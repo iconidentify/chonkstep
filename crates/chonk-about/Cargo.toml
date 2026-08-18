@@ -1,0 +1,11 @@
+[package]
+name = "chonk-about"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "A tiny demo app built with chonk-ui, proving the SDK inherits chonkstep's look and feel."
+
+[dependencies]
+chonk-ui = { path = "../chonk-ui" }
+cosmic-text = "0.12"
+tiny-skia = "0.11"
