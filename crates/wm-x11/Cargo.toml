@@ -1,0 +1,13 @@
+[package]
+name = "wm-x11"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "X11 backend for chonkstep, implementing wm-core::Backend via x11rb."
+
+[dependencies]
+wm-core = { path = "../wm-core" }
+wm-theme-api = { path = "../wm-theme-api" }
+tracing = "0.1"
+thiserror = "2"
+x11rb = { version = "0.13", features = ["randr"] }

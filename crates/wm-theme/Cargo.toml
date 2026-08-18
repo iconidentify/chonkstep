@@ -1,0 +1,13 @@
+[package]
+name = "wm-theme"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "WindowMaker-style theme data model and rendering engine."
+
+[dependencies]
+wm-theme-api = { path = "../wm-theme-api" }
+serde = { version = "1", features = ["derive"] }
+tiny-skia = "0.11"
+cosmic-text = "0.12"
+tracing = "0.1"

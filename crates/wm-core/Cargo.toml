@@ -1,0 +1,12 @@
+[package]
+name = "wm-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Protocol-agnostic window-manager core: client state machine, focus policy, hit-testing."
+
+[dependencies]
+wm-theme-api = { path = "../wm-theme-api" }
+bitflags = "2"
+slotmap = "1"
+tracing = "0.1"

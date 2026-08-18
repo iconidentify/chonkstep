@@ -1,0 +1,9 @@
+[package]
+name = "wm-theme-api"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Geometry primitives and the shared contract between wm-core and wm-theme."
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }

@@ -1,0 +1,12 @@
+[package]
+name = "chonk-ui"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Minimal reusable toolkit for building GUI apps that inherit chonkstep's NeXTSTEP look and feel."
+
+[dependencies]
+wm-theme = { path = "../wm-theme" }
+tiny-skia = "0.11"
+tracing = "0.1"
+x11rb = "0.13"
