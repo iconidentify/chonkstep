@@ -11,6 +11,7 @@ fn main() {
     let scale: f32 = std::env::args().nth(1).and_then(|s| s.parse().ok()).unwrap_or(3.0);
     let title = std::env::args().nth(2).unwrap_or_else(|| "xterm".to_string());
     let out = std::env::args().nth(3).unwrap_or_else(|| "/tmp/decoration_dump".to_string());
+    let focused = std::env::args().nth(4).map(|s| s != "unfocused").unwrap_or(true);
 
     let theme = wm_theme::default_theme::nextstep_classic().scaled(scale);
     let engine = RasterThemeEngine::new(theme);
@@ -18,7 +19,7 @@ fn main() {
     let request = DecorationRequest {
         content_size: Size::new(600, 300),
         title,
-        focused: true,
+        focused,
         resizable: true,
         buttons: vec![
             ButtonRuntimeState { kind: ButtonKind::Close, hovered: false, pressed: false },

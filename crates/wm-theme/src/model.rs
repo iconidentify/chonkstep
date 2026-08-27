@@ -125,6 +125,13 @@ pub struct ResizeBarStyle {
     pub height: u16,
     pub fill: Fill,
     pub bevel: Bevel,
+    /// Width of the corner grip regions at each end of the bar — real
+    /// WindowMaker's `RESIZEBAR_CORNER_WIDTH` (28, `src/wconfig.h.in`).
+    /// Both the etched notch lines `render_decoration` draws and the
+    /// SouthEast/SouthWest hit regions derive from this same value, so
+    /// the visible grip delimiters and the diagonal-resize zones always
+    /// agree exactly.
+    pub corner_width: u16,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
@@ -158,13 +165,45 @@ pub struct MenuStyle {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Theme {
+    /// Stable kebab-case identity — what gets persisted when the user
+    /// picks a theme, so `name` can be reworded freely.
+    pub id: String,
     pub name: String,
     pub titlebar: TitlebarStyle,
     pub resize_bar: ResizeBarStyle,
     pub border: BorderStyle,
     pub menu: MenuStyle,
+    /// Terminal colors spawned terminals launch with — themes restyle
+    /// the whole desktop, terminals included.
+    pub terminal: TerminalPalette,
+    /// Id of the wallpaper artwork this theme composes with (resolved
+    /// by the desktop shell, which owns the embedded images) — picking
+    /// the theme selects this wallpaper too.
+    pub wallpaper: String,
     // Icon/miniwindow appearance and Dock/Clip iconography: out of scope
     // for this milestone.
+}
+
+/// A full terminal color scheme: foreground/background/cursor plus the
+/// 16-slot ANSI palette (colors 0-7 normal, 8-15 bright), in the order
+/// terminals expect them. Colors only — font and geometry are not a
+/// per-theme concern.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TerminalPalette {
+    pub fg: Color,
+    pub bg: Color,
+    pub cursor: Color,
+    pub ansi: [Color; 16],
+    /// Terminal background opacity in percent (e.g. 85 = slightly
+    /// translucent glass over the wallpaper), `None` = fully opaque.
+    /// Realized as true alpha: the session runs a compositor (picom,
+    /// started by `scripts/xsession.sh`) and terminals launch with a
+    /// 32-bit visual and an alpha-tagged background color. urxvt's own
+    /// compositor-free pseudo-transparency was tried first and
+    /// abandoned: its 9.31 background engine silently falls back to an
+    /// opaque background for larger windows (confirmed live — the same
+    /// arguments ghost at 600x400 and go flat at 1300x800).
+    pub opacity: Option<u8>,
 }
 
 impl Theme {
@@ -188,7 +227,11 @@ impl Theme {
         theme.titlebar.height = scale_u16(theme.titlebar.height);
         theme.titlebar.font.size *= factor;
         theme.titlebar.bevel.width = scale_u8(theme.titlebar.bevel.width);
-        theme.titlebar.button_margin = scale_u16(theme.titlebar.button_margin);
+        // Unlike every other dimension, a margin of 0 is a deliberate
+        // "flush to the edge" (WindowMaker's own default TS_NEW button
+        // placement) and must stay exactly 0 at any scale — the min-1
+        // clamp the other u16 fields want would silently un-flush it.
+        theme.titlebar.button_margin = ((theme.titlebar.button_margin as f32) * factor).round() as u16;
         for button in &mut theme.titlebar.buttons {
             button.size = scale_u16(button.size);
             button.bevel.width = scale_u8(button.bevel.width);
@@ -196,6 +239,7 @@ impl Theme {
 
         theme.resize_bar.height = scale_u16(theme.resize_bar.height);
         theme.resize_bar.bevel.width = scale_u8(theme.resize_bar.bevel.width);
+        theme.resize_bar.corner_width = scale_u16(theme.resize_bar.corner_width);
 
         theme.border.width = scale_u8(theme.border.width);
 

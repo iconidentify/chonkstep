@@ -749,10 +749,13 @@ impl<B: Backend> WindowManager<B> {
     /// the current pointer position for whichever edge is being
     /// dragged, enforces the client's `SizeHints` (min/max/resize
     /// increment — `WindowMaker`'s `wWindowConstrainSize`), and pushes
-    /// the result through the normal `reflow_frame` path. Only the
-    /// three south-facing handles this theme actually offers
-    /// (`South`/`SouthEast`/`SouthWest`) are handled; any other edge is
-    /// unreachable in practice since `hit_test` never reports one.
+    /// the result through the normal `reflow_frame` path. All eight
+    /// edges/corners are handled: dragging a north or west handle keeps
+    /// the *opposite* edge anchored, so the frame's origin moves with
+    /// the drag while the far edge stays put — the size-hint constraint
+    /// is applied to the size first and the anchored edge re-derived
+    /// from the constrained result, so a terminal snapping to its cell
+    /// grid never makes the anchored edge drift.
     fn handle_resize_motion(&mut self, root: Point) {
         let Some(active) = &self.active_resize else {
             return;
@@ -765,30 +768,41 @@ impl<B: Backend> WindowManager<B> {
         };
         let overhead_w = client.layout.frame_size.w.saturating_sub(client.geometry.size.w);
         let overhead_h = client.layout.frame_size.h.saturating_sub(client.geometry.size.h);
+        let start_right = start_frame.pos.x + start_frame.size.w as i32;
+        let start_bottom = start_frame.pos.y + start_frame.size.h as i32;
 
         let raw_frame_w = match edge {
-            ResizeEdge::South => start_frame.size.w as i32,
-            ResizeEdge::SouthEast => root.x - start_frame.pos.x,
-            ResizeEdge::SouthWest => (start_frame.pos.x + start_frame.size.w as i32) - root.x,
-            _ => return,
+            ResizeEdge::North | ResizeEdge::South => start_frame.size.w as i32,
+            ResizeEdge::East | ResizeEdge::NorthEast | ResizeEdge::SouthEast => root.x - start_frame.pos.x,
+            ResizeEdge::West | ResizeEdge::NorthWest | ResizeEdge::SouthWest => start_right - root.x,
         }
         .max(1);
-        let raw_frame_h = (root.y - start_frame.pos.y).max(1);
+        let raw_frame_h = match edge {
+            ResizeEdge::East | ResizeEdge::West => start_frame.size.h as i32,
+            ResizeEdge::South | ResizeEdge::SouthEast | ResizeEdge::SouthWest => root.y - start_frame.pos.y,
+            ResizeEdge::North | ResizeEdge::NorthEast | ResizeEdge::NorthWest => start_bottom - root.y,
+        }
+        .max(1);
 
         let raw_content = Size::new((raw_frame_w as u32).saturating_sub(overhead_w), (raw_frame_h as u32).saturating_sub(overhead_h));
         let hints = self.backend.size_hints(client.window);
         let content = resize::constrain_size(raw_content, hints);
 
         let new_frame_w = content.w + overhead_w;
+        let new_frame_h = content.h + overhead_h;
         let new_frame_x = match edge {
-            ResizeEdge::SouthWest => (start_frame.pos.x + start_frame.size.w as i32) - new_frame_w as i32,
+            ResizeEdge::West | ResizeEdge::NorthWest | ResizeEdge::SouthWest => start_right - new_frame_w as i32,
             _ => start_frame.pos.x,
+        };
+        let new_frame_y = match edge {
+            ResizeEdge::North | ResizeEdge::NorthEast | ResizeEdge::NorthWest => start_bottom - new_frame_h as i32,
+            _ => start_frame.pos.y,
         };
 
         let Some(client) = self.clients.get_mut(client_id) else {
             return;
         };
-        client.geometry.pos = Point::new(new_frame_x + client.layout.client_offset.x, start_frame.pos.y + client.layout.client_offset.y);
+        client.geometry.pos = Point::new(new_frame_x + client.layout.client_offset.x, new_frame_y + client.layout.client_offset.y);
         client.geometry.size = content;
         self.reflow_frame(client_id);
     }

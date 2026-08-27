@@ -6,7 +6,7 @@
 
 use std::cell::RefCell;
 
-use tiny_skia::{LineCap, Paint, PathBuilder, Pixmap, Stroke, Transform};
+use tiny_skia::Pixmap;
 use wm_theme_api::{
     ButtonKind, DecorationBuffer, DecorationLayout, DecorationRequest, Point, Rect, ResizeEdge,
     Size, ThemeEngine,
@@ -130,26 +130,56 @@ fn layout_decoration(theme: &Theme, request: &DecorationRequest) -> DecorationLa
         // scale 1, so unscaled behavior is unchanged.
         let handle = ((titlebar_height as f32 * 0.5) as u32).min(frame_size.w / 2).min(frame_size.h / 2).max(10);
         let bar_h = resize_bar_height.max(4).min(frame_size.h);
+        // The bottom grips are real WindowMaker's: each corner owns
+        // `corner_width` (`RESIZEBAR_CORNER_WIDTH`) of the resizebar,
+        // delimited on screen by the notch lines `render_decoration`
+        // draws at these exact x positions; the middle of the bar
+        // resizes straight down. All three regions extend through the
+        // bottom border so the frame's outermost pixels still grab.
+        let cw = (theme.resize_bar.corner_width as u32).min(frame_size.w / 3).max(1);
+        let grip_h = bar_h + border;
+        let grip_y = frame_size.h as i32 - grip_h as i32;
         resize_hitboxes.push((
             ResizeEdge::SouthEast,
-            Rect::new(
-                Point::new(frame_size.w as i32 - handle as i32, frame_size.h as i32 - handle as i32),
-                Size::new(handle, handle),
-            ),
+            Rect::new(Point::new(frame_size.w as i32 - cw as i32, grip_y), Size::new(cw, grip_h)),
         ));
         resize_hitboxes.push((
             ResizeEdge::SouthWest,
-            Rect::new(Point::new(0, frame_size.h as i32 - handle as i32), Size::new(handle, handle)),
+            Rect::new(Point::new(0, grip_y), Size::new(cw, grip_h)),
         ));
-        let middle_w = frame_size.w.saturating_sub(handle * 2);
+        let middle_w = frame_size.w.saturating_sub(cw * 2);
         if middle_w > 0 {
             resize_hitboxes.push((
                 ResizeEdge::South,
-                Rect::new(
-                    Point::new(handle as i32, frame_size.h as i32 - bar_h as i32),
-                    Size::new(middle_w, bar_h),
-                ),
+                Rect::new(Point::new(cw as i32, grip_y), Size::new(middle_w, grip_h)),
             ));
+        }
+
+        // OS X-style activation zones on the remaining edges and top
+        // corners — invisible on purpose: the cursor change is the whole
+        // affordance, exactly as on a Mac, while the bottom keeps its
+        // visible WindowMaker resizebar above. Each top corner is an
+        // L-shaped pair of arms (`handle` long, `band` thick) hugging
+        // the frame's outermost pixels, so the extreme corner reads as a
+        // diagonal resize but the titlebar between the arms still
+        // drags. The east/west bands cover only the frame's own border
+        // strip at client height (the client window swallows pointer
+        // events further in), plus the titlebar's outer edge — also how
+        // a Mac titlebar behaves at its left/right extremes.
+        let band = (titlebar_height / 5).max(border).max(3);
+        let w = frame_size.w as i32;
+        resize_hitboxes.push((ResizeEdge::NorthWest, Rect::new(Point::new(0, 0), Size::new(handle, band))));
+        resize_hitboxes.push((ResizeEdge::NorthWest, Rect::new(Point::new(0, 0), Size::new(band, handle))));
+        resize_hitboxes.push((ResizeEdge::NorthEast, Rect::new(Point::new(w - handle as i32, 0), Size::new(handle, band))));
+        resize_hitboxes.push((ResizeEdge::NorthEast, Rect::new(Point::new(w - band as i32, 0), Size::new(band, handle))));
+        let top_middle_w = frame_size.w.saturating_sub(handle * 2);
+        if top_middle_w > 0 {
+            resize_hitboxes.push((ResizeEdge::North, Rect::new(Point::new(handle as i32, 0), Size::new(top_middle_w, band))));
+        }
+        let side_h = frame_size.h.saturating_sub(handle * 2);
+        if side_h > 0 {
+            resize_hitboxes.push((ResizeEdge::West, Rect::new(Point::new(0, handle as i32), Size::new(band, side_h))));
+            resize_hitboxes.push((ResizeEdge::East, Rect::new(Point::new(w - band as i32, handle as i32), Size::new(band, side_h))));
         }
     }
 
@@ -177,58 +207,7 @@ fn render_decoration(
 
     let titlebar_fill = if request.focused { &theme.titlebar.active } else { &theme.titlebar.inactive };
     paint::fill_area(&mut pixmap, border as i32, border as i32, inner_w, layout.titlebar_height, titlebar_fill);
-    // A full 4-sided chiseled bevel around the whole bar — matching
-    // real WindowMaker's own `wDrawBevel(fwin->titlebar->window, ...)`
-    // call (`src/framewin.c`), not a lone top-edge highlight. That
-    // used to be trimmed down to just the top edge to avoid a button's
-    // own left bevel edge visually doubling up with the titlebar's —
-    // but that doubling was only ugly because it was two *light* edges
-    // stacking into a thick white smear. Now that `draw_bevel` puts
-    // the authentic NeXTSTEP-direction *dark* tone on top/left (see
-    // its doc comment), the titlebar's and each button's top edges
-    // coincide on the same unobtrusive dark line instead — exactly
-    // the redundant-but-harmless overlap real WindowMaker gets for
-    // free from titlebar and buttons being separate, independently
-    // beveled windows.
-    paint::draw_bevel(&mut pixmap, border as i32, border as i32, inner_w, layout.titlebar_height, &theme.titlebar.bevel);
 
-    if request.resizable {
-        let bar_h = theme.resize_bar.height as u32;
-        let bar_y = h.saturating_sub(border).saturating_sub(bar_h);
-        paint::fill_area(&mut pixmap, border as i32, bar_y as i32, inner_w, bar_h, &theme.resize_bar.fill);
-        paint::draw_bevel(&mut pixmap, border as i32, bar_y as i32, inner_w, bar_h, &theme.resize_bar.bevel);
-
-        // The visual half of the resize-corner affordance —
-        // `set_frame_cursor`'s hover-driven cursor change is the other
-        // half. Drawn directly within the real hitboxes (not a
-        // separately-guessed position), so the grip marks and the area
-        // that's actually draggable always agree exactly.
-        let grip_color = (theme.resize_bar.bevel.light, theme.resize_bar.bevel.dark);
-        for (edge, rect) in &layout.resize_hitboxes {
-            let inset = (rect.size.w.min(rect.size.h) / 6).max(1) as i32;
-            let size = rect.size.w.min(rect.size.h).saturating_sub(inset as u32 * 2);
-            match edge {
-                ResizeEdge::SouthEast => {
-                    paint::draw_resize_grip(&mut pixmap, rect.pos.x + inset, rect.pos.y + inset, size, grip_color.0, grip_color.1, false);
-                }
-                ResizeEdge::SouthWest => {
-                    paint::draw_resize_grip(&mut pixmap, rect.pos.x + inset, rect.pos.y + inset, size, grip_color.0, grip_color.1, true);
-                }
-                _ => {}
-            }
-        }
-    }
-
-    let border_color = if request.focused { theme.border.color_active } else { theme.border.color_inactive };
-    if border > 0 {
-        paint::fill_rect(&mut pixmap, 0, 0, w, border, border_color);
-        paint::fill_rect(&mut pixmap, 0, h as i32 - border as i32, w, border, border_color);
-        paint::fill_rect(&mut pixmap, 0, 0, border, h, border_color);
-        paint::fill_rect(&mut pixmap, w as i32 - border as i32, 0, border, h, border_color);
-    }
-
-    let text_color = if request.focused { theme.titlebar.text_color_active } else { theme.titlebar.text_color_inactive };
-    let text_inset = 6i32;
     // The free space for the title sits between whichever button is
     // positioned furthest left (its right edge) and whichever is
     // furthest right (its left edge) — found by position, not by a
@@ -236,7 +215,8 @@ fn render_decoration(
     // Miniaturize, a naive `max()` of right edges would actually pick
     // Miniaturize's (furthest-right) edge, and `min()` of left edges
     // would pick Close's (furthest-left) edge — collapsing the text
-    // region to zero width instead of bounding it correctly.
+    // region to zero width instead of bounding it correctly. These same
+    // edges are also the relief-segment boundaries below.
     let leftmost_button = layout
         .button_hitboxes
         .iter()
@@ -249,6 +229,41 @@ fn render_decoration(
         .max_by_key(|(_, r)| r.pos.x)
         .map(|(_, r)| r.pos.x)
         .unwrap_or(w as i32 - border as i32);
+
+    // Real WindowMaker reliefs the titlebar as *segments* — left
+    // button square, middle bar, right button square, each getting its
+    // own independent `RBEV_RAISED2` (`updateTexture`,
+    // `src/framewin.c` — the buttons are separate X windows over
+    // slices of the same texture). The visible seams where the
+    // segments meet are part of the stock look. The middle segment is
+    // drawn here; each button's own relief is drawn with the button
+    // below.
+    let bevel_t = theme.titlebar.bevel.width.max(1) as u32;
+    let mid_w = (rightmost_button - leftmost_button).max(0) as u32;
+    paint::draw_raised2_bevel(&mut pixmap, leftmost_button, border as i32, mid_w, layout.titlebar_height, bevel_t);
+
+    if request.resizable {
+        let bar_h = (theme.resize_bar.height as u32).min(h);
+        let bar_y = h.saturating_sub(border).saturating_sub(bar_h);
+        paint::fill_area(&mut pixmap, border as i32, bar_y as i32, inner_w, bar_h, &theme.resize_bar.fill);
+        // Notch lines at the same `corner_width` the SouthEast/
+        // SouthWest hitboxes use, so the visible grip delimiters and
+        // the diagonal-resize zones always agree exactly.
+        let cw = (theme.resize_bar.corner_width as u32).min(w / 3).max(1);
+        let bar_t = theme.resize_bar.bevel.width.max(1) as u32;
+        paint::draw_resizebar_relief(&mut pixmap, border as i32, bar_y as i32, inner_w, bar_h, cw, bar_t);
+    }
+
+    let border_color = if request.focused { theme.border.color_active } else { theme.border.color_inactive };
+    if border > 0 {
+        paint::fill_rect(&mut pixmap, 0, 0, w, border, border_color);
+        paint::fill_rect(&mut pixmap, 0, h as i32 - border as i32, w, border, border_color);
+        paint::fill_rect(&mut pixmap, 0, 0, border, h, border_color);
+        paint::fill_rect(&mut pixmap, w as i32 - border as i32, 0, border, h, border_color);
+    }
+
+    let text_color = if request.focused { theme.titlebar.text_color_active } else { theme.titlebar.text_color_inactive };
+    let text_inset = 6i32;
     let text_x = (leftmost_button + text_inset).min(w as i32);
     let text_w = (rightmost_button - text_inset - text_x).max(0) as u32;
     paint::draw_text(
@@ -268,34 +283,27 @@ fn render_decoration(
     for (kind, rect) in &layout.button_hitboxes {
         if let Some(style) = theme.titlebar.buttons.iter().find(|b| b.kind == *kind) {
             let pressed = request.buttons.iter().any(|b| b.kind == *kind && b.pressed);
-            // Real WindowMaker's buttons aren't a separately-colored
-            // control — they're the titlebar's own current fill showing
-            // straight through, framed only by a bevel; confirmed by
-            // reading actual screenshots (a black active titlebar's
-            // Close button is black too, not some other gray). That
-            // fill is *already* painted — the titlebar fill above
-            // covers the button's area too — so unlike `paint::
-            // draw_button`, this deliberately does not re-fill the
-            // button with its own copy of `titlebar_fill`: re-filling a
-            // *sub-rect* with what's actually a diagonal gradient
-            // recomputes the gradient relative to that small rect
-            // instead of the full titlebar span, producing a visibly
-            // different (steeper) gradient than the titlebar around it
-            // — a mismatched seam right at the button's edges, confirmed
-            // live. When idle, only the bevel needs drawing on top of
-            // what's already there; when pressed, `draw_button_pressed`
-            // (see its own doc comment for why a mirrored bevel is the
-            // wrong tool here) replaces it with a flat black fill.
+            // Real WindowMaker's default-style buttons aren't a
+            // separately-colored control — each is the titlebar's own
+            // current fill (already painted above) showing straight
+            // through, with its own independent `RBEV_RAISED2` relief:
+            // one segment of the same three-way split the middle bar
+            // got. Pressed feedback is a relative luminance shift with
+            // the relief inverted to sunken and the glyph nudged — see
+            // `paint::draw_button_pressed` for why not WindowMaker's
+            // own white-flash pushed state.
+            let t = style.bevel.width.max(1) as u32;
             if pressed {
-                paint::draw_button_pressed(&mut pixmap, rect.pos.x, rect.pos.y, rect.size.w, rect.size.h);
+                paint::draw_button_pressed(&mut pixmap, rect.pos.x, rect.pos.y, rect.size.w, rect.size.h, paint::pressed_delta(titlebar_fill), t);
+                draw_button_glyph(&mut pixmap, *kind, *rect, text_color, true);
             } else {
-                paint::draw_bevel(&mut pixmap, rect.pos.x, rect.pos.y, rect.size.w, rect.size.h, &style.bevel);
+                paint::draw_raised2_bevel(&mut pixmap, rect.pos.x, rect.pos.y, rect.size.w, rect.size.h, t);
+                // `text_color` — the stamp color WindowMaker itself
+                // uses for glyphs (`paintButton` fills through the
+                // pixmap's mask with the title *text* color): white on
+                // the focused black bar, black on the unfocused gray.
+                draw_button_glyph(&mut pixmap, *kind, *rect, text_color, false);
             }
-            // `text_color` — already the correct contrast choice for
-            // text sitting on that exact fill — is equally correct for
-            // a glyph sitting on the exact same fill, no separate
-            // contrast logic needed.
-            draw_button_glyph(&mut pixmap, *kind, *rect, text_color);
         }
     }
 
@@ -318,80 +326,124 @@ fn render_decoration(
 /// strokes matching the same shape stay crisp at any scale instead.
 /// Maximize has no WindowMaker original to copy — real WindowMaker has
 /// no maximize button at all — so it keeps this theme's own vector glyph.
-fn draw_wm_close_glyph(pixmap: &mut Pixmap, x0: f32, y0: f32, x1: f32, y1: f32, color: crate::model::Color) {
+/// Real WindowMaker's stock button glyphs, transcribed pixel for pixel
+/// from `PRED_CLOSE_XPM` / `PRED_ICONIFY_XPM` (`src/def_pixmaps.h`).
+/// Every non-transparent XPM pixel is part of the *mask* — WindowMaker
+/// stamps the whole mask in one flat color (the title text color) via
+/// `XSetClipMask` + `XFillRectangle` (`paintButton`, its default-style
+/// arm), so the XPM's own two ink shades never reach the screen and a
+/// plain `#` = ink / `.` = transparent grid captures it exactly.
+const CLOSE_GLYPH: [&str; 10] = [
+    "##......##",
+    "###....###",
+    ".###..###.",
+    "..######..",
+    "...####...",
+    "...####...",
+    "..######..",
+    ".###..###.",
+    "###....###",
+    "##......##",
+];
+
+const ICONIFY_GLYPH: [&str; 10] = [
+    "##########",
+    "##########",
+    "##########",
+    "#........#",
+    "#........#",
+    "#........#",
+    "#........#",
+    "#........#",
+    "#........#",
+    "##########",
+];
+
+/// No stock WindowMaker counterpart (it has no maximize button) — a
+/// plain box outline drawn in the same 10x10 bitmap language.
+const MAXIMIZE_GLYPH: [&str; 10] = [
+    "##########",
+    "##########",
+    "#........#",
+    "#........#",
+    "#........#",
+    "#........#",
+    "#........#",
+    "#........#",
+    "#........#",
+    "##########",
+];
+
+/// Stamps a 10x10 glyph mask centered in `rect` in one flat color,
+/// exactly as real WindowMaker does (see the mask constants above).
+/// The masks are authored for WindowMaker's 23px button; each mask
+/// cell becomes a `round(button/23 * 10)/10`-sized square so the glyph
+/// keeps its stock proportion at any `CHONKSTEP_SCALE`, with hard
+/// nearest-neighbor edges — scaling a 10px bitmap, not redrawing it.
+/// `pressed` nudges the stamp one cell down-right, WindowMaker's own
+/// `d = 1` pressed-state offset.
+pub(crate) fn draw_button_glyph(pixmap: &mut Pixmap, kind: ButtonKind, rect: Rect, color: crate::model::Color, pressed: bool) {
+    let mask: &[&str; 10] = match kind {
+        ButtonKind::Close => &CLOSE_GLYPH,
+        ButtonKind::Miniaturize => &ICONIFY_GLYPH,
+        ButtonKind::Maximize => &MAXIMIZE_GLYPH,
+    };
+    let cell = ((rect.size.w.min(rect.size.h) as f32) / 23.0).round().max(1.0) as i32;
+    let glyph_span = cell * 10;
+    let nudge = if pressed { cell } else { 0 };
+    let x0 = rect.pos.x + (rect.size.w as i32 - glyph_span) / 2 + nudge;
+    let y0 = rect.pos.y + (rect.size.h as i32 - glyph_span) / 2 + nudge;
+    // Magnified diagonals are the one place a scaled 1-bit stamp reads
+    // as jagged rather than crisp — see `draw_close_glyph_smooth`.
+    if kind == ButtonKind::Close && cell > 1 {
+        draw_close_glyph_smooth(pixmap, x0, y0, glyph_span, color);
+        return;
+    }
+    for (row, line) in mask.iter().enumerate() {
+        for (col, ch) in line.bytes().enumerate() {
+            if ch == b'#' {
+                paint::fill_rect(pixmap, x0 + col as i32 * cell, y0 + row as i32 * cell, cell as u32, cell as u32, color);
+            }
+        }
+    }
+}
+
+/// The close glyph at `CHONKSTEP_SCALE` > 1. At native size the
+/// `CLOSE_GLYPH` bitmap stamp is pixel-identical to WindowMaker's, and
+/// that path still runs at `cell == 1`. But real WindowMaker never
+/// draws magnified — it has no HiDPI scaling, so there is no authentic
+/// "scaled-up" reference to copy — and nearest-neighbor magnification
+/// of a 10px 1-bit staircase reads as jagged, not crisp (confirmed
+/// live at scale 2). Scaled, the X is instead redrawn as what the
+/// bitmap *depicts*: two corner-to-corner diagonal bars, anti-aliased,
+/// proportioned to the bitmap footprint (each arm spans ~2.2 of the 10
+/// bitmap cells perpendicular to its axis, tips filling the glyph
+/// box's corners via square caps). The iconify/maximize boxes stay on
+/// the stamp path at every scale: their edges are axis-aligned, where
+/// hard magnified pixels are exactly what a scaled bitmap should look
+/// like.
+fn draw_close_glyph_smooth(pixmap: &mut Pixmap, x0: i32, y0: i32, span: i32, color: crate::model::Color) {
+    use tiny_skia::{LineCap, Paint, PathBuilder, Stroke, Transform};
+
     let mut paint = Paint::default();
     paint.set_color(paint::sk_color(color));
     paint.anti_alias = true;
-    let stroke_width = ((x1 - x0).min(y1 - y0) * 0.12).max(1.4);
-    let stroke = Stroke { width: stroke_width, line_cap: LineCap::Round, ..Default::default() };
-    for (ax, ay, bx, by) in [(x0, y0, x1, y1), (x1, y0, x0, y1)] {
+
+    let s = span as f32;
+    let width = s * 0.22;
+    let stroke = Stroke { width, line_cap: LineCap::Square, ..Default::default() };
+    // Square caps extend half the stroke width past each endpoint, so
+    // insetting the endpoints by that much lands the flattened tips
+    // exactly in the glyph box's corners, like the bitmap's.
+    let m = width * 0.5;
+    let (lo_x, lo_y) = (x0 as f32 + m, y0 as f32 + m);
+    let (hi_x, hi_y) = (x0 as f32 + s - m, y0 as f32 + s - m);
+    for (ax, ay, bx, by) in [(lo_x, lo_y, hi_x, hi_y), (hi_x, lo_y, lo_x, hi_y)] {
         let mut pb = PathBuilder::new();
         pb.move_to(ax, ay);
         pb.line_to(bx, by);
         if let Some(path) = pb.finish() {
             pixmap.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
-        }
-    }
-}
-
-/// The real miniaturize glyph: a tiny window icon (solid title bar over
-/// a hollow bordered body), not a plain dash.
-fn draw_wm_iconify_glyph(pixmap: &mut Pixmap, x0: f32, y0: f32, x1: f32, y1: f32, color: crate::model::Color) {
-    let mut fill_paint = Paint::default();
-    fill_paint.set_color(paint::sk_color(color));
-    fill_paint.anti_alias = true;
-
-    let stroke_width = ((x1 - x0).min(y1 - y0) * 0.09).max(1.2);
-    let bar_h = (y1 - y0) * 0.28;
-    if let Some(r) = tiny_skia::Rect::from_xywh(x0, y0, (x1 - x0).max(1.0), bar_h.max(1.0)) {
-        pixmap.fill_rect(r, &fill_paint, Transform::identity(), None);
-    }
-
-    let mut stroke_paint = Paint::default();
-    stroke_paint.set_color(paint::sk_color(color));
-    stroke_paint.anti_alias = true;
-    let stroke = Stroke { width: stroke_width, ..Default::default() };
-    let body_y = y0 + bar_h + stroke_width * 0.5;
-    if let Some(r) = tiny_skia::Rect::from_ltrb(x0, body_y, x1, y1) {
-        let path = PathBuilder::from_rect(r);
-        pixmap.stroke_path(&path, &stroke_paint, &stroke, Transform::identity(), None);
-    }
-}
-
-pub(crate) fn draw_button_glyph(pixmap: &mut Pixmap, kind: ButtonKind, rect: Rect, color: crate::model::Color) {
-    let mut paint = Paint::default();
-    paint.set_color(paint::sk_color(color));
-    paint.anti_alias = true;
-
-    let short_side = rect.size.w.min(rect.size.h) as f32;
-    let inset = (short_side * 0.26).max(2.0);
-    let stroke_width = (short_side * 0.13).max(1.6);
-    let x0 = rect.pos.x as f32 + inset;
-    let y0 = rect.pos.y as f32 + inset;
-    let x1 = rect.pos.x as f32 + rect.size.w as f32 - inset;
-    let y1 = rect.pos.y as f32 + rect.size.h as f32 - inset;
-
-    // Real WindowMaker's own bitmap glyph technically covers most of
-    // the button, but reproducing that same *proportion* with a clean
-    // vector line at this desktop's larger button sizes read as
-    // oppressively thick and cramped rather than crisp — confirmed
-    // live. A more moderate margin/weight here reads as the standard,
-    // refined close/miniaturize icon this is aiming for.
-    let wm_inset = (short_side * 0.24).max(2.0);
-    let wx0 = rect.pos.x as f32 + wm_inset;
-    let wy0 = rect.pos.y as f32 + wm_inset;
-    let wx1 = rect.pos.x as f32 + rect.size.w as f32 - wm_inset;
-    let wy1 = rect.pos.y as f32 + rect.size.h as f32 - wm_inset;
-
-    match kind {
-        ButtonKind::Close => draw_wm_close_glyph(pixmap, wx0, wy0, wx1, wy1, color),
-        ButtonKind::Miniaturize => draw_wm_iconify_glyph(pixmap, wx0, wy0, wx1, wy1, color),
-        ButtonKind::Maximize => {
-            let stroke = Stroke { width: stroke_width, line_cap: LineCap::Round, ..Default::default() };
-            if let Some(r) = tiny_skia::Rect::from_ltrb(x0, y0, x1, y1) {
-                let path = PathBuilder::from_rect(r);
-                pixmap.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
-            }
         }
     }
 }
@@ -510,6 +562,46 @@ mod tests {
         non_resizable.resizable = false;
         let non_resizable_layout = engine.layout(&non_resizable);
         assert!(non_resizable_layout.resize_hitboxes.is_empty());
+    }
+
+    /// The OS X-style zones: every edge and corner of a resizable frame
+    /// must be reachable, with the extreme corner pixels resolving to a
+    /// *corner* (diagonal) resize rather than the adjacent edge band —
+    /// the corner arms are pushed ahead of the edge bands and hit-tests
+    /// take the first match, which is what this pins down.
+    #[test]
+    fn all_eight_resize_zones_are_exposed_and_corners_win_at_the_extremes() {
+        let engine = RasterThemeEngine::nextstep_classic();
+        let request = sample_request("xterm", true);
+        let layout = engine.layout(&request);
+
+        for edge in [
+            ResizeEdge::North,
+            ResizeEdge::South,
+            ResizeEdge::East,
+            ResizeEdge::West,
+            ResizeEdge::NorthEast,
+            ResizeEdge::NorthWest,
+            ResizeEdge::SouthEast,
+            ResizeEdge::SouthWest,
+        ] {
+            assert!(
+                layout.resize_hitboxes.iter().any(|(e, _)| *e == edge),
+                "resizable frame should expose a {edge:?} zone"
+            );
+        }
+
+        // Same first-match rule `wm-core`'s hit_test applies.
+        let first_edge_at = |p: Point| layout.resize_hitboxes.iter().find(|(_, r)| r.contains(p)).map(|(e, _)| *e);
+        let w = layout.frame_size.w as i32;
+        let h = layout.frame_size.h as i32;
+        assert_eq!(first_edge_at(Point::new(0, 0)), Some(ResizeEdge::NorthWest));
+        assert_eq!(first_edge_at(Point::new(w - 1, 0)), Some(ResizeEdge::NorthEast));
+        assert_eq!(first_edge_at(Point::new(w / 2, 0)), Some(ResizeEdge::North));
+        assert_eq!(first_edge_at(Point::new(0, h / 2)), Some(ResizeEdge::West));
+        assert_eq!(first_edge_at(Point::new(w - 1, h / 2)), Some(ResizeEdge::East));
+        // The titlebar's center must stay a drag region, not a resize.
+        assert_eq!(first_edge_at(Point::new(w / 2, layout.titlebar_height as i32 / 2 + 4)), None);
     }
 
     /// Regression test: the resize-corner hitbox used to be a flat 10px
