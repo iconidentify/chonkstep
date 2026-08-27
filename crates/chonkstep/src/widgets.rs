@@ -10,7 +10,7 @@ use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use wm_theme::{clock, netload, sysmon, Theme};
+use wm_theme::{clock, netload, Theme};
 use wm_theme_api::DecorationBuffer;
 
 /// A single dock widget. `tick` is called roughly once per event-loop
@@ -61,212 +61,40 @@ const ANIM_INTERVAL: Duration = Duration::from_millis(80);
 /// sample at render time.
 const NET_HISTORY: usize = 20;
 
-/// Which face [`SysMonWidget`] currently shows.
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum MonitorMode {
-    /// The original small analog clock face — one tile, nothing else.
-    Analog,
-    /// A taller `btop`-inspired panel: digital clock, CPU, memory, and
-    /// network all at once.
-    HighTech,
-}
-
-/// The dock's clock/CPU/memory/network instrument, combined into one
-/// widget with two faces (click to toggle): a plain one-tile analog
-/// clock, or a taller "high tech" dashboard. Every sampler keeps
-/// updating in the background regardless of which face is showing, so
-/// switching to the dashboard never starts from a cold, empty graph.
-pub struct SysMonWidget {
-    mode: MonitorMode,
+/// The dock's clock: the classic one-tile analog face, nothing else.
+/// It used to be one face of a two-face system-monitor widget (a click
+/// toggled a taller btop-style dashboard with a seven-segment clock,
+/// CPU, memory, and network readouts); the toggle was cut on request
+/// to keep the clock a clock, and the dashboard's samplers and
+/// renderers went with it (see git history to resurrect them).
+pub struct ClockWidget {
     clock: Option<(u32, u32, u32)>,
-    cpu: CpuSampler,
-    mem: MemSampler,
-    net: NetSampler,
 }
 
-impl SysMonWidget {
+impl ClockWidget {
     pub fn new() -> Self {
-        Self { mode: MonitorMode::Analog, clock: None, cpu: CpuSampler::new(), mem: MemSampler::new(), net: NetSampler::new() }
+        Self { clock: None }
     }
 }
 
-impl Default for SysMonWidget {
+impl Default for ClockWidget {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl DockWidget for SysMonWidget {
+impl DockWidget for ClockWidget {
     fn tick(&mut self) -> bool {
         let hms = now_hms();
-        let clock_changed = self.clock != Some(hms);
+        let changed = self.clock != Some(hms);
         self.clock = Some(hms);
-
-        // Every sampler always ticks, regardless of which face is
-        // showing or short-circuit evaluation — a widget further down
-        // this list still needs its own chance to sample even if an
-        // earlier one had nothing new this iteration.
-        let cpu_changed = self.cpu.tick();
-        let mem_changed = self.mem.tick();
-        let net_changed = self.net.tick();
-
-        match self.mode {
-            // The dashboard's readings are invisible in this face, so
-            // their changing doesn't need to trigger a repaint here.
-            MonitorMode::Analog => clock_changed,
-            MonitorMode::HighTech => clock_changed || cpu_changed || mem_changed || net_changed,
-        }
+        changed
     }
 
     fn render(&self, theme: &Theme, tile: u32) -> DecorationBuffer {
-        let (h, m, _s) = self.clock.unwrap_or((0, 0, 0));
-        match self.mode {
-            MonitorMode::Analog => clock::render_clock_tile(theme, tile, h, m, _s),
-            MonitorMode::HighTech => {
-                let rx: Vec<f32> = self.net.rx.iter().copied().collect();
-                let tx: Vec<f32> = self.net.tx.iter().copied().collect();
-                sysmon::render_sysmon_panel(theme, tile, h, m, self.cpu.displayed, self.mem.fraction, &rx, &tx)
-            }
-        }
+        let (h, m, s) = self.clock.unwrap_or((0, 0, 0));
+        clock::render_clock_tile(theme, tile, h, m, s)
     }
-
-    fn tile_height(&self) -> u32 {
-        match self.mode {
-            MonitorMode::Analog => 1,
-            // Comfortably fits the dashboard's clock + CPU tile + memory
-            // bar + network tile stack (see `sysmon::render_sysmon_panel`
-            // for the exact proportions) with a little slack rather than
-            // a razor-tight fit.
-            MonitorMode::HighTech => 3,
-        }
-    }
-
-    fn on_click(&mut self) -> bool {
-        self.mode = match self.mode {
-            MonitorMode::Analog => MonitorMode::HighTech,
-            MonitorMode::HighTech => MonitorMode::Analog,
-        };
-        true
-    }
-}
-
-struct CpuSampler {
-    last_sample: Instant,
-    last_anim: Instant,
-    last_totals: Option<(u64, u64)>,
-    target: f32,
-    displayed: f32,
-}
-
-impl CpuSampler {
-    fn new() -> Self {
-        let past = Instant::now() - SAMPLE_INTERVAL;
-        Self { last_sample: past, last_anim: past, last_totals: None, target: 0.0, displayed: 0.0 }
-    }
-
-    /// Returns whether `displayed` actually moved.
-    fn tick(&mut self) -> bool {
-        if self.last_sample.elapsed() >= SAMPLE_INTERVAL {
-            self.last_sample = Instant::now();
-            if let Some((idle, total)) = read_cpu_totals() {
-                if let Some((prev_idle, prev_total)) = self.last_totals {
-                    let d_total = total.saturating_sub(prev_total);
-                    let d_idle = idle.saturating_sub(prev_idle);
-                    if d_total > 0 {
-                        self.target = 1.0 - (d_idle as f32 / d_total as f32);
-                    }
-                }
-                self.last_totals = Some((idle, total));
-            }
-        }
-
-        if self.last_anim.elapsed() < ANIM_INTERVAL {
-            return false;
-        }
-        let delta = self.target - self.displayed;
-        if delta.abs() < 0.002 {
-            return false;
-        }
-        self.last_anim = Instant::now();
-        self.displayed += delta * 0.35;
-        true
-    }
-}
-
-/// `/proc/stat`'s first line: `cpu  user nice system idle iowait irq
-/// softirq steal ...`. Returns `(idle, total)` jiffy counters — the
-/// caller diffs two samples to get a utilization fraction, since a
-/// single snapshot alone is meaningless (it's a cumulative counter since
-/// boot, not an instantaneous reading).
-fn read_cpu_totals() -> Option<(u64, u64)> {
-    parse_cpu_totals(&std::fs::read_to_string("/proc/stat").ok()?)
-}
-
-fn parse_cpu_totals(contents: &str) -> Option<(u64, u64)> {
-    let line = contents.lines().next()?;
-    let mut fields = line.split_whitespace();
-    if fields.next()? != "cpu" {
-        return None;
-    }
-    let values: Vec<u64> = fields.filter_map(|f| f.parse().ok()).collect();
-    // idle + iowait — both count as "not doing work" for load purposes.
-    let idle = *values.get(3)? + values.get(4).copied().unwrap_or(0);
-    let total: u64 = values.iter().sum();
-    Some((idle, total))
-}
-
-struct MemSampler {
-    last_sample: Instant,
-    fraction: f32,
-}
-
-impl MemSampler {
-    fn new() -> Self {
-        Self { last_sample: Instant::now() - SAMPLE_INTERVAL, fraction: 0.0 }
-    }
-
-    fn tick(&mut self) -> bool {
-        if self.last_sample.elapsed() < SAMPLE_INTERVAL {
-            return false;
-        }
-        self.last_sample = Instant::now();
-        let Some(fraction) = read_mem_fraction() else { return false };
-        let changed = (fraction - self.fraction).abs() >= 0.002;
-        self.fraction = fraction;
-        changed
-    }
-}
-
-/// `/proc/meminfo`: `MemAvailable` (not the naive `MemFree`) is what
-/// actually reflects memory the kernel could hand to a new process
-/// without swapping — the same figure `htop`/`btop` use for their
-/// "used" percentage.
-fn read_mem_fraction() -> Option<f32> {
-    parse_mem_fraction(&std::fs::read_to_string("/proc/meminfo").ok()?)
-}
-
-fn parse_mem_fraction(contents: &str) -> Option<f32> {
-    let mut total = None;
-    let mut available = None;
-    for line in contents.lines() {
-        let mut parts = line.split_whitespace();
-        let key = parts.next()?;
-        let Some(value) = parts.next().and_then(|v| v.parse::<u64>().ok()) else { continue };
-        match key {
-            "MemTotal:" => total = Some(value),
-            "MemAvailable:" => available = Some(value),
-            _ => {}
-        }
-        if total.is_some() && available.is_some() {
-            break;
-        }
-    }
-    let total = total? as f32;
-    let available = available? as f32;
-    if total <= 0.0 {
-        return None;
-    }
-    Some((1.0 - available / total).clamp(0.0, 1.0))
 }
 
 struct NetSampler {
@@ -509,18 +337,7 @@ fn format_rate_digits(bytes_per_sec: f32) -> ([Option<u8>; 3], netload::NetloadU
 mod tests {
     use super::*;
 
-    #[test]
-    fn parses_idle_and_total_jiffies_from_the_cpu_line() {
-        let stat = "cpu  100 0 50 800 20 0 0 0 0 0\ncpu0 50 0 25 400 10 0 0 0 0 0\n";
-        let (idle, total) = parse_cpu_totals(stat).expect("cpu line should parse");
-        assert_eq!(idle, 800 + 20, "idle should include iowait");
-        assert_eq!(total, 100 + 50 + 800 + 20);
-    }
 
-    #[test]
-    fn missing_cpu_line_parses_to_none() {
-        assert_eq!(parse_cpu_totals("not the stat format"), None);
-    }
 
     #[test]
     fn net_totals_sum_every_interface_except_loopback() {
@@ -538,27 +355,8 @@ mod tests {
         assert_eq!(parse_net_totals(""), Some((0, 0)));
     }
 
-    #[test]
-    fn mem_fraction_uses_available_not_free() {
-        let meminfo = "MemTotal:       1000000 kB\nMemFree:          10000 kB\nMemAvailable:    600000 kB\n";
-        let fraction = parse_mem_fraction(meminfo).expect("meminfo should parse");
-        assert!((fraction - 0.4).abs() < 0.001, "used = 1 - available/total = 0.4, got {fraction}");
-    }
 
-    #[test]
-    fn missing_mem_available_parses_to_none() {
-        assert_eq!(parse_mem_fraction("MemTotal: 1000000 kB\n"), None);
-    }
 
-    #[test]
-    fn clicking_the_widget_toggles_between_analog_and_high_tech() {
-        let mut widget = SysMonWidget::new();
-        assert_eq!(widget.tile_height(), 1, "starts in the compact analog face");
-        assert!(widget.on_click());
-        assert_eq!(widget.tile_height(), 3, "switches to the taller dashboard face");
-        assert!(widget.on_click());
-        assert_eq!(widget.tile_height(), 1, "and back again");
-    }
 
     #[test]
     fn per_interface_totals_keep_each_interface_separate_and_skip_loopback() {
