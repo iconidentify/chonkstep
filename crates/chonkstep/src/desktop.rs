@@ -19,7 +19,7 @@ use wm_x11::X11Backend;
 use x11rb::protocol::xproto::Window;
 
 use crate::wallpaper::Wallpaper;
-use crate::widgets::{DockWidget, NetLoadWidget, SysMonWidget};
+use crate::widgets::{ClockWidget, DockWidget, NetLoadWidget};
 
 /// The desktop background color — a cool lavender-gray sampled from a
 /// reference NeXTSTEP desktop screenshot, not the neutral gray this
@@ -220,7 +220,7 @@ impl Desktop {
 
         let wallpaper = Wallpaper::load();
         let widgets: Vec<Box<dyn DockWidget>> =
-            vec![Box::new(SysMonWidget::new()), Box::new(NetLoadWidget::new())];
+            vec![Box::new(ClockWidget::new()), Box::new(NetLoadWidget::new())];
         let dock_height = stacked_dock_height(tile, screen.h, &widgets);
         let dock_geom = Rect {
             pos: Point::new((screen.w.saturating_sub(dock_width)) as i32, 0),

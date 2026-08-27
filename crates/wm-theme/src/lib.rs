@@ -16,16 +16,10 @@
 //!   hysteresis, and cascade positioning for a nested `MenuItem` tree,
 //!   generic over `wm_theme_api::PopupHost` so any host can reuse it.
 //! - [`clock::render_clock_tile`] renders the dock's analog clock tile.
-//! - [`cpu::render_cpu_tile`] renders an LED-style CPU load meter tile.
 //! - [`netgraph::render_network_tile`] renders a mirrored up/down
 //!   network-throughput history tile.
 //! - [`digitalclock::render_digital_clock`] renders a vector-drawn
 //!   seven-segment `HH:MM` readout.
-//! - [`membar::render_memory_bar`] renders a compact memory-pressure
-//!   gauge.
-//! - [`sysmon::render_sysmon_panel`] composites all four of the above
-//!   into one taller "high tech" dock instrument — the alternative to
-//!   the plain analog clock tile.
 //! - [`netload::render_netload_tile`] is a close port of the classic
 //!   `wmnetload` WindowMaker dockapp: a monochrome LCD panel with a
 //!   seven-segment throughput readout and a mirrored dot-matrix graph.
@@ -44,18 +38,15 @@
 
 pub mod cascade;
 pub mod clock;
-pub mod cpu;
 pub mod default_theme;
 pub mod digitalclock;
 pub mod icon;
-pub mod membar;
 pub mod menu;
 pub mod model;
 pub mod netgraph;
 pub mod netload;
 pub mod paint;
 mod raster;
-pub mod sysmon;
 
 pub use model::Theme;
 pub use raster::RasterThemeEngine;
