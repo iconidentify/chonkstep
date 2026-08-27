@@ -62,25 +62,17 @@ fn terminal_args(theme: &Theme) -> Vec<String> {
         "-fg".to_string(),
         hex(theme.terminal.fg),
         "-bg".to_string(),
-        match theme.terminal.opacity {
-            // X11 rgba color syntax (16-bit components); needs the
-            // 32-bit visual below plus the session compositor.
-            // Verified live pixel-for-pixel: composited background =
-            // opacity * bg + (1 - opacity) * wallpaper.
-            Some(opacity) => {
-                let alpha = (opacity.clamp(1, 100) as u32 * 255 / 100) as u8;
-                let c = theme.terminal.bg;
-                format!("rgba:{:02x}00/{:02x}00/{:02x}00/{alpha:02x}00", c.r, c.g, c.b)
-            }
-            None => hex(theme.terminal.bg),
-        },
+        // Deliberately opaque: the theme's glass opacity is applied by
+        // the compositor to the whole frame (`add_opacity_rule` in
+        // `wm-x11`), not by the terminal itself. Client-side alpha via
+        // a 32-bit visual was tried first and reverted: urxvt leaves
+        // stale framebuffer garbage in regions it fails to repaint on
+        // scroll/resize, so rows flickered between glass, garbage, and
+        // fully transparent (confirmed live).
+        hex(theme.terminal.bg),
         "-cr".to_string(),
         hex(theme.terminal.cursor),
     ];
-    if theme.terminal.opacity.is_some() {
-        args.push("-depth".to_string());
-        args.push("32".to_string());
-    }
     for (index, color) in theme.terminal.ansi.iter().enumerate() {
         args.push(format!("--color{index}"));
         args.push(hex(*color));
@@ -111,6 +103,9 @@ fn main() {
 
     let theme = theme_select::load().scaled(scale);
     tracing::info!(theme = %theme.id, "theme loaded");
+    if let Some(opacity) = theme.terminal.opacity {
+        backend.add_opacity_rule("URxvt", opacity);
+    }
     let engine = RasterThemeEngine::new(theme.clone());
 
     let mut desktop = Desktop::new(&mut backend, screen, scale, theme.id.clone());
