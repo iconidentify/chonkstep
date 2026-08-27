@@ -11,4 +11,4 @@ set -u
 LOG_DIR="$HOME/.local/state/chonkstep"
 mkdir -p "$LOG_DIR"
 
-exec startx /home/chrisk/chonkstep/scripts/xsession.sh -- vt1 >> "$LOG_DIR/startx.log" 2>&1
+exec startx "$(cd "$(dirname "$0")" && pwd)/xsession.sh" -- vt1 >> "$LOG_DIR/startx.log" 2>&1

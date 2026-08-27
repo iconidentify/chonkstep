@@ -1,5 +1,6 @@
 mod desktop;
 mod spawn;
+mod theme_select;
 mod wallpaper;
 mod widgets;
 
@@ -36,50 +37,56 @@ use desktop::{Desktop, IconDragResult, RootMenuAction};
 // match the theme this desktop's apps already use elsewhere (same
 // values as the old alacritty config's `[colors]` section) rather than
 // urxvt's own bland stock scheme.
-const TERMINAL_ARGS: &[&str] = &[
-    "-fn",
-    "xft:JetBrainsMono Nerd Font:pixelsize=32,xft:Noto Sans Symbols 2:pixelsize=32",
-    "-geometry",
-    "110x32",
-    "-fg",
-    "#e2e8f0",
-    "-bg",
-    "#0b1220",
-    "-cr",
-    "#e2e8f0",
-    "--color0",
-    "#0b1220",
-    "--color1",
-    "#ef4444",
-    "--color2",
-    "#22c55e",
-    "--color3",
-    "#f59e0b",
-    "--color4",
-    "#3b82f6",
-    "--color5",
-    "#d946ef",
-    "--color6",
-    "#06b6d4",
-    "--color7",
-    "#e2e8f0",
-    "--color8",
-    "#475569",
-    "--color9",
-    "#f87171",
-    "--color10",
-    "#4ade80",
-    "--color11",
-    "#fde068",
-    "--color12",
-    "#60a5fa",
-    "--color13",
-    "#f0abfc",
-    "--color14",
-    "#67e8f9",
-    "--color15",
-    "#f8fafc",
-];
+// Font and geometry are deliberately *not* per-theme: every theme keeps
+// the same terminal font, only its colors change. `pixelsize` tracks
+// CHONKSTEP_SCALE (16px at 1x) the same way the WM's own chrome does.
+const TERMINAL_FONT_BASE_PX: f32 = 16.0;
+// Cells, not pixels — sized so the resulting window still fits the
+// screen at CHONKSTEP_SCALE 2 on a 1920-wide display (the old 110x32
+// exceeded it once the font scaled up).
+const TERMINAL_GEOMETRY: &str = "92x26";
+
+/// urxvt argument list for the active theme's terminal palette —
+/// foreground/background/cursor plus the full 16-slot ANSI set, so
+/// every theme restyles terminals along with the chrome. The scale for
+/// the font size is recovered from the already-scaled theme (titlebar
+/// font is 12px at 1x) rather than re-reading the environment.
+fn terminal_args(theme: &Theme) -> Vec<String> {
+    let hex = |c: wm_theme::model::Color| format!("#{:02x}{:02x}{:02x}", c.r, c.g, c.b);
+    let px = (theme.titlebar.font.size / 12.0 * TERMINAL_FONT_BASE_PX).round().max(8.0) as u32;
+    let mut args = vec![
+        "-fn".to_string(),
+        format!("xft:JetBrainsMono Nerd Font:pixelsize={px},xft:Noto Sans Symbols 2:pixelsize={px}"),
+        "-geometry".to_string(),
+        TERMINAL_GEOMETRY.to_string(),
+        "-fg".to_string(),
+        hex(theme.terminal.fg),
+        "-bg".to_string(),
+        match theme.terminal.opacity {
+            // X11 rgba color syntax (16-bit components); needs the
+            // 32-bit visual below plus the session compositor.
+            // Verified live pixel-for-pixel: composited background =
+            // opacity * bg + (1 - opacity) * wallpaper.
+            Some(opacity) => {
+                let alpha = (opacity.clamp(1, 100) as u32 * 255 / 100) as u8;
+                let c = theme.terminal.bg;
+                format!("rgba:{:02x}00/{:02x}00/{:02x}00/{alpha:02x}00", c.r, c.g, c.b)
+            }
+            None => hex(theme.terminal.bg),
+        },
+        "-cr".to_string(),
+        hex(theme.terminal.cursor),
+    ];
+    if theme.terminal.opacity.is_some() {
+        args.push("-depth".to_string());
+        args.push("32".to_string());
+    }
+    for (index, color) in theme.terminal.ansi.iter().enumerate() {
+        args.push(format!("--color{index}"));
+        args.push(hex(*color));
+    }
+    args
+}
 
 fn main() {
     tracing_subscriber::fmt().with_env_filter(tracing_subscriber::EnvFilter::from_default_env()).init();
@@ -102,10 +109,20 @@ fn main() {
 
     let screen = backend.screen_size();
 
-    let theme = wm_theme::default_theme::nextstep_classic().scaled(scale);
+    let theme = theme_select::load().scaled(scale);
+    tracing::info!(theme = %theme.id, "theme loaded");
     let engine = RasterThemeEngine::new(theme.clone());
 
-    let mut desktop = Desktop::new(&mut backend, screen, scale);
+    let mut desktop = Desktop::new(&mut backend, screen, scale, theme.id.clone());
+
+    // The wallpaper pixmap `Desktop::new` just published dies with the
+    // previous process's X connection on every hot-restart, and the
+    // session compositor keeps referencing the dead one — compositing
+    // translucent windows over black instead of the wallpaper
+    // (confirmed live; a fresh picom picked the new pixmap up fine).
+    // SIGUSR1 is picom's documented full-reset signal: cheap, safe,
+    // and a no-op exit code when no compositor is running.
+    spawn::spawn_detached("pkill", &["-USR1", "-x", "picom"]);
 
     let existing = backend.scan_existing_windows();
     let mut wm = WindowManager::new(backend, Box::new(engine));
@@ -372,7 +389,9 @@ fn handle_shell_click(
     if let Some(action) = desktop.click_menu(wm.backend_mut(), theme, window, local) {
         match action {
             RootMenuAction::LaunchTerminal => {
-                spawn::spawn_detached("urxvt", TERMINAL_ARGS);
+                let args = terminal_args(theme);
+                let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+                spawn::spawn_detached("urxvt", &arg_refs);
             }
             RootMenuAction::LaunchAbout => {
                 spawn::spawn_detached(&about_binary_path(), &[]);
@@ -380,6 +399,23 @@ fn handle_shell_click(
             RootMenuAction::LaunchBrowser => launch_browser(),
             RootMenuAction::SetWallpaper(wallpaper) => {
                 desktop.set_wallpaper(wm.backend_mut(), theme, wallpaper);
+            }
+            RootMenuAction::SetTheme(id) => {
+                if let Err(e) = theme_select::persist(id) {
+                    tracing::warn!(?e, id, "failed to persist theme selection");
+                }
+                // A theme implies its wallpaper — persist that too, so
+                // the fresh process composes the full look. The
+                // Wallpaper menu can still override it afterward.
+                if let Some(pack) = wm_theme::default_theme::theme_by_id(id) {
+                    if let Some(wallpaper) = wallpaper::Wallpaper::from_id(&pack.wallpaper) {
+                        if let Err(e) = wallpaper.persist() {
+                            tracing::warn!(?e, id, "failed to persist theme wallpaper");
+                        }
+                    }
+                }
+                tracing::info!(theme = id, "theme selected \u{2014} hot-restarting in place to apply");
+                restart_in_place();
             }
             RootMenuAction::Exit => return false,
         }
@@ -448,13 +484,16 @@ fn restart_requested() -> bool {
 }
 
 /// Re-execs the *on-disk* binary in place (same PID, replaces this
-/// process's image) rather than `std::env::current_exe()` — deliberately
-/// hardcoded, not resolved from the running process, because the whole
+/// process's image) rather than `std::env::current_exe()` — resolved
+/// from `argv[0]`, not from the running process, because the whole
 /// point is to pick up whatever a `cargo build --release` just put at
-/// this path; `current_exe()` on Linux resolves through `/proc/self/exe`,
+/// that path; `current_exe()` on Linux resolves through `/proc/self/exe`,
 /// which keeps pointing at the *original* (now-replaced) inode this
 /// process was loaded from, not the fresh file now sitting at the same
-/// path. Existing client windows survive the swap: they were added to
+/// path. `argv[0]` is the path the session script launched (and each
+/// re-exec below re-passes), so it tracks wherever the repo lives
+/// without hardcoding a home directory. Existing client windows survive
+/// the swap: they were added to
 /// the X11 SaveSet in `create_decoration`, so when this process's X
 /// connection closes (implied by `exec`, which closes non-inherited
 /// fds), the server reparents them straight back to root instead of
@@ -463,8 +502,8 @@ fn restart_requested() -> bool {
 /// startup.
 fn restart_in_place() -> ! {
     use std::os::unix::process::CommandExt;
-    const BIN: &str = "/home/chrisk/chonkstep/target/release/chonkstep";
-    let err = std::process::Command::new(BIN).exec();
-    tracing::error!(?err, bin = BIN, "re-exec failed; exiting instead of restarting");
+    let bin = std::env::args_os().next().unwrap_or_else(|| "chonkstep".into());
+    let err = std::process::Command::new(&bin).exec();
+    tracing::error!(?err, bin = ?bin, "re-exec failed; exiting instead of restarting");
     std::process::exit(1);
 }
