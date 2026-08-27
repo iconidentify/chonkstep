@@ -97,7 +97,7 @@ pub fn render_menu(
         // it relative to that smaller rect and produce a visibly
         // mismatched, steeper gradient than the strip around it.
         paint::draw_bevel(&mut pixmap, close_rect.pos.x, close_rect.pos.y, close_rect.size.w, close_rect.size.h, &style.bevel);
-        draw_button_glyph(&mut pixmap, ButtonKind::Close, close_rect, menu.title_text_color);
+        draw_button_glyph(&mut pixmap, ButtonKind::Close, close_rect, menu.title_text_color, false);
     }
 
     let title_text_w = close_rect.pos.x.saturating_sub(12).max(0) as u32;

@@ -47,7 +47,7 @@ impl Wallpaper {
         }
     }
 
-    fn from_id(id: &str) -> Option<Self> {
+    pub(crate) fn from_id(id: &str) -> Option<Self> {
         Self::ALL.into_iter().find(|wallpaper| wallpaper.id() == id)
     }
 
@@ -166,5 +166,20 @@ mod tests {
             assert_eq!(Wallpaper::from_id(wallpaper.id()), Some(wallpaper));
         }
         assert_eq!(Wallpaper::from_id("not-a-wallpaper"), None);
+    }
+
+    /// Every built-in theme names a wallpaper this shell actually has —
+    /// the theme registry lives in `wm-theme`, which can't see these
+    /// embedded artworks, so the referential integrity check lives here.
+    #[test]
+    fn every_theme_wallpaper_id_resolves() {
+        for theme in wm_theme::default_theme::all_themes() {
+            assert!(
+                Wallpaper::from_id(&theme.wallpaper).is_some(),
+                "theme {} references unknown wallpaper {}",
+                theme.id,
+                theme.wallpaper
+            );
+        }
     }
 }

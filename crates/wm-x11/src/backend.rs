@@ -13,6 +13,7 @@ use x11rb::protocol::randr::{self, ConnectionExt as _};
 use x11rb::protocol::xproto::*;
 use x11rb::protocol::{ErrorKind, Event};
 use x11rb::rust_connection::RustConnection;
+use x11rb::wrapper::ConnectionExt as _;
 use x11rb::{COPY_DEPTH_FROM_PARENT, CURRENT_TIME, NONE};
 
 
@@ -52,11 +53,20 @@ pub struct X11Backend {
     depth: u8,
     image_byte_order: ImageOrder,
     gc: Gcontext,
+    argb: Option<Argb>,
     /// Server-side pixmap currently installed as the root window's
     /// background. Kept alive for as long as X11 may repaint from it.
     root_background_pixmap: Option<Pixmap>,
 
     wm_protocols: Atom,
+    /// `_XROOTPMAP_ID` / `ESETROOT_PMAP_ID` — the freedesktop-era
+    /// convention (Esetroot, feh, hsetroot) naming the pixmap holding
+    /// the current wallpaper, which pseudo-transparent apps (urxvt
+    /// `-tr` among them) read and composite behind their own content.
+    /// Published by `paint_background`/`paint_background_image`, so
+    /// terminal transparency works with zero compositor involvement.
+    xrootpmap_id: Atom,
+    esetroot_pmap_id: Atom,
     wm_delete_window: Atom,
     wm_take_focus: Atom,
     net_wm_pid: Atom,
@@ -165,9 +175,34 @@ impl X11Backend {
         let net_wm_pid = conn.intern_atom(false, b"_NET_WM_PID")?.reply()?.atom;
         let net_wm_name = conn.intern_atom(false, b"_NET_WM_NAME")?.reply()?.atom;
         let utf8_string = conn.intern_atom(false, b"UTF8_STRING")?.reply()?.atom;
+        let xrootpmap_id = conn.intern_atom(false, b"_XROOTPMAP_ID")?.reply()?.atom;
+        let esetroot_pmap_id = conn.intern_atom(false, b"ESETROOT_PMAP_ID")?.reply()?.atom;
 
         let gc = conn.generate_id()?;
         conn.create_gc(gc, root, &CreateGCAux::new().graphics_exposures(0))?;
+
+        // See `Argb`'s doc comment. A GC is tied to a drawable depth,
+        // so the 32-bit one is created against a throwaway 32-bit
+        // pixmap.
+        let argb = screen
+            .allowed_depths
+            .iter()
+            .find(|d| d.depth == 32)
+            .and_then(|d| d.visuals.iter().find(|v| v.class == VisualClass::TRUE_COLOR))
+            .map(|v| v.visual_id)
+            .and_then(|visual| {
+                let colormap = conn.generate_id().ok()?;
+                conn.create_colormap(ColormapAlloc::NONE, colormap, root, visual).ok()?;
+                let scratch = conn.generate_id().ok()?;
+                conn.create_pixmap(32, scratch, root, 1, 1).ok()?;
+                let gc32 = conn.generate_id().ok()?;
+                conn.create_gc(gc32, scratch, &CreateGCAux::new().graphics_exposures(0)).ok()?;
+                let _ = conn.free_pixmap(scratch);
+                Some(Argb { visual, colormap, gc: gc32 })
+            });
+        if argb.is_none() {
+            tracing::info!("no 32-bit TrueColor visual; frames stay at root depth (no client alpha passthrough)");
+        }
 
         // Without an explicit root cursor, a bare/nested X server (Xephyr,
         // Xvfb) shows nothing at all — real desktops get a default cursor
@@ -208,10 +243,13 @@ impl X11Backend {
             depth: screen.root_depth,
             image_byte_order,
             gc,
+            argb,
             root_background_pixmap: None,
             wm_protocols,
             wm_delete_window,
             wm_take_focus,
+            xrootpmap_id,
+            esetroot_pmap_id,
             net_wm_pid,
             net_wm_name,
             utf8_string,
@@ -261,15 +299,13 @@ impl X11Backend {
     /// automatically on `Expose` from then on — no repaint bookkeeping
     /// needed) and clears it to take effect immediately.
     pub fn paint_background(&mut self, rgb: (u8, u8, u8)) -> Result<(), X11BackendError> {
-        let pixel = pixel_from_rgb(rgb);
-        let aux = ChangeWindowAttributesAux::new().background_pixel(pixel);
-        self.conn.change_window_attributes(self.root, &aux)?;
-        self.conn.clear_area(false, self.root, 0, 0, 0, 0)?;
-        self.conn.flush()?;
-        if let Some(old) = self.root_background_pixmap.take() {
-            self.conn.free_pixmap(old)?;
-        }
-        Ok(())
+        // Routed through the pixmap path (a 1x1 the server tiles) even
+        // though a plain background_pixel would paint identically:
+        // pseudo-transparent apps can only composite what
+        // `_XROOTPMAP_ID` names, so a solid wallpaper must publish a
+        // pixmap too or transparency silently breaks on it.
+        let buffer = DecorationBuffer { width: 1, height: 1, pixels: vec![rgb.0, rgb.1, rgb.2, 255] };
+        self.paint_background_image(&buffer)
     }
 
     /// Installs a screen-sized RGBA buffer as the root background. The
@@ -292,6 +328,14 @@ impl X11Backend {
             self.root,
             &ChangeWindowAttributesAux::new().background_pixmap(pixmap),
         )?;
+        // Advertise the wallpaper pixmap before freeing its
+        // predecessor: apps re-fetch on the PropertyNotify these
+        // changes raise, and updating in this order keeps the window
+        // where a client could read an already-freed pixmap id as
+        // small as the protocol allows.
+        for atom in [self.xrootpmap_id, self.esetroot_pmap_id] {
+            self.conn.change_property32(PropMode::REPLACE, self.root, atom, AtomEnum::PIXMAP, &[pixmap])?;
+        }
         self.conn.clear_area(false, self.root, 0, 0, 0, 0)?;
         self.conn.flush()?;
 
@@ -401,6 +445,14 @@ impl X11Backend {
         if stride == 0 || h == 0 {
             return Ok(());
         }
+        // Frames are 32-bit when ARGB is available (see `Argb`);
+        // everything else (root background pixmap, shell windows)
+        // stays at the root depth. PutImage requires the depth and the
+        // GC to match the destination drawable.
+        let (depth, gc) = match &self.argb {
+            Some(argb) if self.frame_to_client.contains_key(&drawable) => (32, argb.gc),
+            _ => (self.depth, self.gc),
+        };
         // A little under the real limit: PutImage's own header/padding
         // eats a small, fixed slice of it, and lowballing costs nothing.
         const REQUEST_OVERHEAD_BYTES: usize = 64;
@@ -409,7 +461,7 @@ impl X11Backend {
         for (chunk_index, chunk) in data.chunks(rows_per_chunk * stride).enumerate() {
             let y = (chunk_index * rows_per_chunk) as i16;
             let chunk_h = (chunk.len() / stride) as u16;
-            self.conn.put_image(ImageFormat::Z_PIXMAP, drawable, self.gc, w, chunk_h, 0, y, 0, self.depth, chunk)?;
+            self.conn.put_image(ImageFormat::Z_PIXMAP, drawable, gc, w, chunk_h, 0, y, 0, depth, chunk)?;
         }
         Ok(())
     }
@@ -701,9 +753,27 @@ const CURSOR_RESIZE_ARROW_CENTER: (f32, f32) = (5.0, 10.0);
 /// `create_scaled_cursor`'s doc comment for why that matters and why
 /// this is hand-drawn rather than sourced from the X core cursor font
 /// or an Xcursor theme.
+/// Server-side resources for 32-bit ARGB frame windows — the piece
+/// that makes a translucent client's alpha SURVIVE reparenting: with
+/// composite redirection, a client composites against its parent
+/// frame's buffer, so a 24-bit frame flattens the client's alpha
+/// before the compositor ever sees it (translucent terminals rendered
+/// over black, confirmed live). Frames created at depth 32 keep the
+/// alpha channel intact all the way to the compositor; decoration
+/// pixels themselves are opaque (alpha 255 straight from the theme).
+/// `None` when the server offers no 32-bit TrueColor visual (bare
+/// Xvfb, say) — frames then fall back to the root depth exactly as
+/// before.
+struct Argb {
+    visual: Visualid,
+    colormap: Colormap,
+    gc: Gcontext,
+}
+
 struct Cursors {
     default: Cursor,
     resize_v: Cursor,
+    resize_h: Cursor,
     resize_se: Cursor,
     resize_sw: Cursor,
 }
@@ -714,9 +784,13 @@ impl Cursors {
         Ok(Self {
             default: create_scaled_cursor(conn, root, scale, CURSOR_ARROW, (0.0, 0.0))?,
             resize_v: create_scaled_cursor(conn, root, scale, CURSOR_RESIZE_ARROW, hotspot)?,
+            // East/West: the same double-arrow turned 90° to horizontal.
+            resize_h: create_scaled_cursor(conn, root, scale, &rotate_shape(CURSOR_RESIZE_ARROW, hotspot, 90.0_f32.to_radians()), hotspot)?,
             // SouthEast: rotate the vertical double-arrow 45° clockwise
-            // to point along the ↘ diagonal. SouthWest: 45°
-            // counter-clockwise, for ↙.
+            // to point along the ↘ diagonal (shared with NorthWest — the
+            // cursor shows the resize *axis*, so opposite corners use
+            // the same glyph, exactly as on a Mac). SouthWest: 45°
+            // counter-clockwise, for ↙ (shared with NorthEast).
             resize_se: create_scaled_cursor(conn, root, scale, &rotate_shape(CURSOR_RESIZE_ARROW, hotspot, 45.0_f32.to_radians()), hotspot)?,
             resize_sw: create_scaled_cursor(conn, root, scale, &rotate_shape(CURSOR_RESIZE_ARROW, hotspot, -45.0_f32.to_radians()), hotspot)?,
         })
@@ -726,13 +800,9 @@ impl Cursors {
         match edge {
             None => self.default,
             Some(ResizeEdge::South | ResizeEdge::North) => self.resize_v,
+            Some(ResizeEdge::East | ResizeEdge::West) => self.resize_h,
             Some(ResizeEdge::SouthEast | ResizeEdge::NorthWest) => self.resize_se,
             Some(ResizeEdge::SouthWest | ResizeEdge::NorthEast) => self.resize_sw,
-            // No theme in this codebase produces East/West-only resize
-            // hitboxes today (WindowMaker-style: only the bottom edge
-            // resizes) — the plain default is a reasonable fallback if
-            // one ever does, rather than an incomplete match.
-            Some(ResizeEdge::East | ResizeEdge::West) => self.default,
         }
     }
 }
@@ -1098,8 +1168,16 @@ impl Backend for X11Backend {
             // stable throughout the whole drag.
             .bit_gravity(Gravity::NORTH_WEST);
 
+        // Depth-32 frames when the server has an ARGB visual (see
+        // `Argb`'s doc comment) — a window with a non-inherited visual
+        // must also supply its own colormap and border pixel or the
+        // server answers BadMatch.
+        let (depth, visual, aux) = match &self.argb {
+            Some(argb) => (32, argb.visual, aux.colormap(argb.colormap).border_pixel(0)),
+            None => (COPY_DEPTH_FROM_PARENT, 0, aux),
+        };
         if let Err(e) = self.conn.create_window(
-            COPY_DEPTH_FROM_PARENT,
+            depth,
             frame,
             self.root,
             0,
@@ -1108,7 +1186,7 @@ impl Backend for X11Backend {
             layout.frame_size.h.max(1) as u16,
             0,
             WindowClass::INPUT_OUTPUT,
-            0,
+            visual,
             &aux,
         ) {
             tracing::error!(?e, "create_window for frame failed");

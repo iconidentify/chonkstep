@@ -6,8 +6,8 @@
 //! the exact same visual language instead of re-deriving it.
 
 use tiny_skia::{
-    Color as SkColor, FillRule, GradientStop, LineCap, LinearGradient, Paint, PathBuilder, Pixmap,
-    Point as SkPoint, PremultipliedColorU8, Rect as SkRect, SpreadMode, Stroke, Transform,
+    Color as SkColor, FillRule, GradientStop, LinearGradient, Paint, PathBuilder, Pixmap,
+    Point as SkPoint, PremultipliedColorU8, Rect as SkRect, SpreadMode, Transform,
 };
 
 use crate::model::{Bevel, BevelStyle, Color, Fill, FontSpec, FontStyle, FontWeight, GradientDirection, TextAlign};
@@ -104,22 +104,104 @@ pub fn draw_bevel(pixmap: &mut Pixmap, x: i32, y: i32, w: u32, h: u32, bevel: &B
     }
 }
 
-/// Solid black fill, no bevel: real WindowMaker's own pressed-button
-/// rendering (`paintButton`'s `pushed` branch, `TS_NEXT` arm, in
-/// `src/framewin.c`) — not a mirrored/`Sunken` bevel. Mirroring made
-/// sense before `draw_bevel` was confirmed against that same source:
-/// back when `Raised` put *light* on the top-left, `Sunken` (its exact
-/// opposite) read as "dark top-left" — sunken/pushed-in, correctly. But
-/// authentic NeXTSTEP's `Raised` already puts *dark* on the top-left
-/// (see `draw_bevel`'s own doc comment on the inverted light source),
-/// so mirroring it into `Sunken` puts *light* there instead — which
-/// most eyes read as "raised" regardless of what the code calls it. The
-/// result was a button that visually looked like it popped further
-/// *out* the instant you pressed it — confirmed live as exactly
-/// backwards-feeling, "opposite day." WindowMaker itself sidesteps the
-/// whole ambiguity by not bevelling the pressed state at all.
-pub fn draw_button_pressed(pixmap: &mut Pixmap, x: i32, y: i32, w: u32, h: u32) {
-    fill_rect(pixmap, x, y, w, h, Color::rgb(0, 0, 0));
+/// Clamped per-pixel brighten/shade over an opaque rect — the exact
+/// primitive real WindowMaker's relief drawing is built from
+/// (`ROperateLine` with `RAddOperation`/`RSubtractOperation` in
+/// `wrlib/`): it operates on *whatever fill is already there* rather
+/// than painting an absolute color, which is what lets one relief
+/// recipe read correctly on both a black and a light-gray titlebar.
+/// Assumes the destination is already fully opaque, same as
+/// `draw_text` (see its doc comment).
+pub fn op_rect(pixmap: &mut Pixmap, x: i32, y: i32, w: u32, h: u32, delta: i16) {
+    let (pw, ph) = (pixmap.width() as i32, pixmap.height() as i32);
+    let x0 = x.max(0);
+    let y0 = y.max(0);
+    let x1 = (x + w as i32).min(pw);
+    let y1 = (y + h as i32).min(ph);
+    let pixels = pixmap.pixels_mut();
+    for py in y0..y1 {
+        for px in x0..x1 {
+            let idx = (py * pw + px) as usize;
+            let e = pixels[idx];
+            let op = |c: u8| (c as i16 + delta).clamp(0, 255) as u8;
+            if let Some(p) = PremultipliedColorU8::from_rgba(op(e.red()), op(e.green()), op(e.blue()), 255) {
+                pixels[idx] = p;
+            }
+        }
+    }
+}
+
+/// wrlib's `RBEV_RAISED2` relief (`RBevelImage`, `wrlib/misc.c`) — the
+/// one real WindowMaker applies to titlebars, titlebar buttons, and
+/// (partially) resizebars: +80 light lines along top/left, a -40 shade
+/// line plus a hard black outer line along bottom/right. Generalized
+/// from the original's hard-coded 1px lines to `t`-thick ones so the
+/// relief scales with `CHONKSTEP_SCALE` like every other piece of
+/// chrome.
+pub fn draw_raised2_bevel(pixmap: &mut Pixmap, x: i32, y: i32, w: u32, h: u32, t: u32) {
+    let t = t.max(1);
+    if w < 3 * t || h < 3 * t {
+        return;
+    }
+    let (wi, hi, ti) = (w as i32, h as i32, t as i32);
+    op_rect(pixmap, x, y, w, t, 80);
+    op_rect(pixmap, x, y + ti, t, h - t, 80);
+    op_rect(pixmap, x, y + hi - 2 * ti, w - 2 * t, t, -40);
+    fill_rect(pixmap, x, y + hi - ti, w, t, Color::rgb(0, 0, 0));
+    op_rect(pixmap, x + wi - 2 * ti, y, t, h - 2 * t, -40);
+    fill_rect(pixmap, x + wi - ti, y, t, h - t, Color::rgb(0, 0, 0));
+}
+
+/// The stock resizebar relief, line for line from real WindowMaker's
+/// `renderResizebarTexture` (`src/framewin.c`, `SHADOW_RESIZEBAR`
+/// undefined, as shipped): a shade+light line pair across the top, and
+/// a vertical shade+light notch pair `corner_w` in from each end
+/// delimiting the corner grips. No outer side/bottom shading — the
+/// bar's silhouette comes from the frame border below it.
+#[allow(clippy::too_many_arguments)]
+pub fn draw_resizebar_relief(pixmap: &mut Pixmap, x: i32, y: i32, w: u32, h: u32, corner_w: u32, t: u32) {
+    let t = t.max(1);
+    let (ti, cwi) = (t as i32, corner_w as i32);
+    let notch_h = h.saturating_sub(2 * t);
+    op_rect(pixmap, x, y, w, t, -40);
+    op_rect(pixmap, x, y + ti, w, t, 80);
+    op_rect(pixmap, x + cwi, y + 2 * ti, t, notch_h, -40);
+    op_rect(pixmap, x + cwi + ti, y + 2 * ti, t, notch_h, 80);
+    op_rect(pixmap, x + w as i32 - cwi - 2 * ti, y + 2 * ti, t, notch_h, -40);
+    op_rect(pixmap, x + w as i32 - cwi - ti, y + 2 * ti, t, notch_h, 80);
+}
+
+/// wrlib's sunken relief (`RBevelImage`'s `else` branch,
+/// `wrlib/misc.c`): -40 shade lines along top/left, +80 light lines
+/// along bottom/right — the exact mirror of `draw_raised2_bevel`'s
+/// light direction, minus that recipe's hard black outer lines (the
+/// sunken branch has none). Thickness generalized to `t` the same way.
+pub fn draw_sunken_bevel(pixmap: &mut Pixmap, x: i32, y: i32, w: u32, h: u32, t: u32) {
+    let t = t.max(1);
+    if w < 3 * t || h < 3 * t {
+        return;
+    }
+    let (wi, hi, ti) = (w as i32, h as i32, t as i32);
+    op_rect(pixmap, x, y, w, t, -40);
+    op_rect(pixmap, x, y + ti, t, h - t, -40);
+    op_rect(pixmap, x, y + hi - ti, w, t, 80);
+    op_rect(pixmap, x + wi - ti, y, t, h - 2 * t, 80);
+}
+
+/// Pressed-button feedback: shift the button's *existing* fill toward
+/// "pushed" — `delta` positive to lighten (a dark bar), negative to
+/// darken (a light one) — and *invert* the relief to wrlib's sunken
+/// direction rather than removing it: the edge accents stay put and
+/// flip, reading as the surface tilting inward (relief simply
+/// vanishing on press read as the button losing its edge — confirmed
+/// live). Real WindowMaker's own default pressed state is a full white
+/// fill with a black outline (`paintButton`'s `pushed`/`TS_NEW` arm),
+/// which at native 23px reads as a blink but at CHONKSTEP_SCALE button
+/// sizes reads as a glaring white flash — also confirmed live. `t` is
+/// the relief thickness (the theme bevel width, so it scales).
+pub fn draw_button_pressed(pixmap: &mut Pixmap, x: i32, y: i32, w: u32, h: u32, delta: i16, t: u32) {
+    op_rect(pixmap, x, y, w, h, delta);
+    draw_sunken_bevel(pixmap, x, y, w, h, t);
 }
 
 /// Draws a themed, pressable surface: `fill` then the chiseled bevel
@@ -132,12 +214,28 @@ pub fn draw_button_pressed(pixmap: &mut Pixmap, x: i32, y: i32, w: u32, h: u32) 
 /// feedback itself.
 #[allow(clippy::too_many_arguments)]
 pub fn draw_button(pixmap: &mut Pixmap, x: i32, y: i32, w: u32, h: u32, fill: &Fill, bevel: &Bevel, pressed: bool) {
+    fill_area(pixmap, x, y, w, h, fill);
     if pressed {
-        draw_button_pressed(pixmap, x, y, w, h);
+        draw_button_pressed(pixmap, x, y, w, h, pressed_delta(fill), bevel.width.max(1) as u32);
         return;
     }
-    fill_area(pixmap, x, y, w, h, fill);
     draw_bevel(pixmap, x, y, w, h, bevel);
+}
+
+/// The luminance shift `draw_button_pressed` should apply for a given
+/// fill: lighten a dark fill, darken a light one, either way by the
+/// same magnitude so the press feedback is equally visible on any bar.
+pub fn pressed_delta(fill: &Fill) -> i16 {
+    let c = match fill {
+        Fill::Solid(c) => *c,
+        Fill::Gradient(g) => Color::rgb(
+            ((g.from.r as u16 + g.to.r as u16) / 2) as u8,
+            ((g.from.g as u16 + g.to.g as u16) / 2) as u8,
+            ((g.from.b as u16 + g.to.b as u16) / 2) as u8,
+        ),
+    };
+    let luminance = (c.r as u16 + c.g as u16 + c.b as u16) / 3;
+    if luminance < 128 { 56 } else { -56 }
 }
 
 /// A small filled right-pointing triangle — the cascade indicator every
@@ -158,50 +256,6 @@ pub fn draw_cascade_arrow(pixmap: &mut Pixmap, x: i32, y: i32, size: u32, color:
     pb.close();
     if let Some(path) = pb.finish() {
         pixmap.fill_path(&path, &paint, FillRule::Winding, Transform::identity(), None);
-    }
-}
-
-/// The resize-corner affordance: three short parallel diagonal grooves
-/// (each a light+dark pair, one pixel apart, echoing this theme's own
-/// chisel bevel language rather than inventing a new visual motif) in
-/// the corner of the resize bar, angled toward the direction dragging
-/// that corner actually resizes in. `(x, y)` is the corner of the
-/// `size`x`size` box the grip is drawn within — for the bottom-right
-/// (SouthEast) corner that's its top-left; `mirrored` flips the angle
-/// for the bottom-left (SouthWest) corner, whose box is anchored at its
-/// top-right instead.
-#[allow(clippy::too_many_arguments)]
-pub fn draw_resize_grip(pixmap: &mut Pixmap, x: i32, y: i32, size: u32, light: Color, dark: Color, mirrored: bool) {
-    let s = size as f32;
-    let stroke = Stroke { width: 1.0, line_cap: LineCap::Round, ..Default::default() };
-    let mut light_paint = Paint::default();
-    light_paint.set_color(sk_color(light));
-    light_paint.anti_alias = false;
-    let mut dark_paint = Paint::default();
-    dark_paint.set_color(sk_color(dark));
-    dark_paint.anti_alias = false;
-
-    // Three evenly-spaced, increasingly long diagonal grooves fanning
-    // out toward the true corner — reads as a textured, grippable
-    // patch rather than a single arrow-like line.
-    for i in 0..3 {
-        let t = (i + 1) as f32 / 4.0;
-        let len = s * (0.35 + 0.25 * i as f32);
-        let (cx, cy) = (x as f32 + s * t, y as f32 + s * t);
-        let (dx, dy) = (len / 2.0, len / 2.0);
-        let (x0, y0, x1, y1) = if mirrored {
-            (cx + dx, cy - dy, cx - dx, cy + dy)
-        } else {
-            (cx - dx, cy - dy, cx + dx, cy + dy)
-        };
-        for (paint, ox, oy) in [(&light_paint, 0.0, 0.0), (&dark_paint, 1.0, 1.0)] {
-            let mut pb = PathBuilder::new();
-            pb.move_to(x0 + ox, y0 + oy);
-            pb.line_to(x1 + ox, y1 + oy);
-            if let Some(path) = pb.finish() {
-                pixmap.stroke_path(&path, paint, &stroke, Transform::identity(), None);
-            }
-        }
     }
 }
 
@@ -399,30 +453,54 @@ mod tests {
         assert_eq!((sunken_top_left.red(), sunken_top_left.green(), sunken_top_left.blue()), (255, 255, 255), "sunken should invert: light on top-left");
     }
 
-    /// Regression test for the "pops out instead of pushing in" bug: a
-    /// pressed button must be a flat fill with *no* light/dark corner
-    /// distinction at all (real WindowMaker's own pressed-button
-    /// rendering — see `draw_button_pressed`'s doc comment), not a
-    /// bevel of either direction. A mirrored `Sunken` bevel would put
-    /// *light* on the top-left corner — indistinguishable from what a
-    /// plain `Raised` bevel looked like before the direction fix — so
-    /// asserting the two corners are equal (not just "different from
-    /// idle") is what actually catches that regression.
+    /// Pressed feedback is a relative shift (lighten a dark fill,
+    /// darken a light one) plus the relief *inverted* to wrlib's
+    /// sunken direction — dark top-left, light bottom-right — never
+    /// removed: the edge accents flipping rather than vanishing is
+    /// what reads as "pushed in" (see `draw_button_pressed`'s doc
+    /// comment for why not WindowMaker's own white-flash pushed state).
     #[test]
-    fn pressed_button_has_no_bevel_corner_distinction() {
+    fn pressed_button_shifts_fill_and_inverts_relief_to_sunken() {
+        let (w, h) = (20u32, 20u32);
+
+        let dark_fill = Fill::Solid(Color::rgb(0, 0, 0));
+        let mut dark = Pixmap::new(w, h).unwrap();
+        fill_rect(&mut dark, 0, 0, w, h, Color::rgb(0, 0, 0));
+        draw_button_pressed(&mut dark, 0, 0, w, h, pressed_delta(&dark_fill), 1);
+        let top_left = dark.pixels()[0].red();
+        let center = dark.pixels()[((h / 2) * w + w / 2) as usize].red();
+        let bottom_right = dark.pixels()[((h - 1) * w + (w - 1)) as usize].red();
+        assert!(center > 0, "a dark fill should lighten when pressed");
+        assert!(top_left < center, "sunken: top-left shade must sit below the shifted interior");
+        assert!(bottom_right > center, "sunken: bottom-right light must sit above the shifted interior");
+
+        let light_fill = Fill::Solid(Color::rgb(0xAA, 0xAA, 0xAA));
+        let mut light = Pixmap::new(w, h).unwrap();
+        fill_rect(&mut light, 0, 0, w, h, Color::rgb(0xAA, 0xAA, 0xAA));
+        draw_button_pressed(&mut light, 0, 0, w, h, pressed_delta(&light_fill), 1);
+        assert!(light.pixels()[((h / 2) * w + w / 2) as usize].red() < 0xAA, "a light fill should darken when pressed");
+    }
+
+    /// `RBEV_RAISED2` pinned against `wrlib/misc.c`: on a mid-gray
+    /// fill, the top edge gains +80, the outer bottom/right lines are
+    /// hard black, and the inner bottom shade line loses 40.
+    #[test]
+    fn raised2_bevel_matches_wrlib_recipe() {
         let (w, h) = (20u32, 20u32);
         let mut pixmap = Pixmap::new(w, h).unwrap();
         fill_rect(&mut pixmap, 0, 0, w, h, Color::rgb(128, 128, 128));
-        draw_button_pressed(&mut pixmap, 0, 0, w, h);
+        draw_raised2_bevel(&mut pixmap, 0, 0, w, h, 1);
 
-        let top_left = pixmap.pixels()[0];
-        let bottom_right = pixmap.pixels()[((h - 1) * w + (w - 1)) as usize];
-        assert_eq!(
-            (top_left.red(), top_left.green(), top_left.blue()),
-            (bottom_right.red(), bottom_right.green(), bottom_right.blue()),
-            "pressed state must not bevel — both corners should be the same flat dark fill"
-        );
-        assert_eq!((top_left.red(), top_left.green(), top_left.blue()), (0, 0, 0), "pressed state should be a flat black fill");
+        let px = |x: u32, y: u32| {
+            let p = pixmap.pixels()[(y * w + x) as usize];
+            (p.red(), p.green(), p.blue())
+        };
+        assert_eq!(px(w / 2, 0), (208, 208, 208), "top line brightens by 80");
+        assert_eq!(px(0, h / 2), (208, 208, 208), "left line brightens by 80");
+        assert_eq!(px(w / 2, h - 2), (88, 88, 88), "inner bottom line shades by 40");
+        assert_eq!(px(w / 2, h - 1), (0, 0, 0), "outer bottom line is hard black");
+        assert_eq!(px(w - 1, h / 2), (0, 0, 0), "outer right line is hard black");
+        assert_eq!(px(w / 2, h / 2), (128, 128, 128), "interior untouched");
     }
 
     /// The topmost/bottommost row (inclusive) containing an ink pixel

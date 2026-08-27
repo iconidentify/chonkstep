@@ -32,6 +32,10 @@ pub enum RootMenuAction {
     LaunchAbout,
     LaunchBrowser,
     SetWallpaper(Wallpaper),
+    /// The stable id of a built-in theme (`wm_theme::default_theme::
+    /// CHOICES`) — handled in `main.rs`, which persists it and
+    /// hot-restarts in place to redress every surface at once.
+    SetTheme(&'static str),
     Exit,
 }
 
@@ -40,18 +44,30 @@ const ACTION_LAUNCH_ABOUT: u32 = 2;
 const ACTION_EXIT: u32 = 3;
 const ACTION_LAUNCH_BROWSER: u32 = 4;
 const ACTION_WALLPAPER_BASE: u32 = 100;
+const ACTION_THEME_BASE: u32 = 200;
 
-fn root_menu_items(selected_wallpaper: Wallpaper) -> Vec<MenuItem> {
+fn root_menu_items(selected_wallpaper: Wallpaper, selected_theme_id: &str) -> Vec<MenuItem> {
+    let bullet = |selected: bool, label: &str| {
+        if selected {
+            format!("\u{2022} {label}")
+        } else {
+            format!("  {label}")
+        }
+    };
     let wallpaper_items = Wallpaper::ALL
         .into_iter()
         .enumerate()
         .map(|(index, wallpaper)| MenuItem::Action {
-            label: if wallpaper == selected_wallpaper {
-                format!("\u{2022} {}", wallpaper.label())
-            } else {
-                format!("  {}", wallpaper.label())
-            },
+            label: bullet(wallpaper == selected_wallpaper, wallpaper.label()),
             action: ACTION_WALLPAPER_BASE + index as u32,
+        })
+        .collect();
+    let theme_items = wm_theme::default_theme::CHOICES
+        .iter()
+        .enumerate()
+        .map(|(index, (id, label))| MenuItem::Action {
+            label: bullet(*id == selected_theme_id, label),
+            action: ACTION_THEME_BASE + index as u32,
         })
         .collect();
 
@@ -64,6 +80,7 @@ fn root_menu_items(selected_wallpaper: Wallpaper) -> Vec<MenuItem> {
                 MenuItem::Action { label: "About chonkstep".to_string(), action: ACTION_LAUNCH_ABOUT },
             ],
         },
+        MenuItem::Submenu { label: "Theme".to_string(), items: theme_items },
         MenuItem::Submenu { label: "Wallpaper".to_string(), items: wallpaper_items },
         MenuItem::Action { label: "Exit".to_string(), action: ACTION_EXIT },
     ]
@@ -78,6 +95,11 @@ fn resolve_action(action: u32) -> Option<RootMenuAction> {
         action if (ACTION_WALLPAPER_BASE..ACTION_WALLPAPER_BASE + Wallpaper::ALL.len() as u32)
             .contains(&action) => Some(RootMenuAction::SetWallpaper(
             Wallpaper::ALL[(action - ACTION_WALLPAPER_BASE) as usize],
+        )),
+        action if (ACTION_THEME_BASE
+            ..ACTION_THEME_BASE + wm_theme::default_theme::CHOICES.len() as u32)
+            .contains(&action) => Some(RootMenuAction::SetTheme(
+            wm_theme::default_theme::CHOICES[(action - ACTION_THEME_BASE) as usize].0,
         )),
         _ => None,
     }
@@ -174,6 +196,9 @@ pub struct Desktop {
     icons: HashMap<Window, IconTile>,
     icon_drag: Option<IconDrag>,
     wallpaper: Wallpaper,
+    /// Stable id of the active theme — only used to bullet-mark the
+    /// Theme submenu; the `Theme` itself lives in `main.rs`.
+    theme_id: String,
     logo: Pixmap,
 }
 
@@ -181,7 +206,7 @@ impl Desktop {
     /// `scale` multiplies every dock/icon pixel dimension — pass the
     /// same factor used for `Theme::scaled` so the shell's own chrome
     /// (which doesn't go through the theme engine) matches the WM's.
-    pub fn new(backend: &mut X11Backend, screen: Size, scale: f32) -> Self {
+    pub fn new(backend: &mut X11Backend, screen: Size, scale: f32, theme_id: String) -> Self {
         let tile = ((56.0 * scale).round() as u32).max(16);
         let pad = ((4.0 * scale).round() as u32).max(1);
         // The dock is exactly one tile wide, tiles touch directly with
@@ -225,6 +250,7 @@ impl Desktop {
             icons: HashMap::new(),
             icon_drag: None,
             wallpaper,
+            theme_id,
             logo,
         };
         desktop.repaint_wallpaper(backend);
@@ -432,7 +458,7 @@ impl Desktop {
 
     pub fn open_root_menu(&mut self, backend: &mut X11Backend, theme: &Theme, at: Point) {
         let bounds = self.screen_size();
-        self.menu.open(backend, theme, &mut self.font_system, root_menu_items(self.wallpaper), at, bounds);
+        self.menu.open(backend, theme, &mut self.font_system, root_menu_items(self.wallpaper, &self.theme_id), at, bounds);
     }
 
     /// Applies a built-in wallpaper immediately and repaints the dock to
@@ -731,7 +757,7 @@ mod tests {
 
     #[test]
     fn wallpaper_submenu_marks_the_current_selection() {
-        let items = root_menu_items(Wallpaper::TealBlueprint);
+        let items = root_menu_items(Wallpaper::TealBlueprint, "window-maker");
         let submenu = items.iter().find(|item| item.label() == "Wallpaper").expect("wallpaper submenu");
         let MenuItem::Submenu { items, .. } = submenu else { panic!("expected submenu") };
         assert_eq!(items.len(), Wallpaper::ALL.len());
