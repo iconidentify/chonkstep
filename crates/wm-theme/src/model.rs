@@ -194,15 +194,16 @@ pub struct TerminalPalette {
     pub bg: Color,
     pub cursor: Color,
     pub ansi: [Color; 16],
-    /// Terminal background opacity in percent (e.g. 85 = slightly
+    /// Terminal window opacity in percent (e.g. 88 = slightly
     /// translucent glass over the wallpaper), `None` = fully opaque.
-    /// Realized as true alpha: the session runs a compositor (picom,
-    /// started by `scripts/xsession.sh`) and terminals launch with a
-    /// 32-bit visual and an alpha-tagged background color. urxvt's own
-    /// compositor-free pseudo-transparency was tried first and
-    /// abandoned: its 9.31 background engine silently falls back to an
-    /// opaque background for larger windows (confirmed live — the same
-    /// arguments ghost at 600x400 and go flat at 1300x800).
+    /// Applied by the session compositor to the terminal's whole frame
+    /// via `_NET_WM_WINDOW_OPACITY` (see `add_opacity_rule` in
+    /// `wm-x11`), never by the terminal itself: both of urxvt's own
+    /// transparency mechanisms were tried first and reverted — its
+    /// pseudo-transparency silently goes opaque on larger windows, and
+    /// its 32-bit-visual alpha background leaves stale framebuffer
+    /// garbage in regions it fails to repaint on scroll/resize (both
+    /// confirmed live).
     pub opacity: Option<u8>,
 }
 

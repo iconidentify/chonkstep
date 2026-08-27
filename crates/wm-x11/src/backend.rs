@@ -67,6 +67,10 @@ pub struct X11Backend {
     /// terminal transparency works with zero compositor involvement.
     xrootpmap_id: Atom,
     esetroot_pmap_id: Atom,
+    net_wm_window_opacity: Atom,
+    /// `(WM_CLASS name, opacity percent)` rules applied to new frames —
+    /// see `add_opacity_rule`.
+    opacity_rules: Vec<(String, u8)>,
     wm_delete_window: Atom,
     wm_take_focus: Atom,
     net_wm_pid: Atom,
@@ -177,6 +181,7 @@ impl X11Backend {
         let utf8_string = conn.intern_atom(false, b"UTF8_STRING")?.reply()?.atom;
         let xrootpmap_id = conn.intern_atom(false, b"_XROOTPMAP_ID")?.reply()?.atom;
         let esetroot_pmap_id = conn.intern_atom(false, b"ESETROOT_PMAP_ID")?.reply()?.atom;
+        let net_wm_window_opacity = conn.intern_atom(false, b"_NET_WM_WINDOW_OPACITY")?.reply()?.atom;
 
         let gc = conn.generate_id()?;
         conn.create_gc(gc, root, &CreateGCAux::new().graphics_exposures(0))?;
@@ -250,6 +255,8 @@ impl X11Backend {
             wm_take_focus,
             xrootpmap_id,
             esetroot_pmap_id,
+            net_wm_window_opacity,
+            opacity_rules: Vec::new(),
             net_wm_pid,
             net_wm_name,
             utf8_string,
@@ -343,6 +350,54 @@ impl X11Backend {
             self.conn.free_pixmap(old)?;
         }
         Ok(())
+    }
+
+    /// Registers a whole-window translucency rule: any client whose
+    /// `WM_CLASS` instance or class name equals `class` (compared
+    /// case-insensitively) gets `_NET_WM_WINDOW_OPACITY` set on its
+    /// frame, which the session compositor honors uniformly. This is
+    /// deliberately compositor-side rather than client-side alpha:
+    /// urxvt's own 32-bit-visual background path leaves stale
+    /// framebuffer garbage in regions it fails to repaint on scroll
+    /// and resize (confirmed live — rows flipping between glass,
+    /// garbage, and fully transparent), while a frame opacity property
+    /// is applied by the compositor to the finished window image and
+    /// cannot be inconsistent within a window.
+    pub fn add_opacity_rule(&mut self, class: &str, opacity_percent: u8) {
+        self.opacity_rules.push((class.to_ascii_lowercase(), opacity_percent.clamp(1, 100)));
+    }
+
+    fn apply_opacity_rule(&mut self, window: Window, frame: Window) {
+        if self.opacity_rules.is_empty() {
+            return;
+        }
+        let Ok(reply) = self
+            .conn
+            .get_property(false, window, AtomEnum::WM_CLASS, AtomEnum::STRING, 0, 64)
+            .and_then(|c| Ok(c.reply()))
+        else {
+            return;
+        };
+        let Ok(reply) = reply else { return };
+        let value = reply.value;
+        let names: Vec<String> = value
+            .split(|b| *b == 0)
+            .filter(|s| !s.is_empty())
+            .map(|s| String::from_utf8_lossy(s).to_ascii_lowercase())
+            .collect();
+        for (class, percent) in &self.opacity_rules {
+            if names.iter().any(|n| n == class) {
+                let opacity = (*percent as u64 * 0xFFFF_FFFF / 100) as u32;
+                let _ = self.conn.change_property32(
+                    PropMode::REPLACE,
+                    frame,
+                    self.net_wm_window_opacity,
+                    AtomEnum::CARDINAL,
+                    &[opacity],
+                );
+                return;
+            }
+        }
     }
 
     /// Creates an unmanaged shell window (dock panel, menu popup, ...) —
@@ -1226,6 +1281,7 @@ impl Backend for X11Backend {
         let _ = self.conn.flush();
 
         self.frame_to_client.insert(frame, window.0);
+        self.apply_opacity_rule(window.0, frame);
         XFrame(frame)
     }
 
