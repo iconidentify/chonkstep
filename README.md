@@ -22,6 +22,10 @@ restarts that keep your windows open.
   and horizontal arrows on the flat sides. North and west drags anchor
   the opposite edge, and client size hints (a terminal's cell grid) are
   respected mid-drag.
+- **A modal Alt-Tab switcher.** Hold Alt and Tab through a centered
+  switch panel of live window thumbnails - selection commits when Alt
+  is released, Escape cancels, Shift+Tab steps backward. The panel is
+  drawn in the active theme's language, WindowMaker switchpanel style.
 - **Theme engine with five built-in themes.** Window Maker, Amber
   Phosphor, Teal Blueprint, Graphite, and NeXT Lavender. A theme
   restyles everything at once - window chrome, menus, wallpaper, dock,

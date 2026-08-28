@@ -305,6 +305,21 @@ fn handle_notification(wm: &mut WindowManager<X11Backend>, desktop: &mut Desktop
             desktop.remove_icon_for_client(wm.backend_mut(), id);
         }
         Notification::Mapped(_) => {}
+        Notification::CycleUpdated => {
+            if let Some((candidates, selected)) = wm.cycle_state() {
+                // Previews are captured once per session (and again only
+                // if the candidate set itself changes) — stepping the
+                // selection is just a re-render of stored entries.
+                let entries = (desktop.switcher_entry_count() != Some(candidates.len())).then(|| {
+                    candidates
+                        .iter()
+                        .map(|(id, title)| wm_theme::switcher::SwitcherEntry { title: title.clone(), preview: wm.client_preview(*id) })
+                        .collect()
+                });
+                desktop.show_switcher(wm.backend_mut(), theme, entries, selected);
+            }
+        }
+        Notification::CycleEnded => desktop.hide_switcher(wm.backend_mut()),
     }
 }
 

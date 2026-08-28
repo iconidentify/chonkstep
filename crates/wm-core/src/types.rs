@@ -109,4 +109,9 @@ pub enum BackendEvent<Win, Frame> {
     PointerEnter { surface: SurfaceRef<Win, Frame> },
     PointerLeave { surface: SurfaceRef<Win, Frame> },
     KeyPress(KeyCombo),
+    /// A key was released. Backends only need to deliver these while a
+    /// modal keyboard grab is active (the Alt-Tab switcher listens for
+    /// the Alt release that commits the selection); releases outside a
+    /// grab may simply never be emitted.
+    KeyRelease(KeyCombo),
 }
