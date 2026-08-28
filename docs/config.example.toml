@@ -41,6 +41,30 @@
 # is warned about and ignored.
 #theme = "window-maker"
 
+# Where a newly mapped window goes when the application itself asked
+# for no particular position (an explicit position, like a terminal's
+# -geometry +x+y, is always honored instead). One of:
+#   "smart"    (the default) WindowMaker's smart placement: scan the
+#              usable screen for the spot overlapping the least
+#              existing window area, preferring fully free space,
+#              biased toward the top-left so windows fill the screen
+#              in reading order
+#   "cascade"  the classic staircase -- each new window steps down and
+#              right by one titlebar, so every titlebar stays visible
+#   "center"   every new window dead-center in the usable screen
+# Case-insensitive. An unknown value is warned about and "smart" is
+# kept.
+#placement = "smart"
+
+# Edge resistance for interactive moves, in whole pixels: while a
+# window is being dragged, any frame edge that comes within this
+# distance of a screen edge or another window's edge snaps flush
+# against it, so windows line up without pixel-hunting. Larger values
+# grab from farther away; 0 disables snapping entirely. Must be a
+# non-negative integer -- anything else is warned about and the
+# default of 10 is kept.
+#edge_resistance = 10
+
 # Keybindings. Entries here merge OVER the defaults: listing a combo
 # overrides only that combo, and every unlisted default stays bound.
 # The special value "none" unbinds a combo outright.
