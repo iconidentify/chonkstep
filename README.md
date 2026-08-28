@@ -95,29 +95,36 @@ scripts/install.sh
 
 The installer pulls the runtime dependencies with pacman (Xorg,
 rxvt-unicode, picom, wireplumber for the sound instrument, the theme
-fonts, the Wayland stack the compositor builds and runs against -
-libxkbcommon, EGL/mesa, Xwayland - and a Rust toolchain if needed),
-builds both release binaries, installs a `chonkstep.desktop` session
-entry that points back into the checkout, and seeds
+fonts, the stack the Wayland compositor builds and runs against -
+libxkbcommon, EGL/mesa, Xwayland, and libdrm/libinput/libudev/libseat
+for the hardware session - and a Rust toolchain if needed), builds both
+release binaries, installs **two** session entries that point back into
+the checkout - `/usr/share/xsessions/chonkstep.desktop` and
+`/usr/share/wayland-sessions/chonkstep.desktop` - and seeds
 `~/.config/chonkstep/config.toml` from the fully-commented example if
 you don't have one.
 
-How you start it depends on the machine, and on which half you want:
+Both halves are real login sessions. How you start one depends on the
+machine, and on which you want:
 
-- **The X11 session** is the full daily-driver desktop. On **stock
-  Omarchy** there is no login-manager session picker (it boots straight
-  into Hyprland via autologin), so switch to a TTY (Ctrl+Alt+F3), log
-  in, and run `startx scripts/xsession.sh` from the checkout. On a
-  machine **with a display manager** (sddm, gdm, lightdm, ...), log out
-  and pick "chonkstep" in the session list.
-- **The Wayland compositor** runs nested inside whatever desktop you
-  are already in - `./target/release/chonkstep-wayland` from a
-  terminal - and is a preview rather than a login session today. See
-  [Wayland](#wayland) below for why, and for what it can already do.
-  Being on a Wayland desktop (as Omarchy is) does not change the
-  recommendation yet: until the DRM/KMS session lands, the X11 session
-  is the one you can log into, and the installer deliberately does not
-  register a Wayland session entry that would fail when chosen.
+- **With a display manager** (sddm, gdm, lightdm, ...), log out and
+  pick either "chonkstep" (X11) or "chonkstep (Wayland)" from the
+  session list.
+- **On stock Omarchy** there is no session picker at all (it boots
+  straight into Hyprland via autologin), so switch to a TTY
+  (Ctrl+Alt+F3), log in, and run either `startx scripts/xsession.sh`
+  or `exec scripts/wayland-session.sh` from the checkout. The Wayland
+  one needs no `startx`: the compositor *is* the display server, and it
+  takes the graphics device, the input devices, and the VT for itself.
+- **Nested**, for development or a look before you log in:
+  `./target/release/chonkstep-wayland` from a terminal inside your
+  current desktop opens a window that is its screen. See
+  [Wayland](#wayland) below.
+
+Seat access needs no setup on any systemd machine, Omarchy included -
+logind already hands the active session its devices. On a machine
+without logind, enable `seatd` and join the `seat` group; the installer
+prints this only when it finds logind missing.
 
 On a HiDPI display, set `scale = 2.0` in
 `~/.config/chonkstep/config.toml` - it scales chrome, dock, cursors,
@@ -146,29 +153,83 @@ is what keeps the two sessions identical: a feature or a fix lands
 once, in the shared crates, and both stacks get it by construction
 rather than by porting discipline.
 
-The Wayland side is the younger half, and its current shape is stated
-honestly: it runs today as a *nested* session for development. The
-compositor opens a regular window on your existing desktop (Wayland or
-X11, via Smithay's winit backend), and that window is its screen -
-chrome, dock, root menu, themes, and all. A true DRM/KMS session that
-owns the hardware from a TTY, the way Xorg does for the X11 side, is
-planned behind the crate's `session` feature but is not built yet.
+The Wayland side is the younger half, and it runs in two shapes from
+one binary. Which one it takes is decided at startup, not at build
+time: if there is already a desktop here to nest inside (an existing
+`WAYLAND_DISPLAY` or `DISPLAY`) it opens a window; if there is not - a
+bare TTY, a display manager's Wayland session - it takes the hardware.
+`CHONKSTEP_BACKEND=winit` or `=session` forces the choice.
 
-To run it nested, from a terminal on any desktop:
+**As a login session**, the compositor owns the machine the way Xorg
+does for the X11 side: it opens the seat through libseat (logind, or
+seatd where there is no logind), sets a mode on the DRM device, drives
+page flips through GBM and EGL, and reads real keyboards, mice, and
+touchpads through libinput and udev. Ctrl+Alt+F1..F12 switches VTs and
+the session hands its devices back and comes alive again on the way
+in, so the console is never more than a keystroke away. Pick
+"chonkstep (Wayland)" in your display manager's session list, or from a
+TTY:
+
+```sh
+exec scripts/wayland-session.sh
+```
+
+That script is the Wayland twin of `scripts/xsession.sh` - it is what
+the `wayland-sessions` entry points at, and it is also where you set
+your keyboard layout for a TTY login (`XKB_DEFAULT_LAYOUT` and
+friends; there is no settings daemon on a bare VT to ask). It starts no
+compositing manager, unlike the X11 script: the compositor composites
+itself, so the themes' translucent terminals are true alpha in the same
+GLES scene that draws the chrome.
+
+What the session backend does not do yet, stated plainly:
+
+- **One GPU, one output.** The primary DRM device and its first
+  connected connector are the session; a second monitor stays dark.
+  Nothing hot-plugs either: a GPU or a connector that appears
+  mid-session is logged and ignored, so docking a laptop means
+  restarting the session.
+- **No hardware cursor plane.** The pointer is drawn into the frame
+  like every other scene element rather than handed to the display
+  controller's own cursor plane, so it moves at the frame rate rather
+  than the mouse's.
+- **Restart costs you your clients.** The compositor does re-exec in
+  place - that is how the theme menu and `scripts/restart.sh` apply
+  changes on both backends - but Wayland clients die with the socket
+  they were connected to, and there is no SaveSet equivalent to adopt
+  them afterwards. The X11 session keeps your windows across a
+  restart; this one keeps only itself.
+- **No EWMH-analog protocols.** `wlr-foreign-toplevel-management`,
+  `wlr-output-management`, layer-shell, screencopy, idle-inhibit, and
+  DRM leasing are all absent, so external taskbars, pagers, bars,
+  screen recorders, and remote-desktop tools have nothing to talk to.
+  The X11 side's EWMH surface - which `wmctrl`, `xdotool`, and pagers
+  drive - has no counterpart here yet. The desktop's own dock, Clip,
+  and menus need none of it: they are drawn by the compositor, not by
+  clients.
+
+**Nested** remains the way to develop the compositor, and the way to
+look at it without logging out: it opens a regular window on your
+existing desktop (Wayland or X11, via Smithay's winit backend) and
+that window is its screen - chrome, dock, root menu, themes, and all.
+The two modes render through the same scene-building code and the same
+GLES renderer, which is why what you see nested is what you get on the
+hardware. From a terminal on any desktop:
 
 ```sh
 cargo build --release -p chonkstep-wayland
 ./target/release/chonkstep-wayland
 ```
 
-The compositor allocates its own Wayland socket and sets
+Either way, the compositor allocates its own Wayland socket and sets
 `WAYLAND_DISPLAY` (and `DISPLAY`, through XWayland) for everything it
 spawns, so applications launched from the root menu or the themed
-terminal land inside the nested session automatically. To aim a client
-at it from an outside terminal instead, point these variables at the
-socket names from the startup log - the Wayland socket is typically
-the first free slot (`wayland-1` when your host desktop holds
-`wayland-0`), and XWayland's display number is printed alongside it:
+terminal land inside the session automatically. To aim a client at a
+nested one from an outside terminal instead, point these variables at
+the socket names from the startup log - the Wayland socket is
+typically the first free slot (`wayland-1` when your host desktop
+holds `wayland-0`), and XWayland's display number is printed alongside
+it:
 
 ```sh
 WAYLAND_DISPLAY=wayland-1 some-wayland-app

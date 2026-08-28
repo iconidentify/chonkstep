@@ -12,11 +12,12 @@
 use std::time::Duration;
 
 use wm_core::{Backend, BackendEvent, FocusPolicy, WindowManager};
-use wm_theme::{RasterThemeEngine, Theme};
+use wm_theme::RasterThemeEngine;
 use wm_x11::X11Backend;
 
 use chonk_shell::shell::{Shell, ShellOutcome};
-use chonk_shell::{spawn, theme_select};
+use chonk_shell::startup::{ensure_xcursor_size, read_focus_follows_mouse, read_scale_factor, resolve_theme};
+use chonk_shell::spawn;
 
 fn main() {
     tracing_subscriber::fmt().with_env_filter(tracing_subscriber::EnvFilter::from_default_env()).init();
@@ -310,142 +311,13 @@ fn exit_requested(outcome: ShellOutcome) -> bool {
     }
 }
 
-/// The UI scale multiplies every pixel dimension in the theme and the
-/// shell's own dock/icon chrome — for HiDPI displays (a nested X
-/// server has no display-scaling of its own, so the WM's native ~1990s
-/// pixel sizes read as tiny on a modern high-density panel).
-/// Precedence: the `CHONKSTEP_SCALE` env var wins over the config
-/// file's `scale`, which wins over 1.0 (no scaling) — the env var stays
-/// on top because scripts (`dev-nested.sh`, per-display session
-/// launchers) use it to override a user's baseline per invocation.
-fn read_scale_factor(config_scale: Option<f32>) -> f32 {
-    resolve_scale(std::env::var("CHONKSTEP_SCALE").ok().as_deref(), config_scale)
-}
 
-/// Pure core of [`read_scale_factor`], split out so the precedence
-/// rules are unit-testable without mutating process-global env vars
-/// (tests share one process and run on parallel threads; `set_var`
-/// races between them). A value that fails validation — unparseable,
-/// non-finite, zero, or negative — is *skipped*, not clamped: a broken
-/// env var falls through to the config value and a broken config value
-/// falls through to 1.0, so a typo degrades to the next-best answer
-/// instead of either a garbage scale or a dead session.
-fn resolve_scale(env: Option<&str>, config: Option<f32>) -> f32 {
-    let valid = |s: &f32| s.is_finite() && *s > 0.0;
-    env.and_then(|s| s.trim().parse::<f32>().ok())
-        .filter(valid)
-        .or_else(|| config.filter(valid))
-        .unwrap_or(1.0)
-}
 
-/// Sets `XCURSOR_SIZE` on *this* process (so it's inherited by every
-/// app chonkstep spawns, and by the hot-restarted process itself — see
-/// `restart_in_place`, which `exec`s in place and so keeps whatever env
-/// this process already has) unless it's already set. chonkstep scales
-/// its own chrome, decorations, and root cursor by `CHONKSTEP_SCALE`
-/// (see `wm-x11`'s `create_scaled_cursor`), but apps that draw their
-/// *own* cursor via the standard Xcursor mechanism (most modern
-/// toolkits — GTK, Qt, winit) have no way to know about that; they read
-/// this env var instead. Without it, such an app's cursor stays
-/// whatever Xcursor's own DPI-unaware default is — visibly out of
-/// proportion the instant the pointer crosses from chonkstep's chrome
-/// onto that app's own content. Doing this here, not only in
-/// `scripts/xsession.sh`, means it applies from the very first launch
-/// (including inside `dev-nested.sh`) rather than depending on every
-/// launcher remembering to set it — the shell scripts still set it too,
-/// for the rare case something else spawns before chonkstep does, but
-/// this is the one guaranteed to actually run.
-fn ensure_xcursor_size(scale: f32) {
-    if std::env::var_os("XCURSOR_SIZE").is_some() {
-        return;
-    }
-    let size = (24.0 * scale).round().max(1.0) as u32;
-    // SAFETY: called once, at the very start of `main`, before any
-    // other thread exists — no concurrent env access is possible yet.
-    unsafe {
-        std::env::set_var("XCURSOR_SIZE", size.to_string());
-    }
-}
 
-/// Whether to switch from the default click-to-focus to focus-follows-
-/// mouse. Precedence: the `CHONKSTEP_FOCUS_FOLLOWS_MOUSE` env var wins
-/// over the config file's `focus_follows_mouse` — and it wins in *both*
-/// directions: setting it to anything other than `1` forces the policy
-/// off even when the config asks for it, so a session script can pin
-/// either behavior regardless of what the user's config says. Only
-/// when the env var is absent entirely does the config value apply.
-fn read_focus_follows_mouse(config_value: bool) -> bool {
-    resolve_focus_follows_mouse(std::env::var("CHONKSTEP_FOCUS_FOLLOWS_MOUSE").ok().as_deref(), config_value)
-}
 
-/// Pure core of [`read_focus_follows_mouse`] — same testability
-/// rationale as [`resolve_scale`]: precedence logic stays out of reach
-/// of process-global env state so tests can cover every branch without
-/// racing each other on `set_var`.
-fn resolve_focus_follows_mouse(env: Option<&str>, config: bool) -> bool {
-    match env {
-        Some(value) => value == "1",
-        None => config,
-    }
-}
 
-/// Resolves the theme this session dresses in. Precedence: the
-/// persisted theme-menu choice (`theme_select`'s state file) wins over
-/// the config file's `theme`, which wins over the flagship default —
-/// the menu is the more recent, more deliberate gesture (picking a
-/// theme from it hot-restarts on the spot), so a config line written
-/// once must not keep overriding it on every subsequent restart.
-///
-/// `theme_select::load()` already implements the outer two layers
-/// (state file, else flagship); the config layer slots between them
-/// here rather than inside `theme_select` because that module is a pure
-/// persist/recall mechanism also used by the menu itself — which theme
-/// wins at *startup* is session policy, and session policy lives in
-/// the binary.
-fn resolve_theme(config_theme: Option<&str>) -> Theme {
-    if !persisted_theme_choice_exists() {
-        if let Some(theme) = config_theme_fallback(config_theme) {
-            return theme;
-        }
-    }
-    theme_select::load()
-}
 
-/// The config-file layer of [`resolve_theme`], split out (and kept free
-/// of filesystem access) so its edges are unit-testable: `None` when no
-/// theme is configured, and — critically — `None` with a warning, not a
-/// panic or an error, when the configured id names a theme this build
-/// does not ship. A misspelled theme must cost the user the flagship
-/// look for one session, never the session itself.
-fn config_theme_fallback(config_theme: Option<&str>) -> Option<Theme> {
-    let requested = config_theme?;
-    let theme = wm_theme::default_theme::theme_by_id(requested);
-    if theme.is_none() {
-        tracing::warn!(theme = requested, "config names an unknown theme; using the default instead");
-    }
-    theme
-}
 
-/// `true` exactly when `theme_select::load()` would return a persisted
-/// menu choice rather than its flagship fallback: the state file exists
-/// *and* names a theme this build ships (a stale id from another
-/// version does not count — it should fall through to the config layer,
-/// same as no file at all). The path mirrors `theme_select`'s own
-/// `state_path` on purpose and must stay in lockstep with it;
-/// `theme_select` deliberately does not expose "was it persisted?"
-/// because no other caller distinguishes the fallback from a choice.
-fn persisted_theme_choice_exists() -> bool {
-    let path = if let Some(root) = std::env::var_os("XDG_STATE_HOME") {
-        std::path::PathBuf::from(root).join("chonkstep/theme")
-    } else if let Some(home) = std::env::var_os("HOME") {
-        std::path::PathBuf::from(home).join(".local/state/chonkstep/theme")
-    } else {
-        return false;
-    };
-    std::fs::read_to_string(path)
-        .ok()
-        .is_some_and(|id| wm_theme::default_theme::theme_by_id(id.trim()).is_some())
-}
 
 /// Path to the marker file `scripts/restart.sh` touches to ask a
 /// running chonkstep to hot-restart itself — polled once per event-loop
@@ -489,112 +361,10 @@ fn restart_in_place() -> ! {
     std::process::exit(1);
 }
 
-// The precedence helpers are tested through their pure cores
-// (`resolve_scale`, `resolve_focus_follows_mouse`,
-// `config_theme_fallback`) rather than the env-reading wrappers: tests
-// share one process and run on parallel threads, so `set_var`-based
-// tests race each other — the split exists precisely so every branch is
-// reachable without touching process-global state.
 #[cfg(test)]
 mod tests {
-    use super::*;
     use wm_config::Action;
     use wm_core::KeyCombo;
-
-    #[test]
-    fn env_scale_wins_over_config_scale() {
-        assert_eq!(resolve_scale(Some("2.0"), Some(1.5)), 2.0);
-    }
-
-    #[test]
-    fn config_scale_applies_without_env() {
-        assert_eq!(resolve_scale(None, Some(1.5)), 1.5);
-    }
-
-    #[test]
-    fn scale_defaults_to_one_with_neither_source() {
-        assert_eq!(resolve_scale(None, None), 1.0);
-    }
-
-    #[test]
-    fn unparseable_env_scale_falls_through_to_config() {
-        // A typo'd env var must degrade to the next-best answer, not to
-        // the hard default — the config value is still a deliberate
-        // user choice.
-        assert_eq!(resolve_scale(Some("garbage"), Some(1.5)), 1.5);
-    }
-
-    #[test]
-    fn out_of_range_env_scale_falls_through_to_config() {
-        assert_eq!(resolve_scale(Some("0"), Some(1.5)), 1.5);
-        assert_eq!(resolve_scale(Some("-2"), Some(1.5)), 1.5);
-        // `parse::<f32>` accepts these spellings; the validity filter
-        // must still reject them (a NaN scale poisons every pixel
-        // computation downstream).
-        assert_eq!(resolve_scale(Some("inf"), Some(1.5)), 1.5);
-        assert_eq!(resolve_scale(Some("NaN"), Some(1.5)), 1.5);
-    }
-
-    #[test]
-    fn invalid_config_scale_falls_through_to_default() {
-        assert_eq!(resolve_scale(None, Some(0.0)), 1.0);
-        assert_eq!(resolve_scale(None, Some(-1.0)), 1.0);
-        assert_eq!(resolve_scale(None, Some(f32::NAN)), 1.0);
-        assert_eq!(resolve_scale(None, Some(f32::INFINITY)), 1.0);
-    }
-
-    #[test]
-    fn both_sources_invalid_still_yields_a_usable_scale() {
-        // The end-to-end graceful-degradation guarantee: no combination
-        // of broken inputs may leave the session without a scale.
-        assert_eq!(resolve_scale(Some("bogus"), Some(-3.0)), 1.0);
-    }
-
-    #[test]
-    fn whitespace_around_env_scale_is_tolerated() {
-        assert_eq!(resolve_scale(Some(" 1.5 "), None), 1.5);
-    }
-
-    #[test]
-    fn env_focus_var_enables_over_config_off() {
-        assert!(resolve_focus_follows_mouse(Some("1"), false));
-    }
-
-    #[test]
-    fn env_focus_var_disables_over_config_on() {
-        // The env var wins in BOTH directions: any present value other
-        // than "1" pins the policy off regardless of the config.
-        assert!(!resolve_focus_follows_mouse(Some("0"), true));
-        assert!(!resolve_focus_follows_mouse(Some(""), true));
-        assert!(!resolve_focus_follows_mouse(Some("true"), true));
-    }
-
-    #[test]
-    fn config_focus_value_applies_without_env() {
-        assert!(resolve_focus_follows_mouse(None, true));
-        assert!(!resolve_focus_follows_mouse(None, false));
-    }
-
-    #[test]
-    fn config_theme_resolves_known_ids() {
-        for id in ["window-maker", "amber-phosphor", "teal-blueprint", "graphite", "next-lavender"] {
-            let theme = config_theme_fallback(Some(id));
-            assert_eq!(theme.map(|t| t.id), Some(id.to_string()), "built-in theme id {id} must resolve from config");
-        }
-    }
-
-    #[test]
-    fn unknown_config_theme_degrades_to_none() {
-        // `resolve_theme` then falls through to the flagship — a
-        // misspelled theme name must never cost the user the session.
-        assert!(config_theme_fallback(Some("no-such-theme")).is_none());
-        assert!(config_theme_fallback(Some("")).is_none());
-    }
-
-    #[test]
-    fn absent_config_theme_is_not_an_error() {
-        assert!(config_theme_fallback(None).is_none());
-    }
 
     /// Keeps `docs/config.example.toml` honest: the example is parsed
     /// with the real parser, must restate exactly the default bindings

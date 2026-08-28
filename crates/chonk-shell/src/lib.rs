@@ -20,6 +20,7 @@ pub mod desktop;
 pub mod launchdock;
 pub mod shell;
 pub mod spawn;
+pub mod startup;
 pub mod theme_select;
 pub mod wallpaper;
 pub mod widgets;

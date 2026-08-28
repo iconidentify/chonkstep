@@ -45,7 +45,7 @@ use smithay::backend::input::{
 };
 use smithay::desktop::utils::under_from_surface_tree;
 use smithay::desktop::{PopupManager, WindowSurfaceType};
-use smithay::input::keyboard::{FilterResult, Keycode, ModifiersState};
+use smithay::input::keyboard::{keysyms, FilterResult, Keycode, Keysym, ModifiersState};
 use smithay::input::pointer::{AxisFrame, ButtonEvent, MotionEvent};
 use smithay::input::Seat;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
@@ -171,6 +171,25 @@ fn on_keyboard_key<I: InputBackend>(state: &mut Compositor, event: I::KeyboardKe
         let combo = KeyCombo { keysym: keysym.raw(), modifiers: combo_modifiers(mods) };
         match key_state {
             KeyState::Pressed => {
+                // VT switching outranks every other binding, including
+                // the modal keyboard grab: a user who logged into
+                // chonkstep from a TTY has no other way back to one, and
+                // a compositor that can wedge the machine is a trap. The
+                // seat handle lives on the session backend, reachable
+                // only through `&mut Compositor` from in here — see
+                // `session::change_vt`, which is also what decides that
+                // a nested session should forward these combos instead
+                // (it owns no seat to switch).
+                if let Some(vt) = vt_switch_target(mods, keysym, handle.modified_sym()) {
+                    if crate::session::change_vt(data, vt) {
+                        // Suppress the matching release too: the client
+                        // never saw the press, and after a successful
+                        // switch the release is usually delivered to
+                        // whoever owns the VT now anyway.
+                        with_input(&seat, |input| input.suppressed_keys.push(keycode));
+                        return FilterResult::Intercept(());
+                    }
+                }
                 let backend = data.wm.backend_mut();
                 if backend.keyboard_grabbed || backend.grabbed_combos.contains(&combo) {
                     backend.queue(WmEvent::KeyPress(combo));
@@ -202,6 +221,32 @@ fn on_keyboard_key<I: InputBackend>(state: &mut Compositor, event: I::KeyboardKe
             }
         }
     });
+}
+
+/// Which virtual terminal a press asks for, if any: 1-12, or `None`.
+///
+/// Both spellings of the gesture are accepted because which one arrives
+/// depends on the keymap, not on the user:
+///
+/// - `XF86Switch_VT_n` is what a layout with the standard VT-switch
+///   mapping produces for Ctrl+Alt+Fn, and it only appears in the
+///   *modified* keysym — the modifiers are already baked into it, so no
+///   modifier test applies.
+/// - Plain `Fn` with Ctrl+Alt held is the fallback for keymaps that
+///   never map the XF86 symbols (a bare `us` layout loaded without the
+///   `srvrkeys` rules, which is what a minimal TTY session often gets).
+///   This is tested against the *raw* keysym for the same reason
+///   bindings are: the level-0 symbol is stable under modifiers.
+fn vt_switch_target(mods: &ModifiersState, raw: Keysym, modified: Keysym) -> Option<i32> {
+    let modified = modified.raw();
+    if (keysyms::KEY_XF86Switch_VT_1..=keysyms::KEY_XF86Switch_VT_12).contains(&modified) {
+        return Some((modified - keysyms::KEY_XF86Switch_VT_1 + 1) as i32);
+    }
+    let raw = raw.raw();
+    if mods.ctrl && mods.alt && (keysyms::KEY_F1..=keysyms::KEY_F12).contains(&raw) {
+        return Some((raw - keysyms::KEY_F1 + 1) as i32);
+    }
+    None
 }
 
 /// xkb modifier state -> the backend-agnostic `Modifiers` `wm-core`

@@ -1,23 +1,24 @@
 #!/usr/bin/env bash
 # Installs chonkstep on an Omarchy (or any Arch-based) system, both
-# halves of it: the X11 session (a selectable session alongside the
-# existing desktop) and the Wayland compositor (nested, for now - see
-# the closing notes this prints). Nothing is copied out of this
-# checkout: the session entry points back into the repo, so
-# scripts/update.sh (git pull + rebuild + hot-restart) is the whole
+# halves of it: the X11 session and the Wayland session, each a real
+# login session selectable from a display manager. Nothing is copied
+# out of this checkout: the session entries point back into the repo,
+# so scripts/update.sh (git pull + rebuild + hot-restart) is the whole
 # upgrade story.
 #
 # What this does:
 #   1. Installs runtime dependencies with pacman (Xorg, the terminal,
-#      the session compositor, the theme fonts, the Wayland stack the
-#      compositor builds and runs against) and a Rust toolchain if the
-#      system has none.
+#      picom, the theme fonts, and the graphics, input, and seat
+#      libraries the Wayland compositor builds and runs against) and a
+#      Rust toolchain if the system has none.
 #   2. Builds the release binaries - chonkstep and chonkstep-wayland.
-#   3. Installs /usr/share/xsessions/chonkstep.desktop pointing at this
-#      checkout's scripts/xsession.sh, so chonkstep appears in the
-#      login manager's session picker. No wayland-sessions entry: the
-#      compositor has no DRM/KMS backend yet, so a login entry for it
-#      would fail the moment it was chosen.
+#   3. Installs both session entries pointing at this checkout's
+#      launcher scripts - /usr/share/xsessions/chonkstep.desktop
+#      (scripts/xsession.sh) and
+#      /usr/share/wayland-sessions/chonkstep.desktop
+#      (scripts/wayland-session.sh) - so a login manager offers
+#      chonkstep in either flavour, and a machine with no login manager
+#      can start either one from a TTY.
 #
 # Usage: scripts/install.sh
 set -euo pipefail
@@ -33,8 +34,10 @@ fi
 echo "Installing dependencies (sudo)..."
 # xorg-server/xinit/xauth: the X session itself (xauth is what startx
 # needs on a machine with no display manager - stock Omarchy). rxvt-
-# unicode: the terminal the root menu launches. picom: the session
-# compositor behind the themes' translucent terminals. wireplumber:
+# unicode: the terminal the root menu launches. picom: the X11
+# compositing manager behind the themes' translucent terminals - the
+# Wayland session needs no equivalent, because a compositor composites
+# itself. wireplumber:
 # wpctl, which the dock's sound instrument reads and controls (already
 # present on any PipeWire desktop; harmless elsewhere - without a sink
 # the instrument shows its dead-screen face). Fonts: DejaVu
@@ -44,19 +47,37 @@ echo "Installing dependencies (sudo)..."
 # system has NetworkManager and falls back to /sys/class/net on
 # anything else (Omarchy's iwd setup included).
 #
-# The last line is the Wayland half's build and runtime needs, and it
-# is not optional even for an X11-only user: the workspace build below
-# compiles wm-wayland on any Linux host, and that links against
-# libxkbcommon and EGL. libxkbcommon (keyboard layouts), libglvnd/mesa
-# (EGL/GLES for the compositor's renderer), xorg-xwayland (the
-# Xwayland binary the compositor spawns so X11 apps run in a Wayland
-# session). All four are already present on essentially any graphical
-# Arch system; --needed makes listing them free.
+# The last two lines are the Wayland half's build and runtime needs,
+# and they are not optional even for an X11-only user: the workspace
+# build below compiles wm-wayland on any Linux host, and that links
+# against every one of them.
+#
+# Nested and session backends alike: libxkbcommon (keyboard layouts),
+# libglvnd/mesa (EGL/GLES for the compositor's renderer, and libgbm for
+# the session backend's buffer allocation), xorg-xwayland (the Xwayland
+# binary the compositor spawns so X11 apps run in a Wayland session).
+#
+# The session backend on top of that - what turns the compositor from a
+# window on someone else's desktop into a login session that owns the
+# machine: libdrm (mode setting on the graphics device), libinput (real
+# keyboards, mice, and touchpads), systemd-libs (libudev, which is how
+# those devices are discovered and hot-plugged), and seatd (libseat,
+# which is how the compositor opens the DRM and input devices without
+# being root and hands them back across VT switches). Package names
+# checked with `pacman -Qo /usr/lib/libseat.so` and friends rather than
+# guessed - libseat lives in seatd, and libudev in systemd-libs, on
+# Arch. The seatd *daemon* is not needed on a logind system, which is
+# every systemd machine including stock Omarchy; the closing notes
+# below say so only when logind is actually absent.
+#
+# All of these are already present on essentially any graphical Arch
+# system; --needed makes listing them free.
 sudo pacman -S --needed --noconfirm \
     xorg-server xorg-xinit xorg-xauth \
     rxvt-unicode picom wireplumber \
     ttf-dejavu gsfonts ttf-jetbrains-mono-nerd noto-fonts \
-    libxkbcommon libglvnd mesa xorg-xwayland
+    libxkbcommon libglvnd mesa xorg-xwayland \
+    libdrm libinput systemd-libs seatd
 
 if ! command -v cargo >/dev/null 2>&1; then
     echo "Installing Rust toolchain..."
@@ -69,13 +90,28 @@ fi
 echo "Building chonkstep (release)..."
 cargo build --release --workspace
 
-echo "Installing session entry (sudo)..."
+echo "Installing session entries (sudo)..."
 sudo install -d /usr/share/xsessions
 sudo tee /usr/share/xsessions/chonkstep.desktop >/dev/null <<DESKTOP
 [Desktop Entry]
 Name=chonkstep
 Comment=A window manager with WindowMaker parity
 Exec=${repo}/scripts/xsession.sh
+Type=Application
+DESKTOP
+
+# The Wayland twin. Display managers read this directory for sessions
+# they must start on a bare VT (no Xorg first), which is exactly what
+# the compositor's session backend wants: it opens the DRM device and
+# the input devices itself through libseat. The name carries the
+# "(Wayland)" suffix because both entries land in the same picker and
+# "chonkstep" twice would be a coin flip for the user.
+sudo install -d /usr/share/wayland-sessions
+sudo tee /usr/share/wayland-sessions/chonkstep.desktop >/dev/null <<DESKTOP
+[Desktop Entry]
+Name=chonkstep (Wayland)
+Comment=The chonkstep desktop as a native Wayland compositor
+Exec=${repo}/scripts/wayland-session.sh
 Type=Application
 DESKTOP
 
@@ -90,9 +126,10 @@ if [ ! -e "$config" ]; then
 fi
 
 # Stock Omarchy boots straight into Hyprland via autologin - there is
-# no login-manager session picker for the xsessions entry to appear in,
-# so point those users at startx; on a machine that does run a display
-# manager, the session-list path is the smoother one.
+# no login-manager session picker for either session entry to appear
+# in, so point those users at the TTY routes; on a machine that does
+# run a display manager, the session-list path is the smoother one for
+# both.
 has_dm=""
 for dm in sddm gdm lightdm greetd lemurs ly; do
     if systemctl is-enabled "$dm" >/dev/null 2>&1; then
@@ -101,52 +138,67 @@ for dm in sddm gdm lightdm greetd lemurs ly; do
     fi
 done
 
-# Which display stack the user is on right now, so the advice below
-# names the path they can actually take today. Deliberately NOT used to
-# pick "the Wayland version" as their session: see the note printed
-# below - the compositor has no DRM/KMS backend yet, so it cannot own
-# a TTY the way Xorg does, and installing a wayland-sessions entry
-# would put a session in the login picker that fails the moment it is
-# chosen. That entry lands with the session feature, not before.
-session_type="${XDG_SESSION_TYPE:-}"
-if [ -z "$session_type" ] && [ -n "${WAYLAND_DISPLAY:-}" ]; then
-    session_type="wayland"
+# Whether this machine has logind, which decides whether the Wayland
+# session needs any seat setup at all. libseat prefers logind and falls
+# back to the seatd daemon; on a systemd machine (every Omarchy, and
+# nearly every Arch desktop) logind is already granting device access
+# to whoever owns the active VT, so nothing else is required and
+# telling the user to enable seatd would be noise that invites them to
+# break a working setup. /run/systemd/seats is the direct evidence -
+# logind creates it - and an answering loginctl is the fallback for a
+# layout that differs.
+has_logind=""
+if [ -d /run/systemd/seats ] ||
+    { command -v loginctl >/dev/null 2>&1 && loginctl show-seat seat0 >/dev/null 2>&1; }; then
+    has_logind="yes"
 fi
 
 cat <<DONE
 
 chonkstep is installed - both binaries: chonkstep (X11) and
-chonkstep-wayland (the Smithay compositor).
+chonkstep-wayland (the Smithay compositor) - and both are real login
+sessions, running the same desktop.
 
 DONE
 if [ -n "$has_dm" ]; then
     cat <<DONE
-  - X11 session (the full desktop): log out and pick "chonkstep" in
-    ${has_dm}'s session list.
+  - X11 session: log out and pick "chonkstep" in ${has_dm}'s session list.
+  - Wayland session: log out and pick "chonkstep (Wayland)" in the same
+    list. It takes the graphics device, the input devices, and the VT
+    for itself - a session in its own right, not a window inside one.
 DONE
 else
     cat <<DONE
-  - X11 session (the full desktop): no display manager is enabled
-    (stock Omarchy boots straight into Hyprland), so switch to a TTY
-    (Ctrl+Alt+F3), log in, and run:
+  - X11 session: no display manager is enabled (stock Omarchy boots
+    straight into Hyprland), so switch to a TTY (Ctrl+Alt+F3), log in,
+    and run:
       startx ${repo}/scripts/xsession.sh
-    To get a graphical session picker instead, install and enable a
-    display manager (e.g. sddm) - the session entry is already in place.
+  - Wayland session: from that same TTY, instead run:
+      exec ${repo}/scripts/wayland-session.sh
+    (exec, so the compositor replaces the login shell and the session
+    ends when it does. No startx: it is the display server.)
+    To get a graphical session picker offering both instead, install
+    and enable a display manager (e.g. sddm) - both session entries are
+    already in place.
 DONE
 fi
 cat <<DONE
-  - Wayland: run the compositor nested inside your current desktop -
+  - Wayland, nested: for development or a look before you log in, run
       ${repo}/target/release/chonkstep-wayland
-    It opens a window that is its screen: same chrome, dock, menus, and
-    themes as the X11 session, with X11 apps running through XWayland.
-    Nested is the whole story today - the DRM/KMS session that would
-    make it a login option of its own is not built yet, which is why
-    this installer deliberately does not add a wayland-sessions entry.
+    from a terminal inside your current desktop. The compositor sees a
+    desktop already running and opens a window that is its screen -
+    same chrome, dock, menus, and themes, with X11 apps through
+    XWayland.
 DONE
-if [ "$session_type" = "wayland" ]; then
+if [ -z "$has_logind" ]; then
     cat <<DONE
-    (You are on a Wayland session right now, so the nested compositor
-    will run here as-is; the X11 session above needs the TTY route.)
+  - Seat access: this machine has no logind, so the Wayland session
+    needs the seatd daemon (installed above) to hand it the graphics
+    and input devices. Enable it -
+      sudo systemctl enable --now seatd
+    or your init system's equivalent - and join the seat group:
+      sudo usermod -aG seat \$USER
+    Log out and back in afterwards for the group to take effect.
 DONE
 fi
 cat <<DONE
@@ -154,7 +206,7 @@ cat <<DONE
     (the whole file is optional and every line is documented; both
     backends read it).
   - Update later with: scripts/update.sh
-  - The session entry points at this checkout (${repo});
+  - Both session entries point at this checkout (${repo});
     moving the checkout means re-running scripts/install.sh.
 
 DONE
