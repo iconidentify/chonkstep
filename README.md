@@ -95,20 +95,29 @@ scripts/install.sh
 
 The installer pulls the runtime dependencies with pacman (Xorg,
 rxvt-unicode, picom, wireplumber for the sound instrument, the theme
-fonts, and a Rust toolchain if needed), builds the release binaries,
-installs a `chonkstep.desktop` session entry that points back into the
-checkout, and seeds `~/.config/chonkstep/config.toml` from the
-fully-commented example if you don't have one.
+fonts, the Wayland stack the compositor builds and runs against -
+libxkbcommon, EGL/mesa, Xwayland - and a Rust toolchain if needed),
+builds both release binaries, installs a `chonkstep.desktop` session
+entry that points back into the checkout, and seeds
+`~/.config/chonkstep/config.toml` from the fully-commented example if
+you don't have one.
 
-How you start it depends on the machine:
+How you start it depends on the machine, and on which half you want:
 
-- **Stock Omarchy** boots straight into Hyprland via autologin - there
-  is no login-manager session picker. Switch to a TTY (Ctrl+Alt+F3),
-  log in, and run `startx scripts/xsession.sh` from the checkout. (Or
-  install and enable a display manager such as sddm; the session entry
-  is already in place for it.)
-- **A machine with a display manager** (sddm, gdm, lightdm, ...): log
-  out and pick "chonkstep" in the session list.
+- **The X11 session** is the full daily-driver desktop. On **stock
+  Omarchy** there is no login-manager session picker (it boots straight
+  into Hyprland via autologin), so switch to a TTY (Ctrl+Alt+F3), log
+  in, and run `startx scripts/xsession.sh` from the checkout. On a
+  machine **with a display manager** (sddm, gdm, lightdm, ...), log out
+  and pick "chonkstep" in the session list.
+- **The Wayland compositor** runs nested inside whatever desktop you
+  are already in - `./target/release/chonkstep-wayland` from a
+  terminal - and is a preview rather than a login session today. See
+  [Wayland](#wayland) below for why, and for what it can already do.
+  Being on a Wayland desktop (as Omarchy is) does not change the
+  recommendation yet: until the DRM/KMS session lands, the X11 session
+  is the one you can log into, and the installer deliberately does not
+  register a Wayland session entry that would fail when chosen.
 
 On a HiDPI display, set `scale = 2.0` in
 `~/.config/chonkstep/config.toml` - it scales chrome, dock, cursors,
