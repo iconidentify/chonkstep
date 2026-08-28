@@ -38,7 +38,7 @@ use smithay::wayland::compositor::with_states;
 
 use wm_theme_api::Rect;
 
-use crate::state::{Compositor, RootBackground, StackEntry, WaylandBackend};
+use crate::state::{Compositor, Graphics, RootBackground, StackEntry, WaylandBackend};
 
 render_elements! {
     /// Everything one frame is composed of. The macro generates the
@@ -56,128 +56,79 @@ render_elements! {
 /// flag. Failures log and leave the damage flag set — the next wakeup
 /// simply tries again, which is the only sane recovery for a transient
 /// GL hiccup.
-pub(crate) fn render_frame(comp: &mut Compositor) {
-    // Disjoint field borrows: the winit backend (renderer +
-    // framebuffer) mutates while the ledger is read — both live on
-    // `Compositor`, so destructure instead of going through `&mut
-    // self` methods.
-    let Compositor {
-        wm,
-        winit_backend,
-        damage_tracker,
-        output,
+/// The scene, front to back (the damage tracker's convention: earlier
+/// elements occlude later ones) — and the single definition of what a
+/// chonkstep Wayland session looks like. Both backends submit exactly
+/// these elements: the nested winit one and the DRM/KMS session render
+/// the same desktop because they share this function, not because two
+/// implementations were kept in agreement. Returns the elements plus
+/// the clear color the root background asks for.
+pub(crate) fn build_scene(
+    backend: &WaylandBackend,
+    renderer: &mut GlesRenderer,
+    pointer_location: SPoint<f64, smithay::utils::Logical>,
+    cursor_status: &CursorImageStatus,
+    default_cursor: &smithay::backend::renderer::element::memory::MemoryRenderBuffer,
+) -> (Vec<SceneElement<GlesRenderer>>, Color32F) {
+    // Elements are assembled FRONT to BACK — the damage tracker's
+    // convention (first element occludes later ones) — so this walk is
+    // the module-doc composition order reversed: cursor, above-shells,
+    // override-redirect windows, frames, below-shells, wallpaper.
+    let mut elements: Vec<SceneElement<GlesRenderer>> = Vec::new();
+
+    push_cursor_elements(
+        &mut elements,
+        renderer,
         pointer_location,
         cursor_status,
         default_cursor,
-        start_time,
-        ..
-    } = comp;
+    );
 
-    {
-        let (renderer, mut framebuffer) = match winit_backend.bind() {
-            Ok(bound) => bound,
-            Err(error) => {
-                tracing::warn!(?error, "could not bind the winit framebuffer; skipping frame");
-                return;
-            }
-        };
-
-        let backend = wm.backend();
-
-        // Elements are assembled FRONT to BACK — the damage tracker's
-        // convention (first element occludes later ones) — so this
-        // walk is the module-doc composition order reversed: cursor,
-        // above-shells, override-redirect windows, frames, below-
-        // shells, wallpaper.
-        let mut elements: Vec<SceneElement<GlesRenderer>> = Vec::new();
-
-        push_cursor_elements(
-            &mut elements,
-            renderer,
-            *pointer_location,
-            cursor_status,
-            default_cursor,
-        );
-
-        for entry in backend.stacking.iter().rev() {
-            if let StackEntry::Shell(id) = entry {
-                let Some(record) = backend.shells.get(id) else { continue };
-                if record.above && record.mapped {
-                    push_shell_elements(&mut elements, renderer, record);
-                }
+    for entry in backend.stacking.iter().rev() {
+        if let StackEntry::Shell(id) = entry {
+            let Some(record) = backend.shells.get(id) else { continue };
+            if record.above && record.mapped {
+                push_shell_elements(&mut elements, renderer, record);
             }
         }
+    }
 
-        // XWayland override-redirect windows (menus, tooltips —
-        // `WindowType::Unmanaged`, so they own no frame and no
-        // stacking entry) draw above every managed frame, which is
-        // where the X server would put a just-mapped override-redirect
-        // window in practice.
-        for record in backend.windows.values() {
-            if record.window_type == wm_core::WindowType::Unmanaged && record.mapped {
-                push_window_content(&mut elements, renderer, record.content, record);
-            }
+    // XWayland override-redirect windows (menus, tooltips —
+    // `WindowType::Unmanaged`, so they own no frame and no
+    // stacking entry) draw above every managed frame, which is
+    // where the X server would put a just-mapped override-redirect
+    // window in practice.
+    for record in backend.windows.values() {
+        if record.window_type == wm_core::WindowType::Unmanaged && record.mapped {
+            push_window_content(&mut elements, renderer, record.content, record);
         }
+    }
 
-        for entry in backend.stacking.iter().rev() {
-            if let StackEntry::Frame(id) = entry {
-                let Some(frame) = backend.frames.get(id) else { continue };
-                if !frame.mapped {
-                    continue;
-                }
-                let window = backend.windows.get(&frame.window);
-                // Content above chrome: the client's tree first
-                // (front-to-back), then the decoration buffer. A
-                // shaded window keeps its frame mapped with the
-                // content unmapped (`set_client_mapped(false)`), which
-                // falls out naturally here.
-                if let Some(record) = window {
-                    if record.mapped {
-                        push_window_content(&mut elements, renderer, record.content, record);
-                    }
-                }
-                if let Some(buffer) = &frame.buffer {
-                    let location = SPoint::<f64, Physical>::from((
-                        frame.geometry.pos.x as f64,
-                        frame.geometry.pos.y as f64,
-                    ));
-                    match MemoryRenderBufferRenderElement::from_buffer(
-                        renderer,
-                        location,
-                        buffer,
-                        None,
-                        None,
-                        None,
-                        Kind::Unspecified,
-                    ) {
-                        Ok(element) => elements.push(element.into()),
-                        Err(error) => tracing::warn!(?error, "failed to import a decoration buffer"),
-                    }
+    for entry in backend.stacking.iter().rev() {
+        if let StackEntry::Frame(id) = entry {
+            let Some(frame) = backend.frames.get(id) else { continue };
+            if !frame.mapped {
+                continue;
+            }
+            let window = backend.windows.get(&frame.window);
+            // Content above chrome: the client's tree first
+            // (front-to-back), then the decoration buffer. A
+            // shaded window keeps its frame mapped with the
+            // content unmapped (`set_client_mapped(false)`), which
+            // falls out naturally here.
+            if let Some(record) = window {
+                if record.mapped {
+                    push_window_content(&mut elements, renderer, record.content, record);
                 }
             }
-        }
-
-        for entry in backend.stacking.iter().rev() {
-            if let StackEntry::Shell(id) = entry {
-                let Some(record) = backend.shells.get(id) else { continue };
-                if !record.above && record.mapped {
-                    push_shell_elements(&mut elements, renderer, record);
-                }
-            }
-        }
-
-        // Root background. A solid color is simply the clear color —
-        // with full-frame damage every pixel gets cleared, so no
-        // element is needed; a wallpaper image is the bottom-most
-        // element over a black clear.
-        let clear_color = match &backend.root_background {
-            RootBackground::Color((r, g, b)) => {
-                Color32F::new(*r as f32 / 255.0, *g as f32 / 255.0, *b as f32 / 255.0, 1.0)
-            }
-            RootBackground::Image(buffer) => {
+            if let Some(buffer) = &frame.buffer {
+                let location = SPoint::<f64, Physical>::from((
+                    frame.geometry.pos.x as f64,
+                    frame.geometry.pos.y as f64,
+                ));
                 match MemoryRenderBufferRenderElement::from_buffer(
                     renderer,
-                    SPoint::<f64, Physical>::from((0.0, 0.0)),
+                    location,
                     buffer,
                     None,
                     None,
@@ -185,34 +136,63 @@ pub(crate) fn render_frame(comp: &mut Compositor) {
                     Kind::Unspecified,
                 ) {
                     Ok(element) => elements.push(element.into()),
-                    Err(error) => tracing::warn!(?error, "failed to import the wallpaper buffer"),
+                    Err(error) => tracing::warn!(?error, "failed to import a decoration buffer"),
                 }
-                Color32F::new(0.0, 0.0, 0.0, 1.0)
             }
-        };
-
-        // Age 0 = "assume every pixel stale": the deliberate
-        // full-frame redraw described in the module docs.
-        if let Err(error) =
-            damage_tracker.render_output(renderer, &mut framebuffer, 0, &elements, clear_color)
-        {
-            tracing::warn!(?error, "render failed; keeping damage for a retry");
-            return;
         }
     }
 
-    let size = winit_backend.window_size();
-    if let Err(error) = winit_backend.submit(Some(&[SRect::from_size(size)])) {
-        tracing::warn!(?error, "swap failed; keeping damage for a retry");
-        return;
+    for entry in backend.stacking.iter().rev() {
+        if let StackEntry::Shell(id) = entry {
+            let Some(record) = backend.shells.get(id) else { continue };
+            if !record.above && record.mapped {
+                push_shell_elements(&mut elements, renderer, record);
+            }
+        }
     }
 
+    // Root background. A solid color is simply the clear color —
+    // with full-frame damage every pixel gets cleared, so no
+    // element is needed; a wallpaper image is the bottom-most
+    // element over a black clear.
+    let clear_color = match &backend.root_background {
+        RootBackground::Color((r, g, b)) => {
+            Color32F::new(*r as f32 / 255.0, *g as f32 / 255.0, *b as f32 / 255.0, 1.0)
+        }
+        RootBackground::Image(buffer) => {
+            match MemoryRenderBufferRenderElement::from_buffer(
+                renderer,
+                SPoint::<f64, Physical>::from((0.0, 0.0)),
+                buffer,
+                None,
+                None,
+                None,
+                Kind::Unspecified,
+            ) {
+                Ok(element) => elements.push(element.into()),
+                Err(error) => tracing::warn!(?error, "failed to import the wallpaper buffer"),
+            }
+            Color32F::new(0.0, 0.0, 0.0, 1.0)
+        }
+    };
+
+    (elements, clear_color)
+}
+
+/// Tells every mapped surface which frame it just appeared in —
+/// clients gate their next commit on these, so a session that never
+/// sends them freezes after one frame. Shared by both backends for
+/// exactly that reason.
+pub(crate) fn send_frame_callbacks(
+    backend: &WaylandBackend,
+    output: &smithay::output::Output,
+    cursor_status: &CursorImageStatus,
+    elapsed: Duration,
+) {
     // Frame callbacks: clients gate their next commit on these, so
     // every mapped window (and its popups, and a client-provided
     // cursor surface) hears about the frame it just appeared in. The
     // throttle mirrors smithay's reference compositors.
-    let elapsed = start_time.elapsed();
-    let backend: &WaylandBackend = wm.backend();
     for record in backend.windows.values() {
         if !record.mapped || !record.surface.alive() {
             continue;
@@ -238,6 +218,76 @@ pub(crate) fn render_frame(comp: &mut Compositor) {
         });
     }
 
+}
+
+/// Draws one frame through whichever backend this session is running
+/// on. The submission halves differ (a winit swap versus a DRM page
+/// flip) and live with their backends; everything visible above them
+/// is [`build_scene`].
+pub(crate) fn render_frame(comp: &mut Compositor) {
+    // Window previews for the switcher and icon tiles, refreshed off
+    // the same cadence as drawing and throttled internally.
+    crate::capture::refresh_snapshots(comp);
+    match comp.graphics {
+        Graphics::Session(_) => crate::session::render_frame_session(comp),
+        Graphics::Winit(_) => render_frame_winit(comp),
+    }
+}
+
+fn render_frame_winit(comp: &mut Compositor) {
+    // Disjoint field borrows: the winit backend (renderer +
+    // framebuffer) mutates while the ledger is read — both live on
+    // `Compositor`, so destructure instead of going through `&mut
+    // self` methods.
+    let Compositor {
+        wm,
+        graphics,
+        damage_tracker,
+        output,
+        pointer_location,
+        cursor_status,
+        default_cursor,
+        start_time,
+        ..
+    } = comp;
+    let Graphics::Winit(winit_backend) = graphics else {
+        return;
+    };
+
+    {
+        let (renderer, mut framebuffer) = match winit_backend.bind() {
+            Ok(bound) => bound,
+            Err(error) => {
+                tracing::warn!(?error, "could not bind the winit framebuffer; skipping frame");
+                return;
+            }
+        };
+
+        let (elements, clear_color) = build_scene(
+            wm.backend(),
+            renderer,
+            *pointer_location,
+            cursor_status,
+            default_cursor,
+        );
+
+        // Age 0 = "assume every pixel stale": the deliberate
+        // full-frame redraw described in the module docs.
+        if let Err(error) =
+            damage_tracker.render_output(renderer, &mut framebuffer, 0, &elements, clear_color)
+        {
+            tracing::warn!(?error, "render failed; keeping damage for a retry");
+            return;
+        }
+    }
+
+    let size = winit_backend.window_size();
+    if let Err(error) = winit_backend.submit(Some(&[SRect::from_size(size)])) {
+        tracing::warn!(?error, "swap failed; keeping damage for a retry");
+        return;
+    }
+
+    send_frame_callbacks(wm.backend(), output, cursor_status, start_time.elapsed());
     wm.backend_mut().damage = false;
 }
 

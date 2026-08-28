@@ -421,8 +421,13 @@ impl Backend for WaylandBackend {
     /// GLES context this needs). The icon/switcher SDK already designs
     /// for missing previews, so the cost of shipping without it is a
     /// generic tile instead of a live thumbnail, not a broken feature.
-    fn capture_window_image(&self, _window: Self::WindowId, _size: Size) -> Option<DecorationBuffer> {
-        None
+    fn capture_window_image(&self, window: Self::WindowId, _size: Size) -> Option<DecorationBuffer> {
+        // Served from the snapshot the renderer keeps refreshing (see
+        // `crate::capture` for why a compositor cannot answer this
+        // synchronously the way the X11 backend does with XGetImage).
+        // `size` is advisory: the shell's icon and switcher renderers
+        // scale whatever preview they are handed into their own wells.
+        self.windows.get(&window).and_then(|record| record.snapshot.clone())
     }
 
     // -- decoration realization -------------------------------------------

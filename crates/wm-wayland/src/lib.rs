@@ -24,8 +24,10 @@
 #![cfg(target_os = "linux")]
 
 mod backend_impl;
+mod capture;
 mod input;
 mod renderer;
+mod session;
 mod state;
 mod xdg;
 mod xwayland;
