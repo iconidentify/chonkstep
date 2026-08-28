@@ -1,0 +1,87 @@
+# chonkstep configuration
+#
+# Location: ~/.config/chonkstep/config.toml
+#           ($XDG_CONFIG_HOME/chonkstep/config.toml if that is set)
+#
+# Every setting here is optional, and the file itself is optional: with
+# no file at all, the defaults shown below apply. A broken file never
+# prevents the session from starting -- an unreadable or invalid file
+# logs a warning and falls back to the defaults, and an individually
+# bad line (a typo'd key spec, an unknown action name) is skipped while
+# every other line still applies.
+#
+# Changes apply on the next restart of the window manager. A live
+# session hot-reloads without logging out via scripts/restart.sh (or by
+# binding the "restart" action to a key -- see below); open windows
+# survive the restart.
+
+# Focus policy: false (the default) is click-to-focus, true is
+# focus-follows-mouse. The CHONKSTEP_FOCUS_FOLLOWS_MOUSE environment
+# variable, when set, wins over this value in both directions ("1"
+# forces it on, anything else forces it off).
+#focus_follows_mouse = false
+
+# UI scale factor for HiDPI displays: multiplies every pixel dimension
+# in the window chrome, dock, cursors, and terminal font as one system.
+# The CHONKSTEP_SCALE environment variable, when set to a valid value,
+# wins over this. Defaults to 1.0 when neither is set. Must be a finite
+# number greater than zero; an invalid value falls through to the next
+# source rather than breaking startup.
+#scale = 2.0
+
+# Theme to start in. One of the built-in theme ids:
+#   "window-maker"    (the flagship default)
+#   "amber-phosphor"
+#   "teal-blueprint"
+#   "graphite"
+#   "next-lavender"
+# A theme picked from the root menu's Themes submenu is persisted and
+# wins over this value on every later startup -- the menu is the more
+# recent gesture; this line is only the starting point. An unknown id
+# is warned about and ignored.
+#theme = "window-maker"
+
+# Keybindings. Entries here merge OVER the defaults: listing a combo
+# overrides only that combo, and every unlisted default stays bound.
+# The special value "none" unbinds a combo outright.
+#
+# Key spec grammar: case-insensitive, "+"-separated modifier tokens
+# followed by exactly one key token, e.g. "alt+shift+return".
+#   Modifiers: alt, shift, ctrl (or control), super (or mod4, win)
+#   Keys: single letters and digits (a-z, 0-9), return (or enter), tab,
+#         space, escape, left, right, up, down, home, end, pageup,
+#         pagedown, minus, equal, comma, period, f1 through f12
+#
+# Actions (kebab-case, a closed set):
+#   spawn-terminal, close, toggle-maximize, toggle-shade, miniaturize,
+#   toggle-fullscreen, workspace-next, workspace-prev,
+#   workspace-carry-next, workspace-carry-prev, restart, none
+#
+# Window-targeted actions (close, toggle-maximize, toggle-shade,
+# miniaturize, toggle-fullscreen) act on the focused window and do
+# nothing when no window is focused. The Alt+Tab window switcher is
+# part of the window manager's modal machinery and is not rebindable
+# here.
+[keybindings]
+# The full default set, spelled out. Since entries merge over the
+# defaults, restating them changes nothing -- edit or remove lines
+# freely; unlisted combos keep their default meaning.
+"alt+shift+return" = "spawn-terminal"       # launch the themed terminal
+"alt+shift+q" = "close"                     # close the focused window
+"alt+shift+x" = "toggle-maximize"           # maximize / restore
+"alt+shift+s" = "toggle-shade"              # roll the window up into its titlebar
+"alt+shift+m" = "miniaturize"               # collapse to an icon tile
+"alt+shift+f" = "toggle-fullscreen"         # borderless fullscreen on / off
+"alt+ctrl+right" = "workspace-next"         # next workspace (grows on demand)
+"alt+ctrl+left" = "workspace-prev"          # previous workspace (stops at the first)
+"alt+shift+right" = "workspace-carry-next"  # carry the focused window along
+"alt+shift+left" = "workspace-carry-prev"   # carry the focused window back
+
+# The restart action is unbound by default; give it a key to hot-reload
+# this file (and a freshly built binary) without touching a terminal:
+#"super+r" = "restart"
+
+# Unbinding: "none" makes a combo do nothing, without re-listing the
+# rest of the defaults. For example, to free alt+shift+q for some other
+# application:
+#"alt+shift+q" = "none"

@@ -87,6 +87,12 @@ pub struct FakeBackend {
     /// initial manage-time publish and a later move's re-publish, not
     /// just the end state.
     pub published_window_desktops: Vec<(FakeWindowId, usize)>,
+    /// Every `grab_key` call in order — a history rather than a set,
+    /// so a test can assert exactly which combos were registered and
+    /// that nothing beyond them was (e.g. that `bind_default_keys`
+    /// claims only the modal cycling combos, everything else being
+    /// config-driven from the binary).
+    pub grabbed_keys: Vec<KeyCombo>,
 }
 
 impl FakeBackend {
@@ -235,7 +241,9 @@ impl Backend for FakeBackend {
         DragHandle(0)
     }
     fn ungrab_pointer(&mut self, _handle: DragHandle) {}
-    fn grab_key(&mut self, _combo: KeyCombo) {}
+    fn grab_key(&mut self, combo: KeyCombo) {
+        self.grabbed_keys.push(combo);
+    }
     fn ungrab_key(&mut self, _combo: KeyCombo) {}
     fn grab_button_passive(&mut self, window: Self::WindowId, _button: MouseButton) {
         self.passively_grabbed.insert(window);

@@ -26,14 +26,13 @@ const SNAP_THRESHOLD_PX: i32 = 10;
 /// Keysym for the `Tab` key, per `<X11/keysymdef.h>` — the same numeric
 /// space X11 and XKB (and so a future Wayland backend) both use, so
 /// this is genuinely backend-agnostic despite the name. `Alt+Tab`/
-/// `Alt+Shift+Tab` are this WM's only default global keybinding today
-/// (window cycling, `WindowMaker`'s `cycling.c`).
+/// `Alt+Shift+Tab` window cycling (`WindowMaker`'s `cycling.c`) is the
+/// only keybinding `wm-core` claims for itself — every other binding
+/// is config-driven from the binary (see `bind_default_keys`).
 const XK_TAB: u32 = 0xff09;
 const XK_ESCAPE: u32 = 0xff1b;
 const XK_ALT_L: u32 = 0xffe9;
 const XK_ALT_R: u32 = 0xffea;
-const XK_LEFT: u32 = 0xff51;
-const XK_RIGHT: u32 = 0xff53;
 
 /// An in-progress titlebar-drag move. `grab_offset` is the frame-local
 /// point that was clicked — since that's constant relative to the frame
@@ -211,23 +210,30 @@ impl<B: Backend> WindowManager<B> {
         self.backend.publish_workarea(area, self.workspace_count);
     }
 
-    /// Registers this WM's default global keybindings with the backend
-    /// — Alt+Tab / Alt+Shift+Tab window cycling, Alt+Ctrl+Left/Right
-    /// workspace switching, and Alt+Shift+Left/Right to carry the
-    /// focused window along to the neighboring workspace. Call once
-    /// after construction; a real configurable-keybinding story
-    /// (`wm-config`) is future work, but the `Backend::grab_key`/
-    /// `KeyPress` plumbing this exercises is the same plumbing that
-    /// story would ride on.
+    /// Registers the Alt+Tab / Alt+Shift+Tab window-cycling grabs — the
+    /// only keybindings `wm-core` claims for itself. The split is
+    /// deliberate: cycling is *modal* machinery (a switcher session, an
+    /// exclusive keyboard grab, commit-on-Alt-release, cancel-on-Escape,
+    /// the lost-release fallback) that only works woven through this
+    /// crate's internal state, so it lives here; everything else — close,
+    /// maximize, workspace switching, and the rest — is a plain
+    /// combo-to-action mapping the binary drives from user config
+    /// (`wm-config`), registering each configured combo via `grab_key`
+    /// and calling the matching public method when its `KeyPress`
+    /// arrives. Call once after construction.
     pub fn bind_default_keys(&mut self) {
         self.backend.grab_key(KeyCombo { keysym: XK_TAB, modifiers: Modifiers::ALT });
         self.backend.grab_key(KeyCombo { keysym: XK_TAB, modifiers: Modifiers::ALT | Modifiers::SHIFT });
-        let workspace_mods = Modifiers::ALT | Modifiers::CONTROL;
-        self.backend.grab_key(KeyCombo { keysym: XK_RIGHT, modifiers: workspace_mods });
-        self.backend.grab_key(KeyCombo { keysym: XK_LEFT, modifiers: workspace_mods });
-        let carry_mods = Modifiers::ALT | Modifiers::SHIFT;
-        self.backend.grab_key(KeyCombo { keysym: XK_RIGHT, modifiers: carry_mods });
-        self.backend.grab_key(KeyCombo { keysym: XK_LEFT, modifiers: carry_mods });
+    }
+
+    /// Registers a global keybinding with the backend — a pure
+    /// passthrough. The binary calls this once per configured combo at
+    /// startup and then reacts to the resulting
+    /// `BackendEvent::KeyPress`es itself: `wm-core` neither knows nor
+    /// cares what action a combo is bound to (the sole exception being
+    /// the modal Alt+Tab machinery — see `bind_default_keys`).
+    pub fn grab_key(&mut self, combo: KeyCombo) {
+        self.backend.grab_key(combo);
     }
 
     pub fn current_workspace(&self) -> usize {
@@ -1103,6 +1109,19 @@ impl<B: Backend> WindowManager<B> {
         self.maximize(id, directions);
     }
 
+    /// Flips full (both-axes) maximization — the config-driven
+    /// keybinding entry point, so the binary never needs to know
+    /// `MaximizeDirections` exists just to bind one key. Exactly
+    /// `toggle_maximize` with `MaximizeDirections::FULL`: the client's
+    /// current `MAXIMIZED_H`/`MAXIMIZED_V` flags decide whether this
+    /// maximizes or restores, and a partially (one-axis) maximized
+    /// window goes to full first rather than restoring, per
+    /// `toggle_maximize`'s clean-slate semantics. A no-op for an
+    /// unknown/stale `id`.
+    pub fn toggle_maximize_full(&mut self, id: ClientId) {
+        self.toggle_maximize(id, MaximizeDirections::FULL);
+    }
+
     /// Rolls a client up to just its titlebar (WindowMaker's "shade") —
     /// the content window is hidden (not resized to nothing; a real
     /// window is genuinely unmapped, matching `wShadeWindow`) but its
@@ -1229,6 +1248,17 @@ impl<B: Backend> WindowManager<B> {
         tracing::info!(?id, "left fullscreen");
     }
 
+    /// Flips fullscreen via the existing `fullscreen`/`unfullscreen`
+    /// pair — the config-driven keybinding entry point, routed through
+    /// the exact same toggle logic an EWMH `_NET_WM_STATE` Toggle
+    /// message takes (`apply_fullscreen_action`), so a bound key and a
+    /// pager can never disagree about what toggling means. A no-op for
+    /// an unknown/stale `id` (both halves of the pair already bail on
+    /// one).
+    pub fn toggle_fullscreen(&mut self, id: ClientId) {
+        self.apply_fullscreen_action(id, NetStateAction::Toggle);
+    }
+
     /// Iconifies a client: unmaps its frame and marks it `Miniaturized`.
     /// Pushes `Notification::Miniaturized` so the desktop shell can show
     /// an icon tile in its place — clicking that tile should call
@@ -1309,6 +1339,21 @@ impl<B: Backend> WindowManager<B> {
             self.unshade(id);
         }
         self.focus_client(id);
+    }
+
+    /// Closes `id` — the config-driven keybinding entry point, routed
+    /// through exactly the mechanism the titlebar close button's commit
+    /// and `_NET_CLOSE_WINDOW` (`handle_close_request`) use:
+    /// `Backend::send_close`, which does the ICCCM dance
+    /// (`WM_DELETE_WINDOW` when the client supports it, force-kill
+    /// otherwise). One shared mechanism means a bound key can never
+    /// disagree with the other two entry points about how a window
+    /// dies. A no-op for an unknown/stale `id`.
+    pub fn close_client(&mut self, id: ClientId) {
+        let Some(client) = self.clients.get(id) else {
+            return;
+        };
+        self.backend.send_close(client.window);
     }
 
     /// `_NET_CLOSE_WINDOW`: identical to the titlebar close button's
@@ -1398,6 +1443,11 @@ impl<B: Backend> WindowManager<B> {
         self.maximize(id, target);
     }
 
+    /// Only the modal Alt+Tab machinery reacts to key presses here —
+    /// every other grabbed combo reaches the binary through this same
+    /// `BackendEvent::KeyPress` and is matched against user config
+    /// there (see `bind_default_keys` for why the line is drawn where
+    /// it is).
     fn handle_key_press(&mut self, combo: KeyCombo) {
         match combo.keysym {
             XK_TAB => {
@@ -1408,21 +1458,6 @@ impl<B: Backend> WindowManager<B> {
                 }
             }
             XK_ESCAPE if self.cycle.is_some() => self.cycle_end(false),
-            // Alt+Shift+arrows carry the focused window along to the
-            // neighboring workspace. These MUST sit before the plain
-            // switch arms below: those match on keysym alone (no
-            // modifier guard), so a Shift-carrying combo would fall
-            // into them and merely switch, abandoning the window.
-            // Right grows the row on demand exactly like a plain
-            // switch; left stops at 0, same as the arm below.
-            XK_RIGHT if combo.modifiers.contains(Modifiers::SHIFT) => {
-                self.carry_focused_to_workspace(self.current_workspace + 1)
-            }
-            XK_LEFT if combo.modifiers.contains(Modifiers::SHIFT) && self.current_workspace > 0 => {
-                self.carry_focused_to_workspace(self.current_workspace - 1)
-            }
-            XK_RIGHT => self.switch_workspace(self.current_workspace + 1),
-            XK_LEFT if self.current_workspace > 0 => self.switch_workspace(self.current_workspace - 1),
             // Any other key without Alt held means the Alt release was
             // lost (it can slip into the gap before the modal keyboard
             // grab activates) — commit rather than leaving the panel
@@ -1436,24 +1471,6 @@ impl<B: Backend> WindowManager<B> {
         if self.cycle.is_some() && matches!(combo.keysym, XK_ALT_L | XK_ALT_R) {
             self.cycle_end(true);
         }
-    }
-
-    /// Alt+Shift+Left/Right: moves the focused client onto `workspace`
-    /// and switches there with it (real WindowMaker's "move to
-    /// next/previous workspace with window" actions). The refocus at
-    /// the end is load-bearing: `move_client_to_workspace` drops focus
-    /// the instant the client leaves the active workspace, and without
-    /// re-focusing after arriving, the second Alt+Shift+Right in a row
-    /// would find nothing focused and silently do nothing — the whole
-    /// point of the gesture is carrying one window across several
-    /// workspaces in repeated presses. A no-op with nothing focused.
-    fn carry_focused_to_workspace(&mut self, workspace: usize) {
-        let Some(id) = self.focused else {
-            return;
-        };
-        self.move_client_to_workspace(id, workspace);
-        self.switch_workspace(workspace);
-        self.focus_client(id);
     }
 
     /// Alt+Tab / Alt+Shift+Tab window switching, modal like real
@@ -2035,32 +2052,50 @@ mod tests {
         assert_eq!(wm.current_workspace(), 0, "moving a client must not itself change the active workspace");
     }
 
+    // Workspace keybindings are config-driven from the binary now
+    // (see `bind_default_keys`), so the public methods ARE the
+    // dispatch path a bound key takes — these tests exercise them
+    // directly instead of synthesizing hardcoded arrow-key presses.
+
     #[test]
-    fn alt_ctrl_right_then_left_round_trips_the_workspace() {
+    fn switch_workspace_round_trips() {
         let backend = FakeBackend::new();
         let mut wm = wm(backend);
-        let mods = Modifiers::ALT | Modifiers::CONTROL;
 
-        wm.dispatch(BackendEvent::KeyPress(KeyCombo { keysym: XK_RIGHT, modifiers: mods }));
+        wm.switch_workspace(1);
         assert_eq!(wm.current_workspace(), 1);
 
-        wm.dispatch(BackendEvent::KeyPress(KeyCombo { keysym: XK_LEFT, modifiers: mods }));
+        wm.switch_workspace(0);
         assert_eq!(wm.current_workspace(), 0);
     }
 
     #[test]
-    fn alt_ctrl_left_at_workspace_zero_does_not_panic_or_go_negative() {
+    fn switching_to_the_current_workspace_is_a_complete_no_op() {
+        // The "don't go below zero" guard lives with the keybinding
+        // driver in the binary; what wm-core itself guarantees is that
+        // a same-index switch changes nothing and publishes nothing —
+        // a pager re-sending the current desktop must not trigger a
+        // spurious remap/republish storm.
         let backend = FakeBackend::new();
         let mut wm = wm(backend);
-        let mods = Modifiers::ALT | Modifiers::CONTROL;
+        let publishes_before = wm.backend().published_workspaces.len();
 
-        wm.dispatch(BackendEvent::KeyPress(KeyCombo { keysym: XK_LEFT, modifiers: mods }));
+        wm.switch_workspace(0);
 
         assert_eq!(wm.current_workspace(), 0);
+        assert_eq!(wm.backend().published_workspaces.len(), publishes_before, "a same-workspace switch must not re-publish");
     }
 
+    /// The carry gesture (formerly hardcoded Alt+Shift+arrows) is
+    /// driven from the binary now as move + switch + re-focus through
+    /// the public API. This locks in that the sequence works end to
+    /// end — in particular that focus can be re-established after
+    /// `move_client_to_workspace` deliberately drops it (the client
+    /// leaves the active workspace mid-sequence), since carrying one
+    /// window across several workspaces in repeated presses depends on
+    /// it ending up focused after every hop.
     #[test]
-    fn alt_shift_right_carries_the_focused_client_and_follows_it() {
+    fn carrying_a_client_via_public_calls_moves_switches_and_refocuses() {
         let mut backend = FakeBackend::new();
         let window = backend.create_window();
         let mut wm = wm(backend);
@@ -2073,27 +2108,34 @@ mod tests {
             "manage time must publish the window's initial workspace"
         );
 
-        wm.dispatch(BackendEvent::KeyPress(KeyCombo { keysym: XK_RIGHT, modifiers: Modifiers::ALT | Modifiers::SHIFT }));
+        wm.move_client_to_workspace(id, 1);
+        assert!(!wm.client(id).unwrap().flags.contains(ClientFlags::FOCUSED), "focus drops the moment the client leaves the active workspace");
+        wm.switch_workspace(1);
+        wm.dispatch(BackendEvent::ActivateRequested(window));
 
         assert_eq!(wm.current_workspace(), 1, "the switch must follow the carried client (growing the row on demand)");
         assert_eq!(wm.client(id).unwrap().workspace, 1);
         assert!(wm.backend().mapped_frames.contains(&frame), "the carried client must be visible on arrival");
-        assert!(wm.client(id).unwrap().flags.contains(ClientFlags::FOCUSED), "the carried client must stay focused, so repeated presses keep carrying it");
+        assert!(wm.client(id).unwrap().flags.contains(ClientFlags::FOCUSED), "the carried client must end up focused, so a repeated carry keeps carrying it");
         assert_eq!(wm.backend().published_window_desktops.last(), Some(&(window, 1)), "the move must re-publish _NET_WM_DESKTOP");
     }
 
     #[test]
-    fn alt_shift_left_at_workspace_zero_does_nothing() {
+    fn moving_a_client_to_its_own_workspace_is_a_no_op() {
         let mut backend = FakeBackend::new();
         let window = backend.create_window();
         let mut wm = wm(backend);
         wm.dispatch(BackendEvent::MapRequest(window));
         let id = wm.client_for_window(window).unwrap();
+        let frame = wm.client(id).unwrap().frame.unwrap();
+        let desktops_before = wm.backend().published_window_desktops.len();
 
-        wm.dispatch(BackendEvent::KeyPress(KeyCombo { keysym: XK_LEFT, modifiers: Modifiers::ALT | Modifiers::SHIFT }));
+        wm.move_client_to_workspace(id, 0);
 
-        assert_eq!(wm.current_workspace(), 0);
-        assert_eq!(wm.client(id).unwrap().workspace, 0, "there is nothing left of workspace 0 to carry the client to");
+        assert_eq!(wm.client(id).unwrap().workspace, 0);
+        assert!(!wm.backend().unmapped_frames.contains(&frame), "a move that changes nothing must not hide the frame");
+        assert!(wm.client(id).unwrap().flags.contains(ClientFlags::FOCUSED), "a no-op move must not drop focus");
+        assert_eq!(wm.backend().published_window_desktops.len(), desktops_before, "no _NET_WM_DESKTOP re-publish for a move that changes nothing");
     }
 
     #[test]
@@ -2813,6 +2855,62 @@ mod tests {
     }
 
     #[test]
+    fn toggle_maximize_full_round_trips_geometry() {
+        let mut backend = FakeBackend::new();
+        let window = backend.create_window();
+        backend.set_geometry(window, Rect { pos: Point::new(50, 50), size: Size::new(100, 100) });
+        backend.set_monitor(Rect { pos: Point::new(0, 0), size: Size::new(800, 600) });
+        let mut wm = wm(backend);
+        wm.dispatch(BackendEvent::MapRequest(window));
+        let id = wm.client_for_window(window).unwrap();
+        let frame = wm.client(id).unwrap().frame.unwrap();
+        let original_geometry = wm.client(id).unwrap().geometry;
+
+        wm.toggle_maximize_full(id);
+
+        let client = wm.client(id).unwrap();
+        assert!(client.flags.contains(ClientFlags::MAXIMIZED_H | ClientFlags::MAXIMIZED_V));
+        assert_eq!(
+            wm.backend().last_frame_geometry.get(&frame),
+            Some(&Rect { pos: Point::new(0, 0), size: Size::new(800, 600) }),
+            "the first toggle must fill the monitor edge-to-edge"
+        );
+
+        wm.toggle_maximize_full(id);
+
+        let client = wm.client(id).unwrap();
+        assert_eq!(client.geometry, original_geometry, "the second toggle must restore the pre-maximize geometry exactly");
+        assert!(!client.flags.intersects(ClientFlags::MAXIMIZED_H | ClientFlags::MAXIMIZED_V));
+        assert_eq!(client.restore_geometry, None, "the restore snapshot must be consumed, not left to go stale");
+    }
+
+    #[test]
+    fn toggle_maximize_full_over_a_partial_maximize_goes_full_not_restored() {
+        // `toggle_maximize`'s clean-slate semantics, reached through the
+        // keybinding entry point: vertical-only is not "full", so the
+        // toggle must complete the maximize (from the true original
+        // geometry), and only the next toggle restores.
+        let mut backend = FakeBackend::new();
+        let window = backend.create_window();
+        backend.set_geometry(window, Rect { pos: Point::new(50, 50), size: Size::new(100, 100) });
+        backend.set_monitor(Rect { pos: Point::new(0, 0), size: Size::new(800, 600) });
+        let mut wm = wm(backend);
+        wm.dispatch(BackendEvent::MapRequest(window));
+        let id = wm.client_for_window(window).unwrap();
+        let original_geometry = wm.client(id).unwrap().geometry;
+        wm.maximize(id, MaximizeDirections::VERTICAL);
+
+        wm.toggle_maximize_full(id);
+
+        let client = wm.client(id).unwrap();
+        assert!(client.flags.contains(ClientFlags::MAXIMIZED_H | ClientFlags::MAXIMIZED_V), "a partial maximize must be completed, not toggled off");
+        assert_eq!(client.restore_geometry, Some(original_geometry), "the restore snapshot must still be the true original");
+
+        wm.toggle_maximize_full(id);
+        assert_eq!(wm.client(id).unwrap().geometry, original_geometry);
+    }
+
+    #[test]
     fn titlebar_double_click_toggles_shade() {
         // Matches real WindowMaker's `titlebarDblClick` default exactly:
         // a plain double-click (no modifiers) shades, not maximizes —
@@ -3037,6 +3135,43 @@ mod tests {
     }
 
     #[test]
+    fn close_client_uses_the_same_backend_close_path_as_the_close_button() {
+        let mut backend = FakeBackend::new();
+        let window = backend.create_window();
+        let mut wm = wm(backend);
+        wm.dispatch(BackendEvent::MapRequest(window));
+        let id = wm.client_for_window(window).unwrap();
+
+        wm.close_client(id);
+
+        // The third entry point into the one shared close mechanism —
+        // `Backend::send_close`, exactly what the titlebar button's
+        // commit and `_NET_CLOSE_WINDOW` record here too.
+        assert!(wm.backend().close_requests.contains(&window));
+    }
+
+    /// A config keybinding fires against whatever `focused_client`
+    /// returned a moment ago — a window can die between the two, so
+    /// every keybinding-facing method must shrug off a stale id rather
+    /// than panic or touch the backend.
+    #[test]
+    fn keybinding_action_methods_ignore_a_stale_client_id() {
+        let mut backend = FakeBackend::new();
+        let window = backend.create_window();
+        let mut wm = wm(backend);
+        wm.dispatch(BackendEvent::MapRequest(window));
+        let id = wm.client_for_window(window).unwrap();
+        wm.dispatch(BackendEvent::Destroyed(window));
+
+        wm.close_client(id);
+        wm.toggle_maximize_full(id);
+        wm.toggle_fullscreen(id);
+
+        assert!(wm.backend().close_requests.is_empty(), "a stale id must not close anything");
+        assert_eq!(wm.client_count(), 0);
+    }
+
+    #[test]
     fn fullscreen_toggle_covers_the_monitor_and_a_second_toggle_restores_exactly() {
         let mut backend = FakeBackend::new();
         let window = backend.create_window();
@@ -3070,6 +3205,41 @@ mod tests {
         let client = wm.client(id).unwrap();
         assert!(!client.flags.contains(ClientFlags::FULLSCREEN));
         assert_eq!(client.geometry, original_geometry, "a second toggle must restore the prior geometry exactly");
+        assert_eq!(wm.backend().published_net_states.last(), Some(&(window, false, false, false, false, false)));
+    }
+
+    /// Mirror of `fullscreen_toggle_covers_the_monitor_and_a_second_
+    /// toggle_restores_exactly`, through the keybinding entry point
+    /// instead of a `_NET_WM_STATE` message — the two must be
+    /// indistinguishable, since `toggle_fullscreen` routes through the
+    /// same `apply_fullscreen_action` a pager's Toggle takes.
+    #[test]
+    fn toggle_fullscreen_round_trips_exactly() {
+        let mut backend = FakeBackend::new();
+        let window = backend.create_window();
+        backend.set_geometry(window, Rect { pos: Point::new(50, 50), size: Size::new(100, 100) });
+        let monitor = Rect { pos: Point::new(0, 0), size: Size::new(800, 600) };
+        backend.set_monitor(monitor);
+        let mut wm = wm(backend);
+        wm.dispatch(BackendEvent::MapRequest(window));
+        let id = wm.client_for_window(window).unwrap();
+        let frame = wm.client(id).unwrap().frame.unwrap();
+        let original_geometry = wm.client(id).unwrap().geometry;
+
+        wm.toggle_fullscreen(id);
+
+        let client = wm.client(id).unwrap();
+        assert!(client.flags.contains(ClientFlags::FULLSCREEN));
+        assert_eq!(client.geometry, monitor, "content must fill the monitor edge-to-edge");
+        assert_eq!(wm.backend().last_frame_geometry.get(&frame), Some(&monitor), "the frame must be exactly the monitor rect");
+        assert!(wm.backend().raised_frames.contains(&frame), "entering fullscreen must raise");
+        assert_eq!(wm.backend().published_net_states.last(), Some(&(window, true, false, false, false, false)));
+
+        wm.toggle_fullscreen(id);
+
+        let client = wm.client(id).unwrap();
+        assert!(!client.flags.contains(ClientFlags::FULLSCREEN));
+        assert_eq!(client.geometry, original_geometry, "the second toggle must restore the prior geometry exactly");
         assert_eq!(wm.backend().published_net_states.last(), Some(&(window, false, false, false, false, false)));
     }
 
@@ -3167,6 +3337,38 @@ mod tests {
 
         wm.dispatch(BackendEvent::Destroyed(w1));
         assert_eq!(wm.backend().published_client_lists.last(), Some(&vec![w2]));
+    }
+
+    #[test]
+    fn grab_key_forwards_the_combo_to_the_backend() {
+        let backend = FakeBackend::new();
+        let mut wm = wm(backend);
+        let combo = KeyCombo { keysym: 0x0071, modifiers: Modifiers::ALT | Modifiers::SHIFT }; // XK_q
+
+        wm.grab_key(combo);
+
+        assert_eq!(wm.backend().grabbed_keys, vec![combo], "the combo must reach Backend::grab_key unaltered");
+    }
+
+    #[test]
+    fn bind_default_keys_grabs_only_the_modal_cycling_combos() {
+        // The keybinding split (see `bind_default_keys`): everything
+        // beyond Alt+Tab / Alt+Shift+Tab is config-driven from the
+        // binary via `grab_key`, so nothing else may be claimed here —
+        // a leftover hardcoded grab would shadow the user's own
+        // binding for that combo.
+        let backend = FakeBackend::new();
+        let mut wm = wm(backend);
+
+        wm.bind_default_keys();
+
+        assert_eq!(
+            wm.backend().grabbed_keys,
+            vec![
+                KeyCombo { keysym: XK_TAB, modifiers: Modifiers::ALT },
+                KeyCombo { keysym: XK_TAB, modifiers: Modifiers::ALT | Modifiers::SHIFT },
+            ]
+        );
     }
 
     #[test]
