@@ -68,6 +68,10 @@ pub enum MenuClick {
 pub struct CascadeMenu<Id> {
     title: String,
     background: (u8, u8, u8),
+    /// Whether the ROOT level renders WindowMaker's posted-menu close
+    /// box (set per `open`; cascades never carry one — closing the
+    /// root closes the chain).
+    closable: bool,
     bounds: Size,
     levels: Vec<OpenLevel<Id>>,
     grab: Option<PopupGrab>,
@@ -83,6 +87,7 @@ impl<Id: Copy + Eq + std::fmt::Debug> CascadeMenu<Id> {
         Self {
             title: title.into(),
             background,
+            closable: false,
             bounds: Size::new(0, 0),
             levels: Vec::new(),
             grab: None,
@@ -106,8 +111,10 @@ impl<Id: Copy + Eq + std::fmt::Debug> CascadeMenu<Id> {
         items: Vec<MenuItem>,
         at: Point,
         bounds: Size,
+        closable: bool,
     ) {
         self.close(host);
+        self.closable = closable;
         self.bounds = bounds;
         let title = self.title.clone();
         if let Some(level) = self.open_level(host, theme, font_system, title, items, at, None) {
@@ -162,10 +169,10 @@ impl<Id: Copy + Eq + std::fmt::Debug> CascadeMenu<Id> {
     /// If `window` belongs to this menu's chain, re-renders that level
     /// with whichever item is now under the pointer highlighted (a no-op
     /// if unchanged, so hovering within one row doesn't repaint on every
-    /// pixel of motion), truncates any now-stale cascade hanging off a
-    /// sibling item, and arms the hover-open hysteresis for a freshly
-    /// hovered submenu row (see `tick`). Returns whether `window`
-    /// belonged to this menu at all.
+    /// pixel of motion) and arms the hover-open hysteresis for a freshly
+    /// hovered submenu row (see `tick`). Deliberately never closes an
+    /// open cascade — see the comment in the body. Returns whether
+    /// `window` belonged to this menu at all.
     pub fn hover<H: PopupHost<PopupId = Id>>(
         &mut self,
         host: &mut H,
@@ -177,19 +184,39 @@ impl<Id: Copy + Eq + std::fmt::Debug> CascadeMenu<Id> {
         let Some(level) = self.level_for_window(window) else {
             return false;
         };
+        // While the pointer is inside a cascade, every ancestor level
+        // highlights the row its child opened from — the lit trail real
+        // WindowMaker draws through an open chain. Without this, an
+        // ancestor keeps whatever row the pointer last crossed on its
+        // way through (confirmed live: "Exit" sat highlighted on the
+        // root while the pointer browsed Applications > Internet),
+        // which misreads as the selection.
+        for l in 0..level {
+            let parent_row = self.levels[l + 1].opened_from_item;
+            if self.levels[l].highlighted != parent_row {
+                self.levels[l].highlighted = parent_row;
+                self.repaint_level(host, theme, font_system, l);
+            }
+        }
         let hovered = self.levels[level].item_rects.iter().position(|r| r.contains(local));
         if hovered == self.levels[level].highlighted {
             return true;
         }
         self.levels[level].highlighted = hovered;
-        let render = menu::render_menu(theme, font_system, &self.levels[level].title, &self.levels[level].items, hovered);
-        host.paint_popup(self.levels[level].window, &render.buffer);
+        self.repaint_level(host, theme, font_system, level);
 
+        // An open cascade STAYS open while the pointer wanders — real
+        // WindowMaker's posted menus never close on hover-away, and
+        // that is load-bearing ergonomics, not laziness: the natural
+        // diagonal path from a parent row into its cascade crosses the
+        // parent's other rows, and closing the cascade on the first
+        // crossed row (this controller's original behavior) made deep
+        // menus nearly untraversable — the user's pointer "lost the
+        // menu" on every second-level trip (reported exactly so). A
+        // cascade is replaced only by deliberately opening a sibling
+        // (hover-dwell on it, or a click), and closed only with its
+        // parent chain.
         let child_belongs_to = self.levels.get(level + 1).and_then(|c| c.opened_from_item);
-        if hovered != child_belongs_to {
-            self.truncate(host, level + 1);
-        }
-
         self.pending_submenu = match hovered {
             Some(i) if self.levels[level].items[i].is_submenu() && child_belongs_to != Some(i) => {
                 Some(PendingSubmenu { level, item_index: i, hovered_since: Instant::now() })
@@ -197,6 +224,25 @@ impl<Id: Copy + Eq + std::fmt::Debug> CascadeMenu<Id> {
             _ => None,
         };
         true
+    }
+
+    fn repaint_level<H: PopupHost<PopupId = Id>>(
+        &mut self,
+        host: &mut H,
+        theme: &Theme,
+        font_system: &mut cosmic_text::FontSystem,
+        level: usize,
+    ) {
+        let closable = self.levels[level].opened_from_item.is_none() && self.closable;
+        let render = menu::render_menu(
+            theme,
+            font_system,
+            &self.levels[level].title,
+            &self.levels[level].items,
+            self.levels[level].highlighted,
+            closable,
+        );
+        host.paint_popup(self.levels[level].window, &render.buffer);
     }
 
     /// Opens whatever submenu has been hovered long enough — call once
@@ -225,7 +271,8 @@ impl<Id: Copy + Eq + std::fmt::Debug> CascadeMenu<Id> {
         at: Point,
         opened_from_item: Option<usize>,
     ) -> Option<OpenLevel<Id>> {
-        let render = menu::render_menu(theme, font_system, &title, &items, None);
+        let closable = opened_from_item.is_none() && self.closable;
+        let render = menu::render_menu(theme, font_system, &title, &items, None, closable);
         let geom = Rect { pos: at, size: Size::new(render.buffer.width, render.buffer.height) };
         let window = host.create_popup(geom, self.background)?;
         host.paint_popup(window, &render.buffer);
@@ -378,7 +425,7 @@ mod tests {
         }
 
         fn open(&mut self, items: Vec<MenuItem>) {
-            self.cascade.open(&mut self.host, &self.theme, &mut self.font_system, items, Point::new(0, 0), Size::new(1600, 1000));
+            self.cascade.open(&mut self.host, &self.theme, &mut self.font_system, items, Point::new(0, 0), Size::new(1600, 1000), false);
         }
 
         /// Center of item row `index` — computed from a real render of
@@ -386,7 +433,7 @@ mod tests {
         /// actually are as the menu's layout recipe evolves (titlebar-
         /// height title strip, frame border) instead of hardcoding it.
         fn row_point(&mut self, items: &[MenuItem], index: usize) -> Point {
-            let render = menu::render_menu(&self.theme, &mut self.font_system, "chonkstep", items, None);
+            let render = menu::render_menu(&self.theme, &mut self.font_system, "chonkstep", items, None, false);
             let rect = render.item_rects[index];
             Point::new(rect.pos.x + rect.size.w as i32 / 2, rect.pos.y + rect.size.h as i32 / 2)
         }
@@ -518,8 +565,8 @@ mod tests {
 
         let child = *f.host.open.iter().find(|w| **w != root).expect("submenu popup open");
         let painted = f.host.painted.get(&child).expect("submenu was painted").clone();
-        let expected = menu::render_menu(&f.theme, &mut f.font_system, "Applications", &sub_items, None);
-        let wrong = menu::render_menu(&f.theme, &mut f.font_system, "chonkstep", &sub_items, None);
+        let expected = menu::render_menu(&f.theme, &mut f.font_system, "Applications", &sub_items, None, false);
+        let wrong = menu::render_menu(&f.theme, &mut f.font_system, "chonkstep", &sub_items, None, false);
         assert_eq!(painted, expected.buffer, "cascade must be titled by its submenu label");
         assert_ne!(painted, wrong.buffer, "the two titles must actually render differently");
     }
@@ -553,8 +600,14 @@ mod tests {
         assert_eq!(f.host.open.len(), 2, "hover-open should have cascaded the submenu");
     }
 
+    /// The ergonomics fix real WindowMaker embodies: the natural
+    /// diagonal path from a parent row into its cascade crosses the
+    /// parent's other rows, so hovering them must NOT close the open
+    /// cascade — the original hover-away truncation made deep menus
+    /// nearly untraversable (the pointer "lost the menu" on every
+    /// second-level trip).
     #[test]
-    fn hovering_back_to_a_different_row_closes_the_open_submenu() {
+    fn hovering_other_rows_leaves_the_open_cascade_alone() {
         let mut f = Fixture::new();
         let items = vec![submenu("Applications", vec![action("About", 2)]), action("Exit", 9)];
         f.open(items.clone());
@@ -566,7 +619,35 @@ mod tests {
         assert_eq!(f.host.open.len(), 2);
 
         f.hover(root, exit_row);
+        f.tick();
 
-        assert_eq!(f.host.open.len(), 1, "hovering away from the submenu's parent row should close it");
+        assert_eq!(f.host.open.len(), 2, "wandering over a plain row must not close the cascade");
+    }
+
+    /// Deliberately dwelling on a *sibling* submenu row still swaps the
+    /// cascade — persistence must not make the first-opened cascade
+    /// permanent.
+    #[test]
+    fn dwelling_on_a_sibling_submenu_row_swaps_the_cascade() {
+        let mut f = Fixture::new();
+        let items = vec![
+            submenu("Applications", vec![action("About", 2)]),
+            submenu("Utilities", vec![action("Terminal", 3)]),
+        ];
+        f.open(items.clone());
+        let root = f.only_open_window();
+        let row0 = f.row_point(&items, 0);
+        let row1 = f.row_point(&items, 1);
+
+        f.click(root, row0);
+        assert_eq!(f.host.open.len(), 2);
+        let destroyed_before = f.host.destroyed_total;
+
+        f.hover(root, row1);
+        thread::sleep(SUBMENU_HOVER_DELAY + Duration::from_millis(60));
+        f.tick();
+
+        assert_eq!(f.host.open.len(), 2, "still root + exactly one cascade");
+        assert_eq!(f.host.destroyed_total, destroyed_before + 1, "the first cascade must have been replaced");
     }
 }
