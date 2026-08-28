@@ -28,6 +28,11 @@ pub const SUBMENU_HOVER_DELAY: Duration = Duration::from_millis(180);
 /// grows).
 struct OpenLevel<Id> {
     window: Id,
+    /// This level's own title: the root level carries the menu's title,
+    /// and every cascade carries the label of the submenu row it opened
+    /// from — real WindowMaker titles each cascade after its entry
+    /// ("Applications", "Theme"), never the root title repeated.
+    title: String,
     items: Vec<MenuItem>,
     item_rects: Vec<Rect>,
     highlighted: Option<usize>,
@@ -52,8 +57,9 @@ pub enum MenuClick {
     /// An action row fired this id; the whole chain is now closed.
     Action(u32),
     /// The click landed inside the popup but not on any item — the
-    /// close box, or blank space — so the whole chain is now closed with
-    /// no action, exactly like clicking a window's close button.
+    /// title strip, or blank space — so the whole chain is now closed
+    /// with no action (transient menus dismiss on any non-item click,
+    /// like real WindowMaker's unpinned menus).
     Dismissed,
 }
 
@@ -103,7 +109,8 @@ impl<Id: Copy + Eq + std::fmt::Debug> CascadeMenu<Id> {
     ) {
         self.close(host);
         self.bounds = bounds;
-        if let Some(level) = self.open_level(host, theme, font_system, items, at, None) {
+        let title = self.title.clone();
+        if let Some(level) = self.open_level(host, theme, font_system, title, items, at, None) {
             self.levels.push(level);
         }
         self.grab = Some(host.grab_pointer());
@@ -120,9 +127,9 @@ impl<Id: Copy + Eq + std::fmt::Debug> CascadeMenu<Id> {
     /// a submenu row opens immediately (for a fast deliberate click that
     /// beats the hover-open delay), an action row closes the whole chain
     /// and returns the action id, and a click anywhere else in the popup
-    /// (including the title bar's close box) dismisses the whole chain
-    /// with no action. Returns `None` if `window` isn't one of this
-    /// menu's own popups.
+    /// (the title strip, blank space) dismisses the whole chain with no
+    /// action. Returns `None` if `window` isn't one of this menu's own
+    /// popups.
     pub fn click<H: PopupHost<PopupId = Id>>(
         &mut self,
         host: &mut H,
@@ -175,7 +182,7 @@ impl<Id: Copy + Eq + std::fmt::Debug> CascadeMenu<Id> {
             return true;
         }
         self.levels[level].highlighted = hovered;
-        let render = menu::render_menu(theme, font_system, &self.title, &self.levels[level].items, hovered);
+        let render = menu::render_menu(theme, font_system, &self.levels[level].title, &self.levels[level].items, hovered);
         host.paint_popup(self.levels[level].window, &render.buffer);
 
         let child_belongs_to = self.levels.get(level + 1).and_then(|c| c.opened_from_item);
@@ -213,15 +220,16 @@ impl<Id: Copy + Eq + std::fmt::Debug> CascadeMenu<Id> {
         host: &mut H,
         theme: &Theme,
         font_system: &mut cosmic_text::FontSystem,
+        title: String,
         items: Vec<MenuItem>,
         at: Point,
         opened_from_item: Option<usize>,
     ) -> Option<OpenLevel<Id>> {
-        let render = menu::render_menu(theme, font_system, &self.title, &items, None);
+        let render = menu::render_menu(theme, font_system, &title, &items, None);
         let geom = Rect { pos: at, size: Size::new(render.buffer.width, render.buffer.height) };
         let window = host.create_popup(geom, self.background)?;
         host.paint_popup(window, &render.buffer);
-        Some(OpenLevel { window, items, item_rects: render.item_rects, highlighted: None, geom, opened_from_item })
+        Some(OpenLevel { window, title, items, item_rects: render.item_rects, highlighted: None, geom, opened_from_item })
     }
 
     /// Opens a submenu cascading from `item_index` in level
@@ -247,7 +255,7 @@ impl<Id: Copy + Eq + std::fmt::Debug> CascadeMenu<Id> {
         let Some(parent) = self.levels.get(parent_level) else {
             return;
         };
-        let MenuItem::Submenu { items, .. } = parent.items[item_index].clone() else {
+        let MenuItem::Submenu { label, items } = parent.items[item_index].clone() else {
             return;
         };
         if items.is_empty() {
@@ -265,7 +273,9 @@ impl<Id: Copy + Eq + std::fmt::Debug> CascadeMenu<Id> {
             y = (self.bounds.h as i32 - approx_height as i32).max(0);
         }
 
-        if let Some(level) = self.open_level(host, theme, font_system, items, Point::new(x, y), Some(item_index)) {
+        // The cascade titles itself after the row it opened from —
+        // WindowMaker's own naming for submenus.
+        if let Some(level) = self.open_level(host, theme, font_system, label, items, Point::new(x, y), Some(item_index)) {
             self.levels.push(level);
         }
     }
@@ -299,6 +309,9 @@ mod tests {
     struct FakeHost {
         next_id: u32,
         open: HashSet<u32>,
+        /// Last buffer painted into each popup, keyed by popup id — lets
+        /// tests assert *what* a popup shows, not just that it exists.
+        painted: std::collections::HashMap<u32, DecorationBuffer>,
         destroyed_total: u32,
         grabs: u32,
         ungrabs: u32,
@@ -318,7 +331,9 @@ mod tests {
             self.destroyed_total += 1;
         }
 
-        fn paint_popup(&mut self, _popup: u32, _buffer: &DecorationBuffer) {}
+        fn paint_popup(&mut self, popup: u32, buffer: &DecorationBuffer) {
+            self.painted.insert(popup, buffer.clone());
+        }
 
         fn grab_pointer(&mut self) -> PopupGrab {
             self.grabs += 1;
@@ -338,15 +353,11 @@ mod tests {
         MenuItem::Submenu { label: label.to_string(), items }
     }
 
-    /// The first item row's vertical midpoint — inside every item's hit
-    /// rect regardless of which row, since rows are uniform height.
-    fn first_row_point(theme: &Theme) -> Point {
-        Point::new(4, theme.menu.item_height as i32 + 2)
-    }
-
-    /// Inside the title bar, above every item row — a guaranteed miss.
+    /// Inside the title strip, above every item row — a guaranteed
+    /// miss. `(2, 2)` rather than the very corner so it stays inside
+    /// the popup (and inside the title, not the border) at any scale.
     fn title_bar_point() -> Point {
-        Point::new(1, 1)
+        Point::new(2, 2)
     }
 
     struct Fixture {
@@ -368,6 +379,16 @@ mod tests {
 
         fn open(&mut self, items: Vec<MenuItem>) {
             self.cascade.open(&mut self.host, &self.theme, &mut self.font_system, items, Point::new(0, 0), Size::new(1600, 1000));
+        }
+
+        /// Center of item row `index` — computed from a real render of
+        /// the same items, so these tests stay honest about where rows
+        /// actually are as the menu's layout recipe evolves (titlebar-
+        /// height title strip, frame border) instead of hardcoding it.
+        fn row_point(&mut self, items: &[MenuItem], index: usize) -> Point {
+            let render = menu::render_menu(&self.theme, &mut self.font_system, "chonkstep", items, None);
+            let rect = render.item_rects[index];
+            Point::new(rect.pos.x + rect.size.w as i32 / 2, rect.pos.y + rect.size.h as i32 / 2)
         }
 
         fn click(&mut self, window: u32, local: Point) -> Option<MenuClick> {
@@ -418,9 +439,10 @@ mod tests {
     #[test]
     fn clicking_an_action_row_closes_the_menu_and_returns_its_action_id() {
         let mut f = Fixture::new();
-        f.open(vec![action("Terminal", 42)]);
+        let items = vec![action("Terminal", 42)];
+        f.open(items.clone());
         let window = f.only_open_window();
-        let row = first_row_point(&f.theme);
+        let row = f.row_point(&items, 0);
 
         let result = f.click(window, row);
 
@@ -443,9 +465,10 @@ mod tests {
     #[test]
     fn clicking_a_submenu_row_opens_a_second_popup_without_closing() {
         let mut f = Fixture::new();
-        f.open(vec![submenu("Applications", vec![action("About", 2)])]);
+        let items = vec![submenu("Applications", vec![action("About", 2)])];
+        f.open(items.clone());
         let root = f.only_open_window();
-        let row = first_row_point(&f.theme);
+        let row = f.row_point(&items, 0);
 
         let result = f.click(root, row);
 
@@ -461,13 +484,14 @@ mod tests {
         // must destroy the stale one first, never leaving two cascades
         // open from the same parent level.
         let mut f = Fixture::new();
-        f.open(vec![
+        let items = vec![
             submenu("Applications", vec![action("About", 2)]),
             submenu("Utilities", vec![action("Terminal", 3)]),
-        ]);
+        ];
+        f.open(items.clone());
         let root = f.only_open_window();
-        let row0 = first_row_point(&f.theme);
-        let row1 = Point::new(4, f.theme.menu.item_height as i32 * 2 + 2);
+        let row0 = f.row_point(&items, 0);
+        let row1 = f.row_point(&items, 1);
 
         f.click(root, row0);
         assert_eq!(f.host.open.len(), 2, "first submenu open");
@@ -479,12 +503,34 @@ mod tests {
         assert_eq!(f.host.destroyed_total, destroyed_before + 1, "the first submenu's popup must be destroyed");
     }
 
+    /// Real WindowMaker titles each cascade after the row it opened
+    /// from ("Applications"), never the root menu's own title repeated.
+    #[test]
+    fn a_cascade_titles_itself_after_its_submenu_label() {
+        let mut f = Fixture::new();
+        let sub_items = vec![action("About", 2)];
+        let items = vec![submenu("Applications", sub_items.clone())];
+        f.open(items.clone());
+        let root = f.only_open_window();
+
+        let row = f.row_point(&items, 0);
+        f.click(root, row);
+
+        let child = *f.host.open.iter().find(|w| **w != root).expect("submenu popup open");
+        let painted = f.host.painted.get(&child).expect("submenu was painted").clone();
+        let expected = menu::render_menu(&f.theme, &mut f.font_system, "Applications", &sub_items, None);
+        let wrong = menu::render_menu(&f.theme, &mut f.font_system, "chonkstep", &sub_items, None);
+        assert_eq!(painted, expected.buffer, "cascade must be titled by its submenu label");
+        assert_ne!(painted, wrong.buffer, "the two titles must actually render differently");
+    }
+
     #[test]
     fn hovering_a_submenu_row_does_not_open_it_before_the_delay_elapses() {
         let mut f = Fixture::new();
-        f.open(vec![submenu("Applications", vec![action("About", 2)])]);
+        let items = vec![submenu("Applications", vec![action("About", 2)])];
+        f.open(items.clone());
         let root = f.only_open_window();
-        let row = first_row_point(&f.theme);
+        let row = f.row_point(&items, 0);
 
         assert!(f.hover(root, row));
         f.tick();
@@ -495,9 +541,10 @@ mod tests {
     #[test]
     fn hovering_a_submenu_row_opens_it_after_the_delay_elapses() {
         let mut f = Fixture::new();
-        f.open(vec![submenu("Applications", vec![action("About", 2)])]);
+        let items = vec![submenu("Applications", vec![action("About", 2)])];
+        f.open(items.clone());
         let root = f.only_open_window();
-        let row = first_row_point(&f.theme);
+        let row = f.row_point(&items, 0);
 
         f.hover(root, row);
         thread::sleep(SUBMENU_HOVER_DELAY + Duration::from_millis(60));
@@ -509,10 +556,11 @@ mod tests {
     #[test]
     fn hovering_back_to_a_different_row_closes_the_open_submenu() {
         let mut f = Fixture::new();
-        f.open(vec![submenu("Applications", vec![action("About", 2)]), action("Exit", 9)]);
+        let items = vec![submenu("Applications", vec![action("About", 2)]), action("Exit", 9)];
+        f.open(items.clone());
         let root = f.only_open_window();
-        let submenu_row = first_row_point(&f.theme);
-        let exit_row = Point::new(4, f.theme.menu.item_height as i32 * 2 + 2);
+        let submenu_row = f.row_point(&items, 0);
+        let exit_row = f.row_point(&items, 1);
 
         f.click(root, submenu_row);
         assert_eq!(f.host.open.len(), 2);

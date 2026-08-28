@@ -173,8 +173,11 @@ pub struct MenuStyle {
     pub highlight_background: Fill,
     pub highlight_text_color: Color,
     pub bevel: Bevel,
+    /// Row height for entries; the menu's width has no counterpart
+    /// here on purpose — real WindowMaker menus size themselves to
+    /// their widest entry (`wMenuRealize`), so width is derived from
+    /// content at render time, never configured.
     pub item_height: u16,
-    pub min_width: u16,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -265,7 +268,6 @@ impl Theme {
         theme.menu.item_font.size *= factor;
         theme.menu.bevel.width = scale_u8(theme.menu.bevel.width);
         theme.menu.item_height = scale_u16(theme.menu.item_height);
-        theme.menu.min_width = scale_u16(theme.menu.min_width);
 
         theme
     }

@@ -195,7 +195,6 @@ pub fn nextstep_classic() -> Theme {
             highlight_text_color: Color::rgb(0x00, 0x00, 0x00),
             bevel: bevel_raised,
             item_height: 20,
-            min_width: 140,
         },
     }
 }
@@ -274,7 +273,6 @@ fn build_chrome(spec: ChromeSpec) -> Theme {
             highlight_text_color: spec.menu_highlight_text,
             bevel: spec.bevel,
             item_height: 20,
-            min_width: 140,
         },
     }
 }

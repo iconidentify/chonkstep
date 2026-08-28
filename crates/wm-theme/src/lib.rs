@@ -10,7 +10,8 @@
 //! - [`RasterThemeEngine`] implements `wm_theme_api::ThemeEngine` —
 //!   window decorations (titlebar, buttons, border, resize bar).
 //! - [`menu::render_menu`] renders WindowMaker-style popup menus (the
-//!   root menu, app menus), close box included.
+//!   root menu, app menus): content-sized, per-entry relief strips
+//!   under a titlebar-styled title, ported from the wmaker recipes.
 //! - [`cascade::CascadeMenu`] is the reusable *behavior* on top of
 //!   `menu::render_menu`: the popup-window stack, hover-to-open-submenu
 //!   hysteresis, and cascade positioning for a nested `MenuItem` tree,
