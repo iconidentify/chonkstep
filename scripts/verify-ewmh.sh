@@ -8,7 +8,8 @@
 #
 # Prints one "ok:"/"FAIL:" line per assertion ("skip:" where a check's
 # preconditions aren't met) and exits nonzero if anything failed. No
-# sudo, no side effects beyond activating one window at the end.
+# sudo, no side effects beyond activating one window and a round-trip
+# hop to workspace 1 and back at the end.
 #
 # Usage: scripts/verify-ewmh.sh
 set -u
@@ -106,6 +107,50 @@ else
             fi
         else
             fail "_NET_ACTIVE_WINDOW did not follow windowactivate (wanted $target_hex, before ${before:-none}, after ${after:-none})"
+        fi
+    fi
+fi
+
+# --- workspace round-trip: does a pager-style desktop switch
+# (_NET_CURRENT_DESKTOP ClientMessage, which is what `xdotool
+# set_desktop` sends) actually change the published current desktop?
+# The WM grows workspaces on demand, so asking for desktop 1 is always
+# legal even in a fresh session that only has desktop 0 yet.
+if ! command -v xdotool >/dev/null 2>&1; then
+    skip "workspace checks (xdotool not installed)"
+else
+    desk=$(xdotool get_desktop 2>/dev/null)
+    if [ -n "${desk:-}" ] && [ "$desk" -ge 0 ] 2>/dev/null; then
+        ok "xdotool get_desktop reports desktop $desk"
+    else
+        fail "xdotool get_desktop reported nothing usable (got: ${desk:-nothing})"
+    fi
+
+    xdotool set_desktop 1 2>/dev/null || true
+    sleep 0.3
+    after_switch=$(xdotool get_desktop 2>/dev/null)
+    if [ "${after_switch:-}" = "1" ]; then
+        ok "_NET_CURRENT_DESKTOP followed set_desktop 1"
+    else
+        fail "_NET_CURRENT_DESKTOP did not follow set_desktop 1 (got: ${after_switch:-nothing})"
+    fi
+    # Hop back so the check leaves the session on the workspace (and
+    # with the windows) the user was actually looking at.
+    xdotool set_desktop 0 2>/dev/null || true
+    sleep 0.3
+
+    # Per-window desktop assignment: every managed client should carry
+    # _NET_WM_DESKTOP (pagers use it to place windows on the right
+    # miniature). Same URxvt-or-skip convention as the activation check.
+    client=$(xdotool search --class URxvt 2>/dev/null | head -n 1)
+    if [ -z "${client:-}" ]; then
+        skip "_NET_WM_DESKTOP check (no URxvt window running)"
+    else
+        client_hex=$(printf '0x%x' "$client")
+        if xprop -id "$client" _NET_WM_DESKTOP 2>/dev/null | grep -qE '= *[0-9]+'; then
+            ok "_NET_WM_DESKTOP present on URxvt window $client_hex"
+        else
+            fail "_NET_WM_DESKTOP missing from URxvt window $client_hex"
         fi
     fi
 fi

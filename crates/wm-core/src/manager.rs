@@ -212,17 +212,22 @@ impl<B: Backend> WindowManager<B> {
     }
 
     /// Registers this WM's default global keybindings with the backend
-    /// — currently just Alt+Tab / Alt+Shift+Tab window cycling
-    /// (`cycle_focus`). Call once after construction; a real
-    /// configurable-keybinding story (`wm-config`) is future work, but
-    /// the `Backend::grab_key`/`KeyPress` plumbing this exercises is the
-    /// same plumbing that story would ride on.
+    /// — Alt+Tab / Alt+Shift+Tab window cycling, Alt+Ctrl+Left/Right
+    /// workspace switching, and Alt+Shift+Left/Right to carry the
+    /// focused window along to the neighboring workspace. Call once
+    /// after construction; a real configurable-keybinding story
+    /// (`wm-config`) is future work, but the `Backend::grab_key`/
+    /// `KeyPress` plumbing this exercises is the same plumbing that
+    /// story would ride on.
     pub fn bind_default_keys(&mut self) {
         self.backend.grab_key(KeyCombo { keysym: XK_TAB, modifiers: Modifiers::ALT });
         self.backend.grab_key(KeyCombo { keysym: XK_TAB, modifiers: Modifiers::ALT | Modifiers::SHIFT });
         let workspace_mods = Modifiers::ALT | Modifiers::CONTROL;
         self.backend.grab_key(KeyCombo { keysym: XK_RIGHT, modifiers: workspace_mods });
         self.backend.grab_key(KeyCombo { keysym: XK_LEFT, modifiers: workspace_mods });
+        let carry_mods = Modifiers::ALT | Modifiers::SHIFT;
+        self.backend.grab_key(KeyCombo { keysym: XK_RIGHT, modifiers: carry_mods });
+        self.backend.grab_key(KeyCombo { keysym: XK_LEFT, modifiers: carry_mods });
     }
 
     pub fn current_workspace(&self) -> usize {
@@ -305,8 +310,14 @@ impl<B: Backend> WindowManager<B> {
             return;
         }
         client.workspace = workspace;
+        let window = client.window;
+        let frame = client.frame;
+        // A move is precisely when a window's `_NET_WM_DESKTOP`
+        // changes — pagers track membership from this property, not by
+        // guessing from map/unmap traffic.
+        self.backend.publish_window_desktop(window, workspace);
         if workspace != self.current_workspace {
-            if let Some(frame) = client.frame {
+            if let Some(frame) = frame {
                 self.backend.unmap_frame(frame);
             }
             if self.focused == Some(id) {
@@ -393,6 +404,19 @@ impl<B: Backend> WindowManager<B> {
             BackendEvent::NetStateRequested { window, action, first, second } => {
                 self.handle_net_state_request(window, action, first, second)
             }
+            // `_NET_CURRENT_DESKTOP` rides the exact same path as the
+            // keyboard switch — a pager and Alt+Right can never disagree
+            // about what switching means (growth on demand included).
+            BackendEvent::DesktopSwitchRequested(workspace) => self.switch_workspace(workspace),
+            // `_NET_WM_DESKTOP`: a pager dragging a window onto another
+            // desktop. Only the window's own workspace changes — the
+            // active workspace stays put, unlike the follow-the-window
+            // keyboard combos.
+            BackendEvent::WindowDesktopRequested { window, desktop } => {
+                if let Some(&id) = self.window_index.get(&window) {
+                    self.move_client_to_workspace(id, desktop);
+                }
+            }
             // The event-loop driver (the binary) watches for this itself
             // and exits — there's no per-client state worth unwinding
             // when the display connection is already gone.
@@ -467,6 +491,11 @@ impl<B: Backend> WindowManager<B> {
         self.frame_index.insert(frame, id);
         self.managed_order.push(window);
         self.backend.publish_client_list(&self.managed_order);
+        // A fresh window's `_NET_WM_DESKTOP` — published once here (it
+        // lands on the current workspace) and again on every later
+        // move; a pager that never sees the property at all would have
+        // to treat the window as on-every-desktop.
+        self.backend.publish_window_desktop(window, self.current_workspace);
         tracing::info!(?window, "mapped and decorated window");
 
         self.notifications.push_back(Notification::Mapped(id));
@@ -1379,6 +1408,19 @@ impl<B: Backend> WindowManager<B> {
                 }
             }
             XK_ESCAPE if self.cycle.is_some() => self.cycle_end(false),
+            // Alt+Shift+arrows carry the focused window along to the
+            // neighboring workspace. These MUST sit before the plain
+            // switch arms below: those match on keysym alone (no
+            // modifier guard), so a Shift-carrying combo would fall
+            // into them and merely switch, abandoning the window.
+            // Right grows the row on demand exactly like a plain
+            // switch; left stops at 0, same as the arm below.
+            XK_RIGHT if combo.modifiers.contains(Modifiers::SHIFT) => {
+                self.carry_focused_to_workspace(self.current_workspace + 1)
+            }
+            XK_LEFT if combo.modifiers.contains(Modifiers::SHIFT) && self.current_workspace > 0 => {
+                self.carry_focused_to_workspace(self.current_workspace - 1)
+            }
             XK_RIGHT => self.switch_workspace(self.current_workspace + 1),
             XK_LEFT if self.current_workspace > 0 => self.switch_workspace(self.current_workspace - 1),
             // Any other key without Alt held means the Alt release was
@@ -1396,6 +1438,24 @@ impl<B: Backend> WindowManager<B> {
         }
     }
 
+    /// Alt+Shift+Left/Right: moves the focused client onto `workspace`
+    /// and switches there with it (real WindowMaker's "move to
+    /// next/previous workspace with window" actions). The refocus at
+    /// the end is load-bearing: `move_client_to_workspace` drops focus
+    /// the instant the client leaves the active workspace, and without
+    /// re-focusing after arriving, the second Alt+Shift+Right in a row
+    /// would find nothing focused and silently do nothing — the whole
+    /// point of the gesture is carrying one window across several
+    /// workspaces in repeated presses. A no-op with nothing focused.
+    fn carry_focused_to_workspace(&mut self, workspace: usize) {
+        let Some(id) = self.focused else {
+            return;
+        };
+        self.move_client_to_workspace(id, workspace);
+        self.switch_workspace(workspace);
+        self.focus_client(id);
+    }
+
     /// Alt+Tab / Alt+Shift+Tab window switching, modal like real
     /// WindowMaker's `switchpanel.c`: the first press opens a session
     /// (snapshotting the candidates and grabbing the keyboard so the
@@ -1403,11 +1463,20 @@ impl<B: Backend> WindowManager<B> {
     /// and nothing is focused or raised until the session commits —
     /// `Notification::CycleUpdated` tells the shell to draw its panel
     /// in the meantime. Candidates are mapped, non-miniaturized clients
-    /// in `SlotMap` iteration order, stable for the session because the
-    /// order is snapshotted (and pruned on client destruction).
+    /// on the *current* workspace, in `SlotMap` iteration order, stable
+    /// for the session because the order is snapshotted (and pruned on
+    /// client destruction). The workspace restriction matters: a client
+    /// parked on another workspace is `Lifecycle::Normal` but its frame
+    /// is unmapped — cycling onto it set input focus on an invisible
+    /// window, and nothing visibly happened.
     fn cycle_step(&mut self, direction: i32) {
         if self.cycle.is_none() {
-            let order: Vec<ClientId> = self.clients.iter().filter(|(_, c)| c.lifecycle == Lifecycle::Normal).map(|(id, _)| id).collect();
+            let order: Vec<ClientId> = self
+                .clients
+                .iter()
+                .filter(|(_, c)| c.lifecycle == Lifecycle::Normal && c.workspace == self.current_workspace)
+                .map(|(id, _)| id)
+                .collect();
             if order.is_empty() {
                 return;
             }
@@ -1988,6 +2057,102 @@ mod tests {
         wm.dispatch(BackendEvent::KeyPress(KeyCombo { keysym: XK_LEFT, modifiers: mods }));
 
         assert_eq!(wm.current_workspace(), 0);
+    }
+
+    #[test]
+    fn alt_shift_right_carries_the_focused_client_and_follows_it() {
+        let mut backend = FakeBackend::new();
+        let window = backend.create_window();
+        let mut wm = wm(backend);
+        wm.dispatch(BackendEvent::MapRequest(window));
+        let id = wm.client_for_window(window).unwrap();
+        let frame = wm.client(id).unwrap().frame.unwrap();
+        assert_eq!(
+            wm.backend().published_window_desktops.last(),
+            Some(&(window, 0)),
+            "manage time must publish the window's initial workspace"
+        );
+
+        wm.dispatch(BackendEvent::KeyPress(KeyCombo { keysym: XK_RIGHT, modifiers: Modifiers::ALT | Modifiers::SHIFT }));
+
+        assert_eq!(wm.current_workspace(), 1, "the switch must follow the carried client (growing the row on demand)");
+        assert_eq!(wm.client(id).unwrap().workspace, 1);
+        assert!(wm.backend().mapped_frames.contains(&frame), "the carried client must be visible on arrival");
+        assert!(wm.client(id).unwrap().flags.contains(ClientFlags::FOCUSED), "the carried client must stay focused, so repeated presses keep carrying it");
+        assert_eq!(wm.backend().published_window_desktops.last(), Some(&(window, 1)), "the move must re-publish _NET_WM_DESKTOP");
+    }
+
+    #[test]
+    fn alt_shift_left_at_workspace_zero_does_nothing() {
+        let mut backend = FakeBackend::new();
+        let window = backend.create_window();
+        let mut wm = wm(backend);
+        wm.dispatch(BackendEvent::MapRequest(window));
+        let id = wm.client_for_window(window).unwrap();
+
+        wm.dispatch(BackendEvent::KeyPress(KeyCombo { keysym: XK_LEFT, modifiers: Modifiers::ALT | Modifiers::SHIFT }));
+
+        assert_eq!(wm.current_workspace(), 0);
+        assert_eq!(wm.client(id).unwrap().workspace, 0, "there is nothing left of workspace 0 to carry the client to");
+    }
+
+    #[test]
+    fn desktop_switch_request_switches_the_workspace() {
+        let backend = FakeBackend::new();
+        let mut wm = wm(backend);
+
+        // A pager's `_NET_CURRENT_DESKTOP` message — must behave
+        // exactly like the keyboard switch, growth on demand included.
+        wm.dispatch(BackendEvent::DesktopSwitchRequested(2));
+
+        assert_eq!(wm.current_workspace(), 2);
+        assert_eq!(wm.workspace_count(), 3, "switching to index 2 means 3 workspaces (0..=2) now exist");
+    }
+
+    #[test]
+    fn window_desktop_request_moves_the_window_and_hides_it() {
+        let mut backend = FakeBackend::new();
+        let window = backend.create_window();
+        let mut wm = wm(backend);
+        wm.dispatch(BackendEvent::MapRequest(window));
+        let id = wm.client_for_window(window).unwrap();
+        let frame = wm.client(id).unwrap().frame.unwrap();
+
+        // A pager's `_NET_WM_DESKTOP` message: move the window, but —
+        // unlike the Alt+Shift keyboard combos — never follow it.
+        wm.dispatch(BackendEvent::WindowDesktopRequested { window, desktop: 1 });
+
+        assert_eq!(wm.client(id).unwrap().workspace, 1);
+        assert!(wm.backend().unmapped_frames.contains(&frame), "a window sent off the active workspace must be hidden");
+        assert_eq!(wm.current_workspace(), 0, "a pager moving a window must not switch the active workspace");
+        assert_eq!(wm.backend().published_window_desktops.last(), Some(&(window, 1)));
+    }
+
+    #[test]
+    fn alt_tab_skips_clients_parked_on_other_workspaces() {
+        let mut backend = FakeBackend::new();
+        let w1 = backend.create_window();
+        let w2 = backend.create_window();
+        let w3 = backend.create_window();
+        let mut wm = wm(backend);
+        wm.dispatch(BackendEvent::MapRequest(w1));
+        wm.dispatch(BackendEvent::MapRequest(w2));
+        wm.dispatch(BackendEvent::MapRequest(w3));
+        let id1 = wm.client_for_window(w1).unwrap();
+        let id2 = wm.client_for_window(w2).unwrap();
+        let id3 = wm.client_for_window(w3).unwrap();
+        wm.move_client_to_workspace(id2, 1);
+
+        // Focused is w3 (mapped last); Alt+Tab must skip w2 — still
+        // `Lifecycle::Normal`, but parked on workspace 1 with its frame
+        // unmapped — and land on w1. Cycling onto it would set input
+        // focus on a window that isn't visible anywhere on screen.
+        wm.dispatch(alt_tab());
+        wm.dispatch(alt_release());
+
+        assert!(wm.client(id1).unwrap().flags.contains(ClientFlags::FOCUSED));
+        assert!(!wm.client(id3).unwrap().flags.contains(ClientFlags::FOCUSED));
+        assert!(!wm.client(id2).unwrap().flags.contains(ClientFlags::FOCUSED), "a client on another workspace must never be cycled to");
     }
 
     #[test]

@@ -764,6 +764,24 @@ impl X11Backend {
         if e.type_ == self.ewmh.net_close_window {
             return Some(BackendEvent::CloseRequested(XWindow(e.window)));
         }
+        if e.type_ == self.ewmh.net_current_desktop {
+            // EWMH "_NET_CURRENT_DESKTOP": data.l[0] is the desktop a
+            // pager wants switched to. The core clamps/grows as it sees
+            // fit — the backend just reports the ask.
+            return Some(BackendEvent::DesktopSwitchRequested(e.data.as_data32()[0] as usize));
+        }
+        if e.type_ == self.ewmh.net_wm_desktop {
+            // EWMH "_NET_WM_DESKTOP": data.l[0] is the desktop a pager
+            // wants `e.window` moved to. The spec's special 0xFFFFFFFF
+            // value means "on all desktops" — this WM has no sticky
+            // windows, so that request is swallowed rather than
+            // misread as a move to a (nonsensical) huge desktop index.
+            let desktop = e.data.as_data32()[0];
+            if desktop == 0xFFFF_FFFF {
+                return None;
+            }
+            return Some(BackendEvent::WindowDesktopRequested { window: XWindow(e.window), desktop: desktop as usize });
+        }
         if e.type_ == self.ewmh.net_wm_state {
             // EWMH "_NET_WM_STATE" client message layout:
             // data.l[0] = action (0 remove / 1 add / 2 toggle),
@@ -839,6 +857,7 @@ struct EwmhAtoms {
     net_wm_window_type_dnd: Atom,
     net_number_of_desktops: Atom,
     net_current_desktop: Atom,
+    net_wm_desktop: Atom,
     net_workarea: Atom,
 }
 
@@ -873,6 +892,7 @@ impl EwmhAtoms {
             net_wm_window_type_dnd: conn.intern_atom(false, b"_NET_WM_WINDOW_TYPE_DND")?.reply()?.atom,
             net_number_of_desktops: conn.intern_atom(false, b"_NET_NUMBER_OF_DESKTOPS")?.reply()?.atom,
             net_current_desktop: conn.intern_atom(false, b"_NET_CURRENT_DESKTOP")?.reply()?.atom,
+            net_wm_desktop: conn.intern_atom(false, b"_NET_WM_DESKTOP")?.reply()?.atom,
             net_workarea: conn.intern_atom(false, b"_NET_WORKAREA")?.reply()?.atom,
         })
     }
@@ -910,6 +930,7 @@ impl EwmhAtoms {
             self.net_wm_window_type_dnd,
             self.net_number_of_desktops,
             self.net_current_desktop,
+            self.net_wm_desktop,
             self.net_workarea,
             net_wm_name,
         ]
@@ -1896,6 +1917,14 @@ impl Backend for X11Backend {
     fn publish_workspaces(&mut self, count: usize, current: usize) {
         let _ = self.conn.change_property32(PropMode::REPLACE, self.root, self.ewmh.net_number_of_desktops, AtomEnum::CARDINAL, &[count as u32]);
         let _ = self.conn.change_property32(PropMode::REPLACE, self.root, self.ewmh.net_current_desktop, AtomEnum::CARDINAL, &[current as u32]);
+        let _ = self.conn.flush();
+    }
+
+    fn publish_window_desktop(&mut self, window: Self::WindowId, desktop: usize) {
+        // On the client's own window, not the frame, for the same
+        // reason as `publish_net_state`: pagers look properties up by
+        // the ids they got from `_NET_CLIENT_LIST`.
+        let _ = self.conn.change_property32(PropMode::REPLACE, window.0, self.ewmh.net_wm_desktop, AtomEnum::CARDINAL, &[desktop as u32]);
         let _ = self.conn.flush();
     }
 
