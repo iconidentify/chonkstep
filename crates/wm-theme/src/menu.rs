@@ -1,24 +1,45 @@
 //! Rendering for WindowMaker/NeXTSTEP-style popup menus (the root menu,
-//! and eventually app menus): a titled bar over a vertical item list,
-//! each item inverting to the theme's highlight colors on hover. The
-//! title bar carries a close box in its top-right corner, matching a
-//! window titlebar's close button both in position and in glyph —
-//! reuses the exact same drawing code (`raster::draw_button_glyph`) so
-//! the two stay visually identical by construction, not by convention.
+//! and eventually app menus), ported recipe-for-recipe from the
+//! WindowMaker source rather than eyeballed: a titlebar-styled title
+//! strip over a stack of individually-reliefed entry strips.
+//!
+//! The specific recipes, and where they come from:
+//! - Menus size themselves to their content (`wMenuRealize` in
+//!   `src/menu.c`): widest entry text plus fixed paddings, with a gutter
+//!   on the right for the cascade indicator, never a fixed width.
+//! - Every entry is its own raised strip — `WREL_MENUENTRY` in
+//!   `src/texture.c`: +80 add along the top and left, -40 subtract along
+//!   the right and second-to-bottom row, absolute black along the bottom
+//!   row. This stack of shallow strips (a softer cousin of the chrome's
+//!   RAISED2) is the signature WindowMaker menu look.
+//! - The hover highlight (`paintEntry` in `src/menu.c`) fills *inside*
+//!   the entry's relief — inset one line on the left/right/top, three on
+//!   the bottom — so the strip edges stay put while only the face
+//!   inverts. The same lesson as the titlebar buttons: chrome that
+//!   vanishes on interaction reads as breakage.
+//! - The cascade indicator is `paintEntry`'s engraved chevron: three
+//!   hard lines (dim upper diagonal, light lower diagonal, dark spine)
+//!   in absolute colors derived from the item face, not a filled
+//!   triangle glyph.
+//! - The title strip is a real titlebar: the window titlebar's height
+//!   and RAISED2 relief (menus in WindowMaker are `wFrameWindow`s, so
+//!   this equality is by construction there — and by these shared
+//!   constants here). No close box: WindowMaker only shows a titlebar
+//!   button on a menu once it's been pinned ("buttoned"), and these
+//!   popups are transient — clicking anywhere off an item dismisses.
 //!
 //! Menus are trees (`MenuItem::Submenu`), not flat lists — real
 //! WindowMaker root menus nest arbitrarily deep (`Applications >
 //! Internet > Firefox`). This module only renders *one level* at a time;
 //! the popup-stack lifecycle (which submenu is open, hover-to-open
-//! hysteresis, off-screen flip positioning) is a desktop-shell concern —
-//! see `chonkstep::desktop::Desktop` for the reference implementation any
-//! `chonk-ui` app can follow.
+//! hysteresis, off-screen flip positioning) is `cascade::CascadeMenu`'s
+//! job, with `chonkstep::desktop::Desktop` as the reference host.
 
-use wm_theme_api::{ButtonKind, DecorationBuffer, Point, Rect, Size};
+use wm_theme_api::{DecorationBuffer, Point, Rect, Size};
 
-use crate::model::{Theme, TextAlign};
-use crate::raster::draw_button_glyph;
+use crate::model::{Color, Fill, TextAlign, Theme};
 use crate::paint;
+use crate::tile;
 
 /// One row of a menu, at any nesting level. Actions carry an opaque
 /// `u32` the caller assigns and interprets — this crate has no opinion
@@ -42,12 +63,30 @@ impl MenuItem {
 }
 
 /// A rasterized menu popup plus everything needed for hit-testing: one
-/// rect per `items` entry (same order as passed in) and the title bar's
-/// close box.
+/// rect per `items` entry (same order as passed in). Anything outside
+/// the item rects — the title strip, the border — is a dismissal.
 pub struct MenuRender {
     pub buffer: DecorationBuffer,
     pub item_rects: Vec<Rect>,
-    pub close_rect: Rect,
+}
+
+/// The face color an entry's engraved details key off — a solid is
+/// itself, a gradient averages its endpoints (same reasoning as
+/// `tile::tile_ink`).
+fn fill_average(fill: &Fill) -> Color {
+    match fill {
+        Fill::Solid(c) => *c,
+        Fill::Gradient(g) => Color::rgb(
+            ((g.from.r as u16 + g.to.r as u16) / 2) as u8,
+            ((g.from.g as u16 + g.to.g as u16) / 2) as u8,
+            ((g.from.b as u16 + g.to.b as u16) / 2) as u8,
+        ),
+    }
+}
+
+fn shift(c: Color, delta: i16) -> Color {
+    let op = |v: u8| (v as i16 + delta).clamp(0, 255) as u8;
+    Color::rgb(op(c.r), op(c.g), op(c.b))
 }
 
 /// Builds its own `SwashCache` per call: menus are re-rendered only on
@@ -62,45 +101,48 @@ pub fn render_menu(
 ) -> MenuRender {
     let mut swash_cache = cosmic_text::SwashCache::new();
     let menu = &theme.menu;
-    let item_h = menu.item_height as u32;
-    let title_h = item_h;
-    let width = menu.min_width as u32;
-    let bevel_w = menu.bevel.width as u32;
-    let height = title_h + item_h * items.len() as u32 + bevel_w * 2;
+    let item_h = (menu.item_height as u32).max(4);
+    // WindowMaker menu title strips are window titlebars (menus are
+    // wFrameWindows there), so the height and relief come from the
+    // titlebar style, not the item style — visibly taller than an entry.
+    let title_h = (theme.titlebar.height as u32).max(item_h);
+
+    // All of WindowMaker's menu metrics are in unscaled pixels against
+    // its stock ~20px entry; ours scale with the theme, so a stock
+    // metric `v` becomes `px(v)` here.
+    let px = |v: i32| -> i32 { ((v * item_h as i32) + 10) / 20 };
+    let t = (menu.bevel.width as u32).max(1);
+
+    // Content-driven width, `wMenuRealize` verbatim: widest entry text
+    // plus 10, a right gutter of 16 where any row cascades (4 otherwise),
+    // never narrower than the title text plus its titlebar-derived
+    // padding. No fixed or minimum width at all.
+    let any_submenu = items.iter().any(|i| i.is_submenu());
+    let gutter = if any_submenu { px(16) } else { px(4) } as u32;
+    let widest_label = items
+        .iter()
+        .map(|i| paint::text_width(font_system, &menu.item_font, i.label()))
+        .max()
+        .unwrap_or(0);
+    let title_w = paint::text_width(font_system, &menu.title_font, title) + title_h + px(16) as u32;
+    let content_w = (widest_label + px(10) as u32 + gutter).max(title_w);
+
+    // The 1px (scaled) outline around everything is the frame border
+    // every WindowMaker menu window carries, same as its sibling window
+    // frames — content sits inside it.
+    let bw = (theme.border.width as u32).max(1);
+    let width = content_w + bw * 2;
+    let height = title_h + item_h * items.len() as u32 + bw * 2;
 
     let mut pixmap = tiny_skia::Pixmap::new(width.max(1), height.max(1)).expect("nonzero menu size");
 
-    paint::fill_area(&mut pixmap, 0, 0, width, height, &menu.background);
-    paint::fill_area(&mut pixmap, 0, 0, width, title_h, &menu.title_bar);
-
-    // Close box: sized/positioned like a window titlebar close button,
-    // reusing that same button style so the two families of chrome
-    // (window titlebars, menu titles) share one visual vocabulary —
-    // including sitting flush against the title strip's own edges (no
-    // margin), matching real WindowMaker's own buttons. Clamped to
-    // `title_h` defensively: the window titlebar button style now sizes
-    // itself to match its *own* titlebar height, which happens to equal
-    // the menu's `item_height` in the flagship theme, but nothing
-    // guarantees a future theme keeps those two values in lockstep.
-    let close_style = theme.titlebar.buttons.iter().find(|b| b.kind == ButtonKind::Close);
-    let close_size = close_style.map(|s| s.size as u32).unwrap_or(title_h.saturating_sub(6)).min(title_h);
-    let close_rect = Rect::new(Point::new((width.saturating_sub(close_size)) as i32, 0), Size::new(close_size, close_size));
-    if let Some(style) = close_style {
-        // Same parity fix as window titlebars: the close box is the
-        // menu's own title bar fill/text color showing through, not a
-        // separately-colored control — `menu.text_color` is for the
-        // list items below, not text sitting on `menu.title_bar`. And,
-        // also same as window titlebars: no re-fill here, only the
-        // bevel — `menu.title_bar` is a gradient already painted across
-        // the *whole* title strip above; re-filling just this small
-        // close-box rect with the same `Fill::Gradient` would recompute
-        // it relative to that smaller rect and produce a visibly
-        // mismatched, steeper gradient than the strip around it.
-        paint::draw_bevel(&mut pixmap, close_rect.pos.x, close_rect.pos.y, close_rect.size.w, close_rect.size.h, &style.bevel);
-        draw_button_glyph(&mut pixmap, ButtonKind::Close, close_rect, menu.title_text_color, false);
-    }
-
-    let title_text_w = close_rect.pos.x.saturating_sub(12).max(0) as u32;
+    // Title strip: the window titlebar treatment — fill plus the same
+    // RAISED2 relief recipe, centered title text (menus inherit the
+    // frame's stock center justification).
+    let x0 = bw as i32;
+    paint::fill_area(&mut pixmap, x0, bw as i32, content_w, title_h, &menu.title_bar);
+    let title_t = (theme.titlebar.bevel.width as u32).max(1);
+    paint::draw_raised2_bevel(&mut pixmap, x0, bw as i32, content_w, title_h, title_t);
     paint::draw_text(
         &mut pixmap,
         font_system,
@@ -108,35 +150,53 @@ pub fn render_menu(
         title,
         &menu.title_font,
         menu.title_text_color,
-        6,
-        0,
-        title_text_w,
+        x0 + px(8),
+        bw as i32,
+        content_w.saturating_sub(px(16) as u32),
         title_h,
         TextAlign::Center,
     );
-    // No separate bevel around just the title strip: the whole menu
-    // already gets one bevel below (same reasoning as window titlebars
-    // in `raster.rs` — a second, overlapping bevel right at the close
-    // box's corner doubled up into a thick flat stripe instead of a
-    // clean highlight).
 
-    // Room reserved on the right of every row for the cascade arrow, so
-    // a submenu's label never runs into it — kept constant across rows
-    // (whether or not that particular row is a submenu) so text doesn't
-    // jump around as items highlight.
-    let arrow_size = (item_h as f32 * 0.4) as u32;
-    let arrow_gutter = arrow_size + 10;
+    // The chevron's three inks are absolute colors derived from the
+    // item face — WindowMaker draws them with the item texture's
+    // light/dim/dark GCs, so they hold still when the highlight fill
+    // arrives underneath instead of vanishing into it.
+    let face = fill_average(&menu.background);
+    let (chev_light, chev_dim, chev_dark) = (shift(face, 80), shift(face, -40), shift(face, -90));
 
     let mut item_rects = Vec::with_capacity(items.len());
     for (i, item) in items.iter().enumerate() {
-        let y = title_h + i as u32 * item_h;
+        let y0 = (bw + title_h + i as u32 * item_h) as i32;
         let is_highlighted = highlighted == Some(i);
-        let (fill, text_color) = if is_highlighted {
-            (&menu.highlight_background, menu.highlight_text_color)
+
+        // Entry face, then its own WREL_MENUENTRY relief: every row is
+        // a shallow raised strip, and the stack of strips *is* the menu
+        // body — no flat shared background, no whole-menu bevel.
+        paint::fill_area(&mut pixmap, x0, y0, content_w, item_h, &menu.background);
+        let w = content_w;
+        paint::op_rect(&mut pixmap, x0 + t as i32, y0, w - t * 2, t, 80);
+        paint::op_rect(&mut pixmap, x0, y0, t, item_h, 80);
+        paint::op_rect(&mut pixmap, x0 + (w - t) as i32, y0, t, item_h, -40);
+        paint::op_rect(&mut pixmap, x0 + t as i32, y0 + (item_h - t * 2) as i32, w - t * 2, t, -40);
+        paint::fill_rect(&mut pixmap, x0, y0 + (item_h - t) as i32, w, t, Color::rgb(0, 0, 0));
+
+        // The highlight fills inside the relief — one line in on the
+        // left/right/top, three on the bottom (`paintEntry`'s
+        // `1, y+1, w-2, h-3`) — so the strip edges survive the hover.
+        let text_color = if is_highlighted {
+            paint::fill_area(
+                &mut pixmap,
+                x0 + t as i32,
+                y0 + t as i32,
+                w.saturating_sub(t * 2),
+                item_h.saturating_sub(t * 3),
+                &menu.highlight_background,
+            );
+            menu.highlight_text_color
         } else {
-            (&menu.background, menu.text_color)
+            menu.text_color
         };
-        paint::fill_area(&mut pixmap, 0, y as i32, width, item_h, fill);
+
         paint::draw_text(
             &mut pixmap,
             font_system,
@@ -144,26 +204,42 @@ pub fn render_menu(
             item.label(),
             &menu.item_font,
             text_color,
-            8,
-            y as i32,
-            width.saturating_sub(14).saturating_sub(arrow_gutter),
+            x0 + px(5),
+            y0,
+            content_w.saturating_sub(px(5) as u32 + gutter),
             item_h,
             TextAlign::Left,
         );
+
         if item.is_submenu() {
-            let arrow_x = width.saturating_sub(arrow_gutter) as i32 + 2;
-            let arrow_y = y as i32 + ((item_h.saturating_sub(arrow_size)) / 2) as i32;
-            paint::draw_cascade_arrow(&mut pixmap, arrow_x, arrow_y, arrow_size, text_color);
+            // `paintEntry`'s engraved chevron, in entry-local stock
+            // coordinates: dark spine at w-12 from y+6 down to y+h-8,
+            // dim upper diagonal and light lower diagonal meeting at
+            // (w-6, h/2) — thickened leftward like the Clip's creases
+            // so it scales with the rest of the chrome.
+            let ex = x0 + w as i32;
+            let (top, bottom) = (y0 + px(6), y0 + item_h as i32 - px(8));
+            let mid = y0 + (item_h / 2) as i32 - 1;
+            for k in 0..t as i32 {
+                tile::draw_line(&mut pixmap, ex - px(12) - k, top, ex - px(12) - k, bottom, chev_dark);
+                tile::draw_line(&mut pixmap, ex - px(11) - k, top, ex - px(6) - k, mid, chev_dim);
+                tile::draw_line(&mut pixmap, ex - px(11) - k, bottom, ex - px(6) - k, mid, chev_light);
+            }
         }
-        item_rects.push(Rect::new(Point::new(0, y as i32), Size::new(width, item_h)));
+
+        item_rects.push(Rect::new(Point::new(x0, y0), Size::new(content_w, item_h)));
     }
 
-    paint::draw_bevel(&mut pixmap, 0, 0, width, height, &menu.bevel);
+    // The frame border, drawn last so nothing overpaints it.
+    let border = theme.border.color_active;
+    paint::fill_rect(&mut pixmap, 0, 0, width, bw, border);
+    paint::fill_rect(&mut pixmap, 0, (height - bw) as i32, width, bw, border);
+    paint::fill_rect(&mut pixmap, 0, 0, bw, height, border);
+    paint::fill_rect(&mut pixmap, (width - bw) as i32, 0, bw, height, border);
 
     MenuRender {
         buffer: DecorationBuffer { width, height, pixels: pixmap.data().to_vec() },
         item_rects,
-        close_rect,
     }
 }
 
@@ -178,6 +254,11 @@ mod tests {
 
     fn submenu(label: &str, items: Vec<MenuItem>) -> MenuItem {
         MenuItem::Submenu { label: label.to_string(), items }
+    }
+
+    fn px_at(buffer: &DecorationBuffer, x: u32, y: u32) -> (u8, u8, u8) {
+        let i = ((y * buffer.width + x) * 4) as usize;
+        (buffer.pixels[i], buffer.pixels[i + 1], buffer.pixels[i + 2])
     }
 
     #[test]
@@ -196,17 +277,87 @@ mod tests {
         }
     }
 
+    /// `wMenuRealize` behavior: the menu is exactly as wide as its
+    /// content requires — a longer label yields a wider popup, with no
+    /// fixed width flooring everything to the same size.
     #[test]
-    fn close_box_sits_within_the_title_bar_top_right() {
+    fn menu_width_tracks_the_widest_label() {
         let theme = nextstep_classic();
         let mut font_system = cosmic_text::FontSystem::new();
+
+        let short = render_menu(&theme, &mut font_system, "M", &[action("Exit", 1)], None);
+        let long = render_menu(
+            &theme,
+            &mut font_system,
+            "M",
+            &[action("Exit", 1), action("A considerably longer menu entry", 2)],
+            None,
+        );
+
+        assert!(
+            long.buffer.width > short.buffer.width,
+            "content sizing: {} should exceed {}",
+            long.buffer.width,
+            short.buffer.width
+        );
+    }
+
+    /// The title strip is a real titlebar — item rows start below the
+    /// window titlebar's height (plus the frame border), not below one
+    /// item-height.
+    #[test]
+    fn title_strip_uses_the_window_titlebar_height() {
+        let theme = nextstep_classic();
+        let mut font_system = cosmic_text::FontSystem::new();
+
         let render = render_menu(&theme, &mut font_system, "Chonkstep", &[action("Exit", 1)], None);
 
-        assert!(render.close_rect.pos.x > 0, "close box should not sit at the left edge");
-        assert!(
-            (render.close_rect.pos.y + render.close_rect.size.h as i32) as u32 <= theme.menu.item_height as u32,
-            "close box should stay within the title bar's height"
-        );
+        let expected = theme.border.width.max(1) as i32 + theme.titlebar.height as i32;
+        assert_eq!(render.item_rects[0].pos.y, expected);
+    }
+
+    /// Each entry is its own raised strip (`WREL_MENUENTRY`): lighter
+    /// along its top edge than in its face, and terminated by an
+    /// absolute black bottom line.
+    #[test]
+    fn entries_carry_their_own_relief() {
+        let theme = nextstep_classic();
+        let mut font_system = cosmic_text::FontSystem::new();
+
+        let render = render_menu(&theme, &mut font_system, "Chonkstep", &[action("Exit", 1)], None);
+        let row = render.item_rects[0];
+        let cx = (row.pos.x + row.size.w as i32 / 2) as u32;
+
+        let top = px_at(&render.buffer, cx, row.pos.y as u32);
+        let face = px_at(&render.buffer, cx, (row.pos.y + row.size.h as i32 / 2) as u32);
+        let bottom = px_at(&render.buffer, cx, (row.pos.y + row.size.h as i32 - 1) as u32);
+
+        assert!(top.0 > face.0, "top relief line must be lighter than the face");
+        assert_eq!(bottom, (0, 0, 0), "entry must terminate in the absolute black line");
+    }
+
+    /// `paintEntry` insets the highlight fill inside the entry relief —
+    /// hovering must not erase the strip's black bottom line.
+    #[test]
+    fn highlight_preserves_the_entry_relief_edges() {
+        let theme = nextstep_classic();
+        let mut font_system = cosmic_text::FontSystem::new();
+
+        let render = render_menu(&theme, &mut font_system, "Chonkstep", &[action("Exit", 1)], Some(0));
+        let row = render.item_rects[0];
+        let cx = (row.pos.x + row.size.w as i32 / 2) as u32;
+
+        let bottom = px_at(&render.buffer, cx, (row.pos.y + row.size.h as i32 - 1) as u32);
+        assert_eq!(bottom, (0, 0, 0), "highlighted entry must keep its black bottom line");
+
+        // And the face between the edges really is the highlight fill
+        // (sampled away from the centered label's ink).
+        let fx = (row.pos.x + 2) as u32 + theme.menu.bevel.width.max(1) as u32;
+        let face = px_at(&render.buffer, fx, (row.pos.y + row.size.h as i32 / 2) as u32);
+        let crate::model::Fill::Solid(hl) = theme.menu.highlight_background else {
+            panic!("flagship highlight is solid");
+        };
+        assert_eq!(face, (hl.r, hl.g, hl.b), "highlighted face must show the highlight fill");
     }
 
     #[test]
@@ -218,6 +369,6 @@ mod tests {
         let render = render_menu(&theme, &mut font_system, "Chonkstep", &items, None);
         let plain = render_menu(&theme, &mut font_system, "Chonkstep", &[action("Applications", 1)], None);
 
-        assert_ne!(render.buffer.pixels, plain.buffer.pixels, "cascade arrow should make a submenu row paint differently");
+        assert_ne!(render.buffer.pixels, plain.buffer.pixels, "cascade chevron should make a submenu row paint differently");
     }
 }

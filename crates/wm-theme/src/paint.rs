@@ -259,6 +259,39 @@ pub fn draw_cascade_arrow(pixmap: &mut Pixmap, x: i32, y: i32, size: u32, color:
     }
 }
 
+/// Measures the shaped width of `text` in `font` — the real layout
+/// width cosmic-text will produce, fallback glyphs included, not an
+/// average-advance estimate. This is what lets menus (and any
+/// `chonk-ui` popup) size themselves to their content the way real
+/// WindowMaker's `wMenuRealize` does with `WMWidthOfString`.
+pub fn text_width(font_system: &mut cosmic_text::FontSystem, font: &FontSpec, text: &str) -> u32 {
+    use cosmic_text::{Attrs, Buffer, Family, Metrics, Shaping, Style, Weight};
+
+    if text.is_empty() {
+        return 0;
+    }
+    let metrics = Metrics::new(font.size, font.size * 1.25);
+    let mut buffer = Buffer::new(font_system, metrics);
+    // No wrap box: measurement wants the single-line natural width.
+    buffer.set_size(font_system, None, None);
+    let weight = match font.weight {
+        FontWeight::Bold => Weight::BOLD,
+        FontWeight::Normal => Weight::NORMAL,
+    };
+    let style = match font.style {
+        FontStyle::Italic => Style::Italic,
+        FontStyle::Normal => Style::Normal,
+    };
+    let attrs = Attrs::new().family(Family::Name(&font.family)).weight(weight).style(style);
+    buffer.set_text(font_system, text, attrs, Shaping::Advanced);
+    buffer.shape_until_scroll(font_system, false);
+    let mut width = 0f32;
+    for run in buffer.layout_runs() {
+        width = width.max(run.line_w);
+    }
+    width.ceil() as u32
+}
+
 /// Renders `text` with `font`, blending glyph coverage onto `pixmap`
 /// within the `(x, y, w, h)` box per `align`. Assumes the destination
 /// pixels in that box are already fully opaque (alpha 255) — true for
