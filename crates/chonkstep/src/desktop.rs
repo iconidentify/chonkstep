@@ -26,7 +26,7 @@ use wm_x11::X11Backend;
 use x11rb::protocol::xproto::Window;
 
 use crate::wallpaper::Wallpaper;
-use crate::widgets::{ClockWidget, DockWidget, NetLoadWidget, WorkspaceShared};
+use crate::widgets::{ClockWidget, DockWidget, NetTrafficWidget, PowerWidget, SoundWidget, SysLoadWidget, WifiWidget, WorkspaceShared};
 
 /// The desktop background color — a cool lavender-gray sampled from a
 /// reference NeXTSTEP desktop screenshot, not the neutral gray this
@@ -262,12 +262,18 @@ impl Desktop {
         // (The workspace indicator used to live here as a dock widget;
         // it is now the Clip tile at the screen's top-left — see
         // `clip_window` below.)
-        // The identity/clock/net widgets keep their stack under the
-        // identity tile, above the instruments — mirroring where the
-        // Clip anchors in real WindowMaker's layout.
+        // The dock's instrument stack, top to bottom, under the
+        // identity tile: the clock first (the one at-a-glance item),
+        // then the instruments — network traffic, system load, sound,
+        // link, power. Middle-click drag reorders them live; this is
+        // just the default order.
         let widgets: Vec<Box<dyn DockWidget>> = vec![
             Box::new(ClockWidget::new()),
-            Box::new(NetLoadWidget::new()),
+            Box::new(NetTrafficWidget::new()),
+            Box::new(SysLoadWidget::new()),
+            Box::new(SoundWidget::new()),
+            Box::new(WifiWidget::new()),
+            Box::new(PowerWidget::new()),
         ];
         let dock_height = stacked_dock_height(tile, screen.h, &widgets);
         let dock_geom = Rect {
@@ -428,9 +434,9 @@ impl Desktop {
     }
 
     /// Dock-local `(index, rect)` for every widget slot, in order —
-    /// widgets don't all occupy the same height (a widget with more
-    /// than one face, like [`SysMonWidget`](crate::widgets::SysMonWidget),
-    /// can be taller in one than the other), so this walks the stack
+    /// widgets don't all occupy the same height (a widget is free to
+    /// report a taller `tile_height()` for a multi-tile face), so this
+    /// walks the stack
     /// accumulating each one's actual `tile_height()` rather than
     /// assuming a fixed stride. Both hit-testing and painting read from
     /// this single source of truth, so they can never disagree about
@@ -498,12 +504,19 @@ impl Desktop {
     }
 
     /// Left-click handling for whichever widget sits at `local`, if any
-    /// (e.g. `SysMonWidget` toggles its analog/dashboard face). Returns
-    /// `false` if `local` isn't over a widget slot at all, so callers
-    /// can tell whether the click was theirs to handle.
+    /// (e.g. the network instrument cycles interfaces, the sound
+    /// instrument's zones adjust volume). The click is translated into
+    /// the widget's own tile-local coordinates so widgets can carve
+    /// their face into control zones without knowing where the dock
+    /// stacked them. Returns `false` if `local` isn't over a widget
+    /// slot at all, so callers can tell whether the click was theirs to
+    /// handle.
     pub fn click_widget(&mut self, backend: &mut X11Backend, theme: &Theme, local: Point) -> bool {
-        let Some(index) = self.widget_index_at(local) else { return false };
-        if self.widgets[index].on_click() {
+        let Some((index, rect)) = self.widget_slots().into_iter().find(|(_, rect)| rect.contains(local)) else {
+            return false;
+        };
+        let widget_local = Point::new(local.x - rect.pos.x, local.y - rect.pos.y);
+        if self.widgets[index].on_click(widget_local, self.tile) {
             self.redraw_dock(backend, theme);
         }
         true
