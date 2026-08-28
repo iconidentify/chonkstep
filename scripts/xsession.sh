@@ -60,4 +60,13 @@ if command -v picom >/dev/null 2>&1; then
     picom -b --backend xrender --no-use-damage >> "$LOG_DIR/picom.log" 2>&1
 fi
 
+# Rotate a runaway log at login rather than letting it grow without
+# bound: a session that once got stuck in an error loop (a dead X
+# connection being polled, before ShutdownRequested existed) left a
+# multi-gigabyte session.log behind. One .old generation is plenty for
+# postmortems; the append redirect below starts the fresh file.
+if [ -f "$LOG_DIR/session.log" ] && [ "$(wc -c < "$LOG_DIR/session.log")" -gt 52428800 ]; then
+    mv -f "$LOG_DIR/session.log" "$LOG_DIR/session.log.old"
+fi
+
 exec dbus-run-session -- "$BIN" >> "$LOG_DIR/session.log" 2>&1

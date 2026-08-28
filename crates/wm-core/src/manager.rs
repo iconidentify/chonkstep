@@ -1303,7 +1303,21 @@ impl<B: Backend> WindowManager<B> {
         client.lifecycle = Lifecycle::Normal;
         let window = client.window;
         let content_size = client.geometry.size;
-        if let Some(frame) = client.frame {
+        let frame = client.frame;
+        // A window restores onto the workspace the user is looking at,
+        // not the one it was miniaturized on. Icon tiles are visible on
+        // every workspace, so restoring from a different one is a
+        // normal gesture — and without this reassignment the window
+        // became a ghost: mapped over the current workspace but still
+        // *owned* by the old one, so it lingered there on the next
+        // switch back and vanished from here. (Moving *to* the current
+        // workspace never unmaps or drops focus — see
+        // `move_client_to_workspace` — so ordering against the map
+        // below doesn't matter; it's pure assignment plus the
+        // `_NET_WM_DESKTOP` republish pagers need.)
+        let current = self.current_workspace;
+        self.move_client_to_workspace(id, current);
+        if let Some(frame) = frame {
             self.backend.map_frame(frame);
         }
         // Same nudge unshade needs (see there): the client's own pixels
@@ -2034,6 +2048,66 @@ mod tests {
 
         // Still miniaturized, not silently remapped by the round trip.
         assert_eq!(wm.client(id).unwrap().lifecycle, Lifecycle::Miniaturized);
+    }
+
+    /// Regression test: a window miniaturized on workspace 0 and
+    /// restored while viewing workspace 1 stayed *assigned* to 0 — it
+    /// appeared over workspace 1 (the map is unconditional) but
+    /// lingered on 0 after the next switch back and vanished from 1,
+    /// because `deminiaturize` never updated the client's workspace.
+    /// Restoring must adopt the workspace that's active at restore
+    /// time: the icon tiles are visible everywhere, so the gesture
+    /// means "bring it here".
+    #[test]
+    fn deminiaturize_restores_onto_the_active_workspace() {
+        let mut backend = FakeBackend::new();
+        let window = backend.create_window();
+        let mut wm = wm(backend);
+        wm.dispatch(BackendEvent::MapRequest(window));
+        let id = wm.client_for_window(window).unwrap();
+        let frame = wm.client(id).unwrap().frame.unwrap();
+
+        wm.miniaturize(id);
+        wm.switch_workspace(1);
+        wm.deminiaturize(id);
+
+        assert_eq!(wm.client(id).unwrap().workspace, 1, "restore must adopt the active workspace");
+        assert!(wm.backend().mapped_frames.contains(&frame), "restored window must be visible here");
+        assert_eq!(
+            wm.backend().published_window_desktops.last(),
+            Some(&(window, 1)),
+            "pagers must hear the new workspace via _NET_WM_DESKTOP"
+        );
+
+        // The exact ghost the bug produced: back on workspace 0 the
+        // window must be gone, and on workspace 1 it must be present.
+        wm.switch_workspace(0);
+        assert!(wm.backend().unmapped_frames.contains(&frame), "the old workspace must not keep the window");
+        wm.switch_workspace(1);
+        assert!(wm.backend().mapped_frames.contains(&frame), "the adopting workspace keeps the window");
+    }
+
+    /// Restoring on the same workspace the window was miniaturized on
+    /// must not churn state: no workspace change, no `_NET_WM_DESKTOP`
+    /// republish.
+    #[test]
+    fn deminiaturize_on_the_same_workspace_republishes_nothing() {
+        let mut backend = FakeBackend::new();
+        let window = backend.create_window();
+        let mut wm = wm(backend);
+        wm.dispatch(BackendEvent::MapRequest(window));
+        let id = wm.client_for_window(window).unwrap();
+
+        wm.miniaturize(id);
+        let publishes_before = wm.backend().published_window_desktops.len();
+        wm.deminiaturize(id);
+
+        assert_eq!(wm.client(id).unwrap().workspace, 0);
+        assert_eq!(
+            wm.backend().published_window_desktops.len(),
+            publishes_before,
+            "a same-workspace restore must not republish the desktop property"
+        );
     }
 
     #[test]
