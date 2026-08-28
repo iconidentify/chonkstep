@@ -50,8 +50,11 @@ restarts that keep your windows open.
   (dialogs get chrome, docks and notifications are left alone).
   `scripts/verify-ewmh.sh` checks a live session from the outside.
 - **A WindowMaker-style desktop shell.** Right-click root menu with
-  cascading submenus, a dock with live widgets (clock, system monitor,
-  network load), miniaturized-window icon tiles with drag-to-place, and
+  cascading submenus, a dock of instrument apps - an analog clock plus
+  five LED instruments on theme-reactive glass (network traffic with a
+  mirrored up/down history matrix, CPU and memory load, sound volume
+  with click-zone control, wifi/ethernet link state, battery/power) -
+  miniaturized-window icon tiles with drag-to-place, and
   five built-in wallpaper artworks. Real workspaces, too: a dock
   Clip - WindowMaker's workspace tile, ported from its dock.c
   recipes - sits at the top-left corner: clipped-corner arrows advance

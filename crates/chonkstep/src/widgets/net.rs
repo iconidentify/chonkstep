@@ -1,17 +1,23 @@
-//! Network traffic instrument: per-interface up/down throughput on a
-//! `wm_theme::panel` LED screen. Currently the sampling half plus a
-//! placeholder face — the renderer (`wm_theme::nettraffic`) is being
-//! built on the panel SDK; until it lands, the tile shows the SDK's
-//! dead-screen face with live sampling already running underneath.
+//! Network traffic instrument: per-interface up/down throughput on the
+//! `wm_theme::nettraffic` instrument face — download story on top,
+//! upload story on the bottom, mirrored history graph between them.
+//! This file is strictly the data half: it samples `/proc/net/dev`,
+//! maintains rates and normalized histories, and hands the renderer
+//! plain quantized values, so the renderer stays unit-testable
+//! pixel-for-pixel without a live network.
 //!
 //! The sampling layer keeps interfaces separate (click cycles them)
 //! and normalizes each one's history against its own decaying peak, so
 //! a gigabit burst doesn't flatten a quiet link's graph into nothing.
+//! The absolute rates go to the renderer un-normalized — its digit
+//! readouts exist precisely to carry the magnitude the normalized
+//! graph gives up.
 
 use std::cell::RefCell;
 use std::collections::VecDeque;
 use std::time::Instant;
 
+use wm_theme::nettraffic::{self, TrafficLane};
 use wm_theme::{panel, Theme};
 use wm_theme_api::{DecorationBuffer, Point};
 
@@ -44,11 +50,6 @@ fn parse_interface_totals(contents: &str) -> Vec<(String, u64, u64)> {
     out
 }
 
-// The rate/history fields are consumed by the `wm_theme::nettraffic`
-// renderer this widget is being built toward; until that lands, only
-// `name` is read (cycling and retention), so the lint is silenced
-// rather than the sampling deleted and rewritten in a week.
-#[allow(dead_code)]
 pub(crate) struct InterfaceLoad {
     pub name: String,
     last_totals: Option<(u64, u64)>,
@@ -141,7 +142,32 @@ impl DockWidget for NetTrafficWidget {
     fn render(&self, theme: &Theme, tile: u32) -> DecorationBuffer {
         let mut font_system = self.font_system.borrow_mut();
         let mut swash_cache = self.swash_cache.borrow_mut();
-        panel::render_dead_tile(theme, &mut font_system, &mut swash_cache, tile, "NET")
+        // No interfaces at all is the SDK's dead-screen empty state,
+        // not a zeroed instrument — a powered-off screen says "nothing
+        // to measure", a zeroed one would say "measuring silence".
+        let Some(iface) = self.interfaces.get(self.selected) else {
+            return panel::render_dead_tile(theme, &mut font_system, &mut swash_cache, tile, "NET");
+        };
+        // The renderer wants the newest NET_TRAFFIC_COLUMNS samples
+        // quantized to dot-rows; the widget keeps a longer float
+        // history so a future renderer (or scale) can ask for more.
+        let quantize = |history: &VecDeque<f32>| -> Vec<u32> {
+            let skip = history.len().saturating_sub(nettraffic::NET_TRAFFIC_COLUMNS);
+            history.iter().skip(skip).map(|&v| nettraffic::quantize_level(v, nettraffic::NET_TRAFFIC_HALF_ROWS)).collect()
+        };
+        let rx_history = quantize(&iface.rx_history);
+        let tx_history = quantize(&iface.tx_history);
+        let down = TrafficLane {
+            readout: nettraffic::format_rate(iface.rx_bps),
+            now: nettraffic::quantize_level(iface.rx_bps / iface.peak_bps, nettraffic::NET_TRAFFIC_HALF_ROWS),
+            history: &rx_history,
+        };
+        let up = TrafficLane {
+            readout: nettraffic::format_rate(iface.tx_bps),
+            now: nettraffic::quantize_level(iface.tx_bps / iface.peak_bps, nettraffic::NET_TRAFFIC_HALF_ROWS),
+            history: &tx_history,
+        };
+        nettraffic::render_nettraffic_tile(theme, &mut font_system, &mut swash_cache, tile, &iface.name, &down, &up)
     }
 
     fn on_click(&mut self, _local: Point, _tile: u32) -> bool {
@@ -170,5 +196,27 @@ mod tests {
     #[test]
     fn empty_interface_totals_do_not_panic() {
         assert_eq!(parse_interface_totals(""), Vec::<(String, u64, u64)>::new());
+    }
+
+    /// The wiring claim: with no interfaces the widget shows the SDK's
+    /// dead screen, and once one exists (populated the way `tick()`
+    /// would) it switches to the live instrument face — the two must
+    /// render differently or the renderer isn't actually hooked up.
+    #[test]
+    fn widget_face_goes_live_once_an_interface_exists() {
+        let theme = wm_theme::default_theme::nextstep_classic();
+        let mut widget = NetTrafficWidget::new();
+        let dead = widget.render(&theme, 56);
+        assert_eq!((dead.width, dead.height), (56, 56));
+
+        let mut iface = InterfaceLoad::new("eth0".to_string());
+        iface.rx_bps = 42.0 * 1024.0;
+        iface.tx_bps = 3.0 * 1024.0;
+        iface.rx_history.pop_front();
+        iface.rx_history.push_back(0.8);
+        widget.interfaces.push(iface);
+        let live = widget.render(&theme, 56);
+        assert_eq!((live.width, live.height), (56, 56));
+        assert_ne!(dead.pixels, live.pixels);
     }
 }
