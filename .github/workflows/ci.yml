@@ -86,18 +86,29 @@ jobs:
 
   # The Wayland half of the dual architecture. There is no Xvfb
   # equivalent to smoke-test a compositor on a headless runner (the
-  # nested backend needs a host display), so this job's gate is the
-  # strictest thing CI can still do: build the compositor backend and
-  # its binary against the real system libraries, then run the
-  # backend's unit tests. The build step is the load-bearing one — the
-  # -sys crates under Smithay's winit/GLES path (libxkbcommon for the
-  # keymap machinery, EGL/GLES for the renderer, the Wayland client
-  # libraries winit itself links) resolve and link at build time, so a
-  # plain `cargo build` on Linux already proves what the macOS dev
-  # host, where this crate is cfg-empty, structurally cannot. Only the
-  # nested-session dependencies are installed: the `session` feature
-  # (DRM/KMS, libinput, libseat) is off by default and stays off here,
-  # which keeps this job light and honest about what it exercises.
+  # nested backend needs a host display, and the session backend needs
+  # a DRM device and a seat), so this job's gate is the strictest
+  # thing CI can still do: build the compositor backend and its binary
+  # against the real system libraries, then run the backend's unit
+  # tests. The build step is the load-bearing one — every -sys crate
+  # under the Smithay features this compositor pins resolves and links
+  # at build time, so a plain `cargo build` on Linux already proves
+  # what the macOS dev host, where this crate is cfg-empty,
+  # structurally cannot.
+  #
+  # Both backends are compiled in unconditionally (there is no cargo
+  # feature gating the session half — see wm-wayland/Cargo.toml), so
+  # this job installs the union of what they link: the nested/rendering
+  # set (libxkbcommon for the keymap machinery, EGL/GLES for the
+  # renderer, the Wayland client libraries winit itself links) plus the
+  # hardware-session set (libdrm for mode setting, libgbm for buffer
+  # allocation, libinput for devices, libudev for discovering them,
+  # libseat for opening them without root). The names are taken from
+  # Smithay 0.7.0's own CI, minus the ones for features this compositor
+  # does not enable — no libsystemd-dev/libdbus-1-dev (the logind
+  # session backend is not used; libseat's own logind support needs no
+  # build-time dependency), no libpixman-1-dev (renderer_pixman is
+  # off), no libdisplay-info-dev.
   wayland:
     runs-on: ubuntu-latest
     steps:
@@ -108,7 +119,9 @@ jobs:
       - name: Install Wayland build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libxkbcommon-dev libegl-dev libgles-dev libwayland-dev
+          sudo apt-get install -y \
+            libxkbcommon-dev libegl-dev libgles-dev libwayland-dev \
+            libdrm-dev libgbm-dev libinput-dev libudev-dev libseat-dev
 
       # --locked: the compositor pins Smithay 0.7.0, and a silent
       # re-resolution here would test a different dependency tree than
