@@ -37,7 +37,7 @@ jobs:
           sudo apt-get install -y xvfb xterm x11-utils
 
       - name: Build release binaries
-        run: cargo build --release
+        run: cargo build --release -p chonkstep
 
       - name: X11 smoke test
         run: |
