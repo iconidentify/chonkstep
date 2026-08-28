@@ -134,7 +134,12 @@ pub fn render_menu(
         .map(|i| paint::text_width(font_system, &menu.item_font, i.label()))
         .max()
         .unwrap_or(0);
-    let title_w = paint::text_width(font_system, &menu.title_font, title) + title_h + px(16) as u32;
+    // A closable title's width floor adds the close box on top of the
+    // usual padding, so a long title on an otherwise-narrow menu still
+    // fits its box-free region (see the centering below) instead of
+    // truncating against the box.
+    let title_reserve_w = if closable { title_h * 2 + px(16) as u32 } else { title_h + px(16) as u32 };
+    let title_w = paint::text_width(font_system, &menu.title_font, title) + title_reserve_w;
     let content_w = (widest_label + px(10) as u32 + gutter).max(title_w);
 
     // The 1px (scaled) outline around everything is the frame border
@@ -154,23 +159,34 @@ pub fn render_menu(
     let title_t = (theme.titlebar.bevel.width as u32).max(1);
     paint::draw_raised2_bevel(&mut pixmap, x0, bw as i32, content_w, title_h, title_t);
     // The close box: a posted menu's titlebar button, exactly the
-    // window titlebar's close treatment (same bevel, same glyph, flush
-    // right at full title height - TS_NEW style), which is precisely
-    // what real WindowMaker shows on a "buttoned" menu. Drawn over the
-    // already-painted title strip: like window titlebars, the box is
-    // the strip's own fill showing through a bevel, not a separately
-    // colored control.
+    // window titlebar's close treatment — the strip's own fill showing
+    // through the same *relative* RAISED2 relief the titlebar buttons
+    // use, flush right at full title height (TS_NEW style), glyph
+    // stamped in the title ink. The first cut used the theme's
+    // absolute-color chisel bevel instead, and on the black title
+    // strip its bright edges read as a separate plate stuck onto the
+    // menu (caught by visual inspection) — relative relief is what
+    // makes a flush button belong to the surface it sits on.
     let close_rect = if closable {
         let size = title_h.min(content_w);
         let rect = Rect::new(Point::new(x0 + content_w as i32 - size as i32, bw as i32), Size::new(size, size));
-        let style = theme.titlebar.buttons.iter().find(|b| b.kind == ButtonKind::Close);
-        if let Some(style) = style {
-            paint::draw_bevel(&mut pixmap, rect.pos.x, rect.pos.y, rect.size.w, rect.size.h, &style.bevel);
-        }
+        paint::draw_raised2_bevel(&mut pixmap, rect.pos.x, rect.pos.y, rect.size.w, rect.size.h, title_t);
         draw_button_glyph(&mut pixmap, ButtonKind::Close, rect, menu.title_text_color, false);
         Some(rect)
     } else {
         None
+    };
+    // Centered title text — centered in the strip the *eye* sees, which
+    // on a closable menu is the region left of the box, not the full
+    // width. Full-width centering (real WindowMaker's own allButtons
+    // case) either crowds the text against the box or, with symmetric
+    // reserves, leaves a lopsided void on the left — both were caught
+    // by visual inspection; centering in the box-free region balances
+    // the margins around the text where they are actually visible.
+    let title_region = if closable {
+        content_w.saturating_sub(title_h.min(content_w))
+    } else {
+        content_w
     };
     paint::draw_text(
         &mut pixmap,
@@ -181,7 +197,7 @@ pub fn render_menu(
         menu.title_text_color,
         x0 + px(8),
         bw as i32,
-        content_w.saturating_sub(px(16) as u32),
+        title_region.saturating_sub(px(16) as u32),
         title_h,
         TextAlign::Center,
     );
