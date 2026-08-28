@@ -1,11 +1,876 @@
-//! User-facing configuration: keybindings, workspace count, default
-//! focus policy.
+//! User-facing configuration: the `config.toml` format, keybinding spec
+//! parsing, and the built-in defaults everything merges over.
 //!
-//! Kept as its own crate from the start (even though milestone 1's needs
-//! are small) because config parsing is genuinely orthogonal to
+//! Kept as its own crate from the start (even though its needs are
+//! small) because config parsing is genuinely orthogonal to
 //! windowing/rendering — a future control tool could reuse it without
 //! pulling in either.
 //!
-//! Not yet implemented: milestone step 1 is workspace scaffolding only.
+//! Two rules shape every decision here:
+//!
+//! - **A broken config must never cost the user their session.**
+//!   [`load`] is infallible: a missing file silently yields the
+//!   defaults; an unreadable or syntactically invalid file logs a
+//!   warning and falls back to the defaults; and an individually bad
+//!   entry (a typo'd key spec, an unknown action name, a wrongly typed
+//!   value) is warned about and skipped while every *other* entry still
+//!   applies. A window manager that refuses to start over one bad line
+//!   would strand the user at a blank X session with no way to fix it.
+//! - **User bindings merge over the defaults, they never replace the
+//!   set wholesale.** Listing one combo in `[keybindings]` overrides
+//!   only that combo; unlisted defaults survive. The sentinel value
+//!   `"none"` unbinds a combo outright, so every default is escapable
+//!   without the user re-listing the rest. Within the file, a combo
+//!   spelled twice (possible via case or aliases like `ctrl`/`control`)
+//!   resolves to the *last* occurrence, matching how people read a file
+//!   top to bottom.
+//!
+//! The format, in full:
+//!
+//! ```toml
+//! focus_follows_mouse = false        # optional; default false
+//! scale = 2.0                        # optional; UI scale factor
+//! theme = "window-maker"             # optional; theme name
+//!
+//! [keybindings]
+//! "alt+shift+return" = "spawn-terminal"
+//! "super+t" = "spawn-terminal"       # extra binding for the same action
+//! "alt+ctrl+right" = "none"          # unbind a default
+//! ```
+//!
+//! Key specs are case-insensitive, `+`-separated modifier tokens
+//! followed by exactly one key token (see [`parse_key`]). Action names
+//! are the kebab-case of the [`Action`] variants. Precedence against
+//! environment variables and persisted UI state (`CHONKSTEP_SCALE`,
+//! the theme-menu state file, ...) is the binary's business, not this
+//! crate's — which is why `scale` and `theme` stay `Option` here
+//! instead of being defaulted: the caller must be able to tell "user
+//! said nothing" apart from "user chose the default value".
+
+use std::path::PathBuf;
 
 pub use wm_core::FocusPolicy;
+use wm_core::{KeyCombo, Modifiers};
+
+/// Everything a keybinding can do. Deliberately a closed set of verbs
+/// rather than free-form commands: the WM owns the semantics (which
+/// window, which workspace, what "toggle" means mid-drag), so exposing
+/// anything finer-grained than these verbs would leak state-machine
+/// internals into the config format.
+///
+/// Config files name these in kebab-case (`"spawn-terminal"`,
+/// `"workspace-carry-next"`, ...). The pseudo-action `"none"` is *not*
+/// a variant on purpose — it means "remove the binding", and letting it
+/// exist as an `Action` would force every dispatch site to handle a
+/// do-nothing case that should have been filtered out at parse time.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Action {
+    SpawnTerminal,
+    Close,
+    ToggleMaximize,
+    ToggleShade,
+    Miniaturize,
+    ToggleFullscreen,
+    WorkspaceNext,
+    WorkspacePrev,
+    WorkspaceCarryNext,
+    WorkspaceCarryPrev,
+    Restart,
+}
+
+/// Maps a kebab-case action name from a config file to its [`Action`].
+/// Case-insensitive for the same reason key specs are: nothing is
+/// gained by making `"Close"` a startup-breaking typo. Returns `None`
+/// for unknown names — including `"none"`, which the caller must treat
+/// as unbinding *before* asking here.
+fn action_from_name(name: &str) -> Option<Action> {
+    match name.trim().to_ascii_lowercase().as_str() {
+        "spawn-terminal" => Some(Action::SpawnTerminal),
+        "close" => Some(Action::Close),
+        "toggle-maximize" => Some(Action::ToggleMaximize),
+        "toggle-shade" => Some(Action::ToggleShade),
+        "miniaturize" => Some(Action::Miniaturize),
+        "toggle-fullscreen" => Some(Action::ToggleFullscreen),
+        "workspace-next" => Some(Action::WorkspaceNext),
+        "workspace-prev" => Some(Action::WorkspacePrev),
+        "workspace-carry-next" => Some(Action::WorkspaceCarryNext),
+        "workspace-carry-prev" => Some(Action::WorkspaceCarryPrev),
+        "restart" => Some(Action::Restart),
+        _ => None,
+    }
+}
+
+/// The resolved configuration the binary runs with.
+///
+/// `keybindings` holds at most one entry per [`KeyCombo`] — the merge
+/// in [`parse`] maintains that invariant — so the caller can grab each
+/// combo exactly once without deduplicating. `scale` and `theme` stay
+/// `Option` so the binary's precedence rules (env var over config over
+/// built-in, persisted theme state over config) can distinguish an
+/// absent setting from an explicit one.
+#[derive(Clone, Debug)]
+pub struct Config {
+    pub focus_follows_mouse: bool,
+    pub scale: Option<f32>,
+    pub theme: Option<String>,
+    pub keybindings: Vec<(KeyCombo, Action)>,
+}
+
+impl Config {
+    /// The configuration used when no file exists (and the base every
+    /// file merges over). The default bindings deliberately mirror the
+    /// WindowMaker-ish alt+shift chords the rest of the WM was designed
+    /// around; workspace switching sits on alt+ctrl so that carry
+    /// (alt+shift) and plain switch differ by exactly one modifier.
+    pub fn default_config() -> Config {
+        // Routing the defaults through parse_key keeps them honest:
+        // they exercise the exact same parser user specs go through, so
+        // a parser regression fails the default-config test instead of
+        // silently shipping different combos than the docs promise.
+        fn bind(spec: &str, action: Action) -> (KeyCombo, Action) {
+            let combo = parse_key(spec)
+                .expect("default keybinding specs are constants and must always parse");
+            (combo, action)
+        }
+        Config {
+            focus_follows_mouse: false,
+            scale: None,
+            theme: None,
+            keybindings: vec![
+                bind("alt+shift+return", Action::SpawnTerminal),
+                bind("alt+shift+q", Action::Close),
+                bind("alt+shift+x", Action::ToggleMaximize),
+                bind("alt+shift+s", Action::ToggleShade),
+                bind("alt+shift+m", Action::Miniaturize),
+                bind("alt+shift+f", Action::ToggleFullscreen),
+                bind("alt+ctrl+right", Action::WorkspaceNext),
+                bind("alt+ctrl+left", Action::WorkspacePrev),
+                bind("alt+shift+right", Action::WorkspaceCarryNext),
+                bind("alt+shift+left", Action::WorkspaceCarryPrev),
+            ],
+        }
+    }
+}
+
+/// Maps a single (already lowercased, trimmed) key token to its X11
+/// keysym. Only the tokens the WM documents — guessing at arbitrary
+/// keysym names here would make config files silently non-portable
+/// across whatever name table we happened to guess from.
+fn keysym_for(token: &str) -> Option<u32> {
+    // Single-character tokens: letters and digits carry their ASCII
+    // value as keysym (X11 keeps Latin-1 keysyms identical to their
+    // character codes).
+    if token.len() == 1 {
+        let b = token.as_bytes()[0];
+        if b.is_ascii_lowercase() || b.is_ascii_digit() {
+            return Some(b as u32);
+        }
+        return None;
+    }
+    let keysym = match token {
+        // "enter" accepted alongside "return" because both names are in
+        // common use and rejecting one would be a pointless papercut.
+        "return" | "enter" => 0xff0d,
+        "tab" => 0xff09,
+        "space" => 0x20,
+        "escape" => 0xff1b,
+        "left" => 0xff51,
+        "up" => 0xff52,
+        "right" => 0xff53,
+        "down" => 0xff54,
+        "home" => 0xff50,
+        "end" => 0xff57,
+        "pageup" => 0xff55,
+        "pagedown" => 0xff56,
+        // Punctuation gets word names ("minus", not "-") because "+" is
+        // the spec separator and a literal "-"/"=" next to it reads
+        // like a typo; word names keep specs unambiguous.
+        "minus" => 0x2d,
+        "equal" => 0x3d,
+        "comma" => 0x2c,
+        "period" => 0x2e,
+        // Function keys spelled out rather than computed so exactly
+        // f1..f12 exist — no accidental "f01"/"f13" acceptance.
+        "f1" => 0xffbe,
+        "f2" => 0xffbf,
+        "f3" => 0xffc0,
+        "f4" => 0xffc1,
+        "f5" => 0xffc2,
+        "f6" => 0xffc3,
+        "f7" => 0xffc4,
+        "f8" => 0xffc5,
+        "f9" => 0xffc6,
+        "f10" => 0xffc7,
+        "f11" => 0xffc8,
+        "f12" => 0xffc9,
+        _ => return None,
+    };
+    Some(keysym)
+}
+
+/// Parses a `"alt+shift+return"`-style key spec into a [`KeyCombo`].
+///
+/// Case-insensitive; tokens are `+`-separated and whitespace around
+/// each token is ignored. Modifier tokens: `alt`, `shift`, `ctrl` (or
+/// `control`), `super` (or `mod4`, `win`). Exactly one non-modifier
+/// key token is required and it must come last — a modifier *after*
+/// the key (`"return+alt"`) is rejected rather than reordered, because
+/// silently accepting it would also silently accept `"a+b"`-style
+/// two-key typos as "b with some garbage".
+///
+/// Returns `None` (rather than an error type) because every caller —
+/// the config merge, the defaults table — has the same reaction to a
+/// bad spec: skip it and say which spec was bad; the spec string itself
+/// is the only diagnostic worth carrying.
+pub fn parse_key(spec: &str) -> Option<KeyCombo> {
+    let mut modifiers = Modifiers::empty();
+    let mut keysym: Option<u32> = None;
+    for raw in spec.split('+') {
+        // Once the key token has been seen, *any* further token —
+        // second key, trailing modifier, trailing '+' — is malformed.
+        if keysym.is_some() {
+            return None;
+        }
+        let token = raw.trim().to_ascii_lowercase();
+        match token.as_str() {
+            "alt" => modifiers |= Modifiers::ALT,
+            "shift" => modifiers |= Modifiers::SHIFT,
+            "ctrl" | "control" => modifiers |= Modifiers::CONTROL,
+            "super" | "mod4" | "win" => modifiers |= Modifiers::SUPER,
+            // Not a modifier, so it must be the key token; unknown
+            // names (and the empty token from "" / "alt+") fail here.
+            other => keysym = Some(keysym_for(other)?),
+        }
+    }
+    // Modifier-only specs ("alt+shift") fall through with no keysym.
+    keysym.map(|keysym| KeyCombo { keysym, modifiers })
+}
+
+/// Applies a `[keybindings]` table on top of the current binding list,
+/// entry by entry in document order (last spelling of a combo wins).
+///
+/// Every failure mode here is per-entry: a bad key spec, a non-string
+/// value, or an unknown action name each warn and skip that one entry,
+/// leaving the combo's default binding (if any) intact. Skipping —
+/// rather than erroring, and rather than unbinding — is what makes a
+/// typo cost the user one binding at most, never the file or a default
+/// they still rely on.
+fn apply_keybindings(bindings: &mut Vec<(KeyCombo, Action)>, table: &toml::Table) {
+    for (spec, value) in table {
+        let Some(combo) = parse_key(spec) else {
+            tracing::warn!(key = %spec, "config: unparsable key spec in [keybindings], skipping entry");
+            continue;
+        };
+        let toml::Value::String(name) = value else {
+            tracing::warn!(
+                key = %spec,
+                value = ?value,
+                "config: [keybindings] value must be an action name string, skipping entry"
+            );
+            continue;
+        };
+        // "none" means "this combo does nothing": drop any existing
+        // binding (default or earlier file entry) for it.
+        if name.trim().eq_ignore_ascii_case("none") {
+            bindings.retain(|(existing, _)| *existing != combo);
+            continue;
+        }
+        let Some(action) = action_from_name(name) else {
+            tracing::warn!(
+                key = %spec,
+                action = %name,
+                "config: unknown action name, skipping entry (any default binding for this combo is kept)"
+            );
+            continue;
+        };
+        // Replace-then-append keeps the one-entry-per-combo invariant
+        // and gives "last occurrence in the file wins" for combos the
+        // file spells more than once (case / alias variants).
+        bindings.retain(|(existing, _)| *existing != combo);
+        bindings.push((combo, action));
+    }
+}
+
+/// Validates a `scale` value from the file. Integers are accepted
+/// alongside floats because `scale = 2` is the obvious thing to type;
+/// non-positive or non-finite values are rejected as nonsense that
+/// would otherwise propagate NaN/zero into every geometry computation.
+fn scale_from_value(value: &toml::Value) -> Option<f32> {
+    let scale = match value {
+        toml::Value::Float(f) => *f as f32,
+        toml::Value::Integer(i) => *i as f32,
+        _ => return None,
+    };
+    (scale.is_finite() && scale > 0.0).then_some(scale)
+}
+
+/// The pure core [`load`] wraps: parses config-file text into a
+/// [`Config`], merging over [`Config::default_config`].
+///
+/// `Err` is reserved for text that is not valid TOML at all — the one
+/// case where nothing can be salvaged. Everything below that (wrongly
+/// typed fields, unknown keys, bad `[keybindings]` entries) degrades
+/// per-item with a `tracing::warn!`, keeping the rest of the file. The
+/// warnings go through `tracing` rather than being accumulated in the
+/// return value so the function stays trivially callable from tests
+/// and from `load` alike; without a subscriber they cost nothing.
+pub fn parse(text: &str) -> Result<Config, String> {
+    let table: toml::Table = text
+        .parse()
+        .map_err(|err: toml::de::Error| format!("invalid TOML: {err}"))?;
+    let mut config = Config::default_config();
+    for (key, value) in &table {
+        match key.as_str() {
+            "focus_follows_mouse" => match value {
+                toml::Value::Boolean(b) => config.focus_follows_mouse = *b,
+                other => tracing::warn!(
+                    value = ?other,
+                    "config: focus_follows_mouse must be a boolean, keeping default"
+                ),
+            },
+            "scale" => match scale_from_value(value) {
+                Some(scale) => config.scale = Some(scale),
+                None => tracing::warn!(
+                    value = ?value,
+                    "config: scale must be a positive number, ignoring it"
+                ),
+            },
+            "theme" => match value {
+                toml::Value::String(name) => config.theme = Some(name.clone()),
+                other => tracing::warn!(
+                    value = ?other,
+                    "config: theme must be a string, ignoring it"
+                ),
+            },
+            "keybindings" => match value {
+                toml::Value::Table(entries) => apply_keybindings(&mut config.keybindings, entries),
+                other => tracing::warn!(
+                    value = ?other,
+                    "config: [keybindings] must be a table, keeping default bindings"
+                ),
+            },
+            unknown => tracing::warn!(
+                key = %unknown,
+                "config: unknown top-level key, ignoring it"
+            ),
+        }
+    }
+    Ok(config)
+}
+
+/// Where the config file lives: `$XDG_CONFIG_HOME/chonkstep/config.toml`
+/// with the standard `~/.config` fallback. Per the XDG basedir spec, a
+/// relative (or empty) `$XDG_CONFIG_HOME` is treated as unset rather
+/// than resolved against some accidental working directory. `None`
+/// only when `$HOME` is also missing — at which point there is nowhere
+/// sane to look and the defaults are the right answer.
+fn config_path() -> Option<PathBuf> {
+    let base = match std::env::var_os("XDG_CONFIG_HOME") {
+        Some(dir) if !dir.is_empty() && PathBuf::from(&dir).is_absolute() => PathBuf::from(dir),
+        _ => PathBuf::from(std::env::var_os("HOME")?).join(".config"),
+    };
+    Some(base.join("chonkstep").join("config.toml"))
+}
+
+/// Loads the user's config, never failing: this runs on the WM startup
+/// path, and any outcome other than "the session starts" is worse than
+/// any misreading of the config could be.
+///
+/// - No config file (or no `$HOME` to find one under): the defaults,
+///   silently — an absent file is the normal case, not a problem.
+/// - File unreadable or not valid TOML: `tracing::warn!` with the
+///   error, then the defaults.
+/// - File fine but individual entries bad: [`parse`] warns and skips
+///   those entries, keeping the rest.
+pub fn load() -> Config {
+    let Some(path) = config_path() else {
+        return Config::default_config();
+    };
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            return Config::default_config();
+        }
+        Err(err) => {
+            tracing::warn!(path = %path.display(), %err, "config: unreadable, using defaults");
+            return Config::default_config();
+        }
+    };
+    match parse(&text) {
+        Ok(config) => config,
+        Err(err) => {
+            tracing::warn!(path = %path.display(), %err, "config: using defaults");
+            Config::default_config()
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Test-side lookup: the action currently bound to `spec`, if any.
+    fn action_for(config: &Config, spec: &str) -> Option<Action> {
+        let combo = parse_key(spec).expect("test spec must parse");
+        config
+            .keybindings
+            .iter()
+            .find(|(existing, _)| *existing == combo)
+            .map(|(_, action)| action.clone())
+    }
+
+    fn combo(keysym: u32, modifiers: Modifiers) -> KeyCombo {
+        KeyCombo { keysym, modifiers }
+    }
+
+    // ---- parse_key: acceptance ----------------------------------------
+
+    #[test]
+    fn every_letter_and_digit_parses_to_its_ascii_keysym() {
+        for c in ('a'..='z').chain('0'..='9') {
+            let spec = c.to_string();
+            assert_eq!(
+                parse_key(&spec),
+                Some(combo(c as u32, Modifiers::empty())),
+                "spec {spec:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_named_key_parses_to_its_dictated_keysym() {
+        let named: &[(&str, u32)] = &[
+            ("return", 0xff0d),
+            ("enter", 0xff0d),
+            ("tab", 0xff09),
+            ("space", 0x20),
+            ("escape", 0xff1b),
+            ("left", 0xff51),
+            ("up", 0xff52),
+            ("right", 0xff53),
+            ("down", 0xff54),
+            ("home", 0xff50),
+            ("end", 0xff57),
+            ("pageup", 0xff55),
+            ("pagedown", 0xff56),
+            ("minus", 0x2d),
+            ("equal", 0x3d),
+            ("comma", 0x2c),
+            ("period", 0x2e),
+        ];
+        for (name, keysym) in named {
+            assert_eq!(
+                parse_key(name),
+                Some(combo(*keysym, Modifiers::empty())),
+                "spec {name:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn function_keys_f1_through_f12_parse_contiguously() {
+        for n in 1u32..=12 {
+            let spec = format!("f{n}");
+            assert_eq!(
+                parse_key(&spec),
+                Some(combo(0xffbe + n - 1, Modifiers::empty())),
+                "spec {spec:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn every_modifier_and_alias_maps_to_its_flag() {
+        let cases: &[(&str, Modifiers)] = &[
+            ("alt+a", Modifiers::ALT),
+            ("shift+a", Modifiers::SHIFT),
+            ("ctrl+a", Modifiers::CONTROL),
+            ("control+a", Modifiers::CONTROL),
+            ("super+a", Modifiers::SUPER),
+            ("mod4+a", Modifiers::SUPER),
+            ("win+a", Modifiers::SUPER),
+        ];
+        for (spec, modifiers) in cases {
+            assert_eq!(parse_key(spec), Some(combo(0x61, *modifiers)), "spec {spec:?}");
+        }
+    }
+
+    #[test]
+    fn all_four_modifiers_combine() {
+        assert_eq!(
+            parse_key("alt+shift+ctrl+super+z"),
+            Some(combo(
+                0x7a,
+                Modifiers::ALT | Modifiers::SHIFT | Modifiers::CONTROL | Modifiers::SUPER
+            ))
+        );
+    }
+
+    #[test]
+    fn parse_key_is_case_insensitive() {
+        let lower = parse_key("alt+shift+return");
+        assert_eq!(parse_key("ALT+SHIFT+RETURN"), lower);
+        assert_eq!(parse_key("Alt+Shift+Return"), lower);
+        assert_eq!(parse_key("CTRL+F5"), parse_key("ctrl+f5"));
+    }
+
+    #[test]
+    fn parse_key_tolerates_whitespace_around_tokens() {
+        assert_eq!(parse_key(" alt + shift + a "), parse_key("alt+shift+a"));
+    }
+
+    #[test]
+    fn bare_key_without_modifiers_is_valid() {
+        assert_eq!(parse_key("f5"), Some(combo(0xffc2, Modifiers::empty())));
+        assert_eq!(parse_key("space"), Some(combo(0x20, Modifiers::empty())));
+    }
+
+    // ---- parse_key: rejection -----------------------------------------
+
+    #[test]
+    fn rejects_empty_and_whitespace_and_bare_separator_specs() {
+        for spec in ["", "   ", "+", "alt+", "+a", "alt++a"] {
+            assert_eq!(parse_key(spec), None, "spec {spec:?}");
+        }
+    }
+
+    #[test]
+    fn rejects_modifier_only_specs() {
+        for spec in ["alt", "shift", "ctrl", "super", "alt+shift", "alt+ctrl+shift"] {
+            assert_eq!(parse_key(spec), None, "spec {spec:?}");
+        }
+    }
+
+    #[test]
+    fn rejects_unknown_tokens() {
+        for spec in ["banana", "alt+foo", "hyper+a", "alt+esc", "alt+f0", "alt+f13", "alt+f01"] {
+            assert_eq!(parse_key(spec), None, "spec {spec:?}");
+        }
+    }
+
+    #[test]
+    fn rejects_uppercase_only_single_chars_that_are_not_keys() {
+        // Case-insensitivity lowercases first, so "A" is fine — but a
+        // genuinely non-key single char is not.
+        assert!(parse_key("A").is_some());
+        assert_eq!(parse_key("-"), None);
+        assert_eq!(parse_key("="), None);
+    }
+
+    #[test]
+    fn rejects_duplicate_or_multiple_key_tokens() {
+        for spec in ["a+a", "alt+a+b", "return+return", "alt+space+space"] {
+            assert_eq!(parse_key(spec), None, "spec {spec:?}");
+        }
+    }
+
+    #[test]
+    fn rejects_anything_after_the_key_token() {
+        for spec in ["return+alt", "alt+a+shift", "a+"] {
+            assert_eq!(parse_key(spec), None, "spec {spec:?}");
+        }
+    }
+
+    // ---- default_config -----------------------------------------------
+
+    #[test]
+    fn default_config_contains_exactly_the_dictated_bindings_in_order() {
+        let alt_shift = Modifiers::ALT | Modifiers::SHIFT;
+        let alt_ctrl = Modifiers::ALT | Modifiers::CONTROL;
+        // Expected combos written out with literal keysyms (not via
+        // parse_key) so this test cannot be fooled by a parser bug.
+        let expected = vec![
+            (combo(0xff0d, alt_shift), Action::SpawnTerminal),
+            (combo(0x71, alt_shift), Action::Close),
+            (combo(0x78, alt_shift), Action::ToggleMaximize),
+            (combo(0x73, alt_shift), Action::ToggleShade),
+            (combo(0x6d, alt_shift), Action::Miniaturize),
+            (combo(0x66, alt_shift), Action::ToggleFullscreen),
+            (combo(0xff53, alt_ctrl), Action::WorkspaceNext),
+            (combo(0xff51, alt_ctrl), Action::WorkspacePrev),
+            (combo(0xff53, alt_shift), Action::WorkspaceCarryNext),
+            (combo(0xff51, alt_shift), Action::WorkspaceCarryPrev),
+        ];
+        let config = Config::default_config();
+        assert_eq!(config.keybindings, expected);
+        assert!(!config.focus_follows_mouse);
+        assert_eq!(config.scale, None);
+        assert_eq!(config.theme, None);
+    }
+
+    // ---- parse: whole-file behavior -----------------------------------
+
+    #[test]
+    fn empty_text_yields_the_defaults() {
+        let config = parse("").expect("empty text is valid TOML");
+        let defaults = Config::default_config();
+        assert_eq!(config.focus_follows_mouse, defaults.focus_follows_mouse);
+        assert_eq!(config.scale, defaults.scale);
+        assert_eq!(config.theme, defaults.theme);
+        assert_eq!(config.keybindings, defaults.keybindings);
+    }
+
+    #[test]
+    fn invalid_toml_is_a_hard_error_with_a_message() {
+        let err = parse("this = = is not toml").unwrap_err();
+        assert!(err.contains("invalid TOML"), "message was: {err}");
+        assert!(parse("[keybindings").is_err());
+    }
+
+    #[test]
+    fn realistic_full_config_round_trips() {
+        let text = r#"
+            focus_follows_mouse = true
+            scale = 1.5
+            theme = "window-maker"
+
+            [keybindings]
+            "alt+shift+return" = "spawn-terminal"
+            "super+t" = "spawn-terminal"
+            "alt+shift+q" = "none"
+            "alt+ctrl+right" = "workspace-next"
+            "super+f11" = "toggle-fullscreen"
+        "#;
+        let config = parse(text).unwrap();
+        assert!(config.focus_follows_mouse);
+        assert_eq!(config.scale, Some(1.5));
+        assert_eq!(config.theme.as_deref(), Some("window-maker"));
+        // Restating a default is harmless; a new binding is added; the
+        // unbound default is gone; everything unlisted survives.
+        assert_eq!(action_for(&config, "alt+shift+return"), Some(Action::SpawnTerminal));
+        assert_eq!(action_for(&config, "super+t"), Some(Action::SpawnTerminal));
+        assert_eq!(action_for(&config, "alt+shift+q"), None);
+        assert_eq!(action_for(&config, "alt+ctrl+right"), Some(Action::WorkspaceNext));
+        assert_eq!(action_for(&config, "super+f11"), Some(Action::ToggleFullscreen));
+        assert_eq!(action_for(&config, "alt+shift+x"), Some(Action::ToggleMaximize));
+        assert_eq!(action_for(&config, "alt+shift+left"), Some(Action::WorkspaceCarryPrev));
+        // 10 defaults - 1 unbound + 2 new = 11.
+        assert_eq!(config.keybindings.len(), 11);
+    }
+
+    #[test]
+    fn every_action_name_maps_to_its_variant() {
+        let names: &[(&str, Action)] = &[
+            ("spawn-terminal", Action::SpawnTerminal),
+            ("close", Action::Close),
+            ("toggle-maximize", Action::ToggleMaximize),
+            ("toggle-shade", Action::ToggleShade),
+            ("miniaturize", Action::Miniaturize),
+            ("toggle-fullscreen", Action::ToggleFullscreen),
+            ("workspace-next", Action::WorkspaceNext),
+            ("workspace-prev", Action::WorkspacePrev),
+            ("workspace-carry-next", Action::WorkspaceCarryNext),
+            ("workspace-carry-prev", Action::WorkspaceCarryPrev),
+            ("restart", Action::Restart),
+        ];
+        let mut text = String::from("[keybindings]\n");
+        for (n, (name, _)) in names.iter().enumerate() {
+            text.push_str(&format!("\"super+f{}\" = \"{}\"\n", n + 1, name));
+        }
+        let config = parse(&text).unwrap();
+        for (n, (name, action)) in names.iter().enumerate() {
+            let spec = format!("super+f{}", n + 1);
+            assert_eq!(action_for(&config, &spec).as_ref(), Some(action), "action {name:?}");
+        }
+    }
+
+    #[test]
+    fn action_names_are_case_insensitive() {
+        let text = "[keybindings]\n\"super+a\" = \"CLOSE\"\n\"super+b\" = \"Spawn-Terminal\"\n";
+        let config = parse(text).unwrap();
+        assert_eq!(action_for(&config, "super+a"), Some(Action::Close));
+        assert_eq!(action_for(&config, "super+b"), Some(Action::SpawnTerminal));
+    }
+
+    // ---- parse: merge semantics ---------------------------------------
+
+    #[test]
+    fn user_entry_overrides_only_that_combo() {
+        let config = parse("[keybindings]\n\"alt+shift+x\" = \"close\"\n").unwrap();
+        assert_eq!(action_for(&config, "alt+shift+x"), Some(Action::Close));
+        // Every other default is untouched, and no entry was duplicated.
+        assert_eq!(action_for(&config, "alt+shift+q"), Some(Action::Close));
+        assert_eq!(config.keybindings.len(), 10);
+    }
+
+    #[test]
+    fn none_unbinds_a_default() {
+        let config = parse("[keybindings]\n\"alt+shift+q\" = \"none\"\n").unwrap();
+        assert_eq!(action_for(&config, "alt+shift+q"), None);
+        assert_eq!(config.keybindings.len(), 9);
+        assert!(!config.keybindings.iter().any(|(_, a)| *a == Action::Close));
+    }
+
+    #[test]
+    fn none_spelled_differently_still_unbinds() {
+        // The combo is matched semantically, not textually: unbinding
+        // through an alias/case variant of the default's spelling works.
+        let config = parse("[keybindings]\n\"ALT+CONTROL+RIGHT\" = \"None\"\n").unwrap();
+        assert_eq!(action_for(&config, "alt+ctrl+right"), None);
+        assert_eq!(config.keybindings.len(), 9);
+    }
+
+    #[test]
+    fn none_on_an_unbound_combo_is_a_harmless_noop() {
+        let config = parse("[keybindings]\n\"super+z\" = \"none\"\n").unwrap();
+        assert_eq!(config.keybindings, Config::default_config().keybindings);
+    }
+
+    #[test]
+    fn last_occurrence_of_a_combo_in_the_file_wins() {
+        // TOML forbids literally identical duplicate keys, but the same
+        // combo can appear under different spellings; document order
+        // decides.
+        let unbind_then_bind = "[keybindings]\n\
+            \"alt+ctrl+right\" = \"none\"\n\
+            \"alt+control+right\" = \"spawn-terminal\"\n";
+        let config = parse(unbind_then_bind).unwrap();
+        assert_eq!(action_for(&config, "alt+ctrl+right"), Some(Action::SpawnTerminal));
+
+        let bind_then_unbind = "[keybindings]\n\
+            \"alt+control+right\" = \"spawn-terminal\"\n\
+            \"ALT+CTRL+RIGHT\" = \"none\"\n";
+        let config = parse(bind_then_unbind).unwrap();
+        assert_eq!(action_for(&config, "alt+ctrl+right"), None);
+    }
+
+    #[test]
+    fn merged_bindings_keep_one_entry_per_combo() {
+        let text = "[keybindings]\n\
+            \"alt+shift+q\" = \"restart\"\n\
+            \"ALT+SHIFT+Q\" = \"miniaturize\"\n";
+        let config = parse(text).unwrap();
+        let q = parse_key("alt+shift+q").unwrap();
+        let entries: Vec<_> = config.keybindings.iter().filter(|(c, _)| *c == q).collect();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].1, Action::Miniaturize);
+    }
+
+    // ---- parse: per-entry graceful degradation ------------------------
+
+    #[test]
+    fn one_bad_entry_does_not_discard_the_good_ones() {
+        let text = r#"
+            [keybindings]
+            "alt+shift+banana" = "close"
+            "super+t" = "spawn-terminal"
+            "super+u" = "launch-missiles"
+            "super+v" = 17
+            "alt+shift+q" = "none"
+        "#;
+        let config = parse(text).unwrap();
+        // The good entries applied...
+        assert_eq!(action_for(&config, "super+t"), Some(Action::SpawnTerminal));
+        assert_eq!(action_for(&config, "alt+shift+q"), None);
+        // ...the bad ones were skipped without binding anything...
+        assert_eq!(action_for(&config, "super+u"), None);
+        assert_eq!(action_for(&config, "super+v"), None);
+        // ...and the untouched defaults survived: 10 - 1 + 1 = 10.
+        assert_eq!(config.keybindings.len(), 10);
+        assert_eq!(action_for(&config, "alt+shift+x"), Some(Action::ToggleMaximize));
+    }
+
+    #[test]
+    fn unknown_action_name_keeps_that_combos_default() {
+        // A typo'd action on a default combo must not unbind the default.
+        let config = parse("[keybindings]\n\"alt+shift+q\" = \"cloes\"\n").unwrap();
+        assert_eq!(action_for(&config, "alt+shift+q"), Some(Action::Close));
+    }
+
+    #[test]
+    fn wrongly_typed_top_level_fields_keep_their_defaults() {
+        let text = r#"
+            focus_follows_mouse = "yes"
+            scale = "big"
+            theme = 3
+        "#;
+        let config = parse(text).unwrap();
+        assert!(!config.focus_follows_mouse);
+        assert_eq!(config.scale, None);
+        assert_eq!(config.theme, None);
+        assert_eq!(config.keybindings.len(), 10);
+    }
+
+    #[test]
+    fn nonsensical_scale_values_are_ignored() {
+        for text in ["scale = 0.0", "scale = -1.5", "scale = -2", "scale = nan"] {
+            let config = parse(text).unwrap();
+            assert_eq!(config.scale, None, "text {text:?}");
+        }
+    }
+
+    #[test]
+    fn integer_scale_is_accepted() {
+        assert_eq!(parse("scale = 2").unwrap().scale, Some(2.0));
+    }
+
+    #[test]
+    fn keybindings_of_the_wrong_type_keeps_the_defaults() {
+        let config = parse("keybindings = \"oops\"").unwrap();
+        assert_eq!(config.keybindings, Config::default_config().keybindings);
+    }
+
+    #[test]
+    fn unknown_top_level_keys_are_ignored_not_fatal() {
+        let text = "focus_follow_mouse = true\ntheme = \"window-maker\"\n";
+        let config = parse(text).unwrap();
+        // The typo'd key changed nothing; the valid key still applied.
+        assert!(!config.focus_follows_mouse);
+        assert_eq!(config.theme.as_deref(), Some("window-maker"));
+    }
+
+    // ---- load ---------------------------------------------------------
+
+    /// One test covers every load() path because they all mutate
+    /// process-global environment variables; splitting them into
+    /// parallel test threads would race.
+    #[test]
+    fn load_reads_the_xdg_path_and_never_fails() {
+        let saved_xdg = std::env::var_os("XDG_CONFIG_HOME");
+        let saved_home = std::env::var_os("HOME");
+        let scratch = std::env::temp_dir().join(format!("wm-config-load-test-{}", std::process::id()));
+        let config_dir = scratch.join("chonkstep");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        let config_file = config_dir.join("config.toml");
+
+        // Missing file: silent defaults.
+        std::env::set_var("XDG_CONFIG_HOME", &scratch);
+        assert_eq!(load().keybindings, Config::default_config().keybindings);
+
+        // Valid file: its contents win.
+        std::fs::write(&config_file, "theme = \"test-theme\"\nscale = 2.0\n").unwrap();
+        let config = load();
+        assert_eq!(config.theme.as_deref(), Some("test-theme"));
+        assert_eq!(config.scale, Some(2.0));
+
+        // Garbage file: warn (unobserved here) and fall back to defaults.
+        std::fs::write(&config_file, "!!! not toml at all [[[").unwrap();
+        let config = load();
+        assert_eq!(config.theme, None);
+        assert_eq!(config.keybindings, Config::default_config().keybindings);
+
+        // HOME fallback: with XDG_CONFIG_HOME unset, ~/.config is used.
+        let home = scratch.join("home");
+        let home_config_dir = home.join(".config").join("chonkstep");
+        std::fs::create_dir_all(&home_config_dir).unwrap();
+        std::fs::write(home_config_dir.join("config.toml"), "theme = \"from-home\"\n").unwrap();
+        std::env::remove_var("XDG_CONFIG_HOME");
+        std::env::set_var("HOME", &home);
+        assert_eq!(load().theme.as_deref(), Some("from-home"));
+
+        // A relative XDG_CONFIG_HOME is invalid per the basedir spec and
+        // must fall back to ~/.config rather than resolve against cwd.
+        std::env::set_var("XDG_CONFIG_HOME", "relative/config");
+        assert_eq!(load().theme.as_deref(), Some("from-home"));
+
+        match saved_xdg {
+            Some(v) => std::env::set_var("XDG_CONFIG_HOME", v),
+            None => std::env::remove_var("XDG_CONFIG_HOME"),
+        }
+        match saved_home {
+            Some(v) => std::env::set_var("HOME", v),
+            None => std::env::remove_var("HOME"),
+        }
+        let _ = std::fs::remove_dir_all(&scratch);
+    }
+}

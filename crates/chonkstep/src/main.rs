@@ -4,9 +4,11 @@ mod theme_select;
 mod wallpaper;
 mod widgets;
 
+use std::collections::HashMap;
 use std::time::Duration;
 
-use wm_core::{Backend, BackendEvent, FocusPolicy, MouseButton, Notification, WindowManager};
+use wm_config::Action;
+use wm_core::{Backend, BackendEvent, FocusPolicy, KeyCombo, MouseButton, Notification, WindowManager};
 use wm_theme::{RasterThemeEngine, Theme};
 use wm_theme_api::Point;
 use wm_x11::X11Backend;
@@ -80,6 +82,15 @@ fn terminal_args(theme: &Theme) -> Vec<String> {
     args
 }
 
+/// Launches the theme-styled terminal — the one path shared by the root
+/// menu's Terminal item and the `spawn-terminal` keybinding, so the two
+/// gestures can never drift apart on font, geometry, or palette.
+fn spawn_terminal(theme: &Theme) {
+    let args = terminal_args(theme);
+    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    spawn::spawn_detached("urxvt", &arg_refs);
+}
+
 fn main() {
     tracing_subscriber::fmt().with_env_filter(tracing_subscriber::EnvFilter::from_default_env()).init();
     tracing::info!(
@@ -87,8 +98,17 @@ fn main() {
         "chonkstep starting \u{2014} a modern window manager with WindowMaker parity"
     );
 
-    let scale = read_scale_factor();
-    tracing::info!(scale, "UI scale (set CHONKSTEP_SCALE to change)");
+    // User configuration is loaded before anything scale- or theme-
+    // dependent is built. `wm_config::load()` never fails by contract:
+    // no file yields the defaults, and a broken file logs what is wrong
+    // and yields the defaults too. That last part is a hard requirement,
+    // not a convenience — a typo in the config must never cost the user
+    // their session, because with the WM refusing to start there is no
+    // terminal to fix the typo from.
+    let config = wm_config::load();
+
+    let scale = read_scale_factor(config.scale);
+    tracing::info!(scale, "UI scale (config `scale`; CHONKSTEP_SCALE overrides)");
     ensure_xcursor_size(scale);
 
     let mut backend = match X11Backend::connect_and_become_wm(None, scale) {
@@ -101,7 +121,7 @@ fn main() {
 
     let screen = backend.screen_size();
 
-    let theme = theme_select::load().scaled(scale);
+    let theme = resolve_theme(config.theme.as_deref()).scaled(scale);
     tracing::info!(theme = %theme.id, "theme loaded");
     if let Some(opacity) = theme.terminal.opacity {
         backend.add_opacity_rule("URxvt", opacity);
@@ -123,13 +143,33 @@ fn main() {
     let mut wm = WindowManager::new(backend, Box::new(engine));
     wm.set_workarea(desktop.workarea(screen));
     wm.bind_default_keys();
-    if read_focus_follows_mouse() {
-        tracing::info!("focus-follows-mouse enabled (CHONKSTEP_FOCUS_FOLLOWS_MOUSE=1)");
+    // Every configured combo is grabbed on top of the defaults — the
+    // modal Alt+Tab grabs stay `wm-core`'s own (`bind_default_keys`),
+    // but the X server only routes a configured combo's presses to the
+    // WM at all if it is grabbed here. A combo that overlaps a default
+    // grab is harmless: same-client grabs simply replace, and the
+    // backend logs-and-continues on any grab it cannot take (an
+    // unknown keysym in the config degrades to a dead binding, never a
+    // dead session).
+    for (combo, _) in &config.keybindings {
+        wm.grab_key(*combo);
+    }
+    if read_focus_follows_mouse(config.focus_follows_mouse) {
+        tracing::info!("focus-follows-mouse enabled (config `focus_follows_mouse`; CHONKSTEP_FOCUS_FOLLOWS_MOUSE overrides)");
         wm.set_focus_policy(FocusPolicy::FocusFollowsMouse);
     }
     for window in existing {
         wm.dispatch(BackendEvent::MapRequest(window));
     }
+
+    // Combo -> action lookup for the key interception in the event loop
+    // below. Built once: the config is immutable for the life of the
+    // process — editing the file and running `scripts/restart.sh`
+    // re-execs a fresh process that re-reads it, the same hot-reload
+    // path everything else uses. Should a combo somehow appear twice,
+    // the later binding wins (plain insertion order), matching the
+    // intuition that the line further down the file is the correction.
+    let keymap: HashMap<KeyCombo, Action> = config.keybindings.iter().cloned().collect();
 
     tracing::info!(clients = wm.client_count(), "entering event loop");
     loop {
@@ -167,6 +207,32 @@ fn main() {
                 pending_motion = Some(event);
                 continue;
             }
+            // Configured keybindings resolve here, BEFORE `wm.dispatch`:
+            // a combo the user bound runs its action and the event stops
+            // with it. Everything that misses the keymap MUST keep
+            // flowing through to `wm-core` unchanged — during a modal
+            // Alt+Tab session the switcher grabs the whole keyboard, so
+            // every key the user presses arrives as a `KeyPress` here:
+            // Tab steps the selection, Escape cancels, and any other
+            // unbound key commits it, none of which appear in the
+            // config keymap. Unbound keys flowing through is therefore
+            // load-bearing; swallowing them would wedge the switcher
+            // open and eat its Escape. (`KeyRelease` — the Alt release
+            // that commits a cycle — is never intercepted at all.)
+            if let BackendEvent::KeyPress(combo) = &event {
+                if let Some(action) = keymap.get(combo) {
+                    // An action observes the same ordering rule as any
+                    // other non-motion event: the held-back motion
+                    // commits first, so e.g. a focus-follows-mouse focus
+                    // change from this same burst lands before an action
+                    // that targets the focused client.
+                    if let Some(motion) = pending_motion.take() {
+                        dispatch_motion(&mut wm, &mut desktop, &theme, motion);
+                    }
+                    run_config_action(&mut wm, &theme, action);
+                    continue;
+                }
+            }
             if let Some(motion) = pending_motion.take() {
                 dispatch_motion(&mut wm, &mut desktop, &theme, motion);
             }
@@ -192,7 +258,7 @@ fn main() {
 
         let mut should_exit = false;
         while let Some((window, local, button, pressed)) = wm.backend_mut().take_shell_click() {
-            if !handle_shell_click(&mut wm, &mut desktop, &theme, window, local, button, pressed) {
+            if !handle_shell_click(&mut wm, &mut desktop, &theme, scale, window, local, button, pressed) {
                 should_exit = true;
             }
         }
@@ -252,16 +318,31 @@ fn wait_for_x11_activity(fd: std::os::unix::io::RawFd, timeout: Duration) {
     }
 }
 
-/// `CHONKSTEP_SCALE` multiplies every pixel dimension in the theme and
-/// the shell's own dock/icon chrome — for HiDPI displays (a nested X
+/// The UI scale multiplies every pixel dimension in the theme and the
+/// shell's own dock/icon chrome — for HiDPI displays (a nested X
 /// server has no display-scaling of its own, so the WM's native ~1990s
-/// pixel sizes read as tiny on a modern high-density panel). Defaults to
-/// 1.0 (no scaling); `scripts/dev-nested.sh` sets a friendlier default.
-fn read_scale_factor() -> f32 {
-    std::env::var("CHONKSTEP_SCALE")
-        .ok()
-        .and_then(|s| s.parse::<f32>().ok())
-        .filter(|s| s.is_finite() && *s > 0.0)
+/// pixel sizes read as tiny on a modern high-density panel).
+/// Precedence: the `CHONKSTEP_SCALE` env var wins over the config
+/// file's `scale`, which wins over 1.0 (no scaling) — the env var stays
+/// on top because scripts (`dev-nested.sh`, per-display session
+/// launchers) use it to override a user's baseline per invocation.
+fn read_scale_factor(config_scale: Option<f32>) -> f32 {
+    resolve_scale(std::env::var("CHONKSTEP_SCALE").ok().as_deref(), config_scale)
+}
+
+/// Pure core of [`read_scale_factor`], split out so the precedence
+/// rules are unit-testable without mutating process-global env vars
+/// (tests share one process and run on parallel threads; `set_var`
+/// races between them). A value that fails validation — unparseable,
+/// non-finite, zero, or negative — is *skipped*, not clamped: a broken
+/// env var falls through to the config value and a broken config value
+/// falls through to 1.0, so a typo degrades to the next-best answer
+/// instead of either a garbage scale or a dead session.
+fn resolve_scale(env: Option<&str>, config: Option<f32>) -> f32 {
+    let valid = |s: &f32| s.is_finite() && *s > 0.0;
+    env.and_then(|s| s.trim().parse::<f32>().ok())
+        .filter(valid)
+        .or_else(|| config.filter(valid))
         .unwrap_or(1.0)
 }
 
@@ -294,12 +375,84 @@ fn ensure_xcursor_size(scale: f32) {
     }
 }
 
-/// `CHONKSTEP_FOCUS_FOLLOWS_MOUSE=1` switches from the default click-
-/// to-focus to focus-follows-mouse — a real preferences UI is future
-/// work; an env var is enough to prove and use the underlying
-/// `wm-core` policy today.
-fn read_focus_follows_mouse() -> bool {
-    std::env::var("CHONKSTEP_FOCUS_FOLLOWS_MOUSE").is_ok_and(|v| v == "1")
+/// Whether to switch from the default click-to-focus to focus-follows-
+/// mouse. Precedence: the `CHONKSTEP_FOCUS_FOLLOWS_MOUSE` env var wins
+/// over the config file's `focus_follows_mouse` — and it wins in *both*
+/// directions: setting it to anything other than `1` forces the policy
+/// off even when the config asks for it, so a session script can pin
+/// either behavior regardless of what the user's config says. Only
+/// when the env var is absent entirely does the config value apply.
+fn read_focus_follows_mouse(config_value: bool) -> bool {
+    resolve_focus_follows_mouse(std::env::var("CHONKSTEP_FOCUS_FOLLOWS_MOUSE").ok().as_deref(), config_value)
+}
+
+/// Pure core of [`read_focus_follows_mouse`] — same testability
+/// rationale as [`resolve_scale`]: precedence logic stays out of reach
+/// of process-global env state so tests can cover every branch without
+/// racing each other on `set_var`.
+fn resolve_focus_follows_mouse(env: Option<&str>, config: bool) -> bool {
+    match env {
+        Some(value) => value == "1",
+        None => config,
+    }
+}
+
+/// Resolves the theme this session dresses in. Precedence: the
+/// persisted theme-menu choice (`theme_select`'s state file) wins over
+/// the config file's `theme`, which wins over the flagship default —
+/// the menu is the more recent, more deliberate gesture (picking a
+/// theme from it hot-restarts on the spot), so a config line written
+/// once must not keep overriding it on every subsequent restart.
+///
+/// `theme_select::load()` already implements the outer two layers
+/// (state file, else flagship); the config layer slots between them
+/// here rather than inside `theme_select` because that module is a pure
+/// persist/recall mechanism also used by the menu itself — which theme
+/// wins at *startup* is session policy, and session policy lives in
+/// `main`.
+fn resolve_theme(config_theme: Option<&str>) -> Theme {
+    if !persisted_theme_choice_exists() {
+        if let Some(theme) = config_theme_fallback(config_theme) {
+            return theme;
+        }
+    }
+    theme_select::load()
+}
+
+/// The config-file layer of [`resolve_theme`], split out (and kept free
+/// of filesystem access) so its edges are unit-testable: `None` when no
+/// theme is configured, and — critically — `None` with a warning, not a
+/// panic or an error, when the configured id names a theme this build
+/// does not ship. A misspelled theme must cost the user the flagship
+/// look for one session, never the session itself.
+fn config_theme_fallback(config_theme: Option<&str>) -> Option<Theme> {
+    let requested = config_theme?;
+    let theme = wm_theme::default_theme::theme_by_id(requested);
+    if theme.is_none() {
+        tracing::warn!(theme = requested, "config names an unknown theme; using the default instead");
+    }
+    theme
+}
+
+/// `true` exactly when `theme_select::load()` would return a persisted
+/// menu choice rather than its flagship fallback: the state file exists
+/// *and* names a theme this build ships (a stale id from another
+/// version does not count — it should fall through to the config layer,
+/// same as no file at all). The path mirrors `theme_select`'s own
+/// `state_path` on purpose and must stay in lockstep with it;
+/// `theme_select` deliberately does not expose "was it persisted?"
+/// because no other caller distinguishes the fallback from a choice.
+fn persisted_theme_choice_exists() -> bool {
+    let path = if let Some(root) = std::env::var_os("XDG_STATE_HOME") {
+        std::path::PathBuf::from(root).join("chonkstep/theme")
+    } else if let Some(home) = std::env::var_os("HOME") {
+        std::path::PathBuf::from(home).join(".local/state/chonkstep/theme")
+    } else {
+        return false;
+    };
+    std::fs::read_to_string(path)
+        .ok()
+        .is_some_and(|id| wm_theme::default_theme::theme_by_id(id.trim()).is_some())
 }
 
 /// Feeds one (already-coalesced) `PointerMotion` event to the icon drag
@@ -313,6 +466,87 @@ fn dispatch_motion(wm: &mut WindowManager<X11Backend>, desktop: &mut Desktop, th
         desktop.drag_widget_motion(wm.backend_mut(), theme, *root);
     }
     wm.dispatch(event);
+}
+
+/// Runs one configured keybinding action (the event loop already
+/// resolved the combo). Window-targeted actions operate on the focused
+/// client and are silent no-ops when nothing is focused — pressing
+/// "close" over an empty desktop should do exactly nothing, not warn.
+/// Workspace moves guard the left edge (workspace 0, matching the
+/// Clip's rewind arrow); the right edge needs no guard because
+/// `switch_workspace` grows the workspace row on demand. The match is
+/// deliberately exhaustive: a new `Action` variant in `wm-config` fails
+/// compilation here instead of silently binding to nothing.
+fn run_config_action(wm: &mut WindowManager<X11Backend>, theme: &Theme, action: &Action) {
+    match action {
+        Action::SpawnTerminal => spawn_terminal(theme),
+        Action::Close => {
+            if let Some(id) = wm.focused_client() {
+                wm.close_client(id);
+            }
+        }
+        Action::ToggleMaximize => {
+            if let Some(id) = wm.focused_client() {
+                wm.toggle_maximize_full(id);
+            }
+        }
+        Action::ToggleShade => {
+            if let Some(id) = wm.focused_client() {
+                wm.toggle_shade(id);
+            }
+        }
+        Action::Miniaturize => {
+            if let Some(id) = wm.focused_client() {
+                wm.miniaturize(id);
+            }
+        }
+        Action::ToggleFullscreen => {
+            if let Some(id) = wm.focused_client() {
+                wm.toggle_fullscreen(id);
+            }
+        }
+        Action::WorkspaceNext => wm.switch_workspace(wm.current_workspace() + 1),
+        Action::WorkspacePrev => {
+            if wm.current_workspace() > 0 {
+                wm.switch_workspace(wm.current_workspace() - 1);
+            }
+        }
+        Action::WorkspaceCarryNext => carry_focused_to_workspace(wm, wm.current_workspace() + 1),
+        Action::WorkspaceCarryPrev => {
+            if wm.current_workspace() > 0 {
+                carry_focused_to_workspace(wm, wm.current_workspace() - 1);
+            }
+        }
+        // The exact path `scripts/restart.sh` and the theme menu take:
+        // re-exec the on-disk binary in place, windows surviving via
+        // the X11 SaveSet — which is also what makes this binding the
+        // config hot-reload gesture.
+        Action::Restart => restart_in_place(),
+    }
+}
+
+/// Moves the focused client to `workspace` and follows it there — the
+/// keyboard "carry" gesture (real WindowMaker's "move to next/previous
+/// workspace with window"). The refocus at the end is load-bearing:
+/// `move_client_to_workspace` drops focus the instant the client leaves
+/// the active workspace, and without re-focusing after arriving, the
+/// second carry press in a row would find nothing focused and silently
+/// do nothing — the whole point of the gesture is carrying one window
+/// across several workspaces in repeated presses. The refocus rides the
+/// public `ActivateRequested` path (the same one a pager's
+/// `_NET_ACTIVE_WINDOW` message takes), so it also re-raises — correct
+/// here, since the carried window was the focused one to begin with. A
+/// no-op with nothing focused.
+fn carry_focused_to_workspace(wm: &mut WindowManager<X11Backend>, workspace: usize) {
+    let Some(id) = wm.focused_client() else {
+        return;
+    };
+    let Some(window) = wm.client(id).map(|client| client.window) else {
+        return;
+    };
+    wm.move_client_to_workspace(id, workspace);
+    wm.switch_workspace(workspace);
+    wm.dispatch(BackendEvent::ActivateRequested(window));
 }
 
 /// Reacts to a `wm-core` state change the shell needs to know about but
@@ -361,6 +595,7 @@ fn handle_shell_click(
     wm: &mut WindowManager<X11Backend>,
     desktop: &mut Desktop,
     theme: &Theme,
+    scale: f32,
     window: Window,
     local: Point,
     button: MouseButton,
@@ -428,15 +663,11 @@ fn handle_shell_click(
 
     if let Some(action) = desktop.click_menu(wm.backend_mut(), theme, window, local) {
         match action {
-            RootMenuAction::LaunchTerminal => {
-                let args = terminal_args(theme);
-                let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-                spawn::spawn_detached("urxvt", &arg_refs);
-            }
+            RootMenuAction::LaunchTerminal => spawn_terminal(theme),
             RootMenuAction::LaunchAbout => {
                 spawn::spawn_detached(&about_binary_path(), &[]);
             }
-            RootMenuAction::LaunchBrowser => launch_browser(),
+            RootMenuAction::LaunchBrowser => launch_browser(scale),
             RootMenuAction::SetWallpaper(wallpaper) => {
                 desktop.set_wallpaper(wm.backend_mut(), theme, wallpaper);
             }
@@ -490,16 +721,19 @@ fn about_binary_path() -> String {
 /// desktop's own scale.
 const BROWSER_SCALE_FACTOR: f32 = 0.85;
 
-/// Launches the system browser at this desktop's `CHONKSTEP_SCALE`
-/// (times [`BROWSER_SCALE_FACTOR`]) — Microsoft Edge is a third-party,
+/// Launches the system browser at this desktop's resolved scale (times
+/// [`BROWSER_SCALE_FACTOR`]) — Microsoft Edge is a third-party,
 /// chonkstep-unaware binary, so unlike `chonk-about` (a native app that
 /// reads the scale itself via `chonk-ui::scale_factor`), it has to be
 /// told through the flags/env vars its own toolkit understands. See
 /// `spawn::chromium_scale_args`/`spawn::gtk_qt_scale_env` — the same two
 /// calls are the whole recipe for scaling *any* future external app the
-/// menu grows to launch, not just this one.
-fn launch_browser() {
-    let scale = read_scale_factor() * BROWSER_SCALE_FACTOR;
+/// menu grows to launch, not just this one. The scale is passed in
+/// rather than re-read from the environment so the config file's
+/// `scale` fallback (env-less launches) applies here exactly as it does
+/// to the WM's own chrome.
+fn launch_browser(desktop_scale: f32) {
+    let scale = desktop_scale * BROWSER_SCALE_FACTOR;
     let mut args = spawn::chromium_scale_args(scale);
     args.extend(spawn::chromium_avoid_secrets_service_hang_args());
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
@@ -546,4 +780,139 @@ fn restart_in_place() -> ! {
     let err = std::process::Command::new(&bin).exec();
     tracing::error!(?err, bin = ?bin, "re-exec failed; exiting instead of restarting");
     std::process::exit(1);
+}
+
+// The precedence helpers are tested through their pure cores
+// (`resolve_scale`, `resolve_focus_follows_mouse`,
+// `config_theme_fallback`) rather than the env-reading wrappers: tests
+// share one process and run on parallel threads, so `set_var`-based
+// tests race each other — the split exists precisely so every branch is
+// reachable without touching process-global state.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn env_scale_wins_over_config_scale() {
+        assert_eq!(resolve_scale(Some("2.0"), Some(1.5)), 2.0);
+    }
+
+    #[test]
+    fn config_scale_applies_without_env() {
+        assert_eq!(resolve_scale(None, Some(1.5)), 1.5);
+    }
+
+    #[test]
+    fn scale_defaults_to_one_with_neither_source() {
+        assert_eq!(resolve_scale(None, None), 1.0);
+    }
+
+    #[test]
+    fn unparseable_env_scale_falls_through_to_config() {
+        // A typo'd env var must degrade to the next-best answer, not to
+        // the hard default — the config value is still a deliberate
+        // user choice.
+        assert_eq!(resolve_scale(Some("garbage"), Some(1.5)), 1.5);
+    }
+
+    #[test]
+    fn out_of_range_env_scale_falls_through_to_config() {
+        assert_eq!(resolve_scale(Some("0"), Some(1.5)), 1.5);
+        assert_eq!(resolve_scale(Some("-2"), Some(1.5)), 1.5);
+        // `parse::<f32>` accepts these spellings; the validity filter
+        // must still reject them (a NaN scale poisons every pixel
+        // computation downstream).
+        assert_eq!(resolve_scale(Some("inf"), Some(1.5)), 1.5);
+        assert_eq!(resolve_scale(Some("NaN"), Some(1.5)), 1.5);
+    }
+
+    #[test]
+    fn invalid_config_scale_falls_through_to_default() {
+        assert_eq!(resolve_scale(None, Some(0.0)), 1.0);
+        assert_eq!(resolve_scale(None, Some(-1.0)), 1.0);
+        assert_eq!(resolve_scale(None, Some(f32::NAN)), 1.0);
+        assert_eq!(resolve_scale(None, Some(f32::INFINITY)), 1.0);
+    }
+
+    #[test]
+    fn both_sources_invalid_still_yields_a_usable_scale() {
+        // The end-to-end graceful-degradation guarantee: no combination
+        // of broken inputs may leave the session without a scale.
+        assert_eq!(resolve_scale(Some("bogus"), Some(-3.0)), 1.0);
+    }
+
+    #[test]
+    fn whitespace_around_env_scale_is_tolerated() {
+        assert_eq!(resolve_scale(Some(" 1.5 "), None), 1.5);
+    }
+
+    #[test]
+    fn env_focus_var_enables_over_config_off() {
+        assert!(resolve_focus_follows_mouse(Some("1"), false));
+    }
+
+    #[test]
+    fn env_focus_var_disables_over_config_on() {
+        // The env var wins in BOTH directions: any present value other
+        // than "1" pins the policy off regardless of the config.
+        assert!(!resolve_focus_follows_mouse(Some("0"), true));
+        assert!(!resolve_focus_follows_mouse(Some(""), true));
+        assert!(!resolve_focus_follows_mouse(Some("true"), true));
+    }
+
+    #[test]
+    fn config_focus_value_applies_without_env() {
+        assert!(resolve_focus_follows_mouse(None, true));
+        assert!(!resolve_focus_follows_mouse(None, false));
+    }
+
+    #[test]
+    fn config_theme_resolves_known_ids() {
+        for id in ["window-maker", "amber-phosphor", "teal-blueprint", "graphite", "next-lavender"] {
+            let theme = config_theme_fallback(Some(id));
+            assert_eq!(theme.map(|t| t.id), Some(id.to_string()), "built-in theme id {id} must resolve from config");
+        }
+    }
+
+    #[test]
+    fn unknown_config_theme_degrades_to_none() {
+        // `resolve_theme` then falls through to the flagship — a
+        // misspelled theme name must never cost the user the session.
+        assert!(config_theme_fallback(Some("no-such-theme")).is_none());
+        assert!(config_theme_fallback(Some("")).is_none());
+    }
+
+    #[test]
+    fn absent_config_theme_is_not_an_error() {
+        assert!(config_theme_fallback(None).is_none());
+    }
+
+    /// Keeps `docs/config.example.toml` honest: the example is parsed
+    /// with the real parser, must restate exactly the default bindings
+    /// (every option line is commented out, so copying the file
+    /// verbatim changes nothing), and must not smuggle in anything
+    /// extra. Documentation that the test suite does not check drifts;
+    /// this one cannot.
+    #[test]
+    fn example_config_parses_and_matches_the_defaults() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/config.example.toml");
+        let text = std::fs::read_to_string(path).expect("docs/config.example.toml must exist");
+        let example = wm_config::parse(&text).expect("the example config must parse cleanly");
+        let defaults = wm_config::Config::default_config();
+
+        assert!(!example.focus_follows_mouse, "example must leave focus_follows_mouse at its default (commented out)");
+        assert!(example.scale.is_none(), "example must leave scale unset (commented out)");
+        assert!(example.theme.is_none(), "example must leave theme unset (commented out)");
+
+        let as_set = |config: &wm_config::Config| {
+            let mut bindings: Vec<(KeyCombo, Action)> = config.keybindings.clone();
+            bindings.sort_by_key(|(combo, _)| (combo.keysym, combo.modifiers.bits()));
+            bindings
+        };
+        assert_eq!(
+            as_set(&example),
+            as_set(&defaults),
+            "the example's [keybindings] must restate exactly the default set — no drift, no extras"
+        );
+    }
 }
