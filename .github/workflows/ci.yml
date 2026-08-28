@@ -25,7 +25,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Run the workspace test suite
-        run: cargo test --workspace
+        # The Wayland crates are excluded here NOT because they are
+        # untested but because they are the wayland job's whole purpose
+        # (which installs their system libraries and builds+tests them);
+        # compiling Smithay twice per push buys nothing.
+        run: cargo test --workspace --exclude wm-wayland --exclude chonkstep-wayland
 
       - name: Install X11 smoke test dependencies
         run: |
