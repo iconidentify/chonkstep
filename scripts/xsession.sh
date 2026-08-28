@@ -47,8 +47,17 @@ fi
 # the wallpaper when the WM's root pixmap is replaced — is handled by
 # chonkstep itself, which pokes picom with SIGUSR1 after publishing a
 # fresh wallpaper (see main.rs).
+# --no-use-damage trades incremental repaints for full-screen ones:
+# with damage tracking on, picom v13's xrender backend composites stale
+# state after window restacks - a window raised from beneath another
+# kept showing the old scene, and the loser of a restack rendered
+# ghost-faint until an unrelated drag damaged it (confirmed live; the
+# WM's stacking and window content were correct throughout). Full
+# repaints are measurably fine on the software-rendered VM and this is
+# a correctness-over-speed call; revisit if a real GPU host shows the
+# damage path behaving.
 if command -v picom >/dev/null 2>&1; then
-    picom -b --backend xrender >> "$LOG_DIR/picom.log" 2>&1
+    picom -b --backend xrender --no-use-damage >> "$LOG_DIR/picom.log" 2>&1
 fi
 
 exec dbus-run-session -- "$BIN" >> "$LOG_DIR/session.log" 2>&1
