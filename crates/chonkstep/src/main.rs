@@ -1,149 +1,22 @@
-mod apps;
-mod desktop;
-mod launchdock;
-mod spawn;
-mod theme_select;
-mod wallpaper;
-mod widgets;
+//! The X11 chonkstep binary: a thin event-loop driver over the
+//! backend-generic desktop shell in `chonk-shell`. Everything the
+//! desktop *is* — dock, Clip, launcher strip, menus, wallpaper, theme
+//! semantics — lives in [`chonk_shell::shell::Shell`]; this binary owns
+//! only what is irreducibly process- or X11-side: startup wiring, the
+//! `poll`-driven loop with its motion coalescing, scale/theme/focus
+//! precedence (env over config), the hot-restart `exec`, and process
+//! exit. The future Wayland binary mirrors exactly this file over the
+//! same `Shell`, which is what keeps the two desktops identical by
+//! construction rather than by porting discipline.
 
-use std::collections::HashMap;
 use std::time::Duration;
 
-use wm_config::Action;
-use wm_core::{Backend, BackendEvent, ClientFlags, FocusPolicy, KeyCombo, MouseButton, Notification, WindowManager};
+use wm_core::{Backend, BackendEvent, FocusPolicy, WindowManager};
 use wm_theme::{RasterThemeEngine, Theme};
-use wm_theme_api::Point;
-use wm_x11::{X11Backend, XWindow};
-use x11rb::protocol::xproto::Window;
+use wm_x11::X11Backend;
 
-use desktop::{Desktop, IconDragResult, MenuAction, RootMenuAction, WindowMenuAction, WindowMenuContext};
-use launchdock::{LaunchDock, LaunchDockAction};
-
-/// `urxvt`'s own default size (80x24, negotiated correctly through
-/// normal ICCCM size hints) is already reasonable, and — unlike
-/// alacritty, see the git history around this line for the saga — it
-/// reliably relayouts its content to match a real resize (confirmed
-/// live: resizing it externally correctly grows its reported terminal
-/// grid). So this needs no default-size workaround at all; just a
-/// legible font and a roomy geometry passed directly at launch.
-// Fallback chain for glyphs the primary font's own Nerd Font icon patch
-// doesn't cover (some file-type icons in `ls`/`eza`-style aliases
-// rendered as an empty tofu box otherwise) — urxvt's `-fn` list is
-// consulted in order for whatever glyph the first font is missing.
-// Deliberately does *not* include `Noto Color Emoji`: tried it, and
-// urxvt (a classic Xft-based terminal, not GPU-accelerated — it has no
-// color-glyph rendering path the way alacritty/kitty do) doesn't just
-// fail to show emoji with it, it visibly corrupts nearby rendering
-// (a solid black rectangle over adjacent text, confirmed live). Emoji
-// support isn't something urxvt can do; leaving them unrendered is the
-// non-broken outcome.
-//
-// The 16-color ANSI palette (`--color0`..`--color15`) plus fg/bg/cursor
-// match the theme this desktop's apps already use elsewhere (same
-// values as the old alacritty config's `[colors]` section) rather than
-// urxvt's own bland stock scheme.
-// Font and geometry are deliberately *not* per-theme: every theme keeps
-// the same terminal font, only its colors change. `pixelsize` tracks
-// CHONKSTEP_SCALE (16px at 1x) the same way the WM's own chrome does.
-const TERMINAL_FONT_BASE_PX: f32 = 16.0;
-// Cells, not pixels — sized so the resulting window still fits the
-// screen at CHONKSTEP_SCALE 2 on a 1920-wide display (the old 110x32
-// exceeded it once the font scaled up).
-const TERMINAL_GEOMETRY: &str = "92x26";
-
-/// urxvt argument list for the active theme's terminal palette —
-/// foreground/background/cursor plus the full 16-slot ANSI set, so
-/// every theme restyles terminals along with the chrome. The scale for
-/// the font size is recovered from the already-scaled theme (titlebar
-/// font is 12px at 1x) rather than re-reading the environment.
-fn terminal_args(theme: &Theme) -> Vec<String> {
-    let hex = |c: wm_theme::model::Color| format!("#{:02x}{:02x}{:02x}", c.r, c.g, c.b);
-    let px = (theme.titlebar.font.size / 12.0 * TERMINAL_FONT_BASE_PX).round().max(8.0) as u32;
-    let mut args = vec![
-        "-fn".to_string(),
-        format!("xft:JetBrainsMono Nerd Font:pixelsize={px},xft:Noto Sans Symbols 2:pixelsize={px}"),
-        "-geometry".to_string(),
-        TERMINAL_GEOMETRY.to_string(),
-        "-fg".to_string(),
-        hex(theme.terminal.fg),
-        "-bg".to_string(),
-        // Deliberately opaque: the theme's glass opacity is applied by
-        // the compositor to the whole frame (`add_opacity_rule` in
-        // `wm-x11`), not by the terminal itself. Client-side alpha via
-        // a 32-bit visual was tried first and reverted: urxvt leaves
-        // stale framebuffer garbage in regions it fails to repaint on
-        // scroll/resize, so rows flickered between glass, garbage, and
-        // fully transparent (confirmed live).
-        hex(theme.terminal.bg),
-        "-cr".to_string(),
-        hex(theme.terminal.cursor),
-    ];
-    for (index, color) in theme.terminal.ansi.iter().enumerate() {
-        args.push(format!("--color{index}"));
-        args.push(hex(*color));
-    }
-    args
-}
-
-/// Launches the theme-styled terminal — the one path shared by the root
-/// menu's Terminal item and the `spawn-terminal` keybinding, so the two
-/// gestures can never drift apart on font, geometry, or palette.
-fn spawn_terminal(theme: &Theme) {
-    spawn_urxvt(terminal_args(theme));
-}
-
-/// The single urxvt spawn step: [`spawn_terminal`] passes the themed
-/// args alone, [`launch_app`] appends `-e` plus a `.desktop` entry's
-/// command line for `Terminal=true` apps. Factored so the two callers
-/// can never drift on how the arg list actually reaches the process.
-fn spawn_urxvt(args: Vec<String>) {
-    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    spawn::spawn_detached("urxvt", &arg_refs);
-}
-
-/// Launches one `.desktop` entry — the shared dispatch behind both the
-/// root menu's Applications submenu and the launcher dock's tiles, so
-/// the two gestures can never disagree on how an entry runs.
-/// `Terminal=true` entries run inside the themed terminal (urxvt's `-e`
-/// consumes the rest of the command line as the program to exec), so a
-/// TUI app gets the exact font/geometry/palette the Terminal menu item
-/// itself would. An empty parsed command line — a malformed entry the
-/// scanner let through — is a logged no-op, never a panic.
-fn launch_app(entry: &apps::AppEntry, theme: &Theme) {
-    // Scale recovered from the already-scaled theme (titlebar font is
-    // 12px at 1x) — the same trick `terminal_args` uses, so launch
-    // fixups need no separate scale plumbing.
-    let scale = theme.titlebar.font.size / 12.0;
-    let Some((program, args)) = entry.exec.split_first() else {
-        tracing::warn!(app = %entry.id, "desktop entry has an empty command line; not launching");
-        return;
-    };
-    if entry.terminal {
-        let mut argv = terminal_args(theme);
-        argv.push("-e".to_string());
-        argv.extend(entry.exec.iter().cloned());
-        spawn_urxvt(argv);
-        return;
-    }
-    // External GUI launches get the environment/argument fixups the
-    // old dedicated browser launcher carried, now applied generically:
-    // every app is told the desktop's scale through the GTK/Qt env
-    // vars (no XSETTINGS daemon or portal here to advertise it), and
-    // the Chromium family additionally gets its own scale flag plus
-    // `--password-store=basic` — without which Chromium blocks ~25s at
-    // startup on a D-Bus secrets service this session doesn't provide
-    // (the whole story lives on the spawn.rs helpers). Confirmed live:
-    // the first .desktop-launched Chromium hung exactly that way.
-    let mut argv: Vec<String> = args.to_vec();
-    let base = program.rsplit('/').next().unwrap_or(program);
-    if base.contains("chrom") || base.contains("chrome") || base == "microsoft-edge" || base.starts_with("brave") {
-        argv.extend(spawn::chromium_scale_args(scale));
-        argv.extend(spawn::chromium_avoid_secrets_service_hang_args());
-        argv.extend(spawn::chromium_x11_platform_args());
-    }
-    let arg_refs: Vec<&str> = argv.iter().map(String::as_str).collect();
-    spawn::spawn_detached_with_env(program, &arg_refs, &spawn::gtk_qt_scale_env(scale));
-}
+use chonk_shell::shell::{Shell, ShellOutcome};
+use chonk_shell::{spawn, theme_select};
 
 fn main() {
     tracing_subscriber::fmt().with_env_filter(tracing_subscriber::EnvFilter::from_default_env()).init();
@@ -182,35 +55,26 @@ fn main() {
     }
     let engine = RasterThemeEngine::new(theme.clone());
 
-    // The `.desktop` application index, scanned once at startup — one
-    // vec, three consumers that must agree on entry positions: the
-    // desktop keeps a clone for the root menu's Applications submenu
-    // (`RootMenuAction::LaunchApp(i)` indexes it), the launcher dock
-    // resolves its persisted pins against it, and the launch dispatch
-    // in the event loop indexes it again when either of those fires.
-    let apps = apps::scan_applications();
-    tracing::info!(count = apps.len(), "application entries scanned");
+    // The entire desktop shell — dock, Clip, launcher strip, menus,
+    // wallpaper, the `.desktop` application index — is built here in
+    // one step, against the mutable backend, before `WindowManager::new`
+    // takes ownership of it below. From here on the shell reaches the
+    // backend only through the `WindowManager` handed to each of its
+    // methods, which is the shape both backend binaries share.
+    let mut shell = Shell::new(&mut backend, &config, theme, scale);
 
-    let mut desktop = Desktop::new(&mut backend, screen, scale, theme.id.clone(), apps.clone());
-    // The launcher strip below the Clip. Its tile size mirrors
-    // `Desktop::new`'s own derivation (56px at 1x, scaled, floored at
-    // 16) rather than inventing a second number: the strip's tiles
-    // must read as the same family as the Clip above them and the
-    // miniwindow icon tiles pins are dropped from.
-    let mut launchdock = LaunchDock::new(&mut backend, &theme, screen, ((56.0 * scale).round() as u32).max(16), &apps);
-
-    // The wallpaper pixmap `Desktop::new` just published dies with the
-    // previous process's X connection on every hot-restart, and the
-    // session compositor keeps referencing the dead one — compositing
-    // translucent windows over black instead of the wallpaper
-    // (confirmed live; a fresh picom picked the new pixmap up fine).
-    // SIGUSR1 is picom's documented full-reset signal: cheap, safe,
-    // and a no-op exit code when no compositor is running.
+    // The wallpaper pixmap `Shell::new` just published (via its
+    // `Desktop`) dies with the previous process's X connection on every
+    // hot-restart, and the session compositor keeps referencing the
+    // dead one — compositing translucent windows over black instead of
+    // the wallpaper (confirmed live; a fresh picom picked the new
+    // pixmap up fine). SIGUSR1 is picom's documented full-reset signal:
+    // cheap, safe, and a no-op exit code when no compositor is running.
     spawn::spawn_detached("pkill", &["-USR1", "-x", "picom"]);
 
     let existing = backend.scan_existing_windows();
     let mut wm = WindowManager::new(backend, Box::new(engine));
-    wm.set_workarea(desktop.workarea(screen));
+    wm.set_workarea(shell.workarea(screen));
     wm.bind_default_keys();
     // Every configured combo is grabbed on top of the defaults — the
     // modal Alt+Tab grabs stay `wm-core`'s own (`bind_default_keys`),
@@ -237,26 +101,12 @@ fn main() {
         wm.dispatch(BackendEvent::MapRequest(window));
     }
 
-    // Combo -> action lookup for the key interception in the event loop
-    // below. Built once: the config is immutable for the life of the
-    // process — editing the file and running `scripts/restart.sh`
-    // re-execs a fresh process that re-reads it, the same hot-reload
-    // path everything else uses. Should a combo somehow appear twice,
-    // the later binding wins (plain insertion order), matching the
-    // intuition that the line further down the file is the correction.
-    let keymap: HashMap<KeyCombo, Action> = config.keybindings.iter().cloned().collect();
-
     tracing::info!(clients = wm.client_count(), "entering event loop");
-    // The pointer's last known root-relative position, recorded by
-    // every dispatched motion event. Shell button events carry only
-    // window-local coordinates (`translate_button` in `wm-x11`), but
-    // the launcher strip's release/pin decisions need a root position —
-    // and the most recent motion is exact for them in practice, since
-    // a drag's release is always preceded by the motion that put the
-    // pointer wherever it is released. Lives outside the loop because
-    // the release drains from `take_shell_click` on a later iteration
-    // than the motion that preceded it.
-    let mut pointer_root = Point::new(0, 0);
+    // The X11 root window's id, for the click routing below — the one
+    // surface identity the shell cannot know (nothing backend-generic
+    // could name it), so the binary tells root presses apart from
+    // shell-surface clicks before anything reaches the shell.
+    let root = wm.backend().root();
     loop {
         if restart_requested() {
             tracing::info!("restart requested — re-executing in place");
@@ -278,6 +128,7 @@ fn main() {
         // one from earlier in the burst.
         let mut pending_motion = None;
         let mut display_lost = false;
+        let mut should_exit = false;
         while let Some(event) = wm.backend_mut().poll_event() {
             // The display server is gone: nothing below can succeed,
             // and looping on a dead connection is exactly how the
@@ -305,21 +156,23 @@ fn main() {
             // open and eat its Escape. (`KeyRelease` — the Alt release
             // that commits a cycle — is never intercepted at all.)
             if let BackendEvent::KeyPress(combo) = &event {
-                if let Some(action) = keymap.get(combo) {
+                if let Some(action) = shell.keymap_action(combo) {
                     // An action observes the same ordering rule as any
                     // other non-motion event: the held-back motion
                     // commits first, so e.g. a focus-follows-mouse focus
                     // change from this same burst lands before an action
                     // that targets the focused client.
                     if let Some(motion) = pending_motion.take() {
-                        dispatch_motion(&mut wm, &mut desktop, &mut launchdock, &theme, &mut pointer_root, motion);
+                        dispatch_motion(&mut wm, &mut shell, motion);
                     }
-                    run_config_action(&mut wm, &theme, action);
+                    if exit_requested(shell.run_action(&mut wm, &action)) {
+                        should_exit = true;
+                    }
                     continue;
                 }
             }
             if let Some(motion) = pending_motion.take() {
-                dispatch_motion(&mut wm, &mut desktop, &mut launchdock, &theme, &mut pointer_root, motion);
+                dispatch_motion(&mut wm, &mut shell, motion);
             }
             wm.dispatch(event);
         }
@@ -328,22 +181,39 @@ fn main() {
             break;
         }
         if let Some(motion) = pending_motion.take() {
-            dispatch_motion(&mut wm, &mut desktop, &mut launchdock, &theme, &mut pointer_root, motion);
+            dispatch_motion(&mut wm, &mut shell, motion);
         }
 
         while let Some(notification) = wm.take_notification() {
-            handle_notification(&mut wm, &mut desktop, &theme, notification);
+            shell.on_notification(&mut wm, notification);
         }
 
         if let Some(new_size) = wm.backend_mut().take_screen_resize() {
             tracing::info!(width = new_size.w, height = new_size.h, "screen resized");
-            desktop.resize_to_screen(wm.backend_mut(), &theme, new_size);
-            wm.set_workarea(desktop.workarea(new_size));
+            shell.on_screen_resize(&mut wm, new_size);
+            wm.set_workarea(shell.workarea(new_size));
         }
 
-        let mut should_exit = false;
-        while let Some((window, local, button, pressed)) = wm.backend_mut().take_shell_click() {
-            if !handle_shell_click(&mut wm, &mut desktop, &mut launchdock, &theme, &apps, window, local, button, pressed, pointer_root) {
+        // Shell-surface clicks drain to the shell, with the one routing
+        // decision the shell cannot make for itself (see `root` above):
+        // presses on the root window — the right-click that opens the
+        // root menu, any other press that closes an open one — split
+        // off into `on_root_press`. Root reacts on *press* because a
+        // context menu should appear the instant you press the button,
+        // same as everywhere else. Root *releases* still flow through
+        // `on_shell_click`: an in-progress launcher-strip drag holds a
+        // pointer grab, so its release can report against any window at
+        // all, the root included, and the shell's release-before-
+        // anything-else routing must get to see it (drag-off-the-strip
+        // unpins) — a root release the shell has no drag in progress
+        // for falls through its routing as the no-op it always was.
+        while let Some((surface, local, button, pressed)) = wm.backend_mut().take_shell_click() {
+            let outcome = if surface == root && pressed {
+                shell.on_root_press(&mut wm, local, button)
+            } else {
+                shell.on_shell_click(&mut wm, surface, local, button, pressed)
+            };
+            if exit_requested(outcome) {
                 should_exit = true;
             }
         }
@@ -352,25 +222,18 @@ fn main() {
             break;
         }
 
-        if let Some((window, local)) = wm.backend_mut().take_shell_motion() {
-            desktop.hover_menu(wm.backend_mut(), &theme, window, local);
-        }
-        // Workspace plumbing between the WM and the dock indicator:
-        // drain a click on the indicator into a real switch first, then
-        // mirror the authoritative state into the shared cell so
-        // `tick_widgets` repaints the tile exactly when it changed.
-        if let Some(target) = desktop.take_workspace_request() {
-            wm.switch_workspace(target);
-        }
-        let (current, count) = (wm.current_workspace(), wm.workspace_count());
-        desktop.set_workspace_display(wm.backend_mut(), &theme, current, count);
-        desktop.tick_menu(wm.backend_mut(), &theme);
-        desktop.tick_widgets(wm.backend_mut(), &theme);
-        // Same cadence as the widget tick: refresh the launcher strip's
-        // running-app indicators from the live client set — a cheap
-        // no-op inside `update_running` whenever nothing changed.
-        let running = running_pairs(&wm);
-        launchdock.update_running(wm.backend_mut(), &theme, &running);
+        // No separate `take_shell_motion` drain here: the shell drains
+        // it itself inside `on_motion` (menu hover rides the same
+        // cadence as the drag trackers), and every pointer motion over
+        // a shell surface reaches `on_motion` through the coalesced
+        // `PointerMotion` dispatch above — the backend queues both from
+        // the same X event, so a shell motion can never be left pending
+        // past the burst that produced it.
+
+        // Housekeeping: widgets, menu timers, workspace indicator,
+        // launcher running-state — everything the shell refreshes per
+        // tick rather than per event.
+        shell.tick(&mut wm);
 
         // Blocks until the X11 socket actually has something to read,
         // instead of a fixed sleep — the entire reason drags/resizes
@@ -386,10 +249,10 @@ fn main() {
 }
 
 /// How often the main loop wakes up on its own even with no X11
-/// activity at all, to run `tick_menu`/`tick_clock`/`restart_requested`
-/// — ~60Hz, far more than any of those actually need, but cheap and
-/// keeps them feeling responsive rather than picking a number tied to
-/// any one of their specific timing requirements.
+/// activity at all, to run `Shell::tick`/`restart_requested` — ~60Hz,
+/// far more than any of those actually need, but cheap and keeps them
+/// feeling responsive rather than picking a number tied to any one of
+/// their specific timing requirements.
 const HOUSEKEEPING_INTERVAL: Duration = Duration::from_millis(16);
 
 /// Blocks the calling thread until `fd` is readable or `timeout`
@@ -405,6 +268,45 @@ fn wait_for_x11_activity(fd: std::os::unix::io::RawFd, timeout: Duration) {
     // for the duration of the call.
     unsafe {
         libc::poll(fds.as_mut_ptr(), 1, timeout.as_millis() as i32);
+    }
+}
+
+/// Feeds one (already-coalesced) `PointerMotion` event to the shell —
+/// which routes it to its icon, dock-widget, and launcher-strip drag
+/// trackers, records the last root position for its own release
+/// decisions, and drains the backend's pending shell-surface motion
+/// into menu hover — and then to `wm-core` itself. Pulled out of the
+/// main loop's drain since it's needed at two points there (mid-burst,
+/// when a non-motion event follows one, and once more after the burst
+/// ends).
+fn dispatch_motion(
+    wm: &mut WindowManager<X11Backend>,
+    shell: &mut Shell<X11Backend>,
+    event: BackendEvent<wm_x11::XWindow, wm_x11::XFrame>,
+) {
+    if let BackendEvent::PointerMotion { root, .. } = &event {
+        shell.on_motion(wm, *root);
+    }
+    wm.dispatch(event);
+}
+
+/// Applies a [`ShellOutcome`] to the process — the two acts the shell
+/// deliberately cannot perform itself stay here in the binary: `Exit`
+/// is reported back as `true` for the loop to break on, and `Restart`
+/// re-execs on the spot (the shell already persisted whatever the
+/// fresh process must read back — theme choice, wallpaper — before
+/// returning it). Split out because outcomes surface at two points in
+/// the loop (a configured key action mid-drain, a shell click after
+/// it) that must not drift on what each variant means.
+fn exit_requested(outcome: ShellOutcome) -> bool {
+    match outcome {
+        ShellOutcome::Continue => false,
+        ShellOutcome::Exit => true,
+        // The exact path `scripts/restart.sh` takes: re-exec the
+        // on-disk binary in place, windows surviving via the X11
+        // SaveSet — which is also what makes the theme menu (and a
+        // bound `Restart` action) the config hot-reload gesture.
+        ShellOutcome::Restart => restart_in_place(),
     }
 }
 
@@ -499,7 +401,7 @@ fn resolve_focus_follows_mouse(env: Option<&str>, config: bool) -> bool {
 /// here rather than inside `theme_select` because that module is a pure
 /// persist/recall mechanism also used by the menu itself — which theme
 /// wins at *startup* is session policy, and session policy lives in
-/// `main`.
+/// the binary.
 fn resolve_theme(config_theme: Option<&str>) -> Theme {
     if !persisted_theme_choice_exists() {
         if let Some(theme) = config_theme_fallback(config_theme) {
@@ -545,401 +447,11 @@ fn persisted_theme_choice_exists() -> bool {
         .is_some_and(|id| wm_theme::default_theme::theme_by_id(id.trim()).is_some())
 }
 
-/// Feeds one (already-coalesced) `PointerMotion` event to the icon drag
-/// tracker, the dock widget drag tracker, the launcher strip's own drag
-/// tracker, and `wm-core` itself — pulled out of the main loop's drain
-/// since it's needed at two points there (mid-burst, when a non-motion
-/// event follows one, and once more after the burst ends). Also records
-/// the root position into `last_root`, the loop-held cell shell button
-/// handling reads back for release decisions that need root coordinates
-/// (see `pointer_root`'s declaration in `main`).
-fn dispatch_motion(
-    wm: &mut WindowManager<X11Backend>,
-    desktop: &mut Desktop,
-    launchdock: &mut LaunchDock,
-    theme: &Theme,
-    last_root: &mut Point,
-    event: BackendEvent<wm_x11::XWindow, wm_x11::XFrame>,
-) {
-    if let BackendEvent::PointerMotion { root, .. } = &event {
-        *last_root = *root;
-        desktop.drag_icon_motion(wm.backend_mut(), *root);
-        desktop.drag_widget_motion(wm.backend_mut(), theme, *root);
-        launchdock.handle_motion(wm.backend_mut(), theme, *root);
-    }
-    wm.dispatch(event);
-}
-
-/// The launcher strip's view of what is currently running: one
-/// `(WM_CLASS class, raw window id)` pair per managed client —
-/// `iter_clients` only ever yields live clients, so no lifecycle
-/// filtering happens here. The id crosses to the strip as a plain
-/// `u32` because the strip hands it straight back through
-/// `LaunchDockAction::Focus`, where the dispatch re-wraps it as an
-/// `XWindow` for the same `ActivateRequested` path a pager's
-/// `_NET_ACTIVE_WINDOW` message takes.
-fn running_pairs(wm: &WindowManager<X11Backend>) -> Vec<(String, u32)> {
-    wm.iter_clients().map(|(_, client)| (client.class.clone(), client.window.0)).collect()
-}
-
-/// Runs one configured keybinding action (the event loop already
-/// resolved the combo). Window-targeted actions operate on the focused
-/// client and are silent no-ops when nothing is focused — pressing
-/// "close" over an empty desktop should do exactly nothing, not warn.
-/// Workspace moves guard the left edge (workspace 0, matching the
-/// Clip's rewind arrow); the right edge needs no guard because
-/// `switch_workspace` grows the workspace row on demand. The match is
-/// deliberately exhaustive: a new `Action` variant in `wm-config` fails
-/// compilation here instead of silently binding to nothing.
-fn run_config_action(wm: &mut WindowManager<X11Backend>, theme: &Theme, action: &Action) {
-    match action {
-        Action::SpawnTerminal => spawn_terminal(theme),
-        Action::Close => {
-            if let Some(id) = wm.focused_client() {
-                wm.close_client(id);
-            }
-        }
-        Action::ToggleMaximize => {
-            if let Some(id) = wm.focused_client() {
-                wm.toggle_maximize_full(id);
-            }
-        }
-        Action::ToggleShade => {
-            if let Some(id) = wm.focused_client() {
-                wm.toggle_shade(id);
-            }
-        }
-        Action::Miniaturize => {
-            if let Some(id) = wm.focused_client() {
-                wm.miniaturize(id);
-            }
-        }
-        Action::ToggleFullscreen => {
-            if let Some(id) = wm.focused_client() {
-                wm.toggle_fullscreen(id);
-            }
-        }
-        Action::WorkspaceNext => wm.switch_workspace(wm.current_workspace() + 1),
-        Action::WorkspacePrev => {
-            if wm.current_workspace() > 0 {
-                wm.switch_workspace(wm.current_workspace() - 1);
-            }
-        }
-        Action::WorkspaceCarryNext => carry_focused_to_workspace(wm, wm.current_workspace() + 1),
-        Action::WorkspaceCarryPrev => {
-            if wm.current_workspace() > 0 {
-                carry_focused_to_workspace(wm, wm.current_workspace() - 1);
-            }
-        }
-        // The exact path `scripts/restart.sh` and the theme menu take:
-        // re-exec the on-disk binary in place, windows surviving via
-        // the X11 SaveSet — which is also what makes this binding the
-        // config hot-reload gesture.
-        Action::Restart => restart_in_place(),
-    }
-}
-
-/// Moves the focused client to `workspace` and follows it there — the
-/// keyboard "carry" gesture (real WindowMaker's "move to next/previous
-/// workspace with window"). The refocus at the end is load-bearing:
-/// `move_client_to_workspace` drops focus the instant the client leaves
-/// the active workspace, and without re-focusing after arriving, the
-/// second carry press in a row would find nothing focused and silently
-/// do nothing — the whole point of the gesture is carrying one window
-/// across several workspaces in repeated presses. The refocus rides the
-/// public `ActivateRequested` path (the same one a pager's
-/// `_NET_ACTIVE_WINDOW` message takes), so it also re-raises — correct
-/// here, since the carried window was the focused one to begin with. A
-/// no-op with nothing focused.
-fn carry_focused_to_workspace(wm: &mut WindowManager<X11Backend>, workspace: usize) {
-    let Some(id) = wm.focused_client() else {
-        return;
-    };
-    let Some(window) = wm.client(id).map(|client| client.window) else {
-        return;
-    };
-    wm.move_client_to_workspace(id, workspace);
-    wm.switch_workspace(workspace);
-    wm.dispatch(BackendEvent::ActivateRequested(window));
-}
-
-/// Reacts to a `wm-core` state change the shell needs to know about but
-/// that `wm-core` itself has no opinion on — icon tiles for
-/// miniaturized windows, the Alt+Tab switcher, and the titlebar
-/// right-click window menu.
-fn handle_notification(wm: &mut WindowManager<X11Backend>, desktop: &mut Desktop, theme: &Theme, notification: Notification) {
-    match notification {
-        Notification::Miniaturized(id, preview) => {
-            let title = wm.client(id).map(|c| c.title.clone()).unwrap_or_default();
-            desktop.show_icon(wm.backend_mut(), theme, id, &title, preview.as_ref());
-        }
-        Notification::Deminiaturized(id) | Notification::Removed(id) => {
-            desktop.remove_icon_for_client(wm.backend_mut(), id);
-        }
-        Notification::Mapped(_) => {}
-        Notification::CycleUpdated => {
-            if let Some((candidates, selected)) = wm.cycle_state() {
-                // Previews are captured once per session (and again only
-                // if the candidate set itself changes) — stepping the
-                // selection is just a re-render of stored entries.
-                let entries = (desktop.switcher_entry_count() != Some(candidates.len())).then(|| {
-                    candidates
-                        .iter()
-                        .map(|(id, title)| wm_theme::switcher::SwitcherEntry { title: title.clone(), preview: wm.client_preview(*id) })
-                        .collect()
-                });
-                desktop.show_switcher(wm.backend_mut(), theme, entries, selected);
-            }
-        }
-        Notification::CycleEnded => desktop.hide_switcher(wm.backend_mut()),
-        Notification::WindowMenuRequested { id, at } => {
-            // Titlebar right-click: `wm-core` reports which client and
-            // where, the shell owns what the menu contains. The context
-            // is a snapshot of the client's state at open time — that's
-            // what the item labels reflect — while the action a pick
-            // eventually fires re-reads live state inside `wm-core`, so
-            // a snapshot is all the menu needs. A stale id (the client
-            // vanished between the click and this drain) is silently
-            // nothing, matching every other stale-id path.
-            if let Some(client) = wm.client(id) {
-                let ctx = WindowMenuContext {
-                    client: id,
-                    title: client.title.clone(),
-                    shaded: client.flags.contains(ClientFlags::SHADED),
-                    // Either axis counts: the menu's toggle drives
-                    // `toggle_maximize_full`, whose own un-maximize
-                    // branch fires when either flag is set.
-                    maximized: client.flags.intersects(ClientFlags::MAXIMIZED_H | ClientFlags::MAXIMIZED_V),
-                    fullscreen: client.flags.contains(ClientFlags::FULLSCREEN),
-                    workspace: client.workspace,
-                    workspace_count: wm.workspace_count(),
-                };
-                desktop.open_window_menu(wm.backend_mut(), theme, at, ctx);
-            }
-        }
-    }
-}
-
-/// Returns `false` if the root menu's Exit item was chosen.
-///
-/// Root reacts on *press* (a context menu should appear the instant you
-/// press the button, same as everywhere else) — everything else
-/// (restoring an icon, picking a menu item) commits on *release*,
-/// matching the arm-on-press/commit-on-release convention every button
-/// in this theme follows. Without an explicit pointer grab while the
-/// menu is open (see `Desktop::open_root_menu`), release events for a
-/// held button would keep reporting against whatever window the press
-/// landed on — X11's implicit grab — rather than the menu now under the
-/// pointer; that grab is what makes press-drag-release-to-pick work.
-///
-/// Two menu kinds share the pick path at the bottom: the root menu is
-/// opened right here (root press above), while the window menu is
-/// opened from the `WindowMenuRequested` notification the titlebar
-/// right-click emits (see `handle_notification`) — but once open, both
-/// are shell windows, so both deliver their clicks through this
-/// function and resolve in the one `click_menu` dispatch below.
-///
-/// The launcher strip routes ahead of everything else — releases even
-/// ahead of the root-window branch: an in-progress strip drag holds a
-/// pointer grab (like the icon drags), so its release can report
-/// against any window at all, the root included, and the root branch
-/// would otherwise swallow it. `pointer_root` is the pointer's last
-/// known root position (shell clicks themselves carry only
-/// window-local coordinates), which is exactly where the release
-/// happened — see its declaration in `main`.
-fn handle_shell_click(
-    wm: &mut WindowManager<X11Backend>,
-    desktop: &mut Desktop,
-    launchdock: &mut LaunchDock,
-    theme: &Theme,
-    apps: &[apps::AppEntry],
-    window: Window,
-    local: Point,
-    button: MouseButton,
-    pressed: bool,
-    pointer_root: Point,
-) -> bool {
-    let root = wm.backend().root();
-
-    // A release first offers itself to an in-progress strip drag
-    // (drag-off-the-strip unpins); one that no strip drag consumes
-    // falls through to the ordinary routing below, including the
-    // strip's own click resolution when the release is on the strip.
-    if !pressed && launchdock.handle_release(wm.backend_mut(), theme, pointer_root) {
-        return true;
-    }
-
-    // Clicks on the strip itself — mirroring how the desktop's own
-    // clip/dock windows are routed below. The running pairs give the
-    // click its focus-or-launch answer for the pressed tile.
-    if launchdock.owns_window(window) {
-        let running = running_pairs(wm);
-        if let Some(action) = launchdock.handle_click(wm.backend_mut(), theme, local, pressed, &running) {
-            match action {
-                LaunchDockAction::Launch(entry) => launch_app(&entry, theme),
-                // The same activate path a pager's _NET_ACTIVE_WINDOW
-                // message rides — focuses, raises, and switches
-                // workspace as needed, with `wm-core` re-validating
-                // the id (a stale one is silently nothing).
-                LaunchDockAction::Focus(target) => wm.dispatch(BackendEvent::ActivateRequested(XWindow(target))),
-            }
-        }
-        return true;
-    }
-
-    if window == root {
-        if pressed {
-            if button == MouseButton::Right {
-                desktop.open_root_menu(wm.backend_mut(), theme, local);
-            } else {
-                desktop.close_menu(wm.backend_mut());
-            }
-        }
-        return true;
-    }
-
-    if window == desktop.clip_window() {
-        if pressed && button == MouseButton::Left {
-            desktop.click_clip(local);
-        }
-        return true;
-    }
-
-    if window == desktop.dock_window() {
-        // Middle-click-drag on a widget picks it up for reordering; see
-        // `Desktop::begin_widget_drag`/`drag_widget_motion` (the latter
-        // fires from `dispatch_motion` on every pointer move, not from
-        // here). A plain left click instead fires the widget's own
-        // click behavior (e.g. `SysMonWidget` toggling its analog/
-        // dashboard face). Everything else on the dock is still just a
-        // click-through identity tile.
-        match button {
-            MouseButton::Middle => {
-                if pressed {
-                    desktop.begin_widget_drag(wm.backend_mut(), theme, local);
-                } else {
-                    desktop.end_widget_drag(wm.backend_mut(), theme);
-                }
-            }
-            MouseButton::Left if pressed => {
-                desktop.click_widget(wm.backend_mut(), theme, local);
-            }
-            _ => {}
-        }
-        return true;
-    }
-
-    // Every press on an icon tile arms a potential drag (see
-    // `Desktop::begin_icon_drag`); it's resolved into either a restore
-    // or a reposition on release, whichever `end_icon_drag` decides
-    // based on whether the pointer actually moved.
-    if pressed {
-        desktop.begin_icon_drag(wm.backend_mut(), window, local);
-        return true;
-    }
-
-    if let Some(result) = desktop.end_icon_drag(wm.backend_mut()) {
-        match result {
-            IconDragResult::Restore(client_id) => wm.deminiaturize(client_id),
-            // Dropping a miniwindow icon over the launcher strip pins
-            // its application: the client's WM_CLASS resolves back
-            // through the `.desktop` index, and `try_pin_at` decides
-            // whether the drop actually landed on the strip's pin
-            // zone. A miss on either count — no class match, or a
-            // drop anywhere else on the desktop — is silently a plain
-            // reposition, exactly the pre-launcher behavior.
-            IconDragResult::Repositioned { client, root } => {
-                let matched = wm.client(client).and_then(|c| apps::match_window_class(apps, &c.class));
-                if let Some(index) = matched {
-                    launchdock.try_pin_at(wm.backend_mut(), theme, root, &apps[index]);
-                }
-            }
-        }
-        return true;
-    }
-
-    if let Some(action) = desktop.click_menu(wm.backend_mut(), theme, window, local) {
-        match action {
-            MenuAction::Root(action) => match action {
-                RootMenuAction::LaunchTerminal => spawn_terminal(theme),
-                RootMenuAction::LaunchAbout => {
-                    spawn::spawn_detached(&about_binary_path(), &[]);
-                }
-                // Indexes the same apps vec the desktop's menu was
-                // built from, so `i` means the same entry on both
-                // sides; the bounds-safe get covers the impossible
-                // desync anyway — menus fire `Kill`-grade commands, so
-                // "impossible" still doesn't get to panic.
-                RootMenuAction::LaunchApp(i) => {
-                    if let Some(entry) = apps.get(i) {
-                        launch_app(entry, theme);
-                    } else {
-                        tracing::warn!(index = i, count = apps.len(), "menu fired an out-of-range application index");
-                    }
-                }
-                RootMenuAction::SetWallpaper(wallpaper) => {
-                    desktop.set_wallpaper(wm.backend_mut(), theme, wallpaper);
-                }
-                RootMenuAction::SetTheme(id) => {
-                    if let Err(e) = theme_select::persist(id) {
-                        tracing::warn!(?e, id, "failed to persist theme selection");
-                    }
-                    // A theme implies its wallpaper — persist that too, so
-                    // the fresh process composes the full look. The
-                    // Wallpaper menu can still override it afterward.
-                    if let Some(pack) = wm_theme::default_theme::theme_by_id(id) {
-                        if let Some(wallpaper) = wallpaper::Wallpaper::from_id(&pack.wallpaper) {
-                            if let Err(e) = wallpaper.persist() {
-                                tracing::warn!(?e, id, "failed to persist theme wallpaper");
-                            }
-                        }
-                    }
-                    tracing::info!(theme = id, "theme selected \u{2014} hot-restarting in place to apply");
-                    restart_in_place();
-                }
-                RootMenuAction::Exit => return false,
-            },
-            // A window-menu pick carries the client it was opened for.
-            // Every call below is a stale-id-safe no-op by `wm-core`
-            // contract — the client may well have vanished while the
-            // menu sat open — so no re-validation is needed here.
-            MenuAction::Window(client, action) => match action {
-                WindowMenuAction::ToggleMaximize => wm.toggle_maximize_full(client),
-                WindowMenuAction::Miniaturize => wm.miniaturize(client),
-                WindowMenuAction::ToggleShade => wm.toggle_shade(client),
-                WindowMenuAction::ToggleFullscreen => wm.toggle_fullscreen(client),
-                WindowMenuAction::MoveToWorkspace(ws) => wm.move_client_to_workspace(client, ws),
-                WindowMenuAction::Close => wm.close_client(client),
-                WindowMenuAction::Kill => wm.kill_client(client),
-            },
-        }
-    }
-
-    true
-}
-
-/// Path to the `chonk-about` demo binary — resolved relative to
-/// chonkstep's own running binary (`chonk-about` always builds into the
-/// same output directory as `chonkstep` itself, debug or release), not
-/// the process's current working directory. A real xsession launched
-/// by a display manager has no reason for `cwd` to be sitting inside
-/// this project's checkout — the previous relative-path version only
-/// ever worked by coincidence, when run from a dev shell already `cd`'d
-/// there, and would silently fail to launch anywhere else (a real
-/// `scripts/xsession.sh` session included).
-fn about_binary_path() -> String {
-    std::env::current_exe()
-        .ok()
-        .and_then(|exe| exe.parent().map(|dir| dir.join("chonk-about")))
-        .filter(|p| p.exists())
-        .and_then(|p| p.to_str().map(str::to_string))
-        .unwrap_or_else(|| "chonk-about".to_string())
-}
-
 /// Path to the marker file `scripts/restart.sh` touches to ask a
 /// running chonkstep to hot-restart itself — polled once per event-loop
-/// tick (the loop already sleeps 100ms/iteration, so this adds one
-/// cheap `remove_file` attempt to that, not a new busy-loop).
+/// tick (the loop already blocks on the X11 socket with a bounded
+/// timeout, so this adds one cheap `remove_file` attempt per wakeup,
+/// not a new busy-loop).
 fn restart_marker_path() -> std::path::PathBuf {
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
     std::path::PathBuf::from(home).join(".local/state/chonkstep/restart")
@@ -986,6 +498,8 @@ fn restart_in_place() -> ! {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use wm_config::Action;
+    use wm_core::KeyCombo;
 
     #[test]
     fn env_scale_wins_over_config_scale() {

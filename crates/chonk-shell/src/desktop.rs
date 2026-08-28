@@ -2,7 +2,8 @@
 //! widgets, WindowMaker-style, at the top-right of the screen), the
 //! right-click root menu, and icon tiles for miniaturized windows.
 //! None of these are "clients" from `wm-core`'s perspective — they're
-//! unmanaged X11 windows the shell owns and draws directly with
+//! unmanaged shell surfaces (`Backend::ShellId`) the shell owns and
+//! draws directly with
 //! `wm-theme`'s public `paint`/`tile` primitives and its
 //! `menu`/`clock`/`icon` renderers — the same SDK surface a third-party
 //! `chonk-ui` app draws with, so the shell has no rendering code a real
@@ -22,12 +23,13 @@ use wm_theme::switcher::{self, SwitcherEntry};
 use wm_theme::workspace;
 use wm_theme::{icon, paint, tile, Theme};
 // `wm_theme_api::PopupHost` is deliberately referenced by full path in
-// `ShellMenu`'s bounds rather than imported: bringing the trait into
-// scope makes every `backend.ungrab_pointer(..)` call ambiguous
-// between it and `wm_core::Backend`, which X11Backend also implements.
+// bounds rather than imported, and bounded per-method on `Desktop`'s
+// menu-driving methods rather than on the whole impl: a receiver
+// bounded by both it and `wm_core::Backend` at once makes every
+// `backend.ungrab_pointer(..)` call ambiguous between the two traits
+// (both name an `ungrab_pointer`), so the drag-teardown methods keep
+// `Backend` as their only bound.
 use wm_theme_api::{DecorationBuffer, Point, Rect, Size};
-use wm_x11::X11Backend;
-use x11rb::protocol::xproto::Window;
 
 use crate::wallpaper::Wallpaper;
 use crate::widgets::{ClockWidget, DockWidget, NetTrafficWidget, PowerWidget, SoundWidget, SysLoadWidget, WifiWidget, WorkspaceShared};
@@ -49,8 +51,10 @@ pub enum RootMenuAction {
     LaunchApp(usize),
     SetWallpaper(Wallpaper),
     /// The stable id of a built-in theme (`wm_theme::default_theme::
-    /// CHOICES`) — handled in `main.rs`, which persists it and
-    /// hot-restarts in place to redress every surface at once.
+    /// CHOICES`) — handled by the shell orchestration (`crate::shell`),
+    /// which persists it and reports `ShellOutcome::Restart` so the
+    /// backend binary hot-restarts in place to redress every surface
+    /// at once.
     SetTheme(&'static str),
     Exit,
 }
@@ -340,7 +344,8 @@ enum MenuSession {
     },
     Window {
         /// Who the open menu commands — attached to every resolved
-        /// action so the dispatch in `main.rs` needs no other lookup.
+        /// action so the dispatch in `crate::shell` needs no other
+        /// lookup.
         client: ClientId,
         /// The workspace count the Move To submenu was built against:
         /// the resolver's bound for mapping `ACTION_MOVE_TO_BASE + n`
@@ -369,16 +374,17 @@ fn resolve_session_action(session: &MenuSession, action: u32) -> Option<MenuActi
 /// The desktop's single menu session: the root menu and the per-window
 /// commands menu both run on this one `CascadeMenu`, tagged with which
 /// kind of session is open so clicks resolve in the right namespace.
-/// Generic over `PopupHost` — unlike its `Desktop` wrapper methods,
-/// which are `X11Backend`-concrete — so tests can drive real
-/// open/click sequences against a fake host, the same seam
-/// `CascadeMenu`'s own tests use.
-struct ShellMenu {
-    menu: CascadeMenu<Window>,
+/// Generic over the popup id and driven through `PopupHost` alone —
+/// no `Backend` in sight — so tests can drive real open/click
+/// sequences against a fake host, the same seam `CascadeMenu`'s own
+/// tests use; `Desktop` instantiates it at `B::ShellId`, the id type
+/// its backend's `PopupHost` impl shares with the shell surfaces.
+struct ShellMenu<Id> {
+    menu: CascadeMenu<Id>,
     session: MenuSession,
 }
 
-impl ShellMenu {
+impl<Id: Copy + Eq + std::fmt::Debug> ShellMenu<Id> {
     fn new() -> Self {
         // `app_count: 0` before any session opens: with no popup on
         // screen no click can reach the resolver, so the placeholder
@@ -396,7 +402,7 @@ impl ShellMenu {
     /// predecessor the replacement never knew about, and a dropped but
     /// unclosed session would leak its popup windows and its pointer
     /// grab.
-    fn begin_session<H: wm_theme_api::PopupHost<PopupId = Window>>(&mut self, host: &mut H, session: MenuSession, title: String) {
+    fn begin_session<H: wm_theme_api::PopupHost<PopupId = Id>>(&mut self, host: &mut H, session: MenuSession, title: String) {
         self.menu.close(host);
         self.menu = CascadeMenu::new(title, DESKTOP_BG);
         self.session = session;
@@ -406,7 +412,7 @@ impl ShellMenu {
     /// was built from (`Desktop::open_root_menu` reads both from its
     /// one stored vec) — it becomes the session's bound for resolving
     /// `ACTION_APP_BASE +` ids back into `LaunchApp` indices.
-    fn open_root<H: wm_theme_api::PopupHost<PopupId = Window>>(
+    fn open_root<H: wm_theme_api::PopupHost<PopupId = Id>>(
         &mut self,
         host: &mut H,
         theme: &Theme,
@@ -420,7 +426,7 @@ impl ShellMenu {
         self.menu.open(host, theme, font_system, items, at, bounds, true);
     }
 
-    fn open_window<H: wm_theme_api::PopupHost<PopupId = Window>>(
+    fn open_window<H: wm_theme_api::PopupHost<PopupId = Id>>(
         &mut self,
         host: &mut H,
         theme: &Theme,
@@ -435,12 +441,12 @@ impl ShellMenu {
     }
 
     /// See `Desktop::click_menu`, whose contract this implements.
-    fn click<H: wm_theme_api::PopupHost<PopupId = Window>>(
+    fn click<H: wm_theme_api::PopupHost<PopupId = Id>>(
         &mut self,
         host: &mut H,
         theme: &Theme,
         font_system: &mut cosmic_text::FontSystem,
-        window: Window,
+        window: Id,
         local: Point,
     ) -> Option<MenuAction> {
         match self.menu.click(host, theme, font_system, window, local)? {
@@ -449,22 +455,22 @@ impl ShellMenu {
         }
     }
 
-    fn close<H: wm_theme_api::PopupHost<PopupId = Window>>(&mut self, host: &mut H) {
+    fn close<H: wm_theme_api::PopupHost<PopupId = Id>>(&mut self, host: &mut H) {
         self.menu.close(host);
     }
 
-    fn hover<H: wm_theme_api::PopupHost<PopupId = Window>>(
+    fn hover<H: wm_theme_api::PopupHost<PopupId = Id>>(
         &mut self,
         host: &mut H,
         theme: &Theme,
         font_system: &mut cosmic_text::FontSystem,
-        window: Window,
+        window: Id,
         local: Point,
     ) {
         self.menu.hover(host, theme, font_system, window, local);
     }
 
-    fn tick<H: wm_theme_api::PopupHost<PopupId = Window>>(&mut self, host: &mut H, theme: &Theme, font_system: &mut cosmic_text::FontSystem) {
+    fn tick<H: wm_theme_api::PopupHost<PopupId = Id>>(&mut self, host: &mut H, theme: &Theme, font_system: &mut cosmic_text::FontSystem) {
         self.menu.tick(host, theme, font_system);
     }
 }
@@ -478,15 +484,15 @@ impl ShellMenu {
 /// confirmed live and cleared by a compositor restart), and rapid
 /// map/unmap of one stable window is the churn compositors are
 /// actually built for.
-struct SwitcherPanel {
-    window: Option<Window>,
+struct SwitcherPanel<Id> {
+    window: Option<Id>,
     size: Size,
     entries: Vec<SwitcherEntry>,
     visible: bool,
 }
 
-struct IconTile {
-    window: Window,
+struct IconTile<Id> {
+    window: Id,
     client: ClientId,
     /// Current on-screen position — always authoritative, whether it
     /// came from `auto_slot`'s grid math or a manual drag.
@@ -511,8 +517,8 @@ struct WidgetDrag {
 }
 
 /// An icon tile currently being pressed, possibly mid-drag.
-struct IconDrag {
-    window: Window,
+struct IconDrag<Id> {
+    window: Id,
     /// Where within the tile the press landed — kept constant relative
     /// to the tile for the whole drag, so the pointer doesn't visually
     /// "jump" to the tile's corner on the first motion event.
@@ -542,8 +548,9 @@ pub enum IconDragResult {
 
 /// Height of the visible Dock chrome only: one identity tile plus the
 /// current height of every widget. It is capped to the monitor so an
-/// unusually large future widget stack cannot create an invalid X11
-/// window, but it never fills spare space merely because it exists.
+/// unusually large future widget stack cannot request an invalidly
+/// tall shell surface, but it never fills spare space merely because
+/// it exists.
 fn stacked_dock_height(tile: u32, screen_height: u32, widgets: &[Box<dyn DockWidget>]) -> u32 {
     widgets
         .iter()
@@ -553,8 +560,8 @@ fn stacked_dock_height(tile: u32, screen_height: u32, widgets: &[Box<dyn DockWid
         .min(screen_height.max(1))
 }
 
-pub struct Desktop {
-    dock_window: Window,
+pub struct Desktop<B: Backend> {
+    dock_window: B::ShellId,
     screen_width: u32,
     screen_height: u32,
     dock_width: u32,
@@ -575,7 +582,7 @@ pub struct Desktop {
     /// stack/hover/leak-safe teardown behavior for free. `ShellMenu`
     /// adds only the session-kind tag that keeps click resolution in
     /// the right action namespace.
-    menu: ShellMenu,
+    menu: ShellMenu<B::ShellId>,
     /// Every instrument shown below the identity tile, top to bottom —
     /// see `crate::widgets` for the SDK these implement. Order is what
     /// `redraw_dock` draws and what a middle-click drag reorders.
@@ -588,18 +595,19 @@ pub struct Desktop {
     /// The Clip: real WindowMaker's workspace tile, pinned at the
     /// screen's top-left corner (its stock position) — corner arrows
     /// switch workspaces, the face shows the current one.
-    clip_window: Window,
+    clip_window: B::ShellId,
     /// What the Clip last rendered, so workspace churn repaints it
     /// exactly once per actual change.
     clip_drawn: (usize, usize),
     widget_drag: Option<WidgetDrag>,
-    icons: HashMap<Window, IconTile>,
-    icon_drag: Option<IconDrag>,
+    icons: HashMap<B::ShellId, IconTile<B::ShellId>>,
+    icon_drag: Option<IconDrag<B::ShellId>>,
     wallpaper: Wallpaper,
     /// The Alt-Tab switch panel, while a cycle session is live.
-    switcher: Option<SwitcherPanel>,
+    switcher: Option<SwitcherPanel<B::ShellId>>,
     /// Stable id of the active theme — only used to bullet-mark the
-    /// Theme submenu; the `Theme` itself lives in `main.rs`.
+    /// Theme submenu; the `Theme` itself lives with the shell
+    /// orchestration (`crate::shell::Shell`).
     theme_id: String,
     /// The scanned `.desktop` index, sorted by name — the one vec the
     /// Applications submenu is generated from and
@@ -610,11 +618,11 @@ pub struct Desktop {
     logo: Pixmap,
 }
 
-impl Desktop {
+impl<B: Backend> Desktop<B> {
     /// `scale` multiplies every dock/icon pixel dimension — pass the
     /// same factor used for `Theme::scaled` so the shell's own chrome
     /// (which doesn't go through the theme engine) matches the WM's.
-    pub fn new(backend: &mut X11Backend, screen: Size, scale: f32, theme_id: String, apps: Vec<crate::apps::AppEntry>) -> Self {
+    pub fn new(backend: &mut B, screen: Size, scale: f32, theme_id: String, apps: Vec<crate::apps::AppEntry>) -> Self {
         let tile = ((56.0 * scale).round() as u32).max(16);
         let pad = ((4.0 * scale).round() as u32).max(1);
         // The dock is exactly one tile wide, tiles touch directly with
@@ -654,17 +662,17 @@ impl Desktop {
             size: Size::new(dock_width, dock_height),
         };
         let dock_window = backend
-            .create_shell_window(dock_geom, wallpaper.dock_color(), true)
+            .create_shell_surface(dock_geom, wallpaper.dock_color(), true)
             .expect("failed to create dock window");
-        let _ = backend.map_shell_window(dock_window);
-        let _ = backend.raise_shell_window(dock_window);
+        backend.map_shell_surface(dock_window);
+        backend.raise_shell_surface(dock_window);
 
         let clip_geom = Rect { pos: Point::new(0, 0), size: Size::new(tile, tile) };
         let clip_window = backend
-            .create_shell_window(clip_geom, wallpaper.dock_color(), true)
+            .create_shell_surface(clip_geom, wallpaper.dock_color(), true)
             .expect("failed to create clip window");
-        let _ = backend.map_shell_window(clip_window);
-        let _ = backend.raise_shell_window(clip_window);
+        backend.map_shell_surface(clip_window);
+        backend.raise_shell_surface(clip_window);
 
         let logo = Pixmap::decode_png(include_bytes!("../assets/branding/chonkstep-logo-icon.png"))
             .expect("embedded ChonkStep logo should decode");
@@ -696,7 +704,7 @@ impl Desktop {
         desktop
     }
 
-    pub fn dock_window(&self) -> Window {
+    pub fn dock_window(&self) -> B::ShellId {
         self.dock_window
     }
 
@@ -711,12 +719,12 @@ impl Desktop {
     }
 
     /// Repositions/resizes the dock to hug the right edge of a new
-    /// screen size (the nested X server's virtual screen was resized —
-    /// e.g. the user dragged the edge of the Xephyr window this WM is
-    /// running in) and repaints it at the current stack's compact
-    /// content height. Icon tiles already on screen are left where they
-    /// are.
-    pub fn resize_to_screen(&mut self, backend: &mut X11Backend, theme: &Theme, screen: Size) {
+    /// screen size (the backend reported one via `take_screen_resize`
+    /// — e.g. the user dragged the edge of the nested Xephyr window an
+    /// X11 session runs in) and repaints it at the current stack's
+    /// compact content height. Icon tiles already on screen are left
+    /// where they are.
+    pub fn resize_to_screen(&mut self, backend: &mut B, theme: &Theme, screen: Size) {
         self.screen_width = screen.w;
         self.screen_height = screen.h;
         self.repaint_wallpaper(backend);
@@ -728,7 +736,7 @@ impl Desktop {
     /// every `tick()` (never short-circuited) so a widget further down
     /// the list still gets to sample/animate even if an earlier one had
     /// nothing new to report this iteration.
-    pub fn tick_widgets(&mut self, backend: &mut X11Backend, theme: &Theme) {
+    pub fn tick_widgets(&mut self, backend: &mut B, theme: &Theme) {
         let mut changed = false;
         for widget in &mut self.widgets {
             if widget.tick() {
@@ -745,7 +753,7 @@ impl Desktop {
     /// `tick_widgets` pass notices the change and repaints the dock
     /// through the one shared path, instead of this method growing a
     /// second redraw entry point.
-    pub fn set_workspace_display(&mut self, backend: &mut X11Backend, theme: &Theme, current: usize, count: usize) {
+    pub fn set_workspace_display(&mut self, backend: &mut B, theme: &Theme, current: usize, count: usize) {
         {
             let mut shared = self.workspace.borrow_mut();
             shared.current = current;
@@ -757,14 +765,14 @@ impl Desktop {
         }
     }
 
-    fn repaint_clip(&mut self, backend: &mut X11Backend, theme: &Theme) {
+    fn repaint_clip(&mut self, backend: &mut B, theme: &Theme) {
         let (current, count) = self.clip_drawn;
         let current = if current == usize::MAX { 0 } else { current };
         let buffer = workspace::render_clip_tile(theme, &mut self.font_system, &mut self.swash_cache, self.tile, current, count.max(1));
-        backend.blit(self.clip_window, &buffer);
+        backend.paint_shell_surface(self.clip_window, &buffer);
     }
 
-    pub fn clip_window(&self) -> Window {
+    pub fn clip_window(&self) -> B::ShellId {
         self.clip_window
     }
 
@@ -832,7 +840,7 @@ impl Desktop {
     /// `local`, if any. Returns `false` (and does nothing) if `local`
     /// isn't over a widget slot, so callers know whether to treat the
     /// press as consumed.
-    pub fn begin_widget_drag(&mut self, backend: &mut X11Backend, theme: &Theme, local: Point) -> bool {
+    pub fn begin_widget_drag(&mut self, backend: &mut B, theme: &Theme, local: Point) -> bool {
         let Some(index) = self.widget_index_at(local) else { return false };
         // Same reasoning as `begin_icon_drag`: without a grab, a fast
         // drag could outrun the dock's own (narrow) window bounds and
@@ -848,7 +856,7 @@ impl Desktop {
     /// motion, for the same reason `drag_icon_motion` does. The dock
     /// starts at screen `y = 0`, so root-Y and dock-local-Y are already
     /// the same value; no translation needed.
-    pub fn drag_widget_motion(&mut self, backend: &mut X11Backend, theme: &Theme, root: Point) {
+    pub fn drag_widget_motion(&mut self, backend: &mut B, theme: &Theme, root: Point) {
         let Some(dragged) = self.widget_drag.as_ref().map(|d| d.index) else { return };
         let Some(target) = self.widget_index_at(Point::new(0, root.y)) else { return };
         if target == dragged {
@@ -864,7 +872,7 @@ impl Desktop {
     /// Ends whatever widget drag is in progress, if any. Returns `false`
     /// if no drag was active, so callers can tell whether the release
     /// was actually theirs to handle.
-    pub fn end_widget_drag(&mut self, backend: &mut X11Backend, theme: &Theme) -> bool {
+    pub fn end_widget_drag(&mut self, backend: &mut B, theme: &Theme) -> bool {
         let Some(drag) = self.widget_drag.take() else { return false };
         backend.ungrab_pointer(drag.grab);
         self.redraw_dock(backend, theme);
@@ -879,7 +887,7 @@ impl Desktop {
     /// stacked them. Returns `false` if `local` isn't over a widget
     /// slot at all, so callers can tell whether the click was theirs to
     /// handle.
-    pub fn click_widget(&mut self, backend: &mut X11Backend, theme: &Theme, local: Point) -> bool {
+    pub fn click_widget(&mut self, backend: &mut B, theme: &Theme, local: Point) -> bool {
         let Some((index, rect)) = self.widget_slots().into_iter().find(|(_, rect)| rect.contains(local)) else {
             return false;
         };
@@ -890,13 +898,13 @@ impl Desktop {
         true
     }
 
-    fn redraw_dock(&mut self, backend: &mut X11Backend, theme: &Theme) {
+    fn redraw_dock(&mut self, backend: &mut B, theme: &Theme) {
         let dock_height = stacked_dock_height(self.tile, self.screen_height, &self.widgets);
         let dock_geom = Rect {
             pos: Point::new((self.screen_width.saturating_sub(self.dock_width)) as i32, 0),
             size: Size::new(self.dock_width, dock_height),
         };
-        let _ = backend.configure_shell_window(self.dock_window, dock_geom);
+        backend.configure_shell_surface(self.dock_window, dock_geom);
 
         let Some(mut pixmap) = Pixmap::new(self.dock_width, dock_height.max(1)) else {
             return;
@@ -960,17 +968,25 @@ impl Desktop {
             }
         }
 
-        backend.blit(self.dock_window, &pixmap_to_buffer(&pixmap));
+        backend.paint_shell_surface(self.dock_window, &pixmap_to_buffer(&pixmap));
     }
 
-    pub fn open_root_menu(&mut self, backend: &mut X11Backend, theme: &Theme, at: Point) {
+    pub fn open_root_menu(&mut self, backend: &mut B, theme: &Theme, at: Point)
+    where
+        B: wm_theme_api::PopupHost<PopupId = B::ShellId>,
+    {
         let bounds = self.screen_size();
         let items = root_menu_items(self.wallpaper, &self.theme_id, &self.apps);
         self.menu.open_root(backend, theme, &mut self.font_system, items, self.apps.len(), at, bounds);
     }
 
     /// The stored application index `RootMenuAction::LaunchApp`'s
-    /// payload indexes into — the dispatch in `main.rs` reads the
+    /// payload indexes into — the dispatch that launches a picked
+    /// entry reads it back through here, so the flat index names the
+    /// same app on both sides of the menu round-trip.
+    pub fn apps(&self) -> &[crate::apps::AppEntry] {
+        &self.apps
+    }
 
     /// Opens the per-window commands menu at `at` (root coordinates —
     /// where the titlebar right-click landed, as reported by
@@ -978,7 +994,10 @@ impl Desktop {
     /// own (truncated) title. Replaces whatever menu session is
     /// already open, root or window — exactly one menu on screen at a
     /// time, like real WindowMaker's one-open-menu-per-screen rule.
-    pub fn open_window_menu(&mut self, backend: &mut X11Backend, theme: &Theme, at: Point, ctx: WindowMenuContext) {
+    pub fn open_window_menu(&mut self, backend: &mut B, theme: &Theme, at: Point, ctx: WindowMenuContext)
+    where
+        B: wm_theme_api::PopupHost<PopupId = B::ShellId>,
+    {
         let bounds = self.screen_size();
         self.menu.open_window(backend, theme, &mut self.font_system, &ctx, at, bounds);
     }
@@ -986,7 +1005,7 @@ impl Desktop {
     /// Applies a built-in wallpaper immediately and repaints the dock to
     /// its matching quiet-edge color. Selection is intentionally a
     /// session preference for now; persistent settings are future work.
-    pub fn set_wallpaper(&mut self, backend: &mut X11Backend, theme: &Theme, wallpaper: Wallpaper) {
+    pub fn set_wallpaper(&mut self, backend: &mut B, theme: &Theme, wallpaper: Wallpaper) {
         self.wallpaper = wallpaper;
         if let Err(error) = wallpaper.persist() {
             tracing::warn!(?error, wallpaper = wallpaper.label(), "failed to remember wallpaper selection");
@@ -995,13 +1014,10 @@ impl Desktop {
         self.redraw_dock(backend, theme);
     }
 
-    fn repaint_wallpaper(&self, backend: &mut X11Backend) {
-        let result = match self.wallpaper.render(self.screen_size()) {
-            Some(buffer) => backend.paint_background_image(&buffer),
-            None => backend.paint_background(DESKTOP_BG),
-        };
-        if let Err(error) = result {
-            tracing::warn!(?error, wallpaper = self.wallpaper.label(), "failed to paint desktop wallpaper");
+    fn repaint_wallpaper(&self, backend: &mut B) {
+        match self.wallpaper.render(self.screen_size()) {
+            Some(buffer) => backend.paint_root_image(&buffer),
+            None => backend.paint_root_color(DESKTOP_BG),
         }
     }
 
@@ -1011,7 +1027,7 @@ impl Desktop {
     /// — while `None` reuses the stored one, so stepping the selection
     /// never re-captures every window. The popup window is recreated
     /// only when the rendered size changes.
-    pub fn show_switcher(&mut self, backend: &mut X11Backend, theme: &Theme, entries: Option<Vec<SwitcherEntry>>, selected: usize) {
+    pub fn show_switcher(&mut self, backend: &mut B, theme: &Theme, entries: Option<Vec<SwitcherEntry>>, selected: usize) {
         match (entries, self.switcher.as_mut()) {
             (Some(new_entries), Some(panel)) => panel.entries = new_entries,
             (Some(new_entries), None) => {
@@ -1030,7 +1046,7 @@ impl Desktop {
         let size = Size::new(buffer.width, buffer.height);
         if panel.window.is_none() || panel.size != size {
             if let Some(window) = panel.window.take() {
-                let _ = backend.destroy_shell_window(window);
+                backend.destroy_shell_surface(window);
             }
             let geom = Rect {
                 pos: Point::new(
@@ -1039,25 +1055,25 @@ impl Desktop {
                 ),
                 size,
             };
-            match backend.create_shell_window(geom, switcher::panel_background(theme), true) {
-                Ok(window) => {
+            match backend.create_shell_surface(geom, switcher::panel_background(theme), true) {
+                Some(window) => {
                     panel.window = Some(window);
                     panel.size = size;
                     panel.visible = false;
                 }
-                Err(error) => {
-                    tracing::warn!(?error, "failed to create switcher window");
+                None => {
+                    tracing::warn!("failed to create switcher window");
                     return;
                 }
             }
         }
         if let Some(window) = panel.window {
             if !panel.visible {
-                let _ = backend.map_shell_window(window);
+                backend.map_shell_surface(window);
                 panel.visible = true;
             }
-            let _ = backend.raise_shell_window(window);
-            backend.blit(window, &buffer);
+            backend.raise_shell_surface(window);
+            backend.paint_shell_surface(window, &buffer);
         }
     }
 
@@ -1069,16 +1085,19 @@ impl Desktop {
         self.switcher.as_ref().filter(|panel| panel.visible).map(|panel| panel.entries.len())
     }
 
-    pub fn hide_switcher(&mut self, backend: &mut X11Backend) {
+    pub fn hide_switcher(&mut self, backend: &mut B) {
         if let Some(panel) = self.switcher.as_mut() {
             if let Some(window) = panel.window {
-                let _ = backend.unmap_shell_window(window);
+                backend.unmap_shell_surface(window);
             }
             panel.visible = false;
         }
     }
 
-    pub fn close_menu(&mut self, backend: &mut X11Backend) {
+    pub fn close_menu(&mut self, backend: &mut B)
+    where
+        B: wm_theme_api::PopupHost<PopupId = B::ShellId>,
+    {
         self.menu.close(backend);
     }
 
@@ -1091,17 +1110,26 @@ impl Desktop {
     /// dismissals return `None` exactly as before — see
     /// `CascadeMenu::click` for the full click/dismiss/cascade
     /// contract.
-    pub fn click_menu(&mut self, backend: &mut X11Backend, theme: &Theme, window: Window, local: Point) -> Option<MenuAction> {
+    pub fn click_menu(&mut self, backend: &mut B, theme: &Theme, window: B::ShellId, local: Point) -> Option<MenuAction>
+    where
+        B: wm_theme_api::PopupHost<PopupId = B::ShellId>,
+    {
         self.menu.click(backend, theme, &mut self.font_system, window, local)
     }
 
-    pub fn hover_menu(&mut self, backend: &mut X11Backend, theme: &Theme, window: Window, local: Point) {
+    pub fn hover_menu(&mut self, backend: &mut B, theme: &Theme, window: B::ShellId, local: Point)
+    where
+        B: wm_theme_api::PopupHost<PopupId = B::ShellId>,
+    {
         self.menu.hover(backend, theme, &mut self.font_system, window, local);
     }
 
     /// Opens whatever submenu has been hovered long enough — called once
     /// per event-loop iteration (like `tick_widgets`).
-    pub fn tick_menu(&mut self, backend: &mut X11Backend, theme: &Theme) {
+    pub fn tick_menu(&mut self, backend: &mut B, theme: &Theme)
+    where
+        B: wm_theme_api::PopupHost<PopupId = B::ShellId>,
+    {
         self.menu.tick(backend, theme, &mut self.font_system);
     }
 
@@ -1111,19 +1139,19 @@ impl Desktop {
     /// bottom-left of the screen, wrapping upward — matching the icon
     /// row layout in the reference NeXTSTEP screenshot this theme is
     /// matched against — clear of the dock on the right.
-    pub fn show_icon(&mut self, backend: &mut X11Backend, theme: &Theme, client: ClientId, title: &str, preview: Option<&DecorationBuffer>) {
+    pub fn show_icon(&mut self, backend: &mut B, theme: &Theme, client: ClientId, title: &str, preview: Option<&DecorationBuffer>) {
         let slot = (0..).find(|s| !self.icons.values().any(|icon| icon.auto_slot == Some(*s))).unwrap_or(0);
         let pos = self.icon_slot_position(slot);
         let geom = Rect { pos, size: Size::new(self.tile, self.tile) };
 
-        let Ok(window) = backend.create_shell_window(geom, DESKTOP_BG, true) else {
+        let Some(window) = backend.create_shell_surface(geom, DESKTOP_BG, true) else {
             tracing::warn!(?client, "failed to create icon tile window");
             return;
         };
-        let _ = backend.map_shell_window(window);
-        let _ = backend.raise_shell_window(window);
+        backend.map_shell_surface(window);
+        backend.raise_shell_surface(window);
         let buffer = icon::render_icon_tile(theme, &mut self.font_system, &mut self.swash_cache, self.tile, title, preview);
-        backend.blit(window, &buffer);
+        backend.paint_shell_surface(window, &buffer);
 
         self.icons.insert(window, IconTile { window, client, pos, auto_slot: Some(slot) });
     }
@@ -1141,12 +1169,12 @@ impl Desktop {
     /// Removes the icon tile for `client`, if one is showing (a no-op
     /// otherwise — covers both a normal restore and closing a window
     /// while it's still miniaturized).
-    pub fn remove_icon_for_client(&mut self, backend: &mut X11Backend, client: ClientId) {
+    pub fn remove_icon_for_client(&mut self, backend: &mut B, client: ClientId) {
         let Some(window) = self.icons.values().find(|icon| icon.client == client).map(|icon| icon.window) else {
             return;
         };
         self.icons.remove(&window);
-        let _ = backend.destroy_shell_window(window);
+        backend.destroy_shell_surface(window);
     }
 
     /// Starts tracking a press on `window` as a potential icon drag —
@@ -1155,7 +1183,7 @@ impl Desktop {
     /// `IconDrag::moved`'s doc comment). A no-op (and returns `false`)
     /// if `window` isn't a tracked icon tile, so callers can use the
     /// return value to know whether to swallow the press.
-    pub fn begin_icon_drag(&mut self, backend: &mut X11Backend, window: Window, local: Point) -> bool {
+    pub fn begin_icon_drag(&mut self, backend: &mut B, window: B::ShellId, local: Point) -> bool {
         if !self.icons.contains_key(&window) {
             return false;
         }
@@ -1176,7 +1204,7 @@ impl Desktop {
     /// call this on every `BackendEvent::PointerMotion`, not just shell-
     /// targeted motion, since once the pointer leaves the tile's own
     /// small bounds further motion is no longer reported against it.
-    pub fn drag_icon_motion(&mut self, backend: &mut X11Backend, root: Point) {
+    pub fn drag_icon_motion(&mut self, backend: &mut B, root: Point) {
         let Some(drag) = &mut self.icon_drag else {
             return;
         };
@@ -1191,7 +1219,7 @@ impl Desktop {
         drag.moved = true;
         icon.pos = new_pos;
         icon.auto_slot = None;
-        let _ = backend.configure_shell_window(drag.window, Rect { pos: new_pos, size: Size::new(self.tile, self.tile) });
+        backend.configure_shell_surface(drag.window, Rect { pos: new_pos, size: Size::new(self.tile, self.tile) });
     }
 
     /// Resolves whatever press `begin_icon_drag` armed, if any: a
@@ -1201,7 +1229,7 @@ impl Desktop {
     /// go so the caller can hit-test drop targets. Returns `None` if
     /// no icon drag was in progress — callers should fall through to
     /// their normal release handling (e.g. menu clicks) in that case.
-    pub fn end_icon_drag(&mut self, backend: &mut X11Backend) -> Option<IconDragResult> {
+    pub fn end_icon_drag(&mut self, backend: &mut B) -> Option<IconDragResult> {
         let drag = self.icon_drag.take()?;
         backend.ungrab_pointer(drag.grab);
 
@@ -1216,13 +1244,13 @@ impl Desktop {
             return Some(IconDragResult::Repositioned { client: icon.client, root });
         }
         let icon = self.icons.remove(&drag.window)?;
-        let _ = backend.destroy_shell_window(icon.window);
+        backend.destroy_shell_surface(icon.window);
         Some(IconDragResult::Restore(icon.client))
     }
 }
 
 /// Pure drag-threshold arithmetic, kept separate from `drag_icon_motion`
-/// so it's testable without an `X11Backend`: `None` if motion hasn't
+/// so it's testable without a backend: `None` if motion hasn't
 /// crossed `threshold` yet (and hadn't already elsewhere in the drag),
 /// `Some(new_pos)` once it has. Matches `miniwindowMouseDown`'s
 /// `hasMoved` check in real WindowMaker's `icon.c` — the reason a
@@ -1592,10 +1620,10 @@ mod tests {
         ));
     }
 
-    /// Minimal `PopupHost` for driving `ShellMenu` without an X server
-    /// — the same seam `CascadeMenu`'s own tests use. `PopupId = u32`
-    /// is exactly what `Window` aliases, so the `ShellMenu` bounds are
-    /// satisfied by a plain counter.
+    /// Minimal `PopupHost` for driving `ShellMenu` without any backend
+    /// — the same seam `CascadeMenu`'s own tests use. `ShellMenu` is
+    /// generic over the popup id, so `PopupId = u32` satisfies its
+    /// bounds with a plain counter.
     #[derive(Default)]
     struct FakeHost {
         next_id: u32,
@@ -1633,7 +1661,7 @@ mod tests {
         theme: Theme,
         font_system: cosmic_text::FontSystem,
         host: FakeHost,
-        menu: ShellMenu,
+        menu: ShellMenu<u32>,
     }
 
     impl MenuFixture {

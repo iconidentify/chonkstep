@@ -77,6 +77,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "chonk-shell"
+version = "0.1.0"
+dependencies = [
+ "cosmic-text",
+ "tiny-skia",
+ "tracing",
+ "wm-config",
+ "wm-core",
+ "wm-theme",
+ "wm-theme-api",
+]
+
+[[package]]
 name = "chonk-ui"
 version = "0.1.0"
 dependencies = [
@@ -90,17 +103,28 @@ dependencies = [
 name = "chonkstep"
 version = "0.1.0"
 dependencies = [
- "cosmic-text",
+ "chonk-shell",
  "libc",
- "tiny-skia",
  "tracing",
  "tracing-subscriber",
  "wm-config",
  "wm-core",
  "wm-theme",
- "wm-theme-api",
  "wm-x11",
  "x11rb",
+]
+
+[[package]]
+name = "chonkstep-wayland"
+version = "0.1.0"
+dependencies = [
+ "chonk-shell",
+ "tracing",
+ "tracing-subscriber",
+ "wm-config",
+ "wm-core",
+ "wm-theme",
+ "wm-wayland",
 ]
 
 [[package]]
@@ -908,6 +932,15 @@ name = "wm-theme-api"
 version = "0.1.0"
 dependencies = [
  "serde",
+]
+
+[[package]]
+name = "wm-wayland"
+version = "0.1.0"
+dependencies = [
+ "tracing",
+ "wm-core",
+ "wm-theme-api",
 ]
 
 [[package]]
