@@ -53,9 +53,10 @@ restarts that keep your windows open.
   cascading submenus, a dock with live widgets (clock, system monitor,
   network load), miniaturized-window icon tiles with drag-to-place, and
   five built-in wallpaper artworks. Real workspaces, too: a dock
-  indicator tile shows the current one (click it to cycle),
-  Alt+Ctrl+Left/Right switches, Alt+Shift+Left/Right carries the
-  focused window
+  Clip - WindowMaker's workspace tile, ported from its dock.c
+  recipes - sits at the top-left corner: clipped-corner arrows advance
+  (growing workspaces on demand) and rewind, Alt+Ctrl+Left/Right
+  switches, Alt+Shift+Left/Right carries the focused window
   along, and pagers can drive it all via `_NET_CURRENT_DESKTOP` and
   `_NET_WM_DESKTOP`.
 

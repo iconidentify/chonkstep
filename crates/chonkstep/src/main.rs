@@ -211,7 +211,8 @@ fn main() {
         if let Some(target) = desktop.take_workspace_request() {
             wm.switch_workspace(target);
         }
-        desktop.set_workspace_display(wm.current_workspace(), wm.workspace_count());
+        let (current, count) = (wm.current_workspace(), wm.workspace_count());
+        desktop.set_workspace_display(wm.backend_mut(), &theme, current, count);
         desktop.tick_menu(wm.backend_mut(), &theme);
         desktop.tick_widgets(wm.backend_mut(), &theme);
 
@@ -374,6 +375,13 @@ fn handle_shell_click(
             } else {
                 desktop.close_menu(wm.backend_mut());
             }
+        }
+        return true;
+    }
+
+    if window == desktop.clip_window() {
+        if pressed && button == MouseButton::Left {
+            desktop.click_clip(local);
         }
         return true;
     }
