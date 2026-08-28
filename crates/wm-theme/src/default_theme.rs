@@ -3,8 +3,17 @@ use wm_theme_api::ButtonKind;
 use crate::model::{
     Bevel, BevelStyle, BorderStyle, ButtonStyle, Color, Fill, FontSpec, FontStyle, FontWeight,
     Gradient, GradientDirection, MenuStyle, ResizeBarStyle, TerminalPalette, TextAlign, Theme,
-    TitlebarStyle,
+    TileStyle, TitlebarStyle,
 };
+
+/// Diagonal tile gradient helper — every theme's tile is a
+/// WindowMaker-style dgradient, top-left light to bottom-right dark.
+fn tile_gradient(from: Color, to: Color, bevel: Bevel) -> TileStyle {
+    TileStyle {
+        fill: Fill::Gradient(Gradient { direction: GradientDirection::Diagonal, from, to }),
+        bevel,
+    }
+}
 
 /// `(id, label)` for every built-in theme, in menu order — kept as a
 /// const so menu construction doesn't have to build five full `Theme`
@@ -157,6 +166,9 @@ pub fn nextstep_classic() -> Theme {
             color_active: Color::rgb(0x00, 0x00, 0x00),
             color_inactive: Color::rgb(0x00, 0x00, 0x00),
         },
+        // Real WindowMaker's stock IconBack, value-for-value:
+        // (dgradient, "rgb:a6/a6/b6", "rgb:51/55/61") in defaults.c.
+        tile: tile_gradient(Color::rgb(0xA6, 0xA6, 0xB6), Color::rgb(0x51, 0x55, 0x61), bevel_raised),
         menu: MenuStyle {
             title_font: FontSpec {
                 family: FONT_FAMILY.to_string(),
@@ -213,6 +225,7 @@ struct ChromeSpec {
     menu_highlight_bg: Fill,
     menu_highlight_text: Color,
     terminal: TerminalPalette,
+    tile: (Color, Color),
 }
 
 fn build_chrome(spec: ChromeSpec) -> Theme {
@@ -249,6 +262,7 @@ fn build_chrome(spec: ChromeSpec) -> Theme {
             corner_width: 28,
         },
         border: BorderStyle { width: 1, color_active: spec.border, color_inactive: spec.border },
+        tile: tile_gradient(spec.tile.0, spec.tile.1, spec.bevel),
         menu: MenuStyle {
             title_font: font(FontWeight::Bold),
             item_font: font(FontWeight::Normal),
@@ -288,6 +302,7 @@ pub fn amber_phosphor() -> Theme {
         menu_text: Color::rgb(0xD8, 0x9E, 0x3F),
         menu_highlight_bg: Fill::Solid(Color::rgb(0xFF, 0xB0, 0x00)),
         menu_highlight_text: Color::rgb(0x14, 0x0F, 0x08),
+        tile: (Color::rgb(0x40, 0x36, 0x24), Color::rgb(0x14, 0x11, 0x0B)),
         terminal: TerminalPalette {
             fg: Color::rgb(0xFF, 0xB0, 0x00),
             bg: Color::rgb(0x0C, 0x0B, 0x09),
@@ -336,6 +351,7 @@ pub fn teal_blueprint() -> Theme {
         menu_text: Color::rgb(0xCF, 0xE0, 0xDA),
         menu_highlight_bg: Fill::Solid(Color::rgb(0xF2, 0xEF, 0xE1)),
         menu_highlight_text: Color::rgb(0x0A, 0x36, 0x39),
+        tile: (Color::rgb(0x3B, 0x6E, 0x6E), Color::rgb(0x04, 0x2B, 0x2D)),
         terminal: TerminalPalette {
             fg: Color::rgb(0xD7, 0xE5, 0xDC),
             bg: Color::rgb(0x04, 0x28, 0x2B),
@@ -384,6 +400,7 @@ pub fn graphite() -> Theme {
         menu_text: Color::rgb(0xD8, 0xD8, 0xD8),
         menu_highlight_bg: Fill::Solid(Color::rgb(0xEC, 0xEC, 0xEC)),
         menu_highlight_text: Color::rgb(0x16, 0x16, 0x16),
+        tile: (Color::rgb(0x8E, 0x8E, 0x8E), Color::rgb(0x30, 0x30, 0x30)),
         terminal: TerminalPalette {
             fg: Color::rgb(0xD4, 0xD4, 0xD4),
             bg: Color::rgb(0x16, 0x16, 0x16),
@@ -448,6 +465,7 @@ pub fn next_lavender() -> Theme {
         menu_text: Color::rgb(0x10, 0x10, 0x10),
         menu_highlight_bg: Fill::Solid(Color::rgb(0xF2, 0xF2, 0xF2)),
         menu_highlight_text: Color::rgb(0x10, 0x10, 0x10),
+        tile: (Color::rgb(0xB4, 0xB4, 0xC2), Color::rgb(0x6E, 0x6E, 0x80)),
         terminal: TerminalPalette {
             fg: Color::rgb(0xE2, 0xE8, 0xF0),
             bg: Color::rgb(0x0B, 0x12, 0x20),

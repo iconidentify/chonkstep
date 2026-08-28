@@ -3,9 +3,12 @@
 //! right-click root menu, and icon tiles for miniaturized windows.
 //! None of these are "clients" from `wm-core`'s perspective — they're
 //! unmanaged X11 windows the shell owns and draws directly with
-//! `wm-theme`'s public `paint` primitives and its `menu`/`clock`/`icon`
-//! renderers — the same SDK surface a third-party `chonk-ui` app draws
-//! with, so the shell has no rendering code a real app couldn't also use.
+//! `wm-theme`'s public `paint`/`tile` primitives and its
+//! `menu`/`clock`/`icon` renderers — the same SDK surface a third-party
+//! `chonk-ui` app draws with, so the shell has no rendering code a real
+//! app couldn't also use. Every square surface here sits on the tile
+//! platform (`wm_theme::tile`): one face, relief, and ink recipe shared
+//! with the Clip and every widget, so the dock reads as one family.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -17,7 +20,7 @@ use wm_theme::cascade::{CascadeMenu, MenuClick};
 use wm_theme::menu::MenuItem;
 use wm_theme::switcher::{self, SwitcherEntry};
 use wm_theme::workspace;
-use wm_theme::{icon, paint, Theme};
+use wm_theme::{icon, paint, tile, Theme};
 use wm_theme_api::{DecorationBuffer, Point, Rect, Size};
 use wm_x11::X11Backend;
 use x11rb::protocol::xproto::Window;
@@ -517,22 +520,26 @@ impl Desktop {
         let Some(mut pixmap) = Pixmap::new(self.dock_width, dock_height.max(1)) else {
             return;
         };
-        let (r, g, b) = self.wallpaper.dock_color();
-        paint::fill_rect(
-            &mut pixmap,
-            0,
-            0,
-            self.dock_width,
-            dock_height,
-            wm_theme::model::Color::rgb(r, g, b),
-        );
+        // The tile stack covers the whole column — the identity tile
+        // plus every widget slot sums to at least `dock_height`, since
+        // `stacked_dock_height`'s clamp only ever shortens it — so no
+        // flat filler should ever be visible between tiles. The base
+        // coat is still painted with the tile *face* rather than a
+        // solid color, so that even a defensive gap (say, a widget
+        // rendering short) reads as tile family, not as a hole in it.
+        // `wallpaper.dock_color` stays only as the X11 window background
+        // set at creation: the behind-everything fallback for the
+        // instant before the first blit lands.
+        paint::fill_area(&mut pixmap, 0, 0, self.dock_width, dock_height, &theme.tile.fill);
 
-        // Identity tile: flush at the dock's top-left corner, same as
-        // every other tile touches its neighbors — the ChonkStep mark is
-        // deliberately bold enough to survive the Dock's original
-        // 56-pixel scale.
-        paint::fill_area(&mut pixmap, 0, 0, self.tile, self.tile, &theme.titlebar.active);
-        paint::draw_bevel(&mut pixmap, 0, 0, self.tile, self.tile, &theme.titlebar.bevel);
+        // Identity tile: flush at the dock's top-left corner, on the
+        // same tile face/relief as every other square surface (it used
+        // to borrow the titlebar's fill and bevel, which made the top of
+        // the dock read as window chrome rather than as the column's
+        // first tile), with the ChonkStep mark composited centered on
+        // top — the mark is deliberately bold enough to survive the
+        // Dock's original 56-pixel scale.
+        tile::draw_tile_base(&mut pixmap, 0, 0, self.tile, theme);
         let logo_inset = (self.tile / 9).max(2);
         let logo_size = self.tile.saturating_sub(logo_inset * 2);
         let logo_scale = logo_size as f32 / self.logo.width() as f32;
@@ -554,18 +561,21 @@ impl Desktop {
             blit_into(&mut pixmap, rect.pos.x as u32, rect.pos.y as u32, &buffer);
 
             if self.widget_drag.as_ref().is_some_and(|d| d.index == index) {
-                // A thin glow just inside the slot's own edge — the
-                // visual half of "you've picked this up," matching the
-                // bevel's own light tone so it reads as part of the same
-                // chrome rather than an unrelated highlight color. Drawn
-                // inset rather than in a surrounding gap: tiles snap
-                // together now, so there's no gap to draw into.
-                let light = theme.titlebar.bevel.light;
-                let (x, y, w, h) = (rect.pos.x, rect.pos.y, rect.size.w, rect.size.h);
-                paint::fill_rect(&mut pixmap, x, y, w, 1, light);
-                paint::fill_rect(&mut pixmap, x, y + h as i32 - 1, w, 1, light);
-                paint::fill_rect(&mut pixmap, x, y, 1, h, light);
-                paint::fill_rect(&mut pixmap, x + w as i32 - 1, y, 1, h, light);
+                // "You've picked this up": brighten the slot's outermost
+                // pixel ring with the relief's own +80 light delta
+                // (`tile::op_line`, relative) rather than stamping an
+                // absolute chrome color over it — the tile's RAISED2
+                // edge stays structurally intact and simply reads as
+                // lit, so the pickup highlight speaks the tile family's
+                // language instead of borrowing the titlebar bevel's.
+                // Drawn on the edge itself rather than in a surrounding
+                // gap: tiles snap together, so there's no gap to use.
+                let (x, y) = (rect.pos.x, rect.pos.y);
+                let (w, h) = (rect.size.w as i32, rect.size.h as i32);
+                tile::op_line(&mut pixmap, x, y, x + w - 1, y, 80);
+                tile::op_line(&mut pixmap, x, y + h - 1, x + w - 1, y + h - 1, 80);
+                tile::op_line(&mut pixmap, x, y, x, y + h - 1, 80);
+                tile::op_line(&mut pixmap, x + w - 1, y, x + w - 1, y + h - 1, 80);
             }
         }
 

@@ -1,18 +1,23 @@
 //! The workspace Clip: real WindowMaker's top-left corner tile
 //! (`wClipMakeTile`/`paintClipButtons` in `src/dock.c`), ported
-//! recipe-for-recipe and scaled. The tile's two "clipped" corners are
-//! diagonal crease lines (a hard black cut with dark/light shading on
-//! either side, exactly WindowMaker's `ROperateLine` sequence), each
-//! corner carrying a small right-angle arrow: top-right advances a
-//! workspace, bottom-left goes back. The current workspace number sits
-//! large in the middle with a `Desk N` label beneath, matching how the
-//! stock Clip presents the workspace name.
+//! recipe-for-recipe and scaled. This widget's look — diagonal
+//! gradient face, RAISED2 relief, luminance-picked ink — is where the
+//! shared [`crate::tile`] platform came from, and the Clip now renders
+//! on that platform instead of keeping its own copy of the recipe.
+//! The tile's two "clipped" corners are diagonal crease lines (a hard
+//! black cut with dark/light shading on either side, exactly
+//! WindowMaker's `ROperateLine` sequence) drawn over the tile base,
+//! each corner carrying a small right-angle arrow: top-right advances
+//! a workspace, bottom-left goes back. The current workspace number
+//! sits large in the middle with a `Desk N` label beneath, matching
+//! how the stock Clip presents the workspace name.
 
 use tiny_skia::{FillRule, Paint, PathBuilder, Pixmap, Transform};
 use wm_theme_api::DecorationBuffer;
 
-use crate::model::{Color, Fill, TextAlign, Theme};
+use crate::model::{Color, TextAlign, Theme};
 use crate::paint;
+use crate::tile;
 
 /// Fraction math from WindowMaker's own constants: `CLIP_BUTTON_SIZE`
 /// is 23 on a 64px tile, and the arrow edge is that minus 15. Both are
@@ -68,9 +73,11 @@ pub fn render_clip_tile(
         return DecorationBuffer { width: 0, height: 0, pixels: Vec::new() };
     };
 
-    paint::fill_area(&mut pixmap, 0, 0, size, size, &theme.resize_bar.fill);
-    let bevel_t = theme.resize_bar.bevel.width.max(1) as u32;
-    paint::draw_raised2_bevel(&mut pixmap, 0, 0, size, size, bevel_t);
+    // The tile base is the platform this widget inspired: drawing
+    // through it (rather than a private fill + bevel copy) means a
+    // theme's tile style restyles the Clip and every other dock tile
+    // together, and the ink below is guaranteed to match its siblings.
+    tile::draw_tile_base(&mut pixmap, 0, 0, size, theme);
 
     let (pt, tp, arrow) = clip_metrics(size);
     let s = size as i32;
@@ -78,17 +85,19 @@ pub fn render_clip_tile(
 
     // The clipped corners: WindowMaker's exact line triplets — shade
     // below the cut, hard black cut, light above — repeated `t` thick
-    // so the crease scales like every other piece of chrome.
-    let ink = ink_color(&theme.resize_bar.fill);
+    // so the crease scales like every other piece of chrome. Drawn
+    // straight over the tile base, exactly like the stock Clip carves
+    // its corners out of the finished icon tile.
+    let ink = tile::tile_ink(theme);
     for i in 0..t {
         // Top-right crease.
-        op_line(&mut pixmap, tp + i, 0, s - 2 + i, pt - 1, -60);
-        draw_line(&mut pixmap, tp - 1 + i, 0, s - 1 + i, pt + 1, Color::rgb(0, 0, 0));
-        op_line(&mut pixmap, tp + 1 + i, 2, s - 3 + i, pt, 80);
+        tile::op_line(&mut pixmap, tp + i, 0, s - 2 + i, pt - 1, -60);
+        tile::draw_line(&mut pixmap, tp - 1 + i, 0, s - 1 + i, pt + 1, Color::rgb(0, 0, 0));
+        tile::op_line(&mut pixmap, tp + 1 + i, 2, s - 3 + i, pt, 80);
         // Bottom-left crease (mirrored).
-        op_line(&mut pixmap, 2, tp + 2 + i, pt - 2, s - 3 + i, -60);
-        draw_line(&mut pixmap, 0, tp - 1 + i, pt + 1, s - 1 + i, Color::rgb(0, 0, 0));
-        op_line(&mut pixmap, 0, tp - 2 + i, pt + 1, s - 2 + i, 80);
+        tile::op_line(&mut pixmap, 2, tp + 2 + i, pt - 2, s - 3 + i, -60);
+        tile::draw_line(&mut pixmap, 0, tp - 1 + i, pt + 1, s - 1 + i, Color::rgb(0, 0, 0));
+        tile::op_line(&mut pixmap, 0, tp - 2 + i, pt + 1, s - 2 + i, 80);
     }
 
     // Corner arrows: right-angle triangles hugging each clipped
@@ -157,54 +166,6 @@ pub fn render_clip_tile(
     );
 
     DecorationBuffer { width: size, height: size, pixels: pixmap.data().to_vec() }
-}
-
-/// Ink that stays legible on whatever the tile face is — same
-/// luminance reasoning as `paint::pressed_delta`.
-fn ink_color(fill: &Fill) -> Color {
-    let c = match fill {
-        Fill::Solid(c) => *c,
-        Fill::Gradient(g) => g.from,
-    };
-    let luminance = (c.r as u16 + c.g as u16 + c.b as u16) / 3;
-    if luminance < 128 {
-        Color::rgb(0xE8, 0xE8, 0xE8)
-    } else {
-        Color::rgb(0x10, 0x10, 0x10)
-    }
-}
-
-/// Clamped add/subtract along a line — `ROperateLine`, the diagonal
-/// sibling of `paint::op_rect`, in a simple integer line walk (the
-/// creases are always 45-degree-ish short runs; subpixel accuracy buys
-/// nothing at hard-edged 1990s fidelity).
-fn op_line(pixmap: &mut Pixmap, x0: i32, y0: i32, x1: i32, y1: i32, delta: i16) {
-    let steps = (x1 - x0).abs().max((y1 - y0).abs()).max(1);
-    let (w, h) = (pixmap.width() as i32, pixmap.height() as i32);
-    let pixels = pixmap.pixels_mut();
-    for i in 0..=steps {
-        let x = x0 + ((x1 - x0) * i) / steps;
-        let y = y0 + ((y1 - y0) * i) / steps;
-        if x < 0 || y < 0 || x >= w || y >= h {
-            continue;
-        }
-        let idx = (y * w + x) as usize;
-        let e = pixels[idx];
-        let op = |c: u8| (c as i16 + delta).clamp(0, 255) as u8;
-        if let Some(p) = tiny_skia::PremultipliedColorU8::from_rgba(op(e.red()), op(e.green()), op(e.blue()), 255) {
-            pixels[idx] = p;
-        }
-    }
-}
-
-/// Hard 1px line in an absolute color — `RDrawLine`.
-fn draw_line(pixmap: &mut Pixmap, x0: i32, y0: i32, x1: i32, y1: i32, color: Color) {
-    let steps = (x1 - x0).abs().max((y1 - y0).abs()).max(1);
-    for i in 0..=steps {
-        let x = x0 + ((x1 - x0) * i) / steps;
-        let y = y0 + ((y1 - y0) * i) / steps;
-        paint::fill_rect(pixmap, x, y, 1, 1, color);
-    }
 }
 
 fn fill_triangle(pixmap: &mut Pixmap, points: [(i32, i32); 3], color: Color) {
