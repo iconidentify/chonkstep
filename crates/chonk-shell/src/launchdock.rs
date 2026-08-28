@@ -294,6 +294,25 @@ impl<B: Backend> LaunchDock<B> {
     /// `pins * tile` tall (screen-clamped like the Dock), resized and
     /// remapped on pin/unpin, unmapped entirely when no pins exist —
     /// and repainted whenever it is showing.
+    /// Moves the strip onto `primary` - the monitor arrangement
+    /// changed under it.
+    ///
+    /// The strip anchors to the primary monitor rather than the
+    /// desktop origin (see [`strip_origin`]), so the rect it was built
+    /// with goes stale the moment a display is plugged in, unplugged,
+    /// or the session is resized. Everything geometric here reads that
+    /// stored rect - where the surface is configured, and where clicks
+    /// are hit-tested - so a stale one detaches the strip from the
+    /// Clip it sits below *and* sends slot hit-testing to coordinates
+    /// nothing is drawn at.
+    pub fn reposition(&mut self, backend: &mut B, theme: &Theme, primary: Rect) {
+        if self.primary == primary {
+            return;
+        }
+        self.primary = primary;
+        self.sync_window(backend, theme);
+    }
+
     fn sync_window(&mut self, backend: &mut B, theme: &Theme) {
         if self.pins.is_empty() {
             if self.mapped {
@@ -619,6 +638,44 @@ mod tests {
     /// origin: with a second head to the left, the desktop's origin is
     /// on that other screen, and a root-anchored strip would sit there
     /// alone while the Clip stayed on the primary.
+    /// Regression test for the strip staying behind when the monitor
+    /// arrangement changes.
+    ///
+    /// The strip anchors to the primary monitor, but it is not owned
+    /// by `Desktop`, so nothing repositioned it when a display was
+    /// plugged in or the session resized: the Clip moved to the new
+    /// primary and the strip stayed on the old one, hit-testing clicks
+    /// at coordinates it no longer occupied. Found in review, and
+    /// invisible to the tests of the day because nothing here could
+    /// build a `LaunchDock` at all - which is why `wm-core` now
+    /// exposes its `Backend` double behind `test-support`.
+    #[test]
+    fn repositioning_moves_the_strip_onto_the_new_primary_monitor() {
+        use wm_core::fake_backend::FakeBackend;
+
+        let theme = wm_theme::default_theme::nextstep_classic();
+        let mut backend = FakeBackend::new();
+        let start = Rect { pos: Point::new(0, 0), size: Size::new(1920, 1200) };
+        let mut dock: LaunchDock<FakeBackend> = LaunchDock::new(&mut backend, &theme, start, 56, &[]);
+        assert_eq!(strip_origin(dock.primary, 56), Point::new(0, 56));
+
+        // A second display arrives to the left, so the primary's
+        // origin moves right.
+        let moved = Rect { pos: Point::new(1600, 0), size: Size::new(1920, 1200) };
+        dock.reposition(&mut backend, &theme, moved);
+
+        assert_eq!(dock.primary, moved, "the strip must adopt the new primary");
+        assert_eq!(
+            strip_origin(dock.primary, 56),
+            Point::new(1600, 56),
+            "and sit below the Clip on that monitor, not on the old one"
+        );
+
+        // Repositioning to where it already is changes nothing.
+        dock.reposition(&mut backend, &theme, moved);
+        assert_eq!(dock.primary, moved);
+    }
+
     #[test]
     fn the_strip_anchors_to_the_primary_monitor_not_the_desktop_origin() {
         let primary = Rect { pos: Point::new(1600, 0), size: Size::new(1920, 1200) };

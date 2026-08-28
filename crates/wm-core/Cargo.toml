@@ -10,3 +10,8 @@ wm-theme-api = { path = "../wm-theme-api" }
 bitflags = "2"
 slotmap = "1"
 tracing = "0.1"
+
+[features]
+# Exposes `fake_backend` so downstream crates can unit-test code that
+# is generic over `Backend` without an X server or a compositor.
+test-support = []

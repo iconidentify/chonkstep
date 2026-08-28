@@ -772,6 +772,11 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
     pub fn on_screen_resize(&mut self, wm: &mut WindowManager<B>, size: Size) {
         let primary = primary_rect(&wm.monitors(), size);
         self.desktop.resize_to_screen(wm.backend_mut(), &self.theme, size, primary);
+        // The launcher strip anchors to the primary too, and unlike
+        // the dock and Clip it is not owned by `Desktop`, so it has to
+        // be told separately - otherwise it stays on the old monitor
+        // while the Clip moves to the new one.
+        self.launchdock.reposition(wm.backend_mut(), &self.theme, primary);
         self.apply_workareas(wm);
     }
 }
