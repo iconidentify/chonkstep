@@ -74,11 +74,25 @@ scripts/install.sh
 ```
 
 The installer pulls the runtime dependencies with pacman (Xorg,
-rxvt-unicode, picom, the theme fonts, and a Rust toolchain if needed),
-builds the release binaries, and installs a `chonkstep.desktop` session
-entry that points back into the checkout. Log out and pick "chonkstep"
-in the login manager's session list; on a setup without a session
-picker, `startx scripts/xsession.sh` from a TTY does the same.
+rxvt-unicode, picom, wireplumber for the sound instrument, the theme
+fonts, and a Rust toolchain if needed), builds the release binaries,
+installs a `chonkstep.desktop` session entry that points back into the
+checkout, and seeds `~/.config/chonkstep/config.toml` from the
+fully-commented example if you don't have one.
+
+How you start it depends on the machine:
+
+- **Stock Omarchy** boots straight into Hyprland via autologin - there
+  is no login-manager session picker. Switch to a TTY (Ctrl+Alt+F3),
+  log in, and run `startx scripts/xsession.sh` from the checkout. (Or
+  install and enable a display manager such as sddm; the session entry
+  is already in place for it.)
+- **A machine with a display manager** (sddm, gdm, lightdm, ...): log
+  out and pick "chonkstep" in the session list.
+
+On a HiDPI display, set `scale = 2.0` in
+`~/.config/chonkstep/config.toml` - it scales chrome, dock, cursors,
+and the terminal font as one system.
 
 Nothing is copied out of the repository, so updating is:
 
@@ -154,7 +168,15 @@ diagonal WindowMaker `IconBack`-gradient face under the stock RAISED2
 relief, luminance-picked ink, and sunken instrument-panel wells. Dock
 items, miniaturized-window icon tiles, and third-party `chonk-ui` apps
 all build on that one tile, which is why the whole desktop reads as a
-single family.
+single family. One level up, the `panel` module is the instrument SDK:
+a theme-reactive LED screen (glass recessed behind a gasket, with an
+accent-derived palette, seven-segment digits, meters, and history
+matrices) that all five dock instruments draw on - and every instrument
+ships a preview example (`cargo run -p wm-theme --example
+preview_nettraffic -- <dir>`, likewise `_sysload`, `_soundctl`,
+`_wifi`, `_power`) that renders every theme, scale, and state to PNG,
+which doubles as the visual-regression harness new instruments should
+copy.
 
 ![Focused and unfocused WindowMaker chrome](docs/screenshots/windowmaker-chrome.png)
 
