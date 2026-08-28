@@ -45,6 +45,8 @@ pub struct FakeBackend {
     pub paint_count: HashMap<FakeFrameId, u32>,
     pub last_frame_geometry: HashMap<FakeFrameId, Rect>,
     pub close_requests: HashSet<FakeWindowId>,
+    /// Windows force-killed via `kill_client`, in call order.
+    pub killed: Vec<FakeWindowId>,
     pub focused_window: Option<FakeWindowId>,
     pub raised_frames: Vec<FakeFrameId>,
     /// Whether each client's own content window is currently mapped —
@@ -235,6 +237,10 @@ impl Backend for FakeBackend {
 
     fn send_close(&mut self, window: Self::WindowId) {
         self.close_requests.insert(window);
+    }
+
+    fn kill_client(&mut self, window: Self::WindowId) {
+        self.killed.push(window);
     }
 
     fn grab_pointer_for_drag(&mut self) -> DragHandle {

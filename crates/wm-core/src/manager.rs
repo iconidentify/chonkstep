@@ -7,6 +7,7 @@ use crate::backend::Backend;
 use crate::client::{Client, ClientFlags, ClientId, Lifecycle, MaximizeDirections};
 use crate::focus::FocusPolicy;
 use crate::hittest::{hit_test, HitTarget};
+use crate::placement::{self, PlacementPolicy};
 use crate::resize;
 use crate::snap;
 use crate::types::{BackendEvent, KeyCombo, MouseButton, Modifiers, NetState, NetStateAction, SurfaceRef, WindowType};
@@ -102,6 +103,12 @@ pub enum Notification {
     /// requested geometry can't be trusted, as some apps' initial size
     /// negotiation is unreliable across window-manager environments).
     Mapped(ClientId),
+    /// The user right-clicked a window's titlebar — the shell should
+    /// open the per-window commands menu (real WindowMaker's window
+    /// menu) at `at` (root coordinates). `wm-core` deliberately knows
+    /// nothing about menus; it reports the gesture and executes
+    /// whatever public-API calls the shell's menu dispatch makes.
+    WindowMenuRequested { id: ClientId, at: Point },
 }
 
 /// Owns the backend, the theme engine, and all managed-client state.
@@ -127,6 +134,16 @@ pub struct WindowManager<B: Backend> {
     /// calling `set_workarea`. Defaults to the primary monitor's full
     /// geometry when unset.
     workarea: Option<Rect>,
+    /// Where freshly mapped windows that expressed no position
+    /// preference go — see `crate::placement`. Configured by the shell
+    /// (`set_placement_policy`); `Smart` by default.
+    placement_policy: PlacementPolicy,
+    /// Monotonic count of placements performed, feeding the cascade
+    /// staircase (`placement::place_frame`'s `cascade_index`).
+    placements: usize,
+    /// Edge-attraction distance for move drags — see `crate::snap`.
+    /// Configurable (`set_snap_threshold`); `0` disables snapping.
+    snap_threshold: i32,
     notifications: VecDeque<Notification>,
     focus_policy: FocusPolicy,
     /// 0-based, matching `Client::workspace`. Grows on demand the first
@@ -179,6 +196,9 @@ impl<B: Backend> WindowManager<B> {
             active_button_press: None,
             last_titlebar_press: None,
             workarea: None,
+            placement_policy: PlacementPolicy::Smart,
+            placements: 0,
+            snap_threshold: SNAP_THRESHOLD_PX,
             notifications: VecDeque::new(),
             focus_policy: FocusPolicy::default(),
             current_workspace: 0,
@@ -196,6 +216,19 @@ impl<B: Backend> WindowManager<B> {
     /// path needing to know the other exists.
     pub fn set_focus_policy(&mut self, policy: FocusPolicy) {
         self.focus_policy = policy;
+    }
+
+    /// Selects the initial-placement policy for windows that request no
+    /// position of their own — the config file's `placement` entry.
+    pub fn set_placement_policy(&mut self, policy: PlacementPolicy) {
+        self.placement_policy = policy;
+    }
+
+    /// Sets the move-drag edge-attraction distance in pixels — the
+    /// config file's `edge_resistance` entry. `0` disables snapping
+    /// entirely (every position passes through untouched).
+    pub fn set_snap_threshold(&mut self, px: u32) {
+        self.snap_threshold = px.min(i32::MAX as u32) as i32;
     }
 
     /// Reserves screen space windows should not maximize into (e.g. a
@@ -447,7 +480,8 @@ impl<B: Backend> WindowManager<B> {
         // Dialog/Normal distinction stays visible for the future
         // transient-for/placement policy `WindowType::Dialog`'s doc
         // comment anticipates.
-        match self.backend.window_type(window) {
+        let window_type = self.backend.window_type(window);
+        match window_type {
             WindowType::Unmanaged => {
                 // Docks/menus/tooltips draw their own chrome and place
                 // themselves — map as the client created it, track
@@ -477,7 +511,38 @@ impl<B: Backend> WindowManager<B> {
         // screen's corner; treating that as the *content* position and
         // subtracting the titlebar/border offset would push the frame
         // (and its titlebar) to negative coordinates, off-screen.
-        let frame_geom = Rect { pos: content.pos, size: layout.frame_size };
+        // Initial placement: a client that asked for a real position (a
+        // terminal launched with `-geometry +x+y`) is honored verbatim,
+        // but the overwhelmingly common (0, 0) means "don't care, WM
+        // decides" (see the comment below), and that is exactly what
+        // the placement policy exists for. Dialogs center regardless of
+        // policy — they are conversations, not workspace furniture.
+        let frame_pos = if content.pos != Point::new(0, 0) {
+            content.pos
+        } else {
+            let workarea = self.workarea.unwrap_or_else(|| {
+                self.backend.monitors().first().map(|m| m.geometry).unwrap_or(Rect { pos: Point::new(0, 0), size: Size::new(1, 1) })
+            });
+            let existing: Vec<Rect> = self
+                .clients
+                .iter()
+                .filter(|(_, c)| c.lifecycle == Lifecycle::Normal && c.workspace == self.current_workspace)
+                .map(|(_, c)| Rect {
+                    pos: Point::new(c.geometry.pos.x - c.layout.client_offset.x, c.geometry.pos.y - c.layout.client_offset.y),
+                    size: c.layout.frame_size,
+                })
+                .collect();
+            let policy = if window_type == WindowType::Dialog {
+                PlacementPolicy::Center
+            } else {
+                self.placement_policy
+            };
+            let cascade_step = layout.titlebar_height.max(16);
+            let pos = placement::place_frame(policy, workarea, layout.frame_size, &existing, self.placements, cascade_step);
+            self.placements += 1;
+            pos
+        };
+        let frame_geom = Rect { pos: frame_pos, size: layout.frame_size };
         client.geometry.pos = Point::new(
             frame_geom.pos.x + layout.client_offset.x,
             frame_geom.pos.y + layout.client_offset.y,
@@ -713,6 +778,19 @@ impl<B: Backend> WindowManager<B> {
                 self.active_button_press = Some(ActiveButtonPress { client: id, kind });
                 self.repaint_decoration(id);
             }
+            // Right-click anywhere on the titlebar surface asks the
+            // shell for the per-window commands menu (WindowMaker's
+            // window menu) — reported at root coordinates so the shell
+            // can pop the menu under the pointer without knowing frame
+            // geometry.
+            HitTarget::TitlebarDrag | HitTarget::Button(_) if button == MouseButton::Right => {
+                let frame_pos = Point::new(
+                    client.geometry.pos.x - client.layout.client_offset.x,
+                    client.geometry.pos.y - client.layout.client_offset.y,
+                );
+                let at = Point::new(frame_pos.x + local.x, frame_pos.y + local.y);
+                self.notifications.push_back(Notification::WindowMenuRequested { id, at });
+            }
             HitTarget::TitlebarDrag if button == MouseButton::Left => {
                 // A second press on this same client's titlebar within
                 // `DOUBLE_CLICK_MS` triggers a titlebar action instead of
@@ -868,7 +946,7 @@ impl<B: Backend> WindowManager<B> {
             );
             targets.push(Rect { pos: other_frame_pos, size: other.layout.frame_size });
         }
-        let new_frame_pos = snap::snap_position(Rect { pos: raw_pos, size: frame_size }, &targets, SNAP_THRESHOLD_PX);
+        let new_frame_pos = snap::snap_position(Rect { pos: raw_pos, size: frame_size }, &targets, self.snap_threshold);
 
         self.backend
             .set_frame_geometry(frame, Rect { pos: new_frame_pos, size: frame_size });
@@ -1368,6 +1446,18 @@ impl<B: Backend> WindowManager<B> {
             return;
         };
         self.backend.send_close(client.window);
+    }
+
+    /// Force-kills `id`'s client connection — the window menu's "Kill"
+    /// entry, for an application that hangs and stops answering the
+    /// polite `WM_DELETE_WINDOW` close. Deliberately a separate verb
+    /// from `close_client`: closing asks, killing doesn't, and a menu
+    /// should never quietly escalate one into the other.
+    pub fn kill_client(&mut self, id: ClientId) {
+        let Some(client) = self.clients.get(id) else {
+            return;
+        };
+        self.backend.kill_client(client.window);
     }
 
     /// `_NET_CLOSE_WINDOW`: identical to the titlebar close button's

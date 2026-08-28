@@ -97,6 +97,14 @@ pub trait Backend {
     /// `WM_DELETE_WINDOW` if the client supports it, force-kill otherwise.
     fn send_close(&mut self, window: Self::WindowId);
 
+    /// Force-kills the client owning `window` (X11: `XKillClient`) —
+    /// the escalation for an application that no longer answers
+    /// `send_close`'s polite `WM_DELETE_WINDOW`. Defaulted no-op so
+    /// backends without a kill concept still compile.
+    fn kill_client(&mut self, window: Self::WindowId) {
+        let _ = window;
+    }
+
     // -- input grabs --------------------------------------------------------------
     fn grab_pointer_for_drag(&mut self) -> DragHandle;
     fn ungrab_pointer(&mut self, handle: DragHandle);
