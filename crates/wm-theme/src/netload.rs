@@ -1,21 +1,27 @@
 //! An exact-as-practical port of the classic WindowMaker dockapp
-//! `wmnetload`: a monochrome LCD-style panel — sage-gray "glass," a
-//! silver chiseled bevel, a three-digit seven-segment throughput
-//! readout with K/M/G unit indicators, the interface name, and a
-//! mirrored dot-matrix history graph (download filling down from the
-//! top edge, upload filling up from the bottom edge — "without
-//! resorting to colors," exactly as the original's own description
-//! puts it: direction is shown by *position*, not hue). Colors here are
-//! deliberately fixed rather than theme-derived — this widget recreates
-//! a specific piece of hardware-LCD chrome, not this desktop's own
-//! NeXTSTEP palette.
+//! `wmnetload`, sitting on this theme system's common tile: the widget
+//! is a [`tile::draw_tile_base`] like every other dock item, and the
+//! LCD — the monochrome screen carrying the three-digit seven-segment
+//! throughput readout and the mirrored dot-matrix history graph
+//! (download filling down from the top edge, upload filling up from
+//! the bottom edge — "without resorting to colors," exactly as the
+//! original's own description puts it: direction is shown by
+//! *position*, not hue) — is recessed into a [`tile::draw_tile_well`],
+//! the classic dockapp instrument look. The LCD's own sage-gray
+//! monochrome palette stays deliberately fixed rather than
+//! theme-derived: it depicts a specific piece of hardware — a screen —
+//! not tile chrome. Everything *off* the glass (the interface name,
+//! the K/M/G unit indicators) is lettering on the tile face, so it
+//! uses [`tile::tile_ink`]/[`tile::tile_ink_dim`] like the rest of the
+//! family.
 
 use tiny_skia::{Paint, Pixmap, Rect as SkRect, Transform};
 use wm_theme_api::DecorationBuffer;
 
 use crate::digitalclock::{segment_rects, DIGIT_SEGMENTS};
-use crate::model::{Bevel, BevelStyle, Color, FontSpec, FontStyle, FontWeight, TextAlign};
+use crate::model::{Color, FontSpec, FontStyle, FontWeight, TextAlign};
 use crate::paint;
+use crate::tile;
 use crate::Theme;
 
 /// Which unit the three-digit readout is currently expressed in — the
@@ -34,12 +40,14 @@ pub const NET_LOAD_COLUMNS: usize = 16;
 /// the matrix is `NET_LOAD_HALF_ROWS * 2` rows tall in total.
 pub const NET_LOAD_HALF_ROWS: u32 = 5;
 
+// The LCD glass's own fixed palette — see the module doc comment for
+// why these are not theme-derived. `INK` here is the LCD's segment
+// ink, a different thing from `tile::tile_ink` (which is the tile
+// face's lettering color).
 const PANEL: Color = Color { r: 0x68, g: 0x74, b: 0x68, a: 0xff };
 const PANEL_SHADOW: Color = Color { r: 0x58, g: 0x64, b: 0x58, a: 0xff };
 const GHOST: Color = Color { r: 0x58, g: 0x64, b: 0x58, a: 0xff };
 const INK: Color = Color { r: 0x10, g: 0x10, b: 0x10, a: 0xff };
-const BEZEL_LIGHT: Color = Color { r: 0xe8, g: 0xf0, b: 0xf8, a: 0xff };
-const BEZEL_DARK: Color = Color { r: 0x10, g: 0x10, b: 0x10, a: 0xff };
 
 /// `rate_digits` is the three-digit readout — `None` for a leading-zero
 /// blanked position (the original left-pads with blanks, not `0`s).
@@ -59,71 +67,82 @@ pub fn render_netload_tile(
 ) -> DecorationBuffer {
     let size = size.max(8);
     let mut pixmap = Pixmap::new(size, size).expect("nonzero netload tile size");
-    // Deliberately theme-independent for color/bevel treatment — see the
-    // module doc comment — but text still needs a real, registered font
-    // family for `cosmic-text` to resolve, so this borrows the theme's
-    // own (confirmed-available) one rather than guessing a generic name
-    // like "sans-serif", which isn't a real face and silently renders
-    // nothing.
+    // The LCD keeps fixed colors, but text still needs a real,
+    // registered font family for `cosmic-text` to resolve, so this
+    // borrows the theme's own (confirmed-available) one rather than
+    // guessing a generic name like "sans-serif", which isn't a real
+    // face and silently renders nothing.
     let label_family = theme.menu.item_font.family.clone();
 
-    let bevel = Bevel { style: BevelStyle::Raised, width: (size as f32 * 0.05).max(2.0) as u8, light: BEZEL_LIGHT, dark: BEZEL_DARK };
-    paint::fill_rect(&mut pixmap, 0, 0, size, size, PANEL);
-    paint::draw_bevel(&mut pixmap, 0, 0, size, size, &bevel);
+    tile::draw_tile_base(&mut pixmap, 0, 0, size, theme);
 
-    let inset = (bevel.width as f32 + 1.0) as i32;
-    let face_w = (size as i32 - inset * 2).max(1) as u32;
-    let face_h = (size as i32 - inset * 2).max(1) as u32;
-    paint::fill_rect(&mut pixmap, inset, inset, face_w, face_h, PANEL);
+    // Geometry: the LCD well takes the top of the tile; a strip of
+    // tile-face lettering (interface name, unit indicators) sits below
+    // it. `margin` keeps the well's sunken bevel clear of the tile's
+    // own raised relief so the two recipes never merge into mud, and
+    // it scales with the tile like every other piece of chrome.
+    let t = theme.tile.bevel.width.max(1) as i32;
+    let margin = t + (size as i32 / 28).max(1);
+    let strip_h = ((size as f32) * 0.20).round().max(9.0) as i32;
+    let well_x = margin;
+    let well_y = margin;
+    let well_w = (size as i32 - margin * 2).max(0);
+    let well_h = (size as i32 - margin * 2 - strip_h).max(0);
+    tile::draw_tile_well(&mut pixmap, well_x, well_y, well_w as u32, well_h as u32, theme);
 
-    let digit_row_h = (face_h as f32 * 0.36).round() as u32;
-    let name_row_h = (face_h as f32 * 0.16).round() as u32;
-    let matrix_h = face_h.saturating_sub(digit_row_h).saturating_sub(name_row_h);
+    // The glass sits one pixel inside the well's sunken bevel, leaving
+    // a ring of the well's shaded face visible around it — the rubber
+    // gasket a real instrument's LCD sits behind, and what keeps the
+    // sage glass reading as *in* the well rather than pasted over it.
+    let glass_inset = t + 1;
+    let glass_x = well_x + glass_inset;
+    let glass_y = well_y + glass_inset;
+    let glass_w = (well_w - glass_inset * 2).max(0) as u32;
+    let glass_h = (well_h - glass_inset * 2).max(0) as u32;
+    paint::fill_rect(&mut pixmap, glass_x, glass_y, glass_w, glass_h, PANEL);
 
-    draw_digit_row(&mut pixmap, inset, inset, face_w, digit_row_h, font_system, swash_cache, &label_family, rate_digits, unit);
+    // On the glass: digits above, history matrix below. The interface
+    // name row the original wedged between them moved off the screen
+    // entirely (it is a label, not a reading), which buys the digits
+    // and the matrix more height than the original's 56px budget gave.
+    let digit_row_h = (glass_h as f32 * 0.48).round() as u32;
+    let matrix_h = glass_h.saturating_sub(digit_row_h);
+    draw_digit_row(&mut pixmap, glass_x, glass_y, glass_w, digit_row_h, rate_digits);
+    draw_dot_matrix(&mut pixmap, glass_x, glass_y + digit_row_h as i32, glass_w, matrix_h, rx_levels, tx_levels);
 
-    let name_y = inset + digit_row_h as i32;
-    draw_name_row(&mut pixmap, inset, name_y, face_w, name_row_h, font_system, swash_cache, &label_family, interface_name);
-
-    let matrix_y = name_y + name_row_h as i32;
-    draw_dot_matrix(&mut pixmap, inset, matrix_y, face_w, matrix_h, rx_levels, tx_levels);
+    draw_label_strip(
+        &mut pixmap,
+        theme,
+        font_system,
+        swash_cache,
+        &label_family,
+        well_x,
+        well_y + well_h,
+        well_w as u32,
+        strip_h as u32,
+        interface_name,
+        unit,
+    );
 
     DecorationBuffer { width: size, height: size, pixels: pixmap.data().to_vec() }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn draw_digit_row(
-    pixmap: &mut Pixmap,
-    x: i32,
-    y: i32,
-    w: u32,
-    h: u32,
-    font_system: &mut cosmic_text::FontSystem,
-    swash_cache: &mut cosmic_text::SwashCache,
-    label_family: &str,
-    digits: [Option<u8>; 3],
-    unit: NetloadUnit,
-) {
-    let unit_col_w = (w as f32 * 0.18).round().max(10.0) as u32;
-    let digits_w = w.saturating_sub(unit_col_w);
-    let digit_margin = (digits_w as f32 * 0.03).max(1.0);
-    let digit_w = (digits_w as f32 / 3.0 - digit_margin).max(1.0);
-    let digit_h = h as f32 * 0.88;
+/// The three seven-segment digits, spread across the glass width. The
+/// original reserved a unit column on the right of this row; that
+/// column now lives on the tile face (see [`draw_label_strip`]), so
+/// the digits get the full width.
+fn draw_digit_row(pixmap: &mut Pixmap, x: i32, y: i32, w: u32, h: u32, digits: [Option<u8>; 3]) {
+    let pad = (w as f32 * 0.06).max(1.0);
+    let inner_w = (w as f32 - pad * 2.0).max(3.0);
+    let digit_margin = (inner_w * 0.06).max(1.0);
+    let digit_w = (inner_w / 3.0 - digit_margin).max(1.0);
+    let digit_h = h as f32 * 0.80;
     let digit_y = y as f32 + (h as f32 - digit_h) / 2.0;
 
-    let mut dx = x as f32;
+    let mut dx = x as f32 + pad + digit_margin / 2.0;
     for digit in digits {
         draw_lcd_digit(pixmap, dx, digit_y, digit_w, digit_h, digit);
         dx += digit_w + digit_margin;
-    }
-
-    let unit_x = x + digits_w as i32;
-    let labels = [("K", NetloadUnit::Kilo), ("M", NetloadUnit::Mega), ("G", NetloadUnit::Giga)];
-    let label_h = h / 3;
-    let font = FontSpec { family: label_family.to_string(), size: (label_h as f32 * 0.72).max(6.0), weight: FontWeight::Bold, style: FontStyle::Normal };
-    for (i, (label, kind)) in labels.into_iter().enumerate() {
-        let color = if kind == unit { INK } else { GHOST };
-        paint::draw_text(pixmap, font_system, swash_cache, label, &font, color, unit_x, y + i as i32 * label_h as i32, unit_col_w, label_h, TextAlign::Center);
     }
 }
 
@@ -157,26 +176,41 @@ fn draw_lcd_digit(pixmap: &mut Pixmap, x: f32, y: f32, w: f32, h: f32, digit: Op
     }
 }
 
+/// The tile-face lettering under the well: interface name on the
+/// left, the `K`/`M`/`G` unit column (now a row) on the right with the
+/// active unit in full ink and the inactive ones dimmed — the same
+/// lit-vs-ghost indicator idea the original drew on the LCD, restated
+/// in the tile's own ink so it reads as part of the tile family.
 #[allow(clippy::too_many_arguments)]
-fn draw_name_row(
+fn draw_label_strip(
     pixmap: &mut Pixmap,
+    theme: &Theme,
+    font_system: &mut cosmic_text::FontSystem,
+    swash_cache: &mut cosmic_text::SwashCache,
+    label_family: &str,
     x: i32,
     y: i32,
     w: u32,
     h: u32,
-    font_system: &mut cosmic_text::FontSystem,
-    swash_cache: &mut cosmic_text::SwashCache,
-    label_family: &str,
     interface_name: &str,
+    unit: NetloadUnit,
 ) {
-    let mid_y = y + h as i32 / 2;
-    let dash_w = (w as f32 * 0.14).round().max(2.0) as u32;
-    paint::fill_rect(pixmap, x, mid_y, dash_w, 2, INK);
-    paint::fill_rect(pixmap, x + w as i32 - dash_w as i32, mid_y, dash_w, 2, INK);
+    let ink = tile::tile_ink(theme);
+    let dim = tile::tile_ink_dim(theme);
+    let font = FontSpec { family: label_family.to_string(), size: (h as f32 * 0.68).max(6.0), weight: FontWeight::Bold, style: FontStyle::Normal };
+
+    let cell_w = (w as f32 * 0.14).round().max(7.0) as u32;
+    let units_w = cell_w * 3;
+    let labels = [("K", NetloadUnit::Kilo), ("M", NetloadUnit::Mega), ("G", NetloadUnit::Giga)];
+    for (i, (label, kind)) in labels.into_iter().enumerate() {
+        let color = if kind == unit { ink } else { dim };
+        let cx = x + w as i32 - units_w as i32 + i as i32 * cell_w as i32;
+        paint::draw_text(pixmap, font_system, swash_cache, label, &font, color, cx, y, cell_w, h, TextAlign::Center);
+    }
 
     let name = interface_name.to_uppercase();
-    let font = FontSpec { family: label_family.to_string(), size: (h as f32 * 0.72).max(6.0), weight: FontWeight::Bold, style: FontStyle::Normal };
-    paint::draw_text(pixmap, font_system, swash_cache, &name, &font, INK, x, y, w, h, TextAlign::Center);
+    let name_w = w.saturating_sub(units_w);
+    paint::draw_text(pixmap, font_system, swash_cache, &name, &font, ink, x, y, name_w, h, TextAlign::Left);
 }
 
 fn draw_dot_matrix(pixmap: &mut Pixmap, x: i32, y: i32, w: u32, h: u32, rx_levels: &[u32], tx_levels: &[u32]) {
@@ -282,5 +316,37 @@ mod tests {
         let a = render_netload_tile(&theme, &mut font_system, &mut swash_cache, 56, "eth0", [None; 3], NetloadUnit::Kilo, &[0; 16], &[0; 16]);
         let b = render_netload_tile(&theme, &mut font_system, &mut swash_cache, 56, "wlan0", [None; 3], NetloadUnit::Kilo, &[0; 16], &[0; 16]);
         assert_ne!(a.pixels, b.pixels);
+    }
+
+    /// The restyle's structural claims: the widget's face is the
+    /// theme's tile gradient (not the old flat sage panel edge to
+    /// edge), and the fixed LCD glass color still exists inside the
+    /// well — a screen set into a tile, not a tile that *is* a screen.
+    #[test]
+    fn tile_face_shows_through_and_the_lcd_glass_survives() {
+        let theme = nextstep_classic();
+        let mut font_system = cosmic_text::FontSystem::new();
+        let mut swash_cache = cosmic_text::SwashCache::new();
+        let size = 64u32;
+        let buffer = render_netload_tile(&theme, &mut font_system, &mut swash_cache, size, "eth0", [None; 3], NetloadUnit::Kilo, &[0; 16], &[0; 16]);
+        let px = |x: u32, y: u32| {
+            let i = ((y * size + x) * 4) as usize;
+            (buffer.pixels[i], buffer.pixels[i + 1], buffer.pixels[i + 2])
+        };
+        // Two face pixels far apart along the gradient direction, both
+        // inside the tile relief and outside the well/strip: a diagonal
+        // gradient must make them differ (the old design filled both
+        // with the same flat PANEL color).
+        assert_ne!(px(2, 2), px(size - 3, size - 3), "tile gradient should show on the face");
+        // The glass keeps its exact fixed color somewhere (interiors
+        // between segments and dots; buffers are premultiplied-opaque,
+        // so channel values survive verbatim) — enough pixels that it
+        // is clearly a panel, not an artifact.
+        let glass = buffer
+            .pixels
+            .chunks_exact(4)
+            .filter(|p| (p[0], p[1], p[2]) == (PANEL.r, PANEL.g, PANEL.b))
+            .count();
+        assert!(glass > 200, "expected a substantial LCD glass area, found {glass} PANEL pixels");
     }
 }

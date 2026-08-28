@@ -1,21 +1,26 @@
 //! Rendering for small square "icon tiles" — the shape a miniaturized
 //! window collapses to (classic WindowMaker/NeXTSTEP "miniaturize to
-//! icon", not minimize-to-a-taskbar). A miniature titlebar strip (the
-//! window's own inactive fill, a small title) over a preview of the
-//! window's actual content, captured the instant it was miniaturized —
-//! see `wm_core::Backend::capture_window_image`. Falls back to a plain
-//! dark tile when no preview is available (capture failed, or this is
-//! used for something that isn't a captured window at all — a themed
-//! launcher/shelf icon, say).
+//! icon", not minimize-to-a-taskbar), also reused by the Alt-Tab
+//! switcher for its thumbnails. Built on the theme's common tile
+//! ([`tile::draw_tile_base`]): a preview of the window's actual
+//! content, captured the instant it was miniaturized (see
+//! `wm_core::Backend::capture_window_image`), sits letterboxed inside
+//! a recessed [`tile::draw_tile_well`] covering most of the face —
+//! a little framed viewport onto the window — with the title as a
+//! small ink caption on the face beneath it. When no preview exists
+//! (capture failed, or this is used for something that isn't a
+//! captured window at all — a themed launcher/shelf icon, say) the
+//! empty well plus caption still reads as a finished tile, not a
+//! broken one.
 
 use tiny_skia::{FilterQuality, PixmapPaint, Transform};
 use wm_theme_api::DecorationBuffer;
 
-use crate::model::{Color, FontSpec, TextAlign, Theme};
-use crate::paint;
+use crate::model::{FontSpec, TextAlign, Theme};
+use crate::{paint, tile};
 
 /// Rasterizes one icon tile: `size` x `size`. `preview`, if present, is
-/// scaled to fit (letterboxed, never cropped) under the title strip.
+/// scaled to fit (letterboxed, never cropped) inside the well.
 pub fn render_icon_tile(
     theme: &Theme,
     font_system: &mut cosmic_text::FontSystem,
@@ -29,45 +34,55 @@ pub fn render_icon_tile(
         return DecorationBuffer { width: 0, height: 0, pixels: Vec::new() };
     };
 
-    paint::fill_area(&mut pixmap, 0, 0, size, size, &theme.resize_bar.fill);
+    tile::draw_tile_base(&mut pixmap, 0, 0, size, theme);
 
-    // A miniature version of the window's own (inactive — nothing
-    // miniaturized is ever the focused window) titlebar, not a generic
-    // icon-tile color: this is meant to still read as "that window,"
-    // shrunk, not as a different kind of object.
-    let title_h = ((size as f32) * 0.24).round().max(9.0) as u32;
-    paint::fill_area(&mut pixmap, 0, 0, size, title_h, &theme.titlebar.inactive);
+    // Geometry: the preview well fills the tile down to a caption
+    // strip along the bottom. `margin` keeps the well's sunken bevel
+    // clear of the tile's own raised relief (the two recipes read as
+    // mush when they touch) and scales with the tile like all chrome.
+    let t = theme.tile.bevel.width.max(1) as i32;
+    let margin = t + (size as i32 / 28).max(1);
+    let caption_h = ((size as f32) * 0.22).round().max(9.0) as i32;
+    let caption_y = size as i32 - margin - caption_h;
+    let well_x = margin;
+    let well_y = margin;
+    let well_w = (size as i32 - margin * 2).max(0) as u32;
+    let well_h = (caption_y - margin).max(0) as u32;
+    tile::draw_tile_well(&mut pixmap, well_x, well_y, well_w, well_h, theme);
 
+    if let Some(src) = preview.filter(|b| b.width > 0 && b.height > 0) {
+        // The content stays inside the well's sunken bevel so the
+        // recess lines keep framing it; letterbox bars show the well's
+        // shaded floor, which reads far better than the old hard-black
+        // backing — the tile stays one material throughout.
+        let inner = t;
+        let px = well_x + inner;
+        let py = well_y + inner;
+        let pw = (well_w as i32 - inner * 2).max(0) as u32;
+        let ph = (well_h as i32 - inner * 2).max(0) as u32;
+        draw_preview(&mut pixmap, src, px as u32, py as u32, pw, ph);
+    }
+
+    // The caption: the window's title in the tile's own ink, beneath
+    // the well. Deliberately small — this is a caption on a thumbnail,
+    // not a titlebar someone reads from across the room — and hard-
+    // elided the same way the old strip was.
     let text = if label.is_empty() { "?" } else { label };
     let short: String = text.chars().take(24).collect();
-    // Deliberately smaller than a real titlebar's own font — this is a
-    // caption on a thumbnail, not a titlebar someone reads from across
-    // the room.
-    let title_font = FontSpec { size: (title_h as f32 * 0.56).max(6.0), ..theme.titlebar.font.clone() };
-    let text_pad = 3i32;
+    let caption_font = FontSpec { size: (caption_h as f32 * 0.60).max(6.0), ..theme.titlebar.font.clone() };
     paint::draw_text(
         &mut pixmap,
         font_system,
         swash_cache,
         &short,
-        &title_font,
-        theme.titlebar.text_color_inactive,
-        text_pad,
-        0,
-        size.saturating_sub(text_pad as u32 * 2),
-        title_h,
+        &caption_font,
+        tile::tile_ink(theme),
+        well_x,
+        caption_y,
+        well_w,
+        caption_h.max(0) as u32,
         TextAlign::Center,
     );
-
-    let preview_y = title_h;
-    let preview_h = size.saturating_sub(title_h);
-    paint::fill_rect(&mut pixmap, 0, preview_y as i32, size, preview_h, Color::rgb(0x0c, 0x0c, 0x0c));
-
-    if let Some(src) = preview.filter(|b| b.width > 0 && b.height > 0) {
-        draw_preview(&mut pixmap, src, 0, preview_y, size, preview_h);
-    }
-
-    paint::draw_bevel(&mut pixmap, 0, 0, size, size, &theme.titlebar.bevel);
 
     DecorationBuffer { width: size, height: size, pixels: pixmap.data().to_vec() }
 }
@@ -146,11 +161,13 @@ mod tests {
     }
 
     /// Regression guard: a preview with a very different aspect ratio
-    /// than the square tile must still fit entirely within the preview
-    /// area (letterboxed), not overflow past its top edge into the
-    /// title strip or past the tile's own bottom edge.
+    /// than the square tile must still fit entirely within the well
+    /// interior (letterboxed), never spilling onto the tile face above
+    /// the well or into the caption strip below it. Geometry here
+    /// mirrors `render_icon_tile`'s, with one row/column of slack for
+    /// edge filtering, matching the tolerance the old strip test gave.
     #[test]
-    fn wide_preview_stays_within_the_preview_area_not_the_title_strip() {
+    fn wide_preview_stays_within_the_well_not_the_face_or_caption() {
         let theme = nextstep_classic();
         let mut font_system = cosmic_text::FontSystem::new();
         let mut swash_cache = cosmic_text::SwashCache::new();
@@ -161,12 +178,26 @@ mod tests {
         let mut pixmap = tiny_skia::Pixmap::new(buffer.width, buffer.height).unwrap();
         pixmap.data_mut().copy_from_slice(&buffer.pixels);
 
-        let title_h = ((size as f32) * 0.24).round() as u32;
-        for y in 0..title_h.saturating_sub(1) {
+        let t = theme.tile.bevel.width.max(1) as i32;
+        let margin = t + (size as i32 / 28).max(1);
+        let caption_h = ((size as f32) * 0.22).round().max(9.0) as i32;
+        let caption_y = size as i32 - margin - caption_h;
+        let interior_top = (margin + t) as u32;
+        let interior_bottom = (caption_y - t) as u32;
+        let interior_left = (margin + t) as u32;
+        let interior_right = size - interior_left;
+        for y in 0..size {
             for x in 0..size {
+                let inside = x + 1 >= interior_left
+                    && x < interior_right + 1
+                    && y + 1 >= interior_top
+                    && y < interior_bottom + 1;
+                if inside {
+                    continue;
+                }
                 let p = pixmap.pixels()[(y * size + x) as usize];
                 let is_green = p.green() > 180 && p.red() < 120 && p.blue() < 120;
-                assert!(!is_green, "preview pixel bled into the title strip at ({x}, {y})");
+                assert!(!is_green, "preview pixel bled outside the well interior at ({x}, {y})");
             }
         }
     }

@@ -134,6 +134,20 @@ pub struct ResizeBarStyle {
     pub corner_width: u16,
 }
 
+/// The tile: the square platform every dock item, icon, and Clip sits
+/// on — this theme system's common UI surface, and the piece that
+/// makes disparate widgets read as one family. Real WindowMaker's
+/// distinctive look here is `IconBack`'s diagonal gradient
+/// (`src/defaults.c`: dgradient a6a6b6 to 515561), not a flat fill;
+/// each built-in theme supplies its own gradient in that spirit.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TileStyle {
+    pub fill: Fill,
+    /// Relief thickness comes from this bevel's width (the relief
+    /// itself is the relative RAISED2 recipe, like all chrome).
+    pub bevel: Bevel,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct BorderStyle {
     pub width: u8,
@@ -173,6 +187,8 @@ pub struct Theme {
     pub resize_bar: ResizeBarStyle,
     pub border: BorderStyle,
     pub menu: MenuStyle,
+    /// See [`TileStyle`].
+    pub tile: TileStyle,
     /// Terminal colors spawned terminals launch with — themes restyle
     /// the whole desktop, terminals included.
     pub terminal: TerminalPalette,
@@ -238,6 +254,7 @@ impl Theme {
             button.bevel.width = scale_u8(button.bevel.width);
         }
 
+        theme.tile.bevel.width = scale_u8(theme.tile.bevel.width);
         theme.resize_bar.height = scale_u16(theme.resize_bar.height);
         theme.resize_bar.bevel.width = scale_u8(theme.resize_bar.bevel.width);
         theme.resize_bar.corner_width = scale_u16(theme.resize_bar.corner_width);

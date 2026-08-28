@@ -106,7 +106,13 @@ The workspace splits along seams that keep the core testable: `wm-core`
 (decoration rendering), `wm-theme-api` (the boundary between them),
 `chonkstep` (the binary and desktop shell), and `chonk-ui`/`chonk-about`
 (a small SDK surface proving third-party apps can draw with the same
-visual language).
+visual language). Within `wm-theme`, the `tile` module is the common UI
+platform for everything square: the workspace Clip's look formalized - a
+diagonal WindowMaker `IconBack`-gradient face under the stock RAISED2
+relief, luminance-picked ink, and sunken instrument-panel wells. Dock
+items, miniaturized-window icon tiles, and third-party `chonk-ui` apps
+all build on that one tile, which is why the whole desktop reads as a
+single family.
 
 ![Focused and unfocused WindowMaker chrome](docs/screenshots/windowmaker-chrome.png)
 
