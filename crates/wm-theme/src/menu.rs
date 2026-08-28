@@ -24,9 +24,11 @@
 //! - The title strip is a real titlebar: the window titlebar's height
 //!   and RAISED2 relief (menus in WindowMaker are `wFrameWindow`s, so
 //!   this equality is by construction there — and by these shared
-//!   constants here). No close box: WindowMaker only shows a titlebar
-//!   button on a menu once it's been pinned ("buttoned"), and these
-//!   popups are transient — clicking anywhere off an item dismisses.
+//!   constants here). A `closable` menu additionally carries the
+//!   titlebar close box, WindowMaker's affordance on a posted
+//!   ("buttoned") menu — the root menu renders this way, because it
+//!   stays up for leisurely navigation; the transient window menu does
+//!   not. Clicking anywhere off an item dismisses either kind.
 //!
 //! Menus are trees (`MenuItem::Submenu`), not flat lists — real
 //! WindowMaker root menus nest arbitrarily deep (`Applications >
@@ -35,10 +37,11 @@
 //! hysteresis, off-screen flip positioning) is `cascade::CascadeMenu`'s
 //! job, with `chonkstep::desktop::Desktop` as the reference host.
 
-use wm_theme_api::{DecorationBuffer, Point, Rect, Size};
+use wm_theme_api::{ButtonKind, DecorationBuffer, Point, Rect, Size};
 
 use crate::model::{Color, Fill, TextAlign, Theme};
 use crate::paint;
+use crate::raster::draw_button_glyph;
 use crate::tile;
 
 /// One row of a menu, at any nesting level. Actions carry an opaque
@@ -63,11 +66,17 @@ impl MenuItem {
 }
 
 /// A rasterized menu popup plus everything needed for hit-testing: one
-/// rect per `items` entry (same order as passed in). Anything outside
-/// the item rects — the title strip, the border — is a dismissal.
+/// rect per `items` entry (same order as passed in), and the title
+/// strip's close box when the menu was rendered `closable`. Anything
+/// outside the item rects — the title strip, the border — is a
+/// dismissal either way; the box is the *visible* affordance real
+/// WindowMaker gives a posted ("buttoned") menu, so the root menu
+/// reads as something that stays up until you close it, not a popup
+/// that might vanish underneath you.
 pub struct MenuRender {
     pub buffer: DecorationBuffer,
     pub item_rects: Vec<Rect>,
+    pub close_rect: Option<Rect>,
 }
 
 /// The face color an entry's engraved details key off — a solid is
@@ -98,6 +107,7 @@ pub fn render_menu(
     title: &str,
     items: &[MenuItem],
     highlighted: Option<usize>,
+    closable: bool,
 ) -> MenuRender {
     let mut swash_cache = cosmic_text::SwashCache::new();
     let menu = &theme.menu;
@@ -143,6 +153,25 @@ pub fn render_menu(
     paint::fill_area(&mut pixmap, x0, bw as i32, content_w, title_h, &menu.title_bar);
     let title_t = (theme.titlebar.bevel.width as u32).max(1);
     paint::draw_raised2_bevel(&mut pixmap, x0, bw as i32, content_w, title_h, title_t);
+    // The close box: a posted menu's titlebar button, exactly the
+    // window titlebar's close treatment (same bevel, same glyph, flush
+    // right at full title height - TS_NEW style), which is precisely
+    // what real WindowMaker shows on a "buttoned" menu. Drawn over the
+    // already-painted title strip: like window titlebars, the box is
+    // the strip's own fill showing through a bevel, not a separately
+    // colored control.
+    let close_rect = if closable {
+        let size = title_h.min(content_w);
+        let rect = Rect::new(Point::new(x0 + content_w as i32 - size as i32, bw as i32), Size::new(size, size));
+        let style = theme.titlebar.buttons.iter().find(|b| b.kind == ButtonKind::Close);
+        if let Some(style) = style {
+            paint::draw_bevel(&mut pixmap, rect.pos.x, rect.pos.y, rect.size.w, rect.size.h, &style.bevel);
+        }
+        draw_button_glyph(&mut pixmap, ButtonKind::Close, rect, menu.title_text_color, false);
+        Some(rect)
+    } else {
+        None
+    };
     paint::draw_text(
         &mut pixmap,
         font_system,
@@ -240,6 +269,7 @@ pub fn render_menu(
     MenuRender {
         buffer: DecorationBuffer { width, height, pixels: pixmap.data().to_vec() },
         item_rects,
+        close_rect,
     }
 }
 
@@ -267,7 +297,7 @@ mod tests {
         let mut font_system = cosmic_text::FontSystem::new();
         let items = [action("Terminal", 1), action("Restart", 2), action("Exit", 3)];
 
-        let render = render_menu(&theme, &mut font_system, "Chonkstep", &items, Some(1));
+        let render = render_menu(&theme, &mut font_system, "Chonkstep", &items, Some(1), false);
 
         assert_eq!(render.item_rects.len(), items.len());
         assert_eq!(render.buffer.pixels.len(), (render.buffer.width * render.buffer.height * 4) as usize);
@@ -285,13 +315,14 @@ mod tests {
         let theme = nextstep_classic();
         let mut font_system = cosmic_text::FontSystem::new();
 
-        let short = render_menu(&theme, &mut font_system, "M", &[action("Exit", 1)], None);
+        let short = render_menu(&theme, &mut font_system, "M", &[action("Exit", 1)], None, false);
         let long = render_menu(
             &theme,
             &mut font_system,
             "M",
             &[action("Exit", 1), action("A considerably longer menu entry", 2)],
             None,
+            false,
         );
 
         assert!(
@@ -310,7 +341,7 @@ mod tests {
         let theme = nextstep_classic();
         let mut font_system = cosmic_text::FontSystem::new();
 
-        let render = render_menu(&theme, &mut font_system, "Chonkstep", &[action("Exit", 1)], None);
+        let render = render_menu(&theme, &mut font_system, "Chonkstep", &[action("Exit", 1)], None, false);
 
         let expected = theme.border.width.max(1) as i32 + theme.titlebar.height as i32;
         assert_eq!(render.item_rects[0].pos.y, expected);
@@ -324,7 +355,7 @@ mod tests {
         let theme = nextstep_classic();
         let mut font_system = cosmic_text::FontSystem::new();
 
-        let render = render_menu(&theme, &mut font_system, "Chonkstep", &[action("Exit", 1)], None);
+        let render = render_menu(&theme, &mut font_system, "Chonkstep", &[action("Exit", 1)], None, false);
         let row = render.item_rects[0];
         let cx = (row.pos.x + row.size.w as i32 / 2) as u32;
 
@@ -343,7 +374,7 @@ mod tests {
         let theme = nextstep_classic();
         let mut font_system = cosmic_text::FontSystem::new();
 
-        let render = render_menu(&theme, &mut font_system, "Chonkstep", &[action("Exit", 1)], Some(0));
+        let render = render_menu(&theme, &mut font_system, "Chonkstep", &[action("Exit", 1)], Some(0), false);
         let row = render.item_rects[0];
         let cx = (row.pos.x + row.size.w as i32 / 2) as u32;
 
@@ -360,14 +391,38 @@ mod tests {
         assert_eq!(face, (hl.r, hl.g, hl.b), "highlighted face must show the highlight fill");
     }
 
+    /// A closable menu (the posted root menu) carries the titlebar
+    /// close box flush at the title strip's right; a transient one
+    /// (the window menu) carries none.
+    #[test]
+    fn closable_menus_carry_the_title_close_box_and_transient_ones_do_not() {
+        let theme = nextstep_classic();
+        let mut font_system = cosmic_text::FontSystem::new();
+
+        let posted = render_menu(&theme, &mut font_system, "Chonkstep", &[action("Exit", 1)], None, true);
+        let transient = render_menu(&theme, &mut font_system, "Chonkstep", &[action("Exit", 1)], None, false);
+
+        assert!(transient.close_rect.is_none());
+        let close = posted.close_rect.expect("posted menu must expose its close box");
+        let bw = theme.border.width.max(1) as i32;
+        assert_eq!(close.pos.y, bw, "flush with the title strip's top");
+        assert_eq!(
+            close.pos.x + close.size.w as i32,
+            posted.buffer.width as i32 - bw,
+            "flush with the title strip's right edge"
+        );
+        assert!(close.size.h <= theme.titlebar.height as u32, "no taller than the title strip");
+        assert_ne!(posted.buffer.pixels, transient.buffer.pixels, "the box must actually paint");
+    }
+
     #[test]
     fn a_submenu_row_renders_differently_from_a_plain_action_row() {
         let theme = nextstep_classic();
         let mut font_system = cosmic_text::FontSystem::new();
         let items = [submenu("Applications", vec![action("About", 1)])];
 
-        let render = render_menu(&theme, &mut font_system, "Chonkstep", &items, None);
-        let plain = render_menu(&theme, &mut font_system, "Chonkstep", &[action("Applications", 1)], None);
+        let render = render_menu(&theme, &mut font_system, "Chonkstep", &items, None, false);
+        let plain = render_menu(&theme, &mut font_system, "Chonkstep", &[action("Applications", 1)], None, false);
 
         assert_ne!(render.buffer.pixels, plain.buffer.pixels, "cascade chevron should make a submenu row paint differently");
     }
