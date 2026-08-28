@@ -16,8 +16,16 @@ mod resize;
 mod snap;
 mod types;
 
-#[cfg(test)]
-mod fake_backend;
+// The in-memory `Backend` double is compiled for this crate's own
+// tests and for anyone who opts in through the `test-support` feature.
+// `chonk-shell` is the reason it is not merely `#[cfg(test)]`: the
+// shell is generic over `Backend` and had no way to exercise a real
+// one, which is exactly how a missing update path (the launcher strip
+// never learning that the monitor arrangement changed) reached review
+// unnoticed. A test double that only its own crate can use leaves
+// every consumer untestable.
+#[cfg(any(test, feature = "test-support"))]
+pub mod fake_backend;
 
 pub use backend::Backend;
 pub use client::{Client, ClientFlags, ClientId, Lifecycle, MaximizeDirections, MonitorId, MonitorInfo};
