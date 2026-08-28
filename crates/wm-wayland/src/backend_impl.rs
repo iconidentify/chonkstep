@@ -120,12 +120,15 @@ impl Backend for WaylandBackend {
     }
 
     fn monitors(&self) -> Vec<MonitorInfo> {
-        // One output for now (the winit window in the nested dev loop):
-        // same single-monitor shape `wm-x11` reports before RandR.
-        vec![MonitorInfo {
-            geometry: Rect { pos: Point::new(0, 0), size: self.output_size },
-            name: "wayland-0".to_string(),
-        }]
+        // The layout `state.rs`'s `run` discovered, verbatim: one entry
+        // per output, named by its connector (`eDP-1`, `HDMI-A-2`;
+        // "chonkstep" for the nested backend's host window), positioned
+        // in the same global space every rect in this backend lives in,
+        // primary first. A compositor knows this without asking anyone
+        // — it did the mode setting — so unlike `wm-x11`'s RandR query
+        // there is nothing here that can fail or go stale between
+        // calls.
+        self.monitors.clone()
     }
 
     // -- shell surfaces ---------------------------------------------------
@@ -235,6 +238,13 @@ impl Backend for WaylandBackend {
     }
 
     fn screen_size(&self) -> Size {
+        // The union bounding box of every output, which is the extent
+        // of the one coordinate space this backend stores rects in.
+        // With a single monitor it is that monitor's size, so nothing
+        // that predates multi-output sees a change; with several it is
+        // deliberately NOT any one screen's size, and callers that mean
+        // "the monitor over there" want `monitors()` (or `wm-core`'s
+        // per-monitor queries) instead.
         self.output_size
     }
 

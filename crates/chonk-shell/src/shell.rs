@@ -13,7 +13,7 @@
 use std::collections::HashMap;
 
 use wm_config::{Action, Config};
-use wm_core::{Backend, BackendEvent, ClientFlags, KeyCombo, MouseButton, Notification, WindowManager};
+use wm_core::{Backend, BackendEvent, ClientFlags, KeyCombo, MonitorInfo, MouseButton, Notification, WindowManager};
 use wm_theme::Theme;
 use wm_theme_api::{Point, PopupHost, Rect, Size};
 
@@ -244,6 +244,23 @@ fn running_pairs<B: Backend>(wm: &WindowManager<B>) -> Vec<(String, B::WindowId)
 /// `_NET_ACTIVE_WINDOW` message takes), so it also re-raises — correct
 /// here, since the carried window was the focused one to begin with. A
 /// no-op with nothing focused.
+/// The primary monitor's rect — where every piece of shell chrome
+/// hangs. The `primary` flag decides it, the first entry stands in
+/// where the platform named none (matching `Backend::monitors`' own
+/// contract), and an origin-anchored rect of the whole screen is the
+/// last resort for a backend reporting no monitors at all — which is
+/// exactly the single-screen assumption the shell made before it was
+/// monitor-aware, so nothing regresses on a backend that never reports
+/// one.
+fn primary_rect(monitors: &[MonitorInfo], screen: Size) -> Rect {
+    monitors
+        .iter()
+        .find(|m| m.primary)
+        .or_else(|| monitors.first())
+        .map(|m| m.geometry)
+        .unwrap_or(Rect { pos: Point::new(0, 0), size: screen })
+}
+
 fn carry_focused_to_workspace<B: Backend>(wm: &mut WindowManager<B>, workspace: usize) {
     let Some(id) = wm.focused_client() else {
         return;
@@ -296,17 +313,24 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
     /// not go through the theme engine) matches the WM's.
     pub fn new(backend: &mut B, config: &Config, theme: Theme, scale: f32) -> Self {
         let screen = backend.screen_size();
+        // Chrome hangs on the primary monitor, not on the screen: the
+        // screen spans every output at once, so its own corners are
+        // wherever the outermost heads happen to be.
+        let primary = primary_rect(&backend.monitors(), screen);
 
         let apps = apps::scan_applications();
         tracing::info!(count = apps.len(), "application entries scanned");
 
-        let desktop = Desktop::new(backend, screen, scale, theme.id.clone(), apps.clone());
+        let desktop = Desktop::new(backend, screen, primary, scale, theme.id.clone(), apps.clone());
         // The launcher strip below the Clip. Its tile size mirrors
         // `Desktop::new`'s own derivation (56px at 1x, scaled, floored
         // at 16) rather than inventing a second number: the strip's
         // tiles must read as the same family as the Clip above them
         // and the miniwindow icon tiles pins are dropped from.
-        let launchdock = LaunchDock::new(backend, &theme, screen, ((56.0 * scale).round() as u32).max(16), &apps);
+        // It is handed the *primary's* size rather than the screen's,
+        // so the strip's height clamp is measured against the head it
+        // sits on rather than against every head at once.
+        let launchdock = LaunchDock::new(backend, &theme, primary, ((56.0 * scale).round() as u32).max(16), &apps);
 
         Self { desktop, launchdock, apps, theme, keymap: build_keymap(&config.keybindings), pointer_root: Point::new(0, 0) }
     }
@@ -318,11 +342,37 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         &self.theme
     }
 
-    /// The rectangle managed windows may occupy — delegates to the
-    /// Desktop, whose Dock is an always-on-top, content-sized object
-    /// rather than a reserved sidebar, so this is the whole screen.
-    pub fn workarea(&self, screen: Size) -> Rect {
-        self.desktop.workarea(screen)
+    /// The rectangle managed windows may occupy on the *primary*
+    /// monitor — the single-rect form for `WindowManager::set_workarea`,
+    /// which means exactly that.
+    ///
+    /// `_screen` is vestigial: the desktop tracks real monitor geometry
+    /// itself now, and on a multi-head session the screen's own size
+    /// spans every output at once, which is never the answer to "where
+    /// may a window on the primary go". The parameter stays so the
+    /// single-monitor callers that pass it keep working unchanged;
+    /// anything holding a live `WindowManager` should call
+    /// [`Shell::apply_workareas`] instead, which pushes one rect per
+    /// monitor.
+    pub fn workarea(&self, _screen: Size) -> Rect {
+        self.desktop.primary_workarea()
+    }
+
+    /// Pushes one workarea per monitor into the WM — the multi-monitor
+    /// form of [`Shell::workarea`], and what a backend binary should
+    /// call at startup and on every output change. Reads the monitor
+    /// list straight from the WM so the rects land in the same
+    /// positional order `set_workareas` indexes; a backend reporting no
+    /// monitors gets the primary's single rect, which is the whole
+    /// screen on such a backend.
+    pub fn apply_workareas(&self, wm: &mut WindowManager<B>) {
+        let monitors: Vec<Rect> = wm.monitors().into_iter().map(|m| m.geometry).collect();
+        let areas = if monitors.is_empty() {
+            vec![self.desktop.primary_workarea()]
+        } else {
+            self.desktop.workareas(&monitors)
+        };
+        wm.set_workareas(areas);
     }
 
     /// Resolves a configured key combo to its action, for the binary's
@@ -712,12 +762,17 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         self.launchdock.update_running(wm.backend_mut(), &self.theme, &running);
     }
 
-    /// The screen/output changed size (the binary drained the
+    /// The screen/output arrangement changed (the binary drained the
     /// backend's resize event): rehang the desktop chrome on the new
-    /// edges and re-derive the workarea managed windows may occupy.
+    /// primary monitor's edges and re-derive one workarea per monitor.
+    /// `size` is the whole desktop's new extent; the monitor list is
+    /// re-read from the backend here rather than passed in, so an
+    /// output being plugged in or unplugged lands the same way a plain
+    /// resize does.
     pub fn on_screen_resize(&mut self, wm: &mut WindowManager<B>, size: Size) {
-        self.desktop.resize_to_screen(wm.backend_mut(), &self.theme, size);
-        wm.set_workarea(self.desktop.workarea(size));
+        let primary = primary_rect(&wm.monitors(), size);
+        self.desktop.resize_to_screen(wm.backend_mut(), &self.theme, size, primary);
+        self.apply_workareas(wm);
     }
 }
 
@@ -769,6 +824,44 @@ mod tests {
         // this mapping — if it ever stopped saying Restart, a theme
         // pick would persist silently and apply one session late.
         assert_eq!(root_action_outcome(&RootMenuAction::SetTheme("graphite")), ShellOutcome::Restart);
+    }
+
+    fn monitor(geometry: Rect, primary: bool) -> MonitorInfo {
+        MonitorInfo { geometry, name: "test".to_string(), primary }
+    }
+
+    #[test]
+    fn chrome_hangs_on_the_flagged_primary_whatever_its_position_in_the_list() {
+        let left = Rect { pos: Point::new(-1920, 0), size: Size::new(1920, 1080) };
+        let right = Rect { pos: Point::new(0, 0), size: Size::new(1600, 1200) };
+        let monitors = [monitor(left, false), monitor(right, true)];
+
+        assert_eq!(
+            primary_rect(&monitors, Size::new(3520, 1200)),
+            right,
+            "the flagged primary wins, not the first entry"
+        );
+    }
+
+    #[test]
+    fn with_no_flagged_primary_the_first_monitor_stands_in() {
+        // `Backend::monitors` allows a platform that names no primary
+        // at all — index 0 is then the primary, matching what wm-core
+        // itself does with the same list.
+        let first = Rect { pos: Point::new(0, 0), size: Size::new(1600, 1200) };
+        let second = Rect { pos: Point::new(1600, 0), size: Size::new(1920, 1080) };
+        let monitors = [monitor(first, false), monitor(second, false)];
+
+        assert_eq!(primary_rect(&monitors, Size::new(3520, 1200)), first);
+    }
+
+    #[test]
+    fn a_backend_reporting_no_monitors_falls_back_to_the_whole_screen() {
+        // Exactly the origin-anchored, screen-sized assumption the
+        // shell made before it was monitor-aware, so such a backend
+        // behaves the way it always did.
+        let screen = Size::new(1600, 1200);
+        assert_eq!(primary_rect(&[], screen), Rect { pos: Point::new(0, 0), size: screen });
     }
 
     #[test]

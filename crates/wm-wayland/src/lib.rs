@@ -27,6 +27,7 @@ mod backend_impl;
 mod capture;
 mod dmabuf;
 mod input;
+mod protocols;
 mod renderer;
 mod session;
 mod state;

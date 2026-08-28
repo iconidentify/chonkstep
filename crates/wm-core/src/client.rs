@@ -18,13 +18,22 @@ new_key_type! {
 /// `MonitorId` — that's a slotmap key only the core can mint (backends
 /// can't construct one), so a future monitor registry inside
 /// `WindowManager` would ingest these and assign real `MonitorId`s.
-/// `wm-x11` reports a single entry spanning the whole screen until
-/// RandR support lands; `Client::monitor` already carries a `MonitorId`
-/// so real multi-monitor support is additive later, not a rewrite.
+/// `Client::monitor` already carries a `MonitorId` so per-client
+/// monitor ownership is additive later, not a rewrite.
+///
+/// Identity is positional, not by name: `WindowManager::set_workareas`
+/// addresses monitors by their index in `Backend::monitors()`, which is
+/// why that method promises a stable order.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MonitorInfo {
     pub geometry: Rect,
     pub name: String,
+    /// The output the desktop shell hangs its chrome on and that
+    /// anything with no better anchor falls back to. At most one entry
+    /// in a list may set this — see `Backend::monitors` for the full
+    /// contract, including what the core does when a platform names no
+    /// primary at all.
+    pub primary: bool,
 }
 
 /// Where a client sits in its lifecycle. Deliberately WindowMaker-shaped:
@@ -130,8 +139,13 @@ impl<B: Backend> Client<B> {
             // the *current* workspace right after construction — this
             // default only matters for a `Client` that's never mapped.
             workspace: 0,
-            // Unset (null slotmap key) until RandR support for real
-            // multi-monitor lands.
+            // Still unset (null slotmap key): multi-monitor policy
+            // resolves a window's monitor geometrically, from its frame
+            // center against `Backend::monitors()` (see
+            // `WindowManager::monitor_index_at`), so nothing yet needs
+            // a client to *remember* which monitor it is on — and a
+            // remembered one would be the thing that goes stale when an
+            // output is unplugged out from under it.
             monitor: MonitorId::default(),
         }
     }

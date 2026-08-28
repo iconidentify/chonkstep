@@ -75,7 +75,7 @@ use smithay::utils::{Buffer as BufferCoords, Physical, Point as SPoint, Rectangl
 use smithay::utils::{Size as SSize, Transform};
 
 use wm_core::WindowType;
-use wm_theme_api::{DecorationBuffer, Size};
+use wm_theme_api::{DecorationBuffer, Point, Size};
 
 use crate::renderer::{build_scene, SceneElement};
 use crate::state::{Compositor, Graphics, WlWindowId};
@@ -149,9 +149,22 @@ pub(crate) fn refresh_snapshots(comp: &mut Compositor) {
     }
 }
 
-/// Writes the current output's contents to `path` as a PNG - the
-/// session's screenshot path, and the way a headless verifier (CI, a
-/// developer over SSH) sees what a DRM session is actually showing.
+/// Writes the desktop's contents to `path` as a PNG - the session's
+/// screenshot path, and the way a headless verifier (CI, a developer
+/// over SSH) sees what a DRM session is actually showing.
+///
+/// One image covers *every* output, because the scene is drawn once at
+/// the size of the whole global space (the union of the monitors) with
+/// a zero viewport offset - exactly what an output's own render does,
+/// minus the per-output translation. That is both the smaller change
+/// and the more useful artifact: "what is my desktop showing" rarely
+/// means one screen of it, and a per-output screenshot would need the
+/// marker interface to grow a way to name which one.
+///
+/// With monitors of unequal height the union contains a region no
+/// output covers; it comes out as the desktop's own background (the
+/// clear color) rather than as a hole, which is the least surprising
+/// thing a viewer can be handed.
 pub(crate) fn capture_output_png(comp: &mut Compositor, path: &Path) -> Result<(), String> {
     let Compositor {
         wm,
@@ -162,6 +175,8 @@ pub(crate) fn capture_output_png(comp: &mut Compositor, path: &Path) -> Result<(
         ..
     } = comp;
     let renderer = graphics_renderer(graphics);
+    // The whole global space: one output's size on a single-monitor
+    // session, the union bounding box on any other.
     let size = wm.backend().output_size;
 
     // The same scene the frame about to be drawn will submit - cursor
@@ -173,9 +188,12 @@ pub(crate) fn capture_output_png(comp: &mut Compositor, path: &Path) -> Result<(
         *pointer_location,
         cursor_status,
         default_cursor,
+        // No viewport offset: the capture *is* the global space, so
+        // every element stays at the coordinate the ledger holds it at.
+        Point::new(0, 0),
     );
     let buffer = render_offscreen(renderer, &elements, size, 1.0, clear_color)
-        .ok_or_else(|| "offscreen render of the output failed".to_string())?;
+        .ok_or_else(|| "offscreen render of the desktop failed".to_string())?;
     write_png(buffer, path)
 }
 

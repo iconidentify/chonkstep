@@ -4,7 +4,7 @@ use slotmap::SlotMap;
 use wm_theme_api::{ButtonKind, ButtonRuntimeState, DecorationBuffer, DecorationLayout, DecorationRequest, Point, Rect, ResizeEdge, Size, ThemeEngine};
 
 use crate::backend::Backend;
-use crate::client::{Client, ClientFlags, ClientId, Lifecycle, MaximizeDirections};
+use crate::client::{Client, ClientFlags, ClientId, Lifecycle, MaximizeDirections, MonitorInfo};
 use crate::focus::FocusPolicy;
 use crate::hittest::{hit_test, HitTarget};
 use crate::placement::{self, PlacementPolicy};
@@ -34,6 +34,13 @@ const XK_TAB: u32 = 0xff09;
 const XK_ESCAPE: u32 = 0xff1b;
 const XK_ALT_L: u32 = 0xffe9;
 const XK_ALT_R: u32 = 0xffea;
+
+/// What every monitor query answers with when the backend reports no
+/// outputs at all. Not a claim about any real screen — just a
+/// non-degenerate rect, so placement and maximize arithmetic stays sane
+/// instead of dividing into a zero-sized area. Only the test fake and a
+/// backend mid-teardown ever reach it.
+const NO_MONITOR_FALLBACK: Rect = Rect { pos: Point::new(0, 0), size: Size::new(800, 600) };
 
 /// An in-progress titlebar-drag move. `grab_offset` is the frame-local
 /// point that was clicked — since that's constant relative to the frame
@@ -129,11 +136,23 @@ pub struct WindowManager<B: Backend> {
     /// detection — a second press on the *same* client's titlebar within
     /// `DOUBLE_CLICK_MS` toggles maximize instead of starting a move.
     last_titlebar_press: Option<(ClientId, u32)>,
-    /// Screen area windows should maximize into, reserved-space-aware —
-    /// e.g. `chonkstep`'s desktop shell excludes its dock strip by
-    /// calling `set_workarea`. Defaults to the primary monitor's full
-    /// geometry when unset.
-    workarea: Option<Rect>,
+    /// Per-monitor screen area windows should maximize into,
+    /// reserved-space-aware — e.g. `chonkstep`'s desktop shell excludes
+    /// its dock strip from the entry for the monitor the dock hangs on,
+    /// by calling `set_workareas`. Indexed in `Backend::monitors()`
+    /// order, and deliberately allowed to be *shorter* than that list
+    /// (empty included): a monitor with no entry uses its full
+    /// geometry, which is both the right answer for an output no panel
+    /// reserves anything on and what makes a single-rect
+    /// `set_workarea` call meaningful on a multi-head session.
+    workareas: Vec<Rect>,
+    /// The last root-relative pointer position the core has seen.
+    /// `None` until the first `PointerMotion` arrives — a session's
+    /// first window can map before the mouse has moved at all — so
+    /// every reader needs a fallback rather than a default position,
+    /// which would be indistinguishable from the pointer genuinely
+    /// resting at the origin.
+    last_pointer: Option<Point>,
     /// Where freshly mapped windows that expressed no position
     /// preference go — see `crate::placement`. Configured by the shell
     /// (`set_placement_policy`); `Smart` by default.
@@ -195,7 +214,8 @@ impl<B: Backend> WindowManager<B> {
             active_resize: None,
             active_button_press: None,
             last_titlebar_press: None,
-            workarea: None,
+            workareas: Vec::new(),
+            last_pointer: None,
             placement_policy: PlacementPolicy::Smart,
             placements: 0,
             snap_threshold: SNAP_THRESHOLD_PX,
@@ -232,15 +252,113 @@ impl<B: Backend> WindowManager<B> {
     }
 
     /// Reserves screen space windows should not maximize into (e.g. a
-    /// dock/panel strip) — a reusable SDK primitive: any desktop shell
-    /// built on this crate calls this once at startup and again on
-    /// resize, rather than `wm-core` hardcoding a notion of "the dock".
+    /// dock/panel strip), one rect per monitor in `Backend::monitors()`
+    /// order — a reusable SDK primitive: any desktop shell built on
+    /// this crate calls this once at startup and again on output
+    /// changes, rather than `wm-core` hardcoding a notion of "the
+    /// dock".
+    ///
+    /// A vector shorter than the monitor list is legal and leaves every
+    /// monitor past its end at that monitor's full geometry, so a shell
+    /// that only reserves space on one output needs to say nothing
+    /// about the rest.
+    pub fn set_workareas(&mut self, areas: Vec<Rect>) {
+        self.workareas = areas;
+        self.publish_workarea_union();
+    }
+
+    /// The *primary* monitor's workarea — the single-rect form, and
+    /// the whole call for a single-monitor session. Delegates to
+    /// `set_workareas` with the primary's entry replaced and every
+    /// other monitor left at its full geometry, so calling this on a
+    /// multi-head session reserves space on exactly the one output the
+    /// shell's chrome hangs on.
     pub fn set_workarea(&mut self, area: Rect) {
-        self.workarea = Some(area);
-        // `_NET_WORKAREA` is per-desktop in the property format but the
-        // reserved strip is the same on all of them here — the backend
-        // repeats one rect per workspace (see `Backend::publish_workarea`).
-        self.backend.publish_workarea(area, self.workspace_count);
+        let primary = self.primary_monitor_index();
+        // Stops at the primary rather than covering every monitor: the
+        // trailing ones are already "full geometry" by `set_workareas`'
+        // short-vector rule, so spelling them out would only be a
+        // snapshot to go stale.
+        let mut areas: Vec<Rect> = self.backend.monitors().into_iter().take(primary + 1).map(|m| m.geometry).collect();
+        match areas.get_mut(primary) {
+            Some(slot) => *slot = area,
+            // No monitors reported at all — this one rect is the only
+            // screen information there is.
+            None => areas.push(area),
+        }
+        self.set_workareas(areas);
+    }
+
+    /// `_NET_WORKAREA` is per-desktop in the property format and has no
+    /// per-monitor dimension whatsoever (it predates multi-head), so a
+    /// multi-monitor session publishes the bounding box of its
+    /// per-monitor workareas — the only rect that is true of the whole
+    /// desktop rather than of one output. The backend repeats it once
+    /// per workspace, since the reserved strips are the same on all of
+    /// them (see `Backend::publish_workarea`).
+    fn publish_workarea_union(&mut self) {
+        let union = self.effective_workareas().into_iter().reduce(union_rect).unwrap_or(NO_MONITOR_FALLBACK);
+        self.backend.publish_workarea(union, self.workspace_count);
+    }
+
+    /// One workarea per reported monitor: the shell's own entry where
+    /// it set one, that monitor's full geometry where it did not. With
+    /// no monitors reported at all this is whatever `set_workareas` was
+    /// handed, which is then the only screen information in existence.
+    fn effective_workareas(&self) -> Vec<Rect> {
+        let monitors = self.backend.monitors();
+        if monitors.is_empty() {
+            return self.workareas.clone();
+        }
+        monitors.iter().enumerate().map(|(index, m)| self.workareas.get(index).copied().unwrap_or(m.geometry)).collect()
+    }
+
+    /// Every physical output, in the backend's stable order — the same
+    /// indices `set_workareas` addresses. The shell reads this to hang
+    /// its chrome on the primary and to compute one workarea per
+    /// monitor.
+    pub fn monitors(&self) -> Vec<MonitorInfo> {
+        self.backend.monitors()
+    }
+
+    /// Index of the monitor the shell's chrome belongs on: the one the
+    /// backend flagged `primary`, else the first (see
+    /// `Backend::monitors`, which allows a platform to name none).
+    /// Always a valid index into a non-empty monitor list; `0` for an
+    /// empty one, where nothing indexes it anyway.
+    fn primary_monitor_index(&self) -> usize {
+        self.backend.monitors().iter().position(|m| m.primary).unwrap_or(0)
+    }
+
+    /// The monitor `point` falls on: the one containing it, else the
+    /// nearest one. "Nearest" rather than "none" is what makes every
+    /// caller total — the dead corner of an L-shaped dual-head
+    /// arrangement belongs to no output at all, and a frame dragged
+    /// mostly off-screen still has to maximize somewhere.
+    pub fn monitor_index_at(&self, point: Point) -> usize {
+        let monitors = self.backend.monitors();
+        if let Some(index) = monitors.iter().position(|m| m.geometry.contains(point)) {
+            return index;
+        }
+        monitors
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, m)| squared_distance_to(m.geometry, point))
+            .map(|(index, _)| index)
+            .unwrap_or(0)
+    }
+
+    /// The full geometry of the monitor `point` falls on.
+    pub fn monitor_rect_at(&self, point: Point) -> Rect {
+        self.backend.monitors().get(self.monitor_index_at(point)).map(|m| m.geometry).unwrap_or(NO_MONITOR_FALLBACK)
+    }
+
+    /// That monitor's workarea: the shell-reserved area if one was set
+    /// for it, else its full geometry. The per-monitor twin of
+    /// `usable_area`, and what maximize actually measures against.
+    pub fn usable_area_at(&self, point: Point) -> Rect {
+        let index = self.monitor_index_at(point);
+        self.workareas.get(index).copied().unwrap_or_else(|| self.monitor_rect_at(point))
     }
 
     /// Registers the Alt+Tab / Alt+Shift+Tab window-cycling grabs — the
@@ -529,9 +647,7 @@ impl<B: Backend> WindowManager<B> {
         let frame_pos = if content.pos != Point::new(0, 0) {
             content.pos
         } else {
-            let workarea = self.workarea.unwrap_or_else(|| {
-                self.backend.monitors().first().map(|m| m.geometry).unwrap_or(Rect { pos: Point::new(0, 0), size: Size::new(1, 1) })
-            });
+            let workarea = self.placement_area();
             let existing: Vec<Rect> = self
                 .clients
                 .iter()
@@ -910,6 +1026,14 @@ impl<B: Backend> WindowManager<B> {
     }
 
     fn handle_pointer_motion(&mut self, root: Point) {
+        // Recorded before any drag branch returns: this is the core's
+        // only sighting of where the user's attention is, and new-window
+        // placement reads it to open on the monitor being looked at
+        // (see `placement_area`). A drag in progress is no reason to
+        // stop tracking — it is the most emphatic pointer motion there
+        // is.
+        self.last_pointer = Some(root);
+
         if self.active_resize.is_some() {
             self.handle_resize_motion(root);
             return;
@@ -1031,19 +1155,58 @@ impl<B: Backend> WindowManager<B> {
         self.reflow_frame(client_id);
     }
 
-    /// Screen area windows should maximize into: the shell-reserved
-    /// `workarea` if one was set, else the primary monitor's full
-    /// geometry (falling back to a sane default if the backend somehow
-    /// reports no monitors at all).
+    /// Screen area windows should maximize into on the *primary*
+    /// monitor: the shell-reserved workarea if one was set for it, else
+    /// that monitor's full geometry. Anything that knows which monitor
+    /// it means wants `usable_area_at` instead; this is the answer for
+    /// the cases that genuinely have no anchor (a window that belongs
+    /// to no monitor yet).
     fn usable_area(&self) -> Rect {
-        self.workarea.unwrap_or_else(|| {
-            self.backend
-                .monitors()
-                .into_iter()
-                .next()
-                .map(|m| m.geometry)
-                .unwrap_or(Rect { pos: Point::new(0, 0), size: wm_theme_api::Size::new(800, 600) })
-        })
+        let primary = self.primary_monitor_index();
+        self.workareas
+            .get(primary)
+            .copied()
+            .or_else(|| self.backend.monitors().get(primary).map(|m| m.geometry))
+            .unwrap_or(NO_MONITOR_FALLBACK)
+    }
+
+    /// A client's frame center in root coordinates — the point that
+    /// decides which monitor a window "is on", for fullscreen and
+    /// maximize alike. Center rather than origin: a window straddling
+    /// two outputs belongs to the one showing most of it, whereas the
+    /// origin would hand it to whichever output happens to hold its
+    /// top-left corner (so a window nudged one pixel left across the
+    /// seam would maximize onto the monitor it is barely touching).
+    /// `None` for an unknown or stale id.
+    fn client_frame_center(&self, id: ClientId) -> Option<Point> {
+        let client = self.clients.get(id)?;
+        let frame_pos = Point::new(
+            client.geometry.pos.x - client.layout.client_offset.x,
+            client.geometry.pos.y - client.layout.client_offset.y,
+        );
+        Some(Point::new(
+            frame_pos.x + client.layout.frame_size.w as i32 / 2,
+            frame_pos.y + client.layout.frame_size.h as i32 / 2,
+        ))
+    }
+
+    /// Where a fresh window that expressed no position preference
+    /// should be placed: the workarea of the monitor the user is
+    /// actually looking at. "Looking at" is the pointer's monitor —
+    /// the mouse is where attention is, and it is also where the
+    /// launcher click or menu pick that spawned the window happened,
+    /// so a window launched from the second head opens on the second
+    /// head. With no pointer seen yet the focused window's monitor is
+    /// the next best guess (a keyboard-spawned window joins its
+    /// siblings), and the primary is the last.
+    fn placement_area(&self) -> Rect {
+        if let Some(pointer) = self.last_pointer {
+            return self.usable_area_at(pointer);
+        }
+        if let Some(center) = self.focused.and_then(|id| self.client_frame_center(id)) {
+            return self.usable_area_at(center);
+        }
+        self.usable_area()
     }
 
     /// Re-derives layout from a client's current `geometry.size`, then
@@ -1118,7 +1281,16 @@ impl<B: Backend> WindowManager<B> {
     /// in either axis) so `unmaximize` can restore it. No titlebar button
     /// triggers this — see `MaximizeDirections`'s doc comment.
     pub fn maximize(&mut self, id: ClientId, directions: MaximizeDirections) {
-        let usable = self.usable_area();
+        // The window's *own* monitor, not the primary: a window dragged
+        // onto the second head must maximize there. Same frame-center
+        // rule fullscreen picks its monitor by (`client_frame_center`),
+        // but through that monitor's workarea rather than its raw rect
+        // — maximize respects the shell's reserved strip, fullscreen
+        // deliberately does not.
+        let usable = match self.client_frame_center(id) {
+            Some(center) => self.usable_area_at(center),
+            None => self.usable_area(),
+        };
         let Some(client) = self.clients.get_mut(id) else {
             return;
         };
@@ -1259,30 +1431,18 @@ impl<B: Backend> WindowManager<B> {
         }
     }
 
-    /// The monitor a client should fullscreen onto: whichever one
-    /// contains its frame's center point, falling back to the first (a
-    /// frame dragged mostly off every monitor still has to land
-    /// somewhere), with `usable_area`'s hardcoded default as the last
-    /// resort for a backend reporting no monitors at all. Note this is
-    /// the raw monitor rect, deliberately not `usable_area`: fullscreen
-    /// covers the dock strip too — that's the whole point of the state.
+    /// The monitor a client should fullscreen onto: whichever one its
+    /// frame's center lands on (`monitor_index_at`'s nearest-monitor
+    /// rule covers a frame dragged mostly off every output), and the
+    /// primary for a client that no longer exists to have a center.
+    /// Note this is the raw monitor rect, deliberately not
+    /// `usable_area_at`: fullscreen covers the dock strip too — that's
+    /// the whole point of the state.
     fn fullscreen_monitor_rect(&self, id: ClientId) -> Rect {
-        let monitors = self.backend.monitors();
-        let center = self.clients.get(id).map(|client| {
-            let frame_pos = Point::new(
-                client.geometry.pos.x - client.layout.client_offset.x,
-                client.geometry.pos.y - client.layout.client_offset.y,
-            );
-            Point::new(
-                frame_pos.x + client.layout.frame_size.w as i32 / 2,
-                frame_pos.y + client.layout.frame_size.h as i32 / 2,
-            )
-        });
-        center
-            .and_then(|center| monitors.iter().find(|m| m.geometry.contains(center)))
-            .or_else(|| monitors.first())
-            .map(|m| m.geometry)
-            .unwrap_or(Rect { pos: Point::new(0, 0), size: Size::new(800, 600) })
+        match self.client_frame_center(id) {
+            Some(center) => self.monitor_rect_at(center),
+            None => self.backend.monitors().get(self.primary_monitor_index()).map(|m| m.geometry).unwrap_or(NO_MONITOR_FALLBACK),
+        }
     }
 
     /// Enters EWMH fullscreen: the frame becomes exactly the client's
@@ -1786,6 +1946,40 @@ impl<B: Backend> WindowManager<B> {
             ],
         }
     }
+}
+
+/// Bounding box of two rects — how the per-monitor workareas collapse
+/// into the one `_NET_WORKAREA` rect (see `publish_workarea_union`).
+/// Not generic over "empty" rects: a monitor is never zero-sized in
+/// practice, so a zero-sized input still contributes its origin rather
+/// than being skipped, which keeps this a plain fold with no
+/// first-non-empty bookkeeping.
+fn union_rect(a: Rect, b: Rect) -> Rect {
+    let left = a.pos.x.min(b.pos.x);
+    let top = a.pos.y.min(b.pos.y);
+    let right = (a.pos.x + a.size.w as i32).max(b.pos.x + b.size.w as i32);
+    let bottom = (a.pos.y + a.size.h as i32).max(b.pos.y + b.size.h as i32);
+    Rect {
+        pos: Point::new(left, top),
+        size: Size::new((right - left).max(0) as u32, (bottom - top).max(0) as u32),
+    }
+}
+
+/// Squared distance from `point` to the nearest point of `rect`, `0`
+/// for a point inside it — the ordering `monitor_index_at` picks its
+/// nearest monitor by. Squared because only the ordering matters and a
+/// square root would cost precision for nothing; `i64` because a
+/// desktop spanning several 4K outputs has coordinates whose square
+/// overflows `i32`.
+fn squared_distance_to(rect: Rect, point: Point) -> i64 {
+    // `Rect::contains` is half-open, so the last pixel actually inside
+    // is one short of the far edge — measuring to the edge itself would
+    // report a one-pixel gap as zero distance.
+    let last_x = rect.pos.x as i64 + rect.size.w as i64 - 1;
+    let last_y = rect.pos.y as i64 + rect.size.h as i64 - 1;
+    let dx = (rect.pos.x as i64 - point.x as i64).max(point.x as i64 - last_x).max(0);
+    let dy = (rect.pos.y as i64 - point.y as i64).max(point.y as i64 - last_y).max(0);
+    dx * dx + dy * dy
 }
 
 #[cfg(test)]
@@ -3556,5 +3750,200 @@ mod tests {
         let area = Rect { pos: Point::new(0, 0), size: Size::new(800, 576) };
         wm.set_workarea(area);
         assert_eq!(wm.backend().published_workareas.last(), Some(&(area, 3)), "the workarea must be published with the current workspace count");
+    }
+
+    /// Two 800x600 heads side by side, the left one primary — the
+    /// arrangement every multi-monitor test below measures against.
+    fn dual_monitors() -> Vec<MonitorInfo> {
+        vec![
+            MonitorInfo { geometry: LEFT_HEAD, name: "left".to_string(), primary: true },
+            MonitorInfo { geometry: RIGHT_HEAD, name: "right".to_string(), primary: false },
+        ]
+    }
+
+    const LEFT_HEAD: Rect = Rect { pos: Point { x: 0, y: 0 }, size: Size { w: 800, h: 600 } };
+    const RIGHT_HEAD: Rect = Rect { pos: Point { x: 800, y: 0 }, size: Size { w: 800, h: 600 } };
+    /// The left head with a 40px dock strip carved off its bottom.
+    const LEFT_WORKAREA: Rect = Rect { pos: Point { x: 0, y: 0 }, size: Size { w: 800, h: 560 } };
+
+    #[test]
+    fn maximize_fills_the_workarea_of_the_monitor_holding_the_window() {
+        let mut backend = FakeBackend::new();
+        backend.set_monitors(dual_monitors());
+        let window = backend.create_window();
+        // Squarely on the right-hand head, by the client's own
+        // requested position.
+        backend.set_geometry(window, Rect { pos: Point::new(1000, 100), size: Size::new(100, 100) });
+        let mut wm = wm(backend);
+        wm.dispatch(BackendEvent::MapRequest(window));
+        let id = wm.client_for_window(window).unwrap();
+        let frame = wm.client(id).unwrap().frame.unwrap();
+        // A dock strip reserved on the primary only: the right head has
+        // no entry, so it keeps its full geometry (`set_workareas`'
+        // short-vector rule).
+        wm.set_workareas(vec![LEFT_WORKAREA]);
+
+        wm.maximize(id, MaximizeDirections::FULL);
+
+        assert_eq!(
+            wm.backend().last_frame_geometry.get(&frame),
+            Some(&RIGHT_HEAD),
+            "a window on the second head must maximize into that head, not into the primary's reserved workarea"
+        );
+    }
+
+    #[test]
+    fn a_window_dragged_onto_the_second_monitor_maximizes_there() {
+        let mut backend = FakeBackend::new();
+        backend.set_monitors(dual_monitors());
+        let window = backend.create_window();
+        backend.set_geometry(window, Rect { pos: Point::new(100, 100), size: Size::new(100, 100) });
+        let mut wm = wm(backend);
+        wm.dispatch(BackendEvent::MapRequest(window));
+        let id = wm.client_for_window(window).unwrap();
+        let frame = wm.client(id).unwrap().frame.unwrap();
+        let right_workarea = Rect { pos: Point::new(800, 0), size: Size::new(800, 560) };
+        wm.set_workareas(vec![LEFT_WORKAREA, right_workarea]);
+
+        // Where it started: the primary, and its reserved workarea.
+        wm.maximize(id, MaximizeDirections::FULL);
+        assert_eq!(wm.backend().last_frame_geometry.get(&frame), Some(&LEFT_WORKAREA));
+        wm.unmaximize(id);
+
+        // Titlebar-drag it across the seam. Far enough from every
+        // monitor edge that snapping has nothing to say about the
+        // landing position.
+        wm.dispatch(titlebar_press(frame, Point::new(30, 2), 0, Modifiers::empty()));
+        wm.dispatch(BackendEvent::PointerMotion { root: Point::new(1230, 202), surface_local: None });
+        wm.dispatch(frame_release(frame, Point::new(1230, 202)));
+
+        wm.maximize(id, MaximizeDirections::FULL);
+
+        assert_eq!(
+            wm.backend().last_frame_geometry.get(&frame),
+            Some(&right_workarea),
+            "maximize must follow the window across the seam, into the second head's own workarea"
+        );
+    }
+
+    #[test]
+    fn initial_placement_lands_on_the_monitor_under_the_pointer() {
+        let mut backend = FakeBackend::new();
+        backend.set_monitors(dual_monitors());
+        let first = backend.create_window();
+        let second = backend.create_window();
+        let mut wm = wm(backend);
+
+        // The user is working on the right-hand head when the first
+        // window opens...
+        wm.dispatch(BackendEvent::PointerMotion { root: Point::new(1200, 300), surface_local: None });
+        wm.dispatch(BackendEvent::MapRequest(first));
+        let first_frame = frame_rect(&wm, first);
+        assert!(
+            RIGHT_HEAD.contains(first_frame.pos),
+            "a window opened while the pointer is on the second head must place there, got {first_frame:?}"
+        );
+
+        // ...and back on the primary when the second one does.
+        wm.dispatch(BackendEvent::PointerMotion { root: Point::new(200, 300), surface_local: None });
+        wm.dispatch(BackendEvent::MapRequest(second));
+        let second_frame = frame_rect(&wm, second);
+        assert!(
+            LEFT_HEAD.contains(second_frame.pos),
+            "the pointer moving back to the primary must move where new windows open, got {second_frame:?}"
+        );
+    }
+
+    #[test]
+    fn with_no_pointer_seen_placement_follows_the_focused_windows_monitor() {
+        // A session's very first windows can map before the mouse has
+        // moved at all (autostarted apps), so placement must still
+        // resolve to the head the user is demonstrably on.
+        let mut backend = FakeBackend::new();
+        backend.set_monitors(dual_monitors());
+        let anchor = backend.create_window();
+        let fresh = backend.create_window();
+        backend.set_geometry(anchor, Rect { pos: Point::new(1000, 100), size: Size::new(100, 100) });
+        let mut wm = wm(backend);
+
+        wm.dispatch(BackendEvent::MapRequest(anchor));
+        wm.dispatch(BackendEvent::MapRequest(fresh));
+
+        let placed = frame_rect(&wm, fresh);
+        assert!(
+            RIGHT_HEAD.contains(placed.pos),
+            "with no pointer ever seen, a fresh window must join the focused window's head, got {placed:?}"
+        );
+    }
+
+    /// The frame geometry the backend was last told for `window`'s
+    /// client — where a placed window actually landed.
+    fn frame_rect(wm: &WindowManager<FakeBackend>, window: FakeWindowId) -> Rect {
+        let id = wm.client_for_window(window).expect("window should be managed");
+        let frame = wm.client(id).unwrap().frame.unwrap();
+        *wm.backend().last_frame_geometry.get(&frame).expect("a placed frame must have been configured")
+    }
+
+    #[test]
+    fn a_point_outside_every_monitor_resolves_to_the_nearest_one() {
+        // A vertical stack with a 100px gap between the outputs — the
+        // dead band no monitor covers, which a pointer really can sit
+        // in on a mismatched arrangement.
+        let top = Rect { pos: Point::new(0, 0), size: Size::new(800, 600) };
+        let bottom = Rect { pos: Point::new(0, 700), size: Size::new(800, 600) };
+        let mut backend = FakeBackend::new();
+        backend.set_monitors(vec![
+            MonitorInfo { geometry: top, name: "top".to_string(), primary: true },
+            MonitorInfo { geometry: bottom, name: "bottom".to_string(), primary: false },
+        ]);
+        let mut wm = wm(backend);
+        let top_area = Rect { pos: Point::new(0, 0), size: Size::new(800, 560) };
+        let bottom_area = Rect { pos: Point::new(0, 700), size: Size::new(800, 560) };
+        wm.set_workareas(vec![top_area, bottom_area]);
+
+        assert_eq!(wm.usable_area_at(Point::new(400, 640)), top_area, "in the gap, nearer the top output");
+        assert_eq!(wm.usable_area_at(Point::new(400, 680)), bottom_area, "in the gap, nearer the bottom one");
+        assert_eq!(wm.monitor_rect_at(Point::new(400, 680)), bottom, "the raw rect resolves the same way");
+        assert_eq!(
+            wm.usable_area_at(Point::new(-5000, -5000)),
+            top_area,
+            "a point nowhere near any output still has to resolve to one"
+        );
+    }
+
+    #[test]
+    fn set_workarea_reserves_space_on_the_primary_monitor_only() {
+        // The primary is deliberately the *second* entry: an index-0
+        // assumption would reserve the dock strip on the wrong head.
+        let mut backend = FakeBackend::new();
+        backend.set_monitors(vec![
+            MonitorInfo { geometry: LEFT_HEAD, name: "aux".to_string(), primary: false },
+            MonitorInfo { geometry: RIGHT_HEAD, name: "main".to_string(), primary: true },
+        ]);
+        let mut wm = wm(backend);
+        let reserved = Rect { pos: Point::new(800, 0), size: Size::new(800, 560) };
+
+        wm.set_workarea(reserved);
+
+        assert_eq!(wm.usable_area_at(Point::new(1200, 300)), reserved, "the primary keeps the strip it was given");
+        assert_eq!(wm.usable_area_at(Point::new(400, 300)), LEFT_HEAD, "every other head keeps its full geometry");
+    }
+
+    #[test]
+    fn net_workarea_publishes_the_union_of_the_per_monitor_workareas() {
+        let mut backend = FakeBackend::new();
+        backend.set_monitors(dual_monitors());
+        let mut wm = wm(backend);
+
+        wm.set_workareas(vec![Rect { pos: Point::new(0, 40), size: Size::new(800, 560) }]);
+
+        // The property carries no per-monitor dimension at all, so the
+        // bounding box of the reserved primary and the untouched second
+        // head is the only honest thing to hand a pager.
+        assert_eq!(
+            wm.backend().published_workareas.last(),
+            Some(&(Rect { pos: Point::new(0, 0), size: Size::new(1600, 600) }, 1)),
+            "_NET_WORKAREA must span every monitor's workarea"
+        );
     }
 }

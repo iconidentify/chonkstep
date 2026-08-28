@@ -50,6 +50,20 @@ pub struct X11Backend {
     root: Window,
     screen_width: u16,
     screen_height: u16,
+    /// The RandR version the server and this client agreed on at connect
+    /// time, or `None` when the extension isn't there at all. Decides
+    /// which enumeration path `query_monitors` takes, once, instead of
+    /// probing on every call.
+    randr: Option<(u32, u32)>,
+    /// The monitor layout last read from RandR. Cached rather than
+    /// queried per call for two reasons. Cost: `wm-core` asks
+    /// `monitors()` on every placement decision, and a query is a round
+    /// trip plus one more per monitor to resolve its name. Stability:
+    /// `set_workareas` hands the core one rect per monitor *positionally*,
+    /// so the list backing those indices must only ever change when the
+    /// hardware layout does — at which point the shell is told to
+    /// recompute (see `pending_screen_resize`).
+    monitors: Vec<MonitorInfo>,
     depth: u8,
     image_byte_order: ImageOrder,
     gc: Gcontext,
@@ -116,6 +130,12 @@ pub struct X11Backend {
     /// repositions the dock at the new size. Not surfaced through
     /// `Backend::poll_event`/`BackendEvent` since resizing the whole
     /// screen isn't a per-client `wm-core` concern.
+    ///
+    /// A *monitor layout* change (a display plugged, unplugged, or
+    /// rearranged) is queued here too, carrying whatever the screen size
+    /// is at that moment even when it didn't change — see the
+    /// `RandrNotify` arm in `translate_event` for why this reuses the
+    /// resize path instead of adding a second drain.
     pending_screen_resize: Option<Size>,
     /// Keycode -> every keysym bound to it (one per shift level),
     /// snapshotted once at connect time via `GetKeyboardMapping`. Used
@@ -270,19 +290,53 @@ impl X11Backend {
         let cursors = Cursors::create(&conn, root, scale)?;
         conn.change_window_attributes(root, &ChangeWindowAttributesAux::new().cursor(cursors.default))?;
 
-        // RandR screen-change notifications: Xephyr's `-resizeable` flag
-        // resizes the *virtual screen* (not just the outer window) when
-        // the user drags its edge, reported via this extension — without
-        // it we'd never learn the screen got bigger/smaller.
-        if let Ok(cookie) = conn.randr_query_version(1, 6) {
-            let _ = cookie.reply();
+        // RandR, for everything screen-geometry: the monitor layout
+        // `monitors()` reports, and the notifications that say it moved.
+        // Screen-change notifications cover a resize of the *virtual
+        // screen* (Xephyr's `-resizeable` flag does exactly this when the
+        // user drags its edge); CRTC- and output-change notifications
+        // cover a display being plugged, unplugged, or rearranged, which
+        // can leave the virtual screen's own size untouched.
+        //
+        // Nothing here is allowed to be fatal. A server without RandR
+        // (bare Xvfb, an ancient remote X) still has to give the user a
+        // session — it just gets one screen-sized monitor and never
+        // learns about changes — so failures log and carry on rather
+        // than aborting startup. This used to be a `?`, which meant a
+        // RandR-less server couldn't start the WM at all.
+        let randr = conn
+            .randr_query_version(1, 6)
+            .ok()
+            .and_then(|cookie| cookie.reply().ok())
+            .map(|reply| (reply.major_version, reply.minor_version));
+        match randr {
+            Some((major, minor)) => {
+                // RRNotify (crtc/output) arrived in RandR 1.2; asking a
+                // 1.1 server to select those bits earns a protocol error
+                // rather than events, so only ask where they exist.
+                let mut mask = randr::NotifyMask::SCREEN_CHANGE;
+                if randr_at_least(randr, 1, 2) {
+                    mask |= randr::NotifyMask::CRTC_CHANGE | randr::NotifyMask::OUTPUT_CHANGE;
+                }
+                if let Err(e) = conn.randr_select_input(root, mask) {
+                    tracing::warn!(?e, "RandR event selection failed; screen and monitor changes will go unnoticed");
+                }
+                tracing::debug!(major, minor, "RandR available");
+            }
+            None => tracing::info!("no RandR extension; treating the screen as a single monitor"),
         }
-        conn.randr_select_input(root, randr::NotifyMask::SCREEN_CHANGE)?;
 
         let image_byte_order = conn.setup().image_byte_order;
 
         let keyboard_map = fetch_keyboard_map(&conn)?;
         let numlock_mask = find_numlock_mask(&conn, &keyboard_map)?;
+
+        // The X screen is the *union* of every monitor (root spans all of
+        // them), which is why it stays the fallback geometry and never
+        // the per-monitor one.
+        let screen_size = Size::new(screen.width_in_pixels as u32, screen.height_in_pixels as u32);
+        let monitors = query_monitors(&conn, root, randr, screen_size);
+        tracing::info!(?monitors, "monitor layout");
 
         conn.flush()?;
 
@@ -291,6 +345,8 @@ impl X11Backend {
             root,
             screen_width: screen.width_in_pixels,
             screen_height: screen.height_in_pixels,
+            randr,
+            monitors,
             depth: screen.root_depth,
             image_byte_order,
             gc,
@@ -337,17 +393,37 @@ impl X11Backend {
         self.conn.stream().as_raw_fd()
     }
 
-    /// Drains a pending screen-size change from an RandR
-    /// `ScreenChangeNotify` (e.g. the user resized the Xephyr window
-    /// this WM is nested in). The desktop shell should repaint the
-    /// background and reposition the dock at the new size when it sees
-    /// one.
+    /// Drains a pending screen-geometry change: an RandR
+    /// `ScreenChangeNotify` (the user resized the Xephyr window this WM
+    /// is nested in) or a monitor layout change (a display plugged or
+    /// unplugged). The desktop shell should repaint the background,
+    /// reposition the dock on the primary monitor, and recompute one
+    /// workarea per monitor when it sees one — the size reported here is
+    /// the whole screen, `monitors()` is where the per-monitor truth is.
     pub fn take_screen_resize(&mut self) -> Option<Size> {
         self.pending_screen_resize.take()
     }
 
+    /// The X screen: the union of every monitor, since the root window
+    /// spans all of them. Not any one monitor's size.
     pub fn screen_size(&self) -> Size {
         Size::new(self.screen_width as u32, self.screen_height as u32)
+    }
+
+    /// Re-reads the monitor layout after RandR reported a change, and
+    /// says whether it actually differs from the one the core has been
+    /// placing windows against. A single plug event fans out into
+    /// several RandR notifications (one per CRTC, one per output), so
+    /// the comparison — not the event count — is what decides whether
+    /// the shell gets asked to recompute.
+    fn refresh_monitors(&mut self) -> bool {
+        let monitors = query_monitors(&self.conn, self.root, self.randr, self.screen_size());
+        if monitors == self.monitors {
+            return false;
+        }
+        tracing::info!(?monitors, "monitor layout changed");
+        self.monitors = monitors;
+        true
     }
 
     /// Sets the root window's background color (the server redraws it
@@ -743,7 +819,42 @@ impl X11Backend {
             Event::RandrScreenChangeNotify(e) => {
                 self.screen_width = e.width;
                 self.screen_height = e.height;
+                // Order matters: the refresh's fallback path (no RandR
+                // monitors to enumerate) reports a screen-sized monitor,
+                // so it has to run against the *new* screen size.
+                self.refresh_monitors();
                 self.pending_screen_resize = Some(Size::new(e.width as u32, e.height as u32));
+                None
+            }
+            // A CRTC or output changed: a display plugged in, unplugged,
+            // switched off, or moved. The virtual screen's own size need
+            // not change with it — measured on the test VM, `xrandr --fb
+            // 1920x1200 --output Virtual-1 --mode 1600x1200` shrinks the
+            // monitor inside an unchanged screen, and the
+            // `ScreenChangeNotify` that accompanies it reports the same
+            // size as before — so a size-carrying signal says nothing
+            // about what actually moved, and the layout comparison in
+            // `refresh_monitors` is what decides.
+            //
+            // Deliberately routed into `pending_screen_resize` rather
+            // than a second drain of its own: what a shell does with that
+            // signal is "recompute everything derived from screen
+            // geometry" — wallpaper, dock and Clip placement on the
+            // primary monitor, one workarea per monitor — which is
+            // precisely what a layout change needs, and a parallel
+            // mechanism would be one more thing every event loop and
+            // every future backend has to remember to poll. The payload
+            // is the current screen size even when unchanged: the size
+            // was never the message, "your geometry is stale" is.
+            //
+            // Only CRTC- and output-change notifications are selected
+            // (see `connect_and_become_wm`), so every `RandrNotify` that
+            // arrives here is a layout signal; `refresh_monitors`
+            // swallows the ones that turn out to change nothing.
+            Event::RandrNotify(_) => {
+                if self.refresh_monitors() {
+                    self.pending_screen_resize = Some(self.screen_size());
+                }
                 None
             }
             Event::ClientMessage(e) => self.translate_client_message(&e),
@@ -935,6 +1046,169 @@ impl EwmhAtoms {
             net_wm_name,
         ]
     }
+}
+
+/// Whether the RandR version agreed on at connect time is at least
+/// `major.minor`. `RRQueryVersion` answers with the *lower* of what the
+/// client asked for and what the server implements, so this is the
+/// honest test for "that request exists on this connection".
+fn randr_at_least(version: Option<(u32, u32)>, major: u32, minor: u32) -> bool {
+    matches!(version, Some(have) if have >= (major, minor))
+}
+
+/// Reads the live monitor layout from RandR. Three tiers, best first:
+///
+/// * RandR 1.5 `GetMonitors` — the only one that reports *logical*
+///   monitors, which is what a user (and a dock) thinks in: a mirrored
+///   pair is one monitor, not two stacked copies; the primary flag is
+///   already resolved; and monitors an admin carved out by hand with
+///   `xrandr --setmonitor` (splitting one ultrawide panel in two) are
+///   reported as the two screens the user actually arranges windows on.
+/// * A CRTC walk over `GetScreenResourcesCurrent`, for pre-1.5 servers,
+///   with primary derived from `GetOutputPrimary`.
+/// * One screen-sized monitor, for a server with no RandR at all.
+///
+/// Every tier degrades into the next rather than failing: a login
+/// session that refuses to start because it couldn't enumerate monitors
+/// is strictly worse than one that treats the screen as a single
+/// display, which is exactly what this backend did before RandR.
+fn query_monitors(conn: &RustConnection, root: Window, randr: Option<(u32, u32)>, screen: Size) -> Vec<MonitorInfo> {
+    if randr_at_least(randr, 1, 5) {
+        match monitors_via_get_monitors(conn, root) {
+            Some(monitors) if !monitors.is_empty() => return normalize_monitors(monitors),
+            _ => tracing::debug!("RandR 1.5 GetMonitors reported nothing; falling back to a CRTC walk"),
+        }
+    }
+    if randr.is_some() {
+        match monitors_via_crtcs(conn, root) {
+            Some(monitors) if !monitors.is_empty() => return normalize_monitors(monitors),
+            _ => tracing::debug!("RandR reported no active CRTCs; falling back to one screen-sized monitor"),
+        }
+    }
+    vec![MonitorInfo { geometry: Rect { pos: Point::new(0, 0), size: screen }, name: "screen-0".to_string(), primary: true }]
+}
+
+/// RandR 1.5 `GetMonitors`. `get_active = true` on purpose: a monitor
+/// whose outputs are all switched off has no pixels to place a window
+/// on, and must not take up an index in the layout the shell reserves
+/// workareas by.
+fn monitors_via_get_monitors(conn: &RustConnection, root: Window) -> Option<Vec<MonitorInfo>> {
+    let reply = conn.randr_get_monitors(root, true).ok()?.reply().ok()?;
+    // Every name atom is asked for before any answer is awaited: x11rb
+    // writes a request when its cookie is made and only blocks when one
+    // is awaited, so this costs one round trip for the whole set instead
+    // of one per monitor.
+    let names: Vec<_> = reply.monitors.iter().map(|monitor| conn.get_atom_name(monitor.name).ok()).collect();
+    let mut monitors = Vec::with_capacity(reply.monitors.len());
+    for (monitor, name) in reply.monitors.iter().zip(names) {
+        if monitor.width == 0 || monitor.height == 0 {
+            continue;
+        }
+        let name = name
+            .and_then(|cookie| cookie.reply().ok())
+            .map(|reply| String::from_utf8_lossy(&reply.name).into_owned())
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| format!("monitor-{}", monitors.len()));
+        monitors.push(MonitorInfo {
+            geometry: monitor_rect(monitor.x, monitor.y, monitor.width, monitor.height),
+            name,
+            primary: monitor.primary,
+        });
+    }
+    Some(monitors)
+}
+
+/// Pre-1.5 fallback: one monitor per enabled CRTC. `...ResourcesCurrent`
+/// rather than `GetScreenResources` because the latter asks the server
+/// to re-probe every output — a visible stall, and on some drivers a
+/// mode reset — which is far too aggressive for something a window
+/// placement can trigger.
+fn monitors_via_crtcs(conn: &RustConnection, root: Window) -> Option<Vec<MonitorInfo>> {
+    let resources = conn.randr_get_screen_resources_current(root).ok()?.reply().ok()?;
+    let primary_output = conn
+        .randr_get_output_primary(root)
+        .ok()
+        .and_then(|cookie| cookie.reply().ok())
+        .map(|reply| reply.output)
+        .filter(|output| *output != NONE);
+    let crtcs: Vec<_> = resources
+        .crtcs
+        .iter()
+        .filter_map(|&crtc| conn.randr_get_crtc_info(crtc, resources.config_timestamp).ok())
+        .collect();
+
+    // `(geometry, primary, output to name it after)`.
+    let mut kept: Vec<(Rect, bool, randr::Output)> = Vec::new();
+    for cookie in crtcs {
+        let Ok(info) = cookie.reply() else { continue };
+        // A disabled CRTC reports success with a zero size and no
+        // outputs; `InvalidConfigTime` means the layout changed under
+        // this very walk, in which case the change notification that
+        // caused it is still queued and will run the walk again.
+        if info.status != randr::SetConfig::SUCCESS || info.width == 0 || info.height == 0 || info.outputs.is_empty() {
+            continue;
+        }
+        let geometry = monitor_rect(info.x, info.y, info.width, info.height);
+        let primary = primary_output.is_some_and(|output| info.outputs.contains(&output));
+        // Mirrored outputs are distinct CRTCs painting the same screen
+        // rectangle. RandR 1.5 folds those into one logical monitor;
+        // this tier has to do it by hand, because the shell reserves a
+        // workarea per index and a duplicate rectangle would strand one
+        // of them behind a dock that isn't there.
+        if let Some(existing) = kept.iter_mut().find(|(rect, _, _)| *rect == geometry) {
+            existing.1 |= primary;
+            continue;
+        }
+        kept.push((geometry, primary, info.outputs[0]));
+    }
+
+    // Names, in the same request-then-await shape as above.
+    let names: Vec<_> = kept
+        .iter()
+        .map(|(_, _, output)| conn.randr_get_output_info(*output, resources.config_timestamp).ok())
+        .collect();
+    let monitors = kept
+        .into_iter()
+        .zip(names)
+        .map(|((geometry, primary, output), name)| {
+            let name = name
+                .and_then(|cookie| cookie.reply().ok())
+                .map(|reply| String::from_utf8_lossy(&reply.name).into_owned())
+                .filter(|name| !name.is_empty())
+                .unwrap_or_else(|| format!("output-{output}"));
+            MonitorInfo { geometry, name, primary }
+        })
+        .collect();
+    Some(monitors)
+}
+
+fn monitor_rect(x: i16, y: i16, width: u16, height: u16) -> Rect {
+    Rect { pos: Point::new(x as i32, y as i32), size: Size::new(width as u32, height as u32) }
+}
+
+/// Puts a freshly read layout into the shape `wm-core` assumes: ordered
+/// left to right, then top to bottom, with exactly one primary.
+///
+/// The order has to be a function of the *geometry*, never of RandR's
+/// reply order, because `set_workareas` hands the core one rect per
+/// monitor positionally — if this list reshuffled between two calls for
+/// one unchanged physical layout, every monitor's reserved dock strip
+/// would silently jump to a different screen. Two monitors sharing an
+/// origin (a projector mirroring at a different resolution, or a hand-
+/// defined monitor overlapping a real one) break the tie by name, so
+/// even that case is deterministic rather than reply-order dependent.
+///
+/// Exactly one primary because the shell puts the dock, the Clip and the
+/// launcher strip on it: none flagged (a CRTC walk on a server with no
+/// primary output set) would leave the desktop with nowhere to put its
+/// chrome, and two flagged would put it in two places.
+fn normalize_monitors(mut monitors: Vec<MonitorInfo>) -> Vec<MonitorInfo> {
+    monitors.sort_by(|a, b| (a.geometry.pos.x, a.geometry.pos.y, &a.name).cmp(&(b.geometry.pos.x, b.geometry.pos.y, &b.name)));
+    let primary = monitors.iter().position(|monitor| monitor.primary).unwrap_or(0);
+    for (index, monitor) in monitors.iter_mut().enumerate() {
+        monitor.primary = index == primary;
+    }
+    monitors
 }
 
 /// Whether a `poll_for_event` failure means the connection is dead for
@@ -1370,11 +1644,12 @@ impl Backend for X11Backend {
         result
     }
 
+    /// The cached RandR layout (see the `monitors` field): read at
+    /// connect time and re-read only when RandR says something moved, so
+    /// two calls in the same event-loop iteration cannot disagree about
+    /// which monitor index means which screen.
     fn monitors(&self) -> Vec<MonitorInfo> {
-        vec![MonitorInfo {
-            geometry: Rect { pos: Point::new(0, 0), size: self.screen_size() },
-            name: "screen-0".to_string(),
-        }]
+        self.monitors.clone()
     }
 
     fn poll_event(&mut self) -> Option<BackendEvent<Self::WindowId, Self::FrameId>> {
@@ -2072,5 +2347,76 @@ impl wm_theme_api::PopupHost for X11Backend {
 
     fn ungrab_pointer(&mut self, grab: wm_theme_api::PopupGrab) {
         <Self as Backend>::ungrab_pointer(self, DragHandle(grab.0));
+    }
+}
+
+/// Everything an X server is needed for is untestable here by
+/// construction; what is testable is the ordering and primary-flag
+/// contract `wm-core` indexes its per-monitor workareas by, which is
+/// pure and lives in `normalize_monitors`.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn monitor(name: &str, x: i32, y: i32, w: u32, h: u32, primary: bool) -> MonitorInfo {
+        MonitorInfo { geometry: Rect { pos: Point::new(x, y), size: Size::new(w, h) }, name: name.to_string(), primary }
+    }
+
+    #[test]
+    fn orders_left_to_right_then_top_to_bottom() {
+        let ordered = normalize_monitors(vec![
+            monitor("right", 1920, 0, 1920, 1080, false),
+            monitor("below-left", 0, 1080, 1920, 1080, false),
+            monitor("left", 0, 0, 1920, 1080, true),
+        ]);
+        let names: Vec<&str> = ordered.iter().map(|m| m.name.as_str()).collect();
+        assert_eq!(names, ["left", "below-left", "right"]);
+    }
+
+    /// The order must depend only on the geometry: RandR is free to
+    /// report the same unchanged layout in a different order, and a
+    /// reshuffle would silently move every monitor's reserved dock strip
+    /// to a different screen.
+    #[test]
+    fn order_is_independent_of_reply_order() {
+        let layout = || vec![monitor("b", 1920, 0, 1920, 1080, false), monitor("a", 0, 0, 1920, 1080, true), monitor("c", 3840, 0, 1280, 1024, false)];
+        let mut reversed = layout();
+        reversed.reverse();
+        assert_eq!(normalize_monitors(layout()), normalize_monitors(reversed));
+    }
+
+    #[test]
+    fn same_origin_monitors_tie_break_by_name() {
+        let ordered = normalize_monitors(vec![monitor("projector", 0, 0, 1024, 768, false), monitor("panel", 0, 0, 1920, 1080, true)]);
+        let names: Vec<&str> = ordered.iter().map(|m| m.name.as_str()).collect();
+        assert_eq!(names, ["panel", "projector"]);
+    }
+
+    #[test]
+    fn keeps_exactly_one_primary_when_the_server_flags_several() {
+        let normalized = normalize_monitors(vec![monitor("left", 0, 0, 1920, 1080, true), monitor("right", 1920, 0, 1920, 1080, true)]);
+        assert_eq!(normalized.iter().filter(|m| m.primary).count(), 1);
+        assert!(normalized[0].primary, "the leftmost of two flagged monitors keeps the flag");
+    }
+
+    /// A CRTC walk on a server with no primary output set reports none —
+    /// the shell still needs somewhere to put the dock.
+    #[test]
+    fn promotes_the_first_monitor_when_none_is_flagged() {
+        let normalized = normalize_monitors(vec![monitor("right", 1920, 0, 1920, 1080, false), monitor("left", 0, 0, 1920, 1080, false)]);
+        assert!(normalized[0].primary);
+        assert_eq!(normalized[0].name, "left");
+        assert_eq!(normalized.iter().filter(|m| m.primary).count(), 1);
+    }
+
+    /// A monitor left of the origin is normal (`xrandr --left-of` on the
+    /// primary), and negative coordinates must sort before zero rather
+    /// than wrap through an unsigned cast somewhere.
+    #[test]
+    fn negative_origins_sort_before_the_primary() {
+        let ordered = normalize_monitors(vec![monitor("primary", 0, 0, 1920, 1080, true), monitor("left-of", -1280, 0, 1280, 1024, false)]);
+        let names: Vec<&str> = ordered.iter().map(|m| m.name.as_str()).collect();
+        assert_eq!(names, ["left-of", "primary"]);
+        assert!(ordered[1].primary, "sorting must not move the primary flag off its monitor");
     }
 }

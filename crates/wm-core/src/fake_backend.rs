@@ -105,7 +105,10 @@ pub struct FakeBackend {
 
 impl FakeBackend {
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            monitors: vec![MonitorInfo { geometry: FAKE_SCREEN, name: "test-screen".to_string(), primary: true }],
+            ..Self::default()
+        }
     }
 
     pub fn create_window(&mut self) -> FakeWindowId {
@@ -129,12 +132,21 @@ impl FakeBackend {
         self.hints.insert(window, hints);
     }
 
-    /// Sets the single monitor `Backend::monitors()` reports — tests
-    /// default to none (matching a "no screen bounds known" baseline),
-    /// so snapping/maximize tests that care about screen edges opt in
-    /// explicitly.
+    /// Replaces the fake's monitor list with a single primary monitor
+    /// — how a test states the one screen it wants to measure against
+    /// instead of the stock `FAKE_SCREEN`.
     pub fn set_monitor(&mut self, geometry: Rect) {
-        self.monitors = vec![MonitorInfo { geometry, name: "test-screen".to_string() }];
+        self.set_monitors(vec![MonitorInfo { geometry, name: "test-screen".to_string(), primary: true }]);
+    }
+
+    /// Sets the whole monitor list, in the stable order
+    /// `Backend::monitors()` promises — for the multi-head shapes
+    /// `set_monitor` cannot express. The caller owns the `primary`
+    /// flags: this deliberately does not fix them up, so a test can
+    /// exercise a list whose primary is not index 0, and one where the
+    /// platform named no primary at all.
+    pub fn set_monitors(&mut self, monitors: Vec<MonitorInfo>) {
+        self.monitors = monitors;
     }
 
     /// Sets the `_NET_WM_WINDOW_TYPE` this fake reports for `window` —
@@ -146,6 +158,11 @@ impl FakeBackend {
 }
 
 const DEFAULT_GEOMETRY: Rect = Rect { pos: Point { x: 0, y: 0 }, size: Size { w: 200, h: 150 } };
+
+/// The one screen a fresh `FakeBackend` reports, as both its
+/// `screen_size` and its single primary monitor — the two must agree,
+/// since no real backend has a screen its monitor list doesn't cover.
+const FAKE_SCREEN: Rect = Rect { pos: Point { x: 0, y: 0 }, size: Size { w: 1600, h: 1200 } };
 
 impl Backend for FakeBackend {
     type WindowId = FakeWindowId;
@@ -165,7 +182,7 @@ impl Backend for FakeBackend {
     fn paint_root_color(&mut self, _rgb: (u8, u8, u8)) {}
     fn paint_root_image(&mut self, _buffer: &DecorationBuffer) {}
     fn screen_size(&self) -> Size {
-        Size::new(1600, 1200)
+        FAKE_SCREEN.size
     }
 
     fn scan_existing_windows(&mut self) -> Vec<Self::WindowId> {

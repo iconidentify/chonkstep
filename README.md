@@ -184,15 +184,27 @@ GLES scene that draws the chrome.
 
 What the session backend does not do yet, stated plainly:
 
-- **One GPU, one output.** The primary DRM device and its first
-  connected connector are the session; a second monitor stays dark.
-  Nothing hot-plugs either: a GPU or a connector that appears
-  mid-session is logged and ignored, so docking a laptop means
-  restarting the session.
-- **No hardware cursor plane.** The pointer is drawn into the frame
-  like every other scene element rather than handed to the display
-  controller's own cursor plane, so it moves at the frame rate rather
-  than the mouse's.
+- **One GPU, every connector on it.** The session drives every display
+  plugged into the primary DRM device, each with its own mode, page
+  flips, and place in the desktop layout; a second GPU's outputs stay
+  dark. Nothing hot-plugs: a monitor or GPU that appears mid-session is
+  logged and ignored, so docking a laptop means restarting the session.
+  Output layout is left to right in connector order - there is no
+  configuration for arrangement, mirroring, or per-output scale yet.
+- **The hardware cursor depends on your driver.** The pointer is asked
+  for the display controller's cursor plane, which is what makes it
+  track the hand instead of the frame rate. Whether it gets one is the
+  driver's answer: on the virtio-gpu VM this was developed against, the
+  cursor plane exists and `modetest` sees it, but it never reaches the
+  compositor - the universal-planes capability that exposes it is
+  enabled on the device fd and the plane still does not appear by the
+  time the surface is built, which looks like an interaction between
+  Smithay's device bookkeeping and the fresh fd libseat hands over on
+  session activation. The session logs the planes it found
+  ("DRM planes available to this crtc"), so the answer for a given
+  machine is one line in the log; where the plane is missing the
+  pointer is composited into the frame and everything else is
+  unaffected.
 - **Restart costs you your clients.** The compositor does re-exec in
   place - that is how the theme menu and `scripts/restart.sh` apply
   changes on both backends - but Wayland clients die with the socket

@@ -14,7 +14,7 @@
 //! - [`Compositor`] is the one calloop data type. Smithay's delegate
 //!   macros (`delegate_compositor!`, `delegate_xdg_shell!`, ...)
 //!   implement each protocol's dispatch traits for a single concrete
-//!   type, so every per-protocol state object, the seat, the output,
+//!   type, so every per-protocol state object, the seat, the outputs,
 //!   the winit backend with its GLES renderer, and the
 //!   `WindowManager`/`Shell` pair all hang off this struct — there is
 //!   no way to split them into separately-owned pieces without
@@ -48,7 +48,7 @@ use smithay::input::{Seat, SeatState};
 use smithay::output::{Mode, Output, PhysicalProperties, Subpixel};
 use smithay::reexports::calloop::generic::Generic;
 use smithay::reexports::calloop::{EventLoop, Interest, LoopHandle, Mode as TriggerMode, PostAction};
-use smithay::reexports::wayland_server::backend::{ClientData, ClientId, DisconnectReason};
+use smithay::reexports::wayland_server::backend::{ClientData, ClientId, DisconnectReason, GlobalId};
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::reexports::wayland_server::{Display, DisplayHandle};
 use smithay::utils::{Logical, Physical, Transform, SERIAL_COUNTER};
@@ -64,7 +64,8 @@ use smithay::wayland::xwayland_shell::XWaylandShellState;
 use smithay::xwayland::{X11Surface, X11Wm, XWayland, XWaylandEvent};
 
 use wm_core::{
-    Backend, BackendEvent, FocusPolicy, KeyCombo, MouseButton, WindowManager, WindowType,
+    Backend, BackendEvent, FocusPolicy, KeyCombo, MonitorInfo, MouseButton, WindowManager,
+    WindowType,
 };
 use wm_theme::{RasterThemeEngine, Theme};
 use wm_theme_api::{DecorationBuffer, Point, Rect, Size};
@@ -280,6 +281,17 @@ pub struct WaylandBackend {
     /// KeyRelease commentary, mirrored by `input.rs`.
     pub(crate) keyboard_grabbed: bool,
     pub(crate) root_background: RootBackground,
+    /// Every output this session drives, in the order `run` discovered
+    /// them (connector order on the session backend, one entry on the
+    /// nested one) — the primary first. Served verbatim by
+    /// `Backend::monitors`, and consulted by the input code to confine
+    /// the pointer, so this is the ledger's whole idea of the physical
+    /// screen layout.
+    pub(crate) monitors: Vec<MonitorInfo>,
+    /// The union bounding box of [`WaylandBackend::monitors`] — what
+    /// `Backend::screen_size` reports, and the space every rect in this
+    /// ledger lives in. With one output it is that output's size, which
+    /// is why the single-monitor path never notices the distinction.
     pub(crate) output_size: Size,
     /// Set by every mutating verb (paint, map, move, restack, ...);
     /// the renderer clears it after drawing. This is the whole
@@ -301,7 +313,8 @@ pub struct WaylandBackend {
 }
 
 impl WaylandBackend {
-    pub(crate) fn new(display_handle: DisplayHandle, output_size: Size) -> Self {
+    pub(crate) fn new(display_handle: DisplayHandle, monitors: Vec<MonitorInfo>) -> Self {
+        let output_size = union_size(&monitors);
         Self {
             next_id: 1,
             windows: HashMap::new(),
@@ -315,6 +328,7 @@ impl WaylandBackend {
             grabbed_combos: Vec::new(),
             keyboard_grabbed: false,
             root_background: RootBackground::Color((0, 0, 0)),
+            monitors,
             output_size,
             damage: true,
             display_handle,
@@ -395,6 +409,82 @@ pub(crate) enum Graphics {
     Session(Box<crate::session::SessionGraphics>),
 }
 
+/// One output, as the graphics backend hands it to [`run`] before any
+/// wayland global exists: the `Output` with its mode already set, plus
+/// where it sits in the global coordinate space. The session backend
+/// produces one of these per connected connector; the nested backend
+/// produces exactly one, at the origin.
+pub(crate) struct OutputSetup {
+    pub output: Output,
+    pub position: Point,
+    pub size: Size,
+}
+
+/// One output the compositor drives, everything the session needs to
+/// know about it in one place.
+///
+/// The order of [`Compositor::outputs`] is the contract: index 0 is the
+/// primary monitor, and the same index selects the matching entry in
+/// `Backend::monitors` and (on the session backend) in
+/// `SessionGraphics::outputs`. Nothing keys outputs by name, so nothing
+/// has to agree on one.
+pub(crate) struct OutputEntry {
+    pub output: Output,
+    /// Top-left corner in global compositor space. Every rect in the
+    /// ledger is global, so this is what the renderer subtracts to put
+    /// the one shared scene into this output's framebuffer.
+    pub position: Point,
+    pub size: Size,
+    /// Only the nested backend renders through this: the session
+    /// backend's `DrmCompositor` owns damage tracking per crtc itself.
+    /// It is built from the `Output`, so a resize of that output
+    /// retunes it with no work here.
+    pub damage_tracker: OutputDamageTracker,
+    /// The `wl_output` global clients bind to. Dropping the id does not
+    /// take the global down — that needs
+    /// `DisplayHandle::remove_global` — so this is held for the one
+    /// caller that would ever pass it there: a connector-hot-unplug
+    /// path taking an output back off the wire.
+    _global: GlobalId,
+}
+
+impl OutputEntry {
+    /// Advertises one output to clients and prepares it for rendering.
+    fn new(setup: OutputSetup, display_handle: &DisplayHandle) -> Self {
+        let _global = setup.output.create_global::<Compositor>(display_handle);
+        let damage_tracker = OutputDamageTracker::from_output(&setup.output);
+        Self {
+            output: setup.output,
+            position: setup.position,
+            size: setup.size,
+            damage_tracker,
+            _global,
+        }
+    }
+}
+
+/// The union bounding box of every monitor: what `Backend::screen_size`
+/// answers, and the extent of the coordinate space the ledger, the
+/// renderer and the pointer all share.
+///
+/// Only the far corner is measured because outputs are laid out from
+/// the origin rightwards (see `session::init`). A layout that ever put
+/// an output at a negative coordinate — a monitor placed to the *left*
+/// of the primary, which is exactly what an output-management protocol
+/// would let a user ask for — would need the near corner too, and would
+/// need `wm-core` and the shell to stop assuming the screen starts at
+/// (0, 0). Moving that assumption is the real cost of arbitrary output
+/// positioning; the layout code is the easy half.
+fn union_size(monitors: &[MonitorInfo]) -> Size {
+    let mut width: i32 = 0;
+    let mut height: i32 = 0;
+    for monitor in monitors {
+        width = width.max(monitor.geometry.pos.x + monitor.geometry.size.w as i32);
+        height = height.max(monitor.geometry.pos.y + monitor.geometry.size.h as i32);
+    }
+    Size::new(width.max(0) as u32, height.max(0) as u32)
+}
+
 pub struct Compositor {
     /// The policy brain, owning the [`WaylandBackend`] ledger. Protocol
     /// handlers reach the ledger through `self.wm.backend_mut()`.
@@ -424,10 +514,11 @@ pub struct Compositor {
     pub popups: PopupManager,
 
     pub seat: Seat<Compositor>,
-    /// The single output. Multi-monitor waits for the `session`
-    /// backend; `Backend::monitors` reports this one spanning
-    /// everything, same as wm-x11 before RandR.
-    pub output: Output,
+    /// Every output, primary first — see [`OutputEntry`] for what that
+    /// order binds together. Never empty: a session with no output
+    /// never gets built (`session::init` fails, and the nested backend
+    /// always has its host window).
+    pub(crate) outputs: Vec<OutputEntry>,
 
     /// The X11 window-manager connection into XWayland, once
     /// `XWaylandEvent::Ready` has arrived (`None` before that, or if
@@ -446,7 +537,10 @@ pub struct Compositor {
     /// dispatch in a login session never has an unreachable panic on
     /// a screen with no console to read it from.
     pub(crate) dmabuf: crate::dmabuf::DmabufSupport,
-    pub damage_tracker: OutputDamageTracker,
+    /// The wlr protocol surface external tools bind: the
+    /// foreign-toplevel window list and screencopy capture. The
+    /// Wayland counterpart to the X11 session's EWMH properties.
+    pub(crate) protocols: crate::protocols::ProtocolState,
 
     /// Latest pointer position in compositor space, maintained by
     /// `input.rs` — the renderer draws the cursor here, and hit-tests
@@ -576,8 +670,18 @@ impl Compositor {
         // why it cannot land inline).
         self.popups.cleanup();
         self.apply_pending_focus();
+        // Publish the window list and serve screencopy requests: after
+        // the event and notification drains so external tools see the
+        // same state the desktop just settled into, before the damage
+        // test so a capture request can mark the frame it needs.
+        crate::protocols::refresh(self);
 
-        if self.wm.backend().damage {
+        // Damage means the scene changed; `redraw_pending` means a
+        // change already accounted for has not reached every screen yet
+        // (a page flip was still in flight on one of them last pass).
+        // The second condition only ever fires on the session backend
+        // with more than one output — see `session::redraw_pending`.
+        if self.wm.backend().damage || crate::session::redraw_pending(&self.graphics) {
             crate::renderer::render_frame(self);
         }
 
@@ -616,14 +720,32 @@ impl Compositor {
     /// The host winit window changed size: retune the wayland output's
     /// mode and queue the resize for the loop's `take_screen_resize`
     /// drain, which is exactly where an X11 RandR change lands.
+    ///
+    /// Only the first output is touched, and that is not a shortcut:
+    /// this is the nested backend's path, where the host window *is*
+    /// the one output. The session backend never calls it — its outputs
+    /// keep the mode they were set to at startup, and a real mode change
+    /// (or a connector appearing) would have to re-lay-out every output
+    /// and re-advertise all of them, which is the connector-hot-plug
+    /// work `session.rs`'s module docs scope out.
     pub(crate) fn on_output_resized(&mut self, size: SSize<i32, Physical>) {
         let mode = Mode { size, refresh: 60_000 };
-        self.output.change_current_state(Some(mode), None, None, None);
-        self.output.set_preferred(mode);
         let logical = Size::new(size.w.max(0) as u32, size.h.max(0) as u32);
+        let Some(entry) = self.outputs.first_mut() else {
+            return;
+        };
+        entry.output.change_current_state(Some(mode), None, None, None);
+        entry.output.set_preferred(mode);
+        entry.size = logical;
         let backend = self.wm.backend_mut();
-        backend.output_size = logical;
-        backend.pending_resize = Some(logical);
+        if let Some(monitor) = backend.monitors.first_mut() {
+            monitor.geometry.size = logical;
+        }
+        // Through the union rather than assigned directly, so the one
+        // place that decides what "the screen" measures stays one place
+        // even while only a single output can resize.
+        backend.output_size = union_size(&backend.monitors);
+        backend.pending_resize = Some(backend.output_size);
         backend.damage = true;
     }
 
@@ -738,7 +860,7 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
         None => nesting_desktop_present(),
     };
 
-    let (mut graphics, output, output_size) = if nested {
+    let (mut graphics, output_setups) = if nested {
         tracing::info!("nested backend: rendering into a window on the host desktop");
         let (winit_backend, winit_source) = winit::init::<GlesRenderer>()
             .map_err(|error| format!("winit backend init failed: {error}"))?;
@@ -781,20 +903,59 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
             .map_err(|error| format!("failed to register the winit event source: {error}"))?;
 
         let size = Size::new(window_size.w.max(0) as u32, window_size.h.max(0) as u32);
-        (Graphics::Winit(winit_backend), output, size)
+        // One output at the origin: a host window is one screen by
+        // construction, and everything downstream — the ledger's
+        // monitor list, the renderer's viewport offset, the pointer
+        // clamp — then takes the degenerate single-monitor case of the
+        // multi-monitor path rather than a path of its own.
+        (
+            Graphics::Winit(winit_backend),
+            vec![OutputSetup { output, position: Point::new(0, 0), size }],
+        )
     } else {
         tracing::info!("session backend: taking over the DRM device and input");
         let init = crate::session::init(&loop_handle, &display_handle)?;
-        (init.graphics, init.output, init.output_size)
+        (init.graphics, init.outputs)
     };
-    let _global = output.create_global::<Compositor>(&display_handle);
-    let damage_tracker = OutputDamageTracker::from_output(&output);
+    let outputs: Vec<OutputEntry> = output_setups
+        .into_iter()
+        .map(|setup| OutputEntry::new(setup, &display_handle))
+        .collect();
+    // The ledger's copy of the layout, which is what `wm-core` and the
+    // shell see through `Backend::monitors`. Built here, from the same
+    // list the renderer draws through, so the two can never disagree
+    // about where a monitor is. The first output is primary: on the
+    // session backend that is the first connected connector in kernel
+    // enumeration order, and there is no protocol or config that could
+    // currently say otherwise (see `session.rs`'s module docs).
+    let monitors: Vec<MonitorInfo> = outputs
+        .iter()
+        .enumerate()
+        .map(|(index, entry)| MonitorInfo {
+            geometry: Rect { pos: entry.position, size: entry.size },
+            name: entry.output.name(),
+            primary: index == 0,
+        })
+        .collect();
+    for monitor in &monitors {
+        tracing::info!(
+            output = %monitor.name,
+            primary = monitor.primary,
+            x = monitor.geometry.pos.x,
+            y = monitor.geometry.pos.y,
+            width = monitor.geometry.size.w,
+            height = monitor.geometry.size.h,
+            "monitor in the desktop layout"
+        );
+    }
 
     // linux-dmabuf, before the listening socket exists: a global that
     // is missing when a client binds might as well never exist, and
     // GPU clients read its absence as "this compositor has no GPU".
     // Both backends own a `GlesRenderer`, so one call serves both.
     let dmabuf = crate::dmabuf::init_for_graphics(&display_handle, &mut graphics);
+    // Same timing rule as dmabuf: bound before any client can connect.
+    let protocols = crate::protocols::init(&display_handle);
 
     // The listening socket clients connect to, plus the display's own
     // fd so wayland-server processes client requests — both plain
@@ -855,7 +1016,11 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
     // The desktop shell is built against the mutable backend before
     // `WindowManager::new` takes ownership — the exact construction
     // order the X11 binary uses, for the exact same borrow reason.
-    let mut backend = WaylandBackend::new(display_handle.clone(), output_size);
+    let mut backend = WaylandBackend::new(display_handle.clone(), monitors);
+    // The whole screen, as the shell sizes the desktop against it: the
+    // union of every monitor. Where the dock and the workareas land
+    // inside that union is the shell's decision, not this loop's.
+    let output_size = backend.output_size;
     let shell = Shell::new(&mut backend, &config, theme.clone(), scale);
     // No `scan_existing_windows` here: a compositor's clients cannot
     // predate the compositor. (Hot-restart adoption is impossible for
@@ -936,12 +1101,12 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
         xwayland_shell_state,
         popups: PopupManager::default(),
         seat,
-        output,
+        outputs,
         xwm: None,
         xdisplay: None,
         graphics,
         dmabuf,
-        damage_tracker,
+        protocols,
         pointer_location: (0.0, 0.0).into(),
         cursor_status: CursorImageStatus::default_named(),
         default_cursor: build_default_cursor(),
@@ -1058,4 +1223,56 @@ fn build_default_cursor() -> MemoryRenderBuffer {
         Transform::Normal,
         None,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // The rest of this module needs a wayland display, a GPU or a host
+    // window; the layout arithmetic needs none of them, and it is the
+    // part a single-connector test machine cannot demonstrate.
+
+    fn monitor(x: i32, y: i32, w: u32, h: u32) -> MonitorInfo {
+        MonitorInfo {
+            geometry: Rect { pos: Point::new(x, y), size: Size::new(w, h) },
+            name: format!("test-{x}x{y}"),
+            primary: x == 0 && y == 0,
+        }
+    }
+
+    #[test]
+    fn one_monitor_is_its_own_screen() {
+        assert_eq!(union_size(&[monitor(0, 0, 1920, 1080)]), Size::new(1920, 1080));
+    }
+
+    #[test]
+    fn side_by_side_monitors_span_their_widths() {
+        // The layout `session::init` builds: left to right, from the
+        // origin, at each output's mode size.
+        assert_eq!(
+            union_size(&[monitor(0, 0, 1920, 1080), monitor(1920, 0, 1280, 1024)]),
+            Size::new(3200, 1080)
+        );
+    }
+
+    #[test]
+    fn the_union_is_the_farthest_corner_not_the_last_monitor() {
+        // The tallest screen sets the height even when it is not the
+        // last one, and the box covers dead space rather than tracking
+        // the outline of the monitors — which is what makes it a
+        // bounding box and why the pointer needs its own confinement
+        // (see `input::confine_to_outputs`).
+        assert_eq!(
+            union_size(&[monitor(0, 0, 1280, 1024), monitor(1280, 0, 1920, 1080)]),
+            Size::new(3200, 1080)
+        );
+    }
+
+    #[test]
+    fn no_monitors_is_an_empty_screen() {
+        // Not reachable in a running session (`run` always builds at
+        // least one output); the arithmetic must not panic on it.
+        assert_eq!(union_size(&[]), Size::new(0, 0));
+    }
 }
