@@ -23,7 +23,8 @@
 //! - [`netload::render_netload_tile`] is a close port of the classic
 //!   `wmnetload` WindowMaker dockapp: a monochrome LCD panel with a
 //!   seven-segment throughput readout and a mirrored dot-matrix graph.
-//! - [`workspace::render_workspace_tile`] renders the dock's Clip-style workspace-indicator tile.
+//! - [`workspace::render_clip_tile`] renders the top-left Clip tile
+//!   (WindowMaker's workspace switcher, ported from its dock.c recipes).
 //! - [`icon::render_icon_tile`] renders a themed square icon tile (what
 //!   a miniaturized window collapses to; also useful for any app that
 //!   wants a themed launcher/shelf icon).

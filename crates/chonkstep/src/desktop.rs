@@ -16,13 +16,14 @@ use wm_core::{Backend, ClientId, DragHandle};
 use wm_theme::cascade::{CascadeMenu, MenuClick};
 use wm_theme::menu::MenuItem;
 use wm_theme::switcher::{self, SwitcherEntry};
+use wm_theme::workspace;
 use wm_theme::{icon, paint, Theme};
 use wm_theme_api::{DecorationBuffer, Point, Rect, Size};
 use wm_x11::X11Backend;
 use x11rb::protocol::xproto::Window;
 
 use crate::wallpaper::Wallpaper;
-use crate::widgets::{ClockWidget, DockWidget, NetLoadWidget, WorkspaceShared, WorkspaceWidget};
+use crate::widgets::{ClockWidget, DockWidget, NetLoadWidget, WorkspaceShared};
 
 /// The desktop background color — a cool lavender-gray sampled from a
 /// reference NeXTSTEP desktop screenshot, not the neutral gray this
@@ -211,11 +212,18 @@ pub struct Desktop {
     /// see `crate::widgets` for the SDK these implement. Order is what
     /// `redraw_dock` draws and what a middle-click drag reorders.
     widgets: Vec<Box<dyn DockWidget>>,
-    /// The workspace state shared with the `WorkspaceWidget` in
-    /// `widgets` — see `WorkspaceShared`'s doc comment for why this
+    /// The workspace state shared with the Clip tile — see
+    /// `WorkspaceShared`'s doc comment for why this
     /// crosses the `Box<dyn DockWidget>` boundary as a shared cell
     /// rather than through the trait.
     workspace: Rc<RefCell<WorkspaceShared>>,
+    /// The Clip: real WindowMaker's workspace tile, pinned at the
+    /// screen's top-left corner (its stock position) — corner arrows
+    /// switch workspaces, the face shows the current one.
+    clip_window: Window,
+    /// What the Clip last rendered, so workspace churn repaints it
+    /// exactly once per actual change.
+    clip_drawn: (usize, usize),
     widget_drag: Option<WidgetDrag>,
     icons: HashMap<Window, IconTile>,
     icon_drag: Option<IconDrag>,
@@ -248,11 +256,13 @@ impl Desktop {
         // The WM reports the real workspace state after startup; until
         // then "first of one" is what a fresh session actually has.
         let workspace = Rc::new(RefCell::new(WorkspaceShared { current: 0, count: 1, requested: None }));
-        // The workspace indicator sits first — directly under the
+        // (The workspace indicator used to live here as a dock widget;
+        // it is now the Clip tile at the screen's top-left — see
+        // `clip_window` below.)
+        // The identity/clock/net widgets keep their stack under the
         // identity tile, above the instruments — mirroring where the
         // Clip anchors in real WindowMaker's layout.
         let widgets: Vec<Box<dyn DockWidget>> = vec![
-            Box::new(WorkspaceWidget::new(Rc::clone(&workspace))),
             Box::new(ClockWidget::new()),
             Box::new(NetLoadWidget::new()),
         ];
@@ -266,6 +276,13 @@ impl Desktop {
             .expect("failed to create dock window");
         let _ = backend.map_shell_window(dock_window);
         let _ = backend.raise_shell_window(dock_window);
+
+        let clip_geom = Rect { pos: Point::new(0, 0), size: Size::new(tile, tile) };
+        let clip_window = backend
+            .create_shell_window(clip_geom, wallpaper.dock_color(), true)
+            .expect("failed to create clip window");
+        let _ = backend.map_shell_window(clip_window);
+        let _ = backend.raise_shell_window(clip_window);
 
         let logo = Pixmap::decode_png(include_bytes!("../assets/branding/chonkstep-logo-icon.png"))
             .expect("embedded ChonkStep logo should decode");
@@ -282,6 +299,8 @@ impl Desktop {
             menu: CascadeMenu::new("chonkstep", DESKTOP_BG),
             widgets,
             workspace,
+            clip_window,
+            clip_drawn: (usize::MAX, 0),
             widget_drag: None,
             icons: HashMap::new(),
             icon_drag: None,
@@ -347,10 +366,45 @@ impl Desktop {
     // staged separately — the allow keeps the build warning-free until
     // then and is harmless once the caller exists.
     #[allow(dead_code)]
-    pub fn set_workspace_display(&mut self, current: usize, count: usize) {
+    pub fn set_workspace_display(&mut self, backend: &mut X11Backend, theme: &Theme, current: usize, count: usize) {
+        {
+            let mut shared = self.workspace.borrow_mut();
+            shared.current = current;
+            shared.count = count;
+        }
+        if self.clip_drawn != (current, count) {
+            self.clip_drawn = (current, count);
+            self.repaint_clip(backend, theme);
+        }
+    }
+
+    fn repaint_clip(&mut self, backend: &mut X11Backend, theme: &Theme) {
+        let (current, count) = self.clip_drawn;
+        let current = if current == usize::MAX { 0 } else { current };
+        let buffer = workspace::render_clip_tile(theme, &mut self.font_system, &mut self.swash_cache, self.tile, current, count.max(1));
+        backend.blit(self.clip_window, &buffer);
+    }
+
+    pub fn clip_window(&self) -> Window {
+        self.clip_window
+    }
+
+    /// A click on the Clip: WindowMaker's diagonal corner zones — the
+    /// top-right arrow advances, the bottom-left one goes back, the
+    /// body is inert. Same semantics as Alt+Ctrl+Left/Right rather
+    /// than wrapping: forward past the last workspace grows a new one
+    /// on demand (`switch_workspace`'s own behavior), rewind saturates
+    /// at the first — wrapping made the arrows dead on a fresh
+    /// session's single workspace. The switch is routed through the
+    /// shared request cell like every other workspace change, so the
+    /// tile repaints when the WM confirms.
+    pub fn click_clip(&mut self, local: Point) {
         let mut shared = self.workspace.borrow_mut();
-        shared.current = current;
-        shared.count = count;
+        match workspace::clip_hit(self.tile, local.x, local.y) {
+            workspace::ClipZone::Forward => shared.requested = Some(shared.current + 1),
+            workspace::ClipZone::Rewind => shared.requested = shared.current.checked_sub(1),
+            workspace::ClipZone::Body => {}
+        }
     }
 
     /// Drains the workspace switch a click on the indicator tile
