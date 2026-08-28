@@ -814,7 +814,18 @@ impl Backend for WaylandBackend {
     }
 
     fn map_unmanaged(&mut self, window: Self::WindowId) {
+        // `wm-core` only calls this for windows `window_type` classified
+        // `Unmanaged`, so record that on the ledger entry as well.
+        // Without it the field keeps the `Normal` it was born with, and
+        // the renderer's override-redirect pass - which is the *only*
+        // thing that draws a frameless window, since these have no
+        // frame to draw them with - never matches. The window is then
+        // invisible while still answering clicks through the hit-test,
+        // which reads the same field. Every XWayland menu, dropdown and
+        // tooltip lands here.
+        let kind = self.window_type(window);
         if let Some(record) = self.windows.get_mut(&window) {
+            record.window_type = kind;
             record.mapped = true;
             if let ManagedSurface::X11(surface) = &record.surface {
                 // A non-OR X11 window that asked to map still needs its

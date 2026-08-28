@@ -1593,11 +1593,18 @@ impl Backend for X11Backend {
     }
 
     fn paint_root_color(&mut self, rgb: (u8, u8, u8)) {
-        let _ = self.paint_background(rgb);
+        if let Err(error) = self.paint_background(rgb) {
+            tracing::warn!(?error, "failed to paint the desktop background");
+        }
     }
 
     fn paint_root_image(&mut self, buffer: &DecorationBuffer) {
-        let _ = self.paint_background_image(buffer);
+        // Worth a line: a wallpaper that silently fails to paint leaves
+        // the desktop on whatever was behind it, which reads as a
+        // rendering bug rather than an X error.
+        if let Err(error) = self.paint_background_image(buffer) {
+            tracing::warn!(?error, "failed to paint the desktop wallpaper");
+        }
     }
 
     fn take_shell_click(&mut self) -> Option<(Self::ShellId, Point, MouseButton, bool)> {

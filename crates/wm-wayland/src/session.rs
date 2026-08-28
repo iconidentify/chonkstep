@@ -559,7 +559,7 @@ pub(crate) fn init(
     // revokes it, then rebuild our idea of the crtc when it comes back.
     loop_handle
         .insert_source(notifier, |event, &mut (), comp: &mut Compositor| {
-            let Compositor { graphics, wm, .. } = comp;
+            let Compositor { graphics, wm, seat, .. } = comp;
             let Graphics::Session(session) = graphics else {
                 return;
             };
@@ -579,6 +579,11 @@ pub(crate) fn init(
                 }
                 SessionEvent::ActivateSession => {
                     tracing::info!("session resumed: reclaiming the DRM device and input");
+                    // Any button held when the seat was taken away
+                    // released into whichever session owned it, so the
+                    // grab those presses built can never be completed
+                    // here.
+                    crate::input::clear_implicit_grab(seat);
                     // libinput reports failure as a bare `()`; there is
                     // nothing to log but the fact.
                     if session.libinput.resume().is_err() {
@@ -951,7 +956,9 @@ pub(crate) fn render_frame_session(comp: &mut Compositor) {
                 // switch can produce; the seat-activation handler above
                 // resets the device and marks damage, so the recovery
                 // path is there rather than duplicated here.
-                tracing::warn!(?error, output = %output.name, "DRM render failed; keeping this output dirty for a retry");
+                if crate::renderer::note_frame_failure() {
+                    tracing::warn!(?error, output = %output.name, "DRM render failed; keeping this output dirty for a retry");
+                }
                 continue;
             }
         };
@@ -986,6 +993,9 @@ pub(crate) fn render_frame_session(comp: &mut Compositor) {
         // (`Output::enter`/`leave` and a per-surface primary scan-out
         // choice), which is the same bookkeeping presentation feedback
         // would need and neither exists yet.
+        // A frame reached the hardware, so the failure streak that
+        // throttles the warnings above is over.
+        crate::renderer::note_frame_success();
         if let Some(primary) = outputs.first() {
             crate::renderer::send_frame_callbacks(
                 wm.backend(),

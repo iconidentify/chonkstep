@@ -55,6 +55,7 @@ use smithay::input::pointer::{CursorImageAttributes, CursorImageStatus};
 use smithay::render_elements;
 use smithay::utils::{IsAlive, Physical, Point as SPoint, Rectangle as SRect};
 use smithay::wayland::compositor::with_states;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use wm_theme_api::{Point, Rect};
 
@@ -257,6 +258,30 @@ pub(crate) fn send_frame_callbacks(
 
 }
 
+/// How many consecutive failed frames are reported before the warning
+/// is throttled to one in a hundred.
+///
+/// Every failure path here keeps the damage flag set so the next pass
+/// retries, which is right for a transient fault (a VT switch landing
+/// mid-frame) and wrong for a permanent one: a wedged renderer would
+/// otherwise write a warning per frame forever, burning a CPU and
+/// filling the log of a session whose screen is already black. The
+/// count resets on the first frame that succeeds.
+const FRAME_FAILURES_BEFORE_THROTTLE: u32 = 5;
+static CONSECUTIVE_FRAME_FAILURES: AtomicU32 = AtomicU32::new(0);
+
+/// Records a failed frame and answers whether this one should be
+/// logged.
+pub(crate) fn note_frame_failure() -> bool {
+    let previous = CONSECUTIVE_FRAME_FAILURES.fetch_add(1, Ordering::Relaxed);
+    previous < FRAME_FAILURES_BEFORE_THROTTLE || previous % 100 == 0
+}
+
+/// Clears the failure streak after a frame reaches the screen.
+pub(crate) fn note_frame_success() {
+    CONSECUTIVE_FRAME_FAILURES.store(0, Ordering::Relaxed);
+}
+
 /// Draws one frame through whichever backend this session is running
 /// on. The submission halves differ (a winit swap versus a DRM page
 /// flip) and live with their backends; everything visible above them
@@ -303,7 +328,9 @@ fn render_frame_winit(comp: &mut Compositor) {
         let (renderer, mut framebuffer) = match winit_backend.bind() {
             Ok(bound) => bound,
             Err(error) => {
-                tracing::warn!(?error, "could not bind the winit framebuffer; skipping frame");
+                if note_frame_failure() {
+                    tracing::warn!(?error, "could not bind the winit framebuffer; skipping frame");
+                }
                 return;
             }
         };
@@ -322,17 +349,22 @@ fn render_frame_winit(comp: &mut Compositor) {
         if let Err(error) =
             damage_tracker.render_output(renderer, &mut framebuffer, 0, &elements, clear_color)
         {
-            tracing::warn!(?error, "render failed; keeping damage for a retry");
+            if note_frame_failure() {
+                tracing::warn!(?error, "render failed; keeping damage for a retry");
+            }
             return;
         }
     }
 
     let size = winit_backend.window_size();
     if let Err(error) = winit_backend.submit(Some(&[SRect::from_size(size)])) {
-        tracing::warn!(?error, "swap failed; keeping damage for a retry");
+        if note_frame_failure() {
+            tracing::warn!(?error, "swap failed; keeping damage for a retry");
+        }
         return;
     }
 
+    note_frame_success();
     send_frame_callbacks(wm.backend(), output, cursor_status, start_time.elapsed());
     wm.backend_mut().damage = false;
 }
