@@ -47,6 +47,10 @@ pub struct FakeBackend {
     pub close_requests: HashSet<FakeWindowId>,
     /// Windows force-killed via `kill_client`, in call order.
     pub killed: Vec<FakeWindowId>,
+    /// Per-window `WM_CLASS` class strings the existing `window_class`
+    /// trait method serves through `WmClass` — absent means the client
+    /// set no class at all (`None`).
+    pub window_classes: HashMap<FakeWindowId, String>,
     pub focused_window: Option<FakeWindowId>,
     pub raised_frames: Vec<FakeFrameId>,
     /// Whether each client's own content window is currently mapped —
@@ -161,8 +165,10 @@ impl Backend for FakeBackend {
         self.titles.get(&window).cloned()
     }
 
-    fn window_class(&self, _window: Self::WindowId) -> Option<WmClass> {
-        None
+    fn window_class(&self, window: Self::WindowId) -> Option<WmClass> {
+        self.window_classes
+            .get(&window)
+            .map(|class| WmClass { instance: class.to_lowercase(), class: class.clone() })
     }
 
     fn window_pid(&self, _window: Self::WindowId) -> Option<u32> {

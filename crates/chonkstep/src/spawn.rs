@@ -24,9 +24,24 @@ pub fn spawn_detached_with_env(program: &str, args: &[&str], env: &[(String, Str
         command.env(key, value);
     }
     match command.spawn() {
-        Ok(child) => {
+        Ok(mut child) => {
             let pid = child.id();
             tracing::info!(program, pid, "launched");
+            // Reap the child when it eventually exits, or it lingers as
+            // a zombie under the WM for the whole session (confirmed
+            // live once the Applications menu made launches routine:
+            // two exited Chromiums sat `<defunct>` in the process
+            // table). A dedicated thread per launch that just `wait`s
+            // its own pid is deliberately chosen over the classic
+            // SIGCHLD-ignore trick: globally ignoring SIGCHLD makes the
+            // kernel auto-reap *every* child, which breaks the
+            // `Command::output()` calls the instrument widgets rely on
+            // (their `waitpid` would race the auto-reaper and fail).
+            // Launches are user gestures, so the thread count is
+            // bounded by concurrently running launched apps.
+            std::thread::spawn(move || {
+                let _ = child.wait();
+            });
             Some(pid)
         }
         Err(e) => {
@@ -66,6 +81,17 @@ pub fn chromium_scale_args(scale: f32) -> Vec<String> {
 /// file's contents — see `microsoft-edge-stable`'s wrapper script).
 pub fn chromium_avoid_secrets_service_hang_args() -> Vec<String> {
     vec!["--password-store=basic".to_string()]
+}
+
+/// Pins a Chromium-family browser to the X11 ozone backend. Omarchy is
+/// Wayland-first, and its Chromium configuration selects the Wayland
+/// platform - which does not exist inside this X11 session, so the
+/// browser prints "Failed to connect to Wayland display" and exits
+/// without ever mapping a window (confirmed live from the Applications
+/// menu). Chromium honors the *last* occurrence of a switch, and these
+/// launcher args are appended after any flags file, so this wins.
+pub fn chromium_x11_platform_args() -> Vec<String> {
+    vec!["--ozone-platform=x11".to_string()]
 }
 
 /// Environment variables that make GTK/Qt-based UI — including the
