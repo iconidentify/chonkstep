@@ -417,7 +417,7 @@ impl ShellMenu {
         bounds: Size,
     ) {
         self.begin_session(host, MenuSession::Root { app_count }, ROOT_MENU_TITLE.to_string());
-        self.menu.open(host, theme, font_system, items, at, bounds);
+        self.menu.open(host, theme, font_system, items, at, bounds, true);
     }
 
     fn open_window<H: wm_theme_api::PopupHost<PopupId = Window>>(
@@ -431,7 +431,7 @@ impl ShellMenu {
     ) {
         let session = MenuSession::Window { client: ctx.client, workspace_count: ctx.workspace_count };
         self.begin_session(host, session, window_menu_title(&ctx.title));
-        self.menu.open(host, theme, font_system, window_menu_items(ctx), at, bounds);
+        self.menu.open(host, theme, font_system, window_menu_items(ctx), at, bounds, false);
     }
 
     /// See `Desktop::click_menu`, whose contract this implements.
@@ -1660,7 +1660,7 @@ mod tests {
         /// where rows actually land as the menu's layout recipe
         /// evolves, same as `cascade.rs`'s own row-point helper.
         fn row_point(&mut self, title: &str, items: &[MenuItem], index: usize) -> Point {
-            let render = wm_theme::menu::render_menu(&self.theme, &mut self.font_system, title, items, None);
+            let render = wm_theme::menu::render_menu(&self.theme, &mut self.font_system, title, items, None, false);
             let rect = render.item_rects[index];
             Point::new(rect.pos.x + rect.size.w as i32 / 2, rect.pos.y + rect.size.h as i32 / 2)
         }
