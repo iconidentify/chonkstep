@@ -52,7 +52,12 @@ restarts that keep your windows open.
 - **A WindowMaker-style desktop shell.** Right-click root menu with
   cascading submenus, a dock with live widgets (clock, system monitor,
   network load), miniaturized-window icon tiles with drag-to-place, and
-  five built-in wallpaper artworks.
+  five built-in wallpaper artworks. Real workspaces, too: a dock
+  indicator tile shows the current one (click it to cycle),
+  Alt+Ctrl+Left/Right switches, Alt+Shift+Left/Right carries the
+  focused window
+  along, and pagers can drive it all via `_NET_CURRENT_DESKTOP` and
+  `_NET_WM_DESKTOP`.
 
 ![Translucent terminal on the Amber Phosphor theme](docs/screenshots/translucent-terminal.png)
 

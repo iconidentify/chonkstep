@@ -8,9 +8,10 @@
 
 use std::cell::RefCell;
 use std::collections::VecDeque;
+use std::rc::Rc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use wm_theme::{clock, netload, Theme};
+use wm_theme::{clock, netload, workspace, Theme};
 use wm_theme_api::DecorationBuffer;
 
 /// A single dock widget. `tick` is called roughly once per event-loop
@@ -82,6 +83,78 @@ impl DockWidget for ClockWidget {
     fn render(&self, theme: &Theme, tile: u32) -> DecorationBuffer {
         let (h, m, s) = self.clock.unwrap_or((0, 0, 0));
         clock::render_clock_tile(theme, tile, h, m, s)
+    }
+}
+
+/// The workspace state the [`WorkspaceWidget`] and the `Desktop` share
+/// through one `Rc<RefCell<...>>`: the WM's event loop pushes the
+/// authoritative `(current, count)` in through
+/// `Desktop::set_workspace_display`, and the widget's click handler
+/// pushes a switch request out through `requested` for the loop to
+/// drain via `Desktop::take_workspace_request`. A shared cell instead
+/// of widget methods because `Desktop` stores widgets as
+/// `Box<dyn DockWidget>` — by design the dock can't reach a specific
+/// widget's internals, so state that crosses that boundary travels
+/// beside the trait object, not through it.
+pub(crate) struct WorkspaceShared {
+    pub current: usize,
+    pub count: usize,
+    /// A workspace index the user clicked their way toward, waiting for
+    /// the WM to actually perform the switch — `Some` is a request, not
+    /// a fact, which is why the click handler never repaints: the tile
+    /// keeps showing the real current workspace until the WM confirms
+    /// the switch by updating `current`/`count`.
+    pub requested: Option<usize>,
+}
+
+/// The dock's workspace indicator — see `wm_theme::workspace` for the
+/// Clip-flavored tile it draws. A left click cycles to the next
+/// workspace (wrapping past the last back to the first) by *requesting*
+/// the switch through [`WorkspaceShared`]; the repaint happens when the
+/// WM reports the new workspace, never optimistically.
+pub struct WorkspaceWidget {
+    shared: Rc<RefCell<WorkspaceShared>>,
+    /// The `(current, count)` pair the last `render` drew — `tick`
+    /// compares against this so the dock repaints exactly when the
+    /// visible state changed, matching the `DockWidget` contract.
+    rendered: Option<(usize, usize)>,
+    font_system: RefCell<cosmic_text::FontSystem>,
+    swash_cache: RefCell<cosmic_text::SwashCache>,
+}
+
+impl WorkspaceWidget {
+    pub(crate) fn new(shared: Rc<RefCell<WorkspaceShared>>) -> Self {
+        Self {
+            shared,
+            rendered: None,
+            font_system: RefCell::new(cosmic_text::FontSystem::new()),
+            swash_cache: RefCell::new(cosmic_text::SwashCache::new()),
+        }
+    }
+}
+
+impl DockWidget for WorkspaceWidget {
+    fn tick(&mut self) -> bool {
+        let (current, count) = {
+            let shared = self.shared.borrow();
+            (shared.current, shared.count)
+        };
+        let changed = self.rendered != Some((current, count));
+        self.rendered = Some((current, count));
+        changed
+    }
+
+    fn render(&self, theme: &Theme, tile: u32) -> DecorationBuffer {
+        let shared = self.shared.borrow();
+        let mut font_system = self.font_system.borrow_mut();
+        let mut swash_cache = self.swash_cache.borrow_mut();
+        workspace::render_workspace_tile(theme, &mut font_system, &mut swash_cache, tile, shared.current, shared.count)
+    }
+
+    fn on_click(&mut self) -> bool {
+        let mut shared = self.shared.borrow_mut();
+        shared.requested = Some((shared.current + 1) % shared.count.max(1));
+        false
     }
 }
 
@@ -302,5 +375,45 @@ mod tests {
     fn clicking_the_load_widget_with_no_interfaces_discovered_yet_is_a_harmless_no_op() {
         let mut widget = NetLoadWidget::new();
         assert!(!widget.on_click());
+    }
+
+    fn workspace_widget(current: usize, count: usize) -> (Rc<RefCell<WorkspaceShared>>, WorkspaceWidget) {
+        let shared = Rc::new(RefCell::new(WorkspaceShared { current, count, requested: None }));
+        let widget = WorkspaceWidget::new(Rc::clone(&shared));
+        (shared, widget)
+    }
+
+    #[test]
+    fn clicking_the_workspace_widget_requests_the_next_workspace_wrapping() {
+        let (shared, mut widget) = workspace_widget(1, 3);
+        assert!(!widget.on_click(), "a click is a request, not a repaint — the WM confirms the switch");
+        assert_eq!(shared.borrow().requested, Some(2));
+
+        shared.borrow_mut().current = 2;
+        widget.on_click();
+        assert_eq!(shared.borrow().requested, Some(0), "past the last workspace wraps to the first");
+    }
+
+    #[test]
+    fn clicking_the_workspace_widget_with_a_zero_count_does_not_divide_by_zero() {
+        // `count` should never actually be 0 (the WM always has at least
+        // one workspace), but a modulo by it must not panic the shell.
+        let (shared, mut widget) = workspace_widget(0, 0);
+        widget.on_click();
+        assert_eq!(shared.borrow().requested, Some(0));
+    }
+
+    #[test]
+    fn workspace_widget_ticks_true_exactly_when_the_visible_state_changed() {
+        let (shared, mut widget) = workspace_widget(0, 2);
+        assert!(widget.tick(), "first tick has never rendered, so anything is a change");
+        assert!(!widget.tick(), "nothing changed since");
+
+        shared.borrow_mut().current = 1;
+        assert!(widget.tick(), "the WM switched workspaces");
+
+        shared.borrow_mut().count = 3;
+        assert!(widget.tick(), "a grown workspace count changes the position row");
+        assert!(!widget.tick());
     }
 }
