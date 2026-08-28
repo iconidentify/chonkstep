@@ -1,28 +1,61 @@
-//! The dock's workspace-indicator tile, in the spirit of WindowMaker's
-//! Clip: a square tile whose face is dominated by the current workspace
-//! number (1-based — nobody thinks of their first workspace as "0"),
-//! with a small position row underneath showing where that workspace
-//! sits among the full set. Unlike the Clip this doesn't collect app
-//! icons — it exists to answer "which workspace am I on?" at a glance
-//! and to give the dock a click target for cycling — but it borrows the
-//! Clip's visual role: the one dock tile whose face is *about*
-//! workspaces. Drawn in the theme's own language (the resize-bar fill,
-//! the titlebar font, the RAISED2 relief every other tile carries)
-//! rather than inventing indicator-specific chrome.
+//! The workspace Clip: real WindowMaker's top-left corner tile
+//! (`wClipMakeTile`/`paintClipButtons` in `src/dock.c`), ported
+//! recipe-for-recipe and scaled. The tile's two "clipped" corners are
+//! diagonal crease lines (a hard black cut with dark/light shading on
+//! either side, exactly WindowMaker's `ROperateLine` sequence), each
+//! corner carrying a small right-angle arrow: top-right advances a
+//! workspace, bottom-left goes back. The current workspace number sits
+//! large in the middle with a `Desk N` label beneath, matching how the
+//! stock Clip presents the workspace name.
 
-use tiny_skia::Pixmap;
+use tiny_skia::{FillRule, Paint, PathBuilder, Pixmap, Transform};
 use wm_theme_api::DecorationBuffer;
 
-use crate::model::{Color, Fill, FontSpec, TextAlign, Theme};
+use crate::model::{Color, Fill, TextAlign, Theme};
 use crate::paint;
 
-/// Rasterizes one workspace tile: `size` x `size`, showing `current`
-/// (0-based, drawn 1-based) among `count` workspaces. Out-of-range
-/// input is clamped rather than trusted — the desktop shell hands over
-/// whatever the WM last reported, and a momentarily stale pair (a
-/// workspace was just removed, say) should render *something* sane, not
-/// panic the dock.
-pub fn render_workspace_tile(
+/// Fraction math from WindowMaker's own constants: `CLIP_BUTTON_SIZE`
+/// is 23 on a 64px tile, and the arrow edge is that minus 15. Both are
+/// scaled off the actual tile size so the Clip keeps its stock
+/// proportions at any `CHONKSTEP_SCALE`.
+fn clip_metrics(size: u32) -> (i32, i32, i32) {
+    let s = size as i32;
+    let pt = (23 * s) / 64;
+    let tp = s - 1 - pt;
+    let arrow = ((pt - (15 * s) / 64).max(3)) as i32;
+    (pt, tp, arrow)
+}
+
+/// Which Clip zone a tile-local point falls in — WindowMaker's
+/// `getClipButton` diagonal corner test, verbatim but scaled: the
+/// top-right triangle advances, the bottom-left one rewinds, the rest
+/// of the tile is inert (the stock Clip's body is for dragging and
+/// menus, not switching).
+pub fn clip_hit(size: u32, x: i32, y: i32) -> ClipZone {
+    let s = size as i32;
+    if x < 0 || y < 0 || x >= s || y >= s {
+        return ClipZone::Body;
+    }
+    let pt = ((23 * s) / 64) + (2 * s) / 64;
+    if y <= pt - (s - 1 - x) {
+        ClipZone::Forward
+    } else if x <= pt - (s - 1 - y) {
+        ClipZone::Rewind
+    } else {
+        ClipZone::Body
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ClipZone {
+    Forward,
+    Rewind,
+    Body,
+}
+
+/// Renders the Clip tile. `current` is 0-based; the number drawn is
+/// 1-based like WindowMaker's workspace names.
+pub fn render_clip_tile(
     theme: &Theme,
     font_system: &mut cosmic_text::FontSystem,
     swash_cache: &mut cosmic_text::SwashCache,
@@ -30,147 +63,183 @@ pub fn render_workspace_tile(
     current: usize,
     count: usize,
 ) -> DecorationBuffer {
-    let size = size.max(8);
-    let count = count.max(1);
-    let current = current.min(count - 1);
-    let mut pixmap = Pixmap::new(size, size).expect("nonzero workspace tile size");
+    let size = size.max(16);
+    let Some(mut pixmap) = Pixmap::new(size, size) else {
+        return DecorationBuffer { width: 0, height: 0, pixels: Vec::new() };
+    };
 
-    // Same frame treatment as the other dock tiles (see
-    // `clock::render_clock_tile`): the resize-bar fill as the face,
-    // since dockapp tiles don't get their own style in this milestone.
     paint::fill_area(&mut pixmap, 0, 0, size, size, &theme.resize_bar.fill);
+    let bevel_t = theme.resize_bar.bevel.width.max(1) as u32;
+    paint::draw_raised2_bevel(&mut pixmap, 0, 0, size, size, bevel_t);
 
-    let (ink, ghost) = ink_colors(&theme.resize_bar.fill);
-    let t = theme.titlebar.bevel.width.max(1) as u32;
+    let (pt, tp, arrow) = clip_metrics(size);
+    let s = size as i32;
+    let t = ((size as f32) / 64.0).round().max(1.0) as i32;
 
-    // The workspace number, large and centered — the titlebar font
-    // scaled up to tile proportions rather than a new face, so the tile
-    // reads as this theme's chrome. The band leaves the lower ~third of
-    // the tile for the position row.
-    let number_band_h = ((size as f32) * 0.66).round() as u32;
-    let number_font = FontSpec { size: (size as f32 * 0.42).max(8.0), ..theme.titlebar.font.clone() };
+    // The clipped corners: WindowMaker's exact line triplets — shade
+    // below the cut, hard black cut, light above — repeated `t` thick
+    // so the crease scales like every other piece of chrome.
+    let ink = ink_color(&theme.resize_bar.fill);
+    for i in 0..t {
+        // Top-right crease.
+        op_line(&mut pixmap, tp + i, 0, s - 2 + i, pt - 1, -60);
+        draw_line(&mut pixmap, tp - 1 + i, 0, s - 1 + i, pt + 1, Color::rgb(0, 0, 0));
+        op_line(&mut pixmap, tp + 1 + i, 2, s - 3 + i, pt, 80);
+        // Bottom-left crease (mirrored).
+        op_line(&mut pixmap, 2, tp + 2 + i, pt - 2, s - 3 + i, -60);
+        draw_line(&mut pixmap, 0, tp - 1 + i, pt + 1, s - 1 + i, Color::rgb(0, 0, 0));
+        op_line(&mut pixmap, 0, tp - 2 + i, pt + 1, s - 2 + i, 80);
+    }
+
+    // Corner arrows: right-angle triangles hugging each clipped
+    // corner, in the tile's ink color.
+    let m5 = (5 * s) / 64;
+    let m6 = (6 * s) / 64;
+    fill_triangle(
+        &mut pixmap,
+        [(s - m5 - arrow, m5), (s - m6, m5), (s - m6, m5 - 1 + arrow)],
+        ink,
+    );
+    fill_triangle(
+        &mut pixmap,
+        [(m5, s - m5 - arrow), (m5, s - m6), (m5 - 1 + arrow, s - m6)],
+        ink,
+    );
+
+    // The workspace number, large and centered — then the Desk label
+    // beneath, like the stock Clip's workspace name strip.
+    let mut number_font = theme.titlebar.font.clone();
+    number_font.size = (size as f32) * 0.40;
     paint::draw_text(
         &mut pixmap,
         font_system,
         swash_cache,
-        &(current + 1).to_string(),
+        &format!("{}", current + 1),
         &number_font,
         ink,
         0,
-        t as i32,
+        (size as f32 * 0.14) as i32,
         size,
-        number_band_h,
+        (size as f32 * 0.52) as u32,
         TextAlign::Center,
     );
-
-    // Position row: one dot per workspace when they fit (the current
-    // one in full ink, the rest ghosted into the fill), falling back to
-    // a compact "N / M" readout once the count outgrows the tile —
-    // fifteen dots crammed into a 56px tile would read as noise, not
-    // position.
-    let row_y = number_band_h as i32;
-    let row_h = size.saturating_sub(number_band_h).saturating_sub(t * 2);
-    let dot = (size / 16).max(2);
-    let gap = (dot / 2).max(1);
-    let dots_w = count as u32 * dot + (count as u32 - 1) * gap;
-    let avail = size.saturating_sub((t + 2) * 2);
-    if dots_w <= avail {
-        // Hard-edged squares, not circles — matching the rest of the
-        // theme's non-anti-aliased pixel language.
-        let mut x = (size as i32 - dots_w as i32) / 2;
-        let y = row_y + (row_h as i32 - dot as i32) / 2;
-        for index in 0..count {
-            let color = if index == current { ink } else { ghost };
-            paint::fill_rect(&mut pixmap, x, y, dot, dot, color);
-            x += (dot + gap) as i32;
-        }
-    } else {
-        let row_font = FontSpec { size: (size as f32 * 0.16).max(6.0), ..theme.titlebar.font.clone() };
-        paint::draw_text(
-            &mut pixmap,
-            font_system,
-            swash_cache,
-            &format!("{} / {}", current + 1, count),
-            &row_font,
-            ink,
-            0,
-            row_y,
-            size,
-            row_h,
-            TextAlign::Center,
-        );
-    }
-
-    paint::draw_raised2_bevel(&mut pixmap, 0, 0, size, size, t);
+    let mut label_font = theme.menu.item_font.clone();
+    label_font.size = (size as f32) * 0.16;
+    paint::draw_text(
+        &mut pixmap,
+        font_system,
+        swash_cache,
+        &format!("Desk {} / {}", current + 1, count.max(1)),
+        &label_font,
+        ink,
+        0,
+        (size as f32 * 0.66) as i32,
+        size,
+        (size as f32 * 0.26) as u32,
+        TextAlign::Center,
+    );
 
     DecorationBuffer { width: size, height: size, pixels: pixmap.data().to_vec() }
 }
 
-/// The number/dot ink for a given tile fill, plus its ghosted variant
-/// for the not-current dots: light ink on a dark fill, dark ink on a
-/// light one — the same relative-to-the-fill reasoning as
-/// `paint::pressed_delta`, since themes are free to make the resize bar
-/// (and therefore this tile's face) any brightness they like. The ghost
-/// is the ink mixed most-of-the-way back into the fill, so empty dots
-/// read as marks on the same surface rather than a second accent color.
-fn ink_colors(fill: &Fill) -> (Color, Color) {
-    let base = match fill {
+/// Ink that stays legible on whatever the tile face is — same
+/// luminance reasoning as `paint::pressed_delta`.
+fn ink_color(fill: &Fill) -> Color {
+    let c = match fill {
         Fill::Solid(c) => *c,
-        Fill::Gradient(g) => Color::rgb(
-            ((g.from.r as u16 + g.to.r as u16) / 2) as u8,
-            ((g.from.g as u16 + g.to.g as u16) / 2) as u8,
-            ((g.from.b as u16 + g.to.b as u16) / 2) as u8,
-        ),
+        Fill::Gradient(g) => g.from,
     };
-    let luminance = (base.r as u16 + base.g as u16 + base.b as u16) / 3;
-    let ink = if luminance < 128 { Color::rgb(0xF0, 0xF0, 0xF0) } else { Color::rgb(0x10, 0x10, 0x10) };
-    let mix = |i: u8, b: u8| ((i as u16 * 2 + b as u16 * 3) / 5) as u8;
-    let ghost = Color::rgb(mix(ink.r, base.r), mix(ink.g, base.g), mix(ink.b, base.b));
-    (ink, ghost)
+    let luminance = (c.r as u16 + c.g as u16 + c.b as u16) / 3;
+    if luminance < 128 {
+        Color::rgb(0xE8, 0xE8, 0xE8)
+    } else {
+        Color::rgb(0x10, 0x10, 0x10)
+    }
+}
+
+/// Clamped add/subtract along a line — `ROperateLine`, the diagonal
+/// sibling of `paint::op_rect`, in a simple integer line walk (the
+/// creases are always 45-degree-ish short runs; subpixel accuracy buys
+/// nothing at hard-edged 1990s fidelity).
+fn op_line(pixmap: &mut Pixmap, x0: i32, y0: i32, x1: i32, y1: i32, delta: i16) {
+    let steps = (x1 - x0).abs().max((y1 - y0).abs()).max(1);
+    let (w, h) = (pixmap.width() as i32, pixmap.height() as i32);
+    let pixels = pixmap.pixels_mut();
+    for i in 0..=steps {
+        let x = x0 + ((x1 - x0) * i) / steps;
+        let y = y0 + ((y1 - y0) * i) / steps;
+        if x < 0 || y < 0 || x >= w || y >= h {
+            continue;
+        }
+        let idx = (y * w + x) as usize;
+        let e = pixels[idx];
+        let op = |c: u8| (c as i16 + delta).clamp(0, 255) as u8;
+        if let Some(p) = tiny_skia::PremultipliedColorU8::from_rgba(op(e.red()), op(e.green()), op(e.blue()), 255) {
+            pixels[idx] = p;
+        }
+    }
+}
+
+/// Hard 1px line in an absolute color — `RDrawLine`.
+fn draw_line(pixmap: &mut Pixmap, x0: i32, y0: i32, x1: i32, y1: i32, color: Color) {
+    let steps = (x1 - x0).abs().max((y1 - y0).abs()).max(1);
+    for i in 0..=steps {
+        let x = x0 + ((x1 - x0) * i) / steps;
+        let y = y0 + ((y1 - y0) * i) / steps;
+        paint::fill_rect(pixmap, x, y, 1, 1, color);
+    }
+}
+
+fn fill_triangle(pixmap: &mut Pixmap, points: [(i32, i32); 3], color: Color) {
+    let mut p = Paint::default();
+    p.set_color(paint::sk_color(color));
+    p.anti_alias = false;
+    let mut pb = PathBuilder::new();
+    pb.move_to(points[0].0 as f32, points[0].1 as f32);
+    pb.line_to(points[1].0 as f32, points[1].1 as f32);
+    pb.line_to(points[2].0 as f32, points[2].1 as f32);
+    pb.close();
+    if let Some(path) = pb.finish() {
+        pixmap.fill_path(&path, &p, FillRule::Winding, Transform::identity(), None);
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::default_theme::nextstep_classic;
 
-    fn render(size: u32, current: usize, count: usize) -> DecorationBuffer {
-        let theme = nextstep_classic();
-        let mut font_system = cosmic_text::FontSystem::new();
-        let mut swash_cache = cosmic_text::SwashCache::new();
-        render_workspace_tile(&theme, &mut font_system, &mut swash_cache, size, current, count)
+    fn render(current: usize, count: usize, size: u32) -> DecorationBuffer {
+        let theme = crate::default_theme::nextstep_classic();
+        let mut fs = cosmic_text::FontSystem::new();
+        let mut sc = cosmic_text::SwashCache::new();
+        render_clip_tile(&theme, &mut fs, &mut sc, size, current, count)
     }
 
     #[test]
-    fn render_workspace_tile_produces_correctly_sized_buffers() {
-        for size in [16u32, 56, 64] {
-            let buffer = render(size, 0, 4);
-            assert_eq!(buffer.width, size);
-            assert_eq!(buffer.height, size);
-            assert_eq!(buffer.pixels.len(), (size * size * 4) as usize);
-        }
-    }
-
-    /// A flat tile (every pixel the fill color) would mean the number,
-    /// position row, and relief all silently failed to draw — checked
-    /// for both the trivial single-workspace case and a mid-set one,
-    /// since they take different position-row branches at some sizes.
-    #[test]
-    fn first_of_one_and_fourth_of_nine_both_render_non_flat_tiles() {
-        for (current, count) in [(0usize, 1usize), (3, 9)] {
-            let buffer = render(56, current, count);
-            let first = &buffer.pixels[0..4];
-            assert!(
-                buffer.pixels.chunks_exact(4).any(|px| px != first),
-                "workspace {current} of {count} rendered a flat tile"
-            );
+    fn clip_tile_renders_at_the_requested_size_and_is_not_flat() {
+        for size in [56u32, 64, 112] {
+            let tile = render(0, 2, size);
+            assert_eq!((tile.width, tile.height), (size, size));
+            let first = &tile.pixels[0..4];
+            assert!(tile.pixels.chunks_exact(4).any(|px| px != first), "size {size} should not be flat");
         }
     }
 
     #[test]
-    fn the_tile_changes_when_the_current_workspace_changes() {
-        let on_first = render(56, 0, 9);
-        let on_fourth = render(56, 3, 9);
-        assert_ne!(on_first.pixels, on_fourth.pixels, "switching workspaces should visibly change the tile");
+    fn changing_the_workspace_changes_the_pixels() {
+        assert_ne!(render(0, 3, 64).pixels, render(1, 3, 64).pixels);
+    }
+
+    /// WindowMaker's own diagonal corner zones: the extreme corners
+    /// resolve to the arrows, the middle of the tile to the body.
+    #[test]
+    fn hit_zones_match_windowmaker_corner_geometry() {
+        assert_eq!(clip_hit(64, 62, 2), ClipZone::Forward);
+        assert_eq!(clip_hit(64, 2, 62), ClipZone::Rewind);
+        assert_eq!(clip_hit(64, 32, 32), ClipZone::Body);
+        assert_eq!(clip_hit(64, -1, 5), ClipZone::Body);
+        // Scaled tile keeps the same proportional zones.
+        assert_eq!(clip_hit(112, 108, 4), ClipZone::Forward);
+        assert_eq!(clip_hit(112, 4, 108), ClipZone::Rewind);
     }
 }
