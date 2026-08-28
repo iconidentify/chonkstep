@@ -1,16 +1,15 @@
-//! The workspace Clip: real WindowMaker's top-left corner tile
-//! (`wClipMakeTile`/`paintClipButtons` in `src/dock.c`), ported
-//! recipe-for-recipe and scaled. This widget's look — diagonal
-//! gradient face, RAISED2 relief, luminance-picked ink — is where the
-//! shared [`crate::tile`] platform came from, and the Clip now renders
-//! on that platform instead of keeping its own copy of the recipe.
-//! The tile's two "clipped" corners are diagonal crease lines (a hard
-//! black cut with dark/light shading on either side, exactly
-//! WindowMaker's `ROperateLine` sequence) drawn over the tile base,
-//! each corner carrying a small right-angle arrow: top-right advances
-//! a workspace, bottom-left goes back. The current workspace number
-//! sits large in the middle with a `Desk N` label beneath, matching
-//! how the stock Clip presents the workspace name.
+//! The workspace Clip: the classic desktop's top-left corner tile,
+//! reproduced recipe-for-recipe and scaled. This widget's look —
+//! diagonal gradient face, double raised relief, luminance-picked ink —
+//! is where the shared [`crate::tile`] platform came from, and the Clip
+//! now renders on that platform instead of keeping its own copy of the
+//! recipe. The tile's two "clipped" corners are diagonal crease lines
+//! (a hard black cut with dark/light shading on either side, the exact
+//! stock line triplet) drawn over the tile base, each corner carrying a
+//! small right-angle arrow: top-right advances a workspace, bottom-left
+//! goes back. The current workspace number sits large in the middle
+//! with a `Desk N` label beneath, matching how the stock Clip presents
+//! the workspace name.
 
 use tiny_skia::{FillRule, Paint, PathBuilder, Pixmap, Transform};
 use wm_theme_api::DecorationBuffer;
@@ -19,10 +18,10 @@ use crate::model::{Color, TextAlign, Theme};
 use crate::paint;
 use crate::tile;
 
-/// Fraction math from WindowMaker's own constants: `CLIP_BUTTON_SIZE`
-/// is 23 on a 64px tile, and the arrow edge is that minus 15. Both are
-/// scaled off the actual tile size so the Clip keeps its stock
-/// proportions at any `CHONKSTEP_SCALE`.
+/// Fraction math from the stock constants: the corner button is 23 on a
+/// 64px tile, and the arrow edge is that minus 15. Both are scaled off
+/// the actual tile size so the Clip keeps its stock proportions at any
+/// `CHONKSTEP_SCALE`.
 fn clip_metrics(size: u32) -> (i32, i32, i32) {
     let s = size as i32;
     let pt = (23 * s) / 64;
@@ -31,11 +30,10 @@ fn clip_metrics(size: u32) -> (i32, i32, i32) {
     (pt, tp, arrow)
 }
 
-/// Which Clip zone a tile-local point falls in — WindowMaker's
-/// `getClipButton` diagonal corner test, verbatim but scaled: the
-/// top-right triangle advances, the bottom-left one rewinds, the rest
-/// of the tile is inert (the stock Clip's body is for dragging and
-/// menus, not switching).
+/// Which Clip zone a tile-local point falls in — the classic diagonal
+/// corner test, verbatim but scaled: the top-right triangle advances,
+/// the bottom-left one rewinds, the rest of the tile is inert (the
+/// stock Clip's body is for dragging and menus, not switching).
 pub fn clip_hit(size: u32, x: i32, y: i32) -> ClipZone {
     let s = size as i32;
     if x < 0 || y < 0 || x >= s || y >= s {
@@ -59,7 +57,7 @@ pub enum ClipZone {
 }
 
 /// Renders the Clip tile. `current` is 0-based; the number drawn is
-/// 1-based like WindowMaker's workspace names.
+/// 1-based, the way workspaces are classically named.
 pub fn render_clip_tile(
     theme: &Theme,
     font_system: &mut cosmic_text::FontSystem,
@@ -83,7 +81,7 @@ pub fn render_clip_tile(
     let s = size as i32;
     let t = ((size as f32) / 64.0).round().max(1.0) as i32;
 
-    // The clipped corners: WindowMaker's exact line triplets — shade
+    // The clipped corners: the exact stock line triplets — shade
     // below the cut, hard black cut, light above — repeated `t` thick
     // so the crease scales like every other piece of chrome. Drawn
     // straight over the tile base, exactly like the stock Clip carves
@@ -208,10 +206,10 @@ mod tests {
         assert_ne!(render(0, 3, 64).pixels, render(1, 3, 64).pixels);
     }
 
-    /// WindowMaker's own diagonal corner zones: the extreme corners
-    /// resolve to the arrows, the middle of the tile to the body.
+    /// The classic diagonal corner zones: the extreme corners resolve
+    /// to the arrows, the middle of the tile to the body.
     #[test]
-    fn hit_zones_match_windowmaker_corner_geometry() {
+    fn hit_zones_match_the_classic_corner_geometry() {
         assert_eq!(clip_hit(64, 62, 2), ClipZone::Forward);
         assert_eq!(clip_hit(64, 2, 62), ClipZone::Rewind);
         assert_eq!(clip_hit(64, 32, 32), ClipZone::Body);

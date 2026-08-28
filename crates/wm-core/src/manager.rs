@@ -14,22 +14,22 @@ use crate::types::{BackendEvent, KeyCombo, MouseButton, Modifiers, NetState, Net
 
 /// How close together (in ms) two presses on the same titlebar must land
 /// to count as a double-click (toggling maximize). Not backed by an
-/// X server "double-click time" setting yet — a reasonable fixed default,
-/// in the same ballpark WindowMaker itself defaults to.
+/// X server "double-click time" setting yet — a reasonable fixed
+/// default, in the same ballpark as the classic desktop's.
 const DOUBLE_CLICK_MS: u32 = 400;
 
 /// How close (in pixels) a dragged frame edge must come to a screen edge
-/// or another window's edge before it snaps flush — WindowMaker's "edge
-/// resistance"/"attraction" (`src/moveres.c`), simplified to a single
-/// always-on threshold rather than separate resistance/attract modes.
+/// or another window's edge before it snaps flush — the classic "edge
+/// resistance"/"attraction" behavior, simplified to a single always-on
+/// threshold rather than separate resistance/attract modes.
 const SNAP_THRESHOLD_PX: i32 = 10;
 
 /// Keysym for the `Tab` key, per `<X11/keysymdef.h>` — the same numeric
 /// space X11 and XKB (and so a future Wayland backend) both use, so
 /// this is genuinely backend-agnostic despite the name. `Alt+Tab`/
-/// `Alt+Shift+Tab` window cycling (`WindowMaker`'s `cycling.c`) is the
-/// only keybinding `wm-core` claims for itself — every other binding
-/// is config-driven from the binary (see `bind_default_keys`).
+/// `Alt+Shift+Tab` window cycling is the only keybinding `wm-core`
+/// claims for itself — every other binding is config-driven from the
+/// binary (see `bind_default_keys`).
 const XK_TAB: u32 = 0xff09;
 const XK_ESCAPE: u32 = 0xff1b;
 const XK_ALT_L: u32 = 0xffe9;
@@ -52,10 +52,10 @@ struct ActiveMove<B: Backend> {
     grab_offset: Point,
 }
 
-/// An in-progress edge/corner resize drag (WindowMaker's
-/// `wMouseResizeWindow`). `start_frame` is the frame's own geometry at
-/// press time — every motion event recomputes the new size fresh from
-/// it and the current pointer position rather than accumulating deltas
+/// An in-progress edge/corner resize drag. `start_frame` is the frame's
+/// own geometry at press time — every motion event recomputes the new
+/// size fresh from it and the current pointer position rather than
+/// accumulating deltas
 /// (same "no drift" reasoning as `ActiveMove::grab_offset`), anchored
 /// at whichever corner/edge doesn't move for `edge`: the theme this WM
 /// ships only ever offers south-facing handles (`South`/`SouthEast`/
@@ -111,9 +111,9 @@ pub enum Notification {
     /// negotiation is unreliable across window-manager environments).
     Mapped(ClientId),
     /// The user right-clicked a window's titlebar — the shell should
-    /// open the per-window commands menu (real WindowMaker's window
-    /// menu) at `at` (root coordinates). `wm-core` deliberately knows
-    /// nothing about menus; it reports the gesture and executes
+    /// open the per-window commands menu at `at` (root coordinates) —
+    /// the classic NeXTSTEP-style window menu. `wm-core` deliberately
+    /// knows nothing about menus; it reports the gesture and executes
     /// whatever public-API calls the shell's menu dispatch makes.
     WindowMenuRequested { id: ClientId, at: Point },
 }
@@ -167,17 +167,15 @@ pub struct WindowManager<B: Backend> {
     focus_policy: FocusPolicy,
     /// 0-based, matching `Client::workspace`. Grows on demand the first
     /// time something switches to or moves a client onto an index past
-    /// the current row's end (`WindowMaker`'s `wWorkspaceMake`) — there
-    /// is no fixed count and no way to destroy a workspace once
-    /// created, matching real WindowMaker exactly.
+    /// the current row's end — there is no fixed count and no way to
+    /// destroy a workspace once created, the classic behavior.
     current_workspace: usize,
     workspace_count: usize,
-    /// An in-progress Alt-Tab switcher session (WindowMaker's
-    /// `switchpanel.c`): the snapshot of cycle candidates and which one
-    /// is currently selected. Selection moves on every Tab press while
-    /// Alt stays held; releasing Alt commits it, Escape cancels. The
-    /// shell renders the panel from `cycle_state` on every
-    /// `Notification::CycleUpdated`.
+    /// An in-progress Alt-Tab switcher session: the snapshot of cycle
+    /// candidates and which one is currently selected. Selection moves
+    /// on every Tab press while Alt stays held; releasing Alt commits
+    /// it, Escape cancels. The shell renders the panel from
+    /// `cycle_state` on every `Notification::CycleUpdated`.
     cycle: Option<CycleSession>,
     /// Managed clients' own windows in insertion (oldest-first) order —
     /// exactly the order EWMH wants `_NET_CLIENT_LIST` published in,
@@ -404,15 +402,15 @@ impl<B: Backend> WindowManager<B> {
     }
 
     /// Switches to `workspace`, growing the workspace row on demand if
-    /// it's past the current end (real WindowMaker's `wWorkspaceMake`
-    /// — there is no fixed count and no way to destroy a workspace
-    /// once created). Every *mapped* client not on the target
-    /// workspace gets its frame unmapped; every mapped client that IS
-    /// on it gets remapped. Miniaturized/withdrawn clients are left
-    /// alone entirely — their icon tile (a desktop-shell concern, not
-    /// `wm-core`'s) stays visible regardless of workspace, a
-    /// deliberately simpler choice than real WindowMaker's opt-out-able
-    /// per-workspace icon hiding. A no-op if already on `workspace`.
+    /// it's past the current end (there is no fixed count and no way to
+    /// destroy a workspace once created). Every *mapped* client not on
+    /// the target workspace gets its frame unmapped; every mapped
+    /// client that IS on it gets remapped. Miniaturized/withdrawn
+    /// clients are left alone entirely — their icon tile (a
+    /// desktop-shell concern, not `wm-core`'s) stays visible regardless
+    /// of workspace, a deliberately simpler choice than the classic
+    /// opt-out-able per-workspace icon hiding. A no-op if already on
+    /// `workspace`.
     pub fn switch_workspace(&mut self, workspace: usize) {
         if workspace == self.current_workspace {
             return;
@@ -457,10 +455,9 @@ impl<B: Backend> WindowManager<B> {
     }
 
     /// Moves `id` onto `workspace` (growing the row if needed) and
-    /// hides its frame immediately if that isn't the active workspace
-    /// — matches real WindowMaker's `MoveToNextWorkspace`/
-    /// `MoveToPrevWorkspace` window actions. A no-op if `id` is
-    /// already on `workspace`.
+    /// hides its frame immediately if that isn't the active workspace —
+    /// the classic "move to next/previous workspace" window actions.
+    /// A no-op if `id` is already on `workspace`.
     pub fn move_client_to_workspace(&mut self, id: ClientId, workspace: usize) {
         if workspace + 1 > self.workspace_count {
             self.workspace_count = workspace + 1;
@@ -904,10 +901,9 @@ impl<B: Backend> WindowManager<B> {
                 self.repaint_decoration(id);
             }
             // Right-click anywhere on the titlebar surface asks the
-            // shell for the per-window commands menu (WindowMaker's
-            // window menu) — reported at root coordinates so the shell
-            // can pop the menu under the pointer without knowing frame
-            // geometry.
+            // shell for the per-window commands menu — reported at root
+            // coordinates so the shell can pop the menu under the
+            // pointer without knowing frame geometry.
             HitTarget::TitlebarDrag | HitTarget::Button(_) if button == MouseButton::Right => {
                 let frame_pos = Point::new(
                     client.geometry.pos.x - client.layout.client_offset.x,
@@ -919,16 +915,16 @@ impl<B: Backend> WindowManager<B> {
             HitTarget::TitlebarDrag if button == MouseButton::Left => {
                 // A second press on this same client's titlebar within
                 // `DOUBLE_CLICK_MS` triggers a titlebar action instead of
-                // starting a drag — matching real WindowMaker's own
-                // `titlebarDblClick` exactly: a plain double-click shades
+                // starting a drag — exactly the classic titlebar
+                // double-click behavior: a plain double-click shades
                 // (rolls the window up to just its titlebar), and
                 // maximizing needs a modifier — Ctrl alone for vertical-
                 // only, Shift alone for horizontal-only, both together
-                // for full. (WindowMaker also has a `double_click_
-                // fullscreen` preference that swaps the plain case to
-                // full-maximize instead of shade; not implemented here —
-                // shade is the flagship default.) No X server gives
-                // double-click detection for free; this is why
+                // for full. (The classic desktop also offers a
+                // preference that swaps the plain case to full-maximize
+                // instead of shade; not implemented here — shade is the
+                // flagship default.) No X server gives double-click
+                // detection for free; this is why
                 // `BackendEvent::PointerButton` carries a timestamp.
                 let is_double_click = self
                     .last_titlebar_press
@@ -948,11 +944,10 @@ impl<B: Backend> WindowManager<B> {
                     self.active_move = Some(ActiveMove { client: id, frame, grab_offset: local });
                 }
             }
-            // A shaded window has nothing to resize — real WindowMaker
-            // refuses outright (`wMouseResizeWindow` bails if
-            // `wwin->flags.shaded`); matching that rather than letting
-            // a resize silently reshape a window the user can't even
-            // see the content of.
+            // A shaded window has nothing to resize — the classic
+            // behavior is to refuse the drag outright, rather than
+            // letting a resize silently reshape a window the user can't
+            // even see the content of.
             HitTarget::ResizeEdge(edge) if button == MouseButton::Left && !client.flags.contains(ClientFlags::SHADED) => {
                 let start_frame = Rect {
                     pos: Point::new(client.geometry.pos.x - client.layout.client_offset.x, client.geometry.pos.y - client.layout.client_offset.y),
@@ -1063,11 +1058,11 @@ impl<B: Backend> WindowManager<B> {
         };
         let raw_pos = Point::new(root.x - grab_offset.x, root.y - grab_offset.y);
 
-        // Edge resistance/attraction (WindowMaker's `src/moveres.c`): pull
-        // the dragged frame flush against the screen edge or another
-        // window's frame edge once it's within `SNAP_THRESHOLD_PX`. Pure
-        // geometry against every other *visible* client's current frame
-        // rect, recomputed fresh each motion event — cheap at WM scale.
+        // Edge resistance/attraction: pull the dragged frame flush
+        // against the screen edge or another window's frame edge once
+        // it's within `SNAP_THRESHOLD_PX`. Pure geometry against every
+        // other *visible* client's current frame rect, recomputed fresh
+        // each motion event — cheap at WM scale.
         let mut targets: Vec<Rect> = self.backend.monitors().into_iter().map(|m| m.geometry).collect();
         for (other_id, other) in self.clients.iter() {
             if other_id == client_id || other.lifecycle != Lifecycle::Normal {
@@ -1096,11 +1091,11 @@ impl<B: Backend> WindowManager<B> {
     /// Recomputes content size/position fresh from `start_frame` and
     /// the current pointer position for whichever edge is being
     /// dragged, enforces the client's `SizeHints` (min/max/resize
-    /// increment — `WindowMaker`'s `wWindowConstrainSize`), and pushes
-    /// the result through the normal `reflow_frame` path. All eight
-    /// edges/corners are handled: dragging a north or west handle keeps
-    /// the *opposite* edge anchored, so the frame's origin moves with
-    /// the drag while the far edge stays put — the size-hint constraint
+    /// increment), and pushes the result through the normal
+    /// `reflow_frame` path. All eight edges/corners are handled:
+    /// dragging a north or west handle keeps the *opposite* edge
+    /// anchored, so the frame's origin moves with the drag while the
+    /// far edge stays put — the size-hint constraint
     /// is applied to the size first and the anchored edge re-derived
     /// from the constrained result, so a terminal snapping to its cell
     /// grid never makes the anchored edge drift.
@@ -1343,9 +1338,9 @@ impl<B: Backend> WindowManager<B> {
     /// maximize) geometry first when switching between direction
     /// combinations, so e.g. toggling from full-maximize to
     /// vertical-only-maximize starts from a clean slate rather than
-    /// compounding — simpler to reason about than WindowMaker's XOR-based
-    /// incremental toggling, at the cost of not preserving an
-    /// in-progress partial state across a direction change.
+    /// compounding — simpler to reason about than XOR-based incremental
+    /// toggling, at the cost of not preserving an in-progress partial
+    /// state across a direction change.
     pub fn toggle_maximize(&mut self, id: ClientId, directions: MaximizeDirections) {
         let Some(client) = self.clients.get(id) else {
             return;
@@ -1381,11 +1376,11 @@ impl<B: Backend> WindowManager<B> {
         self.toggle_maximize(id, MaximizeDirections::FULL);
     }
 
-    /// Rolls a client up to just its titlebar (WindowMaker's "shade") —
-    /// the content window is hidden (not resized to nothing; a real
-    /// window is genuinely unmapped, matching `wShadeWindow`) but its
-    /// geometry is left completely untouched, so `unshade` restores
-    /// exactly. A no-op if already shaded.
+    /// Rolls a client up to just its titlebar (the classic "shade") —
+    /// the content window is hidden (not resized to nothing; the window
+    /// is genuinely unmapped) but its geometry is left completely
+    /// untouched, so `unshade` restores exactly. A no-op if already
+    /// shaded.
     pub fn shade(&mut self, id: ClientId) {
         let Some(client) = self.clients.get_mut(id) else {
             return;
@@ -1746,11 +1741,11 @@ impl<B: Backend> WindowManager<B> {
         }
     }
 
-    /// Alt+Tab / Alt+Shift+Tab window switching, modal like real
-    /// WindowMaker's `switchpanel.c`: the first press opens a session
-    /// (snapshotting the candidates and grabbing the keyboard so the
-    /// Alt release is visible), every further Tab moves the selection,
-    /// and nothing is focused or raised until the session commits —
+    /// Alt+Tab / Alt+Shift+Tab window switching, modal like the classic
+    /// switch panel: the first press opens a session (snapshotting the
+    /// candidates and grabbing the keyboard so the Alt release is
+    /// visible), every further Tab moves the selection, and nothing is
+    /// focused or raised until the session commits —
     /// `Notification::CycleUpdated` tells the shell to draw its panel
     /// in the meantime. Candidates are mapped, non-miniaturized clients
     /// on the *current* workspace, in `SlotMap` iteration order, stable
@@ -1793,10 +1788,10 @@ impl<B: Backend> WindowManager<B> {
                     let window = client.window;
                     let content_size = client.geometry.size;
                     // Switching to a rolled-up window means "show me
-                    // that window" — real WindowMaker's cycling.c
-                    // unshades on commit too. Without this, committing
-                    // to a shaded client set input focus on an
-                    // *unmapped* window and nothing visibly happened.
+                    // that window", so the commit unshades. Without
+                    // this, committing to a shaded client set input
+                    // focus on an *unmapped* window and nothing visibly
+                    // happened.
                     self.unshade(id);
                     self.focus_client(id);
                     // Repaint nudge after the raise: the session
@@ -3279,7 +3274,7 @@ mod tests {
 
     #[test]
     fn titlebar_double_click_toggles_shade() {
-        // Matches real WindowMaker's `titlebarDblClick` default exactly:
+        // Matches the classic titlebar double-click default exactly:
         // a plain double-click (no modifiers) shades, not maximizes —
         // full maximize needs both Ctrl and Shift held together (see
         // `ctrl_shift_double_click_toggles_full_maximize`).

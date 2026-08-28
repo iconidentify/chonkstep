@@ -23,7 +23,7 @@ fn main() {
     tracing_subscriber::fmt().with_env_filter(tracing_subscriber::EnvFilter::from_default_env()).init();
     tracing::info!(
         version = env!("CARGO_PKG_VERSION"),
-        "chonkstep starting \u{2014} a modern window manager with WindowMaker parity"
+        "chonkstep starting \u{2014} a modern window manager in the classic NeXTSTEP style"
     );
 
     // User configuration is loaded before anything scale- or theme-

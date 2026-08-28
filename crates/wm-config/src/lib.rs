@@ -30,7 +30,7 @@
 //! ```toml
 //! focus_follows_mouse = false        # optional; default false
 //! scale = 2.0                        # optional; UI scale factor
-//! theme = "window-maker"             # optional; theme name
+//! theme = "nextstep-classic"         # optional; theme name
 //! placement = "smart"                # optional; "smart" | "cascade" | "center"
 //! edge_resistance = 10               # optional; px, 0 disables edge snapping
 //!
@@ -131,7 +131,7 @@ pub struct Config {
 impl Config {
     /// The configuration used when no file exists (and the base every
     /// file merges over). The default bindings deliberately mirror the
-    /// WindowMaker-ish alt+shift chords the rest of the WM was designed
+    /// NeXTSTEP-style alt+shift chords the rest of the WM was designed
     /// around; workspace switching sits on alt+ctrl so that carry
     /// (alt+shift) and plain switch differ by exactly one modifier.
     pub fn default_config() -> Config {
@@ -148,10 +148,10 @@ impl Config {
             focus_follows_mouse: false,
             scale: None,
             theme: None,
-            // Smart is WindowMaker's own default placement, and 10px
-            // matches its stock edge-resistance feel: strong enough to
-            // catch a deliberate drag toward an edge, weak enough that
-            // sailing past it never feels sticky.
+            // Smart is the classic default placement, and 10px
+            // matches the stock edge-resistance feel: strong enough
+            // to catch a deliberate drag toward an edge, weak enough
+            // that sailing past it never feels sticky.
             placement: PlacementPolicy::Smart,
             edge_resistance: 10,
             keybindings: vec![
@@ -687,7 +687,7 @@ mod tests {
         let text = r#"
             focus_follows_mouse = true
             scale = 1.5
-            theme = "window-maker"
+            theme = "nextstep-classic"
             placement = "cascade"
             edge_resistance = 4
 
@@ -701,7 +701,7 @@ mod tests {
         let config = parse(text).unwrap();
         assert!(config.focus_follows_mouse);
         assert_eq!(config.scale, Some(1.5));
-        assert_eq!(config.theme.as_deref(), Some("window-maker"));
+        assert_eq!(config.theme.as_deref(), Some("nextstep-classic"));
         assert_eq!(config.placement, PlacementPolicy::Cascade);
         assert_eq!(config.edge_resistance, 4);
         // Restating a default is harmless; a new binding is added; the
@@ -989,11 +989,11 @@ mod tests {
 
     #[test]
     fn unknown_top_level_keys_are_ignored_not_fatal() {
-        let text = "focus_follow_mouse = true\ntheme = \"window-maker\"\n";
+        let text = "focus_follow_mouse = true\ntheme = \"nextstep-classic\"\n";
         let config = parse(text).unwrap();
         // The typo'd key changed nothing; the valid key still applied.
         assert!(!config.focus_follows_mouse);
-        assert_eq!(config.theme.as_deref(), Some("window-maker"));
+        assert_eq!(config.theme.as_deref(), Some("nextstep-classic"));
     }
 
     // ---- load ---------------------------------------------------------

@@ -3,30 +3,30 @@
 //! policy in, position out — so every policy is unit-testable against
 //! literal rectangles, in the same spirit as [`crate::snap`].
 //!
-//! Real WindowMaker's `src/placement.c` is the reference, ported here
-//! rather than reinvented:
+//! The three policies restate the classic NeXTSTEP-style recipes
+//! rather than reinventing them:
 //!
-//! - `Smart` is `smartPlaceWindow`: scan candidate frame origins across
-//!   the workarea, score each by the summed intersection area against
-//!   every existing frame, and keep the minimum. The scan runs in
-//!   reading order (top row first, left to right) and only a *strictly*
-//!   lower score displaces the incumbent, so ties resolve toward the
-//!   top-left and windows fill the screen the way text fills a page.
-//!   WindowMaker scans an 8-pixel grid (`PLACETEST_HSTEP`/`_VSTEP`)
-//!   and then refines around the coarse winner at 1-pixel granularity;
-//!   we keep the grid but replace the refinement pass with exact
-//!   candidates flush against each existing frame's right and bottom
-//!   edges — the only off-grid positions the refinement ever usefully
-//!   found, since a gap between frames is always bounded on the left/
-//!   top by another frame's edge or by the workarea itself. That keeps
-//!   the scan O(grid) while still packing windows perfectly tight.
-//! - `Cascade` is `cascadeWindow`: the classic staircase, each index
-//!   one `cascade_step` down and right from the last. Where WindowMaker
-//!   resets its counter to zero when the staircase would leave the
-//!   screen (burying the first window again), we wrap into a fresh,
+//! - `Smart`: scan candidate frame origins across the workarea, score
+//!   each by the summed intersection area against every existing frame,
+//!   and keep the minimum. The scan runs in reading order (top row
+//!   first, left to right) and only a *strictly* lower score displaces
+//!   the incumbent, so ties resolve toward the top-left and windows
+//!   fill the screen the way text fills a page. The classic algorithm
+//!   scans an 8-pixel grid and then refines around the coarse winner at
+//!   1-pixel granularity; we keep the grid but replace the refinement
+//!   pass with exact candidates flush against each existing frame's
+//!   right and bottom edges — the only off-grid positions the
+//!   refinement ever usefully found, since a gap between frames is
+//!   always bounded on the left/top by another frame's edge or by the
+//!   workarea itself. That keeps the scan O(grid) while still packing
+//!   windows perfectly tight.
+//! - `Cascade`: the classic staircase, each index one `cascade_step`
+//!   down and right from the last. Where the classic algorithm resets
+//!   its counter to zero when the staircase would leave the screen
+//!   (burying the first window again), we wrap into a fresh,
 //!   horizontally shifted column so long sessions keep producing
 //!   distinguishable positions.
-//! - `Center` is `center_place_window`: exact centering.
+//! - `Center`: exact centering.
 //!
 //! The window manager consults this only for clients that requested no
 //! meaningful position — an explicit client position (a terminal
@@ -43,8 +43,7 @@ pub enum PlacementPolicy {
     Center,
 }
 
-/// Candidate-grid pitch for smart placement, straight from
-/// WindowMaker's `PLACETEST_HSTEP`/`PLACETEST_VSTEP` (`wconfig.h`).
+/// Candidate-grid pitch for smart placement, the classic 8 pixels.
 /// Coarse enough to keep the scan cheap on large screens, fine enough
 /// that the grid winner is within a few pixels of optimal — and the
 /// edge-flush candidates (see the module doc) recover the exact packing
@@ -87,10 +86,10 @@ pub fn place_frame(
     clamp_to(workarea, frame, pos)
 }
 
-/// WindowMaker's `smartPlaceWindow`, restated over our types: minimize
-/// the summed overlap with `existing` across a candidate scan of the
-/// workarea, reading-order-biased (see the module doc for how the
-/// candidate set differs from the original's grid-plus-refinement).
+/// Smart placement: minimize the summed overlap with `existing` across
+/// a candidate scan of the workarea, reading-order-biased (see the
+/// module doc for how the candidate set differs from the classic
+/// grid-plus-refinement scan).
 ///
 /// Two deliberate departures from a naive minimum:
 ///
@@ -102,11 +101,11 @@ pub fn place_frame(
 ///   overlap reaches the frame's own area), minimization has
 ///   degenerated to a constant: the tie bias would drop every new
 ///   window on the exact same top-left spot, silently stacking them.
-///   WindowMaker accepts that burial; we fall back to the cascade
-///   staircase instead so consecutive placements on a packed workspace
-///   remain individually grabbable. (The sum double-counts stacked
-///   overlaps, so a pathological pile-up could trip this while a
-///   sliver of the frame would still have been visible — an acceptable
+///   The classic algorithm accepts that burial; we fall back to the
+///   cascade staircase instead so consecutive placements on a packed
+///   workspace remain individually grabbable. (The sum double-counts
+///   stacked overlaps, so a pathological pile-up could trip this while
+///   a sliver of the frame would still have been visible — an acceptable
 ///   trade for keeping the test a cheap sum rather than a union.)
 fn smart_origin(
     workarea: Rect,
@@ -177,15 +176,15 @@ fn axis_candidates(
     candidates
 }
 
-/// Intersection area of two frame rects — WindowMaker's
-/// `calcIntersectionArea`. Widened to i64 before any addition so a
-/// pathological `u32`-sized frame cannot overflow the coordinate math.
+/// Intersection area of two frame rects. Widened to i64 before any
+/// addition so a pathological `u32`-sized frame cannot overflow the
+/// coordinate math.
 fn overlap_area(a: Rect, b: Rect) -> u64 {
     overlap_len(a.pos.x, a.size.w, b.pos.x, b.size.w) * overlap_len(a.pos.y, a.size.h, b.pos.y, b.size.h)
 }
 
-/// Intersection length of two line segments (`calcIntersectionLength`),
-/// zero when they do not touch.
+/// Intersection length of two line segments, zero when they do not
+/// touch.
 fn overlap_len(p1: i32, l1: u32, p2: i32, l2: u32) -> u64 {
     let start = (p1 as i64).max(p2 as i64);
     let end = (p1 as i64 + l1 as i64).min(p2 as i64 + l2 as i64);
@@ -193,15 +192,14 @@ fn overlap_len(p1: i32, l1: u32, p2: i32, l2: u32) -> u64 {
 }
 
 /// The staircase origin for `cascade_index`. Each index advances one
-/// `cascade_step` down and right (WindowMaker's `cascadeWindow`, where
-/// both axes advance by the titlebar height so every buried titlebar
-/// peeks out under its successor). A run ends just before the next
-/// step would push the frame past the workarea on either axis; the
-/// following index starts a fresh column — back at the top, shifted
-/// right by two steps per completed run, wrapping that shift so an
-/// arbitrarily long session keeps cycling through distinguishable
-/// positions instead of resetting onto the very first window the way
-/// the original's `cascade_index = 0` reset does.
+/// `cascade_step` down and right (both axes advance by the titlebar
+/// height, so every buried titlebar peeks out under its successor). A
+/// run ends just before the next step would push the frame past the
+/// workarea on either axis; the following index starts a fresh column —
+/// back at the top, shifted right by two steps per completed run,
+/// wrapping that shift so an arbitrarily long session keeps cycling
+/// through distinguishable positions instead of resetting onto the very
+/// first window the way a plain counter reset to zero would.
 fn cascade_origin(workarea: Rect, frame: Size, cascade_index: usize, cascade_step: u32) -> Point {
     let step = cascade_step.max(1) as i64;
     let usable_w = workarea.size.w.saturating_sub(frame.w) as i64;
@@ -455,7 +453,7 @@ mod tests {
     #[test]
     fn cascade_with_no_slack_pins_every_index_to_the_origin() {
         // A frame exactly the workarea size has nowhere to staircase:
-        // WindowMaker resets to the origin in this situation and so do
+        // the classic behavior is to reset to the origin here and so do
         // we, rather than clamping a runaway diagonal into a corner.
         let area = rect(10, 20, 500, 400);
         for index in 0..10 {

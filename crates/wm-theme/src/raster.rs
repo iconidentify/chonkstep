@@ -75,9 +75,9 @@ impl ThemeEngine for RasterThemeEngine {
 
 /// Pure arithmetic — no rasterization. Miniaturize sits at the
 /// titlebar's top-left corner; Close (and Maximize, for a theme that
-/// opts it back in) cluster at the top-right — real WindowMaker's own
-/// button sides, confirmed by reading actual screenshots, not the
-/// reverse this used to be. Each side's buttons claim their slot in the
+/// opts it back in) cluster at the top-right — the classic button
+/// sides, confirmed by reading actual screenshots, not the reverse
+/// this used to be. Each side's buttons claim their slot in the
 /// order they appear in `theme.titlebar.buttons` — the first one
 /// encountered on a given side lands outermost (closest to the corner),
 /// later ones on that same side stack inward from there.
@@ -91,11 +91,11 @@ fn layout_decoration(theme: &Theme, request: &DecorationRequest) -> DecorationLa
         request.content_size.h + titlebar_height + border * 2 + resize_bar_height,
     );
 
-    // `theme.titlebar.button_margin` — real WindowMaker's own `TS_NEXT`
-    // inset (see the theme's own doc comment on `buttons`), not a flush
-    // `0`: NeXTSTEP's buttons sit inset from the titlebar's corner with
-    // visible titlebar fill showing on every side, not stretched flush
-    // to the edge the way WindowMaker's own newer `TS_NEW` style does it.
+    // `theme.titlebar.button_margin` — the NeXTSTEP inset (see the
+    // theme's own doc comment on `buttons`), not a flush `0`: NeXTSTEP's
+    // buttons sit inset from the titlebar's corner with visible titlebar
+    // fill showing on every side, not stretched flush to the edge the
+    // way the later, flatter chrome styles do it.
     let button_margin = theme.titlebar.button_margin as i32;
     let mut left_x = border as i32 + button_margin;
     let mut right_x = frame_size.w as i32 - border as i32;
@@ -130,12 +130,12 @@ fn layout_decoration(theme: &Theme, request: &DecorationRequest) -> DecorationLa
         // scale 1, so unscaled behavior is unchanged.
         let handle = ((titlebar_height as f32 * 0.5) as u32).min(frame_size.w / 2).min(frame_size.h / 2).max(10);
         let bar_h = resize_bar_height.max(4).min(frame_size.h);
-        // The bottom grips are real WindowMaker's: each corner owns
-        // `corner_width` (`RESIZEBAR_CORNER_WIDTH`) of the resizebar,
-        // delimited on screen by the notch lines `render_decoration`
-        // draws at these exact x positions; the middle of the bar
-        // resizes straight down. All three regions extend through the
-        // bottom border so the frame's outermost pixels still grab.
+        // The bottom grips follow the classic recipe: each corner owns
+        // `corner_width` of the resizebar, delimited on screen by the
+        // notch lines `render_decoration` draws at these exact x
+        // positions; the middle of the bar resizes straight down. All
+        // three regions extend through the bottom border so the frame's
+        // outermost pixels still grab.
         let cw = (theme.resize_bar.corner_width as u32).min(frame_size.w / 3).max(1);
         let grip_h = bar_h + border;
         let grip_y = frame_size.h as i32 - grip_h as i32;
@@ -158,7 +158,7 @@ fn layout_decoration(theme: &Theme, request: &DecorationRequest) -> DecorationLa
         // OS X-style activation zones on the remaining edges and top
         // corners — invisible on purpose: the cursor change is the whole
         // affordance, exactly as on a Mac, while the bottom keeps its
-        // visible WindowMaker resizebar above. Each top corner is an
+        // visible chiseled resizebar above. Each top corner is an
         // L-shaped pair of arms (`handle` long, `band` thick) hugging
         // the frame's outermost pixels, so the extreme corner reads as a
         // diagonal resize but the titlebar between the arms still
@@ -237,14 +237,13 @@ fn render_decoration(
         .map(|(_, r)| r.pos.x)
         .unwrap_or(w as i32 - border as i32);
 
-    // Real WindowMaker reliefs the titlebar as *segments* — left
+    // The classic chrome reliefs the titlebar as *segments* — left
     // button square, middle bar, right button square, each getting its
-    // own independent `RBEV_RAISED2` (`updateTexture`,
-    // `src/framewin.c` — the buttons are separate X windows over
-    // slices of the same texture). The visible seams where the
-    // segments meet are part of the stock look. The middle segment is
-    // drawn here; each button's own relief is drawn with the button
-    // below.
+    // own independent double raised relief (the buttons were separate
+    // X windows over slices of one shared texture, which is where the
+    // split comes from). The visible seams where the segments meet are
+    // part of the stock look. The middle segment is drawn here; each
+    // button's own relief is drawn with the button below.
     let bevel_t = theme.titlebar.bevel.width.max(1) as u32;
     let mid_w = (rightmost_button - leftmost_button).max(0) as u32;
     paint::draw_raised2_bevel(&mut pixmap, leftmost_button, border as i32, mid_w, layout.titlebar_height, bevel_t);
@@ -290,25 +289,25 @@ fn render_decoration(
     for (kind, rect) in &layout.button_hitboxes {
         if let Some(style) = theme.titlebar.buttons.iter().find(|b| b.kind == *kind) {
             let pressed = request.buttons.iter().any(|b| b.kind == *kind && b.pressed);
-            // Real WindowMaker's default-style buttons aren't a
+            // The stock chiseled chrome's buttons aren't a
             // separately-colored control — each is the titlebar's own
             // current fill (already painted above) showing straight
-            // through, with its own independent `RBEV_RAISED2` relief:
+            // through, with its own independent double raised relief:
             // one segment of the same three-way split the middle bar
             // got. Pressed feedback is a relative luminance shift with
             // the relief inverted to sunken and the glyph nudged — see
-            // `paint::draw_button_pressed` for why not WindowMaker's
-            // own white-flash pushed state.
+            // `paint::draw_button_pressed` for why not the classic
+            // white-flash pushed state.
             let t = style.bevel.width.max(1) as u32;
             if pressed {
                 paint::draw_button_pressed(&mut pixmap, rect.pos.x, rect.pos.y, rect.size.w, rect.size.h, paint::pressed_delta(titlebar_fill), t);
                 draw_button_glyph(&mut pixmap, *kind, *rect, text_color, true);
             } else {
                 paint::draw_raised2_bevel(&mut pixmap, rect.pos.x, rect.pos.y, rect.size.w, rect.size.h, t);
-                // `text_color` — the stamp color WindowMaker itself
-                // uses for glyphs (`paintButton` fills through the
-                // pixmap's mask with the title *text* color): white on
-                // the focused black bar, black on the unfocused gray.
+                // `text_color` — the classic stamp color for button
+                // glyphs: the mask is filled through in the title
+                // *text* color, so it is white on the focused black
+                // bar and black on the unfocused gray.
                 draw_button_glyph(&mut pixmap, *kind, *rect, text_color, false);
             }
         }
@@ -317,29 +316,27 @@ fn render_decoration(
     DecorationBuffer { width: w, height: h, pixels: pixmap.data().to_vec() }
 }
 
-/// Close and Miniaturize are pixel-for-pixel recreations of real
-/// WindowMaker's own default button artwork — `PRED_CLOSE_XPM` and
-/// `PRED_ICONIFY_XPM` in its `src/def_pixmaps.h` — reproduced as smooth
-/// anti-aliased vector shapes at the *same proportions and composition*
-/// the real 10x10 bitmap has (a bold diagonal X; a solid title bar over
-/// a hollow bordered body), not as a literal nearest-neighbor bitmap
-/// stamp. A direct pixel stamp of a 10px source glyph reads fine at
-/// WindowMaker's own native ~15px button size, where each source pixel
-/// is close to one real screen pixel — but this theme scales with
-/// `CHONKSTEP_SCALE` (a real 5K-display target), and at 3x a 10x10 grid
-/// blown up with nearest-neighbor scaling turns every diagonal into a
-/// visibly jagged staircase instead of a clean line — confirmed live,
-/// exactly the "jagged edges, low quality" symptom. Anti-aliased vector
-/// strokes matching the same shape stay crisp at any scale instead.
-/// Maximize has no WindowMaker original to copy — real WindowMaker has
-/// no maximize button at all — so it keeps this theme's own vector glyph.
-/// Real WindowMaker's stock button glyphs, transcribed pixel for pixel
-/// from `PRED_CLOSE_XPM` / `PRED_ICONIFY_XPM` (`src/def_pixmaps.h`).
-/// Every non-transparent XPM pixel is part of the *mask* — WindowMaker
-/// stamps the whole mask in one flat color (the title text color) via
-/// `XSetClipMask` + `XFillRectangle` (`paintButton`, its default-style
-/// arm), so the XPM's own two ink shades never reach the screen and a
-/// plain `#` = ink / `.` = transparent grid captures it exactly.
+/// Close and Miniaturize are pixel-for-pixel recreations of the classic
+/// button artwork, reproduced as smooth anti-aliased vector shapes at
+/// the *same proportions and composition* the 10x10 originals have (a
+/// bold diagonal X; a solid title bar over a hollow bordered body), not
+/// as a literal nearest-neighbor bitmap stamp. A direct pixel stamp of
+/// a 10px source glyph reads fine at the original ~15px button size,
+/// where each source pixel is close to one real screen pixel — but this
+/// theme scales with `CHONKSTEP_SCALE` (a real 5K-display target), and
+/// at 3x a 10x10 grid blown up with nearest-neighbor scaling turns
+/// every diagonal into a visibly jagged staircase instead of a clean
+/// line — confirmed live, exactly the "jagged edges, low quality"
+/// symptom. Anti-aliased vector strokes matching the same shape stay
+/// crisp at any scale instead. Maximize has no classic original to copy
+/// — the classic chrome has no maximize button at all — so it keeps
+/// this theme's own vector glyph.
+///
+/// The grids below transcribe those stock glyphs cell for cell. Every
+/// non-transparent source pixel is part of the *mask*: the whole mask
+/// is stamped in one flat color (the title text color), so the
+/// original's own two ink shades never reach the screen and a plain
+/// `#` = ink / `.` = transparent grid captures it exactly.
 const CLOSE_GLYPH: [&str; 10] = [
     "##......##",
     "###....###",
@@ -366,8 +363,8 @@ const ICONIFY_GLYPH: [&str; 10] = [
     "##########",
 ];
 
-/// No stock WindowMaker counterpart (it has no maximize button) — a
-/// plain box outline drawn in the same 10x10 bitmap language.
+/// No stock counterpart (the classic chrome has no maximize button) —
+/// a plain box outline drawn in the same 10x10 bitmap language.
 const MAXIMIZE_GLYPH: [&str; 10] = [
     "##########",
     "##########",
@@ -381,14 +378,13 @@ const MAXIMIZE_GLYPH: [&str; 10] = [
     "##########",
 ];
 
-/// Stamps a 10x10 glyph mask centered in `rect` in one flat color,
-/// exactly as real WindowMaker does (see the mask constants above).
-/// The masks are authored for WindowMaker's 23px button; each mask
-/// cell becomes a `round(button/23 * 10)/10`-sized square so the glyph
-/// keeps its stock proportion at any `CHONKSTEP_SCALE`, with hard
-/// nearest-neighbor edges — scaling a 10px bitmap, not redrawing it.
-/// `pressed` nudges the stamp one cell down-right, WindowMaker's own
-/// `d = 1` pressed-state offset.
+/// Stamps a 10x10 glyph mask centered in `rect` in one flat color (see
+/// the mask constants above). The masks are authored for the stock 23px
+/// button; each mask cell becomes a `round(button/23 * 10)/10`-sized
+/// square so the glyph keeps its stock proportion at any
+/// `CHONKSTEP_SCALE`, with hard nearest-neighbor edges — scaling a 10px
+/// bitmap, not redrawing it. `pressed` nudges the stamp one cell
+/// down-right, the classic one-pixel pressed-state offset.
 pub(crate) fn draw_button_glyph(pixmap: &mut Pixmap, kind: ButtonKind, rect: Rect, color: crate::model::Color, pressed: bool) {
     let mask: &[&str; 10] = match kind {
         ButtonKind::Close => &CLOSE_GLYPH,
@@ -416,19 +412,19 @@ pub(crate) fn draw_button_glyph(pixmap: &mut Pixmap, kind: ButtonKind, rect: Rec
 }
 
 /// The close glyph at `CHONKSTEP_SCALE` > 1. At native size the
-/// `CLOSE_GLYPH` bitmap stamp is pixel-identical to WindowMaker's, and
-/// that path still runs at `cell == 1`. But real WindowMaker never
-/// draws magnified — it has no HiDPI scaling, so there is no authentic
-/// "scaled-up" reference to copy — and nearest-neighbor magnification
-/// of a 10px 1-bit staircase reads as jagged, not crisp (confirmed
-/// live at scale 2). Scaled, the X is instead redrawn as what the
-/// bitmap *depicts*: two corner-to-corner diagonal bars, anti-aliased,
-/// proportioned to the bitmap footprint (each arm spans ~2.2 of the 10
-/// bitmap cells perpendicular to its axis, tips filling the glyph
-/// box's corners via square caps). The iconify/maximize boxes stay on
-/// the stamp path at every scale: their edges are axis-aligned, where
-/// hard magnified pixels are exactly what a scaled bitmap should look
-/// like.
+/// `CLOSE_GLYPH` bitmap stamp is pixel-identical to the original, and
+/// that path still runs at `cell == 1`. But the classic chrome never
+/// draws magnified — it predates HiDPI scaling entirely, so there is no
+/// authentic "scaled-up" reference to copy — and nearest-neighbor
+/// magnification of a 10px 1-bit staircase reads as jagged, not crisp
+/// (confirmed live at scale 2). Scaled, the X is instead redrawn as
+/// what the bitmap *depicts*: two corner-to-corner diagonal bars,
+/// anti-aliased, proportioned to the bitmap footprint (each arm spans
+/// ~2.2 of the 10 bitmap cells perpendicular to its axis, tips filling
+/// the glyph box's corners via square caps). The iconify/maximize boxes
+/// stay on the stamp path at every scale: their edges are axis-aligned,
+/// where hard magnified pixels are exactly what a scaled bitmap should
+/// look like.
 fn draw_close_glyph_smooth(pixmap: &mut Pixmap, x0: i32, y0: i32, span: i32, color: crate::model::Color) {
     use tiny_skia::{LineCap, Paint, PathBuilder, Stroke, Transform};
 
@@ -476,8 +472,8 @@ mod tests {
 
     #[test]
     fn layout_places_miniaturize_top_left_and_close_top_right() {
-        // Real WindowMaker's own default sides, confirmed by reading
-        // actual screenshots — not the reverse this used to assert.
+        // The classic sides, confirmed by reading actual screenshots —
+        // not the reverse this used to assert.
         let theme = crate::default_theme::nextstep_classic();
         let layout = layout_decoration(&theme, &sample_request("xterm", true));
 

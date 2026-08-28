@@ -3,7 +3,7 @@ name = "wm-theme"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "WindowMaker-style theme data model and rendering engine."
+description = "NeXTSTEP-style theme data model and rendering engine."
 
 [dependencies]
 wm-theme-api = { path = "../wm-theme-api" }

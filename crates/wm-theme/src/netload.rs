@@ -1,6 +1,6 @@
-//! An exact-as-practical port of the classic WindowMaker dockapp
-//! `wmnetload`, sitting on this theme system's common tile: the widget
-//! is a [`tile::draw_tile_base`] like every other dock item, and the
+//! An exact-as-practical port of the classic network-load dockapp,
+//! sitting on this theme system's common tile: the widget is a
+//! [`tile::draw_tile_base`] like every other dock item, and the
 //! LCD — the monochrome screen carrying the three-digit seven-segment
 //! throughput readout and the mirrored dot-matrix history graph
 //! (download filling down from the top edge, upload filling up from

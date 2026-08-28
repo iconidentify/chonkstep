@@ -6,8 +6,8 @@ use crate::model::{
     TileStyle, TitlebarStyle,
 };
 
-/// Diagonal tile gradient helper — every theme's tile is a
-/// WindowMaker-style dgradient, top-left light to bottom-right dark.
+/// Diagonal tile gradient helper — every theme's tile is a diagonal
+/// gradient, top-left light to bottom-right dark.
 fn tile_gradient(from: Color, to: Color, bevel: Bevel) -> TileStyle {
     TileStyle {
         fill: Fill::Gradient(Gradient { direction: GradientDirection::Diagonal, from, to }),
@@ -20,7 +20,7 @@ fn tile_gradient(from: Color, to: Color, bevel: Bevel) -> TileStyle {
 /// structs just to list them. `registry_matches_choices` pins this to
 /// `all_themes()`.
 pub const CHOICES: [(&str, &str); 5] = [
-    ("window-maker", "Window Maker"),
+    ("nextstep-classic", "NeXTSTEP Classic"),
     ("amber-phosphor", "Amber Phosphor"),
     ("teal-blueprint", "Teal Blueprint"),
     ("graphite", "Graphite"),
@@ -38,33 +38,30 @@ pub fn theme_by_id(id: &str) -> Option<Theme> {
     all_themes().into_iter().find(|t| t.id == id)
 }
 
-/// The flagship built-in theme: real WindowMaker's stock look,
-/// value-for-value from its own source rather than eyeballed from
-/// screenshots (`src/defaults.c` unless noted):
+/// The flagship built-in theme: the stock chiseled chrome,
+/// value-for-value rather than eyeballed from screenshots:
 /// - Focused titlebar `(solid, black)` with `white` text; unfocused
 ///   `(solid, "rgb:aa/aa/aa")` with `black` text; resizebar the same
 ///   `aa` gray; frame border 1px plain `black`.
-/// - Titlebar/button/resizebar relief is wrlib's `RBEV_RAISED2`
-///   (`wrlib/misc.c`): +80 light lines on top/left, -40 inner shade
-///   plus a hard black outer line on bottom/right — *relative* to
-///   whatever fill is underneath, which is how the same recipe reads
-///   correctly on both the black and the gray bars. Painted by
-///   `paint::draw_raised2_bevel`, not from this struct's absolute
-///   light/dark colors.
-/// - Buttons are WindowMaker's default "new" style (`TS_NEW`,
-///   `src/framewin.c`): the full titlebar height, flush at the bar's
-///   ends (margin 0), showing the titlebar's own fill through with
-///   their own relief; glyphs are the stock 10x10 pixmap masks
-///   (`src/def_pixmaps.h`) stamped in the title text color.
-/// - Font: `"Sans:bold:pixelsize=12"` (`src/wconfig.h.in`), which
-///   fontconfig resolves to DejaVu Sans on a stock Linux desktop —
-///   the exact face visible in reference screenshots. Titlebar height
-///   23 = that font's 15px line height plus WindowMaker's
-///   `TITLEBAR_EXTEND_SPACE` (4) above and below.
+/// - Titlebar/button/resizebar relief is the double raised recipe: +80
+///   light lines on top/left, -40 inner shade plus a hard black outer
+///   line on bottom/right — *relative* to whatever fill is underneath,
+///   which is how the same recipe reads correctly on both the black and
+///   the gray bars. Painted by `paint::draw_raised2_bevel`, not from
+///   this struct's absolute light/dark colors.
+/// - Buttons take the full titlebar height, flush at the bar's ends
+///   (margin 0), showing the titlebar's own fill through with their own
+///   relief; glyphs are the stock 10x10 pixmap masks stamped in the
+///   title text color. (The older NeXT-inset variant used smaller inset
+///   squares — see `TitlebarStyle::button_margin`.)
+/// - Font: `"Sans:bold:pixelsize=12"`, which fontconfig resolves to
+///   DejaVu Sans on a stock Linux desktop — the exact face visible in
+///   reference screenshots. Titlebar height 23 = that font's 15px line
+///   height plus the stock 4px of titlebar padding above and below.
 pub fn nextstep_classic() -> Theme {
     const FONT_FAMILY: &str = "DejaVu Sans";
 
-    // `width` drives the painted thickness of the RAISED2 relief (and
+    // `width` drives the painted thickness of the raised relief (and
     // scales with CHONKSTEP_SCALE); the absolute light/dark colors only
     // matter to chrome still drawn with the absolute-color `draw_bevel`
     // (menus, widgets).
@@ -76,8 +73,8 @@ pub fn nextstep_classic() -> Theme {
     };
 
     Theme {
-        id: "window-maker".to_string(),
-        name: "Window Maker".to_string(),
+        id: "nextstep-classic".to_string(),
+        name: "NeXTSTEP Classic".to_string(),
         wallpaper: "lavender-grid".to_string(),
         // Classic silver-on-black with a restrained ANSI set — the
         // terminal a stock 90s Unix desktop wishes it shipped with.
@@ -119,41 +116,38 @@ pub fn nextstep_classic() -> Theme {
             text_color_inactive: Color::rgb(0x00, 0x00, 0x00),
             text_align: TextAlign::Center,
             bevel: bevel_raised,
-            // Real WindowMaker's default: Miniaturize left-anchored,
-            // Close right-anchored — confirmed by reading actual
-            // screenshots (windowmaker.org's own "Info" dialog and a
-            // themed desktop, both showing miniaturize-left/close-right)
-            // rather than assumed. No Maximize: real WindowMaker has no
-            // maximize button at all (zoom is menu/keybinding-driven) —
-            // `ButtonKind::Maximize` still exists as a WM-core primitive
-            // (reachable via Ctrl+Shift+double-click, see `manager.rs`),
-            // a theme is just free to not expose it as a titlebar button,
-            // same as this one now doesn't.
+            // The classic arrangement: Miniaturize left-anchored, Close
+            // right-anchored — confirmed by reading actual screenshots
+            // (a stock "Info" dialog and a themed desktop, both showing
+            // miniaturize-left/close-right) rather than assumed. No
+            // Maximize: the classic chrome has no maximize button at all
+            // (zoom is menu/keybinding-driven) — `ButtonKind::Maximize`
+            // still exists as a WM-core primitive (reachable via
+            // Ctrl+Shift+double-click, see `manager.rs`), a theme is
+            // just free to not expose it as a titlebar button, same as
+            // this one now doesn't.
             //
-            // Size and placement are WindowMaker's default `TS_NEW`
-            // branch in `wFrameWindowUpdateBorders` (`src/framewin.c`):
-            // `bsize = theight` — buttons are squares filling the full
-            // titlebar height, flush at its ends (margin 0), not the
-            // older `TS_NEXT` style's smaller inset squares.
+            // Size and placement follow the stock rule `bsize = theight`
+            // — buttons are squares filling the full titlebar height,
+            // flush at its ends (margin 0), not the older NeXT-inset
+            // variant's smaller inset squares.
             buttons: vec![
                 ButtonStyle { kind: ButtonKind::Miniaturize, size: 23, bevel: bevel_raised },
                 ButtonStyle { kind: ButtonKind::Close, size: 23, bevel: bevel_raised },
             ],
             button_margin: 0,
         },
-        // `RESIZEBAR_HEIGHT` 8 / `RESIZEBAR_CORNER_WIDTH` 28
-        // (`src/wconfig.h.in`), `ResizebarBack` the same aa-gray as the
-        // unfocused titlebar (`src/defaults.c`).
+        // The stock metrics: an 8px bar with 28px corner grips, filled
+        // with the same aa-gray as the unfocused titlebar.
         resize_bar: ResizeBarStyle {
             height: 8,
             fill: Fill::Solid(Color::rgb(0xAA, 0xAA, 0xAA)),
             bevel: bevel_raised,
             corner_width: 28,
         },
-        // Real WindowMaker's own defaults.c: both "FrameBorderColor"
-        // (unfocused) and "FrameFocusedBorderColor" default to plain
-        // "black" — identical. There's a separate, brighter
-        // "FrameSelectedBorderColor" ("white"), but that's for
+        // Stock behavior: the focused and unfocused frame borders are
+        // both plain black — identical. There is a separate, brighter
+        // border color in the classic scheme ("white"), but that marks
         // rubber-band multi-window *selection*, a different state
         // entirely, not everyday focus/unfocus. An unfocused window's
         // border sitting adjacent to a focused one used to read as a
@@ -166,8 +160,8 @@ pub fn nextstep_classic() -> Theme {
             color_active: Color::rgb(0x00, 0x00, 0x00),
             color_inactive: Color::rgb(0x00, 0x00, 0x00),
         },
-        // Real WindowMaker's stock IconBack, value-for-value:
-        // (dgradient, "rgb:a6/a6/b6", "rgb:51/55/61") in defaults.c.
+        // The stock icon-background gradient, value-for-value: diagonal,
+        // "rgb:a6/a6/b6" to "rgb:51/55/61".
         tile: tile_gradient(Color::rgb(0xA6, 0xA6, 0xB6), Color::rgb(0x51, 0x55, 0x61), bevel_raised),
         menu: MenuStyle {
             title_font: FontSpec {
@@ -182,11 +176,9 @@ pub fn nextstep_classic() -> Theme {
                 weight: FontWeight::Normal,
                 style: FontStyle::Normal,
             },
-            // Real WindowMaker's menu defaults (`src/defaults.c`):
-            // `MenuTitleBack (solid, black)` with white text,
-            // `MenuTextBack (solid, "rgb:aa/aa/aa")` with black text,
-            // and the selected item inverted to `HighlightColor white`
-            // with `HighlightTextColor black`.
+            // The stock menu palette: a solid black title bar with white
+            // text, a solid "rgb:aa/aa/aa" item background with black
+            // text, and the selected item inverted to black on white.
             title_bar: Fill::Solid(Color::rgb(0x00, 0x00, 0x00)),
             title_text_color: Color::rgb(0xFF, 0xFF, 0xFF),
             background: Fill::Solid(Color::rgb(0xAA, 0xAA, 0xAA)),
@@ -200,9 +192,9 @@ pub fn nextstep_classic() -> Theme {
 }
 
 /// Everything that *varies* between the built-in themes. The shared
-/// structure — WindowMaker's default `TS_NEW` geometry (23px titlebar,
-/// full-height flush buttons, 8px resizebar with 28px grips, 1px
-/// border), 12px bold titles — comes from `build_chrome`, so every
+/// structure — the stock chrome geometry (23px titlebar, full-height
+/// flush buttons, 8px resizebar with 28px grips, 1px border), 12px
+/// bold titles — comes from `build_chrome`, so every
 /// theme hit-tests and lays out identically and only the dress
 /// changes.
 struct ChromeSpec {
@@ -427,7 +419,7 @@ pub fn graphite() -> Theme {
 }
 
 /// The NeXTSTEP-sampled look this project's flagship theme wore before
-/// the strict WindowMaker parity pass: diagonal near-black/silver
+/// the strict stock-chrome parity pass: diagonal near-black/silver
 /// gradients, Nimbus Sans (fontconfig's Helvetica), softer chisel
 /// tones — kept alive as its own theme, composed with the solid
 /// classic-lavender desktop. Terminal is the slate palette the desktop
@@ -529,21 +521,20 @@ mod tests {
     fn flagship_theme_has_miniaturize_left_and_close_right_only() {
         let theme = nextstep_classic();
         let kinds: Vec<_> = theme.titlebar.buttons.iter().map(|b| b.kind).collect();
-        assert_eq!(kinds, vec![ButtonKind::Miniaturize, ButtonKind::Close], "matches real WindowMaker: no maximize button");
+        assert_eq!(kinds, vec![ButtonKind::Miniaturize, ButtonKind::Close], "the classic chrome has no maximize button");
     }
 
-    /// Real WindowMaker's stock look is flat solids — `FTitleBack
-    /// (solid, black)`, `UTitleBack (solid, aa)` — not gradients (an
-    /// earlier version of this theme used NeXTSTEP-style diagonal
-    /// gradients, visibly wrong next to a real WindowMaker desktop).
+    /// The stock chiseled look is flat solids — black focused, aa-gray
+    /// unfocused — not gradients (an earlier version of this theme used
+    /// diagonal gradients, visibly wrong beside a reference desktop).
     #[test]
-    fn flagship_theme_uses_windowmaker_solid_fills() {
+    fn flagship_theme_uses_the_stock_solid_fills() {
         let theme = nextstep_classic();
         assert_eq!(theme.titlebar.active, Fill::Solid(Color::rgb(0x00, 0x00, 0x00)));
         assert_eq!(theme.titlebar.inactive, Fill::Solid(Color::rgb(0xAA, 0xAA, 0xAA)));
-        assert_eq!(theme.titlebar.buttons[0].size, theme.titlebar.height, "TS_NEW: buttons fill the titlebar height");
-        assert_eq!(theme.titlebar.button_margin, 0, "TS_NEW: buttons sit flush at the bar's ends");
-        assert_eq!(theme.resize_bar.height, 8, "RESIZEBAR_HEIGHT");
-        assert_eq!(theme.resize_bar.corner_width, 28, "RESIZEBAR_CORNER_WIDTH");
+        assert_eq!(theme.titlebar.buttons[0].size, theme.titlebar.height, "buttons fill the titlebar height");
+        assert_eq!(theme.titlebar.button_margin, 0, "buttons sit flush at the bar's ends");
+        assert_eq!(theme.resize_bar.height, 8, "stock resizebar height");
+        assert_eq!(theme.resize_bar.corner_width, 28, "stock resizebar corner width");
     }
 }

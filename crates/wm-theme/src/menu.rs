@@ -1,41 +1,40 @@
-//! Rendering for WindowMaker/NeXTSTEP-style popup menus (the root menu,
-//! and eventually app menus), ported recipe-for-recipe from the
-//! WindowMaker source rather than eyeballed: a titlebar-styled title
-//! strip over a stack of individually-reliefed entry strips.
+//! Rendering for NeXTSTEP-style popup menus (the root menu, and
+//! eventually app menus), built recipe-for-recipe from the classic
+//! metrics rather than eyeballed: a titlebar-styled title strip over a
+//! stack of individually-reliefed entry strips.
 //!
-//! The specific recipes, and where they come from:
-//! - Menus size themselves to their content (`wMenuRealize` in
-//!   `src/menu.c`): widest entry text plus fixed paddings, with a gutter
-//!   on the right for the cascade indicator, never a fixed width.
-//! - Every entry is its own raised strip — `WREL_MENUENTRY` in
-//!   `src/texture.c`: +80 add along the top and left, -40 subtract along
-//!   the right and second-to-bottom row, absolute black along the bottom
-//!   row. This stack of shallow strips (a softer cousin of the chrome's
-//!   RAISED2) is the signature WindowMaker menu look.
-//! - The hover highlight (`paintEntry` in `src/menu.c`) fills *inside*
-//!   the entry's relief — inset one line on the left/right/top, three on
-//!   the bottom — so the strip edges stay put while only the face
-//!   inverts. The same lesson as the titlebar buttons: chrome that
-//!   vanishes on interaction reads as breakage.
-//! - The cascade indicator is `paintEntry`'s engraved chevron: three
-//!   hard lines (dim upper diagonal, light lower diagonal, dark spine)
-//!   in absolute colors derived from the item face, not a filled
-//!   triangle glyph.
+//! The specific recipes:
+//! - Menus size themselves to their content: widest entry text plus
+//!   fixed paddings, with a gutter on the right for the cascade
+//!   indicator, never a fixed width.
+//! - Every entry is its own raised strip: +80 add along the top and
+//!   left, -40 subtract along the right and second-to-bottom row,
+//!   absolute black along the bottom row. This stack of shallow strips
+//!   (a softer cousin of the chrome's double raised relief) is the
+//!   signature menu look.
+//! - The hover highlight fills *inside* the entry's relief — inset one
+//!   line on the left/right/top, three on the bottom — so the strip
+//!   edges stay put while only the face inverts. The same lesson as the
+//!   titlebar buttons: chrome that vanishes on interaction reads as
+//!   breakage.
+//! - The cascade indicator is an engraved chevron: three hard lines
+//!   (dim upper diagonal, light lower diagonal, dark spine) in absolute
+//!   colors derived from the item face, not a filled triangle glyph.
 //! - The title strip is a real titlebar: the window titlebar's height
-//!   and RAISED2 relief (menus in WindowMaker are `wFrameWindow`s, so
-//!   this equality is by construction there — and by these shared
-//!   constants here). A `closable` menu additionally carries the
-//!   titlebar close box, WindowMaker's affordance on a posted
+//!   and double raised relief. Classically that equality is by
+//!   construction — a menu *is* a window frame — and here it is by
+//!   these shared constants. A `closable` menu additionally carries
+//!   the titlebar close box, the classic affordance on a posted
 //!   ("buttoned") menu — the root menu renders this way, because it
 //!   stays up for leisurely navigation; the transient window menu does
 //!   not. Clicking anywhere off an item dismisses either kind.
 //!
-//! Menus are trees (`MenuItem::Submenu`), not flat lists — real
-//! WindowMaker root menus nest arbitrarily deep (`Applications >
-//! Internet > Firefox`). This module only renders *one level* at a time;
-//! the popup-stack lifecycle (which submenu is open, hover-to-open
-//! hysteresis, off-screen flip positioning) is `cascade::CascadeMenu`'s
-//! job, with `chonkstep::desktop::Desktop` as the reference host.
+//! Menus are trees (`MenuItem::Submenu`), not flat lists — classic root
+//! menus nest arbitrarily deep (`Applications > Internet > Firefox`).
+//! This module only renders *one level* at a time; the popup-stack
+//! lifecycle (which submenu is open, hover-to-open hysteresis,
+//! off-screen flip positioning) is `cascade::CascadeMenu`'s job, with
+//! `chonkstep::desktop::Desktop` as the reference host.
 
 use wm_theme_api::{ButtonKind, DecorationBuffer, Point, Rect, Size};
 
@@ -69,10 +68,10 @@ impl MenuItem {
 /// rect per `items` entry (same order as passed in), and the title
 /// strip's close box when the menu was rendered `closable`. Anything
 /// outside the item rects — the title strip, the border — is a
-/// dismissal either way; the box is the *visible* affordance real
-/// WindowMaker gives a posted ("buttoned") menu, so the root menu
-/// reads as something that stays up until you close it, not a popup
-/// that might vanish underneath you.
+/// dismissal either way; the box is the *visible* affordance a posted
+/// ("buttoned") menu classically gets, so the root menu reads as
+/// something that stays up until you close it, not a popup that might
+/// vanish underneath you.
 pub struct MenuRender {
     pub buffer: DecorationBuffer,
     pub item_rects: Vec<Rect>,
@@ -112,21 +111,21 @@ pub fn render_menu(
     let mut swash_cache = cosmic_text::SwashCache::new();
     let menu = &theme.menu;
     let item_h = (menu.item_height as u32).max(4);
-    // WindowMaker menu title strips are window titlebars (menus are
-    // wFrameWindows there), so the height and relief come from the
-    // titlebar style, not the item style — visibly taller than an entry.
+    // A menu title strip is a window titlebar (classically a menu *is*
+    // a window frame), so the height and relief come from the titlebar
+    // style, not the item style — visibly taller than an entry.
     let title_h = (theme.titlebar.height as u32).max(item_h);
 
-    // All of WindowMaker's menu metrics are in unscaled pixels against
-    // its stock ~20px entry; ours scale with the theme, so a stock
-    // metric `v` becomes `px(v)` here.
+    // All the classic menu metrics are in unscaled pixels against a
+    // stock ~20px entry; ours scale with the theme, so a stock metric
+    // `v` becomes `px(v)` here.
     let px = |v: i32| -> i32 { ((v * item_h as i32) + 10) / 20 };
     let t = (menu.bevel.width as u32).max(1);
 
-    // Content-driven width, `wMenuRealize` verbatim: widest entry text
-    // plus 10, a right gutter of 16 where any row cascades (4 otherwise),
-    // never narrower than the title text plus its titlebar-derived
-    // padding. No fixed or minimum width at all.
+    // Content-driven width, the classic recipe verbatim: widest entry
+    // text plus 10, a right gutter of 16 where any row cascades (4
+    // otherwise), never narrower than the title text plus its
+    // titlebar-derived padding. No fixed or minimum width at all.
     let any_submenu = items.iter().any(|i| i.is_submenu());
     let gutter = if any_submenu { px(16) } else { px(4) } as u32;
     let widest_label = items
@@ -143,8 +142,8 @@ pub fn render_menu(
     let content_w = (widest_label + px(10) as u32 + gutter).max(title_w);
 
     // The 1px (scaled) outline around everything is the frame border
-    // every WindowMaker menu window carries, same as its sibling window
-    // frames — content sits inside it.
+    // every menu window carries, same as its sibling window frames —
+    // content sits inside it.
     let bw = (theme.border.width as u32).max(1);
     let width = content_w + bw * 2;
     let height = title_h + item_h * items.len() as u32 + bw * 2;
@@ -178,11 +177,11 @@ pub fn render_menu(
     };
     // Centered title text — centered in the strip the *eye* sees, which
     // on a closable menu is the region left of the box, not the full
-    // width. Full-width centering (real WindowMaker's own allButtons
-    // case) either crowds the text against the box or, with symmetric
-    // reserves, leaves a lopsided void on the left — both were caught
-    // by visual inspection; centering in the box-free region balances
-    // the margins around the text where they are actually visible.
+    // width. Full-width centering (the classic behavior) either crowds
+    // the text against the box or, with symmetric reserves, leaves a
+    // lopsided void on the left — both were caught by visual
+    // inspection; centering in the box-free region balances the margins
+    // around the text where they are actually visible.
     let title_region = if closable {
         content_w.saturating_sub(title_h.min(content_w))
     } else {
@@ -203,9 +202,9 @@ pub fn render_menu(
     );
 
     // The chevron's three inks are absolute colors derived from the
-    // item face — WindowMaker draws them with the item texture's
-    // light/dim/dark GCs, so they hold still when the highlight fill
-    // arrives underneath instead of vanishing into it.
+    // item face — classically the item texture's own light/dim/dark
+    // pens — so they hold still when the highlight fill arrives
+    // underneath instead of vanishing into it.
     let face = fill_average(&menu.background);
     let (chev_light, chev_dim, chev_dark) = (shift(face, 80), shift(face, -40), shift(face, -90));
 

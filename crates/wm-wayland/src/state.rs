@@ -830,7 +830,7 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
     let xdg_shell_state = XdgShellState::new::<Compositor>(&display_handle);
     // xdg-decoration is what lets us tell clients "the server draws
     // your chrome" — without it every GTK/Qt app draws its own
-    // titlebar and the WindowMaker frames would double up.
+    // titlebar and our chiseled frames would double up.
     let xdg_decoration_state = XdgDecorationState::new::<Compositor>(&display_handle);
     let shm_state = ShmState::new::<Compositor>(&display_handle, vec![]);
     let output_manager_state = OutputManagerState::new_with_xdg_output::<Compositor>(&display_handle);

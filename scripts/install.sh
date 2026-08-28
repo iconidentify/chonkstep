@@ -40,8 +40,8 @@ echo "Installing dependencies (sudo)..."
 # itself. wireplumber:
 # wpctl, which the dock's sound instrument reads and controls (already
 # present on any PipeWire desktop; harmless elsewhere - without a sink
-# the instrument shows its dead-screen face). Fonts: DejaVu
-# (WindowMaker-parity chrome), gsfonts/Nimbus Sans (the NeXT Lavender
+# the instrument shows its dead-screen face). Fonts: DejaVu (the
+# chiseled window chrome), gsfonts/Nimbus Sans (the NeXT Lavender
 # theme), JetBrains Mono Nerd (terminal), Noto (fallback coverage).
 # The link instrument needs nothing extra: it prefers nmcli when the
 # system has NetworkManager and falls back to /sys/class/net on
@@ -95,7 +95,7 @@ sudo install -d /usr/share/xsessions
 sudo tee /usr/share/xsessions/chonkstep.desktop >/dev/null <<DESKTOP
 [Desktop Entry]
 Name=chonkstep
-Comment=A window manager with WindowMaker parity
+Comment=A NeXTSTEP-style window manager with chiseled chrome
 Exec=${repo}/scripts/xsession.sh
 Type=Application
 DESKTOP

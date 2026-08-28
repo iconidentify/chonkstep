@@ -41,7 +41,7 @@ bitflags::bitflags! {
 }
 
 /// A keyboard shortcut: a keysym plus modifier mask. Intentionally
-/// simple (no chords) — matches WindowMaker's own single-combo bindings.
+/// simple (no chords) — the classic desktop binds single combos only.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct KeyCombo {
     pub keysym: u32,
@@ -125,7 +125,8 @@ pub enum BackendEvent<Win, Frame> {
         /// having to reimplement that protocol-agnostic hysteresis logic.
         time_ms: u32,
         /// Modifier keys held at the time of the event (Ctrl/Shift for
-        /// vertical-only/horizontal-only maximize, mirroring WindowMaker).
+        /// vertical-only/horizontal-only maximize, per the classic
+        /// NeXTSTEP-style bindings).
         mods: Modifiers,
     },
     /// Root-relative pointer position — needed for interactive move,

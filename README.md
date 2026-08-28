@@ -1,11 +1,12 @@
 # chonkstep
 
-A window manager for X11, written in Rust, that takes WindowMaker's
-stock look seriously: the default chrome is reproduced value-for-value
-from the WindowMaker source (titlebar metrics, the RAISED2 relief
-recipe, the 10x10 button glyph bitmaps, the 8px resizebar with 28px
-corner grips), then extended with the conveniences a modern desktop
-expects - resize from every edge and corner with macOS-style cursors, a
+A NeXTSTEP-style desktop written in Rust, running as an X11 window
+manager or as a Wayland compositor over one shared shell. The chrome is
+chiseled and specified to the pixel - titlebar metrics, the raised
+relief recipe, the 10x10 button glyph bitmaps, the 8px resizebar with
+28px corner grips - under a dock of live instruments and real
+workspaces, then extended with the conveniences a modern desktop
+expects: resize from every edge and corner with macOS-style cursors, a
 theme engine, translucent terminals, HiDPI scaling, and in-place hot
 restarts that keep your windows open.
 
@@ -13,29 +14,30 @@ restarts that keep your windows open.
 
 ## Features
 
-- **WindowMaker-parity decorations.** Focused black/unfocused gray
-  titlebars, flush full-height buttons with the stock glyphs, etched
-  resizebar grips - checked against WindowMaker's own `framewin.c`,
-  `wrlib`, and `def_pixmaps.h` rather than eyeballed from screenshots.
+- **Chiseled decorations.** Focused black/unfocused gray titlebars,
+  flush full-height buttons with the stock glyphs, etched resizebar
+  grips - every metric, bevel step, and glyph bitmap written down to
+  the pixel rather than eyeballed from screenshots.
 - **Resize everywhere.** All eight edges and corners resize, with
   macOS-style cursor affordances: diagonal arrows on corners, vertical
   and horizontal arrows on the flat sides. North and west drags anchor
   the opposite edge, and client size hints (a terminal's cell grid) are
   respected mid-drag.
-- **WindowMaker window behaviors.** New windows are placed by
-  WindowMaker's smart-placement scan - least overlap, top-left bias -
-  with the `placement` setting switching to cascade or center. A
-  right-click on any titlebar opens the window commands menu:
+- **Classic window behaviors.** New windows are placed by a
+  smart-placement scan - least overlap, top-left bias - with the
+  `placement` setting switching to cascade or center. A right-click on
+  any titlebar opens the window commands menu:
   maximize, miniaturize, shade, fullscreen, move to another workspace,
   close, and kill for the window that ignores close. And move-drags
-  snap flush against screen and window edges, with WindowMaker's edge
+  snap flush against screen and window edges, with the classic edge
   resistance feel (`edge_resistance` tunes the distance; 0 turns it
   off).
 - **A modal Alt-Tab switcher.** Hold Alt and Tab through a centered
   switch panel of live window thumbnails - selection commits when Alt
   is released, Escape cancels, Shift+Tab steps backward. The panel is
-  drawn in the active theme's language, WindowMaker switchpanel style.
-- **Theme engine with five built-in themes.** Window Maker, Amber
+  drawn in the active theme's language - the same chiseled chrome as
+  everything else on screen, not a generic overlay.
+- **Theme engine with five built-in themes.** NeXTSTEP Classic, Amber
   Phosphor, Teal Blueprint, Graphite, and NeXT Lavender. A theme
   restyles everything at once - window chrome, menus, wallpaper, dock,
   and the terminal's 16-color palette - and switching from the root
@@ -62,22 +64,22 @@ restarts that keep your windows open.
   is generated from the system's freedesktop `.desktop` entries -
   categories become cascades, `Terminal=true` apps launch inside the
   themed terminal, NoDisplay/Hidden/TryExec respected - so every
-  installed app is launchable on day one. And WindowMaker's defining
-  feature, the launcher dock: drag a miniaturized window's icon tile
-  onto the strip below the Clip to pin its application (resolved
-  through the `.desktop` index), click to launch - or to focus the
-  running window, marked by an accent lamp on the tile - drag along
-  the strip to reorder, drag off to unpin. Pins persist across
-  sessions.
-- **A WindowMaker-style desktop shell.** Right-click root menu with
+  installed app is launchable on day one. And the classic NeXTSTEP
+  desktop's defining feature, the launcher dock: drag a miniaturized
+  window's icon tile onto the strip below the Clip to pin its
+  application (resolved through the `.desktop` index), click to
+  launch - or to focus the running window, marked by an accent lamp on
+  the tile - drag along the strip to reorder, drag off to unpin. Pins
+  persist across sessions.
+- **A NeXTSTEP-style desktop shell.** Right-click root menu with
   cascading submenus, a dock of instrument apps - an analog clock plus
   five LED instruments on theme-reactive glass (network traffic with a
   mirrored up/down history matrix, CPU and memory load, sound volume
   with click-zone control, wifi/ethernet link state, battery/power) -
   miniaturized-window icon tiles with drag-to-place, and
   five built-in wallpaper artworks. Real workspaces, too: a dock
-  Clip - WindowMaker's workspace tile, ported from its dock.c
-  recipes - sits at the top-left corner: clipped-corner arrows advance
+  Clip - the workspace tile, drawn on the same recipes as the rest of
+  the dock - sits at the top-left corner: clipped-corner arrows advance
   (growing workspaces on demand) and rewind, Alt+Ctrl+Left/Right
   switches, Alt+Shift+Left/Right carries the focused window
   along, and pagers can drive it all via `_NET_CURRENT_DESKTOP` and
@@ -311,7 +313,7 @@ always available; it is not rebindable from the config file.
 - `cargo test --workspace` runs the test suite; the decoration renderer
   is pure Rust (tiny-skia + cosmic-text, no X server needed), so most
   of the visual pipeline is unit-testable, including pixel-level
-  regression tests for the WindowMaker relief recipes.
+  regression tests for the relief recipes.
 
 The workspace splits along seams that keep the core testable: `wm-core`
 (window management logic, no display server), `wm-theme` (decoration
@@ -323,9 +325,9 @@ two backends implementing that contract), `chonkstep` and
 `chonk-ui`/`chonk-about` (a small SDK surface proving third-party apps
 can draw with the same visual language). Within `wm-theme`, the `tile` module is the common UI
 platform for everything square: the workspace Clip's look formalized - a
-diagonal WindowMaker `IconBack`-gradient face under the stock RAISED2
-relief, luminance-picked ink, and sunken instrument-panel wells. Dock
-items, miniaturized-window icon tiles, and third-party `chonk-ui` apps
+diagonal gradient face under the stock raised relief, luminance-picked
+ink, and sunken instrument-panel wells. Dock items,
+miniaturized-window icon tiles, and third-party `chonk-ui` apps
 all build on that one tile, which is why the whole desktop reads as a
 single family. One level up, the `panel` module is the instrument SDK:
 a theme-reactive LED screen (glass recessed behind a gasket, with an
@@ -337,7 +339,7 @@ preview_nettraffic -- <dir>`, likewise `_sysload`, `_soundctl`,
 which doubles as the visual-regression harness new instruments should
 copy.
 
-![Focused and unfocused WindowMaker chrome](docs/screenshots/windowmaker-chrome.png)
+![Focused and unfocused chiseled chrome](docs/screenshots/chiseled-chrome.png)
 
 ## License
 

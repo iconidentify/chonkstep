@@ -351,7 +351,7 @@ impl XdgShellHandler for Compositor {
         // Position straight from the positioner, parent-relative — the
         // renderer and the hit-test both resolve it against the
         // parent's content rect via `PopupManager`. No unconstraining
-        // pass yet: WindowMaker-parity menus hug their parent, and a
+        // pass yet: NeXTSTEP-style menus hug their parent, and a
         // popup off the output edge is the client's own placement to
         // fix. (Initial configure happens at first commit.)
         surface.with_pending_state(|state| {
@@ -525,8 +525,8 @@ impl XdgShellHandler for Compositor {
 
 // -- xdg-decoration ------------------------------------------------------
 // The policy is one line long: this desktop draws the chrome, always —
-// WindowMaker parity is the whole point, and a client drawing its own
-// titlebar under our frame would wear two hats. Clients keep asking for
+// the chiseled frames are the whole point, and a client drawing its own
+// titlebar under one would wear two hats. Clients keep asking for
 // ClientSide (GTK does, universally); the answer is configured
 // ServerSide every time, which the protocol explicitly allows the
 // compositor to impose.

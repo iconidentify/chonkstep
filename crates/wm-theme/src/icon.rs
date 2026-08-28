@@ -1,6 +1,6 @@
 //! Rendering for small square "icon tiles" — the shape a miniaturized
-//! window collapses to (classic WindowMaker/NeXTSTEP "miniaturize to
-//! icon", not minimize-to-a-taskbar), also reused by the Alt-Tab
+//! window collapses to (the classic NeXTSTEP "miniaturize to icon",
+//! not minimize-to-a-taskbar), also reused by the Alt-Tab
 //! switcher for its thumbnails. Built on the theme's common tile
 //! ([`tile::draw_tile_base`]): a preview of the window's actual
 //! content, captured the instant it was miniaturized (see

@@ -3,7 +3,7 @@ name = "chonkstep"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "A modern window manager with WindowMaker parity."
+description = "A modern NeXTSTEP-style window manager for X11."
 
 [dependencies]
 # The backend-generic desktop shell — everything the desktop *is*; this

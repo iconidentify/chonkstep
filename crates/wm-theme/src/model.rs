@@ -15,9 +15,9 @@ impl Color {
     }
 }
 
-/// One of WindowMaker's texture kinds for a background. Textured/pixmap
-/// fills (`TPIXMAP`) are a real WindowMaker feature but out of scope for
-/// milestone 1 — an additive variant here later, not a rewrite.
+/// How a background surface is painted. Textured/pixmap fills are part
+/// of the classic vocabulary but out of scope for milestone 1 — an
+/// additive variant here later, not a rewrite.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Fill {
     Solid(Color),
@@ -31,8 +31,9 @@ pub struct Gradient {
     pub to: Color,
 }
 
-/// WM: `VGRADIENT` / `HGRADIENT` / `DGRADIENT`. Diagonal (top-left to
-/// bottom-right) is the signature WindowMaker titlebar look.
+/// Diagonal (top-left to bottom-right) is the signature titlebar look
+/// of the classic NeXT-style desktop; vertical and horizontal are the
+/// other two the era's themes are written in.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum GradientDirection {
     Vertical,
@@ -82,7 +83,7 @@ pub struct Bevel {
     pub dark: Color,
 }
 
-/// No `fill` field: real WindowMaker's titlebar buttons aren't a
+/// No `fill` field: classic titlebar buttons aren't a
 /// separately-colored control sitting on the titlebar, they're the
 /// titlebar's own active/inactive fill showing straight through, framed
 /// by just a bevel — `render_decoration` paints buttons with the exact
@@ -113,10 +114,10 @@ pub struct TitlebarStyle {
     pub bevel: Bevel,
     pub buttons: Vec<ButtonStyle>,
     /// How far a button's outer edge sits from the titlebar's own edge.
-    /// Real WindowMaker's `TS_NEXT` (the actual NeXTSTEP-lookalike
-    /// style, `src/framewin.c`) hardcodes this to `3` regardless of
-    /// titlebar height — distinct from `TS_NEW` (WindowMaker's own,
-    /// non-NeXT default style), which uses a flush `0` instead.
+    /// The NeXTSTEP-faithful value is a hardcoded `3` regardless of
+    /// titlebar height; the later, flatter chrome styles of the era use
+    /// a flush `0` instead, which is why this is a field and not a
+    /// constant.
     pub button_margin: u16,
 }
 
@@ -125,26 +126,24 @@ pub struct ResizeBarStyle {
     pub height: u16,
     pub fill: Fill,
     pub bevel: Bevel,
-    /// Width of the corner grip regions at each end of the bar — real
-    /// WindowMaker's `RESIZEBAR_CORNER_WIDTH` (28, `src/wconfig.h.in`).
-    /// Both the etched notch lines `render_decoration` draws and the
-    /// SouthEast/SouthWest hit regions derive from this same value, so
-    /// the visible grip delimiters and the diagonal-resize zones always
-    /// agree exactly.
+    /// Width of the corner grip regions at each end of the bar — 28px
+    /// unscaled, the classic value. Both the etched notch lines
+    /// `render_decoration` draws and the SouthEast/SouthWest hit
+    /// regions derive from this same value, so the visible grip
+    /// delimiters and the diagonal-resize zones always agree exactly.
     pub corner_width: u16,
 }
 
 /// The tile: the square platform every dock item, icon, and Clip sits
 /// on — this theme system's common UI surface, and the piece that
-/// makes disparate widgets read as one family. Real WindowMaker's
-/// distinctive look here is `IconBack`'s diagonal gradient
-/// (`src/defaults.c`: dgradient a6a6b6 to 515561), not a flat fill;
-/// each built-in theme supplies its own gradient in that spirit.
+/// makes disparate widgets read as one family. The distinctive classic
+/// look here is a diagonal gradient (a6a6b6 to 515561), not a flat
+/// fill; each built-in theme supplies its own gradient in that spirit.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct TileStyle {
     pub fill: Fill,
     /// Relief thickness comes from this bevel's width (the relief
-    /// itself is the relative RAISED2 recipe, like all chrome).
+    /// itself is the relative double raised recipe, like all chrome).
     pub bevel: Bevel,
 }
 
@@ -155,7 +154,7 @@ pub struct BorderStyle {
     pub color_inactive: Color,
 }
 
-/// WindowMaker/NeXTSTEP-style popup menu (the root menu and app menus):
+/// NeXTSTEP-style popup menu (the root menu and app menus):
 /// a titled bar above a vertical list of items, each item inverting to
 /// `highlight_background`/`highlight_text_color` on hover/selection, the
 /// whole thing framed by the same 3D bevel language as window chrome.
@@ -174,9 +173,9 @@ pub struct MenuStyle {
     pub highlight_text_color: Color,
     pub bevel: Bevel,
     /// Row height for entries; the menu's width has no counterpart
-    /// here on purpose — real WindowMaker menus size themselves to
-    /// their widest entry (`wMenuRealize`), so width is derived from
-    /// content at render time, never configured.
+    /// here on purpose — these menus size themselves to their widest
+    /// entry, so width is derived from content at render time, never
+    /// configured.
     pub item_height: u16,
 }
 
@@ -248,9 +247,9 @@ impl Theme {
         theme.titlebar.font.size *= factor;
         theme.titlebar.bevel.width = scale_u8(theme.titlebar.bevel.width);
         // Unlike every other dimension, a margin of 0 is a deliberate
-        // "flush to the edge" (WindowMaker's own default TS_NEW button
-        // placement) and must stay exactly 0 at any scale — the min-1
-        // clamp the other u16 fields want would silently un-flush it.
+        // "flush to the edge" button placement and must stay exactly 0
+        // at any scale — the min-1 clamp the other u16 fields want
+        // would silently un-flush it.
         theme.titlebar.button_margin = ((theme.titlebar.button_margin as f32) * factor).round() as u16;
         for button in &mut theme.titlebar.buttons {
             button.size = scale_u16(button.size);

@@ -1,18 +1,19 @@
-//! The launcher dock: WindowMaker's defining feature, as a strip of
-//! pinnable application tiles down the left edge below the Clip. Pin
-//! by dragging a miniaturized window's icon tile onto the strip (the
-//! shell resolves the window back to its application through the
-//! `.desktop` index), click to launch — or to focus the running
-//! window when one exists — and drag a tile off the strip to unpin.
-//! Pins persist across sessions in the state directory.
+//! The launcher dock: the defining feature of the classic NeXTSTEP
+//! desktop, a strip of pinnable application tiles down the left edge
+//! below the Clip. Pin by dragging a miniaturized window's icon tile
+//! onto the strip (the shell resolves the window back to its
+//! application through the `.desktop` index), click to launch — or to
+//! focus the running window when one exists — and drag a tile off the
+//! strip to unpin. Pins persist across sessions in the state directory.
 //!
 //! The strip is one shell surface (like the Dock and the Clip in
 //! `desktop.rs`), exactly one tile wide, starting at `y = tile`
 //! directly below the Clip: the Clip opens the left edge the way the
 //! identity tile opens the right one, and the launcher stacks beneath
-//! it, tiles touching, matching real WindowMaker's flush columns. Its
-//! faces come from `wm_theme::launcher::render_launcher_tile`, so a
-//! pinned app renders in the same tile grammar as everything square.
+//! it, tiles touching, in the one flush column the classic NeXTSTEP
+//! desktop draws. Its faces come from
+//! `wm_theme::launcher::render_launcher_tile`, so a pinned app renders
+//! in the same tile grammar as every other square surface.
 //!
 //! Persistence is the same one-file state mechanism `theme_select.rs`
 //! and `wallpaper.rs` use — `$XDG_STATE_HOME/chonkstep/dock` (or the
@@ -55,8 +56,7 @@ struct StripDrag {
     /// Root position of the press, the threshold's fixed reference.
     press_root: Point,
     /// Crossed the drag threshold? A release that never did is a
-    /// click — matching `miniwindowMouseDown`'s `hasMoved` check in
-    /// real WindowMaker's `icon.c`, same as the icon tiles.
+    /// click — the same press-never-moved rule the icon tiles use.
     moved: bool,
     grab: DragHandle,
 }
@@ -223,8 +223,8 @@ impl<B: Backend> LaunchDock<B> {
         };
         match self.pins.iter().position(|pin| pin.id == app.id) {
             Some(existing) => {
-                // Already pinned: one tile per app (like WindowMaker's
-                // dock), so a re-pin moves the existing tile to the
+                // Already pinned: one tile per app is the classic dock
+                // behavior, so a re-pin moves the existing tile to the
                 // drop slot instead of duplicating it.
                 let slot = slot.min(self.pins.len().saturating_sub(1));
                 move_pin(&mut self.pins, existing, slot);

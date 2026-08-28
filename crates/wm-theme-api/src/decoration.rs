@@ -1,9 +1,10 @@
 use crate::{Point, Rect, Size};
 
-/// A titlebar button. Classic WindowMaker has no maximize button at all
-/// (zoom is menu/keybinding-driven); this deliberately breaks from that
-/// one point of parity by adding one, since a directly-clickable
-/// maximize is expected UI on a modern desktop.
+/// A titlebar button. The classic NeXTSTEP desktop has no maximize
+/// button at all (zoom is menu/keybinding-driven); this deliberately
+/// breaks from the classic recipe on that one point by adding one,
+/// since a directly-clickable maximize is expected UI on a modern
+/// desktop.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum ButtonKind {
     Close,
@@ -54,7 +55,7 @@ pub struct DecorationLayout {
     pub titlebar_height: u32,
     pub button_hitboxes: Vec<(ButtonKind, Rect)>,
     pub resize_hitboxes: Vec<(ResizeEdge, Rect)>,
-    /// The frame's height when "shaded" (WindowMaker's roll-up-to-
+    /// The frame's height when "shaded" (the classic roll-up-to-
     /// titlebar state) — just enough for the titlebar plus top/bottom
     /// border, none of the content. A theme-owned value (only the theme
     /// knows its exact border/bevel widths) rather than something
