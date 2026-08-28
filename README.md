@@ -122,6 +122,56 @@ scripts/update.sh
 
 which pulls, rebuilds, and hot-restarts the running session in place.
 
+## Wayland
+
+chonkstep is one desktop with two faces. Everything the desktop *is*
+lives in backend-generic crates - `wm-core` decides (placement, focus,
+stacking, workspaces, the modal Alt-Tab machinery), `wm-theme` renders
+the decorations, and `chonk-shell` is the whole desktop above them:
+dock, instruments, Clip, launcher strip, menus, wallpaper, themes. Two
+backends implement the one backend contract those crates are written
+against - `wm-x11`, and `wm-wayland`, a compositor built on
+[Smithay](https://github.com/Smithay/smithay) - and two thin binaries,
+`chonkstep` and `chonkstep-wayland`, wire the same shell to each. That
+is what keeps the two sessions identical: a feature or a fix lands
+once, in the shared crates, and both stacks get it by construction
+rather than by porting discipline.
+
+The Wayland side is the younger half, and its current shape is stated
+honestly: it runs today as a *nested* session for development. The
+compositor opens a regular window on your existing desktop (Wayland or
+X11, via Smithay's winit backend), and that window is its screen -
+chrome, dock, root menu, themes, and all. A true DRM/KMS session that
+owns the hardware from a TTY, the way Xorg does for the X11 side, is
+planned behind the crate's `session` feature but is not built yet.
+
+To run it nested, from a terminal on any desktop:
+
+```sh
+cargo build --release -p chonkstep-wayland
+./target/release/chonkstep-wayland
+```
+
+The compositor allocates its own Wayland socket and sets
+`WAYLAND_DISPLAY` (and `DISPLAY`, through XWayland) for everything it
+spawns, so applications launched from the root menu or the themed
+terminal land inside the nested session automatically. To aim a client
+at it from an outside terminal instead, point these variables at the
+socket names from the startup log - the Wayland socket is typically
+the first free slot (`wayland-1` when your host desktop holds
+`wayland-0`), and XWayland's display number is printed alongside it:
+
+```sh
+WAYLAND_DISPLAY=wayland-1 some-wayland-app
+DISPLAY=:1 urxvt
+```
+
+X11 applications are first-class citizens, not a compatibility
+afterthought: the compositor starts XWayland at boot and manages its
+windows through exactly the same decoration and policy machinery as
+native Wayland clients, so urxvt - and everything else that predates
+Wayland - runs unchanged.
+
 ## Configuration
 
 chonkstep reads `~/.config/chonkstep/config.toml` (or
@@ -182,11 +232,14 @@ always available; it is not rebindable from the config file.
   regression tests for the WindowMaker relief recipes.
 
 The workspace splits along seams that keep the core testable: `wm-core`
-(window management logic, no X11), `wm-x11` (the backend), `wm-theme`
-(decoration rendering), `wm-theme-api` (the boundary between them),
-`chonkstep` (the binary and desktop shell), and `chonk-ui`/`chonk-about`
-(a small SDK surface proving third-party apps can draw with the same
-visual language). Within `wm-theme`, the `tile` module is the common UI
+(window management logic, no display server), `wm-theme` (decoration
+rendering), `wm-theme-api` (the boundary between them), `chonk-shell`
+(the entire desktop - dock, instruments, Clip, launcher, menus,
+wallpaper - generic over the backend), `wm-x11` and `wm-wayland` (the
+two backends implementing that contract), `chonkstep` and
+`chonkstep-wayland` (the thin binaries wiring the shell to each), and
+`chonk-ui`/`chonk-about` (a small SDK surface proving third-party apps
+can draw with the same visual language). Within `wm-theme`, the `tile` module is the common UI
 platform for everything square: the workspace Clip's look formalized - a
 diagonal WindowMaker `IconBack`-gradient face under the stock RAISED2
 relief, luminance-picked ink, and sunken instrument-panel wells. Dock
