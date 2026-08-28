@@ -10,15 +10,56 @@ license.workspace = true
 # and tests on a macOS dev machine.
 [target.'cfg(target_os = "linux")'.dependencies]
 wm-core = { path = "../wm-core" }
+wm-theme = { path = "../wm-theme" }
 wm-theme-api = { path = "../wm-theme-api" }
+wm-config = { path = "../wm-config" }
+chonk-shell = { path = "../chonk-shell" }
 tracing = "0.1"
+
+# Smithay 0.7 is the pinned compositor framework. Features are opted
+# into explicitly (default-features = false) so the DRM/KMS, libinput,
+# udev, and Vulkan stacks — all of which want system libraries at build
+# time — stay out of the graph until the `session` feature grows real:
+#
+# - backend_winit: the nested development backend (the compositor runs
+#   inside a window on an existing desktop), which also pulls in
+#   backend_egl and the winit/wayland-client plumbing it needs.
+# - renderer_gl: the GLES2 renderer every render element in
+#   `renderer.rs` is typed against.
+# - desktop: `PopupManager` and the surface-tree helpers
+#   (`send_frames_surface_tree`) — we deliberately do NOT use its
+#   `Space`, since `wm-core` owns geometry and stacking, but the
+#   utilities are shared.
+# - wayland_frontend: the wayland-server protocol machinery (pure-Rust
+#   wayland-backend; `use_system_lib` stays OFF on purpose so no
+#   system libwayland is required to build).
+# - xwayland: XWayland process management plus the X11 window-manager
+#   connection (X11Wm/XwmHandler), so X11 apps run under the
+#   compositor unchanged.
+#
+# Keysyms and modifier state come through Smithay's own xkbcommon
+# re-exports (`smithay::input::keyboard::{Keysym, ModifiersState}`), so
+# no direct xkbcommon dependency is needed.
+smithay = { version = "0.7.0", default-features = false, features = [
+    "backend_winit",
+    "renderer_gl",
+    "desktop",
+    "wayland_frontend",
+    "xwayland",
+] }
 
 [features]
 default = ["winit"]
 # The nested development backend: the compositor runs inside a window
-# on an existing X11/Wayland desktop.
+# on an existing X11/Wayland desktop. Currently a marker — the winit
+# stack is unconditionally compiled in via the smithay features above —
+# kept so the eventual `--no-default-features --features session` build
+# has a name to exclude.
 winit = []
-# The real-hardware session: DRM/KMS + libinput + libseat. Needs the
-# corresponding system libraries at build time; off by default so CI
-# and the nested dev loop stay light.
+# The real-hardware session: DRM/KMS + libinput + libseat. A documented
+# placeholder for now — enabling it does nothing yet. When it grows
+# real it will turn on smithay's backend_drm/backend_libinput/
+# backend_session_libseat features, which need the corresponding system
+# libraries at build time; off by default so CI and the nested dev loop
+# stay light.
 session = []

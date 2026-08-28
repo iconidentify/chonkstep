@@ -5,13 +5,15 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
-[dependencies]
+# Everything here is Linux-only: on any other host the binary compiles
+# to its stub arm (see main.rs) with no dependencies at all, so the
+# workspace builds and tests on a macOS dev machine. The list is short
+# on purpose — `wm_wayland::run` owns the compositor, the shell, and
+# the event loop, so this binary reaches `chonk-shell`/`wm-core`
+# through `wm-wayland` rather than naming them itself; only the config
+# loader and the compositor crate appear here.
+[target.'cfg(target_os = "linux")'.dependencies]
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-
-[target.'cfg(target_os = "linux")'.dependencies]
-chonk-shell = { path = "../chonk-shell" }
-wm-core = { path = "../wm-core" }
 wm-config = { path = "../wm-config" }
-wm-theme = { path = "../wm-theme" }
 wm-wayland = { path = "../wm-wayland" }

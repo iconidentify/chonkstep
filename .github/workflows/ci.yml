@@ -79,3 +79,38 @@ jobs:
 
           echo "smoke test passed: WM handshake present, client managed"
           kill "$XTERM_PID" "$WM_PID" "$XVFB_PID" || true
+
+  # The Wayland half of the dual architecture. There is no Xvfb
+  # equivalent to smoke-test a compositor on a headless runner (the
+  # nested backend needs a host display), so this job's gate is the
+  # strictest thing CI can still do: build the compositor backend and
+  # its binary against the real system libraries, then run the
+  # backend's unit tests. The build step is the load-bearing one — the
+  # -sys crates under Smithay's winit/GLES path (libxkbcommon for the
+  # keymap machinery, EGL/GLES for the renderer, the Wayland client
+  # libraries winit itself links) resolve and link at build time, so a
+  # plain `cargo build` on Linux already proves what the macOS dev
+  # host, where this crate is cfg-empty, structurally cannot. Only the
+  # nested-session dependencies are installed: the `session` feature
+  # (DRM/KMS, libinput, libseat) is off by default and stays off here,
+  # which keeps this job light and honest about what it exercises.
+  wayland:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install Wayland build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxkbcommon-dev libegl-dev libgles-dev libwayland-dev
+
+      # --locked: the compositor pins Smithay 0.7.0, and a silent
+      # re-resolution here would test a different dependency tree than
+      # the one the repository actually ships.
+      - name: Build the Wayland compositor and binary
+        run: cargo build -p wm-wayland -p chonkstep-wayland --locked
+
+      - name: Run the wm-wayland test suite
+        run: cargo test -p wm-wayland

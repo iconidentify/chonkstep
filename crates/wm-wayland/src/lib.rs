@@ -4,6 +4,30 @@
 //! policy brain and the same `chonk-shell` desktop drive a native
 //! Wayland session exactly as they drive X11.
 //!
+//! The crate owns the *whole* compositor application, not just a
+//! backend: on X11 the display server is someone else's process and
+//! the WM is one client among many, but a Wayland compositor *is* the
+//! display server, so everything — protocol globals, the GLES
+//! renderer, input, XWayland, and the `WindowManager`/`Shell` pair —
+//! has to live in one process behind one event loop. The binary
+//! (`chonkstep-wayland`) therefore only calls [`run`].
+//!
+//! Everything hangs off one type, [`Compositor`], because Smithay's
+//! delegate macros demand it: each Wayland protocol is wired up with a
+//! `delegate_*!(Compositor)` invocation that implements the dispatch
+//! traits *for that concrete type*, so the calloop data type, every
+//! protocol handler, and the render loop must all agree on a single
+//! struct. See `state.rs` for the full shape and the module split.
+//!
 //! Linux-only by nature; on any other host this crate is deliberately
 //! empty so the workspace builds everywhere.
 #![cfg(target_os = "linux")]
+
+mod backend_impl;
+mod input;
+mod renderer;
+mod state;
+mod xdg;
+mod xwayland;
+
+pub use state::{run, Compositor, WaylandBackend, WlFrameId, WlShellId, WlWindowId};
