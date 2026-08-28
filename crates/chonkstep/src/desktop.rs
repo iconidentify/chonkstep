@@ -263,17 +263,19 @@ impl Desktop {
         // it is now the Clip tile at the screen's top-left — see
         // `clip_window` below.)
         // The dock's instrument stack, top to bottom, under the
-        // identity tile: the clock first (the one at-a-glance item),
-        // then the instruments — network traffic, system load, sound,
-        // link, power. Middle-click drag reorders them live; this is
-        // just the default order.
+        // identity tile: the five instruments — network traffic,
+        // system load, sound, link, power — with the analog clock as
+        // the bookend at the bottom, closing the rack the way the
+        // identity tile opens it (the two non-instrument faces frame
+        // the glass screens between them). Middle-click drag reorders
+        // live; this is just the default order.
         let widgets: Vec<Box<dyn DockWidget>> = vec![
-            Box::new(ClockWidget::new()),
             Box::new(NetTrafficWidget::new()),
             Box::new(SysLoadWidget::new()),
             Box::new(SoundWidget::new()),
             Box::new(WifiWidget::new()),
             Box::new(PowerWidget::new()),
+            Box::new(ClockWidget::new()),
         ];
         let dock_height = stacked_dock_height(tile, screen.h, &widgets);
         let dock_geom = Rect {

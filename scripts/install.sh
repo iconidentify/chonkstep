@@ -26,14 +26,21 @@ if ! command -v pacman >/dev/null 2>&1; then
 fi
 
 echo "Installing dependencies (sudo)..."
-# xorg-server/xinit: the X session itself. rxvt-unicode: the terminal
-# the root menu launches. picom: the session compositor behind the
-# themes' translucent terminals. Fonts: DejaVu (WindowMaker-parity
-# chrome), gsfonts/Nimbus Sans (the NeXT Lavender theme), JetBrains
-# Mono Nerd (terminal), Noto (fallback coverage).
+# xorg-server/xinit/xauth: the X session itself (xauth is what startx
+# needs on a machine with no display manager - stock Omarchy). rxvt-
+# unicode: the terminal the root menu launches. picom: the session
+# compositor behind the themes' translucent terminals. wireplumber:
+# wpctl, which the dock's sound instrument reads and controls (already
+# present on any PipeWire desktop; harmless elsewhere - without a sink
+# the instrument shows its dead-screen face). Fonts: DejaVu
+# (WindowMaker-parity chrome), gsfonts/Nimbus Sans (the NeXT Lavender
+# theme), JetBrains Mono Nerd (terminal), Noto (fallback coverage).
+# The link instrument needs nothing extra: it prefers nmcli when the
+# system has NetworkManager and falls back to /sys/class/net on
+# anything else (Omarchy's iwd setup included).
 sudo pacman -S --needed --noconfirm \
-    xorg-server xorg-xinit \
-    rxvt-unicode picom \
+    xorg-server xorg-xinit xorg-xauth \
+    rxvt-unicode picom wireplumber \
     ttf-dejavu gsfonts ttf-jetbrains-mono-nerd noto-fonts
 
 if ! command -v cargo >/dev/null 2>&1; then
@@ -57,13 +64,52 @@ Exec=${repo}/scripts/xsession.sh
 Type=Application
 DESKTOP
 
+# Seed the user's config from the fully-commented example, so tuning
+# scale/keybindings starts from a documented template instead of a
+# search through the repo. Only when absent - never overwrite a real
+# config on reinstall/update.
+config="${XDG_CONFIG_HOME:-$HOME/.config}/chonkstep/config.toml"
+if [ ! -e "$config" ]; then
+    install -Dm644 docs/config.example.toml "$config"
+    echo "Seeded ${config} (all defaults, fully commented)."
+fi
+
+# Stock Omarchy boots straight into Hyprland via autologin - there is
+# no login-manager session picker for the xsessions entry to appear in,
+# so point those users at startx; on a machine that does run a display
+# manager, the session-list path is the smoother one.
+has_dm=""
+for dm in sddm gdm lightdm greetd lemurs ly; do
+    if systemctl is-enabled "$dm" >/dev/null 2>&1; then
+        has_dm="$dm"
+        break
+    fi
+done
+
 cat <<DONE
 
 chonkstep is installed.
 
-  - Log out and pick "chonkstep" in the login manager's session list.
-  - On a setup without a session picker, start it from a TTY instead:
+DONE
+if [ -n "$has_dm" ]; then
+    cat <<DONE
+  - Log out and pick "chonkstep" in ${has_dm}'s session list.
+DONE
+else
+    cat <<DONE
+  - No display manager detected (stock Omarchy boots straight into
+    Hyprland). Switch to a TTY (Ctrl+Alt+F3), log in, and run:
       startx ${repo}/scripts/xsession.sh
+    To make chonkstep appear in a graphical session picker instead,
+    install and enable a display manager (e.g. sddm) - the session
+    entry is already in place.
+DONE
+fi
+cat <<DONE
+  - HiDPI: set "scale = 2.0" in ${config}
+    (the whole file is optional and every line is documented).
   - Update later with: scripts/update.sh
+  - The session entry points at this checkout (${repo});
+    moving the checkout means re-running scripts/install.sh.
 
 DONE

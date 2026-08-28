@@ -22,21 +22,16 @@ mkdir -p "$LOG_DIR"
 # X11 apps (even basic ones may expect $DBUS_SESSION_BUS_ADDRESS to
 # exist) — chonkstep itself doesn't touch D-Bus, but xterm and anything
 # else launched from its root menu might.
-export CHONKSTEP_SCALE="${CHONKSTEP_SCALE:-3}"
 export RUST_LOG="${RUST_LOG:-info}"
 
-# chonkstep scales its own chrome (titlebars, buttons, its own cursor —
-# see wm-x11's create_scaled_cursor) by CHONKSTEP_SCALE, but it has no
-# say over apps that draw their *own* cursor via the standard Xcursor
-# mechanism (most modern toolkits, including alacritty's winit) — those
-# read XCURSOR_SIZE instead. Without this, such an app's cursor stays
-# whatever Xcursor's own DPI-unaware default is, visibly out of
-# proportion next to chonkstep's own (correctly scaled) pointer the
-# instant it crosses from chrome onto that app's content. 24px is
-# Xcursor's own conventional 1x base size.
-if [ -z "${XCURSOR_SIZE:-}" ]; then
-    export XCURSOR_SIZE="$(awk -v s="$CHONKSTEP_SCALE" 'BEGIN { printf "%d", (24*s)+0.5 }')"
-fi
+# Deliberately no CHONKSTEP_SCALE export here: UI scale belongs to the
+# user's config file (~/.config/chonkstep/config.toml, `scale = 2.0`),
+# with the environment variable as a manual override — an export in
+# this script would silently outrank every user's config, since env
+# beats config in the WM's precedence. The WM also derives and exports
+# XCURSOR_SIZE itself from the *effective* scale (see main.rs's
+# ensure_xcursor_size), so apps drawing their own Xcursor pointers stay
+# in proportion without this script guessing the scale.
 
 # A session compositor gives true alpha (the theme engine's translucent
 # terminals; shadows/fades later if wanted) — chonkstep itself stays a
