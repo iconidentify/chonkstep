@@ -67,7 +67,7 @@ use wm_core::{
     Backend, BackendEvent, FocusPolicy, KeyCombo, MouseButton, WindowManager, WindowType,
 };
 use wm_theme::{RasterThemeEngine, Theme};
-use wm_theme_api::{Point, Rect, Size};
+use wm_theme_api::{DecorationBuffer, Point, Rect, Size};
 
 use chonk_shell::shell::{Shell, ShellOutcome};
 use chonk_shell::theme_select;
@@ -181,6 +181,12 @@ pub(crate) struct WindowRecord {
     /// XWayland windows (menus, tooltips) come through as `Unmanaged`
     /// and are rendered as-is with no frame.
     pub window_type: WindowType,
+    /// Most recent preview of this window's contents, refreshed by
+    /// [`crate::capture`] while rendering and served back through
+    /// `Backend::capture_window_image`. `None` until the first
+    /// snapshot (or forever, for a window that never maps), which the
+    /// shell's icon and switcher renderers already handle.
+    pub snapshot: Option<DecorationBuffer>,
 }
 
 impl WindowRecord {
@@ -195,6 +201,7 @@ impl WindowRecord {
             title: None,
             app_id: None,
             window_type: WindowType::Normal,
+            snapshot: None,
         }
     }
 }
@@ -374,6 +381,21 @@ const HOUSEKEEPING_INTERVAL: Duration = Duration::from_millis(16);
 /// must live on a single struct. Fields are `pub` (not `pub(crate)`)
 /// only where the re-exported API surface needs them; the protocol
 /// handler modules are in-crate and reach everything either way.
+/// Which graphics stack this session is driving. The two arms are the
+/// same desktop with different plumbing underneath: `Winit` renders
+/// into a window on somebody else's desktop (the development and
+/// preview mode), `Session` owns a DRM/KMS device, its outputs, and
+/// its input devices through libseat (the real login session). The
+/// scene they draw is one function, [`crate::renderer::build_scene`],
+/// so the choice never reaches anything visual.
+pub(crate) enum Graphics {
+    Winit(WinitGraphicsBackend<GlesRenderer>),
+    // Constructed by `session::init` once the DRM backend lands; the
+    // allow keeps the staged build warning-free until then.
+    #[allow(dead_code)]
+    Session(Box<crate::session::SessionGraphics>),
+}
+
 pub struct Compositor {
     /// The policy brain, owning the [`WaylandBackend`] ledger. Protocol
     /// handlers reach the ledger through `self.wm.backend_mut()`.
@@ -417,9 +439,8 @@ pub struct Compositor {
     /// the shell spawns find it.
     pub xdisplay: Option<u32>,
 
-    /// The nested development backend: the host window this session
-    /// renders into, with its EGL context and GLES renderer.
-    pub winit_backend: WinitGraphicsBackend<GlesRenderer>,
+    /// The graphics stack: a host window, or the hardware itself.
+    pub(crate) graphics: Graphics,
     pub damage_tracker: OutputDamageTracker,
 
     /// Latest pointer position in compositor space, maintained by
@@ -639,20 +660,19 @@ impl Compositor {
 /// place on a requested restart. The Wayland analogue of everything
 /// `crates/chonkstep/src/main.rs` does after config load — read that
 /// file for the loop-order rationale this mirrors.
+/// Whether some other desktop is already running here to nest inside.
+/// A bare TTY login has neither variable set; a terminal inside
+/// Hyprland, GNOME, or an X session has at least one.
+fn nesting_desktop_present() -> bool {
+    std::env::var_os("WAYLAND_DISPLAY").is_some() || std::env::var_os("DISPLAY").is_some()
+}
+
 pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> {
     let mut event_loop: EventLoop<Compositor> = EventLoop::try_new()?;
     let loop_handle = event_loop.handle();
 
     let display: Display<Compositor> = Display::new()?;
     let display_handle = display.handle();
-
-    // The nested development backend: a host window with an EGL
-    // context and GLES renderer. Real-hardware DRM/KMS waits on the
-    // `session` feature.
-    let (winit_backend, winit_source) =
-        winit::init::<GlesRenderer>().map_err(|error| format!("winit backend init failed: {error}"))?;
-    let window_size = winit_backend.window_size();
-    let output_size = Size::new(window_size.w.max(0) as u32, window_size.h.max(0) as u32);
 
     // Wayland globals. Each `new::<Compositor>` registers the global
     // against the delegate impls in `xdg.rs`/`input.rs`/`xwayland.rs`.
@@ -671,28 +691,98 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
     let mut seat: Seat<Compositor> = seat_state.new_wl_seat(&display_handle, "chonkstep");
     // Keyboard and pointer are assumed present — this is a desktop
     // compositor; hot-plug tracking can come with the session backend.
-    seat.add_keyboard(XkbConfig::default(), 200, 25)
+    // Keyboard layout from the environment, using libxkbcommon's own
+    // XKB_DEFAULT_* convention: a session started from a TTY has no
+    // desktop settings daemon to ask, and a compositor that hardcodes
+    // a US layout is unusable for everyone else. `scripts/wayland-
+    // session.sh` is where a login session sets these; the nested
+    // backend inherits whatever the host desktop already exported.
+    let xkb_env = |name: &str| std::env::var(name).ok().filter(|value| !value.is_empty());
+    let xkb_rules = xkb_env("XKB_DEFAULT_RULES").unwrap_or_default();
+    let xkb_model = xkb_env("XKB_DEFAULT_MODEL").unwrap_or_default();
+    let xkb_layout = xkb_env("XKB_DEFAULT_LAYOUT").unwrap_or_default();
+    let xkb_variant = xkb_env("XKB_DEFAULT_VARIANT").unwrap_or_default();
+    let xkb_options = xkb_env("XKB_DEFAULT_OPTIONS");
+    let xkb_config = XkbConfig {
+        rules: &xkb_rules,
+        model: &xkb_model,
+        layout: &xkb_layout,
+        variant: &xkb_variant,
+        options: xkb_options.clone(),
+    };
+    seat.add_keyboard(xkb_config, 200, 25)
         .map_err(|error| format!("failed to initialize the seat keyboard: {error}"))?;
     seat.add_pointer();
 
-    // The single output, mirroring the winit window. Flipped180 is
-    // deliberately copied from Smithay's own winit references (anvil,
-    // smallvil): the winit EGL surface's coordinate origin differs
-    // from the output's, and this transform is how upstream squares
-    // the two.
-    let mode = Mode { size: window_size, refresh: 60_000 };
-    let output = Output::new(
-        "chonkstep".to_string(),
-        PhysicalProperties {
-            size: (0, 0).into(),
-            subpixel: Subpixel::Unknown,
-            make: "chonkstep".into(),
-            model: "winit".into(),
-        },
-    );
+    // Which kind of session this process is. Owning the hardware and
+    // living in a window on somebody else's desktop are the same
+    // desktop with different plumbing, so the choice is made here, at
+    // startup, rather than at build time - one binary has to serve
+    // both "I am logging in from a TTY" and "I am previewing this
+    // inside my existing desktop". `CHONKSTEP_BACKEND` forces the
+    // decision ("drm"/"session" or "winit"/"nested"); otherwise an
+    // existing `WAYLAND_DISPLAY` or `DISPLAY` means there is already a
+    // desktop here to nest inside, and their absence means a bare TTY.
+    let nested = match std::env::var("CHONKSTEP_BACKEND").ok().as_deref() {
+        Some("winit") | Some("nested") => true,
+        Some("drm") | Some("session") => false,
+        Some(other) => {
+            tracing::warn!(backend = other, "unknown CHONKSTEP_BACKEND value; deciding automatically");
+            nesting_desktop_present()
+        }
+        None => nesting_desktop_present(),
+    };
+
+    let (graphics, output, output_size) = if nested {
+        tracing::info!("nested backend: rendering into a window on the host desktop");
+        let (winit_backend, winit_source) = winit::init::<GlesRenderer>()
+            .map_err(|error| format!("winit backend init failed: {error}"))?;
+        let window_size = winit_backend.window_size();
+
+        // Flipped180 is deliberately copied from Smithay's own winit
+        // references (anvil, smallvil): the winit EGL surface's
+        // coordinate origin differs from the output's, and this
+        // transform is how upstream squares the two. The session
+        // backend's outputs need no such correction, which is why the
+        // transform lives in this arm and not in the shared scene.
+        let mode = Mode { size: window_size, refresh: 60_000 };
+        let output = Output::new(
+            "chonkstep".to_string(),
+            PhysicalProperties {
+                size: (0, 0).into(),
+                subpixel: Subpixel::Unknown,
+                make: "chonkstep".into(),
+                model: "winit".into(),
+            },
+        );
+        output.change_current_state(Some(mode), Some(Transform::Flipped180), None, Some((0, 0).into()));
+        output.set_preferred(mode);
+
+        // Host-window events: input feeds the translation layer in
+        // `input.rs` (the seam where raw winit input becomes seat
+        // events plus `BackendEvent`s per the wm-x11 contract);
+        // everything else is resize/redraw/close plumbing.
+        loop_handle
+            .insert_source(winit_source, |event, _, comp| match event {
+                WinitEvent::Resized { size, .. } => comp.on_output_resized(size),
+                WinitEvent::Input(event) => crate::input::process_input_event(comp, event),
+                // The host asked us to repaint (the window was exposed
+                // or resized): full-frame damage, same as any scene
+                // change.
+                WinitEvent::Redraw => comp.wm.backend_mut().mark_damaged(),
+                WinitEvent::CloseRequested => comp.running = false,
+                WinitEvent::Focus(_) => {}
+            })
+            .map_err(|error| format!("failed to register the winit event source: {error}"))?;
+
+        let size = Size::new(window_size.w.max(0) as u32, window_size.h.max(0) as u32);
+        (Graphics::Winit(winit_backend), output, size)
+    } else {
+        tracing::info!("session backend: taking over the DRM device and input");
+        let init = crate::session::init(&loop_handle, &display_handle)?;
+        (init.graphics, init.output, init.output_size)
+    };
     let _global = output.create_global::<Compositor>(&display_handle);
-    output.change_current_state(Some(mode), Some(Transform::Flipped180), None, Some((0, 0).into()));
-    output.set_preferred(mode);
     let damage_tracker = OutputDamageTracker::from_output(&output);
 
     // The listening socket clients connect to, plus the display's own
@@ -770,22 +860,6 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
     wm.set_placement_policy(config.placement);
     wm.set_snap_threshold(config.edge_resistance);
 
-    // Host-window events: input feeds the translation layer in
-    // `input.rs` (the seam where raw winit input becomes seat events
-    // plus `BackendEvent`s per the wm-x11 contract); everything else
-    // is resize/redraw/close plumbing handled right here.
-    loop_handle
-        .insert_source(winit_source, |event, _, comp| match event {
-            WinitEvent::Resized { size, .. } => comp.on_output_resized(size),
-            WinitEvent::Input(event) => crate::input::process_input_event(comp, event),
-            // The host asked us to repaint (the window was exposed or
-            // resized): full-frame damage, same as any scene change.
-            WinitEvent::Redraw => comp.wm.backend_mut().mark_damaged(),
-            WinitEvent::CloseRequested => comp.running = false,
-            WinitEvent::Focus(_) => {}
-        })
-        .map_err(|error| format!("failed to register the winit event source: {error}"))?;
-
     // XWayland: spawned here, attached (X11Wm::start_wm) when it
     // reports ready. Failure to start is a degraded session — X11
     // apps unavailable — not a dead one, so it logs instead of
@@ -847,7 +921,7 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
         output,
         xwm: None,
         xdisplay: None,
-        winit_backend,
+        graphics,
         damage_tracker,
         pointer_location: (0.0, 0.0).into(),
         cursor_status: CursorImageStatus::default_named(),
