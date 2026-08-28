@@ -1,0 +1,81 @@
+# Two gates on every change: the full workspace test suite (pure Rust,
+# no X server needed - the decoration renderer and wm-core's state
+# machine are tested against an in-memory fake backend), then a live
+# smoke test that boots the release binary as the window manager of a
+# headless Xvfb display and asserts, from the outside with xprop, that
+# it actually took over the display (EWMH's _NET_SUPPORTING_WM_CHECK
+# handshake) and actually manages a real client (an xterm appearing in
+# _NET_CLIENT_LIST). The smoke test exists because everything the unit
+# suite cannot see - connection setup, substructure-redirect ownership,
+# reparenting, property publishing - is exactly what breaks against a
+# real X server.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Run the workspace test suite
+        run: cargo test --workspace
+
+      - name: Install X11 smoke test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb xterm x11-utils
+
+      - name: Build release binaries
+        run: cargo build --release
+
+      - name: X11 smoke test
+        run: |
+          set -eux
+
+          # A headless X server; :99 avoids any display the runner
+          # might already have.
+          Xvfb :99 -screen 0 1280x800x24 &
+          XVFB_PID=$!
+          sleep 2
+
+          # The WM under test. Logs are captured so an assertion
+          # failure below can show what the WM itself saw.
+          DISPLAY=:99 RUST_LOG=info ./target/release/chonkstep > chonkstep.log 2>&1 &
+          WM_PID=$!
+          sleep 3
+
+          # A real client for the WM to manage.
+          DISPLAY=:99 xterm &
+          XTERM_PID=$!
+          sleep 3
+
+          fail() {
+            echo "FAIL: $1"
+            echo "--- chonkstep log ---"
+            cat chonkstep.log || true
+            echo "--- root window properties ---"
+            xprop -display :99 -root || true
+            exit 1
+          }
+
+          # EWMH handshake: a compliant WM publishes a window id in
+          # _NET_SUPPORTING_WM_CHECK on the root. Its absence means
+          # chonkstep never became the WM (or died on startup).
+          xprop -display :99 -root _NET_SUPPORTING_WM_CHECK | grep -q "0x" \
+            || fail "_NET_SUPPORTING_WM_CHECK missing on the root window"
+
+          # Client management: the xterm must have been adopted into
+          # _NET_CLIENT_LIST. An empty or missing list means map
+          # requests are not being handled.
+          xprop -display :99 -root _NET_CLIENT_LIST | grep -q "0x" \
+            || fail "_NET_CLIENT_LIST is empty or missing"
+
+          echo "smoke test passed: WM handshake present, client managed"
+          kill "$XTERM_PID" "$WM_PID" "$XVFB_PID" || true

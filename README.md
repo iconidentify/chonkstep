@@ -85,6 +85,45 @@ scripts/update.sh
 
 which pulls, rebuilds, and hot-restarts the running session in place.
 
+## Configuration
+
+chonkstep reads `~/.config/chonkstep/config.toml` (or
+`$XDG_CONFIG_HOME/chonkstep/config.toml`) at startup. The file is
+optional - with no file, the defaults below apply - and a broken file
+never prevents the session from starting: invalid lines are warned
+about and skipped, and a completely unreadable file just means the
+defaults. See [docs/config.example.toml](docs/config.example.toml) for
+a fully commented example of every option.
+
+Three settings and a keybinding table are available:
+`focus_follows_mouse` (click-to-focus by default), `scale` (HiDPI UI
+scaling; the `CHONKSTEP_SCALE` environment variable overrides it), and
+`theme` (a theme picked live from the root menu is persisted and wins
+over it). Keybindings merge over the defaults - list a combo to change
+it, set it to `"none"` to unbind it, and every unlisted default stays.
+
+Edits apply on the next restart: `scripts/restart.sh` hot-restarts the
+live session in place (windows survive), or bind the `restart` action
+to a key and never leave the keyboard.
+
+The default bindings:
+
+| Binding          | Action                                       |
+|------------------|----------------------------------------------|
+| alt+shift+return | Spawn a terminal                             |
+| alt+shift+q      | Close the focused window                     |
+| alt+shift+x      | Toggle maximize                              |
+| alt+shift+s      | Toggle shade (roll up into the titlebar)     |
+| alt+shift+m      | Miniaturize to an icon tile                  |
+| alt+shift+f      | Toggle fullscreen                            |
+| alt+ctrl+right   | Next workspace (grows on demand)             |
+| alt+ctrl+left    | Previous workspace                           |
+| alt+shift+right  | Carry the focused window to the next         |
+| alt+shift+left   | Carry the focused window to the previous     |
+
+Alt+Tab window cycling is part of the modal switcher machinery and is
+always available; it is not rebindable from the config file.
+
 ## Development
 
 - `scripts/dev-nested.sh [width] [height] [scale]` runs chonkstep

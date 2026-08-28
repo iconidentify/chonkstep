@@ -3,8 +3,14 @@ name = "wm-config"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "User configuration: keybindings, workspace count, default focus policy."
+description = "User configuration: config.toml loading, keybinding parsing, and the built-in defaults."
 
 [dependencies]
 wm-core = { path = "../wm-core" }
 serde = { version = "1", features = ["derive"] }
+# preserve_order matters: [keybindings] entries can name the same combo
+# through different spellings ("alt+ctrl+right" vs "alt+control+right"),
+# and the documented rule is "last one in the file wins" — which requires
+# iterating the table in document order, not BTreeMap key order.
+toml = { version = "0.9", features = ["preserve_order"] }
+tracing = "0.1"
