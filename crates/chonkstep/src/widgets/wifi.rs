@@ -1,0 +1,40 @@
+//! Network link instrument: wifi/ethernet connection state and control.
+//! Currently the SDK's dead-screen placeholder face - the sampling and
+//! the `wm_theme::wifi` renderer are being built on the
+//! `wm_theme::panel` SDK.
+
+use std::cell::RefCell;
+
+use wm_theme::{panel, Theme};
+use wm_theme_api::DecorationBuffer;
+
+use super::DockWidget;
+
+pub struct WifiWidget {
+    font_system: RefCell<cosmic_text::FontSystem>,
+    swash_cache: RefCell<cosmic_text::SwashCache>,
+}
+
+impl WifiWidget {
+    pub fn new() -> Self {
+        Self { font_system: RefCell::new(cosmic_text::FontSystem::new()), swash_cache: RefCell::new(cosmic_text::SwashCache::new()) }
+    }
+}
+
+impl Default for WifiWidget {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl DockWidget for WifiWidget {
+    fn tick(&mut self) -> bool {
+        false
+    }
+
+    fn render(&self, theme: &Theme, tile: u32) -> DecorationBuffer {
+        let mut font_system = self.font_system.borrow_mut();
+        let mut swash_cache = self.swash_cache.borrow_mut();
+        panel::render_dead_tile(theme, &mut font_system, &mut swash_cache, tile, "LNK")
+    }
+}
