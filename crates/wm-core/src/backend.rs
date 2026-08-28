@@ -102,6 +102,14 @@ pub trait Backend {
     fn ungrab_pointer(&mut self, handle: DragHandle);
     fn grab_key(&mut self, combo: KeyCombo);
     fn ungrab_key(&mut self, combo: KeyCombo);
+    /// Exclusive keyboard grab for a modal interaction (the Alt-Tab
+    /// switcher): every key press and release reaches the WM until
+    /// `ungrab_keyboard`, letting it see the plain Tab repeats and the
+    /// Alt release no passive grab covers. Defaulted to a no-op so
+    /// backends (and test fakes) without modal input needs compile
+    /// unchanged.
+    fn grab_keyboard(&mut self) {}
+    fn ungrab_keyboard(&mut self) {}
     /// Passive per-window button grab so the WM sees the first click on
     /// an unfocused window (click-to-focus) without stealing later
     /// clicks from the app. The one honest X11-ism on this trait — a

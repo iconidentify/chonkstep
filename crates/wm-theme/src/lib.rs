@@ -47,6 +47,7 @@ pub mod netgraph;
 pub mod netload;
 pub mod paint;
 mod raster;
+pub mod switcher;
 
 pub use model::Theme;
 pub use raster::RasterThemeEngine;

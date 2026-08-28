@@ -672,6 +672,14 @@ impl X11Backend {
                 let modifiers = modifiers_from_state(u16::from(e.state));
                 Some(BackendEvent::KeyPress(KeyCombo { keysym, modifiers }))
             }
+            // Releases only ever arrive while a modal keyboard grab is
+            // active (nothing passively grabs them) — exactly when the
+            // Alt-Tab switcher needs the Alt release that commits it.
+            Event::KeyRelease(e) => {
+                let keysym = self.keysym_for_keycode(e.detail)?;
+                let modifiers = modifiers_from_state(u16::from(e.state));
+                Some(BackendEvent::KeyRelease(KeyCombo { keysym, modifiers }))
+            }
             Event::PropertyNotify(e) => {
                 // Watch both the legacy and EWMH title properties — a
                 // client that only ever sets `_NET_WM_NAME` (common for
@@ -1453,6 +1461,25 @@ impl Backend for X11Backend {
 
     fn ungrab_pointer(&mut self, _handle: DragHandle) {
         let _ = self.conn.ungrab_pointer(CURRENT_TIME);
+        let _ = self.conn.flush();
+    }
+
+    fn grab_keyboard(&mut self) {
+        match self.conn.grab_keyboard(false, self.root, CURRENT_TIME, GrabMode::ASYNC, GrabMode::ASYNC) {
+            Ok(cookie) => {
+                if let Ok(reply) = cookie.reply() {
+                    if reply.status != GrabStatus::SUCCESS {
+                        tracing::warn!(?reply.status, "grab_keyboard not granted");
+                    }
+                }
+            }
+            Err(e) => tracing::warn!(?e, "grab_keyboard failed"),
+        }
+        let _ = self.conn.flush();
+    }
+
+    fn ungrab_keyboard(&mut self) {
+        let _ = self.conn.ungrab_keyboard(CURRENT_TIME);
         let _ = self.conn.flush();
     }
 
