@@ -25,6 +25,6 @@ pub use hittest::{hit_test, HitTarget};
 pub use manager::{Notification, WindowManager};
 pub use snap::snap_position;
 pub use types::{
-    BackendEvent, DragHandle, KeyCombo, Modifiers, MouseButton, SizeHints, SurfaceRef, WmClass,
-    WmProtocol,
+    BackendEvent, DragHandle, KeyCombo, Modifiers, MouseButton, NetState, NetStateAction,
+    SizeHints, SurfaceRef, WindowType, WmClass, WmProtocol,
 };

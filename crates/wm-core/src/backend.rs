@@ -1,7 +1,7 @@
-use wm_theme_api::{DecorationBuffer, DecorationLayout, Rect, ResizeEdge, Size};
+use wm_theme_api::{DecorationBuffer, DecorationLayout, Rect, ResizeEdge, Size, Point};
 
 use crate::client::MonitorInfo;
-use crate::types::{BackendEvent, DragHandle, KeyCombo, MouseButton, SizeHints, WmClass, WmProtocol};
+use crate::types::{BackendEvent, DragHandle, KeyCombo, MouseButton, SizeHints, WmClass, WmProtocol, WindowType};
 
 /// Everything the protocol-agnostic core needs from a windowing backend
 /// (X11 today via `wm-x11`, a future Wayland/Smithay backend later).
@@ -116,6 +116,38 @@ pub trait Backend {
     /// some clients otherwise leave stale buffer garbage visible until
     /// their next incidental redraw. Defaulted to a no-op.
     fn refresh_client(&mut self, _window: Self::WindowId, _size: Size) {}
+
+    // -- EWMH ---------------------------------------------------------------
+    // All defaulted to no-ops: a backend without a concept of EWMH (the
+    // test fake) compiles unchanged, and `wm-core` calls these
+    // unconditionally at the state-change sites without caring.
+
+    /// The window's advertised `_NET_WM_WINDOW_TYPE`, read at manage
+    /// time to pick a decoration policy.
+    fn window_type(&self, _window: Self::WindowId) -> WindowType {
+        WindowType::Normal
+    }
+    /// Maps a window this WM has decided not to manage (see
+    /// `WindowType::Unmanaged`) exactly as the client created it.
+    fn map_unmanaged(&mut self, _window: Self::WindowId) {}
+    /// Moves the client window within its frame. Reparenting fixes the
+    /// client at the theme's chrome offset and normal reflows never
+    /// change it, so this only matters when the offset itself changes:
+    /// entering fullscreen (content at 0,0, no chrome) and leaving it
+    /// (back to the theme's offset).
+    fn position_client(&mut self, _window: Self::WindowId, _pos: Point) {}
+    /// Publishes `_NET_CLIENT_LIST` (managed clients, oldest first).
+    fn publish_client_list(&mut self, _clients: &[Self::WindowId]) {}
+    /// Publishes `_NET_ACTIVE_WINDOW` (`None` = no window focused).
+    fn publish_active_window(&mut self, _window: Option<Self::WindowId>) {}
+    /// Publishes `_NET_NUMBER_OF_DESKTOPS` and `_NET_CURRENT_DESKTOP`.
+    fn publish_workspaces(&mut self, _count: usize, _current: usize) {}
+    /// Publishes `_NET_WORKAREA` — the same rectangle for every
+    /// desktop, since the dock reserves the same strip on all of them.
+    fn publish_workarea(&mut self, _area: Rect, _workspace_count: usize) {}
+    /// Publishes a client's `_NET_WM_STATE` property from the WM's own
+    /// authoritative flags.
+    fn publish_net_state(&mut self, _window: Self::WindowId, _fullscreen: bool, _max_h: bool, _max_v: bool, _shaded: bool, _hidden: bool) {}
     /// Passive per-window button grab so the WM sees the first click on
     /// an unfocused window (click-to-focus) without stealing later
     /// clicks from the app. The one honest X11-ism on this trait — a

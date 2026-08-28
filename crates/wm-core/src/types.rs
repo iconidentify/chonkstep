@@ -62,6 +62,42 @@ pub enum SurfaceRef<Win, Frame> {
     Frame(Frame),
 }
 
+/// EWMH `_NET_WM_STATE` action field, verbatim from the spec.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NetStateAction {
+    Remove,
+    Add,
+    Toggle,
+}
+
+/// The `_NET_WM_STATE` properties this WM acts on. Anything else in a
+/// message is ignored (never rejected — EWMH wants unknown properties
+/// skipped, not the whole message dropped).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NetState {
+    Fullscreen,
+    MaximizedHorz,
+    MaximizedVert,
+}
+
+/// Coarse EWMH `_NET_WM_WINDOW_TYPE` classification — just enough to
+/// decide decoration policy, deliberately not a 1:1 mirror of every
+/// type atom.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum WindowType {
+    /// Decorate and manage normally (also the fallback for windows
+    /// that declare no type, per the spec).
+    #[default]
+    Normal,
+    /// Decorated and managed like Normal today; kept distinct so a
+    /// future transient-for/placement policy has the information.
+    Dialog,
+    /// Docks, menus, tooltips, splashes, notifications: map as-is,
+    /// no frame, no management — these draw their own chrome and
+    /// position themselves.
+    Unmanaged,
+}
+
 /// Events a `Backend` reports back to the core event loop.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BackendEvent<Win, Frame> {
@@ -109,6 +145,23 @@ pub enum BackendEvent<Win, Frame> {
     PointerEnter { surface: SurfaceRef<Win, Frame> },
     PointerLeave { surface: SurfaceRef<Win, Frame> },
     KeyPress(KeyCombo),
+    /// An EWMH `_NET_ACTIVE_WINDOW` client message: a pager, launcher,
+    /// or tool (xdotool, say) asked for this window to be activated —
+    /// deminiaturized/unshaded if needed, focused, and raised.
+    ActivateRequested(Win),
+    /// An EWMH `_NET_CLOSE_WINDOW` client message — close exactly as if
+    /// the titlebar close button had been pressed.
+    CloseRequested(Win),
+    /// An EWMH `_NET_WM_STATE` client message. The protocol carries an
+    /// action plus up to two state properties in one message (a
+    /// maximize request commonly toggles horizontal and vertical
+    /// together).
+    NetStateRequested { window: Win, action: NetStateAction, first: NetState, second: Option<NetState> },
+    /// The backend's connection to the display server is gone for good.
+    /// The event loop must exit: continuing to poll a dead connection
+    /// just spins (two zombie WMs burning CPU after a display restart —
+    /// confirmed live).
+    ShutdownRequested,
     /// A key was released. Backends only need to deliver these while a
     /// modal keyboard grab is active (the Alt-Tab switcher listens for
     /// the Alt release that commits the selection); releases outside a

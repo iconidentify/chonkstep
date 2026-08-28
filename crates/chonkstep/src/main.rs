@@ -152,7 +152,17 @@ fn main() {
         // window has caught up to the *latest* position, not a stale
         // one from earlier in the burst.
         let mut pending_motion = None;
+        let mut display_lost = false;
         while let Some(event) = wm.backend_mut().poll_event() {
+            // The display server is gone: nothing below can succeed,
+            // and looping on a dead connection is exactly how the
+            // zombie chonkstep processes that outlived an X restart
+            // were born (two found spinning at full poll rate,
+            // confirmed live). Exit cleanly instead.
+            if matches!(event, BackendEvent::ShutdownRequested) {
+                display_lost = true;
+                break;
+            }
             if matches!(event, BackendEvent::PointerMotion { .. }) {
                 pending_motion = Some(event);
                 continue;
@@ -161,6 +171,10 @@ fn main() {
                 dispatch_motion(&mut wm, &mut desktop, &theme, motion);
             }
             wm.dispatch(event);
+        }
+        if display_lost {
+            tracing::error!("display connection lost, exiting");
+            break;
         }
         if let Some(motion) = pending_motion.take() {
             dispatch_motion(&mut wm, &mut desktop, &theme, motion);

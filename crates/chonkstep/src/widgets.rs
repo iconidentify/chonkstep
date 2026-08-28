@@ -49,18 +49,6 @@ fn now_hms() -> (u32, u32, u32) {
 /// cost is paid at most this often.
 const SAMPLE_INTERVAL: Duration = Duration::from_millis(1000);
 
-/// How often the CPU meter's displayed level takes one easing step
-/// toward the real sampled load. Deliberately much coarser than the
-/// event loop's own ~60Hz tick rate: each step that actually moves
-/// triggers a full dock repaint (a real `PutImage` over the wire), and a
-/// meter genuinely doesn't need to visibly move more often than this to
-/// read as smooth.
-const ANIM_INTERVAL: Duration = Duration::from_millis(80);
-
-/// How many recent samples the network graph keeps — one column per
-/// sample at render time.
-const NET_HISTORY: usize = 20;
-
 /// The dock's clock: the classic one-tile analog face, nothing else.
 /// It used to be one face of a two-face system-monitor widget (a click
 /// toggled a taller btop-style dashboard with a seven-segment clock,
@@ -95,77 +83,6 @@ impl DockWidget for ClockWidget {
         let (h, m, s) = self.clock.unwrap_or((0, 0, 0));
         clock::render_clock_tile(theme, tile, h, m, s)
     }
-}
-
-struct NetSampler {
-    last_sample: Instant,
-    last_totals: Option<(u64, u64)>,
-    peak_bps: f32,
-    rx: VecDeque<f32>,
-    tx: VecDeque<f32>,
-}
-
-impl NetSampler {
-    fn new() -> Self {
-        Self {
-            last_sample: Instant::now() - SAMPLE_INTERVAL,
-            last_totals: None,
-            peak_bps: 1.0,
-            rx: VecDeque::from(vec![0.0; NET_HISTORY]),
-            tx: VecDeque::from(vec![0.0; NET_HISTORY]),
-        }
-    }
-
-    fn tick(&mut self) -> bool {
-        if self.last_sample.elapsed() < SAMPLE_INTERVAL {
-            return false;
-        }
-        let elapsed = self.last_sample.elapsed().as_secs_f32();
-        self.last_sample = Instant::now();
-
-        let Some((rx, tx)) = read_net_totals() else { return false };
-        let Some((prev_rx, prev_tx)) = self.last_totals.replace((rx, tx)) else {
-            return false;
-        };
-
-        let rx_bps = rx.saturating_sub(prev_rx) as f32 / elapsed.max(0.1);
-        let tx_bps = tx.saturating_sub(prev_tx) as f32 / elapsed.max(0.1);
-
-        // Slowly-decaying peak so the graph rescales to recent activity
-        // instead of staying squashed by one old spike forever.
-        self.peak_bps = (self.peak_bps * 0.98).max(rx_bps).max(tx_bps).max(1024.0);
-
-        self.rx.pop_front();
-        self.rx.push_back((rx_bps / self.peak_bps).clamp(0.0, 1.0));
-        self.tx.pop_front();
-        self.tx.push_back((tx_bps / self.peak_bps).clamp(0.0, 1.0));
-        true
-    }
-}
-
-/// `/proc/net/dev`: two header lines, then one line per interface —
-/// `iface: rx_bytes rx_packets ... tx_bytes tx_packets ...` (rx bytes is
-/// field 0 after the colon, tx bytes is field 8). `lo` is excluded so
-/// purely local traffic doesn't register as network activity.
-fn read_net_totals() -> Option<(u64, u64)> {
-    parse_net_totals(&std::fs::read_to_string("/proc/net/dev").ok()?)
-}
-
-fn parse_net_totals(contents: &str) -> Option<(u64, u64)> {
-    let mut rx_total = 0u64;
-    let mut tx_total = 0u64;
-    for line in contents.lines().skip(2) {
-        let Some((iface, rest)) = line.split_once(':') else { continue };
-        if iface.trim() == "lo" {
-            continue;
-        }
-        let fields: Vec<u64> = rest.split_whitespace().filter_map(|f| f.parse().ok()).collect();
-        let Some(&rx) = fields.first() else { continue };
-        let Some(&tx) = fields.get(8) else { continue };
-        rx_total += rx;
-        tx_total += tx;
-    }
-    Some((rx_total, tx_total))
 }
 
 /// `/proc/net/dev`, kept per-interface rather than summed — see
@@ -338,22 +255,6 @@ mod tests {
     use super::*;
 
 
-
-    #[test]
-    fn net_totals_sum_every_interface_except_loopback() {
-        let dev = "Inter-|   Receive\n face |bytes\n\
-            \x20 lo: 999 0 0 0 0 0 0 0 999 0 0 0 0 0 0 0\n\
-            \x20 eth0: 1000 5 0 0 0 0 0 0 200 3 0 0 0 0 0 0\n\
-            \x20 wlan0: 500 2 0 0 0 0 0 0 100 1 0 0 0 0 0 0\n";
-        let (rx, tx) = parse_net_totals(dev).expect("dev lines should parse");
-        assert_eq!(rx, 1000 + 500, "loopback traffic must not count");
-        assert_eq!(tx, 200 + 100);
-    }
-
-    #[test]
-    fn empty_dev_contents_do_not_panic() {
-        assert_eq!(parse_net_totals(""), Some((0, 0)));
-    }
 
 
 
