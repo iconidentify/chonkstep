@@ -8,13 +8,13 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use wm_config::Action;
-use wm_core::{Backend, BackendEvent, FocusPolicy, KeyCombo, MouseButton, Notification, WindowManager};
+use wm_core::{Backend, BackendEvent, ClientFlags, FocusPolicy, KeyCombo, MouseButton, Notification, WindowManager};
 use wm_theme::{RasterThemeEngine, Theme};
 use wm_theme_api::Point;
 use wm_x11::X11Backend;
 use x11rb::protocol::xproto::Window;
 
-use desktop::{Desktop, IconDragResult, RootMenuAction};
+use desktop::{Desktop, IconDragResult, MenuAction, RootMenuAction, WindowMenuAction, WindowMenuContext};
 
 /// `urxvt`'s own default size (80x24, negotiated correctly through
 /// normal ICCCM size hints) is already reasonable, and — unlike
@@ -158,6 +158,12 @@ fn main() {
         tracing::info!("focus-follows-mouse enabled (config `focus_follows_mouse`; CHONKSTEP_FOCUS_FOLLOWS_MOUSE overrides)");
         wm.set_focus_policy(FocusPolicy::FocusFollowsMouse);
     }
+    // Initial window placement and drag edge snapping, straight from
+    // the config file (`placement`, `edge_resistance`). `wm-config`
+    // already validated both — anything broken fell back to its default
+    // there, with a warning — so the values apply verbatim here.
+    wm.set_placement_policy(config.placement);
+    wm.set_snap_threshold(config.edge_resistance);
     for window in existing {
         wm.dispatch(BackendEvent::MapRequest(window));
     }
@@ -550,8 +556,9 @@ fn carry_focused_to_workspace(wm: &mut WindowManager<X11Backend>, workspace: usi
 }
 
 /// Reacts to a `wm-core` state change the shell needs to know about but
-/// that `wm-core` itself has no opinion on — currently just icon tiles
-/// for miniaturized windows.
+/// that `wm-core` itself has no opinion on — icon tiles for
+/// miniaturized windows, the Alt+Tab switcher, and the titlebar
+/// right-click window menu.
 fn handle_notification(wm: &mut WindowManager<X11Backend>, desktop: &mut Desktop, theme: &Theme, notification: Notification) {
     match notification {
         Notification::Miniaturized(id, preview) => {
@@ -577,6 +584,31 @@ fn handle_notification(wm: &mut WindowManager<X11Backend>, desktop: &mut Desktop
             }
         }
         Notification::CycleEnded => desktop.hide_switcher(wm.backend_mut()),
+        Notification::WindowMenuRequested { id, at } => {
+            // Titlebar right-click: `wm-core` reports which client and
+            // where, the shell owns what the menu contains. The context
+            // is a snapshot of the client's state at open time — that's
+            // what the item labels reflect — while the action a pick
+            // eventually fires re-reads live state inside `wm-core`, so
+            // a snapshot is all the menu needs. A stale id (the client
+            // vanished between the click and this drain) is silently
+            // nothing, matching every other stale-id path.
+            if let Some(client) = wm.client(id) {
+                let ctx = WindowMenuContext {
+                    client: id,
+                    title: client.title.clone(),
+                    shaded: client.flags.contains(ClientFlags::SHADED),
+                    // Either axis counts: the menu's toggle drives
+                    // `toggle_maximize_full`, whose own un-maximize
+                    // branch fires when either flag is set.
+                    maximized: client.flags.intersects(ClientFlags::MAXIMIZED_H | ClientFlags::MAXIMIZED_V),
+                    fullscreen: client.flags.contains(ClientFlags::FULLSCREEN),
+                    workspace: client.workspace,
+                    workspace_count: wm.workspace_count(),
+                };
+                desktop.open_window_menu(wm.backend_mut(), theme, at, ctx);
+            }
+        }
     }
 }
 
@@ -591,6 +623,13 @@ fn handle_notification(wm: &mut WindowManager<X11Backend>, desktop: &mut Desktop
 /// held button would keep reporting against whatever window the press
 /// landed on — X11's implicit grab — rather than the menu now under the
 /// pointer; that grab is what makes press-drag-release-to-pick work.
+///
+/// Two menu kinds share the pick path at the bottom: the root menu is
+/// opened right here (root press above), while the window menu is
+/// opened from the `WindowMenuRequested` notification the titlebar
+/// right-click emits (see `handle_notification`) — but once open, both
+/// are shell windows, so both deliver their clicks through this
+/// function and resolve in the one `click_menu` dispatch below.
 fn handle_shell_click(
     wm: &mut WindowManager<X11Backend>,
     desktop: &mut Desktop,
@@ -663,32 +702,47 @@ fn handle_shell_click(
 
     if let Some(action) = desktop.click_menu(wm.backend_mut(), theme, window, local) {
         match action {
-            RootMenuAction::LaunchTerminal => spawn_terminal(theme),
-            RootMenuAction::LaunchAbout => {
-                spawn::spawn_detached(&about_binary_path(), &[]);
-            }
-            RootMenuAction::LaunchBrowser => launch_browser(scale),
-            RootMenuAction::SetWallpaper(wallpaper) => {
-                desktop.set_wallpaper(wm.backend_mut(), theme, wallpaper);
-            }
-            RootMenuAction::SetTheme(id) => {
-                if let Err(e) = theme_select::persist(id) {
-                    tracing::warn!(?e, id, "failed to persist theme selection");
+            MenuAction::Root(action) => match action {
+                RootMenuAction::LaunchTerminal => spawn_terminal(theme),
+                RootMenuAction::LaunchAbout => {
+                    spawn::spawn_detached(&about_binary_path(), &[]);
                 }
-                // A theme implies its wallpaper — persist that too, so
-                // the fresh process composes the full look. The
-                // Wallpaper menu can still override it afterward.
-                if let Some(pack) = wm_theme::default_theme::theme_by_id(id) {
-                    if let Some(wallpaper) = wallpaper::Wallpaper::from_id(&pack.wallpaper) {
-                        if let Err(e) = wallpaper.persist() {
-                            tracing::warn!(?e, id, "failed to persist theme wallpaper");
+                RootMenuAction::LaunchBrowser => launch_browser(scale),
+                RootMenuAction::SetWallpaper(wallpaper) => {
+                    desktop.set_wallpaper(wm.backend_mut(), theme, wallpaper);
+                }
+                RootMenuAction::SetTheme(id) => {
+                    if let Err(e) = theme_select::persist(id) {
+                        tracing::warn!(?e, id, "failed to persist theme selection");
+                    }
+                    // A theme implies its wallpaper — persist that too, so
+                    // the fresh process composes the full look. The
+                    // Wallpaper menu can still override it afterward.
+                    if let Some(pack) = wm_theme::default_theme::theme_by_id(id) {
+                        if let Some(wallpaper) = wallpaper::Wallpaper::from_id(&pack.wallpaper) {
+                            if let Err(e) = wallpaper.persist() {
+                                tracing::warn!(?e, id, "failed to persist theme wallpaper");
+                            }
                         }
                     }
+                    tracing::info!(theme = id, "theme selected \u{2014} hot-restarting in place to apply");
+                    restart_in_place();
                 }
-                tracing::info!(theme = id, "theme selected \u{2014} hot-restarting in place to apply");
-                restart_in_place();
-            }
-            RootMenuAction::Exit => return false,
+                RootMenuAction::Exit => return false,
+            },
+            // A window-menu pick carries the client it was opened for.
+            // Every call below is a stale-id-safe no-op by `wm-core`
+            // contract — the client may well have vanished while the
+            // menu sat open — so no re-validation is needed here.
+            MenuAction::Window(client, action) => match action {
+                WindowMenuAction::ToggleMaximize => wm.toggle_maximize_full(client),
+                WindowMenuAction::Miniaturize => wm.miniaturize(client),
+                WindowMenuAction::ToggleShade => wm.toggle_shade(client),
+                WindowMenuAction::ToggleFullscreen => wm.toggle_fullscreen(client),
+                WindowMenuAction::MoveToWorkspace(ws) => wm.move_client_to_workspace(client, ws),
+                WindowMenuAction::Close => wm.close_client(client),
+                WindowMenuAction::Kill => wm.kill_client(client),
+            },
         }
     }
 

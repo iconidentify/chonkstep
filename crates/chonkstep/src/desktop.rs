@@ -21,6 +21,10 @@ use wm_theme::menu::MenuItem;
 use wm_theme::switcher::{self, SwitcherEntry};
 use wm_theme::workspace;
 use wm_theme::{icon, paint, tile, Theme};
+// `wm_theme_api::PopupHost` is deliberately referenced by full path in
+// `ShellMenu`'s bounds rather than imported: bringing the trait into
+// scope makes every `backend.ungrab_pointer(..)` call ambiguous
+// between it and `wm_core::Backend`, which X11Backend also implements.
 use wm_theme_api::{DecorationBuffer, Point, Rect, Size};
 use wm_x11::X11Backend;
 use x11rb::protocol::xproto::Window;
@@ -46,26 +50,101 @@ pub enum RootMenuAction {
     Exit,
 }
 
+/// Snapshot of one client's menu-relevant state at the moment its
+/// commands menu opens — the event loop builds this from the live
+/// client when `Notification::WindowMenuRequested` arrives. The item
+/// labels reflect this snapshot ("Maximize" vs "Unmaximize"); the
+/// action a pick eventually fires re-reads live state inside
+/// `wm-core`, so a snapshot is all the menu itself ever needs.
+pub struct WindowMenuContext {
+    pub client: ClientId,
+    pub title: String,
+    pub shaded: bool,
+    pub maximized: bool,
+    pub fullscreen: bool,
+    /// The window's current workspace (0-based) — bullet-marked in the
+    /// Move To submenu the same way the root menu marks the active
+    /// theme and wallpaper.
+    pub workspace: usize,
+    pub workspace_count: usize,
+}
+
+/// A pick from the per-window commands menu — the shell-side analog of
+/// real WindowMaker's `winmenu.c` entries. Every variant maps onto an
+/// existing `WindowManager` method; the menu adds no behavior of its
+/// own, it only names things the WM can already do.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WindowMenuAction {
+    ToggleMaximize,
+    Miniaturize,
+    ToggleShade,
+    ToggleFullscreen,
+    /// 0-based; a value of `workspace_count` itself means "New
+    /// Workspace" — the grow-on-demand convention
+    /// `move_client_to_workspace` already supports.
+    MoveToWorkspace(usize),
+    /// The polite WM_DELETE_WINDOW request.
+    Close,
+    /// XKillClient — the last resort for a hung client that ignores
+    /// `Close`, exactly why `winmenu.c` keeps both entries.
+    Kill,
+}
+
+/// What a resolved menu click means, tagged by which kind of session
+/// fired it — the root menu and the window menu share one popup stack
+/// (see `ShellMenu`), so the one shared click path has to say which
+/// menu actually spoke.
+pub enum MenuAction {
+    Root(RootMenuAction),
+    Window(ClientId, WindowMenuAction),
+}
+
+// The action-id namespace for both menus, kept in documented, disjoint
+// ranges so a fired id can never even *look* like it belongs to the
+// other menu — `resolve_session_action`'s session check is the real
+// guard, the ranges keep the ids honest and debuggable:
+//   1..=99    root menu one-off entries
+//   100..=199 root Wallpaper submenu (`ACTION_WALLPAPER_BASE` + index)
+//   200..=299 root Theme submenu (`ACTION_THEME_BASE` + index)
+//   300..=399 window menu commands (`ACTION_WINDOW_*`)
+//   400..     window menu Move To entries (`ACTION_MOVE_TO_BASE` + n,
+//             where n == the workspace count means "New Workspace")
 const ACTION_LAUNCH_TERMINAL: u32 = 1;
 const ACTION_LAUNCH_ABOUT: u32 = 2;
 const ACTION_EXIT: u32 = 3;
 const ACTION_LAUNCH_BROWSER: u32 = 4;
 const ACTION_WALLPAPER_BASE: u32 = 100;
 const ACTION_THEME_BASE: u32 = 200;
+const ACTION_WINDOW_MAXIMIZE: u32 = 300;
+const ACTION_WINDOW_MINIATURIZE: u32 = 301;
+const ACTION_WINDOW_SHADE: u32 = 302;
+const ACTION_WINDOW_FULLSCREEN: u32 = 303;
+const ACTION_WINDOW_CLOSE: u32 = 304;
+const ACTION_WINDOW_KILL: u32 = 305;
+const ACTION_MOVE_TO_BASE: u32 = 400;
+
+/// The root menu's fixed title — also what a fresh `ShellMenu` is
+/// titled before any session opens.
+const ROOT_MENU_TITLE: &str = "chonkstep";
+
+/// The shared current-choice marker: a leading bullet on the selected
+/// row, matching spaces on every other row so all labels in the column
+/// start at the same x. Used by the root menu's Theme and Wallpaper
+/// submenus and the window menu's Move To submenu alike.
+fn bullet_label(selected: bool, label: &str) -> String {
+    if selected {
+        format!("\u{2022} {label}")
+    } else {
+        format!("  {label}")
+    }
+}
 
 fn root_menu_items(selected_wallpaper: Wallpaper, selected_theme_id: &str) -> Vec<MenuItem> {
-    let bullet = |selected: bool, label: &str| {
-        if selected {
-            format!("\u{2022} {label}")
-        } else {
-            format!("  {label}")
-        }
-    };
     let wallpaper_items = Wallpaper::ALL
         .into_iter()
         .enumerate()
         .map(|(index, wallpaper)| MenuItem::Action {
-            label: bullet(wallpaper == selected_wallpaper, wallpaper.label()),
+            label: bullet_label(wallpaper == selected_wallpaper, wallpaper.label()),
             action: ACTION_WALLPAPER_BASE + index as u32,
         })
         .collect();
@@ -73,7 +152,7 @@ fn root_menu_items(selected_wallpaper: Wallpaper, selected_theme_id: &str) -> Ve
         .iter()
         .enumerate()
         .map(|(index, (id, label))| MenuItem::Action {
-            label: bullet(*id == selected_theme_id, label),
+            label: bullet_label(*id == selected_theme_id, label),
             action: ACTION_THEME_BASE + index as u32,
         })
         .collect();
@@ -109,6 +188,224 @@ fn resolve_action(action: u32) -> Option<RootMenuAction> {
             wm_theme::default_theme::CHOICES[(action - ACTION_THEME_BASE) as usize].0,
         )),
         _ => None,
+    }
+}
+
+/// Longest window title the commands menu's title strip will show,
+/// ellipsis included. Menus are content-sized (`menu::render_menu`
+/// widens the popup to fit the title as well as the items), so an
+/// unbounded title — a browser or xterm happily puts a whole URL there
+/// — would stretch the popup across the screen. Real WindowMaker
+/// bounds menu text the same way (`winmenu.c`'s workspace submenu
+/// truncates names to `MAX_WORKSPACENAME_WIDTH`). 24 comfortably
+/// out-measures every fixed item label, so truncation only engages for
+/// genuinely long titles.
+const WINDOW_MENU_TITLE_MAX_CHARS: usize = 24;
+
+/// Truncation counts characters, not bytes — slicing a UTF-8 title at
+/// a byte offset could split a code point and panic. The ellipsis
+/// occupies the final slot of the cap rather than extending past it,
+/// so the strip never exceeds `WINDOW_MENU_TITLE_MAX_CHARS` glyphs.
+fn window_menu_title(title: &str) -> String {
+    if title.chars().count() <= WINDOW_MENU_TITLE_MAX_CHARS {
+        return title.to_string();
+    }
+    let mut truncated: String = title.chars().take(WINDOW_MENU_TITLE_MAX_CHARS - 1).collect();
+    truncated.push('\u{2026}');
+    truncated
+}
+
+/// The per-window commands menu, ported from real WindowMaker's
+/// `winmenu.c` entry list — Maximize, Miniaturize, Shade, Move To,
+/// Close, Kill, in its order, with Fullscreen standing in for the
+/// "Other maximization" cascade this WM doesn't have. Labels flip to
+/// their undo forms from the context snapshot, the same way
+/// `updateMenuForWindow` retitles entries there.
+fn window_menu_items(ctx: &WindowMenuContext) -> Vec<MenuItem> {
+    let move_to = (0..ctx.workspace_count)
+        .map(|n| MenuItem::Action {
+            // 1-based labels over 0-based payloads: users count
+            // workspaces from one, `move_client_to_workspace` from
+            // zero.
+            label: bullet_label(n == ctx.workspace, &format!("Workspace {}", n + 1)),
+            action: ACTION_MOVE_TO_BASE + n as u32,
+        })
+        .chain(std::iter::once(MenuItem::Action {
+            // One past the last existing workspace: resolves to
+            // `MoveToWorkspace(workspace_count)`, which
+            // `move_client_to_workspace` grows on demand. The
+            // never-selected bullet gutter keeps its label aligned
+            // with the workspace rows above it.
+            label: bullet_label(false, "New Workspace"),
+            action: ACTION_MOVE_TO_BASE + ctx.workspace_count as u32,
+        }))
+        .collect();
+
+    vec![
+        MenuItem::Action {
+            label: if ctx.maximized { "Unmaximize" } else { "Maximize" }.to_string(),
+            action: ACTION_WINDOW_MAXIMIZE,
+        },
+        MenuItem::Action { label: "Miniaturize".to_string(), action: ACTION_WINDOW_MINIATURIZE },
+        MenuItem::Action {
+            label: if ctx.shaded { "Unshade" } else { "Shade" }.to_string(),
+            action: ACTION_WINDOW_SHADE,
+        },
+        MenuItem::Action {
+            label: if ctx.fullscreen { "Exit Fullscreen" } else { "Fullscreen" }.to_string(),
+            action: ACTION_WINDOW_FULLSCREEN,
+        },
+        MenuItem::Submenu { label: "Move To".to_string(), items: move_to },
+        MenuItem::Action { label: "Close".to_string(), action: ACTION_WINDOW_CLOSE },
+        MenuItem::Action { label: "Kill".to_string(), action: ACTION_WINDOW_KILL },
+    ]
+}
+
+fn resolve_window_action(action: u32, workspace_count: usize) -> Option<WindowMenuAction> {
+    match action {
+        ACTION_WINDOW_MAXIMIZE => Some(WindowMenuAction::ToggleMaximize),
+        ACTION_WINDOW_MINIATURIZE => Some(WindowMenuAction::Miniaturize),
+        ACTION_WINDOW_SHADE => Some(WindowMenuAction::ToggleShade),
+        ACTION_WINDOW_FULLSCREEN => Some(WindowMenuAction::ToggleFullscreen),
+        ACTION_WINDOW_CLOSE => Some(WindowMenuAction::Close),
+        ACTION_WINDOW_KILL => Some(WindowMenuAction::Kill),
+        // `..=`, not `..`: one past the last workspace is the "New
+        // Workspace" entry.
+        action if (ACTION_MOVE_TO_BASE..=ACTION_MOVE_TO_BASE + workspace_count as u32)
+            .contains(&action) => Some(WindowMenuAction::MoveToWorkspace(
+            (action - ACTION_MOVE_TO_BASE) as usize,
+        )),
+        _ => None,
+    }
+}
+
+/// Which menu the one shared popup stack currently hosts. The root
+/// menu and the per-window commands menu deliberately share a single
+/// `CascadeMenu` (exactly one menu session on screen — opening either
+/// closes the other), so the shared click path needs a record of which
+/// session opened last; resolving by id alone would silently make the
+/// id ranges load-bearing for correctness instead of merely tidy.
+enum MenuSession {
+    Root,
+    Window {
+        /// Who the open menu commands — attached to every resolved
+        /// action so the dispatch in `main.rs` needs no other lookup.
+        client: ClientId,
+        /// The workspace count the Move To submenu was built against:
+        /// the resolver's bound for mapping `ACTION_MOVE_TO_BASE + n`
+        /// back into `MoveToWorkspace(n)`.
+        workspace_count: usize,
+    },
+}
+
+/// Decodes a fired action id strictly within the open session's own
+/// namespace: a root id during a window session (or the reverse)
+/// resolves to `None` — an effective dismissal, never a misattributed
+/// command. The two menus already use disjoint id ranges, so this is
+/// belt and suspenders — but menus fire commands as consequential as
+/// `Kill`, and "which menu was open" is knowable, so it is checked
+/// rather than assumed.
+fn resolve_session_action(session: &MenuSession, action: u32) -> Option<MenuAction> {
+    match session {
+        MenuSession::Root => resolve_action(action).map(MenuAction::Root),
+        MenuSession::Window { client, workspace_count } => {
+            resolve_window_action(action, *workspace_count)
+                .map(|window_action| MenuAction::Window(*client, window_action))
+        }
+    }
+}
+
+/// The desktop's single menu session: the root menu and the per-window
+/// commands menu both run on this one `CascadeMenu`, tagged with which
+/// kind of session is open so clicks resolve in the right namespace.
+/// Generic over `PopupHost` — unlike its `Desktop` wrapper methods,
+/// which are `X11Backend`-concrete — so tests can drive real
+/// open/click sequences against a fake host, the same seam
+/// `CascadeMenu`'s own tests use.
+struct ShellMenu {
+    menu: CascadeMenu<Window>,
+    session: MenuSession,
+}
+
+impl ShellMenu {
+    fn new() -> Self {
+        Self { menu: CascadeMenu::new(ROOT_MENU_TITLE, DESKTOP_BG), session: MenuSession::Root }
+    }
+
+    /// Swaps in a fresh controller titled for the session about to
+    /// open, closing whatever is on screen first. `CascadeMenu` fixes
+    /// its title at construction (one app-identity title per
+    /// controller), so a per-window title means a new controller — and
+    /// the outgoing one must be explicitly closed before it is
+    /// dropped: `CascadeMenu::open`'s own self-close cannot reach a
+    /// predecessor the replacement never knew about, and a dropped but
+    /// unclosed session would leak its popup windows and its pointer
+    /// grab.
+    fn begin_session<H: wm_theme_api::PopupHost<PopupId = Window>>(&mut self, host: &mut H, session: MenuSession, title: String) {
+        self.menu.close(host);
+        self.menu = CascadeMenu::new(title, DESKTOP_BG);
+        self.session = session;
+    }
+
+    fn open_root<H: wm_theme_api::PopupHost<PopupId = Window>>(
+        &mut self,
+        host: &mut H,
+        theme: &Theme,
+        font_system: &mut cosmic_text::FontSystem,
+        items: Vec<MenuItem>,
+        at: Point,
+        bounds: Size,
+    ) {
+        self.begin_session(host, MenuSession::Root, ROOT_MENU_TITLE.to_string());
+        self.menu.open(host, theme, font_system, items, at, bounds);
+    }
+
+    fn open_window<H: wm_theme_api::PopupHost<PopupId = Window>>(
+        &mut self,
+        host: &mut H,
+        theme: &Theme,
+        font_system: &mut cosmic_text::FontSystem,
+        ctx: &WindowMenuContext,
+        at: Point,
+        bounds: Size,
+    ) {
+        let session = MenuSession::Window { client: ctx.client, workspace_count: ctx.workspace_count };
+        self.begin_session(host, session, window_menu_title(&ctx.title));
+        self.menu.open(host, theme, font_system, window_menu_items(ctx), at, bounds);
+    }
+
+    /// See `Desktop::click_menu`, whose contract this implements.
+    fn click<H: wm_theme_api::PopupHost<PopupId = Window>>(
+        &mut self,
+        host: &mut H,
+        theme: &Theme,
+        font_system: &mut cosmic_text::FontSystem,
+        window: Window,
+        local: Point,
+    ) -> Option<MenuAction> {
+        match self.menu.click(host, theme, font_system, window, local)? {
+            MenuClick::Action(action) => resolve_session_action(&self.session, action),
+            MenuClick::OpenedSubmenu | MenuClick::Dismissed => None,
+        }
+    }
+
+    fn close<H: wm_theme_api::PopupHost<PopupId = Window>>(&mut self, host: &mut H) {
+        self.menu.close(host);
+    }
+
+    fn hover<H: wm_theme_api::PopupHost<PopupId = Window>>(
+        &mut self,
+        host: &mut H,
+        theme: &Theme,
+        font_system: &mut cosmic_text::FontSystem,
+        window: Window,
+        local: Point,
+    ) {
+        self.menu.hover(host, theme, font_system, window, local);
+    }
+
+    fn tick<H: wm_theme_api::PopupHost<PopupId = Window>>(&mut self, host: &mut H, theme: &Theme, font_system: &mut cosmic_text::FontSystem) {
+        self.menu.tick(host, theme, font_system);
     }
 }
 
@@ -205,12 +502,15 @@ pub struct Desktop {
     drag_threshold: i32,
     font_system: cosmic_text::FontSystem,
     swash_cache: cosmic_text::SwashCache,
-    /// The root menu and its cascades — a generic, reusable SDK
-    /// primitive (`wm_theme::cascade::CascadeMenu`), not desktop-shell-
-    /// specific state; a `chonk-ui` app building its own dropdown menu
-    /// over its own `PopupHost` gets the identical stack/hover/leak-safe
-    /// teardown behavior for free.
-    menu: CascadeMenu<Window>,
+    /// The one open menu session — root menu or per-window commands
+    /// menu, whichever opened last — riding on `wm_theme::cascade::
+    /// CascadeMenu`, a generic, reusable SDK primitive rather than
+    /// desktop-shell-specific state; a `chonk-ui` app building its own
+    /// dropdown menu over its own `PopupHost` gets the identical
+    /// stack/hover/leak-safe teardown behavior for free. `ShellMenu`
+    /// adds only the session-kind tag that keeps click resolution in
+    /// the right action namespace.
+    menu: ShellMenu,
     /// Every instrument shown below the identity tile, top to bottom —
     /// see `crate::widgets` for the SDK these implement. Order is what
     /// `redraw_dock` draws and what a middle-click drag reorders.
@@ -307,7 +607,7 @@ impl Desktop {
             drag_threshold: ((4.0 * scale).round() as i32).max(2),
             font_system: cosmic_text::FontSystem::new(),
             swash_cache: cosmic_text::SwashCache::new(),
-            menu: CascadeMenu::new("chonkstep", DESKTOP_BG),
+            menu: ShellMenu::new(),
             widgets,
             workspace,
             clip_window,
@@ -599,7 +899,18 @@ impl Desktop {
 
     pub fn open_root_menu(&mut self, backend: &mut X11Backend, theme: &Theme, at: Point) {
         let bounds = self.screen_size();
-        self.menu.open(backend, theme, &mut self.font_system, root_menu_items(self.wallpaper, &self.theme_id), at, bounds);
+        self.menu.open_root(backend, theme, &mut self.font_system, root_menu_items(self.wallpaper, &self.theme_id), at, bounds);
+    }
+
+    /// Opens the per-window commands menu at `at` (root coordinates —
+    /// where the titlebar right-click landed, as reported by
+    /// `Notification::WindowMenuRequested`), titled with the window's
+    /// own (truncated) title. Replaces whatever menu session is
+    /// already open, root or window — exactly one menu on screen at a
+    /// time, like real WindowMaker's one-open-menu-per-screen rule.
+    pub fn open_window_menu(&mut self, backend: &mut X11Backend, theme: &Theme, at: Point, ctx: WindowMenuContext) {
+        let bounds = self.screen_size();
+        self.menu.open_window(backend, theme, &mut self.font_system, &ctx, at, bounds);
     }
 
     /// Applies a built-in wallpaper immediately and repaints the dock to
@@ -703,13 +1014,15 @@ impl Desktop {
 
     /// If `window` belongs to the open menu chain, resolves a click on
     /// it and, if it fired an action, returns the resolved
-    /// `RootMenuAction` — see `CascadeMenu::click` for the full
-    /// click/dismiss/cascade contract.
-    pub fn click_menu(&mut self, backend: &mut X11Backend, theme: &Theme, window: Window, local: Point) -> Option<RootMenuAction> {
-        match self.menu.click(backend, theme, &mut self.font_system, window, local) {
-            Some(MenuClick::Action(action)) => resolve_action(action),
-            _ => None,
-        }
+    /// `MenuAction` — `Root(..)` when the root menu is the open
+    /// session, `Window(client, ..)` when the per-window commands menu
+    /// is, decided by which session actually opened rather than by
+    /// inspecting the id (see `resolve_session_action`). Misses and
+    /// dismissals return `None` exactly as before — see
+    /// `CascadeMenu::click` for the full click/dismiss/cascade
+    /// contract.
+    pub fn click_menu(&mut self, backend: &mut X11Backend, theme: &Theme, window: Window, local: Point) -> Option<MenuAction> {
+        self.menu.click(backend, theme, &mut self.font_system, window, local)
     }
 
     pub fn hover_menu(&mut self, backend: &mut X11Backend, theme: &Theme, window: Window, local: Point) {
@@ -976,5 +1289,237 @@ mod tests {
         let MenuItem::Submenu { items, .. } = submenu else { panic!("expected submenu") };
         assert_eq!(items.len(), Wallpaper::ALL.len());
         assert!(items.iter().any(|item| item.label() == "\u{2022} Teal Blueprint"));
+    }
+
+    fn window_ctx(workspace: usize, workspace_count: usize) -> WindowMenuContext {
+        WindowMenuContext {
+            client: ClientId::default(),
+            title: "xterm".to_string(),
+            shaded: false,
+            maximized: false,
+            fullscreen: false,
+            workspace,
+            workspace_count,
+        }
+    }
+
+    #[test]
+    fn window_menu_labels_flip_to_their_undo_forms() {
+        let plain = window_menu_items(&window_ctx(0, 1));
+        let labels: Vec<&str> = plain.iter().map(|item| item.label()).collect();
+        assert_eq!(
+            labels,
+            ["Maximize", "Miniaturize", "Shade", "Fullscreen", "Move To", "Close", "Kill"],
+            "winmenu.c's entry order, with the plain do-forms for an untouched window"
+        );
+
+        let mut engaged = window_ctx(0, 1);
+        engaged.maximized = true;
+        engaged.shaded = true;
+        engaged.fullscreen = true;
+        let items = window_menu_items(&engaged);
+        let labels: Vec<&str> = items.iter().map(|item| item.label()).collect();
+        assert_eq!(
+            labels,
+            ["Unmaximize", "Miniaturize", "Unshade", "Exit Fullscreen", "Move To", "Close", "Kill"],
+            "engaged states must offer their undo forms"
+        );
+    }
+
+    #[test]
+    fn move_to_submenu_lists_every_workspace_marks_the_current_and_ends_with_new_workspace() {
+        let items = window_menu_items(&window_ctx(1, 3));
+        let submenu = items.iter().find(|item| item.label() == "Move To").expect("Move To submenu");
+        let MenuItem::Submenu { items: move_to, .. } = submenu else { panic!("expected a submenu") };
+
+        let labels: Vec<&str> = move_to.iter().map(|item| item.label()).collect();
+        assert_eq!(
+            labels,
+            ["  Workspace 1", "\u{2022} Workspace 2", "  Workspace 3", "  New Workspace"],
+            "1-based labels, the window's own workspace bulleted, New Workspace last"
+        );
+
+        // Payloads are 0-based, in order, with New Workspace resolving
+        // one past the last existing workspace — the id
+        // `move_client_to_workspace` grows a workspace for.
+        for (index, item) in move_to.iter().enumerate() {
+            let MenuItem::Action { action, .. } = item else { panic!("Move To rows are actions") };
+            assert_eq!(
+                resolve_window_action(*action, 3),
+                Some(WindowMenuAction::MoveToWorkspace(index)),
+            );
+        }
+    }
+
+    #[test]
+    fn short_window_titles_pass_through_untruncated() {
+        assert_eq!(window_menu_title("xterm"), "xterm");
+        let exactly_at_cap = "a".repeat(WINDOW_MENU_TITLE_MAX_CHARS);
+        assert_eq!(window_menu_title(&exactly_at_cap), exactly_at_cap);
+    }
+
+    #[test]
+    fn long_window_titles_truncate_to_the_cap_with_a_trailing_ellipsis() {
+        let truncated = window_menu_title(&"x".repeat(60));
+        assert_eq!(truncated.chars().count(), WINDOW_MENU_TITLE_MAX_CHARS);
+        assert!(truncated.ends_with('\u{2026}'));
+
+        // Counted in characters, not bytes — a multibyte title must
+        // truncate cleanly at the same visible length, never split a
+        // code point (which would panic in a byte-indexed slice).
+        let multibyte = window_menu_title(&"\u{00e9}".repeat(60));
+        assert_eq!(multibyte.chars().count(), WINDOW_MENU_TITLE_MAX_CHARS);
+        assert!(multibyte.ends_with('\u{2026}'));
+    }
+
+    #[test]
+    fn action_ids_resolve_only_within_their_own_sessions_namespace() {
+        let window_session = MenuSession::Window { client: ClientId::default(), workspace_count: 2 };
+
+        // A root-menu id fired during a window session (stale event,
+        // stray id — however it happened) must dissolve into nothing,
+        // never decode as a window command.
+        assert!(resolve_session_action(&window_session, ACTION_LAUNCH_TERMINAL).is_none());
+        assert!(resolve_session_action(&window_session, ACTION_WALLPAPER_BASE).is_none());
+        assert!(resolve_session_action(&window_session, ACTION_THEME_BASE).is_none());
+
+        // And the reverse: window ids mean nothing to a root session.
+        assert!(resolve_session_action(&MenuSession::Root, ACTION_WINDOW_KILL).is_none());
+        assert!(resolve_session_action(&MenuSession::Root, ACTION_MOVE_TO_BASE).is_none());
+
+        // While each session still resolves its own namespace.
+        assert!(matches!(
+            resolve_session_action(&window_session, ACTION_WINDOW_CLOSE),
+            Some(MenuAction::Window(_, WindowMenuAction::Close))
+        ));
+        assert!(matches!(
+            resolve_session_action(&MenuSession::Root, ACTION_LAUNCH_TERMINAL),
+            Some(MenuAction::Root(RootMenuAction::LaunchTerminal))
+        ));
+    }
+
+    /// Minimal `PopupHost` for driving `ShellMenu` without an X server
+    /// — the same seam `CascadeMenu`'s own tests use. `PopupId = u32`
+    /// is exactly what `Window` aliases, so the `ShellMenu` bounds are
+    /// satisfied by a plain counter.
+    #[derive(Default)]
+    struct FakeHost {
+        next_id: u32,
+        open: std::collections::HashSet<u32>,
+        grabs: u32,
+        ungrabs: u32,
+    }
+
+    impl wm_theme_api::PopupHost for FakeHost {
+        type PopupId = u32;
+
+        fn create_popup(&mut self, _geometry: Rect, _background: (u8, u8, u8)) -> Option<u32> {
+            self.next_id += 1;
+            self.open.insert(self.next_id);
+            Some(self.next_id)
+        }
+
+        fn destroy_popup(&mut self, popup: u32) {
+            self.open.remove(&popup);
+        }
+
+        fn paint_popup(&mut self, _popup: u32, _buffer: &DecorationBuffer) {}
+
+        fn grab_pointer(&mut self) -> wm_theme_api::PopupGrab {
+            self.grabs += 1;
+            wm_theme_api::PopupGrab(0)
+        }
+
+        fn ungrab_pointer(&mut self, _grab: wm_theme_api::PopupGrab) {
+            self.ungrabs += 1;
+        }
+    }
+
+    struct MenuFixture {
+        theme: Theme,
+        font_system: cosmic_text::FontSystem,
+        host: FakeHost,
+        menu: ShellMenu,
+    }
+
+    impl MenuFixture {
+        fn new() -> Self {
+            Self {
+                theme: wm_theme::default_theme::nextstep_classic(),
+                font_system: cosmic_text::FontSystem::new(),
+                host: FakeHost::default(),
+                menu: ShellMenu::new(),
+            }
+        }
+
+        fn open_root(&mut self) {
+            let items = root_menu_items(Wallpaper::TealBlueprint, "window-maker");
+            self.menu.open_root(&mut self.host, &self.theme, &mut self.font_system, items, Point::new(0, 0), Size::new(1600, 1000));
+        }
+
+        fn open_window(&mut self, ctx: &WindowMenuContext) {
+            self.menu.open_window(&mut self.host, &self.theme, &mut self.font_system, ctx, Point::new(0, 0), Size::new(1600, 1000));
+        }
+
+        /// Center of item row `index`, computed from a real render of
+        /// the same title/items the open session used — honest about
+        /// where rows actually land as the menu's layout recipe
+        /// evolves, same as `cascade.rs`'s own row-point helper.
+        fn row_point(&mut self, title: &str, items: &[MenuItem], index: usize) -> Point {
+            let render = wm_theme::menu::render_menu(&self.theme, &mut self.font_system, title, items, None);
+            let rect = render.item_rects[index];
+            Point::new(rect.pos.x + rect.size.w as i32 / 2, rect.pos.y + rect.size.h as i32 / 2)
+        }
+
+        fn click(&mut self, window: u32, local: Point) -> Option<MenuAction> {
+            self.menu.click(&mut self.host, &self.theme, &mut self.font_system, window, local)
+        }
+
+        fn only_open_window(&self) -> u32 {
+            assert_eq!(self.host.open.len(), 1, "expected exactly one open popup");
+            *self.host.open.iter().next().unwrap()
+        }
+    }
+
+    #[test]
+    fn opening_the_window_menu_over_an_open_root_menu_leaves_one_session() {
+        let mut f = MenuFixture::new();
+        f.open_root();
+        assert_eq!(f.host.open.len(), 1);
+
+        let ctx = window_ctx(0, 2);
+        f.open_window(&ctx);
+
+        assert_eq!(f.host.open.len(), 1, "the root session must be torn down, not shadowed");
+        assert_eq!(f.host.ungrabs, 1, "the root session's pointer grab must be released");
+        assert_eq!(f.host.grabs, 2, "the window session holds its own grab");
+
+        // And the surviving session resolves clicks in the *window*
+        // namespace: its first row is Maximize, not the root menu's
+        // Terminal.
+        let window = f.only_open_window();
+        let items = window_menu_items(&ctx);
+        let row = f.row_point(&window_menu_title(&ctx.title), &items, 0);
+        assert!(matches!(
+            f.click(window, row),
+            Some(MenuAction::Window(_, WindowMenuAction::ToggleMaximize))
+        ));
+        assert!(f.host.open.is_empty(), "firing an action closes the session");
+    }
+
+    #[test]
+    fn reopening_the_root_menu_after_a_window_session_restores_root_resolution() {
+        let mut f = MenuFixture::new();
+        f.open_window(&window_ctx(0, 1));
+        f.open_root();
+        assert_eq!(f.host.open.len(), 1);
+
+        let window = f.only_open_window();
+        let items = root_menu_items(Wallpaper::TealBlueprint, "window-maker");
+        let row = f.row_point(ROOT_MENU_TITLE, &items, 0);
+        assert!(matches!(
+            f.click(window, row),
+            Some(MenuAction::Root(RootMenuAction::LaunchTerminal))
+        ));
     }
 }

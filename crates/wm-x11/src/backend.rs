@@ -1698,6 +1698,11 @@ impl Backend for X11Backend {
         let _ = self.conn.flush();
     }
 
+    fn kill_client(&mut self, window: Self::WindowId) {
+        let _ = self.conn.kill_client(window.0);
+        let _ = self.conn.flush();
+    }
+
     fn grab_pointer_for_drag(&mut self) -> DragHandle {
         let event_mask = EventMask::BUTTON_RELEASE | EventMask::POINTER_MOTION;
         match self.conn.grab_pointer(

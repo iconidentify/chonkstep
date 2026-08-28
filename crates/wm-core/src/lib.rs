@@ -11,6 +11,7 @@ mod client;
 mod focus;
 mod hittest;
 mod manager;
+mod placement;
 mod resize;
 mod snap;
 mod types;
@@ -23,6 +24,7 @@ pub use client::{Client, ClientFlags, ClientId, Lifecycle, MaximizeDirections, M
 pub use focus::FocusPolicy;
 pub use hittest::{hit_test, HitTarget};
 pub use manager::{Notification, WindowManager};
+pub use placement::{place_frame, PlacementPolicy};
 pub use snap::snap_position;
 pub use types::{
     BackendEvent, DragHandle, KeyCombo, Modifiers, MouseButton, NetState, NetStateAction,

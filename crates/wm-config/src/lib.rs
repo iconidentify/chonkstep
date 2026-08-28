@@ -31,6 +31,8 @@
 //! focus_follows_mouse = false        # optional; default false
 //! scale = 2.0                        # optional; UI scale factor
 //! theme = "window-maker"             # optional; theme name
+//! placement = "smart"                # optional; "smart" | "cascade" | "center"
+//! edge_resistance = 10               # optional; px, 0 disables edge snapping
 //!
 //! [keybindings]
 //! "alt+shift+return" = "spawn-terminal"
@@ -50,7 +52,7 @@
 use std::path::PathBuf;
 
 pub use wm_core::FocusPolicy;
-use wm_core::{KeyCombo, Modifiers};
+use wm_core::{KeyCombo, Modifiers, PlacementPolicy};
 
 /// Everything a keybinding can do. Deliberately a closed set of verbs
 /// rather than free-form commands: the WM owns the semantics (which
@@ -107,12 +109,22 @@ fn action_from_name(name: &str) -> Option<Action> {
 /// combo exactly once without deduplicating. `scale` and `theme` stay
 /// `Option` so the binary's precedence rules (env var over config over
 /// built-in, persisted theme state over config) can distinguish an
-/// absent setting from an explicit one.
+/// absent setting from an explicit one. `placement` and
+/// `edge_resistance` are plain values, not `Option`s, because nothing
+/// outside the config file competes over them — "user said nothing"
+/// and "user chose the default" are indistinguishable on purpose.
 #[derive(Clone, Debug)]
 pub struct Config {
     pub focus_follows_mouse: bool,
     pub scale: Option<f32>,
     pub theme: Option<String>,
+    /// Where newly mapped windows go when the client expressed no
+    /// position preference. Fed to the WM's placement engine verbatim.
+    pub placement: PlacementPolicy,
+    /// Snap distance for interactive moves, in pixels: a dragged frame
+    /// edge within this many pixels of a screen or window edge lands
+    /// flush against it. `0` disables snapping entirely.
+    pub edge_resistance: u32,
     pub keybindings: Vec<(KeyCombo, Action)>,
 }
 
@@ -136,6 +148,12 @@ impl Config {
             focus_follows_mouse: false,
             scale: None,
             theme: None,
+            // Smart is WindowMaker's own default placement, and 10px
+            // matches its stock edge-resistance feel: strong enough to
+            // catch a deliberate drag toward an edge, weak enough that
+            // sailing past it never feels sticky.
+            placement: PlacementPolicy::Smart,
+            edge_resistance: 10,
             keybindings: vec![
                 bind("alt+shift+return", Action::SpawnTerminal),
                 bind("alt+shift+q", Action::Close),
@@ -304,6 +322,35 @@ fn scale_from_value(value: &toml::Value) -> Option<f32> {
     (scale.is_finite() && scale > 0.0).then_some(scale)
 }
 
+/// Maps a `placement` value from the file to its policy. Only a string
+/// is meaningful; matching is trimmed and case-insensitive for the
+/// same reason action names are — `"Cascade"` should not silently cost
+/// the user their placement preference.
+fn placement_from_value(value: &toml::Value) -> Option<PlacementPolicy> {
+    let toml::Value::String(name) = value else {
+        return None;
+    };
+    match name.trim().to_ascii_lowercase().as_str() {
+        "smart" => Some(PlacementPolicy::Smart),
+        "cascade" => Some(PlacementPolicy::Cascade),
+        "center" => Some(PlacementPolicy::Center),
+        _ => None,
+    }
+}
+
+/// Validates an `edge_resistance` value: a non-negative integer that
+/// fits the `u32` the WM's snap threshold takes (zero included — it is
+/// the documented way to disable snapping). Floats are rejected rather
+/// than truncated: `edge_resistance = 7.5` misunderstands the unit
+/// (whole pixels), and silently picking a rounding direction would
+/// hide that from the user.
+fn edge_resistance_from_value(value: &toml::Value) -> Option<u32> {
+    let toml::Value::Integer(px) = value else {
+        return None;
+    };
+    u32::try_from(*px).ok()
+}
+
 /// The pure core [`load`] wraps: parses config-file text into a
 /// [`Config`], merging over [`Config::default_config`].
 ///
@@ -340,6 +387,20 @@ pub fn parse(text: &str) -> Result<Config, String> {
                 other => tracing::warn!(
                     value = ?other,
                     "config: theme must be a string, ignoring it"
+                ),
+            },
+            "placement" => match placement_from_value(value) {
+                Some(policy) => config.placement = policy,
+                None => tracing::warn!(
+                    value = ?value,
+                    "config: placement must be \"smart\", \"cascade\", or \"center\", keeping default"
+                ),
+            },
+            "edge_resistance" => match edge_resistance_from_value(value) {
+                Some(px) => config.edge_resistance = px,
+                None => tracing::warn!(
+                    value = ?value,
+                    "config: edge_resistance must be a non-negative integer, keeping default"
                 ),
             },
             "keybindings" => match value {
@@ -596,6 +657,8 @@ mod tests {
         assert!(!config.focus_follows_mouse);
         assert_eq!(config.scale, None);
         assert_eq!(config.theme, None);
+        assert_eq!(config.placement, PlacementPolicy::Smart);
+        assert_eq!(config.edge_resistance, 10);
     }
 
     // ---- parse: whole-file behavior -----------------------------------
@@ -607,6 +670,8 @@ mod tests {
         assert_eq!(config.focus_follows_mouse, defaults.focus_follows_mouse);
         assert_eq!(config.scale, defaults.scale);
         assert_eq!(config.theme, defaults.theme);
+        assert_eq!(config.placement, defaults.placement);
+        assert_eq!(config.edge_resistance, defaults.edge_resistance);
         assert_eq!(config.keybindings, defaults.keybindings);
     }
 
@@ -623,6 +688,8 @@ mod tests {
             focus_follows_mouse = true
             scale = 1.5
             theme = "window-maker"
+            placement = "cascade"
+            edge_resistance = 4
 
             [keybindings]
             "alt+shift+return" = "spawn-terminal"
@@ -635,6 +702,8 @@ mod tests {
         assert!(config.focus_follows_mouse);
         assert_eq!(config.scale, Some(1.5));
         assert_eq!(config.theme.as_deref(), Some("window-maker"));
+        assert_eq!(config.placement, PlacementPolicy::Cascade);
+        assert_eq!(config.edge_resistance, 4);
         // Restating a default is harmless; a new binding is added; the
         // unbound default is gone; everything unlisted survives.
         assert_eq!(action_for(&config, "alt+shift+return"), Some(Action::SpawnTerminal));
@@ -783,11 +852,15 @@ mod tests {
             focus_follows_mouse = "yes"
             scale = "big"
             theme = 3
+            placement = 7
+            edge_resistance = "sticky"
         "#;
         let config = parse(text).unwrap();
         assert!(!config.focus_follows_mouse);
         assert_eq!(config.scale, None);
         assert_eq!(config.theme, None);
+        assert_eq!(config.placement, PlacementPolicy::Smart);
+        assert_eq!(config.edge_resistance, 10);
         assert_eq!(config.keybindings.len(), 10);
     }
 
@@ -802,6 +875,110 @@ mod tests {
     #[test]
     fn integer_scale_is_accepted() {
         assert_eq!(parse("scale = 2").unwrap().scale, Some(2.0));
+    }
+
+    // ---- parse: placement ---------------------------------------------
+
+    #[test]
+    fn every_placement_name_maps_to_its_policy() {
+        let cases: &[(&str, PlacementPolicy)] = &[
+            ("smart", PlacementPolicy::Smart),
+            ("cascade", PlacementPolicy::Cascade),
+            ("center", PlacementPolicy::Center),
+        ];
+        for (name, policy) in cases {
+            let config = parse(&format!("placement = \"{name}\"")).unwrap();
+            assert_eq!(config.placement, *policy, "name {name:?}");
+        }
+    }
+
+    #[test]
+    fn placement_is_case_insensitive_and_trimmed() {
+        for text in [
+            "placement = \"Cascade\"",
+            "placement = \"CASCADE\"",
+            "placement = \"cAsCaDe\"",
+            "placement = \" cascade \"",
+        ] {
+            let config = parse(text).unwrap();
+            assert_eq!(config.placement, PlacementPolicy::Cascade, "text {text:?}");
+        }
+    }
+
+    #[test]
+    fn unknown_or_wrongly_typed_placement_keeps_the_default() {
+        for text in [
+            // Unknown names: no prefix matching, no guessing.
+            "placement = \"random\"",
+            "placement = \"smartest\"",
+            "placement = \"\"",
+            // Wrong types entirely.
+            "placement = 3",
+            "placement = true",
+            "placement = [\"smart\"]",
+        ] {
+            let config = parse(text).unwrap();
+            assert_eq!(config.placement, PlacementPolicy::Smart, "text {text:?}");
+        }
+    }
+
+    // ---- parse: edge_resistance ---------------------------------------
+
+    #[test]
+    fn edge_resistance_accepts_any_non_negative_integer() {
+        let cases: &[(&str, u32)] = &[
+            // Zero is valid, not a degenerate case: it is the documented
+            // way to turn move-drag edge snapping off.
+            ("edge_resistance = 0", 0),
+            ("edge_resistance = 1", 1),
+            ("edge_resistance = 32", 32),
+            ("edge_resistance = 4294967295", u32::MAX),
+        ];
+        for (text, expected) in cases {
+            let config = parse(text).unwrap();
+            assert_eq!(config.edge_resistance, *expected, "text {text:?}");
+        }
+    }
+
+    #[test]
+    fn invalid_edge_resistance_keeps_the_default() {
+        for text in [
+            "edge_resistance = -1",
+            "edge_resistance = -10",
+            // One past u32::MAX: out of range, not silently clamped.
+            "edge_resistance = 4294967296",
+            // Fractional pixels are a unit misunderstanding, and even a
+            // whole-valued float is the wrong type — rejecting both
+            // keeps "integer" an honest description of the setting.
+            "edge_resistance = 1.5",
+            "edge_resistance = 10.0",
+            "edge_resistance = \"10\"",
+            "edge_resistance = true",
+        ] {
+            let config = parse(text).unwrap();
+            assert_eq!(config.edge_resistance, 10, "text {text:?}");
+        }
+    }
+
+    #[test]
+    fn bad_placement_and_edge_resistance_do_not_cost_the_rest_of_the_file() {
+        // Both new settings bad, everything else good: the per-entry
+        // fallback must be surgical, exactly like [keybindings]'.
+        let text = r#"
+            placement = "diagonal"
+            edge_resistance = -3
+            focus_follows_mouse = true
+            theme = "graphite"
+
+            [keybindings]
+            "super+t" = "spawn-terminal"
+        "#;
+        let config = parse(text).unwrap();
+        assert_eq!(config.placement, PlacementPolicy::Smart);
+        assert_eq!(config.edge_resistance, 10);
+        assert!(config.focus_follows_mouse);
+        assert_eq!(config.theme.as_deref(), Some("graphite"));
+        assert_eq!(action_for(&config, "super+t"), Some(Action::SpawnTerminal));
     }
 
     #[test]

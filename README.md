@@ -22,6 +22,15 @@ restarts that keep your windows open.
   and horizontal arrows on the flat sides. North and west drags anchor
   the opposite edge, and client size hints (a terminal's cell grid) are
   respected mid-drag.
+- **WindowMaker window behaviors.** New windows are placed by
+  WindowMaker's smart-placement scan - least overlap, top-left bias -
+  with the `placement` setting switching to cascade or center. A
+  right-click on any titlebar opens the window commands menu:
+  maximize, miniaturize, shade, fullscreen, move to another workspace,
+  close, and kill for the window that ignores close. And move-drags
+  snap flush against screen and window edges, with WindowMaker's edge
+  resistance feel (`edge_resistance` tunes the distance; 0 turns it
+  off).
 - **A modal Alt-Tab switcher.** Hold Alt and Tab through a centered
   switch panel of live window thumbnails - selection commits when Alt
   is released, Escape cancels, Shift+Tab steps backward. The panel is
@@ -112,12 +121,16 @@ about and skipped, and a completely unreadable file just means the
 defaults. See [docs/config.example.toml](docs/config.example.toml) for
 a fully commented example of every option.
 
-Three settings and a keybinding table are available:
+Five settings and a keybinding table are available:
 `focus_follows_mouse` (click-to-focus by default), `scale` (HiDPI UI
-scaling; the `CHONKSTEP_SCALE` environment variable overrides it), and
+scaling; the `CHONKSTEP_SCALE` environment variable overrides it),
 `theme` (a theme picked live from the root menu is persisted and wins
-over it). Keybindings merge over the defaults - list a combo to change
-it, set it to `"none"` to unbind it, and every unlisted default stays.
+over it), `placement` (where new windows land: `smart` by default, or
+`cascade` / `center`), and `edge_resistance` (how close, in pixels, a
+dragged window gets to a screen or window edge before snapping flush;
+`0` disables snapping). Keybindings merge over the defaults - list a
+combo to change it, set it to `"none"` to unbind it, and every
+unlisted default stays.
 
 Edits apply on the next restart: `scripts/restart.sh` hot-restarts the
 live session in place (windows survive), or bind the `restart` action
