@@ -23,6 +23,8 @@
 //! - [`netload::render_netload_tile`] is a close port of the classic
 //!   `wmnetload` WindowMaker dockapp: a monochrome LCD panel with a
 //!   seven-segment throughput readout and a mirrored dot-matrix graph.
+//! - [`tile`] is the common tile platform (face, relief, ink, sunken
+//!   wells) every dock item and icon builds on - the core of the UI kit.
 //! - [`workspace::render_clip_tile`] renders the top-left Clip tile
 //!   (WindowMaker's workspace switcher, ported from its dock.c recipes).
 //! - [`icon::render_icon_tile`] renders a themed square icon tile (what
@@ -50,6 +52,7 @@ pub mod netload;
 pub mod paint;
 mod raster;
 pub mod switcher;
+pub mod tile;
 pub mod workspace;
 
 pub use model::Theme;
