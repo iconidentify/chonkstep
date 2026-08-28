@@ -107,11 +107,19 @@ fn resolve_action(action: u32) -> Option<RootMenuAction> {
 }
 
 /// The Alt-Tab switch panel's popup window and the candidate set it
-/// renders — see `Desktop::show_switcher`.
+/// renders — see `Desktop::show_switcher`. The window is deliberately
+/// long-lived: it is unmapped between sessions, not destroyed, and
+/// only recreated when the rendered size changes. Destroying and
+/// recreating it on every session wedged picom's xrender scene on the
+/// VM (the dead panel kept compositing while live frames vanished —
+/// confirmed live and cleared by a compositor restart), and rapid
+/// map/unmap of one stable window is the churn compositors are
+/// actually built for.
 struct SwitcherPanel {
     window: Option<Window>,
     size: Size,
     entries: Vec<SwitcherEntry>,
+    visible: bool,
 }
 
 struct IconTile {
@@ -502,13 +510,12 @@ impl Desktop {
     /// never re-captures every window. The popup window is recreated
     /// only when the rendered size changes.
     pub fn show_switcher(&mut self, backend: &mut X11Backend, theme: &Theme, entries: Option<Vec<SwitcherEntry>>, selected: usize) {
-        if let Some(new_entries) = entries {
-            if let Some(panel) = self.switcher.take() {
-                if let Some(window) = panel.window {
-                    let _ = backend.destroy_shell_window(window);
-                }
+        match (entries, self.switcher.as_mut()) {
+            (Some(new_entries), Some(panel)) => panel.entries = new_entries,
+            (Some(new_entries), None) => {
+                self.switcher = Some(SwitcherPanel { window: None, size: Size::new(0, 0), entries: new_entries, visible: false });
             }
-            self.switcher = Some(SwitcherPanel { window: None, size: Size::new(0, 0), entries: new_entries });
+            (None, _) => {}
         }
         let Self { switcher, font_system, swash_cache, tile, screen_width, screen_height, .. } = self;
         let Some(panel) = switcher.as_mut() else {
@@ -532,10 +539,9 @@ impl Desktop {
             };
             match backend.create_shell_window(geom, switcher::panel_background(theme), true) {
                 Ok(window) => {
-                    let _ = backend.map_shell_window(window);
-                    let _ = backend.raise_shell_window(window);
                     panel.window = Some(window);
                     panel.size = size;
+                    panel.visible = false;
                 }
                 Err(error) => {
                     tracing::warn!(?error, "failed to create switcher window");
@@ -544,22 +550,29 @@ impl Desktop {
             }
         }
         if let Some(window) = panel.window {
+            if !panel.visible {
+                let _ = backend.map_shell_window(window);
+                panel.visible = true;
+            }
+            let _ = backend.raise_shell_window(window);
             backend.blit(window, &buffer);
         }
     }
 
-    /// How many candidates the open panel is showing, `None` when no
-    /// panel is up — lets the caller decide whether the entry set needs
-    /// rebuilding.
+    /// How many candidates the *visible* panel is showing, `None` when
+    /// no session is on screen — the caller rebuilds the entry set
+    /// (fresh previews) at the start of every session, and again only
+    /// if the candidate count changes mid-session.
     pub fn switcher_entry_count(&self) -> Option<usize> {
-        self.switcher.as_ref().map(|panel| panel.entries.len())
+        self.switcher.as_ref().filter(|panel| panel.visible).map(|panel| panel.entries.len())
     }
 
     pub fn hide_switcher(&mut self, backend: &mut X11Backend) {
-        if let Some(panel) = self.switcher.take() {
+        if let Some(panel) = self.switcher.as_mut() {
             if let Some(window) = panel.window {
-                let _ = backend.destroy_shell_window(window);
+                let _ = backend.unmap_shell_window(window);
             }
+            panel.visible = false;
         }
     }
 
