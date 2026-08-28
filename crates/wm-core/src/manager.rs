@@ -273,6 +273,14 @@ impl<B: Backend> WindowManager<B> {
         self.current_workspace
     }
 
+    /// Iterates every managed client — the shell reads this for
+    /// cross-client concerns wm-core has no opinion on (the launcher
+    /// dock's running-app indicators match `Client::class` against
+    /// `.desktop` entries).
+    pub fn iter_clients(&self) -> impl Iterator<Item = (ClientId, &Client<B>)> {
+        self.clients.iter()
+    }
+
     pub fn workspace_count(&self) -> usize {
         self.workspace_count
     }
@@ -499,6 +507,7 @@ impl<B: Backend> WindowManager<B> {
         let content = self.backend.window_geometry(window);
         tracing::debug!(?window, ?content, "map request — client's own geometry at map time");
         let mut client = Client::new(window, title);
+        client.class = self.backend.window_class(window).map(|c| c.class).unwrap_or_default();
         client.geometry = content;
         client.workspace = self.current_workspace;
 

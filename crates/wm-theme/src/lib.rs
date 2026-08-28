@@ -46,6 +46,7 @@ pub mod clock;
 pub mod default_theme;
 pub mod digitalclock;
 pub mod icon;
+pub mod launcher;
 pub mod menu;
 pub mod model;
 pub mod netgraph;

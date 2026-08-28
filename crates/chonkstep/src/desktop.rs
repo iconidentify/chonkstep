@@ -11,7 +11,7 @@
 //! with the Clip and every widget, so the dock reads as one family.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::rc::Rc;
 
 use tiny_skia::{FilterQuality, Pixmap, PixmapPaint, Transform};
@@ -41,7 +41,12 @@ pub const DESKTOP_BG: (u8, u8, u8) = (128, 129, 159);
 pub enum RootMenuAction {
     LaunchTerminal,
     LaunchAbout,
-    LaunchBrowser,
+    /// An entry picked from the Applications submenu — the payload is
+    /// an index into the same scanned `Vec<AppEntry>` handed to
+    /// `Desktop::new` (read back through `Desktop::apps`), not a menu
+    /// row position: the menu regroups entries by category, but the
+    /// flat index is the identity both sides agree on.
+    LaunchApp(usize),
     SetWallpaper(Wallpaper),
     /// The stable id of a built-in theme (`wm_theme::default_theme::
     /// CHOICES`) — handled in `main.rs`, which persists it and
@@ -109,10 +114,14 @@ pub enum MenuAction {
 //   300..=399 window menu commands (`ACTION_WINDOW_*`)
 //   400..     window menu Move To entries (`ACTION_MOVE_TO_BASE` + n,
 //             where n == the workspace count means "New Workspace")
+//   1000..    root Applications entries (`ACTION_APP_BASE` + the
+//             app's index into the stored `.desktop` index) —
+//             numerically past any Move To id a real session reaches,
+//             but both ranges are open-ended, so here the session
+//             check genuinely is the guard, not just the suspenders
 const ACTION_LAUNCH_TERMINAL: u32 = 1;
 const ACTION_LAUNCH_ABOUT: u32 = 2;
 const ACTION_EXIT: u32 = 3;
-const ACTION_LAUNCH_BROWSER: u32 = 4;
 const ACTION_WALLPAPER_BASE: u32 = 100;
 const ACTION_THEME_BASE: u32 = 200;
 const ACTION_WINDOW_MAXIMIZE: u32 = 300;
@@ -122,6 +131,7 @@ const ACTION_WINDOW_FULLSCREEN: u32 = 303;
 const ACTION_WINDOW_CLOSE: u32 = 304;
 const ACTION_WINDOW_KILL: u32 = 305;
 const ACTION_MOVE_TO_BASE: u32 = 400;
+const ACTION_APP_BASE: u32 = 1000;
 
 /// The root menu's fixed title — also what a fresh `ShellMenu` is
 /// titled before any session opens.
@@ -139,7 +149,39 @@ fn bullet_label(selected: bool, label: &str) -> String {
     }
 }
 
-fn root_menu_items(selected_wallpaper: Wallpaper, selected_theme_id: &str) -> Vec<MenuItem> {
+/// The Applications submenu body, generated from the scanned
+/// `.desktop` index: one cascade per `AppCategory` that actually has
+/// entries — an empty category would render as a dead-end cascade, so
+/// it simply doesn't exist — in the enum's derived order (a `BTreeMap`
+/// keyed by the category iterates exactly that order, no hand-kept
+/// category list to drift out of sync with the enum). Within a
+/// cascade, apps keep their index order: `scan_applications` delivers
+/// the flat vec sorted by name, and filtering by category preserves
+/// that, so each cascade is alphabetical for free. "About chonkstep"
+/// closes the submenu after every cascade — with an empty index it is
+/// the whole submenu, so Applications never opens onto nothing.
+fn applications_items(apps: &[crate::apps::AppEntry]) -> Vec<MenuItem> {
+    let mut by_category: BTreeMap<crate::apps::AppCategory, Vec<MenuItem>> = BTreeMap::new();
+    for (index, app) in apps.iter().enumerate() {
+        by_category.entry(app.category).or_default().push(MenuItem::Action {
+            label: app.name.clone(),
+            // The flat index, not a per-category position — the id has
+            // to round-trip back into the stored vec (see
+            // `RootMenuAction::LaunchApp`).
+            action: ACTION_APP_BASE + index as u32,
+        });
+    }
+    by_category
+        .into_iter()
+        .map(|(category, entries)| MenuItem::Submenu { label: category.label().to_string(), items: entries })
+        .chain(std::iter::once(MenuItem::Action {
+            label: "About chonkstep".to_string(),
+            action: ACTION_LAUNCH_ABOUT,
+        }))
+        .collect()
+}
+
+fn root_menu_items(selected_wallpaper: Wallpaper, selected_theme_id: &str, apps: &[crate::apps::AppEntry]) -> Vec<MenuItem> {
     let wallpaper_items = Wallpaper::ALL
         .into_iter()
         .enumerate()
@@ -159,25 +201,28 @@ fn root_menu_items(selected_wallpaper: Wallpaper, selected_theme_id: &str) -> Ve
 
     vec![
         MenuItem::Action { label: "Terminal".to_string(), action: ACTION_LAUNCH_TERMINAL },
-        MenuItem::Submenu {
-            label: "Applications".to_string(),
-            items: vec![
-                MenuItem::Action { label: "Web Browser".to_string(), action: ACTION_LAUNCH_BROWSER },
-                MenuItem::Action { label: "About chonkstep".to_string(), action: ACTION_LAUNCH_ABOUT },
-            ],
-        },
+        MenuItem::Submenu { label: "Applications".to_string(), items: applications_items(apps) },
         MenuItem::Submenu { label: "Theme".to_string(), items: theme_items },
         MenuItem::Submenu { label: "Wallpaper".to_string(), items: wallpaper_items },
         MenuItem::Action { label: "Exit".to_string(), action: ACTION_EXIT },
     ]
 }
 
-fn resolve_action(action: u32) -> Option<RootMenuAction> {
+/// `app_count` bounds the `ACTION_APP_BASE +` range: the length of the
+/// app index the fired menu was built from, so a stale or corrupt id
+/// past the vec's end dissolves to `None` instead of indexing out of
+/// bounds downstream.
+fn resolve_action(action: u32, app_count: usize) -> Option<RootMenuAction> {
     match action {
         ACTION_LAUNCH_TERMINAL => Some(RootMenuAction::LaunchTerminal),
         ACTION_LAUNCH_ABOUT => Some(RootMenuAction::LaunchAbout),
-        ACTION_LAUNCH_BROWSER => Some(RootMenuAction::LaunchBrowser),
         ACTION_EXIT => Some(RootMenuAction::Exit),
+        // Subtraction-then-compare rather than a `Range::contains`:
+        // `ACTION_APP_BASE + app_count as u32` could in principle
+        // overflow u32, and the subtraction form has no such edge.
+        action if action >= ACTION_APP_BASE
+            && ((action - ACTION_APP_BASE) as usize) < app_count =>
+            Some(RootMenuAction::LaunchApp((action - ACTION_APP_BASE) as usize)),
         action if (ACTION_WALLPAPER_BASE..ACTION_WALLPAPER_BASE + Wallpaper::ALL.len() as u32)
             .contains(&action) => Some(RootMenuAction::SetWallpaper(
             Wallpaper::ALL[(action - ACTION_WALLPAPER_BASE) as usize],
@@ -286,7 +331,13 @@ fn resolve_window_action(action: u32, workspace_count: usize) -> Option<WindowMe
 /// session opened last; resolving by id alone would silently make the
 /// id ranges load-bearing for correctness instead of merely tidy.
 enum MenuSession {
-    Root,
+    Root {
+        /// The app-index length the Applications submenu was built
+        /// against: the resolver's bound for mapping `ACTION_APP_BASE
+        /// + i` back into `LaunchApp(i)` — the root-session twin of
+        /// the window session's `workspace_count`.
+        app_count: usize,
+    },
     Window {
         /// Who the open menu commands — attached to every resolved
         /// action so the dispatch in `main.rs` needs no other lookup.
@@ -307,7 +358,7 @@ enum MenuSession {
 /// rather than assumed.
 fn resolve_session_action(session: &MenuSession, action: u32) -> Option<MenuAction> {
     match session {
-        MenuSession::Root => resolve_action(action).map(MenuAction::Root),
+        MenuSession::Root { app_count } => resolve_action(action, *app_count).map(MenuAction::Root),
         MenuSession::Window { client, workspace_count } => {
             resolve_window_action(action, *workspace_count)
                 .map(|window_action| MenuAction::Window(*client, window_action))
@@ -329,7 +380,11 @@ struct ShellMenu {
 
 impl ShellMenu {
     fn new() -> Self {
-        Self { menu: CascadeMenu::new(ROOT_MENU_TITLE, DESKTOP_BG), session: MenuSession::Root }
+        // `app_count: 0` before any session opens: with no popup on
+        // screen no click can reach the resolver, so the placeholder
+        // bound is never consulted — and zero is the value that would
+        // refuse every app id anyway.
+        Self { menu: CascadeMenu::new(ROOT_MENU_TITLE, DESKTOP_BG), session: MenuSession::Root { app_count: 0 } }
     }
 
     /// Swaps in a fresh controller titled for the session about to
@@ -347,16 +402,21 @@ impl ShellMenu {
         self.session = session;
     }
 
+    /// `app_count` must be the length of the same app index `items`
+    /// was built from (`Desktop::open_root_menu` reads both from its
+    /// one stored vec) — it becomes the session's bound for resolving
+    /// `ACTION_APP_BASE +` ids back into `LaunchApp` indices.
     fn open_root<H: wm_theme_api::PopupHost<PopupId = Window>>(
         &mut self,
         host: &mut H,
         theme: &Theme,
         font_system: &mut cosmic_text::FontSystem,
         items: Vec<MenuItem>,
+        app_count: usize,
         at: Point,
         bounds: Size,
     ) {
-        self.begin_session(host, MenuSession::Root, ROOT_MENU_TITLE.to_string());
+        self.begin_session(host, MenuSession::Root { app_count }, ROOT_MENU_TITLE.to_string());
         self.menu.open(host, theme, font_system, items, at, bounds);
     }
 
@@ -471,8 +531,13 @@ pub enum IconDragResult {
     /// The press/release was a plain click (never crossed the drag
     /// threshold): restore this client's window.
     Restore(ClientId),
-    /// The icon was dragged to a new position; no further action.
-    Repositioned,
+    /// The icon was dragged to a new position. `root` is the pointer's
+    /// root-relative position at release, so a drop target (the
+    /// launcher dock's pin slots) hit-tests against where the pointer
+    /// actually let go, not against the tile's top-left corner —
+    /// dropping a tile whose corner hangs off a target while the
+    /// pointer is squarely on it must still count.
+    Repositioned { client: ClientId, root: Point },
 }
 
 /// Height of the visible Dock chrome only: one identity tile plus the
@@ -536,6 +601,12 @@ pub struct Desktop {
     /// Stable id of the active theme — only used to bullet-mark the
     /// Theme submenu; the `Theme` itself lives in `main.rs`.
     theme_id: String,
+    /// The scanned `.desktop` index, sorted by name — the one vec the
+    /// Applications submenu is generated from and
+    /// `RootMenuAction::LaunchApp` indexes back into. Captured once at
+    /// startup: rescanning on a schedule is future work, and a stale
+    /// menu entry merely fails to launch rather than misfiring.
+    apps: Vec<crate::apps::AppEntry>,
     logo: Pixmap,
 }
 
@@ -543,7 +614,7 @@ impl Desktop {
     /// `scale` multiplies every dock/icon pixel dimension — pass the
     /// same factor used for `Theme::scaled` so the shell's own chrome
     /// (which doesn't go through the theme engine) matches the WM's.
-    pub fn new(backend: &mut X11Backend, screen: Size, scale: f32, theme_id: String) -> Self {
+    pub fn new(backend: &mut X11Backend, screen: Size, scale: f32, theme_id: String, apps: Vec<crate::apps::AppEntry>) -> Self {
         let tile = ((56.0 * scale).round() as u32).max(16);
         let pad = ((4.0 * scale).round() as u32).max(1);
         // The dock is exactly one tile wide, tiles touch directly with
@@ -618,6 +689,7 @@ impl Desktop {
             wallpaper,
             switcher: None,
             theme_id,
+            apps,
             logo,
         };
         desktop.repaint_wallpaper(backend);
@@ -673,10 +745,6 @@ impl Desktop {
     /// `tick_widgets` pass notices the change and repaints the dock
     /// through the one shared path, instead of this method growing a
     /// second redraw entry point.
-    // The event-loop caller lands with `main.rs`'s workspace wiring,
-    // staged separately — the allow keeps the build warning-free until
-    // then and is harmless once the caller exists.
-    #[allow(dead_code)]
     pub fn set_workspace_display(&mut self, backend: &mut X11Backend, theme: &Theme, current: usize, count: usize) {
         {
             let mut shared = self.workspace.borrow_mut();
@@ -722,8 +790,6 @@ impl Desktop {
     /// requested, if any — the event loop performs the actual switch and
     /// then reports back via `set_workspace_display`. Take-semantics so
     /// one click means one switch, not one per loop iteration.
-    // Same staging note as `set_workspace_display` above.
-    #[allow(dead_code)]
     pub fn take_workspace_request(&mut self) -> Option<usize> {
         self.workspace.borrow_mut().requested.take()
     }
@@ -899,8 +965,12 @@ impl Desktop {
 
     pub fn open_root_menu(&mut self, backend: &mut X11Backend, theme: &Theme, at: Point) {
         let bounds = self.screen_size();
-        self.menu.open_root(backend, theme, &mut self.font_system, root_menu_items(self.wallpaper, &self.theme_id), at, bounds);
+        let items = root_menu_items(self.wallpaper, &self.theme_id, &self.apps);
+        self.menu.open_root(backend, theme, &mut self.font_system, items, self.apps.len(), at, bounds);
     }
+
+    /// The stored application index `RootMenuAction::LaunchApp`'s
+    /// payload indexes into — the dispatch in `main.rs` reads the
 
     /// Opens the per-window commands menu at `at` (root coordinates —
     /// where the titlebar right-click landed, as reported by
@@ -1126,16 +1196,24 @@ impl Desktop {
 
     /// Resolves whatever press `begin_icon_drag` armed, if any: a
     /// release without crossing the move threshold restores the
-    /// window (matching a plain click), one that did just leaves the
-    /// icon at its new dragged position. Returns `None` if no icon
-    /// drag was in progress — callers should fall through to their
-    /// normal release handling (e.g. menu clicks) in that case.
+    /// window (matching a plain click), one that did leaves the icon
+    /// at its new dragged position and reports where the pointer let
+    /// go so the caller can hit-test drop targets. Returns `None` if
+    /// no icon drag was in progress — callers should fall through to
+    /// their normal release handling (e.g. menu clicks) in that case.
     pub fn end_icon_drag(&mut self, backend: &mut X11Backend) -> Option<IconDragResult> {
         let drag = self.icon_drag.take()?;
         backend.ungrab_pointer(drag.grab);
 
         if drag.moved {
-            return Some(IconDragResult::Repositioned);
+            let icon = self.icons.get(&drag.window)?;
+            // The release position isn't handed to this method, but the
+            // drag state determines it: every motion placed the tile at
+            // `pointer - grab_offset` (see `resolve_drag_position`), so
+            // the pointer's last root position is exactly the tile's
+            // final position plus the in-tile grab offset.
+            let root = Point::new(icon.pos.x + drag.grab_offset.x, icon.pos.y + drag.grab_offset.y);
+            return Some(IconDragResult::Repositioned { client: icon.client, root });
         }
         let icon = self.icons.remove(&drag.window)?;
         let _ = backend.destroy_shell_window(icon.window);
@@ -1196,6 +1274,7 @@ fn blit_into(dest: &mut Pixmap, x: u32, y: u32, src: &DecorationBuffer) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::apps::{AppCategory, AppEntry};
 
     struct FixedHeightWidget(u32);
 
@@ -1276,7 +1355,7 @@ mod tests {
     fn wallpaper_actions_resolve_to_every_built_in_wallpaper() {
         for (index, wallpaper) in Wallpaper::ALL.into_iter().enumerate() {
             assert!(matches!(
-                resolve_action(ACTION_WALLPAPER_BASE + index as u32),
+                resolve_action(ACTION_WALLPAPER_BASE + index as u32, 0),
                 Some(RootMenuAction::SetWallpaper(resolved)) if resolved == wallpaper
             ));
         }
@@ -1284,11 +1363,119 @@ mod tests {
 
     #[test]
     fn wallpaper_submenu_marks_the_current_selection() {
-        let items = root_menu_items(Wallpaper::TealBlueprint, "window-maker");
+        let items = root_menu_items(Wallpaper::TealBlueprint, "window-maker", &[]);
         let submenu = items.iter().find(|item| item.label() == "Wallpaper").expect("wallpaper submenu");
         let MenuItem::Submenu { items, .. } = submenu else { panic!("expected submenu") };
         assert_eq!(items.len(), Wallpaper::ALL.len());
         assert!(items.iter().any(|item| item.label() == "\u{2022} Teal Blueprint"));
+    }
+
+    /// A minimal scanned entry — only `name` and `category` matter to
+    /// the menu; the rest is inert plumbing the launcher consumes.
+    fn app(name: &str, category: AppCategory) -> AppEntry {
+        AppEntry {
+            id: name.to_lowercase(),
+            name: name.to_string(),
+            exec: vec![name.to_lowercase()],
+            terminal: false,
+            category,
+            startup_wm_class: None,
+        }
+    }
+
+    /// A name-sorted index (as `scan_applications` delivers) whose
+    /// categories are deliberately *not* encountered in enum order —
+    /// Chromium (Internet) sorts first — so a test over it can tell
+    /// derived-order grouping apart from first-seen grouping.
+    fn app_index() -> Vec<AppEntry> {
+        vec![
+            app("Chromium", AppCategory::Internet),
+            app("Emacs", AppCategory::Development),
+            app("GIMP", AppCategory::Graphics),
+            app("Inkscape", AppCategory::Graphics),
+        ]
+    }
+
+    /// The Applications submenu's item list, dug out of a full root
+    /// menu build so these tests exercise the real assembly path, not
+    /// `applications_items` in isolation.
+    fn applications_submenu(apps: &[AppEntry]) -> Vec<MenuItem> {
+        let items = root_menu_items(Wallpaper::TealBlueprint, "window-maker", apps);
+        let submenu = items.iter().find(|item| item.label() == "Applications").expect("Applications submenu");
+        let MenuItem::Submenu { items, .. } = submenu else { panic!("expected a submenu") };
+        items.clone()
+    }
+
+    #[test]
+    fn applications_builds_one_cascade_per_populated_category_in_derived_order() {
+        let applications = applications_submenu(&app_index());
+
+        // Only the three populated categories appear — no empty
+        // cascade for Games, Office, or the rest — grouped in
+        // `AppCategory`'s derived order even though Internet was the
+        // first category encountered in the index, with About closing
+        // the submenu after every cascade.
+        let labels: Vec<&str> = applications.iter().map(|item| item.label()).collect();
+        assert_eq!(labels, ["Development", "Graphics", "Internet", "About chonkstep"]);
+
+        // A multi-app category lists its apps in index order — which
+        // is alphabetical, since the index arrives name-sorted — and
+        // every id is `ACTION_APP_BASE` plus the app's *flat* index,
+        // not its position within the cascade.
+        let MenuItem::Submenu { items: graphics, .. } = &applications[1] else { panic!("expected a cascade") };
+        let rows: Vec<(&str, u32)> = graphics
+            .iter()
+            .map(|item| {
+                let MenuItem::Action { label, action } = item else { panic!("app rows are actions") };
+                (label.as_str(), *action)
+            })
+            .collect();
+        assert_eq!(rows, [("GIMP", ACTION_APP_BASE + 2), ("Inkscape", ACTION_APP_BASE + 3)]);
+    }
+
+    #[test]
+    fn every_app_item_round_trips_through_resolve_action() {
+        let apps = app_index();
+        let applications = applications_submenu(&apps);
+
+        let mut resolved = 0;
+        for cascade in &applications {
+            let MenuItem::Submenu { items, .. } = cascade else { continue };
+            for item in items {
+                let MenuItem::Action { label, action } = item else { panic!("app rows are actions") };
+                let Some(RootMenuAction::LaunchApp(index)) = resolve_action(*action, apps.len()) else {
+                    panic!("app id {action} must resolve to LaunchApp");
+                };
+                // The resolved index names the very app the label
+                // promised — the whole point of carrying flat indices
+                // through the category regrouping.
+                assert_eq!(&apps[index].name, label);
+                resolved += 1;
+            }
+        }
+        assert_eq!(resolved, apps.len(), "every indexed app must be reachable from some cascade");
+    }
+
+    #[test]
+    fn app_ids_past_the_index_end_resolve_to_none() {
+        let apps = app_index();
+        // First id past the vec's end, and the base id against an
+        // empty index: both out of bounds, both must dissolve rather
+        // than index into the stored vec downstream.
+        assert!(resolve_action(ACTION_APP_BASE + apps.len() as u32, apps.len()).is_none());
+        assert!(resolve_action(ACTION_APP_BASE, 0).is_none());
+        assert!(resolve_action(u32::MAX, apps.len()).is_none());
+    }
+
+    #[test]
+    fn an_empty_app_index_leaves_applications_as_just_about() {
+        let applications = applications_submenu(&[]);
+        let labels: Vec<&str> = applications.iter().map(|item| item.label()).collect();
+        assert_eq!(labels, ["About chonkstep"], "no empty category cascades, About still reachable");
+        assert!(
+            applications.iter().all(|item| matches!(item, MenuItem::Action { .. })),
+            "an empty index must produce no cascade at all, not empty ones"
+        );
     }
 
     fn window_ctx(workspace: usize, workspace_count: usize) -> WindowMenuContext {
@@ -1375,17 +1562,20 @@ mod tests {
     #[test]
     fn action_ids_resolve_only_within_their_own_sessions_namespace() {
         let window_session = MenuSession::Window { client: ClientId::default(), workspace_count: 2 };
+        let root_session = MenuSession::Root { app_count: 3 };
 
         // A root-menu id fired during a window session (stale event,
         // stray id — however it happened) must dissolve into nothing,
-        // never decode as a window command.
+        // never decode as a window command. App ids included: they are
+        // root-session ids like any other.
         assert!(resolve_session_action(&window_session, ACTION_LAUNCH_TERMINAL).is_none());
         assert!(resolve_session_action(&window_session, ACTION_WALLPAPER_BASE).is_none());
         assert!(resolve_session_action(&window_session, ACTION_THEME_BASE).is_none());
+        assert!(resolve_session_action(&window_session, ACTION_APP_BASE).is_none());
 
         // And the reverse: window ids mean nothing to a root session.
-        assert!(resolve_session_action(&MenuSession::Root, ACTION_WINDOW_KILL).is_none());
-        assert!(resolve_session_action(&MenuSession::Root, ACTION_MOVE_TO_BASE).is_none());
+        assert!(resolve_session_action(&root_session, ACTION_WINDOW_KILL).is_none());
+        assert!(resolve_session_action(&root_session, ACTION_MOVE_TO_BASE).is_none());
 
         // While each session still resolves its own namespace.
         assert!(matches!(
@@ -1393,8 +1583,12 @@ mod tests {
             Some(MenuAction::Window(_, WindowMenuAction::Close))
         ));
         assert!(matches!(
-            resolve_session_action(&MenuSession::Root, ACTION_LAUNCH_TERMINAL),
+            resolve_session_action(&root_session, ACTION_LAUNCH_TERMINAL),
             Some(MenuAction::Root(RootMenuAction::LaunchTerminal))
+        ));
+        assert!(matches!(
+            resolve_session_action(&root_session, ACTION_APP_BASE + 2),
+            Some(MenuAction::Root(RootMenuAction::LaunchApp(2)))
         ));
     }
 
@@ -1453,8 +1647,8 @@ mod tests {
         }
 
         fn open_root(&mut self) {
-            let items = root_menu_items(Wallpaper::TealBlueprint, "window-maker");
-            self.menu.open_root(&mut self.host, &self.theme, &mut self.font_system, items, Point::new(0, 0), Size::new(1600, 1000));
+            let items = root_menu_items(Wallpaper::TealBlueprint, "window-maker", &[]);
+            self.menu.open_root(&mut self.host, &self.theme, &mut self.font_system, items, 0, Point::new(0, 0), Size::new(1600, 1000));
         }
 
         fn open_window(&mut self, ctx: &WindowMenuContext) {
@@ -1515,7 +1709,7 @@ mod tests {
         assert_eq!(f.host.open.len(), 1);
 
         let window = f.only_open_window();
-        let items = root_menu_items(Wallpaper::TealBlueprint, "window-maker");
+        let items = root_menu_items(Wallpaper::TealBlueprint, "window-maker", &[]);
         let row = f.row_point(ROOT_MENU_TITLE, &items, 0);
         assert!(matches!(
             f.click(window, row),
