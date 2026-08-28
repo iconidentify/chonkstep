@@ -101,10 +101,21 @@ struct InputState {
 
 struct ImplicitGrab {
     target: PressTarget,
-    /// Number of buttons currently held. X11 keeps the original grab
-    /// window when further buttons press mid-grab, and releases only
-    /// end the grab when the last button lifts — mirrored exactly.
-    buttons: u32,
+    /// Which buttons are currently held, by their `wm-core` identity.
+    /// X11 keeps the original grab window when further buttons press
+    /// mid-grab, and releases only end the grab when the last button
+    /// lifts - mirrored exactly.
+    ///
+    /// A set rather than a count: a count only stays honest while
+    /// presses and releases pair up perfectly, and they do not. A
+    /// button held across a VT switch releases into the session that
+    /// took the seat, and a device unplugged mid-click never reports
+    /// the release at all - each of which would leave a count stuck
+    /// above zero and route every later click to a stale target for
+    /// the rest of the session. A repeated press of a button already
+    /// in the set is now idempotent, and `session` clears the grab
+    /// outright when the seat comes back (see `clear_implicit_grab`).
+    buttons: Vec<MouseButton>,
 }
 
 /// Where a button press landed — the routing target its whole implicit
@@ -121,6 +132,17 @@ enum PressTarget {
 /// use. Callers keep each access short — never across a seat call that
 /// re-enters the `Compositor` handlers — which the closure shape makes
 /// structural rather than a discipline.
+/// Drops any implicit pointer grab, because the presses that built it
+/// can no longer be trusted to have matching releases.
+///
+/// Called when the seat is handed back to this session: a button held
+/// while the user switched away releases into whoever owns the seat
+/// now, so this session would wait forever for an event that is not
+/// coming and keep routing every click to the grab's stale target.
+pub(crate) fn clear_implicit_grab(seat: &Seat<Compositor>) {
+    with_input(seat, |input| input.implicit_grab = None);
+}
+
 fn with_input<T>(seat: &Seat<Compositor>, f: impl FnOnce(&mut InputState) -> T) -> T {
     let user_data = seat.user_data();
     user_data.insert_if_missing(|| RefCell::new(InputState::default()));
@@ -506,12 +528,17 @@ fn on_pointer_button<I: InputBackend>(state: &mut Compositor, event: I::PointerB
                 // A second button mid-grab joins the grab; the original
                 // target keeps every event (X11 semantics).
                 Some(grab) => {
-                    grab.buttons += 1;
+                    if let Some(button) = button {
+                        if !grab.buttons.contains(&button) {
+                            grab.buttons.push(button);
+                        }
+                    }
                     grab.target
                 }
                 None => {
                     let target = press_target(&hit);
-                    input.implicit_grab = Some(ImplicitGrab { target, buttons: 1 });
+                    input.implicit_grab =
+                        Some(ImplicitGrab { target, buttons: button.into_iter().collect() });
                     target
                 }
             }
@@ -519,8 +546,12 @@ fn on_pointer_button<I: InputBackend>(state: &mut Compositor, event: I::PointerB
             match input.implicit_grab.as_mut() {
                 Some(grab) => {
                     let target = grab.target;
-                    grab.buttons = grab.buttons.saturating_sub(1);
-                    if grab.buttons == 0 {
+                    if let Some(button) = button {
+                        grab.buttons.retain(|held| *held != button);
+                    }
+                    // An unrecognized button (one `wm_button` does not
+                    // map) still ends a grab it could not have started.
+                    if grab.buttons.is_empty() || button.is_none() {
                         input.implicit_grab = None;
                     }
                     target

@@ -670,11 +670,22 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         self.desktop.drag_widget_motion(wm.backend_mut(), &self.theme, root);
         self.launchdock.handle_motion(wm.backend_mut(), &self.theme, root);
         // Menu hover rides the same cadence: every motion over a shell
-        // surface also arrives as a root-relative motion event (that
-        // is what got us called), so draining the backend's
-        // latest-wins shell motion here highlights exactly the row
-        // under the pointer's final position.
-        if let Some((surface, local)) = wm.backend_mut().take_shell_motion() {
+        // surface also arrives as a root-relative motion event (that is
+        // what got us called), so the pointer's final position is the
+        // one that should highlight a row.
+        //
+        // Drained to empty rather than one-per-call, because the two
+        // backends queue differently: X11 keeps only the latest shell
+        // motion (a compressed MotionNotify), while the compositor
+        // queues each one. Taking a single entry would leave the
+        // compositor's queue permanently one behind and growing under a
+        // fast sweep, highlighting rows the pointer left long ago. The
+        // last entry wins here for the same reason it does on X11.
+        let mut hover = None;
+        while let Some(entry) = wm.backend_mut().take_shell_motion() {
+            hover = Some(entry);
+        }
+        if let Some((surface, local)) = hover {
             self.desktop.hover_menu(wm.backend_mut(), &self.theme, surface, local);
         }
     }

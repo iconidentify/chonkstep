@@ -48,6 +48,7 @@ use smithay::input::{Seat, SeatState};
 use smithay::output::{Mode, Output, PhysicalProperties, Subpixel};
 use smithay::reexports::calloop::generic::Generic;
 use smithay::reexports::calloop::{EventLoop, Interest, LoopHandle, Mode as TriggerMode, PostAction};
+use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::State as XdgToplevelState;
 use smithay::reexports::wayland_server::backend::{ClientData, ClientId, DisconnectReason, GlobalId};
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::reexports::wayland_server::{Display, DisplayHandle};
@@ -758,14 +759,36 @@ impl Compositor {
         let Some(id) = self.wm.backend_mut().pending_focus.take() else {
             return;
         };
-        // XWayland windows additionally track an "activated" flag their
-        // clients read for focus styling; keep it in lockstep with the
-        // seat focus for every X11 window, not just the new one, so a
-        // window losing focus repaints inactive.
+        // Focus is two things to a client: the seat's keyboard focus,
+        // which decides where keys go, and an "I am the active window"
+        // flag it reads for its own styling - a title bar, a caret that
+        // blinks, an unfocused-dim treatment. Keyboard focus alone
+        // leaves every client permanently drawing itself as background
+        // furniture, so both kinds of surface get the flag here, and
+        // every window gets it (not just the newly focused one) so the
+        // one losing focus repaints inactive.
         for (window_id, record) in self.wm.backend().windows.iter() {
-            if let ManagedSurface::X11(surface) = &record.surface {
-                if surface.alive() {
-                    let _ = surface.set_activated(*window_id == id);
+            let active = *window_id == id;
+            match &record.surface {
+                // xdg-shell carries it as a toplevel state on the next
+                // configure; `send_pending_configure` dedups, so an
+                // unchanged flag costs nothing.
+                ManagedSurface::Xdg(toplevel) => {
+                    if toplevel.alive() {
+                        toplevel.with_pending_state(|state| {
+                            if active {
+                                state.states.set(XdgToplevelState::Activated);
+                            } else {
+                                state.states.unset(XdgToplevelState::Activated);
+                            }
+                        });
+                        let _ = toplevel.send_pending_configure();
+                    }
+                }
+                ManagedSurface::X11(surface) => {
+                    if surface.alive() {
+                        let _ = surface.set_activated(active);
+                    }
                 }
             }
         }
@@ -1077,6 +1100,31 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
                     }
                     XWaylandEvent::Error => {
                         tracing::warn!("XWayland exited or failed to start; X11 apps unavailable");
+                        // Every X11 window died with it. Nothing else
+                        // will ever report those surfaces destroyed -
+                        // the destroy notifications came through the
+                        // X11 WM connection that just went away - so
+                        // without this their ledger entries, frames and
+                        // stacking slots outlive them: chrome painted
+                        // around windows that no longer exist, and
+                        // clicks routed into them. Tearing them down
+                        // through the normal Destroyed path lets
+                        // `wm-core` retract focus and drop decorations
+                        // exactly as it would for one window closing.
+                        comp.xwm = None;
+                        comp.xdisplay = None;
+                        let backend = comp.wm.backend_mut();
+                        let orphaned: Vec<WlWindowId> = backend
+                            .windows
+                            .iter()
+                            .filter(|(_, record)| matches!(record.surface, ManagedSurface::X11(_)))
+                            .map(|(id, _)| *id)
+                            .collect();
+                        for id in orphaned {
+                            backend.windows.remove(&id);
+                            backend.queue(BackendEvent::Destroyed(id));
+                        }
+                        backend.mark_damaged();
                     }
                 })
                 .map_err(|error| format!("failed to register the XWayland event source: {error}"))?;
@@ -1133,7 +1181,10 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
     }
 
     if comp.restart {
-        restart_in_place();
+        // `nested` is the decision this process made at startup, so the
+        // replacement makes the same one rather than re-deriving it
+        // from an environment this compositor itself wrote.
+        restart_in_place(nested);
     }
     tracing::info!("compositor session over");
     Ok(())
@@ -1155,10 +1206,28 @@ fn restart_requested() -> bool {
 /// X11 binary documents at length. The one behavioral difference is
 /// unavoidable: Wayland clients die with our socket (no SaveSet), so
 /// the fresh process starts with an empty session.
-fn restart_in_place() -> ! {
+fn restart_in_place(nested: bool) -> ! {
     use std::os::unix::process::CommandExt;
     let bin = std::env::args_os().next().unwrap_or_else(|| "chonkstep-wayland".into());
-    let err = std::process::Command::new(&bin).exec();
+    let mut command = std::process::Command::new(&bin);
+    // Pin the backend across the re-exec instead of letting the new
+    // process guess again.
+    //
+    // A compositor exports `WAYLAND_DISPLAY` (and `DISPLAY`, through
+    // XWayland) into its own environment so the apps it spawns find it.
+    // `exec` keeps that environment, so a session restarted from a TTY
+    // would wake up seeing both variables set, conclude from them that
+    // a desktop is already running here, and try to nest inside the
+    // compositor it just replaced - which is gone, taking the session
+    // with it. Passing the decision explicitly is the fix; the sockets
+    // themselves are stale after the exec either way, so they are
+    // cleared rather than handed to the new process.
+    command.env("CHONKSTEP_BACKEND", if nested { "winit" } else { "drm" });
+    if !nested {
+        command.env_remove("WAYLAND_DISPLAY");
+        command.env_remove("DISPLAY");
+    }
+    let err = command.exec();
     tracing::error!(?err, bin = ?bin, "re-exec failed; exiting instead of restarting");
     std::process::exit(1);
 }

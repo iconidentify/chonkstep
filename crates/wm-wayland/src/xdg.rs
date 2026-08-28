@@ -207,6 +207,15 @@ impl Compositor {
             // MapRequest edge, mirroring how an X11 client can unmap
             // and re-map its window under the same WM bookkeeping.
             set_mapped_marker(&root, false);
+            // The ledger has to hear it too. `mapped` is what the
+            // renderer draws from and what the hit-test routes by, so a
+            // record left mapped after its buffer is gone is an
+            // invisible rectangle that still swallows clicks - and it
+            // outlives the frame, because `wm-core`'s teardown removes
+            // the decoration but never touches this flag.
+            if let Some(record) = backend.windows.get_mut(&id) {
+                record.mapped = false;
+            }
             backend.queue(WmEvent::Unmapped(id));
         } else if has_buffer {
             // A managed client committing a size other than the one on
