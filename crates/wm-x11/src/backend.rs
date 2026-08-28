@@ -2,8 +2,8 @@ use std::cmp::Reverse;
 use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
 
 use wm_core::{
-    Backend, BackendEvent, DragHandle, KeyCombo, Modifiers, MonitorInfo, MouseButton, SizeHints,
-    SurfaceRef, WmClass, WmProtocol,
+    Backend, BackendEvent, DragHandle, KeyCombo, Modifiers, MonitorInfo, MouseButton, NetState,
+    NetStateAction, SizeHints, SurfaceRef, WindowType, WmClass, WmProtocol,
 };
 use wm_theme_api::{DecorationBuffer, DecorationLayout, Point, Rect, ResizeEdge, Size};
 
@@ -81,6 +81,17 @@ pub struct X11Backend {
     /// live: Microsoft Edge miniaturized to a bare "?" icon).
     net_wm_name: Atom,
     utf8_string: Atom,
+    /// Every EWMH atom this backend publishes or reacts to — see
+    /// `EwmhAtoms`.
+    ewmh: EwmhAtoms,
+    /// Whether `BackendEvent::ShutdownRequested` has already been
+    /// emitted for a dead connection. `poll_for_event` keeps returning
+    /// the same fatal error on every call once the display is gone, so
+    /// without this latch the event loop would be handed an endless
+    /// stream of shutdown requests (and, before shutdown existed at
+    /// all, would spin at 100% CPU forever — two zombie WMs after a
+    /// display restart, confirmed live).
+    shutdown_emitted: bool,
 
     known_clients: HashSet<Window>,
     /// Frame XID -> client XID, populated by `create_decoration`.
@@ -182,6 +193,41 @@ impl X11Backend {
         let xrootpmap_id = conn.intern_atom(false, b"_XROOTPMAP_ID")?.reply()?.atom;
         let esetroot_pmap_id = conn.intern_atom(false, b"ESETROOT_PMAP_ID")?.reply()?.atom;
         let net_wm_window_opacity = conn.intern_atom(false, b"_NET_WM_WINDOW_OPACITY")?.reply()?.atom;
+        let ewmh = EwmhAtoms::intern(&conn)?;
+
+        // EWMH supporting-WM-check handshake (EWMH "_NET_SUPPORTING_WM_CHECK"):
+        // pagers/taskbars/tools decide whether an EWMH-compliant WM is
+        // running by reading this property on the root, following it to
+        // a WM-owned window, and checking that window points back at
+        // itself — without it, many refuse to send the client messages
+        // handled in `translate_event` at all. The window itself is a
+        // never-mapped 1x1 InputOnly child of root whose only job is to
+        // exist (and vanish with this connection, which is exactly how
+        // a watcher detects the WM dying).
+        let check_window = conn.generate_id()?;
+        conn.create_window(
+            0, // InputOnly windows must use depth 0 (CopyFromParent)
+            check_window,
+            root,
+            -1,
+            -1,
+            1,
+            1,
+            0,
+            WindowClass::INPUT_ONLY,
+            0,
+            &CreateWindowAux::new().override_redirect(1),
+        )?;
+        conn.change_property32(PropMode::REPLACE, root, ewmh.net_supporting_wm_check, AtomEnum::WINDOW, &[check_window])?;
+        conn.change_property32(PropMode::REPLACE, check_window, ewmh.net_supporting_wm_check, AtomEnum::WINDOW, &[check_window])?;
+        // The spec wants the WM's name on the check window, UTF-8 typed
+        // — this is where `wmctrl -m` and friends get it from.
+        conn.change_property8(PropMode::REPLACE, check_window, net_wm_name, utf8_string, b"chonkstep")?;
+        // Advertise exactly the protocol surface this WM implements —
+        // EWMH says clients must treat an atom missing from
+        // `_NET_SUPPORTED` as unsupported, so listing more than is real
+        // would invite client messages nobody handles.
+        conn.change_property32(PropMode::REPLACE, root, ewmh.net_supported, AtomEnum::ATOM, &ewmh.supported(net_wm_name))?;
 
         let gc = conn.generate_id()?;
         conn.create_gc(gc, root, &CreateGCAux::new().graphics_exposures(0))?;
@@ -260,6 +306,8 @@ impl X11Backend {
             net_wm_pid,
             net_wm_name,
             utf8_string,
+            ewmh,
+            shutdown_emitted: false,
             known_clients: HashSet::new(),
             frame_to_client: HashMap::new(),
             sequences_to_ignore: BinaryHeap::new(),
@@ -698,9 +746,183 @@ impl X11Backend {
                 self.pending_screen_resize = Some(Size::new(e.width as u32, e.height as u32));
                 None
             }
+            Event::ClientMessage(e) => self.translate_client_message(&e),
             _ => None,
         }
     }
+
+    /// Translates the EWMH client messages advertised in
+    /// `_NET_SUPPORTED` (sent by pagers, taskbars, and tools like
+    /// `wmctrl`/`xdotool`) into their backend-agnostic `BackendEvent`
+    /// counterparts. Anything else — including EWMH messages this WM
+    /// doesn't implement — is silently dropped, exactly what the spec
+    /// wants for unsupported messages.
+    fn translate_client_message(&self, e: &ClientMessageEvent) -> Option<BackendEvent<XWindow, XFrame>> {
+        if e.type_ == self.ewmh.net_active_window {
+            return Some(BackendEvent::ActivateRequested(XWindow(e.window)));
+        }
+        if e.type_ == self.ewmh.net_close_window {
+            return Some(BackendEvent::CloseRequested(XWindow(e.window)));
+        }
+        if e.type_ == self.ewmh.net_wm_state {
+            // EWMH "_NET_WM_STATE" client message layout:
+            // data.l[0] = action (0 remove / 1 add / 2 toggle),
+            // data.l[1] and data.l[2] = up to two property atoms — two
+            // because a plain "maximize" toggles horizontal and
+            // vertical in one message.
+            let data = e.data.as_data32();
+            let action = match data[0] {
+                0 => NetStateAction::Remove,
+                1 => NetStateAction::Add,
+                2 => NetStateAction::Toggle,
+                // Not a defined action — a malformed message, not one
+                // to guess at.
+                _ => return None,
+            };
+            let to_net_state = |atom: u32| {
+                if atom == self.ewmh.net_wm_state_fullscreen {
+                    Some(NetState::Fullscreen)
+                } else if atom == self.ewmh.net_wm_state_maximized_horz {
+                    Some(NetState::MaximizedHorz)
+                } else if atom == self.ewmh.net_wm_state_maximized_vert {
+                    Some(NetState::MaximizedVert)
+                } else {
+                    // Unrecognized property atoms are skipped, not
+                    // rejected — EWMH wants the rest of the message
+                    // still honored (see `NetState`'s doc comment).
+                    None
+                }
+            };
+            let mut recognized = [data[1], data[2]].into_iter().filter_map(to_net_state);
+            // If neither property is one this WM acts on, there's
+            // nothing to request — swallow the whole message.
+            let first = recognized.next()?;
+            let second = recognized.next();
+            return Some(BackendEvent::NetStateRequested { window: XWindow(e.window), action, first, second });
+        }
+        None
+    }
+}
+
+/// The EWMH atoms this backend implements, interned in one place at
+/// connect time (same pattern as the ICCCM atoms on `X11Backend`
+/// itself, just grouped — there are enough of them that flat fields
+/// would drown the struct). `_NET_WM_NAME`/`UTF8_STRING` predate this
+/// group (the title-reading path needed them first) and stay where they
+/// were.
+struct EwmhAtoms {
+    net_supported: Atom,
+    net_supporting_wm_check: Atom,
+    net_active_window: Atom,
+    net_client_list: Atom,
+    net_close_window: Atom,
+    net_wm_state: Atom,
+    net_wm_state_fullscreen: Atom,
+    net_wm_state_maximized_horz: Atom,
+    net_wm_state_maximized_vert: Atom,
+    net_wm_state_shaded: Atom,
+    net_wm_state_hidden: Atom,
+    net_wm_window_type: Atom,
+    net_wm_window_type_normal: Atom,
+    net_wm_window_type_dialog: Atom,
+    net_wm_window_type_desktop: Atom,
+    net_wm_window_type_dock: Atom,
+    net_wm_window_type_toolbar: Atom,
+    net_wm_window_type_menu: Atom,
+    net_wm_window_type_utility: Atom,
+    net_wm_window_type_splash: Atom,
+    net_wm_window_type_dropdown_menu: Atom,
+    net_wm_window_type_popup_menu: Atom,
+    net_wm_window_type_tooltip: Atom,
+    net_wm_window_type_notification: Atom,
+    net_wm_window_type_combo: Atom,
+    net_wm_window_type_dnd: Atom,
+    net_number_of_desktops: Atom,
+    net_current_desktop: Atom,
+    net_workarea: Atom,
+}
+
+impl EwmhAtoms {
+    fn intern(conn: &RustConnection) -> Result<Self, X11BackendError> {
+        Ok(Self {
+            net_supported: conn.intern_atom(false, b"_NET_SUPPORTED")?.reply()?.atom,
+            net_supporting_wm_check: conn.intern_atom(false, b"_NET_SUPPORTING_WM_CHECK")?.reply()?.atom,
+            net_active_window: conn.intern_atom(false, b"_NET_ACTIVE_WINDOW")?.reply()?.atom,
+            net_client_list: conn.intern_atom(false, b"_NET_CLIENT_LIST")?.reply()?.atom,
+            net_close_window: conn.intern_atom(false, b"_NET_CLOSE_WINDOW")?.reply()?.atom,
+            net_wm_state: conn.intern_atom(false, b"_NET_WM_STATE")?.reply()?.atom,
+            net_wm_state_fullscreen: conn.intern_atom(false, b"_NET_WM_STATE_FULLSCREEN")?.reply()?.atom,
+            net_wm_state_maximized_horz: conn.intern_atom(false, b"_NET_WM_STATE_MAXIMIZED_HORZ")?.reply()?.atom,
+            net_wm_state_maximized_vert: conn.intern_atom(false, b"_NET_WM_STATE_MAXIMIZED_VERT")?.reply()?.atom,
+            net_wm_state_shaded: conn.intern_atom(false, b"_NET_WM_STATE_SHADED")?.reply()?.atom,
+            net_wm_state_hidden: conn.intern_atom(false, b"_NET_WM_STATE_HIDDEN")?.reply()?.atom,
+            net_wm_window_type: conn.intern_atom(false, b"_NET_WM_WINDOW_TYPE")?.reply()?.atom,
+            net_wm_window_type_normal: conn.intern_atom(false, b"_NET_WM_WINDOW_TYPE_NORMAL")?.reply()?.atom,
+            net_wm_window_type_dialog: conn.intern_atom(false, b"_NET_WM_WINDOW_TYPE_DIALOG")?.reply()?.atom,
+            net_wm_window_type_desktop: conn.intern_atom(false, b"_NET_WM_WINDOW_TYPE_DESKTOP")?.reply()?.atom,
+            net_wm_window_type_dock: conn.intern_atom(false, b"_NET_WM_WINDOW_TYPE_DOCK")?.reply()?.atom,
+            net_wm_window_type_toolbar: conn.intern_atom(false, b"_NET_WM_WINDOW_TYPE_TOOLBAR")?.reply()?.atom,
+            net_wm_window_type_menu: conn.intern_atom(false, b"_NET_WM_WINDOW_TYPE_MENU")?.reply()?.atom,
+            net_wm_window_type_utility: conn.intern_atom(false, b"_NET_WM_WINDOW_TYPE_UTILITY")?.reply()?.atom,
+            net_wm_window_type_splash: conn.intern_atom(false, b"_NET_WM_WINDOW_TYPE_SPLASH")?.reply()?.atom,
+            net_wm_window_type_dropdown_menu: conn.intern_atom(false, b"_NET_WM_WINDOW_TYPE_DROPDOWN_MENU")?.reply()?.atom,
+            net_wm_window_type_popup_menu: conn.intern_atom(false, b"_NET_WM_WINDOW_TYPE_POPUP_MENU")?.reply()?.atom,
+            net_wm_window_type_tooltip: conn.intern_atom(false, b"_NET_WM_WINDOW_TYPE_TOOLTIP")?.reply()?.atom,
+            net_wm_window_type_notification: conn.intern_atom(false, b"_NET_WM_WINDOW_TYPE_NOTIFICATION")?.reply()?.atom,
+            net_wm_window_type_combo: conn.intern_atom(false, b"_NET_WM_WINDOW_TYPE_COMBO")?.reply()?.atom,
+            net_wm_window_type_dnd: conn.intern_atom(false, b"_NET_WM_WINDOW_TYPE_DND")?.reply()?.atom,
+            net_number_of_desktops: conn.intern_atom(false, b"_NET_NUMBER_OF_DESKTOPS")?.reply()?.atom,
+            net_current_desktop: conn.intern_atom(false, b"_NET_CURRENT_DESKTOP")?.reply()?.atom,
+            net_workarea: conn.intern_atom(false, b"_NET_WORKAREA")?.reply()?.atom,
+        })
+    }
+
+    /// The `_NET_SUPPORTED` payload: every EWMH atom this WM actually
+    /// implements (all of the above, plus `_NET_WM_NAME`, which is
+    /// interned elsewhere — see `X11Backend::net_wm_name`).
+    fn supported(&self, net_wm_name: Atom) -> Vec<Atom> {
+        vec![
+            self.net_supported,
+            self.net_supporting_wm_check,
+            self.net_active_window,
+            self.net_client_list,
+            self.net_close_window,
+            self.net_wm_state,
+            self.net_wm_state_fullscreen,
+            self.net_wm_state_maximized_horz,
+            self.net_wm_state_maximized_vert,
+            self.net_wm_state_shaded,
+            self.net_wm_state_hidden,
+            self.net_wm_window_type,
+            self.net_wm_window_type_normal,
+            self.net_wm_window_type_dialog,
+            self.net_wm_window_type_desktop,
+            self.net_wm_window_type_dock,
+            self.net_wm_window_type_toolbar,
+            self.net_wm_window_type_menu,
+            self.net_wm_window_type_utility,
+            self.net_wm_window_type_splash,
+            self.net_wm_window_type_dropdown_menu,
+            self.net_wm_window_type_popup_menu,
+            self.net_wm_window_type_tooltip,
+            self.net_wm_window_type_notification,
+            self.net_wm_window_type_combo,
+            self.net_wm_window_type_dnd,
+            self.net_number_of_desktops,
+            self.net_current_desktop,
+            self.net_workarea,
+            net_wm_name,
+        ]
+    }
+}
+
+/// Whether a `poll_for_event` failure means the connection is dead for
+/// good (the display server exited or the socket closed — reported by
+/// x11rb as `IoError`, typically `UnexpectedEof`) as opposed to a
+/// transient/recoverable condition. Only fatal errors justify asking
+/// the core to shut down; see `poll_event`.
+fn is_fatal_connection_error(error: &ConnectionError) -> bool {
+    matches!(error, ConnectionError::IoError(_))
 }
 
 /// Keysym for `Num_Lock`, per `<X11/keysymdef.h>` — looked up once at
@@ -1073,6 +1295,25 @@ impl Backend for X11Backend {
             let event = match self.conn.poll_for_event() {
                 Ok(Some(e)) => e,
                 Ok(None) => return None,
+                // An IO error (UnexpectedEof when the display server
+                // goes away) is unrecoverable: the connection never
+                // comes back, and every subsequent poll fails the same
+                // way instantly. Warning and returning `None` here —
+                // the old behavior — left the event loop spinning on a
+                // dead fd forever (two zombie WMs burning CPU after a
+                // display restart, confirmed live), so a fatal error
+                // now asks the core to exit instead. Emitted exactly
+                // once: the loop may keep polling while it winds down,
+                // and it needs `None` (not an endless shutdown stream)
+                // from then on.
+                Err(e) if is_fatal_connection_error(&e) => {
+                    if self.shutdown_emitted {
+                        return None;
+                    }
+                    self.shutdown_emitted = true;
+                    tracing::error!(?e, "X11 connection lost; shutting down");
+                    return Some(BackendEvent::ShutdownRequested);
+                }
                 Err(e) => {
                     tracing::warn!(?e, "poll_for_event failed");
                     return None;
@@ -1464,6 +1705,14 @@ impl Backend for X11Backend {
         let _ = self.conn.flush();
     }
 
+    fn position_client(&mut self, window: Self::WindowId, pos: Point) {
+        let aux = ConfigureWindowAux::new().x(pos.x).y(pos.y);
+        if let Err(e) = self.conn.configure_window(window.0, &aux) {
+            tracing::warn!(?e, ?window, "position_client failed");
+        }
+        let _ = self.conn.flush();
+    }
+
     fn refresh_client(&mut self, window: Self::WindowId, size: Size) {
         let event = ExposeEvent {
             response_type: EXPOSE_EVENT,
@@ -1571,6 +1820,122 @@ impl Backend for X11Backend {
         if let Err(e) = self.conn.allow_events(Allow::REPLAY_POINTER, CURRENT_TIME) {
             tracing::warn!(?e, "allow_events(ReplayPointer) failed");
         }
+        let _ = self.conn.flush();
+    }
+
+    // -- EWMH ---------------------------------------------------------------
+
+    fn window_type(&self, window: Self::WindowId) -> WindowType {
+        // Up to 8 entries: `_NET_WM_WINDOW_TYPE` is a preference list
+        // ("most preferred first"), and no real client declares more
+        // types than that — 8 is comfortably past anything in the wild
+        // without reading unbounded property data.
+        let Ok(cookie) = self.conn.get_property(false, window.0, self.ewmh.net_wm_window_type, AtomEnum::ATOM, 0, 8) else {
+            return WindowType::Normal;
+        };
+        let Ok(reply) = cookie.reply() else {
+            return WindowType::Normal;
+        };
+        let Some(atoms) = reply.value32() else {
+            return WindowType::Normal;
+        };
+        for atom in atoms {
+            if atom == self.ewmh.net_wm_window_type_dialog {
+                return WindowType::Dialog;
+            }
+            // Everything that draws its own chrome and positions
+            // itself — the WM's only job for these is to stay out of
+            // the way (see `WindowType::Unmanaged`).
+            let unmanaged = [
+                self.ewmh.net_wm_window_type_desktop,
+                self.ewmh.net_wm_window_type_dock,
+                self.ewmh.net_wm_window_type_toolbar,
+                self.ewmh.net_wm_window_type_menu,
+                self.ewmh.net_wm_window_type_splash,
+                self.ewmh.net_wm_window_type_dropdown_menu,
+                self.ewmh.net_wm_window_type_popup_menu,
+                self.ewmh.net_wm_window_type_tooltip,
+                self.ewmh.net_wm_window_type_notification,
+                self.ewmh.net_wm_window_type_combo,
+                self.ewmh.net_wm_window_type_dnd,
+            ];
+            if unmanaged.contains(&atom) {
+                return WindowType::Unmanaged;
+            }
+            if atom == self.ewmh.net_wm_window_type_normal || atom == self.ewmh.net_wm_window_type_utility {
+                return WindowType::Normal;
+            }
+            // An atom this WM doesn't recognize: keep scanning — the
+            // list is ordered by client preference, and the spec wants
+            // a WM to fall through to the first type it *does* know.
+        }
+        // No property, or nothing recognized in it — the spec's own
+        // mandated fallback for a managed window.
+        WindowType::Normal
+    }
+
+    fn map_unmanaged(&mut self, window: Self::WindowId) {
+        let _ = self.conn.map_window(window.0);
+        let _ = self.conn.flush();
+    }
+
+    fn publish_client_list(&mut self, clients: &[Self::WindowId]) {
+        let ids: Vec<Window> = clients.iter().map(|w| w.0).collect();
+        let _ = self.conn.change_property32(PropMode::REPLACE, self.root, self.ewmh.net_client_list, AtomEnum::WINDOW, &ids);
+        let _ = self.conn.flush();
+    }
+
+    fn publish_active_window(&mut self, window: Option<Self::WindowId>) {
+        // "No focused window" is published as window id 0 (`None` on
+        // the wire), per the spec — not by deleting the property.
+        let id = window.map_or(NONE, |w| w.0);
+        let _ = self.conn.change_property32(PropMode::REPLACE, self.root, self.ewmh.net_active_window, AtomEnum::WINDOW, &[id]);
+        let _ = self.conn.flush();
+    }
+
+    fn publish_workspaces(&mut self, count: usize, current: usize) {
+        let _ = self.conn.change_property32(PropMode::REPLACE, self.root, self.ewmh.net_number_of_desktops, AtomEnum::CARDINAL, &[count as u32]);
+        let _ = self.conn.change_property32(PropMode::REPLACE, self.root, self.ewmh.net_current_desktop, AtomEnum::CARDINAL, &[current as u32]);
+        let _ = self.conn.flush();
+    }
+
+    fn publish_workarea(&mut self, area: Rect, workspace_count: usize) {
+        // `_NET_WORKAREA` wants one x,y,w,h quadruple per desktop.
+        // They're all identical here — the dock reserves the same strip
+        // on every workspace (see the `Backend` trait's doc comment) —
+        // but the property format still requires spelling each one out.
+        let mut values = Vec::with_capacity(workspace_count * 4);
+        for _ in 0..workspace_count {
+            values.extend_from_slice(&[area.pos.x.max(0) as u32, area.pos.y.max(0) as u32, area.size.w, area.size.h]);
+        }
+        let _ = self.conn.change_property32(PropMode::REPLACE, self.root, self.ewmh.net_workarea, AtomEnum::CARDINAL, &values);
+        let _ = self.conn.flush();
+    }
+
+    fn publish_net_state(&mut self, window: Self::WindowId, fullscreen: bool, max_h: bool, max_v: bool, shaded: bool, hidden: bool) {
+        let mut atoms = Vec::with_capacity(5);
+        if fullscreen {
+            atoms.push(self.ewmh.net_wm_state_fullscreen);
+        }
+        if max_h {
+            atoms.push(self.ewmh.net_wm_state_maximized_horz);
+        }
+        if max_v {
+            atoms.push(self.ewmh.net_wm_state_maximized_vert);
+        }
+        if shaded {
+            atoms.push(self.ewmh.net_wm_state_shaded);
+        }
+        if hidden {
+            atoms.push(self.ewmh.net_wm_state_hidden);
+        }
+        // On the client's own window, not the frame: pagers/taskbars
+        // look the state up by the client id they got from
+        // `_NET_CLIENT_LIST`, and never learn frame ids at all. An
+        // all-false state publishes an empty list rather than deleting
+        // the property — same end state for readers, one less request
+        // shape to reason about.
+        let _ = self.conn.change_property32(PropMode::REPLACE, window.0, self.ewmh.net_wm_state, AtomEnum::ATOM, &atoms);
         let _ = self.conn.flush();
     }
 }

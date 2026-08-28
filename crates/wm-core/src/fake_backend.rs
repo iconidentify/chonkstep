@@ -7,7 +7,7 @@ use wm_theme_api::{
 
 use crate::backend::Backend;
 use crate::client::MonitorInfo;
-use crate::types::{BackendEvent, DragHandle, KeyCombo, MouseButton, SizeHints, WmClass, WmProtocol};
+use crate::types::{BackendEvent, DragHandle, KeyCombo, MouseButton, SizeHints, WindowType, WmClass, WmProtocol};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct FakeWindowId(pub u64);
@@ -28,6 +28,10 @@ pub struct FakeBackend {
     geometries: HashMap<FakeWindowId, Rect>,
     hints: HashMap<FakeWindowId, SizeHints>,
     monitors: Vec<MonitorInfo>,
+    /// Per-window `_NET_WM_WINDOW_TYPE` the fake reports — absent means
+    /// `WindowType::Normal`, matching both the trait default and the
+    /// EWMH fallback for windows that declare no type.
+    window_types: HashMap<FakeWindowId, WindowType>,
 
     pub mapped_frames: HashSet<FakeFrameId>,
     pub unmapped_frames: HashSet<FakeFrameId>,
@@ -59,6 +63,25 @@ pub struct FakeBackend {
     /// frame that's never had its cursor touched at all (absent from
     /// the map).
     pub frame_cursor: HashMap<FakeFrameId, Option<ResizeEdge>>,
+    /// Windows handed to `map_unmanaged` — the `WindowType::Unmanaged`
+    /// path, mapped as-is with no frame or tracking.
+    pub unmanaged_mapped: Vec<FakeWindowId>,
+    /// Every `publish_client_list` call in order — a history rather
+    /// than just the latest list, so a test can assert the list grew on
+    /// map and shrank on destroy, not merely inspect the end state.
+    pub published_client_lists: Vec<Vec<FakeWindowId>>,
+    /// Every `publish_active_window` call in order (`None` = focus
+    /// cleared).
+    pub published_active_windows: Vec<Option<FakeWindowId>>,
+    /// Every `publish_workspaces` call in order, as `(count, current)`.
+    pub published_workspaces: Vec<(usize, usize)>,
+    /// Every `publish_workarea` call in order, as
+    /// `(area, workspace_count)`.
+    pub published_workareas: Vec<(Rect, usize)>,
+    /// Every `publish_net_state` call in order, as
+    /// `(window, fullscreen, max_h, max_v, shaded, hidden)` — matching
+    /// the trait method's parameter order exactly.
+    pub published_net_states: Vec<(FakeWindowId, bool, bool, bool, bool, bool)>,
 }
 
 impl FakeBackend {
@@ -93,6 +116,13 @@ impl FakeBackend {
     /// explicitly.
     pub fn set_monitor(&mut self, geometry: Rect) {
         self.monitors = vec![MonitorInfo { geometry, name: "test-screen".to_string() }];
+    }
+
+    /// Sets the `_NET_WM_WINDOW_TYPE` this fake reports for `window` —
+    /// windows never set report `WindowType::Normal`, same as the trait
+    /// default. Lets tests exercise the `Unmanaged` map path.
+    pub fn set_window_type(&mut self, window: FakeWindowId, window_type: WindowType) {
+        self.window_types.insert(window, window_type);
     }
 }
 
@@ -210,6 +240,34 @@ impl Backend for FakeBackend {
     }
     fn replay_pointer(&mut self) {
         self.replay_pointer_calls += 1;
+    }
+
+    fn window_type(&self, window: Self::WindowId) -> WindowType {
+        self.window_types.get(&window).copied().unwrap_or_default()
+    }
+
+    fn map_unmanaged(&mut self, window: Self::WindowId) {
+        self.unmanaged_mapped.push(window);
+    }
+
+    fn publish_client_list(&mut self, clients: &[Self::WindowId]) {
+        self.published_client_lists.push(clients.to_vec());
+    }
+
+    fn publish_active_window(&mut self, window: Option<Self::WindowId>) {
+        self.published_active_windows.push(window);
+    }
+
+    fn publish_workspaces(&mut self, count: usize, current: usize) {
+        self.published_workspaces.push((count, current));
+    }
+
+    fn publish_workarea(&mut self, area: Rect, workspace_count: usize) {
+        self.published_workareas.push((area, workspace_count));
+    }
+
+    fn publish_net_state(&mut self, window: Self::WindowId, fullscreen: bool, max_h: bool, max_v: bool, shaded: bool, hidden: bool) {
+        self.published_net_states.push((window, fullscreen, max_h, max_v, shaded, hidden));
     }
 }
 

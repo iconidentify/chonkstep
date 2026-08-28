@@ -42,6 +42,13 @@ restarts that keep your windows open.
   the freshly built binary in place; open windows survive via the X11
   SaveSet. This is also how theme switching and `scripts/update.sh`
   apply changes without logging out.
+- **EWMH compliance.** Publishes `_NET_SUPPORTED`, the client list,
+  active window, workspaces, and workarea, and honors activation,
+  close, and fullscreen/maximize requests - so `wmctrl`, `xdotool`,
+  taskbars, and pagers see real state, video players go properly
+  fullscreen, and `_NET_WM_WINDOW_TYPE` picks the decoration policy
+  (dialogs get chrome, docks and notifications are left alone).
+  `scripts/verify-ewmh.sh` checks a live session from the outside.
 - **A WindowMaker-style desktop shell.** Right-click root menu with
   cascading submenus, a dock with live widgets (clock, system monitor,
   network load), miniaturized-window icon tiles with drag-to-place, and
