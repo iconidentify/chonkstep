@@ -50,10 +50,16 @@ pub mod menu;
 pub mod model;
 pub mod netgraph;
 pub mod netload;
+pub mod nettraffic;
 pub mod paint;
+pub mod panel;
+pub mod power;
 mod raster;
+pub mod soundctl;
 pub mod switcher;
+pub mod sysload;
 pub mod tile;
+pub mod wifi;
 pub mod workspace;
 
 pub use model::Theme;
