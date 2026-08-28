@@ -70,7 +70,6 @@ use wm_theme::{RasterThemeEngine, Theme};
 use wm_theme_api::{DecorationBuffer, Point, Rect, Size};
 
 use chonk_shell::shell::{Shell, ShellOutcome};
-use chonk_shell::theme_select;
 
 /// A managed client window (an xdg toplevel or an XWayland surface) in
 /// the id space `wm-core` reasons about. Plain integers rather than
@@ -441,6 +440,12 @@ pub struct Compositor {
 
     /// The graphics stack: a host window, or the hardware itself.
     pub(crate) graphics: Graphics,
+    /// linux-dmabuf: the format set we advertise and the protocol
+    /// state behind it. Always present; "this renderer cannot do
+    /// dmabuf" is represented inside, not by an `Option`, so protocol
+    /// dispatch in a login session never has an unreachable panic on
+    /// a screen with no console to read it from.
+    pub(crate) dmabuf: crate::dmabuf::DmabufSupport,
     pub damage_tracker: OutputDamageTracker,
 
     /// Latest pointer position in compositor space, maintained by
@@ -733,7 +738,7 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
         None => nesting_desktop_present(),
     };
 
-    let (graphics, output, output_size) = if nested {
+    let (mut graphics, output, output_size) = if nested {
         tracing::info!("nested backend: rendering into a window on the host desktop");
         let (winit_backend, winit_source) = winit::init::<GlesRenderer>()
             .map_err(|error| format!("winit backend init failed: {error}"))?;
@@ -785,6 +790,12 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
     let _global = output.create_global::<Compositor>(&display_handle);
     let damage_tracker = OutputDamageTracker::from_output(&output);
 
+    // linux-dmabuf, before the listening socket exists: a global that
+    // is missing when a client binds might as well never exist, and
+    // GPU clients read its absence as "this compositor has no GPU".
+    // Both backends own a `GlesRenderer`, so one call serves both.
+    let dmabuf = crate::dmabuf::init_for_graphics(&display_handle, &mut graphics);
+
     // The listening socket clients connect to, plus the display's own
     // fd so wayland-server processes client requests — both plain
     // calloop sources.
@@ -828,9 +839,16 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
     // consumers are the nested-Xephyr dev scripts); theme precedence
     // is identical to the X11 binary: persisted theme-menu choice,
     // else the config's theme, else the flagship.
-    let scale = config.scale.filter(|s| s.is_finite() && *s > 0.0).unwrap_or(1.0);
-    tracing::info!(scale, "UI scale (config `scale`)");
-    let theme = resolve_theme(config.theme.as_deref()).scaled(scale);
+    // Session policy comes from `chonk_shell::startup`, shared with the
+    // X11 binary: same env-over-config precedence, same theme
+    // resolution, same cursor sizing. A compositor that resolved these
+    // its own way is exactly how the two sessions would drift.
+    let scale = chonk_shell::startup::read_scale_factor(config.scale);
+    tracing::info!(scale, "UI scale (config `scale`; CHONKSTEP_SCALE overrides)");
+    // XWayland clients draw their own Xcursor pointers and have no way
+    // to learn this session's scale otherwise.
+    chonk_shell::startup::ensure_xcursor_size(scale);
+    let theme = chonk_shell::startup::resolve_theme(config.theme.as_deref()).scaled(scale);
     tracing::info!(theme = %theme.id, "theme loaded");
     let engine = RasterThemeEngine::new(theme.clone());
 
@@ -853,8 +871,8 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
     for (combo, _) in &config.keybindings {
         wm.grab_key(*combo);
     }
-    if config.focus_follows_mouse {
-        tracing::info!("focus-follows-mouse enabled (config `focus_follows_mouse`)");
+    if chonk_shell::startup::read_focus_follows_mouse(config.focus_follows_mouse) {
+        tracing::info!("focus-follows-mouse enabled (config `focus_follows_mouse`; CHONKSTEP_FOCUS_FOLLOWS_MOUSE overrides)");
         wm.set_focus_policy(FocusPolicy::FocusFollowsMouse);
     }
     wm.set_placement_policy(config.placement);
@@ -922,6 +940,7 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
         xwm: None,
         xdisplay: None,
         graphics,
+        dmabuf,
         damage_tracker,
         pointer_location: (0.0, 0.0).into(),
         cursor_status: CursorImageStatus::default_named(),
@@ -955,41 +974,7 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
     Ok(())
 }
 
-/// Resolves the theme this session dresses in, mirroring the X11
-/// binary's precedence exactly: the persisted theme-menu choice
-/// (`theme_select`'s state file) wins over the config file's `theme`,
-/// which wins over the flagship default. Duplicated from
-/// `crates/chonkstep/src/main.rs` rather than shared because which
-/// theme wins at startup is *session policy* and session policy lives
-/// with each session owner — see that file's `resolve_theme` docs.
-fn resolve_theme(config_theme: Option<&str>) -> Theme {
-    if !persisted_theme_choice_exists() {
-        if let Some(requested) = config_theme {
-            if let Some(theme) = wm_theme::default_theme::theme_by_id(requested) {
-                return theme;
-            }
-            tracing::warn!(theme = requested, "config names an unknown theme; using the default instead");
-        }
-    }
-    theme_select::load()
-}
 
-/// `true` exactly when `theme_select::load()` would return a persisted
-/// menu choice rather than its flagship fallback — same path and same
-/// stale-id rule as the X11 binary's helper of the same name, and it
-/// must stay in lockstep with `theme_select`'s `state_path`.
-fn persisted_theme_choice_exists() -> bool {
-    let path = if let Some(root) = std::env::var_os("XDG_STATE_HOME") {
-        std::path::PathBuf::from(root).join("chonkstep/theme")
-    } else if let Some(home) = std::env::var_os("HOME") {
-        std::path::PathBuf::from(home).join(".local/state/chonkstep/theme")
-    } else {
-        return false;
-    };
-    std::fs::read_to_string(path)
-        .ok()
-        .is_some_and(|id| wm_theme::default_theme::theme_by_id(id.trim()).is_some())
-}
 
 /// `true` at most once per `touch` of `scripts/restart.sh`'s marker
 /// file — `remove_file` both checks and consumes in one step, same as
