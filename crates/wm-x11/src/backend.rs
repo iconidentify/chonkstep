@@ -1464,6 +1464,23 @@ impl Backend for X11Backend {
         let _ = self.conn.flush();
     }
 
+    fn refresh_client(&mut self, window: Self::WindowId, size: Size) {
+        let event = ExposeEvent {
+            response_type: EXPOSE_EVENT,
+            sequence: 0,
+            window: window.0,
+            x: 0,
+            y: 0,
+            width: size.w.min(u16::MAX as u32) as u16,
+            height: size.h.min(u16::MAX as u32) as u16,
+            count: 0,
+        };
+        if let Err(e) = self.conn.send_event(false, window.0, EventMask::EXPOSURE, event) {
+            tracing::warn!(?e, ?window, "refresh_client send_event failed");
+        }
+        let _ = self.conn.flush();
+    }
+
     fn grab_keyboard(&mut self) {
         match self.conn.grab_keyboard(false, self.root, CURRENT_TIME, GrabMode::ASYNC, GrabMode::ASYNC) {
             Ok(cookie) => {

@@ -202,6 +202,13 @@ fn render_decoration(
 ) -> DecorationBuffer {
     let (w, h) = (layout.frame_size.w.max(1), layout.frame_size.h.max(1));
     let mut pixmap = Pixmap::new(w, h).expect("decoration size is nonzero");
+    // Defined, opaque pixels over the whole frame first — including the
+    // client-area interior the client normally covers. Frames are
+    // 32-bit ARGB (see wm-x11's `Argb`), and a fresh pixmap's
+    // transparent pixels composite as holes: any gap the client leaves
+    // (mid-resize, a client painting late after unshade) showed raw
+    // wallpaper punched through the frame, reading as corruption.
+    paint::fill_rect(&mut pixmap, 0, 0, w, h, crate::model::Color::rgb(0, 0, 0));
     let border = theme.border.width as u32;
     let inner_w = w.saturating_sub(border * 2);
 
