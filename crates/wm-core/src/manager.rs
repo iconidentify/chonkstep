@@ -1147,7 +1147,9 @@ impl<B: Backend> WindowManager<B> {
         self.backend.ungrab_keyboard();
         if commit {
             if let Some(&id) = session.order.get(session.selected) {
-                if self.clients.get(id).is_some() {
+                if let Some(client) = self.clients.get(id) {
+                    let window = client.window;
+                    let content_size = client.geometry.size;
                     // Switching to a rolled-up window means "show me
                     // that window" — real WindowMaker's cycling.c
                     // unshades on commit too. Without this, committing
@@ -1155,6 +1157,15 @@ impl<B: Backend> WindowManager<B> {
                     // *unmapped* window and nothing visibly happened.
                     self.unshade(id);
                     self.focus_client(id);
+                    // Repaint nudge after the raise: the session
+                    // compositor (picom xrender on the reference VM)
+                    // does not reliably refresh a window's region on a
+                    // bare restack — the raised window kept showing
+                    // whatever previously covered it until some later
+                    // damage arrived (a drag "repaired" it, confirmed
+                    // live). A full-window redraw from the client is
+                    // exactly that damage.
+                    self.backend.refresh_client(window, content_size);
                 }
             }
         }
