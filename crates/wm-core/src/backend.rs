@@ -20,9 +20,22 @@ pub trait Backend {
 
     // -- lifecycle --------------------------------------------------------
     fn scan_existing_windows(&mut self) -> Vec<Self::WindowId>;
-    /// One entry per physical output. A backend without real
-    /// multi-monitor support yet (e.g. `wm-x11` before RandR is wired
-    /// up) reports a single entry spanning the whole screen.
+    /// One entry per physical output, in a **stable order**: an output
+    /// that stays connected must keep the same index across calls.
+    /// That ordering is load-bearing, not a nicety —
+    /// `WindowManager::set_workareas` addresses monitors positionally,
+    /// so a list that reshuffles would silently hand one monitor's
+    /// reserved strip to another.
+    ///
+    /// Exactly one entry carries `primary: true` where the platform
+    /// names a primary output (RandR's primary, a compositor's
+    /// configured main output). Where the platform names none, every
+    /// entry is `primary: false` and the core treats index 0 as
+    /// primary — so a list is never left without one, and a backend
+    /// never has to invent a primary the platform did not state.
+    ///
+    /// A backend without real multi-monitor support yet reports a
+    /// single primary entry spanning the whole screen.
     fn monitors(&self) -> Vec<MonitorInfo>;
 
     /// The identity of a shell-owned surface — the dock, the Clip, the
@@ -204,6 +217,13 @@ pub trait Backend {
     fn publish_workspaces(&mut self, _count: usize, _current: usize) {}
     /// Publishes `_NET_WORKAREA` — the same rectangle for every
     /// desktop, since the dock reserves the same strip on all of them.
+    /// `area` is the *union* of the per-monitor workareas, not any one
+    /// monitor's: the property's format is one rect per desktop with no
+    /// per-monitor dimension at all (EWMH predates multi-head), so the
+    /// bounding box is the only rect a multi-monitor session can state
+    /// without lying about some output. Clients that need real
+    /// per-monitor reserved space read the panels' own
+    /// `_NET_WM_STRUT_PARTIAL`. See `WindowManager::set_workareas`.
     fn publish_workarea(&mut self, _area: Rect, _workspace_count: usize) {}
     /// Publishes a client's `_NET_WM_STATE` property from the WM's own
     /// authoritative flags.

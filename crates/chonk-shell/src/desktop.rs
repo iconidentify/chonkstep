@@ -560,10 +560,70 @@ fn stacked_dock_height(tile: u32, screen_height: u32, widgets: &[Box<dyn DockWid
         .min(screen_height.max(1))
 }
 
+/// Root geometry of the Dock: a one-tile-wide column hugging the top-
+/// right corner of the monitor it belongs to. Anchored to `primary`'s
+/// own corner rather than to the screen's, because on a multi-head
+/// desktop the screen's top-right corner belongs to whichever output
+/// happens to sit furthest right — and the screen's origin can be
+/// negative outright, for a second head placed left of the primary.
+fn dock_geometry(primary: Rect, dock_width: u32, dock_height: u32) -> Rect {
+    Rect {
+        pos: Point::new(primary.pos.x + primary.size.w.saturating_sub(dock_width) as i32, primary.pos.y),
+        size: Size::new(dock_width, dock_height),
+    }
+}
+
+/// Root geometry of the Clip: a single tile in the primary monitor's
+/// top-left corner (real WindowMaker's stock Clip position).
+fn clip_geometry(primary: Rect, tile: u32) -> Rect {
+    Rect { pos: primary.pos, size: Size::new(tile, tile) }
+}
+
+/// Root position of miniwindow icon slot `slot`: tiles fill
+/// left-to-right along the primary monitor's bottom edge and wrap
+/// upward — the icon row layout in the reference NeXTSTEP screenshot,
+/// clear of the Dock on the right.
+fn icon_slot_position(primary: Rect, tile: u32, pad: u32, slot: usize) -> Point {
+    let stride = tile + pad;
+    let usable_width = primary.size.w.max(stride);
+    let cols = (usable_width / stride).max(1) as usize;
+    let (row, col) = (slot / cols, slot % cols);
+    Point::new(
+        primary.pos.x + pad as i32 + col as i32 * stride as i32,
+        primary.pos.y + primary.size.h as i32 - ((row as u32 + 1) * stride) as i32,
+    )
+}
+
+/// One workarea per monitor — the whole body of `Desktop::workareas`,
+/// split out so the per-monitor rule is testable without standing up a
+/// backend. The primary is matched by rect rather than by index because
+/// that is the only identity the Desktop stores; two monitors with
+/// identical rects would be indistinguishable, which is a configuration
+/// no arrangement produces (two outputs cannot occupy the same space).
+fn workareas_for(monitors: &[Rect], primary: Rect, primary_workarea: Rect) -> Vec<Rect> {
+    monitors.iter().map(|&monitor| if monitor == primary { primary_workarea } else { monitor }).collect()
+}
+
+/// Root position that centers a `size` panel — the Alt-Tab switcher —
+/// on the primary monitor, so it appears where the user is looking
+/// rather than straddling the seam between two heads.
+fn centered_on(primary: Rect, size: Size) -> Point {
+    Point::new(
+        primary.pos.x + (primary.size.w as i32 - size.w as i32) / 2,
+        primary.pos.y + (primary.size.h as i32 - size.h as i32) / 2,
+    )
+}
+
 pub struct Desktop<B: Backend> {
     dock_window: B::ShellId,
-    screen_width: u32,
-    screen_height: u32,
+    /// The whole desktop's bounding box — every monitor at once. That
+    /// is the surface the wallpaper has to cover and the extent menus
+    /// are kept inside; it is *not* where chrome goes (see `primary`).
+    screen: Size,
+    /// The primary monitor's rect, in root coordinates: where every
+    /// piece of the shell's own chrome hangs. Deliberately not derived
+    /// from `screen` — see `dock_geometry`.
+    primary: Rect,
     dock_width: u32,
     tile: u32,
     pad: u32,
@@ -622,7 +682,12 @@ impl<B: Backend> Desktop<B> {
     /// `scale` multiplies every dock/icon pixel dimension — pass the
     /// same factor used for `Theme::scaled` so the shell's own chrome
     /// (which doesn't go through the theme engine) matches the WM's.
-    pub fn new(backend: &mut B, screen: Size, scale: f32, theme_id: String, apps: Vec<crate::apps::AppEntry>) -> Self {
+    /// `screen` is the whole desktop's bounding box (what the wallpaper
+    /// covers); `primary` is the monitor rect every piece of chrome
+    /// hangs on. On a single-monitor session the two agree, and every
+    /// caller must still pass both — the shell cannot recover the
+    /// primary's origin from a size.
+    pub fn new(backend: &mut B, screen: Size, primary: Rect, scale: f32, theme_id: String, apps: Vec<crate::apps::AppEntry>) -> Self {
         let tile = ((56.0 * scale).round() as u32).max(16);
         let pad = ((4.0 * scale).round() as u32).max(1);
         // The dock is exactly one tile wide, tiles touch directly with
@@ -656,18 +721,15 @@ impl<B: Backend> Desktop<B> {
             Box::new(PowerWidget::new()),
             Box::new(ClockWidget::new()),
         ];
-        let dock_height = stacked_dock_height(tile, screen.h, &widgets);
-        let dock_geom = Rect {
-            pos: Point::new((screen.w.saturating_sub(dock_width)) as i32, 0),
-            size: Size::new(dock_width, dock_height),
-        };
+        let dock_height = stacked_dock_height(tile, primary.size.h, &widgets);
+        let dock_geom = dock_geometry(primary, dock_width, dock_height);
         let dock_window = backend
             .create_shell_surface(dock_geom, wallpaper.dock_color(), true)
             .expect("failed to create dock window");
         backend.map_shell_surface(dock_window);
         backend.raise_shell_surface(dock_window);
 
-        let clip_geom = Rect { pos: Point::new(0, 0), size: Size::new(tile, tile) };
+        let clip_geom = clip_geometry(primary, tile);
         let clip_window = backend
             .create_shell_surface(clip_geom, wallpaper.dock_color(), true)
             .expect("failed to create clip window");
@@ -678,8 +740,8 @@ impl<B: Backend> Desktop<B> {
             .expect("embedded ChonkStep logo should decode");
         let desktop = Self {
             dock_window,
-            screen_width: screen.w,
-            screen_height: screen.h,
+            screen,
+            primary,
             dock_width,
             tile,
             pad,
@@ -708,27 +770,57 @@ impl<B: Backend> Desktop<B> {
         self.dock_window
     }
 
-    /// The Dock is an always-on-top, content-sized object rather than a
-    /// reserved sidebar, so maximized windows use the whole monitor.
-    pub fn workarea(&self, screen: Size) -> Rect {
-        Rect { pos: Point::new(0, 0), size: screen }
+    /// One workarea per monitor, in the order `monitors` arrives in —
+    /// exactly the positional order `WindowManager::set_workareas`
+    /// indexes. The Dock is an always-on-top, content-sized object
+    /// rather than a reserved sidebar (real WindowMaker's Dock behaves
+    /// the same way), so it carves nothing out of the monitor it hangs
+    /// on and every entry is that monitor's full geometry. This stays a
+    /// per-monitor computation regardless, so that the day the Dock does
+    /// reserve a strip, only the primary's entry has to change.
+    pub fn workareas(&self, monitors: &[Rect]) -> Vec<Rect> {
+        workareas_for(monitors, self.primary, self.primary_workarea())
     }
 
+    /// The rectangle managed windows may occupy on the primary monitor:
+    /// its whole rect, minus whatever the Dock reserves — which is
+    /// nothing today (see `workareas`).
+    pub fn primary_workarea(&self) -> Rect {
+        self.primary
+    }
+
+    /// The whole desktop's extent — the union of every monitor, which
+    /// is what the wallpaper covers and what menus are kept inside.
+    /// Menus deliberately use this rather than `primary`: a menu opens
+    /// wherever the pointer is, which on a multi-head session is
+    /// routinely not the primary at all.
     fn screen_size(&self) -> Size {
-        Size::new(self.screen_width, self.screen_height)
+        self.screen
     }
 
-    /// Repositions/resizes the dock to hug the right edge of a new
-    /// screen size (the backend reported one via `take_screen_resize`
-    /// — e.g. the user dragged the edge of the nested Xephyr window an
-    /// X11 session runs in) and repaints it at the current stack's
-    /// compact content height. Icon tiles already on screen are left
-    /// where they are.
-    pub fn resize_to_screen(&mut self, backend: &mut B, theme: &Theme, screen: Size) {
-        self.screen_width = screen.w;
-        self.screen_height = screen.h;
+    /// Rehangs the dock on a new screen/monitor arrangement (the
+    /// backend reported one via `take_screen_resize` — e.g. the user
+    /// dragged the edge of the nested Xephyr window an X11 session runs
+    /// in, or an output was plugged in) and repaints it at the current
+    /// stack's compact content height. Icon tiles already on screen are
+    /// left where they are: a tile the user placed is theirs, and one
+    /// left in its auto slot is re-slotted the next time the grid is
+    /// consulted anyway.
+    pub fn resize_to_screen(&mut self, backend: &mut B, theme: &Theme, screen: Size, primary: Rect) {
+        self.screen = screen;
+        self.primary = primary;
         self.repaint_wallpaper(backend);
         self.redraw_dock(backend, theme);
+        self.reposition_clip(backend, theme);
+    }
+
+    /// Moves the Clip back to the primary monitor's corner after the
+    /// arrangement changed. Separate from `redraw_dock` only because
+    /// the two surfaces are separate; both are pure "put the chrome
+    /// back where it belongs" work.
+    fn reposition_clip(&mut self, backend: &mut B, theme: &Theme) {
+        backend.configure_shell_surface(self.clip_window, clip_geometry(self.primary, self.tile));
+        self.repaint_clip(backend, theme);
     }
 
     /// Advances every dock widget by one event-loop tick and repaints
@@ -899,11 +991,8 @@ impl<B: Backend> Desktop<B> {
     }
 
     fn redraw_dock(&mut self, backend: &mut B, theme: &Theme) {
-        let dock_height = stacked_dock_height(self.tile, self.screen_height, &self.widgets);
-        let dock_geom = Rect {
-            pos: Point::new((self.screen_width.saturating_sub(self.dock_width)) as i32, 0),
-            size: Size::new(self.dock_width, dock_height),
-        };
+        let dock_height = stacked_dock_height(self.tile, self.primary.size.h, &self.widgets);
+        let dock_geom = dock_geometry(self.primary, self.dock_width, dock_height);
         backend.configure_shell_surface(self.dock_window, dock_geom);
 
         let Some(mut pixmap) = Pixmap::new(self.dock_width, dock_height.max(1)) else {
@@ -1035,7 +1124,7 @@ impl<B: Backend> Desktop<B> {
             }
             (None, _) => {}
         }
-        let Self { switcher, font_system, swash_cache, tile, screen_width, screen_height, .. } = self;
+        let Self { switcher, font_system, swash_cache, tile, primary, .. } = self;
         let Some(panel) = switcher.as_mut() else {
             return;
         };
@@ -1048,13 +1137,7 @@ impl<B: Backend> Desktop<B> {
             if let Some(window) = panel.window.take() {
                 backend.destroy_shell_surface(window);
             }
-            let geom = Rect {
-                pos: Point::new(
-                    (*screen_width as i32 - size.w as i32) / 2,
-                    (*screen_height as i32 - size.h as i32) / 2,
-                ),
-                size,
-            };
+            let geom = Rect { pos: centered_on(*primary, size), size };
             match backend.create_shell_surface(geom, switcher::panel_background(theme), true) {
                 Some(window) => {
                     panel.window = Some(window);
@@ -1157,13 +1240,7 @@ impl<B: Backend> Desktop<B> {
     }
 
     fn icon_slot_position(&self, slot: usize) -> Point {
-        let stride = self.tile + self.pad;
-        let usable_width = self.screen_width.max(stride);
-        let cols = (usable_width / stride).max(1) as usize;
-        let (row, col) = (slot / cols, slot % cols);
-        let x = self.pad as i32 + col as i32 * stride as i32;
-        let y = self.screen_height as i32 - ((row as u32 + 1) * stride) as i32;
-        Point::new(x, y)
+        icon_slot_position(self.primary, self.tile, self.pad, slot)
     }
 
     /// Removes the icon tile for `client`, if one is showing (a no-op
@@ -1327,6 +1404,84 @@ mod tests {
 
         assert_eq!(stacked_dock_height(56, 1_080, &widgets), 280);
         assert_eq!(stacked_dock_height(56, 200, &widgets), 200, "oversized stacks are screen-clamped");
+    }
+
+    /// A second head placed to the *left* of the primary: the whole
+    /// desktop then spans x -1920..1920, so anything that anchored
+    /// chrome to the screen's own origin or size would land it on the
+    /// wrong output. Every geometry test below measures against this.
+    const AUX_LEFT: Rect = Rect { pos: Point { x: -1920, y: 0 }, size: Size { w: 1920, h: 1080 } };
+    const PRIMARY: Rect = Rect { pos: Point { x: 0, y: 0 }, size: Size { w: 1600, h: 1200 } };
+
+    #[test]
+    fn the_dock_hugs_the_primary_monitors_top_right_corner() {
+        let dock = dock_geometry(PRIMARY, 56, 400);
+        assert_eq!(dock, Rect { pos: Point::new(1544, 0), size: Size::new(56, 400) });
+
+        // Moving the primary itself carries the dock with it — the
+        // case a screen-anchored dock got wrong, since the desktop's
+        // own top-right corner belongs to whichever head sits furthest
+        // right.
+        let offset_primary = Rect { pos: Point::new(1920, 200), size: Size::new(1600, 1200) };
+        let dock = dock_geometry(offset_primary, 56, 400);
+        assert_eq!(dock, Rect { pos: Point::new(3464, 200), size: Size::new(56, 400) });
+    }
+
+    #[test]
+    fn a_dock_wider_than_its_monitor_pins_to_that_monitors_left_edge() {
+        // `saturating_sub` rather than a wrap into a huge positive x:
+        // an absurd dock width must still leave the surface on the
+        // monitor it belongs to.
+        let narrow = Rect { pos: Point::new(-1920, 0), size: Size::new(40, 1080) };
+        assert_eq!(dock_geometry(narrow, 56, 100).pos, Point::new(-1920, 0));
+    }
+
+    #[test]
+    fn the_clip_sits_in_the_primary_monitors_own_corner() {
+        assert_eq!(clip_geometry(PRIMARY, 56), Rect { pos: Point::new(0, 0), size: Size::new(56, 56) });
+        // On a primary that is *not* at the desktop's origin, the Clip
+        // follows the monitor rather than staying at root (0, 0) — which
+        // on this arrangement is still on the primary only by accident.
+        let right_primary = Rect { pos: Point::new(1920, 0), size: Size::new(1600, 1200) };
+        assert_eq!(clip_geometry(right_primary, 56), Rect { pos: Point::new(1920, 0), size: Size::new(56, 56) });
+    }
+
+    #[test]
+    fn icon_slots_fill_the_primary_monitors_bottom_edge_and_wrap_upward() {
+        // 1600 wide, stride 60 (56 + 4 pad) — 26 columns before the row
+        // wraps, and the first row sits one stride up from the
+        // monitor's bottom edge.
+        assert_eq!(icon_slot_position(PRIMARY, 56, 4, 0), Point::new(4, 1140));
+        assert_eq!(icon_slot_position(PRIMARY, 56, 4, 1), Point::new(64, 1140));
+        assert_eq!(icon_slot_position(PRIMARY, 56, 4, 26), Point::new(4, 1080), "the 27th tile wraps onto a second row");
+
+        // The same slots on a head at negative x land in *its* bottom
+        // -left corner, not at the desktop's origin.
+        assert_eq!(icon_slot_position(AUX_LEFT, 56, 4, 0), Point::new(-1916, 1020));
+    }
+
+    #[test]
+    fn the_switcher_panel_centers_on_the_primary_monitor() {
+        assert_eq!(centered_on(PRIMARY, Size::new(600, 200)), Point::new(500, 500));
+        // Centered on the head, not on the desktop: an arrangement
+        // whose union is twice as wide must not push the panel onto the
+        // seam between the two.
+        assert_eq!(centered_on(AUX_LEFT, Size::new(600, 200)), Point::new(-1260, 440));
+    }
+
+    #[test]
+    fn every_monitor_gets_a_workarea_in_the_order_the_wm_indexes_them() {
+        // The Dock reserves nothing today, so the primary's entry is
+        // its own full rect — but it is still computed as the primary's
+        // entry, positionally, so a future reserved strip lands on the
+        // right head and only there.
+        let monitors = [AUX_LEFT, PRIMARY];
+        assert_eq!(workareas_for(&monitors, PRIMARY, PRIMARY), vec![AUX_LEFT, PRIMARY]);
+
+        // With a strip actually reserved, only the primary's entry
+        // shrinks; every other head keeps its full geometry.
+        let reserved = Rect { pos: Point::new(0, 0), size: Size::new(1600, 1140) };
+        assert_eq!(workareas_for(&monitors, PRIMARY, reserved), vec![AUX_LEFT, reserved]);
     }
 
     #[test]

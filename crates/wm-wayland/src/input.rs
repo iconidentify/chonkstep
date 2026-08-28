@@ -30,6 +30,17 @@
 //! `Shell::on_root_press`, standing in for the root-window id the X11
 //! loop compares against.
 //!
+//! Every coordinate in this module is GLOBAL — the one space spanning
+//! all monitors that the ledger stores its rects in — and that is what
+//! makes multi-monitor input free here: the hit-test compares a global
+//! pointer position against global rects, and the surface-local
+//! coordinates it hands the shell, `wm-core`, and the seat are all
+//! differences of two global points, so a window on a monitor whose
+//! origin is (1920, 0) resolves exactly like one at the origin. The
+//! only place output geometry appears at all is confining the pointer
+//! ([`confine_to_outputs`]), which is the one question — "where is the
+//! pointer allowed to be" — that the physical layout genuinely answers.
+//!
 //! The cross-event routing state ([`InputState`]) lives in the seat's
 //! user-data map rather than as a `Compositor` field: the seat is the
 //! thing whose events the state describes, the map ties the lifetime to
@@ -51,7 +62,7 @@ use smithay::input::Seat;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::utils::{Logical, Point as LogicalPoint, SERIAL_COUNTER};
 
-use wm_core::{BackendEvent, KeyCombo, Modifiers, MouseButton, SurfaceRef};
+use wm_core::{BackendEvent, KeyCombo, Modifiers, MonitorInfo, MouseButton, SurfaceRef};
 use wm_theme_api::Point;
 
 use crate::state::{
@@ -274,6 +285,14 @@ fn combo_modifiers(mods: &ModifiersState) -> Modifiers {
 
 /// Winit reports the pointer absolutely against the host window;
 /// transform to output space and route.
+///
+/// The transform is against the *whole* global space (every monitor's
+/// union), not one screen: for the nested backend those are the same
+/// rectangle, and for an absolute device on a real session — a
+/// touchscreen, a tablet — spanning the desktop is what an unconfigured
+/// one does everywhere. Mapping a tablet to a single output is a
+/// libinput device-configuration feature this session does not read
+/// yet.
 fn on_pointer_move_absolute<I: InputBackend>(
     state: &mut Compositor,
     event: I::PointerMotionAbsoluteEvent,
@@ -284,17 +303,61 @@ fn on_pointer_move_absolute<I: InputBackend>(
 }
 
 /// Relative motion (the libinput/session path): accumulate onto the
-/// current location and clamp to the output — the compositor equivalent
-/// of the X server confining the pointer to the screen.
+/// current location and confine the result to the outputs — the
+/// compositor equivalent of the X server keeping the pointer on the
+/// screen.
 fn on_pointer_move_relative<I: InputBackend>(
     state: &mut Compositor,
     event: I::PointerMotionEvent,
 ) {
-    let size = state.wm.backend().output_size;
-    let mut position = state.pointer_location + event.delta();
-    position.x = position.x.clamp(0.0, (size.w.max(1) - 1) as f64);
-    position.y = position.y.clamp(0.0, (size.h.max(1) - 1) as f64);
+    let position =
+        confine_to_outputs(&state.wm.backend().monitors, state.pointer_location + event.delta());
     pointer_moved(state, position, event.time_msec());
+}
+
+/// Pulls a pointer position onto the nearest output.
+///
+/// With one monitor this is the plain clamp to its rectangle it has
+/// always been. With several it cannot be a clamp to the union bounding
+/// box: two monitors of different heights (or a future non-contiguous
+/// layout) leave regions inside that box which no output covers, and a
+/// pointer parked in one would be invisible — the cursor is composited
+/// per output, so a point off every output is drawn nowhere — while
+/// still hit-testing against whatever shell surface happens to extend
+/// there. Projecting onto the nearest monitor instead keeps the pointer
+/// somewhere the user can see it, and costs a distance comparison per
+/// monitor on a list that is one or two entries long.
+///
+/// Note this only confines; it does not stop the pointer at a monitor
+/// edge. A drag across the boundary passes straight through, which is
+/// the behavior every desktop with a contiguous layout has.
+fn confine_to_outputs(
+    monitors: &[MonitorInfo],
+    position: LogicalPoint<f64, Logical>,
+) -> LogicalPoint<f64, Logical> {
+    let mut best: Option<(f64, LogicalPoint<f64, Logical>)> = None;
+    for monitor in monitors {
+        let rect = monitor.geometry;
+        // The far edge is the last pixel INSIDE the monitor, matching
+        // `Rect::contains`'s half-open convention — a pointer at exactly
+        // `pos.x + size.w` belongs to the next monitor, or to nothing.
+        let x = position
+            .x
+            .clamp(rect.pos.x as f64, (rect.pos.x + rect.size.w.max(1) as i32 - 1) as f64);
+        let y = position
+            .y
+            .clamp(rect.pos.y as f64, (rect.pos.y + rect.size.h.max(1) as i32 - 1) as f64);
+        // Zero for a position already on this monitor, which is what
+        // makes the common case fall out of the same comparison.
+        let distance = (position.x - x).powi(2) + (position.y - y).powi(2);
+        if best.as_ref().is_none_or(|(best_distance, _)| distance < *best_distance) {
+            best = Some((distance, (x, y).into()));
+        }
+    }
+    // No monitors at all is not a state a running session reaches (see
+    // `Compositor::outputs`); leaving the position untouched is still
+    // better than snapping it to the origin.
+    best.map(|(_, point)| point).unwrap_or(position)
 }
 
 /// The shared motion path: hover/crossing bookkeeping, WM/shell queue
@@ -804,4 +867,72 @@ fn popup_hit(
 /// Root-space point -> a rect's local coordinates.
 fn local_to(at: Point, origin: Point) -> Point {
     Point::new(at.x - origin.x, at.y - origin.y)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wm_theme_api::{Rect, Size};
+
+    // Routing and hit-testing need a live seat, a wayland display and a
+    // ledger full of surfaces, so they are exercised by running the
+    // session. Pointer confinement is the one piece of this module that
+    // is pure geometry — and the one piece whose multi-monitor behavior
+    // the single-connector test VM cannot show, which is exactly why it
+    // is worth pinning here.
+
+    fn monitor(x: i32, y: i32, w: u32, h: u32) -> MonitorInfo {
+        MonitorInfo {
+            geometry: Rect { pos: Point::new(x, y), size: Size::new(w, h) },
+            name: format!("test-{x}x{y}"),
+            primary: x == 0 && y == 0,
+        }
+    }
+
+    fn confined(monitors: &[MonitorInfo], x: f64, y: f64) -> (f64, f64) {
+        let point = confine_to_outputs(monitors, (x, y).into());
+        (point.x, point.y)
+    }
+
+    #[test]
+    fn one_monitor_confines_to_its_own_edges() {
+        let monitors = [monitor(0, 0, 800, 600)];
+        assert_eq!(confined(&monitors, 400.0, 300.0), (400.0, 300.0));
+        // The far edge is the last pixel inside, not the width itself:
+        // a pointer at x=800 would hit-test against nothing.
+        assert_eq!(confined(&monitors, 1000.0, 900.0), (799.0, 599.0));
+        assert_eq!(confined(&monitors, -50.0, -1.0), (0.0, 0.0));
+    }
+
+    #[test]
+    fn a_second_monitor_extends_the_reachable_area() {
+        let monitors = [monitor(0, 0, 800, 600), monitor(800, 0, 640, 480)];
+        // The seam is crossable: what used to be past the right edge is
+        // now the second monitor's left column.
+        assert_eq!(confined(&monitors, 800.0, 100.0), (800.0, 100.0));
+        assert_eq!(confined(&monitors, 1439.0, 479.0), (1439.0, 479.0));
+        // And the far edge is now the second monitor's.
+        assert_eq!(confined(&monitors, 5000.0, 10.0), (1439.0, 10.0));
+    }
+
+    #[test]
+    fn a_point_no_monitor_covers_snaps_to_the_nearest_one() {
+        // Unequal heights leave dead space under the shorter monitor,
+        // inside the union bounding box but on no screen. A pointer
+        // there would be drawn nowhere, so it lands on the nearest edge
+        // instead — here the second monitor's bottom row, not the first
+        // monitor's right column, because it is closer.
+        let monitors = [monitor(0, 0, 800, 600), monitor(800, 0, 640, 480)];
+        assert_eq!(confined(&monitors, 1000.0, 550.0), (1000.0, 479.0));
+        // Straddling: nearer to the tall monitor horizontally than to
+        // the short one's bottom edge.
+        assert_eq!(confined(&monitors, 805.0, 599.0), (799.0, 599.0));
+    }
+
+    #[test]
+    fn no_monitors_leaves_the_position_alone() {
+        // Not a state a running session reaches; it must not panic or
+        // teleport the pointer to the origin if it ever does.
+        assert_eq!(confined(&[], 12.0, 34.0), (12.0, 34.0));
+    }
 }

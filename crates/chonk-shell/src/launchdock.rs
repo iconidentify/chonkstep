@@ -69,7 +69,10 @@ pub struct LaunchDock<B: Backend> {
     window: Option<B::ShellId>,
     mapped: bool,
     tile: u32,
-    screen: Size,
+    /// The monitor this strip lives on - the primary. Its position is
+    /// what `strip_origin` anchors to; its height still bounds how
+    /// many tiles fit.
+    primary: Rect,
     /// Same ~4px-scaled threshold as `desktop.rs`'s `drag_threshold`,
     /// derived from the tile size (which is itself `56 * scale`) so
     /// the strip feels the same at any `CHONKSTEP_SCALE`.
@@ -93,7 +96,7 @@ impl<B: Backend> LaunchDock<B> {
     /// Loads persisted pins (resolving desktop-file ids against
     /// `apps`; stale ids are dropped with a warning) and creates the
     /// strip surface when there is anything to show.
-    pub fn new(backend: &mut B, theme: &Theme, screen: Size, tile: u32, apps: &[AppEntry]) -> Self {
+    pub fn new(backend: &mut B, theme: &Theme, primary: Rect, tile: u32, apps: &[AppEntry]) -> Self {
         let tile = tile.max(1);
         let state_path = state_path();
         let pins = state_path.as_deref().map(|path| load_pins(path, apps)).unwrap_or_default();
@@ -102,7 +105,7 @@ impl<B: Backend> LaunchDock<B> {
             window: None,
             mapped: false,
             tile,
-            screen,
+            primary,
             drag_threshold: ((4.0 * tile as f32 / 56.0).round() as i32).max(2),
             state_path,
             pins,
@@ -138,7 +141,7 @@ impl<B: Backend> LaunchDock<B> {
         pressed: bool,
         running: &[(String, B::WindowId)],
     ) -> Option<LaunchDockAction<B::WindowId>> {
-        let origin = strip_origin(self.tile);
+        let origin = strip_origin(self.primary, self.tile);
         let root = Point::new(local.x + origin.x, local.y + origin.y);
         if pressed {
             let slot = slot_at(origin, self.tile, self.pins.len(), root)?;
@@ -179,7 +182,7 @@ impl<B: Backend> LaunchDock<B> {
     /// the strip: that release is a click, and it arrives (with the
     /// running-window pairs a click needs) through `handle_click`.
     pub fn handle_release(&mut self, backend: &mut B, theme: &Theme, root: Point) -> bool {
-        let origin = strip_origin(self.tile);
+        let origin = strip_origin(self.primary, self.tile);
         let Some(drag) = self.drag.as_ref() else { return false };
         if !drag.moved {
             if slot_at(origin, self.tile, self.pins.len(), root).is_some() {
@@ -214,7 +217,7 @@ impl<B: Backend> LaunchDock<B> {
     /// current extent, or the would-be first slot when nothing is
     /// pinned yet).
     pub fn try_pin_at(&mut self, backend: &mut B, theme: &Theme, root: Point, app: &AppEntry) -> bool {
-        let origin = strip_origin(self.tile);
+        let origin = strip_origin(self.primary, self.tile);
         let Some(slot) = slot_at(origin, self.tile, self.pins.len().max(1), root) else {
             return false;
         };
@@ -250,7 +253,7 @@ impl<B: Backend> LaunchDock<B> {
         root: Point,
         running: &[(String, B::WindowId)],
     ) -> Option<LaunchDockAction<B::WindowId>> {
-        let origin = strip_origin(self.tile);
+        let origin = strip_origin(self.primary, self.tile);
         let drag = self.drag.take()?;
         backend.ungrab_pointer(drag.grab);
 
@@ -301,7 +304,7 @@ impl<B: Backend> LaunchDock<B> {
             }
             return;
         }
-        let geometry = Rect { pos: strip_origin(self.tile), size: Size::new(self.tile, self.strip_height()) };
+        let geometry = Rect { pos: strip_origin(self.primary, self.tile), size: Size::new(self.tile, self.strip_height()) };
         let window = match self.window {
             Some(window) => {
                 backend.configure_shell_surface(window, geometry);
@@ -332,7 +335,7 @@ impl<B: Backend> LaunchDock<B> {
     /// Dock's `stacked_dock_height`).
     fn strip_height(&self) -> u32 {
         let full = (self.pins.len() as u32).saturating_mul(self.tile);
-        let below_clip = self.screen.h.saturating_sub(self.tile).max(self.tile);
+        let below_clip = self.primary.size.h.saturating_sub(self.tile).max(self.tile);
         full.min(below_clip).max(1)
     }
 
@@ -372,10 +375,15 @@ impl<B: Backend> LaunchDock<B> {
     }
 }
 
-/// Root position of the strip's top-left corner: the left edge,
-/// directly below the Clip (which is `tile` x `tile` at the origin).
-fn strip_origin(tile: u32) -> Point {
-    Point::new(0, tile as i32)
+/// Root position of the strip's top-left corner: the primary
+/// monitor's left edge, directly below the Clip (which is `tile` x
+/// `tile` in that monitor's corner). Anchoring to the *monitor* rather
+/// than the desktop origin is what keeps the strip attached to the
+/// Clip on a multi-head layout - with a second screen to the left of
+/// the primary the desktop origin is off on that other monitor, and a
+/// root-anchored strip would sit there by itself.
+fn strip_origin(primary: Rect, tile: u32) -> Point {
+    Point::new(primary.pos.x, primary.pos.y + tile as i32)
 }
 
 /// Which of `slots` tile slots the root-relative `root` falls in, for
@@ -592,7 +600,8 @@ mod tests {
 
     #[test]
     fn slots_resolve_over_the_strip_extent_and_the_empty_strips_first_slot() {
-        let origin = strip_origin(56);
+        let primary = Rect { pos: Point::new(0, 0), size: Size::new(1920, 1200) };
+        let origin = strip_origin(primary, 56);
 
         // Three pins: y = 56..224 on the left edge, one slot per tile.
         assert_eq!(slot_at(origin, 56, 3, Point::new(10, 60)), Some(0));
@@ -604,6 +613,20 @@ mod tests {
         // The empty strip's pin zone is its would-be first slot.
         assert_eq!(slot_at(origin, 56, 0usize.max(1), Point::new(10, 60)), Some(0));
         assert_eq!(slot_at(origin, 56, 0usize.max(1), Point::new(10, 120)), None);
+    }
+
+    /// The strip follows the primary monitor rather than the desktop
+    /// origin: with a second head to the left, the desktop's origin is
+    /// on that other screen, and a root-anchored strip would sit there
+    /// alone while the Clip stayed on the primary.
+    #[test]
+    fn the_strip_anchors_to_the_primary_monitor_not_the_desktop_origin() {
+        let primary = Rect { pos: Point::new(1600, 0), size: Size::new(1920, 1200) };
+        let origin = strip_origin(primary, 56);
+        assert_eq!(origin, Point::new(1600, 56), "below the Clip, in the primary's corner");
+
+        assert_eq!(slot_at(origin, 56, 3, Point::new(1610, 60)), Some(0), "hit-testing follows the strip");
+        assert_eq!(slot_at(origin, 56, 3, Point::new(10, 60)), None, "the other monitor is not the strip");
     }
 
     #[test]
