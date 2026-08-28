@@ -58,6 +58,17 @@ restarts that keep your windows open.
   fullscreen, and `_NET_WM_WINDOW_TYPE` picks the decoration policy
   (dialogs get chrome, docks and notifications are left alone).
   `scripts/verify-ewmh.sh` checks a live session from the outside.
+- **A real application story.** The root menu's Applications submenu
+  is generated from the system's freedesktop `.desktop` entries -
+  categories become cascades, `Terminal=true` apps launch inside the
+  themed terminal, NoDisplay/Hidden/TryExec respected - so every
+  installed app is launchable on day one. And WindowMaker's defining
+  feature, the launcher dock: drag a miniaturized window's icon tile
+  onto the strip below the Clip to pin its application (resolved
+  through the `.desktop` index), click to launch - or to focus the
+  running window, marked by an accent lamp on the tile - drag along
+  the strip to reorder, drag off to unpin. Pins persist across
+  sessions.
 - **A WindowMaker-style desktop shell.** Right-click root menu with
   cascading submenus, a dock of instrument apps - an analog clock plus
   five LED instruments on theme-reactive glass (network traffic with a

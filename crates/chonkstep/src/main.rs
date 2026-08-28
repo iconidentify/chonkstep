@@ -1,4 +1,6 @@
+mod apps;
 mod desktop;
+mod launchdock;
 mod spawn;
 mod theme_select;
 mod wallpaper;
@@ -11,10 +13,11 @@ use wm_config::Action;
 use wm_core::{Backend, BackendEvent, ClientFlags, FocusPolicy, KeyCombo, MouseButton, Notification, WindowManager};
 use wm_theme::{RasterThemeEngine, Theme};
 use wm_theme_api::Point;
-use wm_x11::X11Backend;
+use wm_x11::{X11Backend, XWindow};
 use x11rb::protocol::xproto::Window;
 
 use desktop::{Desktop, IconDragResult, MenuAction, RootMenuAction, WindowMenuAction, WindowMenuContext};
+use launchdock::{LaunchDock, LaunchDockAction};
 
 /// `urxvt`'s own default size (80x24, negotiated correctly through
 /// normal ICCCM size hints) is already reasonable, and — unlike
@@ -86,9 +89,60 @@ fn terminal_args(theme: &Theme) -> Vec<String> {
 /// menu's Terminal item and the `spawn-terminal` keybinding, so the two
 /// gestures can never drift apart on font, geometry, or palette.
 fn spawn_terminal(theme: &Theme) {
-    let args = terminal_args(theme);
+    spawn_urxvt(terminal_args(theme));
+}
+
+/// The single urxvt spawn step: [`spawn_terminal`] passes the themed
+/// args alone, [`launch_app`] appends `-e` plus a `.desktop` entry's
+/// command line for `Terminal=true` apps. Factored so the two callers
+/// can never drift on how the arg list actually reaches the process.
+fn spawn_urxvt(args: Vec<String>) {
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
     spawn::spawn_detached("urxvt", &arg_refs);
+}
+
+/// Launches one `.desktop` entry — the shared dispatch behind both the
+/// root menu's Applications submenu and the launcher dock's tiles, so
+/// the two gestures can never disagree on how an entry runs.
+/// `Terminal=true` entries run inside the themed terminal (urxvt's `-e`
+/// consumes the rest of the command line as the program to exec), so a
+/// TUI app gets the exact font/geometry/palette the Terminal menu item
+/// itself would. An empty parsed command line — a malformed entry the
+/// scanner let through — is a logged no-op, never a panic.
+fn launch_app(entry: &apps::AppEntry, theme: &Theme) {
+    // Scale recovered from the already-scaled theme (titlebar font is
+    // 12px at 1x) — the same trick `terminal_args` uses, so launch
+    // fixups need no separate scale plumbing.
+    let scale = theme.titlebar.font.size / 12.0;
+    let Some((program, args)) = entry.exec.split_first() else {
+        tracing::warn!(app = %entry.id, "desktop entry has an empty command line; not launching");
+        return;
+    };
+    if entry.terminal {
+        let mut argv = terminal_args(theme);
+        argv.push("-e".to_string());
+        argv.extend(entry.exec.iter().cloned());
+        spawn_urxvt(argv);
+        return;
+    }
+    // External GUI launches get the environment/argument fixups the
+    // old dedicated browser launcher carried, now applied generically:
+    // every app is told the desktop's scale through the GTK/Qt env
+    // vars (no XSETTINGS daemon or portal here to advertise it), and
+    // the Chromium family additionally gets its own scale flag plus
+    // `--password-store=basic` — without which Chromium blocks ~25s at
+    // startup on a D-Bus secrets service this session doesn't provide
+    // (the whole story lives on the spawn.rs helpers). Confirmed live:
+    // the first .desktop-launched Chromium hung exactly that way.
+    let mut argv: Vec<String> = args.to_vec();
+    let base = program.rsplit('/').next().unwrap_or(program);
+    if base.contains("chrom") || base.contains("chrome") || base == "microsoft-edge" || base.starts_with("brave") {
+        argv.extend(spawn::chromium_scale_args(scale));
+        argv.extend(spawn::chromium_avoid_secrets_service_hang_args());
+        argv.extend(spawn::chromium_x11_platform_args());
+    }
+    let arg_refs: Vec<&str> = argv.iter().map(String::as_str).collect();
+    spawn::spawn_detached_with_env(program, &arg_refs, &spawn::gtk_qt_scale_env(scale));
 }
 
 fn main() {
@@ -128,7 +182,22 @@ fn main() {
     }
     let engine = RasterThemeEngine::new(theme.clone());
 
-    let mut desktop = Desktop::new(&mut backend, screen, scale, theme.id.clone());
+    // The `.desktop` application index, scanned once at startup — one
+    // vec, three consumers that must agree on entry positions: the
+    // desktop keeps a clone for the root menu's Applications submenu
+    // (`RootMenuAction::LaunchApp(i)` indexes it), the launcher dock
+    // resolves its persisted pins against it, and the launch dispatch
+    // in the event loop indexes it again when either of those fires.
+    let apps = apps::scan_applications();
+    tracing::info!(count = apps.len(), "application entries scanned");
+
+    let mut desktop = Desktop::new(&mut backend, screen, scale, theme.id.clone(), apps.clone());
+    // The launcher strip below the Clip. Its tile size mirrors
+    // `Desktop::new`'s own derivation (56px at 1x, scaled, floored at
+    // 16) rather than inventing a second number: the strip's tiles
+    // must read as the same family as the Clip above them and the
+    // miniwindow icon tiles pins are dropped from.
+    let mut launchdock = LaunchDock::new(&mut backend, &theme, screen, ((56.0 * scale).round() as u32).max(16), &apps);
 
     // The wallpaper pixmap `Desktop::new` just published dies with the
     // previous process's X connection on every hot-restart, and the
@@ -178,6 +247,16 @@ fn main() {
     let keymap: HashMap<KeyCombo, Action> = config.keybindings.iter().cloned().collect();
 
     tracing::info!(clients = wm.client_count(), "entering event loop");
+    // The pointer's last known root-relative position, recorded by
+    // every dispatched motion event. Shell button events carry only
+    // window-local coordinates (`translate_button` in `wm-x11`), but
+    // the launcher strip's release/pin decisions need a root position —
+    // and the most recent motion is exact for them in practice, since
+    // a drag's release is always preceded by the motion that put the
+    // pointer wherever it is released. Lives outside the loop because
+    // the release drains from `take_shell_click` on a later iteration
+    // than the motion that preceded it.
+    let mut pointer_root = Point::new(0, 0);
     loop {
         if restart_requested() {
             tracing::info!("restart requested — re-executing in place");
@@ -233,14 +312,14 @@ fn main() {
                     // change from this same burst lands before an action
                     // that targets the focused client.
                     if let Some(motion) = pending_motion.take() {
-                        dispatch_motion(&mut wm, &mut desktop, &theme, motion);
+                        dispatch_motion(&mut wm, &mut desktop, &mut launchdock, &theme, &mut pointer_root, motion);
                     }
                     run_config_action(&mut wm, &theme, action);
                     continue;
                 }
             }
             if let Some(motion) = pending_motion.take() {
-                dispatch_motion(&mut wm, &mut desktop, &theme, motion);
+                dispatch_motion(&mut wm, &mut desktop, &mut launchdock, &theme, &mut pointer_root, motion);
             }
             wm.dispatch(event);
         }
@@ -249,7 +328,7 @@ fn main() {
             break;
         }
         if let Some(motion) = pending_motion.take() {
-            dispatch_motion(&mut wm, &mut desktop, &theme, motion);
+            dispatch_motion(&mut wm, &mut desktop, &mut launchdock, &theme, &mut pointer_root, motion);
         }
 
         while let Some(notification) = wm.take_notification() {
@@ -264,7 +343,7 @@ fn main() {
 
         let mut should_exit = false;
         while let Some((window, local, button, pressed)) = wm.backend_mut().take_shell_click() {
-            if !handle_shell_click(&mut wm, &mut desktop, &theme, scale, window, local, button, pressed) {
+            if !handle_shell_click(&mut wm, &mut desktop, &mut launchdock, &theme, &apps, window, local, button, pressed, pointer_root) {
                 should_exit = true;
             }
         }
@@ -287,6 +366,11 @@ fn main() {
         desktop.set_workspace_display(wm.backend_mut(), &theme, current, count);
         desktop.tick_menu(wm.backend_mut(), &theme);
         desktop.tick_widgets(wm.backend_mut(), &theme);
+        // Same cadence as the widget tick: refresh the launcher strip's
+        // running-app indicators from the live client set — a cheap
+        // no-op inside `update_running` whenever nothing changed.
+        let running = running_pairs(&wm);
+        launchdock.update_running(wm.backend_mut(), &theme, &running);
 
         // Blocks until the X11 socket actually has something to read,
         // instead of a fixed sleep — the entire reason drags/resizes
@@ -462,16 +546,40 @@ fn persisted_theme_choice_exists() -> bool {
 }
 
 /// Feeds one (already-coalesced) `PointerMotion` event to the icon drag
-/// tracker, the dock widget drag tracker, and `wm-core` itself — pulled
-/// out of the main loop's drain since it's needed at two points there
-/// (mid-burst, when a non-motion event follows one, and once more after
-/// the burst ends).
-fn dispatch_motion(wm: &mut WindowManager<X11Backend>, desktop: &mut Desktop, theme: &Theme, event: BackendEvent<wm_x11::XWindow, wm_x11::XFrame>) {
+/// tracker, the dock widget drag tracker, the launcher strip's own drag
+/// tracker, and `wm-core` itself — pulled out of the main loop's drain
+/// since it's needed at two points there (mid-burst, when a non-motion
+/// event follows one, and once more after the burst ends). Also records
+/// the root position into `last_root`, the loop-held cell shell button
+/// handling reads back for release decisions that need root coordinates
+/// (see `pointer_root`'s declaration in `main`).
+fn dispatch_motion(
+    wm: &mut WindowManager<X11Backend>,
+    desktop: &mut Desktop,
+    launchdock: &mut LaunchDock,
+    theme: &Theme,
+    last_root: &mut Point,
+    event: BackendEvent<wm_x11::XWindow, wm_x11::XFrame>,
+) {
     if let BackendEvent::PointerMotion { root, .. } = &event {
+        *last_root = *root;
         desktop.drag_icon_motion(wm.backend_mut(), *root);
         desktop.drag_widget_motion(wm.backend_mut(), theme, *root);
+        launchdock.handle_motion(wm.backend_mut(), theme, *root);
     }
     wm.dispatch(event);
+}
+
+/// The launcher strip's view of what is currently running: one
+/// `(WM_CLASS class, raw window id)` pair per managed client —
+/// `iter_clients` only ever yields live clients, so no lifecycle
+/// filtering happens here. The id crosses to the strip as a plain
+/// `u32` because the strip hands it straight back through
+/// `LaunchDockAction::Focus`, where the dispatch re-wraps it as an
+/// `XWindow` for the same `ActivateRequested` path a pager's
+/// `_NET_ACTIVE_WINDOW` message takes.
+fn running_pairs(wm: &WindowManager<X11Backend>) -> Vec<(String, u32)> {
+    wm.iter_clients().map(|(_, client)| (client.class.clone(), client.window.0)).collect()
 }
 
 /// Runs one configured keybinding action (the event loop already
@@ -630,17 +738,54 @@ fn handle_notification(wm: &mut WindowManager<X11Backend>, desktop: &mut Desktop
 /// right-click emits (see `handle_notification`) — but once open, both
 /// are shell windows, so both deliver their clicks through this
 /// function and resolve in the one `click_menu` dispatch below.
+///
+/// The launcher strip routes ahead of everything else — releases even
+/// ahead of the root-window branch: an in-progress strip drag holds a
+/// pointer grab (like the icon drags), so its release can report
+/// against any window at all, the root included, and the root branch
+/// would otherwise swallow it. `pointer_root` is the pointer's last
+/// known root position (shell clicks themselves carry only
+/// window-local coordinates), which is exactly where the release
+/// happened — see its declaration in `main`.
 fn handle_shell_click(
     wm: &mut WindowManager<X11Backend>,
     desktop: &mut Desktop,
+    launchdock: &mut LaunchDock,
     theme: &Theme,
-    scale: f32,
+    apps: &[apps::AppEntry],
     window: Window,
     local: Point,
     button: MouseButton,
     pressed: bool,
+    pointer_root: Point,
 ) -> bool {
     let root = wm.backend().root();
+
+    // A release first offers itself to an in-progress strip drag
+    // (drag-off-the-strip unpins); one that no strip drag consumes
+    // falls through to the ordinary routing below, including the
+    // strip's own click resolution when the release is on the strip.
+    if !pressed && launchdock.handle_release(wm.backend_mut(), theme, pointer_root) {
+        return true;
+    }
+
+    // Clicks on the strip itself — mirroring how the desktop's own
+    // clip/dock windows are routed below. The running pairs give the
+    // click its focus-or-launch answer for the pressed tile.
+    if launchdock.owns_window(window) {
+        let running = running_pairs(wm);
+        if let Some(action) = launchdock.handle_click(wm.backend_mut(), theme, local, pressed, &running) {
+            match action {
+                LaunchDockAction::Launch(entry) => launch_app(&entry, theme),
+                // The same activate path a pager's _NET_ACTIVE_WINDOW
+                // message rides — focuses, raises, and switches
+                // workspace as needed, with `wm-core` re-validating
+                // the id (a stale one is silently nothing).
+                LaunchDockAction::Focus(target) => wm.dispatch(BackendEvent::ActivateRequested(XWindow(target))),
+            }
+        }
+        return true;
+    }
 
     if window == root {
         if pressed {
@@ -694,8 +839,21 @@ fn handle_shell_click(
     }
 
     if let Some(result) = desktop.end_icon_drag(wm.backend_mut()) {
-        if let IconDragResult::Restore(client_id) = result {
-            wm.deminiaturize(client_id);
+        match result {
+            IconDragResult::Restore(client_id) => wm.deminiaturize(client_id),
+            // Dropping a miniwindow icon over the launcher strip pins
+            // its application: the client's WM_CLASS resolves back
+            // through the `.desktop` index, and `try_pin_at` decides
+            // whether the drop actually landed on the strip's pin
+            // zone. A miss on either count — no class match, or a
+            // drop anywhere else on the desktop — is silently a plain
+            // reposition, exactly the pre-launcher behavior.
+            IconDragResult::Repositioned { client, root } => {
+                let matched = wm.client(client).and_then(|c| apps::match_window_class(apps, &c.class));
+                if let Some(index) = matched {
+                    launchdock.try_pin_at(wm.backend_mut(), theme, root, &apps[index]);
+                }
+            }
         }
         return true;
     }
@@ -707,7 +865,18 @@ fn handle_shell_click(
                 RootMenuAction::LaunchAbout => {
                     spawn::spawn_detached(&about_binary_path(), &[]);
                 }
-                RootMenuAction::LaunchBrowser => launch_browser(scale),
+                // Indexes the same apps vec the desktop's menu was
+                // built from, so `i` means the same entry on both
+                // sides; the bounds-safe get covers the impossible
+                // desync anyway — menus fire `Kill`-grade commands, so
+                // "impossible" still doesn't get to panic.
+                RootMenuAction::LaunchApp(i) => {
+                    if let Some(entry) = apps.get(i) {
+                        launch_app(entry, theme);
+                    } else {
+                        tracing::warn!(index = i, count = apps.len(), "menu fired an out-of-range application index");
+                    }
+                }
                 RootMenuAction::SetWallpaper(wallpaper) => {
                     desktop.set_wallpaper(wm.backend_mut(), theme, wallpaper);
                 }
@@ -765,34 +934,6 @@ fn about_binary_path() -> String {
         .filter(|p| p.exists())
         .and_then(|p| p.to_str().map(str::to_string))
         .unwrap_or_else(|| "chonk-about".to_string())
-}
-
-/// Edge's own UI (toolbar, tabs, page content) reads a touch large next
-/// to the rest of chonkstep's chrome at a 1:1 match to `CHONKSTEP_SCALE`
-/// — confirmed by eye, not a technical constraint — so its own scale is
-/// nudged down slightly rather than matched exactly. Purely a per-app
-/// tuning knob: change this one number to adjust, independently of the
-/// desktop's own scale.
-const BROWSER_SCALE_FACTOR: f32 = 0.85;
-
-/// Launches the system browser at this desktop's resolved scale (times
-/// [`BROWSER_SCALE_FACTOR`]) — Microsoft Edge is a third-party,
-/// chonkstep-unaware binary, so unlike `chonk-about` (a native app that
-/// reads the scale itself via `chonk-ui::scale_factor`), it has to be
-/// told through the flags/env vars its own toolkit understands. See
-/// `spawn::chromium_scale_args`/`spawn::gtk_qt_scale_env` — the same two
-/// calls are the whole recipe for scaling *any* future external app the
-/// menu grows to launch, not just this one. The scale is passed in
-/// rather than re-read from the environment so the config file's
-/// `scale` fallback (env-less launches) applies here exactly as it does
-/// to the WM's own chrome.
-fn launch_browser(desktop_scale: f32) {
-    let scale = desktop_scale * BROWSER_SCALE_FACTOR;
-    let mut args = spawn::chromium_scale_args(scale);
-    args.extend(spawn::chromium_avoid_secrets_service_hang_args());
-    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    let env = spawn::gtk_qt_scale_env(scale);
-    spawn::spawn_detached_with_env("microsoft-edge-stable", &arg_refs, &env);
 }
 
 /// Path to the marker file `scripts/restart.sh` touches to ask a

@@ -91,6 +91,10 @@ pub struct Client<B: Backend> {
     /// frame exists for this client (milestone step 4).
     pub frame: Option<B::FrameId>,
     pub title: String,
+    /// `WM_CLASS`'s class field, captured at manage time — the
+    /// application identity the shell's launcher matching keys on.
+    /// Empty when the client set none.
+    pub class: String,
     /// Root-relative content geometry (standard X11 convention).
     pub geometry: Rect,
     pub layout: DecorationLayout,
@@ -116,6 +120,7 @@ impl<B: Backend> Client<B> {
             window,
             frame: None,
             title,
+            class: String::new(),
             geometry: Rect::default(),
             layout: DecorationLayout::default(),
             lifecycle: Lifecycle::Normal,
