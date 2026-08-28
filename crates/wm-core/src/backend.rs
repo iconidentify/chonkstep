@@ -24,6 +24,58 @@ pub trait Backend {
     /// multi-monitor support yet (e.g. `wm-x11` before RandR is wired
     /// up) reports a single entry spanning the whole screen.
     fn monitors(&self) -> Vec<MonitorInfo>;
+
+    /// The identity of a shell-owned surface — the dock, the Clip, the
+    /// launcher strip, icon tiles, menu popups. The same id space
+    /// `wm_theme_api::PopupHost` uses on this backend, so the desktop
+    /// shell's cascade menus and its other surfaces interoperate.
+    ///
+    /// This surface family is what makes the shell backend-portable:
+    /// `chonk-shell` draws everything through `DecorationBuffer`s
+    /// painted onto these, so an X11 backend maps them to
+    /// override-redirect windows while a Wayland compositor maps them
+    /// to internal scene elements — the shell cannot tell the
+    /// difference, by construction.
+    type ShellId: Copy + Eq + std::hash::Hash + std::fmt::Debug;
+
+    /// Creates an (unmapped) shell surface. `above`: keep it over
+    /// managed clients (docks, menus); `false` sits it at desktop
+    /// level. `None` when the backend cannot create surfaces (a fake
+    /// that doesn't model them).
+    fn create_shell_surface(&mut self, geometry: Rect, background: (u8, u8, u8), above: bool) -> Option<Self::ShellId>;
+    fn map_shell_surface(&mut self, id: Self::ShellId);
+    fn unmap_shell_surface(&mut self, id: Self::ShellId);
+    fn destroy_shell_surface(&mut self, id: Self::ShellId);
+    fn raise_shell_surface(&mut self, id: Self::ShellId);
+    fn configure_shell_surface(&mut self, id: Self::ShellId, geometry: Rect);
+    /// Blits `buffer` onto the surface — the shell's one drawing verb.
+    fn paint_shell_surface(&mut self, id: Self::ShellId, buffer: &DecorationBuffer);
+
+    /// Paints the desktop background — solid color or a wallpaper
+    /// image. On X11 this is the root window (plus the root-pixmap
+    /// publishing compositors read); a Wayland compositor draws it as
+    /// the scene's bottom layer.
+    fn paint_root_color(&mut self, rgb: (u8, u8, u8));
+    fn paint_root_image(&mut self, buffer: &DecorationBuffer);
+
+    /// Drains one queued click on a shell surface: `(surface, surface-
+    /// local position, button, pressed)`. Backends queue these from
+    /// their input machinery; the binary's event loop drains and feeds
+    /// them to the shell.
+    fn take_shell_click(&mut self) -> Option<(Self::ShellId, Point, MouseButton, bool)> {
+        None
+    }
+    /// Drains one queued pointer motion over a shell surface.
+    fn take_shell_motion(&mut self) -> Option<(Self::ShellId, Point)> {
+        None
+    }
+    /// Drains a pending screen-size change (RandR on X11, output
+    /// reconfiguration on Wayland).
+    fn take_screen_resize(&mut self) -> Option<Size> {
+        None
+    }
+    /// The current screen/output size.
+    fn screen_size(&self) -> Size;
     /// Non-blocking. The event-loop driver calls this in a loop on fd
     /// readiness until it returns `None`.
     fn poll_event(&mut self) -> Option<BackendEvent<Self::WindowId, Self::FrameId>>;

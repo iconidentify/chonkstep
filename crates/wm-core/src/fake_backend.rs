@@ -45,6 +45,8 @@ pub struct FakeBackend {
     pub paint_count: HashMap<FakeFrameId, u32>,
     pub last_frame_geometry: HashMap<FakeFrameId, Rect>,
     pub close_requests: HashSet<FakeWindowId>,
+    /// Monotonic id source for `create_shell_surface`.
+    pub next_shell_id: u32,
     /// Windows force-killed via `kill_client`, in call order.
     pub killed: Vec<FakeWindowId>,
     /// Per-window `WM_CLASS` class strings the existing `window_class`
@@ -148,6 +150,23 @@ const DEFAULT_GEOMETRY: Rect = Rect { pos: Point { x: 0, y: 0 }, size: Size { w:
 impl Backend for FakeBackend {
     type WindowId = FakeWindowId;
     type FrameId = FakeFrameId;
+    type ShellId = u32;
+
+    fn create_shell_surface(&mut self, _geometry: wm_theme_api::Rect, _background: (u8, u8, u8), _above: bool) -> Option<Self::ShellId> {
+        self.next_shell_id += 1;
+        Some(self.next_shell_id)
+    }
+    fn map_shell_surface(&mut self, _id: Self::ShellId) {}
+    fn unmap_shell_surface(&mut self, _id: Self::ShellId) {}
+    fn destroy_shell_surface(&mut self, _id: Self::ShellId) {}
+    fn raise_shell_surface(&mut self, _id: Self::ShellId) {}
+    fn configure_shell_surface(&mut self, _id: Self::ShellId, _geometry: wm_theme_api::Rect) {}
+    fn paint_shell_surface(&mut self, _id: Self::ShellId, _buffer: &DecorationBuffer) {}
+    fn paint_root_color(&mut self, _rgb: (u8, u8, u8)) {}
+    fn paint_root_image(&mut self, _buffer: &DecorationBuffer) {}
+    fn screen_size(&self) -> Size {
+        Size::new(1600, 1200)
+    }
 
     fn scan_existing_windows(&mut self) -> Vec<Self::WindowId> {
         Vec::new()

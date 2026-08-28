@@ -1,0 +1,24 @@
+[package]
+name = "wm-wayland"
+description = "Wayland compositor backend for chonkstep, built on Smithay"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Linux-only by nature: on other hosts this crate compiles to an empty
+# library (see lib.rs's cfg gate) so the whole workspace still builds
+# and tests on a macOS dev machine.
+[target.'cfg(target_os = "linux")'.dependencies]
+wm-core = { path = "../wm-core" }
+wm-theme-api = { path = "../wm-theme-api" }
+tracing = "0.1"
+
+[features]
+default = ["winit"]
+# The nested development backend: the compositor runs inside a window
+# on an existing X11/Wayland desktop.
+winit = []
+# The real-hardware session: DRM/KMS + libinput + libseat. Needs the
+# corresponding system libraries at build time; off by default so CI
+# and the nested dev loop stay light.
+session = []

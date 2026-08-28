@@ -1,5 +1,7 @@
 //! Built-in ChonkStep wallpapers and the small amount of image layout
-//! needed to turn their source PNGs into screen-sized root pixmaps.
+//! needed to turn their source PNGs into screen-sized root background
+//! images (see `Backend::paint_root_image` for how a backend shows
+//! one).
 
 use std::path::PathBuf;
 

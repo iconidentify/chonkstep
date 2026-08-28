@@ -6,14 +6,18 @@ license.workspace = true
 description = "A modern window manager with WindowMaker parity."
 
 [dependencies]
+# The backend-generic desktop shell — everything the desktop *is*; this
+# binary only wires it to the X11 backend and drives the event loop.
+chonk-shell = { path = "../chonk-shell" }
 wm-core = { path = "../wm-core" }
+# `Theme` (resolve/scale at startup) and `RasterThemeEngine` for
+# `WindowManager::new`.
 wm-theme = { path = "../wm-theme" }
-wm-theme-api = { path = "../wm-theme-api" }
 wm-x11 = { path = "../wm-x11" }
 wm-config = { path = "../wm-config" }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 x11rb = "0.13"
-tiny-skia = "0.11"
-cosmic-text = "0.12"
+# `poll(2)` on the X11 connection fd — the block-until-activity core of
+# the event loop (see `wait_for_x11_activity`).
 libc = "0.2"

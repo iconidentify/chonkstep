@@ -1275,6 +1275,72 @@ fn from_server_bytes(data: &[u8], width: u32, height: u32, order: ImageOrder) ->
 impl Backend for X11Backend {
     type WindowId = XWindow;
     type FrameId = XFrame;
+    type ShellId = Window;
+
+    // The shell-surface family delegates to the inherent methods the
+    // shell called directly before it went backend-generic — X11 shell
+    // surfaces are plain override-redirect windows. Errors are logged
+    // and swallowed here (the inherent methods return Results for the
+    // binary's own startup paths): a failed shell paint must never
+    // take the WM down.
+
+    fn create_shell_surface(&mut self, geometry: Rect, background: (u8, u8, u8), above: bool) -> Option<Self::ShellId> {
+        match self.create_shell_window(geometry, background, above) {
+            Ok(win) => Some(win),
+            Err(e) => {
+                tracing::warn!(?e, "failed to create shell surface");
+                None
+            }
+        }
+    }
+
+    fn map_shell_surface(&mut self, id: Self::ShellId) {
+        let _ = self.map_shell_window(id);
+    }
+
+    fn unmap_shell_surface(&mut self, id: Self::ShellId) {
+        let _ = self.unmap_shell_window(id);
+    }
+
+    fn destroy_shell_surface(&mut self, id: Self::ShellId) {
+        let _ = self.destroy_shell_window(id);
+    }
+
+    fn raise_shell_surface(&mut self, id: Self::ShellId) {
+        let _ = self.raise_shell_window(id);
+    }
+
+    fn configure_shell_surface(&mut self, id: Self::ShellId, geometry: Rect) {
+        let _ = self.configure_shell_window(id, geometry);
+    }
+
+    fn paint_shell_surface(&mut self, id: Self::ShellId, buffer: &DecorationBuffer) {
+        self.blit(id, buffer);
+    }
+
+    fn paint_root_color(&mut self, rgb: (u8, u8, u8)) {
+        let _ = self.paint_background(rgb);
+    }
+
+    fn paint_root_image(&mut self, buffer: &DecorationBuffer) {
+        let _ = self.paint_background_image(buffer);
+    }
+
+    fn take_shell_click(&mut self) -> Option<(Self::ShellId, Point, MouseButton, bool)> {
+        X11Backend::take_shell_click(self)
+    }
+
+    fn take_shell_motion(&mut self) -> Option<(Self::ShellId, Point)> {
+        X11Backend::take_shell_motion(self)
+    }
+
+    fn take_screen_resize(&mut self) -> Option<Size> {
+        X11Backend::take_screen_resize(self)
+    }
+
+    fn screen_size(&self) -> Size {
+        X11Backend::screen_size(self)
+    }
 
     fn scan_existing_windows(&mut self) -> Vec<Self::WindowId> {
         let tree = match self.conn.query_tree(self.root) {

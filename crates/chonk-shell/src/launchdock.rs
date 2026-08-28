@@ -6,7 +6,7 @@
 //! window when one exists — and drag a tile off the strip to unpin.
 //! Pins persist across sessions in the state directory.
 //!
-//! The strip is one shell window (like the Dock and the Clip in
+//! The strip is one shell surface (like the Dock and the Clip in
 //! `desktop.rs`), exactly one tile wide, starting at `y = tile`
 //! directly below the Clip: the Clip opens the left edge the way the
 //! identity tile opens the right one, and the launcher stacks beneath
@@ -29,16 +29,19 @@ use std::path::{Path, PathBuf};
 use wm_core::{Backend, DragHandle};
 use wm_theme::Theme;
 use wm_theme_api::{DecorationBuffer, Point, Rect, Size};
-use wm_x11::X11Backend;
-use x11rb::protocol::xproto::Window;
 
 use crate::apps::{match_window_class, AppEntry};
 
 /// What a click on the strip resolved to — the shell dispatches:
 /// `Launch` spawns the entry, `Focus` activates the running window.
-pub enum LaunchDockAction {
+/// Generic over the backend's client-window id (`W` =
+/// `Backend::WindowId` in the shell) rather than over the backend
+/// itself: the enum only carries an id, and the free helpers below
+/// ([`resolve_click`], [`running_lamps`]) stay directly testable with
+/// plain integers.
+pub enum LaunchDockAction<W> {
     Launch(AppEntry),
-    Focus(Window),
+    Focus(W),
 }
 
 /// A press on a strip tile, possibly mid-drag — the same
@@ -58,12 +61,12 @@ struct StripDrag {
     grab: DragHandle,
 }
 
-pub struct LaunchDock {
-    /// The strip's one shell window — `None` until the first pin ever
+pub struct LaunchDock<B: Backend> {
+    /// The strip's one shell surface — `None` until the first pin ever
     /// needs it, and kept (unmapped) across empty spells rather than
     /// destroyed, the same churn-avoidance reasoning as the switcher
     /// panel in `desktop.rs`.
-    window: Option<Window>,
+    window: Option<B::ShellId>,
     mapped: bool,
     tile: u32,
     screen: Size,
@@ -86,11 +89,11 @@ pub struct LaunchDock {
     swash_cache: cosmic_text::SwashCache,
 }
 
-impl LaunchDock {
+impl<B: Backend> LaunchDock<B> {
     /// Loads persisted pins (resolving desktop-file ids against
     /// `apps`; stale ids are dropped with a warning) and creates the
-    /// strip window when there is anything to show.
-    pub fn new(backend: &mut X11Backend, theme: &Theme, screen: Size, tile: u32, apps: &[AppEntry]) -> Self {
+    /// strip surface when there is anything to show.
+    pub fn new(backend: &mut B, theme: &Theme, screen: Size, tile: u32, apps: &[AppEntry]) -> Self {
         let tile = tile.max(1);
         let state_path = state_path();
         let pins = state_path.as_deref().map(|path| load_pins(path, apps)).unwrap_or_default();
@@ -112,10 +115,10 @@ impl LaunchDock {
         dock
     }
 
-    /// Whether `window` is the strip — the shell routes its clicks and
-    /// motion here when so.
-    pub fn owns_window(&self, window: Window) -> bool {
-        self.window == Some(window)
+    /// Whether `surface` is the strip — the shell routes its clicks
+    /// and motion here when so.
+    pub fn owns_window(&self, surface: B::ShellId) -> bool {
+        self.window == Some(surface)
     }
 
     /// A button press/release on the strip. Press arms a potential
@@ -123,17 +126,18 @@ impl LaunchDock {
     /// can't outrun the narrow strip); a release that never crossed
     /// the drag threshold is a click, resolving to a
     /// [`LaunchDockAction`]: `Focus` when one of the `running`
-    /// `(WM_CLASS class, X window id)` pairs matches the tile's entry,
-    /// `Launch` otherwise. A release that did cross the threshold
-    /// completes the drag instead — reorder on the strip, unpin off it.
+    /// `(WM_CLASS class, client window id)` pairs matches the tile's
+    /// entry, `Launch` otherwise. A release that did cross the
+    /// threshold completes the drag instead — reorder on the strip,
+    /// unpin off it.
     pub fn handle_click(
         &mut self,
-        backend: &mut X11Backend,
+        backend: &mut B,
         theme: &Theme,
         local: Point,
         pressed: bool,
-        running: &[(String, u32)],
-    ) -> Option<LaunchDockAction> {
+        running: &[(String, B::WindowId)],
+    ) -> Option<LaunchDockAction<B::WindowId>> {
         let origin = strip_origin(self.tile);
         let root = Point::new(local.x + origin.x, local.y + origin.y);
         if pressed {
@@ -156,7 +160,7 @@ impl LaunchDock {
     /// threshold ghosts the picked-up tile in place (the drop target
     /// is always a strip slot or "off", so a tile chasing the pointer
     /// would add motion without adding information).
-    pub fn handle_motion(&mut self, backend: &mut X11Backend, theme: &Theme, root: Point) {
+    pub fn handle_motion(&mut self, backend: &mut B, theme: &Theme, root: Point) {
         {
             let Some(drag) = self.drag.as_mut() else { return };
             if drag.moved || !crossed_threshold(drag.press_root, root, self.drag_threshold) {
@@ -174,7 +178,7 @@ impl LaunchDock {
     /// the threshold is *not* consumed while the pointer is still over
     /// the strip: that release is a click, and it arrives (with the
     /// running-window pairs a click needs) through `handle_click`.
-    pub fn handle_release(&mut self, backend: &mut X11Backend, theme: &Theme, root: Point) -> bool {
+    pub fn handle_release(&mut self, backend: &mut B, theme: &Theme, root: Point) -> bool {
         let origin = strip_origin(self.tile);
         let Some(drag) = self.drag.as_ref() else { return false };
         if !drag.moved {
@@ -193,10 +197,10 @@ impl LaunchDock {
     }
 
     /// Repaints running-app indicators from the current set of managed
-    /// windows' `(WM_CLASS class, X window id)` pairs — call from the
-    /// shell's tick; a cheap no-op when no tile's lamp actually
+    /// windows' `(WM_CLASS class, client window id)` pairs — call from
+    /// the shell's tick; a cheap no-op when no tile's lamp actually
     /// changed.
-    pub fn update_running(&mut self, backend: &mut X11Backend, theme: &Theme, running: &[(String, u32)]) {
+    pub fn update_running(&mut self, backend: &mut B, theme: &Theme, running: &[(String, B::WindowId)]) {
         let lit = running_lamps(&self.pins, running);
         if lit != self.lit {
             self.lit = lit;
@@ -209,7 +213,7 @@ impl LaunchDock {
     /// when `root` isn't over the strip's pin zone (the strip's
     /// current extent, or the would-be first slot when nothing is
     /// pinned yet).
-    pub fn try_pin_at(&mut self, backend: &mut X11Backend, theme: &Theme, root: Point, app: &AppEntry) -> bool {
+    pub fn try_pin_at(&mut self, backend: &mut B, theme: &Theme, root: Point, app: &AppEntry) -> bool {
         let origin = strip_origin(self.tile);
         let Some(slot) = slot_at(origin, self.tile, self.pins.len().max(1), root) else {
             return false;
@@ -241,11 +245,11 @@ impl LaunchDock {
     /// two entry points can never disagree about drop semantics.
     fn finish_drag(
         &mut self,
-        backend: &mut X11Backend,
+        backend: &mut B,
         theme: &Theme,
         root: Point,
-        running: &[(String, u32)],
-    ) -> Option<LaunchDockAction> {
+        running: &[(String, B::WindowId)],
+    ) -> Option<LaunchDockAction<B::WindowId>> {
         let origin = strip_origin(self.tile);
         let drag = self.drag.take()?;
         backend.ungrab_pointer(drag.grab);
@@ -283,15 +287,15 @@ impl LaunchDock {
         }
     }
 
-    /// Brings the strip window in line with the pin count: sized
+    /// Brings the strip surface in line with the pin count: sized
     /// `pins * tile` tall (screen-clamped like the Dock), resized and
     /// remapped on pin/unpin, unmapped entirely when no pins exist —
     /// and repainted whenever it is showing.
-    fn sync_window(&mut self, backend: &mut X11Backend, theme: &Theme) {
+    fn sync_window(&mut self, backend: &mut B, theme: &Theme) {
         if self.pins.is_empty() {
             if self.mapped {
                 if let Some(window) = self.window {
-                    let _ = backend.unmap_shell_window(window);
+                    backend.unmap_shell_surface(window);
                 }
                 self.mapped = false;
             }
@@ -300,43 +304,43 @@ impl LaunchDock {
         let geometry = Rect { pos: strip_origin(self.tile), size: Size::new(self.tile, self.strip_height()) };
         let window = match self.window {
             Some(window) => {
-                let _ = backend.configure_shell_window(window, geometry);
+                backend.configure_shell_surface(window, geometry);
                 window
             }
-            None => match backend.create_shell_window(geometry, crate::desktop::DESKTOP_BG, true) {
-                Ok(window) => {
+            None => match backend.create_shell_surface(geometry, crate::desktop::DESKTOP_BG, true) {
+                Some(window) => {
                     self.window = Some(window);
                     window
                 }
-                Err(error) => {
-                    tracing::warn!(?error, "failed to create launcher strip window");
+                None => {
+                    tracing::warn!("failed to create launcher strip surface");
                     return;
                 }
             },
         };
         if !self.mapped {
-            let _ = backend.map_shell_window(window);
+            backend.map_shell_surface(window);
             self.mapped = true;
         }
-        let _ = backend.raise_shell_window(window);
+        backend.raise_shell_surface(window);
         self.repaint(backend, theme);
     }
 
     /// The strip's visible height: every pinned tile, clamped to what
     /// actually fits below the Clip so an absurd pin count can't ask
-    /// X11 for an invalid window (same defensive clamp as the Dock's
-    /// `stacked_dock_height`).
+    /// the backend for an invalid surface (same defensive clamp as the
+    /// Dock's `stacked_dock_height`).
     fn strip_height(&self) -> u32 {
         let full = (self.pins.len() as u32).saturating_mul(self.tile);
         let below_clip = self.screen.h.saturating_sub(self.tile).max(self.tile);
         full.min(below_clip).max(1)
     }
 
-    /// Renders every pin's tile into one strip buffer and blits it.
+    /// Renders every pin's tile into one strip buffer and paints it.
     /// The buffer is assembled by concatenation rather than through an
-    /// intermediate pixmap: tiles are exactly strip-wide, so each one
+    /// intermediate image: tiles are exactly strip-wide, so each one
     /// *is* its band of rows.
-    fn repaint(&mut self, backend: &mut X11Backend, theme: &Theme) {
+    fn repaint(&mut self, backend: &mut B, theme: &Theme) {
         let Some(window) = self.window else { return };
         if self.pins.is_empty() {
             return;
@@ -364,7 +368,7 @@ impl LaunchDock {
         if let Some(drag) = self.drag.as_ref().filter(|drag| drag.moved) {
             ghost_slot(&mut pixels, self.tile, drag.index);
         }
-        backend.blit(window, &DecorationBuffer { width: self.tile, height: self.pins.len() as u32 * self.tile, pixels });
+        backend.paint_shell_surface(window, &DecorationBuffer { width: self.tile, height: self.pins.len() as u32 * self.tile, pixels });
     }
 }
 
@@ -401,7 +405,7 @@ fn crossed_threshold(press: Point, current: Point, threshold: i32) -> bool {
 /// Matching goes through [`match_window_class`] over a one-entry
 /// slice so the `StartupWMClass`-then-name-then-executable precedence
 /// rules live in exactly one place.
-fn resolve_click(pin: &AppEntry, running: &[(String, u32)]) -> LaunchDockAction {
+fn resolve_click<W: Copy>(pin: &AppEntry, running: &[(String, W)]) -> LaunchDockAction<W> {
     for (class, window) in running {
         if match_window_class(std::slice::from_ref(pin), class).is_some() {
             return LaunchDockAction::Focus(*window);
@@ -414,7 +418,7 @@ fn resolve_click(pin: &AppEntry, running: &[(String, u32)]) -> LaunchDockAction 
 /// pairs — same matching rule as [`resolve_click`], so the lamp and
 /// the click can never disagree about whether an app counts as
 /// running.
-fn running_lamps(pins: &[AppEntry], running: &[(String, u32)]) -> Vec<bool> {
+fn running_lamps<W>(pins: &[AppEntry], running: &[(String, W)]) -> Vec<bool> {
     pins.iter()
         .map(|pin| running.iter().any(|(class, _)| match_window_class(std::slice::from_ref(pin), class).is_some()))
         .collect()
@@ -642,6 +646,9 @@ mod tests {
 
         let running = [("Navigator".to_string(), 42u32)];
         assert_eq!(running_lamps(&pins, &running), [true, false]);
-        assert_eq!(running_lamps(&pins, &[]), [false, false]);
+        // The empty slice pins no window-id type, so name one — any
+        // id type gives the same lamps, which is the point of the
+        // helper being generic.
+        assert_eq!(running_lamps::<u32>(&pins, &[]), [false, false]);
     }
 }

@@ -24,7 +24,11 @@ fn main() {
     let mut font_system = cosmic_text::FontSystem::new();
     let mut swash_cache = cosmic_text::SwashCache::new();
 
-    let logo = Pixmap::decode_png(include_bytes!("../../chonkstep/assets/branding/chonkstep-logo-icon.png"))
+    // The branding assets live with the shell crate (they moved there
+    // along with the desktop modules that embed them) — referenced
+    // across crates rather than duplicated, so the About panel's mark
+    // can never drift from the Dock's.
+    let logo = Pixmap::decode_png(include_bytes!("../../chonk-shell/assets/branding/chonkstep-logo-icon.png"))
         .expect("embedded ChonkStep logo should decode");
 
     app.run(
