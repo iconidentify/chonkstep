@@ -13,6 +13,7 @@ use tiny_skia::{FilterQuality, Pixmap, PixmapPaint, Transform};
 use wm_core::{Backend, ClientId, DragHandle};
 use wm_theme::cascade::{CascadeMenu, MenuClick};
 use wm_theme::menu::MenuItem;
+use wm_theme::switcher::{self, SwitcherEntry};
 use wm_theme::{icon, paint, Theme};
 use wm_theme_api::{DecorationBuffer, Point, Rect, Size};
 use wm_x11::X11Backend;
@@ -103,6 +104,14 @@ fn resolve_action(action: u32) -> Option<RootMenuAction> {
         )),
         _ => None,
     }
+}
+
+/// The Alt-Tab switch panel's popup window and the candidate set it
+/// renders — see `Desktop::show_switcher`.
+struct SwitcherPanel {
+    window: Option<Window>,
+    size: Size,
+    entries: Vec<SwitcherEntry>,
 }
 
 struct IconTile {
@@ -196,6 +205,8 @@ pub struct Desktop {
     icons: HashMap<Window, IconTile>,
     icon_drag: Option<IconDrag>,
     wallpaper: Wallpaper,
+    /// The Alt-Tab switch panel, while a cycle session is live.
+    switcher: Option<SwitcherPanel>,
     /// Stable id of the active theme — only used to bullet-mark the
     /// Theme submenu; the `Theme` itself lives in `main.rs`.
     theme_id: String,
@@ -250,6 +261,7 @@ impl Desktop {
             icons: HashMap::new(),
             icon_drag: None,
             wallpaper,
+            switcher: None,
             theme_id,
             logo,
         };
@@ -480,6 +492,74 @@ impl Desktop {
         };
         if let Err(error) = result {
             tracing::warn!(?error, wallpaper = self.wallpaper.label(), "failed to paint desktop wallpaper");
+        }
+    }
+
+    /// Shows (or updates) the Alt-Tab switch panel. `entries: Some`
+    /// replaces the candidate set (previews included) — passed on the
+    /// first update of a session and again if the set changes mid-cycle
+    /// — while `None` reuses the stored one, so stepping the selection
+    /// never re-captures every window. The popup window is recreated
+    /// only when the rendered size changes.
+    pub fn show_switcher(&mut self, backend: &mut X11Backend, theme: &Theme, entries: Option<Vec<SwitcherEntry>>, selected: usize) {
+        if let Some(new_entries) = entries {
+            if let Some(panel) = self.switcher.take() {
+                if let Some(window) = panel.window {
+                    let _ = backend.destroy_shell_window(window);
+                }
+            }
+            self.switcher = Some(SwitcherPanel { window: None, size: Size::new(0, 0), entries: new_entries });
+        }
+        let Self { switcher, font_system, swash_cache, tile, screen_width, screen_height, .. } = self;
+        let Some(panel) = switcher.as_mut() else {
+            return;
+        };
+        let buffer = switcher::render_switcher(theme, font_system, swash_cache, &panel.entries, selected, *tile);
+        if buffer.width == 0 || buffer.height == 0 {
+            return;
+        }
+        let size = Size::new(buffer.width, buffer.height);
+        if panel.window.is_none() || panel.size != size {
+            if let Some(window) = panel.window.take() {
+                let _ = backend.destroy_shell_window(window);
+            }
+            let geom = Rect {
+                pos: Point::new(
+                    (*screen_width as i32 - size.w as i32) / 2,
+                    (*screen_height as i32 - size.h as i32) / 2,
+                ),
+                size,
+            };
+            match backend.create_shell_window(geom, switcher::panel_background(theme), true) {
+                Ok(window) => {
+                    let _ = backend.map_shell_window(window);
+                    let _ = backend.raise_shell_window(window);
+                    panel.window = Some(window);
+                    panel.size = size;
+                }
+                Err(error) => {
+                    tracing::warn!(?error, "failed to create switcher window");
+                    return;
+                }
+            }
+        }
+        if let Some(window) = panel.window {
+            backend.blit(window, &buffer);
+        }
+    }
+
+    /// How many candidates the open panel is showing, `None` when no
+    /// panel is up — lets the caller decide whether the entry set needs
+    /// rebuilding.
+    pub fn switcher_entry_count(&self) -> Option<usize> {
+        self.switcher.as_ref().map(|panel| panel.entries.len())
+    }
+
+    pub fn hide_switcher(&mut self, backend: &mut X11Backend) {
+        if let Some(panel) = self.switcher.take() {
+            if let Some(window) = panel.window {
+                let _ = backend.destroy_shell_window(window);
+            }
         }
     }
 

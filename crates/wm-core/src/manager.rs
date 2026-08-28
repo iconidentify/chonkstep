@@ -29,6 +29,9 @@ const SNAP_THRESHOLD_PX: i32 = 10;
 /// `Alt+Shift+Tab` are this WM's only default global keybinding today
 /// (window cycling, `WindowMaker`'s `cycling.c`).
 const XK_TAB: u32 = 0xff09;
+const XK_ESCAPE: u32 = 0xff1b;
+const XK_ALT_L: u32 = 0xffe9;
+const XK_ALT_R: u32 = 0xffea;
 const XK_LEFT: u32 = 0xff51;
 const XK_RIGHT: u32 = 0xff53;
 
@@ -87,6 +90,13 @@ pub enum Notification {
     /// A client was closed/destroyed — the shell should remove any icon
     /// tile it had (covers closing a window while it's miniaturized).
     Removed(ClientId),
+    /// The Alt-Tab switcher session started or its selection moved —
+    /// the shell should (re)draw the switch panel from
+    /// `WindowManager::cycle_state`.
+    CycleUpdated,
+    /// The Alt-Tab switcher session ended (committed or cancelled) —
+    /// the shell should take the panel down.
+    CycleEnded,
     /// A client was just mapped and decorated for the first time — lets
     /// the shell react to new windows (e.g. giving a freshly spawned
     /// app a sane default size via `resize_client_content` when its own
@@ -127,6 +137,18 @@ pub struct WindowManager<B: Backend> {
     /// created, matching real WindowMaker exactly.
     current_workspace: usize,
     workspace_count: usize,
+    /// An in-progress Alt-Tab switcher session (WindowMaker's
+    /// `switchpanel.c`): the snapshot of cycle candidates and which one
+    /// is currently selected. Selection moves on every Tab press while
+    /// Alt stays held; releasing Alt commits it, Escape cancels. The
+    /// shell renders the panel from `cycle_state` on every
+    /// `Notification::CycleUpdated`.
+    cycle: Option<CycleSession>,
+}
+
+struct CycleSession {
+    order: Vec<ClientId>,
+    selected: usize,
 }
 
 impl<B: Backend> WindowManager<B> {
@@ -147,6 +169,7 @@ impl<B: Backend> WindowManager<B> {
             focus_policy: FocusPolicy::default(),
             current_workspace: 0,
             workspace_count: 1,
+            cycle: None,
         }
     }
 
@@ -334,6 +357,7 @@ impl<B: Backend> WindowManager<B> {
             }
             BackendEvent::TitleChanged(window) => self.handle_title_changed(window),
             BackendEvent::KeyPress(combo) => self.handle_key_press(combo),
+            BackendEvent::KeyRelease(combo) => self.handle_key_release(combo),
             BackendEvent::PointerEnter { surface } => self.handle_pointer_enter(surface),
             other => {
                 tracing::debug!(?other, "backend event not yet handled");
@@ -431,6 +455,20 @@ impl<B: Backend> WindowManager<B> {
             if let Some(frame) = client.frame {
                 self.frame_index.remove(&frame);
                 self.backend.destroy_decoration(frame);
+            }
+        }
+        // Keep an active switcher session honest when one of its
+        // candidates disappears mid-cycle: prune it from the snapshot
+        // (clamping the selection) and let the shell redraw — or end
+        // the session outright if nothing is left to switch to.
+        if let Some(session) = &mut self.cycle {
+            let before = session.order.len();
+            session.order.retain(|&other| other != id);
+            if session.order.is_empty() {
+                self.cycle_end(false);
+            } else if session.order.len() != before {
+                session.selected = session.selected.min(session.order.len() - 1);
+                self.notifications.push_back(Notification::CycleUpdated);
             }
         }
         self.notifications.push_back(Notification::Removed(id));
@@ -1041,36 +1079,89 @@ impl<B: Backend> WindowManager<B> {
         match combo.keysym {
             XK_TAB => {
                 if combo.modifiers.contains(Modifiers::SHIFT) {
-                    self.cycle_focus(-1);
-                } else {
-                    self.cycle_focus(1);
+                    self.cycle_step(-1);
+                } else if combo.modifiers.contains(Modifiers::ALT) {
+                    self.cycle_step(1);
                 }
             }
+            XK_ESCAPE if self.cycle.is_some() => self.cycle_end(false),
             XK_RIGHT => self.switch_workspace(self.current_workspace + 1),
             XK_LEFT if self.current_workspace > 0 => self.switch_workspace(self.current_workspace - 1),
+            // Any other key without Alt held means the Alt release was
+            // lost (it can slip into the gap before the modal keyboard
+            // grab activates) — commit rather than leaving the panel
+            // stuck on screen.
+            _ if self.cycle.is_some() && !combo.modifiers.contains(Modifiers::ALT) => self.cycle_end(true),
             _ => {}
         }
     }
 
-    /// Alt+Tab / Alt+Shift+Tab window cycling (WindowMaker's
-    /// `cycling.c`): steps focus to the next/previous mapped, non-
-    /// miniaturized client — in `SlotMap` iteration order, which is
-    /// stable across calls as long as the client set itself doesn't
-    /// change — and raises it immediately. Deliberately no modal
-    /// preview panel (real WindowMaker's `switchpanel.c`): each press
-    /// commits its step right away, the interaction model most modern
-    /// WMs use for Alt-Tab.
-    fn cycle_focus(&mut self, direction: i32) {
-        let ids: Vec<ClientId> = self.clients.iter().filter(|(_, c)| c.lifecycle == Lifecycle::Normal).map(|(id, _)| id).collect();
-        if ids.is_empty() {
-            return;
+    fn handle_key_release(&mut self, combo: KeyCombo) {
+        if self.cycle.is_some() && matches!(combo.keysym, XK_ALT_L | XK_ALT_R) {
+            self.cycle_end(true);
         }
-        let current = self.focused.and_then(|focused| ids.iter().position(|&id| id == focused));
-        let next_index = match current {
-            Some(i) => (i as i32 + direction).rem_euclid(ids.len() as i32) as usize,
-            None => 0,
+    }
+
+    /// Alt+Tab / Alt+Shift+Tab window switching, modal like real
+    /// WindowMaker's `switchpanel.c`: the first press opens a session
+    /// (snapshotting the candidates and grabbing the keyboard so the
+    /// Alt release is visible), every further Tab moves the selection,
+    /// and nothing is focused or raised until the session commits —
+    /// `Notification::CycleUpdated` tells the shell to draw its panel
+    /// in the meantime. Candidates are mapped, non-miniaturized clients
+    /// in `SlotMap` iteration order, stable for the session because the
+    /// order is snapshotted (and pruned on client destruction).
+    fn cycle_step(&mut self, direction: i32) {
+        if self.cycle.is_none() {
+            let order: Vec<ClientId> = self.clients.iter().filter(|(_, c)| c.lifecycle == Lifecycle::Normal).map(|(id, _)| id).collect();
+            if order.is_empty() {
+                return;
+            }
+            let selected = self.focused.and_then(|focused| order.iter().position(|&id| id == focused)).unwrap_or(0);
+            self.backend.grab_keyboard();
+            self.cycle = Some(CycleSession { order, selected });
+        }
+        let session = self.cycle.as_mut().expect("session exists or was just created");
+        session.selected = (session.selected as i32 + direction).rem_euclid(session.order.len() as i32) as usize;
+        self.notifications.push_back(Notification::CycleUpdated);
+    }
+
+    /// Ends the switcher session; `commit` focuses and raises the
+    /// selected client (Alt released), `!commit` leaves focus exactly
+    /// where it was (Escape).
+    fn cycle_end(&mut self, commit: bool) {
+        let Some(session) = self.cycle.take() else {
+            return;
         };
-        self.focus_client(ids[next_index]);
+        self.backend.ungrab_keyboard();
+        if commit {
+            if let Some(&id) = session.order.get(session.selected) {
+                if self.clients.get(id).is_some() {
+                    self.focus_client(id);
+                }
+            }
+        }
+        self.notifications.push_back(Notification::CycleEnded);
+    }
+
+    /// The live switcher session for the shell's panel: `(candidates
+    /// as (id, title), selected index)`, `None` when no session is
+    /// active.
+    pub fn cycle_state(&self) -> Option<(Vec<(ClientId, String)>, usize)> {
+        let session = self.cycle.as_ref()?;
+        let entries = session
+            .order
+            .iter()
+            .map(|&id| (id, self.clients.get(id).map(|c| c.title.clone()).unwrap_or_default()))
+            .collect();
+        Some((entries, session.selected))
+    }
+
+    /// A live thumbnail of a client's current content for the switcher
+    /// panel — same capture path miniaturize previews use.
+    pub fn client_preview(&self, id: ClientId) -> Option<DecorationBuffer> {
+        let client = self.clients.get(id)?;
+        self.backend.capture_window_image(client.window, client.geometry.size)
     }
 
     fn focus_client(&mut self, id: ClientId) {
@@ -1176,6 +1267,14 @@ mod tests {
         BackendEvent::KeyPress(KeyCombo { keysym: XK_TAB, modifiers: Modifiers::ALT | Modifiers::SHIFT })
     }
 
+    fn alt_release() -> BackendEvent<FakeWindowId, FakeFrameId> {
+        BackendEvent::KeyRelease(KeyCombo { keysym: XK_ALT_L, modifiers: Modifiers::ALT })
+    }
+
+    fn escape() -> BackendEvent<FakeWindowId, FakeFrameId> {
+        BackendEvent::KeyPress(KeyCombo { keysym: XK_ESCAPE, modifiers: Modifiers::empty() })
+    }
+
     #[test]
     fn alt_tab_cycles_focus_to_the_next_client_and_raises_it() {
         let mut backend = FakeBackend::new();
@@ -1189,11 +1288,38 @@ mod tests {
         assert!(wm.client(id2).unwrap().flags.contains(ClientFlags::FOCUSED), "mapping w2 last should focus it");
 
         wm.dispatch(alt_tab());
+        // Modal: pressing Tab only moves the switcher selection — focus
+        // must not change until Alt is released.
+        assert!(wm.client(id2).unwrap().flags.contains(ClientFlags::FOCUSED), "selection alone must not move focus");
+        let (entries, selected) = wm.cycle_state().expect("session should be active");
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[selected].0, id1, "first Tab selects the next client");
 
+        wm.dispatch(alt_release());
+
+        assert!(wm.cycle_state().is_none(), "releasing Alt ends the session");
         assert!(wm.client(id1).unwrap().flags.contains(ClientFlags::FOCUSED));
         assert!(!wm.client(id2).unwrap().flags.contains(ClientFlags::FOCUSED));
         let frame1 = wm.client(id1).unwrap().frame.unwrap();
         assert!(wm.backend().raised_frames.contains(&frame1), "cycling must raise the newly-focused window");
+    }
+
+    #[test]
+    fn escape_cancels_the_switcher_without_moving_focus() {
+        let mut backend = FakeBackend::new();
+        let w1 = backend.create_window();
+        let w2 = backend.create_window();
+        let mut wm = wm(backend);
+        wm.dispatch(BackendEvent::MapRequest(w1));
+        wm.dispatch(BackendEvent::MapRequest(w2));
+        let id2 = wm.client_for_window(w2).unwrap();
+
+        wm.dispatch(alt_tab());
+        assert!(wm.cycle_state().is_some());
+        wm.dispatch(escape());
+
+        assert!(wm.cycle_state().is_none(), "Escape ends the session");
+        assert!(wm.client(id2).unwrap().flags.contains(ClientFlags::FOCUSED), "cancelling must leave focus untouched");
     }
 
     #[test]
@@ -1207,9 +1333,10 @@ mod tests {
         let id1 = wm.client_for_window(w1).unwrap();
         let id2 = wm.client_for_window(w2).unwrap();
 
-        wm.dispatch(alt_tab()); // focused w2 -> w1
-        assert!(wm.client(id1).unwrap().flags.contains(ClientFlags::FOCUSED));
-        wm.dispatch(alt_tab()); // w1 -> wraps to w2
+        wm.dispatch(alt_tab()); // selection: w2 -> w1
+        wm.dispatch(alt_tab()); // selection: w1 -> wraps to w2
+        wm.dispatch(alt_release());
+        let _ = id1;
         assert!(wm.client(id2).unwrap().flags.contains(ClientFlags::FOCUSED), "cycling forward from the last client must wrap to the first");
     }
 
@@ -1227,9 +1354,9 @@ mod tests {
         // Focused is w2; Alt+Tab (forward) goes to w1; Alt+Shift+Tab
         // (backward) from w1 must go back to w2, not onward to w1 again.
         wm.dispatch(alt_tab());
-        assert!(wm.client(id1).unwrap().flags.contains(ClientFlags::FOCUSED));
-
         wm.dispatch(alt_shift_tab());
+        wm.dispatch(alt_release());
+        let _ = id1;
         assert!(wm.client(id2).unwrap().flags.contains(ClientFlags::FOCUSED));
     }
 
@@ -1251,6 +1378,7 @@ mod tests {
         // Focused is w3 (mapped last); Alt+Tab must skip miniaturized w2
         // entirely and land on w1.
         wm.dispatch(alt_tab());
+        wm.dispatch(alt_release());
 
         assert!(wm.client(id1).unwrap().flags.contains(ClientFlags::FOCUSED));
         assert!(!wm.client(id3).unwrap().flags.contains(ClientFlags::FOCUSED));
