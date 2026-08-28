@@ -108,8 +108,16 @@ pub fn render_clip_tile(
 
     // The workspace number, large and centered — then the Desk label
     // beneath, like the stock Clip's workspace name strip.
+    // Type sizes are tuned against the clipped corners, not just the
+    // tile: at the earlier 0.40/0.16 ratios the label ran nearly the
+    // full tile width and its first glyph sat on top of the rewind
+    // arrow (confirmed at 400 percent zoom). 0.30/0.115 keeps the
+    // number readable at a glance while the label clears both crease
+    // lines with margin (0.115 still grazed the bottom-left crease;
+    // 0.10 clears it); the label floor keeps it legible at
+    // CHONKSTEP_SCALE 1's 56px tile.
     let mut number_font = theme.titlebar.font.clone();
-    number_font.size = (size as f32) * 0.40;
+    number_font.size = (size as f32) * 0.30;
     paint::draw_text(
         &mut pixmap,
         font_system,
@@ -118,24 +126,33 @@ pub fn render_clip_tile(
         &number_font,
         ink,
         0,
-        (size as f32 * 0.14) as i32,
+        (size as f32 * 0.17) as i32,
         size,
-        (size as f32 * 0.52) as u32,
+        (size as f32 * 0.46) as u32,
         TextAlign::Center,
     );
     let mut label_font = theme.menu.item_font.clone();
-    label_font.size = (size as f32) * 0.16;
+    label_font.size = ((size as f32) * 0.10).max(8.0);
+    // Long labels drop the "Desk" word rather than growing back into
+    // the crease: the guard estimates the rendered width from an
+    // average glyph advance, erring toward the shorter form.
+    let full = format!("Desk {} / {}", current + 1, count.max(1));
+    let label = if (full.chars().count() as f32) * label_font.size * 0.55 > (size as f32) * 0.68 {
+        format!("{} / {}", current + 1, count.max(1))
+    } else {
+        full
+    };
     paint::draw_text(
         &mut pixmap,
         font_system,
         swash_cache,
-        &format!("Desk {} / {}", current + 1, count.max(1)),
+        &label,
         &label_font,
         ink,
         0,
-        (size as f32 * 0.66) as i32,
+        (size as f32 * 0.65) as i32,
         size,
-        (size as f32 * 0.26) as u32,
+        (size as f32 * 0.24) as u32,
         TextAlign::Center,
     );
 
