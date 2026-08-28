@@ -16,21 +16,21 @@ use crate::menu::{self, MenuItem};
 use crate::model::Theme;
 
 /// How long the pointer must dwell over a submenu row before it opens —
-/// matches classic Mac/NeXT/WindowMaker menu hysteresis (WindowMaker's
-/// own `MENU_SELECT_DELAY` is ~200ms) so merely sweeping the mouse across
-/// a row on the way to something else doesn't flash every cascade open
-/// along the path.
+/// matches classic Mac/NeXT menu hysteresis (~200ms in the desktops
+/// this look comes from) so merely sweeping the mouse across a row on
+/// the way to something else doesn't flash every cascade open along the
+/// path.
 pub const SUBMENU_HOVER_DELAY: Duration = Duration::from_millis(180);
 
 /// One level of an open menu/submenu chain — each is its own popup
-/// window (matching real WindowMaker: cascades are separate top-level
+/// window, the classic arrangement: cascades are separate top-level
 /// windows positioned beside their parent, not a single window that
-/// grows).
+/// grows.
 struct OpenLevel<Id> {
     window: Id,
     /// This level's own title: the root level carries the menu's title,
     /// and every cascade carries the label of the submenu row it opened
-    /// from — real WindowMaker titles each cascade after its entry
+    /// from — the classic behavior titles each cascade after its entry
     /// ("Applications", "Theme"), never the root title repeated.
     title: String,
     items: Vec<MenuItem>,
@@ -59,7 +59,7 @@ pub enum MenuClick {
     /// The click landed inside the popup but not on any item — the
     /// title strip, or blank space — so the whole chain is now closed
     /// with no action (transient menus dismiss on any non-item click,
-    /// like real WindowMaker's unpinned menus).
+    /// the way an unpinned classic menu does).
     Dismissed,
 }
 
@@ -68,9 +68,9 @@ pub enum MenuClick {
 pub struct CascadeMenu<Id> {
     title: String,
     background: (u8, u8, u8),
-    /// Whether the ROOT level renders WindowMaker's posted-menu close
-    /// box (set per `open`; cascades never carry one — closing the
-    /// root closes the chain).
+    /// Whether the ROOT level renders the posted-menu close box (set
+    /// per `open`; cascades never carry one — closing the root closes
+    /// the chain).
     closable: bool,
     bounds: Size,
     levels: Vec<OpenLevel<Id>>,
@@ -185,8 +185,8 @@ impl<Id: Copy + Eq + std::fmt::Debug> CascadeMenu<Id> {
             return false;
         };
         // While the pointer is inside a cascade, every ancestor level
-        // highlights the row its child opened from — the lit trail real
-        // WindowMaker draws through an open chain. Without this, an
+        // highlights the row its child opened from — the lit trail the
+        // classic desktop draws through an open chain. Without this, an
         // ancestor keeps whatever row the pointer last crossed on its
         // way through (confirmed live: "Exit" sat highlighted on the
         // root while the pointer browsed Applications > Internet),
@@ -205,9 +205,9 @@ impl<Id: Copy + Eq + std::fmt::Debug> CascadeMenu<Id> {
         self.levels[level].highlighted = hovered;
         self.repaint_level(host, theme, font_system, level);
 
-        // An open cascade STAYS open while the pointer wanders — real
-        // WindowMaker's posted menus never close on hover-away, and
-        // that is load-bearing ergonomics, not laziness: the natural
+        // An open cascade STAYS open while the pointer wanders — a
+        // posted menu classically never closes on hover-away, and that
+        // is load-bearing ergonomics, not laziness: the natural
         // diagonal path from a parent row into its cascade crosses the
         // parent's other rows, and closing the cascade on the first
         // crossed row (this controller's original behavior) made deep
@@ -283,8 +283,8 @@ impl<Id: Copy + Eq + std::fmt::Debug> CascadeMenu<Id> {
     /// `parent_level`, positioned beside the parent: to its right,
     /// flipping to the left if that would run off the screen's right
     /// edge, row-aligned with the item it cascades from and clamped so
-    /// it doesn't run off the bottom — matches real WindowMaker's
-    /// cascade placement (`menu.c`'s `open_to_left` logic).
+    /// it doesn't run off the bottom — the classic cascade placement,
+    /// including its flip-to-the-left rule.
     fn open_submenu<H: PopupHost<PopupId = Id>>(
         &mut self,
         host: &mut H,
@@ -320,8 +320,8 @@ impl<Id: Copy + Eq + std::fmt::Debug> CascadeMenu<Id> {
             y = (self.bounds.h as i32 - approx_height as i32).max(0);
         }
 
-        // The cascade titles itself after the row it opened from —
-        // WindowMaker's own naming for submenus.
+        // The cascade titles itself after the row it opened from — the
+        // classic naming for submenus.
         if let Some(level) = self.open_level(host, theme, font_system, label, items, Point::new(x, y), Some(item_index)) {
             self.levels.push(level);
         }
@@ -550,8 +550,8 @@ mod tests {
         assert_eq!(f.host.destroyed_total, destroyed_before + 1, "the first submenu's popup must be destroyed");
     }
 
-    /// Real WindowMaker titles each cascade after the row it opened
-    /// from ("Applications"), never the root menu's own title repeated.
+    /// Each cascade is titled after the row it opened from
+    /// ("Applications"), never the root menu's own title repeated.
     #[test]
     fn a_cascade_titles_itself_after_its_submenu_label() {
         let mut f = Fixture::new();
@@ -600,7 +600,7 @@ mod tests {
         assert_eq!(f.host.open.len(), 2, "hover-open should have cascaded the submenu");
     }
 
-    /// The ergonomics fix real WindowMaker embodies: the natural
+    /// The ergonomics fix the classic posted menu embodies: the natural
     /// diagonal path from a parent row into its cascade crosses the
     /// parent's other rows, so hovering them must NOT close the open
     /// cascade — the original hover-away truncation made deep menus

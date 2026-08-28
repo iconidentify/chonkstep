@@ -30,7 +30,7 @@
 #scale = 2.0
 
 # Theme to start in. One of the built-in theme ids:
-#   "window-maker"    (the flagship default)
+#   "nextstep-classic" (the flagship default)
 #   "amber-phosphor"
 #   "teal-blueprint"
 #   "graphite"
@@ -39,16 +39,15 @@
 # wins over this value on every later startup -- the menu is the more
 # recent gesture; this line is only the starting point. An unknown id
 # is warned about and ignored.
-#theme = "window-maker"
+#theme = "nextstep-classic"
 
 # Where a newly mapped window goes when the application itself asked
 # for no particular position (an explicit position, like a terminal's
 # -geometry +x+y, is always honored instead). One of:
-#   "smart"    (the default) WindowMaker's smart placement: scan the
-#              usable screen for the spot overlapping the least
-#              existing window area, preferring fully free space,
-#              biased toward the top-left so windows fill the screen
-#              in reading order
+#   "smart"    (the default) smart placement: scan the usable screen
+#              for the spot overlapping the least existing window
+#              area, preferring fully free space, biased toward the
+#              top-left so windows fill the screen in reading order
 #   "cascade"  the classic staircase -- each new window steps down and
 #              right by one titlebar, so every titlebar stays visible
 #   "center"   every new window dead-center in the usable screen

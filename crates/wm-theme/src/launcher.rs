@@ -14,8 +14,8 @@
 //! long name), and a running app earns a small lit indicator lamp in
 //! [`panel::panel_accent`] at the face's bottom-right corner — the one
 //! deliberate accent emphasis the tile grammar allows (see
-//! [`tile::tile_ink`]'s doc comment), spent exactly where WindowMaker
-//! spends its own running marker.
+//! [`tile::tile_ink`]'s doc comment), spent exactly where the classic
+//! dock puts its own running marker.
 
 use wm_theme_api::DecorationBuffer;
 

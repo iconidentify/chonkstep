@@ -1,5 +1,5 @@
 //! A small analog clock tile for the dock sidebar, in the spirit of the
-//! classic WindowMaker `wmclock` dockapp. The clock sits on the shared
+//! classic analog-clock dockapp. The clock sits on the shared
 //! [`crate::tile`] platform: face and relief come from
 //! [`tile::draw_tile_base`], the dial is recessed into a
 //! [`tile::draw_tile_well`] so it reads as an instrument set into the

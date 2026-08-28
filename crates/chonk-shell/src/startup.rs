@@ -200,7 +200,7 @@ mod tests {
     }
     #[test]
     fn config_theme_resolves_known_ids() {
-        for id in ["window-maker", "amber-phosphor", "teal-blueprint", "graphite", "next-lavender"] {
+        for id in ["nextstep-classic", "amber-phosphor", "teal-blueprint", "graphite", "next-lavender"] {
             let theme = config_theme_fallback(Some(id));
             assert_eq!(theme.map(|t| t.id), Some(id.to_string()), "built-in theme id {id} must resolve from config");
         }

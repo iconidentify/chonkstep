@@ -6,7 +6,7 @@
 //! the glass follows the theme's [`crate::panel::PanelPalette`].
 //!
 //! The composition is one vertically symmetric instrument, direction
-//! carried by *position*, never hue (the wmnetload principle):
+//! carried by *position*, never hue (the classic dockapp principle):
 //! download is always the top story, upload always the bottom one, and
 //! the horizontal seam between them is the graph's shared baseline.
 //! The middle band — the largest share of the glass, because it is the

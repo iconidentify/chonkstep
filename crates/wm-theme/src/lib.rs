@@ -1,4 +1,4 @@
-//! WindowMaker-style theme data model and rendering engine.
+//! NeXTSTEP-style theme data model and rendering engine.
 //!
 //! Pure Rust with no X11/Wayland dependency — this crate only ever
 //! produces `wm_theme_api::DecorationBuffer` (raw RGBA8 pixels) and
@@ -9,9 +9,9 @@
 //!
 //! - [`RasterThemeEngine`] implements `wm_theme_api::ThemeEngine` —
 //!   window decorations (titlebar, buttons, border, resize bar).
-//! - [`menu::render_menu`] renders WindowMaker-style popup menus (the
-//!   root menu, app menus): content-sized, per-entry relief strips
-//!   under a titlebar-styled title, ported from the wmaker recipes.
+//! - [`menu::render_menu`] renders NeXTSTEP-style popup menus (the
+//!   root menu, app menus): content-sized, with per-entry relief strips
+//!   under a titlebar-styled title.
 //! - [`cascade::CascadeMenu`] is the reusable *behavior* on top of
 //!   `menu::render_menu`: the popup-window stack, hover-to-open-submenu
 //!   hysteresis, and cascade positioning for a nested `MenuItem` tree,
@@ -22,12 +22,12 @@
 //! - [`digitalclock::render_digital_clock`] renders a vector-drawn
 //!   seven-segment `HH:MM` readout.
 //! - [`netload::render_netload_tile`] is a close port of the classic
-//!   `wmnetload` WindowMaker dockapp: a monochrome LCD panel with a
-//!   seven-segment throughput readout and a mirrored dot-matrix graph.
+//!   network-load dockapp: a monochrome LCD panel with a seven-segment
+//!   throughput readout and a mirrored dot-matrix graph.
 //! - [`tile`] is the common tile platform (face, relief, ink, sunken
 //!   wells) every dock item and icon builds on - the core of the UI kit.
 //! - [`workspace::render_clip_tile`] renders the top-left Clip tile
-//!   (WindowMaker's workspace switcher, ported from its dock.c recipes).
+//!   (the classic desktop's workspace switcher).
 //! - [`icon::render_icon_tile`] renders a themed square icon tile (what
 //!   a miniaturized window collapses to; also useful for any app that
 //!   wants a themed launcher/shelf icon).
@@ -38,8 +38,8 @@
 //!   inherit the same NeXTSTEP look and feel, rather than re-deriving it.
 //!
 //! Not yet implemented: the native RON theme-file loader (still just
-//! the hardcoded flagship theme in `default_theme`) and legacy
-//! WindowMaker `.style`/`.themed` import (deferred past milestone 1).
+//! the hardcoded flagship theme in `default_theme`) and import of the
+//! legacy `.style`/`.themed` theme formats (deferred past milestone 1).
 
 pub mod cascade;
 pub mod clock;

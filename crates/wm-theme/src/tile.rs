@@ -1,15 +1,15 @@
 //! The tile: this theme system's common UI platform, extracted from
 //! the workspace Clip once it became clear its look — a diagonal
-//! WindowMaker-gradient face under the RAISED2 relief, with
-//! luminance-picked ink — was the style everything square should
-//! share. Every dock item, miniaturized-window icon, and the Clip
-//! itself renders on one of these, and a third-party `chonk-ui` app
-//! can too: this module plus [`crate::paint`] is the SDK surface for
-//! building tiles that belong on this desktop.
+//! gradient face under the double raised relief, with luminance-picked
+//! ink — was the style everything square should share. Every dock
+//! item, miniaturized-window icon, and the Clip itself renders on one
+//! of these, and a third-party `chonk-ui` app can too: this module
+//! plus [`crate::paint`] is the SDK surface for building tiles that
+//! belong on this desktop.
 //!
 //! The face comes from [`crate::model::TileStyle`] (per-theme; the
-//! flagship uses real WindowMaker's stock `IconBack` gradient), the
-//! relief is the same relative RAISED2 recipe as window chrome, and
+//! flagship uses the classic stock icon-background gradient), the
+//! relief is the same relative raised recipe as window chrome, and
 //! recessed content areas (an LCD readout, a window preview) sit in a
 //! [`draw_tile_well`] — shaded and sunken, the classic instrument-
 //! panel inset.
@@ -77,9 +77,9 @@ pub fn tile_ink_dim(theme: &Theme) -> Color {
     }
 }
 
-/// Clamped add/subtract along a line — `ROperateLine`'s diagonal
-/// form, the sibling of `paint::op_rect` (which only does rects).
-/// Integer line walk on purpose: tile details are hard-edged.
+/// Clamped add/subtract along a line — the diagonal sibling of
+/// `paint::op_rect` (which only does rects). Integer line walk on
+/// purpose: tile details are hard-edged.
 pub fn op_line(pixmap: &mut Pixmap, x0: i32, y0: i32, x1: i32, y1: i32, delta: i16) {
     let steps = (x1 - x0).abs().max((y1 - y0).abs()).max(1);
     let (w, h) = (pixmap.width() as i32, pixmap.height() as i32);
@@ -99,7 +99,8 @@ pub fn op_line(pixmap: &mut Pixmap, x0: i32, y0: i32, x1: i32, y1: i32, delta: i
     }
 }
 
-/// Hard 1px line in an absolute color — `RDrawLine`.
+/// Hard 1px line in an absolute color — [`op_line`]'s counterpart for
+/// details that must not take their tone from what is underneath.
 pub fn draw_line(pixmap: &mut Pixmap, x0: i32, y0: i32, x1: i32, y1: i32, color: Color) {
     let steps = (x1 - x0).abs().max((y1 - y0).abs()).max(1);
     for i in 0..=steps {

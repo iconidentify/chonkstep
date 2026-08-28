@@ -3,7 +3,7 @@
 //! upload growing down from it — the same idiom system-monitor network
 //! mini-graphs use, drawn in this theme's flat hard-edged style. Used by
 //! `sysmon`'s combined dashboard for an at-a-glance, all-interfaces-
-//! summed read (see `netload` for the per-interface `wmnetload` port).
+//! summed read (see `netload` for the per-interface dockapp port).
 
 use tiny_skia::{Paint, Pixmap, Rect as SkRect, Transform};
 use wm_theme_api::DecorationBuffer;

@@ -259,15 +259,14 @@ struct ToplevelEntry {
 /// The four states this protocol carries, as `wm-core` sees them.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 struct ToplevelStates {
-    /// Both axes. `wm-core` maximizes per axis (WindowMaker's
-    /// `MAX_HORIZONTAL`/`MAX_VERTICAL`) and this protocol has one
-    /// boolean, so a half-maximized window reads as unmaximized — which
-    /// keeps the round trip honest: a taskbar that then asks for
-    /// `set_maximized` gets a full maximize, and one that asks for
-    /// `unset_maximized` on a full one gets the geometry back.
+    /// Both axes. `wm-core` maximizes each axis independently and this
+    /// protocol has one boolean, so a half-maximized window reads as
+    /// unmaximized — which keeps the round trip honest: a taskbar that
+    /// then asks for `set_maximized` gets a full maximize, and one that
+    /// asks for `unset_maximized` on a full one gets the geometry back.
     maximized: bool,
-    /// `Lifecycle::Miniaturized`. WindowMaker's iconify, which is what
-    /// "minimized" means to every taskbar that will read it.
+    /// `Lifecycle::Miniaturized`. Iconifying to a desktop tile, which
+    /// is what "minimized" means to every taskbar that will read it.
     minimized: bool,
     activated: bool,
     fullscreen: bool,

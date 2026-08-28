@@ -31,7 +31,7 @@ pub fn fill_rect(pixmap: &mut Pixmap, x: i32, y: i32, w: u32, h: u32, color: Col
 }
 
 /// Fills a rect with a `Fill` — solid color or a linear gradient in one
-/// of WindowMaker's three directions.
+/// of the three classic directions (vertical, horizontal, diagonal).
 pub fn fill_area(pixmap: &mut Pixmap, x: i32, y: i32, w: u32, h: u32, fill: &Fill) {
     if w == 0 || h == 0 {
         return;
@@ -70,19 +70,16 @@ pub fn fill_area(pixmap: &mut Pixmap, x: i32, y: i32, w: u32, h: u32, fill: &Fil
     pixmap.fill_rect(rect, &paint, Transform::identity(), None);
 }
 
-/// The classic NeXTSTEP chiseled border: hard 1-2px edges. Confirmed
-/// against real WindowMaker's own `wDrawBevel` (`src/texture.c`, the
-/// `TS_NEXT`/"next" style branch, the one that actually reproduces
-/// NeXTSTEP rather than WindowMaker's own separate default look):
-/// NeXTSTEP's implied light source reads as coming from the
-/// *bottom-right*, not the top-left the way most other 90s toolkits
-/// (Windows, Motif, and WindowMaker's own non-NeXT styles) do it — a
-/// `Raised` bevel is dark on the top/left sides and light on the
-/// bottom/right, swapped for `Sunken`. Getting this backwards (light
-/// top-left, like this used to before being confirmed against the real
-/// source) is subtle on any one edge but compounds across every button,
-/// titlebar, and menu item in the app into a systemically "off" look.
-/// `width > 1` nests the same pass shrinking the rect each iteration.
+/// The classic NeXTSTEP chiseled border: hard 1-2px edges. NeXTSTEP's
+/// implied light source reads as coming from the *bottom-right*, not
+/// the top-left the way most other 90s toolkits (Windows, Motif, and
+/// the non-NeXT chrome styles of the era) do it — a `Raised` bevel is
+/// dark on the top/left sides and light on the bottom/right, swapped
+/// for `Sunken`. Getting this backwards (light top-left, as this used
+/// to do before the direction was pinned down) is subtle on any one
+/// edge but compounds across every button, titlebar, and menu item in
+/// the app into a systemically "off" look. `width > 1` nests the same
+/// pass shrinking the rect each iteration.
 pub fn draw_bevel(pixmap: &mut Pixmap, x: i32, y: i32, w: u32, h: u32, bevel: &Bevel) {
     let (top_left, bottom_right) = match bevel.style {
         BevelStyle::Raised => (bevel.dark, bevel.light),
@@ -105,11 +102,10 @@ pub fn draw_bevel(pixmap: &mut Pixmap, x: i32, y: i32, w: u32, h: u32, bevel: &B
 }
 
 /// Clamped per-pixel brighten/shade over an opaque rect — the exact
-/// primitive real WindowMaker's relief drawing is built from
-/// (`ROperateLine` with `RAddOperation`/`RSubtractOperation` in
-/// `wrlib/`): it operates on *whatever fill is already there* rather
-/// than painting an absolute color, which is what lets one relief
-/// recipe read correctly on both a black and a light-gray titlebar.
+/// primitive every relief recipe in this crate is built from: it
+/// operates on *whatever fill is already there* rather than painting an
+/// absolute color, which is what lets one relief recipe read correctly
+/// on both a black and a light-gray titlebar.
 /// Assumes the destination is already fully opaque, same as
 /// `draw_text` (see its doc comment).
 pub fn op_rect(pixmap: &mut Pixmap, x: i32, y: i32, w: u32, h: u32, delta: i16) {
@@ -131,13 +127,12 @@ pub fn op_rect(pixmap: &mut Pixmap, x: i32, y: i32, w: u32, h: u32, delta: i16) 
     }
 }
 
-/// wrlib's `RBEV_RAISED2` relief (`RBevelImage`, `wrlib/misc.c`) — the
-/// one real WindowMaker applies to titlebars, titlebar buttons, and
-/// (partially) resizebars: +80 light lines along top/left, a -40 shade
-/// line plus a hard black outer line along bottom/right. Generalized
-/// from the original's hard-coded 1px lines to `t`-thick ones so the
-/// relief scales with `CHONKSTEP_SCALE` like every other piece of
-/// chrome.
+/// The double raised relief — the one the classic recipe puts on
+/// titlebars, titlebar buttons, and (partially) resizebars: +80 light
+/// lines along top/left, a -40 shade line plus a hard black outer line
+/// along bottom/right. Generalized from the classic hard-coded 1px
+/// lines to `t`-thick ones so the relief scales with `CHONKSTEP_SCALE`
+/// like every other piece of chrome.
 pub fn draw_raised2_bevel(pixmap: &mut Pixmap, x: i32, y: i32, w: u32, h: u32, t: u32) {
     let t = t.max(1);
     if w < 3 * t || h < 3 * t {
@@ -152,12 +147,10 @@ pub fn draw_raised2_bevel(pixmap: &mut Pixmap, x: i32, y: i32, w: u32, h: u32, t
     fill_rect(pixmap, x + wi - ti, y, t, h - t, Color::rgb(0, 0, 0));
 }
 
-/// The stock resizebar relief, line for line from real WindowMaker's
-/// `renderResizebarTexture` (`src/framewin.c`, `SHADOW_RESIZEBAR`
-/// undefined, as shipped): a shade+light line pair across the top, and
-/// a vertical shade+light notch pair `corner_w` in from each end
-/// delimiting the corner grips. No outer side/bottom shading — the
-/// bar's silhouette comes from the frame border below it.
+/// The stock resizebar relief, line for line: a shade+light line pair
+/// across the top, and a vertical shade+light notch pair `corner_w` in
+/// from each end delimiting the corner grips. No outer side/bottom
+/// shading — the bar's silhouette comes from the frame border below it.
 #[allow(clippy::too_many_arguments)]
 pub fn draw_resizebar_relief(pixmap: &mut Pixmap, x: i32, y: i32, w: u32, h: u32, corner_w: u32, t: u32) {
     let t = t.max(1);
@@ -171,11 +164,10 @@ pub fn draw_resizebar_relief(pixmap: &mut Pixmap, x: i32, y: i32, w: u32, h: u32
     op_rect(pixmap, x + w as i32 - cwi - ti, y + 2 * ti, t, notch_h, 80);
 }
 
-/// wrlib's sunken relief (`RBevelImage`'s `else` branch,
-/// `wrlib/misc.c`): -40 shade lines along top/left, +80 light lines
+/// The sunken relief: -40 shade lines along top/left, +80 light lines
 /// along bottom/right — the exact mirror of `draw_raised2_bevel`'s
 /// light direction, minus that recipe's hard black outer lines (the
-/// sunken branch has none). Thickness generalized to `t` the same way.
+/// sunken form has none). Thickness generalized to `t` the same way.
 pub fn draw_sunken_bevel(pixmap: &mut Pixmap, x: i32, y: i32, w: u32, h: u32, t: u32) {
     let t = t.max(1);
     if w < 3 * t || h < 3 * t {
@@ -190,15 +182,15 @@ pub fn draw_sunken_bevel(pixmap: &mut Pixmap, x: i32, y: i32, w: u32, h: u32, t:
 
 /// Pressed-button feedback: shift the button's *existing* fill toward
 /// "pushed" — `delta` positive to lighten (a dark bar), negative to
-/// darken (a light one) — and *invert* the relief to wrlib's sunken
+/// darken (a light one) — and *invert* the relief to the sunken
 /// direction rather than removing it: the edge accents stay put and
 /// flip, reading as the surface tilting inward (relief simply
 /// vanishing on press read as the button losing its edge — confirmed
-/// live). Real WindowMaker's own default pressed state is a full white
-/// fill with a black outline (`paintButton`'s `pushed`/`TS_NEW` arm),
-/// which at native 23px reads as a blink but at CHONKSTEP_SCALE button
-/// sizes reads as a glaring white flash — also confirmed live. `t` is
-/// the relief thickness (the theme bevel width, so it scales).
+/// live). The other classic pressed state — a full white fill with a
+/// black outline — reads as a blink at a native 23px button but at
+/// CHONKSTEP_SCALE button sizes reads as a glaring white flash, also
+/// confirmed live, so it is deliberately not used here. `t` is the
+/// relief thickness (the theme bevel width, so it scales).
 pub fn draw_button_pressed(pixmap: &mut Pixmap, x: i32, y: i32, w: u32, h: u32, delta: i16, t: u32) {
     op_rect(pixmap, x, y, w, h, delta);
     draw_sunken_bevel(pixmap, x, y, w, h, t);
@@ -239,10 +231,9 @@ pub fn pressed_delta(fill: &Fill) -> i16 {
 }
 
 /// A small filled right-pointing triangle — the cascade indicator every
-/// classic NeXTSTEP/WindowMaker-style menu draws beside an item that
-/// opens a nested submenu (`menu.c`'s "draw the cascade indicator" in
-/// real WindowMaker). `(x, y)` is the top-left of the triangle's
-/// bounding box, `size` its height; width is `size * 0.8`.
+/// classic NeXTSTEP-style menu draws beside an item that opens a nested
+/// submenu. `(x, y)` is the top-left of the triangle's bounding box,
+/// `size` its height; width is `size * 0.8`.
 pub fn draw_cascade_arrow(pixmap: &mut Pixmap, x: i32, y: i32, size: u32, color: Color) {
     let mut paint = Paint::default();
     paint.set_color(sk_color(color));
@@ -262,8 +253,8 @@ pub fn draw_cascade_arrow(pixmap: &mut Pixmap, x: i32, y: i32, size: u32, color:
 /// Measures the shaped width of `text` in `font` — the real layout
 /// width cosmic-text will produce, fallback glyphs included, not an
 /// average-advance estimate. This is what lets menus (and any
-/// `chonk-ui` popup) size themselves to their content the way real
-/// WindowMaker's `wMenuRealize` does with `WMWidthOfString`.
+/// `chonk-ui` popup) size themselves to their content — the widest
+/// shaped label plus fixed padding — the way the classic recipe does.
 pub fn text_width(font_system: &mut cosmic_text::FontSystem, font: &FontSpec, text: &str) -> u32 {
     use cosmic_text::{Attrs, Buffer, Family, Metrics, Shaping, Style, Weight};
 
@@ -459,12 +450,11 @@ mod tests {
     use super::*;
     use crate::model::{FontStyle, FontWeight};
 
-    /// Regression test for the light-source direction confirmed against
-    /// real WindowMaker's `wDrawBevel` (`TS_NEXT` branch of
-    /// `src/texture.c`): a `Raised` bevel's outer top-left corner must
-    /// be the *dark* tone and its outer bottom-right corner the *light*
-    /// one — backwards from most other 90s toolkits' top-left highlight
-    /// convention, which this used to (incorrectly) follow.
+    /// Regression test for the NeXTSTEP light-source direction: a
+    /// `Raised` bevel's outer top-left corner must be the *dark* tone
+    /// and its outer bottom-right corner the *light* one — backwards
+    /// from most other 90s toolkits' top-left highlight convention,
+    /// which this used to (incorrectly) follow.
     #[test]
     fn raised_bevel_is_dark_on_top_left_and_light_on_bottom_right() {
         let bevel = Bevel { style: BevelStyle::Raised, width: 1, light: Color::rgb(255, 255, 255), dark: Color::rgb(0, 0, 0) };
@@ -487,11 +477,11 @@ mod tests {
     }
 
     /// Pressed feedback is a relative shift (lighten a dark fill,
-    /// darken a light one) plus the relief *inverted* to wrlib's
-    /// sunken direction — dark top-left, light bottom-right — never
-    /// removed: the edge accents flipping rather than vanishing is
-    /// what reads as "pushed in" (see `draw_button_pressed`'s doc
-    /// comment for why not WindowMaker's own white-flash pushed state).
+    /// darken a light one) plus the relief *inverted* to the sunken
+    /// direction — dark top-left, light bottom-right — never removed:
+    /// the edge accents flipping rather than vanishing is what reads
+    /// as "pushed in" (see `draw_button_pressed`'s doc comment for why
+    /// not the classic white-flash pushed state).
     #[test]
     fn pressed_button_shifts_fill_and_inverts_relief_to_sunken() {
         let (w, h) = (20u32, 20u32);
@@ -514,11 +504,11 @@ mod tests {
         assert!(light.pixels()[((h / 2) * w + w / 2) as usize].red() < 0xAA, "a light fill should darken when pressed");
     }
 
-    /// `RBEV_RAISED2` pinned against `wrlib/misc.c`: on a mid-gray
-    /// fill, the top edge gains +80, the outer bottom/right lines are
-    /// hard black, and the inner bottom shade line loses 40.
+    /// The double raised relief, pinned exactly: on a mid-gray fill,
+    /// the top edge gains +80, the outer bottom/right lines are hard
+    /// black, and the inner bottom shade line loses 40.
     #[test]
-    fn raised2_bevel_matches_wrlib_recipe() {
+    fn raised2_bevel_matches_the_stock_recipe() {
         let (w, h) = (20u32, 20u32);
         let mut pixmap = Pixmap::new(w, h).unwrap();
         fill_rect(&mut pixmap, 0, 0, w, h, Color::rgb(128, 128, 128));

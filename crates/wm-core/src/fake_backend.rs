@@ -337,8 +337,8 @@ impl Backend for FakeBackend {
 }
 
 /// In-memory `ThemeEngine` double: fixed 20px titlebar, two 14x14
-/// buttons (close top-left, miniaturize top-right — matching real
-/// WindowMaker's convention), plus south-facing resize hitboxes
+/// buttons (close top-left, miniaturize top-right — the classic
+/// NeXTSTEP-style arrangement), plus south-facing resize hitboxes
 /// (`South`/`SouthEast`/`SouthWest`, matching the real flagship
 /// theme's shape) so resize-drag tests can exercise them without an X
 /// server. `render` fills a buffer of the right size with a constant

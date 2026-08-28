@@ -1,5 +1,5 @@
 //! The desktop shell: a content-sized Dock (an identity tile plus its
-//! widgets, WindowMaker-style, at the top-right of the screen), the
+//! widgets, NeXTSTEP-style, at the top-right of the screen), the
 //! right-click root menu, and icon tiles for miniaturized windows.
 //! None of these are "clients" from `wm-core`'s perspective — they're
 //! unmanaged shell surfaces (`Backend::ShellId`) the shell owns and
@@ -78,10 +78,9 @@ pub struct WindowMenuContext {
     pub workspace_count: usize,
 }
 
-/// A pick from the per-window commands menu — the shell-side analog of
-/// real WindowMaker's `winmenu.c` entries. Every variant maps onto an
-/// existing `WindowManager` method; the menu adds no behavior of its
-/// own, it only names things the WM can already do.
+/// A pick from the per-window commands menu. Every variant maps onto
+/// an existing `WindowManager` method; the menu adds no behavior of
+/// its own, it only names things the WM can already do.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WindowMenuAction {
     ToggleMaximize,
@@ -95,7 +94,7 @@ pub enum WindowMenuAction {
     /// The polite WM_DELETE_WINDOW request.
     Close,
     /// XKillClient — the last resort for a hung client that ignores
-    /// `Close`, exactly why `winmenu.c` keeps both entries.
+    /// `Close`, which is exactly why the menu carries both entries.
     Kill,
 }
 
@@ -244,11 +243,10 @@ fn resolve_action(action: u32, app_count: usize) -> Option<RootMenuAction> {
 /// ellipsis included. Menus are content-sized (`menu::render_menu`
 /// widens the popup to fit the title as well as the items), so an
 /// unbounded title — a browser or xterm happily puts a whole URL there
-/// — would stretch the popup across the screen. Real WindowMaker
-/// bounds menu text the same way (`winmenu.c`'s workspace submenu
-/// truncates names to `MAX_WORKSPACENAME_WIDTH`). 24 comfortably
-/// out-measures every fixed item label, so truncation only engages for
-/// genuinely long titles.
+/// — would stretch the popup across the screen. The classic recipe
+/// bounds menu text the same way, truncating a long name to a fixed
+/// character width. 24 comfortably out-measures every fixed item
+/// label, so truncation only engages for genuinely long titles.
 const WINDOW_MENU_TITLE_MAX_CHARS: usize = 24;
 
 /// Truncation counts characters, not bytes — slicing a UTF-8 title at
@@ -264,12 +262,12 @@ fn window_menu_title(title: &str) -> String {
     truncated
 }
 
-/// The per-window commands menu, ported from real WindowMaker's
-/// `winmenu.c` entry list — Maximize, Miniaturize, Shade, Move To,
-/// Close, Kill, in its order, with Fullscreen standing in for the
-/// "Other maximization" cascade this WM doesn't have. Labels flip to
-/// their undo forms from the context snapshot, the same way
-/// `updateMenuForWindow` retitles entries there.
+/// The per-window commands menu, in the classic entry order —
+/// Maximize, Miniaturize, Shade, Move To, Close, Kill — with
+/// Fullscreen standing in for the "Other maximization" cascade this WM
+/// doesn't have. Labels flip to their undo forms from the context
+/// snapshot, so an already-maximized window offers Unmaximize in the
+/// slot Maximize would otherwise hold.
 fn window_menu_items(ctx: &WindowMenuContext) -> Vec<MenuItem> {
     let move_to = (0..ctx.workspace_count)
         .map(|n| MenuItem::Action {
@@ -500,9 +498,9 @@ struct IconTile<Id> {
     /// `Some(slot)` while this tile is still sitting where the
     /// auto-arrange grid put it; `None` once the user has dragged it
     /// anywhere, at which point it keeps its dragged `pos` forever and
-    /// frees its old slot for the next auto-placed icon — matching real
-    /// WindowMaker's `icon_moved` flag in `icon.c`, which permanently
-    /// exempts a manually-repositioned icon from grid re-arrangement.
+    /// frees its old slot for the next auto-placed icon: a manually
+    /// repositioned icon is permanently exempt from grid
+    /// re-arrangement.
     auto_slot: Option<usize>,
 }
 
@@ -525,8 +523,7 @@ struct IconDrag<Id> {
     grab_offset: Point,
     /// Crossed `DRAG_THRESHOLD_PX`? A plain click (press, tiny or no
     /// motion, release) restores the window instead of "moving" it —
-    /// matches `miniwindowMouseDown`'s `hasMoved` check in real
-    /// WindowMaker's `icon.c`, which is exactly why a click still works
+    /// the press-never-moved rule is exactly why a click still works
     /// at all despite every press arming a potential drag.
     moved: bool,
     grab: DragHandle,
@@ -574,7 +571,7 @@ fn dock_geometry(primary: Rect, dock_width: u32, dock_height: u32) -> Rect {
 }
 
 /// Root geometry of the Clip: a single tile in the primary monitor's
-/// top-left corner (real WindowMaker's stock Clip position).
+/// top-left corner (the Clip's stock position).
 fn clip_geometry(primary: Rect, tile: u32) -> Rect {
     Rect { pos: primary.pos, size: Size::new(tile, tile) }
 }
@@ -652,9 +649,9 @@ pub struct Desktop<B: Backend> {
     /// crosses the `Box<dyn DockWidget>` boundary as a shared cell
     /// rather than through the trait.
     workspace: Rc<RefCell<WorkspaceShared>>,
-    /// The Clip: real WindowMaker's workspace tile, pinned at the
-    /// screen's top-left corner (its stock position) — corner arrows
-    /// switch workspaces, the face shows the current one.
+    /// The Clip: the workspace tile, pinned at the screen's top-left
+    /// corner (its stock position) — corner arrows switch workspaces,
+    /// the face shows the current one.
     clip_window: B::ShellId,
     /// What the Clip last rendered, so workspace churn repaints it
     /// exactly once per actual change.
@@ -692,11 +689,11 @@ impl<B: Backend> Desktop<B> {
         let pad = ((4.0 * scale).round() as u32).max(1);
         // The dock is exactly one tile wide, tiles touch directly with
         // no gap, and the identity tile sits flush at the very top —
-        // matching real WindowMaker's Dock, a flush column of icons
-        // touching both the screen edge and each other, not a WM
-        // convention of its own. `pad` still spaces the *desktop's* icon
-        // grid (miniaturized windows), which is a separate, unrelated
-        // piece of chrome.
+        // the classic dock is a flush column of icons touching both
+        // the screen edge and each other, not a WM convention of its
+        // own. `pad` still spaces the *desktop's* icon grid
+        // (miniaturized windows), which is a separate, unrelated piece
+        // of chrome.
         let dock_width = tile;
 
         let wallpaper = Wallpaper::load();
@@ -773,8 +770,8 @@ impl<B: Backend> Desktop<B> {
     /// One workarea per monitor, in the order `monitors` arrives in —
     /// exactly the positional order `WindowManager::set_workareas`
     /// indexes. The Dock is an always-on-top, content-sized object
-    /// rather than a reserved sidebar (real WindowMaker's Dock behaves
-    /// the same way), so it carves nothing out of the monitor it hangs
+    /// rather than a reserved sidebar (the classic dock behaves the
+    /// same way), so it carves nothing out of the monitor it hangs
     /// on and every entry is that monitor's full geometry. This stays a
     /// per-monitor computation regardless, so that the day the Dock does
     /// reserve a strip, only the primary's entry has to change.
@@ -868,7 +865,7 @@ impl<B: Backend> Desktop<B> {
         self.clip_window
     }
 
-    /// A click on the Clip: WindowMaker's diagonal corner zones — the
+    /// A click on the Clip: the classic diagonal corner zones — the
     /// top-right arrow advances, the bottom-left one goes back, the
     /// body is inert. Same semantics as Alt+Ctrl+Left/Right rather
     /// than wrapping: forward past the last workspace grows a new one
@@ -909,7 +906,7 @@ impl<B: Backend> Desktop<B> {
     /// assuming a fixed stride. Both hit-testing and painting read from
     /// this single source of truth, so they can never disagree about
     /// where a widget sits. No gap between consecutive slots — tiles
-    /// snap together, matching real WindowMaker's Dock.
+    /// snap together, the way the classic dock stacks them.
     fn widget_slots(&self) -> Vec<(usize, Rect)> {
         let mut y = self.widgets_top();
         let mut slots = Vec::with_capacity(self.widgets.len());
@@ -1082,7 +1079,7 @@ impl<B: Backend> Desktop<B> {
     /// `Notification::WindowMenuRequested`), titled with the window's
     /// own (truncated) title. Replaces whatever menu session is
     /// already open, root or window — exactly one menu on screen at a
-    /// time, like real WindowMaker's one-open-menu-per-screen rule.
+    /// time, the classic one-open-menu-per-screen rule.
     pub fn open_window_menu(&mut self, backend: &mut B, theme: &Theme, at: Point, ctx: WindowMenuContext)
     where
         B: wm_theme_api::PopupHost<PopupId = B::ShellId>,
@@ -1217,8 +1214,8 @@ impl<B: Backend> Desktop<B> {
     }
 
     /// Shows an icon tile for a client that was just miniaturized —
-    /// classic WindowMaker "miniaturize to icon", not minimize-to-a-
-    /// taskbar (there is no taskbar). Tiles fill left-to-right along the
+    /// the classic "miniaturize to icon", not minimize-to-a-taskbar
+    /// (there is no taskbar). Tiles fill left-to-right along the
     /// bottom-left of the screen, wrapping upward — matching the icon
     /// row layout in the reference NeXTSTEP screenshot this theme is
     /// matched against — clear of the dock on the right.
@@ -1329,8 +1326,7 @@ impl<B: Backend> Desktop<B> {
 /// Pure drag-threshold arithmetic, kept separate from `drag_icon_motion`
 /// so it's testable without a backend: `None` if motion hasn't
 /// crossed `threshold` yet (and hadn't already elsewhere in the drag),
-/// `Some(new_pos)` once it has. Matches `miniwindowMouseDown`'s
-/// `hasMoved` check in real WindowMaker's `icon.c` — the reason a
+/// `Some(new_pos)` once it has. The threshold is the reason a
 /// press-then-release with no real movement still works as a plain
 /// click instead of "dragging" the icon a few pixels and never
 /// restoring the window.
@@ -1546,7 +1542,7 @@ mod tests {
 
     #[test]
     fn wallpaper_submenu_marks_the_current_selection() {
-        let items = root_menu_items(Wallpaper::TealBlueprint, "window-maker", &[]);
+        let items = root_menu_items(Wallpaper::TealBlueprint, "nextstep-classic", &[]);
         let submenu = items.iter().find(|item| item.label() == "Wallpaper").expect("wallpaper submenu");
         let MenuItem::Submenu { items, .. } = submenu else { panic!("expected submenu") };
         assert_eq!(items.len(), Wallpaper::ALL.len());
@@ -1583,7 +1579,7 @@ mod tests {
     /// menu build so these tests exercise the real assembly path, not
     /// `applications_items` in isolation.
     fn applications_submenu(apps: &[AppEntry]) -> Vec<MenuItem> {
-        let items = root_menu_items(Wallpaper::TealBlueprint, "window-maker", apps);
+        let items = root_menu_items(Wallpaper::TealBlueprint, "nextstep-classic", apps);
         let submenu = items.iter().find(|item| item.label() == "Applications").expect("Applications submenu");
         let MenuItem::Submenu { items, .. } = submenu else { panic!("expected a submenu") };
         items.clone()
@@ -1680,7 +1676,7 @@ mod tests {
         assert_eq!(
             labels,
             ["Maximize", "Miniaturize", "Shade", "Fullscreen", "Move To", "Close", "Kill"],
-            "winmenu.c's entry order, with the plain do-forms for an untouched window"
+            "the classic entry order, with the plain do-forms for an untouched window"
         );
 
         let mut engaged = window_ctx(0, 1);
@@ -1830,7 +1826,7 @@ mod tests {
         }
 
         fn open_root(&mut self) {
-            let items = root_menu_items(Wallpaper::TealBlueprint, "window-maker", &[]);
+            let items = root_menu_items(Wallpaper::TealBlueprint, "nextstep-classic", &[]);
             self.menu.open_root(&mut self.host, &self.theme, &mut self.font_system, items, 0, Point::new(0, 0), Size::new(1600, 1000));
         }
 
@@ -1892,7 +1888,7 @@ mod tests {
         assert_eq!(f.host.open.len(), 1);
 
         let window = f.only_open_window();
-        let items = root_menu_items(Wallpaper::TealBlueprint, "window-maker", &[]);
+        let items = root_menu_items(Wallpaper::TealBlueprint, "nextstep-classic", &[]);
         let row = f.row_point(ROOT_MENU_TITLE, &items, 0);
         assert!(matches!(
             f.click(window, row),

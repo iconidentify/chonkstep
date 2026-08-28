@@ -1,9 +1,9 @@
-//! The Alt-Tab switch panel (real WindowMaker's `switchpanel.c`, in
-//! this theme's own visual language): a centered strip of live window
-//! thumbnails — the same tiles miniaturized windows get — with the
-//! selected one sitting on a highlight backdrop and its full title
-//! written underneath. Pure rasterization; the desktop shell owns the
-//! popup window this is blitted onto.
+//! The Alt-Tab switch panel, in this theme's own visual language: a
+//! centered strip of live window thumbnails — the same tiles
+//! miniaturized windows get — with the selected one sitting on a
+//! highlight backdrop and its full title written underneath. Pure
+//! rasterization; the desktop shell owns the popup window this is
+//! blitted onto.
 
 use tiny_skia::Pixmap;
 use wm_theme_api::DecorationBuffer;

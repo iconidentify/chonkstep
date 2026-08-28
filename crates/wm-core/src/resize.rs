@@ -1,8 +1,7 @@
 //! Pure geometry: clamps a candidate content size to a client's
-//! `SizeHints` (`WM_NORMAL_HINTS`'s min/max size and resize increment) —
-//! WindowMaker's `wWindowConstrainSize` in `moveres.c`. No I/O, no
-//! backend dependency, trivially unit-tested — matches this crate's
-//! `hittest`/`snap` modules in spirit.
+//! `SizeHints` (`WM_NORMAL_HINTS`'s min/max size and resize increment).
+//! No I/O, no backend dependency, trivially unit-tested — matches this
+//! crate's `hittest`/`snap` modules in spirit.
 
 use wm_theme_api::Size;
 

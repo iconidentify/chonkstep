@@ -2,11 +2,11 @@
 //! "instrument" dock app (network traffic, system load, sound, power)
 //! builds on, the way everything square builds on [`crate::tile`].
 //!
-//! The look is the classic WindowMaker dockapp instrument — a dark
-//! glass screen recessed into the tile behind a gasket (see
-//! [`crate::netload`], the wmnetload port this generalizes from) — but
-//! where wmnetload's LCD keeps a fixed sage palette because it depicts
-//! one specific piece of hardware, *this* panel is a family of screens
+//! The look is the classic dockapp instrument — a dark glass screen
+//! recessed into the tile behind a gasket (see [`crate::netload`], the
+//! network-load port this generalizes from) — but where that LCD keeps
+//! a fixed sage palette because it depicts one specific piece of
+//! hardware, *this* panel is a family of screens
 //! that belong to the theme: every color on the glass derives from one
 //! accent picked out of the theme's own terminal palette
 //! ([`panel_accent`]), so the Amber Phosphor theme gets amber LEDs,
@@ -27,7 +27,7 @@
 //!   time).
 //! - [`draw_led_matrix`]: the mirrored two-direction dot matrix
 //!   (download filling down from the top edge, upload up from the
-//!   bottom — direction by position, not hue, as wmnetload put it).
+//!   bottom — direction by position, not hue).
 //! - [`render_dead_tile`]: the powered-off instrument — a blank glass
 //!   with a dim label — for empty states (no battery, no sink, a
 //!   widget not yet live).
@@ -291,7 +291,8 @@ pub(crate) fn mirrored_row_edges(y: i32, h: u32, half_rows: u32, k: u32, element
     (seam - near - element_h, seam + near)
 }
 
-/// The mirrored two-direction matrix wmnetload made canonical: `top`
+/// The mirrored two-direction matrix the classic network-load dockapp
+/// made canonical: `top`
 /// levels fill *downward* from the top edge, `bottom` levels fill
 /// *upward* from the bottom edge, each `0..=half_rows` — direction is
 /// shown by position, not hue. Columns come from the longer of the two

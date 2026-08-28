@@ -1,9 +1,8 @@
 //! Pure geometry: pulls a candidate frame rect snug against nearby edges
 //! (the screen boundary, other windows' frames) when it lands within a
-//! small pixel threshold of one — WindowMaker calls this "edge
-//! resistance"/"attraction" (`src/moveres.c`). No I/O, no backend
-//! dependency, trivially unit-tested — matches this crate's `hittest`
-//! module in spirit.
+//! small pixel threshold of one, the classic "edge resistance"/"edge
+//! attraction" behavior. No I/O, no backend dependency, trivially
+//! unit-tested — matches this crate's `hittest` module in spirit.
 
 use wm_theme_api::{Point, Rect};
 

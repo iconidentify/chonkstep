@@ -233,8 +233,8 @@ fn running_pairs<B: Backend>(wm: &WindowManager<B>) -> Vec<(String, B::WindowId)
 }
 
 /// Moves the focused client to `workspace` and follows it there — the
-/// keyboard "carry" gesture (real WindowMaker's "move to next/previous
-/// workspace with window"). The refocus at the end is load-bearing:
+/// keyboard "carry" gesture — move to the next or previous workspace
+/// with the window in hand. The refocus at the end is load-bearing:
 /// `move_client_to_workspace` drops focus the instant the client leaves
 /// the active workspace, and without re-focusing after arriving, the
 /// second carry press in a row would find nothing focused and silently

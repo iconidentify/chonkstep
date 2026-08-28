@@ -36,7 +36,7 @@ pub struct MonitorInfo {
     pub primary: bool,
 }
 
-/// Where a client sits in its lifecycle. Deliberately WindowMaker-shaped:
+/// Where a client sits in its lifecycle. Deliberately NeXTSTEP-shaped:
 /// `Miniaturized` means unmapped-and-represented-by-an-icon, not
 /// "minimized to a taskbar" — no taskbar concept exists here.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -54,15 +54,15 @@ bitflags::bitflags! {
     pub struct ClientFlags: u8 {
         const FOCUSED    = 1 << 0;
         const SHADED     = 1 << 1;
-        /// A modern addition — classic WindowMaker predates EWMH
-        /// fullscreen. An orthogonal presentation mode, not a lifecycle
-        /// stage, hence a flag rather than a `Lifecycle` variant.
+        /// A modern addition — the classic NeXTSTEP desktop predates
+        /// EWMH fullscreen. An orthogonal presentation mode, not a
+        /// lifecycle stage, hence a flag rather than a `Lifecycle`
+        /// variant.
         const FULLSCREEN = 1 << 2;
         const STICKY     = 1 << 3;
         const URGENT     = 1 << 4;
         /// Set independently — a window can be maximized horizontally,
-        /// vertically, or both ("full" maximize), matching WindowMaker's
-        /// `MAX_HORIZONTAL`/`MAX_VERTICAL`.
+        /// vertically, or both ("full" maximize).
         const MAXIMIZED_H = 1 << 5;
         const MAXIMIZED_V = 1 << 6;
         /// Ignores the client's own `ConfigureRequest` resize attempts
@@ -79,10 +79,11 @@ bitflags::bitflags! {
 
 bitflags::bitflags! {
     /// Which axes to maximize along — passed to
-    /// `WindowManager::maximize`/`toggle_maximize`. WindowMaker has no
-    /// titlebar button for this (see `ButtonKind`'s doc comment); it's
-    /// invoked via titlebar double-click, optionally with Ctrl (vertical
-    /// only) or Shift (horizontal only) held.
+    /// `WindowManager::maximize`/`toggle_maximize`. The classic
+    /// NeXTSTEP-style titlebar has no button for this (see
+    /// `ButtonKind`'s doc comment); it's invoked via titlebar
+    /// double-click, optionally with Ctrl (vertical only) or Shift
+    /// (horizontal only) held.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
     pub struct MaximizeDirections: u8 {
         const HORIZONTAL = 1 << 0;
@@ -113,12 +114,11 @@ pub struct Client<B: Backend> {
     /// time a client is maximized (in either axis) and cleared once it's
     /// fully unmaximized. `None` means "not currently maximized".
     pub restore_geometry: Option<Rect>,
-    /// A plain 0-based index into `WindowManager`'s workspace row —
-    /// real WindowMaker uses exactly this (`int workspace` on its own
-    /// window struct), not a generational handle: workspaces are never
-    /// destroyed out from under a live client the way a frame or a
-    /// monitor could be, so the extra safety a slotmap key buys
-    /// elsewhere in this crate isn't needed here.
+    /// A plain 0-based index into `WindowManager`'s workspace row, not
+    /// a generational handle: workspaces are never destroyed out from
+    /// under a live client the way a frame or a monitor could be, so
+    /// the extra safety a slotmap key buys elsewhere in this crate
+    /// isn't needed here.
     pub workspace: usize,
     pub monitor: MonitorId,
 }
