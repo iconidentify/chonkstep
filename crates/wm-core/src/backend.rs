@@ -148,6 +148,9 @@ pub trait Backend {
     /// Publishes a client's `_NET_WM_STATE` property from the WM's own
     /// authoritative flags.
     fn publish_net_state(&mut self, _window: Self::WindowId, _fullscreen: bool, _max_h: bool, _max_v: bool, _shaded: bool, _hidden: bool) {}
+    /// Publishes a client's `_NET_WM_DESKTOP` property — which
+    /// workspace the window lives on, for pagers and taskbars.
+    fn publish_window_desktop(&mut self, _window: Self::WindowId, _desktop: usize) {}
     /// Passive per-window button grab so the WM sees the first click on
     /// an unfocused window (click-to-focus) without stealing later
     /// clicks from the app. The one honest X11-ism on this trait — a

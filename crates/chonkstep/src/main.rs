@@ -204,6 +204,14 @@ fn main() {
         if let Some((window, local)) = wm.backend_mut().take_shell_motion() {
             desktop.hover_menu(wm.backend_mut(), &theme, window, local);
         }
+        // Workspace plumbing between the WM and the dock indicator:
+        // drain a click on the indicator into a real switch first, then
+        // mirror the authoritative state into the shared cell so
+        // `tick_widgets` repaints the tile exactly when it changed.
+        if let Some(target) = desktop.take_workspace_request() {
+            wm.switch_workspace(target);
+        }
+        desktop.set_workspace_display(wm.current_workspace(), wm.workspace_count());
         desktop.tick_menu(wm.backend_mut(), &theme);
         desktop.tick_widgets(wm.backend_mut(), &theme);
 

@@ -157,6 +157,14 @@ pub enum BackendEvent<Win, Frame> {
     /// maximize request commonly toggles horizontal and vertical
     /// together).
     NetStateRequested { window: Win, action: NetStateAction, first: NetState, second: Option<NetState> },
+    /// An EWMH `_NET_CURRENT_DESKTOP` client message: a pager or tool
+    /// (xdotool set_desktop) asked to switch to this workspace.
+    DesktopSwitchRequested(usize),
+    /// An EWMH `_NET_WM_DESKTOP` client message: move this window to
+    /// that workspace. The spec's 0xFFFFFFFF "all desktops" value is
+    /// not delivered (this WM has no sticky windows yet); backends
+    /// swallow it.
+    WindowDesktopRequested { window: Win, desktop: usize },
     /// The backend's connection to the display server is gone for good.
     /// The event loop must exit: continuing to poll a dead connection
     /// just spins (two zombie WMs burning CPU after a display restart —

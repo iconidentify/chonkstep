@@ -82,6 +82,11 @@ pub struct FakeBackend {
     /// `(window, fullscreen, max_h, max_v, shaded, hidden)` — matching
     /// the trait method's parameter order exactly.
     pub published_net_states: Vec<(FakeWindowId, bool, bool, bool, bool, bool)>,
+    /// Every `publish_window_desktop` call in order, as
+    /// `(window, desktop)` — a history, so a test can assert both the
+    /// initial manage-time publish and a later move's re-publish, not
+    /// just the end state.
+    pub published_window_desktops: Vec<(FakeWindowId, usize)>,
 }
 
 impl FakeBackend {
@@ -268,6 +273,10 @@ impl Backend for FakeBackend {
 
     fn publish_net_state(&mut self, window: Self::WindowId, fullscreen: bool, max_h: bool, max_v: bool, shaded: bool, hidden: bool) {
         self.published_net_states.push((window, fullscreen, max_h, max_v, shaded, hidden));
+    }
+
+    fn publish_window_desktop(&mut self, window: Self::WindowId, desktop: usize) {
+        self.published_window_desktops.push((window, desktop));
     }
 }
 

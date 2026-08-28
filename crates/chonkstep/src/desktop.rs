@@ -7,7 +7,9 @@
 //! renderers — the same SDK surface a third-party `chonk-ui` app draws
 //! with, so the shell has no rendering code a real app couldn't also use.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
+use std::rc::Rc;
 
 use tiny_skia::{FilterQuality, Pixmap, PixmapPaint, Transform};
 use wm_core::{Backend, ClientId, DragHandle};
@@ -20,7 +22,7 @@ use wm_x11::X11Backend;
 use x11rb::protocol::xproto::Window;
 
 use crate::wallpaper::Wallpaper;
-use crate::widgets::{ClockWidget, DockWidget, NetLoadWidget};
+use crate::widgets::{ClockWidget, DockWidget, NetLoadWidget, WorkspaceShared, WorkspaceWidget};
 
 /// The desktop background color — a cool lavender-gray sampled from a
 /// reference NeXTSTEP desktop screenshot, not the neutral gray this
@@ -209,6 +211,11 @@ pub struct Desktop {
     /// see `crate::widgets` for the SDK these implement. Order is what
     /// `redraw_dock` draws and what a middle-click drag reorders.
     widgets: Vec<Box<dyn DockWidget>>,
+    /// The workspace state shared with the `WorkspaceWidget` in
+    /// `widgets` — see `WorkspaceShared`'s doc comment for why this
+    /// crosses the `Box<dyn DockWidget>` boundary as a shared cell
+    /// rather than through the trait.
+    workspace: Rc<RefCell<WorkspaceShared>>,
     widget_drag: Option<WidgetDrag>,
     icons: HashMap<Window, IconTile>,
     icon_drag: Option<IconDrag>,
@@ -238,8 +245,17 @@ impl Desktop {
         let dock_width = tile;
 
         let wallpaper = Wallpaper::load();
-        let widgets: Vec<Box<dyn DockWidget>> =
-            vec![Box::new(ClockWidget::new()), Box::new(NetLoadWidget::new())];
+        // The WM reports the real workspace state after startup; until
+        // then "first of one" is what a fresh session actually has.
+        let workspace = Rc::new(RefCell::new(WorkspaceShared { current: 0, count: 1, requested: None }));
+        // The workspace indicator sits first — directly under the
+        // identity tile, above the instruments — mirroring where the
+        // Clip anchors in real WindowMaker's layout.
+        let widgets: Vec<Box<dyn DockWidget>> = vec![
+            Box::new(WorkspaceWidget::new(Rc::clone(&workspace))),
+            Box::new(ClockWidget::new()),
+            Box::new(NetLoadWidget::new()),
+        ];
         let dock_height = stacked_dock_height(tile, screen.h, &widgets);
         let dock_geom = Rect {
             pos: Point::new((screen.w.saturating_sub(dock_width)) as i32, 0),
@@ -265,6 +281,7 @@ impl Desktop {
             swash_cache: cosmic_text::SwashCache::new(),
             menu: CascadeMenu::new("chonkstep", DESKTOP_BG),
             widgets,
+            workspace,
             widget_drag: None,
             icons: HashMap::new(),
             icon_drag: None,
@@ -319,6 +336,31 @@ impl Desktop {
         if changed {
             self.redraw_dock(backend, theme);
         }
+    }
+
+    /// Feeds the WM's authoritative workspace state to the dock's
+    /// indicator tile. No repaint here on purpose: the next
+    /// `tick_widgets` pass notices the change and repaints the dock
+    /// through the one shared path, instead of this method growing a
+    /// second redraw entry point.
+    // The event-loop caller lands with `main.rs`'s workspace wiring,
+    // staged separately — the allow keeps the build warning-free until
+    // then and is harmless once the caller exists.
+    #[allow(dead_code)]
+    pub fn set_workspace_display(&mut self, current: usize, count: usize) {
+        let mut shared = self.workspace.borrow_mut();
+        shared.current = current;
+        shared.count = count;
+    }
+
+    /// Drains the workspace switch a click on the indicator tile
+    /// requested, if any — the event loop performs the actual switch and
+    /// then reports back via `set_workspace_display`. Take-semantics so
+    /// one click means one switch, not one per loop iteration.
+    // Same staging note as `set_workspace_display` above.
+    #[allow(dead_code)]
+    pub fn take_workspace_request(&mut self) -> Option<usize> {
+        self.workspace.borrow_mut().requested.take()
     }
 
     /// Dock-local Y where the widget stack begins — directly below the
