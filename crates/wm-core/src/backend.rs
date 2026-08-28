@@ -110,6 +110,12 @@ pub trait Backend {
     /// unchanged.
     fn grab_keyboard(&mut self) {}
     fn ungrab_keyboard(&mut self) {}
+    /// Asks a client to repaint its entire content (a synthetic
+    /// full-window Expose on X11) — used after remapping a window whose
+    /// pixels the server did not retain (unshade, deminiaturize), where
+    /// some clients otherwise leave stale buffer garbage visible until
+    /// their next incidental redraw. Defaulted to a no-op.
+    fn refresh_client(&mut self, _window: Self::WindowId, _size: Size) {}
     /// Passive per-window button grab so the WM sees the first click on
     /// an unfocused window (click-to-focus) without stealing later
     /// clicks from the app. The one honest X11-ism on this trait — a

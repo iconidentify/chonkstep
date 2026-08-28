@@ -1007,8 +1007,14 @@ impl<B: Backend> WindowManager<B> {
         }
         client.flags.remove(ClientFlags::SHADED);
         let window = client.window;
+        let content_size = client.geometry.size;
         self.backend.set_client_mapped(window, true);
         self.reflow_frame(id);
+        // Nudge the client to repaint everything: X preserves no pixels
+        // across the unmap, and some clients (urxvt among them) repaint
+        // lazily enough on remap that stale buffer garbage stays
+        // visible until their next full redraw.
+        self.backend.refresh_client(window, content_size);
         tracing::info!(?id, "unshaded");
     }
 
@@ -1060,9 +1066,14 @@ impl<B: Backend> WindowManager<B> {
             return;
         }
         client.lifecycle = Lifecycle::Normal;
+        let window = client.window;
+        let content_size = client.geometry.size;
         if let Some(frame) = client.frame {
             self.backend.map_frame(frame);
         }
+        // Same nudge unshade needs (see there): the client's own pixels
+        // weren't retained while unmapped either.
+        self.backend.refresh_client(window, content_size);
         // Explicit, not left to an `Expose` reply: a window without
         // backing-store (every frame here — `create_decoration` never
         // requests it) isn't guaranteed by X11 to retain its pixel
@@ -1137,6 +1148,12 @@ impl<B: Backend> WindowManager<B> {
         if commit {
             if let Some(&id) = session.order.get(session.selected) {
                 if self.clients.get(id).is_some() {
+                    // Switching to a rolled-up window means "show me
+                    // that window" — real WindowMaker's cycling.c
+                    // unshades on commit too. Without this, committing
+                    // to a shaded client set input focus on an
+                    // *unmapped* window and nothing visibly happened.
+                    self.unshade(id);
                     self.focus_client(id);
                 }
             }
@@ -1302,6 +1319,27 @@ mod tests {
         assert!(!wm.client(id2).unwrap().flags.contains(ClientFlags::FOCUSED));
         let frame1 = wm.client(id1).unwrap().frame.unwrap();
         assert!(wm.backend().raised_frames.contains(&frame1), "cycling must raise the newly-focused window");
+    }
+
+    #[test]
+    fn committing_to_a_shaded_client_unshades_it() {
+        let mut backend = FakeBackend::new();
+        let w1 = backend.create_window();
+        let w2 = backend.create_window();
+        let mut wm = wm(backend);
+        wm.dispatch(BackendEvent::MapRequest(w1));
+        wm.dispatch(BackendEvent::MapRequest(w2));
+        let id1 = wm.client_for_window(w1).unwrap();
+        wm.shade(id1);
+        assert!(wm.client(id1).unwrap().flags.contains(ClientFlags::SHADED));
+
+        // Focused is w2; one Tab selects w1 (shaded), commit.
+        wm.dispatch(alt_tab());
+        wm.dispatch(alt_release());
+
+        let client = wm.client(id1).unwrap();
+        assert!(!client.flags.contains(ClientFlags::SHADED), "cycling to a shaded window must unroll it");
+        assert!(client.flags.contains(ClientFlags::FOCUSED));
     }
 
     #[test]
