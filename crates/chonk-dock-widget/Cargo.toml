@@ -1,0 +1,30 @@
+[package]
+name = "chonk-dock-widget"
+description = "The dock widget SDK: the DockWidget trait and the declarative sampling vocabulary its implementors are written against."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# Deliberately incapable. This crate is the *whole* non-rendering
+# dependency surface of `chonk-instruments`, whose own `clippy.toml`
+# makes `std::fs`, `std::process` and `std::thread::spawn` build errors.
+# A lint like that is only worth having if obeying it is possible, so
+# everything a widget legitimately needs has to arrive as data — which
+# is what `sampling` is. Nothing here can perform I/O, and nothing here
+# should ever gain the ability to: the sampler *runtime* (threads,
+# `read_dir`, `Command`) lives in `chonk-shell`, on the dock's side of
+# the boundary, and that separation is the crate's reason to exist.
+#
+#   - `wm-core` for `MouseButton`, which `DockInput` carries. Re-exported
+#     so instruments need not depend on it.
+#   - `wm-theme` / `wm-theme-api` for `Theme` and `DecorationBuffer`,
+#     the input and output of `DockWidget::render`.
+#   - `cosmic-text` for the shared `FontSystem`/`SwashCache` threaded
+#     through `render` — five instruments used to construct one each,
+#     which is five full fontconfig scans for the shaping caches of a
+#     handful of three-character labels.
+[dependencies]
+wm-core = { path = "../wm-core" }
+wm-theme = { path = "../wm-theme" }
+wm-theme-api = { path = "../wm-theme-api" }
+cosmic-text = "0.12"

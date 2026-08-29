@@ -41,7 +41,7 @@
 use wm_theme::{panel, soundctl, Theme};
 use wm_theme_api::DecorationBuffer;
 
-use super::{DockInput, DockWidget, Effect, Samples, Source, SourceId, SAMPLE_INTERVAL};
+use chonk_dock_widget::{DockInput, DockWidget, Effect, Samples, Source, SourceId, SAMPLE_INTERVAL};
 
 /// One reading of the default sink. `PartialEq` is what lets `update`
 /// report "repaint needed" as a plain comparison.
@@ -164,9 +164,9 @@ impl DockWidget for SoundWidget {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::widgets::sampling::SampleBench;
+    use chonk_dock_widget::SampleBench;
     use soundctl::SoundZone;
-    use wm_core::MouseButton;
+    use chonk_dock_widget::MouseButton;
     use wm_theme_api::Point;
 
     #[test]

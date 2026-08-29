@@ -6,6 +6,12 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+chonk-dock-widget = { path = "../chonk-dock-widget" }
+# The six built-in instruments. The edge points this way and only this
+# way: `chonk-instruments` cannot see this crate, which is what makes
+# its per-crate ban on file, process and thread APIs meaningful — there
+# is nothing there to reach for, not merely a lint saying not to.
+chonk-instruments = { path = "../chonk-instruments" }
 wm-core = { path = "../wm-core" }
 wm-theme = { path = "../wm-theme" }
 wm-theme-api = { path = "../wm-theme-api" }

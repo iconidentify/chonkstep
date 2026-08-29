@@ -1,0 +1,28 @@
+[package]
+name = "chonk-instruments"
+description = "The six built-in dock instruments: clock, network traffic, system load, sound, link, power. Pure folds over sampled data — this crate cannot perform I/O."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# This dependency list is the enforcement, and it is short on purpose.
+#
+# Read it together with this crate's own `clippy.toml`: the lint bans
+# the I/O APIs by name, and this list makes sure there is nothing here
+# to reach for anyway. An instrument gets the SDK (which is incapable by
+# construction — see `chonk-dock-widget`), a theme, a pixel buffer type,
+# and a text shaper. It does not get `chonk-shell`, and it *cannot*:
+# `chonk-shell` depends on this crate, so the edge only points one way.
+#
+# The rule this encodes used to be a paragraph in a module doc. On
+# 2026-08-29 four of the six modules in this crate were still doing
+# blocking file I/O on the compositor's repaint thread despite it, and a
+# fifth was shelling out to `nmcli` — a ~3.6s freeze once every ~34s
+# that the compositor's own watchdog blamed on the display driver. The
+# paragraph was true, well-written, and worth nothing. This is the same
+# rule stated somewhere the compiler reads.
+[dependencies]
+chonk-dock-widget = { path = "../chonk-dock-widget" }
+wm-theme = { path = "../wm-theme" }
+wm-theme-api = { path = "../wm-theme-api" }
+cosmic-text = "0.12"

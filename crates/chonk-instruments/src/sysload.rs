@@ -26,7 +26,7 @@ use wm_theme::sysload::{render_sysload_tile, SYS_LOAD_COLUMNS, SYS_LOAD_MEM_SEGM
 use wm_theme::Theme;
 use wm_theme_api::DecorationBuffer;
 
-use super::{DockWidget, Samples, Source, SourceId, SAMPLE_INTERVAL};
+use chonk_dock_widget::{DockWidget, Samples, Source, SourceId, SAMPLE_INTERVAL};
 
 /// Used-memory fraction at which the tile lights its alarm frame. 90%
 /// of *available*-derived usage means the kernel is genuinely close to
@@ -191,7 +191,7 @@ impl DockWidget for SysLoadWidget {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::widgets::sampling::SampleBench;
+    use chonk_dock_widget::SampleBench;
 
     #[test]
     fn cpu_totals_sum_the_right_fields_and_exclude_guest_time() {

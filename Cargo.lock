@@ -258,6 +258,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "chonk-dock-widget"
+version = "0.1.0"
+dependencies = [
+ "cosmic-text",
+ "wm-core",
+ "wm-theme",
+ "wm-theme-api",
+]
+
+[[package]]
 name = "chonk-dockclock"
 version = "0.1.0"
 dependencies = [
@@ -265,9 +275,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "chonk-instruments"
+version = "0.1.0"
+dependencies = [
+ "chonk-dock-widget",
+ "cosmic-text",
+ "wm-theme",
+ "wm-theme-api",
+]
+
+[[package]]
 name = "chonk-shell"
 version = "0.1.0"
 dependencies = [
+ "chonk-dock-widget",
+ "chonk-instruments",
  "cosmic-text",
  "tiny-skia",
  "tracing",

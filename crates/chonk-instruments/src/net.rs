@@ -25,7 +25,7 @@ use wm_theme::nettraffic::{self, TrafficLane};
 use wm_theme::{panel, Theme};
 use wm_theme_api::DecorationBuffer;
 
-use super::{DockInput, DockWidget, Effect, Samples, Source, SourceId, SAMPLE_INTERVAL};
+use chonk_dock_widget::{DockInput, DockWidget, Effect, Samples, Source, SourceId, SAMPLE_INTERVAL};
 
 /// How many history samples the widget keeps per direction — enough
 /// for any renderer column count up to this.
@@ -203,8 +203,8 @@ impl DockWidget for NetTrafficWidget {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::widgets::sampling::SampleBench;
-    use wm_core::MouseButton;
+    use chonk_dock_widget::SampleBench;
+    use chonk_dock_widget::MouseButton;
     use wm_theme_api::Point;
 
     fn press() -> DockInput {
