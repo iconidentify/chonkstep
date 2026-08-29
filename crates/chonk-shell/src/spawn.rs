@@ -7,8 +7,34 @@ use std::process::{Command, Stdio};
 /// via `_NET_WM_PID` (see `Backend::window_pid`), rather than matching
 /// on something as loose as "any window of the expected class."
 pub fn spawn_detached(program: &str, args: &[&str]) -> Option<u32> {
-    spawn_detached_with_env(program, args, &[])
+    spawn_detached_with_env(program, args, &[], &[])
 }
+
+/// The variables that must be *removed* from a dockapp's environment,
+/// and the reason the removal is mandatory rather than tidy.
+///
+/// The dockapp boundary's headline claim is that a dockapp holds no
+/// display connection, so `wl_shm`, `zwlr_screencopy_v1` and
+/// `zwlr_foreign_toplevel_management_v1` (`wm-wayland/src/protocols.rs`)
+/// are *unreachable* rather than merely denied — a stronger guarantee
+/// than Wayland's own, because there is no object to ask.
+///
+/// That claim is false by default. Nothing stops the dockapp *process*
+/// from opening `$WAYLAND_DISPLAY` or `$DISPLAY` itself: it inherits
+/// the environment (this function does not clear it, and
+/// `wm-wayland/src/state.rs` deliberately sets both for children so
+/// that ordinary launched apps work). A dockapp that connected on its
+/// own would get everything a normal client gets — screen capture, the
+/// window list, the clipboard — while presenting as a tile.
+///
+/// Unsetting both is what turns "a dockapp is granted nothing extra"
+/// into "a dockapp is granted strictly less than a normal app". It is a
+/// hurdle, not a cage — a determined program can guess `:0` or
+/// enumerate `$XDG_RUNTIME_DIR/wayland-*` — and the SDK documentation
+/// says so plainly. What it buys is that reaching a display server
+/// becomes a deliberate, auditable act by the dockapp rather than
+/// something it gets for free by calling a toolkit's `init()`.
+pub const DISPLAY_SERVER_ENV: [&str; 2] = ["WAYLAND_DISPLAY", "DISPLAY"];
 
 /// Same as [`spawn_detached`], with extra environment variables set on
 /// top of whatever chonkstep's own process already has (which the child
@@ -17,12 +43,21 @@ pub fn spawn_detached(program: &str, args: &[&str]) -> Option<u32> {
 /// a third-party binary chonkstep doesn't control needs to be *told*
 /// about the desktop's scale through whatever convention its own
 /// toolkit understands, since it has no way to ask chonkstep for one.
-pub fn spawn_detached_with_env(program: &str, args: &[&str], env: &[(String, String)]) -> Option<u32> {
+///
+/// `unset` names variables to *remove* from the child's environment.
+/// It exists for dockapps, which must be launched with
+/// [`DISPLAY_SERVER_ENV`] cleared — see that constant for why that is a
+/// requirement of the design rather than a precaution. Pass `&[]` when
+/// there is nothing to remove.
+pub fn spawn_detached_with_env(
+    program: &str,
+    args: &[&str],
+    env: &[(String, String)],
+    unset: &[&str],
+) -> Option<u32> {
     let mut command = Command::new(program);
     command.args(args).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
-    for (key, value) in env {
-        command.env(key, value);
-    }
+    apply_env(&mut command, env, unset);
     match command.spawn() {
         Ok(mut child) => {
             let pid = child.id();
@@ -40,6 +75,13 @@ pub fn spawn_detached_with_env(program: &str, args: &[&str], env: &[(String, Str
             // Launches are user gestures, so the thread count is
             // bounded by concurrently running launched apps.
             std::thread::spawn(move || {
+                // Audited exception to `clippy.toml`'s ban on blocking
+                // child-process calls: this closure is the entire body
+                // of a thread whose only job is to outlive the child and
+                // reap it. Nothing waits on this thread, so the only
+                // thing a never-returning `wait` can hold up is one
+                // thread-sized allocation until the session ends.
+                #[allow(clippy::disallowed_methods)]
                 let _ = child.wait();
             });
             Some(pid)
@@ -48,6 +90,28 @@ pub fn spawn_detached_with_env(program: &str, args: &[&str], env: &[(String, Str
             tracing::warn!(program, ?e, "failed to launch");
             None
         }
+    }
+}
+
+/// Applies the set/unset lists to a `Command`.
+///
+/// Split out so the policy is testable without spawning anything:
+/// `Command::get_envs` reports the pending modifications (a removal
+/// shows up as `(key, None)`), which lets the tests below assert what a
+/// child *would* see. Verifying it by actually running a process would
+/// mean waiting on a child, which this workspace's `clippy.toml` bans
+/// outright for good reasons.
+///
+/// Removals are applied after additions on purpose: if a caller ever
+/// passes the same key in both lists, "remove it" is the safer reading
+/// of an ambiguous instruction, and for [`DISPLAY_SERVER_ENV`] it is
+/// the only acceptable one.
+fn apply_env(command: &mut Command, env: &[(String, String)], unset: &[&str]) {
+    for (key, value) in env {
+        command.env(key, value);
+    }
+    for key in unset {
+        command.env_remove(key);
     }
 }
 
@@ -138,6 +202,51 @@ mod tests {
         let env = gtk_qt_scale_env(1.5);
         let gdk_scale = &env.iter().find(|(k, _)| k == "GDK_SCALE").unwrap().1;
         assert_eq!(gdk_scale, "2");
+    }
+
+    #[test]
+    fn a_dockapps_launch_environment_has_no_display_server_in_it() {
+        // The mandatory mitigation, asserted rather than trusted: a
+        // dockapp that inherited WAYLAND_DISPLAY or DISPLAY could open
+        // a display connection and help itself to screen capture, the
+        // window list and the clipboard while presenting as a tile.
+        let mut command = Command::new("/bin/true");
+        apply_env(
+            &mut command,
+            &[("CHONKSTEP_DOCK_SOCKET".to_string(), "/run/user/1000/chonkstep/dock-1.sock".to_string())],
+            &DISPLAY_SERVER_ENV,
+        );
+        let envs: Vec<_> = command.get_envs().collect();
+        for variable in DISPLAY_SERVER_ENV {
+            let entry = envs.iter().find(|(key, _)| *key == std::ffi::OsStr::new(variable));
+            assert_eq!(entry.map(|(_, value)| *value), Some(None), "{variable} must be removed, not merely left unset");
+        }
+        assert!(
+            envs.iter().any(|(key, value)| *key == std::ffi::OsStr::new("CHONKSTEP_DOCK_SOCKET") && value.is_some()),
+            "the variables the dockapp actually needs still arrive"
+        );
+    }
+
+    #[test]
+    fn removal_wins_over_an_accidental_set_of_the_same_variable() {
+        // An ambiguous instruction about DISPLAY has exactly one safe
+        // reading.
+        let mut command = Command::new("/bin/true");
+        apply_env(&mut command, &[("DISPLAY".to_string(), ":0".to_string())], &["DISPLAY"]);
+        let display = command.get_envs().find(|(key, _)| *key == std::ffi::OsStr::new("DISPLAY"));
+        assert_eq!(display.map(|(_, value)| value), Some(None));
+    }
+
+    #[test]
+    fn an_empty_unset_list_leaves_the_inherited_environment_alone() {
+        // `spawn_detached_with_env`'s existing callers must be
+        // unaffected: they pass no removals and inherit everything.
+        let mut command = Command::new("/bin/true");
+        apply_env(&mut command, &gtk_qt_scale_env(2.0), &[]);
+        assert!(
+            command.get_envs().all(|(_, value)| value.is_some()),
+            "nothing should be marked for removal"
+        );
     }
 
     #[test]

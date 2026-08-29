@@ -3,10 +3,25 @@ name = "chonk-ui"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Minimal reusable toolkit for building GUI apps that inherit chonkstep's NeXTSTEP look and feel."
+description = "Minimal reusable toolkit for building GUI apps and dock tiles that inherit chonkstep's NeXTSTEP look and feel."
+
+[features]
+default = ["x11"]
+# The windowed `App` half of the SDK. On by default, because an SDK app
+# is usually a window. Off for a dockapp: `chonk_ui::dockapp` opens no
+# display connection, and a binary that does not even link `x11rb` is
+# the plainest possible evidence for that claim. See `src/app.rs`.
+x11 = ["dep:x11rb"]
 
 [dependencies]
+chonk-dock-proto = { path = "../chonk-dock-proto" }
 wm-theme = { path = "../wm-theme" }
 tiny-skia = "0.11"
+# The `theme_toml` correctness path in `Welcome`/`ThemeChanged`: a
+# dockapp built against a different `wm-theme`, or running under a
+# future user-defined theme with no built-in id, deserializes the real
+# palette instead of guessing. Same version the shell's own config
+# loader uses, so there is one `toml` in the tree.
+toml = "0.9"
 tracing = "0.1"
-x11rb = "0.13"
+x11rb = { version = "0.13", optional = true }

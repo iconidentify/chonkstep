@@ -1,6 +1,11 @@
 [workspace]
 resolver = "2"
-members = ["crates/*"]
+# `examples/*` holds runnable reference programs that are real
+# workspace members rather than `cargo --example` targets: a dockapp is
+# a separate *binary* the dock launches, so it has to build, link and
+# ship like one. `chonk-dockclock` in particular is a conformance test —
+# see its module doc — and it only tests anything if CI builds it.
+members = ["crates/*", "examples/*"]
 
 [workspace.package]
 version = "0.1.0"

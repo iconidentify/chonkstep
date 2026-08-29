@@ -1,0 +1,24 @@
+[package]
+name = "chonk-dock-proto"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The chonkstep dockapp wire protocol: message codec, SOCK_SEQPACKET transport, and backpressure policy, shared by the shell and the SDK."
+
+# Deliberately minimal. This crate is the *contract* between the desktop
+# shell and third-party dockapps built on `chonk-ui`, so anything it
+# depends on becomes something a third party has to link too. It depends
+# on `libc` and nothing else:
+#
+#   - No chonkstep crates (`chonk-shell`, `wm-core`, `wm-theme`, ...).
+#     `chonk-ui/src/lib.rs` promises an SDK app links none of the WM's
+#     own crates, and the protocol sits *under* that promise: a dockapp
+#     is a process that speaks bytes over a socket, not a WM plugin.
+#   - `libc` rather than pure std because `SOCK_SEQPACKET` is simply not
+#     reachable from std: `std::os::unix::net` only ever creates
+#     `SOCK_STREAM`/`SOCK_DGRAM` sockets, and SEQPACKET's message
+#     framing is the entire reason it was chosen (see `transport`).
+#     `libc` is already in this workspace's lockfile via other
+#     dependencies, so it costs a third party nothing new.
+[dependencies]
+libc = "0.2"
