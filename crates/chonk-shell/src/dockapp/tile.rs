@@ -333,15 +333,21 @@ pub(crate) struct RemoteTile {
     entry: DockappEntry,
     state: TileState,
     connection: Option<Connection>,
-    /// The nonce the *current* launch must present in its `Hello`.
-    /// Re-minted per launch, so a stale process from a previous launch
-    /// cannot reclaim the slot from the one that replaced it.
+    /// The nonce whichever process currently owns this slot must present
+    /// in its `Hello`.
     ///
-    /// All zeroes before the first launch, which is never a token
-    /// anything can present: `awaiting_hello` requires
-    /// [`TileState::Starting`], and the only path into that state runs
-    /// through [`launch`](Self::launch), which mints a real one before
-    /// it spawns anything.
+    /// Written in exactly two places, which between them are the whole
+    /// of the tile's identity story: [`launch`](Self::launch) mints a
+    /// fresh one per launch, so a stale process from a previous launch
+    /// cannot reclaim the slot from the one that replaced it; and
+    /// [`rejoin`](Self::rejoin) inherits one from the previous *shell*
+    /// (see [`super::handoff`]), which is what lets a survivor of a hot
+    /// restart be readopted instead of replaced.
+    ///
+    /// All zeroes until one of those two runs, and that value is never
+    /// presentable: `awaiting_hello` admits only
+    /// [`TileState::Starting`] and [`TileState::Rejoining`], and the
+    /// only paths into those states are the two writers above.
     token: [u8; TOKEN_BYTES],
     child: Option<SpawnedChild>,
     budget: LaunchBudget,
