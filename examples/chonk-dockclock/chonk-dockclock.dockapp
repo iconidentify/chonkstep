@@ -1,0 +1,35 @@
+# The reference dockapp manifest, and the registry's only end-to-end
+# exercise until a third-party one exists.
+#
+# `chonk-dockclock` is deliberately not shipped as *the* clock — the
+# built-in `CLK` instrument stays in-process, because the six built-ins
+# ship with the compositor and a process boundary buys nothing on the
+# axis that motivated it. This exists so the out-of-process path is
+# something a developer sees working every day rather than a second code
+# path nobody exercises, which is the kind that rots.
+#
+# Install by copying to one of:
+#   $XDG_DATA_DIRS/chonkstep/dockapps/
+#   $XDG_CONFIG_HOME/chonkstep/dockapps/   (per-user)
+
+# The registry key. Also the dock-order persistence line, the `Hello`
+# id, and the per-tile menu's title — which is why it is stable and
+# separate from `name`: renaming the label must not reset a user's dock
+# arrangement.
+id = "chonk-dockclock"
+
+# The label drawn on the starting/dead/hung face, in the same
+# three-or-four-character shape the built-in instruments use, because it
+# is drawn by the same renderer.
+name = "CLK"
+
+# argv; exec[0] is the program. Bare rather than absolute so a
+# development build on $PATH and an installed one resolve the same way.
+exec = ["chonk-dockclock"]
+
+tile_units = 1
+
+# A clock has no reason to exit, so any exit is a fault worth
+# relaunching after — but still under the crash-loop cutoff, which no
+# policy escapes.
+restart = "on-crash"

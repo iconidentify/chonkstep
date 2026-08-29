@@ -327,4 +327,30 @@ mod tests {
         // supervised one.
         assert!(matches!(parsed("id = \"x\"\nexec = [\"y\"]\nrestart = \"sometimes\"\n"), Err(RejectReason::Unparsable(_))));
     }
+
+    #[test]
+    fn the_reference_dockapp_manifest_this_repo_ships_is_one_the_registry_admits() {
+        // `examples/chonk-dockclock` is the conformance dockapp — the
+        // out-of-process path a developer sees working every day rather
+        // than a second code path nobody exercises. Its manifest is the
+        // only end-to-end exercise of this parser against a real file,
+        // and it is documentation as much as data: a third-party author
+        // will copy it. A manifest that drifted out of sync with the
+        // schema would teach them the wrong shape and would do it
+        // silently, since nothing else reads this file during a build.
+        let manifest = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../examples/chonk-dockclock/chonk-dockclock.dockapp");
+        let text = std::fs::read_to_string(&manifest)
+            .unwrap_or_else(|error| panic!("{}: {error}", manifest.display()));
+
+        let entry = parse(&text, &manifest).expect("the shipped reference manifest must parse");
+        assert_eq!(entry.id, "chonk-dockclock");
+        assert_eq!(entry.exec, vec!["chonk-dockclock".to_string()]);
+        assert_eq!(entry.tile_units, 1);
+        // Pinned rather than merely parsed: a clock has no reason to
+        // exit, so `on-crash` is the policy the comment in the file
+        // argues for, and a silent flip to `always` or `never` would
+        // make the reference teach the wrong lesson.
+        assert_eq!(entry.restart, RestartPolicy::OnCrash);
+    }
 }

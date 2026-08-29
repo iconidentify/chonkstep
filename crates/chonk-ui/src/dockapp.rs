@@ -68,6 +68,19 @@ pub use tiny_skia::Pixmap;
 /// 100 ms. Ten seconds is a hundredfold margin on a loaded machine; a
 /// shell that has not come back by then is not coming back, and the
 /// registry will relaunch this process when it does.
+/// The largest UI scale a dockapp will draw at before deciding the
+/// shell has told it something it cannot use.
+///
+/// Not a taste judgement: the desktop's own `scale` is documented as a
+/// HiDPI multiplier (2.0 on a 227-DPI panel), `chonk-dock-proto` caps a
+/// tile's edge at `MAX_TILE_PX` = 256, and the theme's metrics are
+/// multiplied by this before anything is drawn. Eight is far past any
+/// display that exists and still comfortably inside the range where the
+/// arithmetic stays sane, which is exactly what an upper bound on
+/// hostile input wants to be — generous enough never to reject a real
+/// desktop, tight enough that nothing downstream has to wonder.
+const MAX_SCALE: f32 = 8.0;
+
 const RECONNECT_WINDOW: Duration = Duration::from_secs(10);
 const RECONNECT_FIRST_DELAY: Duration = Duration::from_millis(100);
 const RECONNECT_MAX_DELAY: Duration = Duration::from_secs(1);
@@ -305,6 +318,38 @@ enum Outcome {
 /// whether the trigger was a fresh connection or a new palette. A
 /// dockapp resizing its own tile in-place halfway down a match arm is
 /// how "old-size frames blitted at the new size" bugs happen.
+/// Whether a tile can actually be drawn at the geometry and scale the
+/// shell just sent.
+///
+/// Split out of [`serve`] so the policy is testable without a socket —
+/// the same reason `spawn::apply_env` is a free function over a
+/// `Command` rather than logic inside a spawn.
+fn check_drawable(state: &ThemeState, tile_units: u8) -> Result<(), Error> {
+    // `scale` is the one that actually bites. It reaches
+    // `Theme::scaled`, which multiplies every metric in the palette by
+    // it, so a NaN silently turns every dimension into NaN and the tile
+    // renders as nothing with no error anywhere to explain it. Rejecting
+    // rather than clamping is deliberate: a shell sending an unusable
+    // scale is one this dockapp cannot correctly draw for, and quietly
+    // substituting 1.0 would put a wrongly-sized tile on screen and call
+    // it success.
+    if !state.scale.is_finite() || state.scale <= 0.0 || state.scale > MAX_SCALE {
+        return Err(Error::Geometry { width: state.tile_px, height: 0 });
+    }
+    // `frame_fits` is the protocol's own predicate, not a second
+    // opinion: it decides whether a frame at this geometry can cross the
+    // socket at all. A dockapp that allocated a pixmap it could never
+    // send would draw happily into a buffer every `Frame` send then
+    // rejected as `TooLarge`.
+    if !chonk_dock_proto::frame_fits(state.tile_px, tile_units) {
+        return Err(Error::Geometry {
+            width: state.tile_px,
+            height: state.tile_px.saturating_mul(u32::from(tile_units)),
+        });
+    }
+    Ok(())
+}
+
 fn serve<D, I>(
     socket: &Seqpacket,
     state: &ThemeState,
@@ -316,6 +361,33 @@ where
     D: FnMut(&Ctx, &mut Pixmap) -> bool,
     I: FnMut(&Ctx, InputEvent) -> bool,
 {
+    // Everything in `state` arrived over the socket, and the next two
+    // uses of it are an allocation and a float multiplication — the two
+    // places where an unvetted number stops being data and starts being
+    // behaviour. The codec bounds what it can: `tile_px` is checked
+    // against `MAX_TILE_PX` on decode. It cannot bound `scale`, because
+    // `DecodeError` has no variant for a float outside a usable range
+    // and adding one is a breaking change to a crate the shell is being
+    // written against right now. So the guard lives here, at the last
+    // point before the values are believed.
+    //
+    // `scale` is the one that actually bites. It reaches
+    // `Theme::scaled`, which multiplies every metric in the palette by
+    // it: a NaN silently turns every dimension into NaN and the tile
+    // renders as nothing, with no error anywhere to explain it. A
+    // negative or absurd value is the same story with a different
+    // shape. Rejecting is right rather than clamping — a shell sending
+    // an unusable scale is a shell this dockapp cannot correctly draw
+    // for, and quietly substituting 1.0 would put a wrongly-sized tile
+    // on screen and call it success.
+    //
+    // `frame_fits` is the protocol's own predicate, not a second
+    // opinion: it is what decides whether a frame at this geometry can
+    // cross the socket at all. A dockapp that allocated a pixmap it
+    // could never send would draw happily into a buffer every `Frame`
+    // send then rejected as `TooLarge`.
+    check_drawable(state, options.tile_units)?;
+
     let mut ctx = Ctx {
         theme: theme_from(state),
         tile_px: state.tile_px,
@@ -485,6 +557,57 @@ mod tests {
 
     fn state(theme_id: &str, theme_toml: String) -> ThemeState {
         ThemeState { tile_px: 56, scale: 1.0, theme_id: theme_id.to_string(), theme_toml }
+    }
+
+    /// A `ThemeState` at the stock geometry with `scale` replaced — the
+    /// field the codec cannot bound and the one that reaches
+    /// `Theme::scaled`.
+    fn at_scale(scale: f32) -> ThemeState {
+        ThemeState { scale, ..state("nextstep-classic", String::new()) }
+    }
+
+    #[test]
+    fn a_nan_scale_is_refused_rather_than_multiplied_through_the_palette() {
+        // The specific trap: NaN propagates silently. Every metric in a
+        // scaled theme becomes NaN, the tile draws as nothing, and no
+        // error is raised anywhere to say why — which is the worst
+        // possible failure for a third-party dockapp author to debug.
+        assert!(check_drawable(&at_scale(f32::NAN), 1).is_err());
+        assert!(check_drawable(&at_scale(f32::INFINITY), 1).is_err());
+        assert!(check_drawable(&at_scale(f32::NEG_INFINITY), 1).is_err());
+    }
+
+    #[test]
+    fn a_non_positive_or_absurd_scale_is_refused() {
+        assert!(check_drawable(&at_scale(0.0), 1).is_err());
+        assert!(check_drawable(&at_scale(-2.0), 1).is_err());
+        assert!(check_drawable(&at_scale(MAX_SCALE + 0.1), 1).is_err());
+    }
+
+    #[test]
+    fn every_scale_a_real_desktop_uses_is_accepted() {
+        // The bound exists to reject hostile input, not to have an
+        // opinion about displays. 1.0 and 2.0 are the stock and HiDPI
+        // settings; 1.5 is the fractional case the config documents.
+        for scale in [0.5, 1.0, 1.5, 2.0, 3.0, MAX_SCALE] {
+            assert!(check_drawable(&at_scale(scale), 1).is_ok(), "scale {scale} should draw");
+        }
+    }
+
+    #[test]
+    fn a_geometry_that_could_never_cross_the_socket_is_refused_before_it_is_allocated() {
+        // Deferring to the protocol's own predicate rather than
+        // re-deriving a bound here: allocating a pixmap whose frames
+        // `Frame` would reject as TooLarge means drawing happily into a
+        // buffer nobody ever sees.
+        let huge = ThemeState { tile_px: chonk_dock_proto::MAX_TILE_PX, ..at_scale(1.0) };
+        assert_eq!(
+            check_drawable(&huge, chonk_dock_proto::MAX_TILE_UNITS).is_err(),
+            !chonk_dock_proto::frame_fits(chonk_dock_proto::MAX_TILE_PX, chonk_dock_proto::MAX_TILE_UNITS),
+            "the SDK must agree with the transport about what fits"
+        );
+        assert!(check_drawable(&ThemeState { tile_px: 0, ..at_scale(1.0) }, 1).is_err());
+        assert!(check_drawable(&at_scale(1.0), 0).is_err(), "a zero-tall tile is not a tile");
     }
 
     #[test]
