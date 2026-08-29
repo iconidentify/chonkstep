@@ -108,7 +108,7 @@ impl Default for SoundWidget {
 }
 
 impl DockWidget for SoundWidget {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "SND"
     }
 

@@ -123,7 +123,7 @@ impl Default for SysLoadWidget {
 }
 
 impl DockWidget for SysLoadWidget {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "LOAD"
     }
 

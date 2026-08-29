@@ -186,7 +186,7 @@ impl Default for PowerWidget {
 }
 
 impl DockWidget for PowerWidget {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "PWR"
     }
 

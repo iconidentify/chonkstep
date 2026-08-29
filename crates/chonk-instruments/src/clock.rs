@@ -40,7 +40,7 @@ impl Default for ClockWidget {
 }
 
 impl DockWidget for ClockWidget {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "CLK"
     }
 

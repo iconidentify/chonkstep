@@ -33,8 +33,8 @@ use wm_theme_api::{DecorationBuffer, Point, Rect, Size};
 
 use crate::wallpaper::Wallpaper;
 use crate::widgets::{
-    run_detached, ClockWidget, DockInput, DockWidget, Effect, NetTrafficWidget, PowerWidget, SamplerRegistry, SoundWidget, SupervisedWidget, SysLoadWidget,
-    WifiWidget, WorkspaceShared,
+    run_detached, ClockWidget, DockInput, DockItem, DockWidget, Effect, NetTrafficWidget, PowerWidget, SamplerRegistry, SoundWidget, SupervisedWidget,
+    SysLoadWidget, WifiWidget, WorkspaceShared,
 };
 
 /// The desktop background color — a cool lavender-gray sampled from a
@@ -42,6 +42,158 @@ use crate::widgets::{
 /// theme's window chrome uses. The dock has no separate backdrop panel
 /// in that reference either: icons sit directly on this same color.
 pub const DESKTOP_BG: (u8, u8, u8) = (128, 129, 159);
+
+/// Remembering the order the user put the dock's tiles in.
+///
+/// # Why this had to exist before dockapps did
+///
+/// Middle-drag reordering has worked for as long as the dock has had
+/// more than one tile, and until now it was never written down
+/// anywhere. Every theme pick is a hot restart (`ShellOutcome::
+/// Restart`), so the arrangement silently reverted on the most routine
+/// thing a user does to this desktop. That was already a bug; a mixed
+/// column of built-ins and out-of-process dockapps makes it a much
+/// worse one, since "which tiles are in my dock, and where" stops being
+/// a compile-time constant the moment a `.dockapp` registry exists.
+///
+/// One file describes the whole column, both kinds of tile, from day
+/// one: one id per line, in top-to-bottom order, human-editable exactly
+/// like the launcher's pin file and the theme and wallpaper files
+/// beside it. Built-ins take the reserved
+/// [`BUILTIN_PREFIX`](crate::widgets::BUILTIN_PREFIX) namespace so a
+/// `.dockapp` declaring `id = "clock"` cannot displace the analog
+/// clock.
+///
+/// # The rule about entries that do not resolve
+///
+/// An id in the file with no live tile behind it is *kept*, not
+/// dropped. This is the difference between this and
+/// `launchdock`'s pin file, and it is deliberate: a launcher pin that
+/// stops resolving means an application was uninstalled, while a dock
+/// entry that stops resolving is usually a dockapp that is between
+/// versions, whose binary is mid-upgrade, or whose registry file is on
+/// a filesystem that has not mounted yet. Forgetting where the user had
+/// put it — permanently, on the next drag — because it happened to be
+/// absent for one session is a worse answer than carrying a line
+/// nobody can currently resolve. [`merge`] is what keeps it, and keeps
+/// it *in place* rather than at the end.
+pub(crate) mod dock_order {
+    use std::path::{Path, PathBuf};
+
+    /// `$XDG_STATE_HOME/chonkstep/dock-items`, or the `~/.local/state`
+    /// fallback — the same resolution as `launchdock`'s `dock` file,
+    /// `theme_select.rs`'s and `wallpaper.rs`'s, which all live in this
+    /// same directory. The name is `dock-items` rather than `dock`
+    /// because `dock` is already taken by the launcher strip's pins,
+    /// and two files a user may edit by hand should not be one
+    /// character apart in meaning.
+    pub(crate) fn state_path() -> Option<PathBuf> {
+        if let Some(root) = std::env::var_os("XDG_STATE_HOME") {
+            return Some(PathBuf::from(root).join("chonkstep/dock-items"));
+        }
+        std::env::var_os("HOME").map(PathBuf::from).map(|home| home.join(".local/state/chonkstep/dock-items"))
+    }
+
+    /// The remembered order, or an empty list if there is no file yet
+    /// (a fresh session, which then gets the built-in default order).
+    ///
+    /// Blank lines and `#` comments are skipped, because this is a file
+    /// people are invited to edit and a file people edit acquires
+    /// comments.
+    pub(crate) fn load(path: &Path) -> Vec<String> {
+        let Ok(text) = std::fs::read_to_string(path) else {
+            return Vec::new();
+        };
+        text.lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty() && !line.starts_with('#'))
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// Writes one id per line.
+    pub(crate) fn save(path: &Path, ids: &[String]) -> std::io::Result<()> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let mut text = String::new();
+        for id in ids {
+            text.push_str(id);
+            text.push('\n');
+        }
+        std::fs::write(path, text)
+    }
+
+    /// Sorts `items` into the remembered order.
+    ///
+    /// Two rules, and both matter:
+    ///
+    /// * A remembered id with no live item is skipped here and
+    ///   *preserved* by [`merge`] on the next write. See the module
+    ///   docs.
+    /// * A live item nobody remembers keeps its position relative to
+    ///   the other unremembered items and lands after everything that
+    ///   was remembered. That is what happens when an upgrade adds a
+    ///   seventh instrument or the user drops in a new dockapp: it
+    ///   appears at the bottom of the column, which is predictable,
+    ///   rather than in the middle of an arrangement they built.
+    ///
+    /// Generic over the key so the whole rule is testable against
+    /// plain strings, with no dock, no backend and no widgets.
+    pub(crate) fn arrange<T>(items: Vec<T>, order: &[String], id_of: impl Fn(&T) -> String) -> Vec<T> {
+        if order.is_empty() {
+            return items;
+        }
+        let mut keyed: Vec<(String, Option<T>)> = items.into_iter().map(|item| (id_of(&item), Some(item))).collect();
+        let mut arranged = Vec::with_capacity(keyed.len());
+        for wanted in order {
+            if let Some(slot) = keyed.iter_mut().find(|(id, item)| id == wanted && item.is_some()) {
+                arranged.push(slot.1.take().expect("just checked it is Some"));
+            }
+        }
+        arranged.extend(keyed.into_iter().filter_map(|(_, item)| item));
+        arranged
+    }
+
+    /// The line-for-line contents to write after a reorder: the live
+    /// column, plus every remembered id that did not resolve this
+    /// session, put back where it was.
+    ///
+    /// "Where it was" means *after the same neighbour it used to
+    /// follow*. Walking `remembered` and re-inserting each unresolved
+    /// id after its nearest still-live predecessor keeps a dockapp that
+    /// sat between the clock and the power tile between the clock and
+    /// the power tile, through however many sessions it takes for its
+    /// registry file to come back. Appending them at the end would be
+    /// simpler and would quietly relocate every one of them to the
+    /// bottom of the dock — which is the same forgetting this exists to
+    /// prevent, one step slower.
+    pub(crate) fn merge(live: &[String], remembered: &[String]) -> Vec<String> {
+        let mut out: Vec<String> = live.to_vec();
+        let mut anchor: Option<String> = None;
+        for id in remembered {
+            if live.contains(id) {
+                anchor = Some(id.clone());
+                continue;
+            }
+            if out.contains(id) {
+                continue;
+            }
+            let at = match &anchor {
+                // Position after the neighbour it used to follow. The
+                // anchor is live by construction, so the `position` is
+                // always found.
+                Some(previous) => out.iter().position(|live| live == previous).map_or(0, |index| index + 1),
+                // It was the very first line, and nothing before it
+                // survives: the top of the column is where it goes.
+                None => 0,
+            };
+            out.insert(at, id.clone());
+            anchor = Some(id.clone());
+        }
+        out
+    }
+}
 
 pub enum RootMenuAction {
     LaunchTerminal,
@@ -520,7 +672,7 @@ struct IconTile<Id> {
 /// widget lives in one shared dock pixmap — so this just tracks which
 /// slot is "held"; `drag_widget_motion` does the actual reordering the
 /// moment the pointer crosses into a neighboring slot.
-struct WidgetDrag {
+struct ItemDrag {
     index: usize,
     grab: DragHandle,
 }
@@ -559,15 +711,15 @@ pub enum IconDragResult {
 /// unusually large future widget stack cannot request an invalidly
 /// tall shell surface, but it never fills spare space merely because
 /// it exists.
-fn stacked_dock_height(tile: u32, screen_height: u32, widgets: &[SupervisedWidget]) -> u32 {
-    widgets
+fn stacked_dock_height(tile: u32, screen_height: u32, items: &[SupervisedWidget]) -> u32 {
+    items
         .iter()
         // `SupervisedWidget::tile_height` already floors a widget's own
         // answer at one tile, and already answers exactly one for an
         // evicted widget — so an evicted multi-tile instrument shrinks
         // the dock rather than leaving a hole where its extra tiles
         // used to be.
-        .fold(tile, |height, widget| height.saturating_add(tile.saturating_mul(widget.tile_height())))
+        .fold(tile, |height, item| height.saturating_add(tile.saturating_mul(item.tile_height())))
         .min(screen_height.max(1))
 }
 
@@ -625,6 +777,40 @@ fn centered_on(primary: Rect, size: Size) -> Point {
     )
 }
 
+/// The dock's default instrument stack, top to bottom, under the
+/// identity tile: the five instruments — network traffic, system load,
+/// sound, link, power — with the analog clock as the bookend at the
+/// bottom, closing the rack the way the identity tile opens it (the two
+/// non-instrument faces frame the glass screens between them).
+/// Middle-click drag reorders live and `dock_order` remembers it; this
+/// is only what a session with no remembered order starts from.
+///
+/// Each one carries its persistence id here, beside the constructor it
+/// names, because this is the only place the pairing is visible at a
+/// glance: the literal below is character-for-character the line that
+/// appears in the user's `dock-items` file, so a grep for the line in
+/// the file finds the line in the source.
+///
+/// Deliberately *not* derived from `DockWidget::name`, which is a
+/// display label drawn on the dead-screen tile. Renaming "LOAD" is a
+/// cosmetic change; if it doubled as the persistence key it would
+/// silently reset every user's dock arrangement.
+///
+/// A free function rather than an inline array so that
+/// `builtin_ids_are_reserved_and_unique` can check the ids without
+/// standing up a backend — the constructors themselves are cheap and
+/// touch nothing.
+fn builtin_items() -> Vec<DockItem> {
+    vec![
+        DockItem::builtin("builtin:net", Box::new(NetTrafficWidget::new()) as Box<dyn DockWidget>),
+        DockItem::builtin("builtin:sysload", Box::new(SysLoadWidget::new())),
+        DockItem::builtin("builtin:sound", Box::new(SoundWidget::new())),
+        DockItem::builtin("builtin:wifi", Box::new(WifiWidget::new())),
+        DockItem::builtin("builtin:power", Box::new(PowerWidget::new())),
+        DockItem::builtin("builtin:clock", Box::new(ClockWidget::new())),
+    ]
+}
+
 pub struct Desktop<B: Backend> {
     dock_window: B::ShellId,
     /// The whole desktop's bounding box — every monitor at once. That
@@ -661,7 +847,14 @@ pub struct Desktop<B: Backend> {
     /// the calls across the trait boundary and evicts a widget that
     /// keeps blocking the repaint thread — see its doc comment for why
     /// the dock does not simply trust its widgets.
-    widgets: Vec<SupervisedWidget>,
+    items: Vec<SupervisedWidget>,
+    /// The dock order as last read from (or written to) disk — see
+    /// [`dock_order`].
+    ///
+    /// Kept rather than re-read, because it is the only record of ids
+    /// that did not resolve this session, and those have to survive the
+    /// next reorder's rewrite. See `dock_order::merge`.
+    remembered_order: Vec<String>,
     /// Every sampler thread the widget stack asked for, and the
     /// readings they have produced — see `crate::widgets::sampling`.
     ///
@@ -685,7 +878,7 @@ pub struct Desktop<B: Backend> {
     /// What the Clip last rendered, so workspace churn repaints it
     /// exactly once per actual change.
     clip_drawn: (usize, usize),
-    widget_drag: Option<WidgetDrag>,
+    item_drag: Option<ItemDrag>,
     icons: HashMap<B::ShellId, IconTile<B::ShellId>>,
     icon_drag: Option<IconDrag<B::ShellId>>,
     wallpaper: Wallpaper,
@@ -732,38 +925,31 @@ impl<B: Backend> Desktop<B> {
         // (The workspace indicator used to live here as a dock widget;
         // it is now the Clip tile at the screen's top-left — see
         // `clip_window` below.)
-        // The dock's instrument stack, top to bottom, under the
-        // identity tile: the five instruments — network traffic,
-        // system load, sound, link, power — with the analog clock as
-        // the bookend at the bottom, closing the rack the way the
-        // identity tile opens it (the two non-instrument faces frame
-        // the glass screens between them). Middle-click drag reorders
-        // live; this is just the default order.
         let mut samplers = SamplerRegistry::new();
-        let widgets: Vec<SupervisedWidget> = [
-            Box::new(NetTrafficWidget::new()) as Box<dyn DockWidget>,
-            Box::new(SysLoadWidget::new()),
-            Box::new(SoundWidget::new()),
-            Box::new(WifiWidget::new()),
-            Box::new(PowerWidget::new()),
-            Box::new(ClockWidget::new()),
-        ]
-        .into_iter()
-        // Supervision is applied here, at the one place widgets enter
-        // the dock, rather than being something each widget opts into:
-        // the widget that needs it most is by definition the one that
-        // would not have thought to.
-        .map(SupervisedWidget::new)
-        // And the same argument for sampling: a widget's sources are
-        // registered and bound at the one place it enters the dock, so
-        // no widget can be constructed into the stack with its sampling
-        // half half-wired.
-        .map(|mut widget| {
-            widget.bind(&mut samplers);
-            widget
-        })
-        .collect();
-        let dock_height = stacked_dock_height(tile, primary.size.h, &widgets);
+        let items: Vec<SupervisedWidget> = builtin_items()
+            .into_iter()
+            // Supervision is applied here, at the one place items enter
+            // the dock, rather than being something each item opts
+            // into: the item that needs it most is by definition the
+            // one that would not have thought to.
+            .map(SupervisedWidget::new)
+            // And the same argument for sampling: an item's sources are
+            // registered and bound at the one place it enters the dock,
+            // so nothing can be constructed into the stack with its
+            // sampling half half-wired.
+            .map(|mut item| {
+                item.bind(&mut samplers);
+                item
+            })
+            .collect();
+        // The user's arrangement, applied before anything is measured
+        // or drawn: `stacked_dock_height` sums heights in column order,
+        // so reordering after it would size the dock for a column that
+        // no longer exists. An absent or empty file leaves the default
+        // order above exactly as written.
+        let remembered_order = dock_order::state_path().map(|path| dock_order::load(&path)).unwrap_or_default();
+        let items = dock_order::arrange(items, &remembered_order, |item| item.id().to_string());
+        let dock_height = stacked_dock_height(tile, primary.size.h, &items);
         let dock_geom = dock_geometry(primary, dock_width, dock_height);
         let dock_window = backend
             .create_shell_surface(dock_geom, wallpaper.dock_color(), true)
@@ -791,12 +977,13 @@ impl<B: Backend> Desktop<B> {
             font_system: cosmic_text::FontSystem::new(),
             swash_cache: cosmic_text::SwashCache::new(),
             menu: ShellMenu::new(),
-            widgets,
+            items,
+            remembered_order,
             samplers,
             workspace,
             clip_window,
             clip_drawn: (usize::MAX, 0),
-            widget_drag: None,
+            item_drag: None,
             icons: HashMap::new(),
             icon_drag: None,
             wallpaper,
@@ -885,14 +1072,14 @@ impl<B: Backend> Desktop<B> {
     /// dock rather than allowed to keep doing it. What it can no longer
     /// block on is the system — that moved to the sampler threads
     /// `samplers` owns.
-    pub fn tick_widgets(&mut self, backend: &mut B, theme: &Theme) {
+    pub fn tick_items(&mut self, backend: &mut B, theme: &Theme) {
         self.samplers.refresh();
         let mut changed = false;
         {
             // Scoped so the borrow of `samplers` ends before the
             // repaint, which needs all of `self`.
             let samples = self.samplers.samples();
-            for widget in &mut self.widgets {
+            for widget in &mut self.items {
                 if widget.update(&samples) {
                     changed = true;
                 }
@@ -905,7 +1092,7 @@ impl<B: Backend> Desktop<B> {
 
     /// Feeds the WM's authoritative workspace state to the dock's
     /// indicator tile. No repaint here on purpose: the next
-    /// `tick_widgets` pass notices the change and repaints the dock
+    /// `tick_items` pass notices the change and repaints the dock
     /// through the one shared path, instead of this method growing a
     /// second redraw entry point.
     pub fn set_workspace_display(&mut self, backend: &mut B, theme: &Theme, current: usize, count: usize) {
@@ -960,7 +1147,7 @@ impl<B: Backend> Desktop<B> {
     /// Dock-local Y where the widget stack begins — directly below the
     /// identity tile, touching it, same as every other tile touches its
     /// neighbors.
-    fn widgets_top(&self) -> i32 {
+    fn items_top(&self) -> i32 {
         self.tile as i32
     }
 
@@ -973,10 +1160,10 @@ impl<B: Backend> Desktop<B> {
     /// this single source of truth, so they can never disagree about
     /// where a widget sits. No gap between consecutive slots — tiles
     /// snap together, the way the classic dock stacks them.
-    fn widget_slots(&self) -> Vec<(usize, Rect)> {
-        let mut y = self.widgets_top();
-        let mut slots = Vec::with_capacity(self.widgets.len());
-        for (index, widget) in self.widgets.iter().enumerate() {
+    fn item_slots(&self) -> Vec<(usize, Rect)> {
+        let mut y = self.items_top();
+        let mut slots = Vec::with_capacity(self.items.len());
+        for (index, widget) in self.items.iter().enumerate() {
             let h = self.tile * widget.tile_height();
             slots.push((index, Rect { pos: Point::new(0, y), size: Size::new(self.tile, h) }));
             y += h as i32;
@@ -987,21 +1174,21 @@ impl<B: Backend> Desktop<B> {
     /// Which widget slot (if any) `local` — in dock-local coordinates —
     /// falls within. Misses both the identity tile above and the
     /// inter-widget gaps between slots.
-    fn widget_index_at(&self, local: Point) -> Option<usize> {
-        self.widget_slots().into_iter().find(|(_, rect)| rect.contains(local)).map(|(index, _)| index)
+    fn item_index_at(&self, local: Point) -> Option<usize> {
+        self.item_slots().into_iter().find(|(_, rect)| rect.contains(local)).map(|(index, _)| index)
     }
 
     /// Starts a middle-click drag-to-reorder on whichever widget sits at
     /// `local`, if any. Returns `false` (and does nothing) if `local`
     /// isn't over a widget slot, so callers know whether to treat the
     /// press as consumed.
-    pub fn begin_widget_drag(&mut self, backend: &mut B, theme: &Theme, local: Point) -> bool {
-        let Some(index) = self.widget_index_at(local) else { return false };
+    pub fn begin_item_drag(&mut self, backend: &mut B, theme: &Theme, local: Point) -> bool {
+        let Some(index) = self.item_index_at(local) else { return false };
         // Same reasoning as `begin_icon_drag`: without a grab, a fast
         // drag could outrun the dock's own (narrow) window bounds and
         // stop reporting motion against it.
         let grab = backend.grab_pointer_for_drag();
-        self.widget_drag = Some(WidgetDrag { index, grab });
+        self.item_drag = Some(ItemDrag { index, grab });
         self.redraw_dock(backend, theme);
         true
     }
@@ -1011,14 +1198,14 @@ impl<B: Backend> Desktop<B> {
     /// motion, for the same reason `drag_icon_motion` does. The dock
     /// starts at screen `y = 0`, so root-Y and dock-local-Y are already
     /// the same value; no translation needed.
-    pub fn drag_widget_motion(&mut self, backend: &mut B, theme: &Theme, root: Point) {
-        let Some(dragged) = self.widget_drag.as_ref().map(|d| d.index) else { return };
-        let Some(target) = self.widget_index_at(Point::new(0, root.y)) else { return };
+    pub fn drag_item_motion(&mut self, backend: &mut B, theme: &Theme, root: Point) {
+        let Some(dragged) = self.item_drag.as_ref().map(|d| d.index) else { return };
+        let Some(target) = self.item_index_at(Point::new(0, root.y)) else { return };
         if target == dragged {
             return;
         }
-        self.widgets.swap(dragged, target);
-        if let Some(drag) = &mut self.widget_drag {
+        self.items.swap(dragged, target);
+        if let Some(drag) = &mut self.item_drag {
             drag.index = target;
         }
         self.redraw_dock(backend, theme);
@@ -1027,11 +1214,41 @@ impl<B: Backend> Desktop<B> {
     /// Ends whatever widget drag is in progress, if any. Returns `false`
     /// if no drag was active, so callers can tell whether the release
     /// was actually theirs to handle.
-    pub fn end_widget_drag(&mut self, backend: &mut B, theme: &Theme) -> bool {
-        let Some(drag) = self.widget_drag.take() else { return false };
+    pub fn end_item_drag(&mut self, backend: &mut B, theme: &Theme) -> bool {
+        let Some(drag) = self.item_drag.take() else { return false };
         backend.ungrab_pointer(drag.grab);
+        self.persist_order();
         self.redraw_dock(backend, theme);
         true
+    }
+
+    /// Writes the column's current order to
+    /// `$XDG_STATE_HOME/chonkstep/dock-items`.
+    ///
+    /// Called when a drag *ends*, not on every slot the pointer crosses
+    /// mid-drag: `drag_item_motion` reorders continuously as the
+    /// pointer sweeps, so persisting there would write the file once
+    /// per crossed tile for an arrangement the user has not committed
+    /// to yet. The release is the commit. (The cost of that choice is
+    /// that a session killed mid-drag forgets the drag, which is the
+    /// correct thing to forget.)
+    ///
+    /// A write failure is a warning and nothing else. The dock is
+    /// arranged the way the user just arranged it either way; what has
+    /// been lost is only that the *next* session will not know, and
+    /// refusing to run over a read-only state directory would trade a
+    /// small forgetting for a broken desktop.
+    fn persist_order(&mut self) {
+        let Some(path) = dock_order::state_path() else {
+            return;
+        };
+        let live: Vec<String> = self.items.iter().map(|item| item.id().to_string()).collect();
+        let merged = dock_order::merge(&live, &self.remembered_order);
+        if let Err(error) = dock_order::save(&path, &merged) {
+            tracing::warn!(?error, path = %path.display(), "failed to remember the dock's order");
+            return;
+        }
+        self.remembered_order = merged;
     }
 
     /// Pointer input for whichever widget sits under it, if any (e.g.
@@ -1048,10 +1265,10 @@ impl<B: Backend> Desktop<B> {
     /// `apply_effects`.
     pub fn dock_input(&mut self, backend: &mut B, theme: &Theme, input: DockInput) -> bool {
         let Some(local) = input.local() else { return false };
-        let Some((index, rect)) = self.widget_slots().into_iter().find(|(_, rect)| rect.contains(local)) else {
+        let Some((index, rect)) = self.item_slots().into_iter().find(|(_, rect)| rect.contains(local)) else {
             return false;
         };
-        let effects = self.widgets[index].on_input(input.translated(rect.pos), self.tile);
+        let effects = self.items[index].on_input(input.translated(rect.pos), self.tile);
         self.apply_effects(backend, theme, effects);
         true
     }
@@ -1088,7 +1305,7 @@ impl<B: Backend> Desktop<B> {
     }
 
     fn redraw_dock(&mut self, backend: &mut B, theme: &Theme) {
-        let dock_height = stacked_dock_height(self.tile, self.primary.size.h, &self.widgets);
+        let dock_height = stacked_dock_height(self.tile, self.primary.size.h, &self.items);
         let dock_geom = dock_geometry(self.primary, self.dock_width, dock_height);
         backend.configure_shell_surface(self.dock_window, dock_geom);
 
@@ -1131,7 +1348,7 @@ impl<B: Backend> Desktop<B> {
             None,
         );
 
-        for (index, rect) in self.widget_slots() {
+        for (index, rect) in self.item_slots() {
             // `None` is an evicted widget: the dock draws its own
             // tombstone rather than calling code it has already
             // disowned. `render_dead_tile` is the same powered-off
@@ -1141,16 +1358,16 @@ impl<B: Backend> Desktop<B> {
             // as a hole punched in the column. The widget's own name is
             // the label, so the dock says *which* one went dark without
             // the user having to find the log.
-            let buffer = match self.widgets[index].render(theme, self.tile, &mut self.font_system, &mut self.swash_cache) {
+            let buffer = match self.items[index].render(theme, self.tile, &mut self.font_system, &mut self.swash_cache) {
                 Some(buffer) => buffer,
                 None => {
-                    let label = self.widgets[index].name();
+                    let label = self.items[index].name();
                     panel::render_dead_tile(theme, &mut self.font_system, &mut self.swash_cache, self.tile, label)
                 }
             };
             blit_into(&mut pixmap, rect.pos.x as u32, rect.pos.y as u32, &buffer);
 
-            if self.widget_drag.as_ref().is_some_and(|d| d.index == index) {
+            if self.item_drag.as_ref().is_some_and(|d| d.index == index) {
                 // "You've picked this up": brighten the slot's outermost
                 // pixel ring with the relief's own +80 light delta
                 // (`tile::op_line`, relative) rather than stamping an
@@ -1320,7 +1537,7 @@ impl<B: Backend> Desktop<B> {
     }
 
     /// Opens whatever submenu has been hovered long enough — called once
-    /// per event-loop iteration (like `tick_widgets`).
+    /// per event-loop iteration (like `tick_items`).
     pub fn tick_menu(&mut self, backend: &mut B, theme: &Theme)
     where
         B: wm_theme_api::PopupHost<PopupId = B::ShellId>,
@@ -1491,6 +1708,40 @@ fn blit_into(dest: &mut Pixmap, x: u32, y: u32, src: &DecorationBuffer) {
 mod tests {
     use super::*;
     use crate::apps::{AppCategory, AppEntry};
+    use crate::widgets::BUILTIN_PREFIX;
+
+    /// Ids are the persistence key for the whole column, so two rules
+    /// hold and neither is checkable by reading `builtin_items` alone
+    /// once it has more entries than fit on a screen: every built-in
+    /// sits in the reserved namespace (so no `.dockapp` can claim one),
+    /// and no two share an id (a duplicate would make `dock_order`
+    /// place one of them and silently drop the other on the next
+    /// rewrite).
+    #[test]
+    fn builtin_ids_are_reserved_and_unique() {
+        let items = builtin_items();
+        let ids: Vec<&str> = items.iter().map(|item| item.id()).collect();
+        for id in &ids {
+            assert!(id.starts_with(BUILTIN_PREFIX), "{id} must sit in the reserved namespace");
+            assert!(id.len() > BUILTIN_PREFIX.len(), "{id} is the bare prefix with no name after it");
+        }
+        let mut sorted = ids.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), ids.len(), "two built-ins share a persistence id: {ids:?}");
+    }
+
+    /// The ids are also a *published* format — they appear in a file
+    /// the user is invited to edit — so changing one is a breaking
+    /// change to their dock arrangement, not a rename. Pinning them
+    /// here makes that cost visible in the diff rather than in a bug
+    /// report six months later saying the dock "randomly reset".
+    #[test]
+    fn builtin_ids_are_the_ones_already_written_to_users_dock_item_files() {
+        let items = builtin_items();
+        let ids: Vec<&str> = items.iter().map(|item| item.id()).collect();
+        assert_eq!(ids, ["builtin:net", "builtin:sysload", "builtin:sound", "builtin:wifi", "builtin:power", "builtin:clock"]);
+    }
 
     struct FixedHeightWidget(u32);
 
@@ -1514,11 +1765,16 @@ mod tests {
 
     #[test]
     fn dock_height_is_only_the_identity_and_current_widget_stack() {
-        let widgets: Vec<SupervisedWidget> =
-            [Box::new(FixedHeightWidget(1)) as Box<dyn DockWidget>, Box::new(FixedHeightWidget(3))].into_iter().map(SupervisedWidget::new).collect();
+        let items: Vec<SupervisedWidget> = [
+            DockItem::builtin("builtin:one", Box::new(FixedHeightWidget(1)) as Box<dyn DockWidget>),
+            DockItem::builtin("builtin:three", Box::new(FixedHeightWidget(3))),
+        ]
+        .into_iter()
+        .map(SupervisedWidget::new)
+        .collect();
 
-        assert_eq!(stacked_dock_height(56, 1_080, &widgets), 280);
-        assert_eq!(stacked_dock_height(56, 200, &widgets), 200, "oversized stacks are screen-clamped");
+        assert_eq!(stacked_dock_height(56, 1_080, &items), 280);
+        assert_eq!(stacked_dock_height(56, 200, &items), 200, "oversized stacks are screen-clamped");
     }
 
     /// A second head placed to the *left* of the primary: the whole
@@ -2013,5 +2269,111 @@ mod tests {
             f.click(window, row),
             Some(MenuAction::Root(RootMenuAction::LaunchTerminal))
         ));
+    }
+}
+
+#[cfg(test)]
+mod dock_order_tests {
+    use super::dock_order::{arrange, load, merge, save};
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    fn ids(order: &[&str]) -> Vec<String> {
+        order.iter().map(|id| id.to_string()).collect()
+    }
+
+    fn arranged(items: &[&str], order: &[String]) -> Vec<String> {
+        arrange(ids(items), order, |item| item.clone())
+    }
+
+    /// A unique per-test state file under the system temp dir, so
+    /// parallel tests never share a file and no environment variable is
+    /// mutated (env is process-global; a test touching it would race
+    /// every other test in the binary). Same shape as
+    /// `launchdock`'s own fixture, for the same reason.
+    fn temp_state_file(tag: &str) -> PathBuf {
+        static COUNTER: AtomicU32 = AtomicU32::new(0);
+        let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!("chonkstep-dock-order-{}-{tag}-{unique}", std::process::id())).join("dock-items")
+    }
+
+    fn cleanup(path: &Path) {
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::remove_dir_all(parent);
+        }
+    }
+
+    #[test]
+    fn a_session_with_no_remembered_order_keeps_the_built_in_default() {
+        assert_eq!(arranged(&["a", "b", "c"], &[]), ids(&["a", "b", "c"]));
+    }
+
+    #[test]
+    fn the_remembered_order_is_what_the_column_comes_up_in() {
+        assert_eq!(arranged(&["a", "b", "c"], &ids(&["c", "a", "b"])), ids(&["c", "a", "b"]));
+    }
+
+    /// The upgrade case: a release adds a seventh instrument that no
+    /// existing `dock-items` file mentions. It must appear — a new
+    /// instrument that is invisible until the user finds a file to edit
+    /// is a broken feature — and it must appear somewhere predictable
+    /// rather than in the middle of an arrangement they built.
+    #[test]
+    fn an_item_nobody_remembers_lands_at_the_bottom_in_declaration_order() {
+        assert_eq!(arranged(&["a", "b", "new1", "new2"], &ids(&["b", "a"])), ids(&["b", "a", "new1", "new2"]));
+    }
+
+    /// The rule this whole module turns on. A dockapp whose registry
+    /// file is missing this session — mid-upgrade, unmounted
+    /// filesystem, a typo the user is about to fix — must not lose its
+    /// place. It is skipped at load, and put back by the next write.
+    #[test]
+    fn an_entry_that_did_not_resolve_keeps_its_place_through_a_reorder() {
+        let remembered = ids(&["clock", "absent", "power"]);
+        // It resolves to nothing, so the live column has two tiles.
+        assert_eq!(arranged(&["clock", "power"], &remembered), ids(&["clock", "power"]));
+        // The user then drags power above clock. The absent entry is
+        // still between them, because that is where they left it.
+        assert_eq!(merge(&ids(&["power", "clock"]), &remembered), ids(&["power", "clock", "absent"]));
+        // ...and with the original arrangement it is still in the
+        // middle, following the same neighbour it always followed.
+        assert_eq!(merge(&ids(&["clock", "power"]), &remembered), ids(&["clock", "absent", "power"]));
+    }
+
+    #[test]
+    fn an_unresolved_first_entry_goes_back_to_the_top() {
+        assert_eq!(merge(&ids(&["b", "c"]), &ids(&["absent", "b", "c"])), ids(&["absent", "b", "c"]));
+    }
+
+    #[test]
+    fn consecutive_unresolved_entries_keep_their_own_order() {
+        assert_eq!(merge(&ids(&["a", "z"]), &ids(&["a", "x", "y", "z"])), ids(&["a", "x", "y", "z"]));
+    }
+
+    /// Nothing above is worth anything if the file it round-trips
+    /// through cannot carry it. Comments and blank lines survive being
+    /// ignored because this is a file people are told they may edit.
+    #[test]
+    fn the_order_round_trips_through_the_state_file() {
+        let path = temp_state_file("roundtrip");
+        save(&path, &ids(&["builtin:clock", "chonk-dockclock", "builtin:net"])).unwrap();
+        assert_eq!(load(&path), ids(&["builtin:clock", "chonk-dockclock", "builtin:net"]));
+
+        std::fs::write(&path, "# hand-edited\n\nbuiltin:net\n  builtin:clock  \n").unwrap();
+        assert_eq!(load(&path), ids(&["builtin:net", "builtin:clock"]), "comments and padding are not ids");
+
+        cleanup(&path);
+    }
+
+    #[test]
+    fn a_missing_file_is_an_empty_order_rather_than_an_error() {
+        assert!(load(Path::new("/nonexistent/chonkstep/dock-items")).is_empty());
+    }
+
+    /// A duplicated line — trivially producible by hand-editing — must
+    /// not clone a tile into two slots.
+    #[test]
+    fn a_duplicated_remembered_id_places_the_item_once() {
+        assert_eq!(arranged(&["a", "b"], &ids(&["b", "b", "a"])), ids(&["b", "a"]));
     }
 }
