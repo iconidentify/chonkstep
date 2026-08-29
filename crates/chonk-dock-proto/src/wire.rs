@@ -1,0 +1,1369 @@
+//! The codec: message types and their exact byte layout.
+//!
+//! Pure — no I/O, no clock, no allocation beyond the message itself.
+//! That is on purpose: this is the module a fuzzer points at (Phase 5),
+//! and the one place where "a hostile process wrote these bytes" has to
+//! be true in the author's head on every line.
+//!
+//! # Framing
+//!
+//! There is none, and that is the point. The transport is
+//! `SOCK_SEQPACKET`, so one `send()` is one `recv()` and the kernel
+//! preserves the boundary. Length-prefix parsers are the single most
+//! productive source of protocol CVEs — every "read a length, trust it,
+//! allocate it, read that many bytes" is a bug waiting for an author to
+//! have a bad afternoon. Choosing SEQPACKET deletes that code path
+//! instead of reviewing it. What is left is a fixed 4-byte header plus
+//! fixed-width fields, in the spirit of `wm-wayland/src/protocols.rs`
+//! writing wlr protocol messages out by hand.
+//!
+//! # Byte order
+//!
+//! Little-endian, always. This socket never leaves the machine — both
+//! peers are processes of the same user on the same kernel — so
+//! network byte order would be two `bswap`s per field bought with
+//! nothing. Fixed rather than native-endian so the layout is
+//! *documented* rather than "whatever this build did".
+//!
+//! # Strictness
+//!
+//! Every decoder rejects: an unknown message kind, a non-zero reserved
+//! byte, trailing bytes after the last field, an out-of-range enum
+//! discriminant, and any string over its cap. Nothing is clamped,
+//! truncated or ignored on the decode path.
+//!
+//! Rejecting unknown bits rather than ignoring them costs forward
+//! compatibility, which is deliberate: [`crate::PROTOCOL_VERSION`] is
+//! checked for *equality* at handshake, so there is no such thing as a
+//! peer that speaks a different version and gets to keep talking. A
+//! reserved byte that suddenly means something is a version bump. The
+//! failure mode this buys out of is the bad one — a v1 shell silently
+//! ignoring the field that said "these pixels are BGRA now".
+//!
+//! # Message table
+//!
+//! Header, every message: `kind:u8`, `reserved:[u8;3] = 0`.
+//!
+//! ```text
+//! dockapp -> shell
+//!   0x01 Hello   proto:u32 tile_units:u8 wants:u8 id_len:u8 rsv:u8
+//!                token:[u8;16] id:[u8;id_len]
+//!   0x02 Frame   generation:u32 width:u32 height:u32
+//!                pixels:[u8; width*height*4]      premultiplied RGBA8,
+//!                                                 top row first, no padding
+//!   0x03 Pong    seq:u32
+//!   0x04 Log     level:u8 rsv:u8 text_len:u16 text:[u8;text_len]
+//! shell -> dockapp
+//!   0x81 Welcome       tile_px:u32 scale:f32(bits) theme_id_len:u16 rsv:u16
+//!                      theme_toml_len:u32 theme_id:[u8] theme_toml:[u8]
+//!   0x82 ThemeChanged  (identical body to Welcome)
+//!   0x83 Input         kind:u8 button:u8 rsv:u16 x:i32 y:i32 delta:i32
+//!   0x84 Visibility    visible:u8 rsv:[u8;3]
+//!   0x85 Ping          seq:u32
+//!   0x86 Goodbye       reason:u8 rsv:[u8;3]
+//! ```
+
+use std::fmt;
+
+use crate::{
+    MAX_FRAME_BYTES, MAX_ID_BYTES, MAX_LOG_BYTES, MAX_MESSAGE_BYTES, MAX_THEME_ID_BYTES,
+    MAX_THEME_TOML_BYTES, MAX_TILE_PX, MAX_TILE_UNITS, TOKEN_BYTES,
+};
+
+const KIND_HELLO: u8 = 0x01;
+const KIND_FRAME: u8 = 0x02;
+const KIND_PONG: u8 = 0x03;
+const KIND_LOG: u8 = 0x04;
+const KIND_WELCOME: u8 = 0x81;
+const KIND_THEME_CHANGED: u8 = 0x82;
+const KIND_INPUT: u8 = 0x83;
+const KIND_VISIBILITY: u8 = 0x84;
+const KIND_PING: u8 = 0x85;
+const KIND_GOODBYE: u8 = 0x86;
+
+const HEADER_BYTES: usize = 4;
+
+// ---------------------------------------------------------------------
+// Enums on the wire
+// ---------------------------------------------------------------------
+
+/// Which input events a dockapp wants delivered.
+///
+/// A hint, not a permission: the shell already refuses to send middle
+/// and right button events to *any* dockapp (middle is the dock's
+/// reorder gesture and right is reserved for the per-tile menu), so
+/// this exists to let a tile that only paints say "do not wake me for
+/// pointer motion" and save both sides the traffic.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub struct InputMask(u8);
+
+impl InputMask {
+    pub const PRESS: u8 = 1 << 0;
+    pub const RELEASE: u8 = 1 << 1;
+    pub const SCROLL: u8 = 1 << 2;
+    /// `Enter`/`Leave` together — a tile that wants one always wants
+    /// the other, or it latches into a permanent hover state the first
+    /// time the pointer leaves.
+    pub const CROSSING: u8 = 1 << 3;
+
+    const ALL: u8 = Self::PRESS | Self::RELEASE | Self::SCROLL | Self::CROSSING;
+
+    pub fn new(bits: u8) -> Option<Self> {
+        (bits & !Self::ALL == 0).then_some(Self(bits))
+    }
+
+    pub fn all() -> Self {
+        Self(Self::ALL)
+    }
+
+    pub fn none() -> Self {
+        Self(0)
+    }
+
+    pub fn bits(self) -> u8 {
+        self.0
+    }
+
+    pub fn wants(self, bit: u8) -> bool {
+        self.0 & bit != 0
+    }
+
+    /// Whether an event of this kind should be delivered at all.
+    pub fn accepts(self, kind: InputKind) -> bool {
+        match kind {
+            InputKind::Press => self.wants(Self::PRESS),
+            InputKind::Release => self.wants(Self::RELEASE),
+            InputKind::Scroll => self.wants(Self::SCROLL),
+            InputKind::Enter | InputKind::Leave => self.wants(Self::CROSSING),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InputKind {
+    Press,
+    Release,
+    Scroll,
+    Enter,
+    Leave,
+}
+
+impl InputKind {
+    fn code(self) -> u8 {
+        match self {
+            Self::Press => 1,
+            Self::Release => 2,
+            Self::Scroll => 3,
+            Self::Enter => 4,
+            Self::Leave => 5,
+        }
+    }
+
+    fn from_code(code: u8) -> Option<Self> {
+        match code {
+            1 => Some(Self::Press),
+            2 => Some(Self::Release),
+            3 => Some(Self::Scroll),
+            4 => Some(Self::Enter),
+            5 => Some(Self::Leave),
+            _ => None,
+        }
+    }
+}
+
+/// Mirrors `wm_core::types::MouseButton`, re-declared rather than
+/// imported because this crate must not depend on `wm-core` (a dockapp
+/// links this crate and nothing else of chonkstep's).
+///
+/// `Middle` and `Right` exist on the wire but the shell never sends
+/// them: middle is the dock's reorder gesture and right is reserved for
+/// the per-tile menu. A dockapp that could swallow middle-click could
+/// make itself un-reorderable and un-removable, which is a tile holding
+/// the dock hostage. They are encodable so that reserving them stays a
+/// *policy* decision in the shell, visible at one call site, instead of
+/// a hole in the wire format that would need a version bump to undo.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Button {
+    Left,
+    Middle,
+    Right,
+}
+
+impl Button {
+    fn code(self) -> u8 {
+        match self {
+            Self::Left => 1,
+            Self::Middle => 2,
+            Self::Right => 3,
+        }
+    }
+
+    fn from_code(code: u8) -> Option<Option<Self>> {
+        match code {
+            0 => Some(None),
+            1 => Some(Some(Self::Left)),
+            2 => Some(Some(Self::Middle)),
+            3 => Some(Some(Self::Right)),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LogLevel {
+    Error,
+    Warn,
+    Info,
+    Debug,
+}
+
+impl LogLevel {
+    fn code(self) -> u8 {
+        match self {
+            Self::Error => 1,
+            Self::Warn => 2,
+            Self::Info => 3,
+            Self::Debug => 4,
+        }
+    }
+
+    fn from_code(code: u8) -> Option<Self> {
+        match code {
+            1 => Some(Self::Error),
+            2 => Some(Self::Warn),
+            3 => Some(Self::Info),
+            4 => Some(Self::Debug),
+            _ => None,
+        }
+    }
+}
+
+/// Why the shell is closing a connection. Sent best-effort before the
+/// fd closes — a dockapp that gets one can say something useful in its
+/// own log instead of reporting a bare EOF, and `CrashLooped` in
+/// particular tells it not to bother reconnecting.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum GoodbyeReason {
+    /// The session is ending. Reconnecting is pointless.
+    Shutdown,
+    /// The dockapp sent something that did not decode, or violated a
+    /// bound. The shell logs the specifics; the wire carries only this.
+    ProtocolError,
+    /// `Hello` presented the wrong token, or an id with no registry slot.
+    Unauthorized,
+    /// Another connection claimed this id. One connection per id.
+    Replaced,
+    /// The tile geometry this dockapp asked for cannot be carried
+    /// inline by v1. See `crate::frame_fits`.
+    TileTooLarge,
+    /// The dockapp stopped reading and the shell's send queue stayed
+    /// full — see `crate::queue::SendQueue`. Almost always followed by
+    /// the fd closing immediately, since a peer in this state is by
+    /// definition not reading this message either.
+    Overflow,
+    /// The user removed the tile from the dock.
+    Removed,
+}
+
+impl GoodbyeReason {
+    fn code(self) -> u8 {
+        match self {
+            Self::Shutdown => 1,
+            Self::ProtocolError => 2,
+            Self::Unauthorized => 3,
+            Self::Replaced => 4,
+            Self::TileTooLarge => 5,
+            Self::Overflow => 6,
+            Self::Removed => 7,
+        }
+    }
+
+    fn from_code(code: u8) -> Option<Self> {
+        match code {
+            1 => Some(Self::Shutdown),
+            2 => Some(Self::ProtocolError),
+            3 => Some(Self::Unauthorized),
+            4 => Some(Self::Replaced),
+            5 => Some(Self::TileTooLarge),
+            6 => Some(Self::Overflow),
+            7 => Some(Self::Removed),
+            _ => None,
+        }
+    }
+}
+
+/// One pointer event, in coordinates local to the dockapp's own tile —
+/// the dockapp is never told where its tile is on screen, or that other
+/// tiles exist.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct InputEvent {
+    pub kind: InputKind,
+    /// `None` for `Scroll`, `Enter` and `Leave`.
+    pub button: Option<Button>,
+    pub x: i32,
+    pub y: i32,
+    /// Notches, signed; `0` for everything but `Scroll`.
+    pub delta: i32,
+}
+
+// ---------------------------------------------------------------------
+// Messages
+// ---------------------------------------------------------------------
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum ClientMessage {
+    Hello {
+        proto: u32,
+        id: String,
+        tile_units: u8,
+        token: [u8; TOKEN_BYTES],
+        wants: InputMask,
+    },
+    /// Premultiplied RGBA8, top row first, `width * height * 4` bytes
+    /// with no row padding — byte-identical to `tiny_skia::Pixmap`'s
+    /// buffer and to `wm_theme_api::DecorationBuffer::pixels`, which is
+    /// what makes a remote tile and a built-in tile the same thing at
+    /// the dock's blit seam.
+    ///
+    /// `generation` is the dockapp's own counter. The shell echoes
+    /// nothing back; it exists so a log line can say *which* frame was
+    /// dropped by the rate limiter.
+    Frame {
+        generation: u32,
+        width: u32,
+        height: u32,
+        pixels: Vec<u8>,
+    },
+    Pong {
+        seq: u32,
+    },
+    Log {
+        level: LogLevel,
+        text: String,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum ServerMessage {
+    /// Sent once, immediately after a `Hello` is accepted.
+    Welcome(ThemeState),
+    /// Sent whenever the user picks a different theme or the scale
+    /// changes. A dockapp *never* restarts for a theme change — that is
+    /// the whole reason this message exists rather than the shell
+    /// killing and relaunching the process.
+    ThemeChanged(ThemeState),
+    Input(InputEvent),
+    /// `false` while the dock is hidden or the tile is scrolled out of
+    /// the visible strip: a dockapp should stop sampling and stop
+    /// drawing, not just stop being looked at.
+    Visibility {
+        visible: bool,
+    },
+    Ping {
+        seq: u32,
+    },
+    Goodbye {
+        reason: GoodbyeReason,
+    },
+}
+
+/// The tile geometry and palette a dockapp draws with. Two theme
+/// payloads on purpose:
+///
+/// - `theme_id` is the fast path. A dockapp built against this
+///   workspace's `wm-theme` calls `default_theme::theme_by_id` and
+///   parses nothing at all, exactly as `startup.rs` does.
+/// - `theme_toml` is the correctness path. A dockapp built against a
+///   *different* `wm-theme` version, or a session running a future
+///   user-defined theme with no built-in id, still gets the real
+///   palette by deserializing it (`Theme` derives `Serialize` /
+///   `Deserialize`).
+///
+/// A dockapp that can use neither falls back to its own default. The
+/// worst case is a tile in the wrong colors, never a tile that fails to
+/// draw.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ThemeState {
+    /// Device pixels per tile edge. The dockapp's surface is
+    /// `tile_px` wide and `tile_px * tile_units` tall.
+    pub tile_px: u32,
+    /// The session's `CHONKSTEP_SCALE`. Present so a dockapp can size
+    /// its own hand-computed geometry, the same job `chonk_ui::App::scale`
+    /// does for a windowed SDK app.
+    pub scale: f32,
+    pub theme_id: String,
+    pub theme_toml: String,
+}
+
+// ---------------------------------------------------------------------
+// Errors
+// ---------------------------------------------------------------------
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DecodeError {
+    /// A zero-length datagram. Not EOF — `recv` reports that separately
+    /// — so this is a peer that actually sent nothing.
+    Empty,
+    /// Over [`MAX_MESSAGE_BYTES`]. Checked before anything else, so an
+    /// oversized message costs one comparison.
+    TooLarge { len: usize },
+    UnknownKind { kind: u8 },
+    /// The message ended in the middle of a field.
+    Truncated { field: &'static str },
+    /// Fields decoded, but bytes were left over. Rejected rather than
+    /// ignored: a decoder that tolerates trailing bytes is a decoder
+    /// where two different byte strings mean the same message, which is
+    /// how smuggling bugs start.
+    TrailingBytes { extra: usize },
+    /// A reserved field was not zero. See the module's strictness note.
+    ReservedNotZero { field: &'static str },
+    BadUtf8 { field: &'static str },
+    /// A string was over its cap, or empty where emptiness is illegal.
+    StringLength { field: &'static str, len: usize, max: usize },
+    /// An id contained something outside the permitted character set.
+    IdCharset,
+    /// An enum discriminant this version does not define.
+    BadEnum { field: &'static str, value: u8 },
+    /// `width`/`height` outside the permitted tile geometry.
+    FrameGeometry { width: u32, height: u32 },
+    /// `pixels.len()` disagreed with `width * height * 4`. Note this is
+    /// impossible to get wrong *silently*: the pixel payload is the
+    /// remainder of the datagram, so a lying header is a mismatch here
+    /// rather than a short read somewhere downstream.
+    FrameLengthMismatch { expected: usize, actual: usize },
+}
+
+impl fmt::Display for DecodeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Empty => write!(f, "empty message"),
+            Self::TooLarge { len } => write!(f, "message of {len} bytes exceeds the {MAX_MESSAGE_BYTES}-byte cap"),
+            Self::UnknownKind { kind } => write!(f, "unknown message kind {kind:#04x}"),
+            Self::Truncated { field } => write!(f, "message ended inside field `{field}`"),
+            Self::TrailingBytes { extra } => write!(f, "{extra} trailing bytes after the last field"),
+            Self::ReservedNotZero { field } => write!(f, "reserved field `{field}` was not zero"),
+            Self::BadUtf8 { field } => write!(f, "field `{field}` was not valid UTF-8"),
+            Self::StringLength { field, len, max } => write!(f, "field `{field}` is {len} bytes, limit {max}"),
+            Self::IdCharset => write!(f, "id contains characters outside [A-Za-z0-9._:-]"),
+            Self::BadEnum { field, value } => write!(f, "field `{field}` has undefined value {value}"),
+            Self::FrameGeometry { width, height } => write!(f, "frame geometry {width}x{height} is out of range"),
+            Self::FrameLengthMismatch { expected, actual } => {
+                write!(f, "frame declared {expected} pixel bytes but carried {actual}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for DecodeError {}
+
+/// Encoding fails only when the *local* program built a message that
+/// cannot legally exist. It is a programming error on this side of the
+/// socket, surfaced rather than silently truncated: a dockapp that
+/// tries to send a frame too big for the transport needs to be told
+/// so at the call site, not left wondering why its tile is blank.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum EncodeError {
+    StringLength { field: &'static str, len: usize, max: usize },
+    IdCharset,
+    FrameGeometry { width: u32, height: u32 },
+    FrameLengthMismatch { expected: usize, actual: usize },
+    /// The encoded message would exceed [`MAX_MESSAGE_BYTES`].
+    TooLarge { len: usize },
+}
+
+impl fmt::Display for EncodeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::StringLength { field, len, max } => write!(f, "field `{field}` is {len} bytes, limit {max}"),
+            Self::IdCharset => write!(f, "id contains characters outside [A-Za-z0-9._:-]"),
+            Self::FrameGeometry { width, height } => write!(f, "frame geometry {width}x{height} is out of range"),
+            Self::FrameLengthMismatch { expected, actual } => {
+                write!(f, "frame geometry needs {expected} pixel bytes but was given {actual}")
+            }
+            Self::TooLarge { len } => write!(f, "message of {len} bytes exceeds the {MAX_MESSAGE_BYTES}-byte cap"),
+        }
+    }
+}
+
+impl std::error::Error for EncodeError {}
+
+// ---------------------------------------------------------------------
+// String hygiene
+// ---------------------------------------------------------------------
+
+/// Drops every character that could make a string do something other
+/// than be read, and returns at most `max` bytes of what is left.
+///
+/// Applied by the decoder to free-text fields, so that a caller cannot
+/// forget: by the time a `Log`'s text is in a `ClientMessage` it is
+/// already safe to hand to `cosmic-text` or to `tracing`. Three
+/// families go:
+///
+/// - C0/C1 controls (`char::is_control`): a `\n` in a log line forges a
+///   second log entry; an ESC in a line that reaches a terminal is a
+///   terminal escape sequence the dockapp did not earn.
+/// - Bidi overrides and isolates (U+202A..U+202E, U+2066..U+2069):
+///   these reorder *surrounding* text when rendered, so a tile's name
+///   can rewrite the label of the menu entry next to it.
+/// - The zero-width joiner/non-joiner and U+200B: invisible characters
+///   let two different ids render identically.
+///
+/// Truncation is on a `char` boundary, so the result is always valid
+/// UTF-8 — `cosmic-text` shapes it, and a byte-sliced string would
+/// panic long before it got there.
+pub fn sanitize_text(text: &str, max: usize) -> String {
+    let mut out = String::with_capacity(text.len().min(max));
+    for c in text.chars() {
+        let dangerous = c.is_control()
+            || matches!(c, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
+            || matches!(c, '\u{200B}' | '\u{200C}' | '\u{200D}' | '\u{FEFF}');
+        if dangerous {
+            continue;
+        }
+        if out.len() + c.len_utf8() > max {
+            break;
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// A dockapp id names a registry entry, keys the shell's slot table,
+/// and is printed in logs and the per-tile menu. It is checked against
+/// an allowlist rather than a blocklist because an allowlist is
+/// auditable in one glance and a blocklist is a promise to have thought
+/// of everything.
+///
+/// `:` is permitted so that built-in dock items can keep their reserved
+/// `builtin:clock` form in the same namespace as remote ids without
+/// needing a second validator.
+pub fn is_valid_id(id: &str) -> bool {
+    !id.is_empty()
+        && id.len() <= MAX_ID_BYTES
+        && id.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b':'))
+}
+
+/// Whether a frame's own geometry is the geometry the shell allocated.
+///
+/// Deliberately an equality test with no clamping. `resize_to_screen`
+/// can change the dock's tile size mid-session (a monitor change), and
+/// a frame produced against the old size is not a frame that should be
+/// scaled, cropped, or letterboxed — it is a frame from before the
+/// resize, and blitting it at the new size paints garbage into the
+/// dock. Reject it; the dockapp gets a `ThemeChanged` carrying the new
+/// `tile_px` and its next frame is correct.
+pub fn frame_matches_tile(width: u32, height: u32, tile_px: u32, tile_units: u8) -> bool {
+    width == tile_px && height == tile_px.saturating_mul(u32::from(tile_units))
+}
+
+// ---------------------------------------------------------------------
+// Reader / Writer
+// ---------------------------------------------------------------------
+
+struct Reader<'a> {
+    buf: &'a [u8],
+    pos: usize,
+}
+
+impl<'a> Reader<'a> {
+    fn new(buf: &'a [u8]) -> Self {
+        Self { buf, pos: 0 }
+    }
+
+    fn take(&mut self, n: usize, field: &'static str) -> Result<&'a [u8], DecodeError> {
+        let end = self.pos.checked_add(n).ok_or(DecodeError::Truncated { field })?;
+        let slice = self.buf.get(self.pos..end).ok_or(DecodeError::Truncated { field })?;
+        self.pos = end;
+        Ok(slice)
+    }
+
+    fn u8(&mut self, field: &'static str) -> Result<u8, DecodeError> {
+        Ok(self.take(1, field)?[0])
+    }
+
+    fn u16(&mut self, field: &'static str) -> Result<u16, DecodeError> {
+        let b = self.take(2, field)?;
+        Ok(u16::from_le_bytes([b[0], b[1]]))
+    }
+
+    fn u32(&mut self, field: &'static str) -> Result<u32, DecodeError> {
+        let b = self.take(4, field)?;
+        Ok(u32::from_le_bytes([b[0], b[1], b[2], b[3]]))
+    }
+
+    fn i32(&mut self, field: &'static str) -> Result<i32, DecodeError> {
+        Ok(self.u32(field)? as i32)
+    }
+
+    fn f32(&mut self, field: &'static str) -> Result<f32, DecodeError> {
+        Ok(f32::from_bits(self.u32(field)?))
+    }
+
+    fn reserved(&mut self, n: usize, field: &'static str) -> Result<(), DecodeError> {
+        if self.take(n, field)?.iter().any(|&b| b != 0) {
+            return Err(DecodeError::ReservedNotZero { field });
+        }
+        Ok(())
+    }
+
+    fn string(&mut self, len: usize, max: usize, field: &'static str) -> Result<String, DecodeError> {
+        if len > max {
+            return Err(DecodeError::StringLength { field, len, max });
+        }
+        let bytes = self.take(len, field)?;
+        std::str::from_utf8(bytes).map(str::to_owned).map_err(|_| DecodeError::BadUtf8 { field })
+    }
+
+    fn rest(&mut self) -> &'a [u8] {
+        let slice = &self.buf[self.pos..];
+        self.pos = self.buf.len();
+        slice
+    }
+
+    fn finish(self) -> Result<(), DecodeError> {
+        let extra = self.buf.len() - self.pos;
+        if extra != 0 {
+            return Err(DecodeError::TrailingBytes { extra });
+        }
+        Ok(())
+    }
+}
+
+fn header(buf: &[u8]) -> Result<(u8, Reader<'_>), DecodeError> {
+    if buf.is_empty() {
+        return Err(DecodeError::Empty);
+    }
+    if buf.len() > MAX_MESSAGE_BYTES {
+        return Err(DecodeError::TooLarge { len: buf.len() });
+    }
+    let mut reader = Reader::new(buf);
+    let kind = reader.u8("kind")?;
+    reader.reserved(3, "header.reserved")?;
+    Ok((kind, reader))
+}
+
+fn start(kind: u8, capacity: usize) -> Vec<u8> {
+    let mut out = Vec::with_capacity(HEADER_BYTES + capacity);
+    out.push(kind);
+    out.extend_from_slice(&[0, 0, 0]);
+    out
+}
+
+fn check_string(field: &'static str, s: &str, max: usize) -> Result<(), EncodeError> {
+    if s.len() > max {
+        return Err(EncodeError::StringLength { field, len: s.len(), max });
+    }
+    Ok(())
+}
+
+fn finish(out: Vec<u8>) -> Result<Vec<u8>, EncodeError> {
+    if out.len() > MAX_MESSAGE_BYTES {
+        return Err(EncodeError::TooLarge { len: out.len() });
+    }
+    Ok(out)
+}
+
+fn theme_state_encode(kind: u8, state: &ThemeState) -> Result<Vec<u8>, EncodeError> {
+    check_string("theme_id", &state.theme_id, MAX_THEME_ID_BYTES)?;
+    check_string("theme_toml", &state.theme_toml, MAX_THEME_TOML_BYTES)?;
+    let mut out = start(kind, 16 + state.theme_id.len() + state.theme_toml.len());
+    out.extend_from_slice(&state.tile_px.to_le_bytes());
+    out.extend_from_slice(&state.scale.to_bits().to_le_bytes());
+    out.extend_from_slice(&(state.theme_id.len() as u16).to_le_bytes());
+    out.extend_from_slice(&0u16.to_le_bytes());
+    out.extend_from_slice(&(state.theme_toml.len() as u32).to_le_bytes());
+    out.extend_from_slice(state.theme_id.as_bytes());
+    out.extend_from_slice(state.theme_toml.as_bytes());
+    finish(out)
+}
+
+fn theme_state_decode(reader: &mut Reader<'_>) -> Result<ThemeState, DecodeError> {
+    let tile_px = reader.u32("tile_px")?;
+    let scale = reader.f32("scale")?;
+    let theme_id_len = reader.u16("theme_id_len")? as usize;
+    reader.reserved(2, "theme.reserved")?;
+    let theme_toml_len = reader.u32("theme_toml_len")? as usize;
+    let theme_id = reader.string(theme_id_len, MAX_THEME_ID_BYTES, "theme_id")?;
+    let theme_toml = reader.string(theme_toml_len, MAX_THEME_TOML_BYTES, "theme_toml")?;
+    Ok(ThemeState { tile_px, scale, theme_id, theme_toml })
+}
+
+// ---------------------------------------------------------------------
+// ClientMessage codec
+// ---------------------------------------------------------------------
+
+impl ClientMessage {
+    pub fn encode(&self) -> Result<Vec<u8>, EncodeError> {
+        match self {
+            Self::Hello { proto, id, tile_units, token, wants } => {
+                if !is_valid_id(id) {
+                    return Err(if id.len() > MAX_ID_BYTES {
+                        EncodeError::StringLength { field: "id", len: id.len(), max: MAX_ID_BYTES }
+                    } else {
+                        EncodeError::IdCharset
+                    });
+                }
+                let mut out = start(KIND_HELLO, 24 + id.len());
+                out.extend_from_slice(&proto.to_le_bytes());
+                out.push(*tile_units);
+                out.push(wants.bits());
+                out.push(id.len() as u8);
+                out.push(0);
+                out.extend_from_slice(token);
+                out.extend_from_slice(id.as_bytes());
+                finish(out)
+            }
+            Self::Frame { generation, width, height, pixels } => {
+                if *width == 0 || *height == 0 || *width > MAX_TILE_PX || *height > MAX_TILE_PX * u32::from(MAX_TILE_UNITS) {
+                    return Err(EncodeError::FrameGeometry { width: *width, height: *height });
+                }
+                let expected = (*width as usize) * (*height as usize) * 4;
+                if pixels.len() != expected {
+                    return Err(EncodeError::FrameLengthMismatch { expected, actual: pixels.len() });
+                }
+                if expected > MAX_FRAME_BYTES {
+                    return Err(EncodeError::TooLarge { len: expected });
+                }
+                let mut out = start(KIND_FRAME, 12 + pixels.len());
+                out.extend_from_slice(&generation.to_le_bytes());
+                out.extend_from_slice(&width.to_le_bytes());
+                out.extend_from_slice(&height.to_le_bytes());
+                out.extend_from_slice(pixels);
+                finish(out)
+            }
+            Self::Pong { seq } => {
+                let mut out = start(KIND_PONG, 4);
+                out.extend_from_slice(&seq.to_le_bytes());
+                finish(out)
+            }
+            Self::Log { level, text } => {
+                // Truncated here, rejected on decode. The asymmetry is
+                // deliberate: a dockapp logging a long line is being
+                // sloppy and should still get its first 256 bytes
+                // through, but a *peer* sending an over-long one is
+                // testing our bounds and gets nothing.
+                let text = sanitize_text(text, MAX_LOG_BYTES);
+                let mut out = start(KIND_LOG, 4 + text.len());
+                out.push(level.code());
+                out.push(0);
+                out.extend_from_slice(&(text.len() as u16).to_le_bytes());
+                out.extend_from_slice(text.as_bytes());
+                finish(out)
+            }
+        }
+    }
+
+    pub fn decode(buf: &[u8]) -> Result<Self, DecodeError> {
+        let (kind, mut r) = header(buf)?;
+        let message = match kind {
+            KIND_HELLO => {
+                let proto = r.u32("proto")?;
+                let tile_units = r.u8("tile_units")?;
+                let wants_bits = r.u8("wants")?;
+                let id_len = r.u8("id_len")? as usize;
+                r.reserved(1, "hello.reserved")?;
+                let mut token = [0u8; TOKEN_BYTES];
+                token.copy_from_slice(r.take(TOKEN_BYTES, "token")?);
+                let id = r.string(id_len, MAX_ID_BYTES, "id")?;
+                if !is_valid_id(&id) {
+                    return Err(DecodeError::IdCharset);
+                }
+                let wants = InputMask::new(wants_bits).ok_or(DecodeError::BadEnum { field: "wants", value: wants_bits })?;
+                Self::Hello { proto, id, tile_units, token, wants }
+            }
+            KIND_FRAME => {
+                let generation = r.u32("generation")?;
+                let width = r.u32("width")?;
+                let height = r.u32("height")?;
+                // Geometry is bounds-checked *before* the multiply, so
+                // `width * height * 4` cannot overflow into a small
+                // "expected" that a short payload would then satisfy.
+                if width == 0 || height == 0 || width > MAX_TILE_PX || height > MAX_TILE_PX * u32::from(MAX_TILE_UNITS) {
+                    return Err(DecodeError::FrameGeometry { width, height });
+                }
+                let expected = (width as usize) * (height as usize) * 4;
+                let pixels = r.rest();
+                if pixels.len() != expected {
+                    return Err(DecodeError::FrameLengthMismatch { expected, actual: pixels.len() });
+                }
+                Self::Frame { generation, width, height, pixels: pixels.to_vec() }
+            }
+            KIND_PONG => Self::Pong { seq: r.u32("seq")? },
+            KIND_LOG => {
+                let level_code = r.u8("level")?;
+                let level = LogLevel::from_code(level_code).ok_or(DecodeError::BadEnum { field: "level", value: level_code })?;
+                r.reserved(1, "log.reserved")?;
+                let text_len = r.u16("text_len")? as usize;
+                let text = r.string(text_len, MAX_LOG_BYTES, "text")?;
+                // Sanitized on the way *in*, so no later caller can
+                // forget: by the time this value exists it is safe to
+                // shape, print, or put in a tracing field.
+                Self::Log { level, text: sanitize_text(&text, MAX_LOG_BYTES) }
+            }
+            _ => return Err(DecodeError::UnknownKind { kind }),
+        };
+        r.finish()?;
+        Ok(message)
+    }
+}
+
+// ---------------------------------------------------------------------
+// ServerMessage codec
+// ---------------------------------------------------------------------
+
+impl ServerMessage {
+    pub fn encode(&self) -> Result<Vec<u8>, EncodeError> {
+        match self {
+            Self::Welcome(state) => theme_state_encode(KIND_WELCOME, state),
+            Self::ThemeChanged(state) => theme_state_encode(KIND_THEME_CHANGED, state),
+            Self::Input(event) => {
+                let mut out = start(KIND_INPUT, 16);
+                out.push(event.kind.code());
+                out.push(event.button.map_or(0, Button::code));
+                out.extend_from_slice(&0u16.to_le_bytes());
+                out.extend_from_slice(&event.x.to_le_bytes());
+                out.extend_from_slice(&event.y.to_le_bytes());
+                out.extend_from_slice(&event.delta.to_le_bytes());
+                finish(out)
+            }
+            Self::Visibility { visible } => {
+                let mut out = start(KIND_VISIBILITY, 4);
+                out.push(u8::from(*visible));
+                out.extend_from_slice(&[0, 0, 0]);
+                finish(out)
+            }
+            Self::Ping { seq } => {
+                let mut out = start(KIND_PING, 4);
+                out.extend_from_slice(&seq.to_le_bytes());
+                finish(out)
+            }
+            Self::Goodbye { reason } => {
+                let mut out = start(KIND_GOODBYE, 4);
+                out.push(reason.code());
+                out.extend_from_slice(&[0, 0, 0]);
+                finish(out)
+            }
+        }
+    }
+
+    pub fn decode(buf: &[u8]) -> Result<Self, DecodeError> {
+        let (kind, mut r) = header(buf)?;
+        let message = match kind {
+            KIND_WELCOME => Self::Welcome(theme_state_decode(&mut r)?),
+            KIND_THEME_CHANGED => Self::ThemeChanged(theme_state_decode(&mut r)?),
+            KIND_INPUT => {
+                let kind_code = r.u8("input.kind")?;
+                let input_kind =
+                    InputKind::from_code(kind_code).ok_or(DecodeError::BadEnum { field: "input.kind", value: kind_code })?;
+                let button_code = r.u8("input.button")?;
+                let button =
+                    Button::from_code(button_code).ok_or(DecodeError::BadEnum { field: "input.button", value: button_code })?;
+                r.reserved(2, "input.reserved")?;
+                let x = r.i32("x")?;
+                let y = r.i32("y")?;
+                let delta = r.i32("delta")?;
+                Self::Input(InputEvent { kind: input_kind, button, x, y, delta })
+            }
+            KIND_VISIBILITY => {
+                let visible = r.u8("visible")?;
+                if visible > 1 {
+                    return Err(DecodeError::BadEnum { field: "visible", value: visible });
+                }
+                r.reserved(3, "visibility.reserved")?;
+                Self::Visibility { visible: visible == 1 }
+            }
+            KIND_PING => Self::Ping { seq: r.u32("seq")? },
+            KIND_GOODBYE => {
+                let code = r.u8("reason")?;
+                let reason = GoodbyeReason::from_code(code).ok_or(DecodeError::BadEnum { field: "reason", value: code })?;
+                r.reserved(3, "goodbye.reserved")?;
+                Self::Goodbye { reason }
+            }
+            _ => return Err(DecodeError::UnknownKind { kind }),
+        };
+        r.finish()?;
+        Ok(message)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn hello() -> ClientMessage {
+        ClientMessage::Hello {
+            proto: crate::PROTOCOL_VERSION,
+            id: "clock".to_string(),
+            tile_units: 1,
+            token: [0xAB; TOKEN_BYTES],
+            wants: InputMask::new(InputMask::PRESS | InputMask::CROSSING).unwrap(),
+        }
+    }
+
+    fn hello_with_id(id: &str) -> ClientMessage {
+        // `ClientMessage` is an enum, so there is no struct-update
+        // shorthand to lean on here.
+        ClientMessage::Hello {
+            proto: crate::PROTOCOL_VERSION,
+            id: id.to_string(),
+            tile_units: 1,
+            token: [0xAB; TOKEN_BYTES],
+            wants: InputMask::none(),
+        }
+    }
+
+    fn frame(width: u32, height: u32) -> ClientMessage {
+        ClientMessage::Frame {
+            generation: 7,
+            width,
+            height,
+            pixels: vec![0x80; (width as usize) * (height as usize) * 4],
+        }
+    }
+
+    fn theme_state() -> ThemeState {
+        ThemeState {
+            tile_px: 112,
+            scale: 2.0,
+            theme_id: "nextstep-classic".to_string(),
+            theme_toml: "id = \"nextstep-classic\"\n".to_string(),
+        }
+    }
+
+    // -- round trips ---------------------------------------------------
+
+    #[test]
+    fn every_client_message_survives_a_round_trip() {
+        let messages = [
+            hello(),
+            frame(56, 56),
+            ClientMessage::Pong { seq: u32::MAX },
+            ClientMessage::Log { level: LogLevel::Warn, text: "battery sampler timed out".to_string() },
+        ];
+        for message in messages {
+            let bytes = message.encode().expect("encodes");
+            assert_eq!(ClientMessage::decode(&bytes), Ok(message.clone()), "round trip of {message:?}");
+        }
+    }
+
+    #[test]
+    fn every_server_message_survives_a_round_trip() {
+        let messages = [
+            ServerMessage::Welcome(theme_state()),
+            ServerMessage::ThemeChanged(theme_state()),
+            ServerMessage::Input(InputEvent {
+                kind: InputKind::Press,
+                button: Some(Button::Left),
+                x: 12,
+                y: -3,
+                delta: 0,
+            }),
+            ServerMessage::Input(InputEvent { kind: InputKind::Scroll, button: None, x: 1, y: 2, delta: -1 }),
+            ServerMessage::Visibility { visible: true },
+            ServerMessage::Visibility { visible: false },
+            ServerMessage::Ping { seq: 9 },
+            ServerMessage::Goodbye { reason: GoodbyeReason::Shutdown },
+        ];
+        for message in messages {
+            let bytes = message.encode().expect("encodes");
+            assert_eq!(ServerMessage::decode(&bytes), Ok(message.clone()), "round trip of {message:?}");
+        }
+    }
+
+    #[test]
+    fn the_scale_float_survives_bit_exactly() {
+        // Encoded as `to_bits`, not as text: 1.5 and 2.25 are the real
+        // fractional scales this desktop runs at, and a tile drawn at
+        // 1.4999999 instead of 1.5 lands its bevel a pixel off.
+        for scale in [1.0f32, 1.5, 2.0, 2.25, 3.0] {
+            let state = ThemeState { scale, ..theme_state() };
+            let bytes = ServerMessage::Welcome(state).encode().unwrap();
+            let ServerMessage::Welcome(decoded) = ServerMessage::decode(&bytes).unwrap() else { panic!("kind") };
+            assert_eq!(decoded.scale.to_bits(), scale.to_bits());
+        }
+    }
+
+    // -- pinned wire layout --------------------------------------------
+
+    #[test]
+    fn hello_has_the_documented_byte_layout() {
+        // Pinned deliberately. The module doc publishes this table and
+        // a third-party dockapp may be built against it; a refactor
+        // that reorders two fields must fail here rather than in
+        // somebody else's binary.
+        let bytes = hello().encode().unwrap();
+        assert_eq!(&bytes[0..4], &[0x01, 0, 0, 0], "kind + reserved");
+        assert_eq!(&bytes[4..8], &1u32.to_le_bytes(), "proto");
+        assert_eq!(bytes[8], 1, "tile_units");
+        assert_eq!(bytes[9], InputMask::PRESS | InputMask::CROSSING, "wants");
+        assert_eq!(bytes[10], 5, "id_len");
+        assert_eq!(bytes[11], 0, "reserved");
+        assert_eq!(&bytes[12..28], &[0xAB; 16], "token");
+        assert_eq!(&bytes[28..], b"clock", "id");
+        assert_eq!(bytes.len(), 33);
+    }
+
+    #[test]
+    fn input_is_a_fixed_twenty_bytes() {
+        let bytes = ServerMessage::Input(InputEvent {
+            kind: InputKind::Scroll,
+            button: None,
+            x: 1,
+            y: 2,
+            delta: -1,
+        })
+        .encode()
+        .unwrap();
+        assert_eq!(bytes.len(), 20);
+        assert_eq!(&bytes[0..4], &[0x83, 0, 0, 0]);
+        assert_eq!(bytes[4], 3, "InputKind::Scroll");
+        assert_eq!(bytes[5], 0, "no button");
+        assert_eq!(&bytes[16..20], &(-1i32).to_le_bytes());
+    }
+
+    #[test]
+    fn client_and_server_kinds_live_in_separate_number_spaces() {
+        // The high bit separates the directions, so feeding a message
+        // back down the socket it came from is a clean `UnknownKind`
+        // rather than an accidental reinterpretation.
+        for bytes in [
+            ServerMessage::Ping { seq: 1 }.encode().unwrap(),
+            ServerMessage::Goodbye { reason: GoodbyeReason::Shutdown }.encode().unwrap(),
+        ] {
+            assert!(matches!(ClientMessage::decode(&bytes), Err(DecodeError::UnknownKind { .. })));
+        }
+        for bytes in [hello().encode().unwrap(), ClientMessage::Pong { seq: 1 }.encode().unwrap()] {
+            assert!(matches!(ServerMessage::decode(&bytes), Err(DecodeError::UnknownKind { .. })));
+        }
+    }
+
+    // -- malformed input -----------------------------------------------
+
+    #[test]
+    fn an_empty_datagram_is_an_error_not_a_panic() {
+        assert_eq!(ClientMessage::decode(&[]), Err(DecodeError::Empty));
+        assert_eq!(ServerMessage::decode(&[]), Err(DecodeError::Empty));
+    }
+
+    #[test]
+    fn an_oversized_datagram_is_rejected_before_anything_is_parsed() {
+        let huge = vec![KIND_FRAME; MAX_MESSAGE_BYTES + 1];
+        assert_eq!(ClientMessage::decode(&huge), Err(DecodeError::TooLarge { len: MAX_MESSAGE_BYTES + 1 }));
+    }
+
+    #[test]
+    fn unknown_kinds_are_rejected() {
+        for kind in [0x00u8, 0x05, 0x7F, 0x80, 0x87, 0xFF] {
+            let buf = [kind, 0, 0, 0];
+            assert!(matches!(ClientMessage::decode(&buf), Err(DecodeError::UnknownKind { .. })), "kind {kind:#04x}");
+            assert!(matches!(ServerMessage::decode(&buf), Err(DecodeError::UnknownKind { .. })), "kind {kind:#04x}");
+        }
+    }
+
+    #[test]
+    fn a_nonzero_reserved_byte_is_rejected_rather_than_ignored() {
+        let mut bytes = ClientMessage::Pong { seq: 1 }.encode().unwrap();
+        bytes[2] = 0x01;
+        assert_eq!(ClientMessage::decode(&bytes), Err(DecodeError::ReservedNotZero { field: "header.reserved" }));
+
+        let mut bytes = hello().encode().unwrap();
+        bytes[11] = 0xFF;
+        assert_eq!(ClientMessage::decode(&bytes), Err(DecodeError::ReservedNotZero { field: "hello.reserved" }));
+
+        let mut bytes = ServerMessage::Ping { seq: 1 }.encode().unwrap();
+        bytes[1] = 0x80;
+        assert_eq!(ServerMessage::decode(&bytes), Err(DecodeError::ReservedNotZero { field: "header.reserved" }));
+    }
+
+    #[test]
+    fn trailing_bytes_are_rejected() {
+        let mut bytes = ClientMessage::Pong { seq: 1 }.encode().unwrap();
+        bytes.push(0);
+        assert_eq!(ClientMessage::decode(&bytes), Err(DecodeError::TrailingBytes { extra: 1 }));
+
+        let mut bytes = ServerMessage::Welcome(theme_state()).encode().unwrap();
+        bytes.extend_from_slice(b"smuggled");
+        assert_eq!(ServerMessage::decode(&bytes), Err(DecodeError::TrailingBytes { extra: 8 }));
+    }
+
+    #[test]
+    fn every_truncation_of_every_message_is_an_error_and_never_a_panic() {
+        // The cheap systematic version of what Phase 5's fuzzer will do
+        // properly: a hostile peer controls the datagram length, so
+        // every prefix of every message must land in `Err` without
+        // indexing off the end of the buffer.
+        let client = [
+            hello().encode().unwrap(),
+            frame(8, 8).encode().unwrap(),
+            ClientMessage::Pong { seq: 3 }.encode().unwrap(),
+            ClientMessage::Log { level: LogLevel::Info, text: "hi".into() }.encode().unwrap(),
+        ];
+        for bytes in &client {
+            for len in 0..bytes.len() {
+                assert!(ClientMessage::decode(&bytes[..len]).is_err(), "prefix {len} of {bytes:?} decoded");
+            }
+            assert!(ClientMessage::decode(bytes).is_ok());
+        }
+
+        let server = [
+            ServerMessage::Welcome(theme_state()).encode().unwrap(),
+            ServerMessage::Input(InputEvent { kind: InputKind::Enter, button: None, x: 0, y: 0, delta: 0 })
+                .encode()
+                .unwrap(),
+            ServerMessage::Visibility { visible: true }.encode().unwrap(),
+            ServerMessage::Ping { seq: 3 }.encode().unwrap(),
+            ServerMessage::Goodbye { reason: GoodbyeReason::Removed }.encode().unwrap(),
+        ];
+        for bytes in &server {
+            for len in 0..bytes.len() {
+                assert!(ServerMessage::decode(&bytes[..len]).is_err(), "prefix {len} decoded");
+            }
+            assert!(ServerMessage::decode(bytes).is_ok());
+        }
+    }
+
+    #[test]
+    fn flipping_any_single_byte_never_panics_the_decoder() {
+        let originals = [hello().encode().unwrap(), frame(4, 4).encode().unwrap(), ServerMessage::Welcome(theme_state()).encode().unwrap()];
+        for bytes in &originals {
+            for index in 0..bytes.len() {
+                for mask in [0x01u8, 0x80, 0xFF] {
+                    let mut mutated = bytes.clone();
+                    mutated[index] ^= mask;
+                    // The result is uninteresting; not unwinding is the
+                    // assertion.
+                    let _ = ClientMessage::decode(&mutated);
+                    let _ = ServerMessage::decode(&mutated);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_frame_header_that_lies_about_its_size_is_rejected() {
+        // Declares a 56x56 tile, carries four bytes. The pixel payload
+        // is the datagram remainder, so a lying header can only ever be
+        // a length mismatch — there is no separate length field to
+        // desynchronize from.
+        let mut bytes = start(KIND_FRAME, 16);
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&56u32.to_le_bytes());
+        bytes.extend_from_slice(&56u32.to_le_bytes());
+        bytes.extend_from_slice(&[0, 0, 0, 0]);
+        assert_eq!(
+            ClientMessage::decode(&bytes),
+            Err(DecodeError::FrameLengthMismatch { expected: 56 * 56 * 4, actual: 4 })
+        );
+    }
+
+    #[test]
+    fn frame_dimensions_that_would_overflow_the_pixel_count_are_rejected_by_geometry() {
+        // `width * height * 4` on a 32-bit count would wrap; the
+        // geometry bound is checked first precisely so the multiply
+        // below it can never be reached with these values.
+        for (w, h) in [(u32::MAX, u32::MAX), (0x4000_0000, 4), (0, 56), (56, 0), (MAX_TILE_PX + 1, 56)] {
+            let mut bytes = start(KIND_FRAME, 12);
+            bytes.extend_from_slice(&0u32.to_le_bytes());
+            bytes.extend_from_slice(&w.to_le_bytes());
+            bytes.extend_from_slice(&h.to_le_bytes());
+            assert_eq!(
+                ClientMessage::decode(&bytes),
+                Err(DecodeError::FrameGeometry { width: w, height: h }),
+                "geometry {w}x{h}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_frame_bigger_than_the_transport_can_carry_fails_to_encode() {
+        // The v1-inline ceiling, surfaced at the call site instead of
+        // as a surprise `EMSGSIZE` from the kernel.
+        let too_big = frame(MAX_TILE_PX, MAX_TILE_PX * u32::from(MAX_TILE_UNITS));
+        assert!(matches!(too_big.encode(), Err(EncodeError::TooLarge { .. })));
+    }
+
+    // -- hostile strings -----------------------------------------------
+
+    #[test]
+    fn an_over_long_id_is_rejected_on_decode() {
+        let long = "a".repeat(MAX_ID_BYTES + 1);
+        let mut bytes = start(KIND_HELLO, 24 + long.len());
+        bytes.extend_from_slice(&1u32.to_le_bytes());
+        bytes.push(1);
+        bytes.push(0);
+        bytes.push(long.len() as u8);
+        bytes.push(0);
+        bytes.extend_from_slice(&[0u8; TOKEN_BYTES]);
+        bytes.extend_from_slice(long.as_bytes());
+        assert_eq!(
+            ClientMessage::decode(&bytes),
+            Err(DecodeError::StringLength { field: "id", len: MAX_ID_BYTES + 1, max: MAX_ID_BYTES })
+        );
+    }
+
+    #[test]
+    fn an_id_at_exactly_the_cap_is_accepted() {
+        let id = "a".repeat(MAX_ID_BYTES);
+        let bytes = hello_with_id(&id).encode().unwrap();
+        let ClientMessage::Hello { id: decoded, .. } = ClientMessage::decode(&bytes).unwrap() else { panic!() };
+        assert_eq!(decoded, id);
+    }
+
+    #[test]
+    fn ids_outside_the_allowlist_are_rejected_at_both_ends() {
+        for hostile in [
+            "clock\nnet",             // forges a second line in any log
+            "clock\u{202E}kcolc",     // bidi override rewrites text beside it
+            "clock net",              // a space breaks the one-id-per-line registry file
+            "../../etc/passwd",       // an id is used to key files; keep `/` out
+            "clock\u{0}",             // NUL
+            "",                       // empty
+        ] {
+            assert!(!is_valid_id(hostile), "{hostile:?} should not be a valid id");
+            let message = hello_with_id(hostile);
+            assert!(message.encode().is_err(), "{hostile:?} should not encode");
+        }
+        assert!(is_valid_id("builtin:clock"), "reserved built-in ids share the namespace");
+        assert!(is_valid_id("org.example.weather-2"));
+    }
+
+    #[test]
+    fn a_hostile_id_smuggled_past_the_encoder_is_still_caught_on_decode() {
+        // The encoder refuses to build one, so this hand-assembles the
+        // bytes a non-Rust or malicious client would send.
+        let id = b"clock\nnet";
+        let mut bytes = start(KIND_HELLO, 24 + id.len());
+        bytes.extend_from_slice(&1u32.to_le_bytes());
+        bytes.push(1);
+        bytes.push(0);
+        bytes.push(id.len() as u8);
+        bytes.push(0);
+        bytes.extend_from_slice(&[0u8; TOKEN_BYTES]);
+        bytes.extend_from_slice(id);
+        assert_eq!(ClientMessage::decode(&bytes), Err(DecodeError::IdCharset));
+    }
+
+    #[test]
+    fn invalid_utf8_in_a_string_field_is_rejected() {
+        let mut bytes = start(KIND_LOG, 4 + 2);
+        bytes.push(LogLevel::Info.code());
+        bytes.push(0);
+        bytes.extend_from_slice(&2u16.to_le_bytes());
+        bytes.extend_from_slice(&[0xFF, 0xFE]);
+        assert_eq!(ClientMessage::decode(&bytes), Err(DecodeError::BadUtf8 { field: "text" }));
+    }
+
+    #[test]
+    fn an_over_long_log_line_is_rejected_on_decode_and_truncated_on_encode() {
+        // A 10MB "tooltip" handed to cosmic-text is a rendering denial
+        // of service, so the bound is enforced before the string is
+        // ever materialized.
+        let long = "x".repeat(MAX_LOG_BYTES + 1);
+        let mut bytes = start(KIND_LOG, 4 + long.len());
+        bytes.push(LogLevel::Info.code());
+        bytes.push(0);
+        bytes.extend_from_slice(&(long.len() as u16).to_le_bytes());
+        bytes.extend_from_slice(long.as_bytes());
+        assert_eq!(
+            ClientMessage::decode(&bytes),
+            Err(DecodeError::StringLength { field: "text", len: MAX_LOG_BYTES + 1, max: MAX_LOG_BYTES })
+        );
+
+        let encoded = ClientMessage::Log { level: LogLevel::Info, text: long }.encode().unwrap();
+        let ClientMessage::Log { text, .. } = ClientMessage::decode(&encoded).unwrap() else { panic!() };
+        assert_eq!(text.len(), MAX_LOG_BYTES);
+    }
+
+    #[test]
+    fn control_characters_never_survive_the_decoder() {
+        let hostile = "line\u{1b}[2Jone\nline two\u{202E}reversed\u{200B}";
+        let encoded = ClientMessage::Log { level: LogLevel::Error, text: hostile.to_string() }.encode().unwrap();
+        let ClientMessage::Log { text, .. } = ClientMessage::decode(&encoded).unwrap() else { panic!() };
+        assert!(!text.chars().any(char::is_control), "no C0/C1 controls survive: {text:?}");
+        assert!(!text.contains('\u{202E}'), "no bidi override survives");
+        assert!(!text.contains('\u{200B}'), "no zero-width space survives");
+        assert_eq!(
+            text, "line[2Joneline tworeversed",
+            "the dangerous characters are dropped and the surrounding text closes up behind them"
+        );
+    }
+
+    #[test]
+    fn sanitize_truncates_on_a_char_boundary() {
+        // A byte-sliced multi-byte string is not valid UTF-8 and
+        // panics `String::from_utf8` long before cosmic-text sees it.
+        let wide = "ü".repeat(10); // two bytes each
+        let out = sanitize_text(&wide, 5);
+        assert_eq!(out, "üü", "4 bytes fit, the fifth char would be 6");
+        assert!(std::str::from_utf8(out.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn sanitize_leaves_ordinary_text_alone() {
+        assert_eq!(sanitize_text("CPU 42% · 3.4 GHz", 256), "CPU 42% · 3.4 GHz");
+    }
+
+    // -- enums ---------------------------------------------------------
+
+    #[test]
+    fn undefined_enum_discriminants_are_rejected() {
+        let mut bytes = ServerMessage::Input(InputEvent { kind: InputKind::Press, button: Some(Button::Left), x: 0, y: 0, delta: 0 })
+            .encode()
+            .unwrap();
+        bytes[4] = 99;
+        assert_eq!(ServerMessage::decode(&bytes), Err(DecodeError::BadEnum { field: "input.kind", value: 99 }));
+
+        let mut bytes = ServerMessage::Input(InputEvent { kind: InputKind::Press, button: Some(Button::Left), x: 0, y: 0, delta: 0 })
+            .encode()
+            .unwrap();
+        bytes[5] = 4;
+        assert_eq!(ServerMessage::decode(&bytes), Err(DecodeError::BadEnum { field: "input.button", value: 4 }));
+
+        let mut bytes = ServerMessage::Goodbye { reason: GoodbyeReason::Shutdown }.encode().unwrap();
+        bytes[4] = 0;
+        assert_eq!(ServerMessage::decode(&bytes), Err(DecodeError::BadEnum { field: "reason", value: 0 }));
+
+        let mut bytes = ClientMessage::Log { level: LogLevel::Info, text: String::new() }.encode().unwrap();
+        bytes[4] = 7;
+        assert_eq!(ClientMessage::decode(&bytes), Err(DecodeError::BadEnum { field: "level", value: 7 }));
+    }
+
+    #[test]
+    fn a_bool_on_the_wire_is_zero_or_one_and_nothing_else() {
+        let mut bytes = ServerMessage::Visibility { visible: true }.encode().unwrap();
+        bytes[4] = 2;
+        assert_eq!(ServerMessage::decode(&bytes), Err(DecodeError::BadEnum { field: "visible", value: 2 }));
+    }
+
+    #[test]
+    fn unknown_input_mask_bits_are_rejected() {
+        assert_eq!(InputMask::new(0xFF), None);
+        assert_eq!(InputMask::all().bits(), 0b1111);
+        let mut bytes = hello().encode().unwrap();
+        bytes[9] = 0xF0;
+        assert_eq!(ClientMessage::decode(&bytes), Err(DecodeError::BadEnum { field: "wants", value: 0xF0 }));
+    }
+
+    #[test]
+    fn an_input_mask_gates_exactly_the_events_it_names() {
+        let crossing_only = InputMask::new(InputMask::CROSSING).unwrap();
+        assert!(crossing_only.accepts(InputKind::Enter));
+        assert!(crossing_only.accepts(InputKind::Leave), "wanting Enter without Leave latches hover forever");
+        assert!(!crossing_only.accepts(InputKind::Press));
+        assert!(!InputMask::none().accepts(InputKind::Scroll));
+        for kind in [InputKind::Press, InputKind::Release, InputKind::Scroll, InputKind::Enter, InputKind::Leave] {
+            assert!(InputMask::all().accepts(kind));
+        }
+    }
+
+    // -- geometry policy -----------------------------------------------
+
+    #[test]
+    fn a_frame_from_before_a_monitor_change_does_not_match_the_new_tile() {
+        assert!(frame_matches_tile(56, 56, 56, 1));
+        assert!(frame_matches_tile(56, 112, 56, 2));
+        assert!(!frame_matches_tile(56, 56, 112, 1), "the dock rescaled under it");
+        assert!(!frame_matches_tile(56, 56, 56, 2), "one tile's worth of pixels for a two-tile slot");
+        assert!(!frame_matches_tile(112, 56, 56, 1));
+    }
+}

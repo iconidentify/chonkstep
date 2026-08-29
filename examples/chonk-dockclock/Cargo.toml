@@ -1,0 +1,14 @@
+[package]
+name = "chonk-dockclock"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The reference dockapp: chonk-shell's clock tile, reimplemented out-of-process on the public chonk-ui SDK."
+publish = false
+
+[dependencies]
+# `default-features = false` drops `x11rb`. Not an optimization: this
+# binary must not contain an X11 client library, because "a dockapp
+# holds no display connection" is a claim the reference dockapp should
+# be able to demonstrate with `ldd`, not just assert in a doc comment.
+chonk-ui = { path = "../../crates/chonk-ui", default-features = false }
