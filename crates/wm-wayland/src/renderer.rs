@@ -495,6 +495,18 @@ fn push_cursor_elements(
                     .map(|attrs| attrs.lock().unwrap().hotspot)
                     .unwrap_or_default()
             });
+            // A client cursor is drawn 1:1, never multiplied by the UI
+            // scale. Outputs here advertise scale 1 (nothing passes a
+            // scale to `change_current_state`), so a client's cursor
+            // buffer pixels *are* screen pixels; the session tells
+            // clients how large to draw through `XCURSOR_SIZE` (24 x
+            // scale, `chonk_shell::startup::ensure_xcursor_size`),
+            // which is the channel every toolkit actually reads.
+            // Scaling here would double-size exactly the clients that
+            // already look right. A client that commits a cursor at
+            // buffer scale 2 anyway is halved by smithay — and its
+            // hotspot, being surface-local, is in those same halved
+            // units, so the two stay consistent.
             let position = (location - hotspot.to_f64()).to_physical(1.0).to_i32_round();
             elements.extend(render_elements_from_surface_tree(
                 renderer,
@@ -506,6 +518,13 @@ fn push_cursor_elements(
             ));
         }
         _ => {
+            // No hotspot offset and no size override: the arrow's tip
+            // is its (0, 0) pixel, and `state::build_default_cursor`
+            // has already rasterized the shape at the UI scale from
+            // that same origin, so the tip stays under the pointer at
+            // every scale. Sizing the element here instead would ask
+            // the GLES renderer to filter a 1-bit shape up, blurring
+            // the halo the arrow reads against dark windows by.
             match MemoryRenderBufferRenderElement::from_buffer(
                 renderer,
                 location.to_physical(1.0),
