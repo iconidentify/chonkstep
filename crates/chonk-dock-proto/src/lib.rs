@@ -43,6 +43,24 @@
 //! property does not depend on a flag surviving, and
 //! [`queue::SendQueue`] absorbs the `EAGAIN` that results.
 //!
+//! Three places make that claim checkable rather than merely stated,
+//! and a change to this crate should keep all three passing:
+//!
+//! - `tests/hostile_peer.rs` — a thousand simulated repaint passes
+//!   against a peer that stopped reading, required to fit inside one
+//!   16 ms frame. The same shape, and the same numbers, as
+//!   `chonk-shell`'s
+//!   `a_sampler_blocked_in_a_child_process_costs_the_caller_nothing`,
+//!   which guards the first version of this bug.
+//! - `tests/codec_fuzz.rs` — a seeded, deterministic fuzz harness over
+//!   [`wire`], including every single-byte mutation of every valid
+//!   message. Its header explains why it is this and not `cargo-fuzz`.
+//! - `examples/chonk-dockapp-torture` — the same properties against a
+//!   real hostile *process*, with modes for hanging, flooding,
+//!   crashing, lying and refusing to complete a handshake. Its own
+//!   `tests/against_a_fake_shell.rs` runs it under a minimal shell, so
+//!   the process-level claim is in CI and not only in a demo.
+//!
 //! # Versioning
 //!
 //! [`PROTOCOL_VERSION`] is presented in [`wire::ClientMessage::Hello`]

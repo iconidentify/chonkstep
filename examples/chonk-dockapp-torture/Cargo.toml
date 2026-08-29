@@ -1,0 +1,27 @@
+[package]
+name = "chonk-dockapp-torture"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The hostile dockapp: hangs, floods, crashes and lies on demand, so the shell's handling of a misbehaving tile is proved rather than argued."
+publish = false
+
+[dependencies]
+# `default-features = false` drops `x11rb`, exactly as `chonk-dockclock`
+# does: a dockapp holds no display connection, and the claim is worth
+# being able to check with `ldd` rather than only in a doc comment.
+#
+# The SDK is used wherever it can express the behaviour under test —
+# `flood` is a real `dockapp::run_with` loop — because a torture client
+# that shares no code with a real one is testing a different program.
+chonk-ui = { path = "../../crates/chonk-ui", default-features = false }
+
+# ...and the raw protocol for everything the SDK deliberately cannot
+# express. This is the whole reason this binary exists: the SDK's
+# encoder refuses to emit an over-long id, its event loop always reads
+# its socket, and its send path never lies about a frame's dimensions.
+# Those are exactly the behaviours the shell has to survive, so testing
+# them requires assembling the bytes by hand. A torture client that can
+# only do what the SDK permits cannot test the shell's hostility
+# handling at all.
+chonk-dock-proto = { path = "../../crates/chonk-dock-proto" }
