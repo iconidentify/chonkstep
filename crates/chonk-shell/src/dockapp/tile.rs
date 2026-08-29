@@ -267,15 +267,31 @@ struct Connection {
     /// When this connection was established, for
     /// [`LaunchBudget::record_failure`]'s `stable` argument.
     since: Instant,
+    /// The geometry and palette this connection has been *told* about —
+    /// the `Welcome` it was adopted with, then whatever
+    /// [`RemoteTile::push_theme`] has sent since.
+    ///
+    /// Kept per connection rather than per tile because it is a fact
+    /// about a conversation: a dockapp that reconnects has been told
+    /// nothing yet, whatever the tile knew about its predecessor.
+    told: ThemeState,
 }
 
 /// Everything one servicing pass needs from the shell.
 pub(crate) struct ServiceContext<'a> {
     pub now: Instant,
-    /// Device pixels per tile edge, as the dock is currently laid out.
-    pub tile_px: u32,
-    pub scale: f32,
-    pub theme: &'a Theme,
+    /// The geometry and palette the dock is laid out for *right now*,
+    /// in the shape it goes on the wire.
+    ///
+    /// One field rather than the `tile_px` / `scale` / `&Theme` triple
+    /// it replaced, because those three were the same three numbers a
+    /// dockapp is told in `Welcome` and `ThemeChanged` and nothing
+    /// guaranteed the two agreed. The tile's geometry check
+    /// ([`RemoteTile::on_frame`]) and the message that tells a dockapp
+    /// which geometry to draw at now read the same value, so "the dock
+    /// relaid out but the dockapp was never told" is not a state that
+    /// can be constructed.
+    pub theme: &'a ThemeState,
     /// Where dockapps connect. Passed rather than recomputed so every
     /// launched child is told the same path the listener is actually
     /// bound to.
@@ -391,7 +407,8 @@ impl RemoteTile {
     /// `chonk_dock_proto::validate_hello` against
     /// [`token`](Self::token).
     pub(crate) fn adopt(&mut self, socket: Seqpacket, wants: InputMask, welcome: ThemeState, now: Instant) {
-        let mut connection = Connection { socket, send: SendQueue::new(), wants, ping_seq: 0, last_ping: now, unanswered: 0, since: now };
+        let mut connection =
+            Connection { socket, send: SendQueue::new(), wants, ping_seq: 0, last_ping: now, unanswered: 0, since: now, told: welcome.clone() };
         // Queued, not sent inline, for exactly the reason every other
         // send is queued — see `flush`. The first message is not an
         // exception worth carving out, and a `Welcome` that blocked
@@ -429,8 +446,9 @@ impl RemoteTile {
         // notification the relayout has to remember to send — means
         // `on_frame`'s equality check can never be comparing against a
         // number nobody updated.
-        self.set_tile_px(ctx.tile_px);
+        self.set_tile_px(ctx.theme.tile_px);
         self.receive(ctx);
+        self.push_theme(ctx);
         self.check_liveness(ctx.now);
         // A frame parked by the rate limiter becomes visible on the
         // pass after its token refills. `next_ready_in` exists for a
@@ -617,6 +635,67 @@ impl RemoteTile {
             self.state = TileState::Hung { since: now };
             self.dirty = true;
         }
+    }
+
+    /// Tells a connected dockapp that its geometry or its palette
+    /// changed, so it restyles in place.
+    ///
+    /// **A dockapp never restarts for a theme change.** That is the
+    /// whole reason `ThemeChanged` exists rather than the shell killing
+    /// and relaunching the process: a theme pick is the most routine
+    /// thing a user does to this desktop, and a tile that lost its
+    /// in-app state (and cost a fork, an exec and a fontconfig scan)
+    /// every time one happened would be a worse tile than a built-in.
+    /// The SDK's half is already there — `chonk_ui::dockapp::serve`
+    /// returns `Outcome::Retheme`, rebuilding its `Ctx` and its pixmap
+    /// on the *same* socket.
+    ///
+    /// # Why this is polled rather than notified
+    ///
+    /// There is no "the theme changed" call site to keep in sync. The
+    /// state is recomputed once per servicing pass and compared, for
+    /// the same reason [`set_tile_px`](Self::set_tile_px) takes its
+    /// answer from the context: the triggers are diffuse — a theme pick,
+    /// a scale change, and `Desktop::resize_to_screen` changing the tile
+    /// edge when a monitor is plugged in — and a notification is
+    /// something a future fourth trigger can forget to send. A
+    /// comparison cannot be forgotten. The cost is one `ThemeState`
+    /// comparison per tile per pass, which is four integer/string
+    /// compares against a value `DockHost` has already cached; the
+    /// expensive part (serializing the theme to TOML) happens once, in
+    /// `DockHost::refresh_theme`, and only when the theme actually
+    /// differs.
+    ///
+    /// # Why `same_as` and not `!=`
+    ///
+    /// `ThemeState` derives `PartialEq` over an `f32`, so `!=` against a
+    /// NaN scale is *always* true and this function would push a message
+    /// on every pass forever — filling the send queue at the repaint
+    /// rate until the tile was disconnected for overflow. The codec now
+    /// refuses to decode such a scale, but the shell *constructs* this
+    /// value rather than decoding it, so that guard does not cover this
+    /// side. [`ThemeState::same_as`] compares the bits and is therefore
+    /// reflexive whatever the float is; `a_theme_state_the_shell_cannot_
+    /// compare_is_pushed_once_not_forever` pins it.
+    fn push_theme(&mut self, ctx: &ServiceContext) {
+        let Some(connection) = self.connection.as_ref() else { return };
+        if connection.told.same_as(ctx.theme) {
+            return;
+        }
+        let next = ctx.theme.clone();
+        tracing::debug!(id = %self.entry.id, tile_px = next.tile_px, theme = %next.theme_id, "telling a dockapp to restyle in place");
+        // Recorded before the enqueue can fail and *whatever* it does
+        // with the message. The invariant that matters is "we do not ask
+        // again until the answer changes again": a dockapp whose queue
+        // was full and dropped this one gets the next change, not a
+        // retry storm of this one. `enqueue` may itself disconnect on
+        // sustained overflow, which takes the connection (and this
+        // record) with it — which is also correct, since a reconnect is
+        // told everything again in its `Welcome`.
+        if let Some(connection) = self.connection.as_mut() {
+            connection.told = next.clone();
+        }
+        self.enqueue(ServerMessage::ThemeChanged(next), ctx.now);
     }
 
     /// Sends whatever the socket will take.
@@ -810,8 +889,8 @@ impl RemoteTile {
         let env = vec![
             (ENV_SOCKET.to_string(), ctx.socket_path.to_string_lossy().into_owned()),
             (ENV_TOKEN.to_string(), transport::token_to_hex(&token)),
-            ("CHONKSTEP_SCALE".to_string(), format!("{:.4}", ctx.scale)),
-            ("CHONKSTEP_THEME".to_string(), ctx.theme.id.clone()),
+            ("CHONKSTEP_SCALE".to_string(), format!("{:.4}", ctx.theme.scale)),
+            ("CHONKSTEP_THEME".to_string(), ctx.theme.theme_id.clone()),
         ];
         let args: Vec<&str> = self.entry.exec[1..].iter().map(String::as_str).collect();
         match spawn::spawn_supervised(&self.entry.exec[0], &args, &env, &DISPLAY_SERVER_ENV) {
@@ -1486,7 +1565,6 @@ mod tests {
         let mut tile = RemoteTile::new(entry(RestartPolicy::Never, 1), 56, base);
         tile.adopt(ours, InputMask::all(), welcome(), base);
 
-        let theme = theme();
         let socket_path = PathBuf::from("/test/dock.sock");
         let mut scratch = Vec::new();
         let start = Instant::now();
@@ -1495,7 +1573,7 @@ mod tests {
             // every one of these queues another message at a peer that
             // is not reading.
             let now = base + PING_INTERVAL * (step as u32 + 1);
-            let mut ctx = ServiceContext { now, tile_px: 56, scale: 1.0, theme: &theme, socket_path: &socket_path, scratch: &mut scratch };
+            let mut ctx = ServiceContext { now, theme: &welcome(), socket_path: &socket_path, scratch: &mut scratch };
             tile.service(&mut ctx);
         }
         let elapsed = start.elapsed();
@@ -1519,10 +1597,9 @@ mod tests {
         tile.adopt(ours, InputMask::all(), welcome(), base);
         drop(peer);
 
-        let theme = theme();
         let socket_path = PathBuf::from("/test/dock.sock");
         let mut scratch = Vec::new();
-        let mut ctx = ServiceContext { now: base + PING_INTERVAL, tile_px: 56, scale: 1.0, theme: &theme, socket_path: &socket_path, scratch: &mut scratch };
+        let mut ctx = ServiceContext { now: base + PING_INTERVAL, theme: &welcome(), socket_path: &socket_path, scratch: &mut scratch };
         tile.service(&mut ctx);
 
         assert!(tile.poll_fd().is_none(), "the connection is gone");
@@ -1542,12 +1619,11 @@ mod tests {
         tile.adopt(ours, InputMask::all(), welcome(), base);
         tile.state = TileState::Live;
 
-        let theme = theme();
         let socket_path = PathBuf::from("/test/dock.sock");
         let mut scratch = Vec::new();
         let mut pass = |tile: &mut RemoteTile, step: u32| {
             let now = base + PING_INTERVAL * step;
-            let mut ctx = ServiceContext { now, tile_px: 56, scale: 1.0, theme: &theme, socket_path: &socket_path, scratch: &mut scratch };
+            let mut ctx = ServiceContext { now, theme: &welcome(), socket_path: &socket_path, scratch: &mut scratch };
             tile.service(&mut ctx);
         };
 
@@ -1567,6 +1643,189 @@ mod tests {
         assert_eq!(tile.state, TileState::Live);
     }
 
+    /// Every datagram the peer has been sent since the last drain, as
+    /// raw bytes.
+    ///
+    /// Raw rather than decoded because one test is specifically about a
+    /// message the *dockapp's own decoder* refuses, and a helper that
+    /// unwrapped the decode would hide exactly the thing it is asserting.
+    fn drain(peer: &Seqpacket) -> Vec<Vec<u8>> {
+        let mut buffer = vec![0u8; chonk_dock_proto::MAX_MESSAGE_BYTES];
+        let mut datagrams = Vec::new();
+        loop {
+            match peer.recv(&mut buffer) {
+                Ok(0) => return datagrams,
+                Ok(n) => datagrams.push(buffer[..n].to_vec()),
+                Err(_) => return datagrams,
+            }
+        }
+    }
+
+    /// The `ThemeChanged`s a dockapp would actually act on. A servicing
+    /// pass may legitimately interleave a `Ping`, so tests filter rather
+    /// than demand an exact sequence — the same tolerance a real dockapp
+    /// has to have.
+    fn themes_pushed(datagrams: &[Vec<u8>]) -> Vec<ThemeState> {
+        datagrams
+            .iter()
+            .filter_map(|bytes| match ServerMessage::decode(bytes) {
+                Ok(ServerMessage::ThemeChanged(state)) => Some(state),
+                _ => None,
+            })
+            .collect()
+    }
+
+    // -----------------------------------------------------------------
+    // Theming: a dockapp never restarts for a theme change
+    // -----------------------------------------------------------------
+
+    /// **A theme change restyles a running dockapp; it does not relaunch
+    /// it.** The whole reason `ThemeChanged` exists rather than the
+    /// shell killing and respawning the process on every theme pick.
+    ///
+    /// Asserted on the socket, not on an internal flag: the peer here is
+    /// the dockapp's end of a real `SOCK_SEQPACKET` pair, and what it
+    /// receives is exactly what a real dockapp's `serve` loop would
+    /// decode into an `Outcome::Retheme`.
+    #[test]
+    fn a_theme_change_restyles_a_running_dockapp_without_relaunching_it() {
+        let (ours, peer) = seqpacket_pair();
+        let base = Instant::now();
+        let mut tile = RemoteTile::new(entry(RestartPolicy::Always, 1), 56, base);
+        tile.adopt(ours, InputMask::all(), welcome(), base);
+        tile.state = TileState::Live;
+        let socket_path = PathBuf::from("/test/dock.sock");
+        let mut scratch = Vec::new();
+        let _ = drain(&peer); // the Welcome and Visibility from `adopt`
+
+        // A theme pick: new id, new palette, and — because the theme
+        // menu is also how the scale is changed — a new tile edge.
+        let next = ThemeState { tile_px: 112, scale: 2.0, theme_id: "amber-phosphor".into(), theme_toml: "id = \"amber-phosphor\"".into() };
+        let mut ctx = ServiceContext { now: base, theme: &next, socket_path: &socket_path, scratch: &mut scratch };
+        tile.service(&mut ctx);
+
+        assert_eq!(themes_pushed(&drain(&peer)), vec![next.clone()], "the dockapp is told, over its existing connection");
+        assert_eq!(tile.state, TileState::Live, "and is not restarted, or even disturbed");
+        assert!(tile.poll_fd().is_some(), "the same socket it had before");
+        assert!(tile.child.is_none(), "nothing was spawned");
+    }
+
+    /// Design risk #4, end to end: `resize_to_screen` can change the
+    /// tile edge under a running dockapp (a monitor plugged in, a scale
+    /// change), and frames drawn for the old edge are in flight at
+    /// exactly that moment. Those must be **rejected, not blitted at the
+    /// wrong size** — and `ThemeChanged` carrying the new `tile_px` is
+    /// the thing that lets the dockapp catch up rather than being stuck
+    /// sending frames the shell will refuse forever.
+    #[test]
+    fn a_relayout_rejects_the_old_size_and_theme_changed_is_how_the_dockapp_catches_up() {
+        let (ours, peer) = seqpacket_pair();
+        let base = Instant::now();
+        let mut tile = RemoteTile::new(entry(RestartPolicy::Always, 1), 56, base);
+        tile.adopt(ours, InputMask::none(), welcome(), base);
+        let socket_path = PathBuf::from("/test/dock.sock");
+        let mut scratch = Vec::new();
+        let _ = drain(&peer);
+
+        let at_56 = welcome();
+        let ctx = ServiceContext { now: base, theme: &at_56, socket_path: &socket_path, scratch: &mut scratch };
+        assert!(tile.on_frame(1, 56, 56, vec![9; 56 * 56 * 4], &ctx), "the dock is laid out at 56");
+        assert!(tile.last_frame.is_some());
+
+        // The relayout. The tile edge is now 112 and the frame the
+        // dockapp is about to send was drawn for 56.
+        let at_112 = ThemeState { tile_px: 112, scale: 2.0, ..welcome() };
+        let mut ctx = ServiceContext { now: base, theme: &at_112, socket_path: &socket_path, scratch: &mut scratch };
+        tile.service(&mut ctx);
+
+        assert!(tile.last_frame.is_none(), "the stored 56px frame is dropped rather than drawn into a 112px slot");
+        assert!(tile.on_frame(2, 56, 56, vec![9; 56 * 56 * 4], &ctx), "an in-flight old-size frame is refused, not fatal");
+        assert!(tile.last_frame.is_none(), "and above all not blitted at the wrong size");
+        assert!(tile.poll_fd().is_some(), "refusing a frame does not cost the connection");
+
+        // And this is what tells the dockapp to start drawing 112.
+        let pushed = themes_pushed(&drain(&peer));
+        assert_eq!(pushed.len(), 1, "exactly one ThemeChanged for one relayout");
+        assert_eq!(pushed[0].tile_px, 112, "carrying the new geometry, which is what ends the rejections");
+
+        assert!(tile.on_frame(3, 112, 112, vec![7; 112 * 112 * 4], &ctx), "the dockapp redraws at the size it was told");
+        assert_eq!(tile.last_frame.as_ref().map(|frame| frame.width), Some(112));
+    }
+
+    /// A dock whose theme is not changing must not chatter. The push is
+    /// evaluated on every servicing pass — ~60 times a second — so
+    /// "nothing changed" has to be genuinely nothing.
+    #[test]
+    fn an_unchanged_theme_is_never_pushed_again() {
+        let (ours, peer) = seqpacket_pair();
+        let base = Instant::now();
+        let mut tile = RemoteTile::new(entry(RestartPolicy::Always, 1), 56, base);
+        tile.adopt(ours, InputMask::none(), welcome(), base);
+        tile.state = TileState::Live;
+        let socket_path = PathBuf::from("/test/dock.sock");
+        let mut scratch = Vec::new();
+        let _ = drain(&peer);
+
+        let steady = welcome();
+        for step in 0..1_000u32 {
+            let mut ctx =
+                ServiceContext { now: base + Duration::from_millis(16 * step as u64), theme: &steady, socket_path: &socket_path, scratch: &mut scratch };
+            tile.service(&mut ctx);
+        }
+        assert!(themes_pushed(&drain(&peer)).is_empty(), "a dock that did not change told the dockapp nothing");
+    }
+
+    /// **The loop this cannot be allowed to become.**
+    ///
+    /// `ThemeState` derives `PartialEq` over an `f32`, and IEEE-754 says
+    /// NaN equals nothing — including itself. So `if next != last_sent
+    /// { push }`, the shape this feature naturally takes, would push a
+    /// `ThemeChanged` on *every* servicing pass forever if a NaN scale
+    /// ever reached it: a compositor busy-loop, filling a dockapp's send
+    /// queue at the repaint rate until the tile was disconnected for
+    /// overflow, provoked by one bad float.
+    ///
+    /// Two things stop it and both are asserted: the codec refuses to
+    /// decode such a scale (`DecodeError::BadFloat`), and
+    /// `ThemeState::same_as` compares bits so the *sender* — which
+    /// constructs its state rather than decoding it — is reflexive too.
+    /// This test bypasses the first deliberately, by handing the tile a
+    /// hand-built context, because the point is that the second one
+    /// holds on its own.
+    #[test]
+    fn a_theme_state_the_shell_cannot_compare_is_pushed_once_not_forever() {
+        let (ours, peer) = seqpacket_pair();
+        let base = Instant::now();
+        let mut tile = RemoteTile::new(entry(RestartPolicy::Always, 1), 56, base);
+        tile.adopt(ours, InputMask::none(), welcome(), base);
+        tile.state = TileState::Live;
+        let socket_path = PathBuf::from("/test/dock.sock");
+        let mut scratch = Vec::new();
+        let _ = drain(&peer);
+
+        let nan = ThemeState { scale: f32::NAN, ..welcome() };
+        assert_ne!(nan, nan, "the premise: derived equality is not reflexive here");
+        for step in 0..1_000u32 {
+            let mut ctx =
+                ServiceContext { now: base + Duration::from_millis(16 * step as u64), theme: &nan, socket_path: &socket_path, scratch: &mut scratch };
+            tile.service(&mut ctx);
+        }
+        // Layered, and both layers are asserted. `same_as` stopped the
+        // loop: exactly one datagram went out, not a thousand. The codec
+        // stopped the value: that one datagram is the one a dockapp's
+        // decoder refuses, so the bad scale never reaches a `Theme` on
+        // the far side either.
+        let sent = drain(&peer);
+        let refused: Vec<_> = sent.iter().filter_map(|bytes| ServerMessage::decode(bytes).err()).collect();
+        assert_eq!(
+            refused,
+            vec![chonk_dock_proto::DecodeError::BadFloat { field: "scale", bits: f32::NAN.to_bits() }],
+            "one change is one message whatever the float, and that message is one the peer refuses"
+        );
+        assert!(themes_pushed(&sent).is_empty(), "nothing usable was claimed to be a theme");
+        assert!(tile.poll_fd().is_some(), "and the tile was never disconnected for overflow");
+    }
+
     /// A frame of the registered size is adopted; one of any other size
     /// is refused without disturbing the connection. Old-size frames
     /// are in flight exactly when a relayout happens, and blitting one
@@ -1577,10 +1836,9 @@ mod tests {
         let base = Instant::now();
         let mut tile = RemoteTile::new(entry(RestartPolicy::Never, 2), 56, base);
         tile.adopt(ours, InputMask::none(), welcome(), base);
-        let theme = theme();
         let socket_path = PathBuf::from("/test/dock.sock");
         let mut scratch = Vec::new();
-        let ctx = ServiceContext { now: base, tile_px: 56, scale: 1.0, theme: &theme, socket_path: &socket_path, scratch: &mut scratch };
+        let ctx = ServiceContext { now: base, theme: &welcome(), socket_path: &socket_path, scratch: &mut scratch };
 
         assert!(tile.on_frame(1, 56, 112, vec![0; 56 * 112 * 4], &ctx), "two units of 56px is exactly this tile");
         assert!(tile.last_frame.is_some());
