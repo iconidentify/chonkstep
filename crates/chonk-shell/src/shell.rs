@@ -42,29 +42,43 @@ pub enum ShellOutcome {
     Restart,
 }
 
-/// `urxvt`'s own default size (80x24, negotiated correctly through
-/// normal ICCCM size hints) is already reasonable, and — unlike
-/// alacritty, see the git history around this line for the saga — it
-/// reliably relayouts its content to match a real resize (confirmed
-/// live: resizing it externally correctly grows its reported terminal
-/// grid). So this needs no default-size workaround at all; just a
-/// legible font and a roomy geometry passed directly at launch.
+/// `foot`'s own default size is already reasonable, and it relayouts
+/// its content to match a real resize — so this needs no default-size
+/// workaround at all; just a legible font and a roomy geometry passed
+/// directly at launch. (alacritty was tried before urxvt, see the git
+/// history around this line for the resize saga; foot is not that
+/// terminal and negotiates xdg-shell configures properly.)
+//
+// foot rather than urxvt because this desktop runs as a Wayland
+// compositor: urxvt is an X11 client and every terminal the shell
+// spawned had to detour through XWayland. foot is Wayland-native, so
+// the terminal is a first-class `xdg_toplevel` on the same protocol as
+// the rest of the session.
+//
 // Fallback chain for glyphs the primary font's own Nerd Font icon patch
 // doesn't cover (some file-type icons in `ls`/`eza`-style aliases
-// rendered as an empty tofu box otherwise) — urxvt's `-fn` list is
-// consulted in order for whatever glyph the first font is missing.
-// Deliberately does *not* include `Noto Color Emoji`: tried it, and
-// urxvt (a classic Xft-based terminal, not GPU-accelerated — it has no
-// color-glyph rendering path the way alacritty/kitty do) doesn't just
-// fail to show emoji with it, it visibly corrupts nearby rendering
-// (a solid black rectangle over adjacent text, confirmed live). Emoji
-// support isn't something urxvt can do; leaving them unrendered is the
-// non-broken outcome.
+// rendered as an empty tofu box otherwise) — foot's `--font` list is
+// consulted in order for whatever glyph the first font is missing, the
+// same way urxvt's `-fn` list was. Unlike urxvt (a classic Xft
+// terminal with no color-glyph path, which corrupted nearby rendering
+// when handed `Noto Color Emoji`), foot does render color emoji from
+// its own fontconfig fallback, so nothing needs to be excluded here.
 //
-// The 16-color ANSI palette (`--color0`..`--color15`) plus fg/bg/cursor
-// match the theme this desktop's apps already use elsewhere (same
-// values as the old alacritty config's `[colors]` section) rather than
-// urxvt's own bland stock scheme.
+// The 16-color ANSI palette (`regular0`..`regular7`, `bright0`..
+// `bright7`) plus fg/bg/cursor match the theme this desktop's apps
+// already use elsewhere rather than foot's own stock scheme. foot
+// takes them as `--override` config keys, and its color values are
+// bare RRGGBB with no `#` prefix.
+//
+// `colors-dark`, not the bare `colors` section: foot 1.27 deprecates
+// the latter ("[colors]: deprecated; use [colors-dark] instead") and
+// warns once per key, which at twenty keys is twenty lines of noise in
+// the session log on every terminal launch. Pinning
+// `initial-color-theme=dark` alongside it is what makes the choice
+// safe — foot picks `colors-dark` by default, but a user's own
+// foot.ini setting `initial-color-theme=light` would otherwise send it
+// to a `colors-light` section this desktop never populates, leaving a
+// themed terminal wearing foot's stock palette.
 // Font and geometry are deliberately *not* per-theme: every theme keeps
 // the same terminal font, only its colors change. `pixelsize` tracks
 // CHONKSTEP_SCALE (16px at 1x) the same way the WM's own chrome does.
@@ -74,38 +88,57 @@ const TERMINAL_FONT_BASE_PX: f32 = 16.0;
 // exceeded it once the font scaled up).
 const TERMINAL_GEOMETRY: &str = "92x26";
 
-/// urxvt argument list for the active theme's terminal palette —
+/// foot argument list for the active theme's terminal palette —
 /// foreground/background/cursor plus the full 16-slot ANSI set, so
 /// every theme restyles terminals along with the chrome. The scale for
 /// the font size is recovered from the already-scaled theme (titlebar
 /// font is 12px at 1x) rather than re-reading the environment.
 fn terminal_args(theme: &Theme) -> Vec<String> {
-    let hex = |c: wm_theme::model::Color| format!("#{:02x}{:02x}{:02x}", c.r, c.g, c.b);
+    // foot wants bare RRGGBB, not the `#rrggbb` urxvt took.
+    let hex = |c: wm_theme::model::Color| format!("{:02x}{:02x}{:02x}", c.r, c.g, c.b);
     let px = (theme.titlebar.font.size / 12.0 * TERMINAL_FONT_BASE_PX).round().max(8.0) as u32;
     let mut args = vec![
-        "-fn".to_string(),
-        format!("xft:JetBrainsMono Nerd Font:pixelsize={px},xft:Noto Sans Symbols 2:pixelsize={px}"),
-        "-geometry".to_string(),
+        "--font".to_string(),
+        format!("JetBrainsMono Nerd Font:pixelsize={px},Noto Sans Symbols 2:pixelsize={px}"),
+        "--window-size-chars".to_string(),
         TERMINAL_GEOMETRY.to_string(),
-        "-fg".to_string(),
-        hex(theme.terminal.fg),
-        "-bg".to_string(),
-        // Deliberately opaque: the theme's glass opacity is applied by
-        // the compositor to the whole frame (the X11 binary registers
-        // a per-app opacity rule for urxvt), not by the terminal
-        // itself.
-        // Client-side alpha via a 32-bit visual was tried first and
-        // reverted: urxvt leaves stale framebuffer garbage in regions
-        // it fails to repaint on scroll/resize, so rows flickered
-        // between glass, garbage, and fully transparent (confirmed
-        // live).
-        hex(theme.terminal.bg),
-        "-cr".to_string(),
-        hex(theme.terminal.cursor),
+        "--override".to_string(),
+        "initial-color-theme=dark".to_string(),
+        "--override".to_string(),
+        format!("colors-dark.foreground={}", hex(theme.terminal.fg)),
+        "--override".to_string(),
+        format!("colors-dark.background={}", hex(theme.terminal.bg)),
+        // `cursor` is a *pair*: the text color drawn inside the cursor
+        // block, then the block itself. urxvt's `-cr` set only the
+        // block, so the background goes in the text slot to keep the
+        // classic reversed look the themes were written against.
+        "--override".to_string(),
+        format!("colors-dark.cursor={} {}", hex(theme.terminal.bg), hex(theme.terminal.cursor)),
     ];
+    // The theme's glass, applied by the terminal itself rather than by
+    // a compositor opacity rule. On X11 that rule is what produces
+    // translucency (`add_opacity_rule("URxvt", ..)` in the X11
+    // binary's main), and client-side alpha was deliberately avoided
+    // there because urxvt's 32-bit-visual path left stale framebuffer
+    // garbage on scroll/resize. Neither constraint survives the move:
+    // there is no per-app opacity rule on the Wayland side at all, so
+    // without this the themes' `opacity` would simply do nothing, and
+    // foot's own alpha is a clean premultiplied surface the compositor
+    // composites correctly.
+    if let Some(opacity) = theme.terminal.opacity {
+        args.push("--override".to_string());
+        args.push(format!("colors-dark.alpha={:.3}", f32::from(opacity) / 100.0));
+    }
     for (index, color) in theme.terminal.ansi.iter().enumerate() {
-        args.push(format!("--color{index}"));
-        args.push(hex(*color));
+        // 0-7 are the regular ANSI slots, 8-15 the bright ones; the
+        // theme stores them as one flat 16-slot array.
+        let key = if index < 8 {
+            format!("colors-dark.regular{index}")
+        } else {
+            format!("colors-dark.bright{}", index - 8)
+        };
+        args.push("--override".to_string());
+        args.push(format!("{key}={}", hex(*color)));
     }
     args
 }
@@ -114,26 +147,29 @@ fn terminal_args(theme: &Theme) -> Vec<String> {
 /// menu's Terminal item and the `spawn-terminal` keybinding, so the two
 /// gestures can never drift apart on font, geometry, or palette.
 fn spawn_terminal(theme: &Theme) {
-    spawn_urxvt(terminal_args(theme));
+    spawn_foot(terminal_args(theme));
 }
 
-/// The single urxvt spawn step: [`spawn_terminal`] passes the themed
+/// The single foot spawn step: [`spawn_terminal`] passes the themed
 /// args alone, [`launch_app`] appends `-e` plus a `.desktop` entry's
 /// command line for `Terminal=true` apps. Factored so the two callers
 /// can never drift on how the arg list actually reaches the process.
-fn spawn_urxvt(args: Vec<String>) {
+fn spawn_foot(args: Vec<String>) {
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    spawn::spawn_detached("urxvt", &arg_refs);
+    spawn::spawn_detached("foot", &arg_refs);
 }
 
 /// Launches one `.desktop` entry — the shared dispatch behind both the
 /// root menu's Applications submenu and the launcher dock's tiles, so
 /// the two gestures can never disagree on how an entry runs.
-/// `Terminal=true` entries run inside the themed terminal (urxvt's `-e`
-/// consumes the rest of the command line as the program to exec), so a
-/// TUI app gets the exact font/geometry/palette the Terminal menu item
-/// itself would. An empty parsed command line — a malformed entry the
-/// scanner let through — is a logged no-op, never a panic.
+/// `Terminal=true` entries run inside the themed terminal, so a TUI app
+/// gets the exact font/geometry/palette the Terminal menu item itself
+/// would. foot takes the program to exec as its trailing arguments and
+/// accepts `-e` as an explicit no-op for xterm compatibility, so the
+/// separator is kept: it costs nothing and keeps the command line
+/// readable as "terminal options, then the thing to run".
+/// An empty parsed command line — a malformed entry the scanner let
+/// through — is a logged no-op, never a panic.
 fn launch_app(entry: &AppEntry, theme: &Theme) {
     // Scale recovered from the already-scaled theme (titlebar font is
     // 12px at 1x) — the same trick `terminal_args` uses, so launch
@@ -147,7 +183,7 @@ fn launch_app(entry: &AppEntry, theme: &Theme) {
         let mut argv = terminal_args(theme);
         argv.push("-e".to_string());
         argv.extend(entry.exec.iter().cloned());
-        spawn_urxvt(argv);
+        spawn_foot(argv);
         return;
     }
     // External GUI launches get the environment/argument fixups the
