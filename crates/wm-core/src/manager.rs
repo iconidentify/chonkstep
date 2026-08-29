@@ -1247,7 +1247,8 @@ impl<B: Backend> WindowManager<B> {
         // height is overridden to `shaded_frame_height`, but the client's
         // own content geometry (and everything the theme computed from
         // it) is left completely untouched, so unshading is exact.
-        let frame_height = if client.flags.contains(ClientFlags::SHADED) { layout.shaded_frame_height } else { layout.frame_size.h };
+        let shaded = client.flags.contains(ClientFlags::SHADED);
+        let frame_height = if shaded { layout.shaded_frame_height } else { layout.frame_size.h };
         let frame_geom = Rect {
             pos: Point::new(
                 client.geometry.pos.x - layout.client_offset.x,
@@ -1260,7 +1261,15 @@ impl<B: Backend> WindowManager<B> {
 
         if let Some(frame) = client.frame {
             self.backend.set_frame_geometry(frame, frame_geom);
-            let buffer = self.theme.render(&request, &layout);
+            // Painted from the shade's *own* inputs, never the unshaded
+            // `layout` — see `shaded_paint_inputs` for why the frame
+            // rect alone is not enough.
+            let buffer = if shaded {
+                let (shaded_request, shaded_layout) = shaded_paint_inputs(&request, &layout);
+                self.theme.render(&shaded_request, &shaded_layout)
+            } else {
+                self.theme.render(&request, &layout)
+            };
             self.backend.paint_decoration(frame, &buffer);
         }
         self.backend.position_client(window, layout.client_offset);
@@ -1912,7 +1921,18 @@ impl<B: Backend> WindowManager<B> {
         };
         let pressed_button = self.active_button_press.as_ref().filter(|p| p.client == id).map(|p| p.kind);
         let request = Self::decoration_request(client, pressed_button);
-        let buffer = self.theme.render(&request, &client.layout);
+        // `client.layout` is deliberately kept at its full unshaded
+        // shape while shaded (that is what makes unshading exact), so
+        // every repaint of a shaded frame — a focus change, a title
+        // update, the button release that immediately follows the
+        // shading double-click itself — has to re-derive the shade's
+        // paint inputs rather than hand the theme that layout.
+        let buffer = if client.flags.contains(ClientFlags::SHADED) {
+            let (shaded_request, shaded_layout) = shaded_paint_inputs(&request, &client.layout);
+            self.theme.render(&shaded_request, &shaded_layout)
+        } else {
+            self.theme.render(&request, &client.layout)
+        };
         self.backend.paint_decoration(frame, &buffer);
     }
 
@@ -1941,6 +1961,45 @@ impl<B: Backend> WindowManager<B> {
             ],
         }
     }
+}
+
+/// The request/layout pair a *shaded* frame's decoration must be
+/// rasterized from, derived from the unshaded pair the theme produced.
+///
+/// Shrinking the frame rect (`Backend::set_frame_geometry`) is only half
+/// of rolling a window up. On X11 it passes for the whole thing by
+/// accident: the frame is a real server window, so shortening it clips
+/// whatever oversized pixmap was last blitted into it and the roll-up
+/// looks right even though the buffer is still full height. A Wayland
+/// frame has no such window — `wm-wayland`'s renderer composites the
+/// decoration buffer at `frame.geometry.pos` at the *buffer's* own size
+/// and never consults `frame.geometry.size` — so there the buffer IS the
+/// frame's outline. Painting the unshaded buffer left the full-size
+/// outline on screen (client area filled opaque black, resizebar and
+/// all) while the unmapped content vanished behind it: exactly the
+/// reported "double-click blanks the window instead of rolling it up".
+///
+/// `resizable: false` is not incidental. A rolled-up window has no
+/// bottom edge to drag — `handle_frame_button_press` already refuses a
+/// resize drag on a `SHADED` client — and `resizable` is precisely what
+/// tells the theme to spend height on a resizebar. Left set, the theme
+/// would still paint one, and at shaded height there is no room below
+/// the titlebar for it to land: it would be drawn straight over the
+/// titlebar's bottom edge. Clearing `resize_hitboxes` keeps the layout
+/// self-consistent with that (hit-testing a shaded frame never reaches
+/// them anyway — they sit below its bottom edge, outside the rect the
+/// backends test against — but a layout that paints no grip must not
+/// claim to have one). Neither of these is stored back on the client:
+/// `Client::layout` deliberately keeps the unshaded shape, which is
+/// what makes unshading exact, so this pair exists only for the length
+/// of one `ThemeEngine::render` call.
+fn shaded_paint_inputs(request: &DecorationRequest, layout: &DecorationLayout) -> (DecorationRequest, DecorationLayout) {
+    let mut request = request.clone();
+    request.resizable = false;
+    let mut layout = layout.clone();
+    layout.frame_size.h = layout.shaded_frame_height;
+    layout.resize_hitboxes.clear();
+    (request, layout)
 }
 
 /// Bounding box of two rects — how the per-monitor workareas collapse
@@ -3344,6 +3403,127 @@ mod tests {
     }
 
     #[test]
+    fn shade_paints_a_titlebar_only_decoration_buffer() {
+        // Regression test: shading shrank the frame *rect* but still
+        // painted the full-height decoration into it. On X11 the frame
+        // window clips the oversized buffer, so the roll-up looked
+        // right; on Wayland the buffer is the frame's outline (the
+        // renderer draws it at the buffer's own size), so the window
+        // went blank at full size instead of rolling up. Asserting the
+        // painted buffer against the frame rect catches it on either
+        // backend.
+        let mut backend = FakeBackend::new();
+        let window = backend.create_window();
+        backend.set_geometry(window, Rect { pos: Point::new(50, 50), size: Size::new(100, 100) });
+        let mut wm = wm(backend);
+        wm.dispatch(BackendEvent::MapRequest(window));
+        let id = wm.client_for_window(window).unwrap();
+        let frame = wm.client(id).unwrap().frame.unwrap();
+        let shaded_height = wm.client(id).unwrap().layout.shaded_frame_height;
+
+        wm.shade(id);
+
+        let painted = *wm.backend().last_paint_size.get(&frame).unwrap();
+        let frame_geom = *wm.backend().last_frame_geometry.get(&frame).unwrap();
+        assert_eq!(painted.h, shaded_height, "the decoration buffer must be rasterized at shaded height");
+        assert_eq!(painted, frame_geom.size, "the painted buffer must cover the frame rect exactly, no more");
+    }
+
+    #[test]
+    fn a_shaded_frame_stays_rolled_up_across_repaints() {
+        // The double-click that shades is followed immediately by the
+        // matching button *release*, which repaints the frame to clear
+        // any pressed button — and `repaint_decoration` renders from
+        // `client.layout`, which stays at its full unshaded shape by
+        // design. Before the fix that repaint re-inflated the buffer a
+        // few microseconds after the shade painted it correctly, so the
+        // user never saw a rolled-up frame at all.
+        let mut backend = FakeBackend::new();
+        let window = backend.create_window();
+        backend.set_geometry(window, Rect { pos: Point::new(50, 50), size: Size::new(100, 100) });
+        let mut wm = wm(backend);
+        wm.dispatch(BackendEvent::MapRequest(window));
+        let id = wm.client_for_window(window).unwrap();
+        let frame = wm.client(id).unwrap().frame.unwrap();
+        let shaded_height = wm.client(id).unwrap().layout.shaded_frame_height;
+
+        // A real double-click on the titlebar drag region, then the
+        // release that ends it.
+        let drag_point = Point::new(30, 2);
+        wm.dispatch(titlebar_press(frame, drag_point, 0, Modifiers::empty()));
+        wm.dispatch(titlebar_press(frame, drag_point, 100, Modifiers::empty()));
+        wm.dispatch(frame_release(frame, drag_point));
+
+        assert!(wm.client(id).unwrap().flags.contains(ClientFlags::SHADED));
+        let painted = *wm.backend().last_paint_size.get(&frame).unwrap();
+        assert_eq!(painted.h, shaded_height, "the repaint after the double-click must stay at shaded height");
+
+        // Any later repaint (focus change, title update) must hold the
+        // shade too — same trap, different trigger.
+        wm.backend_mut().set_title(window, "chrisk@imac:~/chonkstep");
+        wm.dispatch(BackendEvent::TitleChanged(window));
+        let painted = *wm.backend().last_paint_size.get(&frame).unwrap();
+        assert_eq!(painted.h, shaded_height, "a title-change repaint must not re-inflate a shaded frame");
+    }
+
+    #[test]
+    fn every_frame_state_change_paints_a_buffer_that_matches_the_frame_rect() {
+        // The invariant the shade bug broke, swept over the state
+        // changes that move a frame's edges. It is stated as "buffer ==
+        // rect" rather than "buffer is at least the rect" because a
+        // backend that composites the buffer directly (Wayland) shows
+        // every pixel of it: too small leaves the frame stunted, too
+        // large paints chrome over screen the frame doesn't own.
+        // Fullscreen is deliberately out of scope — that path paints no
+        // decoration at all (`reflow_frame`'s fullscreen branch), the
+        // client's own content covering the frame edge to edge.
+        type Op = (&'static str, fn(&mut WindowManager<FakeBackend>, ClientId));
+        let ops: &[Op] = &[
+            ("shade", |wm, id| wm.shade(id)),
+            ("unshade", |wm, id| {
+                wm.shade(id);
+                wm.unshade(id)
+            }),
+            ("maximize while shaded", |wm, id| {
+                wm.shade(id);
+                wm.maximize(id, MaximizeDirections::FULL)
+            }),
+            ("maximize", |wm, id| wm.maximize(id, MaximizeDirections::FULL)),
+            ("unmaximize", |wm, id| {
+                wm.maximize(id, MaximizeDirections::FULL);
+                wm.unmaximize(id)
+            }),
+            ("miniaturize and back", |wm, id| {
+                wm.miniaturize(id);
+                wm.deminiaturize(id)
+            }),
+        ];
+
+        for (name, op) in ops {
+            let mut backend = FakeBackend::new();
+            let window = backend.create_window();
+            backend.set_geometry(window, Rect { pos: Point::new(50, 50), size: Size::new(100, 100) });
+            let mut wm = wm(backend);
+            wm.dispatch(BackendEvent::MapRequest(window));
+            let id = wm.client_for_window(window).unwrap();
+            let frame = wm.client(id).unwrap().frame.unwrap();
+            assert_eq!(
+                wm.backend().last_paint_size.get(&frame).copied(),
+                wm.backend().last_frame_geometry.get(&frame).map(|geometry| geometry.size),
+                "map: decoration buffer and frame rect disagree"
+            );
+
+            op(&mut wm, id);
+
+            assert_eq!(
+                wm.backend().last_paint_size.get(&frame).copied(),
+                wm.backend().last_frame_geometry.get(&frame).map(|geometry| geometry.size),
+                "{name}: decoration buffer and frame rect disagree"
+            );
+        }
+    }
+
+    #[test]
     fn unshade_restores_full_frame_and_remaps_content() {
         let mut backend = FakeBackend::new();
         let window = backend.create_window();
@@ -3358,8 +3538,14 @@ mod tests {
 
         assert!(!wm.client(id).unwrap().flags.contains(ClientFlags::SHADED));
         assert_eq!(wm.backend().client_mapped.get(&window), Some(&true));
-        let frame_geom = wm.backend().last_frame_geometry.get(&frame).unwrap();
+        let frame_geom = *wm.backend().last_frame_geometry.get(&frame).unwrap();
         assert_eq!(frame_geom.size.h, wm.client(id).unwrap().layout.frame_size.h);
+        // The buffer has to grow back with the rect: a Wayland frame is
+        // only as big as the decoration painted into it, so a shaded
+        // buffer left behind here would leave the window a titlebar-
+        // sized strip with its content hanging out below it.
+        let painted = *wm.backend().last_paint_size.get(&frame).unwrap();
+        assert_eq!(painted, frame_geom.size, "unshading must repaint the decoration at full frame size");
     }
 
     #[test]

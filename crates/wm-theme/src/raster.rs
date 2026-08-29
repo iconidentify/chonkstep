@@ -567,6 +567,68 @@ mod tests {
         assert!(non_resizable_layout.resize_hitboxes.is_empty());
     }
 
+    /// The shade (windowshade / roll-up) render. `wm-core`'s
+    /// `shaded_paint_inputs` asks for exactly this shape — the theme's
+    /// own `shaded_frame_height` with `resizable` cleared — and the
+    /// result has to be a *whole* decoration at that height, not the top
+    /// slice of a taller one: the Wayland compositor draws the
+    /// decoration buffer at the buffer's own size with nothing to clip
+    /// it, so anything the theme paints outside those rows is what the
+    /// user sees on screen.
+    ///
+    /// The `resizable` half is the part that isn't obvious. At shaded
+    /// height there is no room below the titlebar for a resize bar, so a
+    /// theme still told to draw one puts it straight over the titlebar's
+    /// bottom edge — which is why the bottom border strip is checked
+    /// against the top one rather than merely checking the height.
+    #[test]
+    fn a_shaded_frame_renders_as_a_complete_titlebar_only_decoration() {
+        let engine = RasterThemeEngine::nextstep_classic();
+        let border = engine.theme().border.width as u32;
+        let request = sample_request("xterm", true);
+        let layout = engine.layout(&request);
+        assert_eq!(
+            layout.shaded_frame_height,
+            layout.titlebar_height + border * 2,
+            "the shade keeps the titlebar and its own top/bottom border, nothing else"
+        );
+
+        let full = engine.render(&request, &layout);
+
+        let mut shaded_request = request.clone();
+        shaded_request.resizable = false;
+        let mut shaded_layout = layout.clone();
+        shaded_layout.frame_size.h = layout.shaded_frame_height;
+        shaded_layout.resize_hitboxes.clear();
+        let shaded = engine.render(&shaded_request, &shaded_layout);
+
+        assert_eq!(shaded.width, layout.frame_size.w);
+        assert_eq!(shaded.height, layout.shaded_frame_height);
+        assert_eq!(shaded.pixels.len(), (shaded.width * shaded.height * 4) as usize);
+
+        let row = |buffer: &DecorationBuffer, y: u32| {
+            let stride = (buffer.width * 4) as usize;
+            buffer.pixels[y as usize * stride..(y as usize + 1) * stride].to_vec()
+        };
+
+        // Everything above the bottom border — titlebar fill, bevel
+        // segments, title text, button glyphs — is pixel-for-pixel the
+        // decoration the unshaded frame draws in the same rows. A shade
+        // is the same titlebar, not a redrawn one.
+        for y in 0..(layout.shaded_frame_height - border) {
+            assert_eq!(row(&shaded, y), row(&full, y), "shaded row {y} differs from the unshaded frame's titlebar");
+        }
+        // And the rows the resize bar would have landed in are plain
+        // border, identical to the top border strip.
+        for y in 0..border {
+            assert_eq!(
+                row(&shaded, layout.shaded_frame_height - border + y),
+                row(&shaded, y),
+                "the shade's bottom border strip is not plain border — something (the resize bar) painted into it"
+            );
+        }
+    }
+
     /// The OS X-style zones: every edge and corner of a resizable frame
     /// must be reachable, with the extreme corner pixels resolving to a
     /// *corner* (diagonal) resize rather than the adjacent edge band —

@@ -41,8 +41,8 @@ use smithay::wayland::shell::xdg::{SurfaceCachedState, ToplevelSurface, XdgTople
 use smithay::xwayland::xwm::WmWindowType;
 
 use wm_core::{
-    Backend, BackendEvent, DragHandle, KeyCombo, MonitorInfo, MouseButton, SizeHints, WindowType,
-    WmClass, WmProtocol,
+    Backend, BackendEvent, DragHandle, KeyCombo, MonitorInfo, MouseButton, ScrollDelta, SizeHints,
+    WindowType, WmClass, WmProtocol,
 };
 use wm_theme_api::{DecorationBuffer, DecorationLayout, Point, Rect, ResizeEdge, Size};
 
@@ -231,6 +231,10 @@ impl Backend for WaylandBackend {
 
     fn take_shell_motion(&mut self) -> Option<(Self::ShellId, Point)> {
         self.shell_motions.pop_front()
+    }
+
+    fn take_shell_scroll(&mut self) -> Option<(Self::ShellId, Point, ScrollDelta)> {
+        self.shell_scrolls.pop_front()
     }
 
     fn take_screen_resize(&mut self) -> Option<Size> {
@@ -492,6 +496,18 @@ impl Backend for WaylandBackend {
 
     // -- geometry / visibility --------------------------------------------
 
+    /// Note what `geometry.size` does and does not do here. It is the
+    /// frame's *input* extent — `input.rs`'s `hit_at` tests points
+    /// against exactly this rect — but not its visible one: there is no
+    /// server-side frame window to clip anything, so `renderer.rs`
+    /// composites the decoration buffer at `geometry.pos` at the
+    /// buffer's own size and never reads this size at all. A caller that
+    /// changes a frame's size without painting a buffer to match has
+    /// moved the clickable rect out from under an unchanged picture.
+    /// (That is the whole windowshade bug: `wm-core` shrank the frame
+    /// for a shaded window but painted the full-height decoration into
+    /// it, which X11's real frame window happened to clip and this
+    /// backend does not — see `wm-core`'s `shaded_paint_inputs`.)
     fn set_frame_geometry(&mut self, frame: Self::FrameId, geometry: Rect) {
         let Some(record) = self.frames.get_mut(&frame) else {
             return;
