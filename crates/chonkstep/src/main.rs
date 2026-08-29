@@ -15,6 +15,7 @@ use wm_core::{Backend, BackendEvent, FocusPolicy, WindowManager};
 use wm_theme::RasterThemeEngine;
 use wm_x11::X11Backend;
 
+use chonk_shell::dockapp::Farewell;
 use chonk_shell::shell::{Shell, ShellOutcome};
 use chonk_shell::startup::{ensure_xcursor_size, read_focus_follows_mouse, read_scale_factor, resolve_theme};
 use chonk_shell::spawn;
@@ -116,10 +117,11 @@ fn main() {
         if restart_requested() {
             tracing::info!("restart requested — re-executing in place");
             // Dockapps first: `restart_in_place` never returns, and the
-            // replacement process launches its own copy of every
-            // registered tile from the registry. See
-            // `Shell::shut_down`.
-            shell.shut_down();
+            // replacement process has to be told which of them are still
+            // out there. `Restarting` leaves them running and hands
+            // their tokens forward, so they are readopted rather than
+            // relaunched. See `Shell::shut_down`.
+            shell.shut_down(Farewell::Restarting);
             restart_in_place();
         }
 
@@ -284,8 +286,9 @@ fn main() {
 
     // Whatever ended the loop — the root menu's Exit, a lost display —
     // the dockapps this session launched are its responsibility and
-    // nothing else will collect them.
-    shell.shut_down();
+    // nothing else will collect them. Nothing is handed forward: there
+    // is no incoming shell to hand it to.
+    shell.shut_down(Farewell::SessionOver);
 }
 
 /// How often the main loop wakes up on its own even with no X11
@@ -365,11 +368,11 @@ fn exit_requested(shell: &mut Shell<X11Backend>, outcome: ShellOutcome) -> bool 
         // SaveSet — which is also what makes the theme menu (and a
         // bound `Restart` action) the config hot-reload gesture.
         ShellOutcome::Restart => {
-            // `restart_in_place` never returns and the replacement
-            // process launches its own copy of every registered
-            // dockapp, so the outgoing one has to let go of its first
-            // — see `Shell::shut_down`.
-            shell.shut_down();
+            // `restart_in_place` never returns, so the outgoing shell
+            // has to let go of its dockapps first — leaving them
+            // running, and handing their tokens to the process that is
+            // about to replace it. See `Shell::shut_down`.
+            shell.shut_down(Farewell::Restarting);
             restart_in_place()
         }
     }

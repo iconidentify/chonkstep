@@ -32,7 +32,7 @@ use wm_theme::{icon, paint, panel, tile, Theme};
 use wm_theme_api::{DecorationBuffer, Point, Rect, Size};
 
 use crate::dockapp::tile::{RemoteTile, ServiceContext, StopReason, TileState};
-use crate::dockapp::{self, DockHost};
+use crate::dockapp::{self, DockHost, Farewell};
 use crate::wallpaper::Wallpaper;
 use crate::widgets::{
     run_detached, ClockWidget, DockInput, DockItem, DockWidget, Effect, NetTrafficWidget, PowerWidget, SamplerRegistry, SoundWidget, SupervisedWidget,
@@ -629,6 +629,12 @@ fn describe_tile_state(state: TileState, now: std::time::Instant) -> String {
     match state {
         TileState::Waiting { until } => format!("restarting in {:?}", until.saturating_duration_since(now)),
         TileState::Starting { .. } => "starting".to_string(),
+        // Worth naming rather than folding into "starting": the user
+        // just restarted the shell, and "still running from before the
+        // restart" is the interesting fact about this tile.
+        TileState::Rejoining { until } => {
+            format!("waiting {:?} for it to reconnect", until.saturating_duration_since(now))
+        }
         TileState::Live => "running".to_string(),
         TileState::Hung { since } => format!("not responding for {:?}", now.saturating_duration_since(since)),
         TileState::Stopped { reason } => match reason {
@@ -1101,11 +1107,25 @@ impl<B: Backend> Desktop<B> {
         let dockapps = DockHost::new(&dockapp::current_display());
         let registered = if dockapps.is_listening() { dockapp::registry::scan() } else { Vec::new() };
         let now = std::time::Instant::now();
+        // Tokens the *previous* shell left behind, if this start is a
+        // hot restart. Read and deleted here, before the column is
+        // built, so a tile whose dockapp is still running out there
+        // holds its slot open for the survivor instead of launching a
+        // second copy of it. See `dockapp::handoff` — this is the half
+        // that turns the SDK's reconnect-on-EOF loop (written in Phase
+        // 4a, unhonoured until now) into restart survival.
+        let mut inherited = dockapps.handoff_path().map(|path| dockapp::handoff::take(&path)).unwrap_or_default();
 
         let mut samplers = SamplerRegistry::new();
         let items: Vec<SupervisedWidget> = builtin_items()
             .into_iter()
-            .chain(registered.into_iter().map(|entry| DockItem::Remote(Box::new(RemoteTile::new(entry, tile, now)))))
+            .chain(registered.into_iter().map(|entry| {
+                let mut remote = RemoteTile::new(entry, tile, now);
+                if let Some(token) = inherited.remove(remote.id()) {
+                    remote.rejoin(token, now);
+                }
+                DockItem::Remote(Box::new(remote))
+            }))
             // Supervision is applied here, at the one place items enter
             // the dock, rather than being something each item opts
             // into: the item that needs it most is by definition the
@@ -1548,60 +1568,18 @@ impl<B: Backend> Desktop<B> {
 
     /// Matches one `Hello` to the tile that minted its token.
     ///
-    /// Every rejection below answers with a reason on the wire and a
-    /// detail in the log, never the other way around: a peer that
-    /// failed authentication learns "you were not launched by this
-    /// shell" and nothing about the shell's internals.
+    /// The decision itself lives in [`dockapp::admit`], over an iterator
+    /// of tiles rather than over `self`: it is the one piece of this
+    /// feature that is worth testing against a real socket and a real
+    /// handshake, and a `Desktop` needs a backend.
     fn admit(&mut self, admission: crate::dockapp::Admission, now: std::time::Instant) {
-        let crate::dockapp::Admission { socket, hello } = admission;
-        let chonk_dock_proto::ClientMessage::Hello { id, .. } = &hello else {
-            dockapp::goodbye(&socket, chonk_dock_proto::wire::GoodbyeReason::ProtocolError);
-            return;
-        };
-        let id = id.clone();
-        // Cloned before the tile is borrowed, and taken from the same
+        // Cloned before the tiles are borrowed, and taken from the same
         // cache `service_dockapps` hands every tile this pass — so the
         // geometry a `Hello` is validated against, the geometry the
         // `Welcome` announces, and the geometry `on_frame` will insist
         // on are one value rather than three that happen to agree.
         let welcome = self.dockapps.theme().clone();
-        let tile_px = welcome.tile_px;
-        let Some(tile) = self.items.iter_mut().filter_map(|item| item.remote_mut()).find(|tile| tile.id() == id) else {
-            tracing::warn!(%id, "a dockapp presented an id with no registered slot");
-            dockapp::goodbye(&socket, chonk_dock_proto::wire::GoodbyeReason::Unauthorized);
-            return;
-        };
-        // One connection per registered id. The already-connected tile
-        // keeps its connection: the incoming one is either a second
-        // instance of a dockapp that failed to notice it was already
-        // running, or a process that guessed a token — and in neither
-        // case is displacing a working tile the right answer.
-        if !tile.awaiting_hello() {
-            tracing::warn!(%id, "a second connection claimed a dockapp id that is already connected");
-            dockapp::goodbye(&socket, chonk_dock_proto::wire::GoodbyeReason::Replaced);
-            return;
-        }
-        match chonk_dock_proto::validate_hello(&hello, tile.token(), tile_px) {
-            Ok(accepted) => {
-                if accepted.tile_units != tile.entry().tile_units {
-                    // The registry is the authority on how much of the
-                    // column a dockapp occupies — the dock laid out for
-                    // that number before the process even started.
-                    tracing::warn!(%id, asked = accepted.tile_units, registered = tile.entry().tile_units, "a dockapp asked for a different tile height than it registered");
-                    dockapp::goodbye(&socket, chonk_dock_proto::wire::GoodbyeReason::TileTooLarge);
-                    return;
-                }
-                // The same value `push_theme` compares against, from the
-                // same producer, so a dockapp that connects and one that
-                // restyles can never be told different things about the
-                // current dock.
-                tile.adopt(socket, accepted.wants, welcome, now);
-            }
-            Err(reason) => {
-                tracing::warn!(%id, ?reason, "refusing a dockapp connection");
-                dockapp::goodbye(&socket, reason);
-            }
-        }
+        dockapp::admit(self.items.iter_mut().filter_map(|item| item.remote_mut()), admission, &welcome, now);
     }
 
     /// Opens a dock tile's own right-click menu, if the tile at `local`
@@ -1695,29 +1673,15 @@ impl<B: Backend> Desktop<B> {
         self.items[index].on_input(input, self.tile)
     }
 
-    /// Stops every out-of-process tile, for a session that is ending or
-    /// re-execing.
+    /// Lets go of every out-of-process tile, for a session that is
+    /// ending or re-execing.
     ///
-    /// Without this a hot restart — which is what a theme pick *is* —
-    /// briefly doubles every dockapp. The old process sees its socket
-    /// EOF and, per the SDK's reconnect-on-EOF loop, spends ten seconds
-    /// trying to reach a shell that has been replaced, while the fresh
-    /// shell has already launched its own copy from the registry. The
-    /// old one is eventually refused (its token was minted by a process
-    /// that no longer exists) and exits, so nothing is *broken* — but
-    /// for those ten seconds the user pays for two of everything, and
-    /// on a theme-menu session that is a thing they will do repeatedly.
-    ///
-    /// `Goodbye { Shutdown }` first, because the reason is actionable
-    /// on the far side: it says "reconnecting is pointless" as against
-    /// the bare EOF that means "try again". Best-effort, like every
-    /// send here.
-    pub fn shut_down_dockapps(&mut self) {
-        for item in &mut self.items {
-            if let Some(tile) = item.remote_mut() {
-                tile.shut_down(chonk_dock_proto::wire::GoodbyeReason::Shutdown);
-            }
-        }
+    /// The decision is [`dockapp::shut_down`]'s; this supplies the
+    /// tiles and the path. See there for what the two farewells mean and
+    /// why the restarting one is the whole of Phase 4c's payoff.
+    pub fn shut_down_dockapps(&mut self, farewell: Farewell) {
+        let handoff = self.dockapps.handoff_path();
+        dockapp::shut_down(self.items.iter_mut().filter_map(|item| item.remote_mut()), handoff.as_deref(), farewell);
     }
 
     /// Performs what a widget asked for.

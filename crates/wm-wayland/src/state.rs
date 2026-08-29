@@ -72,6 +72,7 @@ use wm_core::{
 use wm_theme::{RasterThemeEngine, Theme};
 use wm_theme_api::{DecorationBuffer, Point, Rect, Size};
 
+use chonk_shell::dockapp::Farewell;
 use chonk_shell::shell::{Shell, ShellOutcome};
 
 /// A managed client window (an xdg toplevel or an XWayland surface) in
@@ -1301,9 +1302,17 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
 
     // Whatever ended the loop — the root menu's Exit, a theme pick, a
     // touched restart marker — the dockapps this session launched are
-    // its responsibility, and the replacement process will launch its
-    // own copy of every one of them. See `Shell::shut_down`.
-    comp.shell.shut_down();
+    // its responsibility. On a restart they are left running and their
+    // tokens are handed to the incoming compositor, which readopts them;
+    // on a real exit they are stopped. See `Shell::shut_down`.
+    //
+    // Worth naming here of all places, because this is the backend where
+    // it is remarkable: a Wayland client dies with the compositor's
+    // socket and there is no SaveSet equivalent to adopt it afterwards
+    // (README, "Restart costs you your clients"). A dockapp is not a
+    // Wayland client, so it survives the restart that kills every window
+    // on the screen — strictly more than any ordinary client here gets.
+    comp.shell.shut_down(if comp.restart { Farewell::Restarting } else { Farewell::SessionOver });
 
     if comp.restart {
         // `nested` is the decision this process made at startup, so the

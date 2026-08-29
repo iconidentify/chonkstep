@@ -96,6 +96,18 @@ pub(crate) const UNANSWERED_PINGS_BEFORE_HUNG: u32 = 3;
 /// this one measures a cold binary's startup on a loaded machine.
 pub(crate) const HANDSHAKE_GRACE: Duration = Duration::from_secs(10);
 
+/// How long a tile holds its slot open for a dockapp handed over from
+/// the previous shell before giving up and launching a fresh one.
+///
+/// Ten seconds, matched deliberately to the SDK's `RECONNECT_WINDOW`
+/// (`chonk_ui::dockapp`): the survivor tries for exactly that long, so a
+/// shorter wait here would launch a second copy while the first was
+/// still knocking, and a longer one would leave a hole in the dock after
+/// the survivor had already given up and exited. The two numbers are one
+/// number, and changing either without the other reintroduces the
+/// double-launch this whole mechanism exists to remove.
+pub(crate) const REJOIN_WINDOW: Duration = Duration::from_secs(10);
+
 /// Notches beyond which one drained scroll gesture stops being
 /// forwarded.
 ///
@@ -133,6 +145,18 @@ pub(crate) enum TileState {
     /// Launched; no `Hello` yet. `since` bounds it against
     /// [`HANDSHAKE_GRACE`].
     Starting { since: Instant },
+    /// Handed forward across the shell's own restart: a process from
+    /// the *previous* shell is still running with a token this tile has
+    /// inherited, and this tile is holding its slot open instead of
+    /// launching a second copy. `until` is when it gives up and does.
+    ///
+    /// Distinct from [`Starting`](Self::Starting) rather than folded
+    /// into it because the difference is real and shows up in three
+    /// places: there is no child process of ours to reap or terminate,
+    /// giving up is not a *failure* (nothing crashed — a dockapp simply
+    /// did not come back) so it must not spend the crash-loop budget,
+    /// and the log lines say entirely different things.
+    Rejoining { until: Instant },
     /// Connected, answering pings, sending frames.
     Live,
     /// Connected, but [`UNANSWERED_PINGS_BEFORE_HUNG`] pings have gone
@@ -392,6 +416,21 @@ impl RemoteTile {
         self.connection.as_ref().map(|c| c.socket.as_raw_fd())
     }
 
+    /// Everything [`launch`](Self::launch) does to this tile's own state
+    /// except the `fork`/`exec`.
+    ///
+    /// Exists so the restart-survival tests can stand a tile in the
+    /// state a launched one is in — token minted, awaiting a `Hello` —
+    /// and then drive a real socket against it, without a real dockapp
+    /// binary in the loop. Deliberately mirrors `launch` line for line;
+    /// if that ever does more to `self` than this does, this is wrong.
+    #[cfg(test)]
+    pub(crate) fn pretend_launched(&mut self, token: [u8; TOKEN_BYTES], now: Instant) {
+        self.token = token;
+        self.state = TileState::Starting { since: now };
+        self.dirty = true;
+    }
+
     // -----------------------------------------------------------------
     // Handshake
     // -----------------------------------------------------------------
@@ -399,8 +438,92 @@ impl RemoteTile {
     /// Whether this tile is waiting for a `Hello` — i.e. whether an
     /// incoming connection presenting this id should be considered at
     /// all.
+    /// # The adoption rule, and the token
+    ///
+    /// The set is deliberately narrow: a tile admits a `Hello` only
+    /// while it is *expecting* one and has no connection. `Starting`
+    /// means this shell launched a process that has not spoken yet;
+    /// `Rejoining` means the previous shell did, and handed this one the
+    /// token so the survivor can be readopted rather than replaced.
+    ///
+    /// What this does **not** widen is how many connections a tile has.
+    /// A `Hello` for an id that is already connected is still refused
+    /// with `Replaced`, *even when it presents a valid token*, and that
+    /// is the deliberate call:
+    ///
+    /// * A valid token proves "you were launched for this slot". It does
+    ///   not prove "you are the process currently drawing it". The token
+    ///   is a shared secret handed over in the environment, so a forked
+    ///   copy of the dockapp, or any process of this user that read
+    ///   `/proc/<pid>/environ`, holds one just as good.
+    /// * The failure mode of the alternative is worse. Displacing on a
+    ///   token match would let a second instance of a dockapp — a user
+    ///   starting it by hand, a `.dockapp` whose `exec` forks — silently
+    ///   steal a working tile, and would give anything that can read the
+    ///   token a takeover at a moment of its choosing.
+    /// * Refusing costs the loser almost nothing. The genuine reconnect
+    ///   case never collides, because socket EOF is instant and
+    ///   definitive: by the time a survivor's `Hello` arrives, the tile
+    ///   it wants has already seen its predecessor go. A dockapp refused
+    ///   here is one whose slot really is occupied, and it exits.
     pub(crate) fn awaiting_hello(&self) -> bool {
-        matches!(self.state, TileState::Starting { .. }) && self.connection.is_none()
+        matches!(self.state, TileState::Starting { .. } | TileState::Rejoining { .. }) && self.connection.is_none()
+    }
+
+    /// Inherits a token from the previous shell and holds this tile's
+    /// slot open for the process that already has it.
+    ///
+    /// Called at startup for every registered id that appears in the
+    /// handoff file (see [`super::handoff`]). Nothing is launched while
+    /// the tile is [`TileState::Rejoining`]; if nobody claims the slot
+    /// within [`REJOIN_WINDOW`] the tile falls back to a normal launch,
+    /// so the worst case of a handoff for a process that died in the gap
+    /// is a tile that appears a few seconds late.
+    pub(crate) fn rejoin(&mut self, token: [u8; TOKEN_BYTES], now: Instant) {
+        tracing::info!(id = %self.entry.id, "holding a dock slot open for a dockapp that survived the shell restart");
+        self.token = token;
+        self.state = TileState::Rejoining { until: now + REJOIN_WINDOW };
+        self.dirty = true;
+    }
+
+    /// Lets go of a running dockapp *without* killing it, so it can be
+    /// readopted by the shell that replaces this one. Returns the token
+    /// the replacement will need, or `None` if there is nothing worth
+    /// handing over.
+    ///
+    /// Three deliberate omissions, each of which would break the
+    /// handoff if it were here:
+    ///
+    /// * No `Goodbye`. The reason codes are actionable on the far side —
+    ///   `Shutdown` means "reconnecting is pointless" — and a bare EOF
+    ///   means "try again", which is exactly the instruction. This is
+    ///   the one place the shell deliberately says nothing.
+    /// * No `terminate`. The whole point is that the process outlives
+    ///   this shell.
+    /// * No token re-mint. The survivor will present the one it was
+    ///   given at launch.
+    ///
+    /// A [`TileState::Hung`] tile is *not* handed over. It has stopped
+    /// running its own event loop, so it will not notice the EOF, will
+    /// never reconnect, and nothing would ever collect it — an orphan
+    /// for the rest of the login session. It gets the ordinary shutdown
+    /// instead.
+    pub(crate) fn hand_off(&mut self) -> Option<(String, [u8; TOKEN_BYTES])> {
+        let worth_keeping = matches!(self.state, TileState::Starting { .. } | TileState::Live | TileState::Rejoining { .. });
+        if !worth_keeping {
+            return None;
+        }
+        self.connection = None;
+        // Dropped, not terminated. `SpawnedChild` has no `Drop` of its
+        // own — killing is `terminate()`, which is exactly what is not
+        // being called here — so letting go of the handle leaves the
+        // process running. It was spawned detached to begin with, so it
+        // simply reparents to init like any other detached child when
+        // this shell `exec`s away.
+        self.child = None;
+        self.dirty = true;
+        tracing::info!(id = %self.entry.id, "leaving a dockapp running across the shell restart");
+        Some((self.entry.id.clone(), self.token))
     }
 
     /// Accepts an authenticated connection. The caller has already run
@@ -848,6 +971,16 @@ impl RemoteTile {
             TileState::Starting { since } if self.connection.is_none() && ctx.now.saturating_duration_since(since) >= HANDSHAKE_GRACE => {
                 self.disconnected(ctx.now, "launched but never completed a handshake");
             }
+            // The handed-off process never came back. Not a failure —
+            // nothing crashed, and the likeliest cause is that it had
+            // already exited before the restart — so this goes straight
+            // to a launch rather than through `disconnected`, which
+            // would spend one of the five failures the crash-loop cutoff
+            // counts.
+            TileState::Rejoining { until } if ctx.now >= until => {
+                tracing::info!(id = %self.entry.id, waited = ?REJOIN_WINDOW, "no dockapp reclaimed this slot after the restart; launching a fresh one");
+                self.launch(ctx);
+            }
             _ => {}
         }
     }
@@ -1079,7 +1212,7 @@ impl DockWidget for RemoteTile {
             // "no sink", "no interface", "no battery". A starting
             // dockapp should read as an instrument warming up, not as a
             // hole in the column.
-            (TileState::Waiting { .. } | TileState::Starting { .. } | TileState::Live | TileState::Hung { .. }, _) => {
+            (TileState::Waiting { .. } | TileState::Starting { .. } | TileState::Rejoining { .. } | TileState::Live | TileState::Hung { .. }, _) => {
                 dead_face(theme, fonts, swash, tile, units, &self.entry.name)
             }
             (TileState::Stopped { .. }, _) => {
@@ -1128,7 +1261,7 @@ impl DockWidget for RemoteTile {
                 }
                 return Vec::new();
             }
-            TileState::Waiting { .. } | TileState::Starting { .. } => return Vec::new(),
+            TileState::Waiting { .. } | TileState::Starting { .. } | TileState::Rejoining { .. } => return Vec::new(),
         }
 
         let Some(event) = wire_event(&input) else { return Vec::new() };
@@ -1852,6 +1985,49 @@ mod tests {
     // -----------------------------------------------------------------
     // Policy
     // -----------------------------------------------------------------
+
+    /// A handed-off dockapp that never came back is not a *failure*.
+    /// Nothing crashed — the likeliest cause is that it had already
+    /// exited before the restart — so giving up on the rejoin must not
+    /// spend one of the five attempts the crash-loop cutoff counts.
+    /// Charging it would mean five theme picks in a minute could stop a
+    /// perfectly healthy tile permanently.
+    #[test]
+    fn giving_up_on_a_rejoin_launches_without_spending_the_crash_budget() {
+        let base = Instant::now();
+        let mut tile = RemoteTile::new(entry(RestartPolicy::Always, 1), 56, base);
+        tile.rejoin([7u8; TOKEN_BYTES], base);
+        assert_eq!(tile.state, TileState::Rejoining { until: base + REJOIN_WINDOW });
+        assert_eq!(tile.token(), &[7u8; TOKEN_BYTES], "the inherited token is what a survivor has to present");
+
+        let socket_path = PathBuf::from("/test/dock.sock");
+        let mut scratch = Vec::new();
+        let steady = welcome();
+
+        // Still inside the window: held open, nothing launched.
+        let mut ctx = ServiceContext { now: base + REJOIN_WINDOW / 2, theme: &steady, socket_path: &socket_path, scratch: &mut scratch };
+        tile.service(&mut ctx);
+        assert_eq!(tile.state, TileState::Rejoining { until: base + REJOIN_WINDOW });
+        assert_eq!(tile.budget.recent_failures(), 0);
+
+        // Past it: a fresh launch. The entry's program does not exist, so
+        // the launch itself fails and books exactly one failure — the
+        // number to look at, because going through `disconnected` for the
+        // expiry as well would have made it two.
+        let mut ctx = ServiceContext { now: base + REJOIN_WINDOW, theme: &steady, socket_path: &socket_path, scratch: &mut scratch };
+        tile.service(&mut ctx);
+        assert_eq!(tile.budget.recent_failures(), 1, "the failed launch, and only the failed launch");
+        assert!(matches!(tile.state, TileState::Waiting { .. }), "backing off to try the program again");
+    }
+
+    /// The rejoin window and the SDK's reconnect window are one number.
+    /// A shorter wait here launches a second copy while the survivor is
+    /// still knocking; a longer one leaves a hole in the dock after the
+    /// survivor has already given up and exited.
+    #[test]
+    fn the_shell_waits_exactly_as_long_as_a_dockapp_keeps_knocking() {
+        assert_eq!(REJOIN_WINDOW, Duration::from_secs(10), "chonk_ui::dockapp::RECONNECT_WINDOW is the same ten seconds");
+    }
 
     #[test]
     fn a_tile_starts_due_immediately_rather_than_after_a_backoff() {

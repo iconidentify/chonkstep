@@ -71,6 +71,7 @@
 //! freeze the compositor, cannot see another tile's content or events,
 //! and cannot enumerate or capture your windows.
 
+pub(crate) mod handoff;
 pub(crate) mod registry;
 pub(crate) mod tile;
 
@@ -83,6 +84,25 @@ use chonk_dock_proto::transport::{Seqpacket, SeqpacketListener};
 use chonk_dock_proto::wire::{GoodbyeReason, ThemeState};
 use chonk_dock_proto::{ClientMessage, ServerMessage, MAX_MESSAGE_BYTES};
 use wm_theme::model::Theme;
+
+/// Why the session is letting go of its dockapps — and therefore
+/// whether they are being *stopped* or *handed forward*.
+///
+/// One enum rather than two methods because the caller is a binary's
+/// event loop that already knows which of the two it is doing, and
+/// because the wrong answer is silent in both directions: stopping on a
+/// restart loses the feature, handing forward on a logout leaves
+/// processes running after the session that owns them is gone.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Farewell {
+    /// This process is about to `exec` its replacement. Dockapps stay
+    /// running and their tokens are written where the incoming shell
+    /// will find them — see [`handoff`].
+    Restarting,
+    /// The session is over. Dockapps are told `Goodbye { Shutdown }` and
+    /// terminated, and any handoff file is cleared.
+    SessionOver,
+}
 
 /// A connection that has been accepted but has not identified itself.
 struct Pending {
@@ -228,9 +248,18 @@ impl DockHost {
             Ok(path) => path,
             Err(error) => {
                 tracing::warn!(?error, "no dockapp socket path; dockapps are unavailable this session");
-                return Self { listener: None, socket_path: PathBuf::new(), pending: Vec::new(), scratch: Vec::new(), broadcast: ThemeBroadcast::new() };
+                return Self::unbound(PathBuf::new());
             }
         };
+        Self::bind_at(socket_path)
+    }
+
+    /// Binds a named socket. Split out of [`new`](Self::new) so a test
+    /// can stand a real listener up in a scratch directory without
+    /// touching `$XDG_RUNTIME_DIR` — the environment is process-global
+    /// and this crate's tests share one binary, so an env-var dance here
+    /// would be a test that fails whenever another one runs beside it.
+    pub(crate) fn bind_at(socket_path: PathBuf) -> Self {
         match SeqpacketListener::bind(&socket_path) {
             Ok(listener) => {
                 tracing::info!(socket = %socket_path.display(), "dockapp socket listening");
@@ -238,13 +267,26 @@ impl DockHost {
             }
             Err(error) => {
                 tracing::warn!(?error, socket = %socket_path.display(), "could not bind the dockapp socket; dockapps are unavailable this session");
-                Self { listener: None, socket_path, pending: Vec::new(), scratch: Vec::new(), broadcast: ThemeBroadcast::new() }
+                Self::unbound(socket_path)
             }
         }
     }
 
+    /// A session with no dockapp socket: every built-in instrument, no
+    /// remote tiles, and no failure anybody has to handle.
+    fn unbound(socket_path: PathBuf) -> Self {
+        Self { listener: None, socket_path, pending: Vec::new(), scratch: Vec::new(), broadcast: ThemeBroadcast::new() }
+    }
+
     pub(crate) fn socket_path(&self) -> &PathBuf {
         &self.socket_path
+    }
+
+    /// Where the tokens of dockapps left running across a restart are
+    /// written and read. `None` for a session with no socket, which is a
+    /// session with no dockapps.
+    pub(crate) fn handoff_path(&self) -> Option<PathBuf> {
+        handoff::beside(&self.socket_path)
     }
 
     pub(crate) fn is_listening(&self) -> bool {
@@ -360,6 +402,149 @@ impl DockHost {
     }
 }
 
+/// Matches one `Hello` to the tile that minted its token, and adopts it
+/// if it earns the slot.
+///
+/// # The adoption rule
+///
+/// A `Hello` is admitted when the id names a registered tile, that tile
+/// is *expecting* a connection ([`RemoteTile::awaiting_hello`] — either
+/// it just launched a process, or it inherited a token across the
+/// shell's restart and is holding the slot open), and the token it
+/// presents is still that tile's. All three, every time. The reconnect
+/// case does not relax any of them; it only widens which tile *states*
+/// count as expecting.
+///
+/// # A valid token does not displace a connected tile
+///
+/// The `Replaced` refusal below fires even for a `Hello` whose token
+/// would have validated, and that is deliberate. A valid token proves
+/// "you were launched for this slot" — not "you are the process
+/// currently drawing it". It is a shared secret handed over in the
+/// environment, so a forked copy of the dockapp, or any process of this
+/// user that read `/proc/<pid>/environ`, holds one just as good.
+/// Displacing on a token match would let a second instance of a dockapp
+/// silently steal a working tile, and would hand anything that can read
+/// the token a takeover at a moment of its choosing. Refusing costs the
+/// genuine reconnect nothing, because socket EOF is instant and
+/// definitive: by the time a survivor's `Hello` arrives, the tile it
+/// wants has already seen its predecessor go.
+///
+/// # Rejections
+///
+/// Every one answers with a reason on the wire and a detail in the log,
+/// never the other way around: a peer that failed authentication learns
+/// "you were not launched by this shell" and nothing about the shell's
+/// internals.
+pub(crate) fn admit<'a>(
+    tiles: impl Iterator<Item = &'a mut tile::RemoteTile>,
+    admission: Admission,
+    welcome: &ThemeState,
+    now: Instant,
+) {
+    let Admission { socket, hello } = admission;
+    let ClientMessage::Hello { id, .. } = &hello else {
+        goodbye(&socket, GoodbyeReason::ProtocolError);
+        return;
+    };
+    let id = id.clone();
+    let Some(tile) = tiles.into_iter().find(|tile| tile.id() == id) else {
+        tracing::warn!(%id, "a dockapp presented an id with no registered slot");
+        goodbye(&socket, GoodbyeReason::Unauthorized);
+        return;
+    };
+    let rejoining = matches!(tile.state(), tile::TileState::Rejoining { .. });
+    // One connection per registered id — see the note above on why a
+    // valid token does not change this answer.
+    if !tile.awaiting_hello() {
+        tracing::warn!(%id, "a second connection claimed a dockapp id that is already connected");
+        goodbye(&socket, GoodbyeReason::Replaced);
+        return;
+    }
+    match chonk_dock_proto::validate_hello(&hello, tile.token(), welcome.tile_px) {
+        Ok(accepted) => {
+            if accepted.tile_units != tile.entry().tile_units {
+                // The registry is the authority on how much of the
+                // column a dockapp occupies — the dock laid out for that
+                // number before the process even started. A survivor
+                // that changed its mind across a restart is refused for
+                // the same reason a fresh one is.
+                tracing::warn!(%id, asked = accepted.tile_units, registered = tile.entry().tile_units, "a dockapp asked for a different tile height than it registered");
+                goodbye(&socket, GoodbyeReason::TileTooLarge);
+                return;
+            }
+            if rejoining {
+                tracing::info!(%id, "readopted a dockapp that outlived the shell restart");
+            }
+            tile.adopt(socket, accepted.wants, welcome.clone(), now);
+        }
+        Err(reason) => {
+            tracing::warn!(%id, ?reason, rejoining, "refusing a dockapp connection");
+            goodbye(&socket, reason);
+        }
+    }
+}
+
+/// Lets go of every out-of-process tile, in one of two entirely
+/// different ways.
+///
+/// # [`Farewell::SessionOver`]
+///
+/// `Goodbye { Shutdown }`, then terminate. The reason code is actionable
+/// on the far side: it says "reconnecting is pointless", as against the
+/// bare EOF that means "try again". The handoff file is cleared, so the
+/// *next* login does not hold slots open for processes that ended with
+/// this one.
+///
+/// # [`Farewell::Restarting`]
+///
+/// The dockapps stay running, and their tokens are written where the
+/// incoming shell will find them ([`handoff`]). This is what makes a
+/// dockapp survive a theme pick, `scripts/restart.sh` and
+/// `scripts/update.sh` — and it is worth naming that on the Wayland
+/// session that is **strictly better than any ordinary client gets**: a
+/// Wayland client dies with the compositor's socket and there is no
+/// SaveSet equivalent to adopt it afterwards (see the README's "Restart
+/// costs you your clients"). A dock tile that is not a display-server
+/// client keeps running through the restart that kills every window on
+/// the screen.
+///
+/// Before this existed, a restart briefly *doubled* every dockapp
+/// instead: the old process saw EOF, spent ten seconds trying to reach a
+/// shell that had been replaced, and was eventually refused because its
+/// token had been minted by a process that no longer existed — while the
+/// fresh shell had already launched its own copy from the registry.
+/// Nothing was broken, but the user paid for two of everything for ten
+/// seconds, on the gesture they perform most. Now the survivor *is* the
+/// copy.
+pub(crate) fn shut_down<'a>(
+    tiles: impl Iterator<Item = &'a mut tile::RemoteTile>,
+    handoff_path: Option<&std::path::Path>,
+    farewell: Farewell,
+) {
+    let mut tokens = Vec::new();
+    for tile in tiles {
+        if farewell == Farewell::Restarting {
+            if let Some(entry) = tile.hand_off() {
+                tokens.push(entry);
+                continue;
+            }
+            // Fell through: nothing worth handing over (never launched,
+            // already stopped, or hung — see `RemoteTile::hand_off` for
+            // why a hung tile is deliberately not left behind). It gets
+            // the ordinary shutdown.
+        }
+        tile.shut_down(GoodbyeReason::Shutdown);
+    }
+    match handoff_path {
+        Some(path) if farewell == Farewell::Restarting => handoff::write(path, &tokens),
+        Some(path) => handoff::clear(path),
+        // No socket this session, so there were no dockapps to hand over
+        // in the first place.
+        None => {}
+    }
+}
+
 /// Best-effort refusal with a reason. The wire carries only the reason
 /// code; the shell logs the detail — so a rejected dockapp learns
 /// something it can act on ("rebuild me", "you were not launched by
@@ -459,5 +644,391 @@ mod tests {
             broadcast.refresh(56, good, &theme("nextstep-classic"));
             assert_eq!(broadcast.state().scale, good, "a real session's scale is passed through untouched");
         }
+    }
+}
+
+/// Restart survival, end to end over a real socket.
+///
+/// The shell half here is the *real* one — a real `SeqpacketListener`, a
+/// real `DockHost`, real `RemoteTile`s, and the real `admit` and
+/// `shut_down` the event loop calls. Only two things are stood in for:
+/// the dockapp's process (a `Seqpacket` this test drives directly, doing
+/// exactly what `chonk_ui::dockapp` does — `tests/dockapp_conformance.rs`
+/// is the proof of that, running the real SDK loop against a
+/// hand-written shell), and the `fork`/`exec` (`pretend_launched`).
+///
+/// The sequence being reproduced is the one a user performs when they
+/// pick a theme: shell, dockapp, `exec`, second shell, same dockapp.
+#[cfg(test)]
+mod restart_tests {
+    use super::*;
+    use std::path::Path;
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::time::Duration;
+
+    use chonk_dock_proto::handshake::hello;
+    use chonk_dock_proto::transport::mint_token;
+    use chonk_dock_proto::wire::InputMask;
+    use chonk_dock_proto::TOKEN_BYTES;
+
+    use crate::dockapp::registry::{DockappEntry, RestartPolicy};
+    use crate::dockapp::tile::{RemoteTile, ServiceContext, TileState};
+
+    static COUNTER: AtomicU32 = AtomicU32::new(0);
+
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn new() -> Self {
+            let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
+            let dir = std::env::temp_dir().join(format!("chonk-dock-restart-{}-{unique}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::set_permissions(&dir, std::os::unix::fs::PermissionsExt::from_mode(0o700)).unwrap();
+            Self(dir)
+        }
+
+        fn socket(&self) -> PathBuf {
+            self.0.join("dock-test.sock")
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn entry(id: &str) -> DockappEntry {
+        DockappEntry {
+            id: id.to_string(),
+            name: "TST".to_string(),
+            // Deliberately not runnable: every one of these tests
+            // asserts that no fresh process was launched, and a launch
+            // that failed to spawn is visible in the tile's state.
+            exec: vec!["/nonexistent/chonk-test-dockapp".to_string()],
+            tile_units: 1,
+            restart: RestartPolicy::Always,
+            source: PathBuf::from("/test/test.dockapp"),
+        }
+    }
+
+    fn state(tile_px: u32, theme_id: &str) -> ThemeState {
+        ThemeState { tile_px, scale: 1.0, theme_id: theme_id.into(), theme_toml: String::new() }
+    }
+
+    /// One shell instance: its listener, its tiles, and the servicing
+    /// pass its event loop runs. `Desktop` is the same code plus a
+    /// backend, which a unit test cannot have.
+    struct FakeShell {
+        host: DockHost,
+        tiles: Vec<RemoteTile>,
+        scratch: Vec<u8>,
+    }
+
+    impl FakeShell {
+        /// Starts a shell the way `Desktop::new` does: bind, read
+        /// whatever the previous one handed over, and give an inherited
+        /// token to the tile it names.
+        fn start(socket: &Path, ids: &[&str], now: Instant) -> Self {
+            let host = DockHost::bind_at(socket.to_path_buf());
+            let mut inherited = host.handoff_path().map(|path| handoff::take(&path)).unwrap_or_default();
+            let tiles = ids
+                .iter()
+                .map(|id| {
+                    let mut tile = RemoteTile::new(entry(id), 56, now);
+                    if let Some(token) = inherited.remove(*id) {
+                        tile.rejoin(token, now);
+                    }
+                    tile
+                })
+                .collect();
+            Self { host, tiles, scratch: Vec::new() }
+        }
+
+        fn pass(&mut self, now: Instant, theme: &ThemeState) {
+            for admission in self.host.service(now) {
+                admit(self.tiles.iter_mut(), admission, theme, now);
+            }
+            let socket_path = self.host.socket_path().clone();
+            let mut ctx = ServiceContext { now, theme, socket_path: &socket_path, scratch: &mut self.scratch };
+            for tile in &mut self.tiles {
+                tile.service(&mut ctx);
+            }
+        }
+
+        fn finish(&mut self, farewell: Farewell) {
+            let path = self.host.handoff_path();
+            shut_down(self.tiles.iter_mut(), path.as_deref(), farewell);
+        }
+    }
+
+    /// Connects and says `Hello` exactly as `chonk_ui::dockapp` does.
+    fn dockapp_connects(socket: &Path, id: &str, token: [u8; TOKEN_BYTES]) -> Seqpacket {
+        let peer = Seqpacket::connect(socket).expect("a dockapp can reach the dock socket");
+        peer.send(&hello(id, 1, token, InputMask::all()).encode().unwrap()).expect("Hello");
+        peer
+    }
+
+    /// Everything queued for the dockapp right now, plus whether the
+    /// socket has reached EOF. Both halves matter: the shell interleaves
+    /// `Ping`s with anything a test is looking for, and one test's whole
+    /// assertion is about which of "a `Goodbye`" and "a bare EOF" arrived.
+    fn drain(peer: &Seqpacket) -> (Vec<ServerMessage>, bool) {
+        let mut buffer = vec![0u8; MAX_MESSAGE_BYTES];
+        let mut messages = Vec::new();
+        loop {
+            match peer.recv(&mut buffer) {
+                Ok(0) => return (messages, true),
+                Ok(n) => messages.push(ServerMessage::decode(&buffer[..n]).expect("decodable")),
+                // `connect` returns an `O_NONBLOCK` socket, so this is
+                // "nothing more right now" rather than a wait.
+                Err(_) => return (messages, false),
+            }
+        }
+    }
+
+    fn goodbye_reason(messages: &[ServerMessage]) -> Option<GoodbyeReason> {
+        messages.iter().find_map(|message| match message {
+            ServerMessage::Goodbye { reason } => Some(*reason),
+            _ => None,
+        })
+    }
+
+    fn welcomed_with(peer: &Seqpacket) -> Option<ThemeState> {
+        drain(peer).0.into_iter().find_map(|message| match message {
+            ServerMessage::Welcome(state) => Some(state),
+            _ => None,
+        })
+    }
+
+    /// **The deliverable, stated as a test.** A dockapp outlives the
+    /// shell that launched it and is readopted by its replacement — not
+    /// killed, not relaunched, not doubled.
+    #[test]
+    fn a_dockapp_survives_the_shells_own_restart_and_is_readopted() {
+        let scratch = Scratch::new();
+        let socket = scratch.socket();
+        let base = Instant::now();
+        let at_56 = state(56, "nextstep-classic");
+
+        // --- the shell the user is running -----------------------------
+        let mut first = FakeShell::start(&socket, &["clock"], base);
+        let token = mint_token().unwrap();
+        first.tiles[0].pretend_launched(token, base);
+        let peer = dockapp_connects(&socket, "clock", token);
+        first.pass(base, &at_56);
+        assert!(welcomed_with(&peer).is_some(), "the dockapp is admitted and welcomed");
+
+        peer.send(&ClientMessage::Frame { generation: 1, width: 56, height: 56, pixels: vec![3; 56 * 56 * 4] }.encode().unwrap()).unwrap();
+        first.pass(base + Duration::from_millis(16), &at_56);
+        assert_eq!(first.tiles[0].state(), TileState::Live, "and is drawing");
+
+        // --- the user picks a theme, so the shell re-execs --------------
+        first.finish(Farewell::Restarting);
+        drop(first); // `exec`: the listener and every fd go with the image
+
+        // The dockapp sees a bare EOF, which is the SDK's signal to retry
+        // rather than exit. `Goodbye { Shutdown }` would have told it the
+        // opposite, which is why the restart path deliberately sends
+        // nothing.
+        let (parting, eof) = drain(&peer);
+        assert!(eof, "the socket really is gone");
+        assert_eq!(goodbye_reason(&parting), None, "a bare EOF means \"try again\"; a Goodbye would have told it the opposite");
+        drop(peer);
+
+        // --- the replacement shell -------------------------------------
+        let later = base + Duration::from_millis(120);
+        let after = state(56, "amber-phosphor");
+        let mut second = FakeShell::start(&socket, &["clock"], later);
+        assert!(
+            matches!(second.tiles[0].state(), TileState::Rejoining { .. }),
+            "the slot is held open for the survivor, not filled with a second copy"
+        );
+
+        second.pass(later, &after);
+        assert!(matches!(second.tiles[0].state(), TileState::Rejoining { .. }), "and nothing is launched while it waits");
+
+        // The survivor knocks again, with the token it was given at
+        // launch by a process that no longer exists.
+        let peer = dockapp_connects(&socket, "clock", token);
+        second.pass(later + Duration::from_millis(16), &after);
+        assert!(second.tiles[0].poll_fd().is_some(), "readopted into the existing tile");
+        assert!(second.tiles[0].pid().is_none(), "and no second process was ever spawned");
+        assert_eq!(
+            welcomed_with(&peer).map(|state| state.theme_id),
+            Some("amber-phosphor".to_string()),
+            "welcomed with the new shell's theme, so a restart-for-a-theme-pick lands the theme too"
+        );
+
+        peer.send(&ClientMessage::Frame { generation: 2, width: 56, height: 56, pixels: vec![4; 56 * 56 * 4] }.encode().unwrap()).unwrap();
+        second.pass(later + Duration::from_millis(32), &after);
+        assert_eq!(second.tiles[0].state(), TileState::Live, "the same process, drawing into the same slot");
+    }
+
+    /// A session that is genuinely ending stops its dockapps and leaves
+    /// nothing for the next login to adopt. The two farewells have to be
+    /// different or one of them is wrong.
+    #[test]
+    fn a_session_that_ends_stops_its_dockapps_and_leaves_no_tokens_behind() {
+        let scratch = Scratch::new();
+        let socket = scratch.socket();
+        let base = Instant::now();
+        let at_56 = state(56, "nextstep-classic");
+
+        let mut shell = FakeShell::start(&socket, &["clock"], base);
+        let token = mint_token().unwrap();
+        shell.tiles[0].pretend_launched(token, base);
+        let peer = dockapp_connects(&socket, "clock", token);
+        shell.pass(base, &at_56);
+        assert!(welcomed_with(&peer).is_some());
+
+        shell.finish(Farewell::SessionOver);
+        // `Goodbye { Shutdown }` is actionable: it says "reconnecting is
+        // pointless", where the bare EOF of a restart says "try again".
+        assert_eq!(goodbye_reason(&drain(&peer).0), Some(GoodbyeReason::Shutdown));
+
+        let handoff = shell.host.handoff_path().unwrap();
+        assert!(!handoff.exists(), "a logout must not leave credentials for a session that is over");
+        drop(shell);
+
+        let next = FakeShell::start(&socket, &["clock"], base);
+        assert!(matches!(next.tiles[0].state(), TileState::Waiting { .. }), "the next login launches its own, immediately");
+    }
+
+    /// **A valid token does not displace a connected tile.**
+    ///
+    /// The token proves "you were launched for this slot", not "you are
+    /// the process currently drawing it" — it is a shared secret in an
+    /// environment any process of this user can read. Displacing on a
+    /// match would let a second instance of a dockapp silently steal a
+    /// working tile, and hand anything that could read the token a
+    /// takeover at a moment of its choosing. The incumbent keeps the
+    /// slot; the challenger is told `Replaced` and exits.
+    #[test]
+    fn a_valid_token_does_not_displace_a_dockapp_that_is_already_connected() {
+        let scratch = Scratch::new();
+        let socket = scratch.socket();
+        let base = Instant::now();
+        let at_56 = state(56, "nextstep-classic");
+
+        let mut shell = FakeShell::start(&socket, &["clock"], base);
+        let token = mint_token().unwrap();
+        shell.tiles[0].pretend_launched(token, base);
+        let incumbent = dockapp_connects(&socket, "clock", token);
+        shell.pass(base, &at_56);
+        assert!(welcomed_with(&incumbent).is_some());
+        let held = shell.tiles[0].poll_fd();
+
+        // A second process with a perfectly good copy of the token.
+        let challenger = dockapp_connects(&socket, "clock", token);
+        shell.pass(base + Duration::from_millis(16), &at_56);
+
+        assert_eq!(
+            goodbye_reason(&drain(&challenger).0),
+            Some(GoodbyeReason::Replaced),
+            "a valid token is not a claim on an occupied slot"
+        );
+        assert_eq!(shell.tiles[0].poll_fd(), held, "and the tile that was working keeps working");
+
+        incumbent.send(&ClientMessage::Frame { generation: 1, width: 56, height: 56, pixels: vec![1; 56 * 56 * 4] }.encode().unwrap()).unwrap();
+        shell.pass(base + Duration::from_millis(32), &at_56);
+        assert_eq!(shell.tiles[0].state(), TileState::Live);
+    }
+
+    /// The reconnect path widens *which tile states* accept a `Hello`.
+    /// It does not weaken what a `Hello` has to prove. A held-open slot
+    /// still refuses a token it did not inherit — otherwise the handoff
+    /// would be a ten-second authentication hole at every theme pick.
+    #[test]
+    fn a_held_open_slot_still_refuses_a_token_it_did_not_inherit() {
+        let scratch = Scratch::new();
+        let socket = scratch.socket();
+        let base = Instant::now();
+        let at_56 = state(56, "nextstep-classic");
+
+        let real = mint_token().unwrap();
+        handoff::write(&handoff::beside(&socket).unwrap(), &[("clock".into(), real)]);
+        let mut shell = FakeShell::start(&socket, &["clock"], base);
+        assert!(matches!(shell.tiles[0].state(), TileState::Rejoining { .. }));
+
+        let mut guessed = real;
+        guessed[0] ^= 0xFF;
+        let impostor = dockapp_connects(&socket, "clock", guessed);
+        shell.pass(base, &at_56);
+
+        assert_eq!(goodbye_reason(&drain(&impostor).0), Some(GoodbyeReason::Unauthorized));
+        assert!(shell.tiles[0].poll_fd().is_none(), "the slot was not given away");
+        assert!(matches!(shell.tiles[0].state(), TileState::Rejoining { .. }), "and is still being held for the one that can prove it");
+
+        // ...and the real survivor still gets in afterwards.
+        let survivor = dockapp_connects(&socket, "clock", real);
+        shell.pass(base + Duration::from_millis(16), &at_56);
+        assert!(welcomed_with(&survivor).is_some());
+    }
+
+    /// A dockapp that stopped answering is not left behind by a restart.
+    /// It would not notice the EOF, would never reconnect, and nothing
+    /// would ever collect it — an orphan for the rest of the login.
+    #[test]
+    fn a_hung_dockapp_is_stopped_by_a_restart_rather_than_handed_forward() {
+        let scratch = Scratch::new();
+        let socket = scratch.socket();
+        let base = Instant::now();
+        let at_56 = state(56, "nextstep-classic");
+
+        let mut shell = FakeShell::start(&socket, &["clock"], base);
+        let token = mint_token().unwrap();
+        shell.tiles[0].pretend_launched(token, base);
+        let peer = dockapp_connects(&socket, "clock", token);
+        shell.pass(base, &at_56);
+        assert!(welcomed_with(&peer).is_some());
+
+        // Stops answering pings without closing its socket, which is
+        // exactly what `TileState::Hung` means.
+        for step in 1..=4 {
+            shell.pass(base + Duration::from_secs(2 * step), &at_56);
+        }
+        assert!(matches!(shell.tiles[0].state(), TileState::Hung { .. }));
+
+        shell.finish(Farewell::Restarting);
+        let handoff = shell.host.handoff_path().unwrap();
+        assert!(!handoff.exists(), "nothing was handed forward, so the next shell launches a live tile instead");
+    }
+
+    /// The handoff is consumed, not kept. A file that survived would be
+    /// read again at the *next* restart, holding a slot open for a
+    /// process that stopped existing two restarts ago.
+    #[test]
+    fn a_handoff_is_spent_by_the_shell_that_reads_it() {
+        let scratch = Scratch::new();
+        let socket = scratch.socket();
+        let base = Instant::now();
+        let token = mint_token().unwrap();
+        handoff::write(&handoff::beside(&socket).unwrap(), &[("clock".into(), token)]);
+
+        let first = FakeShell::start(&socket, &["clock"], base);
+        assert!(matches!(first.tiles[0].state(), TileState::Rejoining { .. }));
+        drop(first);
+
+        let second = FakeShell::start(&socket, &["clock"], base);
+        assert!(matches!(second.tiles[0].state(), TileState::Waiting { .. }), "the token was spent; this tile launches its own");
+    }
+
+    /// An id nobody registered gets nothing, handoff or no handoff. The
+    /// registry is still the only source of dock slots.
+    #[test]
+    fn a_handoff_for_an_id_that_is_no_longer_registered_is_ignored() {
+        let scratch = Scratch::new();
+        let socket = scratch.socket();
+        let base = Instant::now();
+        let at_56 = state(56, "nextstep-classic");
+        let token = mint_token().unwrap();
+        // The user uninstalled `clock` between the two shells.
+        handoff::write(&handoff::beside(&socket).unwrap(), &[("clock".into(), token)]);
+
+        let mut shell = FakeShell::start(&socket, &["net"], base);
+        let survivor = dockapp_connects(&socket, "clock", token);
+        shell.pass(base, &at_56);
+        assert_eq!(goodbye_reason(&drain(&survivor).0), Some(GoodbyeReason::Unauthorized));
     }
 }
