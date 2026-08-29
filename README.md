@@ -212,7 +212,14 @@ What the session backend does not do yet, stated plainly:
   changes on both backends - but Wayland clients die with the socket
   they were connected to, and there is no SaveSet equivalent to adopt
   them afterwards. The X11 session keeps your windows across a
-  restart; this one keeps only itself.
+  restart; this one keeps only itself - and its dockapps. A dockapp is
+  not a display-server client (it holds no `wl_display` at all, which is
+  the whole point of that boundary), so the compositor leaves it running
+  across the re-exec and hands its connection token to the replacement,
+  which readopts it into the same tile instead of launching a second
+  copy. The result is the odd one out on this list: an out-of-process
+  dock tile gets a guarantee across a restart that no ordinary Wayland
+  client on this desktop can have.
 - **No EWMH-analog protocols.** `wlr-foreign-toplevel-management`,
   `wlr-output-management`, layer-shell, screencopy, idle-inhibit, and
   DRM leasing are all absent, so external taskbars, pagers, bars,

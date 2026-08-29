@@ -497,19 +497,22 @@ fn send(socket: &Seqpacket, message: &ClientMessage) -> Result<(), Error> {
 /// Retries `connect()` against the stable socket path after the shell
 /// goes away.
 ///
-/// The payoff is worth naming: with the shell side of this (Phase 4c,
-/// where a fresh shell adopts a reconnect for a registered id), a
-/// dockapp survives a theme switch, `scripts/restart.sh` *and*
-/// `scripts/update.sh` on Wayland — strictly better than any real
-/// Wayland client on this desktop gets today, which is killed outright
-/// by a compositor restart.
+/// The payoff, now that the shell honours it (Phase 4c): **a dockapp
+/// survives a theme switch, `scripts/restart.sh` and
+/// `scripts/update.sh`** — the outgoing shell leaves it running and
+/// hands its token to its replacement, which holds the slot open and
+/// readopts the survivor rather than launching a second copy. On the
+/// Wayland session that is strictly better than any ordinary client
+/// gets: a Wayland client dies with the compositor's socket and there is
+/// no SaveSet equivalent to adopt it afterwards.
 ///
-/// This is written now, ahead of that shell support, because it is
-/// twenty lines and because the alternative is shipping an SDK whose
-/// third-party users all have to be told to upgrade later. Until the
-/// shell adopts reconnects, the reconnect succeeds at the socket level
-/// and the handshake is then refused, which surfaces as a clean error
-/// instead of a silent hang.
+/// Two details of that contract are load-bearing here. The shell waits
+/// exactly [`RECONNECT_WINDOW`] for the knock, so shortening this
+/// without shortening `dockapp::tile::REJOIN_WINDOW` leaves a hole in
+/// the dock and lengthening it launches a second copy. And a restart
+/// deliberately sends no `Goodbye` — a bare EOF means "try again", which
+/// is why the loop below is entered on EOF and not on
+/// `Goodbye { Shutdown }`.
 ///
 /// `None` means the window elapsed: the caller exits, and the shell's
 /// registry relaunches the process when it comes back.

@@ -172,12 +172,20 @@ fn a_dockapp_handshakes_draws_answers_pings_and_rethemes_without_restarting() {
 
     // 8. The shell vanishes without saying goodbye — a crash, or
     //    `scripts/restart.sh`. The dockapp must see the EOF and come
-    //    back to the same socket path rather than exiting, which is
-    //    what will let it survive a shell restart once Phase 4c teaches
-    //    the shell to adopt a reconnect for a registered id. Written
-    //    and tested now because it is twenty lines, and because an SDK
-    //    that gains restart survival in a later version means telling
-    //    every third party to rebuild.
+    //    back to the same socket path rather than exiting.
+    //
+    //    This is the client half of restart survival. The shell half —
+    //    a fresh shell inheriting the token and readopting the survivor
+    //    into the same tile instead of launching a second copy — landed
+    //    in Phase 4c and is tested against the real `DockHost`, real
+    //    `RemoteTile`s and the real `admit` in
+    //    `chonk-shell`'s `dockapp::restart_tests`. It cannot be tested
+    //    from here: `chonk-ui` is the third-party SDK and must not
+    //    depend on `chonk-shell` (lib.rs states that constraint), so
+    //    the two halves are proven against each other's contract rather
+    //    than in one process. What this file guarantees for that test is
+    //    that the sequence it hand-writes is the sequence the real SDK
+    //    performs.
     drop(peer);
     let reconnect_started = Instant::now();
     let peer = loop {

@@ -19,6 +19,7 @@ use wm_theme_api::{Point, PopupHost, Rect, Size};
 
 use crate::apps::{self, AppEntry};
 use crate::desktop::{Desktop, IconDragResult, MenuAction, RootMenuAction, WindowMenuAction, WindowMenuContext};
+use crate::dockapp::Farewell;
 use crate::launchdock::{LaunchDock, LaunchDockAction};
 use crate::widgets::DockInput;
 use crate::{spawn, theme_select, wallpaper};
@@ -949,20 +950,24 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         self.launchdock.update_running(wm.backend_mut(), &self.theme, &running);
     }
 
-    /// Winds the session down: stops every out-of-process dock tile.
+    /// Winds the session down, in the way the binary says it is ending.
     ///
     /// The binary calls this once it has decided to exit or re-exec,
-    /// before it does either. It exists because a hot restart is the
-    /// most routine thing a user does to this desktop (every theme pick
-    /// is one) and, without it, each one briefly doubles every dockapp
-    /// — see `Desktop::shut_down_dockapps`.
+    /// before it does either, and the argument is the difference between
+    /// the two: [`Farewell::SessionOver`] stops every out-of-process
+    /// tile, [`Farewell::Restarting`] leaves them running and hands
+    /// their tokens to the incoming shell so they are readopted rather
+    /// than relaunched. A hot restart is the most routine thing a user
+    /// does to this desktop — every theme pick is one — which is why it
+    /// is worth having the second mode at all. See
+    /// `Desktop::shut_down_dockapps`.
     ///
     /// Nothing else needs winding down: sampler threads, popup
     /// surfaces and shell surfaces all die with the process, and the
     /// dock order was already persisted at the moment the user
     /// committed a drag.
-    pub fn shut_down(&mut self) {
-        self.desktop.shut_down_dockapps();
+    pub fn shut_down(&mut self, farewell: Farewell) {
+        self.desktop.shut_down_dockapps(farewell);
     }
 
     /// The screen/output arrangement changed (the binary drained the
