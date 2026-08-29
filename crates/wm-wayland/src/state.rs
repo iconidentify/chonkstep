@@ -672,21 +672,28 @@ impl Compositor {
             };
             self.note_outcome(outcome);
         }
-        if !self.running {
-            // Exit/restart was requested somewhere above — mirror the
-            // X11 loop's break-before-tick.
-            return;
-        }
-
         // Scroll drains beside the clicks and separately from them: an
         // axis event is not a button, so `take_shell_click` never
         // reports one and the two drains cannot double-count the same
         // gesture. Queued rather than coalesced, unlike motion, because
         // every notch is its own command — three notches on a volume
         // tile is three steps, and keeping only the last would swallow
-        // input the user gave.
+        // input the user gave. A scroll produces no `ShellOutcome`, so
+        // it sits on this side of the exit check with the clicks that
+        // do.
         while let Some((surface, local, delta)) = self.wm.backend_mut().take_shell_scroll() {
             self.shell.on_shell_scroll(&mut self.wm, surface, local, delta);
+        }
+
+        if !self.running {
+            // Exit/restart was requested somewhere above — mirror the
+            // X11 loop's break-before-tick. Sources are reconciled even
+            // on the way out: a menu pick above (Remove on a dock
+            // tile's menu) can have closed a dockapp socket, and
+            // leaving its source registered would hand calloop a closed
+            // descriptor if anything dispatched again.
+            self.sync_dock_sources();
+            return;
         }
 
         // No separate shell-motion drain, same as X11: the shell
