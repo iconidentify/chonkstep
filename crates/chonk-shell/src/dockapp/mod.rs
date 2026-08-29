@@ -80,8 +80,9 @@ use std::time::Instant;
 
 use chonk_dock_proto::handshake::HANDSHAKE_TIMEOUT;
 use chonk_dock_proto::transport::{Seqpacket, SeqpacketListener};
-use chonk_dock_proto::wire::GoodbyeReason;
+use chonk_dock_proto::wire::{GoodbyeReason, ThemeState};
 use chonk_dock_proto::{ClientMessage, ServerMessage, MAX_MESSAGE_BYTES};
+use wm_theme::model::Theme;
 
 /// A connection that has been accepted but has not identified itself.
 struct Pending {
@@ -117,6 +118,100 @@ pub(crate) struct DockHost {
     /// repaint thread would be a worse use of it than anything a
     /// dockapp could do.
     scratch: Vec<u8>,
+    /// The wire-shaped view of "what the dock looks like right now",
+    /// recomputed only when it actually changed — see
+    /// [`ThemeBroadcast`].
+    broadcast: ThemeBroadcast,
+}
+
+/// The `ThemeState` every dockapp is told, cached against the inputs
+/// that produce it.
+///
+/// The cache is not a micro-optimisation. `theme_toml` is
+/// `toml::to_string(theme)`, which walks and formats the whole palette
+/// and allocates a few kilobytes; the servicing pass that needs this
+/// value runs on the compositor's repaint thread once per housekeeping
+/// tick (16 ms), so serializing unconditionally would be ~60 full theme
+/// serializations a second, forever, to produce the same string.
+///
+/// So the comparison is on the *source* — the `Theme` itself, by value,
+/// plus the tile edge and scale — and the serialization happens only
+/// when that comparison fails. Comparing the `Theme` rather than just
+/// its `id` is the correctness half: `theme_id` is the fast path a
+/// dockapp resolves through `theme_by_id`, but `theme_toml` exists
+/// precisely for palettes that path cannot name, and a cache keyed on
+/// the id alone would never notice one of those change.
+///
+/// It also gives `Welcome` and `ThemeChanged` one producer. A dockapp
+/// that connects and a dockapp that restyles are told the same thing by
+/// the same code, so the two can never drift into disagreeing about
+/// what the current theme is.
+struct ThemeBroadcast {
+    /// What `state` was built from. `None` until the first refresh.
+    source: Option<Theme>,
+    state: ThemeState,
+}
+
+impl ThemeBroadcast {
+    fn new() -> Self {
+        // Placeholder until the first `refresh`, which happens on the
+        // first servicing pass — before any dockapp can have connected,
+        // since connecting requires a tile that has launched.
+        Self { source: None, state: ThemeState { tile_px: 0, scale: 1.0, theme_id: String::new(), theme_toml: String::new() } }
+    }
+
+    fn refresh(&mut self, tile_px: u32, scale: f32, theme: &Theme) {
+        let scale = usable_scale(scale);
+        if self.state.tile_px == tile_px
+            && self.state.scale.to_bits() == scale.to_bits()
+            && self.source.as_ref().is_some_and(|cached| cached == theme)
+        {
+            return;
+        }
+        self.source = Some(theme.clone());
+        self.state = ThemeState {
+            tile_px,
+            scale,
+            theme_id: theme.id.clone(),
+            // The correctness path beside the fast one: a dockapp built
+            // against a different `wm-theme`, or a session running a
+            // theme with no built-in id, still gets the real palette. An
+            // unserializable theme is a shell bug and costs the dockapp
+            // the fast path only — an empty string here means "I have
+            // nothing to add", and the SDK falls back to `theme_by_id`
+            // and then to its own default rather than failing to draw.
+            theme_toml: toml::to_string(theme).unwrap_or_default(),
+        };
+    }
+
+    fn state(&self) -> &ThemeState {
+        &self.state
+    }
+}
+
+/// The shell's last chance to stop an unusable scale becoming a wire
+/// value.
+///
+/// The codec refuses to *decode* a NaN, infinite, non-positive or absurd
+/// scale ([`chonk_dock_proto::wire::DecodeError::BadFloat`]), which is
+/// the right place for it — but the shell is the sender, and a sender
+/// does not decode its own messages. Without this clamp a bad
+/// `Desktop::scale` would produce a `Welcome` every dockapp rejects, and
+/// the SDK would treat the rejection as a protocol disagreement and
+/// reconnect: a launch loop the user would experience as a dock full of
+/// tiles that never appear, caused by one float.
+///
+/// Substituting rather than refusing, and only here: a desktop that
+/// cannot tell its dockapps a scale is still a desktop, and 1.0 is what
+/// every unscaled session already runs at. The log line is what makes it
+/// findable — a silent substitution here would be the wrong-sized-tile
+/// bug the SDK's `check_drawable` refuses to commit.
+fn usable_scale(scale: f32) -> f32 {
+    if scale.is_finite() && scale > 0.0 && scale <= chonk_dock_proto::MAX_SCALE {
+        return scale;
+    }
+    tracing::error!(scale, "the dock's scale is not a number a tile can be drawn at; telling dockapps 1.0 instead");
+    1.0
 }
 
 impl DockHost {
@@ -133,17 +228,17 @@ impl DockHost {
             Ok(path) => path,
             Err(error) => {
                 tracing::warn!(?error, "no dockapp socket path; dockapps are unavailable this session");
-                return Self { listener: None, socket_path: PathBuf::new(), pending: Vec::new(), scratch: Vec::new() };
+                return Self { listener: None, socket_path: PathBuf::new(), pending: Vec::new(), scratch: Vec::new(), broadcast: ThemeBroadcast::new() };
             }
         };
         match SeqpacketListener::bind(&socket_path) {
             Ok(listener) => {
                 tracing::info!(socket = %socket_path.display(), "dockapp socket listening");
-                Self { listener: Some(listener), socket_path, pending: Vec::new(), scratch: Vec::new() }
+                Self { listener: Some(listener), socket_path, pending: Vec::new(), scratch: Vec::new(), broadcast: ThemeBroadcast::new() }
             }
             Err(error) => {
                 tracing::warn!(?error, socket = %socket_path.display(), "could not bind the dockapp socket; dockapps are unavailable this session");
-                Self { listener: None, socket_path, pending: Vec::new(), scratch: Vec::new() }
+                Self { listener: None, socket_path, pending: Vec::new(), scratch: Vec::new(), broadcast: ThemeBroadcast::new() }
             }
         }
     }
@@ -158,6 +253,19 @@ impl DockHost {
 
     pub(crate) fn scratch(&mut self) -> &mut Vec<u8> {
         &mut self.scratch
+    }
+
+    /// Recomputes the `ThemeState` every dockapp is told, if anything it
+    /// is built from changed. Cheap when nothing did — see
+    /// [`ThemeBroadcast`].
+    pub(crate) fn refresh_theme(&mut self, tile_px: u32, scale: f32, theme: &Theme) {
+        self.broadcast.refresh(tile_px, scale, theme);
+    }
+
+    /// The current one. Call [`refresh_theme`](Self::refresh_theme)
+    /// first; a servicing pass does, once, before it touches any tile.
+    pub(crate) fn theme(&self) -> &ThemeState {
+        self.broadcast.state()
     }
 
     /// Every fd the event loop must watch on this side: the listener,
@@ -274,4 +382,82 @@ pub(crate) fn current_display() -> String {
     std::env::var("WAYLAND_DISPLAY")
         .or_else(|_| std::env::var("DISPLAY"))
         .unwrap_or_else(|_| "default".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn theme(id: &str) -> Theme {
+        let mut theme = wm_theme::default_theme::all_themes().into_iter().next().expect("the theme set is never empty");
+        theme.id = id.to_string();
+        theme
+    }
+
+    #[test]
+    fn the_serialized_theme_is_produced_once_and_reused() {
+        // The property that makes it safe to evaluate this on the
+        // repaint thread every 16 ms. `toml::to_string` walks the whole
+        // palette; doing it per pass would be ~60 full serializations a
+        // second to produce the same string.
+        let mut broadcast = ThemeBroadcast::new();
+        broadcast.refresh(56, 1.0, &theme("nextstep-classic"));
+        let first = broadcast.state().clone();
+        assert!(!first.theme_toml.is_empty(), "the correctness path carries a real palette, not an empty string");
+
+        let before = broadcast.state().theme_toml.as_ptr();
+        broadcast.refresh(56, 1.0, &theme("nextstep-classic"));
+        assert_eq!(broadcast.state().theme_toml.as_ptr(), before, "an unchanged theme must not be re-serialized");
+        assert!(broadcast.state().same_as(&first));
+    }
+
+    #[test]
+    fn every_input_that_a_dockapp_can_see_change_triggers_a_refresh() {
+        // Stated as the full set rather than as one example, because a
+        // trigger that is missed here is a dockapp drawing at the wrong
+        // size or in last week's colors with nothing to indicate it.
+        let base = theme("nextstep-classic");
+        let mut broadcast = ThemeBroadcast::new();
+        broadcast.refresh(56, 1.0, &base);
+        let start = broadcast.state().clone();
+
+        broadcast.refresh(112, 1.0, &base);
+        assert!(!broadcast.state().same_as(&start), "a relayout changes the tile edge");
+
+        broadcast.refresh(56, 2.0, &base);
+        assert!(!broadcast.state().same_as(&start), "a scale change");
+
+        broadcast.refresh(56, 1.0, &theme("amber-phosphor"));
+        assert!(!broadcast.state().same_as(&start), "a different theme id");
+
+        // The one a cache keyed on the id alone would miss, and the
+        // whole reason `theme_toml` exists: a palette that changed
+        // without its name changing.
+        let mut repainted = base.clone();
+        repainted.tile.fill = wm_theme::model::Fill::Solid(wm_theme::model::Color::rgb(1, 2, 3));
+        broadcast.refresh(56, 1.0, &repainted);
+        assert_eq!(broadcast.state().theme_id, start.theme_id, "same id...");
+        assert!(!broadcast.state().same_as(&start), "...different palette, and the dockapp has to be told");
+    }
+
+    #[test]
+    fn a_scale_no_tile_can_be_drawn_at_never_reaches_the_wire() {
+        // The shell is the *sender*, so the codec's `BadFloat` check
+        // cannot cover it. Without this clamp a bad `Desktop::scale`
+        // would produce a `Welcome` every dockapp rejects, and the SDK
+        // would reconnect: a launch loop the user sees as a dock full of
+        // tiles that never appear.
+        for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY, 0.0, -1.0, 1e30, chonk_dock_proto::MAX_SCALE + 0.1] {
+            let mut broadcast = ThemeBroadcast::new();
+            broadcast.refresh(56, bad, &theme("nextstep-classic"));
+            let bytes = ServerMessage::Welcome(broadcast.state().clone()).encode().expect("encodable");
+            assert!(ServerMessage::decode(&bytes).is_ok(), "the shell must not send a scale of {bad}, which its own peer would refuse");
+            assert_eq!(broadcast.state().scale, 1.0);
+        }
+        for good in [0.5f32, 1.0, 1.5, 2.0, chonk_dock_proto::MAX_SCALE] {
+            let mut broadcast = ThemeBroadcast::new();
+            broadcast.refresh(56, good, &theme("nextstep-classic"));
+            assert_eq!(broadcast.state().scale, good, "a real session's scale is passed through untouched");
+        }
+    }
 }

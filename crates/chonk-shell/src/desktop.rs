@@ -1509,13 +1509,19 @@ impl<B: Backend> Desktop<B> {
     /// exists to inform the user rather than to protect the desktop.
     fn service_dockapps(&mut self, theme: &Theme) {
         let now = std::time::Instant::now();
+        // Once, before anything else in the pass, so every tile serviced
+        // below — and every `Welcome` sent above — describes the same
+        // dock. Recomputing the serialized theme only happens when it
+        // actually changed; see `ThemeBroadcast`.
+        self.dockapps.refresh_theme(self.tile, self.scale, theme);
         for admission in self.dockapps.service(now) {
-            self.admit(admission, theme, now);
+            self.admit(admission, now);
         }
 
         let socket_path = self.dockapps.socket_path().clone();
         let mut scratch = std::mem::take(self.dockapps.scratch());
-        let mut ctx = ServiceContext { now, tile_px: self.tile, scale: self.scale, theme, socket_path: &socket_path, scratch: &mut scratch };
+        let theme_state = self.dockapps.theme().clone();
+        let mut ctx = ServiceContext { now, theme: &theme_state, socket_path: &socket_path, scratch: &mut scratch };
         for item in &mut self.items {
             // A tile the supervisor evicted is one the dock has
             // disowned, and continuing to run its process would leave a
@@ -1546,14 +1552,20 @@ impl<B: Backend> Desktop<B> {
     /// detail in the log, never the other way around: a peer that
     /// failed authentication learns "you were not launched by this
     /// shell" and nothing about the shell's internals.
-    fn admit(&mut self, admission: crate::dockapp::Admission, theme: &Theme, now: std::time::Instant) {
+    fn admit(&mut self, admission: crate::dockapp::Admission, now: std::time::Instant) {
         let crate::dockapp::Admission { socket, hello } = admission;
         let chonk_dock_proto::ClientMessage::Hello { id, .. } = &hello else {
             dockapp::goodbye(&socket, chonk_dock_proto::wire::GoodbyeReason::ProtocolError);
             return;
         };
         let id = id.clone();
-        let tile_px = self.tile;
+        // Cloned before the tile is borrowed, and taken from the same
+        // cache `service_dockapps` hands every tile this pass — so the
+        // geometry a `Hello` is validated against, the geometry the
+        // `Welcome` announces, and the geometry `on_frame` will insist
+        // on are one value rather than three that happen to agree.
+        let welcome = self.dockapps.theme().clone();
+        let tile_px = welcome.tile_px;
         let Some(tile) = self.items.iter_mut().filter_map(|item| item.remote_mut()).find(|tile| tile.id() == id) else {
             tracing::warn!(%id, "a dockapp presented an id with no registered slot");
             dockapp::goodbye(&socket, chonk_dock_proto::wire::GoodbyeReason::Unauthorized);
@@ -1579,18 +1591,10 @@ impl<B: Backend> Desktop<B> {
                     dockapp::goodbye(&socket, chonk_dock_proto::wire::GoodbyeReason::TileTooLarge);
                     return;
                 }
-                let welcome = chonk_dock_proto::wire::ThemeState {
-                    tile_px,
-                    scale: self.scale,
-                    theme_id: theme.id.clone(),
-                    // The correctness path beside the fast one: a
-                    // dockapp built against a different `wm-theme`, or
-                    // a session running a theme with no built-in id,
-                    // still gets the real palette. An unserializable
-                    // theme is a shell bug and costs the dockapp the
-                    // slow path only.
-                    theme_toml: toml::to_string(theme).unwrap_or_default(),
-                };
+                // The same value `push_theme` compares against, from the
+                // same producer, so a dockapp that connects and one that
+                // restyles can never be told different things about the
+                // current dock.
                 tile.adopt(socket, accepted.wants, welcome, now);
             }
             Err(reason) => {
