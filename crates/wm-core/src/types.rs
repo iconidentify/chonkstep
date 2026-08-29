@@ -30,6 +30,69 @@ pub enum MouseButton {
     Right,
 }
 
+/// One drained scroll gesture, counted in **whole wheel notches**.
+///
+/// The discrete-vs-continuous question is settled here, once, for
+/// every backend, because the two we have push in opposite directions:
+///
+/// * X11 has no axis concept at all. The server reports a wheel as an
+///   ordinary button press/release pair — 4/5 vertical, 6/7 horizontal —
+///   one pair per detent. That is the *entire* signal: no distance, no
+///   partial notch, no velocity. Asking an X11 backend for a continuous
+///   delta forces it to invent a pixels-per-notch constant, i.e. to
+///   fabricate precision the protocol never carried, which every
+///   backend-blind caller would then have to divide back out.
+/// * Wayland/libinput has the opposite problem: it reports continuous
+///   amounts (a touchpad genuinely is continuous; a high-resolution
+///   wheel reports 120ths of a detent). Continuous -> notches is a
+///   well-defined accumulate-and-threshold, and `wm-wayland` owns that
+///   accumulator so every caller gets the same answer. Notches ->
+///   continuous has no defined answer at all.
+///
+/// So the trait speaks the unit whose conversion has a defined
+/// direction. Both backends can state notches honestly; only one of
+/// them could state pixels.
+///
+/// Rejected: carrying both a notch count and an optional continuous
+/// delta. It has no consumer — every reader in the plan is a step
+/// machine (volume +/-1, a page, a dock tile's next face), and the
+/// out-of-process dockapp protocol's `Input` message already commits
+/// to a single `delta: i32` on the wire — and an optional field that
+/// one backend permanently leaves `None` makes callers branch on which
+/// backend they are running under. Erasing exactly that is the only
+/// reason this trait exists.
+///
+/// The fields are named for a DIRECTION, not an axis, deliberately. A
+/// signed field called `vertical` is precisely the kind of thing two
+/// backends implement with opposite signs while every reviewer nods
+/// along, because the name never says which way is positive (and the
+/// two platforms really do disagree: X11's button 4 is up, while
+/// `wl_pointer.axis` defines its positive vertical value as *down*).
+/// `up` and `right` cannot be implemented backwards quietly.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ScrollDelta {
+    /// Notches scrolled away from the user: a wheel rolled forward, or
+    /// two fingers moving up a touchpad. Negative is toward the user.
+    ///
+    /// Note this is the opposite sign to the `y` of the `Point` it
+    /// arrives with — screen coordinates grow downward, while a scroll
+    /// direction is named after the gesture. That mismatch is the
+    /// reason the field is `up` rather than `y`.
+    pub up: i32,
+    /// Notches scrolled to the right: X11's button 7, a wheel tilted
+    /// right, or two fingers moving right. Negative is left.
+    pub right: i32,
+}
+
+impl ScrollDelta {
+    /// Neither axis moved. Backends must never queue one of these —
+    /// see `Backend::take_shell_scroll` — so a caller that drains an
+    /// event may act on it unconditionally.
+    pub fn is_zero(self) -> bool {
+        self.up == 0 && self.right == 0
+    }
+}
+
 bitflags::bitflags! {
     #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
     pub struct Modifiers: u8 {

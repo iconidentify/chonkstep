@@ -1,7 +1,7 @@
 use wm_theme_api::{DecorationBuffer, DecorationLayout, Rect, ResizeEdge, Size, Point};
 
 use crate::client::MonitorInfo;
-use crate::types::{BackendEvent, DragHandle, KeyCombo, MouseButton, SizeHints, WmClass, WmProtocol, WindowType};
+use crate::types::{BackendEvent, DragHandle, KeyCombo, MouseButton, ScrollDelta, SizeHints, WmClass, WmProtocol, WindowType};
 
 /// Everything the protocol-agnostic core needs from a windowing backend
 /// (X11 today via `wm-x11`, a future Wayland/Smithay backend later).
@@ -80,6 +80,37 @@ pub trait Backend {
     }
     /// Drains one queued pointer motion over a shell surface.
     fn take_shell_motion(&mut self) -> Option<(Self::ShellId, Point)> {
+        None
+    }
+    /// Drains one queued scroll over a shell surface: `(surface,
+    /// surface-local position, delta)`. The position is the pointer's,
+    /// in the same surface-local space `take_shell_click` reports, so
+    /// a caller resolves a scroll to a widget with the identical code
+    /// it already uses for clicks.
+    ///
+    /// Queued like clicks, not coalesced like motion, and the
+    /// distinction is load-bearing: for motion only the newest
+    /// position means anything, but every notch is its own command —
+    /// three notches on a volume tile is three steps — so keeping only
+    /// the last would silently swallow input the user gave.
+    ///
+    /// What a caller may rely on:
+    /// * `delta` is never zero. A backend with nothing to report
+    ///   queues nothing.
+    /// * `delta` is a COUNT, not a flag. A backend may fold notches
+    ///   that arrived together into one entry with `up`/`right` beyond
+    ///   +/-1 (a high-resolution wheel spun hard does this), so read it
+    ///   as a number of steps; it must never drop them.
+    /// * Both counts are in the direction the *user* perceives. Any
+    ///   natural-scroll or direction configuration the platform holds
+    ///   is already applied by the time it reaches here.
+    /// * Nothing here is a wheel *button*: `take_shell_click` never
+    ///   reports one, so the two drains cannot double-count the same
+    ///   physical input. (`MouseButton` deliberately stays
+    ///   `{Left, Middle, Right}` — a `MouseButton::WheelUp` would have
+    ///   made "pressed: false" meaningless and forced every existing
+    ///   click site to learn about a button that cannot be held.)
+    fn take_shell_scroll(&mut self) -> Option<(Self::ShellId, Point, ScrollDelta)> {
         None
     }
     /// Drains a pending screen-size change (RandR on X11, output
