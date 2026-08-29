@@ -133,6 +133,17 @@ pub const MAX_FRAME_BYTES: usize = MAX_MESSAGE_BYTES - 64;
 /// letting a `Hello` claim a tile the size of the screen.
 pub const MAX_TILE_PX: u32 = 256;
 
+/// Largest `CHONKSTEP_SCALE` the protocol will carry.
+///
+/// Every metric in a `Theme` is multiplied by this before anything is
+/// drawn, so it is an upper bound on hostile input in the strict sense:
+/// eight is far past any display that exists and still comfortably
+/// inside the range where the arithmetic stays sane. Lives here rather
+/// than in the SDK because [`wire::DecodeError::BadFloat`] enforces it
+/// for both peers, and a bound that the two ends define separately is a
+/// bound they will eventually disagree about.
+pub const MAX_SCALE: f32 = 8.0;
+
 /// How many stacked tiles one dockapp may occupy. The dock is a
 /// vertical strip on a real screen; a dockapp asking for more than four
 /// tiles is asking for the dock, not a slot in it.
