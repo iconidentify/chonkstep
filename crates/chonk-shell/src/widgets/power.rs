@@ -1,31 +1,47 @@
-//! Power instrument: battery capacity, charge state, AC presence,
-//! sampled from `/sys/class/power_supply` and rendered by
-//! `wm_theme::power` — this file is the data half of the split the
-//! widget SDK prescribes, so everything here is sampling and
-//! summarizing, no drawing.
+//! Power instrument: battery capacity, charge state, AC presence, read
+//! from `/sys/class/power_supply` and rendered by `wm_theme::power` —
+//! this file is the data half of the split the widget SDK prescribes,
+//! so everything here is interpretation, no drawing and (since Layer 3)
+//! no walking of the directory either.
 //!
-//! The sampling degrades per-field on purpose: a supply directory with
-//! an unreadable `capacity` still contributes its `status`, one with a
-//! missing `type` is still classified by the battery-shaped fields it
-//! does have, and only a machine exposing *nothing* falls through to
-//! the renderer's dead screen. Desktops and VMs — a `Mains` supply and
-//! no battery — get the deliberate "on line power" face instead.
+//! The walk is a [`Source::Tree`]: the dock's sampler thread does the
+//! `read_dir` and the up-to-four small reads per supply, and `update`
+//! is handed the contents. `parse_supply` and `summarize` are unchanged
+//! — the migration moved the four `read_to_string` calls off the
+//! compositor's repaint thread and rewired what feeds them, nothing
+//! more. Reading a battery's `capacity` can go out to an embedded
+//! controller over I2C, which is precisely the kind of small, usually
+//! instant read that is occasionally not.
+//!
+//! The interpretation degrades per-field on purpose: a supply directory
+//! with an unreadable `capacity` still contributes its `status`, one
+//! with a missing `type` is still classified by the battery-shaped
+//! fields it does have, and only a machine exposing *nothing* falls
+//! through to the renderer's dead screen. Desktops and VMs — a `Mains`
+//! supply and no battery — get the deliberate "on line power" face
+//! instead.
 
-use std::cell::RefCell;
-use std::path::Path;
-use std::time::{Duration, Instant};
+use std::path::PathBuf;
+use std::time::Duration;
 
 use wm_theme::power::{render_power_tile, ChargeState, PowerFace};
 use wm_theme::Theme;
 use wm_theme_api::DecorationBuffer;
 
-use super::DockWidget;
+use super::{DockWidget, Samples, Source, SourceId, TreeEntry};
 
-/// Sampling throttle — deliberately wider than the shared
+/// Sampling interval — deliberately wider than the shared
 /// `SAMPLE_INTERVAL`: battery percentage moves on the scale of minutes,
-/// and every sample is a handful of sysfs reads that wake the disk of
-/// exactly nobody but still cost syscalls per tick.
+/// so a faster cadence would buy nothing and cost a wake-up per second
+/// on a machine whose whole reason for having a battery gauge is that
+/// it is running on the battery.
 const POWER_SAMPLE_INTERVAL: Duration = Duration::from_secs(10);
+
+/// Where the supplies live, and which of each supply's files the tile
+/// reads. Positional: [`SupplyReading`] is built from these indices, so
+/// the array and [`reading_from`] have to stay in step.
+const SUPPLY_ROOT: &str = "/sys/class/power_supply";
+const SUPPLY_FIELDS: &[&str] = &["type", "capacity", "status", "online"];
 
 /// What a supply's `type` file declares it to be.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -130,9 +146,11 @@ fn summarize(supplies: &[SupplyReading]) -> PowerFace {
         ChargeState::Charging
     } else if any(BatteryStatus::Discharging) {
         ChargeState::Discharging
-    } else if any(BatteryStatus::Full) || any(BatteryStatus::NotCharging) {
-        ChargeState::Full
-    } else if ac_online {
+    } else if any(BatteryStatus::Full) || any(BatteryStatus::NotCharging) || ac_online {
+        // Two different routes to the same answer, folded into one arm
+        // because they are one answer: a pack reporting Full/NotCharging
+        // says so itself, and a pack reporting no status at all while
+        // the AC line is up is the fallback for the same conclusion.
         ChargeState::Full
     } else {
         ChargeState::Discharging
@@ -140,42 +158,24 @@ fn summarize(supplies: &[SupplyReading]) -> PowerFace {
     PowerFace::Battery { capacity, state }
 }
 
-/// The thin IO shell around [`parse_supply`]: one directory per supply,
-/// one small file per field, absent files read as `None`. Parameterized
-/// on the root so tests can point it at a fixture tree.
-fn read_supplies_from(root: &Path) -> Vec<SupplyReading> {
-    let Ok(entries) = std::fs::read_dir(root) else { return Vec::new() };
-    let mut out = Vec::new();
-    for entry in entries.flatten() {
-        let dir = entry.path();
-        let field = |name: &str| std::fs::read_to_string(dir.join(name)).ok();
-        let (kind, capacity, status, online) = (field("type"), field("capacity"), field("status"), field("online"));
-        out.push(parse_supply(kind.as_deref(), capacity.as_deref(), status.as_deref(), online.as_deref()));
-    }
-    out
-}
-
-fn read_supplies() -> Vec<SupplyReading> {
-    read_supplies_from(Path::new("/sys/class/power_supply"))
+/// One sampled supply directory to one [`SupplyReading`] — the whole
+/// of what replaced this module's `read_dir`. Pure, because the reads
+/// already happened on a sampler thread.
+fn reading_from(entry: &TreeEntry) -> SupplyReading {
+    parse_supply(entry.file(0), entry.file(1), entry.file(2), entry.file(3))
 }
 
 pub struct PowerWidget {
-    last_sample: Instant,
+    supplies: SourceId,
     face: PowerFace,
-    font_system: RefCell<cosmic_text::FontSystem>,
-    swash_cache: RefCell<cosmic_text::SwashCache>,
 }
 
 impl PowerWidget {
     pub fn new() -> Self {
-        Self {
-            // Backdated so the first tick samples immediately instead
-            // of showing the dead screen for the first ten seconds.
-            last_sample: Instant::now() - POWER_SAMPLE_INTERVAL,
-            face: PowerFace::NoInfo,
-            font_system: RefCell::new(cosmic_text::FontSystem::new()),
-            swash_cache: RefCell::new(cosmic_text::SwashCache::new()),
-        }
+        // `NoInfo` until the first sample lands: the dead screen is the
+        // honest face for "has not looked yet", and the sampler's first
+        // run happens immediately rather than an interval in.
+        Self { supplies: SourceId::UNBOUND, face: PowerFace::NoInfo }
     }
 }
 
@@ -186,12 +186,32 @@ impl Default for PowerWidget {
 }
 
 impl DockWidget for PowerWidget {
-    fn tick(&mut self) -> bool {
-        if self.last_sample.elapsed() < POWER_SAMPLE_INTERVAL {
+    fn name(&self) -> &'static str {
+        "PWR"
+    }
+
+    fn sources(&self) -> Vec<Source> {
+        vec![Source::Tree {
+            root: PathBuf::from(SUPPLY_ROOT),
+            files: SUPPLY_FIELDS,
+            // No subdirectory tells this tile anything: a supply either
+            // declares its `type` or is classified by the fields it
+            // exposes.
+            dirs: &[],
+            interval: POWER_SAMPLE_INTERVAL,
+        }]
+    }
+
+    fn bind(&mut self, ids: &[SourceId]) {
+        self.supplies = ids.first().copied().unwrap_or(SourceId::UNBOUND);
+    }
+
+    fn update(&mut self, samples: &Samples) -> bool {
+        if !samples.fresh(self.supplies) {
             return false;
         }
-        self.last_sample = Instant::now();
-        let face = summarize(&read_supplies());
+        let supplies: Vec<SupplyReading> = samples.tree(self.supplies).iter().map(reading_from).collect();
+        let face = summarize(&supplies);
         if face == self.face {
             return false;
         }
@@ -199,16 +219,25 @@ impl DockWidget for PowerWidget {
         true
     }
 
-    fn render(&self, theme: &Theme, tile: u32) -> DecorationBuffer {
-        let mut font_system = self.font_system.borrow_mut();
-        let mut swash_cache = self.swash_cache.borrow_mut();
-        render_power_tile(theme, &mut font_system, &mut swash_cache, tile, self.face)
+    fn render(&self, theme: &Theme, tile: u32, fonts: &mut cosmic_text::FontSystem, swash: &mut cosmic_text::SwashCache) -> DecorationBuffer {
+        render_power_tile(theme, fonts, swash, tile, self.face)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::widgets::sampling::SampleBench;
+
+    /// One `/sys/class/power_supply/<name>` directory as the sampler
+    /// would have delivered it, positional against `SUPPLY_FIELDS`.
+    fn supply(name: &str, fields: [Option<&str>; 4]) -> TreeEntry {
+        TreeEntry {
+            name: name.to_string(),
+            files: fields.iter().map(|f| f.map(str::to_string)).collect(),
+            dirs: Vec::new(),
+        }
+    }
 
     fn battery(capacity: Option<u8>, status: Option<BatteryStatus>) -> SupplyReading {
         SupplyReading { kind: SupplyKind::Battery, capacity, status, online: None }
@@ -289,31 +318,65 @@ mod tests {
         assert_eq!(summarize(&[parse_supply(None, None, None, None)]), PowerFace::NoInfo);
     }
 
+    /// The end-to-end fold, on the laptop tree with a hole in it that
+    /// `read_supplies_from` used to be tested against: two supplies,
+    /// BAT0 missing its `status` file entirely, and the face that has
+    /// to come out the other side. (The directory walk itself moved to
+    /// a sampler thread and is tested there, against a real fixture
+    /// directory, as `read_tree_walks_a_fixture_directory_and_degrades_per_field`.)
     #[test]
-    fn read_supplies_from_walks_a_fixture_tree_with_holes() {
-        let root = std::env::temp_dir().join(format!("chonkstep-power-fixture-{}", std::process::id()));
-        let bat = root.join("BAT0");
-        let ac = root.join("AC");
-        std::fs::create_dir_all(&bat).unwrap();
-        std::fs::create_dir_all(&ac).unwrap();
-        std::fs::write(bat.join("type"), "Battery\n").unwrap();
-        std::fs::write(bat.join("capacity"), "73\n").unwrap();
-        // No status file at all: the field must degrade, not the supply.
-        std::fs::write(ac.join("type"), "Mains\n").unwrap();
-        std::fs::write(ac.join("online"), "1\n").unwrap();
+    fn update_folds_a_sampled_supply_tree_into_a_face() {
+        let mut bench = SampleBench::new();
+        let id = bench.tree(vec![
+            supply("AC", [Some("Mains\n"), None, None, Some("1\n")]),
+            supply("BAT0", [Some("Battery\n"), Some("73\n"), None, None]),
+        ]);
+        let mut widget = PowerWidget::new();
+        widget.bind(&[id]);
 
-        let mut supplies = read_supplies_from(&root);
-        supplies.sort_by_key(|s| s.kind == SupplyKind::Mains);
-        assert_eq!(
-            supplies,
-            vec![
-                SupplyReading { kind: SupplyKind::Battery, capacity: Some(73), status: None, online: None },
-                mains(Some(true)),
-            ]
-        );
-        assert_eq!(summarize(&supplies), PowerFace::Battery { capacity: Some(73), state: ChargeState::Full });
+        assert!(widget.update(&bench.samples()));
+        assert_eq!(widget.face, PowerFace::Battery { capacity: Some(73), state: ChargeState::Full });
 
-        std::fs::remove_dir_all(&root).unwrap();
-        assert_eq!(read_supplies_from(&root), Vec::new(), "a missing sysfs root reads as no supplies");
+        // Unplugged: same tree, `online` flips, and the AC fallback
+        // that was carrying `Full` stops carrying it.
+        bench.set_tree(id, vec![
+            supply("AC", [Some("Mains\n"), None, None, Some("0\n")]),
+            supply("BAT0", [Some("Battery\n"), Some("71\n"), Some("Discharging\n"), None]),
+        ]);
+        assert!(widget.update(&bench.samples()));
+        assert_eq!(widget.face, PowerFace::Battery { capacity: Some(71), state: ChargeState::Discharging });
+    }
+
+    /// Ten seconds between readings means most passes are stale, and a
+    /// reading that says the same thing as the last one is not a
+    /// repaint either — a battery gauge that redrew the dock every
+    /// sample would repaint it 8,640 times a day to show the same
+    /// number.
+    #[test]
+    fn only_a_changed_face_repaints() {
+        let mut bench = SampleBench::new();
+        let id = bench.tree(vec![supply("BAT0", [Some("Battery"), Some("50"), Some("Discharging"), None])]);
+        let mut widget = PowerWidget::new();
+        widget.bind(&[id]);
+        assert!(widget.update(&bench.samples()));
+
+        bench.all_stale();
+        assert!(!widget.update(&bench.samples()), "a stale pass folds nothing");
+
+        bench.set_tree(id, vec![supply("BAT0", [Some("Battery"), Some("50"), Some("Discharging"), None])]);
+        assert!(!widget.update(&bench.samples()), "a fresh reading that says the same thing is not a change");
+    }
+
+    /// The dev-host case: no such directory, so the sampler delivers no
+    /// entries and the tile shows the dead screen rather than inventing
+    /// a battery.
+    #[test]
+    fn an_empty_tree_is_the_dead_face() {
+        let mut bench = SampleBench::new();
+        let id = bench.tree(Vec::new());
+        let mut widget = PowerWidget::new();
+        widget.bind(&[id]);
+        assert!(!widget.update(&bench.samples()), "NoInfo was already the face");
+        assert_eq!(widget.face, PowerFace::NoInfo);
     }
 }
