@@ -108,9 +108,18 @@ fn main() {
     // could name it), so the binary tells root presses apart from
     // shell-surface clicks before anything reaches the shell.
     let root = wm.backend().root();
+    // Reused across iterations so building the wait set is a `clear`
+    // and a few pushes rather than an allocation at 60Hz — see
+    // `wait_for_activity`.
+    let mut wait_fds: Vec<std::os::unix::io::RawFd> = Vec::new();
     loop {
         if restart_requested() {
             tracing::info!("restart requested — re-executing in place");
+            // Dockapps first: `restart_in_place` never returns, and the
+            // replacement process launches its own copy of every
+            // registered tile from the registry. See
+            // `Shell::shut_down`.
+            shell.shut_down();
             restart_in_place();
         }
 
@@ -166,7 +175,8 @@ fn main() {
                     if let Some(motion) = pending_motion.take() {
                         dispatch_motion(&mut wm, &mut shell, motion);
                     }
-                    if exit_requested(shell.run_action(&mut wm, &action)) {
+                    let outcome = shell.run_action(&mut wm, &action);
+                    if exit_requested(&mut shell, outcome) {
                         should_exit = true;
                     }
                     continue;
@@ -214,13 +224,25 @@ fn main() {
             } else {
                 shell.on_shell_click(&mut wm, surface, local, button, pressed)
             };
-            if exit_requested(outcome) {
+            if exit_requested(&mut shell, outcome) {
                 should_exit = true;
             }
         }
         if should_exit {
             tracing::info!("exit requested from root menu, shutting down");
             break;
+        }
+
+        // Scroll drains beside the clicks, and separately from them:
+        // X11 reports a wheel as button 4/5 press/release pairs, which
+        // the backend turns into notch counts rather than clicks (see
+        // `Backend::take_shell_scroll`), so nothing here can
+        // double-count the same physical input. Queued rather than
+        // coalesced, unlike motion, because every notch is its own
+        // command — three notches on a volume tile is three steps, and
+        // keeping only the last would swallow input the user gave.
+        while let Some((surface, local, delta)) = wm.backend_mut().take_shell_scroll() {
+            shell.on_shell_scroll(&mut wm, surface, local, delta);
         }
 
         // No separate `take_shell_motion` drain here: the shell drains
@@ -245,8 +267,25 @@ fn main() {
         // so the clock/menu-hover-timeout ticks above still run
         // regularly even with zero X11 activity; real input wakes this
         // up immediately, every time, regardless of that bound.
-        wait_for_x11_activity(wm.backend().connection_fd(), HOUSEKEEPING_INTERVAL);
+        // The X socket plus everything the shell is waiting on that
+        // the display server knows nothing about: the dockapp
+        // listener, and one fd per connected dockapp. Rebuilt every
+        // pass because the set changes as dockapps connect, die and
+        // restart — a stale fd here is at best a spurious wakeup, and
+        // at worst a wait on a descriptor this process has since reused
+        // for something else. The `Vec` lives outside the loop so the
+        // rebuild is a `clear` and some pushes rather than an
+        // allocation at 60Hz.
+        wait_fds.clear();
+        wait_fds.push(wm.backend().connection_fd());
+        wait_fds.extend(shell.extra_poll_fds());
+        wait_for_activity(&wait_fds, HOUSEKEEPING_INTERVAL);
     }
+
+    // Whatever ended the loop — the root menu's Exit, a lost display —
+    // the dockapps this session launched are its responsibility and
+    // nothing else will collect them.
+    shell.shut_down();
 }
 
 /// How often the main loop wakes up on its own even with no X11
@@ -256,19 +295,37 @@ fn main() {
 /// their specific timing requirements.
 const HOUSEKEEPING_INTERVAL: Duration = Duration::from_millis(16);
 
-/// Blocks the calling thread until `fd` is readable or `timeout`
-/// elapses, whichever comes first — the integration pattern x11rb's own
-/// `event_loop_integration` module docs recommend for exactly this
-/// (`conn.stream().as_raw_fd()` + an external `poll`), rather than
-/// guessing at a fixed sleep duration that either wastes latency (too
-/// long) or busy-loops (too short).
-fn wait_for_x11_activity(fd: std::os::unix::io::RawFd, timeout: Duration) {
-    let mut fds = [libc::pollfd { fd, events: libc::POLLIN, revents: 0 }];
-    // SAFETY: `fds` is a valid, appropriately-sized array for the
-    // `nfds=1` we pass; `poll` only reads/writes through that pointer
-    // for the duration of the call.
+/// Blocks the calling thread until one of `fds` is readable or
+/// `timeout` elapses, whichever comes first — the integration pattern
+/// x11rb's own `event_loop_integration` module docs recommend for
+/// exactly this (`conn.stream().as_raw_fd()` + an external `poll`),
+/// rather than guessing at a fixed sleep duration that either wastes
+/// latency (too long) or busy-loops (too short).
+///
+/// It takes a *set* of descriptors because the X socket is no longer
+/// the only thing this session waits on: an out-of-process dock tile
+/// pushes its pixels down a Unix socket the display server knows
+/// nothing about, and a frame that arrived has to wake this loop the
+/// same way an X event does. That is the entire X11-side cost of
+/// dockapps — everything else about them is backend-generic, because a
+/// dockapp is not a display-server client at all.
+///
+/// Nothing is read here. `poll` only says *that* something is ready;
+/// which fd it was does not matter, because the loop's next pass
+/// services every dockapp regardless and each of those reads until
+/// `EAGAIN`. Skipping the readiness bookkeeping costs one wasted pass
+/// over a handful of sockets and saves this function from having to
+/// know what any of them are.
+fn wait_for_activity(fds: &[std::os::unix::io::RawFd], timeout: Duration) {
+    if fds.is_empty() {
+        return;
+    }
+    let mut poll_fds: Vec<libc::pollfd> = fds.iter().map(|&fd| libc::pollfd { fd, events: libc::POLLIN, revents: 0 }).collect();
+    // SAFETY: `poll_fds` is a valid array of exactly the length passed
+    // as `nfds`; `poll` only reads/writes through that pointer for the
+    // duration of the call.
     unsafe {
-        libc::poll(fds.as_mut_ptr(), 1, timeout.as_millis() as i32);
+        libc::poll(poll_fds.as_mut_ptr(), poll_fds.len() as libc::nfds_t, timeout.as_millis() as i32);
     }
 }
 
@@ -299,7 +356,7 @@ fn dispatch_motion(
 /// returning it). Split out because outcomes surface at two points in
 /// the loop (a configured key action mid-drain, a shell click after
 /// it) that must not drift on what each variant means.
-fn exit_requested(outcome: ShellOutcome) -> bool {
+fn exit_requested(shell: &mut Shell<X11Backend>, outcome: ShellOutcome) -> bool {
     match outcome {
         ShellOutcome::Continue => false,
         ShellOutcome::Exit => true,
@@ -307,7 +364,14 @@ fn exit_requested(outcome: ShellOutcome) -> bool {
         // on-disk binary in place, windows surviving via the X11
         // SaveSet — which is also what makes the theme menu (and a
         // bound `Restart` action) the config hot-reload gesture.
-        ShellOutcome::Restart => restart_in_place(),
+        ShellOutcome::Restart => {
+            // `restart_in_place` never returns and the replacement
+            // process launches its own copy of every registered
+            // dockapp, so the outgoing one has to let go of its first
+            // — see `Shell::shut_down`.
+            shell.shut_down();
+            restart_in_place()
+        }
     }
 }
 

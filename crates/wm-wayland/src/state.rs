@@ -32,6 +32,7 @@
 //! theme/scale precedence as the X11 binary, and the dispatch loop.
 
 use std::collections::{HashMap, VecDeque};
+use std::os::fd::{BorrowedFd, RawFd};
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -47,7 +48,7 @@ use smithay::input::pointer::CursorImageStatus;
 use smithay::input::{Seat, SeatState};
 use smithay::output::{Mode, Output, PhysicalProperties, Subpixel};
 use smithay::reexports::calloop::generic::Generic;
-use smithay::reexports::calloop::{EventLoop, Interest, LoopHandle, Mode as TriggerMode, PostAction};
+use smithay::reexports::calloop::{EventLoop, Interest, LoopHandle, Mode as TriggerMode, PostAction, RegistrationToken};
 use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::State as XdgToplevelState;
 use smithay::reexports::wayland_server::backend::{ClientData, ClientId, DisconnectReason, GlobalId};
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
@@ -508,6 +509,12 @@ pub struct Compositor {
 
     pub display_handle: DisplayHandle,
     pub loop_handle: LoopHandle<'static, Compositor>,
+    /// One calloop source per file descriptor the shell asked to be
+    /// woken on that this compositor knows nothing else about: the
+    /// dockapp listener, and one per connected out-of-process dock
+    /// tile. Reconciled against `Shell::extra_poll_fds` at the end of
+    /// every dispatch pass — see [`Compositor::sync_dock_sources`].
+    dock_sources: Vec<(RawFd, RegistrationToken)>,
 
     // Per-protocol smithay state. Constructed once in `run`; the
     // handler impls in `xdg.rs`/`input.rs`/`xwayland.rs` return these
@@ -671,6 +678,17 @@ impl Compositor {
             return;
         }
 
+        // Scroll drains beside the clicks and separately from them: an
+        // axis event is not a button, so `take_shell_click` never
+        // reports one and the two drains cannot double-count the same
+        // gesture. Queued rather than coalesced, unlike motion, because
+        // every notch is its own command — three notches on a volume
+        // tile is three steps, and keeping only the last would swallow
+        // input the user gave.
+        while let Some((surface, local, delta)) = self.wm.backend_mut().take_shell_scroll() {
+            self.shell.on_shell_scroll(&mut self.wm, surface, local, delta);
+        }
+
         // No separate shell-motion drain, same as X11: the shell
         // drains `take_shell_motion` itself inside `on_motion`, which
         // every coalesced `PointerMotion` above passes through.
@@ -702,6 +720,87 @@ impl Compositor {
         // frame callbacks, focus enter/leave) only reach clients on a
         // flush.
         let _ = self.display_handle.flush_clients();
+
+        // Last, after every socket this pass was going to close has
+        // been closed. See `sync_dock_sources` for why that ordering is
+        // the safety argument and not a tidiness one.
+        self.sync_dock_sources();
+    }
+
+    /// Brings the set of registered dockapp sources in line with what
+    /// the shell is currently waiting on.
+    ///
+    /// # Why a source per fd rather than one for the listener
+    ///
+    /// A dockapp is not a Wayland client. It never opens a display
+    /// connection — the shell strips `WAYLAND_DISPLAY` and `DISPLAY`
+    /// from its environment before `exec` — so nothing in this
+    /// compositor's own protocol machinery will ever hear from it. It
+    /// is a process on the end of a `SOCK_SEQPACKET` socket, and the
+    /// only thing this loop has to do about that is wake up when one
+    /// has something to say. That is the *entire* Wayland-side cost of
+    /// out-of-process dock tiles; the X11 binary pays the same cost by
+    /// adding the same descriptors to its `poll` set.
+    ///
+    /// # Why nothing is read in the callback
+    ///
+    /// The callback is empty. Its only job is to end the
+    /// `event_loop.dispatch` wait; `dispatch_pending` then services
+    /// every dockapp regardless of which fd woke us, and each of those
+    /// reads until `EAGAIN`. Level-triggered polling is therefore safe
+    /// rather than a spin: the socket that woke us is always drained
+    /// before the next wait begins.
+    ///
+    /// # Why the reconciliation runs *here*
+    ///
+    /// The registered `BorrowedFd` outlives the borrow checker's
+    /// ability to prove it is valid, so validity is a property of this
+    /// ordering: `dispatch_pending` services the dockapps (which is the
+    /// only place a dockapp socket is ever closed) and *then* runs
+    /// this, which unregisters the sources for any fd that went away —
+    /// all before control returns to `event_loop.dispatch`, which is
+    /// the only place calloop touches a registered descriptor. There is
+    /// no point at which a source names a closed fd and something polls
+    /// it.
+    fn sync_dock_sources(&mut self) {
+        let wanted = self.shell.extra_poll_fds();
+        // Removals first, so a descriptor that was closed this pass is
+        // unregistered before anything else can be inserted at the same
+        // number.
+        let mut kept = Vec::with_capacity(wanted.len());
+        for (fd, token) in std::mem::take(&mut self.dock_sources) {
+            if wanted.contains(&fd) {
+                kept.push((fd, token));
+            } else {
+                self.loop_handle.remove(token);
+            }
+        }
+        self.dock_sources = kept;
+
+        for fd in wanted {
+            if self.dock_sources.iter().any(|(known, _)| *known == fd) {
+                continue;
+            }
+            // SAFETY: `fd` is owned by a `Seqpacket` or
+            // `SeqpacketListener` inside the shell, and the source is
+            // removed above on the same pass that drops the owner and
+            // before calloop next polls — see the ordering argument in
+            // this method's docs.
+            let borrowed = unsafe { BorrowedFd::borrow_raw(fd) };
+            let source = Generic::new(borrowed, Interest::READ, TriggerMode::Level);
+            match self.loop_handle.insert_source(source, |_, _, _| Ok(PostAction::Continue)) {
+                Ok(token) => self.dock_sources.push((fd, token)),
+                Err(error) => {
+                    // Not fatal, and worth being precise about why: the
+                    // loop already wakes on a 16ms housekeeping bound,
+                    // so an unregistered dockapp fd costs that tile up
+                    // to 16ms of frame latency and nothing else. This
+                    // is a latency optimisation, not a correctness
+                    // requirement.
+                    tracing::warn!(fd, ?error, "could not watch a dockapp socket; its frames will arrive on the housekeeping tick instead");
+                }
+            }
+        }
     }
 
     /// Feeds one already-coalesced `PointerMotion` to the shell's drag
@@ -1160,6 +1259,7 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
         data_device_state,
         xwayland_shell_state,
         popups: PopupManager::default(),
+        dock_sources: Vec::new(),
         seat,
         outputs,
         xwm: None,
@@ -1191,6 +1291,12 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
         event_loop.dispatch(Some(HOUSEKEEPING_INTERVAL), &mut comp)?;
         comp.dispatch_pending();
     }
+
+    // Whatever ended the loop — the root menu's Exit, a theme pick, a
+    // touched restart marker — the dockapps this session launched are
+    // its responsibility, and the replacement process will launch its
+    // own copy of every one of them. See `Shell::shut_down`.
+    comp.shell.shut_down();
 
     if comp.restart {
         // `nested` is the decision this process made at startup, so the

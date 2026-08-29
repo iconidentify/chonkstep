@@ -32,6 +32,8 @@ use std::time::{Duration, Instant};
 use wm_theme::Theme;
 use wm_theme_api::DecorationBuffer;
 
+use crate::dockapp::tile::RemoteTile;
+
 pub mod sampling;
 
 pub use chonk_dock_widget::{DockInput, DockWidget, Effect, Samples, Source, SourceId, TreeEntry, SAMPLE_INTERVAL};
@@ -106,6 +108,15 @@ pub(crate) enum DockItem {
     /// tile are interchangeable *here*, which is what lets any one of
     /// them move out later without touching the dock.
     Builtin { id: &'static str, widget: Box<dyn DockWidget> },
+    /// A tile drawn by a separate process, pushing pixels down a
+    /// private socket — see [`crate::dockapp`].
+    ///
+    /// The reason this arm can exist beside the one above with no
+    /// special handling anywhere in the dock is that the two produce
+    /// the same thing: a tile-sized premultiplied-RGBA buffer. Keeping
+    /// `render -> DecorationBuffer` was chosen *because* of this arm;
+    /// the wire format is the return type.
+    Remote(Box<RemoteTile>),
 }
 
 impl DockItem {
@@ -134,6 +145,27 @@ impl DockItem {
     pub(crate) fn id(&self) -> &str {
         match self {
             DockItem::Builtin { id, .. } => id,
+            DockItem::Remote(tile) => tile.id(),
+        }
+    }
+
+    /// The remote tile behind this item, for the servicing the dock
+    /// does on its behalf — reading its socket, pinging it, relaunching
+    /// it. Deliberately not part of [`DockWidget`]: none of that is
+    /// something a *widget* does, and putting it on the trait would put
+    /// a socket pump in the vocabulary the six built-in instruments are
+    /// written against.
+    pub(crate) fn remote_mut(&mut self) -> Option<&mut RemoteTile> {
+        match self {
+            DockItem::Builtin { .. } => None,
+            DockItem::Remote(tile) => Some(tile),
+        }
+    }
+
+    pub(crate) fn remote(&self) -> Option<&RemoteTile> {
+        match self {
+            DockItem::Builtin { .. } => None,
+            DockItem::Remote(tile) => Some(tile),
         }
     }
 }
@@ -145,42 +177,49 @@ impl DockWidget for DockItem {
     fn name(&self) -> &str {
         match self {
             DockItem::Builtin { widget, .. } => widget.name(),
+            DockItem::Remote(tile) => tile.name(),
         }
     }
 
     fn sources(&self) -> Vec<Source> {
         match self {
             DockItem::Builtin { widget, .. } => widget.sources(),
+            DockItem::Remote(tile) => tile.sources(),
         }
     }
 
     fn bind(&mut self, ids: &[SourceId]) {
         match self {
             DockItem::Builtin { widget, .. } => widget.bind(ids),
+            DockItem::Remote(tile) => tile.bind(ids),
         }
     }
 
     fn update(&mut self, samples: &Samples) -> bool {
         match self {
             DockItem::Builtin { widget, .. } => widget.update(samples),
+            DockItem::Remote(tile) => tile.update(samples),
         }
     }
 
     fn render(&self, theme: &Theme, tile: u32, fonts: &mut cosmic_text::FontSystem, swash: &mut cosmic_text::SwashCache) -> DecorationBuffer {
         match self {
             DockItem::Builtin { widget, .. } => widget.render(theme, tile, fonts, swash),
+            DockItem::Remote(remote) => remote.render(theme, tile, fonts, swash),
         }
     }
 
     fn tile_height(&self) -> u32 {
         match self {
             DockItem::Builtin { widget, .. } => widget.tile_height(),
+            DockItem::Remote(tile) => tile.tile_height(),
         }
     }
 
     fn on_input(&mut self, input: DockInput, tile: u32) -> Vec<Effect> {
         match self {
             DockItem::Builtin { widget, .. } => widget.on_input(input, tile),
+            DockItem::Remote(remote) => remote.on_input(input, tile),
         }
     }
 }
@@ -531,6 +570,32 @@ impl SupervisedWidget {
 
     pub(crate) fn name(&self) -> &str {
         &self.name
+    }
+
+    /// The remote tile this item wraps, for the servicing the dock does
+    /// on its behalf. `None` for a built-in, and `None` for an evicted
+    /// item — the dock has stopped calling it, and a socket pump is one
+    /// more call.
+    ///
+    /// Servicing is exposed *past* the supervisor rather than through
+    /// it because it is not a `DockWidget` call and must not be timed
+    /// as one: reading a socket is the dock's own work, done on the
+    /// dock's behalf, and charging it to the dockapp's budget would
+    /// eventually evict a tile for the shell being slow.
+    pub(crate) fn remote_mut(&mut self) -> Option<&mut RemoteTile> {
+        self.item.remote_mut()
+    }
+
+    pub(crate) fn remote(&self) -> Option<&RemoteTile> {
+        self.item.remote()
+    }
+
+    /// Whether the supervisor has given up on this item — see the type
+    /// docs. Exposed so the dock can stop a *remote* item's process
+    /// too: an evicted tile whose dockapp kept running would draw
+    /// frames nobody will ever blit.
+    pub(crate) fn evicted(&self) -> bool {
+        self.evicted
     }
 
     /// This item's persistence key — see [`DockItem::id`]. Answered

@@ -288,10 +288,14 @@ dependencies = [
 name = "chonk-shell"
 version = "0.1.0"
 dependencies = [
+ "chonk-dock-proto",
  "chonk-dock-widget",
  "chonk-instruments",
  "cosmic-text",
+ "libc",
+ "serde",
  "tiny-skia",
+ "toml",
  "tracing",
  "wm-config",
  "wm-core",
