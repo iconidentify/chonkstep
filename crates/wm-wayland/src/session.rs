@@ -245,14 +245,36 @@ const DEVICE_FLAGS: OFlags = OFlags::RDWR
 /// How long a page flip may stay in flight before the session says so.
 ///
 /// The kernel promises a completion event for every atomic commit it
-/// accepted, so exceeding this is a driver bug rather than a case to
-/// recover from — and "recovery" would mean rendering into a buffer the
-/// display engine still owns, which corrupts the screen instead of
-/// fixing it. So this only produces a log line, but that line is the
-/// difference between a frozen desktop that explains itself over SSH
-/// and one that says nothing at all. Two seconds is far beyond any real
-/// refresh interval, including a 24Hz cinema mode.
+/// accepted, so exceeding this is a driver bug rather than ordinary
+/// backpressure, and the log line is the difference between a frozen
+/// desktop that explains itself over SSH and one that says nothing at
+/// all. Two seconds is far beyond any real refresh interval, including
+/// a 24Hz cinema mode. This threshold only talks; the one that acts is
+/// [`FLIP_STALL_RECOVERY`].
 const FLIP_STALL_WARNING: Duration = Duration::from_secs(2);
+
+/// How long a page flip may stay in flight before the session stops
+/// waiting for it and resets the device out from under it.
+///
+/// This used not to exist, on the reasoning that a lost flip cannot be
+/// recovered from because the display engine still owns the buffer and
+/// drawing into it would corrupt the screen. That is right about the
+/// buffer and wrong about the conclusion: the flip is unrecoverable
+/// only while the crtc keeps its current programming.
+/// [`service_pending_flips`] never renders into the stuck buffer — it
+/// tears the crtc's state down and drops every swapchain buffer, which
+/// makes the next frame go out as a full modeset commit rather than a
+/// page flip, on a display engine that by then owns nothing. The
+/// alternative is what the session log from 2026-08-29 05:23 records:
+/// an output frozen for the remaining thirty seconds of the session,
+/// with the error line advising a VT switch as the only way out.
+///
+/// Five seconds rather than two, for two reasons. A driver that is
+/// merely very late deserves to finish, because the reset costs a
+/// visible modeset flicker. And the threshold doubles as the retry
+/// interval: if a reset does not take, the next attempt is five seconds
+/// away instead of one frame away.
+const FLIP_STALL_RECOVERY: Duration = Duration::from_secs(5);
 
 /// Everything the session backend owns while it runs: the seat, the
 /// DRM device and its GBM allocator, the EGL/GLES renderer, one
@@ -803,11 +825,112 @@ fn attach_output(
 /// something unrelated damaged the scene again. The nested backend has
 /// exactly one output and clears damage only on success, so it never
 /// needs this and always answers `false`.
+///
+/// A flip still in flight counts too, and not because anything can be
+/// drawn while it is — [`render_frame_session`] will skip that output —
+/// but because [`service_pending_flips`] runs from inside that function
+/// and has to be reached on a desktop where nothing at all is
+/// happening. That is precisely the state a lost flip leaves behind: no
+/// damage, no dirty output, nothing to bring the render path back, and
+/// so no one left to notice. The cost is one extra pass over the
+/// outputs per housekeeping wakeup while a flip is outstanding, which
+/// at 60Hz is most of them, and each pass is a `Duration` comparison
+/// per output.
 pub(crate) fn redraw_pending(graphics: &Graphics) -> bool {
     match graphics {
         Graphics::Winit(_) => false,
-        Graphics::Session(session) => session.outputs.iter().any(|output| output.dirty),
+        Graphics::Session(session) => session
+            .outputs
+            .iter()
+            .any(|output| output.dirty || output.frame_pending.is_some()),
     }
+}
+
+/// Services every page flip in flight: names the ones that have overrun
+/// [`FLIP_STALL_WARNING`], and resets the device out from under any
+/// that have overrun [`FLIP_STALL_RECOVERY`].
+///
+/// Called once per render pass, before any output is drawn, and that
+/// placement is half the fix. The check this replaces sat *after* the
+/// `dirty` test inside the draw loop, so a stuck flip on an idle
+/// desktop went unnoticed until something happened to damage the scene:
+/// the session log that prompted this work shows a flip queued at
+/// 05:22:59.73 and first reported at 05:23:03.29 — `waited=3.558s`
+/// against a two-second threshold — because nothing asked the question
+/// until the pointer moved.
+///
+/// Returns whether the device was reset. No caller needs it today (the
+/// reset leaves every output dirty, and the draw loop that follows
+/// repaints them), but a bare `bool` at the call site reads better than
+/// a unit-returning function whose name suggests it might not do
+/// anything.
+fn service_pending_flips(session: &mut SessionGraphics) -> bool {
+    let mut needs_reset = false;
+    for output in session.outputs.iter_mut() {
+        let Some(flip) = output.frame_pending.as_mut() else {
+            continue;
+        };
+        let waited = flip.queued_at.elapsed();
+        if !flip.stall_reported && waited > FLIP_STALL_WARNING {
+            flip.stall_reported = true;
+            tracing::error!(
+                ?waited,
+                output = %output.name,
+                "no page-flip completion from the DRM device; this output is frozen until one \
+                 arrives or the stall watchdog resets the device"
+            );
+        }
+        needs_reset |= waited > FLIP_STALL_RECOVERY;
+    }
+    if !needs_reset {
+        return false;
+    }
+
+    // Device-wide, and deliberately not `DrmDevice::activate(true)`
+    // even though the VT-resume path recovers with exactly that call.
+    // `activate`'s `disable_connectors` argument only takes effect when
+    // the device had actually been paused — it is reached through
+    // `!set_active(true)`, and `set_active` returns the *previous*
+    // flag — so on a device that never left us it does nothing at all.
+    // The reset has to be asked for directly.
+    tracing::warn!("resetting the DRM device to recover from a stalled page flip");
+    if let Err(error) = session.drm.reset_state() {
+        tracing::error!(
+            ?error,
+            "could not reset the DRM device after a stalled page flip; the screen stays frozen \
+             until the next attempt"
+        );
+        return false;
+    }
+
+    for output in session.outputs.iter_mut() {
+        // Forces the next `render_frame` to report a non-empty result
+        // and the next `queue_frame` to go out as a full modeset commit
+        // rather than a page flip. That is the part that actually
+        // unwedges a crtc the kernel still believes has a flip
+        // outstanding, and the reason a plain retry would not: further
+        // page flips against a pending one come back `EBUSY`.
+        if let Err(error) = output.drm_compositor.reset_state() {
+            tracing::error!(
+                ?error,
+                output = %output.name,
+                "could not reset the crtc state after a stalled page flip"
+            );
+        }
+        // The swapchain slot the lost flip is holding will never come
+        // back through `frame_submitted`. Dropping every buffer is what
+        // keeps the frames after the reset from failing with
+        // `NoFreeSlotsError`.
+        output.drm_compositor.reset_buffers();
+        // A late completion for the flip just abandoned finds this
+        // `None` (or, if the reset's own frame is already out, a newer
+        // flip's `Some`) and calls `frame_submitted` with nothing
+        // pending, which smithay answers `Ok(None)`. Harmless, and the
+        // same shape the pause/resume path has always had.
+        output.frame_pending = None;
+        output.dirty = true;
+    }
+    true
 }
 
 /// Switches the seat to virtual terminal `vt`, reporting whether this
@@ -881,28 +1004,29 @@ pub(crate) fn render_frame_session(comp: &mut Compositor) {
     // resume handler's repaint has something to repaint.
     let device_active = session.drm.is_active();
 
+    // Before anything is drawn, and unconditionally rather than per
+    // dirty output: a flip that is never going to complete is exactly
+    // the case where nothing else in this function would run. Skipped
+    // on an inactive device, where every flip is legitimately abandoned
+    // and the resume handler is what clears them.
+    if device_active {
+        service_pending_flips(session);
+    }
+
     let SessionGraphics { renderer, outputs: session_outputs, .. } = &mut **session;
     let mut drew_any = false;
     for output in session_outputs.iter_mut() {
-        if !output.dirty {
-            continue;
-        }
-        if let Some(flip) = output.frame_pending.as_mut() {
+        if output.frame_pending.is_some() {
             // A page flip is in flight on this crtc. Rendering now would
             // burn a swapchain slot on a frame the display cannot show
             // before the one already queued, so leave the output dirty
             // and let the vblank handler's clearing of this flag be what
-            // schedules the redraw.
-            let waited = flip.queued_at.elapsed();
-            if !flip.stall_reported && waited > FLIP_STALL_WARNING {
-                flip.stall_reported = true;
-                tracing::error!(
-                    ?waited,
-                    output = %output.name,
-                    "no page-flip completion from the DRM device; this output is frozen until one \
-                     arrives (driver bug — switch VTs to get a console back)"
-                );
-            }
+            // schedules the redraw. Whether that flip is merely in
+            // flight or stuck is `service_pending_flips`' question, and
+            // it has already been asked this pass.
+            continue;
+        }
+        if !output.dirty {
             continue;
         }
         if !device_active {
