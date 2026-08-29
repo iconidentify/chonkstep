@@ -36,5 +36,5 @@ pub use placement::{place_frame, PlacementPolicy};
 pub use snap::snap_position;
 pub use types::{
     BackendEvent, DragHandle, KeyCombo, Modifiers, MouseButton, NetState, NetStateAction,
-    SizeHints, SurfaceRef, WindowType, WmClass, WmProtocol,
+    ScrollDelta, SizeHints, SurfaceRef, WindowType, WmClass, WmProtocol,
 };

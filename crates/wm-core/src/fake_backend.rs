@@ -7,7 +7,7 @@ use wm_theme_api::{
 
 use crate::backend::Backend;
 use crate::client::MonitorInfo;
-use crate::types::{BackendEvent, DragHandle, KeyCombo, MouseButton, SizeHints, WindowType, WmClass, WmProtocol};
+use crate::types::{BackendEvent, DragHandle, KeyCombo, MouseButton, ScrollDelta, SizeHints, WindowType, WmClass, WmProtocol};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct FakeWindowId(pub u64);
@@ -43,10 +43,25 @@ pub struct FakeBackend {
     /// test assert a *fresh* repaint actually happened, not just that
     /// one happened at some point in the frame's history.
     pub paint_count: HashMap<FakeFrameId, u32>,
+    /// Dimensions of the last `DecorationBuffer` painted into each
+    /// frame. A backend that owns no frame window of its own (the
+    /// Wayland one composites the buffer directly, at the buffer's own
+    /// size) draws exactly this rect and nothing else, so a buffer that
+    /// disagrees with `last_frame_geometry` is a visible bug there even
+    /// though X11's server-side clipping would hide it.
+    pub last_paint_size: HashMap<FakeFrameId, Size>,
     pub last_frame_geometry: HashMap<FakeFrameId, Rect>,
     pub close_requests: HashSet<FakeWindowId>,
     /// Monotonic id source for `create_shell_surface`.
     pub next_shell_id: u32,
+    /// Scroll events waiting for `Backend::take_shell_scroll`, oldest
+    /// first. The fake has no input hardware, so tests stage them with
+    /// `queue_shell_scroll` — the same shape a real backend's input
+    /// machinery pushes (`wm-x11`'s `pending_shell_scrolls`,
+    /// `wm-wayland`'s `shell_scrolls`), so a test drives the drain
+    /// through the trait exactly as the event loop does, with no
+    /// display server anywhere.
+    pub queued_shell_scrolls: VecDeque<(u32, Point, ScrollDelta)>,
     /// Windows force-killed via `kill_client`, in call order.
     pub killed: Vec<FakeWindowId>,
     /// Per-window `WM_CLASS` class strings the existing `window_class`
@@ -155,6 +170,19 @@ impl FakeBackend {
     pub fn set_window_type(&mut self, window: FakeWindowId, window_type: WindowType) {
         self.window_types.insert(window, window_type);
     }
+
+    /// Stages a scroll for the next `take_shell_scroll` drain, as a
+    /// real backend would after a wheel notch over `shell` at
+    /// `local`.
+    ///
+    /// Deliberately a plain push with no validation: the fake's job is
+    /// to let a test say "the user scrolled here", including saying
+    /// things a well-behaved backend would not, so a consumer's
+    /// handling of a multi-notch or diagonal delta is reachable
+    /// without a mouse.
+    pub fn queue_shell_scroll(&mut self, shell: u32, local: Point, delta: ScrollDelta) {
+        self.queued_shell_scrolls.push_back((shell, local, delta));
+    }
 }
 
 const DEFAULT_GEOMETRY: Rect = Rect { pos: Point { x: 0, y: 0 }, size: Size { w: 200, h: 150 } };
@@ -179,6 +207,9 @@ impl Backend for FakeBackend {
     fn raise_shell_surface(&mut self, _id: Self::ShellId) {}
     fn configure_shell_surface(&mut self, _id: Self::ShellId, _geometry: wm_theme_api::Rect) {}
     fn paint_shell_surface(&mut self, _id: Self::ShellId, _buffer: &DecorationBuffer) {}
+    fn take_shell_scroll(&mut self) -> Option<(Self::ShellId, Point, ScrollDelta)> {
+        self.queued_shell_scrolls.pop_front()
+    }
     fn paint_root_color(&mut self, _rgb: (u8, u8, u8)) {}
     fn paint_root_image(&mut self, _buffer: &DecorationBuffer) {}
     fn screen_size(&self) -> Size {
@@ -236,9 +267,10 @@ impl Backend for FakeBackend {
         self.destroyed_frames.insert(frame);
     }
 
-    fn paint_decoration(&mut self, frame: Self::FrameId, _buffer: &DecorationBuffer) {
+    fn paint_decoration(&mut self, frame: Self::FrameId, buffer: &DecorationBuffer) {
         self.painted_frames.insert(frame);
         *self.paint_count.entry(frame).or_insert(0) += 1;
+        self.last_paint_size.insert(frame, Size::new(buffer.width, buffer.height));
     }
 
     fn set_frame_cursor(&mut self, frame: Self::FrameId, edge: Option<ResizeEdge>) {
@@ -394,5 +426,47 @@ impl ThemeEngine for FakeTheme {
     fn render(&self, _request: &DecorationRequest, layout: &DecorationLayout) -> DecorationBuffer {
         let (w, h) = (layout.frame_size.w, layout.frame_size.h);
         DecorationBuffer { width: w, height: h, pixels: vec![128u8; (w * h * 4) as usize] }
+    }
+}
+
+/// The fake's own contract tests. Only the parts of it that carry
+/// behavior rather than record-keeping are worth testing here, and the
+/// scroll queue is one: it is the sole path by which a consumer of
+/// `Backend::take_shell_scroll` can be exercised with no display
+/// server, so if its ordering or its drain-to-empty were wrong, every
+/// test built on it would be wrong in the same direction and none of
+/// them would say so.
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scrolls_drain_oldest_first_and_then_stop() {
+        let mut backend = FakeBackend::default();
+        backend.queue_shell_scroll(7, Point::new(4, 5), ScrollDelta { up: 1, right: 0 });
+        backend.queue_shell_scroll(7, Point::new(4, 5), ScrollDelta { up: -2, right: 0 });
+
+        assert_eq!(backend.take_shell_scroll(), Some((7, Point::new(4, 5), ScrollDelta { up: 1, right: 0 })));
+        assert_eq!(backend.take_shell_scroll(), Some((7, Point::new(4, 5), ScrollDelta { up: -2, right: 0 })));
+        assert_eq!(backend.take_shell_scroll(), None, "a drained queue must end the loop, not repeat");
+    }
+
+    /// Scroll and click are separate channels on purpose (a wheel is
+    /// not a `MouseButton`), so draining one must not consume or
+    /// invent the other — the event loop calls both drains every pass.
+    #[test]
+    fn the_scroll_queue_is_independent_of_the_click_queue() {
+        let mut backend = FakeBackend::default();
+        backend.queue_shell_scroll(1, Point::new(0, 0), ScrollDelta { up: 0, right: 1 });
+
+        assert_eq!(backend.take_shell_click(), None);
+        assert!(backend.take_shell_scroll().is_some());
+    }
+
+    #[test]
+    fn a_zero_delta_is_the_only_one_a_backend_may_not_queue() {
+        assert!(ScrollDelta::default().is_zero());
+        assert!(!ScrollDelta { up: -1, right: 0 }.is_zero());
+        assert!(!ScrollDelta { up: 0, right: 1 }.is_zero());
     }
 }

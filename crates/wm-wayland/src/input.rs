@@ -62,7 +62,7 @@ use smithay::input::Seat;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::utils::{Logical, Point as LogicalPoint, SERIAL_COUNTER};
 
-use wm_core::{BackendEvent, KeyCombo, Modifiers, MonitorInfo, MouseButton, SurfaceRef};
+use wm_core::{BackendEvent, KeyCombo, Modifiers, MonitorInfo, MouseButton, ScrollDelta, SurfaceRef};
 use wm_theme_api::Point;
 
 use crate::state::{
@@ -97,6 +97,9 @@ struct InputState {
     /// stray release confuses stateful clients (games, VMs) even though
     /// most toolkits shrug it off.
     suppressed_keys: Vec<Keycode>,
+    /// Leftover fractions of a wheel notch, for the shell's discrete
+    /// scroll channel — see [`ScrollAccumulator`].
+    scroll: ScrollAccumulator,
 }
 
 struct ImplicitGrab {
@@ -654,12 +657,20 @@ fn press_target(hit: &Hit) -> PressTarget {
 
 // -- pointer axis --------------------------------------------------------
 
-/// Scroll goes to clients only (the WM has no scroll gestures — same as
-/// X11, where wheel events were buttons 4/5 and `wm-x11` dropped them).
-/// The seat delivers to the current pointer focus, which the motion
-/// routing above only ever points at client content — so a scroll over
-/// chrome or a shell surface lands nowhere, exactly as intended.
+/// Scroll over a shell surface (or the desktop background) becomes a
+/// discrete `Backend::take_shell_scroll` event; everything else goes
+/// to clients through the seat, continuous data intact.
+///
+/// The split is deliberate and only one way round is defensible. A
+/// client asked for `wl_pointer.axis` and can use every fraction of
+/// it, so quantizing on the way to a client would be destroying data
+/// its own protocol promised it. The shell channel is defined in whole
+/// notches (`wm_core::ScrollDelta` records why), so it is the side
+/// that accumulates.
 fn on_pointer_axis<I: InputBackend>(state: &mut Compositor, event: I::PointerAxisEvent) {
+    if route_shell_scroll::<I>(state, &event) {
+        return;
+    }
     let horizontal = event
         .amount(Axis::Horizontal)
         .unwrap_or_else(|| event.amount_v120(Axis::Horizontal).unwrap_or(0.0) * 15.0 / 120.0);
@@ -699,6 +710,181 @@ fn on_pointer_axis<I: InputBackend>(state: &mut Compositor, event: I::PointerAxi
     };
     pointer.axis(state, frame);
     pointer.frame(state);
+}
+
+/// One wheel detent, in the units libinput's non-v120 `amount`
+/// reports for a wheel: degrees, and every wheel since the IMPS/2 era
+/// clicks once per 15°. `on_pointer_axis` above already relies on this
+/// number for its v120 fallback, which is where it comes from.
+///
+/// Reused as the touchpad threshold, where `amount` is logical pixels
+/// rather than degrees: 15 px of two-finger travel is one step. That
+/// is a chosen number, not a derived one — libinput exposes no notch
+/// concept for a device that has no notches — and one constant for
+/// both devices is the point. Two would drift apart, and a wheel step
+/// and a finger step have to feel like the same step to the user, who
+/// owns both.
+const UNITS_PER_NOTCH: f64 = 15.0;
+
+/// The notch fraction one axis of one event carries.
+///
+/// `v120` first when the device reports it: 120 units == one detent is
+/// exact by definition (the high-resolution wheel API's whole purpose),
+/// so a wheel never accumulates rounding error and a notch is never
+/// half-eaten. Only a device with no detents at all — a touchpad,
+/// where `v120` is `None` — falls back to the continuous amount.
+fn axis_notches(v120: Option<f64>, amount: Option<f64>) -> f64 {
+    match v120 {
+        Some(high_resolution) => high_resolution / 120.0,
+        None => amount.unwrap_or(0.0) / UNITS_PER_NOTCH,
+    }
+}
+
+/// Sub-notch scroll left over between events, and who it belongs to.
+///
+/// A touchpad reports a continuous stream that may take a dozen events
+/// to add up to one step, so the residual has to survive between
+/// events — which is why this lives in [`InputState`] on the seat and
+/// not in a local.
+#[derive(Default)]
+struct ScrollAccumulator {
+    /// The surface the residual below was collected over. A scroll
+    /// aimed somewhere else discards it: half a notch collected on one
+    /// dock tile must not complete into a step on the next one the
+    /// pointer happens to cross, which would credit a tile with input
+    /// the user never spent there.
+    owner: Option<WlShellId>,
+    up: f64,
+    right: f64,
+}
+
+impl ScrollAccumulator {
+    /// Folds one event's notch fractions in and returns whatever whole
+    /// notches that completed, keeping the remainder for next time.
+    /// `None` when nothing completed — the drain's contract is that a
+    /// queued delta is never zero.
+    fn fold(&mut self, owner: WlShellId, up: f64, right: f64) -> Option<ScrollDelta> {
+        if self.owner != Some(owner) {
+            *self = ScrollAccumulator { owner: Some(owner), up: 0.0, right: 0.0 };
+        }
+        self.up = accumulate(self.up, up);
+        self.right = accumulate(self.right, right);
+        let delta = ScrollDelta { up: take_whole(&mut self.up), right: take_whole(&mut self.right) };
+        (!delta.is_zero()).then_some(delta)
+    }
+
+    /// Drops the residual — the gesture that was building it is over
+    /// (the finger lifted), so the next one starts from zero instead
+    /// of inheriting a fraction from a gesture the user considers
+    /// finished.
+    fn reset(&mut self) {
+        *self = ScrollAccumulator::default();
+    }
+}
+
+/// Adds `amount` to `total`, discarding a residual that points the
+/// other way. Without this, a flick that stops 0.9 notches into a
+/// scroll down leaves the user needing 1.9 notches of scroll up to get
+/// one step back — the classic "the first scroll after a direction
+/// change does nothing" bug.
+fn accumulate(total: f64, amount: f64) -> f64 {
+    if total != 0.0 && amount != 0.0 && total.signum() != amount.signum() {
+        amount
+    } else {
+        total + amount
+    }
+}
+
+/// Splits the whole notches out of `residual`, leaving the fraction.
+fn take_whole(residual: &mut f64) -> i32 {
+    let whole = residual.trunc();
+    *residual -= whole;
+    whole as i32
+}
+
+/// Offers a scroll to the shell-surface family, returning whether it
+/// was claimed (in which case the seat must not also see it).
+///
+/// Routed exactly as a button press is, implicit grab included: X11's
+/// server-side implicit grab sends wheel buttons to the grab window
+/// too, so a scroll during a drag reaches the same place on both
+/// backends. Without this, the two would disagree in precisely the
+/// situation nobody tests by hand.
+fn route_shell_scroll<I: InputBackend>(state: &mut Compositor, event: &I::PointerAxisEvent) -> bool {
+    // Signs. `wl_pointer.axis` defines a positive vertical value as
+    // motion toward the BOTTOM of the screen, while `ScrollDelta::up`
+    // is named for the gesture, so the vertical axis inverts here and
+    // the horizontal one (positive == right in both) does not. This
+    // negation is the single line that makes button 4 on X11 and a
+    // forward wheel roll here mean the same thing; `wm-x11`'s
+    // `the_wheel_buttons_map_to_the_gesture_they_name` is its
+    // counterpart.
+    //
+    // The values are taken as libinput reports them, which already
+    // reflects the user's natural-scrolling setting.
+    // `relative_direction` is deliberately ignored: it exists so a
+    // client can UNDO that inversion for content-following gestures
+    // like pinch-zoom, and a dock tile's ±1 step wants the direction
+    // the user configured, not the raw hardware one.
+    let up = -axis_notches(event.amount_v120(Axis::Vertical), event.amount(Axis::Vertical));
+    let right = axis_notches(event.amount_v120(Axis::Horizontal), event.amount(Axis::Horizontal));
+
+    let seat = state.seat.clone();
+    let position = state.pointer_location;
+    let at = Point::new(position.x.floor() as i32, position.y.floor() as i32);
+    let hit = hit_at(state.wm.backend(), at, position);
+    let target = with_input(&seat, |input| input.implicit_grab.as_ref().map(|grab| grab.target))
+        .unwrap_or_else(|| press_target(&hit));
+
+    let owner = match target {
+        PressTarget::Shell(shell) => shell,
+        // Background scrolls travel the same queue under the sentinel
+        // id, for the same reason background clicks do: on X11 the
+        // root window is just another window the shell recognizes by
+        // id, so anything else would make the two backends' scroll
+        // streams differ over the desktop.
+        PressTarget::Root => ROOT_SHELL,
+        // Frame chrome and client content are not the shell's. Chrome
+        // binds no scroll gesture (`wm-x11` drops those notches
+        // outright), and content is the client's — both fall through
+        // to the seat below, which is where they went before this
+        // channel existed.
+        PressTarget::Frame(_) | PressTarget::Content(_) => {
+            with_input(&seat, |input| input.scroll.reset());
+            return false;
+        }
+    };
+
+    // A finger leaving the touchpad ends the gesture; the residual it
+    // was building belongs to that gesture and not to the next one.
+    // (Checked before the fold so a stop event carrying zeros cannot
+    // resurrect an old fraction.)
+    if event.source() == AxisSource::Finger
+        && event.amount(Axis::Vertical).unwrap_or(0.0) == 0.0
+        && event.amount(Axis::Horizontal).unwrap_or(0.0) == 0.0
+    {
+        with_input(&seat, |input| input.scroll.reset());
+        return true;
+    }
+
+    let completed = with_input(&seat, |input| input.scroll.fold(owner, up, right));
+    // Claimed either way: a fraction that has not yet added up to a
+    // step is still the shell's scroll, and handing it to the seat as
+    // a consolation prize would deliver one gesture to two places.
+    let Some(delta) = completed else {
+        return true;
+    };
+
+    let backend = state.wm.backend_mut();
+    let local = match backend.shells.get(&owner) {
+        Some(record) => local_to(at, record.geometry.pos),
+        // The background has no record and no origin of its own:
+        // root-local coordinates ARE global ones, exactly as
+        // `on_pointer_button` treats them.
+        None => at,
+    };
+    backend.shell_scrolls.push_back((owner, local, delta));
+    true
 }
 
 // -- hit-testing ---------------------------------------------------------
@@ -965,5 +1151,133 @@ mod tests {
         // Not a state a running session reaches; it must not panic or
         // teleport the pointer to the origin if it ever does.
         assert_eq!(confined(&[], 12.0, 34.0), (12.0, 34.0));
+    }
+
+    // -- discrete scroll ---------------------------------------------
+    // The other pure piece of this module: turning libinput's
+    // continuous axis values into the whole notches the shell channel
+    // is defined in. `route_shell_scroll` itself needs a seat and a
+    // populated ledger, but every decision it makes that could differ
+    // from `wm-x11` lives in these three functions.
+
+    const DOCK: WlShellId = WlShellId(1);
+    const CLIP: WlShellId = WlShellId(2);
+
+    /// One detent of a high-resolution wheel is exactly one step, with
+    /// no rounding left behind — the reason `v120` is preferred over
+    /// the continuous amount.
+    #[test]
+    fn a_high_resolution_detent_is_exactly_one_notch() {
+        assert_eq!(axis_notches(Some(120.0), Some(15.0)), 1.0);
+        assert_eq!(axis_notches(Some(-120.0), Some(-15.0)), -1.0);
+        // Half a detent on a free-spinning wheel is half a step, and
+        // stays a fraction until its other half arrives.
+        assert_eq!(axis_notches(Some(60.0), Some(7.5)), 0.5);
+    }
+
+    /// A device with no v120 (a touchpad) falls back to the continuous
+    /// amount over the shared threshold.
+    #[test]
+    fn a_continuous_amount_is_measured_in_notch_fractions() {
+        assert_eq!(axis_notches(None, Some(15.0)), 1.0);
+        assert_eq!(axis_notches(None, Some(5.0)), 1.0 / 3.0);
+        assert_eq!(axis_notches(None, None), 0.0);
+    }
+
+    /// The whole point of the accumulator: a touchpad drip-feeds
+    /// fractions and the caller must see one step at the moment they
+    /// add up, not a step per event and not nothing at all.
+    #[test]
+    fn touchpad_fractions_add_up_to_exactly_one_step() {
+        let mut scroll = ScrollAccumulator::default();
+        assert_eq!(scroll.fold(DOCK, 0.4, 0.0), None);
+        assert_eq!(scroll.fold(DOCK, 0.4, 0.0), None);
+        assert_eq!(scroll.fold(DOCK, 0.4, 0.0), Some(ScrollDelta { up: 1, right: 0 }));
+        // 0.2 of a notch is still owed, so the next step needs only
+        // 0.8 more — no input is lost to truncation.
+        assert_eq!(scroll.fold(DOCK, 0.7, 0.0), None);
+        assert_eq!(scroll.fold(DOCK, 0.2, 0.0), Some(ScrollDelta { up: 1, right: 0 }));
+    }
+
+    /// A wheel spun hard between two event-loop passes reports several
+    /// detents at once; they must arrive as a count, not be flattened
+    /// to one step or split into events with no positions of their own.
+    #[test]
+    fn several_detents_in_one_event_stay_a_count() {
+        let mut scroll = ScrollAccumulator::default();
+        assert_eq!(scroll.fold(DOCK, -3.0, 0.0), Some(ScrollDelta { up: -3, right: 0 }));
+    }
+
+    /// Both axes complete in the same event when a tilt-wheel or a
+    /// diagonal two-finger drag says so.
+    #[test]
+    fn the_two_axes_complete_independently() {
+        let mut scroll = ScrollAccumulator::default();
+        assert_eq!(scroll.fold(DOCK, 0.5, 1.0), Some(ScrollDelta { up: 0, right: 1 }));
+        assert_eq!(scroll.fold(DOCK, 0.5, 0.0), Some(ScrollDelta { up: 1, right: 0 }));
+    }
+
+    /// Reversing direction must not cost the user a step: without the
+    /// residual reset, 0.9 notches down followed by a deliberate flick
+    /// up would need 1.9 notches to produce one step up.
+    #[test]
+    fn reversing_direction_does_not_eat_the_first_step() {
+        let mut scroll = ScrollAccumulator::default();
+        assert_eq!(scroll.fold(DOCK, -0.9, 0.0), None);
+        assert_eq!(scroll.fold(DOCK, 1.0, 0.0), Some(ScrollDelta { up: 1, right: 0 }));
+    }
+
+    /// Residual belongs to the surface it was collected over. A tile
+    /// the pointer merely crossed must not inherit most of a step the
+    /// user spent on its neighbour.
+    #[test]
+    fn a_residual_does_not_follow_the_pointer_to_another_surface() {
+        let mut scroll = ScrollAccumulator::default();
+        assert_eq!(scroll.fold(DOCK, 0.9, 0.0), None);
+        assert_eq!(scroll.fold(CLIP, 0.2, 0.0), None, "0.9 + 0.2 would have been a step on the wrong surface");
+        assert_eq!(scroll.fold(CLIP, 0.8, 0.0), Some(ScrollDelta { up: 1, right: 0 }));
+    }
+
+    /// A finger lifting ends the gesture (`route_shell_scroll` calls
+    /// this on libinput's stop event), so the next gesture starts from
+    /// zero rather than borrowing a fraction from the last one.
+    #[test]
+    fn lifting_the_finger_discards_the_partial_step() {
+        let mut scroll = ScrollAccumulator::default();
+        assert_eq!(scroll.fold(DOCK, 0.9, 0.0), None);
+        scroll.reset();
+        assert_eq!(scroll.fold(DOCK, 0.9, 0.0), None, "the old 0.9 must not complete this one");
+        assert_eq!(scroll.fold(DOCK, 0.1, 0.0), Some(ScrollDelta { up: 1, right: 0 }));
+    }
+
+    /// Equivalence with `wm-x11`, stated as an assertion rather than a
+    /// comment. There, `wheel_scroll` maps button 4 to `up: 1` and
+    /// button 7 to `right: 1`; here the same physical gesture arrives
+    /// as a `wl_pointer` axis value whose vertical sign is the
+    /// opposite. If either side's sign flips, one of these two tests
+    /// fails.
+    #[test]
+    fn one_detent_here_equals_one_x11_wheel_button_there() {
+        let mut scroll = ScrollAccumulator::default();
+        // A wheel rolled away from the user: libinput reports negative
+        // vertical (positive is toward the screen's bottom), which
+        // `route_shell_scroll` negates.
+        let up = -axis_notches(Some(-120.0), Some(-15.0));
+        assert_eq!(scroll.fold(DOCK, up, 0.0), Some(ScrollDelta { up: 1, right: 0 }), "must equal wm-x11's button 4");
+
+        // A wheel tilted right: positive horizontal on both platforms,
+        // so no negation.
+        let right = axis_notches(Some(120.0), Some(15.0));
+        assert_eq!(scroll.fold(DOCK, 0.0, right), Some(ScrollDelta { up: 0, right: 1 }), "must equal wm-x11's button 7");
+    }
+
+    /// A delta the drain would queue is never empty, matching
+    /// `Backend::take_shell_scroll`'s stated contract — an event that
+    /// completes nothing yields `None` instead of a zero step.
+    #[test]
+    fn nothing_completing_queues_nothing() {
+        let mut scroll = ScrollAccumulator::default();
+        assert_eq!(scroll.fold(DOCK, 0.0, 0.0), None);
+        assert_eq!(scroll.fold(DOCK, 0.3, -0.3), None);
     }
 }

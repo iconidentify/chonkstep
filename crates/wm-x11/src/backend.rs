@@ -3,7 +3,7 @@ use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
 
 use wm_core::{
     Backend, BackendEvent, DragHandle, KeyCombo, Modifiers, MonitorInfo, MouseButton, NetState,
-    NetStateAction, SizeHints, SurfaceRef, WindowType, WmClass, WmProtocol,
+    NetStateAction, ScrollDelta, SizeHints, SurfaceRef, WindowType, WmClass, WmProtocol,
 };
 use wm_theme_api::{DecorationBuffer, DecorationLayout, Point, Rect, ResizeEdge, Size};
 
@@ -124,6 +124,14 @@ pub struct X11Backend {
     /// icon tile) — overwritten rather than queued, since only the most
     /// recent position matters for hover-highlight purposes.
     pending_shell_motion: Option<(Window, Point)>,
+    /// Wheel notches over a window we don't recognize as a
+    /// client/frame — same audience and same drain cadence as
+    /// `pending_shell_clicks`, in its own queue because a wheel is not
+    /// a `MouseButton` (see `wm_core::ScrollDelta`). Queued, not
+    /// collapsed like `pending_shell_motion`: each notch is a separate
+    /// command from the user, so keeping only the newest would eat the
+    /// first two of a three-notch spin.
+    pending_shell_scrolls: VecDeque<(Window, Point, ScrollDelta)>,
     /// Set by an RandR `ScreenChangeNotify` (e.g. the user resizing the
     /// Xephyr window this WM is nested in) — drained by the desktop
     /// shell in `chonkstep`, which repaints the background and
@@ -370,6 +378,7 @@ impl X11Backend {
             painted: HashMap::new(),
             pending_shell_clicks: VecDeque::new(),
             pending_shell_motion: None,
+            pending_shell_scrolls: VecDeque::new(),
             pending_screen_resize: None,
             keyboard_map,
             numlock_mask,
@@ -498,7 +507,7 @@ impl X11Backend {
         let Ok(reply) = self
             .conn
             .get_property(false, window, AtomEnum::WM_CLASS, AtomEnum::STRING, 0, 64)
-            .and_then(|c| Ok(c.reply()))
+            .map(|c| c.reply())
         else {
             return;
         };
@@ -661,6 +670,13 @@ impl X11Backend {
         self.pending_shell_motion.take()
     }
 
+    /// Drains one wheel notch over a non-client window (dock, root,
+    /// menu popup), oldest first. See `Backend::take_shell_scroll` for
+    /// what a caller may rely on.
+    pub fn take_shell_scroll(&mut self) -> Option<(Window, Point, ScrollDelta)> {
+        self.pending_shell_scrolls.pop_front()
+    }
+
     fn keysym_for_keycode(&self, keycode: u8) -> Option<u32> {
         self.keyboard_map.get(&keycode)?.first().copied()
     }
@@ -697,13 +713,39 @@ impl X11Backend {
         time: u32,
         state: u16,
     ) -> Option<BackendEvent<XWindow, XFrame>> {
+        let local = Point::new(x as i32, y as i32);
+
+        // A wheel reaches us as a button, so it has to be split off
+        // before anything treats `detail` as one. The WM itself has no
+        // scroll gesture (no titlebar or frame behavior binds the
+        // wheel), so the only audience is the shell-surface family.
+        if let Some(delta) = wheel_scroll(detail) {
+            // Press only. The server sends a release immediately after
+            // each wheel press purely to keep the button state machine
+            // consistent — it marks no second event — so honoring both
+            // would double every notch.
+            //
+            // The window test mirrors the shell-click routing below:
+            // anything we did create as a frame, or know as a client,
+            // is not the shell's. Neither of those cases can actually
+            // arrive today (frames bind no wheel behavior, and the
+            // per-window passive grabs `grab_button_passive` installs
+            // are for real buttons only, so the server never sends us
+            // a client's wheel), which is exactly why the check is
+            // here: it states the routing rule rather than relying on
+            // an event that merely happens not to be selected.
+            if pressed && !self.frame_to_client.contains_key(&event_window) && !self.known_clients.contains(&event_window) {
+                self.pending_shell_scrolls.push_back((event_window, local, delta));
+            }
+            return None;
+        }
+
         let button = match detail {
             1 => MouseButton::Left,
             2 => MouseButton::Middle,
             3 => MouseButton::Right,
             _ => return None,
         };
-        let local = Point::new(x as i32, y as i32);
         let mods = modifiers_from_state(state);
 
         if self.frame_to_client.contains_key(&event_window) {
@@ -1484,6 +1526,38 @@ fn create_scaled_cursor(conn: &RustConnection, root: Window, scale: f32, points:
 /// `Mod4` are the conventional Alt/Super mappings on essentially every
 /// modern X11 setup (sourced from `xmodmap`'s defaults), not a hardcoded
 /// keycode — good enough without adding a full modifier-remapping query.
+/// The `ScrollDelta` an X11 button number means, or `None` for a
+/// button that is not the wheel.
+///
+/// X11's core protocol has no axis event: a wheel detent arrives as an
+/// ordinary press/release pair on buttons 4-7. Nothing in the protocol
+/// spec says those numbers mean "wheel" — it is the convention every
+/// X input driver has emitted and every toolkit has consumed since
+/// IMPS/2 mice arrived (xf86-input-libinput still maps its scroll axes
+/// onto exactly these four buttons, and `xev` shows them as plain
+/// ButtonPress). Treating them as a wheel is reading the de-facto
+/// standard, not guessing at one.
+///
+/// 4/5 are up/down and 6/7 are left/right. The horizontal pair is
+/// supported rather than dropped because dropping it would have been
+/// the *asymmetric* choice: the Wayland side gets a horizontal axis
+/// whether we want one or not, so ignoring 6/7 here would leave the
+/// two backends disagreeing about what a tilt-wheel does, which is the
+/// one thing `Backend` exists to prevent.
+///
+/// Pure, and free-standing, so the mapping is testable with no X
+/// server — `translate_button`, its only caller, needs a live
+/// connection and therefore cannot be.
+fn wheel_scroll(detail: u8) -> Option<ScrollDelta> {
+    match detail {
+        4 => Some(ScrollDelta { up: 1, right: 0 }),
+        5 => Some(ScrollDelta { up: -1, right: 0 }),
+        6 => Some(ScrollDelta { up: 0, right: -1 }),
+        7 => Some(ScrollDelta { up: 0, right: 1 }),
+        _ => None,
+    }
+}
+
 fn modifiers_from_state(state: u16) -> Modifiers {
     let mut mods = Modifiers::empty();
     if state & u16::from(KeyButMask::SHIFT) != 0 {
@@ -1511,7 +1585,7 @@ fn modifiers_from_state(state: u16) -> Modifiers {
 fn to_server_bytes(buffer: &DecorationBuffer, order: ImageOrder) -> Vec<u8> {
     let msb_first = order == ImageOrder::MSB_FIRST;
     let mut out = Vec::with_capacity(buffer.pixels.len());
-    for px in buffer.pixels.chunks_exact(4) {
+    for px in buffer.pixels.as_chunks::<4>().0 {
         let (r, g, b, a) = (px[0], px[1], px[2], px[3]);
         if msb_first {
             out.extend_from_slice(&[a, r, g, b]);
@@ -1539,7 +1613,7 @@ fn from_server_bytes(data: &[u8], width: u32, height: u32, order: ImageOrder) ->
     }
     let msb_first = order == ImageOrder::MSB_FIRST;
     let mut pixels = Vec::with_capacity(data.len());
-    for px in data.chunks_exact(4) {
+    for px in data.as_chunks::<4>().0 {
         let (r, g, b) = if msb_first { (px[1], px[2], px[3]) } else { (px[2], px[1], px[0]) };
         pixels.extend_from_slice(&[r, g, b, 0xFF]);
     }
@@ -1613,6 +1687,10 @@ impl Backend for X11Backend {
 
     fn take_shell_motion(&mut self) -> Option<(Self::ShellId, Point)> {
         X11Backend::take_shell_motion(self)
+    }
+
+    fn take_shell_scroll(&mut self) -> Option<(Self::ShellId, Point, ScrollDelta)> {
+        X11Backend::take_shell_scroll(self)
     }
 
     fn take_screen_resize(&mut self) -> Option<Size> {
@@ -2358,15 +2436,65 @@ impl wm_theme_api::PopupHost for X11Backend {
 }
 
 /// Everything an X server is needed for is untestable here by
-/// construction; what is testable is the ordering and primary-flag
-/// contract `wm-core` indexes its per-monitor workareas by, which is
-/// pure and lives in `normalize_monitors`.
+/// construction; what is testable is the pure translation this backend
+/// does on top of it — the ordering and primary-flag contract
+/// `wm-core` indexes its per-monitor workareas by
+/// (`normalize_monitors`), and the wheel-button mapping the shell's
+/// scroll channel is defined by (`wheel_scroll`).
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn monitor(name: &str, x: i32, y: i32, w: u32, h: u32, primary: bool) -> MonitorInfo {
         MonitorInfo { geometry: Rect { pos: Point::new(x, y), size: Size::new(w, h) }, name: name.to_string(), primary }
+    }
+
+    /// The sign convention, spelled out against the physical gesture,
+    /// because this is the exact spot where a backend can silently
+    /// disagree with its sibling: `wm-wayland` derives the same
+    /// `ScrollDelta` from `wl_pointer.axis`, whose vertical value is
+    /// positive *downward* — the opposite of button 4. Equivalent
+    /// physical input, equivalent event, is the whole contract, and it
+    /// is one negation away from being false.
+    #[test]
+    fn the_wheel_buttons_map_to_the_gesture_they_name() {
+        assert_eq!(wheel_scroll(4), Some(ScrollDelta { up: 1, right: 0 }), "button 4 is a roll away from the user");
+        assert_eq!(wheel_scroll(5), Some(ScrollDelta { up: -1, right: 0 }), "button 5 is a roll toward the user");
+        assert_eq!(wheel_scroll(6), Some(ScrollDelta { up: 0, right: -1 }), "button 6 is a tilt left");
+        assert_eq!(wheel_scroll(7), Some(ScrollDelta { up: 0, right: 1 }), "button 7 is a tilt right");
+    }
+
+    /// Buttons 1-3 must stay clicks: they are the ones the shell (and
+    /// the dock's middle-click reorder) already routes through
+    /// `take_shell_click`, and a wheel branch that swallowed one would
+    /// make it vanish from that path entirely rather than fail loudly.
+    #[test]
+    fn the_real_buttons_are_not_wheel_notches() {
+        for detail in [1u8, 2, 3] {
+            assert_eq!(wheel_scroll(detail), None, "button {detail} is a click");
+        }
+    }
+
+    /// Buttons 8/9 are the thumb "back"/"forward" pair, and 0 is not a
+    /// button at all. Neither is a wheel; both must fall through to
+    /// `translate_button`'s existing "unknown button" drop rather than
+    /// being invented into scroll steps.
+    #[test]
+    fn side_buttons_are_not_wheel_notches() {
+        for detail in [0u8, 8, 9, 10, 255] {
+            assert_eq!(wheel_scroll(detail), None, "button {detail} is not a wheel");
+        }
+    }
+
+    /// Every notch a backend may report is non-zero — the drain's
+    /// stated contract, which callers are allowed to lean on.
+    #[test]
+    fn no_wheel_button_produces_an_empty_delta() {
+        for detail in 0u8..=255 {
+            if let Some(delta) = wheel_scroll(detail) {
+                assert!(!delta.is_zero(), "button {detail} queued a scroll that says nothing happened");
+            }
+        }
     }
 
     #[test]
