@@ -17,16 +17,22 @@ pub enum Wallpaper {
     TealBlueprint,
     GraphiteFold,
     ClassicLavender,
+    JadeTerrace,
+    IvoryOrb,
+    IndigoWaves,
 }
 
 impl Wallpaper {
     pub const DEFAULT: Self = Self::LavenderGrid;
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 8] = [
         Self::LavenderGrid,
         Self::AmberTerminal,
         Self::TealBlueprint,
         Self::GraphiteFold,
         Self::ClassicLavender,
+        Self::JadeTerrace,
+        Self::IvoryOrb,
+        Self::IndigoWaves,
     ];
 
     pub const fn label(self) -> &'static str {
@@ -36,6 +42,9 @@ impl Wallpaper {
             Self::TealBlueprint => "Teal Blueprint",
             Self::GraphiteFold => "Graphite Fold",
             Self::ClassicLavender => "Classic Lavender",
+            Self::JadeTerrace => "Jade Terrace",
+            Self::IvoryOrb => "Ivory Orb",
+            Self::IndigoWaves => "Indigo Waves",
         }
     }
 
@@ -46,6 +55,9 @@ impl Wallpaper {
             Self::TealBlueprint => "teal-blueprint",
             Self::GraphiteFold => "graphite-fold",
             Self::ClassicLavender => "classic-lavender",
+            Self::JadeTerrace => "jade-terrace",
+            Self::IvoryOrb => "ivory-orb",
+            Self::IndigoWaves => "indigo-waves",
         }
     }
 
@@ -81,6 +93,9 @@ impl Wallpaper {
             Self::TealBlueprint => (5, 70, 73),
             Self::GraphiteFold => (24, 24, 24),
             Self::ClassicLavender => DESKTOP_BG,
+            Self::JadeTerrace => (30, 60, 45),
+            Self::IvoryOrb => (250, 247, 234),
+            Self::IndigoWaves => (29, 32, 45),
         }
     }
 
@@ -91,6 +106,9 @@ impl Wallpaper {
             Self::TealBlueprint => Some(include_bytes!("../assets/wallpapers/teal-blueprint.png")),
             Self::GraphiteFold => Some(include_bytes!("../assets/wallpapers/graphite-fold.png")),
             Self::ClassicLavender => None,
+            Self::JadeTerrace => Some(include_bytes!("../assets/wallpapers/jade-terrace.png")),
+            Self::IvoryOrb => Some(include_bytes!("../assets/wallpapers/ivory-orb.png")),
+            Self::IndigoWaves => Some(include_bytes!("../assets/wallpapers/indigo-waves.png")),
         }
     }
 

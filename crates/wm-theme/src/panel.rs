@@ -394,7 +394,10 @@ mod tests {
     fn the_accent_follows_the_theme() {
         let accents: Vec<Color> = all_themes().iter().map(panel_accent).collect();
         let distinct: std::collections::HashSet<(u8, u8, u8)> = accents.iter().map(|c| (c.r, c.g, c.b)).collect();
-        assert!(distinct.len() >= 4, "five themes should produce at least four distinct LED accents, got {distinct:?}");
+        assert!(
+            distinct.len() >= accents.len() - 1,
+            "the built-in themes should produce all but at most one distinct LED accent, got {distinct:?}"
+        );
     }
 
     #[test]

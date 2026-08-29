@@ -16,20 +16,32 @@ fn tile_gradient(from: Color, to: Color, bevel: Bevel) -> TileStyle {
 }
 
 /// `(id, label)` for every built-in theme, in menu order — kept as a
-/// const so menu construction doesn't have to build five full `Theme`
-/// structs just to list them. `registry_matches_choices` pins this to
+/// const so menu construction doesn't have to build every full `Theme`
+/// struct just to list them. `registry_matches_choices` pins this to
 /// `all_themes()`.
-pub const CHOICES: [(&str, &str); 5] = [
+pub const CHOICES: [(&str, &str); 8] = [
     ("nextstep-classic", "NeXTSTEP Classic"),
     ("amber-phosphor", "Amber Phosphor"),
     ("teal-blueprint", "Teal Blueprint"),
     ("graphite", "Graphite"),
     ("next-lavender", "NeXT Lavender"),
+    ("jade-lacquer", "Jade Lacquer"),
+    ("ivory-halftone", "Ivory Halftone"),
+    ("indigo-filament", "Indigo Filament"),
 ];
 
 /// Every built-in theme, same order as `CHOICES`.
 pub fn all_themes() -> Vec<Theme> {
-    vec![nextstep_classic(), amber_phosphor(), teal_blueprint(), graphite(), next_lavender()]
+    vec![
+        nextstep_classic(),
+        amber_phosphor(),
+        teal_blueprint(),
+        graphite(),
+        next_lavender(),
+        jade_lacquer(),
+        ivory_halftone(),
+        indigo_filament(),
+    ]
 }
 
 /// Looks a built-in theme up by its stable id (what theme selection
@@ -483,6 +495,175 @@ pub fn next_lavender() -> Theme {
     })
 }
 
+/// Lacquered jade with warm sand ink, composed with the jade-terrace
+/// artwork. Slot 4 is given a real blue rather than the source
+/// palette's jade: a scheme whose blue and green are the same color
+/// reads a diff as one undifferentiated wash.
+pub fn jade_lacquer() -> Theme {
+    build_chrome(ChromeSpec {
+        id: "jade-lacquer",
+        name: "Jade Lacquer",
+        wallpaper: "jade-terrace",
+        font_family: "DejaVu Sans",
+        active: Fill::Solid(Color::rgb(0x0B, 0x17, 0x14)),
+        inactive: Fill::Solid(Color::rgb(0x6E, 0x8A, 0x79)),
+        text_active: Color::rgb(0xF7, 0xE8, 0xB2),
+        text_inactive: Color::rgb(0x0E, 0x1E, 0x18),
+        border: Color::rgb(0x04, 0x0B, 0x09),
+        resizebar: Fill::Solid(Color::rgb(0x6E, 0x8A, 0x79)),
+        bevel: Bevel { style: BevelStyle::Raised, width: 1, light: Color::rgb(0xC4, 0xD6, 0xC2), dark: Color::rgb(0x07, 0x12, 0x0F) },
+        menu_title_bg: Fill::Solid(Color::rgb(0x0B, 0x17, 0x14)),
+        menu_title_text: Color::rgb(0xF7, 0xE8, 0xB2),
+        menu_bg: Fill::Solid(Color::rgb(0x16, 0x28, 0x21)),
+        menu_text: Color::rgb(0xC1, 0xC4, 0x97),
+        menu_highlight_bg: Fill::Solid(Color::rgb(0xD6, 0xD5, 0xBC)),
+        menu_highlight_text: Color::rgb(0x0B, 0x17, 0x14),
+        tile: (Color::rgb(0x5C, 0x7C, 0x6A), Color::rgb(0x14, 0x26, 0x1F)),
+        terminal: TerminalPalette {
+            fg: Color::rgb(0xC1, 0xC4, 0x97),
+            bg: Color::rgb(0x0C, 0x15, 0x12),
+            // Jade rather than the palette's brighter aqua: the aqua is
+            // Teal Blueprint's LED almost exactly, and two themes that
+            // glow the same color are one theme on an instrument panel.
+            cursor: Color::rgb(0x6F, 0xC9, 0x8A),
+            ansi: [
+                Color::rgb(0x0C, 0x15, 0x12),
+                Color::rgb(0xFF, 0x53, 0x45),
+                Color::rgb(0x54, 0x9E, 0x6A),
+                Color::rgb(0xE5, 0xC7, 0x36),
+                Color::rgb(0x4E, 0x9F, 0xB8),
+                Color::rgb(0xD2, 0x68, 0x9C),
+                Color::rgb(0x2D, 0xD5, 0xB7),
+                Color::rgb(0xC1, 0xC4, 0x97),
+                Color::rgb(0x3B, 0x4F, 0x45),
+                Color::rgb(0xFF, 0x7A, 0x6E),
+                Color::rgb(0x63, 0xB0, 0x7A),
+                Color::rgb(0xF7, 0xE8, 0xB2),
+                Color::rgb(0x7C, 0xC0, 0xD6),
+                Color::rgb(0xE0, 0x8A, 0xB4),
+                Color::rgb(0x8C, 0xD3, 0xCB),
+                Color::rgb(0xE8, 0xE6, 0xC9),
+            ],
+            opacity: Some(86),
+        },
+    })
+}
+
+/// Ink on press-cream paper — the first built-in light theme, composed
+/// with the ivory-orb artwork. What "light" changes is everything the
+/// bars sit *on*: the focused titlebar stays the dark bar the classic
+/// chrome focuses with, because inverting that is what makes a light
+/// desktop stop showing you which window has the keyboard. Two other
+/// deliberate departures follow from the ground being pale rather than
+/// dark: menu selection inverts to the palette's blue instead of to
+/// white (white on a cream menu is not a selection, it is a smudge),
+/// and the terminal's bright-white slot is the same ink as its black,
+/// since on cream the most legible color is the darkest one.
+pub fn ivory_halftone() -> Theme {
+    build_chrome(ChromeSpec {
+        id: "ivory-halftone",
+        name: "Ivory Halftone",
+        wallpaper: "ivory-orb",
+        font_family: "DejaVu Sans",
+        active: Fill::Solid(Color::rgb(0x10, 0x0F, 0x0F)),
+        inactive: Fill::Solid(Color::rgb(0xCE, 0xCD, 0xC3)),
+        text_active: Color::rgb(0xFF, 0xFC, 0xF0),
+        text_inactive: Color::rgb(0x40, 0x3E, 0x3C),
+        border: Color::rgb(0x10, 0x0F, 0x0F),
+        resizebar: Fill::Solid(Color::rgb(0xCE, 0xCD, 0xC3)),
+        bevel: Bevel { style: BevelStyle::Raised, width: 1, light: Color::rgb(0xFF, 0xFC, 0xF0), dark: Color::rgb(0x87, 0x85, 0x80) },
+        menu_title_bg: Fill::Solid(Color::rgb(0x10, 0x0F, 0x0F)),
+        menu_title_text: Color::rgb(0xFF, 0xFC, 0xF0),
+        menu_bg: Fill::Solid(Color::rgb(0xE6, 0xE4, 0xD9)),
+        menu_text: Color::rgb(0x10, 0x0F, 0x0F),
+        menu_highlight_bg: Fill::Solid(Color::rgb(0x20, 0x5E, 0xA6)),
+        menu_highlight_text: Color::rgb(0xFF, 0xFC, 0xF0),
+        tile: (Color::rgb(0xF2, 0xEF, 0xE4), Color::rgb(0xA9, 0xA7, 0x9C)),
+        terminal: TerminalPalette {
+            fg: Color::rgb(0x10, 0x0F, 0x0F),
+            bg: Color::rgb(0xFF, 0xFC, 0xF0),
+            cursor: Color::rgb(0x43, 0x85, 0xBE),
+            ansi: [
+                Color::rgb(0x10, 0x0F, 0x0F),
+                Color::rgb(0xAF, 0x30, 0x29),
+                Color::rgb(0x66, 0x80, 0x0B),
+                Color::rgb(0xAD, 0x83, 0x01),
+                Color::rgb(0x20, 0x5E, 0xA6),
+                Color::rgb(0xA0, 0x2F, 0x6F),
+                Color::rgb(0x24, 0x83, 0x7B),
+                Color::rgb(0x6F, 0x6E, 0x69),
+                Color::rgb(0xB7, 0xB5, 0xAC),
+                Color::rgb(0xD1, 0x4D, 0x41),
+                Color::rgb(0x87, 0x9A, 0x39),
+                Color::rgb(0xD0, 0xA2, 0x15),
+                Color::rgb(0x43, 0x85, 0xBE),
+                Color::rgb(0xCE, 0x5D, 0x97),
+                Color::rgb(0x3A, 0xA9, 0x9F),
+                Color::rgb(0x10, 0x0F, 0x0F),
+            ],
+            // Barely tinted: glass this pale has no contrast left to
+            // spend on the wallpaper behind it.
+            opacity: Some(94),
+        },
+    })
+}
+
+/// Lit filament traces on near-black indigo, composed with the
+/// indigo-waves artwork. The mauve cursor is the theme's declared
+/// accent and the same value the wallpaper's cap square is cut in, so
+/// the dock's LEDs and the desktop behind them glow as one.
+pub fn indigo_filament() -> Theme {
+    let night = Fill::Gradient(Gradient {
+        direction: GradientDirection::Diagonal,
+        from: Color::rgb(0x31, 0x32, 0x44),
+        to: Color::rgb(0x11, 0x11, 0x1B),
+    });
+    build_chrome(ChromeSpec {
+        id: "indigo-filament",
+        name: "Indigo Filament",
+        wallpaper: "indigo-waves",
+        font_family: "DejaVu Sans",
+        active: night.clone(),
+        inactive: Fill::Solid(Color::rgb(0x45, 0x47, 0x5A)),
+        text_active: Color::rgb(0xCD, 0xD6, 0xF4),
+        text_inactive: Color::rgb(0x93, 0x99, 0xB2),
+        border: Color::rgb(0x0A, 0x0A, 0x12),
+        resizebar: Fill::Solid(Color::rgb(0x45, 0x47, 0x5A)),
+        bevel: Bevel { style: BevelStyle::Raised, width: 1, light: Color::rgb(0x8A, 0x90, 0xB4), dark: Color::rgb(0x0D, 0x0D, 0x16) },
+        menu_title_bg: night,
+        menu_title_text: Color::rgb(0xCD, 0xD6, 0xF4),
+        menu_bg: Fill::Solid(Color::rgb(0x1E, 0x1E, 0x2E)),
+        menu_text: Color::rgb(0xBA, 0xC2, 0xDE),
+        menu_highlight_bg: Fill::Solid(Color::rgb(0xCD, 0xD6, 0xF4)),
+        menu_highlight_text: Color::rgb(0x1E, 0x1E, 0x2E),
+        tile: (Color::rgb(0x58, 0x5B, 0x70), Color::rgb(0x1A, 0x1A, 0x26)),
+        terminal: TerminalPalette {
+            fg: Color::rgb(0xCD, 0xD6, 0xF4),
+            bg: Color::rgb(0x18, 0x18, 0x25),
+            cursor: Color::rgb(0xCB, 0xA6, 0xF7),
+            ansi: [
+                Color::rgb(0x45, 0x47, 0x5A),
+                Color::rgb(0xF3, 0x8B, 0xA8),
+                Color::rgb(0xA6, 0xE3, 0xA1),
+                Color::rgb(0xF9, 0xE2, 0xAF),
+                Color::rgb(0x89, 0xB4, 0xFA),
+                Color::rgb(0xCB, 0xA6, 0xF7),
+                Color::rgb(0x94, 0xE2, 0xD5),
+                Color::rgb(0xBA, 0xC2, 0xDE),
+                Color::rgb(0x58, 0x5B, 0x70),
+                Color::rgb(0xF3, 0x8B, 0xA8),
+                Color::rgb(0xA6, 0xE3, 0xA1),
+                Color::rgb(0xF9, 0xE2, 0xAF),
+                Color::rgb(0x89, 0xB4, 0xFA),
+                Color::rgb(0xF5, 0xC2, 0xE7),
+                Color::rgb(0x94, 0xE2, 0xD5),
+                Color::rgb(0xA6, 0xAD, 0xC8),
+            ],
+            opacity: Some(84),
+        },
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -522,6 +703,28 @@ mod tests {
         let theme = nextstep_classic();
         let kinds: Vec<_> = theme.titlebar.buttons.iter().map(|b| b.kind).collect();
         assert_eq!(kinds, vec![ButtonKind::Miniaturize, ButtonKind::Close], "the classic chrome has no maximize button");
+    }
+
+    /// The one theme that inverts the desktop's ground. Its *focused*
+    /// bar still has to be the dark one - that is what makes focus
+    /// readable at a glance - so this pins the pair, not just "some
+    /// part of it is light": dark bar, pale everything underneath.
+    #[test]
+    fn the_light_theme_darkens_focus_and_lightens_what_sits_under_it() {
+        let theme = ivory_halftone();
+        let lum = |c: Color| (c.r as u16 + c.g as u16 + c.b as u16) / 3;
+        let solid = |fill: &Fill| match fill {
+            Fill::Solid(c) => *c,
+            Fill::Gradient(g) => g.from,
+        };
+        assert!(lum(solid(&theme.titlebar.active)) < 48, "the focused bar stays ink");
+        assert!(lum(theme.titlebar.text_color_active) > 200, "on which the title is paper");
+        assert!(lum(solid(&theme.titlebar.inactive)) > 180, "the unfocused bar is paper");
+        assert!(lum(solid(&theme.menu.background)) > 180, "menus are paper");
+        assert!(lum(theme.terminal.bg) > 200, "and so is the terminal");
+        // White-on-cream is a smudge, not a selection, so the light
+        // theme highlights with its accent rather than inverting.
+        assert!(lum(solid(&theme.menu.highlight_background)) < 128);
     }
 
     /// The stock chiseled look is flat solids — black focused, aa-gray
