@@ -131,3 +131,85 @@ jobs:
 
       - name: Run the wm-wayland test suite
         run: cargo test -p wm-wayland
+
+  # Lint. This job exists because of one specific incident and one
+  # specific class of bug.
+  #
+  # On 2026-08-29 the dock's wifi tile sampled the system by calling
+  # `nmcli dev wifi` straight from `DockWidget::tick()`, which runs on
+  # the compositor's single repaint thread. `nmcli dev wifi` defaults to
+  # `--rescan auto` and blocks for a real hardware scan whenever
+  # NetworkManager's cache is older than thirty seconds — ~3.6s at a
+  # time, once every ~34s — and for all of it the compositor drew
+  # nothing, read no input, and left the page-flip completion sitting
+  # unread in its DRM fd. Its own stall watchdog then reported the
+  # display driver, which was idle and correct throughout. Four agents
+  # and a tour of DRM internals later, the culprit was a wifi icon.
+  #
+  # Nothing in CI could have caught that, because CI had no lint step at
+  # all: the tests passed, the builds passed, and the diff that
+  # introduced it looked like every other diff. `clippy.toml` at the
+  # repository root now bans the blocking process APIs outright, with
+  # one narrowly-scoped `#[allow]` plus a written justification at each
+  # of the four call sites where blocking is genuinely correct (sampler
+  # worker threads, off-thread click handlers, the launcher's per-child
+  # reaper). This job is what makes that ban real rather than advisory.
+  #
+  # System libraries are installed here for the same reason the wayland
+  # job installs them: the ban is only worth having if it also covers
+  # `wm-wayland`, which is where a blocking call would do the most
+  # damage, and clippy has to link what it lints.
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install Wayland build dependencies
+        # Same set, same reasoning, as the wayland job's — see the long
+        # comment there for why each package is on the list.
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libxkbcommon-dev libegl-dev libgles-dev libwayland-dev \
+            libdrm-dev libgbm-dev libinput-dev libudev-dev libseat-dev
+
+      # Gate one: the incident's own lint, denied across every crate in
+      # the workspace with no exemptions and no ratchet. `--no-deps`
+      # keeps clippy off crates.io dependencies, whose source nobody
+      # here can fix; `--workspace` makes every member a primary package
+      # so all of them are still linted.
+      - name: Ban blocking child-process calls workspace-wide
+        run: cargo clippy --workspace --all-targets --no-deps -- -D clippy::disallowed_methods
+
+      # Gate two: everything else clippy has to say, denied — but only
+      # on the nine crates that are clean today. This is a ratchet, not
+      # a compromise: `wm-theme` (9 warnings, mostly `too_many_arguments`
+      # on renderer signatures that take theme + font system + swash
+      # cache + geometry, plus a `div_ceil` and a redundant cast) and
+      # `wm-wayland` (6, including a genuine `large_enum_variant` on
+      # `Graphics`) were left out because they were dirty before this job
+      # existed and fixing them is a change to those crates' code, not to
+      # CI. Both are gated by gate one regardless.
+      #
+      # Adding a crate to this list is how the debt gets paid; removing
+      # one is how it gets hidden. The list is deliberately explicit
+      # rather than an `--exclude` of the dirty two, so a *new* crate
+      # arrives ungated and someone has to make the choice out loud
+      # rather than inheriting whatever state it was born in.
+      - name: Deny clippy warnings on the crates that are clean
+        run: |
+          cargo clippy --all-targets --no-deps \
+            -p chonk-about \
+            -p chonk-shell \
+            -p chonk-ui \
+            -p chonkstep \
+            -p chonkstep-wayland \
+            -p wm-config \
+            -p wm-core \
+            -p wm-theme-api \
+            -p wm-x11 \
+            -- -D warnings

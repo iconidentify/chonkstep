@@ -1,0 +1,42 @@
+# Blocking on a child process is banned by default in this workspace.
+#
+# Why a lint rather than a rule people are told: on 2026-08-29 the
+# dock's wifi tile sampled the system by calling `nmcli dev wifi`
+# straight from `DockWidget::tick()`. `tick()` runs on the compositor's
+# single repaint thread, and `nmcli dev wifi` defaults to
+# `--rescan auto`, which blocks for a real hardware scan whenever
+# NetworkManager's cache is older than thirty seconds. For ~3.6s at a
+# time, once every ~34s, the compositor drew nothing, read no input, and
+# did not collect the page-flip completion already sitting in its DRM
+# fd — so its own stall watchdog reported "no page-flip completion from
+# the DRM device" and the display driver, which was idle and correct the
+# whole time, took the blame. Four agents and a tour of DRM internals
+# later, the culprit turned out to be a wifi icon.
+#
+# The damage was never the 3.6 seconds. It was that the failure was
+# silent at the call site and pointed at the wrong subsystem. Nothing in
+# the diff that introduced it looked wrong, because a synchronous
+# `Command::output()` looks exactly like a synchronous
+# `Command::output()` wherever it is written; the whole difference is
+# which thread reaches it, and that is not visible in the line itself.
+# This file makes that difference something a reviewer sees.
+#
+# The end state is deliberately *not* "nobody blocks on a child": there
+# are legitimate call sites (sampler worker threads, off-thread click
+# handlers, the launcher's per-child reaper thread). Each of them
+# carries its own narrowly-scoped
+#
+#     #[allow(clippy::disallowed_methods)] // <why this one is safe>
+#
+# so the audit is one visible, reviewable annotation per site instead of
+# an unwritten rule. If you are reaching for one of these: the question
+# to answer in that comment is not "is this fast?" but "which thread am
+# I on, and what freezes if this call never returns?".
+#
+# `Command::spawn` is intentionally NOT banned — it does not wait. The
+# banned three are the ones that do.
+disallowed-methods = [
+    { path = "std::process::Command::output", reason = "blocks the calling thread until the child exits; on the compositor's repaint thread that is a frozen desktop, and it will be misreported as a display-driver stall. Run it on a worker thread (see chonk-shell's widgets::BackgroundCommand) and let the tile go stale, or annotate the call site with #[allow(clippy::disallowed_methods)] and a comment naming the thread it runs on." },
+    { path = "std::process::Command::status", reason = "same wait as Command::output, minus the output. See the note on Command::output." },
+    { path = "std::process::Child::wait", reason = "blocks the calling thread until the child exits. Reaping a spawned child is legitimate — on a thread dedicated to it (see chonk-shell's spawn::spawn_detached_with_env), never on a thread anything else is waiting for." },
+]

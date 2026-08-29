@@ -469,7 +469,7 @@ fn ghost_slot(pixels: &mut [u8], tile: u32, slot: usize) {
     let slot_bytes = (tile * tile * 4) as usize;
     let start = slot * slot_bytes;
     let Some(region) = pixels.get_mut(start..start + slot_bytes) else { return };
-    for pixel in region.chunks_exact_mut(4) {
+    for pixel in region.as_chunks_mut::<4>().0 {
         pixel[0] = pixel[0].saturating_sub(48);
         pixel[1] = pixel[1].saturating_sub(48);
         pixel[2] = pixel[2].saturating_sub(48);
@@ -629,9 +629,11 @@ mod tests {
         assert_eq!(slot_at(origin, 56, 3, Point::new(56, 60)), None, "right of the strip");
         assert_eq!(slot_at(origin, 56, 3, Point::new(10, 30)), None, "the Clip's tile is not the strip");
 
-        // The empty strip's pin zone is its would-be first slot.
-        assert_eq!(slot_at(origin, 56, 0usize.max(1), Point::new(10, 60)), Some(0));
-        assert_eq!(slot_at(origin, 56, 0usize.max(1), Point::new(10, 120)), None);
+        // The empty strip's pin zone is its would-be first slot: the
+        // caller clamps a zero pin count up to one before asking, so
+        // one is the number that actually reaches `slot_at`.
+        assert_eq!(slot_at(origin, 56, 1, Point::new(10, 60)), Some(0));
+        assert_eq!(slot_at(origin, 56, 1, Point::new(10, 120)), None);
     }
 
     /// The strip follows the primary monitor rather than the desktop
