@@ -1534,14 +1534,25 @@ impl<B: Backend> Desktop<B> {
         // dock. Recomputing the serialized theme only happens when it
         // actually changed; see `ThemeBroadcast`.
         self.dockapps.refresh_theme(self.tile, self.scale, theme);
-        for admission in self.dockapps.service(now) {
-            self.admit(admission, now);
-        }
 
         let socket_path = self.dockapps.socket_path().clone();
+        // Taken out first so the mutable borrow of `dockapps` ends
+        // before the shared one below begins; handed back at the end.
         let mut scratch = std::mem::take(self.dockapps.scratch());
-        let theme_state = self.dockapps.theme().clone();
-        let mut ctx = ServiceContext { now, theme: &theme_state, socket_path: &socket_path, scratch: &mut scratch };
+        let admissions = self.dockapps.service(now);
+
+        // Borrowed, never cloned. `theme_toml` is a few kilobytes and
+        // this runs at ~60Hz on the repaint thread, so a clone per pass
+        // would be a quarter of a megabyte a second of copying to
+        // produce a value that is almost always identical. Disjoint
+        // field borrows (`dockapps` shared, `items` mutable) are what
+        // make that possible, and are why `admit` is a free function
+        // over an iterator rather than a method on `&mut self`.
+        let theme_state = self.dockapps.theme();
+        for admission in admissions {
+            dockapp::admit(self.items.iter_mut().filter_map(|item| item.remote_mut()), admission, theme_state, now);
+        }
+        let mut ctx = ServiceContext { now, theme: theme_state, socket_path: &socket_path, scratch: &mut scratch };
         for item in &mut self.items {
             // A tile the supervisor evicted is one the dock has
             // disowned, and continuing to run its process would leave a
@@ -1564,22 +1575,6 @@ impl<B: Backend> Desktop<B> {
         // allocation rather than asking the allocator for a quarter of
         // a megabyte on the repaint thread.
         *self.dockapps.scratch() = scratch;
-    }
-
-    /// Matches one `Hello` to the tile that minted its token.
-    ///
-    /// The decision itself lives in [`dockapp::admit`], over an iterator
-    /// of tiles rather than over `self`: it is the one piece of this
-    /// feature that is worth testing against a real socket and a real
-    /// handshake, and a `Desktop` needs a backend.
-    fn admit(&mut self, admission: crate::dockapp::Admission, now: std::time::Instant) {
-        // Cloned before the tiles are borrowed, and taken from the same
-        // cache `service_dockapps` hands every tile this pass — so the
-        // geometry a `Hello` is validated against, the geometry the
-        // `Welcome` announces, and the geometry `on_frame` will insist
-        // on are one value rather than three that happen to agree.
-        let welcome = self.dockapps.theme().clone();
-        dockapp::admit(self.items.iter_mut().filter_map(|item| item.remote_mut()), admission, &welcome, now);
     }
 
     /// Opens a dock tile's own right-click menu, if the tile at `local`
