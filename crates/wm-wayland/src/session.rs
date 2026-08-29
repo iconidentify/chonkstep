@@ -276,6 +276,65 @@ const FLIP_STALL_WARNING: Duration = Duration::from_secs(2);
 /// away instead of one frame away.
 const FLIP_STALL_RECOVERY: Duration = Duration::from_secs(5);
 
+/// How long the event loop may go without reaching
+/// [`service_pending_flips`] before the gap is treated as the loop
+/// having been blocked, rather than as time a flip spent outstanding.
+///
+/// The stall thresholds above measure "how long has the kernel had this
+/// flip", and they are only meaningful if this process was actually
+/// around to notice a completion. It is not always: anything that
+/// blocks the single main thread — most infamously a synchronous child
+/// process in a dock widget's sampler — parks the loop with the flip's
+/// completion event sitting unread in the DRM fd. Charging that time to
+/// the driver produced the 2026-08-29 diagnosis this comment exists to
+/// prevent a repeat of: a widget shelling out to `nmcli` blocked the
+/// loop for ~3.6s once every ~34s, and every one of those was logged as
+/// "no page-flip completion from the DRM device". The device was idle
+/// and correct the whole time; the compositor had simply stopped
+/// asking.
+///
+/// The danger is not the misleading log line, it is
+/// [`FLIP_STALL_RECOVERY`]: a blocked loop that crosses five seconds
+/// would trigger `reset_state()`, and on Apple's DCP a modeset commit
+/// blocks the caller for as long as 8.5 seconds inside `iomfb_modeset`.
+/// The "recovery" would then be several times worse than the stall, for
+/// a flip that was never stuck. So time the loop demonstrably spent
+/// away is credited back to every flip in flight instead of counted
+/// against it.
+///
+/// Generous relative to the 16ms housekeeping cadence, because the cost
+/// of being wrong is asymmetric: crediting a little real driver latency
+/// only delays a warning, while charging a little blocked time can fire
+/// a modeset.
+const LOOP_BLOCK_GRACE: Duration = Duration::from_millis(250);
+
+/// Whether to force full-output damage on every frame instead of
+/// trusting the damage tracker's per-element result.
+///
+/// The escape hatch for the change described at the `reset_buffer_ages`
+/// call site. Partial damage is the default because full-frame damage
+/// costs a 2560x1600 recomposite per pointer sample on a panel with no
+/// cursor plane; but the artifact it prevented (stale rectangles where
+/// an element moved and the tracker did not notice) is a *visual* bug,
+/// so getting back to the safe behaviour must not require a compiler.
+/// `CHONKSTEP_FULL_DAMAGE=1` restores it for the next session.
+///
+/// Read once and cached: this sits in the per-output frame path, and a
+/// per-frame environment lookup is exactly the kind of small syscall
+/// that this file has spent its recent history removing.
+fn full_damage_forced() -> bool {
+    static FORCED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FORCED.get_or_init(|| {
+        let forced = std::env::var_os("CHONKSTEP_FULL_DAMAGE").is_some_and(|value| value != "0");
+        if forced {
+            tracing::info!(
+                "CHONKSTEP_FULL_DAMAGE is set; forcing full-output damage on every frame"
+            );
+        }
+        forced
+    })
+}
+
 /// Everything the session backend owns while it runs: the seat, the
 /// DRM device and its GBM allocator, the EGL/GLES renderer, one
 /// [`SessionOutput`] per connected connector, and the libinput context.
@@ -318,6 +377,10 @@ pub(crate) struct SessionGraphics {
     /// and resume it. The `LibinputInputBackend` calloop owns holds its
     /// own clone of the same underlying context.
     libinput: Libinput,
+    /// When [`service_pending_flips`] last ran. The gap between
+    /// consecutive visits is how long the main thread was away, which
+    /// is time no flip should be charged for — see [`LOOP_BLOCK_GRACE`].
+    last_service: Instant,
 }
 
 /// One output being scanned out: its crtc, its place in the global
@@ -655,6 +718,7 @@ pub(crate) fn init(
             renderer,
             outputs: session_outputs,
             libinput,
+            last_service: Instant::now(),
         })),
         outputs: setups,
     })
@@ -865,6 +929,36 @@ pub(crate) fn redraw_pending(graphics: &Graphics) -> bool {
 /// a unit-returning function whose name suggests it might not do
 /// anything.
 fn service_pending_flips(session: &mut SessionGraphics) -> bool {
+    // Credit back whatever time the main thread spent not running. A
+    // flip is only "late" relative to a loop that was there to see it
+    // complete; see [`LOOP_BLOCK_GRACE`] for why charging a blocked
+    // loop's time to the driver is actively dangerous on this hardware.
+    // Pushing `queued_at` forward (rather than subtracting at the
+    // comparison) keeps the credit sticky: a flip blocked across
+    // several passes accumulates all of them, and the `waited` value
+    // that reaches the log is then the driver's share alone.
+    let now = Instant::now();
+    let away = now.saturating_duration_since(session.last_service);
+    session.last_service = now;
+    if let Some(blocked) = away.checked_sub(LOOP_BLOCK_GRACE) {
+        for output in session.outputs.iter_mut() {
+            if let Some(flip) = output.frame_pending.as_mut() {
+                flip.queued_at += blocked;
+                // A flip already named as stalled that turns out to
+                // have been waiting on us, not on the kernel, should be
+                // allowed to say so again once it has genuinely
+                // overrun on its own merits.
+                if flip.queued_at.elapsed() < FLIP_STALL_WARNING {
+                    flip.stall_reported = false;
+                }
+            }
+        }
+        tracing::debug!(
+            ?blocked,
+            "main loop was away; crediting the time back to flips in flight rather than the driver"
+        );
+    }
+
     let mut needs_reset = false;
     for output in session.outputs.iter_mut() {
         let Some(flip) = output.frame_pending.as_mut() else {
@@ -1033,14 +1127,35 @@ pub(crate) fn render_frame_session(comp: &mut Compositor) {
             continue;
         }
 
-        // Force full-frame damage, the session-side equivalent of the
-        // winit path's `age = 0`: with every buffer age reset the
-        // internal damage tracker treats the whole output as stale. Same
-        // trade the X11 session made by running picom with
-        // `--no-use-damage` — a little GPU fill in exchange for never
-        // chasing a partial-damage artifact. Revisit only with evidence,
-        // and revisit both backends together.
-        output.drm_compositor.reset_buffer_ages();
+        // Resetting every buffer age makes the internal damage tracker
+        // treat the whole output as stale, forcing a full-frame submit —
+        // the session-side equivalent of the winit path's `age = 0`, and
+        // the same trade the X11 session made by running picom with
+        // `--no-use-damage`: a little GPU fill in exchange for never
+        // chasing a partial-damage artifact.
+        //
+        // That comment used to end "revisit only with evidence". The
+        // evidence arrived. This display has no hardware cursor plane
+        // (apple-drm registers none by design — the DCP cannot blend a
+        // third surface, and it faults on a framebuffer that clips
+        // off-screen), so the pointer is composited into the scene and
+        // every pointer motion marks the output dirty. With full-frame
+        // damage that is a 2560x1600 recomposite — 4.1 megapixels,
+        // roughly 983 MB/s of writes — per trackpad sample, on a machine
+        // whose panel is driven over a firmware mailbox. It is the
+        // single largest avoidable cost in the frame path, and it is
+        // paid hardest during exactly the interaction where latency is
+        // most visible.
+        //
+        // So the default is now the tracker's own per-element damage.
+        // The old behaviour stays one environment variable away because
+        // the artifact class it guarded against is real and shows up as
+        // stale rectangles rather than a crash — the kind of bug a user
+        // hits before a developer does, and one that would otherwise
+        // require a rebuild to escape.
+        if full_damage_forced() {
+            output.drm_compositor.reset_buffer_ages();
+        }
 
         // One scene build per output: the elements are the same objects
         // in different places, since `render_frame` intersects them
