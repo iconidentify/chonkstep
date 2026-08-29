@@ -21,7 +21,7 @@ use wm_theme::cascade::{CascadeMenu, MenuClick};
 use wm_theme::menu::MenuItem;
 use wm_theme::switcher::{self, SwitcherEntry};
 use wm_theme::workspace;
-use wm_theme::{icon, paint, tile, Theme};
+use wm_theme::{icon, paint, panel, tile, Theme};
 // `wm_theme_api::PopupHost` is deliberately referenced by full path in
 // bounds rather than imported, and bounded per-method on `Desktop`'s
 // menu-driving methods rather than on the whole impl: a receiver
@@ -32,7 +32,10 @@ use wm_theme::{icon, paint, tile, Theme};
 use wm_theme_api::{DecorationBuffer, Point, Rect, Size};
 
 use crate::wallpaper::Wallpaper;
-use crate::widgets::{ClockWidget, DockWidget, NetTrafficWidget, PowerWidget, SoundWidget, SysLoadWidget, WifiWidget, WorkspaceShared};
+use crate::widgets::{
+    run_detached, ClockWidget, DockInput, DockWidget, Effect, NetTrafficWidget, PowerWidget, SamplerRegistry, SoundWidget, SupervisedWidget, SysLoadWidget,
+    WifiWidget, WorkspaceShared,
+};
 
 /// The desktop background color — a cool lavender-gray sampled from a
 /// reference NeXTSTEP desktop screenshot, not the neutral gray this
@@ -410,6 +413,14 @@ impl<Id: Copy + Eq + std::fmt::Debug> ShellMenu<Id> {
     /// was built from (`Desktop::open_root_menu` reads both from its
     /// one stored vec) — it becomes the session's bound for resolving
     /// `ACTION_APP_BASE +` ids back into `LaunchApp` indices.
+    // Eight arguments, three over clippy's default. Grouping them into
+    // a struct would only move the same eight values one line up at the
+    // single call site, and this signature is deliberately a mirror of
+    // `CascadeMenu::open`'s (host, theme, font system, items, position,
+    // bounds) plus the two pieces of session identity — a reader
+    // matching this against the SDK primitive it wraps is better served
+    // by the parallel than by a bag.
+    #[allow(clippy::too_many_arguments)]
     fn open_root<H: wm_theme_api::PopupHost<PopupId = Id>>(
         &mut self,
         host: &mut H,
@@ -548,12 +559,15 @@ pub enum IconDragResult {
 /// unusually large future widget stack cannot request an invalidly
 /// tall shell surface, but it never fills spare space merely because
 /// it exists.
-fn stacked_dock_height(tile: u32, screen_height: u32, widgets: &[Box<dyn DockWidget>]) -> u32 {
+fn stacked_dock_height(tile: u32, screen_height: u32, widgets: &[SupervisedWidget]) -> u32 {
     widgets
         .iter()
-        .fold(tile, |height, widget| {
-            height.saturating_add(tile.saturating_mul(widget.tile_height().max(1)))
-        })
+        // `SupervisedWidget::tile_height` already floors a widget's own
+        // answer at one tile, and already answers exactly one for an
+        // evicted widget — so an evicted multi-tile instrument shrinks
+        // the dock rather than leaving a hole where its extra tiles
+        // used to be.
+        .fold(tile, |height, widget| height.saturating_add(tile.saturating_mul(widget.tile_height())))
         .min(screen_height.max(1))
 }
 
@@ -643,7 +657,22 @@ pub struct Desktop<B: Backend> {
     /// Every instrument shown below the identity tile, top to bottom —
     /// see `crate::widgets` for the SDK these implement. Order is what
     /// `redraw_dock` draws and what a middle-click drag reorders.
-    widgets: Vec<Box<dyn DockWidget>>,
+    /// Each one wrapped in a [`SupervisedWidget`], which is what times
+    /// the calls across the trait boundary and evicts a widget that
+    /// keeps blocking the repaint thread — see its doc comment for why
+    /// the dock does not simply trust its widgets.
+    widgets: Vec<SupervisedWidget>,
+    /// Every sampler thread the widget stack asked for, and the
+    /// readings they have produced — see `crate::widgets::sampling`.
+    ///
+    /// The dock owns these rather than the widgets, and that is the
+    /// point rather than an implementation detail: a widget declares
+    /// what it needs and is handed the result, so there is no moment at
+    /// which one could read `/proc`, walk sysfs or wait on `nmcli` from
+    /// the compositor's repaint thread. It also owns the executor for
+    /// the [`Effect`]s a click returns, for exactly the same reason —
+    /// `wpctl set-volume` arrives on this thread too.
+    samplers: SamplerRegistry,
     /// The workspace state shared with the Clip tile — see
     /// `WorkspaceShared`'s doc comment for why this
     /// crosses the `Box<dyn DockWidget>` boundary as a shared cell
@@ -710,14 +739,30 @@ impl<B: Backend> Desktop<B> {
         // identity tile opens it (the two non-instrument faces frame
         // the glass screens between them). Middle-click drag reorders
         // live; this is just the default order.
-        let widgets: Vec<Box<dyn DockWidget>> = vec![
-            Box::new(NetTrafficWidget::new()),
+        let mut samplers = SamplerRegistry::new();
+        let widgets: Vec<SupervisedWidget> = [
+            Box::new(NetTrafficWidget::new()) as Box<dyn DockWidget>,
             Box::new(SysLoadWidget::new()),
             Box::new(SoundWidget::new()),
             Box::new(WifiWidget::new()),
             Box::new(PowerWidget::new()),
             Box::new(ClockWidget::new()),
-        ];
+        ]
+        .into_iter()
+        // Supervision is applied here, at the one place widgets enter
+        // the dock, rather than being something each widget opts into:
+        // the widget that needs it most is by definition the one that
+        // would not have thought to.
+        .map(SupervisedWidget::new)
+        // And the same argument for sampling: a widget's sources are
+        // registered and bound at the one place it enters the dock, so
+        // no widget can be constructed into the stack with its sampling
+        // half half-wired.
+        .map(|mut widget| {
+            widget.bind(&mut samplers);
+            widget
+        })
+        .collect();
         let dock_height = stacked_dock_height(tile, primary.size.h, &widgets);
         let dock_geom = dock_geometry(primary, dock_width, dock_height);
         let dock_window = backend
@@ -747,6 +792,7 @@ impl<B: Backend> Desktop<B> {
             swash_cache: cosmic_text::SwashCache::new(),
             menu: ShellMenu::new(),
             widgets,
+            samplers,
             workspace,
             clip_window,
             clip_drawn: (usize::MAX, 0),
@@ -820,16 +866,36 @@ impl<B: Backend> Desktop<B> {
         self.repaint_clip(backend, theme);
     }
 
-    /// Advances every dock widget by one event-loop tick and repaints
-    /// the dock if anything actually changed — called unconditionally on
-    /// every `tick()` (never short-circuited) so a widget further down
-    /// the list still gets to sample/animate even if an earlier one had
-    /// nothing new to report this iteration.
+    /// Collects whatever the sampler threads have finished, folds it
+    /// into every dock widget, and repaints the dock if anything
+    /// actually changed.
+    ///
+    /// One `refresh` for the whole stack, before any widget sees
+    /// anything: that is what makes `Samples::fresh` mean "new since
+    /// your last `update`" for every widget alike, and what stops one
+    /// widget's pass from observing a different instant than its
+    /// neighbour's.
+    ///
+    /// Every widget is updated (never short-circuited) so one further
+    /// down the list still gets to fold even if an earlier one had
+    /// nothing new. All of it is timed and budgeted by
+    /// [`SupervisedWidget`]: this loop runs on the compositor's single
+    /// repaint thread, so a widget that blocks here freezes the whole
+    /// desktop, and one that does it repeatedly is dropped from the
+    /// dock rather than allowed to keep doing it. What it can no longer
+    /// block on is the system — that moved to the sampler threads
+    /// `samplers` owns.
     pub fn tick_widgets(&mut self, backend: &mut B, theme: &Theme) {
+        self.samplers.refresh();
         let mut changed = false;
-        for widget in &mut self.widgets {
-            if widget.tick() {
-                changed = true;
+        {
+            // Scoped so the borrow of `samplers` ends before the
+            // repaint, which needs all of `self`.
+            let samples = self.samplers.samples();
+            for widget in &mut self.widgets {
+                if widget.update(&samples) {
+                    changed = true;
+                }
             }
         }
         if changed {
@@ -911,7 +977,7 @@ impl<B: Backend> Desktop<B> {
         let mut y = self.widgets_top();
         let mut slots = Vec::with_capacity(self.widgets.len());
         for (index, widget) in self.widgets.iter().enumerate() {
-            let h = self.tile * widget.tile_height().max(1);
+            let h = self.tile * widget.tile_height();
             slots.push((index, Rect { pos: Point::new(0, y), size: Size::new(self.tile, h) }));
             y += h as i32;
         }
@@ -968,23 +1034,57 @@ impl<B: Backend> Desktop<B> {
         true
     }
 
-    /// Left-click handling for whichever widget sits at `local`, if any
-    /// (e.g. the network instrument cycles interfaces, the sound
-    /// instrument's zones adjust volume). The click is translated into
-    /// the widget's own tile-local coordinates so widgets can carve
-    /// their face into control zones without knowing where the dock
-    /// stacked them. Returns `false` if `local` isn't over a widget
-    /// slot at all, so callers can tell whether the click was theirs to
-    /// handle.
-    pub fn click_widget(&mut self, backend: &mut B, theme: &Theme, local: Point) -> bool {
+    /// Pointer input for whichever widget sits under it, if any (e.g.
+    /// the network instrument cycles interfaces, the sound instrument's
+    /// zones adjust volume). `input` arrives in dock-local coordinates
+    /// and is re-anchored to the widget's own tile before delivery, so
+    /// widgets can carve their face into control zones without knowing
+    /// where the dock stacked them. Returns `false` if the input isn't
+    /// over a widget slot at all, so callers can tell whether it was
+    /// theirs to handle.
+    ///
+    /// Whatever the widget wants done comes back as [`Effect`]s and is
+    /// performed here, off this thread where it needs to be — see
+    /// `apply_effects`.
+    pub fn dock_input(&mut self, backend: &mut B, theme: &Theme, input: DockInput) -> bool {
+        let Some(local) = input.local() else { return false };
         let Some((index, rect)) = self.widget_slots().into_iter().find(|(_, rect)| rect.contains(local)) else {
             return false;
         };
-        let widget_local = Point::new(local.x - rect.pos.x, local.y - rect.pos.y);
-        if self.widgets[index].on_click(widget_local, self.tile) {
+        let effects = self.widgets[index].on_input(input.translated(rect.pos), self.tile);
+        self.apply_effects(backend, theme, effects);
+        true
+    }
+
+    /// Performs what a widget asked for.
+    ///
+    /// [`Effect::Run`] is the one that matters: it goes to a thread of
+    /// its own, because `wpctl set-volume` and `nmcli radio wifi off`
+    /// arrive on the compositor's repaint thread and can park it every
+    /// bit as thoroughly as a sample could. That a widget can only
+    /// *return* one of these — never run it — is the click path's half
+    /// of the same guarantee `SamplerRegistry` gives the sampling path.
+    ///
+    /// Repaints are coalesced: a widget that emits several effects gets
+    /// one redraw, not one per effect.
+    fn apply_effects(&mut self, backend: &mut B, theme: &Theme, effects: Vec<Effect>) {
+        let mut repaint = false;
+        for effect in effects {
+            match effect {
+                Effect::Repaint => repaint = true,
+                Effect::Resample(id) => {
+                    if let Some(resampler) = self.samplers.resampler(id) {
+                        resampler.resample_soon();
+                    }
+                }
+                Effect::Run { program, args, then } => {
+                    run_detached(program, args, then.and_then(|id| self.samplers.resampler(id)));
+                }
+            }
+        }
+        if repaint {
             self.redraw_dock(backend, theme);
         }
-        true
     }
 
     fn redraw_dock(&mut self, backend: &mut B, theme: &Theme) {
@@ -1032,7 +1132,22 @@ impl<B: Backend> Desktop<B> {
         );
 
         for (index, rect) in self.widget_slots() {
-            let buffer = self.widgets[index].render(theme, self.tile);
+            // `None` is an evicted widget: the dock draws its own
+            // tombstone rather than calling code it has already
+            // disowned. `render_dead_tile` is the same powered-off
+            // face the instruments already use for "no sink", "no
+            // interface", "no battery" — an evicted slot should read as
+            // a dead instrument, which belongs to the family, and not
+            // as a hole punched in the column. The widget's own name is
+            // the label, so the dock says *which* one went dark without
+            // the user having to find the log.
+            let buffer = match self.widgets[index].render(theme, self.tile, &mut self.font_system, &mut self.swash_cache) {
+                Some(buffer) => buffer,
+                None => {
+                    let label = self.widgets[index].name();
+                    panel::render_dead_tile(theme, &mut self.font_system, &mut self.swash_cache, self.tile, label)
+                }
+            };
             blit_into(&mut pixmap, rect.pos.x as u32, rect.pos.y as u32, &buffer);
 
             if self.widget_drag.as_ref().is_some_and(|d| d.index == index) {
@@ -1380,11 +1495,15 @@ mod tests {
     struct FixedHeightWidget(u32);
 
     impl DockWidget for FixedHeightWidget {
-        fn tick(&mut self) -> bool {
+        fn name(&self) -> &'static str {
+            "FIX"
+        }
+
+        fn update(&mut self, _samples: &crate::widgets::Samples) -> bool {
             false
         }
 
-        fn render(&self, _theme: &Theme, _tile: u32) -> DecorationBuffer {
+        fn render(&self, _theme: &Theme, _tile: u32, _fonts: &mut cosmic_text::FontSystem, _swash: &mut cosmic_text::SwashCache) -> DecorationBuffer {
             DecorationBuffer { width: 1, height: 1, pixels: vec![0; 4] }
         }
 
@@ -1395,8 +1514,8 @@ mod tests {
 
     #[test]
     fn dock_height_is_only_the_identity_and_current_widget_stack() {
-        let widgets: Vec<Box<dyn DockWidget>> =
-            vec![Box::new(FixedHeightWidget(1)), Box::new(FixedHeightWidget(3))];
+        let widgets: Vec<SupervisedWidget> =
+            [Box::new(FixedHeightWidget(1)) as Box<dyn DockWidget>, Box::new(FixedHeightWidget(3))].into_iter().map(SupervisedWidget::new).collect();
 
         assert_eq!(stacked_dock_height(56, 1_080, &widgets), 280);
         assert_eq!(stacked_dock_height(56, 200, &widgets), 200, "oversized stacks are screen-clamped");

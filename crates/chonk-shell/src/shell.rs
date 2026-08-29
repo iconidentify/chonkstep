@@ -20,6 +20,7 @@ use wm_theme_api::{Point, PopupHost, Rect, Size};
 use crate::apps::{self, AppEntry};
 use crate::desktop::{Desktop, IconDragResult, MenuAction, RootMenuAction, WindowMenuAction, WindowMenuContext};
 use crate::launchdock::{LaunchDock, LaunchDockAction};
+use crate::widgets::DockInput;
 use crate::{spawn, theme_select, wallpaper};
 
 /// What the binary's event loop must do after handing an event to the
@@ -203,7 +204,7 @@ fn launch_app(entry: &AppEntry, theme: &Theme) {
         argv.extend(spawn::chromium_x11_platform_args());
     }
     let arg_refs: Vec<&str> = argv.iter().map(String::as_str).collect();
-    spawn::spawn_detached_with_env(program, &arg_refs, &spawn::gtk_qt_scale_env(scale));
+    spawn::spawn_detached_with_env(program, &arg_refs, &spawn::gtk_qt_scale_env(scale), &[]);
 }
 
 /// Path to the `chonk-about` demo binary — resolved relative to the
@@ -569,10 +570,22 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
             // Middle-click-drag on a widget picks it up for reordering;
             // see `Desktop::begin_widget_drag`/`drag_widget_motion`
             // (the latter fires from `on_motion` on every pointer
-            // move, not from here). A plain left click instead fires
-            // the widget's own click behavior (e.g. the system monitor
-            // toggling its analog/dashboard face). Everything else on
-            // the dock is still just a click-through identity tile.
+            // move, not from here). Middle stays the dock's own gesture
+            // and is never offered to a widget: a tile that could
+            // swallow it could make itself un-reorderable.
+            //
+            // Left goes to the widget as a `DockInput`, both edges of
+            // it. Widgets act on the press and ignore the release — but
+            // they are *told* about the release, because press/release
+            // is the shape the out-of-process tile protocol needs, and
+            // delivering only half of it now would bake the narrower
+            // shape into every widget written between here and there.
+            //
+            // Right is reserved and deliberately unhandled: it is
+            // earmarked for a per-tile menu (Restart, Remove, About),
+            // and a widget that had already been given it could not
+            // have it taken back. Everything else on the dock is still
+            // just a click-through identity tile.
             match button {
                 MouseButton::Middle => {
                     if pressed {
@@ -581,10 +594,15 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
                         self.desktop.end_widget_drag(wm.backend_mut(), &self.theme);
                     }
                 }
-                MouseButton::Left if pressed => {
-                    self.desktop.click_widget(wm.backend_mut(), &self.theme, local);
+                MouseButton::Left => {
+                    let input = if pressed {
+                        DockInput::Press { local, button }
+                    } else {
+                        DockInput::Release { local, button }
+                    };
+                    self.desktop.dock_input(wm.backend_mut(), &self.theme, input);
                 }
-                _ => {}
+                MouseButton::Right => {}
             }
             return ShellOutcome::Continue;
         }
@@ -653,7 +671,31 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         match action {
             RootMenuAction::LaunchTerminal => spawn_terminal(&self.theme),
             RootMenuAction::LaunchAbout => {
-                spawn::spawn_detached(&about_binary_path(), &[]);
+                // `CHONKSTEP_THEME` is the one published channel by
+                // which an SDK app learns which theme the desktop is
+                // wearing: `chonk_ui::active_theme` reads it and falls
+                // back to NeXTSTEP Classic when it is absent. Until this
+                // line existed the variable had a consumer and no
+                // producer, so `chonk-about` — the SDK's own showcase —
+                // rendered in Classic on every other theme, which is
+                // exactly the mismatch the SDK exists to prevent.
+                //
+                // Deliberately not a state-file read inside `chonk-ui`:
+                // that would duplicate `startup::resolve_theme`'s
+                // precedence (env, then config, then default) in a
+                // second crate and drift from it silently. The launcher
+                // knows the live answer; it should say so.
+                //
+                // Phase 4b's dockapp launch wants the same variable, and
+                // a running dockapp additionally gets `ThemeChanged`
+                // pushed down its socket — this env var is only how a
+                // freshly-spawned one learns the theme it starts in.
+                spawn::spawn_detached_with_env(
+                    &about_binary_path(),
+                    &[],
+                    &[("CHONKSTEP_THEME".to_string(), self.theme.id.clone())],
+                    &[],
+                );
             }
             // Indexes the same apps vec the desktop's menu was built
             // from, so `i` means the same entry on both sides; the
