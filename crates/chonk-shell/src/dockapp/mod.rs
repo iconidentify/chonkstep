@@ -402,8 +402,8 @@ impl DockHost {
     }
 }
 
-/// Matches one `Hello` to the tile that minted its token, and adopts it
-/// if it earns the slot.
+/// Matches one `Hello` to the tile whose token it presents, and adopts
+/// it if it earns the slot.
 ///
 /// # The adoption rule
 ///
@@ -437,7 +437,7 @@ impl DockHost {
 /// "you were not launched by this shell" and nothing about the shell's
 /// internals.
 pub(crate) fn admit<'a>(
-    tiles: impl Iterator<Item = &'a mut tile::RemoteTile>,
+    mut tiles: impl Iterator<Item = &'a mut tile::RemoteTile>,
     admission: Admission,
     welcome: &ThemeState,
     now: Instant,
@@ -448,7 +448,7 @@ pub(crate) fn admit<'a>(
         return;
     };
     let id = id.clone();
-    let Some(tile) = tiles.into_iter().find(|tile| tile.id() == id) else {
+    let Some(tile) = tiles.find(|tile| tile.id() == id) else {
         tracing::warn!(%id, "a dockapp presented an id with no registered slot");
         goodbye(&socket, GoodbyeReason::Unauthorized);
         return;
