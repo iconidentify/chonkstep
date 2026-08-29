@@ -65,8 +65,8 @@ use smithay::wayland::xwayland_shell::XWaylandShellState;
 use smithay::xwayland::{X11Surface, X11Wm, XWayland, XWaylandEvent};
 
 use wm_core::{
-    Backend, BackendEvent, FocusPolicy, KeyCombo, MonitorInfo, MouseButton, WindowManager,
-    WindowType,
+    Backend, BackendEvent, FocusPolicy, KeyCombo, MonitorInfo, MouseButton, ScrollDelta,
+    WindowManager, WindowType,
 };
 use wm_theme::{RasterThemeEngine, Theme};
 use wm_theme_api::{DecorationBuffer, Point, Rect, Size};
@@ -267,6 +267,17 @@ pub struct WaylandBackend {
     /// `Backend::take_shell_motion` (the shell itself drains this
     /// inside `Shell::on_motion`, same as on X11).
     pub(crate) shell_motions: VecDeque<(WlShellId, Point)>,
+    /// Whole wheel notches over shell surfaces (surface,
+    /// surface-local position, delta) — plus notches over the desktop
+    /// background under [`ROOT_SHELL`], mirroring `shell_clicks`.
+    /// Drained by `Backend::take_shell_scroll`.
+    ///
+    /// Queued rather than summed: a caller reading three separate
+    /// one-notch entries and a caller reading one three-notch entry
+    /// both behave correctly (the delta is a count), but only the
+    /// queue preserves the positions, and on a dock the position is
+    /// which tile the user was pointing at when each notch landed.
+    pub(crate) shell_scrolls: VecDeque<(WlShellId, Point, ScrollDelta)>,
     /// Output size change waiting for the loop's
     /// `take_screen_resize` drain (the winit window was resized).
     pub(crate) pending_resize: Option<Size>,
@@ -325,6 +336,7 @@ impl WaylandBackend {
             pending: VecDeque::new(),
             shell_clicks: VecDeque::new(),
             shell_motions: VecDeque::new(),
+            shell_scrolls: VecDeque::new(),
             pending_resize: None,
             grabbed_combos: Vec::new(),
             keyboard_grabbed: false,
@@ -1157,7 +1169,7 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
         protocols,
         pointer_location: (0.0, 0.0).into(),
         cursor_status: CursorImageStatus::default_named(),
-        default_cursor: build_default_cursor(),
+        default_cursor: build_default_cursor(scale),
         theme,
         start_time: Instant::now(),
         running: true,
@@ -1238,7 +1250,60 @@ fn restart_in_place(nested: bool) -> ! {
 /// the compositor must have a cursor before any theme machinery could
 /// run, and clients that care set their own via `wl_pointer.set_cursor`
 /// anyway.
-fn build_default_cursor() -> MemoryRenderBuffer {
+///
+/// `scale` is the session's UI scale, and it has to be baked into the
+/// pixels here because nothing downstream will apply it: the buffer is
+/// drawn by `renderer::push_cursor_elements` with no explicit size, so
+/// smithay sizes the element at the buffer's own dimensions divided by
+/// its buffer scale (`element::memory`'s `from_buffer`), and every
+/// output in this session stays at scale 1 (neither `run`'s winit
+/// output nor `session::attach_output` ever passes a scale to
+/// `change_current_state`, and the damage tracker takes its render
+/// scale from the output). A fixed 1x arrow therefore reached the
+/// screen at 1x pixels next to `scaled(scale)` chrome and clients'
+/// `XCURSOR_SIZE`-sized pointers — the "tiny cursor over the desktop,
+/// right-sized cursor over a window" report.
+///
+/// Raising the *buffer scale* argument instead would move the bug, not
+/// fix it: a buffer scale of 2 tells smithay these pixels are 2 per
+/// logical unit, which halves the element on a scale-1 output.
+fn build_default_cursor(scale: f32) -> MemoryRenderBuffer {
+    let (pixels, width, height) = default_cursor_pixels(scale);
+    // RGBA byte order is the little-endian DRM fourcc Abgr8888, NOT
+    // Argb8888 — mixing those up swaps red and blue. Fully opaque or
+    // fully transparent pixels only, so these bytes are also already
+    // valid premultiplied alpha, which is what the GLES renderer's
+    // blending expects (and what tiny-skia's `data()` provides for the
+    // decoration buffers `backend_impl` imports the same way).
+    //
+    // Buffer scale 1 for the reason `backend_impl::import_buffer`
+    // documents for decoration buffers: this session's ledger is in
+    // physical pixels, so a buffer already rasterized at the UI scale
+    // is 1 buffer pixel per unit of that space.
+    MemoryRenderBuffer::from_slice(
+        &pixels,
+        Fourcc::Abgr8888,
+        (width, height),
+        1,
+        Transform::Normal,
+        None,
+    )
+}
+
+/// The arrow's premultiplied RGBA8 pixels at `scale`, with its width
+/// and height. Split out from [`build_default_cursor`] because the
+/// scaling is the part worth testing and `MemoryRenderBuffer` exposes
+/// no dimensions to assert on.
+///
+/// Nearest-neighbour pixel replication rather than a filtered resample:
+/// the source is a hand-placed 1-bit shape with a one-pixel halo, and
+/// interpolating it would blur that halo into grey fringing at exactly
+/// the theme's hard-edged aesthetic. Sampling from the source origin
+/// also keeps the hotspot correct for free — the tip sits at pixel
+/// (0, 0) and `push_cursor_elements` draws this buffer at the pointer
+/// position with no hotspot offset, and (0, 0) maps to (0, 0) under any
+/// scale factor.
+fn default_cursor_pixels(scale: f32) -> (Vec<u8>, i32, i32) {
     // '#' = black shape, 'o' = white halo, anything else transparent.
     // Rows may be ragged; missing trailing cells are transparent.
     const ARROW: [&str; 19] = [
@@ -1262,14 +1327,24 @@ fn build_default_cursor() -> MemoryRenderBuffer {
         "      o##o",
         "       oo",
     ];
-    let height = ARROW.len();
-    let width = ARROW.iter().map(|row| row.len()).max().unwrap_or(1);
+    let source_height = ARROW.len();
+    let source_width = ARROW.iter().map(|row| row.len()).max().unwrap_or(1);
+    // Never below 1x, matching `wm-x11`'s `create_scaled_cursor`: a
+    // sub-1 scale is a config typo, and shrinking the pointer below the
+    // hand-placed shape loses the halo entirely. (`f32::max` also
+    // returns 1.0 for a NaN scale, so the cast below is always sane.)
+    let scale = scale.max(1.0) as f64;
+    let width = ((source_width as f64 * scale).round() as usize).max(1);
+    let height = ((source_height as f64 * scale).round() as usize).max(1);
     let mut pixels = vec![0u8; width * height * 4];
-    for (y, row) in ARROW.iter().enumerate() {
-        for (x, cell) in row.bytes().enumerate() {
-            let value: Option<[u8; 4]> = match cell {
-                b'#' => Some([0, 0, 0, 0xFF]),
-                b'o' => Some([0xFF, 0xFF, 0xFF, 0xFF]),
+    for y in 0..height {
+        // `min` guards the row a rounded-up edge pixel would sample
+        // past the source for.
+        let row = ARROW[((y as f64 / scale) as usize).min(source_height - 1)].as_bytes();
+        for x in 0..width {
+            let value: Option<[u8; 4]> = match row.get((x as f64 / scale) as usize) {
+                Some(b'#') => Some([0, 0, 0, 0xFF]),
+                Some(b'o') => Some([0xFF, 0xFF, 0xFF, 0xFF]),
                 _ => None,
             };
             if let Some(rgba) = value {
@@ -1278,20 +1353,7 @@ fn build_default_cursor() -> MemoryRenderBuffer {
             }
         }
     }
-    // RGBA byte order is the little-endian DRM fourcc Abgr8888, NOT
-    // Argb8888 — mixing those up swaps red and blue. Fully opaque or
-    // fully transparent pixels only, so these bytes are also already
-    // valid premultiplied alpha, which is what the GLES renderer's
-    // blending expects (and what tiny-skia's `data()` provides for the
-    // decoration buffers `backend_impl` imports the same way).
-    MemoryRenderBuffer::from_slice(
-        &pixels,
-        Fourcc::Abgr8888,
-        (width as i32, height as i32),
-        1,
-        Transform::Normal,
-        None,
-    )
+    (pixels, width as i32, height as i32)
 }
 
 #[cfg(test)]
@@ -1336,6 +1398,78 @@ mod tests {
             union_size(&[monitor(0, 0, 1280, 1024), monitor(1280, 0, 1920, 1080)]),
             Size::new(3200, 1080)
         );
+    }
+
+    // The cursor pixels are pure arithmetic over a const string
+    // table — no display, no GPU — which is the half of
+    // `build_default_cursor` that got the size wrong.
+
+    /// Alpha of the pixel at (x, y) in a `default_cursor_pixels` buffer.
+    fn alpha_at(pixels: &[u8], width: i32, x: i32, y: i32) -> u8 {
+        pixels[((y * width + x) * 4 + 3) as usize]
+    }
+
+    #[test]
+    fn the_default_cursor_grows_with_the_ui_scale() {
+        // The bug this pins: at scale 2.0 the arrow reached the screen
+        // at its 1x size (10x19) because nothing multiplied it, leaving
+        // a half-size pointer next to `scaled(2.0)` chrome.
+        let (_, base_width, base_height) = default_cursor_pixels(1.0);
+        assert_eq!((base_width, base_height), (10, 19));
+        let (_, width, height) = default_cursor_pixels(2.0);
+        assert_eq!((width, height), (base_width * 2, base_height * 2));
+    }
+
+    #[test]
+    fn a_fractional_scale_rounds_to_whole_pixels() {
+        let (pixels, width, height) = default_cursor_pixels(1.5);
+        assert_eq!((width, height), (15, 29));
+        assert_eq!(pixels.len(), (width * height * 4) as usize);
+    }
+
+    #[test]
+    fn the_hotspot_pixel_stays_at_the_origin() {
+        // `push_cursor_elements` draws this buffer at the pointer
+        // position with no hotspot offset, so the tip must remain at
+        // (0, 0) at every scale or the pointer would click low and to
+        // the right of where it points.
+        for scale in [1.0, 1.5, 2.0, 3.0] {
+            let (pixels, width, _) = default_cursor_pixels(scale);
+            assert_eq!(alpha_at(&pixels, width, 0, 0), 0xFF, "scale {scale}");
+        }
+    }
+
+    #[test]
+    fn scaling_replicates_pixels_rather_than_blending_them() {
+        // Every destination pixel is one source pixel verbatim: a
+        // filtered resample would put partially transparent grey
+        // between the black shape and its white halo.
+        let (pixels, width, height) = default_cursor_pixels(2.0);
+        for y in 0..height {
+            for x in 0..width {
+                let at = ((y * width + x) * 4) as usize;
+                let rgba = &pixels[at..at + 4];
+                assert!(
+                    rgba == [0, 0, 0, 0] || rgba == [0, 0, 0, 0xFF] || rgba == [0xFF; 4],
+                    "({x}, {y}) is {rgba:?}"
+                );
+            }
+        }
+        // The source's transparent gap at (3, 12) ("o#o o##o") becomes
+        // a 2x2 transparent block, which is the replication itself.
+        assert_eq!(alpha_at(&pixels, width, 6, 24), 0);
+        assert_eq!(alpha_at(&pixels, width, 7, 25), 0);
+        assert_eq!(alpha_at(&pixels, width, 5, 24), 0xFF);
+    }
+
+    #[test]
+    fn a_scale_below_one_is_clamped() {
+        // A config typo must not shrink the pointer past the shape the
+        // halo was hand-placed on — same floor `wm-x11`'s
+        // `create_scaled_cursor` applies.
+        let (_, width, height) = default_cursor_pixels(1.0);
+        assert_eq!(default_cursor_pixels(0.25).1, width);
+        assert_eq!(default_cursor_pixels(0.0).2, height);
     }
 
     #[test]
