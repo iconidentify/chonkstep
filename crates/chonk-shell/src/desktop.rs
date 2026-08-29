@@ -31,6 +31,8 @@ use wm_theme::{icon, paint, panel, tile, Theme};
 // `Backend` as their only bound.
 use wm_theme_api::{DecorationBuffer, Point, Rect, Size};
 
+use crate::dockapp::tile::{RemoteTile, ServiceContext, StopReason, TileState};
+use crate::dockapp::{self, DockHost};
 use crate::wallpaper::Wallpaper;
 use crate::widgets::{
     run_detached, ClockWidget, DockInput, DockItem, DockWidget, Effect, NetTrafficWidget, PowerWidget, SamplerRegistry, SoundWidget, SupervisedWidget,
@@ -260,6 +262,38 @@ pub enum WindowMenuAction {
 pub enum MenuAction {
     Root(RootMenuAction),
     Window(ClientId, WindowMenuAction),
+    /// A pick from a dock tile's own right-click menu, carrying the
+    /// tile's persistence id rather than its slot index: the column can
+    /// be reordered (or a tile can crash out of it) while the menu sits
+    /// open, and an index would then name a different tile than the one
+    /// the user right-clicked.
+    DockItem(String, DockItemMenuAction),
+}
+
+/// What a dock tile's own menu offers.
+///
+/// Only remote tiles have one. A built-in instrument is part of the
+/// compositor: "Remove" would mean editing the dock's default column
+/// and "Restart" would mean restarting the shell, neither of which is
+/// what the word says.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DockItemMenuAction {
+    /// Stop the process, clear the crash-loop budget, launch again.
+    /// The one gesture that resets the budget — see
+    /// `dockapp::tile::LaunchBudget`.
+    Restart,
+    /// Stop the process and take the tile out of the column.
+    ///
+    /// Session-scoped, deliberately and visibly: the dockapp is still
+    /// registered, so a fresh session brings it back. Making removal
+    /// permanent would mean a second state file recording "things the
+    /// user does not want", whose failure mode is a dockapp that is
+    /// installed, enabled, and invisible for reasons nothing in the UI
+    /// explains. The log line names the `.dockapp` file, which is the
+    /// thing to delete or edit for a permanent answer.
+    Remove,
+    /// Open the facts submenu: id, declaring file, state, pid.
+    About,
 }
 
 // The action-id namespace for both menus, kept in documented, disjoint
@@ -272,6 +306,13 @@ pub enum MenuAction {
 //   300..=399 window menu commands (`ACTION_WINDOW_*`)
 //   400..     window menu Move To entries (`ACTION_MOVE_TO_BASE` + n,
 //             where n == the workspace count means "New Workspace")
+//   500..=549 dock tile menu commands (`ACTION_DOCK_*`)
+//   550..=599 dock tile About rows, which resolve to nothing
+//             — both ranges sit numerically inside the open-ended Move
+//             To one, so here (as with the Applications range below)
+//             the session check genuinely is the guard rather than the
+//             suspenders: a session that opened a dock tile's menu will
+//             not resolve a Move To id, and vice versa
 //   1000..    root Applications entries (`ACTION_APP_BASE` + the
 //             app's index into the stored `.desktop` index) —
 //             numerically past any Move To id a real session reaches,
@@ -289,6 +330,14 @@ const ACTION_WINDOW_FULLSCREEN: u32 = 303;
 const ACTION_WINDOW_CLOSE: u32 = 304;
 const ACTION_WINDOW_KILL: u32 = 305;
 const ACTION_MOVE_TO_BASE: u32 = 400;
+const ACTION_DOCK_RESTART: u32 = 500;
+const ACTION_DOCK_REMOVE: u32 = 501;
+/// Rows in the About submenu. They fire ids that resolve to nothing,
+/// which dismisses the menu — the classic behaviour of a menu entry
+/// with nothing to do. `MenuItem` has no disabled variant, and adding
+/// one to the theme SDK to grey out four lines of diagnostics would be
+/// a change to every menu in the desktop for the benefit of this one.
+const ACTION_DOCK_ABOUT_ROW: u32 = 550;
 const ACTION_APP_BASE: u32 = 1000;
 
 /// The root menu's fixed title — also what a fresh `ShellMenu` is
@@ -495,6 +544,13 @@ enum MenuSession {
         /// the window session's `workspace_count`.
         app_count: usize,
     },
+    /// A dock tile's own menu. Keyed by the tile's persistence id, not
+    /// its slot: a middle-drag or a crash can change the column while
+    /// the menu is open, and an index would then command a different
+    /// tile than the one the user right-clicked.
+    DockItem {
+        id: String,
+    },
     Window {
         /// Who the open menu commands — attached to every resolved
         /// action so the dispatch in `crate::shell` needs no other
@@ -517,11 +573,77 @@ enum MenuSession {
 fn resolve_session_action(session: &MenuSession, action: u32) -> Option<MenuAction> {
     match session {
         MenuSession::Root { app_count } => resolve_action(action, *app_count).map(MenuAction::Root),
+        MenuSession::DockItem { id } => resolve_dock_item_action(action).map(|command| MenuAction::DockItem(id.clone(), command)),
         MenuSession::Window { client, workspace_count } => {
             resolve_window_action(action, *workspace_count)
                 .map(|window_action| MenuAction::Window(*client, window_action))
         }
     }
+}
+
+/// A dock tile menu id, or `None` for the About rows (which carry
+/// diagnostics, not commands, and dismiss the menu when picked).
+fn resolve_dock_item_action(action: u32) -> Option<DockItemMenuAction> {
+    match action {
+        ACTION_DOCK_RESTART => Some(DockItemMenuAction::Restart),
+        ACTION_DOCK_REMOVE => Some(DockItemMenuAction::Remove),
+        _ => None,
+    }
+}
+
+/// The rows of one remote tile's menu.
+///
+/// About is a submenu of facts rather than a dialog, for the same
+/// reason the window menu has no dialogs: this desktop has exactly one
+/// popup mechanism and adding a second one for four lines of
+/// diagnostics would be a new surface to lay out, theme, dismiss and
+/// keep on the right monitor. What a user needs when a tile misbehaves
+/// is which file declared it and what the shell currently thinks it is
+/// doing, and those fit on rows.
+fn dock_item_menu_items(tile: &RemoteTile, now: std::time::Instant) -> Vec<MenuItem> {
+    let entry = tile.entry();
+    let facts = vec![
+        MenuItem::Action { label: format!("id: {}", entry.id), action: ACTION_DOCK_ABOUT_ROW },
+        MenuItem::Action { label: format!("state: {}", describe_tile_state(tile.state(), now)), action: ACTION_DOCK_ABOUT_ROW },
+        MenuItem::Action {
+            label: match tile.pid() {
+                Some(pid) => format!("pid: {pid}"),
+                None => "pid: not running".to_string(),
+            },
+            action: ACTION_DOCK_ABOUT_ROW,
+        },
+        MenuItem::Action { label: format!("restart: {:?}", entry.restart), action: ACTION_DOCK_ABOUT_ROW },
+        MenuItem::Action { label: format!("from: {}", entry.source.display()), action: ACTION_DOCK_ABOUT_ROW },
+    ];
+    vec![
+        MenuItem::Action { label: "Restart".to_string(), action: ACTION_DOCK_RESTART },
+        MenuItem::Action { label: "Remove".to_string(), action: ACTION_DOCK_REMOVE },
+        MenuItem::Submenu { label: "About".to_string(), items: facts },
+    ]
+}
+
+/// One tile state as a line a user can act on. Durations are included
+/// where they are the whole story: "hung for 4s" and "hung for 40
+/// minutes" call for different reactions.
+fn describe_tile_state(state: TileState, now: std::time::Instant) -> String {
+    match state {
+        TileState::Waiting { until } => format!("restarting in {:?}", until.saturating_duration_since(now)),
+        TileState::Starting { .. } => "starting".to_string(),
+        TileState::Live => "running".to_string(),
+        TileState::Hung { since } => format!("not responding for {:?}", now.saturating_duration_since(since)),
+        TileState::Stopped { reason } => match reason {
+            StopReason::CrashLooped => "stopped: crash-looped".to_string(),
+            StopReason::PolicyNever => "stopped: restart = never".to_string(),
+            StopReason::CleanExit => "stopped: exited cleanly".to_string(),
+            StopReason::Removed => "stopped: removed".to_string(),
+        },
+    }
+}
+
+/// The title of a dock tile's menu — its label, so the menu says which
+/// tile it belongs to on a column where several may look alike.
+fn dock_item_menu_title(name: &str) -> String {
+    name.to_string()
 }
 
 /// The desktop's single menu session: the root menu and the per-window
@@ -585,6 +707,32 @@ impl<Id: Copy + Eq + std::fmt::Debug> ShellMenu<Id> {
     ) {
         self.begin_session(host, MenuSession::Root { app_count }, ROOT_MENU_TITLE.to_string());
         self.menu.open(host, theme, font_system, items, at, bounds, true);
+    }
+
+    // Nine arguments, two over clippy's default — and the same
+    // judgement as `open_root` two methods down: this signature is
+    // deliberately `CascadeMenu::open`'s (host, theme, font system,
+    // items, position, bounds) plus the session's identity, and a
+    // reader matching it against the SDK primitive it wraps is better
+    // served by the parallel than by a bag that moves the same values
+    // one line up at the single call site.
+    #[allow(clippy::too_many_arguments)]
+    fn open_dock_item<H: wm_theme_api::PopupHost<PopupId = Id>>(
+        &mut self,
+        host: &mut H,
+        theme: &Theme,
+        font_system: &mut cosmic_text::FontSystem,
+        id: String,
+        title: String,
+        items: Vec<MenuItem>,
+        at: Point,
+        bounds: Size,
+    ) {
+        self.begin_session(host, MenuSession::DockItem { id }, title);
+        // Not "closable": a tile menu is a transient command menu like
+        // the window menu, not a posted one like the root menu, so it
+        // gets no close box and vanishes on the first pick or miss.
+        self.menu.open(host, theme, font_system, items, at, bounds, false);
     }
 
     fn open_window<H: wm_theme_api::PopupHost<PopupId = Id>>(
@@ -848,6 +996,16 @@ pub struct Desktop<B: Backend> {
     /// keeps blocking the repaint thread — see its doc comment for why
     /// the dock does not simply trust its widgets.
     items: Vec<SupervisedWidget>,
+    /// Every registered out-of-process tile's listener and pending
+    /// connections — see [`crate::dockapp`]. Separate from `items`
+    /// because a `Hello` names an id and resolving an id to a slot
+    /// means looking at the column, which is this type's business and
+    /// not a socket's.
+    dockapps: DockHost,
+    /// The session's UI scale, kept because a launched dockapp has to
+    /// be *told* it (`CHONKSTEP_SCALE`) — it has no display connection
+    /// to ask, which is the whole point of it.
+    scale: f32,
     /// The dock order as last read from (or written to) disk — see
     /// [`dock_order`].
     ///
@@ -879,6 +1037,15 @@ pub struct Desktop<B: Backend> {
     /// exactly once per actual change.
     clip_drawn: (usize, usize),
     item_drag: Option<ItemDrag>,
+    /// The id of the dock item the pointer is currently inside, so
+    /// `Enter`/`Leave` are delivered once per crossing rather than once
+    /// per motion event.
+    ///
+    /// An id rather than a slot index: the column can be reordered
+    /// under a stationary pointer (a middle-drag does exactly that),
+    /// and an index would then silently start naming a different tile
+    /// without any crossing having happened.
+    hovered_item: Option<String>,
     icons: HashMap<B::ShellId, IconTile<B::ShellId>>,
     icon_drag: Option<IconDrag<B::ShellId>>,
     wallpaper: Wallpaper,
@@ -925,9 +1092,20 @@ impl<B: Backend> Desktop<B> {
         // (The workspace indicator used to live here as a dock widget;
         // it is now the Clip tile at the screen's top-left — see
         // `clip_window` below.)
+        // The dockapp socket and registry, before the column is built:
+        // a registered dockapp is a slot in the same list as a built-in
+        // instrument, so the two have to be known at the same moment
+        // for `dock_order` to arrange them together. A session where
+        // the socket could not be bound gets an empty registry and
+        // every built-in, which is the desktop as it was.
+        let dockapps = DockHost::new(&dockapp::current_display());
+        let registered = if dockapps.is_listening() { dockapp::registry::scan() } else { Vec::new() };
+        let now = std::time::Instant::now();
+
         let mut samplers = SamplerRegistry::new();
         let items: Vec<SupervisedWidget> = builtin_items()
             .into_iter()
+            .chain(registered.into_iter().map(|entry| DockItem::Remote(Box::new(RemoteTile::new(entry, tile, now)))))
             // Supervision is applied here, at the one place items enter
             // the dock, rather than being something each item opts
             // into: the item that needs it most is by definition the
@@ -978,12 +1156,15 @@ impl<B: Backend> Desktop<B> {
             swash_cache: cosmic_text::SwashCache::new(),
             menu: ShellMenu::new(),
             items,
+            dockapps,
+            scale,
             remembered_order,
             samplers,
             workspace,
             clip_window,
             clip_drawn: (usize::MAX, 0),
             item_drag: None,
+            hovered_item: None,
             icons: HashMap::new(),
             icon_drag: None,
             wallpaper,
@@ -1073,6 +1254,12 @@ impl<B: Backend> Desktop<B> {
     /// block on is the system — that moved to the sampler threads
     /// `samplers` owns.
     pub fn tick_items(&mut self, backend: &mut B, theme: &Theme) {
+        // Out-of-process tiles first, so a frame that arrived this pass
+        // is folded by the same `update` sweep that folds a sampler
+        // reading, and reaches the screen on the same repaint. Doing it
+        // after would show every dockapp frame one pass (16ms) late for
+        // no reason.
+        self.service_dockapps(theme);
         self.samplers.refresh();
         let mut changed = false;
         {
@@ -1271,6 +1458,262 @@ impl<B: Backend> Desktop<B> {
         let effects = self.items[index].on_input(input.translated(rect.pos), self.tile);
         self.apply_effects(backend, theme, effects);
         true
+    }
+
+    // -----------------------------------------------------------------
+    // Out-of-process tiles
+    // -----------------------------------------------------------------
+
+    /// Every file descriptor the binary's event loop must add to its
+    /// wait, beyond whatever the display connection already gives it:
+    /// the dockapp listener, every connection that has not identified
+    /// itself yet, and one per connected dockapp.
+    ///
+    /// **This is the whole of the backend-specific cost of dockapps.**
+    /// The X11 binary adds these to the `pollfd` array it already
+    /// builds around the X socket; the Wayland binary wraps each in a
+    /// calloop `Generic` source. Nothing else about a dockapp differs
+    /// between the two stacks, because a dockapp is not a
+    /// display-server client — it is a process on the end of a Unix
+    /// socket, and both loops already know how to wait on one of those.
+    ///
+    /// Recomputed per wait rather than cached: the set changes whenever
+    /// a dockapp connects, dies or is restarted, and a stale fd in a
+    /// `poll` set is either a spurious wakeup (harmless) or a wait on a
+    /// descriptor this process has reused for something else (not).
+    /// Both loops call this immediately before they wait, which is the
+    /// only moment the answer is knowable.
+    ///
+    /// Getting this *wrong* is bounded, which is worth knowing before
+    /// anyone spends a day on it: both loops already wake on a 16ms
+    /// housekeeping bound, so an fd omitted here costs a dockapp frame
+    /// up to 16ms of latency and nothing else. It is a latency
+    /// optimisation with a correctness-shaped API, not a correctness
+    /// requirement.
+    pub fn extra_poll_fds(&self) -> Vec<std::os::fd::RawFd> {
+        let mut fds = self.dockapps.poll_fds();
+        fds.extend(self.items.iter().filter_map(|item| item.remote().and_then(RemoteTile::poll_fd)));
+        fds
+    }
+
+    /// One servicing pass over every out-of-process tile: admit new
+    /// connections, read whatever arrived, ping, flush, relaunch.
+    ///
+    /// Nothing here can block. Every `recv` and `send` is
+    /// `MSG_DONTWAIT`, every send goes through a bounded queue that
+    /// drops rather than waits, and a dockapp that has stopped reading
+    /// or writing simply stops appearing. A hung dockapp costs this
+    /// function one `encode` and one non-blocking `send` every two
+    /// seconds and costs the compositor nothing else at all — see
+    /// `crate::dockapp::tile` for why the liveness check therefore
+    /// exists to inform the user rather than to protect the desktop.
+    fn service_dockapps(&mut self, theme: &Theme) {
+        let now = std::time::Instant::now();
+        for admission in self.dockapps.service(now) {
+            self.admit(admission, theme, now);
+        }
+
+        let socket_path = self.dockapps.socket_path().clone();
+        let mut scratch = std::mem::take(self.dockapps.scratch());
+        let mut ctx = ServiceContext { now, tile_px: self.tile, scale: self.scale, theme, socket_path: &socket_path, scratch: &mut scratch };
+        for item in &mut self.items {
+            // A tile the supervisor evicted is one the dock has
+            // disowned, and continuing to run its process would leave a
+            // dockapp drawing frames nobody will ever blit. Shut it
+            // down once; `shut_down` is idempotent.
+            if item.evicted() {
+                if let Some(tile) = item.remote_mut() {
+                    if !matches!(tile.state(), TileState::Stopped { reason: StopReason::Removed }) {
+                        tracing::warn!(id = %tile.id(), "shutting down an evicted dockapp");
+                        tile.shut_down(chonk_dock_proto::wire::GoodbyeReason::Removed);
+                    }
+                }
+                continue;
+            }
+            if let Some(tile) = item.remote_mut() {
+                tile.service(&mut ctx);
+            }
+        }
+        // Hand the buffer back so the next pass reuses the same
+        // allocation rather than asking the allocator for a quarter of
+        // a megabyte on the repaint thread.
+        *self.dockapps.scratch() = scratch;
+    }
+
+    /// Matches one `Hello` to the tile that minted its token.
+    ///
+    /// Every rejection below answers with a reason on the wire and a
+    /// detail in the log, never the other way around: a peer that
+    /// failed authentication learns "you were not launched by this
+    /// shell" and nothing about the shell's internals.
+    fn admit(&mut self, admission: crate::dockapp::Admission, theme: &Theme, now: std::time::Instant) {
+        let crate::dockapp::Admission { socket, hello } = admission;
+        let chonk_dock_proto::ClientMessage::Hello { id, .. } = &hello else {
+            dockapp::goodbye(&socket, chonk_dock_proto::wire::GoodbyeReason::ProtocolError);
+            return;
+        };
+        let id = id.clone();
+        let tile_px = self.tile;
+        let Some(tile) = self.items.iter_mut().filter_map(|item| item.remote_mut()).find(|tile| tile.id() == id) else {
+            tracing::warn!(%id, "a dockapp presented an id with no registered slot");
+            dockapp::goodbye(&socket, chonk_dock_proto::wire::GoodbyeReason::Unauthorized);
+            return;
+        };
+        // One connection per registered id. The already-connected tile
+        // keeps its connection: the incoming one is either a second
+        // instance of a dockapp that failed to notice it was already
+        // running, or a process that guessed a token — and in neither
+        // case is displacing a working tile the right answer.
+        if !tile.awaiting_hello() {
+            tracing::warn!(%id, "a second connection claimed a dockapp id that is already connected");
+            dockapp::goodbye(&socket, chonk_dock_proto::wire::GoodbyeReason::Replaced);
+            return;
+        }
+        match chonk_dock_proto::validate_hello(&hello, tile.token(), tile_px) {
+            Ok(accepted) => {
+                if accepted.tile_units != tile.entry().tile_units {
+                    // The registry is the authority on how much of the
+                    // column a dockapp occupies — the dock laid out for
+                    // that number before the process even started.
+                    tracing::warn!(%id, asked = accepted.tile_units, registered = tile.entry().tile_units, "a dockapp asked for a different tile height than it registered");
+                    dockapp::goodbye(&socket, chonk_dock_proto::wire::GoodbyeReason::TileTooLarge);
+                    return;
+                }
+                let welcome = chonk_dock_proto::wire::ThemeState {
+                    tile_px,
+                    scale: self.scale,
+                    theme_id: theme.id.clone(),
+                    // The correctness path beside the fast one: a
+                    // dockapp built against a different `wm-theme`, or
+                    // a session running a theme with no built-in id,
+                    // still gets the real palette. An unserializable
+                    // theme is a shell bug and costs the dockapp the
+                    // slow path only.
+                    theme_toml: toml::to_string(theme).unwrap_or_default(),
+                };
+                tile.adopt(socket, accepted.wants, welcome, now);
+            }
+            Err(reason) => {
+                tracing::warn!(%id, ?reason, "refusing a dockapp connection");
+                dockapp::goodbye(&socket, reason);
+            }
+        }
+    }
+
+    /// Opens a dock tile's own right-click menu, if the tile at `local`
+    /// has one.
+    ///
+    /// Returns whether a menu opened, so the caller can tell a
+    /// right-click that landed on a remote tile from one that landed on
+    /// a built-in (which has no menu) or on the identity tile.
+    pub fn open_dock_item_menu(&mut self, backend: &mut B, theme: &Theme, local: Point, root: Point) -> bool
+    where
+        B: wm_theme_api::PopupHost<PopupId = B::ShellId>,
+    {
+        let Some(index) = self.item_index_at(local) else { return false };
+        let now = std::time::Instant::now();
+        let Some(tile) = self.items[index].remote() else { return false };
+        let (id, title, items) = (tile.id().to_string(), dock_item_menu_title(tile.name()), dock_item_menu_items(tile, now));
+        let bounds = self.screen_size();
+        self.menu.open_dock_item(backend, theme, &mut self.font_system, id, title, items, root, bounds);
+        true
+    }
+
+    /// Performs a pick from a dock tile's menu. A stale id — the tile
+    /// was removed while its menu sat open — is silently nothing,
+    /// matching every other stale-target path in the shell.
+    pub fn dock_item_menu_action(&mut self, backend: &mut B, theme: &Theme, id: &str, action: DockItemMenuAction) {
+        let now = std::time::Instant::now();
+        match action {
+            DockItemMenuAction::Restart => {
+                if let Some(tile) = self.items.iter_mut().filter_map(|item| item.remote_mut()).find(|tile| tile.id() == id) {
+                    tile.user_restart(now);
+                }
+            }
+            DockItemMenuAction::Remove => {
+                let Some(index) = self.items.iter().position(|item| item.id() == id) else { return };
+                if let Some(tile) = self.items[index].remote_mut() {
+                    tracing::info!(%id, source = %tile.entry().source.display(), "removing a dockapp tile for this session; delete or edit that file to remove it permanently");
+                    tile.shut_down(chonk_dock_proto::wire::GoodbyeReason::Removed);
+                }
+                self.items.remove(index);
+                // The column changed, so the remembered order should
+                // say so — and `merge` keeps the removed id as an
+                // unresolved entry, which is exactly right: bring the
+                // dockapp back next session and it returns to the slot
+                // the user had put it in.
+                self.persist_order();
+            }
+            // The About rows carry no command; they resolve to `None`
+            // and never reach here.
+            DockItemMenuAction::About => {}
+        }
+        self.redraw_dock(backend, theme);
+    }
+
+    /// Tracks which dock item the pointer is inside and delivers
+    /// `Enter`/`Leave` as it crosses between them.
+    ///
+    /// Driven from root coordinates rather than from the surface-local
+    /// motion the backend queues, and that is deliberate. The
+    /// surface-local stream only reports motion *over* the dock, so
+    /// there is no event at the moment the pointer leaves it — a tile
+    /// would latch into a permanent hover state the first time the
+    /// pointer wandered off, which is precisely the bug the protocol's
+    /// `CROSSING` mask exists to make impossible ("a tile that wants
+    /// one always wants the other"). Root motion arrives for every
+    /// pointer move on the desktop, so the leaving edge is always seen.
+    pub fn update_dock_hover(&mut self, backend: &mut B, theme: &Theme, root: Point) {
+        let dock_height = stacked_dock_height(self.tile, self.primary.size.h, &self.items);
+        let dock = dock_geometry(self.primary, self.dock_width, dock_height);
+        let inside = dock.contains(root).then(|| Point::new(root.x - dock.pos.x, root.y - dock.pos.y));
+        let target = inside.and_then(|local| self.item_index_at(local)).map(|index| self.items[index].id().to_string());
+        if target == self.hovered_item {
+            return;
+        }
+        let left = self.hovered_item.take();
+        if let Some(id) = left {
+            let effects = self.deliver_by_id(&id, DockInput::Leave);
+            self.apply_effects(backend, theme, effects);
+        }
+        if let Some(id) = target {
+            let effects = self.deliver_by_id(&id, DockInput::Enter);
+            self.apply_effects(backend, theme, effects);
+            self.hovered_item = Some(id);
+        }
+    }
+
+    /// Hands one input to the item with this id, if it is still in the
+    /// column. Used by the crossing events, which name a tile rather
+    /// than a position for the reason on `hovered_item`.
+    fn deliver_by_id(&mut self, id: &str, input: DockInput) -> Vec<Effect> {
+        let Some(index) = self.items.iter().position(|item| item.id() == id) else { return Vec::new() };
+        self.items[index].on_input(input, self.tile)
+    }
+
+    /// Stops every out-of-process tile, for a session that is ending or
+    /// re-execing.
+    ///
+    /// Without this a hot restart — which is what a theme pick *is* —
+    /// briefly doubles every dockapp. The old process sees its socket
+    /// EOF and, per the SDK's reconnect-on-EOF loop, spends ten seconds
+    /// trying to reach a shell that has been replaced, while the fresh
+    /// shell has already launched its own copy from the registry. The
+    /// old one is eventually refused (its token was minted by a process
+    /// that no longer exists) and exits, so nothing is *broken* — but
+    /// for those ten seconds the user pays for two of everything, and
+    /// on a theme-menu session that is a thing they will do repeatedly.
+    ///
+    /// `Goodbye { Shutdown }` first, because the reason is actionable
+    /// on the far side: it says "reconnecting is pointless" as against
+    /// the bare EOF that means "try again". Best-effort, like every
+    /// send here.
+    pub fn shut_down_dockapps(&mut self) {
+        for item in &mut self.items {
+            if let Some(tile) = item.remote_mut() {
+                tile.shut_down(chonk_dock_proto::wire::GoodbyeReason::Shutdown);
+            }
+        }
     }
 
     /// Performs what a widget asked for.
@@ -1679,7 +2122,10 @@ fn pixmap_to_buffer(pixmap: &Pixmap) -> DecorationBuffer {
     DecorationBuffer { width: pixmap.width(), height: pixmap.height(), pixels: pixmap.data().to_vec() }
 }
 
-fn blit_into(dest: &mut Pixmap, x: u32, y: u32, src: &DecorationBuffer) {
+/// `pub(crate)` because a remote tile composes its own dead face out
+/// of a square dead screen and plain tile base — see
+/// `dockapp::tile::dead_face`. One clipping blit, used by both.
+pub(crate) fn blit_into(dest: &mut Pixmap, x: u32, y: u32, src: &DecorationBuffer) {
     let (dest_w, dest_h) = (dest.width(), dest.height());
     for row in 0..src.height {
         let dy = y + row;

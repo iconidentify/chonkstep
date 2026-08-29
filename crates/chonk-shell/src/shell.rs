@@ -13,7 +13,7 @@
 use std::collections::HashMap;
 
 use wm_config::{Action, Config};
-use wm_core::{Backend, BackendEvent, ClientFlags, KeyCombo, MonitorInfo, MouseButton, Notification, WindowManager};
+use wm_core::{Backend, BackendEvent, ClientFlags, KeyCombo, MonitorInfo, MouseButton, Notification, ScrollDelta, WindowManager};
 use wm_theme::Theme;
 use wm_theme_api::{Point, PopupHost, Rect, Size};
 
@@ -581,11 +581,11 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
             // delivering only half of it now would bake the narrower
             // shape into every widget written between here and there.
             //
-            // Right is reserved and deliberately unhandled: it is
-            // earmarked for a per-tile menu (Restart, Remove, About),
-            // and a widget that had already been given it could not
-            // have it taken back. Everything else on the dock is still
-            // just a click-through identity tile.
+            // Right opens the tile's own menu (Restart, Remove,
+            // About) and is never delivered to a tile. It was reserved
+            // before there was anything to put in it for exactly this
+            // reason: a tile that had already been given right-click
+            // could not have it taken back.
             match button {
                 MouseButton::Middle => {
                     if pressed {
@@ -602,7 +602,18 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
                     };
                     self.desktop.dock_input(wm.backend_mut(), &self.theme, input);
                 }
-                MouseButton::Right => {}
+                MouseButton::Right => {
+                    if pressed {
+                        // On press, like every other context menu in
+                        // this desktop — a menu should appear the
+                        // instant the button goes down. Only remote
+                        // tiles have one: a built-in instrument is part
+                        // of the compositor, where "Remove" would mean
+                        // editing the default column and "Restart"
+                        // would mean restarting the shell.
+                        self.desktop.open_dock_item_menu(wm.backend_mut(), &self.theme, local, self.pointer_root);
+                    }
+                }
             }
             return ShellOutcome::Continue;
         }
@@ -649,6 +660,15 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
                 // `wm-core` contract — the client may well have
                 // vanished while the menu sat open — so no
                 // re-validation is needed here.
+                // A dock tile's own menu. The pick carries the tile's
+                // persistence id rather than its slot, so a reorder or
+                // a crash while the menu sat open cannot make it
+                // command a different tile than the one right-clicked;
+                // a stale id is silently nothing, like every other
+                // stale target here.
+                MenuAction::DockItem(id, action) => {
+                    self.desktop.dock_item_menu_action(wm.backend_mut(), &self.theme, &id, action);
+                }
                 MenuAction::Window(client, action) => match action {
                     WindowMenuAction::ToggleMaximize => wm.toggle_maximize_full(client),
                     WindowMenuAction::Miniaturize => wm.miniaturize(client),
@@ -662,6 +682,78 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         }
 
         ShellOutcome::Continue
+    }
+
+    /// Every file descriptor the binary's event loop must wait on
+    /// besides its own display connection — the dockapp listener and
+    /// one per connected dockapp.
+    ///
+    /// This is the *entire* backend-specific cost of out-of-process
+    /// dock tiles, and it is deliberately shaped as a list of raw fds
+    /// rather than as anything cleverer: the X11 binary appends them to
+    /// the `pollfd` array it already builds around the X socket, and
+    /// the Wayland binary wraps each in a calloop `Generic` source.
+    /// Neither needs to know what is on the other end, because a
+    /// dockapp is not a display-server client — it is a process on a
+    /// Unix socket, and both loops already wait on those.
+    ///
+    /// Call it immediately before waiting: the set changes as dockapps
+    /// connect, die and restart, and a stale fd is at best a spurious
+    /// wakeup. Getting it wrong is bounded — both loops already wake on
+    /// a 16ms housekeeping bound, so a missing fd costs a dockapp frame
+    /// up to 16ms and nothing else.
+    pub fn extra_poll_fds(&self) -> Vec<std::os::fd::RawFd> {
+        self.desktop.extra_poll_fds()
+    }
+
+    /// A scroll over a shell surface, resolved to a dock tile the same
+    /// way a click is.
+    ///
+    /// # `delta` is a count, and it is replayed as one
+    ///
+    /// `ScrollDelta` carries whole wheel notches, and a backend may
+    /// legitimately fold several that arrived together into one entry —
+    /// `wm-wayland` accumulates a high-resolution wheel's 120ths into
+    /// detents, and a hard flick produces more than one per report. So
+    /// a delta of three means *three* steps, and it is delivered as
+    /// three `DockInput::Scroll` events rather than one carrying a 3.
+    ///
+    /// That choice costs two extra messages and buys correctness by
+    /// construction on the far side of a boundary this shell does not
+    /// control. A dockapp is third-party code; the obvious naive
+    /// implementation of its scroll handler adjusts by one step per
+    /// event and would silently swallow two notches out of three
+    /// forever, in a way neither side could see. The wire keeps a
+    /// signed `delta` so the direction travels with the event and a
+    /// future high-resolution path has somewhere to go.
+    ///
+    /// The step count is capped at
+    /// [`MAX_SCROLL_STEPS`](crate::dockapp::tile::MAX_SCROLL_STEPS),
+    /// because "replay it N times" with an unbounded N read off an
+    /// input event is a loop on the repaint thread whose length a
+    /// backend bug decides.
+    ///
+    /// Only the vertical axis is delivered. The dock is a vertical
+    /// column of square tiles and `DockInput::Scroll` carries one
+    /// delta; inventing a rule that folds `right` into it would make
+    /// two different gestures indistinguishable to every tile.
+    pub fn on_shell_scroll(&mut self, wm: &mut WindowManager<B>, surface: B::ShellId, local: Point, delta: ScrollDelta) {
+        if surface != self.desktop.dock_window() {
+            return;
+        }
+        let notches = delta.up;
+        if notches == 0 {
+            return;
+        }
+        let wanted = notches.unsigned_abs();
+        let steps = wanted.min(crate::dockapp::tile::MAX_SCROLL_STEPS as u32);
+        if steps < wanted {
+            tracing::warn!(notches, delivered = steps, "clamping an implausibly large scroll report");
+        }
+        let step = notches.signum();
+        for _ in 0..steps {
+            self.desktop.dock_input(wm.backend_mut(), &self.theme, DockInput::Scroll { local, delta: step });
+        }
     }
 
     /// The side-effect half of a root-menu pick; its outcome half is
@@ -746,6 +838,12 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         self.pointer_root = root;
         self.desktop.drag_icon_motion(wm.backend_mut(), root);
         self.desktop.drag_item_motion(wm.backend_mut(), &self.theme, root);
+        // Which dock tile the pointer is inside, from root coordinates
+        // rather than from the dock's own surface-local motion: only
+        // root motion reports the moment the pointer *leaves* the dock,
+        // and a tile that never receives `Leave` latches into a
+        // permanent hover state. See `Desktop::update_dock_hover`.
+        self.desktop.update_dock_hover(wm.backend_mut(), &self.theme, root);
         self.launchdock.handle_motion(wm.backend_mut(), &self.theme, root);
         // Menu hover rides the same cadence: every motion over a shell
         // surface also arrives as a root-relative motion event (that is
@@ -849,6 +947,22 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         // changed.
         let running = running_pairs(wm);
         self.launchdock.update_running(wm.backend_mut(), &self.theme, &running);
+    }
+
+    /// Winds the session down: stops every out-of-process dock tile.
+    ///
+    /// The binary calls this once it has decided to exit or re-exec,
+    /// before it does either. It exists because a hot restart is the
+    /// most routine thing a user does to this desktop (every theme pick
+    /// is one) and, without it, each one briefly doubles every dockapp
+    /// — see `Desktop::shut_down_dockapps`.
+    ///
+    /// Nothing else needs winding down: sampler threads, popup
+    /// surfaces and shell surfaces all die with the process, and the
+    /// dock order was already persisted at the moment the user
+    /// committed a drag.
+    pub fn shut_down(&mut self) {
+        self.desktop.shut_down_dockapps();
     }
 
     /// The screen/output arrangement changed (the binary drained the

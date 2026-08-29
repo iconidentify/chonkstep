@@ -6,6 +6,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+chonk-dock-proto = { path = "../chonk-dock-proto" }
 chonk-dock-widget = { path = "../chonk-dock-widget" }
 # The six built-in instruments. The edge points this way and only this
 # way: `chonk-instruments` cannot see this crate, which is what makes
@@ -17,7 +18,18 @@ wm-theme = { path = "../wm-theme" }
 wm-theme-api = { path = "../wm-theme-api" }
 wm-config = { path = "../wm-config" }
 cosmic-text = "0.12"
+# `SIGTERM` for a dockapp whose socket died while its process did not
+# (`spawn::SpawnedChild::terminate`). std has no way to signal a process
+# it is not currently holding a `Child` for, and holding one would mean
+# owning the `wait` that must stay on its own thread.
+libc = "0.2"
+serde = { version = "1", features = ["derive"] }
 tiny-skia = "0.11"
+# `.dockapp` registration files. Already a workspace dependency (the
+# config, the theme model, and `chonk-ui` all speak it), so a dockapp
+# manifest costs nothing new and looks like every other file this
+# desktop asks a user to edit.
+toml = "0.9"
 tracing = "0.1"
 
 [dev-dependencies]
