@@ -18,7 +18,7 @@ use std::time::Duration;
 use wm_theme::{clock, Theme};
 use wm_theme_api::DecorationBuffer;
 
-use super::{DockWidget, Samples, Source, SourceId};
+use chonk_dock_widget::{DockWidget, Samples, Source, SourceId};
 
 pub struct ClockWidget {
     time: SourceId,
@@ -74,7 +74,7 @@ impl DockWidget for ClockWidget {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::widgets::sampling::SampleBench;
+    use chonk_dock_widget::SampleBench;
 
     /// The whole widget as a pure fold: a reading in, a repaint
     /// decision out, no clock and no kernel involved.

@@ -182,8 +182,26 @@ jobs:
       # keeps clippy off crates.io dependencies, whose source nobody
       # here can fix; `--workspace` makes every member a primary package
       # so all of them are still linted.
+      #
+      # `disallowed_types` joined `disallowed_methods` here when
+      # `crates/chonk-instruments` gained a `clippy.toml` of its own.
+      # Both flags are needed and neither is redundant: the workspace
+      # file bans blocking *methods* (`Command::output` and friends),
+      # while the instruments file additionally bans whole *types*
+      # (`std::process::Command`, `std::fs::File`) — a widget has no
+      # business constructing either, whatever it then calls on it. A
+      # `clippy.toml` only declares; the deny flag is what makes the
+      # declaration bite, so a ban with no matching flag here is a
+      # comment.
+      #
+      # Note also that clippy resolves `clippy.toml` from the crate
+      # directory upward and stops at the first hit, so a per-crate file
+      # *replaces* the workspace one rather than extending it. That is
+      # why `chonk-instruments/clippy.toml` repeats the workspace's
+      # three bans verbatim; if you add a ban to the root file, add it
+      # there too or that crate quietly loses it.
       - name: Ban blocking child-process calls workspace-wide
-        run: cargo clippy --workspace --all-targets --no-deps -- -D clippy::disallowed_methods
+        run: cargo clippy --workspace --all-targets --no-deps -- -D clippy::disallowed_methods -D clippy::disallowed_types
 
       # Gate two: everything else clippy has to say, denied — but only
       # on the nine crates that are clean today. This is a ratchet, not
@@ -200,10 +218,18 @@ jobs:
       # rather than an `--exclude` of the dirty two, so a *new* crate
       # arrives ungated and someone has to make the choice out loud
       # rather than inheriting whatever state it was born in.
+      #
+      # `chonk-dock-widget` and `chonk-instruments` were added the day
+      # they were split out of `chonk-shell`, which was already on the
+      # list — the choice made out loud is that a crate carved out of a
+      # clean one starts clean and stays that way. `chonk-dock-proto`
+      # is not here yet.
       - name: Deny clippy warnings on the crates that are clean
         run: |
           cargo clippy --all-targets --no-deps \
             -p chonk-about \
+            -p chonk-dock-widget \
+            -p chonk-instruments \
             -p chonk-shell \
             -p chonk-ui \
             -p chonkstep \

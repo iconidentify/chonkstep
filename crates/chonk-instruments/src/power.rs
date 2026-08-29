@@ -28,7 +28,7 @@ use wm_theme::power::{render_power_tile, ChargeState, PowerFace};
 use wm_theme::Theme;
 use wm_theme_api::DecorationBuffer;
 
-use super::{DockWidget, Samples, Source, SourceId, TreeEntry};
+use chonk_dock_widget::{DockWidget, Samples, Source, SourceId, TreeEntry};
 
 /// Sampling interval — deliberately wider than the shared
 /// `SAMPLE_INTERVAL`: battery percentage moves on the scale of minutes,
@@ -227,7 +227,7 @@ impl DockWidget for PowerWidget {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::widgets::sampling::SampleBench;
+    use chonk_dock_widget::SampleBench;
 
     /// One `/sys/class/power_supply/<name>` directory as the sampler
     /// would have delivered it, positional against `SUPPLY_FIELDS`.

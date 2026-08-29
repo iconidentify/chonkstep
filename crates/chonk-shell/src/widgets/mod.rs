@@ -1,182 +1,43 @@
-//! The dock's widget SDK: one small trait, [`DockWidget`], plus one
-//! module per built-in widget. A widget owns whatever animation state
-//! it needs and renders itself on demand — the same contract for every
-//! widget, so `Desktop`'s dock layout and drag-to-reorder logic never
-//! needs to know a widget's internals. Adding a new one is implementing
-//! this trait in its own module and pushing it into `Desktop::new`'s
-//! widget list; nothing else in the dock changes.
+//! The dock's side of the widget SDK: supervision, and the re-exports
+//! that let the rest of the shell name a widget without reaching past
+//! it.
 //!
-//! The SDK is a three-way split, and each third is somewhere a widget
-//! is *not*:
+//! The SDK itself is two crates, and the split is load-bearing:
 //!
-//! * **Sampling** is [`sampling`]. A widget declares [`Source`]s and
-//!   reads [`Samples`]; the dock owns every sampler thread. This is
-//!   what takes away a widget's *reason* to block the compositor's
-//!   repaint thread — which is a thing that happened, cost the desktop
-//!   3.6-second freezes, and got blamed on the display driver. See
-//!   that module's docs.
-//! * **Rendering** is `wm-theme`. Widgets call a pure renderer with
-//!   plain values instead of drawing, which is what keeps renderers
-//!   unit-testable pixel-for-pixel without a live system, and it is the
-//!   pattern third-party `chonk-ui` dockapps should copy.
-//!   Instrument-style widgets (screens with LED readouts) build on
-//!   `wm_theme::panel`, the theme-reactive glass-and-LED kit.
-//! * **Acting** is [`Effect`]. A click that has to run `wpctl` or
-//!   `nmcli` returns the intent; the dock runs it off-thread.
+//! * `chonk-dock-widget` is the vocabulary — the [`DockWidget`] trait,
+//!   [`Source`], [`Samples`], [`Effect`], [`DockInput`]. Nothing in it
+//!   can perform I/O.
+//! * `chonk-instruments` is the six built-in tiles, written against
+//!   that vocabulary and against `wm-theme`, and *nothing else*. Its
+//!   own `clippy.toml` makes `std::fs::File`, `std::process::Command`,
+//!   `std::fs::{read, read_to_string, read_dir}`, `std::thread::spawn`
+//!   and `TcpStream::connect` build errors inside it.
 //!
-//! What is left for a widget is the part only it can do: fold this
-//! sample into that state, and say what that state looks like. Both are
-//! pure and both are testable against fixtures.
+//! What is left in this module is what belongs to the dock rather than
+//! to a widget: [`sampling`], the runtime that turns declared `Source`s
+//! into `Samples` on threads of its own, and [`SupervisedWidget`], the
+//! timing guard the dock wraps every item in.
 //!
-//! Be precise about how strong that is. Nothing in the type system
-//! stops someone typing `std::fs::read_to_string` inside an `update`;
-//! what has changed is that there is no longer anything for it to buy,
-//! because everything a widget needs already arrived as data. Closing
-//! the remaining gap is a build-time job rather than a design one:
-//! moving these modules into a crate of their own with a `clippy.toml`
-//! banning `std::process::Command`, `std::fs::{read, read_to_string,
-//! read_dir}` and `std::thread::spawn` makes writing one a compile
-//! error. That extraction is the next phase's work; until it lands,
-//! this module doc is the rule and [`SupervisedWidget`] is what notices
-//! it being broken.
+//! Read the two together and the layering is the whole story. Sampling
+//! is a structure in which a widget cannot freeze the compositor —
+//! there is no entry point from which it could — and the extraction
+//! makes writing one anyway a compile error. Supervision is the
+//! backstop for everything that structure does not cover: an
+//! accidentally quadratic render, a pathological text-shaping path, an
+//! out-of-process tile whose code is not in this repository at all.
+//! Keep both; do not confuse them.
 
 use std::time::{Duration, Instant};
 
 use wm_theme::Theme;
 use wm_theme_api::DecorationBuffer;
 
-mod clock;
-mod net;
-mod power;
 pub mod sampling;
-mod sound;
-mod sysload;
-mod wifi;
 
-pub use clock::ClockWidget;
-pub use net::NetTrafficWidget;
-pub use power::PowerWidget;
-pub use sampling::{DockInput, Effect, Samples, Source, SourceId, TreeEntry};
-pub use sound::SoundWidget;
-pub use sysload::SysLoadWidget;
-pub use wifi::WifiWidget;
+pub use chonk_dock_widget::{DockInput, DockWidget, Effect, Samples, Source, SourceId, TreeEntry, SAMPLE_INTERVAL};
+pub use chonk_instruments::{ClockWidget, NetTrafficWidget, PowerWidget, SoundWidget, SysLoadWidget, WifiWidget};
 
 pub(crate) use sampling::{run_detached, SamplerRegistry};
-
-/// A single dock widget.
-///
-/// The shape of this trait is the whole of Layer 3: there is no entry
-/// point at which a widget has any reason to perform I/O. It declares
-/// what it needs ([`sources`](DockWidget::sources)), is told what those
-/// turned into ([`bind`](DockWidget::bind)), folds already-collected
-/// readings into its own state ([`update`](DockWidget::update)), draws
-/// that state ([`render`](DockWidget::render)), and returns intents
-/// rather than performing them ([`on_input`](DockWidget::on_input)).
-/// Every one of those runs on the compositor's single repaint thread,
-/// and not one of them is handed anything to wait on.
-pub trait DockWidget {
-    /// This widget's identity, for the log and for the tombstone tile
-    /// its slot shows if the dock ever has to evict it — see
-    /// [`SupervisedWidget`]. Deliberately not defaulted: "some widget
-    /// overran its budget" is not a line anyone can act on, and the
-    /// only moment the answer is knowable for free is here, in the
-    /// widget's own source.
-    ///
-    /// Keep it short and stable. It is drawn as-is on the dead-screen
-    /// face, so it wants the same shape as the empty-state labels the
-    /// built-ins already use ("NET", "SND", "LNK") — three or four
-    /// upper-case characters, not a sentence.
-    fn name(&self) -> &'static str;
-
-    /// Everything this widget needs sampled, declared once at
-    /// construction. The dock starts one worker per source and never
-    /// calls this again, so it is not a place to react to anything —
-    /// which is exactly the property that keeps a widget off the
-    /// sampling path entirely. Defaulted empty: a widget that draws
-    /// only its own state (a future purely-animated tile) declares
-    /// nothing.
-    fn sources(&self) -> Vec<Source> {
-        Vec::new()
-    }
-
-    /// The ids for the sources this widget just declared, in the same
-    /// order it declared them. Called once, immediately after
-    /// [`sources`](DockWidget::sources), before the first
-    /// [`update`](DockWidget::update).
-    ///
-    /// A widget that declares sources and forgets to implement this
-    /// keeps [`SourceId::UNBOUND`] and reads nothing forever, which
-    /// shows up as a permanently dead instrument rather than a crash —
-    /// see that constant for why that is the deliberate failure mode.
-    fn bind(&mut self, ids: &[SourceId]) {
-        let _ = ids;
-    }
-
-    /// Folds this pass's readings into the widget's state. Returns
-    /// whether `render` would now produce different pixels, so the dock
-    /// only repaints when something actually changed.
-    ///
-    /// Called once per event-loop iteration — roughly 60Hz against
-    /// sources that update at 1Hz, so the overwhelmingly common case is
-    /// that nothing is [`fresh`](Samples::fresh) and this returns
-    /// `false` immediately. That asymmetry is why widgets fold on
-    /// `fresh` rather than on a clock of their own: "a sampler
-    /// completed a run" and "a sixtieth of a second went by" are
-    /// different questions, and only the first one is news.
-    ///
-    /// This replaced `tick()`, and the difference is the point.
-    /// `tick()` was a moment at which a widget could do anything,
-    /// including read `/proc/stat`, `read_dir` sysfs, or wait on
-    /// `nmcli` — all of which four of the six built-ins were still
-    /// doing on the repaint thread. `update` is handed data that has
-    /// already been collected and has nothing to wait on.
-    fn update(&mut self, samples: &Samples) -> bool;
-
-    /// Draws the widget's current state into a tile-sized
-    /// premultiplied-RGBA buffer.
-    ///
-    /// `fonts` and `swash` are the dock's own, threaded through rather
-    /// than owned per widget: a `cosmic_text::FontSystem` is a full
-    /// fontconfig scan, and the five instruments that each built one at
-    /// startup were paying that five times over for the shaping caches
-    /// of a handful of three-character labels. `Desktop` already owns
-    /// one for its menus and switcher; that is the one every tile now
-    /// shapes against, so the caches are shared too.
-    ///
-    /// `&self` rather than `&mut self` on purpose: rendering must be a
-    /// function of state that [`update`](DockWidget::update) already
-    /// settled, so that the same state cannot draw two different
-    /// things.
-    fn render(&self, theme: &Theme, tile: u32, fonts: &mut cosmic_text::FontSystem, swash: &mut cosmic_text::SwashCache) -> DecorationBuffer;
-
-    /// How many `tile`-tall units this widget currently occupies in the
-    /// dock's vertical stack. Most widgets are exactly one square tile;
-    /// override when a widget's rendered size varies (e.g. by mode).
-    fn tile_height(&self) -> u32 {
-        1
-    }
-
-    /// Pointer input inside this widget's own tile, in that tile's
-    /// coordinates (origin at its top-left), with `tile` the tile edge
-    /// length — so a widget can carve its face into control zones (a
-    /// volume widget's louder/softer halves) without knowing where in
-    /// the column the dock put it.
-    ///
-    /// Returns what it wants done: [`Effect::Repaint`] if its pixels
-    /// changed, [`Effect::Run`] for a command, [`Effect::Resample`] to
-    /// hurry a sampler. It returns intents rather than acting because a
-    /// `wpctl set-volume` or an `nmcli radio wifi off` arrives on the
-    /// compositor's repaint thread and can park it exactly as well as a
-    /// sample could — the click path was always the sampling problem
-    /// wearing a different hat.
-    ///
-    /// Most widgets have no input behavior; the default no-op covers
-    /// them.
-    fn on_input(&mut self, input: DockInput, tile: u32) -> Vec<Effect> {
-        let _ = (input, tile);
-        Vec::new()
-    }
-}
 
 /// How long one `DockWidget` call may take before the dock names it in
 /// the log. Exceeding this is *reported*, not punished — see
@@ -673,16 +534,6 @@ impl SupervisedWidget {
     }
 }
 
-/// How often the dock re-reads the system on a widget's behalf: the
-/// stock [`Source`] interval, shared so the instruments that have no
-/// reason to differ visibly agree.
-///
-/// One second is a reading rate, not a frame rate. `update` is called
-/// roughly sixty times a second and folds nothing on fifty-nine of
-/// them; that asymmetry is the normal, healthy state of a dock tile
-/// and is why [`Samples::fresh`] exists.
-pub const SAMPLE_INTERVAL: Duration = Duration::from_millis(1000);
-
 /// The workspace state the Clip tile and the `Desktop` share
 /// through one `Rc<RefCell<...>>`: the WM's event loop pushes the
 /// authoritative `(current, count)` in through
@@ -707,7 +558,7 @@ pub(crate) struct WorkspaceShared {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::widgets::sampling::SampleBench;
+    use chonk_dock_widget::SampleBench;
     use std::cell::Cell;
     use std::rc::Rc;
     use wm_theme_api::Point;
@@ -957,3 +808,4 @@ mod tests {
         assert_eq!(unique.len(), names.len(), "two widgets sharing a name make the log ambiguous: {names:?}");
     }
 }
+

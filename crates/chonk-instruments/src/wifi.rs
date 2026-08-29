@@ -49,7 +49,7 @@ use wm_theme::wifi::{render_wifi_tile, LinkReading};
 use wm_theme::{panel, Theme};
 use wm_theme_api::DecorationBuffer;
 
-use super::{DockInput, DockWidget, Effect, Samples, Source, SourceId, TreeEntry, SAMPLE_INTERVAL};
+use chonk_dock_widget::{DockInput, DockWidget, Effect, Samples, Source, SourceId, TreeEntry, SAMPLE_INTERVAL};
 
 /// Where the interfaces live, and which of each interface's files the
 /// tile reads. Positional, like every [`Source::Tree`]: the arrays and
@@ -391,8 +391,8 @@ impl DockWidget for WifiWidget {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::widgets::sampling::SampleBench;
-    use wm_core::MouseButton;
+    use chonk_dock_widget::SampleBench;
+    use chonk_dock_widget::MouseButton;
     use wm_theme_api::Point;
 
     fn press() -> DockInput {
