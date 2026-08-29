@@ -85,7 +85,22 @@ pub trait DockWidget {
     /// face, so it wants the same shape as the empty-state labels the
     /// built-ins already use ("NET", "SND", "LNK") — three or four
     /// upper-case characters, not a sentence.
-    fn name(&self) -> &'static str;
+    /// # Why `&str` and not `&'static str`
+    ///
+    /// It was `&'static str` until the dock's column became a mixed
+    /// one. A built-in's identity is a literal in its own source, but
+    /// the other implementor is now `chonk-shell`'s `DockItem`, whose
+    /// remote half carries the `id` of the `.dockapp` file that
+    /// declared it — a `String` read off disk at startup. Returning
+    /// `&'static str` for one of those means leaking it, permanently,
+    /// on every registry scan, so that a *borrow* can satisfy a
+    /// lifetime the value never had. Relaxing the lifetime instead
+    /// costs the six built-ins nothing (every `&'static str` is
+    /// already a `&str`) and costs the dock's supervisor one `String`
+    /// per item, cached once at construction so an evicted item still
+    /// has a name for its tombstone without calling back into code the
+    /// dock has disowned.
+    fn name(&self) -> &str;
 
     /// Everything this widget needs sampled, declared once at
     /// construction. The dock starts one worker per source and never

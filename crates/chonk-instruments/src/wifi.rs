@@ -287,7 +287,7 @@ impl Default for WifiWidget {
 }
 
 impl DockWidget for WifiWidget {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "LNK"
     }
 

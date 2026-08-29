@@ -39,6 +39,152 @@ pub use chonk_instruments::{ClockWidget, NetTrafficWidget, PowerWidget, SoundWid
 
 pub(crate) use sampling::{run_detached, SamplerRegistry};
 
+/// The reserved namespace for a built-in tile's id.
+///
+/// Dock order is persisted as one id per line (see
+/// [`crate::desktop::dock_order`]), and that file names both kinds of
+/// tile. A remote tile's id is the `id` field of the `.dockapp` file
+/// that declared it, which is attacker-chosen in the weak sense that
+/// anything on disk is; prefixing the built-ins keeps a `.dockapp`
+/// claiming `id = "clock"` from displacing the analog clock, and keeps
+/// the two namespaces separable by eye when a user edits the file by
+/// hand — which is a supported thing to do, exactly as it is for the
+/// launcher's pin file beside it.
+pub(crate) const BUILTIN_PREFIX: &str = "builtin:";
+
+/// One thing stacked in the dock's column.
+///
+/// # Why this exists at all
+///
+/// The dock is about to hold two very different kinds of tile: the six
+/// instruments that ship with the compositor, and out-of-process
+/// dockapps that push pixels down a socket
+/// (`chonk-dock-proto`). Almost nothing in the dock cares which is
+/// which. Layout walks a column of heights; `redraw_dock` blits a
+/// column of buffers; a middle-drag swaps two positions; a click
+/// resolves to a slot and hands it a tile-local event. Every one of
+/// those is the same code for both.
+///
+/// So the split is an enum behind the *existing* trait rather than a
+/// second trait, a generic parameter, or a parallel `Vec`. This type
+/// implements [`DockWidget`], which means [`SupervisedWidget`] wraps it
+/// unchanged, `Desktop`'s slot arithmetic keeps one list, and the day a
+/// built-in is moved out-of-process nothing in `redraw_dock` is
+/// touched. The alternative that suggests itself — making the dock
+/// generic over the item type — would buy exactly nothing (there is one
+/// dock, and it is heterogeneous by definition) and cost every call
+/// site a turbofish.
+///
+/// It is introduced *before* the remote half exists, deliberately.
+/// Every site that indexes the column — `item_slots`, `redraw_dock`,
+/// the drag, the input routing — has to be read and re-reasoned about
+/// when the thing it is indexing changes kind. Doing that once, against
+/// a one-variant enum whose behavior is provably identical to what it
+/// replaced, is a different and much smaller job than doing it in the
+/// same change that introduces sockets, subprocesses and a crash-loop
+/// budget.
+///
+/// # The id is here, not on the trait
+///
+/// [`DockWidget::name`] is a *display* label — "CLK", "NET" — drawn on
+/// the dead-screen tile. It is not an identity: renaming a label is a
+/// cosmetic change, and if it doubled as the persistence key it would
+/// silently reset every user's dock arrangement. So the id is assigned
+/// where an item enters the column, in `Desktop::new`'s list, next to
+/// the constructor it names.
+pub(crate) enum DockItem {
+    /// An instrument compiled into the shell — `chonk-instruments`.
+    ///
+    /// These stay in-process, and that is a decision rather than an
+    /// unfinished migration. The risk a process boundary contains is
+    /// not present for code that ships with the compositor; after
+    /// declarative sampling they cannot block the loop, so the boundary
+    /// buys nothing on the axis that motivated it; and the cost is six
+    /// processes, six `FontSystem`s (the sampling work *deleted* five
+    /// of those, rather than multiplying them by six), six sockets and
+    /// six crash budgets. What matters is that a built-in and a remote
+    /// tile are interchangeable *here*, which is what lets any one of
+    /// them move out later without touching the dock.
+    Builtin { id: &'static str, widget: Box<dyn DockWidget> },
+}
+
+impl DockItem {
+    /// A built-in instrument under its reserved persistence id.
+    ///
+    /// `id` is written including [`BUILTIN_PREFIX`] rather than having
+    /// it prepended here, so that the literal in `Desktop::new` is
+    /// character-for-character what appears in the user's `dock-items`
+    /// file. A grep for the line in the file finds the line in the
+    /// source. `builtin_ids_are_prefixed_and_unique` keeps the two
+    /// honest.
+    pub(crate) fn builtin(id: &'static str, widget: Box<dyn DockWidget>) -> Self {
+        // The reserved namespace is what stops a `.dockapp` declaring
+        // `id = "clock"` from taking the analog clock's line in the
+        // user's `dock-items` file. A built-in that forgot the prefix
+        // would be the one hole in that, and would not fail anywhere
+        // visible — it would simply be displaceable. `debug_assert`
+        // rather than a hard panic: this is a mistake made at compile
+        // time by whoever adds the seventh instrument, so a developer
+        // build is exactly where it should stop.
+        debug_assert!(id.starts_with(BUILTIN_PREFIX), "a built-in dock item's id must begin with `{BUILTIN_PREFIX}`, got {id:?}");
+        DockItem::Builtin { id, widget }
+    }
+
+    /// This item's persistence key — see [`BUILTIN_PREFIX`].
+    pub(crate) fn id(&self) -> &str {
+        match self {
+            DockItem::Builtin { id, .. } => id,
+        }
+    }
+}
+
+/// The whole reason [`DockItem`] is an enum behind this trait rather
+/// than something the dock has to match on: every one of these
+/// forwards, and the dock never learns which arm it took.
+impl DockWidget for DockItem {
+    fn name(&self) -> &str {
+        match self {
+            DockItem::Builtin { widget, .. } => widget.name(),
+        }
+    }
+
+    fn sources(&self) -> Vec<Source> {
+        match self {
+            DockItem::Builtin { widget, .. } => widget.sources(),
+        }
+    }
+
+    fn bind(&mut self, ids: &[SourceId]) {
+        match self {
+            DockItem::Builtin { widget, .. } => widget.bind(ids),
+        }
+    }
+
+    fn update(&mut self, samples: &Samples) -> bool {
+        match self {
+            DockItem::Builtin { widget, .. } => widget.update(samples),
+        }
+    }
+
+    fn render(&self, theme: &Theme, tile: u32, fonts: &mut cosmic_text::FontSystem, swash: &mut cosmic_text::SwashCache) -> DecorationBuffer {
+        match self {
+            DockItem::Builtin { widget, .. } => widget.render(theme, tile, fonts, swash),
+        }
+    }
+
+    fn tile_height(&self) -> u32 {
+        match self {
+            DockItem::Builtin { widget, .. } => widget.tile_height(),
+        }
+    }
+
+    fn on_input(&mut self, input: DockInput, tile: u32) -> Vec<Effect> {
+        match self {
+            DockItem::Builtin { widget, .. } => widget.on_input(input, tile),
+        }
+    }
+}
+
 /// How long one `DockWidget` call may take before the dock names it in
 /// the log. Exceeding this is *reported*, not punished — see
 /// [`SEVERE_BUDGET`] for the threshold that actually costs a widget its
@@ -328,24 +474,35 @@ fn verdict(elapsed: Duration, offences_before: u32, warmed: bool, limits: Limits
 /// proven it cannot afford to wait would be a strange reward for
 /// noticing.
 ///
-/// # The shape this wants to grow into
+/// # It covers remote tiles too
 ///
-/// A later phase puts out-of-process third-party dockapps in the same
-/// column, as `enum DockItem { Builtin(Box<dyn DockWidget>),
-/// Remote(RemoteTile) }`, and supervision plus tombstoning should cover
-/// remote tiles too — arguably more so, since their code is not in this
-/// repository at all. Nothing here needs to be generic for that: have
-/// `DockItem` implement `DockWidget` (its `name` is the item's
-/// identity, its `render` either the widget's pixels or the remote
-/// tile's last delivered buffer) and this type wraps it unchanged. The
-/// generic parameter that suggests itself today would buy exactly
-/// nothing and cost every call site a turbofish.
+/// What this wraps is a [`DockItem`], not a built-in widget: an
+/// out-of-process dockapp's tile is supervised on exactly the same
+/// terms, and arguably needs it more, since its code is not in this
+/// repository at all. Nothing here had to become generic for that.
+/// `DockItem` implements [`DockWidget`] — its `name` is the item's
+/// label, its `render` either the widget's pixels or the remote tile's
+/// last delivered frame — so every method below is the same code it
+/// was, and the timing charge lands on whichever kind of item was slow.
+///
+/// Note what that does *not* mean for a remote tile. A dockapp that
+/// hangs costs this budget nothing, because the shell never calls into
+/// it: it reads a socket that has stopped producing. The eviction
+/// machinery here fires on a `DockItem` whose *in-process* work is slow
+/// — a pathological render of a stale frame, say — and a hung dockapp
+/// is caught by its own liveness check instead. Two mechanisms, two
+/// different failures; see `crate::dockapp`.
 pub(crate) struct SupervisedWidget {
-    widget: Box<dyn DockWidget>,
+    item: DockItem,
     /// Cached at construction so the log and the tombstone still have
-    /// an identity after eviction, without calling back into the
-    /// widget for it.
-    name: &'static str,
+    /// an identity after eviction, without calling back into the item
+    /// for it.
+    ///
+    /// A `String` rather than a `&'static str`: a remote tile's name
+    /// comes from a `.dockapp` file read at startup. See
+    /// [`DockWidget::name`] for why the trait relaxed rather than the
+    /// dock leaking one literal per registry scan.
+    name: String,
     limits: Limits,
     offences: u32,
     entry: [EntryPoint; CallKind::COUNT],
@@ -359,10 +516,10 @@ pub(crate) struct SupervisedWidget {
 }
 
 impl SupervisedWidget {
-    pub(crate) fn new(widget: Box<dyn DockWidget>) -> Self {
-        let name = widget.name();
+    pub(crate) fn new(item: DockItem) -> Self {
+        let name = item.name().to_string();
         Self {
-            widget,
+            item,
             name,
             limits: Limits::STOCK,
             offences: 0,
@@ -372,8 +529,16 @@ impl SupervisedWidget {
         }
     }
 
-    pub(crate) fn name(&self) -> &'static str {
-        self.name
+    pub(crate) fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// This item's persistence key — see [`DockItem::id`]. Answered
+    /// even for an evicted item: the arrangement the user chose
+    /// outlives one instrument going dark, and rewriting the order file
+    /// without it would quietly forget where they had put it.
+    pub(crate) fn id(&self) -> &str {
+        self.item.id()
     }
 
     /// An evicted widget occupies exactly one tile whatever it used to
@@ -383,7 +548,7 @@ impl SupervisedWidget {
         if self.evicted {
             1
         } else {
-            self.widget.tile_height().max(1)
+            self.item.tile_height().max(1)
         }
     }
 
@@ -396,7 +561,7 @@ impl SupervisedWidget {
             return std::mem::take(&mut self.relayout);
         }
         let start = Instant::now();
-        let changed = self.widget.update(samples);
+        let changed = self.item.update(samples);
         self.charge(CallKind::Update, start.elapsed());
         changed || self.evicted
     }
@@ -410,8 +575,8 @@ impl SupervisedWidget {
     /// frame to be late for, and the budget machinery's whole meaning is
     /// "you were on the repaint thread".
     pub(crate) fn bind(&mut self, registry: &mut SamplerRegistry) {
-        let ids = registry.register(self.widget.sources());
-        self.widget.bind(&ids);
+        let ids = registry.register(self.item.sources());
+        self.item.bind(&ids);
     }
 
     /// `None` means "evicted — draw the tombstone instead". The buffer
@@ -430,7 +595,7 @@ impl SupervisedWidget {
             return None;
         }
         let start = Instant::now();
-        let buffer = self.widget.render(theme, tile, fonts, swash);
+        let buffer = self.item.render(theme, tile, fonts, swash);
         self.charge(CallKind::Render, start.elapsed());
         Some(buffer)
     }
@@ -451,7 +616,7 @@ impl SupervisedWidget {
             return Vec::new();
         }
         let start = Instant::now();
-        let mut effects = self.widget.on_input(input, tile);
+        let mut effects = self.item.on_input(input, tile);
         self.charge(CallKind::Input, start.elapsed());
         if self.evicted {
             effects.push(Effect::Repaint);
@@ -529,8 +694,8 @@ impl SupervisedWidget {
     }
 
     #[cfg(test)]
-    fn with_limits(widget: Box<dyn DockWidget>, limits: Limits) -> Self {
-        Self { limits, ..Self::new(widget) }
+    fn with_limits(item: DockItem, limits: Limits) -> Self {
+        Self { limits, ..Self::new(item) }
     }
 }
 
@@ -585,7 +750,7 @@ mod tests {
     }
 
     impl DockWidget for SlowWidget {
-        fn name(&self) -> &'static str {
+        fn name(&self) -> &str {
             "SLOW"
         }
 
@@ -687,7 +852,7 @@ mod tests {
         let (mut fonts, mut swash) = (cosmic_text::FontSystem::new(), cosmic_text::SwashCache::new());
         let widget = SlowWidget::new(TEST_LIMITS.severe * 2);
         let (ticks, renders) = (Rc::clone(&widget.ticks), Rc::clone(&widget.renders));
-        let mut supervised = SupervisedWidget::with_limits(Box::new(widget), TEST_LIMITS);
+        let mut supervised = SupervisedWidget::with_limits(DockItem::builtin("builtin:test", Box::new(widget)), TEST_LIMITS);
 
         // Three severe overruns. The warm-up pass does not apply to
         // these, so the third one is the eviction.
@@ -712,7 +877,7 @@ mod tests {
     fn eviction_collapses_the_slot_to_one_tile_and_asks_for_exactly_one_relayout() {
         let bench = no_samples();
         let (mut fonts, mut swash) = (cosmic_text::FontSystem::new(), cosmic_text::SwashCache::new());
-        let mut supervised = SupervisedWidget::with_limits(Box::new(SlowWidget::new(TEST_LIMITS.severe * 2)), TEST_LIMITS);
+        let mut supervised = SupervisedWidget::with_limits(DockItem::builtin("builtin:test", Box::new(SlowWidget::new(TEST_LIMITS.severe * 2))), TEST_LIMITS);
         assert_eq!(supervised.tile_height(), 3, "a healthy widget keeps whatever height it asked for");
 
         // Evict through `render`, so the relayout request has to
@@ -732,7 +897,7 @@ mod tests {
     /// frame would have caught it never.
     #[test]
     fn offences_accumulate_across_entry_points_and_across_healthy_frames_in_between() {
-        let mut supervised = SupervisedWidget::with_limits(Box::new(SlowWidget::new(TEST_LIMITS.severe * 2)), TEST_LIMITS);
+        let mut supervised = SupervisedWidget::with_limits(DockItem::builtin("builtin:test", Box::new(SlowWidget::new(TEST_LIMITS.severe * 2))), TEST_LIMITS);
         supervised.charge(CallKind::Update, TEST_LIMITS.severe);
         for _ in 0..2_000 {
             supervised.charge(CallKind::Render, Duration::ZERO);
@@ -747,7 +912,7 @@ mod tests {
     fn a_healthy_widget_is_never_evicted_however_long_it_runs() {
         struct Cheap;
         impl DockWidget for Cheap {
-            fn name(&self) -> &'static str {
+            fn name(&self) -> &str {
                 "OK"
             }
             fn update(&mut self, _samples: &Samples) -> bool {
@@ -759,7 +924,7 @@ mod tests {
         }
 
         let bench = no_samples();
-        let mut supervised = SupervisedWidget::new(Box::new(Cheap));
+        let mut supervised = SupervisedWidget::new(DockItem::builtin("builtin:cheap", Box::new(Cheap)));
         for _ in 0..10_000 {
             supervised.update(&bench.samples());
         }
@@ -791,14 +956,18 @@ mod tests {
     /// dead-screen face can actually draw.
     #[test]
     fn every_built_in_widget_names_itself_shortly_and_distinctly() {
-        let names: Vec<&'static str> = vec![
-            NetTrafficWidget::new().name(),
-            SysLoadWidget::new().name(),
-            SoundWidget::new().name(),
-            WifiWidget::new().name(),
-            PowerWidget::new().name(),
-            ClockWidget::new().name(),
+        // Each widget is kept alive in the vector rather than named
+        // from a temporary: `DockWidget::name` borrows from `&self` now
+        // that a remote tile's name is a `String` it owns.
+        let widgets: Vec<Box<dyn DockWidget>> = vec![
+            Box::new(NetTrafficWidget::new()),
+            Box::new(SysLoadWidget::new()),
+            Box::new(SoundWidget::new()),
+            Box::new(WifiWidget::new()),
+            Box::new(PowerWidget::new()),
+            Box::new(ClockWidget::new()),
         ];
+        let names: Vec<&str> = widgets.iter().map(|widget| widget.name()).collect();
         for name in &names {
             assert!(!name.is_empty(), "a nameless widget is an unactionable log line");
             assert!(name.len() <= 5, "{name:?} is too long for the tombstone tile's face");

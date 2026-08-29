@@ -568,7 +568,7 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
 
         if surface == self.desktop.dock_window() {
             // Middle-click-drag on a widget picks it up for reordering;
-            // see `Desktop::begin_widget_drag`/`drag_widget_motion`
+            // see `Desktop::begin_item_drag`/`drag_item_motion`
             // (the latter fires from `on_motion` on every pointer
             // move, not from here). Middle stays the dock's own gesture
             // and is never offered to a widget: a tile that could
@@ -589,9 +589,9 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
             match button {
                 MouseButton::Middle => {
                     if pressed {
-                        self.desktop.begin_widget_drag(wm.backend_mut(), &self.theme, local);
+                        self.desktop.begin_item_drag(wm.backend_mut(), &self.theme, local);
                     } else {
-                        self.desktop.end_widget_drag(wm.backend_mut(), &self.theme);
+                        self.desktop.end_item_drag(wm.backend_mut(), &self.theme);
                     }
                 }
                 MouseButton::Left => {
@@ -745,7 +745,7 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
     pub fn on_motion(&mut self, wm: &mut WindowManager<B>, root: Point) {
         self.pointer_root = root;
         self.desktop.drag_icon_motion(wm.backend_mut(), root);
-        self.desktop.drag_widget_motion(wm.backend_mut(), &self.theme, root);
+        self.desktop.drag_item_motion(wm.backend_mut(), &self.theme, root);
         self.launchdock.handle_motion(wm.backend_mut(), &self.theme, root);
         // Menu hover rides the same cadence: every motion over a shell
         // surface also arrives as a root-relative motion event (that is
@@ -842,7 +842,7 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         let (current, count) = (wm.current_workspace(), wm.workspace_count());
         self.desktop.set_workspace_display(wm.backend_mut(), &self.theme, current, count);
         self.desktop.tick_menu(wm.backend_mut(), &self.theme);
-        self.desktop.tick_widgets(wm.backend_mut(), &self.theme);
+        self.desktop.tick_items(wm.backend_mut(), &self.theme);
         // Same cadence as the widget tick: refresh the launcher
         // strip's running-app indicators from the live client set — a
         // cheap no-op inside `update_running` whenever nothing

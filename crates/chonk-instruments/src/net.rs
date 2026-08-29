@@ -109,7 +109,7 @@ impl Default for NetTrafficWidget {
 }
 
 impl DockWidget for NetTrafficWidget {
-    fn name(&self) -> &'static str {
+    fn name(&self) -> &str {
         "NET"
     }
 
