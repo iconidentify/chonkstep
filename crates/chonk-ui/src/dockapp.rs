@@ -50,7 +50,11 @@ use std::time::{Duration, Instant};
 
 use chonk_dock_proto::transport::{Seqpacket, ENV_SOCKET, ENV_TOKEN};
 use chonk_dock_proto::wire::{ClientMessage, InputEvent, InputMask, ServerMessage, ThemeState};
-use chonk_dock_proto::{handshake, MAX_MESSAGE_BYTES, TOKEN_BYTES};
+// `MAX_SCALE` comes from the protocol crate rather than being restated
+// here: the codec enforces the same bound on decode
+// (`wire::DecodeError::BadFloat`), and two ends that each define their
+// own ceiling are two ends that will eventually disagree about it.
+use chonk_dock_proto::{handshake, MAX_MESSAGE_BYTES, MAX_SCALE, TOKEN_BYTES};
 
 use crate::model::Theme;
 
@@ -68,19 +72,11 @@ pub use tiny_skia::Pixmap;
 /// 100 ms. Ten seconds is a hundredfold margin on a loaded machine; a
 /// shell that has not come back by then is not coming back, and the
 /// registry will relaunch this process when it does.
-/// The largest UI scale a dockapp will draw at before deciding the
-/// shell has told it something it cannot use.
 ///
-/// Not a taste judgement: the desktop's own `scale` is documented as a
-/// HiDPI multiplier (2.0 on a 227-DPI panel), `chonk-dock-proto` caps a
-/// tile's edge at `MAX_TILE_PX` = 256, and the theme's metrics are
-/// multiplied by this before anything is drawn. Eight is far past any
-/// display that exists and still comfortably inside the range where the
-/// arithmetic stays sane, which is exactly what an upper bound on
-/// hostile input wants to be — generous enough never to reject a real
-/// desktop, tight enough that nothing downstream has to wonder.
-const MAX_SCALE: f32 = 8.0;
-
+/// (This doc comment had drifted onto `MAX_SCALE`, which was declared
+/// between it and the constant it describes; `MAX_SCALE` moved to
+/// `chonk-dock-proto` in Phase 4c and the comment went back where it
+/// belongs.)
 const RECONNECT_WINDOW: Duration = Duration::from_secs(10);
 const RECONNECT_FIRST_DELAY: Duration = Duration::from_millis(100);
 const RECONNECT_MAX_DELAY: Duration = Duration::from_secs(1);
@@ -325,6 +321,14 @@ enum Outcome {
 /// the same reason `spawn::apply_env` is a free function over a
 /// `Command` rather than logic inside a spawn.
 fn check_drawable(state: &ThemeState, tile_units: u8) -> Result<(), Error> {
+    // Kept after the codec learned the same rule, not replaced by it.
+    // `ThemeState` is a public struct with public fields, so a caller
+    // that builds one by hand — a test, a fake shell, a future in-
+    // process path — reaches `serve` without passing a decoder at all;
+    // and `check_drawable` additionally checks a geometry the codec
+    // cannot see, because `tile_units` is this dockapp's own request and
+    // never appears in the message.
+    //
     // `scale` is the one that actually bites. It reaches
     // `Theme::scaled`, which multiplies every metric in the palette by
     // it, so a NaN silently turns every dimension into NaN and the tile
@@ -364,12 +368,13 @@ where
     // Everything in `state` arrived over the socket, and the next two
     // uses of it are an allocation and a float multiplication — the two
     // places where an unvetted number stops being data and starts being
-    // behaviour. The codec bounds what it can: `tile_px` is checked
-    // against `MAX_TILE_PX` on decode. It cannot bound `scale`, because
-    // `DecodeError` has no variant for a float outside a usable range
-    // and adding one is a breaking change to a crate the shell is being
-    // written against right now. So the guard lives here, at the last
-    // point before the values are believed.
+    // behaviour. The codec bounds both now: `tile_px` against
+    // `MAX_TILE_PX`, and `scale` against `MAX_SCALE` via
+    // `DecodeError::BadFloat` (which Phase 4c added, because the crate
+    // is unpublished and a breaking change to `DecodeError` will never
+    // again be as cheap as it is today). This is the second lock, at the
+    // last point before the values are believed — see `check_drawable`
+    // for why it is worth keeping.
     //
     // `scale` is the one that actually bites. It reaches
     // `Theme::scaled`, which multiplies every metric in the palette by

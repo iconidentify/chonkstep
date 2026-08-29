@@ -29,8 +29,16 @@
 //!
 //! Every decoder rejects: an unknown message kind, a non-zero reserved
 //! byte, trailing bytes after the last field, an out-of-range enum
-//! discriminant, and any string over its cap. Nothing is clamped,
+//! discriminant, any string over its cap, and any float outside the
+//! range a tile can actually be drawn at. Nothing is clamped,
 //! truncated or ignored on the decode path.
+//!
+//! One consequence is worth stating because other code depends on it:
+//! **a decoded message is always equal to itself.** `ServerMessage`
+//! derives `PartialEq` over a struct containing an `f32`, and IEEE-754
+//! says NaN equals nothing — so before the `scale` check existed,
+//! `decode(b) == decode(b)` was false for a message a peer could send
+//! at will. See [`DecodeError::BadFloat`] and [`ThemeState::same_as`].
 //!
 //! Rejecting unknown bits rather than ignoring them costs forward
 //! compatibility, which is deliberate: [`crate::PROTOCOL_VERSION`] is
@@ -66,8 +74,8 @@
 use std::fmt;
 
 use crate::{
-    MAX_FRAME_BYTES, MAX_ID_BYTES, MAX_LOG_BYTES, MAX_MESSAGE_BYTES, MAX_THEME_ID_BYTES,
-    MAX_THEME_TOML_BYTES, MAX_TILE_PX, MAX_TILE_UNITS, TOKEN_BYTES,
+    MAX_FRAME_BYTES, MAX_ID_BYTES, MAX_LOG_BYTES, MAX_MESSAGE_BYTES, MAX_SCALE,
+    MAX_THEME_ID_BYTES, MAX_THEME_TOML_BYTES, MAX_TILE_PX, MAX_TILE_UNITS, TOKEN_BYTES,
 };
 
 const KIND_HELLO: u8 = 0x01;
@@ -395,11 +403,65 @@ pub struct ThemeState {
     pub theme_toml: String,
 }
 
+impl ThemeState {
+    /// Equality that is *reflexive*, which the derived `PartialEq` is
+    /// not.
+    ///
+    /// `scale` is an `f32`, so `PartialEq` inherits IEEE-754's rule that
+    /// NaN is equal to nothing including itself. That makes the derive
+    /// unsafe for the one shape of code every consumer of this type
+    /// naturally writes:
+    ///
+    /// ```text
+    /// if next_state != last_sent { send ThemeChanged; last_sent = next_state }
+    /// ```
+    ///
+    /// With a NaN scale that condition is true on *every* pass forever,
+    /// so the shell would push a `ThemeChanged` at its repaint rate
+    /// until the dockapp's send queue overflowed and the tile was
+    /// disconnected — a compositor busy-loop provoked by one bad float.
+    ///
+    /// [`theme_state_decode`] now rejects an unusable scale outright
+    /// ([`DecodeError::BadFloat`]), so a *decoded* `ThemeState` can no
+    /// longer carry one. This is the second lock, on the side of the
+    /// socket where the value is *constructed* rather than parsed: the
+    /// shell builds its own `ThemeState` from its own `scale` field and
+    /// never decodes it, so the codec's guard cannot cover the sender.
+    /// Comparing the bits makes the answer total whatever the float is.
+    pub fn same_as(&self, other: &Self) -> bool {
+        self.tile_px == other.tile_px
+            && self.scale.to_bits() == other.scale.to_bits()
+            && self.theme_id == other.theme_id
+            && self.theme_toml == other.theme_toml
+    }
+}
+
 // ---------------------------------------------------------------------
 // Errors
 // ---------------------------------------------------------------------
 
+/// Why a datagram from the peer could not be read.
+///
+/// `#[non_exhaustive]`, and `EncodeError` below deliberately is not.
+/// The line between them is who made the mistake:
+///
+/// * A `DecodeError` describes *the peer's* bytes. Every variant means
+///   the same thing to the code that receives one — "this peer sent
+///   something this version cannot read" — and both existing consumers
+///   act on it identically: `RemoteTile::receive` logs it and drops the
+///   connection, `chonk_ui::dockapp::serve` logs it and reconnects.
+///   Nobody can usefully handle `BadFloat` differently from
+///   `Truncated`, so the exhaustiveness a downstream `match` buys is
+///   worth less than being able to describe a new rejection without a
+///   semver break. This very commit is the evidence: adding `BadFloat`
+///   to an exhaustive published enum would have broken every consumer
+///   for a variant they would all have wildcarded.
+/// * An [`EncodeError`] describes *local* code building a message that
+///   cannot legally exist. A new way to do that is something the author
+///   of the calling code may genuinely want the compiler to point at,
+///   so that one stays exhaustive.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum DecodeError {
     /// A zero-length datagram. Not EOF — `recv` reports that separately
     /// — so this is a peer that actually sent nothing.
@@ -431,6 +493,15 @@ pub enum DecodeError {
     /// remainder of the datagram, so a lying header is a mismatch here
     /// rather than a short read somewhere downstream.
     FrameLengthMismatch { expected: usize, actual: usize },
+    /// A float field was not a number a tile can be drawn at: NaN,
+    /// infinite, zero, negative, or past [`crate::MAX_SCALE`].
+    ///
+    /// Carries the *bits* rather than the `f32` on purpose. An `f32` in
+    /// here would drag NaN's non-reflexive equality up into
+    /// `DecodeError` itself — `err == err` would be false for exactly
+    /// the error that exists to stamp out that bug — and would cost the
+    /// enum its `Eq`, which the tests and the fuzz harness compare with.
+    BadFloat { field: &'static str, bits: u32 },
 }
 
 impl fmt::Display for DecodeError {
@@ -449,6 +520,9 @@ impl fmt::Display for DecodeError {
             Self::FrameGeometry { width, height } => write!(f, "frame geometry {width}x{height} is out of range"),
             Self::FrameLengthMismatch { expected, actual } => {
                 write!(f, "frame declared {expected} pixel bytes but carried {actual}")
+            }
+            Self::BadFloat { field, bits } => {
+                write!(f, "field `{field}` is {} (bits {bits:#010x}), which is not a usable value", f32::from_bits(*bits))
             }
         }
     }
@@ -606,8 +680,32 @@ impl<'a> Reader<'a> {
         Ok(self.u32(field)? as i32)
     }
 
-    fn f32(&mut self, field: &'static str) -> Result<f32, DecodeError> {
-        Ok(f32::from_bits(self.u32(field)?))
+    /// Reads an `f32` and refuses one a tile cannot be drawn at.
+    ///
+    /// The only float on this wire is `scale`, and it is not decoration:
+    /// it reaches `Theme::scaled`, which multiplies every metric in the
+    /// palette by it. A NaN turns every dimension into NaN and the tile
+    /// renders as nothing, with no error anywhere to explain it; zero or
+    /// a negative collapses or inverts it; 1e30 asks for a pixmap the
+    /// allocator will refuse. So the check is here, in the one place
+    /// both sides of the socket share, rather than only in the SDK's
+    /// `check_drawable` — which stays as defence in depth, and which
+    /// also checks geometry this cannot see.
+    ///
+    /// The sharper reason is the NaN. `ThemeState` derives `PartialEq`
+    /// over a raw `f32`, so a message carrying a NaN scale is not equal
+    /// to *itself*: `decode(b) == decode(b)` is false, and the natural
+    /// "push a `ThemeChanged` when the state changed" loop then pushes
+    /// on every pass forever. Rejecting at decode makes that
+    /// unreachable for anything that came off a socket. See
+    /// [`ThemeState::same_as`] for the sender's half.
+    fn f32_usable(&mut self, field: &'static str, max: f32) -> Result<f32, DecodeError> {
+        let bits = self.u32(field)?;
+        let value = f32::from_bits(bits);
+        if !value.is_finite() || value <= 0.0 || value > max {
+            return Err(DecodeError::BadFloat { field, bits });
+        }
+        Ok(value)
     }
 
     fn reserved(&mut self, n: usize, field: &'static str) -> Result<(), DecodeError> {
@@ -690,7 +788,7 @@ fn theme_state_encode(kind: u8, state: &ThemeState) -> Result<Vec<u8>, EncodeErr
 
 fn theme_state_decode(reader: &mut Reader<'_>) -> Result<ThemeState, DecodeError> {
     let tile_px = reader.u32("tile_px")?;
-    let scale = reader.f32("scale")?;
+    let scale = reader.f32_usable("scale", MAX_SCALE)?;
     let theme_id_len = reader.u16("theme_id_len")? as usize;
     reader.reserved(2, "theme.reserved")?;
     let theme_toml_len = reader.u32("theme_toml_len")? as usize;
@@ -1297,41 +1395,110 @@ mod tests {
     // -- floats ----------------------------------------------------------
 
     #[test]
-    fn a_nan_scale_survives_the_wire_but_makes_theme_state_equality_non_reflexive() {
-        // Found by the Phase 5 fuzz harness, and recorded because it is
-        // a live trap for the *consumer*, not a codec bug: `scale` is a
-        // raw f32 and `ThemeState` derives `PartialEq`, so a message
-        // carrying a NaN scale is not equal to itself. Shell code
-        // shaped like `if next_state != last_sent { push ThemeChanged }`
-        // would push forever.
+    fn a_nan_scale_is_rejected_at_decode_rather_than_handed_on() {
+        // Found by the Phase 5 fuzz harness. A NaN `scale` is not a
+        // cosmetic problem: `ThemeState` derives `PartialEq` over a raw
+        // `f32`, so a message carrying one is not equal to *itself*, and
+        // the shape every consumer of this type naturally writes —
+        // `if next_state != last_sent { push ThemeChanged }` — then
+        // pushes on every pass forever, at the compositor's repaint
+        // rate, until the peer's send queue overflows.
         //
-        // The codec's own job is done correctly — the bits survive
-        // exactly, which is what the round-trip below asserts — so this
-        // is a note for whoever compares two `ThemeState`s, and for the
-        // SDK, which currently hands `scale` straight to
-        // `Theme::scaled` and `tile_px` straight to `Pixmap::new`
-        // without asking whether either is a number a tile can be drawn
-        // at. See the Phase 5 report.
+        // Phase 5 left this as a note for the consumer because
+        // `DecodeError` had no variant for a float and adding one was a
+        // breaking change to a crate the shell was being written
+        // against. It is cheaper now than it will ever be again, so the
+        // check moved to the one place both sides share.
         let state = ThemeState { tile_px: 56, scale: f32::NAN, theme_id: "x".into(), theme_toml: String::new() };
-        let bytes = ServerMessage::Welcome(state.clone()).encode().unwrap();
-        let ServerMessage::Welcome(decoded) = ServerMessage::decode(&bytes).unwrap() else { panic!("kind") };
-        assert_eq!(decoded.scale.to_bits(), f32::NAN.to_bits(), "the bits round trip exactly");
-        assert_ne!(decoded, state, "...and yet the two are not `==`, because NaN != NaN");
+        let bytes = ServerMessage::Welcome(state).encode().unwrap();
+        assert_eq!(
+            ServerMessage::decode(&bytes),
+            Err(DecodeError::BadFloat { field: "scale", bits: f32::NAN.to_bits() }),
+            "a NaN scale must not reach a consumer that will compare it"
+        );
+    }
+
+    /// The property the `BadFloat` check exists to establish, stated
+    /// over every scale bit pattern that is interesting or adversarial:
+    /// **whatever a peer sends, a message that decodes is equal to
+    /// itself.** Without it `ServerMessage`'s derived `PartialEq` is not
+    /// an equivalence relation, and every `!=` written against it is a
+    /// latent infinite loop.
+    #[test]
+    fn every_message_that_decodes_is_equal_to_itself() {
+        let interesting = [
+            f32::NAN,
+            -f32::NAN,
+            f32::from_bits(0x7f80_0001), // a signalling NaN
+            f32::INFINITY,
+            f32::NEG_INFINITY,
+            0.0,
+            -0.0,
+            -1.0,
+            f32::MIN_POSITIVE,
+            f32::from_bits(1), // the smallest subnormal
+            1.0,
+            1.5,
+            2.0,
+            MAX_SCALE,
+            MAX_SCALE + 0.1,
+            1e30,
+        ];
+        for scale in interesting {
+            let state = ThemeState { tile_px: 56, scale, theme_id: "x".into(), theme_toml: String::new() };
+            let bytes = ServerMessage::ThemeChanged(state).encode().unwrap();
+            let Ok(decoded) = ServerMessage::decode(&bytes) else { continue };
+            assert_eq!(decoded, decoded, "scale {scale} decoded to something not equal to itself");
+        }
     }
 
     #[test]
-    fn a_nonsense_scale_is_carried_rather_than_rejected() {
-        // Stated as a test so the decision is visible: the decoder does
-        // not validate `scale`, because the *shell* is the sender and
-        // this crate has no `DecodeError` variant for a float without a
-        // public API change. Every one of these reaches a dockapp as
-        // written.
-        for scale in [0.0f32, -1.0, f32::INFINITY, f32::NEG_INFINITY, 1e30] {
+    fn an_unusable_scale_is_rejected_rather_than_carried() {
+        // Zero and negative collapse or invert every metric in the
+        // palette; the infinities and 1e30 ask for a pixmap no allocator
+        // will produce. Rejecting rather than clamping is the same call
+        // the SDK's `check_drawable` already makes: a peer sending an
+        // unusable scale is one this end cannot correctly draw for, and
+        // quietly substituting 1.0 would put a wrongly-sized tile on
+        // screen and call it success.
+        for scale in [0.0f32, -0.0, -1.0, f32::INFINITY, f32::NEG_INFINITY, 1e30, MAX_SCALE + 0.1] {
             let state = ThemeState { tile_px: 56, scale, theme_id: "x".into(), theme_toml: String::new() };
             let bytes = ServerMessage::ThemeChanged(state).encode().unwrap();
-            let ServerMessage::ThemeChanged(decoded) = ServerMessage::decode(&bytes).unwrap() else { panic!("kind") };
-            assert_eq!(decoded.scale.to_bits(), scale.to_bits(), "carried verbatim; the SDK is the one that must check");
+            assert_eq!(
+                ServerMessage::decode(&bytes),
+                Err(DecodeError::BadFloat { field: "scale", bits: scale.to_bits() }),
+                "scale {scale} must not reach a dockapp"
+            );
         }
+    }
+
+    #[test]
+    fn the_scales_a_real_session_runs_at_all_decode() {
+        // The bound has to be generous enough never to reject a real
+        // desktop; that is half of what makes rejecting the rest safe.
+        for scale in [0.5f32, 1.0, 1.25, 1.5, 2.0, 2.25, 3.0, 4.0, MAX_SCALE] {
+            let state = ThemeState { tile_px: 56, scale, theme_id: "x".into(), theme_toml: String::new() };
+            let bytes = ServerMessage::Welcome(state.clone()).encode().unwrap();
+            assert_eq!(ServerMessage::decode(&bytes), Ok(ServerMessage::Welcome(state)), "scale {scale} is a real session");
+        }
+    }
+
+    #[test]
+    fn same_as_is_reflexive_where_derived_equality_is_not() {
+        // The sender's half of the same guarantee. The shell builds its
+        // own `ThemeState` and never decodes it, so `BadFloat` cannot
+        // cover it; `same_as` is what makes "has it changed?" a total
+        // question there.
+        let nan = ThemeState { tile_px: 56, scale: f32::NAN, theme_id: "x".into(), theme_toml: String::new() };
+        assert_ne!(nan, nan, "the derive is not reflexive, which is exactly the trap");
+        assert!(nan.same_as(&nan), "`same_as` is");
+
+        let ordinary = ThemeState { scale: 2.0, ..nan.clone() };
+        assert!(ordinary.same_as(&ordinary));
+        assert!(!ordinary.same_as(&nan), "and it still separates two different states");
+        assert!(!ordinary.same_as(&ThemeState { tile_px: 112, ..ordinary.clone() }));
+        assert!(!ordinary.same_as(&ThemeState { theme_id: "y".into(), ..ordinary.clone() }));
+        assert!(!ordinary.same_as(&ThemeState { theme_toml: "a = 1".into(), ..ordinary.clone() }));
     }
 
     #[test]

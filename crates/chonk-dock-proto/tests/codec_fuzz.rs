@@ -68,8 +68,8 @@
 //! failure message prints the seed and the offending bytes either way.
 
 use chonk_dock_proto::wire::{
-    is_valid_id, sanitize_text, Button, ClientMessage, GoodbyeReason, InputEvent, InputKind, InputMask, LogLevel,
-    ServerMessage, ThemeState,
+    is_valid_id, sanitize_text, Button, ClientMessage, DecodeError, GoodbyeReason, InputEvent, InputKind, InputMask,
+    LogLevel, ServerMessage, ThemeState,
 };
 use chonk_dock_proto::{MAX_FRAME_BYTES, MAX_ID_BYTES, MAX_LOG_BYTES, MAX_MESSAGE_BYTES, TOKEN_BYTES};
 
@@ -182,12 +182,25 @@ fn check_client(bytes: &[u8], origin: &str) {
 /// `if next != last_sent { push ThemeChanged }` would push forever with
 /// a NaN scale. Recorded in `wire.rs`'s own tests as
 /// `a_nan_scale_survives_the_wire_but_makes_theme_state_equality_non_reflexive`.
-fn same_server(a: &Result<ServerMessage, chonk_dock_proto::DecodeError>, b: &Result<ServerMessage, chonk_dock_proto::DecodeError>) -> bool {
+fn same_server(a: &Result<ServerMessage, DecodeError>, b: &Result<ServerMessage, DecodeError>) -> bool {
     match (a, b) {
         (Ok(x), Ok(y)) => server_eq(x, y),
         (Err(x), Err(y)) => x == y,
         _ => false,
     }
+}
+
+/// The `scale` in a message the decoder is entitled to reject, if it has
+/// one. Mirrors `wire`'s own predicate rather than restating it loosely:
+/// a test that accepted *any* `BadFloat` would pass while the decoder
+/// rejected perfectly good scales.
+fn unusable_scale(message: &ServerMessage) -> Option<f32> {
+    let state = match message {
+        ServerMessage::Welcome(state) | ServerMessage::ThemeChanged(state) => state,
+        _ => return None,
+    };
+    let scale = state.scale;
+    (!scale.is_finite() || scale <= 0.0 || scale > chonk_dock_proto::MAX_SCALE).then_some(scale)
 }
 
 fn server_eq(a: &ServerMessage, b: &ServerMessage) -> bool {
@@ -628,12 +641,26 @@ fn seeded_random_valid_messages_round_trip() {
 
         let message = random_server_message(&mut rng);
         let Ok(bytes) = message.encode() else { continue };
-        // `same_server` rather than `assert_eq!`: see its doc for why a
-        // NaN `scale` makes `==` the wrong comparison here.
-        assert!(
-            same_server(&ServerMessage::decode(&bytes), &Ok(message.clone())),
-            "round trip failed for {message:?} (seed {seed:#x})"
-        );
+        // The one place the two directions are deliberately not
+        // symmetric, so it is asserted rather than assumed: `encode`
+        // carries any `scale` bit pattern, `decode` refuses the ones a
+        // tile cannot be drawn at. Keeping the encoder a pure
+        // serializer is what lets this harness put every float a
+        // hostile peer could actually send in front of the decoder — an
+        // encoder that refused them would quietly delete its own most
+        // interesting corpus. (The alternative, an `EncodeError`
+        // variant, would also be a second breaking change to an enum
+        // that is deliberately exhaustive; see `DecodeError`'s note.)
+        match ServerMessage::decode(&bytes) {
+            Err(DecodeError::BadFloat { field, bits }) => {
+                let scale = unusable_scale(&message).unwrap_or_else(|| panic!("BadFloat for {message:?} which has no float"));
+                assert_eq!((field, bits), ("scale", scale.to_bits()), "rejected the wrong float (seed {seed:#x})");
+            }
+            other => assert!(
+                same_server(&other, &Ok(message.clone())),
+                "round trip failed for {message:?} (seed {seed:#x})"
+            ),
+        }
         check_server(&bytes, "round-trip");
     }
 }
