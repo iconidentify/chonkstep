@@ -37,11 +37,15 @@ restarts that keep your windows open.
   is released, Escape cancels, Shift+Tab steps backward. The panel is
   drawn in the active theme's language - the same chiseled chrome as
   everything else on screen, not a generic overlay.
-- **Theme engine with five built-in themes.** NeXTSTEP Classic, Amber
-  Phosphor, Teal Blueprint, Graphite, and NeXT Lavender. A theme
-  restyles everything at once - window chrome, menus, wallpaper, dock,
-  and the terminal's 16-color palette - and switching from the root
-  menu applies instantly via hot restart, windows intact.
+- **Theme engine with eight built-in themes.** NeXTSTEP Classic, Amber
+  Phosphor, Teal Blueprint, Graphite, NeXT Lavender, Jade Lacquer,
+  Ivory Halftone, and Indigo Filament. A theme restyles everything at
+  once - window chrome, menus, wallpaper, dock, and the terminal's
+  16-color palette - and switching from the root menu applies instantly
+  via hot restart, windows intact. Ivory Halftone is the light one: it
+  keeps the dark focused titlebar (inverting *that* is what stops a
+  light desktop from showing which window has the keyboard) and turns
+  everything the bars sit on to press-cream paper.
 - **Translucent terminals.** Each theme sets a glass opacity for the
   terminals it spawns, composited as true alpha through a session
   compositor. The window manager creates 32-bit ARGB frames so client
@@ -77,7 +81,7 @@ restarts that keep your windows open.
   mirrored up/down history matrix, CPU and memory load, sound volume
   with click-zone control, wifi/ethernet link state, battery/power) -
   miniaturized-window icon tiles with drag-to-place, and
-  five built-in wallpaper artworks. Real workspaces, too: a dock
+  eight built-in wallpaper artworks. Real workspaces, too: a dock
   Clip - the workspace tile, drawn on the same recipes as the rest of
   the dock - sits at the top-left corner: clipped-corner arrows advance
   (growing workspaces on demand) and rewind, Alt+Ctrl+Left/Right
