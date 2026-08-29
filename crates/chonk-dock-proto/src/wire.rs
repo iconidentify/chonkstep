@@ -502,6 +502,14 @@ impl std::error::Error for EncodeError {}
 /// - C0/C1 controls (`char::is_control`): a `\n` in a log line forges a
 ///   second log entry; an ESC in a line that reaches a terminal is a
 ///   terminal escape sequence the dockapp did not earn.
+/// - The Unicode line and paragraph separators, U+2028 and U+2029.
+///   These are *not* `char::is_control` — they are category Zl/Zp — so
+///   dropping the C0 newline without dropping them left the hole
+///   half-closed: both break a line in every text engine that shapes
+///   them, `cosmic-text` included, so either one forges exactly the
+///   second log entry the `\n` rule exists to prevent. Found in Phase 5
+///   hardening by asking what "no line breaks" actually means in
+///   Unicode rather than in ASCII.
 /// - Bidi overrides and isolates (U+202A..U+202E, U+2066..U+2069):
 ///   these reorder *surrounding* text when rendered, so a tile's name
 ///   can rewrite the label of the menu entry next to it.
@@ -515,6 +523,9 @@ pub fn sanitize_text(text: &str, max: usize) -> String {
     let mut out = String::with_capacity(text.len().min(max));
     for c in text.chars() {
         let dangerous = c.is_control()
+            // Zl / Zp: line and paragraph separator. Not `is_control`,
+            // but they break a line just as hard as `\n` does.
+            || matches!(c, '\u{2028}' | '\u{2029}')
             || matches!(c, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
             || matches!(c, '\u{200B}' | '\u{200C}' | '\u{200D}' | '\u{FEFF}');
         if dangerous {
@@ -782,6 +793,33 @@ impl ClientMessage {
                     return Err(DecodeError::FrameGeometry { width, height });
                 }
                 let expected = (width as usize) * (height as usize) * 4;
+                // ...and against MAX_FRAME_BYTES separately, because the
+                // per-edge caps alone do not imply it.
+                //
+                // Found by the Phase 5 fuzz harness
+                // (`tests/codec_fuzz.rs`), reproducer pinned there as
+                // `a_frame_the_encoder_could_not_produce_is_not_accepted_
+                // by_the_decoder`. The edge caps permit 254x258, whose
+                // 262128 pixel bytes plus this message's 16-byte header
+                // come to exactly MAX_MESSAGE_BYTES — so `header`'s cap
+                // let it through, the geometry cap let it through, and
+                // the length matched the declared size. The decoder
+                // returned `Ok` for a frame its own `encode` refuses
+                // with `EncodeError::TooLarge`, because MAX_FRAME_BYTES
+                // is MAX_MESSAGE_BYTES - 64 and only 16 of those 64
+                // bytes are header. A 48-byte window of geometries fell
+                // between the two rules.
+                //
+                // The exposure was small (the shell's
+                // `frame_matches_tile` would reject 254x258 as not
+                // being any tile it allocated), but MAX_FRAME_BYTES is
+                // documented as the ceiling on a Frame's payload and
+                // the shell is entitled to size buffers against it. A
+                // decoder that accepts what its encoder cannot emit is
+                // a decoder with a corner nobody tests.
+                if expected > MAX_FRAME_BYTES {
+                    return Err(DecodeError::FrameGeometry { width, height });
+                }
                 let pixels = r.rest();
                 if pixels.len() != expected {
                     return Err(DecodeError::FrameLengthMismatch { expected, actual: pixels.len() });
@@ -1182,7 +1220,119 @@ mod tests {
         assert!(matches!(too_big.encode(), Err(EncodeError::TooLarge { .. })));
     }
 
+    #[test]
+    fn a_frame_over_the_payload_ceiling_is_refused_even_when_both_its_edges_are_legal() {
+        // The Phase 5 fuzz finding, kept in-crate as well as in
+        // `tests/codec_fuzz.rs` so that `cargo test -p chonk-dock-proto
+        // --lib` alone still covers it.
+        //
+        // 254 and 258 are both inside the per-edge caps (MAX_TILE_PX
+        // and MAX_TILE_PX * MAX_TILE_UNITS), but 254*258*4 = 262128 is
+        // over MAX_FRAME_BYTES while 262128 + 16 is exactly
+        // MAX_MESSAGE_BYTES — so every other bound in the decoder was
+        // satisfied. The encoder always refused this frame; the decoder
+        // used to accept it.
+        let (w, h) = (254u32, 258u32);
+        let payload = (w as usize) * (h as usize) * 4;
+        assert!(payload > MAX_FRAME_BYTES && payload + HEADER_BYTES + 12 == MAX_MESSAGE_BYTES, "the reproducer still sits on the ceiling");
+
+        let mut bytes = start(KIND_FRAME, 12 + payload);
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        bytes.extend_from_slice(&w.to_le_bytes());
+        bytes.extend_from_slice(&h.to_le_bytes());
+        bytes.resize(HEADER_BYTES + 12 + payload, 0xAA);
+        assert_eq!(ClientMessage::decode(&bytes), Err(DecodeError::FrameGeometry { width: w, height: h }));
+
+        // And the property the fix restores, stated directly: the
+        // decoder never accepts what the encoder could not have
+        // produced.
+        assert!(frame(w, h).encode().is_err(), "the encoder always refused this one");
+    }
+
+    #[test]
+    fn every_decodable_frame_fits_the_payload_budget_the_shell_allocates_against() {
+        // The general form of the test above, over the whole geometry
+        // space the per-edge caps permit. Cheap because it never
+        // materializes a payload — it only asks the arithmetic whether
+        // a frame of these dimensions could decode at all.
+        for width in 1..=MAX_TILE_PX {
+            for height in 1..=MAX_TILE_PX * u32::from(MAX_TILE_UNITS) {
+                let payload = (width as usize) * (height as usize) * 4;
+                let decodable = payload <= MAX_FRAME_BYTES && payload + HEADER_BYTES + 12 <= MAX_MESSAGE_BYTES;
+                let encodable = payload <= MAX_FRAME_BYTES;
+                assert_eq!(decodable, encodable, "the two ends disagree about {width}x{height}");
+            }
+        }
+    }
+
     // -- hostile strings -----------------------------------------------
+
+    #[test]
+    fn an_id_can_look_like_a_relative_path_so_the_shell_must_never_join_one_to_a_path() {
+        // Not a defect in this crate, and deliberately not "fixed" here
+        // — it is a written obligation on the consumer, which is what a
+        // test in the crate that defines the charset is for.
+        //
+        // The allowlist permits `.` (`org.example.weather`) and `:`
+        // (`builtin:clock`), which means `..` and `.` are themselves
+        // valid ids. Nothing in this crate turns an id into a path, and
+        // the design's uses of one — a HashMap key, a line in
+        // `$XDG_STATE_HOME/chonkstep/dock-items`, a label in the
+        // per-tile menu — are all safe. But the first time somebody
+        // writes `dockapps_dir.join(id)`, a dockapp that declares
+        // `id = ".."` is reading a directory it was not offered.
+        //
+        // Rejecting them here was considered and not done: the id
+        // charset is wire-visible policy that the shell side is being
+        // written against right now, and the correct place to refuse a
+        // path component is the code that builds a path. If a path join
+        // ever does appear, tighten it *there*, and note that
+        // `format!("{id}.dockapp")` is already safe because the suffix
+        // makes `..` into `...dockapp`.
+        assert!(is_valid_id(".."), "documented, not endorsed");
+        assert!(is_valid_id("."));
+        assert!(!is_valid_id("../etc"), "a separator is still refused, which is what stops traversal proper");
+    }
+
+    // -- floats ----------------------------------------------------------
+
+    #[test]
+    fn a_nan_scale_survives_the_wire_but_makes_theme_state_equality_non_reflexive() {
+        // Found by the Phase 5 fuzz harness, and recorded because it is
+        // a live trap for the *consumer*, not a codec bug: `scale` is a
+        // raw f32 and `ThemeState` derives `PartialEq`, so a message
+        // carrying a NaN scale is not equal to itself. Shell code
+        // shaped like `if next_state != last_sent { push ThemeChanged }`
+        // would push forever.
+        //
+        // The codec's own job is done correctly — the bits survive
+        // exactly, which is what the round-trip below asserts — so this
+        // is a note for whoever compares two `ThemeState`s, and for the
+        // SDK, which currently hands `scale` straight to
+        // `Theme::scaled` and `tile_px` straight to `Pixmap::new`
+        // without asking whether either is a number a tile can be drawn
+        // at. See the Phase 5 report.
+        let state = ThemeState { tile_px: 56, scale: f32::NAN, theme_id: "x".into(), theme_toml: String::new() };
+        let bytes = ServerMessage::Welcome(state.clone()).encode().unwrap();
+        let ServerMessage::Welcome(decoded) = ServerMessage::decode(&bytes).unwrap() else { panic!("kind") };
+        assert_eq!(decoded.scale.to_bits(), f32::NAN.to_bits(), "the bits round trip exactly");
+        assert_ne!(decoded, state, "...and yet the two are not `==`, because NaN != NaN");
+    }
+
+    #[test]
+    fn a_nonsense_scale_is_carried_rather_than_rejected() {
+        // Stated as a test so the decision is visible: the decoder does
+        // not validate `scale`, because the *shell* is the sender and
+        // this crate has no `DecodeError` variant for a float without a
+        // public API change. Every one of these reaches a dockapp as
+        // written.
+        for scale in [0.0f32, -1.0, f32::INFINITY, f32::NEG_INFINITY, 1e30] {
+            let state = ThemeState { tile_px: 56, scale, theme_id: "x".into(), theme_toml: String::new() };
+            let bytes = ServerMessage::ThemeChanged(state).encode().unwrap();
+            let ServerMessage::ThemeChanged(decoded) = ServerMessage::decode(&bytes).unwrap() else { panic!("kind") };
+            assert_eq!(decoded.scale.to_bits(), scale.to_bits(), "carried verbatim; the SDK is the one that must check");
+        }
+    }
 
     #[test]
     fn an_over_long_id_is_rejected_on_decode() {
@@ -1296,6 +1446,27 @@ mod tests {
         let out = sanitize_text(&wide, 5);
         assert_eq!(out, "üü", "4 bytes fit, the fifth char would be 6");
         assert!(std::str::from_utf8(out.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn unicode_line_separators_are_dropped_along_with_the_ascii_one() {
+        // A Phase 5 finding. `char::is_control` covers C0 and C1 but
+        // not U+2028 (LINE SEPARATOR, category Zl) or U+2029
+        // (PARAGRAPH SEPARATOR, Zp), so a `Log` carrying one used to
+        // arrive with a line break intact — forging exactly the second
+        // journal entry that dropping `\n` exists to prevent. "No
+        // control characters" is an ASCII answer to a Unicode question.
+        let hostile = "battery ok\u{2028}ERROR: disk failing\u{2029}second forged line";
+        let clean = sanitize_text(hostile, MAX_LOG_BYTES);
+        assert!(!clean.contains('\u{2028}') && !clean.contains('\u{2029}'), "{clean:?}");
+        assert_eq!(clean, "battery okERROR: disk failingsecond forged line", "the text closes up behind them");
+
+        // ...and end to end through the codec, which is where it
+        // matters: by the time a `ClientMessage::Log` exists it is
+        // documented as safe to shape and to print.
+        let encoded = ClientMessage::Log { level: LogLevel::Info, text: hostile.to_string() }.encode().unwrap();
+        let ClientMessage::Log { text, .. } = ClientMessage::decode(&encoded).unwrap() else { panic!() };
+        assert!(!text.contains('\u{2028}') && !text.contains('\u{2029}'));
     }
 
     #[test]

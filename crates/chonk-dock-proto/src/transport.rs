@@ -224,12 +224,34 @@ pub fn mint_token() -> io::Result<[u8; TOKEN_BYTES]> {
     if filled == token.len() as libc::ssize_t {
         return Ok(token);
     }
-    let bytes = std::fs::read("/dev/urandom")?;
-    if bytes.len() < TOKEN_BYTES {
-        return Err(io::Error::other("could not read 16 random bytes"));
-    }
-    token.copy_from_slice(&bytes[..TOKEN_BYTES]);
+    read_urandom(&mut token)?;
     Ok(token)
+}
+
+/// Reads exactly [`TOKEN_BYTES`] from `/dev/urandom`.
+///
+/// **`read_exact`, never `fs::read`.** This was a hang, found in Phase
+/// 5 hardening and measured rather than reasoned about: `/dev/urandom`
+/// is a character device that never reaches EOF, and `std::fs::read`
+/// calls `read_to_end`, which loops until a read returns zero. It
+/// therefore never returns — it allocates until the OOM killer picks a
+/// winner. A five-second probe confirmed the thread was still inside it
+/// with the buffer growing.
+///
+/// The path is narrow but it is exactly the path the fallback exists
+/// for: `getrandom(2)` on a 16-byte buffer with `flags = 0` effectively
+/// always succeeds on a running system, so this code only executes when
+/// the syscall is *unavailable* — a seccomp policy, an old kernel, a
+/// container profile. In other words, the fallback written to handle a
+/// sandbox would have wedged the shell's startup inside that sandbox,
+/// which is the least debuggable place it could possibly have happened.
+///
+/// Separate function so the fix is testable: see
+/// `the_urandom_fallback_reads_sixteen_bytes_and_returns`.
+fn read_urandom(token: &mut [u8; TOKEN_BYTES]) -> io::Result<()> {
+    use std::io::Read;
+    let mut file = std::fs::File::open("/dev/urandom")?;
+    file.read_exact(token)
 }
 
 pub fn token_to_hex(token: &[u8; TOKEN_BYTES]) -> String {
@@ -292,19 +314,44 @@ pub struct Seqpacket {
 impl Seqpacket {
     /// Connects to a shell's dock socket. Used by the SDK.
     ///
-    /// Connects in blocking mode and switches to non-blocking after:
-    /// an `AF_UNIX` `connect()` to a listening socket completes without
-    /// a round trip, so there is no latency to save, and it avoids the
-    /// `EINPROGRESS` dance for no benefit.
+    /// `SOCK_NONBLOCK` at creation, so the `connect()` itself cannot
+    /// block. This was previously a *blocking* connect, on the stated
+    /// reasoning that "an `AF_UNIX` `connect()` to a listening socket
+    /// completes without a round trip, so there is no latency to save".
+    /// That reasoning is true right up until the listener's backlog is
+    /// full, and then it is wrong in the worst available way: a
+    /// blocking `AF_UNIX` `connect()` to a socket whose backlog is full
+    /// **waits, indefinitely**, for the owner to call `accept()`
+    /// (`unix_wait_for_peer` in the kernel). Measured in Phase 5
+    /// hardening, not inferred: a probe that filled a `listen(1)`
+    /// backlog and then made one blocking connect was still inside it
+    /// three seconds later, with no timeout in sight.
+    ///
+    /// Two callers made that reachable. The SDK's, where the cost is
+    /// one dockapp that never starts — bad but contained. And
+    /// [`SeqpacketListener::bind`]'s own stale-socket probe, where the
+    /// cost is the *shell* hanging at startup because some other
+    /// process of this user is squatting the dock path with a backlog
+    /// it never drains. A compositor that will not start is a worse
+    /// outcome than one that stutters, and this whole crate exists on
+    /// the principle that an unbounded wait is never the answer.
+    ///
+    /// A full backlog now surfaces as `ErrorKind::WouldBlock`. There is
+    /// no `EINPROGRESS` case to handle: `AF_UNIX` connects are not
+    /// asynchronous, so the call either completes or reports `EAGAIN`.
+    /// The SDK's reconnect path already retries with backoff, and its
+    /// first connect propagates the error to a supervisor that will
+    /// relaunch — both strictly better than waiting forever on a peer
+    /// that may never accept.
     pub fn connect(path: &Path) -> io::Result<Self> {
         let (addr, len) = sockaddr_un(path)?;
-        let raw = cvt(unsafe { libc::socket(libc::AF_UNIX, libc::SOCK_SEQPACKET | libc::SOCK_CLOEXEC, 0) })?;
+        let raw = cvt(unsafe {
+            libc::socket(libc::AF_UNIX, libc::SOCK_SEQPACKET | libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK, 0)
+        })?;
         let fd = unsafe { OwnedFd::from_raw_fd(raw) };
         widen_socket_buffers(fd.as_raw_fd());
         cvt(unsafe { libc::connect(fd.as_raw_fd(), (&addr as *const libc::sockaddr_un).cast(), len) })?;
-        let socket = Self { fd };
-        socket.set_nonblocking(true)?;
-        Ok(socket)
+        Ok(Self { fd })
     }
 
     /// Adopts an already-connected fd (what [`SeqpacketListener::accept`]
@@ -515,6 +562,23 @@ impl SeqpacketListener {
             Ok(_) => Err(io::Error::new(
                 io::ErrorKind::AddrInUse,
                 format!("{} is already accepting connections; another chonkstep session owns this display", path.display()),
+            )),
+            // `EAGAIN` from the now-non-blocking probe means the socket
+            // *is* listening and its backlog is momentarily full — a
+            // live owner, not debris. This case has to be named
+            // explicitly: falling into the `Err` arm below would unlink
+            // a socket somebody is still serving, which is precisely
+            // the "second shell silently steals the first one's
+            // dockapps" outcome the probe exists to prevent. (Before
+            // `connect` was made non-blocking this case could not
+            // return at all; it hung instead, which is why the arm is
+            // new and not merely rearranged.)
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => Err(io::Error::new(
+                io::ErrorKind::AddrInUse,
+                format!(
+                    "{} is listening but its backlog is full; something owns this display and is not accepting",
+                    path.display()
+                ),
             )),
             Err(_) => std::fs::remove_file(path),
         }
@@ -975,6 +1039,116 @@ mod tests {
         for bad in ["", "zz", &"0".repeat(31), &"0".repeat(33), "gg00000000000000000000000000000000"] {
             assert_eq!(token_from_hex(bad), None, "{bad:?} should not parse");
         }
+    }
+
+    #[test]
+    fn the_urandom_fallback_reads_sixteen_bytes_and_returns() {
+        // The regression test for a hang, not for a wrong value.
+        // `mint_token`'s fallback used to be `std::fs::read
+        // ("/dev/urandom")`, and `/dev/urandom` is a character device
+        // that never reaches EOF: `read_to_end` loops until a read
+        // returns zero, so the call never returned and the buffer grew
+        // until the OOM killer intervened. Measured, not reasoned
+        // about — a probe thread was still inside it after five
+        // seconds.
+        //
+        // Run on a worker thread with a bounded wait for the same
+        // reason every other property in this crate is: a regression
+        // here does not fail, it hangs, and a test that hangs on
+        // failure is a test somebody eventually disables.
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let mut token = [0u8; TOKEN_BYTES];
+            let result = read_urandom(&mut token);
+            let _ = tx.send(result.map(|()| token));
+        });
+        let token = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("read_urandom did not return; /dev/urandom has no EOF and must be read with read_exact")
+            .expect("/dev/urandom should be readable");
+        assert_ne!(token, [0u8; TOKEN_BYTES], "sixteen zero bytes is not a credential");
+    }
+
+    #[test]
+    fn probing_a_socket_whose_backlog_is_full_does_not_hang_and_does_not_delete_it() {
+        // A blocking `AF_UNIX` connect to a listener whose backlog is
+        // full waits, indefinitely, for the owner to call `accept()`.
+        // `SeqpacketListener::bind` probes an existing socket with
+        // exactly such a connect to decide whether it is debris — so
+        // before `Seqpacket::connect` was made non-blocking, any
+        // process of this user could wedge the *compositor's startup*
+        // permanently by squatting the dock path with a backlog it
+        // never drained.
+        //
+        // Two things are asserted: the probe returns, and it returns
+        // `AddrInUse` rather than unlinking a socket someone is still
+        // serving. The second matters as much as the first — the
+        // failure mode of "treat EAGAIN as debris" is a second shell
+        // silently stealing the first one's dockapps.
+        let scratch = Scratch::new();
+        let path = scratch.socket();
+        let owner = SeqpacketListener::bind(&path).expect("bind");
+
+        // Fill the backlog. Held in a Vec so none of them is closed and
+        // frees a slot underneath the probe.
+        let mut pending = Vec::new();
+        for _ in 0..(BACKLOG + 8) {
+            match Seqpacket::connect(&path) {
+                Ok(socket) => pending.push(socket),
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
+                Err(e) => panic!("filling the backlog: {e}"),
+            }
+        }
+        assert!(pending.len() >= BACKLOG as usize, "the backlog should have accepted at least {BACKLOG} connections");
+
+        let probe_path = path.clone();
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(SeqpacketListener::bind(&probe_path).map(|_| ()));
+        });
+        let outcome = rx.recv_timeout(Duration::from_secs(5)).expect(
+            "bind() blocked probing a socket whose backlog is full; a squatting process would wedge the              compositor's startup forever",
+        );
+        let err = outcome.expect_err("a live owner must not be evicted");
+        assert_eq!(err.kind(), io::ErrorKind::AddrInUse);
+        assert!(path.exists(), "the probe must not unlink a socket that is still being served");
+        assert_eq!(owner.path(), path);
+    }
+
+    #[test]
+    fn connect_reports_a_full_backlog_instead_of_waiting_for_it() {
+        // The same property from the client's side, which is where the
+        // SDK lives. A dockapp that cannot get in should be told so and
+        // retry (the SDK's reconnect path backs off), never park.
+        //
+        // On a worker thread with a bounded wait, like every other
+        // non-blocking assertion in this crate: a regression makes
+        // `connect` never return, so measured inline this would hang
+        // the suite instead of failing it.
+        let scratch = Scratch::new();
+        let path = scratch.socket();
+        let _listener = SeqpacketListener::bind(&path).expect("bind");
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            // The accepted sockets are held so that none of them closes
+            // and frees a backlog slot underneath the next connect.
+            let mut pending = Vec::new();
+            let outcome = loop {
+                match Seqpacket::connect(&path) {
+                    Ok(socket) => pending.push(socket),
+                    Err(e) => break Ok(e.kind()),
+                }
+                if pending.len() >= 1_000 {
+                    break Err("the backlog appears to be unbounded");
+                }
+            };
+            let _ = tx.send(outcome);
+        });
+        let kind = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("connect() blocked on a full backlog instead of reporting it")
+            .expect("the backlog should be bounded");
+        assert_eq!(kind, io::ErrorKind::WouldBlock, "a full backlog is EAGAIN, not a wait");
     }
 
     #[test]
