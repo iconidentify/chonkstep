@@ -10,10 +10,18 @@
 # bad line (a typo'd key spec, an unknown action name) is skipped while
 # every other line still applies.
 #
-# Changes apply on the next restart of the window manager. A live
-# session hot-reloads without logging out via scripts/restart.sh (or by
-# binding the "restart" action to a key -- see below); open windows
-# survive the restart.
+# Changes apply to a live session without restarting anything: run
+# scripts/reload.sh, or bind the "reload" action to a key (see below).
+# A reload re-reads this file and applies all of it -- theme, scale,
+# focus, placement, edge resistance, terminal font size, and these
+# bindings -- keeping every window, client connection and dockapp.
+#
+# scripts/restart.sh still exists and is a different thing: it re-execs
+# the on-disk binary, which is how you pick up a NEW BUILD. Use it after
+# rebuilding, not after editing this file. On the X11 session that costs
+# nothing visible (windows survive via the SaveSet); on the Wayland
+# session it costs you every client, because Wayland clients die with
+# the socket they were connected to.
 
 # Focus policy: false (the default) is click-to-focus, true is
 # focus-follows-mouse. The CHONKSTEP_FOCUS_FOLLOWS_MOUSE environment
@@ -27,6 +35,12 @@
 # wins over this. Defaults to 1.0 when neither is set. Must be a finite
 # number greater than zero; an invalid value falls through to the next
 # source rather than breaking startup.
+#
+# Applied by a reload, live. Two things do not follow, both because
+# they are read by other processes at the moment those processes start:
+# an application already running keeps the font size and the cursor
+# size it was launched with. Anything launched after the reload gets
+# the new scale.
 #scale = 2.0
 
 # Theme to start in. One of the built-in theme ids:
@@ -41,7 +55,10 @@
 # A theme picked from the root menu's Themes submenu is persisted and
 # wins over this value on every later startup -- the menu is the more
 # recent gesture; this line is only the starting point. An unknown id
-# is warned about and ignored.
+# is warned about and ignored. Picking one from the menu applies it
+# immediately, in place: the chrome, the dock, the menus, the wallpaper
+# and every dockapp restyle without the session restarting. Terminals
+# already open keep the palette they were launched with.
 #theme = "nextstep-classic"
 
 # Where a newly mapped window goes when the application itself asked
@@ -97,7 +114,11 @@
 # Actions (kebab-case, a closed set):
 #   spawn-terminal, close, toggle-maximize, toggle-shade, miniaturize,
 #   toggle-fullscreen, workspace-next, workspace-prev,
-#   workspace-carry-next, workspace-carry-prev, restart, none
+#   workspace-carry-next, workspace-carry-prev, reload, restart, none
+#
+# "reload" re-reads this file and applies it in place; "restart"
+# re-execs the on-disk binary to pick up a new build. See the note at
+# the top of this file for which one you want.
 #
 # Window-targeted actions (close, toggle-maximize, toggle-shade,
 # miniaturize, toggle-fullscreen) act on the focused window and do
@@ -119,9 +140,11 @@
 "alt+shift+right" = "workspace-carry-next"  # carry the focused window along
 "alt+shift+left" = "workspace-carry-prev"   # carry the focused window back
 
-# The restart action is unbound by default; give it a key to hot-reload
-# this file (and a freshly built binary) without touching a terminal:
-#"super+r" = "restart"
+# Both are unbound by default. Give "reload" a key and this file
+# applies itself without you touching a terminal; give "restart" one
+# for after a rebuild:
+#"super+r" = "reload"
+#"super+shift+r" = "restart"
 
 # Unbinding: "none" makes a combo do nothing, without re-listing the
 # rest of the defaults. For example, to free alt+shift+q for some other

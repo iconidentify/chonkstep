@@ -118,6 +118,21 @@ pub trait Backend {
     fn take_screen_resize(&mut self) -> Option<Size> {
         None
     }
+    /// The UI scale changed: rebuild whatever this backend sized from
+    /// the old one.
+    ///
+    /// Defaulted to a no-op because most backends size nothing from the
+    /// UI scale — everything they draw arrives as an already-rasterized
+    /// buffer. The exception is server-side resources a backend builds
+    /// for itself: the X11 backend rasterizes its own pointer cursors
+    /// at the scale it was connected with, and those are the only
+    /// pixels in the session the theme engine does not produce.
+    ///
+    /// `wm-core` calls this and nothing else on a scale change; every
+    /// other consequence reaches the backend as ordinary paint traffic.
+    fn set_ui_scale(&mut self, scale: f32) {
+        let _ = scale;
+    }
     /// The current screen/output size.
     fn screen_size(&self) -> Size;
     /// Non-blocking. The event-loop driver calls this in a loop on fd

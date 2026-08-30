@@ -241,6 +241,28 @@ impl Backend for WaylandBackend {
         self.pending_resize.take()
     }
 
+    fn set_ui_scale(&mut self, scale: f32) {
+        // Nothing in this ledger is sized from the UI scale: every
+        // pixel it holds arrived pre-rasterized from the theme engine,
+        // which has already been rebuilt at the new scale by the time
+        // this is called. The compositor's *own* pointer is the
+        // exception, and it is not reachable from here — it hangs off
+        // `Compositor`, and a `Backend` verb runs inside the
+        // `WindowManager`'s `&mut self`, which is precisely the borrow
+        // that cannot also hold the compositor. So this records the
+        // request and `Compositor::dispatch_pending` acts on it, the
+        // same detour `set_input_focus` takes through `pending_focus`.
+        //
+        // Recording it is also what makes the rebuild unmissable: this
+        // is the one thing every caller of
+        // `Shell::apply_session_state` reaches, whether the scale
+        // changed because the compositor loop saw a `reload` marker or
+        // because a bound `Action::Reload` ran inside the shell and
+        // never returned through that loop at all. See
+        // `WaylandBackend::pending_cursor_scale`.
+        self.pending_cursor_scale = Some(scale);
+    }
+
     fn screen_size(&self) -> Size {
         // The union bounding box of every output, which is the extent
         // of the one coordinate space this backend stores rects in.

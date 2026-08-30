@@ -54,6 +54,21 @@ pub struct FakeBackend {
     pub close_requests: HashSet<FakeWindowId>,
     /// Monotonic id source for `create_shell_surface`.
     pub next_shell_id: u32,
+    /// Where each shell surface currently is, as the shell last told
+    /// this backend — written by both `create_shell_surface` and
+    /// `configure_shell_surface`, so it always holds the live answer.
+    ///
+    /// Recorded because a shell surface that is *repainted* but never
+    /// *reconfigured* is a whole class of bug this double could not see
+    /// before: the dock and the launcher strip are sized from the UI
+    /// scale, and a rescale that redrew them at the new size without
+    /// moving the surface underneath would leave the picture right and
+    /// every click landing somewhere else. That is the same asymmetry
+    /// the Wayland backend documents on `set_frame_geometry` ("a caller
+    /// that changes a frame's size without painting a buffer to match
+    /// has moved the clickable rect out from under an unchanged
+    /// picture"), read from the other end.
+    pub shell_geometries: HashMap<u32, Rect>,
     /// Scroll events waiting for `Backend::take_shell_scroll`, oldest
     /// first. The fake has no input hardware, so tests stage them with
     /// `queue_shell_scroll` — the same shape a real backend's input
@@ -197,15 +212,20 @@ impl Backend for FakeBackend {
     type FrameId = FakeFrameId;
     type ShellId = u32;
 
-    fn create_shell_surface(&mut self, _geometry: wm_theme_api::Rect, _background: (u8, u8, u8), _above: bool) -> Option<Self::ShellId> {
+    fn create_shell_surface(&mut self, geometry: wm_theme_api::Rect, _background: (u8, u8, u8), _above: bool) -> Option<Self::ShellId> {
         self.next_shell_id += 1;
+        self.shell_geometries.insert(self.next_shell_id, geometry);
         Some(self.next_shell_id)
     }
     fn map_shell_surface(&mut self, _id: Self::ShellId) {}
     fn unmap_shell_surface(&mut self, _id: Self::ShellId) {}
-    fn destroy_shell_surface(&mut self, _id: Self::ShellId) {}
+    fn destroy_shell_surface(&mut self, id: Self::ShellId) {
+        self.shell_geometries.remove(&id);
+    }
     fn raise_shell_surface(&mut self, _id: Self::ShellId) {}
-    fn configure_shell_surface(&mut self, _id: Self::ShellId, _geometry: wm_theme_api::Rect) {}
+    fn configure_shell_surface(&mut self, id: Self::ShellId, geometry: wm_theme_api::Rect) {
+        self.shell_geometries.insert(id, geometry);
+    }
     fn paint_shell_surface(&mut self, _id: Self::ShellId, _buffer: &DecorationBuffer) {}
     fn take_shell_scroll(&mut self) -> Option<(Self::ShellId, Point, ScrollDelta)> {
         self.queued_shell_scrolls.pop_front()

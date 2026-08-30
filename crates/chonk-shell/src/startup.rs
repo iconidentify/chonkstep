@@ -19,9 +19,76 @@
 //! stays unit-testable without `set_var`, which tests running in
 //! parallel threads of one process cannot use safely.
 
+use wm_config::{Action, Config};
+use wm_core::{FocusPolicy, KeyCombo, PlacementPolicy};
 use wm_theme::Theme;
 
 use crate::theme_select;
+
+/// Everything about a running session that a user can change without
+/// restarting it: the look (theme and UI scale) and the policy the
+/// config file sets.
+///
+/// This type is why the module's doc comment above is written in the
+/// present tense rather than about startup alone. Those resolvers began
+/// as "the decisions a session makes before it draws anything"; they
+/// are now the decisions a session makes *whenever* it is asked to,
+/// because a theme pick and a config reload re-make exactly the same
+/// set. Bundling them means a live change and a fresh start resolve
+/// through one code path with one precedence order — the alternative,
+/// which this repository has already paid for once, is two paths that
+/// agree until the day someone edits one of them.
+///
+/// The theme is kept at 1x with the scale beside it rather than
+/// pre-multiplied, because scaling is not reversible: `Theme::scaled`
+/// rounds every metric to whole pixels, so a theme scaled to 2 and back
+/// to 1 is not the theme it started as. Holding the unscaled original
+/// is what lets the scale change twice without the chrome drifting.
+#[derive(Clone, Debug)]
+pub struct SessionState {
+    /// The chosen theme at 1x — the thing `scale` multiplies.
+    pub base_theme: Theme,
+    /// UI scale factor; always finite and positive (see
+    /// [`resolve_scale`]).
+    pub scale: f32,
+    pub focus: FocusPolicy,
+    pub placement: PlacementPolicy,
+    pub edge_resistance: u32,
+    pub terminal_font_px: f32,
+    pub keybindings: Vec<(KeyCombo, Action)>,
+}
+
+impl SessionState {
+    /// Resolves a whole session's worth of state from a freshly loaded
+    /// config, applying every precedence rule in this module: the
+    /// environment over the config for scale and focus, the persisted
+    /// theme-menu choice over the config for the theme.
+    ///
+    /// Called at startup and again on every reload, which is the point
+    /// — a reload that resolved by different rules than the startup it
+    /// replaces would make "restart to be sure" true again.
+    pub fn resolve(config: &Config) -> Self {
+        Self {
+            base_theme: resolve_theme(config.theme.as_deref()),
+            scale: read_scale_factor(config.scale),
+            focus: if read_focus_follows_mouse(config.focus_follows_mouse) {
+                FocusPolicy::FocusFollowsMouse
+            } else {
+                FocusPolicy::ClickToFocus
+            },
+            placement: config.placement,
+            edge_resistance: config.edge_resistance,
+            terminal_font_px: config.terminal_font_px,
+            keybindings: config.keybindings.clone(),
+        }
+    }
+
+    /// The theme every surface is actually drawn from: [`Self::base_theme`]
+    /// at [`Self::scale`].
+    pub fn theme(&self) -> Theme {
+        self.base_theme.scaled(self.scale)
+    }
+}
 
 /// UI scale. Precedence: `CHONKSTEP_SCALE` beats the config file's
 /// `scale`, which beats 1.0 (no scaling). The environment stays on top
@@ -118,6 +185,82 @@ pub fn persisted_theme_choice_exists() -> bool {
         .is_some_and(|id| wm_theme::default_theme::theme_by_id(&id).is_some())
 }
 
+/// Where this session keeps the small state files it writes for
+/// itself: the theme-menu choice, the dock order, and the two
+/// request markers below.
+fn state_dir() -> std::path::PathBuf {
+    if let Some(root) = std::env::var_os("XDG_STATE_HOME") {
+        return std::path::PathBuf::from(root).join("chonkstep");
+    }
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from).unwrap_or_else(|| ".".into());
+    home.join(".local/state/chonkstep")
+}
+
+/// Whether something has asked this session to re-exec its on-disk
+/// binary since the last call (`scripts/restart.sh` writes the marker).
+///
+/// A destructive read: the marker is consumed by observing it, so a
+/// request is honored exactly once. Lives here, shared, because both
+/// binaries poll it once per wakeup and had grown their own copy of
+/// this function — one of which had already drifted to inlining the
+/// path the other had factored out.
+pub fn restart_requested() -> bool {
+    std::fs::remove_file(state_dir().join("restart")).is_ok()
+}
+
+/// Whether something has asked this session to re-read its config file
+/// and apply it in place since the last call (`scripts/reload.sh`).
+///
+/// The cheaper half of the pair, and the one to reach for: a reload
+/// keeps every window, every client connection and every dockapp,
+/// where a restart on the Wayland session keeps only the compositor
+/// and its dockapps. Polled rather than watched with inotify — the
+/// same argument the dockapp theme broadcast makes for polling, plus
+/// a much smaller one: the session already wakes at 16ms to do
+/// housekeeping, so a poll costs a `unlink` syscall on a path that is
+/// almost never there.
+pub fn reload_requested() -> bool {
+    std::fs::remove_file(state_dir().join("reload")).is_ok()
+}
+
+/// Whether `XCURSOR_SIZE` was the user's own when this session started,
+/// rather than something [`ensure_xcursor_size`] put there.
+///
+/// Recorded because after startup the two are indistinguishable — the
+/// variable is set either way — and they must be treated differently:
+/// a value the user pinned is a preference this desktop has no business
+/// overriding at any scale, while one this session derived is stale the
+/// moment the scale changes. See [`xcursor_size_env`].
+static XCURSOR_SIZE_WAS_PRESET: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+/// The Xcursor size this desktop implies at `scale`. 24px is Xcursor's
+/// own conventional 1x base size.
+fn xcursor_size_for(scale: f32) -> u32 {
+    (24.0 * scale).round().max(1.0) as u32
+}
+
+/// The `XCURSOR_SIZE` to hand a freshly launched application, or `None`
+/// when the user pinned one of their own.
+///
+/// This exists because [`ensure_xcursor_size`] cannot be re-run. It
+/// writes the *process* environment, and its safety argument is that it
+/// happens before any other thread exists — which stops being true the
+/// instant the session is up, and a live scale change happens well
+/// after that. So the scale that reaches an application is put in that
+/// application's own environment at spawn time instead, where no shared
+/// state is mutated and no thread can race.
+///
+/// The consequence worth knowing: an app launched after a live rescale
+/// gets a correctly sized cursor, and an app that was already running
+/// does not. Xcursor reads this once, at the point a client sets up its
+/// cursor theme, and there is no protocol for telling it again.
+pub fn xcursor_size_env(scale: f32) -> Option<(String, String)> {
+    if XCURSOR_SIZE_WAS_PRESET.get().copied().unwrap_or(false) {
+        return None;
+    }
+    Some(("XCURSOR_SIZE".to_string(), xcursor_size_for(scale).to_string()))
+}
+
 /// Sets `XCURSOR_SIZE` on this process (inherited by every app the
 /// session spawns) unless it is already set. Both sessions scale their
 /// own chrome and their own pointer, but an application that draws its
@@ -127,10 +270,14 @@ pub fn persisted_theme_choice_exists() -> bool {
 /// out of proportion the instant the pointer crosses onto its content.
 /// 24px is Xcursor's own conventional 1x base size.
 pub fn ensure_xcursor_size(scale: f32) {
-    if std::env::var_os("XCURSOR_SIZE").is_some() {
+    let preset = std::env::var_os("XCURSOR_SIZE").is_some();
+    // Recorded before the early return, so the answer is available
+    // whichever branch is taken — see `XCURSOR_SIZE_WAS_PRESET`.
+    let _ = XCURSOR_SIZE_WAS_PRESET.set(preset);
+    if preset {
         return;
     }
-    let size = (24.0 * scale).round().max(1.0) as u32;
+    let size = xcursor_size_for(scale);
     // SAFETY: called once at the very start of a session's startup,
     // before any other thread exists, so no concurrent env access is
     // possible.
@@ -142,6 +289,37 @@ pub fn ensure_xcursor_size(scale: f32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_xcursor_size_tracks_the_scale_from_the_conventional_base() {
+        assert_eq!(xcursor_size_for(1.0), 24);
+        assert_eq!(xcursor_size_for(2.0), 48);
+        assert_eq!(xcursor_size_for(1.5), 36);
+        // Floored, for the same reason the tile edge is: a hand-edited
+        // `scale = 0.001` must not produce a zero-pixel cursor.
+        assert_eq!(xcursor_size_for(0.001), 1);
+    }
+
+    #[test]
+    fn a_session_state_scales_a_theme_it_keeps_at_1x() {
+        let base = wm_theme::default_theme::nextstep_classic();
+        let state = SessionState {
+            base_theme: base.clone(),
+            scale: 2.0,
+            focus: FocusPolicy::ClickToFocus,
+            placement: PlacementPolicy::Smart,
+            edge_resistance: 10,
+            terminal_font_px: 20.0,
+            keybindings: Vec::new(),
+        };
+        assert_eq!(state.theme(), base.scaled(2.0));
+        // The load-bearing half: the state still holds the *unscaled*
+        // theme afterwards. `Theme::scaled` rounds every metric to whole
+        // pixels and is not reversible, so a session that kept only the
+        // scaled theme would drift a little further from the original
+        // every time the scale changed.
+        assert_eq!(state.base_theme, base);
+    }
 
     #[test]
     fn scale_defaults_to_one_with_neither_source() {

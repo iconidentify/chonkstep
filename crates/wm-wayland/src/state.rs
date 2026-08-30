@@ -66,14 +66,15 @@ use smithay::wayland::xwayland_shell::XWaylandShellState;
 use smithay::xwayland::{X11Surface, X11Wm, XWayland, XWaylandEvent};
 
 use wm_core::{
-    Backend, BackendEvent, FocusPolicy, KeyCombo, MonitorInfo, MouseButton, ScrollDelta,
-    WindowManager, WindowType,
+    Backend, BackendEvent, KeyCombo, MonitorInfo, MouseButton, ScrollDelta, WindowManager,
+    WindowType,
 };
-use wm_theme::{RasterThemeEngine, Theme};
+use wm_theme::{FontState, RasterThemeEngine};
 use wm_theme_api::{DecorationBuffer, Point, Rect, Size};
 
 use chonk_shell::dockapp::Farewell;
 use chonk_shell::shell::{Shell, ShellOutcome};
+use chonk_shell::startup::{ensure_xcursor_size, reload_requested, restart_requested, SessionState};
 
 /// A managed client window (an xdg toplevel or an XWayland surface) in
 /// the id space `wm-core` reasons about. Plain integers rather than
@@ -324,6 +325,18 @@ pub struct WaylandBackend {
     /// the same each-loop cadence X11 focus changes effectively land
     /// on.
     pub(crate) pending_focus: Option<WlWindowId>,
+    /// A UI scale change `Shell::apply_session_state` has announced,
+    /// waiting for [`Compositor::dispatch_pending`] to rebuild the
+    /// compositor's own pointer from it.
+    ///
+    /// Same detour, and the same reason for it, as
+    /// [`WaylandBackend::pending_focus`]: the thing that has to change
+    /// hangs off [`Compositor`], and a `Backend` verb runs inside the
+    /// `WindowManager`'s `&mut self` and can never reach it. What is
+    /// particular to this one is *why* the announcement is worth
+    /// recording at all rather than acting on where the reload was
+    /// noticed — see the drain in `dispatch_pending`.
+    pub(crate) pending_cursor_scale: Option<f32>,
 }
 
 impl WaylandBackend {
@@ -348,6 +361,7 @@ impl WaylandBackend {
             damage: true,
             display_handle,
             pending_focus: None,
+            pending_cursor_scale: None,
         }
     }
 
@@ -577,10 +591,6 @@ pub struct Compositor {
     /// inherit one from.
     pub(crate) default_cursor: MemoryRenderBuffer,
 
-    /// The active theme — kept for the pieces the loop owner still
-    /// needs after `Shell::new` (mirrors the X11 binary keeping its
-    /// copy for engine construction and per-app rules).
-    pub theme: Theme,
     /// Monotonic session clock for frame-callback timestamps.
     pub start_time: Instant,
     /// Cleared to exit the dispatch loop (root-menu Exit, host window
@@ -714,6 +724,30 @@ impl Compositor {
         // same state the desktop just settled into, before the damage
         // test so a capture request can mark the frame it needs.
         crate::protocols::refresh(self);
+
+        // The UI scale moved: rebuild the built-in pointer, the one
+        // thing this session draws that is sized from that scale and
+        // does not come out of the theme engine (see
+        // `build_default_cursor`). Damage because the arrow that is
+        // already on screen is the wrong size until it is redrawn, and
+        // a pointer sitting still over an idle desktop produces none of
+        // its own.
+        //
+        // Drained here, every pass, rather than rebuilt next to
+        // wherever a reload was noticed. A scale change reaches the
+        // session from at least two directions — the `reload` marker
+        // `run`'s loop polls, and an `Action::Reload` keybinding that
+        // `Shell::run_action` applies without ever passing through that
+        // poll — and both of them end in
+        // `Shell::apply_session_state`, which tells the backend and
+        // nothing else. So the announcement is the only point both
+        // paths cross, and a rebuild written into either one of them is
+        // a pointer that silently stays the wrong size on the other.
+        if let Some(scale) = self.wm.backend_mut().pending_cursor_scale.take() {
+            tracing::info!(scale, "rebuilding the compositor's own pointer for the new UI scale");
+            self.default_cursor = build_default_cursor(scale);
+            self.wm.backend_mut().mark_damaged();
+        }
 
         // Damage means the scene changed; `redraw_pending` means a
         // change already accounted for has not reached every screen yet
@@ -1161,23 +1195,36 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
     std::env::set_var("WAYLAND_DISPLAY", &socket_name);
     tracing::info!(socket = ?socket_name, "wayland socket listening");
 
-    // Scale and theme. Scale comes from the config alone (the
-    // CHONKSTEP_SCALE env override is an X11-session concern — its
-    // consumers are the nested-Xephyr dev scripts); theme precedence
-    // is identical to the X11 binary: persisted theme-menu choice,
-    // else the config's theme, else the flagship.
     // Session policy comes from `chonk_shell::startup`, shared with the
     // X11 binary: same env-over-config precedence, same theme
     // resolution, same cursor sizing. A compositor that resolved these
     // its own way is exactly how the two sessions would drift.
-    let scale = chonk_shell::startup::read_scale_factor(config.scale);
+    //
+    // Resolved as one `SessionState` rather than value by value, and by
+    // the same call the reload below makes, so a session that has been
+    // reloaded a dozen times is indistinguishable from one that started
+    // where it now stands.
+    let state = SessionState::resolve(&config);
+    // Kept separately because `state` is handed off to the applier
+    // below, and the compositor's own pointer is sized from the scale
+    // here (and only here — every later change to it arrives through
+    // `pending_cursor_scale`).
+    let scale = state.scale;
     tracing::info!(scale, "UI scale (config `scale`; CHONKSTEP_SCALE overrides)");
     // XWayland clients draw their own Xcursor pointers and have no way
     // to learn this session's scale otherwise.
-    chonk_shell::startup::ensure_xcursor_size(scale);
-    let theme = chonk_shell::startup::resolve_theme(config.theme.as_deref()).scaled(scale);
+    ensure_xcursor_size(scale);
+    let theme = state.theme();
     tracing::info!(theme = %theme.id, "theme loaded");
-    let engine = RasterThemeEngine::new(theme.clone());
+    // The font database is built out here rather than inside the engine
+    // so the shell can hold on to it and build this engine's
+    // replacements around the same one on every later restyle. A
+    // restyle must restyle and not re-scan fontconfig — doubly so on
+    // this stack, where the process that would block on that scan is
+    // the display server every client is waiting on. See
+    // `wm_theme::FontState`.
+    let fonts = FontState::new();
+    let engine = RasterThemeEngine::with_fonts(theme, fonts.clone());
 
     // The desktop shell is built against the mutable backend before
     // `WindowManager::new` takes ownership — the exact construction
@@ -1187,27 +1234,30 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
     // union of every monitor. Where the dock and the workareas land
     // inside that union is the shell's decision, not this loop's.
     let output_size = backend.output_size;
-    let shell = Shell::new(&mut backend, &config, theme.clone(), scale);
+    let mut shell = Shell::new(&mut backend, &state, fonts);
     // No `scan_existing_windows` here: a compositor's clients cannot
     // predate the compositor. (Hot-restart adoption is impossible for
     // the same reason — see `Compositor::restart`.)
     let mut wm = WindowManager::new(backend, Box::new(engine));
+    // Session policy — focus, placement, edge resistance, the keymap
+    // and the grabs that go with it — is applied through the very call
+    // a live reload makes, in place of the setter block that used to
+    // stand here. Two places that set a setting is how a setting ends
+    // up reloadable but not startable, or the reverse. The look half
+    // costs nothing: the shell was just built from this same state, so
+    // the applier finds nothing changed there and repaints nothing.
+    //
+    // The config's combos still reach `grab_key`, one layer down, and
+    // that still matters here for the reason it always did: a "grab" on
+    // this stack is only a filter entry — the compositor sees every key
+    // regardless — but going through the same path keeps `wm-core`'s
+    // bookkeeping, and any future per-combo policy, identical on both
+    // stacks. `wm-core`'s own modal Alt+Tab grabs belong to
+    // `bind_default_keys` below; the applier only ever reconciles the
+    // grabs the *config* asked for.
+    shell.apply_session_state(&mut wm, state);
     wm.set_workarea(shell.workarea(output_size));
     wm.bind_default_keys();
-    // Same contract as X11: every configured combo is registered on
-    // top of the defaults. Here a "grab" is only a filter entry (the
-    // compositor sees all keys regardless), but registering through
-    // the same `grab_key` path keeps `wm-core`'s bookkeeping — and any
-    // future per-combo policy — identical on both stacks.
-    for (combo, _) in &config.keybindings {
-        wm.grab_key(*combo);
-    }
-    if chonk_shell::startup::read_focus_follows_mouse(config.focus_follows_mouse) {
-        tracing::info!("focus-follows-mouse enabled (config `focus_follows_mouse`; CHONKSTEP_FOCUS_FOLLOWS_MOUSE overrides)");
-        wm.set_focus_policy(FocusPolicy::FocusFollowsMouse);
-    }
-    wm.set_placement_policy(config.placement);
-    wm.set_snap_threshold(config.edge_resistance);
 
     // XWayland: spawned here, attached (X11Wm::start_wm) when it
     // reports ready. Failure to start is a degraded session — X11
@@ -1302,7 +1352,6 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
         pointer_location: (0.0, 0.0).into(),
         cursor_status: CursorImageStatus::default_named(),
         default_cursor: build_default_cursor(scale),
-        theme,
         start_time: Instant::now(),
         running: true,
         restart: false,
@@ -1316,6 +1365,19 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
             tracing::info!("restart requested — re-executing in place");
             comp.restart = true;
             break;
+        }
+        // Its cheaper sibling, polled beside it, and on this stack
+        // almost always the one a user wants: a reload re-reads the
+        // config and moves the running session onto it, where a restart
+        // here costs every client on the screen (there is no SaveSet to
+        // hand them forward — see `restart_in_place`). `wm_config::load`
+        // cannot fail, so the worst a mistyped edit does to a live
+        // session is move it to the defaults, which is exactly what a
+        // restart with the same file would have done.
+        if reload_requested() {
+            tracing::info!("reload requested — re-reading the config and applying it in place");
+            let state = SessionState::resolve(&wm_config::load());
+            comp.shell.apply_session_state(&mut comp.wm, state);
         }
         // Blocks on every source at once (wayland clients, winit
         // input, XWayland) with the housekeeping bound — the calloop
@@ -1346,17 +1408,6 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
     }
     tracing::info!("compositor session over");
     Ok(())
-}
-
-
-
-/// `true` at most once per `touch` of `scripts/restart.sh`'s marker
-/// file — `remove_file` both checks and consumes in one step, same as
-/// the X11 binary.
-fn restart_requested() -> bool {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    let path = std::path::PathBuf::from(home).join(".local/state/chonkstep/restart");
-    std::fs::remove_file(path).is_ok()
 }
 
 /// Re-execs the on-disk binary in place — resolved from `argv[0]`, not
