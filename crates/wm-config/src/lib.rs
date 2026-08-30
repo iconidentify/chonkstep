@@ -33,6 +33,7 @@
 //! theme = "nextstep-classic"         # optional; theme name
 //! placement = "smart"                # optional; "smart" | "cascade" | "center"
 //! edge_resistance = 10               # optional; px, 0 disables edge snapping
+//! terminal_font_px = 20              # optional; terminal font size at 1x
 //!
 //! [keybindings]
 //! "alt+shift+return" = "spawn-terminal"
@@ -125,8 +126,24 @@ pub struct Config {
     /// edge within this many pixels of a screen or window edge lands
     /// flush against it. `0` disables snapping entirely.
     pub edge_resistance: u32,
+    /// Point size of the spawned terminal's font *at 1x*, which the UI
+    /// scale then multiplies exactly as it multiplies the chrome — so
+    /// this is one number for "how big is terminal text", independent
+    /// of the display it lands on. Not per-theme on purpose: a theme
+    /// restyles the terminal's colors, never its metrics.
+    pub terminal_font_px: f32,
     pub keybindings: Vec<(KeyCombo, Action)>,
 }
+
+/// Terminal font size when the config says nothing, in 1x pixels.
+pub const DEFAULT_TERMINAL_FONT_PX: f32 = 20.0;
+
+/// The range a `terminal_font_px` value has to land in. Below the floor
+/// the terminal is unreadable; above the ceiling a default-sized window
+/// has room for almost no columns. Both ends are rejected loudly rather
+/// than clamped silently, so a typo'd `2000` is reported instead of
+/// quietly becoming something else.
+const TERMINAL_FONT_PX_RANGE: std::ops::RangeInclusive<f32> = 6.0..=96.0;
 
 impl Config {
     /// The configuration used when no file exists (and the base every
@@ -154,6 +171,7 @@ impl Config {
             // that sailing past it never feels sticky.
             placement: PlacementPolicy::Smart,
             edge_resistance: 10,
+            terminal_font_px: DEFAULT_TERMINAL_FONT_PX,
             keybindings: vec![
                 bind("alt+shift+return", Action::SpawnTerminal),
                 bind("alt+shift+q", Action::Close),
@@ -322,6 +340,19 @@ fn scale_from_value(value: &toml::Value) -> Option<f32> {
     (scale.is_finite() && scale > 0.0).then_some(scale)
 }
 
+/// Validates a `terminal_font_px` value. Integers are accepted beside
+/// floats for the same reason `scale` accepts them — `terminal_font_px
+/// = 20` is the obvious thing to type — and the value must land inside
+/// [`TERMINAL_FONT_PX_RANGE`].
+fn terminal_font_px_from_value(value: &toml::Value) -> Option<f32> {
+    let px = match value {
+        toml::Value::Float(f) => *f as f32,
+        toml::Value::Integer(i) => *i as f32,
+        _ => return None,
+    };
+    (px.is_finite() && TERMINAL_FONT_PX_RANGE.contains(&px)).then_some(px)
+}
+
 /// Maps a `placement` value from the file to its policy. Only a string
 /// is meaningful; matching is trimmed and case-insensitive for the
 /// same reason action names are — `"Cascade"` should not silently cost
@@ -401,6 +432,13 @@ pub fn parse(text: &str) -> Result<Config, String> {
                 None => tracing::warn!(
                     value = ?value,
                     "config: edge_resistance must be a non-negative integer, keeping default"
+                ),
+            },
+            "terminal_font_px" => match terminal_font_px_from_value(value) {
+                Some(px) => config.terminal_font_px = px,
+                None => tracing::warn!(
+                    value = ?value,
+                    "config: terminal_font_px must be a number between 6 and 96, keeping default"
                 ),
             },
             "keybindings" => match value {

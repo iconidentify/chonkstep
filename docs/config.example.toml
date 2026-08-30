@@ -35,6 +35,9 @@
 #   "teal-blueprint"
 #   "graphite"
 #   "next-lavender"
+#   "jade-lacquer"
+#   "ivory-halftone"   (the light one)
+#   "indigo-filament"
 # A theme picked from the root menu's Themes submenu is persisted and
 # wins over this value on every later startup -- the menu is the more
 # recent gesture; this line is only the starting point. An unknown id
@@ -63,6 +66,22 @@
 # non-negative integer -- anything else is warned about and the
 # default of 10 is kept.
 #edge_resistance = 10
+
+# Font size of the terminal the desktop spawns, in pixels at 1x scale.
+# The UI `scale` above multiplies it, exactly as it multiplies the
+# window chrome -- so this is one number for "how big is terminal text"
+# regardless of the display it lands on. At the default 20 with
+# scale = 2.0 the terminal is set in 40px type.
+#
+# The launch geometry is derived from it rather than fixed: the window
+# is sized as a fraction of the monitor, so raising this trades columns
+# for legibility instead of pushing the window off the screen. Colors
+# are the active theme's; the font size is not per-theme, since a theme
+# restyles the terminal rather than resizing it.
+#
+# Must be a number between 6 and 96 -- outside that it is warned about
+# and the default of 20 is kept.
+#terminal_font_px = 20
 
 # Keybindings. Entries here merge OVER the defaults: listing a combo
 # overrides only that combo, and every unlisted default stays bound.

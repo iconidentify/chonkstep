@@ -82,28 +82,40 @@ pub enum ShellOutcome {
 // to a `colors-light` section this desktop never populates, leaving a
 // themed terminal wearing foot's stock palette.
 // Font and geometry are deliberately *not* per-theme: every theme keeps
-// the same terminal font, only its colors change. `pixelsize` tracks
-// CHONKSTEP_SCALE (16px at 1x) the same way the WM's own chrome does.
-const TERMINAL_FONT_BASE_PX: f32 = 16.0;
-// Cells, not pixels — sized so the resulting window still fits the
-// screen at CHONKSTEP_SCALE 2 on a 1920-wide display (the old 110x32
-// exceeded it once the font scaled up).
-const TERMINAL_GEOMETRY: &str = "92x26";
+// the same terminal font, only its colors change. The size comes from
+// the config's `terminal_font_px` (1x pixels) and tracks CHONKSTEP_SCALE
+// the same way the WM's own chrome does.
+//
+// The window is sized in *pixels*, not in cells. It used to be a
+// hand-tuned "92x26" pinned to whatever fitted a 1920-wide display at
+// scale 2 — but a cell count is only safe while the font size is a
+// constant, and the moment the font became a user setting that geometry
+// would march off the edge of the screen the first time anyone raised
+// it. A fraction of the actual head fits by construction at any font
+// size, on any display, and lets the column count be what falls out.
+// Wider than tall by less than it looks: the height fraction is the
+// larger of the two because the chrome comes off the height and a
+// terminal is judged on rows.
+const TERMINAL_SCREEN_FRACTION: (f32, f32) = (0.70, 0.78);
+// Floor for that fraction, so a small or oddly-shaped head still gets a
+// usable terminal rather than a proportionally tiny one.
+const TERMINAL_MIN_SIZE: (u32, u32) = (640, 400);
 
 /// foot argument list for the active theme's terminal palette —
 /// foreground/background/cursor plus the full 16-slot ANSI set, so
 /// every theme restyles terminals along with the chrome. The scale for
 /// the font size is recovered from the already-scaled theme (titlebar
 /// font is 12px at 1x) rather than re-reading the environment.
-fn terminal_args(theme: &Theme) -> Vec<String> {
+fn terminal_args(theme: &Theme, font_px: f32, screen: Size) -> Vec<String> {
     // foot wants bare RRGGBB, not the `#rrggbb` urxvt took.
     let hex = |c: wm_theme::model::Color| format!("{:02x}{:02x}{:02x}", c.r, c.g, c.b);
-    let px = (theme.titlebar.font.size / 12.0 * TERMINAL_FONT_BASE_PX).round().max(8.0) as u32;
+    let px = (font_px * (theme.titlebar.font.size / 12.0)).round().max(8.0) as u32;
+    let (window_w, window_h) = terminal_window_size(theme, screen);
     let mut args = vec![
         "--font".to_string(),
         format!("JetBrainsMono Nerd Font:pixelsize={px},Noto Sans Symbols 2:pixelsize={px}"),
-        "--window-size-chars".to_string(),
-        TERMINAL_GEOMETRY.to_string(),
+        "--window-size-pixels".to_string(),
+        format!("{window_w}x{window_h}"),
         "--override".to_string(),
         "initial-color-theme=dark".to_string(),
         "--override".to_string(),
@@ -145,11 +157,39 @@ fn terminal_args(theme: &Theme) -> Vec<String> {
     args
 }
 
+/// The head a freshly launched terminal has to fit — the primary
+/// monitor, the same rectangle every other piece of shell chrome hangs
+/// on.
+fn terminal_screen<B: Backend + PopupHost<PopupId = B::ShellId>>(shell: &Shell<B>) -> Size {
+    shell.desktop.primary_workarea().size
+}
+
+/// The terminal's launch size, in pixels, for a given head.
+///
+/// foot's `--window-size-pixels` sizes the terminal's *own* surface,
+/// but what has to fit the screen is the decorated frame — so the
+/// chrome the WM is about to wrap around it (titlebar, resizebar, both
+/// borders) comes off the height first. Without that subtraction the
+/// frame overhangs the bottom of the head by exactly one titlebar,
+/// which is the sort of thing nobody notices until the screen is small.
+fn terminal_window_size(theme: &Theme, screen: Size) -> (u32, u32) {
+    let chrome_h = u32::from(theme.titlebar.height)
+        + u32::from(theme.resize_bar.height)
+        + 2 * u32::from(theme.border.width);
+    let width = ((screen.w as f32 * TERMINAL_SCREEN_FRACTION.0) as u32)
+        .max(TERMINAL_MIN_SIZE.0)
+        .min(screen.w.max(1));
+    let height = ((screen.h as f32 * TERMINAL_SCREEN_FRACTION.1) as u32)
+        .max(TERMINAL_MIN_SIZE.1)
+        .min(screen.h.saturating_sub(chrome_h).max(1));
+    (width, height)
+}
+
 /// Launches the theme-styled terminal — the one path shared by the root
 /// menu's Terminal item and the `spawn-terminal` keybinding, so the two
 /// gestures can never drift apart on font, geometry, or palette.
-fn spawn_terminal(theme: &Theme) {
-    spawn_foot(terminal_args(theme));
+fn spawn_terminal(theme: &Theme, font_px: f32, screen: Size) {
+    spawn_foot(terminal_args(theme, font_px, screen));
 }
 
 /// The single foot spawn step: [`spawn_terminal`] passes the themed
@@ -172,7 +212,7 @@ fn spawn_foot(args: Vec<String>) {
 /// readable as "terminal options, then the thing to run".
 /// An empty parsed command line — a malformed entry the scanner let
 /// through — is a logged no-op, never a panic.
-fn launch_app(entry: &AppEntry, theme: &Theme) {
+fn launch_app(entry: &AppEntry, theme: &Theme, font_px: f32, screen: Size) {
     // Scale recovered from the already-scaled theme (titlebar font is
     // 12px at 1x) — the same trick `terminal_args` uses, so launch
     // fixups need no separate scale plumbing.
@@ -182,7 +222,7 @@ fn launch_app(entry: &AppEntry, theme: &Theme) {
         return;
     };
     if entry.terminal {
-        let mut argv = terminal_args(theme);
+        let mut argv = terminal_args(theme, font_px, screen);
         argv.push("-e".to_string());
         argv.extend(entry.exec.iter().cloned());
         spawn_foot(argv);
@@ -341,6 +381,10 @@ pub struct Shell<B: Backend + PopupHost<PopupId = B::ShellId>> {
     /// `take_shell_click` on a later loop iteration than the motion
     /// that preceded it.
     pointer_root: Point,
+    /// Terminal font size at 1x, straight from the config — the scale
+    /// is recovered from the theme at launch time, so this stays the
+    /// one number the user actually set.
+    terminal_font_px: f32,
 }
 
 impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
@@ -370,7 +414,15 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         // sits on rather than against every head at once.
         let launchdock = LaunchDock::new(backend, &theme, primary, ((56.0 * scale).round() as u32).max(16), &apps);
 
-        Self { desktop, launchdock, apps, theme, keymap: build_keymap(&config.keybindings), pointer_root: Point::new(0, 0) }
+        Self {
+            desktop,
+            launchdock,
+            apps,
+            theme,
+            keymap: build_keymap(&config.keybindings),
+            pointer_root: Point::new(0, 0),
+            terminal_font_px: config.terminal_font_px,
+        }
     }
 
     /// The theme every surface (the shell's own chrome included) is
@@ -435,7 +487,9 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
     /// of silently binding to nothing.
     pub fn run_action(&mut self, wm: &mut WindowManager<B>, action: &Action) -> ShellOutcome {
         match action {
-            Action::SpawnTerminal => spawn_terminal(&self.theme),
+            Action::SpawnTerminal => {
+                spawn_terminal(&self.theme, self.terminal_font_px, terminal_screen(self))
+            }
             Action::Close => {
                 if let Some(id) = wm.focused_client() {
                     wm.close_client(id);
@@ -548,7 +602,9 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
             let running = running_pairs(wm);
             if let Some(action) = self.launchdock.handle_click(wm.backend_mut(), &self.theme, local, pressed, &running) {
                 match action {
-                    LaunchDockAction::Launch(entry) => launch_app(&entry, &self.theme),
+                    LaunchDockAction::Launch(entry) => {
+                        launch_app(&entry, &self.theme, self.terminal_font_px, terminal_screen(self))
+                    }
                     // The same activate path a pager's
                     // _NET_ACTIVE_WINDOW message rides — focuses,
                     // raises, and switches workspace as needed, with
@@ -762,7 +818,9 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
     /// so the split can never let a pick's act and its outcome drift.
     fn run_root_menu_action(&mut self, wm: &mut WindowManager<B>, action: RootMenuAction) {
         match action {
-            RootMenuAction::LaunchTerminal => spawn_terminal(&self.theme),
+            RootMenuAction::LaunchTerminal => {
+                spawn_terminal(&self.theme, self.terminal_font_px, terminal_screen(self))
+            }
             RootMenuAction::LaunchAbout => {
                 // `CHONKSTEP_THEME` is the one published channel by
                 // which an SDK app learns which theme the desktop is
@@ -797,7 +855,7 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
             // doesn't get to panic.
             RootMenuAction::LaunchApp(i) => {
                 if let Some(entry) = self.apps.get(i) {
-                    launch_app(entry, &self.theme);
+                    launch_app(entry, &self.theme, self.terminal_font_px, terminal_screen(self));
                 } else {
                     tracing::warn!(index = i, count = self.apps.len(), "menu fired an out-of-range application index");
                 }
