@@ -76,7 +76,7 @@ use wm_core::{
     BackendEvent, DragHandle, KeyCombo, Modifiers, MonitorInfo, MouseButton, ScrollDelta,
     SurfaceRef, WindowType,
 };
-use wm_theme_api::Point;
+use wm_theme_api::{Point, Rect, ResizeEdge};
 
 use crate::state::{
     Compositor, ManagedSurface, PointerGrabChange, StackEntry, WaylandBackend, WlFrameId,
@@ -199,6 +199,13 @@ impl DragGrab {
     /// Whether `handle` names this grab, and so may end it.
     pub(crate) fn holds(&self, handle: DragHandle) -> bool {
         self.handle == handle
+    }
+
+    /// Where this drag's events are going, if a pointer event has
+    /// latched it yet — read by [`pointer_subject`] so the renderer
+    /// can keep a frame drag's resize cursor up while the drag runs.
+    pub(crate) fn target(&self) -> Option<PressTarget> {
+        self.target
     }
 
     /// This drag's routing target, latching it on first use from the
@@ -633,6 +640,10 @@ fn pointer_moved(state: &mut Compositor, position: LogicalPoint<f64, Logical>, t
     // is scene damage by definition — without this the arrow freezes
     // between window updates.
     state.pointer_location = position;
+    // Mirrored onto the ledger so `Backend::pointer_position` can
+    // answer without reaching the `Compositor` — see that verb for the
+    // stale-anchor bug the mirror exists to prevent.
+    state.wm.backend_mut().pointer = Some(at);
     // Before anything routes by it: a grab left behind by a drag that
     // is over must not decide where this event goes.
     reclaim_leaked_grab(state, &seat);
@@ -832,6 +843,11 @@ fn on_pointer_button<I: InputBackend>(state: &mut Compositor, event: I::PointerB
         Some(anchor) if route.dragging => anchor,
         _ => pressed_target,
     };
+    // The one line that says where a click went. Buttons are rare
+    // enough to afford it at debug level, and "the click landed on the
+    // wrong thing" bugs are undebuggable from a live session without
+    // it — the whole LibreOffice investigation ran on this line.
+    tracing::debug!(?target, ?button, pressed, dragging = route.dragging, "pointer button routed");
 
     let backend = state.wm.backend_mut();
     let mut deliver_to_client = false;
@@ -1258,7 +1274,7 @@ fn hit_at(backend: &WaylandBackend, at: Point, position: LogicalPoint<f64, Logic
             if let Some(hit) = popup_hit(backend, None, *window, position) {
                 return hit;
             }
-            if record.content.contains(at) {
+            if frameless_claims(record.content, record.content_offset, at) {
                 if let Some(hit) = content_hit(backend, None, *window, position) {
                     return hit;
                 }
@@ -1311,6 +1327,55 @@ fn hit_at(backend: &WaylandBackend, at: Point, position: LogicalPoint<f64, Logic
     Hit::Root
 }
 
+/// What the compositor's own pointer should look like, answered from
+/// the same ledger the hit-test routes by — the renderer asks this
+/// every frame (`push_cursor_elements`) instead of trusting the last
+/// `CursorImageStatus` a client happened to set. Trusting it was the
+/// bug: a client's cursor surface outlives the pointer's visit (no
+/// client un-sets a cursor on leave — leave means it may not), so
+/// LibreOffice's pointer kept being drawn over the desktop, the dock,
+/// and every frame the pointer crossed afterwards.
+pub(crate) enum PointerSubject {
+    /// Client content: the client's `wl_pointer.set_cursor` choice
+    /// applies, falling back to the arrow when it never made one.
+    Client,
+    /// One of our frames' chrome, with the resize cursor the frame
+    /// last asked for (`Backend::set_frame_cursor`), if any.
+    Frame(Option<ResizeEdge>),
+    /// Everything else — shell surfaces, the desktop: the arrow.
+    Desktop,
+}
+
+/// Classifies what the pointer is over for cursor selection.
+///
+/// A drag grab answers first, from its anchor rather than the hit
+/// under the pointer: the client under a WM drag has been sent a leave
+/// and is being told nothing, so its cursor must not show — and a
+/// frame-edge resize keeps its edge cursor up even as the pointer
+/// overshoots the chrome onto content or desktop mid-drag, which every
+/// fast resize does.
+pub(crate) fn pointer_subject(
+    backend: &WaylandBackend,
+    position: LogicalPoint<f64, Logical>,
+) -> PointerSubject {
+    if let Some(grab) = &backend.pointer_grab {
+        return match grab.target() {
+            Some(PressTarget::Frame(frame)) => {
+                PointerSubject::Frame(backend.frame_cursors.get(&frame).copied())
+            }
+            _ => PointerSubject::Desktop,
+        };
+    }
+    let at = Point::new(position.x.floor() as i32, position.y.floor() as i32);
+    match hit_at(backend, at, position) {
+        Hit::Content { .. } => PointerSubject::Client,
+        Hit::FrameChrome { frame, .. } => {
+            PointerSubject::Frame(backend.frame_cursors.get(&frame).copied())
+        }
+        Hit::Shell { .. } | Hit::Root => PointerSubject::Desktop,
+    }
+}
+
 /// What the top-down hit-test found under a point.
 enum Hit {
     /// A mapped shell surface (dock, menu, icon tile), with the
@@ -1343,6 +1408,38 @@ enum Hit {
     },
     /// The desktop background.
     Root,
+}
+
+/// How far outside its declared window geometry a client-decorated
+/// window still owns the pointer, so its own resize grips are
+/// grabbable at the visible edge rather than only strictly inside it.
+/// GTK puts the grip band for `xdg_toplevel.resize` in the shadow
+/// margin just *outside* the window geometry; a boundary drawn exactly
+/// at the geometry would make edge-resize of such a window a
+/// pixel-hunt for the sliver of grip that overlaps the window itself.
+const RESIZE_MARGIN: i32 = 8;
+
+/// Whether a client-decorated window owns the point `at` — the
+/// boundary of ownership for a window whose buffer is larger than the
+/// window it declared.
+///
+/// The declared `xdg_surface.set_window_geometry` rect (`content`) is
+/// the boundary, give or take the resize margin above; the rest of the
+/// buffer is drop shadow, and a shadow that answered the hit-test
+/// would both start drags anchored up to its width away from the
+/// visible edge and swallow clicks meant for whatever the shadow is
+/// painted over. `shadow` is the window's `content_offset` — how much
+/// buffer extends past the geometry — and clamps the margin, so a
+/// window with no shadow claims exactly its own rectangle and never a
+/// band of its neighbour's pixels: the margin is only ever carved out
+/// of space the client is already drawing (translucently) into.
+fn frameless_claims(content: Rect, shadow: Point, at: Point) -> bool {
+    let margin_x = RESIZE_MARGIN.min(shadow.x.max(0));
+    let margin_y = RESIZE_MARGIN.min(shadow.y.max(0));
+    at.x >= content.pos.x - margin_x
+        && at.y >= content.pos.y - margin_y
+        && at.x < content.pos.x + content.size.w as i32 + margin_x
+        && at.y < content.pos.y + content.size.h as i32 + margin_y
 }
 
 /// Content hit for a window whose content rect contains the point:
@@ -1706,7 +1803,9 @@ mod tests {
 
     fn ledger() -> WaylandBackend {
         let display = Display::<Compositor>::new().expect("a display with no socket");
-        WaylandBackend::new(display.handle(), Vec::new())
+        // Ledger scale 1 — the value every running session passes today
+        // (see the note at `run`'s construction site).
+        WaylandBackend::new(display.handle(), Vec::new(), 1)
     }
 
     const FRAME: WlFrameId = WlFrameId(11);
@@ -1818,6 +1917,123 @@ mod tests {
         let mut grab = DragGrab::new(DragHandle(9));
         grab.anchor(Some(PressTarget::Frame(FRAME)), &Hit::Root);
         assert!(!grab.anchor_alive(&backend), "the frame is not in the ledger");
+    }
+
+    // -- shadow-band ownership ---------------------------------------
+    // The boundary rule for a client-decorated window whose buffer is
+    // bigger than the window it declared. Pinned with GTK's real
+    // numbers (LibreOffice's template dialog declares
+    // `set_window_geometry(26, 23, 818, 651)`), because the failure on
+    // either side of the line is user-visible: claim the shadow and a
+    // press in thin air starts a drag on this window instead of the
+    // one visibly under it; claim strictly the geometry and the
+    // client's own edge grips are a pixel-hunt.
+
+    #[test]
+    fn the_declared_window_geometry_is_owned_and_the_shadow_is_not() {
+        let content = Rect { pos: Point::new(200, 100), size: Size::new(818, 651) };
+        let shadow = Point::new(26, 23);
+        // Inside the window, corners included.
+        assert!(frameless_claims(content, shadow, Point::new(200, 100)));
+        assert!(frameless_claims(content, shadow, Point::new(1017, 750)));
+        // The far reaches of the shadow band fall through to whatever
+        // is beneath — this is the click the shadow used to steal.
+        assert!(!frameless_claims(content, shadow, Point::new(200 - 26, 100)));
+        assert!(!frameless_claims(content, shadow, Point::new(200, 100 - 23)));
+        assert!(!frameless_claims(content, shadow, Point::new(1017 + 26, 750)));
+    }
+
+    #[test]
+    fn a_thin_grip_band_of_the_shadow_still_belongs_to_the_window() {
+        let content = Rect { pos: Point::new(200, 100), size: Size::new(818, 651) };
+        let shadow = Point::new(26, 23);
+        // Just outside the visible edge: the client's resize grip.
+        assert!(frameless_claims(content, shadow, Point::new(200 - RESIZE_MARGIN, 100)));
+        assert!(frameless_claims(content, shadow, Point::new(200, 100 - RESIZE_MARGIN)));
+        assert!(frameless_claims(
+            content,
+            shadow,
+            Point::new(200 + 818 + RESIZE_MARGIN - 1, 100 + 651 + RESIZE_MARGIN - 1),
+        ));
+        // One past the margin is shadow again.
+        assert!(!frameless_claims(content, shadow, Point::new(200 - RESIZE_MARGIN - 1, 100)));
+    }
+
+    /// A window with no declared shadow claims exactly its rectangle:
+    /// the margin is carved out of the client's own oversized buffer,
+    /// never out of a neighbour's pixels.
+    #[test]
+    fn no_shadow_means_no_margin() {
+        let content = Rect { pos: Point::new(50, 50), size: Size::new(100, 100) };
+        let none = Point::new(0, 0);
+        assert!(frameless_claims(content, none, Point::new(50, 50)));
+        assert!(!frameless_claims(content, none, Point::new(49, 50)));
+        assert!(!frameless_claims(content, none, Point::new(50, 150)));
+        // A shadow thinner than the margin clamps the claim to the
+        // shadow — there is no buffer past it to press on.
+        let thin = Point::new(3, 3);
+        assert!(frameless_claims(content, thin, Point::new(47, 50)));
+        assert!(!frameless_claims(content, thin, Point::new(46, 50)));
+    }
+
+    // -- pointer position mirror -------------------------------------
+
+    /// `Backend::pointer_position` answers from the ledger mirror the
+    /// motion path maintains — the fix for the first CSD titlebar drag
+    /// anchoring wherever the pointer last crossed the desktop. `None`
+    /// before any motion, so `wm-core` refuses a drag it would have to
+    /// anchor on a guess.
+    #[test]
+    fn pointer_position_reports_the_mirrored_location_only_once_one_exists() {
+        let mut backend = ledger();
+        assert_eq!(backend.pointer_position(), None);
+        backend.pointer = Some(Point::new(123, 456));
+        assert_eq!(backend.pointer_position(), Some(Point::new(123, 456)));
+    }
+
+    // -- cursor subject ----------------------------------------------
+
+    /// While the window manager drags a frame edge, the resize cursor
+    /// stays up even though the pointer is far off the chrome — the
+    /// grab's anchor answers, not the hit under the pointer.
+    #[test]
+    fn a_frame_drag_keeps_its_frames_cursor() {
+        let mut backend = ledger();
+        backend.frame_cursors.insert(FRAME, ResizeEdge::SouthEast);
+        backend.grab_pointer_for_drag();
+        backend
+            .pointer_grab
+            .as_mut()
+            .unwrap()
+            .anchor(Some(PressTarget::Frame(FRAME)), &Hit::Root);
+        match pointer_subject(&backend, (5.0, 5.0).into()) {
+            PointerSubject::Frame(Some(ResizeEdge::SouthEast)) => {}
+            _ => panic!("a drag anchored on a frame must show that frame's cursor"),
+        }
+    }
+
+    /// A drag anchored on client content is the window manager moving
+    /// the window: the client was sent a leave, so its cursor must not
+    /// show — the compositor's arrow does.
+    #[test]
+    fn a_content_drag_shows_the_compositors_own_cursor() {
+        let mut backend = ledger();
+        backend.grab_pointer_for_drag();
+        backend
+            .pointer_grab
+            .as_mut()
+            .unwrap()
+            .anchor(Some(PressTarget::Content(WINDOW)), &Hit::Root);
+        assert!(matches!(pointer_subject(&backend, (5.0, 5.0).into()), PointerSubject::Desktop));
+    }
+
+    /// With nothing grabbed and nothing under the pointer, the desktop
+    /// answers — which is what un-sticks a client's stale cursor
+    /// surface the moment the pointer leaves its window.
+    #[test]
+    fn an_empty_scene_is_the_desktops_cursor() {
+        let backend = ledger();
+        assert!(matches!(pointer_subject(&backend, (5.0, 5.0).into()), PointerSubject::Desktop));
     }
 
     // -- client buffer scale -----------------------------------------

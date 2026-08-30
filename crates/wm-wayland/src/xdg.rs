@@ -57,7 +57,7 @@ use smithay::{
 };
 
 use wm_core::{BackendEvent, NetState, NetStateAction};
-use wm_theme_api::{Point, Rect, Size};
+use wm_theme_api::{Point, Rect, ResizeEdge, Size};
 
 use crate::state::{ClientState, Compositor, ManagedSurface, WindowRecord, WlFrameId, WlWindowId};
 
@@ -325,6 +325,19 @@ impl Compositor {
             }
             backend.queue(WmEvent::Unmapped(id));
         } else if has_buffer {
+            // The window-geometry offset is re-read on every commit,
+            // not only at the map edge, because a shadow inset is not a
+            // constant of the window: GTK drops it entirely when
+            // maximized and can change it with the theme. A stale
+            // offset shifts everything anchored at `content.pos -
+            // content_offset` — the drawn window slides out from under
+            // its own hit rect by exactly the difference, most visibly
+            // as a maximized window hanging off the top-left of the
+            // screen by its former shadow.
+            let offset = committed_content_offset(&root, surface_scale);
+            if let Some(record) = backend.windows.get_mut(&id) {
+                record.content_offset = offset;
+            }
             // A managed client committing a size other than the one on
             // record is the Wayland spelling of an X11 self-resize
             // ConfigureRequest (a terminal snapping to its cell grid
@@ -596,17 +609,38 @@ impl XdgShellHandler for Compositor {
 
     fn resize_request(
         &mut self,
-        _surface: ToplevelSurface,
+        surface: ToplevelSurface,
         _seat: WlSeat,
         _serial: Serial,
-        _edges: smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::ResizeEdge,
+        edges: smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::ResizeEdge,
     ) {
-        // Still dropped, where `move_request` no longer is: there is no
-        // `BackendEvent` shape for a client-initiated resize, and unlike
-        // a move it is not the only path left to an unframed window —
-        // a client that draws its own chrome draws its own resize grips
-        // with it and can resize itself by committing a new size, which
-        // `toplevel_committed` above already translates.
+        // This used to be dropped, on the reasoning that unlike a move
+        // it was not the only path left to an unframed window: a client
+        // that draws its own chrome draws its own resize grips and
+        // could resize itself by committing a new size. The second half
+        // of that was wrong in practice — a grip does not commit sizes,
+        // it sends exactly this request and waits for the compositor to
+        // run the drag, so dropping it made every client-decorated
+        // window's edges dead weight: the grip arms, the cursor
+        // changes, and nothing ever moves. `wm-core` now runs the same
+        // interactive resize a resizebar drag runs (grab taken, ends on
+        // release, size hints respected), anchored on its own record of
+        // the window; the edge is the one thing only the client knows.
+        //
+        // The serial is unchecked for the same reason `move_request`'s
+        // is: the failure it would prevent ends on its own at the next
+        // press-and-release, and checking would mean threading the
+        // seat's grab history through here.
+        let Some(edge) = wm_resize_edge(edges) else {
+            // `None` (and any future protocol value): a resize with no
+            // edge has no geometry to solve for, so it is refused
+            // rather than guessed at.
+            return;
+        };
+        let backend = self.wm.backend_mut();
+        if let Some(id) = backend.window_for_surface(surface.wl_surface()) {
+            backend.queue(WmEvent::ResizeRequest { window: id, edge });
+        }
     }
 
     fn maximize_request(&mut self, surface: ToplevelSurface) {
@@ -725,6 +759,28 @@ impl XdgShellHandler for Compositor {
     }
 }
 
+/// The protocol's resize edge -> the theme vocabulary `wm-core` runs
+/// its resize state machine in. `None` for `xdg_toplevel`'s literal
+/// `None` edge (and for any value a future protocol revision adds):
+/// the request means "resize from nowhere", which no drag can honor —
+/// the compass points map one-to-one and nothing else does.
+fn wm_resize_edge(
+    edge: smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::ResizeEdge,
+) -> Option<ResizeEdge> {
+    use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::ResizeEdge as Xdg;
+    match edge {
+        Xdg::Top => Some(ResizeEdge::North),
+        Xdg::Bottom => Some(ResizeEdge::South),
+        Xdg::Left => Some(ResizeEdge::West),
+        Xdg::Right => Some(ResizeEdge::East),
+        Xdg::TopLeft => Some(ResizeEdge::NorthWest),
+        Xdg::TopRight => Some(ResizeEdge::NorthEast),
+        Xdg::BottomLeft => Some(ResizeEdge::SouthWest),
+        Xdg::BottomRight => Some(ResizeEdge::SouthEast),
+        _ => None,
+    }
+}
+
 // -- xdg-decoration ------------------------------------------------------
 // The policy is one line long: this desktop draws the chrome, always —
 // the chiseled frames are the whole point, and a client drawing its own
@@ -826,5 +882,31 @@ mod tests {
         assert_eq!(logical_to_physical(300, 0), 300);
         assert_eq!(logical_to_physical(300, -2), 300);
         assert_eq!(logical_to_physical(300, i32::MIN), 300);
+    }
+
+    /// Every compass point of `xdg_toplevel.resize` maps to the edge of
+    /// the same name — a swapped pair here is a window that grows left
+    /// when its right grip is dragged, which no test of the drag itself
+    /// would localize to this table.
+    #[test]
+    fn every_xdg_resize_edge_maps_to_its_compass_point() {
+        use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::ResizeEdge as Xdg;
+        assert_eq!(wm_resize_edge(Xdg::Top), Some(ResizeEdge::North));
+        assert_eq!(wm_resize_edge(Xdg::Bottom), Some(ResizeEdge::South));
+        assert_eq!(wm_resize_edge(Xdg::Left), Some(ResizeEdge::West));
+        assert_eq!(wm_resize_edge(Xdg::Right), Some(ResizeEdge::East));
+        assert_eq!(wm_resize_edge(Xdg::TopLeft), Some(ResizeEdge::NorthWest));
+        assert_eq!(wm_resize_edge(Xdg::TopRight), Some(ResizeEdge::NorthEast));
+        assert_eq!(wm_resize_edge(Xdg::BottomLeft), Some(ResizeEdge::SouthWest));
+        assert_eq!(wm_resize_edge(Xdg::BottomRight), Some(ResizeEdge::SouthEast));
+    }
+
+    /// The protocol's `None` edge is refused, not guessed at: a resize
+    /// from no edge has no geometry to solve for, and `wm-core` must
+    /// never see a request the drag machinery cannot finish.
+    #[test]
+    fn a_resize_from_no_edge_is_refused() {
+        use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::ResizeEdge as Xdg;
+        assert_eq!(wm_resize_edge(Xdg::None), None);
     }
 }

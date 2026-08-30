@@ -71,7 +71,7 @@ use wm_core::{
     WindowType,
 };
 use wm_theme::{FontState, RasterThemeEngine};
-use wm_theme_api::{DecorationBuffer, Point, Rect, Size};
+use wm_theme_api::{DecorationBuffer, Point, Rect, ResizeEdge, Size};
 
 use crate::input::DragGrab;
 
@@ -363,6 +363,28 @@ pub(crate) enum RootBackground {
 /// protocol handlers write into and the renderer reads out of. See the
 /// module docs for why no display connection lives here.
 pub struct WaylandBackend {
+    /// The whole-number scale every `wl_output` in this session
+    /// advertises, and therefore the factor smithay applies to every
+    /// element it composes.
+    ///
+    /// This compositor positions elements in physical pixels and always
+    /// will — the theme rasterizes chrome in device pixels and the shell
+    /// lays the dock out against the monitor's device size. That is
+    /// compatible with a scaled output, because element *positions* are
+    /// physical either way; what is not compatible is a buffer that
+    /// claims a scale it was not drawn at. Smithay scales an element by
+    /// `output_scale / buffer_scale`, so chrome rasterized at 2x and
+    /// imported as scale 1 gets drawn twice again — which is exactly
+    /// how a first attempt at this put the dock off the right edge of
+    /// the screen and the wallpaper over four of them.
+    ///
+    /// So every buffer this compositor imports declares *this* scale,
+    /// and the arithmetic comes out at one buffer pixel per screen
+    /// pixel. Clients are told the same number and render themselves at
+    /// it, which is the only way a native Wayland client can learn the
+    /// desktop is scaled at all.
+    pub(crate) ui_scale: i32,
+
     /// Shared allocator for all three id spaces — window, frame, and
     /// shell ids never collide, which makes stray-id bugs loud in logs
     /// instead of silently aliasing. Starts at 1 so [`ROOT_SHELL`]
@@ -472,6 +494,30 @@ pub struct WaylandBackend {
     /// Routing needs no such detour and does not wait for this — the
     /// flag above is live the instant the verb returns.
     pub(crate) pending_pointer_grab: Option<PointerGrabChange>,
+    /// Where the pointer is, mirrored from `input.rs` on every motion —
+    /// what `Backend::pointer_position` answers with.
+    ///
+    /// The mirror exists because `wm-core` genuinely cannot remember
+    /// this for itself: motion over a client's own content is the
+    /// client's and is never queued as a `PointerMotion`, so by the
+    /// time a client-decorated window asks to be dragged
+    /// (`MoveRequest`), the position `wm-core` last heard can be stale
+    /// by the whole width of that window — and the drag began by
+    /// teleporting the window by exactly that error on its first
+    /// motion. On X11 the backend asks the server (`query_pointer`);
+    /// here the compositor is the server, and this field is its answer.
+    /// `None` only before the first motion of the session, when there
+    /// is no position to be had from anywhere.
+    pub(crate) pointer: Option<Point>,
+    /// The cursor each frame most recently asked to show, from
+    /// `Backend::set_frame_cursor`: an entry per frame whose pointer is
+    /// (or was last) over a resize hitbox, absent meaning the plain
+    /// arrow. The renderer reads this — through
+    /// [`crate::input::pointer_subject`] — to pick the pointer image
+    /// while the pointer is over that frame's chrome; on X11 the server
+    /// did this from a per-window cursor attribute, and this map is
+    /// that attribute's ledger spelling.
+    pub(crate) frame_cursors: HashMap<WlFrameId, ResizeEdge>,
 }
 
 /// Which way a drag grab just moved, for the seat-side half that
@@ -481,10 +527,32 @@ pub(crate) enum PointerGrabChange {
     Released,
 }
 
+/// The integer `wl_output.scale` for a configured UI scale.
+///
+/// `wl_output` carries a whole number, so a fractional UI scale has to
+/// be reported as one. Rounding rather than truncating makes 1.5
+/// advertise 2 — a client rendering slightly large and being scaled
+/// down reads far better than one rendering at half size — and the
+/// floor of 1 stops a nonsense configuration from telling clients their
+/// pixels are worth nothing.
+///
+/// Not called yet: this is the parked half of the output-scale work —
+/// it becomes the argument to `WaylandBackend::new` the moment the
+/// outputs advertise the same number, and until then every session
+/// passes 1 (see the note at `run`'s construction site).
+#[expect(dead_code)]
+pub(crate) fn integral_scale(scale: f32) -> i32 {
+    if !scale.is_finite() {
+        return 1;
+    }
+    (scale.round() as i32).max(1)
+}
+
 impl WaylandBackend {
-    pub(crate) fn new(display_handle: DisplayHandle, monitors: Vec<MonitorInfo>) -> Self {
+    pub(crate) fn new(display_handle: DisplayHandle, monitors: Vec<MonitorInfo>, ui_scale: i32) -> Self {
         let output_size = union_size(&monitors);
         Self {
+            ui_scale: ui_scale.max(1),
             next_id: 1,
             windows: HashMap::new(),
             frames: HashMap::new(),
@@ -506,6 +574,8 @@ impl WaylandBackend {
             pending_cursor_scale: None,
             pointer_grab: None,
             pending_pointer_grab: None,
+            pointer: None,
+            frame_cursors: HashMap::new(),
         }
     }
 
@@ -787,13 +857,19 @@ pub struct Compositor {
     pub pointer_location: SPoint<f64, Logical>,
     /// What the cursor should look like, per the focused client's
     /// `wl_pointer.set_cursor` (maintained by `input.rs`'s
-    /// `SeatHandler::cursor_image`). The renderer falls back to
-    /// [`Compositor::default_cursor`] for `Named` shapes.
+    /// `SeatHandler::cursor_image`). Honored only while the pointer is
+    /// over client content; the renderer falls back to
+    /// [`Compositor::cursors`] for `Named` shapes and everywhere else
+    /// (see `push_cursor_elements`).
     pub cursor_status: CursorImageStatus,
-    /// Built-in arrow drawn whenever no client cursor surface applies
-    /// — a compositor draws its own cursor, there is no server to
-    /// inherit one from.
-    pub(crate) default_cursor: MemoryRenderBuffer,
+    /// The compositor's own pointer images — the arrow, and the resize
+    /// double-arrows shown over frame edges — drawn whenever no client
+    /// cursor surface applies: a compositor draws its own cursor, there
+    /// is no server to inherit one from. Which member is drawn is the
+    /// renderer's per-frame decision (see `push_cursor_elements`), fed
+    /// by what the pointer is over and what `Backend::set_frame_cursor`
+    /// recorded on the ledger.
+    pub(crate) cursors: CursorSet,
 
     /// Monotonic session clock for frame-callback timestamps.
     pub start_time: Instant,
@@ -969,7 +1045,7 @@ impl Compositor {
         if let Some(scale) = self.wm.backend_mut().pending_cursor_scale.take() {
             tracing::info!(scale, "rebuilding the compositor's own pointer for the new UI scale");
             self.ui_scale = scale;
-            self.default_cursor = build_default_cursor(scale);
+            self.cursors = CursorSet::build(scale);
             self.wm.backend_mut().mark_damaged();
             self.republish_xsettings();
         }
@@ -1638,7 +1714,14 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
     // then native clients render at 1x and are told the scale the only
     // other way they will hear it: the per-child environment the
     // launcher sets.
-    let mut backend = WaylandBackend::new(display_handle.clone(), monitors);
+    // Ledger scale 1, deliberately, for the reason the paragraphs
+    // above spell out: every output this session advertises is scale 1
+    // and every rect and buffer in the ledger is physical, so a buffer
+    // declared at any other scale would be composited smaller than the
+    // rectangle it was painted for. The `ui_scale` plumbing this feeds
+    // exists for the in-progress logical/physical split; it goes live
+    // by changing this argument alongside the output scale, not before.
+    let mut backend = WaylandBackend::new(display_handle.clone(), monitors, 1);
     // The whole screen, as the shell sizes the desktop against it: the
     // union of every monitor. Where the dock and the workareas land
     // inside that union is the shell's decision, not this loop's.
@@ -1770,7 +1853,7 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
         protocols,
         pointer_location: (0.0, 0.0).into(),
         cursor_status: CursorImageStatus::default_named(),
-        default_cursor: build_default_cursor(scale),
+        cursors: CursorSet::build(scale),
         start_time: Instant::now(),
         running: true,
         restart: false,
@@ -1883,27 +1966,99 @@ fn restart_in_place(nested: bool) -> ! {
 /// Raising the *buffer scale* argument instead would move the bug, not
 /// fix it: a buffer scale of 2 tells smithay these pixels are 2 per
 /// logical unit, which halves the element on a scale-1 output.
-fn build_default_cursor(scale: f32) -> MemoryRenderBuffer {
-    let (pixels, width, height) = default_cursor_pixels(scale);
-    // RGBA byte order is the little-endian DRM fourcc Abgr8888, NOT
-    // Argb8888 — mixing those up swaps red and blue. Fully opaque or
-    // fully transparent pixels only, so these bytes are also already
-    // valid premultiplied alpha, which is what the GLES renderer's
-    // blending expects (and what tiny-skia's `data()` provides for the
-    // decoration buffers `backend_impl` imports the same way).
-    //
-    // Buffer scale 1 for the reason `backend_impl::import_buffer`
-    // documents for decoration buffers: this session's ledger is in
-    // physical pixels, so a buffer already rasterized at the UI scale
-    // is 1 buffer pixel per unit of that space.
+/// One pointer image plus the pixel of it that sits on the pointer's
+/// position. The arrow's hotspot is its (0, 0) tip; a resize
+/// double-arrow's is its center, because the shape *points across* the
+/// position it marks — drawn from its corner, the visible crosshair of
+/// the arrows would float below and right of the edge the user is
+/// actually about to grab.
+pub(crate) struct CursorSprite {
+    pub(crate) buffer: MemoryRenderBuffer,
+    pub(crate) hotspot: (i32, i32),
+}
+
+/// Every cursor this compositor draws itself, pre-rendered once per UI
+/// scale (not lazily per-hover) — the same set, from the same
+/// hand-authored shapes, as `wm-x11`'s `Cursors`. Diagonals are shared
+/// between opposite corners because the cursor shows the resize *axis*:
+/// SouthEast and NorthWest stretch along the same ↘ line.
+pub(crate) struct CursorSet {
+    arrow: CursorSprite,
+    resize_vertical: CursorSprite,
+    resize_horizontal: CursorSprite,
+    resize_southeast: CursorSprite,
+    resize_southwest: CursorSprite,
+}
+
+impl CursorSet {
+    pub(crate) fn build(scale: f32) -> Self {
+        let right_angle = 90.0_f32.to_radians();
+        Self {
+            arrow: CursorSprite { buffer: build_default_cursor(scale), hotspot: (0, 0) },
+            resize_vertical: build_resize_cursor(scale, 0.0),
+            // East/West: the same double-arrow turned to horizontal;
+            // the diagonals are the 45° rotations between them — the
+            // construction `wm-x11`'s `Cursors::create` uses. The
+            // angles are assigned by the picture they produce, not
+            // copied from there: with this rotation's sign convention
+            // (screen coordinates, y down), -45° is the ⤡ arrow along
+            // the NW–SE axis and +45° the ⤢ along NE–SW — verified by
+            // rasterizing both, because the first draft copied the X11
+            // literals and put each diagonal on the corner the OTHER
+            // one resizes.
+            resize_horizontal: build_resize_cursor(scale, right_angle),
+            resize_southeast: build_resize_cursor(scale, -right_angle / 2.0),
+            resize_southwest: build_resize_cursor(scale, right_angle / 2.0),
+        }
+    }
+
+    pub(crate) fn arrow(&self) -> &CursorSprite {
+        &self.arrow
+    }
+
+    /// The sprite for a resize edge — the mapping `wm-x11`'s
+    /// `Cursors::for_edge` uses, minus the `None` arm the caller
+    /// spells as [`CursorSet::arrow`].
+    pub(crate) fn for_edge(&self, edge: ResizeEdge) -> &CursorSprite {
+        match edge {
+            ResizeEdge::North | ResizeEdge::South => &self.resize_vertical,
+            ResizeEdge::East | ResizeEdge::West => &self.resize_horizontal,
+            ResizeEdge::SouthEast | ResizeEdge::NorthWest => &self.resize_southeast,
+            ResizeEdge::SouthWest | ResizeEdge::NorthEast => &self.resize_southwest,
+        }
+    }
+}
+
+/// Imports one cursor's pixels. RGBA byte order is the little-endian
+/// DRM fourcc Abgr8888, NOT Argb8888 — mixing those up swaps red and
+/// blue. Fully opaque or fully transparent pixels only, so these bytes
+/// are also already valid premultiplied alpha, which is what the GLES
+/// renderer's blending expects (and what tiny-skia's `data()` provides
+/// for the decoration buffers `backend_impl` imports the same way).
+///
+/// Buffer scale 1 for the reason `backend_impl::import_buffer`
+/// documents for decoration buffers: this session's ledger is in
+/// physical pixels, so a buffer already rasterized at the UI scale is
+/// 1 buffer pixel per unit of that space.
+fn import_cursor(pixels: &[u8], width: i32, height: i32) -> MemoryRenderBuffer {
     MemoryRenderBuffer::from_slice(
-        &pixels,
+        pixels,
         Fourcc::Abgr8888,
         (width, height),
         1,
         Transform::Normal,
         None,
     )
+}
+
+fn build_default_cursor(scale: f32) -> MemoryRenderBuffer {
+    let (pixels, width, height) = default_cursor_pixels(scale);
+    import_cursor(&pixels, width, height)
+}
+
+fn build_resize_cursor(scale: f32, angle_rad: f32) -> CursorSprite {
+    let (pixels, width, height, hotspot) = resize_cursor_pixels(scale, angle_rad);
+    CursorSprite { buffer: import_cursor(&pixels, width, height), hotspot }
 }
 
 /// The arrow's premultiplied RGBA8 pixels at `scale`, with its width
@@ -1970,6 +2125,129 @@ fn default_cursor_pixels(scale: f32) -> (Vec<u8>, i32, i32) {
         }
     }
     (pixels, width as i32, height as i32)
+}
+
+/// The double-headed resize arrow (⇕), the same polygon `wm-x11`'s
+/// `CURSOR_RESIZE_ARROW` hands the X server, traced as one outline:
+/// apex of the top triangle, down its right side, along the shaft, out
+/// to the bottom triangle, back up the other side. All four resize
+/// cursors are rotations of this one shape about its center.
+const CURSOR_RESIZE_ARROW: &[(f32, f32)] = &[
+    (5.0, 0.0),
+    (10.0, 6.0),
+    (7.0, 6.0),
+    (7.0, 14.0),
+    (10.0, 14.0),
+    (5.0, 20.0),
+    (0.0, 14.0),
+    (3.0, 14.0),
+    (3.0, 6.0),
+    (0.0, 6.0),
+];
+const CURSOR_RESIZE_ARROW_CENTER: (f32, f32) = (5.0, 10.0);
+
+/// Even-odd point-in-polygon (ray casting toward +x). Sampled at pixel
+/// centers below, so a pixel is part of the shape when its center is
+/// inside the outline — the software spelling of the X server's
+/// `FillPoly` this replaces.
+fn polygon_contains(polygon: &[(f32, f32)], x: f32, y: f32) -> bool {
+    let mut inside = false;
+    let mut j = polygon.len() - 1;
+    for i in 0..polygon.len() {
+        let (xi, yi) = polygon[i];
+        let (xj, yj) = polygon[j];
+        if (yi > y) != (yj > y) && x < (xj - xi) * (y - yi) / (yj - yi) + xi {
+            inside = !inside;
+        }
+        j = i;
+    }
+    inside
+}
+
+/// The resize arrow's premultiplied RGBA8 pixels at `scale`, rotated by
+/// `angle_rad` about its center, with the buffer size and the hotspot —
+/// the rotated center — in buffer coordinates. The rendering follows
+/// `wm-x11`'s `create_scaled_cursor` step for step (scale, rotate,
+/// shift into a non-negative box, black shape over a white halo) so the
+/// two backends' resize pointers are one drawing; the halo is the
+/// shape dilated by the same clamped radius, and it exists for the same
+/// reason as the arrow's — a flat black glyph disappears against a
+/// dark window at exactly the edge the user is squinting at.
+fn resize_cursor_pixels(scale: f32, angle_rad: f32) -> (Vec<u8>, i32, i32, (i32, i32)) {
+    let s = scale.max(1.0);
+    let (cx, cy) = CURSOR_RESIZE_ARROW_CENTER;
+    let (sin, cos) = angle_rad.sin_cos();
+    let outline: Vec<(f32, f32)> = CURSOR_RESIZE_ARROW
+        .iter()
+        .map(|&(x, y)| {
+            let (dx, dy) = (x - cx, y - cy);
+            ((dx * cos - dy * sin + cx) * s, (dx * sin + dy * cos + cy) * s)
+        })
+        .collect();
+    let hotspot_f = (cx * s, cy * s);
+
+    let min_x = outline.iter().map(|p| p.0).fold(hotspot_f.0, f32::min);
+    let min_y = outline.iter().map(|p| p.1).fold(hotspot_f.1, f32::min);
+    let max_x = outline.iter().map(|p| p.0).fold(hotspot_f.0, f32::max);
+    let max_y = outline.iter().map(|p| p.1).fold(hotspot_f.1, f32::max);
+
+    // Same halo radius and margin as the X11 rasterizer, so the two
+    // stay the same picture at every scale.
+    let halo = (s.round() as i32).clamp(1, 3);
+    let margin = halo + 1;
+    let shift_x = margin as f32 - min_x;
+    let shift_y = margin as f32 - min_y;
+    let width = (((max_x - min_x).round() as i32) + margin * 2).max(1) as usize;
+    let height = (((max_y - min_y).round() as i32) + margin * 2).max(1) as usize;
+    let hotspot = (
+        (hotspot_f.0 + shift_x).round() as i32,
+        (hotspot_f.1 + shift_y).round() as i32,
+    );
+
+    let shifted: Vec<(f32, f32)> =
+        outline.iter().map(|&(x, y)| (x + shift_x, y + shift_y)).collect();
+    let shape: Vec<bool> = (0..width * height)
+        .map(|i| {
+            let (x, y) = ((i % width) as f32 + 0.5, (i / width) as f32 + 0.5);
+            polygon_contains(&shifted, x, y)
+        })
+        .collect();
+
+    let mut pixels = vec![0u8; width * height * 4];
+    for y in 0..height {
+        for x in 0..width {
+            let rgba: [u8; 4] = if shape[y * width + x] {
+                [0, 0, 0, 0xFF]
+            } else {
+                // The halo: any pixel within `halo` of the shape in
+                // Chebyshev distance — the same dilation the X11 side
+                // draws as offset copies of the polygon.
+                let mut near = false;
+                'scan: for dy in -halo..=halo {
+                    for dx in -halo..=halo {
+                        let (nx, ny) = (x as i32 + dx, y as i32 + dy);
+                        if nx >= 0
+                            && ny >= 0
+                            && (nx as usize) < width
+                            && (ny as usize) < height
+                            && shape[ny as usize * width + nx as usize]
+                        {
+                            near = true;
+                            break 'scan;
+                        }
+                    }
+                }
+                if near {
+                    [0xFF, 0xFF, 0xFF, 0xFF]
+                } else {
+                    continue;
+                }
+            };
+            let at = (y * width + x) * 4;
+            pixels[at..at + 4].copy_from_slice(&rgba);
+        }
+    }
+    (pixels, width as i32, height as i32, hotspot)
 }
 
 #[cfg(test)]
@@ -2086,6 +2364,77 @@ mod tests {
         let (_, width, height) = default_cursor_pixels(1.0);
         assert_eq!(default_cursor_pixels(0.25).1, width);
         assert_eq!(default_cursor_pixels(0.0).2, height);
+    }
+
+    // -- the resize cursors ------------------------------------------
+    // Rasterized from the same polygon `wm-x11` hands the X server, so
+    // what is pinned here is the software half: the rotations land the
+    // shape the right way round, the hotspot stays its center, and the
+    // buffer grows with the scale.
+
+    /// Alpha of the pixel at (x, y) in a `resize_cursor_pixels` buffer.
+    fn resize_alpha_at(pixels: &[u8], width: i32, x: i32, y: i32) -> u8 {
+        pixels[((y * width + x) * 4 + 3) as usize]
+    }
+
+    #[test]
+    fn the_vertical_arrow_is_taller_than_wide_and_the_horizontal_is_its_transpose() {
+        let (_, vw, vh, _) = resize_cursor_pixels(1.0, 0.0);
+        assert!(vh > vw, "a ⇕ cursor is taller than it is wide ({vw}x{vh})");
+        let (_, hw, hh, _) = resize_cursor_pixels(1.0, 90.0_f32.to_radians());
+        // The 90° turn swaps the extents (give or take a rounding
+        // pixel, since the outline is rotated in floats and re-boxed).
+        assert!((hw - vh).abs() <= 1 && (hh - vw).abs() <= 1, "{vw}x{vh} vs {hw}x{hh}");
+    }
+
+    /// The hotspot is the shaft's center — the pixel the user is told
+    /// they are pointing at must be part of the drawing, or the cursor
+    /// visibly floats beside the edge it marks.
+    #[test]
+    fn the_hotspot_is_inside_the_shape_at_every_rotation() {
+        for angle in [0.0_f32, 45.0, 90.0, -45.0] {
+            let (pixels, width, height, (hx, hy)) =
+                resize_cursor_pixels(2.0, angle.to_radians());
+            assert!(hx > 0 && hx < width && hy > 0 && hy < height);
+            assert_eq!(
+                resize_alpha_at(&pixels, width, hx, hy),
+                0xFF,
+                "hotspot ({hx}, {hy}) must land on the shaft at {angle}°"
+            );
+        }
+    }
+
+    #[test]
+    fn the_resize_cursor_grows_with_the_ui_scale() {
+        let (_, base_width, base_height, _) = resize_cursor_pixels(1.0, 0.0);
+        let (_, width, height, _) = resize_cursor_pixels(2.0, 0.0);
+        assert!(width > base_width && height > base_height);
+    }
+
+    /// The two diagonals run along opposite axes: -45° is the ⤡
+    /// arrow, its shaft passing through the quadrants northwest and
+    /// southeast of the hotspot, and +45° is the ⤢ through the other
+    /// two. A sign slip in either rotation shows a corner the axis it
+    /// does not resize along — the mistake `CursorSet::build`'s
+    /// comment records nearly shipping — and this is the assertion
+    /// that catches it. (Exact pixel-mirror equality between the two
+    /// is deliberately not asserted: the outline is rotated in floats,
+    /// so the buffers' boundary pixels round independently.)
+    #[test]
+    fn each_diagonal_runs_through_its_own_corners() {
+        let (se_pixels, se_width, _, (sx, sy)) = resize_cursor_pixels(2.0, -45.0_f32.to_radians());
+        let (sw_pixels, sw_width, _, (wx, wy)) = resize_cursor_pixels(2.0, 45.0_f32.to_radians());
+        let d = se_width / 4;
+        // ↘: shape on the NW–SE diagonal, nothing on the NE–SW one.
+        assert_eq!(resize_alpha_at(&se_pixels, se_width, sx - d, sy - d), 0xFF);
+        assert_eq!(resize_alpha_at(&se_pixels, se_width, sx + d, sy + d), 0xFF);
+        assert_eq!(resize_alpha_at(&se_pixels, se_width, sx + d, sy - d), 0);
+        assert_eq!(resize_alpha_at(&se_pixels, se_width, sx - d, sy + d), 0);
+        // ↙: the mirror.
+        assert_eq!(resize_alpha_at(&sw_pixels, sw_width, wx + d, wy - d), 0xFF);
+        assert_eq!(resize_alpha_at(&sw_pixels, sw_width, wx - d, wy + d), 0xFF);
+        assert_eq!(resize_alpha_at(&sw_pixels, sw_width, wx - d, wy - d), 0);
+        assert_eq!(resize_alpha_at(&sw_pixels, sw_width, wx + d, wy + d), 0);
     }
 
     // The stacking transforms behind a client-decorated window's place
