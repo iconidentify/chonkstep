@@ -124,6 +124,66 @@ since they answer in Motif hints instead of by staying quiet.
 
 ## UI scale and HiDPI
 
+### Native Wayland clients are not scaled, and why
+
+A native Wayland client — LibreOffice, and every GTK application — renders
+at 1x on a desktop configured at scale 2, next to chrome that is correctly
+scaled. This is the largest outstanding gap, and the cause is understood
+precisely enough to state, so that the next attempt does not repeat the one
+that failed.
+
+**The environment variables cannot fix it.** The launcher puts `GDK_SCALE`
+and `QT_SCALE_FACTOR` in every child's environment, and for a Wayland client
+they do nothing: verified under `WAYLAND_DEBUG`, a GTK client launched with
+`GDK_SCALE=2` against an output advertising scale 1 makes **no
+`wl_surface.set_buffer_scale` call at all** and declares the same window
+geometry it would have at 1x. On Wayland, GTK takes its scale from
+`wl_output.scale`. The variables remain load-bearing for X11 and XWayland
+clients, which have no output scale to read.
+
+**So the only fix is to advertise a real `wl_output` scale.** That was tried
+once and it broke the desktop badly — the dock vanished off the right edge
+of the screen, the wallpaper was clipped to a quarter, and the chrome
+collapsed into the top-left. The conclusion drawn at the time, that a
+physical-pixel compositor is fundamentally incompatible with a scaled
+output and needs a full logical/physical split first, was **wrong**, and
+believing it would cost whoever tries next a great deal of unnecessary work.
+
+The actual mechanism is narrower. Element *positions* are physical in
+smithay either way, and were never the problem. What broke is that this
+compositor imports its own buffers — window chrome, the dock, the wallpaper,
+the pointer — declaring a buffer scale of `1` (`backend_impl.rs`,
+`import_buffer`), while the theme has already rasterized them at the UI
+scale. Smithay scales an element by `output_scale / buffer_scale`, so
+chrome drawn at 2x and imported as scale 1 is drawn at 2x *again*. Every
+symptom follows from that one factor of two: a dock 224px wide anchored at
+x=3728 runs past a 3840px screen, and a wallpaper sized to the screen covers
+four of them.
+
+The shape of the fix, then, is:
+
+- every buffer this compositor imports declares the scale it was actually
+  rasterized at, so `output_scale / buffer_scale` comes out at 1 and one
+  buffer pixel lands on one screen pixel;
+- outputs advertise the session's scale, rounded to a whole number, since
+  `wl_output.scale` carries only integers;
+- client surface trees render at the output scale, which is what
+  `render_elements_from_surface_tree`'s scale argument means — smithay
+  divides by each surface's own `set_buffer_scale` internally, so one value
+  is correct for a client that scaled itself and for one that did not (the
+  latter is upscaled, which is the right answer for it);
+- values crossing the ledger boundary convert by that same scale, because a
+  client works in logical pixels and this ledger is physical. Note the
+  configure path especially: converting with the wrong factor there makes
+  the round trip feed itself and a scaled window grows without bound on its
+  first map.
+
+Status: **not implemented.** Everything above is diagnosis, verified against
+a real session and a real client, not a description of shipped behaviour.
+
+### XSETTINGS
+
+
 The session runs an XSETTINGS manager (`crates/chonk-xsettings`), which owns
 the `_XSETTINGS_S<screen>` selection and publishes `Xft/DPI`,
 `Gdk/WindowScalingFactor`, `Gdk/UnscaledDPI` and `Gtk/CursorThemeSize` to
