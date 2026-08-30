@@ -98,7 +98,7 @@ pub(crate) fn build_scene(
     renderer: &mut GlesRenderer,
     pointer_location: SPoint<f64, smithay::utils::Logical>,
     cursor_status: &CursorImageStatus,
-    default_cursor: &smithay::backend::renderer::element::memory::MemoryRenderBuffer,
+    cursors: &crate::state::CursorSet,
     viewport: Point,
 ) -> (Vec<SceneElement<GlesRenderer>>, Color32F) {
     // Elements are assembled FRONT to BACK — the damage tracker's
@@ -110,9 +110,10 @@ pub(crate) fn build_scene(
     push_cursor_elements(
         &mut elements,
         renderer,
+        backend,
         pointer_location,
         cursor_status,
-        default_cursor,
+        cursors,
         viewport,
     );
 
@@ -325,7 +326,7 @@ fn render_frame_winit(comp: &mut Compositor) {
         outputs,
         pointer_location,
         cursor_status,
-        default_cursor,
+        cursors,
         start_time,
         ..
     } = comp;
@@ -358,7 +359,7 @@ fn render_frame_winit(comp: &mut Compositor) {
             renderer,
             *pointer_location,
             cursor_status,
-            default_cursor,
+            cursors,
             Point::new(0, 0),
         );
 
@@ -524,18 +525,28 @@ fn push_window_content(
     ));
 }
 
-/// Pushes the pointer's elements: the client-set cursor surface when
-/// one is active (offset by its hotspot, which smithay stashes in the
-/// surface's data map), the built-in arrow otherwise. `Named` cursor
-/// shapes also fall back to the arrow — shipping an Xcursor theme
-/// loader is not worth it for a nested dev backend, and clients that
-/// care set surface cursors.
+/// Pushes the pointer's elements, picking the image by what the
+/// pointer is over ([`crate::input::pointer_subject`]) rather than by
+/// the last `CursorImageStatus` alone: the client-set cursor surface
+/// applies only over that client's own content (offset by its hotspot,
+/// which smithay stashes in the surface's data map); over our frames
+/// the compositor's own arrow — or the resize double-arrow the frame
+/// asked for through `Backend::set_frame_cursor` — is drawn; over the
+/// desktop and shell surfaces, the arrow. A status is a *statement by
+/// a client*, and it outlives the pointer's visit (no client un-sets a
+/// cursor on leave; leave means it may not), so trusting it everywhere
+/// kept LibreOffice's pointer on screen over the dock and every frame
+/// the pointer crossed after leaving it. `Named` cursor shapes also
+/// fall back to the arrow — shipping an Xcursor theme loader is not
+/// worth it for a nested dev backend, and clients that care set
+/// surface cursors.
 fn push_cursor_elements(
     elements: &mut Vec<SceneElement<GlesRenderer>>,
     renderer: &mut GlesRenderer,
+    backend: &WaylandBackend,
     location: SPoint<f64, smithay::utils::Logical>,
     status: &CursorImageStatus,
-    default_cursor: &smithay::backend::renderer::element::memory::MemoryRenderBuffer,
+    cursors: &crate::state::CursorSet,
     viewport: Point,
 ) {
     // The pointer has one position in global space and is pushed into
@@ -545,7 +556,47 @@ fn push_cursor_elements(
     // tracking which screen it is on.
     let offset =
         SPoint::<f64, smithay::utils::Logical>::from((viewport.x as f64, viewport.y as f64));
+    let global = location;
     let location = location - offset;
+    // `Hidden` stays absolute, over every subject: screencopy relies on
+    // substituting it to capture a cursorless frame (see
+    // `protocols.rs`'s `capture_region`), and a client hiding the
+    // pointer over its own video is the one client statement that must
+    // not be second-guessed while the pointer is there.
+    if matches!(status, CursorImageStatus::Hidden) {
+        return;
+    }
+    let subject = crate::input::pointer_subject(backend, global);
+    let sprite = match subject {
+        crate::input::PointerSubject::Client => None,
+        crate::input::PointerSubject::Frame(Some(edge)) => Some(cursors.for_edge(edge)),
+        crate::input::PointerSubject::Frame(None) | crate::input::PointerSubject::Desktop => {
+            Some(cursors.arrow())
+        }
+    };
+    if let Some(sprite) = sprite {
+        // The compositor's own image, hotspot-corrected: the resize
+        // double-arrows mark their center, not their corner, and
+        // drawing them uncorrected puts the visible crosshair half a
+        // glyph below-right of the edge the user is aiming at.
+        let position = SPoint::<f64, smithay::utils::Logical>::from((
+            location.x - sprite.hotspot.0 as f64,
+            location.y - sprite.hotspot.1 as f64,
+        ));
+        match MemoryRenderBufferRenderElement::from_buffer(
+            renderer,
+            position.to_physical(1.0),
+            &sprite.buffer,
+            None,
+            None,
+            None,
+            Kind::Cursor,
+        ) {
+            Ok(element) => elements.push(element.into()),
+            Err(error) => tracing::warn!(?error, "failed to import a compositor cursor"),
+        }
+        return;
+    }
     match status {
         CursorImageStatus::Hidden => {}
         CursorImageStatus::Surface(surface) if surface.alive() => {
@@ -579,8 +630,9 @@ fn push_cursor_elements(
             ));
         }
         _ => {
-            // No hotspot offset and no size override: the arrow's tip
-            // is its (0, 0) pixel, and `state::build_default_cursor`
+            // A client that never set a cursor (or set a `Named` shape)
+            // gets the arrow. No hotspot offset and no size override:
+            // the arrow's tip is its (0, 0) pixel, and the cursor set
             // has already rasterized the shape at the UI scale from
             // that same origin, so the tip stays under the pointer at
             // every scale. Sizing the element here instead would ask
@@ -589,7 +641,7 @@ fn push_cursor_elements(
             match MemoryRenderBufferRenderElement::from_buffer(
                 renderer,
                 location.to_physical(1.0),
-                default_cursor,
+                &cursors.arrow().buffer,
                 None,
                 None,
                 None,

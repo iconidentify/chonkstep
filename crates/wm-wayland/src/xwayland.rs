@@ -41,7 +41,7 @@ use smithay::xwayland::xwm::{
 use smithay::xwayland::{X11Surface, X11Wm, XwmHandler};
 
 use wm_core::{BackendEvent, NetState, NetStateAction};
-use wm_theme_api::{Point, Rect, Size};
+use wm_theme_api::{Point, Rect, ResizeEdge, Size};
 
 use crate::state::{
     Compositor, ManagedSurface, WaylandBackend, WindowRecord, WlFrameId, WlWindowId,
@@ -89,6 +89,23 @@ fn ensure_x11_record(backend: &mut WaylandBackend, window: &X11Surface) -> WlWin
         WindowRecord::new(ManagedSurface::X11(window.clone()), wm_rect(window.geometry())),
     );
     id
+}
+
+/// Smithay's XWM edge -> the theme vocabulary `wm-core` resizes in.
+/// Total, unlike the xdg mapping in `xdg.rs`: `_NET_WM_MOVERESIZE`'s
+/// move and keyboard directions arrive as separate XWM callbacks, so
+/// every value this enum can carry names a real edge.
+fn wm_resize_edge(edge: X11ResizeEdge) -> ResizeEdge {
+    match edge {
+        X11ResizeEdge::Top => ResizeEdge::North,
+        X11ResizeEdge::Bottom => ResizeEdge::South,
+        X11ResizeEdge::Left => ResizeEdge::West,
+        X11ResizeEdge::Right => ResizeEdge::East,
+        X11ResizeEdge::TopLeft => ResizeEdge::NorthWest,
+        X11ResizeEdge::TopRight => ResizeEdge::NorthEast,
+        X11ResizeEdge::BottomLeft => ResizeEdge::SouthWest,
+        X11ResizeEdge::BottomRight => ResizeEdge::SouthEast,
+    }
 }
 
 fn wm_rect(rect: Rectangle<i32, Logical>) -> Rect {
@@ -320,21 +337,30 @@ impl XwmHandler for Compositor {
     fn resize_request(
         &mut self,
         _xwm: XwmId,
-        _window: X11Surface,
+        window: X11Surface,
         _button: u32,
-        _resize_edge: X11ResizeEdge,
+        resize_edge: X11ResizeEdge,
     ) {
-        // The half of `_NET_WM_MOVERESIZE` that is still dropped: there
-        // is no `BackendEvent` shape for a client-initiated resize, and
-        // `wm-x11` dropped these client messages too. Resizing is driven
-        // from our own chrome's edges.
-        //
-        // Not symmetrical with `move_request` below, and the asymmetry
-        // is the point rather than an oversight. Taking our chrome away
-        // from a client-decorated window removes the only way to *move*
-        // it, so that one had to be answered; it does not remove the
-        // only way to resize one, because such a client draws its own
-        // resize grips and handles the drag itself.
+        // The other half of `_NET_WM_MOVERESIZE`, dropped until
+        // `BackendEvent::ResizeRequest` existed — on the argument that
+        // it was not symmetrical with `move_request`: taking our chrome
+        // away from a client-decorated window removed the only way to
+        // *move* it, whereas such a client draws its own resize grips
+        // and, it was assumed, handles the drag itself. The assumption
+        // was backwards. `_NET_WM_MOVERESIZE` is the grip *delegating*
+        // the drag — a client that ran it itself would never have sent
+        // the message — so dropping it left every grip on a
+        // client-decorated X11 window armed and inert. `wm-core` now
+        // runs the same interactive resize a resizebar drag runs; the
+        // edge is the client's report of which grip was grabbed, the
+        // start geometry is our own record.
+        let backend = self.wm.backend_mut();
+        if let Some(id) = x11_window_id(backend, &window) {
+            backend.queue(WmEvent::ResizeRequest {
+                window: id,
+                edge: wm_resize_edge(resize_edge),
+            });
+        }
     }
 
     fn move_request(&mut self, _xwm: XwmId, window: X11Surface, _button: u32) {
@@ -487,3 +513,25 @@ impl Compositor {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The XWM edge table, pinned for the same reason as the xdg one in
+    /// `xdg.rs`: a swapped pair resizes the wrong side of the window and
+    /// nothing nearer the drag would say why. Total — `_NET_WM_MOVERESIZE`'s
+    /// move and keyboard values never reach this enum.
+    #[test]
+    fn every_x11_resize_edge_maps_to_its_compass_point() {
+        assert_eq!(wm_resize_edge(X11ResizeEdge::Top), ResizeEdge::North);
+        assert_eq!(wm_resize_edge(X11ResizeEdge::Bottom), ResizeEdge::South);
+        assert_eq!(wm_resize_edge(X11ResizeEdge::Left), ResizeEdge::West);
+        assert_eq!(wm_resize_edge(X11ResizeEdge::Right), ResizeEdge::East);
+        assert_eq!(wm_resize_edge(X11ResizeEdge::TopLeft), ResizeEdge::NorthWest);
+        assert_eq!(wm_resize_edge(X11ResizeEdge::TopRight), ResizeEdge::NorthEast);
+        assert_eq!(wm_resize_edge(X11ResizeEdge::BottomLeft), ResizeEdge::SouthWest);
+        assert_eq!(wm_resize_edge(X11ResizeEdge::BottomRight), ResizeEdge::SouthEast);
+    }
+}
+

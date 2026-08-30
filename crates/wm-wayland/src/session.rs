@@ -1079,7 +1079,7 @@ pub(crate) fn render_frame_session(comp: &mut Compositor) {
         outputs,
         pointer_location,
         cursor_status,
-        default_cursor,
+        cursors,
         start_time,
         ..
     } = comp;
@@ -1166,7 +1166,7 @@ pub(crate) fn render_frame_session(comp: &mut Compositor) {
             renderer,
             *pointer_location,
             cursor_status,
-            default_cursor,
+            cursors,
             output.position,
         );
 

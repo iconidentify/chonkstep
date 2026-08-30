@@ -1207,7 +1207,7 @@ fn capture_region(
     transform: Transform,
     overlay_cursor: bool,
 ) -> Option<DecorationBuffer> {
-    let Compositor { wm, graphics, pointer_location, cursor_status, default_cursor, .. } = comp;
+    let Compositor { wm, graphics, pointer_location, cursor_status, cursors, .. } = comp;
     let renderer = graphics_renderer(graphics);
     let hidden = CursorImageStatus::Hidden;
     let status = if overlay_cursor { &*cursor_status } else { &hidden };
@@ -1216,7 +1216,7 @@ fn capture_region(
         renderer,
         *pointer_location,
         status,
-        default_cursor,
+        cursors,
         region.pos,
     );
     render_offscreen(renderer, &elements, region.size, transform, clear_color)

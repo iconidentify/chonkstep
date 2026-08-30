@@ -171,7 +171,7 @@ pub(crate) fn capture_output_png(comp: &mut Compositor, path: &Path) -> Result<(
         graphics,
         pointer_location,
         cursor_status,
-        default_cursor,
+        cursors,
         ..
     } = comp;
     let renderer = graphics_renderer(graphics);
@@ -187,7 +187,7 @@ pub(crate) fn capture_output_png(comp: &mut Compositor, path: &Path) -> Result<(
         renderer,
         *pointer_location,
         cursor_status,
-        default_cursor,
+        cursors,
         // No viewport offset: the capture *is* the global space, so
         // every element stays at the coordinate the ledger holds it at.
         Point::new(0, 0),

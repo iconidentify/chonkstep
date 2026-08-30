@@ -78,7 +78,7 @@ fn smithay_rect(rect: Rect) -> SmithayRect<i32, Logical> {
 /// physical pixels, not logical ones needing another scale factor.
 /// `None` for an empty buffer (nothing to show; callers keep whatever
 /// they had), mirroring `wm-x11`'s blit ignoring empty buffers.
-fn import_buffer(buffer: &DecorationBuffer) -> Option<MemoryRenderBuffer> {
+fn import_buffer(buffer: &DecorationBuffer, scale: i32) -> Option<MemoryRenderBuffer> {
     if buffer.width == 0 || buffer.height == 0 {
         return None;
     }
@@ -86,7 +86,7 @@ fn import_buffer(buffer: &DecorationBuffer) -> Option<MemoryRenderBuffer> {
         &buffer.pixels,
         Fourcc::Abgr8888,
         (buffer.width as i32, buffer.height as i32),
-        1,
+        scale,
         Transform::Normal,
         None,
     ))
@@ -195,7 +195,7 @@ impl Backend for WaylandBackend {
 
     fn paint_shell_surface(&mut self, id: Self::ShellId, buffer: &DecorationBuffer) {
         if let Some(shell) = self.shells.get_mut(&id) {
-            if let Some(imported) = import_buffer(buffer) {
+            if let Some(imported) = import_buffer(buffer, self.ui_scale) {
                 shell.buffer = Some(imported);
                 self.damage = true;
             }
@@ -210,7 +210,7 @@ impl Backend for WaylandBackend {
     fn paint_root_image(&mut self, buffer: &DecorationBuffer) {
         // An empty buffer keeps the previous background rather than
         // installing a zero-sized image nothing can render.
-        if let Some(imported) = import_buffer(buffer) {
+        if let Some(imported) = import_buffer(buffer, self.ui_scale) {
             self.root_background = RootBackground::Image(imported);
             self.damage = true;
         }
@@ -257,6 +257,21 @@ impl Backend for WaylandBackend {
         // never returned through that loop at all. See
         // `WaylandBackend::pending_cursor_scale`.
         self.pending_cursor_scale = Some(scale);
+    }
+
+    /// The pointer's current position, from the mirror `input.rs`
+    /// keeps on the ledger — this backend's spelling of the X11
+    /// `query_pointer` round trip, and NOT redundant with the
+    /// `PointerMotion` stream: motion over a client's own content is
+    /// never queued (it is the client's), so `wm-core`'s remembered
+    /// position can be stale by the width of a client-decorated window
+    /// at exactly the moment that window asks to be moved or resized.
+    /// Answering honestly here is what keeps the first CSD titlebar
+    /// drag anchored where the user pressed instead of wherever the
+    /// pointer last crossed the desktop — the "first drag teleports
+    /// the window" bug, live on LibreOffice until this existed.
+    fn pointer_position(&self) -> Option<Point> {
+        self.pointer
     }
 
     fn screen_size(&self) -> Size {
@@ -500,6 +515,11 @@ impl Backend for WaylandBackend {
     }
 
     fn destroy_decoration(&mut self, frame: Self::FrameId) {
+        // The cursor entry goes with the frame (both removal verbs do
+        // this, matching `wm-x11`'s `frame_cursor.remove`): a stale
+        // entry would re-apply a resize cursor to whatever frame the id
+        // is ever reused for.
+        self.frame_cursors.remove(&frame);
         if self.frames.remove(&frame).is_some() {
             self.stacking
                 .retain(|entry| !matches!(entry, StackEntry::Frame(f) if *f == frame));
@@ -529,6 +549,7 @@ impl Backend for WaylandBackend {
     /// it; matching that keeps the window under the pointer that was
     /// just interacting with it.
     fn release_decoration(&mut self, window: Self::WindowId, frame: Self::FrameId) {
+        self.frame_cursors.remove(&frame);
         if self.frames.remove(&frame).is_none() {
             return;
         }
@@ -542,20 +563,38 @@ impl Backend for WaylandBackend {
 
     fn paint_decoration(&mut self, frame: Self::FrameId, buffer: &DecorationBuffer) {
         if let Some(record) = self.frames.get_mut(&frame) {
-            if let Some(imported) = import_buffer(buffer) {
+            if let Some(imported) = import_buffer(buffer, self.ui_scale) {
                 record.buffer = Some(imported);
                 self.damage = true;
             }
         }
     }
 
-    /// No-op for now: the pointer image is composited by the renderer
-    /// from the input module's pointer state, so indicating a resize
-    /// edge means swapping that cursor image, not flagging a window —
-    /// a follow-up in the input/renderer pair once a second cursor
-    /// image exists to swap to. Harmless meanwhile: resize itself works,
-    /// only the hover affordance is missing.
-    fn set_frame_cursor(&mut self, _frame: Self::FrameId, _edge: Option<ResizeEdge>) {}
+    /// Records which cursor this frame wants shown, for the renderer to
+    /// pick up: the pointer image is composited by the renderer from
+    /// the input module's pointer state, so indicating a resize edge
+    /// means swapping that cursor image, not flagging a window the way
+    /// the X11 backend's `change_window_attributes` does. The swap
+    /// itself happens in `push_cursor_elements`, which consults this
+    /// map whenever the pointer is over the frame's chrome (via
+    /// `input::pointer_subject`); recording is all that can happen
+    /// here, for the reason every deferred field on the ledger states —
+    /// a `Backend` verb runs inside the `WindowManager`'s `&mut self`
+    /// and can reach nothing on `Compositor`.
+    fn set_frame_cursor(&mut self, frame: Self::FrameId, edge: Option<ResizeEdge>) {
+        let changed = match edge {
+            Some(edge) => self.frame_cursors.insert(frame, edge) != Some(edge),
+            None => self.frame_cursors.remove(&frame).is_some(),
+        };
+        // Damage only on a real change: this is called on every motion
+        // over chrome, and the pointer's own movement already damages
+        // the scene — but a change can also arrive with the pointer
+        // still (a keybinding resize ending under it), and without the
+        // flag the old cursor would linger until something else moved.
+        if changed {
+            self.damage = true;
+        }
+    }
 
     // -- geometry / visibility --------------------------------------------
 
