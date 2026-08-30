@@ -58,6 +58,14 @@ pub struct FakeBackend {
     /// "was it raised when it was clicked", and only the second one is
     /// the bug.
     pub raised_frameless: Vec<FakeWindowId>,
+    /// How many pointer grabs are currently outstanding: incremented by
+    /// `grab_pointer_for_drag`, decremented by `ungrab_pointer`.
+    ///
+    /// A count rather than a flag because the number that matters is
+    /// zero-or-not after a drag: a grab left behind freezes the pointer
+    /// for every client on the session, and a double release would hand
+    /// back a grab someone else holds.
+    pub outstanding_pointer_grabs: i32,
     pub mapped_frames: HashSet<FakeFrameId>,
     pub unmapped_frames: HashSet<FakeFrameId>,
     pub destroyed_frames: HashSet<FakeFrameId>,
@@ -375,9 +383,12 @@ impl Backend for FakeBackend {
     }
 
     fn grab_pointer_for_drag(&mut self) -> DragHandle {
-        DragHandle(0)
+        self.outstanding_pointer_grabs += 1;
+        DragHandle(self.outstanding_pointer_grabs as u64)
     }
-    fn ungrab_pointer(&mut self, _handle: DragHandle) {}
+    fn ungrab_pointer(&mut self, _handle: DragHandle) {
+        self.outstanding_pointer_grabs -= 1;
+    }
     fn grab_key(&mut self, combo: KeyCombo) {
         self.grabbed_keys.push(combo);
     }

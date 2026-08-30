@@ -230,6 +230,21 @@ pub enum BackendEvent<Win, Frame> {
     /// first mapped — which is a worse bug than the spare titlebar that
     /// removing our chrome was meant to fix.
     MoveRequest(Win),
+    /// The pointer button came up during an interactive drag, somewhere
+    /// the backend cannot name a surface for.
+    ///
+    /// `PointerButton` needs a `SurfaceRef`, and there are releases that
+    /// have none to give: over the root itself, over a window this
+    /// desktop does not manage, or over nothing at all because edge
+    /// snapping just pulled the frame out from under the pointer. Every
+    /// one of those is still the end of the drag, and a drag that is
+    /// never told it ended leaves the window glued to the cursor with
+    /// no button held — the exact failure this whole path exists to
+    /// prevent, reappearing in the corner cases.
+    ///
+    /// A backend may emit this instead of, or in addition to, a
+    /// `PointerButton` release; ending a drag is idempotent.
+    DragEnded,
     PointerButton {
         surface: SurfaceRef<Win, Frame>,
         local: Point,

@@ -10,7 +10,7 @@ use crate::hittest::{hit_test, HitTarget};
 use crate::placement::{self, PlacementPolicy};
 use crate::resize;
 use crate::snap;
-use crate::types::{BackendEvent, ClientChrome, KeyCombo, MouseButton, Modifiers, NetState, NetStateAction, SurfaceRef, WindowType};
+use crate::types::{BackendEvent, ClientChrome, DragHandle, KeyCombo, MouseButton, Modifiers, NetState, NetStateAction, SurfaceRef, WindowType};
 
 /// How close together (in ms) two presses on the same titlebar must land
 /// to count as a double-click (toggling maximize). Not backed by an
@@ -136,6 +136,23 @@ pub struct WindowManager<B: Backend> {
     frame_index: HashMap<B::FrameId, ClientId>,
     focused: Option<ClientId>,
     active_move: Option<ActiveMove>,
+    /// The pointer grab held for the duration of an interactive drag.
+    ///
+    /// A framed window did not need one: the window manager owns the
+    /// frame the pointer is over, so the motion and the release land on
+    /// it by construction. A window whose client draws its own chrome
+    /// has no such surface — every event goes to the client — so a drag
+    /// begun on one would start and then never end, and the window
+    /// would follow the pointer with no button held until something
+    /// else interrupted it. That was reported from a real session,
+    /// dragging LibreOffice.
+    ///
+    /// `Some` exactly while a move or a resize is in flight. Paired
+    /// with the backend's grab so a leak is visible in one place rather
+    /// than distributed across every path a drag can end on — and a
+    /// leaked pointer grab freezes the desktop for every client, which
+    /// is worse than the bug it fixes.
+    drag_grab: Option<DragHandle>,
     active_resize: Option<ActiveResize>,
     active_button_press: Option<ActiveButtonPress>,
     /// The most recent press on a titlebar drag region, for double-click
@@ -215,6 +232,7 @@ impl<B: Backend> WindowManager<B> {
             frame_index: HashMap::new(),
             focused: None,
             active_move: None,
+            drag_grab: None,
             active_resize: None,
             active_button_press: None,
             last_titlebar_press: None,
@@ -630,6 +648,7 @@ impl<B: Backend> WindowManager<B> {
             BackendEvent::TitleChanged(window) => self.handle_title_changed(window),
             BackendEvent::ChromeChanged(window) => self.handle_chrome_changed(window),
             BackendEvent::MoveRequest(window) => self.handle_move_request(window),
+            BackendEvent::DragEnded => self.end_active_drag(),
             BackendEvent::KeyPress(combo) => self.handle_key_press(combo),
             BackendEvent::KeyRelease(combo) => self.handle_key_release(combo),
             BackendEvent::PointerEnter { surface } => self.handle_pointer_enter(surface),
@@ -845,8 +864,13 @@ impl<B: Backend> WindowManager<B> {
             self.focused = None;
             self.backend.publish_active_window(None);
         }
-        if self.active_move.as_ref().is_some_and(|m| m.client == id) {
-            self.active_move = None;
+        if self.active_move.as_ref().is_some_and(|m| m.client == id)
+            || self.active_resize.as_ref().is_some_and(|r| r.client == id)
+        {
+            // The window being dragged has gone. Ending the drag here
+            // is what stops the grab outliving it — a pointer grab with
+            // nothing left to move is a frozen desktop.
+            self.end_active_drag();
         }
         self.fullscreen_restore.remove(&id);
         if let Some(client) = self.clients.remove(id) {
@@ -938,6 +962,16 @@ impl<B: Backend> WindowManager<B> {
         time_ms: u32,
         mods: Modifiers,
     ) {
+        // A drag ends on the button coming up, wherever that happens.
+        // Not only on the frame: a window whose client draws its own
+        // chrome is dragged with the pointer over the *client*, and
+        // under the drag grab the release may be reported against the
+        // root, the frame or the client depending on the backend. Any
+        // of them means the same thing, and treating only one of them
+        // as the end is what left the window stuck to the cursor.
+        if !pressed && button == MouseButton::Left && (self.active_move.is_some() || self.active_resize.is_some()) {
+            self.end_active_drag();
+        }
         match surface {
             SurfaceRef::Frame(frame) => self.handle_frame_button(frame, local, button, pressed, time_ms, mods),
             SurfaceRef::Client(window) => self.handle_client_button(window, pressed),
@@ -1056,6 +1090,7 @@ impl<B: Backend> WindowManager<B> {
                 } else {
                     self.last_titlebar_press = Some((id, time_ms));
                     self.active_move = Some(ActiveMove { client: id, grab_offset: local });
+                    self.begin_drag_grab();
                 }
             }
             // A shaded window has nothing to resize — the classic
@@ -1068,6 +1103,7 @@ impl<B: Backend> WindowManager<B> {
                     size: client.layout.frame_size,
                 };
                 self.active_resize = Some(ActiveResize { client: id, edge, start_frame });
+                self.begin_drag_grab();
             }
             _ => {}
         }
@@ -1077,11 +1113,10 @@ impl<B: Backend> WindowManager<B> {
         if button != MouseButton::Left {
             return;
         }
-        if self.active_move.as_ref().is_some_and(|m| m.client == id) {
-            self.active_move = None;
-        }
-        if self.active_resize.as_ref().is_some_and(|r| r.client == id) {
-            self.active_resize = None;
+        if self.active_move.as_ref().is_some_and(|m| m.client == id)
+            || self.active_resize.as_ref().is_some_and(|r| r.client == id)
+        {
+            self.end_active_drag();
         }
 
         let Some(active) = self.active_button_press.take_if(|p| p.client == id) else {
@@ -1154,7 +1189,7 @@ impl<B: Backend> WindowManager<B> {
         let (client_id, grab_offset) = (active.client, active.grab_offset);
 
         let Some(client) = self.clients.get(client_id) else {
-            self.active_move = None;
+            self.end_active_drag();
             return;
         };
         // A shaded window's *displayed* frame is only `shaded_frame_
@@ -2237,7 +2272,37 @@ impl<B: Backend> WindowManager<B> {
             client: id,
             grab_offset: Point::new(pointer.x - origin.x, pointer.y - origin.y),
         });
+        // The grab is what makes this kind of drag finishable at all:
+        // the client asked for it precisely because the pointer is over
+        // its own chrome, so without one every later motion and the
+        // release go to the client and never come back here.
+        self.begin_drag_grab();
         tracing::debug!(?window, "client asked to be moved — interactive move begun");
+    }
+
+    /// Takes the pointer for a drag that is starting, if one is not
+    /// already held. Idempotent: a second press mid-drag must not
+    /// strand the first grab.
+    fn begin_drag_grab(&mut self) {
+        if self.drag_grab.is_some() {
+            return;
+        }
+        self.drag_grab = Some(self.backend.grab_pointer_for_drag());
+    }
+
+    /// Ends any interactive drag and releases the pointer.
+    ///
+    /// The single exit. Every way a drag can stop — the button coming
+    /// up anywhere at all, the client being destroyed under it, a
+    /// workspace switching out from under it — goes through here, so
+    /// that "the drag is over" and "the pointer is free" cannot come
+    /// apart. Safe to call when nothing is dragging.
+    fn end_active_drag(&mut self) {
+        self.active_move = None;
+        self.active_resize = None;
+        if let Some(handle) = self.drag_grab.take() {
+            self.backend.ungrab_pointer(handle);
+        }
     }
 
     fn repaint_decoration(&mut self, id: ClientId) {
@@ -3274,6 +3339,70 @@ mod tests {
         );
         let id = wm.client_for_window(window).unwrap();
         assert_eq!(wm.client(id).unwrap().geometry.pos, Point::new(200, 200), "and the core must agree where it is");
+    }
+
+    #[test]
+    fn a_drag_on_a_frameless_window_ends_when_the_button_comes_up() {
+        // The bug this guards, reported from a real session dragging
+        // LibreOffice: the window followed the cursor with no button
+        // held. A window whose client draws its own chrome has no frame
+        // for the release to land on, so the release arrives against
+        // the *client* — and the old code only ended a drag on a frame
+        // release. The pointer grab has to come back too, because a
+        // leaked one freezes the pointer for every client on the
+        // session.
+        let mut backend = FakeBackend::new();
+        let window = backend.create_window();
+        backend.set_geometry(window, Rect { pos: Point::new(100, 100), size: Size::new(400, 300) });
+        backend.set_client_draws_own_chrome(window, true);
+        let mut wm = wm(backend);
+        wm.dispatch(BackendEvent::MapRequest(window));
+
+        wm.dispatch(BackendEvent::PointerMotion { root: Point::new(150, 120), surface_local: None });
+        wm.dispatch(BackendEvent::MoveRequest(window));
+        assert_eq!(wm.backend().outstanding_pointer_grabs, 1, "a drag must take the pointer");
+
+        wm.dispatch(BackendEvent::PointerMotion { root: Point::new(250, 220), surface_local: None });
+        let id = wm.client_for_window(window).unwrap();
+        assert_eq!(wm.client(id).unwrap().geometry.pos, Point::new(200, 200), "it tracks while held");
+
+        // Released over the client, which is where the pointer is.
+        wm.dispatch(BackendEvent::PointerButton {
+            surface: SurfaceRef::Client(window),
+            local: Point::new(0, 0),
+            button: MouseButton::Left,
+            pressed: false,
+            time_ms: 0,
+            mods: Modifiers::empty(),
+        });
+        assert_eq!(wm.backend().outstanding_pointer_grabs, 0, "and gives the pointer back");
+
+        // Moving afterwards must not move the window any more.
+        wm.dispatch(BackendEvent::PointerMotion { root: Point::new(600, 600), surface_local: None });
+        assert_eq!(
+            wm.client(id).unwrap().geometry.pos,
+            Point::new(200, 200),
+            "the window must stay where it was dropped, not follow the cursor"
+        );
+    }
+
+    #[test]
+    fn a_drag_whose_window_disappears_gives_the_pointer_back() {
+        // The other way a leaked grab happens: the dragged client dies
+        // mid-drag. A pointer grab with nothing left to move is a
+        // frozen desktop.
+        let mut backend = FakeBackend::new();
+        let window = backend.create_window();
+        backend.set_geometry(window, Rect { pos: Point::new(0, 0), size: Size::new(400, 300) });
+        backend.set_client_draws_own_chrome(window, true);
+        let mut wm = wm(backend);
+        wm.dispatch(BackendEvent::MapRequest(window));
+        wm.dispatch(BackendEvent::PointerMotion { root: Point::new(10, 10), surface_local: None });
+        wm.dispatch(BackendEvent::MoveRequest(window));
+        assert_eq!(wm.backend().outstanding_pointer_grabs, 1);
+
+        wm.dispatch(BackendEvent::Destroyed(window));
+        assert_eq!(wm.backend().outstanding_pointer_grabs, 0, "the grab must not outlive the window");
     }
 
     #[test]

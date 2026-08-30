@@ -33,6 +33,7 @@ use smithay::utils::Serial;
 use smithay::wayland::buffer::BufferHandler;
 use smithay::wayland::compositor::{
     get_parent, with_states, CompositorClientState, CompositorHandler, CompositorState,
+    SurfaceAttributes,
 };
 use smithay::wayland::output::OutputHandler;
 use smithay::wayland::selection::data_device::{
@@ -84,30 +85,99 @@ fn set_mapped_marker(surface: &WlSurface, value: bool) {
     });
 }
 
-/// The size the client actually committed: its declared xdg window
-/// geometry when set, else the buffer's logical size. `wm-core` reads
-/// this through `Backend::window_geometry` at map time (how big does
-/// the fresh client want to be), and `commit` compares it against the
-/// record to detect client-side resizes.
+/// How many device pixels one of this surface's own pixels is worth:
+/// the `wl_surface.set_buffer_scale` it last committed, floored at 1.
+///
+/// There is deliberately no session-wide answer to that question. Every
+/// `wl_output` here stays at scale 1 — the long note beside
+/// `WaylandBackend::new` in `state.rs` records what happened the day one
+/// did not — so a client never hears the desktop's scale from the
+/// protocol. It hears it, if at all, from the environment the launcher
+/// puts it in (`GDK_SCALE`, `QT_SCALE_FACTOR`), and toolkits differ on
+/// whether they read those at all. A GTK application started from the
+/// dock draws into a 2x buffer; the Xwayland server beside it, and any
+/// toolkit that only trusts `wl_output`, draws into a 1x one. Asking
+/// the session would get one of those two wrong every time.
+///
+/// The number is read from the surface's double-buffered
+/// [`SurfaceAttributes`], whose `current()` half is by construction
+/// whatever the client's last `wl_surface.commit` made real — the
+/// pending half is a request that has not happened yet. `smithay`'s
+/// `RendererSurfaceState` holds a copy of the same value, but only from
+/// the first buffer attach onward, and this is asked for a window's
+/// geometry before a client has ever attached one; there the attribute
+/// still answers, with smithay's default of 1.
+pub(crate) fn committed_buffer_scale(surface: &WlSurface) -> i32 {
+    usable_buffer_scale(with_states(surface, |states| {
+        let mut guard = states.cached_state.get::<SurfaceAttributes>();
+        guard.current().buffer_scale
+    }))
+}
+
+/// Floors a buffer scale at 1. The protocol forbids anything smaller
+/// and smithay refuses such a request before it is ever stored, so this
+/// is not expected to fire — it is here because the value is a
+/// *multiplier* on every size and offset that crosses into the ledger,
+/// and a zero reaching that multiplication would not fail anywhere near
+/// itself. `committed_content_size` checks the client's geometry for
+/// positive extents *before* converting it, so a zero factor sails past
+/// that guard and reports a 0x0 window as the size the client asked
+/// for: `wm-core` lays out a frame around nothing, configures the
+/// client to nothing, and no log line mentions a scale.
+const fn usable_buffer_scale(scale: i32) -> i32 {
+    if scale < 1 {
+        1
+    } else {
+        scale
+    }
+}
+
+/// Converts one surface-local length into the device pixels this
+/// compositor stores and draws in. `buffer_scale` is the owning
+/// surface's [`committed_buffer_scale`].
+pub(crate) const fn logical_to_physical(logical: i32, buffer_scale: i32) -> i32 {
+    logical * usable_buffer_scale(buffer_scale)
+}
+
 /// Where the client's window starts inside its own buffer — the
 /// `xdg_surface.set_window_geometry` origin, which for a client drawing
 /// its own chrome is the drop-shadow margin. See
 /// `WindowRecord::content_offset`.
+///
+/// Converted by the same per-surface factor as the size below and as
+/// the renderer draws with: the offset positions a rectangle measured
+/// in physical pixels, and an inset scaled by anything else slides the
+/// window out from under its own frame by the difference.
 fn committed_content_offset(surface: &WlSurface, scale: i32) -> Point {
     with_states(surface, |states| {
         let mut guard = states.cached_state.get::<SurfaceCachedState>();
         guard.current().geometry
     })
     .filter(|geometry| geometry.size.w > 0 && geometry.size.h > 0)
-    .map(|geometry| Point::new(geometry.loc.x * scale, geometry.loc.y * scale))
+    .map(|geometry| {
+        Point::new(
+            logical_to_physical(geometry.loc.x, scale),
+            logical_to_physical(geometry.loc.y, scale),
+        )
+    })
     .unwrap_or(Point::new(0, 0))
 }
 
+/// The size the client actually committed: its declared xdg window
+/// geometry when set, else the buffer's logical size. `wm-core` reads
+/// this through `Backend::window_geometry` at map time (how big does
+/// the fresh client want to be), and `commit` compares it against the
+/// record to detect client-side resizes.
 ///
 /// `scale` converts the client's logical pixels into the physical ones
-/// this compositor's ledger is kept in. A client told the output is 2x
-/// declares a 300x226 window and commits a 600x452 buffer; 600x452 is
-/// what the frame has to be drawn around.
+/// this compositor's ledger is kept in, and must be the surface's own
+/// [`committed_buffer_scale`] — the factor `push_window_content`
+/// renders it at. A client running at 2x declares a 300x226 window and
+/// commits a 600x452 buffer, and 600x452 is what the frame has to be
+/// drawn around, because 600x452 is what reaches the screen. Convert by
+/// any other number and the three descriptions of one window stop
+/// agreeing: the frame is drawn to one rectangle, the pointer routed by
+/// a second, and the client's pixels land in a third.
 fn committed_content_size(surface: &WlSurface, scale: i32) -> Option<Size> {
     let geometry = with_states(surface, |states| {
         let mut guard = states.cached_state.get::<SurfaceCachedState>();
@@ -115,13 +185,21 @@ fn committed_content_size(surface: &WlSurface, scale: i32) -> Option<Size> {
     });
     if let Some(geometry) = geometry {
         if geometry.size.w > 0 && geometry.size.h > 0 {
-            return Some(Size::new((geometry.size.w * scale) as u32, (geometry.size.h * scale) as u32));
+            return Some(Size::new(
+                logical_to_physical(geometry.size.w, scale) as u32,
+                logical_to_physical(geometry.size.h, scale) as u32,
+            ));
         }
     }
     with_renderer_surface_state(surface, |state| state.surface_size())
         .flatten()
         .filter(|size| size.w > 0 && size.h > 0)
-        .map(|size| Size::new((size.w * scale) as u32, (size.h * scale) as u32))
+        .map(|size| {
+            Size::new(
+                logical_to_physical(size.w, scale) as u32,
+                logical_to_physical(size.h, scale) as u32,
+            )
+        })
 }
 
 // -- wl_compositor -------------------------------------------------------
@@ -210,7 +288,7 @@ impl Compositor {
             with_renderer_surface_state(&root, |state| state.buffer().is_some()).unwrap_or(false);
         let was_mapped = mapped_marker(&root);
         let backend = self.wm.backend_mut();
-        let surface_scale = backend.ui_scale;
+        let surface_scale = committed_buffer_scale(&root);
         let committed = committed_content_size(&root, surface_scale);
         let Some(id) = backend.window_for_surface(&root) else {
             return;
@@ -709,3 +787,44 @@ delegate_data_device!(Compositor);
 delegate_primary_selection!(Compositor);
 delegate_xdg_shell!(Compositor);
 delegate_xdg_decoration!(Compositor);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The invariant that keeps every existing client exactly where it
+    /// was: a surface that draws one pixel per pixel is measured
+    /// unchanged. Everything in this module runs through this
+    /// conversion, so a factor that misbehaved at 1 would move every
+    /// Xwayland window and every toolkit that ignores `GDK_SCALE`.
+    #[test]
+    fn a_one_to_one_surface_is_measured_unchanged() {
+        assert_eq!(logical_to_physical(300, 1), 300);
+        assert_eq!(logical_to_physical(0, 1), 0);
+        assert_eq!(logical_to_physical(-24, 1), -24);
+    }
+
+    /// The bug this conversion exists for, in numbers: LibreOffice with
+    /// `GDK_SCALE=2` declares a 300x226 window and hands over a 600x452
+    /// buffer. The ledger has to hold 600x452 or the frame is drawn at
+    /// half the size of the pixels inside it.
+    #[test]
+    fn a_two_x_surface_is_measured_in_the_pixels_it_drew() {
+        assert_eq!(logical_to_physical(300, 2), 600);
+        assert_eq!(logical_to_physical(226, 2), 452);
+        // Window-geometry origins are converted by the same factor, and
+        // a client-drawn drop shadow makes them negative as often as
+        // not.
+        assert_eq!(logical_to_physical(-13, 2), -26);
+    }
+
+    /// A scale below 1 cannot arrive over the protocol, and the point
+    /// of the floor is that if one ever did it would not silently
+    /// annihilate the window: 0 would collapse every size to nothing.
+    #[test]
+    fn an_absent_or_impossible_scale_degrades_to_one() {
+        assert_eq!(logical_to_physical(300, 0), 300);
+        assert_eq!(logical_to_physical(300, -2), 300);
+        assert_eq!(logical_to_physical(300, i32::MIN), 300);
+    }
+}
