@@ -870,14 +870,38 @@ impl Compositor {
     }
 
     /// Lands a deferred `set_input_focus` on the seat's keyboard. A
-    /// window with no `wl_surface` yet (an XWayland window before its
-    /// association) or one that died in the meantime clears focus
-    /// rather than leaving it on the previous window — matching what
-    /// the X11 server does when a focused window disappears.
+    /// window that died in the meantime clears focus rather than
+    /// leaving it on the previous window — matching what the X11 server
+    /// does when a focused window disappears. A window that is still
+    /// alive but has no `wl_surface` *yet* is retried instead, see
+    /// below.
     fn apply_pending_focus(&mut self) {
         let Some(id) = self.wm.backend_mut().pending_focus.take() else {
             return;
         };
+        // An XWayland window exists as an X11 window before Xwayland
+        // binds a `wl_surface` to it, and that bind can land one or
+        // more passes after the map that focused it. Clearing the seat
+        // in that window (which this used to do) left `wm-core`
+        // believing the window was focused while the seat held nothing
+        // — a divergence `focus_client` cannot repair, because its
+        // "already focused" early return is exactly the path a user
+        // takes to try: clicking the window that already looks focused.
+        // The window stayed keyboard-dead until they focused something
+        // else and came back. So put the request back and retry on the
+        // next pass; the association arrives (and this lands), or the
+        // window dies (and the lookup below clears focus for real).
+        let awaiting_surface = self
+            .wm
+            .backend()
+            .windows
+            .get(&id)
+            .filter(|record| record.surface.alive())
+            .is_some_and(|record| record.surface.wl_surface().is_none());
+        if awaiting_surface {
+            self.wm.backend_mut().pending_focus = Some(id);
+            return;
+        }
         // Focus is two things to a client: the seat's keyboard focus,
         // which decides where keys go, and an "I am the active window"
         // flag it reads for its own styling - a title bar, a caret that
