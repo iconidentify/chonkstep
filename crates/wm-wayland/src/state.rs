@@ -272,6 +272,36 @@ pub(crate) struct WindowRecord {
     /// snapshot (or forever, for a window that never maps), which the
     /// shell's icon and switcher renderers already handle.
     pub snapshot: Option<DecorationBuffer>,
+    /// Whether this toplevel ever created a `zxdg_toplevel_decoration_v1`,
+    /// i.e. whether it negotiated decorations with us at all.
+    ///
+    /// The xdg-decoration preamble is explicit about what silence means:
+    /// "if compositor and client do not negotiate the use of a
+    /// server-side decoration using this protocol, clients continue to
+    /// self-decorate as they see fit". So a toplevel that never creates
+    /// the object is stating, by the protocol's own rule, that it draws
+    /// its own chrome — and framing it anyway is what put two titlebars
+    /// on LibreOffice and every GTK application on this desktop.
+    ///
+    /// Always false for XWayland surfaces, which answer the same
+    /// question through `_MOTIF_WM_HINTS` instead.
+    pub negotiated_decoration: bool,
+    /// Where this surface's *window* starts inside its own buffer, from
+    /// `xdg_surface.set_window_geometry`.
+    ///
+    /// A client drawing its own chrome usually draws a drop shadow
+    /// around it, and that shadow is part of the buffer while being no
+    /// part of the window: GTK declares `set_window_geometry(22, 22,
+    /// w, h)` on a buffer 44px wider than `w`. Everything this
+    /// compositor positions — the frame, the hit rect, `content` above
+    /// — means the *window*, so the surface has to be drawn this much
+    /// up and to the left of it for the two to line up. Ignoring it is
+    /// what put the window visibly inside its own frame, hanging off
+    /// the left of the screen.
+    ///
+    /// Zero for surfaces that declare no geometry, which is the
+    /// overwhelming majority.
+    pub content_offset: Point,
 }
 
 impl WindowRecord {
@@ -287,6 +317,9 @@ impl WindowRecord {
             app_id: None,
             window_type: WindowType::Normal,
             snapshot: None,
+            // Silence means client-side; only `new_decoration` sets this.
+            negotiated_decoration: false,
+            content_offset: Point::new(0, 0),
         }
     }
 }
@@ -328,6 +361,22 @@ pub(crate) enum RootBackground {
 /// protocol handlers write into and the renderer reads out of. See the
 /// module docs for why no display connection lives here.
 pub struct WaylandBackend {
+    /// The whole-number output scale this session advertises to Wayland
+    /// clients, and therefore the factor between a client's coordinates
+    /// and this ledger's.
+    ///
+    /// Everything stored here is in physical pixels, because the theme
+    /// rasterizes chrome in physical pixels and always has. A client,
+    /// once told the output has a scale, works in logical ones: it
+    /// declares a window geometry of 300x226 and submits a buffer twice
+    /// that. So every size crossing this boundary is multiplied on the
+    /// way in and divided on the way out, and this is the factor.
+    ///
+    /// Whole-number because `wl_output.scale` is an integer; a
+    /// configured 1.5 advertises 2 and the chrome keeps its own
+    /// fractional size. Never zero — see `integral_scale`.
+    pub(crate) ui_scale: i32,
+
     /// Shared allocator for all three id spaces — window, frame, and
     /// shell ids never collide, which makes stray-id bugs loud in logs
     /// instead of silently aliasing. Starts at 1 so [`ROOT_SHELL`]
@@ -420,10 +469,26 @@ pub struct WaylandBackend {
     pub(crate) pending_cursor_scale: Option<f32>,
 }
 
+/// The integer `wl_output.scale` for a configured UI scale.
+///
+/// `wl_output` has only ever carried a whole number, so a fractional UI
+/// scale has to be reported as one. Rounding rather than truncating is
+/// what makes 1.5 advertise 2 (a client rendering slightly large and
+/// being scaled down reads far better than one rendering half-size),
+/// and the floor of 1 is what stops a nonsense configuration from
+/// telling clients their pixels are worth nothing.
+pub(crate) fn integral_scale(scale: f32) -> i32 {
+    if !scale.is_finite() {
+        return 1;
+    }
+    (scale.round() as i32).max(1)
+}
+
 impl WaylandBackend {
-    pub(crate) fn new(display_handle: DisplayHandle, monitors: Vec<MonitorInfo>) -> Self {
+    pub(crate) fn new(display_handle: DisplayHandle, monitors: Vec<MonitorInfo>, ui_scale: f32) -> Self {
         let output_size = union_size(&monitors);
         Self {
+            ui_scale: integral_scale(ui_scale),
             next_id: 1,
             windows: HashMap::new(),
             frames: HashMap::new(),
@@ -1530,7 +1595,23 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
     // The desktop shell is built against the mutable backend before
     // `WindowManager::new` takes ownership — the exact construction
     // order the X11 binary uses, for the exact same borrow reason.
-    let mut backend = WaylandBackend::new(display_handle.clone(), monitors);
+    // Tell every output what scale it is, now that the session state
+    // has been resolved. This is the only way a Wayland client can
+    // learn there is a scale at all — there is no environment variable
+    // it will read and no protocol it will ask — so without it every
+    // native client renders at 1x and is half-size on a HiDPI panel
+    // while the desktop's own chrome around it is not.
+    //
+    // Done here rather than where the outputs are built because the
+    // scale is not known then: the graphics stack and its outputs come
+    // up before the config is resolved, and reordering that would put
+    // config parsing ahead of the display server coming up.
+    let output_scale = integral_scale(state.scale);
+    for entry in &outputs {
+        entry.output.change_current_state(None, None, Some(smithay::output::Scale::Integer(output_scale)), None);
+    }
+
+    let mut backend = WaylandBackend::new(display_handle.clone(), monitors, state.scale);
     // The whole screen, as the shell sizes the desktop against it: the
     // union of every monitor. Where the dock and the workareas land
     // inside that union is the shell's decision, not this loop's.

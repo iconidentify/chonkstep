@@ -617,8 +617,14 @@ impl Backend for WaylandBackend {
                     // dedups: a size the client already has produces no
                     // event, which matters during interactive resize
                     // where this is called per motion event.
+                    // Back into the client's own logical pixels. This
+                    // ledger is physical; a client told the output has a
+                    // scale is not, and configuring it with physical
+                    // numbers would ask a 2x client to be twice the size
+                    // it should be, every time.
+                    let scale = self.ui_scale.max(1);
                     toplevel.with_pending_state(|state| {
-                        state.size = Some((size.w as i32, size.h as i32).into());
+                        state.size = Some((size.w as i32 / scale, size.h as i32 / scale).into());
                     });
                     let _ = toplevel.send_pending_configure();
                 }
@@ -956,55 +962,41 @@ impl Backend for WaylandBackend {
             // this hint, chonkstep framed them anyway, and they wore our
             // chrome over their own.
             ManagedSurface::X11(surface) => !surface.is_decorated(),
-            // Wayland toplevels get `false`, always — and the reason is
-            // worth writing down, because the obvious improvement does
-            // not work and someone will try it.
+            // A Wayland toplevel that never negotiated decorations is
+            // stating, by the protocol's own rule, that it decorates
+            // itself. The xdg-decoration preamble: "if compositor and
+            // client do not negotiate the use of a server-side
+            // decoration using this protocol, clients continue to
+            // self-decorate as they see fit." Neither GTK3 nor GTK4
+            // ever creates the object — confirmed here by running a GTK
+            // client under `WAYLAND_DEBUG`, which shows the global being
+            // advertised and no request against it, ever — so under the
+            // previous rule (frame everything that did not ask)
+            // LibreOffice and every other GTK application wore our
+            // titlebar over their own headerbar.
             //
-            // A client that binds xdg-decoration is handled: this
-            // compositor forces `ServerSide` on every such toplevel (see
-            // `XdgDecorationHandler` in `xdg.rs`), the protocol lets a
-            // compositor impose that, and a client that has been told
-            // ServerSide and still draws a titlebar is broken rather
-            // than undetected. So the only population in question is the
-            // clients that never bind the protocol at all — GTK4 and
-            // libadwaita above all, which draw a headerbar and never
-            // negotiate. Those DO wear two titlebars here today.
+            // The objection to reading silence this way is real and is
+            // not dismissed: a toolkit with no decoration support at all
+            // (SDL2 or GLFW built without libdecor, a bare wl_egl demo)
+            // is silent for the opposite reason and draws nothing, and
+            // unframed it is a rectangle with no titlebar to grab. Two
+            // things make that survivable rather than a worse bug than
+            // the one being fixed. The protocol says such a client is
+            // self-decorating whatever it actually draws, so this is
+            // conformance and not a guess — a client that wants our
+            // chrome need only ask for it, which is one request. And a
+            // frameless window is no longer stuck: it can be dragged
+            // with the modifier-drag every window answers to, and it can
+            // ask to be moved through `MoveRequest`.
             //
-            // Detecting them means treating the *absence* of a request
-            // as an answer, and absence is doing two jobs at once. The
-            // xdg-decoration preamble does say "if compositor and client
-            // do not negotiate the use of a server-side decoration using
-            // this protocol, clients continue to self-decorate as they
-            // see fit" — but "as they see fit" includes drawing nothing.
-            // A toolkit with no decoration support (SDL2 or GLFW built
-            // without libdecor, a bare wl_egl demo) is indistinguishable
-            // from libadwaita by this signal and draws no titlebar at
-            // all; unframed, it is a rectangle that cannot be moved,
-            // resized or closed with the pointer. Trading LibreOffice's
-            // spare titlebar for that is not a fix.
-            //
-            // The second half is that the flag could not be kept honest
-            // even for the clients it did catch. `XdgDecorationHandler`
-            // reports `new_decoration` when a client creates a
-            // `zxdg_toplevel_decoration_v1`, so "has bound" is
-            // observable — but smithay 0.7 handles the object's
-            // `destroy` request internally and calls no handler for it,
-            // and destroying it is precisely how the protocol spells
-            // "switch back to a mode without any server-side
-            // decorations". A cached "did it bind" bit would therefore
-            // go stale on exactly the transition `ChromeChanged` exists
-            // to carry. (Version 2 of the interface also lets a client
-            // bind *after* committing a buffer, i.e. after this backend
-            // has already emitted `MapRequest`, so the map-time answer
-            // is not final either.)
-            //
-            // Flipping this is a one-line change once someone decides
-            // the trade is worth it — track `new_decoration` in the
-            // surface's data map the way `MappedMarker` is tracked in
-            // `xdg.rs`, and answer `!bound` here. It is a desktop-wide
-            // policy change (every GTK application loses chonkstep
-            // chrome), not a bug fix, which is why it is not made here.
-            ManagedSurface::Xdg(_) => false,
+            // One known staleness: smithay 0.7 handles the decoration
+            // object's `destroy` internally and calls no handler, and
+            // destroying it is how a client spells "back to
+            // self-decorating". A client that negotiates and then
+            // destroys keeps its frame until it unmaps. No toolkit
+            // observed here does that, and the alternative was leaving
+            // every GTK window double-decorated.
+            ManagedSurface::Xdg(_) => !record.negotiated_decoration,
         }
     }
 

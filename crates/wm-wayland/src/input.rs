@@ -1077,7 +1077,15 @@ fn content_hit(
 ) -> Option<Hit> {
     let record = backend.windows.get(&window)?;
     let root_surface = record.surface.wl_surface();
-    let content_origin = record.content.pos;
+    // The surface tree is anchored where the renderer actually draws
+    // it — up and left of the window by the client's own
+    // window-geometry offset — so that a click resolves to the same
+    // pixel the user is looking at. Anchoring on the window instead
+    // would send every client coordinates shifted by its drop shadow.
+    let content_origin = Point::new(
+        record.content.pos.x - record.content_offset.x,
+        record.content.pos.y - record.content_offset.y,
+    );
     let (surface, origin) = match &root_surface {
         Some(root) => under_from_surface_tree(
             root,
@@ -1121,7 +1129,12 @@ fn popup_hit(
         // top of `hit_at` — no xdg popups to test here.
         return None;
     };
-    let content_origin = record.content.pos;
+    // Popup offsets are measured from the parent surface's own origin,
+    // which is the buffer's, so the same correction as `hit_at` applies.
+    let content_origin = Point::new(
+        record.content.pos.x - record.content_offset.x,
+        record.content.pos.y - record.content_offset.y,
+    );
     for (popup, offset) in PopupManager::popups_for_surface(toplevel.wl_surface()) {
         let popup_origin: LogicalPoint<i32, Logical> =
             (content_origin.x + offset.x, content_origin.y + offset.y).into();

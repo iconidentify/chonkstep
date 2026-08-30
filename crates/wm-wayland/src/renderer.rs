@@ -106,6 +106,11 @@ pub(crate) fn build_scene(
     // the module-doc composition order reversed: cursor, above-shells,
     // override-redirect windows, frames, below-shells, wallpaper.
     let mut elements: Vec<SceneElement<GlesRenderer>> = Vec::new();
+    // The factor between what a client reports and what is drawn — see
+    // `push_window_content`. Read from the ledger rather than passed in
+    // so that a live scale change reaches the next frame without a
+    // second path to keep in step.
+    let surface_scale = backend.ui_scale;
 
     push_cursor_elements(
         &mut elements,
@@ -132,7 +137,7 @@ pub(crate) fn build_scene(
     // window in practice.
     for record in backend.windows.values() {
         if record.window_type == wm_core::WindowType::Unmanaged && record.mapped {
-            push_window_content(&mut elements, renderer, record.content, record, viewport);
+            push_window_content(&mut elements, renderer, record.content, record, viewport, surface_scale);
         }
     }
 
@@ -148,7 +153,7 @@ pub(crate) fn build_scene(
         if let StackEntry::Window(id) = entry {
             let Some(record) = backend.windows.get(id) else { continue };
             if record.mapped {
-                push_window_content(&mut elements, renderer, record.content, record, viewport);
+                push_window_content(&mut elements, renderer, record.content, record, viewport, surface_scale);
             }
         }
         if let StackEntry::Frame(id) = entry {
@@ -164,7 +169,7 @@ pub(crate) fn build_scene(
             // falls out naturally here.
             if let Some(record) = window {
                 if record.mapped {
-                    push_window_content(&mut elements, renderer, record.content, record, viewport);
+                    push_window_content(&mut elements, renderer, record.content, record, viewport, surface_scale);
                 }
             }
             if let Some(buffer) = &frame.buffer {
@@ -441,16 +446,22 @@ fn push_shell_elements(
 
 /// Pushes one managed window's client content (front to back): its
 /// xdg popups above, then the surface tree itself at the content rect.
-/// The tree is drawn at the content origin directly — with server-side
-/// decorations enforced via xdg-decoration, clients do not wrap their
-/// buffers in shadow margins, so the surface origin and the xdg window
-/// geometry origin coincide.
+///
+/// Two corrections separate the surface's origin from the content rect,
+/// and both used to be assumed away. A client drawing its own chrome
+/// wraps its buffer in a drop shadow and says so through
+/// `xdg_surface.set_window_geometry`, so the buffer starts up and left
+/// of the window (`record.content_offset`). And a client told the
+/// output has a scale works in logical pixels while this ledger is in
+/// physical ones, so everything it reports is `scale` times smaller
+/// than what is drawn.
 fn push_window_content(
     elements: &mut Vec<SceneElement<GlesRenderer>>,
     renderer: &mut GlesRenderer,
     content: Rect,
     record: &crate::state::WindowRecord,
     viewport: Point,
+    scale: i32,
 ) {
     if !record.surface.alive() {
         return;
@@ -458,15 +469,37 @@ fn push_window_content(
     let Some(surface) = record.surface.wl_surface() else {
         return;
     };
-    let origin =
-        SPoint::<i32, Physical>::from((content.pos.x - viewport.x, content.pos.y - viewport.y));
+    // Drawn up and to the left by the client's own window-geometry
+    // offset, so that the *window* lands at `content.pos` rather than
+    // the top-left of a buffer that also contains a drop shadow. For a
+    // client that declares no geometry this is zero and the expression
+    // is the plain one it used to be. See `WindowRecord::content_offset`.
+    let origin = SPoint::<i32, Physical>::from((
+        content.pos.x - viewport.x - record.content_offset.x,
+        content.pos.y - viewport.y - record.content_offset.y,
+    ));
+    // Client surfaces are rendered at the output's scale, not at 1:1.
+    // A client told the output is 2x commits a buffer twice the size of
+    // its logical window, and smithay divides the buffer by its
+    // `wl_surface.set_buffer_scale` before multiplying by this — so
+    // passing the output scale here is what makes such a buffer land
+    // one buffer pixel to one screen pixel. A client that ignores the
+    // scale and commits a 1x buffer is upscaled by the same factor,
+    // which is the correct thing to do with it: right size, soft edges,
+    // rather than right pixels at half size.
+    //
+    // Chrome is not drawn through here — frames and shell surfaces are
+    // memory buffers the theme already rasterized in physical pixels,
+    // pushed at 1:1 elsewhere in this file — so the two do not have to
+    // agree beyond meeting at the same rectangle.
+    let surface_scale = scale as f64;
     for (popup, offset) in PopupManager::popups_for_surface(&surface) {
-        let location = origin + SPoint::<i32, Physical>::from((offset.x, offset.y));
+        let location = origin + SPoint::<i32, Physical>::from((offset.x * scale, offset.y * scale));
         elements.extend(render_elements_from_surface_tree(
             renderer,
             popup.wl_surface(),
             location,
-            1.0,
+            surface_scale,
             1.0,
             Kind::Unspecified,
         ));
@@ -475,7 +508,7 @@ fn push_window_content(
         renderer,
         &surface,
         origin,
-        1.0,
+        surface_scale,
         1.0,
         Kind::Unspecified,
     ));
