@@ -413,6 +413,81 @@ impl X11Backend {
         self.pending_screen_resize.take()
     }
 
+    /// Re-rasterizes the pointer cursors after the session's UI scale
+    /// changed under it. They are the only pixels on the desktop the
+    /// theme engine does not produce (see `create_scaled_cursor` for
+    /// why this WM draws its own pointers at all), so nothing else in
+    /// the live-restyle path touches them: without this, a rescale left
+    /// the pointer at whatever size the session was *started* at while
+    /// every other piece of chrome around it changed size, which is the
+    /// precise mismatch that got the X core cursor font thrown out in
+    /// the first place.
+    ///
+    /// Cheap when the scale did not actually move, because the shell
+    /// applies a whole look at once and will happily hand back the
+    /// scale it already had. Compared with `to_bits` rather than `==`:
+    /// a NaN that reached here would compare unequal to itself and
+    /// rebuild five cursors on every apply forever, the same
+    /// non-reflexive-float trap `usable_scale` guards in `chonk-shell`'s
+    /// dockapp host.
+    ///
+    /// Degrades rather than fails, like the rest of this backend: a
+    /// server that will not give us a new set leaves the session
+    /// running on the set it has — wrongly sized, entirely usable —
+    /// which beats losing the desktop over a pointer.
+    pub fn set_ui_scale(&mut self, scale: f32) {
+        if self.cursors.scale.to_bits() == scale.to_bits() {
+            return;
+        }
+        let cursors = match Cursors::create(&self.conn, self.root, scale) {
+            Ok(cursors) => cursors,
+            Err(e) => {
+                tracing::warn!(?e, scale, "rebuilding the cursors at the new scale failed; keeping the ones the session already has");
+                return;
+            }
+        };
+        let superseded = std::mem::replace(&mut self.cursors, cursors);
+
+        // Root first. Every window that was never given a cursor of its
+        // own inherits this one through the parent chain, so this single
+        // request is what re-points the whole desktop.
+        if let Err(e) = self.conn.change_window_attributes(self.root, &ChangeWindowAttributesAux::new().cursor(self.cursors.default)) {
+            tracing::warn!(?e, "re-setting the root cursor after a scale change failed");
+        }
+
+        // Then every frame that *was*, which is every frame the pointer
+        // has ever been over. `set_frame_cursor` returns early when the
+        // edge it is handed matches the one it last set, and a scale
+        // change does not move any pointer: each frame's memoized edge
+        // is still what it was (`None`, the plain arrow, for all but the
+        // one under the pointer). So the memo would answer "already
+        // current" for the rest of the session while the id it stands
+        // for is one we are about to free, and those frames would keep
+        // naming a dead cursor. Re-issuing each frame's *current* edge
+        // here fixes them without invalidating the memo, which stays
+        // exactly as true afterwards as it was before.
+        for (&frame, &edge) in &self.frame_cursor {
+            let cursor = self.cursors.for_edge(edge);
+            if let Err(e) = self.conn.change_window_attributes(frame, &ChangeWindowAttributesAux::new().cursor(cursor)) {
+                tracing::warn!(?e, frame, "re-setting a frame's cursor after a scale change failed");
+            }
+        }
+
+        // Only now the old ids, and only because they are queued behind
+        // the re-points above: the server executes one client's requests
+        // in the order they were written, so by the time it reaches a
+        // `FreeCursor` nothing names that cursor any more. Freeing at
+        // all is the point — cursors are server-side resources with no
+        // owner in this process, and a session whose scale is nudged a
+        // few times an hour would otherwise strand five of them per
+        // nudge for as long as it runs.
+        for cursor in superseded.all() {
+            let _ = self.conn.free_cursor(cursor);
+        }
+        let _ = self.conn.flush();
+        tracing::debug!(scale, "pointer cursors redrawn at the new scale");
+    }
+
     /// The X screen: the union of every monitor, since the root window
     /// spans all of them. Not any one monitor's size.
     pub fn screen_size(&self) -> Size {
@@ -1398,6 +1473,12 @@ struct Cursors {
     resize_h: Cursor,
     resize_se: Cursor,
     resize_sw: Cursor,
+    /// The scale these five were rasterized at, kept so `set_ui_scale`
+    /// can tell a real scale change from the shell re-applying a look
+    /// at the scale it already had — the pixmaps, halo width and
+    /// hotspot are all baked in at creation, so nothing about a cursor
+    /// itself can be inspected to answer that afterwards.
+    scale: f32,
 }
 
 impl Cursors {
@@ -1415,7 +1496,18 @@ impl Cursors {
             // counter-clockwise, for ↙ (shared with NorthEast).
             resize_se: create_scaled_cursor(conn, root, scale, &rotate_shape(CURSOR_RESIZE_ARROW, hotspot, 45.0_f32.to_radians()), hotspot)?,
             resize_sw: create_scaled_cursor(conn, root, scale, &rotate_shape(CURSOR_RESIZE_ARROW, hotspot, -45.0_f32.to_radians()), hotspot)?,
+            scale,
         })
+    }
+
+    /// Every cursor id in the set, for the one caller that has to treat
+    /// them as a group rather than by role: `set_ui_scale`, freeing a
+    /// superseded set. Written as an exhaustive destructure so that a
+    /// sixth cursor added to the struct fails to compile here instead
+    /// of quietly leaking a server-side resource on every rescale.
+    fn all(&self) -> [Cursor; 5] {
+        let Self { default, resize_v, resize_h, resize_se, resize_sw, scale: _ } = *self;
+        [default, resize_v, resize_h, resize_se, resize_sw]
     }
 
     fn for_edge(&self, edge: Option<ResizeEdge>) -> Cursor {
@@ -1695,6 +1787,10 @@ impl Backend for X11Backend {
 
     fn take_screen_resize(&mut self) -> Option<Size> {
         X11Backend::take_screen_resize(self)
+    }
+
+    fn set_ui_scale(&mut self, scale: f32) {
+        X11Backend::set_ui_scale(self, scale)
     }
 
     fn screen_size(&self) -> Size {

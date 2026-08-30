@@ -11,13 +11,13 @@
 
 use std::time::Duration;
 
-use wm_core::{Backend, BackendEvent, FocusPolicy, WindowManager};
-use wm_theme::RasterThemeEngine;
+use wm_core::{Backend, BackendEvent, WindowManager};
+use wm_theme::{FontState, RasterThemeEngine};
 use wm_x11::X11Backend;
 
 use chonk_shell::dockapp::Farewell;
 use chonk_shell::shell::{Shell, ShellOutcome};
-use chonk_shell::startup::{ensure_xcursor_size, read_focus_follows_mouse, read_scale_factor, resolve_theme};
+use chonk_shell::startup::{ensure_xcursor_size, reload_requested, restart_requested, SessionState};
 use chonk_shell::spawn;
 
 fn main() {
@@ -36,11 +36,15 @@ fn main() {
     // terminal to fix the typo from.
     let config = wm_config::load();
 
-    let scale = read_scale_factor(config.scale);
-    tracing::info!(scale, "UI scale (config `scale`; CHONKSTEP_SCALE overrides)");
-    ensure_xcursor_size(scale);
+    // Everything a user can change without restarting, resolved in one
+    // place and by one set of rules — the same call a live reload makes
+    // (see `reload_requested` below), so a session that has been
+    // reloaded is indistinguishable from one that started that way.
+    let state = SessionState::resolve(&config);
+    tracing::info!(scale = state.scale, "UI scale (config `scale`; CHONKSTEP_SCALE overrides)");
+    ensure_xcursor_size(state.scale);
 
-    let mut backend = match X11Backend::connect_and_become_wm(None, scale) {
+    let mut backend = match X11Backend::connect_and_become_wm(None, state.scale) {
         Ok(b) => b,
         Err(e) => {
             tracing::error!(?e, "failed to start");
@@ -50,12 +54,17 @@ fn main() {
 
     let screen = backend.screen_size();
 
-    let theme = resolve_theme(config.theme.as_deref()).scaled(scale);
+    let theme = state.theme();
     tracing::info!(theme = %theme.id, "theme loaded");
     if let Some(opacity) = theme.terminal.opacity {
         backend.add_opacity_rule("URxvt", opacity);
     }
-    let engine = RasterThemeEngine::new(theme.clone());
+    // The font database is built here rather than inside the engine, so
+    // that the shell can hold a handle to it and build the engine's
+    // replacements around the same one on every later restyle — see
+    // `wm_theme::FontState`.
+    let fonts = FontState::new();
+    let engine = RasterThemeEngine::with_fonts(theme, fonts.clone());
 
     // The entire desktop shell — dock, Clip, launcher strip, menus,
     // wallpaper, the `.desktop` application index — is built here in
@@ -63,7 +72,7 @@ fn main() {
     // takes ownership of it below. From here on the shell reaches the
     // backend only through the `WindowManager` handed to each of its
     // methods, which is the shape both backend binaries share.
-    let mut shell = Shell::new(&mut backend, &config, theme, scale);
+    let mut shell = Shell::new(&mut backend, &state, fonts);
 
     // The wallpaper pixmap `Shell::new` just published (via its
     // `Desktop`) dies with the previous process's X connection on every
@@ -76,29 +85,20 @@ fn main() {
 
     let existing = backend.scan_existing_windows();
     let mut wm = WindowManager::new(backend, Box::new(engine));
+    // Session policy — focus, placement, edge resistance, the keymap —
+    // is applied through the very same call a live reload makes. The
+    // look half of it is already correct (the shell was just built from
+    // this state), so the applier finds nothing changed there and
+    // repaints nothing; what it does do is put the four policy setters
+    // in one place instead of two, which is what stops a setting from
+    // being reloadable but not startable, or the reverse.
+    //
+    // The modal Alt+Tab grabs are `wm-core`'s own and are taken
+    // separately, below: the applier only ever reconciles grabs the
+    // *config* asked for.
+    shell.apply_session_state(&mut wm, state);
     wm.set_workarea(shell.workarea(screen));
     wm.bind_default_keys();
-    // Every configured combo is grabbed on top of the defaults — the
-    // modal Alt+Tab grabs stay `wm-core`'s own (`bind_default_keys`),
-    // but the X server only routes a configured combo's presses to the
-    // WM at all if it is grabbed here. A combo that overlaps a default
-    // grab is harmless: same-client grabs simply replace, and the
-    // backend logs-and-continues on any grab it cannot take (an
-    // unknown keysym in the config degrades to a dead binding, never a
-    // dead session).
-    for (combo, _) in &config.keybindings {
-        wm.grab_key(*combo);
-    }
-    if read_focus_follows_mouse(config.focus_follows_mouse) {
-        tracing::info!("focus-follows-mouse enabled (config `focus_follows_mouse`; CHONKSTEP_FOCUS_FOLLOWS_MOUSE overrides)");
-        wm.set_focus_policy(FocusPolicy::FocusFollowsMouse);
-    }
-    // Initial window placement and drag edge snapping, straight from
-    // the config file (`placement`, `edge_resistance`). `wm-config`
-    // already validated both — anything broken fell back to its default
-    // there, with a warning — so the values apply verbatim here.
-    wm.set_placement_policy(config.placement);
-    wm.set_snap_threshold(config.edge_resistance);
     for window in existing {
         wm.dispatch(BackendEvent::MapRequest(window));
     }
@@ -114,6 +114,17 @@ fn main() {
     // `wait_for_activity`.
     let mut wait_fds: Vec<std::os::unix::io::RawFd> = Vec::new();
     loop {
+        // The cheap request first. A reload keeps every window, every
+        // client connection and every dockapp; a restart keeps the
+        // windows (via the SaveSet) but costs a process image. Checking
+        // reload first means that when both markers somehow exist, the
+        // session applies the config it was asked to apply before
+        // throwing itself away — the restart then starts from it.
+        if reload_requested() {
+            tracing::info!("reload requested — re-reading the config and applying it in place");
+            shell.apply_session_state(&mut wm, SessionState::resolve(&wm_config::load()));
+        }
+
         if restart_requested() {
             tracing::info!("restart requested — re-executing in place");
             // Dockapps first: `restart_in_place` never returns, and the
@@ -385,23 +396,6 @@ fn exit_requested(shell: &mut Shell<X11Backend>, outcome: ShellOutcome) -> bool 
 
 
 
-
-/// Path to the marker file `scripts/restart.sh` touches to ask a
-/// running chonkstep to hot-restart itself — polled once per event-loop
-/// tick (the loop already blocks on the X11 socket with a bounded
-/// timeout, so this adds one cheap `remove_file` attempt per wakeup,
-/// not a new busy-loop).
-fn restart_marker_path() -> std::path::PathBuf {
-    let home = std::env::var("HOME").unwrap_or_else(|_| ".".to_string());
-    std::path::PathBuf::from(home).join(".local/state/chonkstep/restart")
-}
-
-/// `true` at most once per `touch` of the marker file — `remove_file`
-/// both checks for and consumes the request in one step, so a restart
-/// can never fire twice for a single request.
-fn restart_requested() -> bool {
-    std::fs::remove_file(restart_marker_path()).is_ok()
-}
 
 /// Re-execs the *on-disk* binary in place (same PID, replaces this
 /// process's image) rather than `std::env::current_exe()` — resolved

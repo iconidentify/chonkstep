@@ -5,6 +5,7 @@
 //! doc comment in `lib.rs`.
 
 use std::cell::RefCell;
+use std::rc::Rc;
 
 use tiny_skia::Pixmap;
 use wm_theme_api::{
@@ -15,36 +16,98 @@ use wm_theme_api::{
 use crate::model::Theme;
 use crate::paint;
 
-/// Implements `ThemeEngine` for a single `Theme`. Owns the font state
-/// `cosmic-text` needs; wrapped in `RefCell` because `ThemeEngine`'s
-/// methods take `&self` (a theme can be shared/boxed as
+/// The font machinery decoration text is shaped and rasterized with,
+/// in a handle that is cheap to clone.
+///
+/// It exists as a separate type for one reason:
+/// `cosmic_text::FontSystem::new()` scans the system's fonts through
+/// fontconfig, which costs hundreds of milliseconds and must happen
+/// exactly once per session. Restyling is the most routine thing a
+/// user does to this desktop — every theme pick is one, and every one
+/// of them used to re-exec the process — so a live retheme builds a
+/// *new* [`RasterThemeEngine`] around the *same* font state
+/// ([`RasterThemeEngine::with_fonts`]) rather than a new engine that
+/// re-scans. That is the same argument the dockapp protocol makes for
+/// `ThemeChanged` being a message rather than a relaunch, applied to
+/// the window manager's own engine.
+///
+/// `Rc`, not `Arc`, and `RefCell`, not a lock: `ThemeEngine`'s methods
+/// take `&self` while shaping needs `&mut`, which already pins an
+/// engine to one thread — the window manager's, single-threaded by
+/// design. Sharing the state does not widen that; it only lets two
+/// engines that never coexist on separate threads hand it over.
+#[derive(Clone)]
+pub struct FontState {
+    font_system: Rc<RefCell<cosmic_text::FontSystem>>,
+    swash_cache: Rc<RefCell<cosmic_text::SwashCache>>,
+}
+
+impl FontState {
+    /// Loads the system font database. Expensive — call it once per
+    /// session and clone the handle thereafter.
+    pub fn new() -> Self {
+        Self {
+            font_system: Rc::new(RefCell::new(cosmic_text::FontSystem::new())),
+            swash_cache: Rc::new(RefCell::new(cosmic_text::SwashCache::new())),
+        }
+    }
+
+    /// Whether the database holds a face for `family`. Used to warn
+    /// once per engine build that a theme names a font this machine
+    /// does not have.
+    fn has_family(&self, family: &str) -> bool {
+        self.font_system
+            .borrow()
+            .db()
+            .faces()
+            .any(|face| face.families.iter().any(|(name, _)| name == family))
+    }
+}
+
+impl Default for FontState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Implements `ThemeEngine` for a single `Theme`. Holds the font state
+/// `cosmic-text` needs behind [`FontState`]'s `RefCell`s, because
+/// `ThemeEngine`'s methods take `&self` (a theme can be shared/boxed as
 /// `Box<dyn ThemeEngine>`) while shaping/rasterizing glyphs needs `&mut`
 /// access — safe because the whole window manager is single-threaded.
+///
+/// One engine draws one theme, for the life of that theme: a restyle
+/// replaces the engine (see [`RasterThemeEngine::with_fonts`] and
+/// `wm_core::WindowManager::set_theme_engine`) rather than mutating it
+/// underneath the layouts already derived from it. That keeps
+/// "which theme is this layout from" answerable by identity — a
+/// half-restyled engine, handing out old metrics and new colors in the
+/// same pass, is the state this deliberately cannot reach.
 pub struct RasterThemeEngine {
     theme: Theme,
-    font_system: RefCell<cosmic_text::FontSystem>,
-    swash_cache: RefCell<cosmic_text::SwashCache>,
+    fonts: FontState,
 }
 
 impl RasterThemeEngine {
+    /// Builds an engine with its own freshly scanned font database.
+    /// The session's *first* engine; every later one should come from
+    /// [`Self::with_fonts`] so the scan is not repeated.
     pub fn new(theme: Theme) -> Self {
-        let font_system = cosmic_text::FontSystem::new();
-        let family = &theme.titlebar.font.family;
-        let has_family = font_system
-            .db()
-            .faces()
-            .any(|face| face.families.iter().any(|(name, _)| name == family));
-        if !has_family {
+        Self::with_fonts(theme, FontState::new())
+    }
+
+    /// The same engine dressed in a different theme, reusing font state
+    /// that is already loaded — how a live retheme or rescale builds
+    /// the engine it swaps in. See [`FontState`] for why this is not
+    /// simply another [`Self::new`].
+    pub fn with_fonts(theme: Theme, fonts: FontState) -> Self {
+        if !fonts.has_family(&theme.titlebar.font.family) {
             tracing::warn!(
-                family = %family,
+                family = %theme.titlebar.font.family,
                 "configured theme font not found on the system; text will render with whatever fallback sans font fontdb picks"
             );
         }
-        Self {
-            theme,
-            font_system: RefCell::new(font_system),
-            swash_cache: RefCell::new(cosmic_text::SwashCache::new()),
-        }
+        Self { theme, fonts }
     }
 
     /// Convenience constructor wrapping the flagship built-in theme.
@@ -54,6 +117,12 @@ impl RasterThemeEngine {
 
     pub fn theme(&self) -> &Theme {
         &self.theme
+    }
+
+    /// A handle to this engine's font state, for building the engine
+    /// that replaces it. Cheap: two `Rc` bumps.
+    pub fn fonts(&self) -> FontState {
+        self.fonts.clone()
     }
 }
 
@@ -65,8 +134,8 @@ impl ThemeEngine for RasterThemeEngine {
     fn render(&self, request: &DecorationRequest, layout: &DecorationLayout) -> DecorationBuffer {
         render_decoration(
             &self.theme,
-            &mut self.font_system.borrow_mut(),
-            &mut self.swash_cache.borrow_mut(),
+            &mut self.fonts.font_system.borrow_mut(),
+            &mut self.fonts.swash_cache.borrow_mut(),
             request,
             layout,
         )

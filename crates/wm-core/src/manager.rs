@@ -249,6 +249,62 @@ impl<B: Backend> WindowManager<B> {
         self.snap_threshold = px.min(i32::MAX as u32) as i32;
     }
 
+    /// Swaps the decoration engine and re-lays-out every managed client
+    /// against it — how a live theme or UI-scale change reaches the
+    /// window chrome without restarting the session.
+    ///
+    /// The sweep is part of the swap rather than a second call the
+    /// caller makes afterward, because the two are not independently
+    /// useful: an engine whose metrics no client has been reflowed
+    /// against is a window manager whose `Client::layout` cache
+    /// disagrees with what is on screen, and every hit-test and drag
+    /// computed from that cache would be wrong. Making it one act means
+    /// it cannot be half-done.
+    ///
+    /// `wm-core` still never sees a `Theme` — the caller builds the
+    /// engine (see `wm_theme::RasterThemeEngine::with_fonts`, which
+    /// reuses the loaded font database so a restyle costs no fontconfig
+    /// scan) and this crate only knows it has a new source of layouts.
+    pub fn set_theme_engine(&mut self, theme: Box<dyn ThemeEngine>) {
+        self.theme = theme;
+        self.relayout_all_clients();
+    }
+
+    /// Re-derives every managed client's decoration layout from the
+    /// current engine, pushes the resulting frame geometry to the
+    /// backend, and repaints the chrome.
+    ///
+    /// Withdrawn clients are skipped: they are unmapped and possibly
+    /// already destroyed, and `reflow_frame` would still push a
+    /// position and a size at the window. Miniaturized ones are *not* —
+    /// their frame is unmapped but alive, and reflowing it now is what
+    /// makes a later deminiaturize exact rather than restoring a window
+    /// into chrome measured for the previous theme.
+    ///
+    /// A drag in flight is left alone deliberately rather than
+    /// cancelled: `ActiveMove`'s grab offset was computed against the
+    /// old layout, so a scale change landing mid-drag shifts the window
+    /// under the pointer by the difference in titlebar height. That is
+    /// a cosmetic jump in a race a user has to work to hit (a config
+    /// reload while holding a titlebar), and cancelling the drag to
+    /// avoid it would be the more surprising of the two.
+    pub fn relayout_all_clients(&mut self) {
+        let ids: Vec<ClientId> = self.clients.keys().collect();
+        for id in ids {
+            let Some(client) = self.clients.get(id) else {
+                continue;
+            };
+            if client.lifecycle == Lifecycle::Withdrawn {
+                continue;
+            }
+            // `reflow_frame` repaints the decoration itself as part of
+            // pushing the new frame geometry, so this is one call, not
+            // two — and a fullscreen client takes its branch, which
+            // bypasses the theme entirely and is correct unchanged.
+            self.reflow_frame(id);
+        }
+    }
+
     /// Reserves screen space windows should not maximize into (e.g. a
     /// dock/panel strip), one rect per monitor in `Backend::monitors()`
     /// order — a reusable SDK primitive: any desktop shell built on
@@ -383,6 +439,15 @@ impl<B: Backend> WindowManager<B> {
     /// the modal Alt+Tab machinery — see `bind_default_keys`).
     pub fn grab_key(&mut self, combo: KeyCombo) {
         self.backend.grab_key(combo);
+    }
+
+    /// Releases a passive grab taken by [`Self::grab_key`] — how a
+    /// config reload lets go of a combo the user has just unbound.
+    /// Without it a rebind could only ever add grabs, and a combo
+    /// removed from the config file would keep being swallowed by this
+    /// session for as long as it ran.
+    pub fn ungrab_key(&mut self, combo: KeyCombo) {
+        self.backend.ungrab_key(combo);
     }
 
     pub fn current_workspace(&self) -> usize {

@@ -12,15 +12,16 @@
 
 use std::collections::HashMap;
 
-use wm_config::{Action, Config};
-use wm_core::{Backend, BackendEvent, ClientFlags, KeyCombo, MonitorInfo, MouseButton, Notification, ScrollDelta, WindowManager};
-use wm_theme::Theme;
-use wm_theme_api::{Point, PopupHost, Rect, Size};
+use wm_config::Action;
+use wm_core::{Backend, BackendEvent, ClientFlags, ClientId, KeyCombo, MonitorInfo, MouseButton, Notification, ScrollDelta, WindowManager};
+use wm_theme::{FontState, RasterThemeEngine, Theme};
+use wm_theme_api::{DecorationBuffer, Point, PopupHost, Rect, Size};
 
 use crate::apps::{self, AppEntry};
 use crate::desktop::{Desktop, IconDragResult, MenuAction, RootMenuAction, WindowMenuAction, WindowMenuContext};
 use crate::dockapp::Farewell;
 use crate::launchdock::{LaunchDock, LaunchDockAction};
+use crate::startup::SessionState;
 use crate::widgets::DockInput;
 use crate::{spawn, theme_select, wallpaper};
 
@@ -37,10 +38,16 @@ pub enum ShellOutcome {
     Continue,
     /// The user asked to end the session (the root menu's Exit item).
     Exit,
-    /// The session must be rebuilt from scratch to apply a change that
-    /// touches every surface at once — a theme pick, or the configured
-    /// restart keybinding (which doubles as the config hot-reload
-    /// gesture, since a fresh process re-reads the config file).
+    /// The process must re-exec its on-disk image.
+    ///
+    /// This used to mean "apply a change that touches every surface at
+    /// once", and a theme pick raised it. It no longer does: a theme,
+    /// a UI scale and every config-file setting are applied in place by
+    /// [`Shell::apply_session_state`], and the only thing left that a
+    /// running process genuinely cannot do to itself is *become a
+    /// different build*. So this is now raised by exactly one gesture,
+    /// the `restart` keybinding, and means what `scripts/update.sh`
+    /// needs it to mean.
     Restart,
 }
 
@@ -245,7 +252,13 @@ fn launch_app(entry: &AppEntry, theme: &Theme, font_px: f32, screen: Size) {
         argv.extend(spawn::chromium_x11_platform_args());
     }
     let arg_refs: Vec<&str> = argv.iter().map(String::as_str).collect();
-    spawn::spawn_detached_with_env(program, &arg_refs, &spawn::gtk_qt_scale_env(scale), &[]);
+    // Toolkit scaling *and* the pointer size, both in this child's own
+    // environment rather than the session's: the scale can change while
+    // the session runs, and the process environment cannot safely be
+    // rewritten once threads exist. See `startup::xcursor_size_env`.
+    let mut env = spawn::gtk_qt_scale_env(scale);
+    env.extend(crate::startup::xcursor_size_env(scale));
+    spawn::spawn_detached_with_env(program, &arg_refs, &env, &[]);
 }
 
 /// Path to the `chonk-about` demo binary — resolved relative to the
@@ -273,6 +286,27 @@ fn about_binary_path() -> String {
 /// appear twice, the later binding wins (plain insertion order),
 /// matching the intuition that the line further down the file is the
 /// correction.
+/// Which passive key grabs to release and which to take, moving from
+/// the combos currently held to the combos a config now asks for.
+///
+/// Pure, and separated from the calls it implies, for the reason every
+/// resolver in [`crate::startup`] is: the interesting part is the rule,
+/// the rule is easy to get subtly wrong (a combo present in both lists
+/// must be left alone, not dropped and re-taken), and a test for it
+/// should not need a display server.
+///
+/// A combo bound twice in one config yields one grab: the keymap
+/// resolves duplicates by last-one-wins, and grabbing the same combo
+/// twice would leave the second grab held after the first is released.
+fn grab_delta(previous: &[KeyCombo], next: &[(KeyCombo, Action)]) -> (Vec<KeyCombo>, Vec<KeyCombo>) {
+    let mut wanted: Vec<KeyCombo> = next.iter().map(|(combo, _)| *combo).collect();
+    wanted.sort_by_key(|combo| (combo.keysym, combo.modifiers.bits()));
+    wanted.dedup();
+    let to_ungrab = previous.iter().filter(|combo| !wanted.contains(combo)).copied().collect();
+    let to_grab = wanted.iter().filter(|combo| !previous.contains(combo)).copied().collect();
+    (to_ungrab, to_grab)
+}
+
 fn build_keymap(bindings: &[(KeyCombo, Action)]) -> HashMap<KeyCombo, Action> {
     bindings.iter().cloned().collect()
 }
@@ -286,11 +320,11 @@ fn build_keymap(bindings: &[(KeyCombo, Action)]) -> HashMap<KeyCombo, Action> {
 fn root_action_outcome(action: &RootMenuAction) -> ShellOutcome {
     match action {
         RootMenuAction::Exit => ShellOutcome::Exit,
-        // A theme redresses every surface at once; only a fresh
-        // process composes the full look (see `run_root_menu_action`,
-        // which persists the choice this outcome asks the binary to
-        // apply).
-        RootMenuAction::SetTheme(_) => ShellOutcome::Restart,
+        // A theme redresses every surface at once, and used to need a
+        // fresh process to do it. `run_root_menu_action` now applies it
+        // in place, so there is nothing left for the binary to carry
+        // out.
+        RootMenuAction::SetTheme(_) => ShellOutcome::Continue,
         RootMenuAction::LaunchTerminal
         | RootMenuAction::LaunchAbout
         | RootMenuAction::LaunchApp(_)
@@ -369,7 +403,25 @@ pub struct Shell<B: Backend + PopupHost<PopupId = B::ShellId>> {
     /// in `on_shell_click` indexes this copy again when either of
     /// those fires.
     apps: Vec<AppEntry>,
+    /// Everything a live change can alter, as resolved — the source
+    /// `theme` below is derived from, and the base every later
+    /// [`Shell::apply_session_state`] diffs against.
+    state: SessionState,
+    /// `state.theme()`, cached: the scaled theme every surface is drawn
+    /// from, recomputed only when the state it comes from changes.
+    /// `Theme::scaled` clones and re-rounds every metric in the theme,
+    /// which is not something to do on the paint path.
     theme: Theme,
+    /// The font database the decoration engine rasterizes with, held so
+    /// a restyle can build the replacement engine around the *same*
+    /// one — see [`FontState`], and `RasterThemeEngine::with_fonts`.
+    fonts: FontState,
+    /// The config-file key combos this shell currently holds passive
+    /// grabs for. Owned here rather than by the binaries because a
+    /// reload has to release what the user unbound, which means
+    /// knowing what was bound before — and two binaries tracking that
+    /// separately is two chances to leak a grab.
+    grabbed: Vec<KeyCombo>,
     keymap: HashMap<KeyCombo, Action>,
     /// The pointer's last known root-relative position, recorded by
     /// every [`Shell::on_motion`] call. Shell button events carry only
@@ -381,19 +433,22 @@ pub struct Shell<B: Backend + PopupHost<PopupId = B::ShellId>> {
     /// `take_shell_click` on a later loop iteration than the motion
     /// that preceded it.
     pointer_root: Point,
-    /// Terminal font size at 1x, straight from the config — the scale
-    /// is recovered from the theme at launch time, so this stays the
-    /// one number the user actually set.
-    terminal_font_px: f32,
 }
 
 impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
     /// Builds the whole shell against an already-connected backend:
-    /// scans applications, raises the Dock/Clip/launcher chrome, and
-    /// compiles the configured keymap. `scale` must be the same factor
-    /// the theme was scaled by, so the shell's own chrome (which does
-    /// not go through the theme engine) matches the WM's.
-    pub fn new(backend: &mut B, config: &Config, theme: Theme, scale: f32) -> Self {
+    /// scans applications, raises the Dock/Clip/launcher chrome,
+    /// compiles the configured keymap and takes its key grabs.
+    ///
+    /// Takes the resolved [`SessionState`] rather than a `Config` plus
+    /// a theme plus a scale, so that the values a fresh session starts
+    /// from and the values [`Shell::apply_session_state`] moves it to
+    /// are the same type, resolved by the same rules. `fonts` is the
+    /// font state the caller's decoration engine was built with — the
+    /// shell needs it to build that engine's replacements.
+    pub fn new(backend: &mut B, state: &SessionState, fonts: FontState) -> Self {
+        let theme = state.theme();
+        let scale = state.scale;
         let screen = backend.screen_size();
         // Chrome hangs on the primary monitor, not on the screen: the
         // screen spans every output at once, so its own corners are
@@ -412,17 +467,122 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         // It is handed the *primary's* size rather than the screen's,
         // so the strip's height clamp is measured against the head it
         // sits on rather than against every head at once.
-        let launchdock = LaunchDock::new(backend, &theme, primary, ((56.0 * scale).round() as u32).max(16), &apps);
+        let launchdock = LaunchDock::new(backend, &theme, primary, crate::desktop::tile_px(scale), &apps);
+
+        // Take the configured grabs through the same delta the applier
+        // uses, from an empty starting set: one implementation, so a
+        // fresh session and a reloaded one cannot end up holding
+        // different grabs for the same config file.
+        let (_, to_grab) = grab_delta(&[], &state.keybindings);
+        for combo in &to_grab {
+            backend.grab_key(*combo);
+        }
 
         Self {
             desktop,
             launchdock,
             apps,
+            keymap: build_keymap(&state.keybindings),
+            grabbed: to_grab,
+            state: state.clone(),
             theme,
-            keymap: build_keymap(&config.keybindings),
+            fonts,
             pointer_root: Point::new(0, 0),
-            terminal_font_px: config.terminal_font_px,
         }
+    }
+
+    /// Moves this session to `next` — the one path a theme pick, a UI
+    /// scale change and a config-file reload all take.
+    ///
+    /// Ordering is load-bearing and the reason this is one function
+    /// rather than a handful the callers compose:
+    ///
+    /// 1. Policy first, unconditionally. These are plain setters with
+    ///    nothing to repaint, and they must land even when the look is
+    ///    identical — a reload that only changed `edge_resistance` has
+    ///    no theme work to do at all.
+    /// 2. Metrics next, before anything paints: `Desktop::set_scale`
+    ///    re-derives the tile edge every later step measures against.
+    /// 3. The decoration engine, which re-lays-out every managed client
+    ///    as part of the swap (`WindowManager::set_theme_engine`).
+    /// 4. The shell's own chrome, which is not drawn through that
+    ///    engine and so has to be told separately.
+    /// 5. Workareas last, because the dock's height is an input to them
+    ///    and step 4 is what settles it.
+    ///
+    /// Dockapps are deliberately absent from that list. They already
+    /// poll the tile edge, the scale and the whole theme once per
+    /// servicing pass and push a `ThemeChanged` when any of it moves,
+    /// so updating `Desktop`'s fields in step 2 *is* telling them —
+    /// within one 16ms tick, with no call here that a fourth trigger
+    /// could forget to make.
+    pub fn apply_session_state(&mut self, wm: &mut WindowManager<B>, next: SessionState) {
+        // 1. Policy.
+        wm.set_focus_policy(next.focus);
+        wm.set_placement_policy(next.placement);
+        wm.set_snap_threshold(next.edge_resistance);
+        self.keymap = build_keymap(&next.keybindings);
+        let (to_ungrab, to_grab) = grab_delta(&self.grabbed, &next.keybindings);
+        for combo in &to_ungrab {
+            wm.ungrab_key(*combo);
+        }
+        for combo in &to_grab {
+            wm.grab_key(*combo);
+        }
+        self.grabbed.retain(|combo| !to_ungrab.contains(combo));
+        self.grabbed.extend(to_grab);
+
+        // 2. Metrics.
+        let theme = next.theme();
+        let scale_changed = self.desktop.set_scale(next.scale);
+        let theme_changed = theme != self.theme;
+        self.state = next;
+        if !scale_changed && !theme_changed {
+            // Nothing that is drawn has moved. Repainting anyway would
+            // be a visible flash on a reload that only rebound a key.
+            return;
+        }
+        self.theme = theme;
+        self.desktop.set_theme_id(self.theme.id.clone());
+        tracing::info!(
+            theme = %self.theme.id,
+            scale = self.state.scale,
+            scale_changed,
+            theme_changed,
+            "applying a new look in place"
+        );
+
+        // 3. The decoration engine, and with it every client's chrome.
+        wm.set_theme_engine(Box::new(RasterThemeEngine::with_fonts(self.theme.clone(), self.fonts.clone())));
+        if scale_changed {
+            // The only pixels in the session the theme engine does not
+            // produce: the backend's own pointer cursors.
+            wm.backend_mut().set_ui_scale(self.state.scale);
+        }
+
+        // 4. The shell's own chrome. Icon-tile thumbnails are gathered
+        //    before the backend is borrowed mutably — see
+        //    `Desktop::icon_clients`.
+        let previews: Vec<(ClientId, Option<DecorationBuffer>)> = self
+            .desktop
+            .icon_clients()
+            .into_iter()
+            .map(|id| (id, wm.client_preview(id)))
+            .collect();
+        let tile = crate::desktop::tile_px(self.state.scale);
+        self.desktop.relayout(wm.backend_mut(), &self.theme, &previews);
+        self.launchdock.restyle(wm.backend_mut(), &self.theme, tile);
+
+        // 5. Workareas, now that the dock has settled its height.
+        self.apply_workareas(wm);
+    }
+
+    /// Dresses the session in a different theme, keeping every other
+    /// piece of session state as it is. The theme menu's whole job.
+    fn apply_theme(&mut self, wm: &mut WindowManager<B>, base: Theme) {
+        let mut next = self.state.clone();
+        next.base_theme = base;
+        self.apply_session_state(wm, next);
     }
 
     /// The theme every surface (the shell's own chrome included) is
@@ -488,7 +648,7 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
     pub fn run_action(&mut self, wm: &mut WindowManager<B>, action: &Action) -> ShellOutcome {
         match action {
             Action::SpawnTerminal => {
-                spawn_terminal(&self.theme, self.terminal_font_px, terminal_screen(self))
+                spawn_terminal(&self.theme, self.state.terminal_font_px, terminal_screen(self))
             }
             Action::Close => {
                 if let Some(id) = wm.focused_client() {
@@ -527,11 +687,23 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
                     carry_focused_to_workspace(wm, wm.current_workspace() - 1);
                 }
             }
-            // The same act the theme menu's pick asks for: the binary
-            // rebuilds the session in place (the X11 binary re-execs
-            // its on-disk image, windows surviving via the SaveSet) —
-            // which is also what makes this binding the config
-            // hot-reload gesture.
+            // Re-read the config file and apply it here and now:
+            // theme, UI scale, focus policy, placement, edge resistance
+            // and these bindings themselves, with nothing closed and
+            // nothing re-execed. A broken file at this point is not
+            // fatal and never was — `wm_config::load` warns and hands
+            // back the defaults — but note what that means for a live
+            // reload specifically: a typo does not leave the session
+            // alone, it moves the session to the defaults. That is the
+            // same thing a restart with a broken file has always done,
+            // and the warning it logs is the same one.
+            Action::Reload => {
+                self.apply_session_state(wm, SessionState::resolve(&wm_config::load()));
+            }
+            // Re-exec the on-disk binary. Since `Action::Reload` exists
+            // this is no longer the config hot-reload gesture; it is
+            // how a session picks up a *new build* of itself, which is
+            // the one thing it cannot do without exec.
             Action::Restart => return ShellOutcome::Restart,
         }
         ShellOutcome::Continue
@@ -603,7 +775,7 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
             if let Some(action) = self.launchdock.handle_click(wm.backend_mut(), &self.theme, local, pressed, &running) {
                 match action {
                     LaunchDockAction::Launch(entry) => {
-                        launch_app(&entry, &self.theme, self.terminal_font_px, terminal_screen(self))
+                        launch_app(&entry, &self.theme, self.state.terminal_font_px, terminal_screen(self))
                     }
                     // The same activate path a pager's
                     // _NET_ACTIVE_WINDOW message rides — focuses,
@@ -819,7 +991,7 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
     fn run_root_menu_action(&mut self, wm: &mut WindowManager<B>, action: RootMenuAction) {
         match action {
             RootMenuAction::LaunchTerminal => {
-                spawn_terminal(&self.theme, self.terminal_font_px, terminal_screen(self))
+                spawn_terminal(&self.theme, self.state.terminal_font_px, terminal_screen(self))
             }
             RootMenuAction::LaunchAbout => {
                 // `CHONKSTEP_THEME` is the one published channel by
@@ -855,7 +1027,7 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
             // doesn't get to panic.
             RootMenuAction::LaunchApp(i) => {
                 if let Some(entry) = self.apps.get(i) {
-                    launch_app(entry, &self.theme, self.terminal_font_px, terminal_screen(self));
+                    launch_app(entry, &self.theme, self.state.terminal_font_px, terminal_screen(self));
                 } else {
                     tracing::warn!(index = i, count = self.apps.len(), "menu fired an out-of-range application index");
                 }
@@ -864,20 +1036,32 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
                 self.desktop.set_wallpaper(wm.backend_mut(), &self.theme, wallpaper);
             }
             RootMenuAction::SetTheme(id) => {
+                // Resolved first: a pick naming a theme that does not
+                // exist must change nothing at all, rather than persist
+                // a choice this session then declines to wear. Not
+                // reachable from the menu, which is generated from the
+                // same list — but this is also the path a future
+                // scripted theme change would take.
+                let Some(base) = wm_theme::default_theme::theme_by_id(id) else {
+                    tracing::warn!(theme = id, "theme menu named a theme that does not exist; keeping the current one");
+                    return;
+                };
                 if let Err(e) = theme_select::persist(id) {
                     tracing::warn!(?e, id, "failed to persist theme selection");
                 }
-                // A theme implies its wallpaper — persist that too, so
-                // the fresh process composes the full look. The
-                // Wallpaper menu can still override it afterward.
-                if let Some(pack) = wm_theme::default_theme::theme_by_id(id) {
-                    if let Some(wallpaper) = wallpaper::Wallpaper::from_id(&pack.wallpaper) {
-                        if let Err(e) = wallpaper.persist() {
-                            tracing::warn!(?e, id, "failed to persist theme wallpaper");
-                        }
+                // A theme implies its wallpaper. Applied *and*
+                // persisted: applied because the desktop holds its
+                // wallpaper as loaded state that a restyle does not
+                // re-read, and persisted so the next session composes
+                // the same full look. The Wallpaper menu can still
+                // override it afterward.
+                if let Some(paper) = wallpaper::Wallpaper::from_id(&base.wallpaper) {
+                    if let Err(e) = paper.persist() {
+                        tracing::warn!(?e, id, "failed to persist theme wallpaper");
                     }
+                    self.desktop.set_wallpaper(wm.backend_mut(), &self.theme, paper);
                 }
-                tracing::info!(theme = id, "theme selected \u{2014} hot-restarting in place to apply");
+                self.apply_theme(wm, base);
             }
             RootMenuAction::Exit => {}
         }
@@ -1089,12 +1273,54 @@ mod tests {
     }
 
     #[test]
-    fn set_theme_maps_to_the_restart_outcome() {
-        // The pick's persistence happens in `run_root_menu_action`;
-        // the restart itself is the binary's act, reached only through
-        // this mapping — if it ever stopped saying Restart, a theme
-        // pick would persist silently and apply one session late.
-        assert_eq!(root_action_outcome(&RootMenuAction::SetTheme("graphite")), ShellOutcome::Restart);
+    fn set_theme_asks_the_binary_for_nothing() {
+        // This assertion used to read `ShellOutcome::Restart`, and
+        // inverting it is the whole point of the live-apply work: a
+        // theme pick is applied by `run_root_menu_action` in place, so
+        // there is no process-level act left for the binary to carry
+        // out. If this ever says Restart again, every theme pick has
+        // silently started costing the user their Wayland clients.
+        assert_eq!(root_action_outcome(&RootMenuAction::SetTheme("graphite")), ShellOutcome::Continue);
+    }
+
+    fn key(keysym: u32) -> KeyCombo {
+        KeyCombo { keysym, modifiers: Modifiers::ALT }
+    }
+
+    #[test]
+    fn a_grab_delta_takes_only_what_is_new_and_releases_only_what_is_gone() {
+        // The combo present in both lists is the interesting one: it
+        // must be left strictly alone. Releasing and re-taking it would
+        // work on X11 by luck (same-client grabs replace) and is
+        // exactly the kind of churn that becomes a dropped keypress on
+        // a backend where it does not.
+        let previous = vec![key(1), key(2)];
+        let next = vec![(key(2), Action::Close), (key(3), Action::Miniaturize)];
+        let (to_ungrab, to_grab) = grab_delta(&previous, &next);
+        assert_eq!(to_ungrab, vec![key(1)]);
+        assert_eq!(to_grab, vec![key(3)]);
+    }
+
+    #[test]
+    fn a_grab_delta_from_nothing_takes_everything() {
+        // The startup path: `Shell::new` reconciles from an empty set
+        // rather than having its own grab loop, so this is the case
+        // that has to behave like the old dedicated loop did.
+        let next = vec![(key(1), Action::Close), (key(2), Action::Restart)];
+        let (to_ungrab, to_grab) = grab_delta(&[], &next);
+        assert!(to_ungrab.is_empty());
+        assert_eq!(to_grab, vec![key(1), key(2)]);
+    }
+
+    #[test]
+    fn a_combo_bound_twice_is_grabbed_once() {
+        // A config may bind the same combo twice (last one wins in the
+        // keymap). Grabbing it twice would leave the second grab held
+        // after the first is released, so the session would keep
+        // swallowing a key the user had just unbound.
+        let next = vec![(key(1), Action::Close), (key(1), Action::Miniaturize)];
+        let (_, to_grab) = grab_delta(&[], &next);
+        assert_eq!(to_grab, vec![key(1)]);
     }
 
     fn monitor(geometry: Rect, primary: bool) -> MonitorInfo {

@@ -773,6 +773,33 @@ mod restart_tests {
     /// socket has reached EOF. Both halves matter: the shell interleaves
     /// `Ping`s with anything a test is looking for, and one test's whole
     /// assertion is about which of "a `Goodbye`" and "a bare EOF" arrived.
+    /// [`drain`], but giving a close a bounded moment to become
+    /// visible before concluding it has not happened.
+    ///
+    /// `drain` reads a non-blocking socket, where "nothing to read
+    /// right now" and "the peer is gone" are the same `EAGAIN` until
+    /// the kernel has actually torn the far end down. That teardown is
+    /// not synchronous with the `drop` that triggers it: on a loaded
+    /// machine the reading thread can reach its `recv` first and
+    /// conclude the socket is still open. This turns the assertion from
+    /// "is it closed at this instant", which nothing guarantees, into
+    /// "does it close at all", which is the property being tested.
+    ///
+    /// Found the hard way: the one caller failed about one run in three
+    /// once the suite got heavy enough to contend for CPU.
+    fn drain_until_eof(peer: &Seqpacket) -> (Vec<ServerMessage>, bool) {
+        let mut collected = Vec::new();
+        for _ in 0..500 {
+            let (messages, eof) = drain(peer);
+            collected.extend(messages);
+            if eof {
+                return (collected, true);
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        (collected, false)
+    }
+
     fn drain(peer: &Seqpacket) -> (Vec<ServerMessage>, bool) {
         let mut buffer = vec![0u8; MAX_MESSAGE_BYTES];
         let mut messages = Vec::new();
@@ -831,7 +858,7 @@ mod restart_tests {
         // rather than exit. `Goodbye { Shutdown }` would have told it the
         // opposite, which is why the restart path deliberately sends
         // nothing.
-        let (parting, eof) = drain(&peer);
+        let (parting, eof) = drain_until_eof(&peer);
         assert!(eof, "the socket really is gone");
         assert_eq!(goodbye_reason(&parting), None, "a bare EOF means \"try again\"; a Goodbye would have told it the opposite");
         drop(peer);

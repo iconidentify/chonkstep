@@ -78,6 +78,14 @@ pub enum Action {
     WorkspacePrev,
     WorkspaceCarryNext,
     WorkspaceCarryPrev,
+    /// Re-read this file and apply it to the running session — theme,
+    /// UI scale, focus policy, placement, edge resistance and these
+    /// very bindings, with no restart and nothing closed.
+    Reload,
+    /// Re-exec the session's on-disk binary. Distinct from [`Self::Reload`]
+    /// on purpose: reloading applies a changed *config*, restarting
+    /// applies a changed *build*, and only the second one has to cost
+    /// the user anything.
     Restart,
 }
 
@@ -98,6 +106,7 @@ fn action_from_name(name: &str) -> Option<Action> {
         "workspace-prev" => Some(Action::WorkspacePrev),
         "workspace-carry-next" => Some(Action::WorkspaceCarryNext),
         "workspace-carry-prev" => Some(Action::WorkspaceCarryPrev),
+        "reload" => Some(Action::Reload),
         "restart" => Some(Action::Restart),
         _ => None,
     }

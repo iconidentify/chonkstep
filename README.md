@@ -7,8 +7,8 @@ relief recipe, the 10x10 button glyph bitmaps, the 8px resizebar with
 28px corner grips - under a dock of live instruments and real
 workspaces, then extended with the conveniences a modern desktop
 expects: resize from every edge and corner with macOS-style cursors, a
-theme engine, translucent terminals, HiDPI scaling, and in-place hot
-restarts that keep your windows open.
+theme engine, translucent terminals, HiDPI scaling applied live, and
+in-place hot restarts that keep your windows open.
 
 ![Theme menu on the Teal Blueprint theme](docs/screenshots/theme-menu.png)
 
@@ -41,8 +41,10 @@ restarts that keep your windows open.
   Phosphor, Teal Blueprint, Graphite, NeXT Lavender, Jade Lacquer,
   Ivory Halftone, and Indigo Filament. A theme restyles everything at
   once - window chrome, menus, wallpaper, dock, and the terminal's
-  16-color palette - and switching from the root menu applies instantly
-  via hot restart, windows intact. Ivory Halftone is the light one: it
+  16-color palette - and switching from the root menu applies on the
+  spot: no restart, nothing closed, every window and dockapp where you
+  left it. (Terminals already open keep the palette they launched
+  with; new ones get the new one.) Ivory Halftone is the light one: it
   keeps the dark focused titlebar (inverting *that* is what stops a
   light desktop from showing which window has the keyboard) and turns
   everything the bars sit on to press-cream paper.
@@ -51,12 +53,25 @@ restarts that keep your windows open.
   compositor. The window manager creates 32-bit ARGB frames so client
   alpha survives reparenting - any translucent app works, not just the
   terminal.
-- **HiDPI scaling.** `CHONKSTEP_SCALE` scales every piece of chrome -
-  titlebars, buttons, bevels, cursors, glyphs - as one system.
-- **Hot restart.** `scripts/restart.sh` asks a live session to re-exec
-  the freshly built binary in place; open windows survive via the X11
-  SaveSet. This is also how theme switching and `scripts/update.sh`
-  apply changes without logging out.
+- **HiDPI scaling, changed live.** `scale` in the config file (or
+  `CHONKSTEP_SCALE`) scales every piece of chrome - titlebars, buttons,
+  bevels, cursors, glyphs - as one system, and `scripts/reload.sh`
+  applies a new value to the running session: the chrome re-lays-out,
+  the dock and Clip re-measure, the pointer cursors are redrawn, and
+  every dockapp is told its new tile size. Applications already running
+  keep the font and cursor sizes they were launched with, since those
+  are read once at their own startup.
+- **Live reload, and hot restart.** Two different things, and the
+  first is the one you usually want. `scripts/reload.sh` (or the
+  bindable `reload` action) re-reads the config file and applies all of
+  it - theme, scale, focus policy, placement, edge resistance,
+  terminal font size, the keybindings themselves - to the running
+  session, keeping every window, client connection and dockapp.
+  `scripts/restart.sh` re-execs the on-disk binary, which is how
+  `scripts/update.sh` picks up a *new build*: the one change a running
+  process cannot apply to itself. Open windows survive a restart on
+  X11 via the SaveSet; on Wayland they do not, which is exactly why
+  reload exists.
 - **EWMH compliance.** Publishes `_NET_SUPPORTED`, the client list,
   active window, workspaces, and workarea, and honors activation,
   close, and fullscreen/maximize requests - so `wmctrl`, `xdotool`,
@@ -211,9 +226,11 @@ What the session backend does not do yet, stated plainly:
   machine is one line in the log; where the plane is missing the
   pointer is composited into the frame and everything else is
   unaffected.
-- **Restart costs you your clients.** The compositor does re-exec in
-  place - that is how the theme menu and `scripts/restart.sh` apply
-  changes on both backends - but Wayland clients die with the socket
+- **Restart costs you your clients** - though far less often than it
+  used to, since a theme, a scale or any config change now applies
+  without one (see **Live reload** above). The compositor does re-exec
+  in place - that is how `scripts/restart.sh` and `scripts/update.sh`
+  apply a new build on both backends - but Wayland clients die with the socket
   they were connected to, and there is no SaveSet equivalent to adopt
   them afterwards. The X11 session keeps your windows across a
   restart; this one keeps only itself - and its dockapps. A dockapp is
@@ -288,9 +305,11 @@ dragged window gets to a screen or window edge before snapping flush;
 combo to change it, set it to `"none"` to unbind it, and every
 unlisted default stays.
 
-Edits apply on the next restart: `scripts/restart.sh` hot-restarts the
-live session in place (windows survive), or bind the `restart` action
-to a key and never leave the keyboard.
+Edits apply to the running session: `scripts/reload.sh` re-reads this
+file and applies all of it in place - nothing closed, no window lost -
+or bind the `reload` action to a key and never leave the keyboard.
+`scripts/restart.sh` is the other gesture, for after a rebuild: it
+re-execs the binary to pick up a new build.
 
 The default bindings:
 

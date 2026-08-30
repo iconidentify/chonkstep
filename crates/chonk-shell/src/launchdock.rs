@@ -106,7 +106,7 @@ impl<B: Backend> LaunchDock<B> {
             mapped: false,
             tile,
             primary,
-            drag_threshold: ((4.0 * tile as f32 / 56.0).round() as i32).max(2),
+            drag_threshold: drag_threshold_for_tile(tile),
             state_path,
             pins,
             lit,
@@ -297,6 +297,28 @@ impl<B: Backend> LaunchDock<B> {
     /// Moves the strip onto `primary` - the monitor arrangement
     /// changed under it.
     ///
+    /// Re-dresses the strip in `theme` and, if the UI scale moved,
+    /// re-derives its tile edge — the live theme/scale entry point, and
+    /// the counterpart to [`LaunchDock::reposition`]'s monitor-change
+    /// one.
+    ///
+    /// Deliberately *not* routed through `reposition`: that method
+    /// early-returns when the primary rect is unchanged, which is
+    /// exactly the case here (a restyle moves no monitor), so reusing
+    /// it would swallow every scale change that did not coincide with a
+    /// display being plugged in. The repaint is unconditional for the
+    /// same class of reason — a theme change moves no tile edge, and a
+    /// method that only acted when the size changed would leave the
+    /// strip wearing the old palette.
+    pub fn restyle(&mut self, backend: &mut B, theme: &Theme, tile: u32) {
+        let tile = tile.max(1);
+        if self.tile != tile {
+            self.tile = tile;
+            self.drag_threshold = drag_threshold_for_tile(tile);
+        }
+        self.sync_window(backend, theme);
+    }
+
     /// The strip anchors to the primary monitor rather than the
     /// desktop origin (see [`strip_origin`]), so the rect it was built
     /// with goes stale the moment a display is plugged in, unplugged,
@@ -392,6 +414,16 @@ impl<B: Backend> LaunchDock<B> {
         }
         backend.paint_shell_surface(window, &DecorationBuffer { width: self.tile, height: self.pins.len() as u32 * self.tile, pixels });
     }
+}
+
+/// How far a press must travel before it is a reorder drag rather than
+/// a launch click, derived from the strip's own tile edge so the
+/// gesture feels identical at any UI scale. Expressed in tiles rather
+/// than in the scale directly because the strip is only ever told its
+/// tile size — see `crate::desktop::drag_threshold_px`, the same
+/// gesture measured from the other end.
+fn drag_threshold_for_tile(tile: u32) -> i32 {
+    ((4.0 * tile as f32 / 56.0).round() as i32).max(2)
 }
 
 /// Root position of the strip's top-left corner: the primary
@@ -651,6 +683,40 @@ mod tests {
     /// invisible to the tests of the day because nothing here could
     /// build a `LaunchDock` at all - which is why `wm-core` now
     /// exposes its `Backend` double behind `test-support`.
+    /// The strip's tile edge is derived from the UI scale by the shell,
+    /// not by the strip, so a live rescale reaches it as a new `tile`.
+    /// It must land on exactly what a strip built at that tile would
+    /// hold — including the drag threshold, which is derived from the
+    /// tile a second time and so is the field most likely to be left
+    /// behind.
+    #[test]
+    fn restyling_to_a_new_tile_matches_a_strip_built_at_that_tile() {
+        use wm_core::fake_backend::FakeBackend;
+
+        let theme = wm_theme::default_theme::nextstep_classic();
+        let mut backend = FakeBackend::new();
+        let primary = Rect { pos: Point::new(0, 0), size: Size::new(640, 480) };
+
+        let mut restyled: LaunchDock<FakeBackend> = LaunchDock::new(&mut backend, &theme, primary, 56, &[]);
+        restyled.restyle(&mut backend, &theme, 112);
+
+        // Compared against the shared derivation rather than against a
+        // second strip built at 112: standing one up costs a fontconfig
+        // scan, and the divergence a native comparison used to guard
+        // against — two copies of this formula drifting apart — is what
+        // hoisting `drag_threshold_for_tile` structurally removed.
+        assert_eq!(restyled.tile, 112);
+        assert_eq!(restyled.drag_threshold, drag_threshold_for_tile(112));
+
+        // And it got there with the primary rect held still.
+        // `reposition` early-returns when the primary is unchanged,
+        // which is exactly the case during a restyle: if `restyle` were
+        // ever implemented by delegating to it, every scale change that
+        // did not coincide with a monitor being plugged in would be
+        // silently dropped.
+        assert_eq!(restyled.primary, primary, "a restyle must not depend on the monitor having moved");
+    }
+
     #[test]
     fn repositioning_moves_the_strip_onto_the_new_primary_monitor() {
         use wm_core::fake_backend::FakeBackend;

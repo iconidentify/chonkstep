@@ -809,6 +809,12 @@ struct SwitcherPanel<Id> {
 struct IconTile<Id> {
     window: Id,
     client: ClientId,
+    /// The window title this tile was drawn with. Kept so a live theme
+    /// or scale change can re-render the tile without asking the window
+    /// manager for it again — the tile outlives any particular pass
+    /// through the shell, and a miniaturized client's title is not
+    /// otherwise reachable from here.
+    title: String,
     /// Current on-screen position — always authoritative, whether it
     /// came from `auto_slot`'s grid math or a manual drag.
     pos: Point,
@@ -894,6 +900,37 @@ fn dock_geometry(primary: Rect, dock_width: u32, dock_height: u32) -> Rect {
 /// top-left corner (the Clip's stock position).
 fn clip_geometry(primary: Rect, tile: u32) -> Rect {
     Rect { pos: primary.pos, size: Size::new(tile, tile) }
+}
+
+/// The dock/Clip/icon tile edge at `scale`, in device pixels.
+///
+/// One function rather than the formula written out wherever a tile is
+/// measured, because it is measured in three places that must agree:
+/// `Desktop::new`, `Desktop::set_scale`, and the launcher strip the
+/// shell builds alongside the Clip (`crate::shell::Shell::new`). Two of
+/// those already held the same literal expression; a live scale change
+/// is exactly the kind of edit that updates one and not the other, and
+/// a strip whose tiles are a different size from the Clip above them is
+/// the visible result.
+///
+/// The floor is what keeps a sub-1.0 scale from producing a tile too
+/// small to draw the chrome into at all.
+pub fn tile_px(scale: f32) -> u32 {
+    ((56.0 * scale).round() as u32).max(16)
+}
+
+/// Gap between miniwindow icon tiles on the desktop grid, in device
+/// pixels. Not used for the dock, whose tiles touch flush by design —
+/// see `Desktop::new`.
+pub fn icon_pad_px(scale: f32) -> u32 {
+    ((4.0 * scale).round() as u32).max(1)
+}
+
+/// How far the pointer must travel from a press before it counts as a
+/// drag rather than a click, in device pixels — scaled so the gesture
+/// feels the same at any UI scale.
+pub fn drag_threshold_px(scale: f32) -> i32 {
+    ((4.0 * scale).round() as i32).max(2)
 }
 
 /// Root position of miniwindow icon slot `slot`: tiles fill
@@ -1080,8 +1117,8 @@ impl<B: Backend> Desktop<B> {
     /// caller must still pass both — the shell cannot recover the
     /// primary's origin from a size.
     pub fn new(backend: &mut B, screen: Size, primary: Rect, scale: f32, theme_id: String, apps: Vec<crate::apps::AppEntry>) -> Self {
-        let tile = ((56.0 * scale).round() as u32).max(16);
-        let pad = ((4.0 * scale).round() as u32).max(1);
+        let tile = tile_px(scale);
+        let pad = icon_pad_px(scale);
         // The dock is exactly one tile wide, tiles touch directly with
         // no gap, and the identity tile sits flush at the very top —
         // the classic dock is a flush column of icons touching both
@@ -1171,7 +1208,7 @@ impl<B: Backend> Desktop<B> {
             dock_width,
             tile,
             pad,
-            drag_threshold: ((4.0 * scale).round() as i32).max(2),
+            drag_threshold: drag_threshold_px(scale),
             font_system: cosmic_text::FontSystem::new(),
             swash_cache: cosmic_text::SwashCache::new(),
             menu: ShellMenu::new(),
@@ -1243,6 +1280,134 @@ impl<B: Backend> Desktop<B> {
         self.repaint_wallpaper(backend);
         self.redraw_dock(backend, theme);
         self.reposition_clip(backend, theme);
+    }
+
+    /// Re-derives every metric this desktop measured from the UI scale
+    /// at construction, and reports whether any of them moved.
+    ///
+    /// Metrics only: nothing is repainted here. The caller pairs this
+    /// with [`Desktop::relayout`] because a theme change needs the
+    /// repaint without the metric update, and doing both in one method
+    /// would mean a theme pick recomputing a scale that did not change.
+    ///
+    /// Compared through `to_bits` rather than `==`: a derived `PartialEq`
+    /// over an `f32` is not reflexive, so a NaN scale would compare
+    /// unequal to itself and report a change on every single call. The
+    /// scale resolver upstream refuses a non-finite value, and the
+    /// dockapp broadcast guards the same way for the same reason — this
+    /// is the third place that lesson applies, so it is applied here
+    /// too rather than trusted to the caller.
+    pub fn set_scale(&mut self, scale: f32) -> bool {
+        if self.scale.to_bits() == scale.to_bits() {
+            return false;
+        }
+        self.scale = scale;
+        self.tile = tile_px(scale);
+        self.pad = icon_pad_px(scale);
+        // The dock is exactly one tile wide — the same identity
+        // `Desktop::new` establishes, restated here rather than left to
+        // drift.
+        self.dock_width = self.tile;
+        self.drag_threshold = drag_threshold_px(scale);
+        true
+    }
+
+    /// The active theme's id, for the Themes submenu's bullet. Set by
+    /// the shell when a theme is applied live; the `Theme` itself lives
+    /// with the shell orchestration, not here.
+    pub fn set_theme_id(&mut self, id: String) {
+        self.theme_id = id;
+    }
+
+    /// Repaints every surface this desktop owns from the current theme
+    /// and the current metrics — the theme/scale twin of
+    /// [`Desktop::resize_to_screen`], which does the same for a changed
+    /// monitor arrangement.
+    ///
+    /// It does strictly more than `resize_to_screen`: that one leaves
+    /// icon tiles alone on purpose (a tile the user placed is theirs,
+    /// and a rearrangement does not change how big it is), but a scale
+    /// change *does* change how big it is, and a theme change changes
+    /// what is drawn in it. So icon tiles are re-rendered here and not
+    /// there.
+    ///
+    /// `previews` supplies the window thumbnail for each miniaturized
+    /// client, keyed by `ClientId` — see [`Desktop::icon_clients`] for
+    /// why the caller collects them rather than this method fetching
+    /// them.
+    pub fn relayout(&mut self, backend: &mut B, theme: &Theme, previews: &[(ClientId, Option<DecorationBuffer>)]) {
+        self.repaint_wallpaper(backend);
+        self.redraw_dock(backend, theme);
+        self.reposition_clip(backend, theme);
+        self.relayout_icons(backend, theme, previews);
+        self.discard_switcher(backend);
+    }
+
+    /// The clients that currently have an icon tile on the desktop.
+    ///
+    /// Exists so the shell can gather each one's thumbnail from the
+    /// window manager *before* handing this type the backend: the
+    /// preview comes from `WindowManager::client_preview` (an immutable
+    /// borrow of the WM) while painting needs `WindowManager::
+    /// backend_mut` (a mutable one), and the two cannot overlap. The
+    /// caller collects, then paints.
+    pub fn icon_clients(&self) -> Vec<ClientId> {
+        self.icons.values().map(|icon| icon.client).collect()
+    }
+
+    /// Resizes, re-slots and re-renders every icon tile against the
+    /// current theme and tile edge.
+    ///
+    /// A tile still sitting in its auto-arranged slot is re-slotted, so
+    /// the grid stays a grid at the new tile size. A tile the user
+    /// dragged somewhere keeps its position — the same rule
+    /// `icon_slot_position`'s `auto_slot: None` case encodes everywhere
+    /// else, and the same one `resize_to_screen` honors: a placed icon
+    /// is the user's, and a restyle is not a reason to move it.
+    ///
+    /// A client with no entry in `previews` (or a `None` one) is drawn
+    /// without a thumbnail rather than skipped: an unmapped window
+    /// cannot always be re-captured, and a tile wearing the new theme
+    /// with no preview is a better answer than one still wearing the
+    /// old theme.
+    fn relayout_icons(&mut self, backend: &mut B, theme: &Theme, previews: &[(ClientId, Option<DecorationBuffer>)]) {
+        let tile = self.tile;
+        let entries: Vec<(B::ShellId, ClientId, Option<usize>, String)> = self
+            .icons
+            .values()
+            .map(|icon| (icon.window, icon.client, icon.auto_slot, icon.title.clone()))
+            .collect();
+        for (window, client, auto_slot, title) in entries {
+            let pos = match auto_slot {
+                Some(slot) => self.icon_slot_position(slot),
+                None => self.icons.get(&window).map(|icon| icon.pos).unwrap_or(Point::new(0, 0)),
+            };
+            backend.configure_shell_surface(window, Rect { pos, size: Size::new(tile, tile) });
+            let preview = previews
+                .iter()
+                .find(|(id, _)| *id == client)
+                .and_then(|(_, preview)| preview.as_ref());
+            let buffer = icon::render_icon_tile(theme, &mut self.font_system, &mut self.swash_cache, tile, &title, preview);
+            backend.paint_shell_surface(window, &buffer);
+            if let Some(icon) = self.icons.get_mut(&window) {
+                icon.pos = pos;
+            }
+        }
+    }
+
+    /// Drops the Alt-Tab panel's surface so the next cycle rebuilds it.
+    ///
+    /// Cheaper and more certain than re-rendering it: the panel is
+    /// recreated whenever its rendered size changes anyway
+    /// (`show_switcher`), it is only ever visible while a modal cycle is
+    /// held, and a restyle cannot land in the middle of one — the key
+    /// grab that drives the cycle owns the keyboard for its duration.
+    fn discard_switcher(&mut self, backend: &mut B) {
+        if let Some(panel) = self.switcher.take() {
+            if let Some(window) = panel.window {
+                backend.destroy_shell_surface(window);
+            }
+        }
     }
 
     /// Moves the Clip back to the primary monitor's corner after the
@@ -1971,7 +2136,7 @@ impl<B: Backend> Desktop<B> {
         let buffer = icon::render_icon_tile(theme, &mut self.font_system, &mut self.swash_cache, self.tile, title, preview);
         backend.paint_shell_surface(window, &buffer);
 
-        self.icons.insert(window, IconTile { window, client, pos, auto_slot: Some(slot) });
+        self.icons.insert(window, IconTile { window, client, title: title.to_string(), pos, auto_slot: Some(slot) });
     }
 
     fn icon_slot_position(&self, slot: usize) -> Point {
@@ -2118,6 +2283,119 @@ mod tests {
     use super::*;
     use crate::apps::{AppCategory, AppEntry};
     use crate::widgets::BUILTIN_PREFIX;
+
+    /// The invariant the whole live-scale path rests on: a session that
+    /// was rescaled is indistinguishable from one that started at that
+    /// scale.
+    ///
+    /// It is worth a test rather than a reading of `set_scale`, because
+    /// the failure it guards against is not a wrong formula — it is a
+    /// *forgotten* one. `Desktop::new` derives five things from the
+    /// scale; `set_scale` has to derive the same five, and nothing but
+    /// this assertion notices the day someone adds a sixth to one and
+    /// not the other.
+    /// A screen small enough that the wallpaper render every
+    /// `Desktop::new` performs stays cheap. Nothing these tests assert
+    /// depends on the size — the dock hangs off the primary's right
+    /// edge and the Clip off its top-left corner at any of them — and a
+    /// desktop-sized pixmap per construction is most of what makes
+    /// these the slowest tests in the crate.
+    const TEST_SCREEN: Size = Size { w: 640, h: 480 };
+
+    /// The invariant the whole live-scale path rests on: a session that
+    /// was rescaled is indistinguishable from one that started at that
+    /// scale.
+    ///
+    /// It is worth a test rather than a reading of `set_scale`, because
+    /// the failure it guards against is not a wrong formula — it is a
+    /// *forgotten* one. `Desktop::new` derives five things from the
+    /// scale; `set_scale` has to derive the same five, and nothing but
+    /// this assertion notices the day someone adds a sixth to one and
+    /// not the other.
+    #[test]
+    fn a_rescaled_desktop_is_the_desktop_that_scale_would_have_built() {
+        use wm_core::fake_backend::FakeBackend;
+
+        let primary = Rect { pos: Point::new(0, 0), size: TEST_SCREEN };
+        let build = |backend: &mut FakeBackend, scale: f32| -> Desktop<FakeBackend> {
+            Desktop::new(backend, TEST_SCREEN, primary, scale, "nextstep-classic".to_string(), Vec::new())
+        };
+
+        let mut backend = FakeBackend::new();
+        let mut rescaled = build(&mut backend, 1.0);
+        assert!(rescaled.set_scale(2.0), "moving to a different scale must report a change");
+        let native = build(&mut backend, 2.0);
+
+        assert_eq!(rescaled.tile, native.tile);
+        assert_eq!(rescaled.pad, native.pad);
+        assert_eq!(rescaled.dock_width, native.dock_width);
+        assert_eq!(rescaled.drag_threshold, native.drag_threshold);
+        assert_eq!(rescaled.scale, native.scale);
+
+        // The counterpart, asserted here rather than in a test of its
+        // own because a `Desktop` costs a fontconfig scan to stand up
+        // and this test already has two: re-applying the scale it is
+        // already at reports no change. Load-bearing for the applier,
+        // which repaints nothing when this is false — a reload that
+        // only rebound a key must not flash the desktop.
+        assert!(!rescaled.set_scale(2.0));
+    }
+
+    /// The test above proves `set_scale` re-derives the right numbers.
+    /// This one proves they reach the screen: that the dock's *surface*
+    /// is reconfigured, not merely repainted at a new size inside its
+    /// old rect. Those two failures look identical in a screenshot of
+    /// the dock and completely different to anything trying to click on
+    /// it.
+    #[test]
+    fn a_rescale_moves_the_dock_surface_and_not_just_its_pixels() {
+        use wm_core::fake_backend::FakeBackend;
+
+        let primary = Rect { pos: Point::new(0, 0), size: TEST_SCREEN };
+        let mut backend = FakeBackend::new();
+        let mut desktop: Desktop<FakeBackend> =
+            Desktop::new(&mut backend, TEST_SCREEN, primary, 1.0, "nextstep-classic".to_string(), Vec::new());
+
+        let dock = desktop.dock_window();
+        let clip = desktop.clip_window();
+        assert_eq!(backend.shell_geometries[&dock].size.w, tile_px(1.0), "the dock is one tile wide");
+
+        desktop.set_scale(2.0);
+        desktop.relayout(&mut backend, &wm_theme::default_theme::nextstep_classic().scaled(2.0), &[]);
+
+        let after = backend.shell_geometries[&dock];
+        assert_eq!(after.size.w, tile_px(2.0), "the dock surface must be reconfigured to the new tile width");
+        // Still anchored to the monitor's right edge: it grew leftward
+        // rather than sliding off the screen.
+        assert_eq!(after.pos.x + after.size.w as i32, primary.size.w as i32);
+        assert_eq!(backend.shell_geometries[&clip].size, Size::new(tile_px(2.0), tile_px(2.0)));
+    }
+
+    #[test]
+    fn a_scale_change_survives_a_round_trip() {
+        // Scaling is lossy — `Theme::scaled` rounds every metric to
+        // whole pixels — which is why a session keeps its theme at 1x
+        // and re-derives, rather than rescaling what it already has.
+        // These metrics are derived the same way, from the scale alone
+        // rather than from their own previous value, so going up and
+        // coming back lands exactly where it started. Asserted on the
+        // derivation rather than on a `Desktop`, because standing one
+        // up costs a fontconfig scan and this needs no backend at all.
+        assert_eq!((tile_px(1.0), icon_pad_px(1.0)), (56, 4));
+        assert_eq!((tile_px(2.0), icon_pad_px(2.0)), (112, 8));
+        assert_eq!((tile_px(1.0), icon_pad_px(1.0)), (56, 4));
+    }
+
+    #[test]
+    fn a_tile_stays_drawable_at_an_absurdly_small_scale() {
+        // The floors in `tile_px`/`icon_pad_px` are what stop a
+        // hand-edited `scale = 0.01` from asking the backend for a
+        // zero-sized surface. `resolve_scale` refuses zero and
+        // negatives; it does not refuse "very small".
+        assert_eq!(tile_px(0.001), 16);
+        assert_eq!(icon_pad_px(0.001), 1);
+        assert_eq!(drag_threshold_px(0.001), 2);
+    }
 
     /// Ids are the persistence key for the whole column, so two rules
     /// hold and neither is checkable by reading `builtin_items` alone
