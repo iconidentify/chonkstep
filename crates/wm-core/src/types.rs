@@ -1,4 +1,4 @@
-use wm_theme_api::{Point, Rect, Size};
+use wm_theme_api::{Point, Rect, ResizeEdge, Size};
 
 /// `WM_CLASS`: instance + class name pair (e.g. `("xterm", "XTerm")`).
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -245,6 +245,18 @@ pub enum BackendEvent<Win, Frame> {
     /// A backend may emit this instead of, or in addition to, a
     /// `PointerButton` release; ending a drag is idempotent.
     DragEnded,
+    /// The client asked the window manager to start resizing it from
+    /// `edge` — X11's `_NET_WM_MOVERESIZE` resize directions, or a
+    /// Wayland toplevel's `resize` request.
+    ///
+    /// The sibling of [`Self::MoveRequest`], and needed for the same
+    /// window: one whose client draws its own chrome has no resizebar
+    /// of ours, so its own grips are the only resize handles it has,
+    /// and dropping the request leaves it resizable by nothing at all.
+    /// The edge comes from the client because only it knows which grip
+    /// was grabbed; the geometry the drag starts from is this window
+    /// manager's own record, never the client's claim.
+    ResizeRequest { window: Win, edge: ResizeEdge },
     PointerButton {
         surface: SurfaceRef<Win, Frame>,
         local: Point,

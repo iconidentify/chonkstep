@@ -649,6 +649,7 @@ impl<B: Backend> WindowManager<B> {
             BackendEvent::ChromeChanged(window) => self.handle_chrome_changed(window),
             BackendEvent::MoveRequest(window) => self.handle_move_request(window),
             BackendEvent::DragEnded => self.end_active_drag(),
+            BackendEvent::ResizeRequest { window, edge } => self.handle_resize_request(window, edge),
             BackendEvent::KeyPress(combo) => self.handle_key_press(combo),
             BackendEvent::KeyRelease(combo) => self.handle_key_release(combo),
             BackendEvent::PointerEnter { surface } => self.handle_pointer_enter(surface),
@@ -2305,6 +2306,43 @@ impl<B: Backend> WindowManager<B> {
         }
     }
 
+    /// The client asked to be resized from `edge` — begin an
+    /// interactive resize exactly as a resizebar drag would have.
+    ///
+    /// Same refusals as [`Self::handle_move_request`], for the same
+    /// reasons: never while another drag is in flight, and never for a
+    /// window this manager does not know. A shaded window refuses too,
+    /// matching the resizebar's own rule — resizing a window whose
+    /// content is rolled up silently reshapes something the user
+    /// cannot see.
+    fn handle_resize_request(&mut self, window: B::WindowId, edge: ResizeEdge) {
+        if self.active_move.is_some() || self.active_resize.is_some() {
+            return;
+        }
+        let Some(&id) = self.window_index.get(&window) else {
+            return;
+        };
+        let Some(client) = self.clients.get(id) else {
+            return;
+        };
+        if client.flags.contains(ClientFlags::SHADED) {
+            return;
+        }
+        let start_frame = Rect {
+            pos: Point::new(
+                client.geometry.pos.x - client.layout.client_offset.x,
+                client.geometry.pos.y - client.layout.client_offset.y,
+            ),
+            size: client.layout.frame_size,
+        };
+        self.active_resize = Some(ActiveResize { client: id, edge, start_frame });
+        // Without the grab this resize could start but never end — the
+        // client asked precisely because the pointer is over its own
+        // chrome, where neither the motion nor the release reach us.
+        self.begin_drag_grab();
+        tracing::debug!(?window, ?edge, "client asked to be resized — interactive resize begun");
+    }
+
     fn repaint_decoration(&mut self, id: ClientId) {
         let Some(client) = self.clients.get(id) else {
             return;
@@ -3384,6 +3422,42 @@ mod tests {
             Point::new(200, 200),
             "the window must stay where it was dropped, not follow the cursor"
         );
+    }
+
+    #[test]
+    fn a_client_decorated_window_can_be_resized_by_asking() {
+        // The resize sibling of the move test above. A frameless window
+        // has no resizebar of ours, so its client's own grips — which
+        // arrive here as a ResizeRequest — are the only way it can ever
+        // be resized. Dragging the south-east grip outward must grow
+        // the window and stop growing it on release.
+        let mut backend = FakeBackend::new();
+        let window = backend.create_window();
+        backend.set_geometry(window, Rect { pos: Point::new(100, 100), size: Size::new(400, 300) });
+        backend.set_client_draws_own_chrome(window, true);
+        let mut wm = wm(backend);
+        wm.dispatch(BackendEvent::MapRequest(window));
+
+        wm.dispatch(BackendEvent::PointerMotion { root: Point::new(500, 400), surface_local: None });
+        wm.dispatch(BackendEvent::ResizeRequest { window, edge: ResizeEdge::SouthEast });
+        assert_eq!(wm.backend().outstanding_pointer_grabs, 1, "a resize is a drag and takes the pointer");
+
+        wm.dispatch(BackendEvent::PointerMotion { root: Point::new(600, 500), surface_local: None });
+        let id = wm.client_for_window(window).unwrap();
+        assert_eq!(wm.client(id).unwrap().geometry.size, Size::new(500, 400), "the south-east drag grows both axes");
+        assert_eq!(wm.client(id).unwrap().geometry.pos, Point::new(100, 100), "the anchored corner stays put");
+
+        wm.dispatch(BackendEvent::PointerButton {
+            surface: SurfaceRef::Client(window),
+            local: Point::new(0, 0),
+            button: MouseButton::Left,
+            pressed: false,
+            time_ms: 0,
+            mods: Modifiers::empty(),
+        });
+        assert_eq!(wm.backend().outstanding_pointer_grabs, 0);
+        wm.dispatch(BackendEvent::PointerMotion { root: Point::new(900, 900), surface_local: None });
+        assert_eq!(wm.client(id).unwrap().geometry.size, Size::new(500, 400), "released means done");
     }
 
     #[test]

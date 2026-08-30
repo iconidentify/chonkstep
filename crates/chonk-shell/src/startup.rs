@@ -270,7 +270,19 @@ pub fn xcursor_size_env(scale: f32) -> Option<(String, String)> {
 /// out of proportion the instant the pointer crosses onto its content.
 /// 24px is Xcursor's own conventional 1x base size.
 pub fn ensure_xcursor_size(scale: f32) {
-    let preset = std::env::var_os("XCURSOR_SIZE").is_some();
+    // "Already set" is not the same as "the user set it", and telling
+    // the two apart is what the marker variable is for. A hot restart
+    // re-execs this process, so the replacement inherits the
+    // `XCURSOR_SIZE` its predecessor computed — at whatever scale that
+    // session happened to start at. Treating it as a user preference
+    // froze the cursor size at the very first boot's scale forever:
+    // observed live as a session at scale 2 handing every child
+    // `XCURSOR_SIZE=24`, because the first boot predated the config's
+    // `scale` line. The marker survives the exec precisely because the
+    // environment does, so a value this desktop set is recognized as
+    // its own and recomputed rather than honored.
+    let ours = std::env::var_os("CHONKSTEP_OWNS_XCURSOR_SIZE").is_some();
+    let preset = std::env::var_os("XCURSOR_SIZE").is_some() && !ours;
     // Recorded before the early return, so the answer is available
     // whichever branch is taken — see `XCURSOR_SIZE_WAS_PRESET`.
     let _ = XCURSOR_SIZE_WAS_PRESET.set(preset);
@@ -283,6 +295,7 @@ pub fn ensure_xcursor_size(scale: f32) {
     // possible.
     unsafe {
         std::env::set_var("XCURSOR_SIZE", size.to_string());
+        std::env::set_var("CHONKSTEP_OWNS_XCURSOR_SIZE", "1");
     }
 }
 
