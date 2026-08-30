@@ -360,8 +360,11 @@ its own titlebar is the only handle it has. Both stacks translate the request
 into the same interactive move the window manager runs for its own titlebar
 drags, edge snapping included.
 
-**GTK4/libadwaita double titlebars, native Wayland only.** Known wrong, with
-the reasoning above.
+**GTK4/libadwaita double titlebars.** Fixed: a toplevel that never
+negotiates xdg-decoration is client-decorated by the protocol's own
+default rule and is no longer framed, so GTK4 and libadwaita windows
+wear exactly their own headerbar. This entry is kept because earlier
+revisions of this document listed it as known wrong.
 
 **Drag icons.** Not drawn during a native Wayland drag.
 

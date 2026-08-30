@@ -1251,10 +1251,25 @@ impl<B: Backend> Desktop<B> {
     }
 
     /// The rectangle managed windows may occupy on the primary monitor:
-    /// its whole rect, minus whatever the Dock reserves — which is
-    /// nothing today (see `workareas`).
+    /// its whole rect minus the Dock's column on the right edge.
+    ///
+    /// The README promised this reservation from the start and the code
+    /// returned the full monitor anyway, so a maximized window slid
+    /// under the instruments — recorded as a known wrong in the
+    /// compatibility notes until now. The full height is reserved, not
+    /// just the instruments' current extent: the dock grows downward as
+    /// tiles are added and miniaturized windows return to it, and a
+    /// workarea that tracked its momentary height would reflow every
+    /// maximized window each time a tile came or went.
+    ///
+    /// The Clip and the launcher strip on the left deliberately reserve
+    /// nothing: they are corner furniture in the classic desktop, and
+    /// windows sliding under the Clip is how the original behaved too.
     pub fn primary_workarea(&self) -> Rect {
-        self.primary
+        Rect {
+            pos: self.primary.pos,
+            size: Size::new(self.primary.size.w.saturating_sub(self.dock_width).max(1), self.primary.size.h),
+        }
     }
 
     /// The whole desktop's extent — the union of every monitor, which
@@ -2312,6 +2327,29 @@ mod tests {
     /// scale; `set_scale` has to derive the same five, and nothing but
     /// this assertion notices the day someone adds a sixth to one and
     /// not the other.
+    #[test]
+    fn the_workarea_stops_at_the_dock_column() {
+        // A maximized window must not slide under the instruments. The
+        // reservation is exactly one dock column off the right edge of
+        // the primary — no more (the Clip reserves nothing), and it has
+        // to track a live rescale, since the column widens with the
+        // tile.
+        use wm_core::fake_backend::FakeBackend;
+
+        let primary = Rect { pos: Point::new(0, 0), size: TEST_SCREEN };
+        let mut backend = FakeBackend::new();
+        let mut desktop: Desktop<FakeBackend> =
+            Desktop::new(&mut backend, TEST_SCREEN, primary, 1.0, "nextstep-classic".to_string(), Vec::new());
+
+        let area = desktop.primary_workarea();
+        assert_eq!(area.size.w, TEST_SCREEN.w - tile_px(1.0), "one dock column reserved on the right");
+        assert_eq!(area.size.h, TEST_SCREEN.h, "nothing reserved vertically");
+        assert_eq!(area.pos, primary.pos);
+
+        desktop.set_scale(2.0);
+        assert_eq!(desktop.primary_workarea().size.w, TEST_SCREEN.w - tile_px(2.0), "the reservation follows the tile");
+    }
+
     #[test]
     fn a_rescaled_desktop_is_the_desktop_that_scale_would_have_built() {
         use wm_core::fake_backend::FakeBackend;

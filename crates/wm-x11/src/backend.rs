@@ -1839,13 +1839,19 @@ impl Cursors {
             resize_v: create_scaled_cursor(conn, root, scale, CURSOR_RESIZE_ARROW, hotspot)?,
             // East/West: the same double-arrow turned 90° to horizontal.
             resize_h: create_scaled_cursor(conn, root, scale, &rotate_shape(CURSOR_RESIZE_ARROW, hotspot, 90.0_f32.to_radians()), hotspot)?,
-            // SouthEast: rotate the vertical double-arrow 45° clockwise
-            // to point along the ↘ diagonal (shared with NorthWest — the
-            // cursor shows the resize *axis*, so opposite corners use
-            // the same glyph, exactly as on a Mac). SouthWest: 45°
-            // counter-clockwise, for ↙ (shared with NorthEast).
-            resize_se: create_scaled_cursor(conn, root, scale, &rotate_shape(CURSOR_RESIZE_ARROW, hotspot, 45.0_f32.to_radians()), hotspot)?,
-            resize_sw: create_scaled_cursor(conn, root, scale, &rotate_shape(CURSOR_RESIZE_ARROW, hotspot, -45.0_f32.to_radians()), hotspot)?,
+            // SouthEast (shared with NorthWest — the cursor shows the
+            // resize *axis*, so opposite corners use the same glyph,
+            // exactly as on a Mac) and SouthWest (shared with
+            // NorthEast). The signs look backwards and are not: with
+            // this rotation convention and X11's y-down pixel grid,
+            // +45° turns the vertical double-arrow onto the ↗↙
+            // diagonal, not ↘. Discovered by rasterizing the same
+            // shapes in software for the Wayland compositor's cursor
+            // set, whose orientation test pins the corrected mapping —
+            // the original signs shipped the wrong diagonal on every
+            // corner and nobody noticed from the code alone.
+            resize_se: create_scaled_cursor(conn, root, scale, &rotate_shape(CURSOR_RESIZE_ARROW, hotspot, -45.0_f32.to_radians()), hotspot)?,
+            resize_sw: create_scaled_cursor(conn, root, scale, &rotate_shape(CURSOR_RESIZE_ARROW, hotspot, 45.0_f32.to_radians()), hotspot)?,
             scale,
         })
     }
