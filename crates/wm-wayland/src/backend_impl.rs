@@ -50,9 +50,11 @@ use wm_core::{
 };
 use wm_theme_api::{DecorationBuffer, DecorationLayout, Point, Rect, ResizeEdge, Size};
 
+use crate::input::DragGrab;
 use crate::state::{
     ensure_stack_entry, raise_stack_entry, replace_stack_entry, FrameRecord, ManagedSurface,
-    RootBackground, ShellRecord, StackEntry, WaylandBackend, WlFrameId, WlShellId, WlWindowId,
+    PointerGrabChange, RootBackground, ShellRecord, StackEntry, WaylandBackend, WlFrameId,
+    WlShellId, WlWindowId,
 };
 
 /// `wm-theme` rect -> smithay logical rect. The theme side is
@@ -617,12 +619,29 @@ impl Backend for WaylandBackend {
                     // dedups: a size the client already has produces no
                     // event, which matters during interactive resize
                     // where this is called per motion event.
-                    // Back into the client's own logical pixels. This
-                    // ledger is physical; a client told the output has a
-                    // scale is not, and configuring it with physical
-                    // numbers would ask a 2x client to be twice the size
-                    // it should be, every time.
-                    let scale = self.ui_scale.max(1);
+                    // Back into the client's own logical pixels, by the
+                    // factor that client itself committed — the same one
+                    // `xdg.rs` measured the buffer with and the renderer
+                    // draws it at. This is the return leg of a round
+                    // trip, and the two legs have to use one number or
+                    // the window never stops growing: the ledger holds a
+                    // 2x client's 600px buffer, a configure that calls
+                    // 600 *logical* asks GTK for a 1200px buffer, the
+                    // commit path reports 1200, `wm-core` reflows around
+                    // it and resizes the client to 1200, and so on. The
+                    // reflow at map time is enough to start it, so the
+                    // window is already unbounded by the time it first
+                    // appears.
+                    //
+                    // The session-wide `ui_scale` used to stand in here.
+                    // It is 1 on every session this compositor builds
+                    // (nothing tells outputs otherwise — see the note by
+                    // `WaylandBackend::new`), so the division was a
+                    // no-op, and for a client scaled by its environment
+                    // rather than by the protocol it was the wrong
+                    // question anyway: the desktop's idea of a scale
+                    // says nothing about what any one client drew.
+                    let scale = crate::xdg::committed_buffer_scale(toplevel.wl_surface());
                     toplevel.with_pending_state(|state| {
                         state.size = Some((size.w as i32 / scale, size.h as i32 / scale).into());
                     });
@@ -864,18 +883,49 @@ impl Backend for WaylandBackend {
 
     // -- input grabs ------------------------------------------------------
 
-    /// A compositor owns the pointer unconditionally — every motion and
-    /// button event already flows through this process before any
-    /// client sees it, which is the entire condition an X11 pointer
-    /// grab exists to create. During a drag the input module simply
-    /// keeps routing events to the WM instead of the surface under the
-    /// pointer, so a no-op handle is the CORRECT implementation, not a
-    /// stub.
+    /// Records that the pointer belongs to a drag until further notice.
+    /// The input module then routes every motion and button to the
+    /// window manager instead of the surface under the cursor, and the
+    /// seat takes the pointer off the client that had it (see
+    /// [`DragGrab`], and `input::apply_pointer_grab_change` for the
+    /// half that has to reach the seat).
+    ///
+    /// This used to return a no-op handle, on the reasoning that a
+    /// compositor sees every pointer event anyway so a drag's routing
+    /// needs nothing declared. That held for as long as every managed
+    /// window wore one of our frames — the drag runs over our own
+    /// surface, so its release comes back to `wm-core` whether or not
+    /// anything was grabbed — and stopped holding the day a window
+    /// could have no frame at all.
     fn grab_pointer_for_drag(&mut self) -> DragHandle {
-        DragHandle(0)
+        // From the ledger's shared id counter, which starts at 1: a
+        // handle is never reused, and never 0, so the `DragHandle(0)`
+        // that a backend without grabs hands back can never be mistaken
+        // for one of these.
+        let handle = DragHandle(self.alloc_id());
+        // Replaces rather than refuses. A second grab means a drag
+        // started while another was somehow still recorded, and the
+        // newer one is the one the user is making; keeping the older
+        // would leave the pointer answering to a gesture that is over.
+        self.pointer_grab = Some(DragGrab::new(handle));
+        self.pending_pointer_grab = Some(PointerGrabChange::Taken);
+        handle
     }
 
-    fn ungrab_pointer(&mut self, _handle: DragHandle) {}
+    /// Ends the drag `handle` names, and only that one.
+    ///
+    /// A handle that names no current grab is ignored deliberately,
+    /// which is what the token is for: the shell hands a stale one back
+    /// when it supersedes a press whose release never arrived
+    /// (`LaunchDock::handle_click`), and `input.rs` can have already
+    /// reclaimed the grab from a drag that outlived its buttons. In
+    /// both cases the grab this names is gone and the one in flight, if
+    /// any, belongs to somebody else.
+    fn ungrab_pointer(&mut self, handle: DragHandle) {
+        if self.pointer_grab.as_ref().is_some_and(|grab| grab.holds(handle)) {
+            self.end_pointer_grab();
+        }
+    }
 
     fn grab_key(&mut self, combo: KeyCombo) {
         // No server to register grabs with — the keyboard handler

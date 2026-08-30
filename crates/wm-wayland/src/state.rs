@@ -73,6 +73,8 @@ use wm_core::{
 use wm_theme::{FontState, RasterThemeEngine};
 use wm_theme_api::{DecorationBuffer, Point, Rect, Size};
 
+use crate::input::DragGrab;
+
 use chonk_shell::dockapp::Farewell;
 use chonk_xsettings::{DesktopAppearance, ManagerState, XSettingsError, XSettingsManager};
 use chonk_shell::shell::{Shell, ShellOutcome};
@@ -361,22 +363,6 @@ pub(crate) enum RootBackground {
 /// protocol handlers write into and the renderer reads out of. See the
 /// module docs for why no display connection lives here.
 pub struct WaylandBackend {
-    /// The whole-number output scale this session advertises to Wayland
-    /// clients, and therefore the factor between a client's coordinates
-    /// and this ledger's.
-    ///
-    /// Everything stored here is in physical pixels, because the theme
-    /// rasterizes chrome in physical pixels and always has. A client,
-    /// once told the output has a scale, works in logical ones: it
-    /// declares a window geometry of 300x226 and submits a buffer twice
-    /// that. So every size crossing this boundary is multiplied on the
-    /// way in and divided on the way out, and this is the factor.
-    ///
-    /// Whole-number because `wl_output.scale` is an integer; a
-    /// configured 1.5 advertises 2 and the chrome keeps its own
-    /// fractional size. Never zero — see `integral_scale`.
-    pub(crate) ui_scale: i32,
-
     /// Shared allocator for all three id spaces — window, frame, and
     /// shell ids never collide, which makes stray-id bugs loud in logs
     /// instead of silently aliasing. Starts at 1 so [`ROOT_SHELL`]
@@ -467,28 +453,38 @@ pub struct WaylandBackend {
     /// recording at all rather than acting on where the reload was
     /// noticed — see the drain in `dispatch_pending`.
     pub(crate) pending_cursor_scale: Option<f32>,
+    /// The interactive drag currently holding the pointer, if any.
+    ///
+    /// This *is* `Backend::grab_pointer_for_drag` — there is no server
+    /// to ask, so the grab is a fact recorded here and consulted by the
+    /// routing in `input.rs`, exactly as [`WaylandBackend::
+    /// keyboard_grabbed`] is for the modal keyboard grab. See
+    /// [`DragGrab`] for what goes wrong without one.
+    pub(crate) pointer_grab: Option<DragGrab>,
+    /// A pointer-grab transition waiting for
+    /// [`Compositor::dispatch_pending`] to tell the seat about it.
+    ///
+    /// The same detour, and the same reason for it, as
+    /// [`WaylandBackend::pending_focus`]: taking the pointer away from
+    /// the client under it and giving it back are both seat operations,
+    /// and the `Backend` verbs that decide them run inside the
+    /// `WindowManager`'s `&mut self`, which can never reach a seat.
+    /// Routing needs no such detour and does not wait for this — the
+    /// flag above is live the instant the verb returns.
+    pub(crate) pending_pointer_grab: Option<PointerGrabChange>,
 }
 
-/// The integer `wl_output.scale` for a configured UI scale.
-///
-/// `wl_output` has only ever carried a whole number, so a fractional UI
-/// scale has to be reported as one. Rounding rather than truncating is
-/// what makes 1.5 advertise 2 (a client rendering slightly large and
-/// being scaled down reads far better than one rendering half-size),
-/// and the floor of 1 is what stops a nonsense configuration from
-/// telling clients their pixels are worth nothing.
-pub(crate) fn integral_scale(scale: f32) -> i32 {
-    if !scale.is_finite() {
-        return 1;
-    }
-    (scale.round() as i32).max(1)
+/// Which way a drag grab just moved, for the seat-side half that
+/// [`crate::input::apply_pointer_grab_change`] performs.
+pub(crate) enum PointerGrabChange {
+    Taken,
+    Released,
 }
 
 impl WaylandBackend {
-    pub(crate) fn new(display_handle: DisplayHandle, monitors: Vec<MonitorInfo>, ui_scale: f32) -> Self {
+    pub(crate) fn new(display_handle: DisplayHandle, monitors: Vec<MonitorInfo>) -> Self {
         let output_size = union_size(&monitors);
         Self {
-            ui_scale: integral_scale(ui_scale),
             next_id: 1,
             windows: HashMap::new(),
             frames: HashMap::new(),
@@ -508,6 +504,8 @@ impl WaylandBackend {
             display_handle,
             pending_focus: None,
             pending_cursor_scale: None,
+            pointer_grab: None,
+            pending_pointer_grab: None,
         }
     }
 
@@ -530,6 +528,20 @@ impl WaylandBackend {
     /// or its change waits for the next unrelated damage to appear.
     pub(crate) fn mark_damaged(&mut self) {
         self.damage = true;
+    }
+
+    /// Ends whatever drag grab is in flight and asks the seat to hand
+    /// the pointer back to the client under it.
+    ///
+    /// The single exit, so that "no drag holds the pointer" and "the
+    /// client under it has been told" cannot come apart: `Backend::
+    /// ungrab_pointer` calls it when the drag's owner is finished, and
+    /// `input.rs` calls it when it finds a grab whose drag is already
+    /// over. Idempotent — no grab means nothing to announce either.
+    pub(crate) fn end_pointer_grab(&mut self) {
+        if self.pointer_grab.take().is_some() {
+            self.pending_pointer_grab = Some(PointerGrabChange::Released);
+        }
     }
 
     /// Resolves a `wl_surface` back to the managed window it belongs
@@ -911,6 +923,14 @@ impl Compositor {
         // why it cannot land inline).
         self.popups.cleanup();
         self.apply_pending_focus();
+        // Beside the focus intent and for the same reason: a drag that
+        // began or ended anywhere above has to reach the seat, and only
+        // this side of the loop can reach one. Before the flush at the
+        // bottom of this pass, so the leave a starting drag owes its
+        // client — and the enter an ending one owes whoever is under
+        // the pointer now — travels with everything else this pass
+        // decided rather than waiting for the next event.
+        crate::input::apply_pointer_grab_change(self);
         // Publish the window list and serve screencopy requests: after
         // the event and notification drains so external tools see the
         // same state the desktop just settled into, before the damage
@@ -1595,23 +1615,30 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
     // The desktop shell is built against the mutable backend before
     // `WindowManager::new` takes ownership — the exact construction
     // order the X11 binary uses, for the exact same borrow reason.
-    // Tell every output what scale it is, now that the session state
-    // has been resolved. This is the only way a Wayland client can
-    // learn there is a scale at all — there is no environment variable
-    // it will read and no protocol it will ask — so without it every
-    // native client renders at 1x and is half-size on a HiDPI panel
-    // while the desktop's own chrome around it is not.
+    // Every output stays at scale 1 whatever the session's UI scale is.
     //
-    // Done here rather than where the outputs are built because the
-    // scale is not known then: the graphics stack and its outputs come
-    // up before the config is resolved, and reordering that would put
-    // config parsing ahead of the display server coming up.
-    let output_scale = integral_scale(state.scale);
-    for entry in &outputs {
-        entry.output.change_current_state(None, None, Some(smithay::output::Scale::Integer(output_scale)), None);
-    }
-
-    let mut backend = WaylandBackend::new(display_handle.clone(), monitors, state.scale);
+    // Advertising the real scale here is the right end state and was
+    // tried: a client answers `wl_output.scale(2)` with
+    // `set_buffer_scale(2)` and renders itself properly, which is the
+    // only way a native Wayland client can ever learn this desktop is
+    // scaled. But it cannot be done by this one line, because smithay
+    // composes an output in *logical* coordinates and everything in
+    // this compositor is physical: the theme rasterizes chrome in
+    // device pixels, the ledger stores device-pixel rectangles, and the
+    // shell lays the dock out against the monitor's device size.
+    // Declaring a 3840x2160 output to be scale 2 makes its logical
+    // extent 1920x1080, and every one of those coordinates then lands
+    // outside it — the dock anchored to the right edge disappears, the
+    // wallpaper is clipped to a quarter, and the chrome collapses into
+    // the top-left. Observed exactly that way on a real 4K session.
+    //
+    // Making it work needs the logical/physical split done properly
+    // through `wm-core`, the theme and the shell, not a scale on the
+    // output with conversions bolted on at the ledger boundary. Until
+    // then native clients render at 1x and are told the scale the only
+    // other way they will hear it: the per-child environment the
+    // launcher sets.
+    let mut backend = WaylandBackend::new(display_handle.clone(), monitors);
     // The whole screen, as the shell sizes the desktop against it: the
     // union of every monitor. Where the dock and the workareas land
     // inside that union is the shell's decision, not this loop's.

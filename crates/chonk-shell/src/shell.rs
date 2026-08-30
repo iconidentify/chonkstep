@@ -209,13 +209,10 @@ fn terminal_window_size(theme: &Theme, screen: Size) -> (u32, u32) {
 /// menu's Terminal item and the `spawn-terminal` keybinding, so the two
 /// gestures can never drift apart on font, geometry, or palette.
 fn spawn_terminal(theme: &Theme, font_px: f32, screen: Size) {
+    // The scale the theme was built at, on both stacks — see the note
+    // in `launch_app` about why this is not withheld on Wayland.
     let ui_scale = theme.titlebar.font.size / 12.0;
-    let client_scale = match spawn::current_display_stack() {
-        // The compositor advertises the scale; foot applies it itself.
-        spawn::DisplayStack::Wayland => 1.0,
-        spawn::DisplayStack::X11 => ui_scale,
-    };
-    spawn_foot(terminal_args(theme, font_px, screen, client_scale));
+    spawn_foot(terminal_args(theme, font_px, screen, ui_scale));
 }
 
 /// The single foot spawn step: [`spawn_terminal`] passes the themed
@@ -249,11 +246,7 @@ fn launch_app(entry: &AppEntry, theme: &Theme, font_px: f32, screen: Size) {
     };
     if entry.terminal {
         let ui_scale = theme.titlebar.font.size / 12.0;
-        let terminal_scale = match spawn::current_display_stack() {
-            spawn::DisplayStack::Wayland => 1.0,
-            spawn::DisplayStack::X11 => ui_scale,
-        };
-        let mut argv = terminal_args(theme, font_px, screen, terminal_scale);
+        let mut argv = terminal_args(theme, font_px, screen, ui_scale);
         argv.push("-e".to_string());
         argv.extend(entry.exec.iter().cloned());
         spawn_foot(argv);
@@ -297,10 +290,12 @@ fn launch_app(entry: &AppEntry, theme: &Theme, font_px: f32, screen: Size) {
     // The X11 session keeps every one of them. There is no output scale
     // in X11 for a client to read, which is the whole reason this
     // machinery was written.
-    let client_scale = match spawn::current_display_stack() {
-        spawn::DisplayStack::Wayland => 1.0,
-        spawn::DisplayStack::X11 => scale,
-    };
+    // Applied on both stacks. This was briefly withheld on Wayland,
+    // on the reasoning that the compositor advertises an output scale
+    // there and a client acting on both would scale itself twice — but
+    // the compositor does not advertise one (see `WaylandBackend::new`),
+    // so withholding it left every launched client at 1x.
+    let client_scale = scale;
     if base.contains("chrom") || base.contains("chrome") || base.starts_with("microsoft-edge") || base.starts_with("brave") {
         argv.extend(spawn::chromium_scale_args(client_scale));
         argv.extend(spawn::chromium_avoid_secrets_service_hang_args());

@@ -176,6 +176,17 @@ pub struct X11Backend {
     /// slowly-moving pointer within the same hitbox doesn't re-set an
     /// already-current cursor on every single `MotionNotify`.
     frame_cursor: HashMap<Window, Option<ResizeEdge>>,
+    /// The active pointer grab held for an interactive drag, named by
+    /// the `DragHandle` it was handed out under — `None` whenever the
+    /// server has granted this WM no grab. Recorded rather than
+    /// inferred, because the one thing `ungrab_pointer` must never do
+    /// is release a grab belonging to a drag other than the one asking
+    /// (see its doc comment).
+    drag_grab: Option<DragHandle>,
+    /// Source of those handles: one per *granted* grab, never reused,
+    /// and never zero — `DragHandle(0)` is the answer a refused grab
+    /// gives, and it has to be a value no live grab can ever wear.
+    next_drag_grab: u64,
 }
 
 impl X11Backend {
@@ -449,6 +460,8 @@ impl X11Backend {
             numlock_mask,
             cursors,
             frame_cursor: HashMap::new(),
+            drag_grab: None,
+            next_drag_grab: 1,
         })
     }
 
@@ -848,6 +861,121 @@ impl X11Backend {
         self.pending_shell_scrolls.pop_front()
     }
 
+    /// Takes an active pointer grab on the root for the duration of an
+    /// interactive drag — a titlebar move, an edge resize, a dock icon
+    /// being dragged along its column — so that the motion steering it
+    /// and the button release ending it reach this window manager
+    /// wherever the pointer travels.
+    ///
+    /// Without one, a drag only survives while the pointer stays over a
+    /// window this WM selected input on. That holds for a frame, and is
+    /// exactly false for a window whose client drew its own titlebar:
+    /// there is no frame, the client owns every pixel under the
+    /// pointer, and the move it asks for by `_NET_WM_MOVERESIZE` would
+    /// begin and never be told the button came up — the window trailing
+    /// the cursor with nothing held down until some unrelated event
+    /// happened to break the spell. The same hole opens on a framed
+    /// window whenever its size hints stop the frame following the
+    /// pointer and the pointer ends up over the client's own content.
+    ///
+    /// `owner_events: true`, because this backend routes pointer events
+    /// by the window they were reported against (see `translate_button`
+    /// and the shell drains above), and that routing is worth keeping
+    /// intact under the grab: with it, events over our own frames, dock
+    /// and menu popups continue to be reported against those windows
+    /// and reach the core and the shell exactly as they do ungrabbed.
+    /// `false` would force every event to report against the root, so
+    /// even a plain framed titlebar drag — the case that works today —
+    /// would stop being recognizable as a frame event.
+    ///
+    /// `GrabMode::ASYNC` for both pointer and keyboard: a drag needs
+    /// the events, not the input queue. Synchronous mode would freeze
+    /// event processing until each `AllowEvents`, which is a desktop
+    /// that stops responding for as long as anyone holds a titlebar.
+    ///
+    /// The reply is waited for — one round trip, once per drag — since
+    /// a grab that was *not* granted (another client already holds the
+    /// pointer, most plausibly a client that sent `_NET_WM_MOVERESIZE`
+    /// without dropping its own implicit button grab first) must not be
+    /// reported as one: the returned `DragHandle(0)` matches no live
+    /// grab, so the teardown that follows correctly releases nothing.
+    pub fn grab_pointer_for_drag(&mut self) -> DragHandle {
+        let event_mask = EventMask::BUTTON_RELEASE | EventMask::POINTER_MOTION;
+        let granted = match self.conn.grab_pointer(
+            true,
+            self.root,
+            event_mask,
+            GrabMode::ASYNC,
+            GrabMode::ASYNC,
+            NONE,
+            NONE,
+            CURRENT_TIME,
+        ) {
+            Ok(cookie) => match cookie.reply() {
+                Ok(reply) if reply.status == GrabStatus::SUCCESS => true,
+                Ok(reply) => {
+                    tracing::warn!(?reply.status, "pointer grab for a drag not granted");
+                    false
+                }
+                Err(e) => {
+                    tracing::warn!(?e, "grab_pointer reply error");
+                    false
+                }
+            },
+            Err(e) => {
+                tracing::warn!(?e, "grab_pointer request failed");
+                false
+            }
+        };
+        if !granted {
+            return DragHandle(0);
+        }
+        let handle = DragHandle(self.next_drag_grab);
+        self.next_drag_grab += 1;
+        self.drag_grab = Some(handle);
+        tracing::debug!(?handle, "pointer grabbed for a drag");
+        handle
+    }
+
+    /// Releases the drag grab `handle` names — and only that one.
+    ///
+    /// The identity test is the entire point of the handle. A pointer
+    /// grab this WM leaks is not a cosmetic bug: it is a desktop where
+    /// no client sees the pointer again until this process exits, which
+    /// is far worse than the stuck drag the grab exists to prevent. The
+    /// way one gets leaked is a second drag beginning before the first
+    /// was torn down — a dock drag overlapping a titlebar drag, a
+    /// `_NET_WM_MOVERESIZE` arriving mid-resize. The server replaces
+    /// this client's grab with the newer one, so an unconditional
+    /// ungrab from the older drag's late teardown would free the grab
+    /// the *live* drag is relying on and hand back the very bug being
+    /// fixed here. A stale or repeated handle therefore does nothing,
+    /// and so does `DragHandle(0)` — a grab that was refused never had
+    /// anything to give back, and some other drag may legitimately hold
+    /// the grab it did not get.
+    ///
+    /// A grab still held when this process dies needs no unwinding: the
+    /// server drops every grab a client owns when its connection closes,
+    /// which is also the only thing standing between a panic mid-drag
+    /// and a frozen session.
+    pub fn ungrab_pointer(&mut self, handle: DragHandle) {
+        if self.drag_grab != Some(handle) {
+            tracing::debug!(?handle, held = ?self.drag_grab, "ignoring an ungrab for a grab we are not holding");
+            return;
+        }
+        // Forgotten before the request is attempted, not after it is
+        // seen to succeed: if the request fails there is nothing left to
+        // retry against (a dead connection has already dropped the grab
+        // server-side), while a slot left occupied would make every
+        // later ungrab of this handle a no-op and every later drag look
+        // like it is stealing someone else's grab.
+        self.drag_grab = None;
+        if let Err(e) = self.conn.ungrab_pointer(CURRENT_TIME) {
+            tracing::warn!(?e, "ungrab_pointer failed");
+        }
+        let _ = self.conn.flush();
+    }
+
     fn keysym_for_keycode(&self, keycode: u8) -> Option<u32> {
         self.keyboard_map.get(&keycode)?.first().copied()
     }
@@ -877,6 +1005,11 @@ impl X11Backend {
     fn translate_button(
         &mut self,
         event_window: Window,
+        // The child of `event_window` the pointer is over (`NONE` when
+        // there is none) — consulted only for an event a grab redirected
+        // to the root, where it is the sole record of what was under the
+        // pointer.
+        child: Window,
         x: i16,
         y: i16,
         detail: u8,
@@ -939,6 +1072,57 @@ impl X11Backend {
                 mods,
             });
         }
+        // A button coming up while this WM holds a drag grab, over a
+        // window it never selected input on — which is every client's
+        // own content — is reported against the grab window (the root),
+        // not against what the pointer is over, so neither test above
+        // recognizes the release that ends the drag. That is precisely
+        // the release a client-decorated window's move hangs on: it has
+        // no frame to catch it and its client owns every pixel under
+        // the pointer. The grab's `child` field names the root child
+        // the pointer is actually over — a frame, or the client itself
+        // for a window that has none — which is the same vocabulary
+        // those tests speak, so re-running them against it recovers the
+        // routing a frame would have provided for free.
+        //
+        // Presses are deliberately not re-routed: `local` here is
+        // root-relative (the event was reported against the root), and
+        // a press is the one thing the core hit-tests against frame
+        // geometry. A release it isn't — the drag ends wherever the
+        // button comes up, before any hit test.
+        //
+        // The release is queued for the shell below as well rather than
+        // consumed here, because the shell holds a grab of its own for
+        // a dock or launcher-strip drag through this very call, and its
+        // drag trackers are driven by exactly this root-reported
+        // release (see the shell-click drain in `chonkstep`'s event
+        // loop). One physical release, two audiences, neither of which
+        // can end the other's drag.
+        if !pressed && event_window == self.root && self.drag_grab.is_some() {
+            let dragged = if self.frame_to_client.contains_key(&child) {
+                Some(SurfaceRef::Frame(XFrame(child)))
+            } else if self.known_clients.contains(&child) {
+                Some(SurfaceRef::Client(XWindow(child)))
+            } else {
+                None
+            };
+            if let Some(surface) = dragged {
+                self.pending_shell_clicks.push_back((event_window, local, button, pressed));
+                return Some(BackendEvent::PointerButton { surface, local, button, pressed, time_ms: time, mods });
+            }
+            // No `child` to name, and the drag still ended. This is not
+            // a rare shape: the pointer can be over the root itself,
+            // over a window this desktop does not manage, or over
+            // nothing the routing recognizes because edge snapping just
+            // pulled the frame out from under it. `PointerButton`
+            // cannot carry any of those — it needs a `SurfaceRef` —
+            // and a release that goes unreported leaves the window
+            // glued to the cursor, which is the whole failure this
+            // grab exists to prevent. `DragEnded` says the one thing
+            // that is true without naming a surface.
+            self.pending_shell_clicks.push_back((event_window, local, button, pressed));
+            return Some(BackendEvent::DragEnded);
+        }
         // Root, dock, menu popups, or anything else we didn't create as
         // a client frame: hand it to the desktop shell instead — both
         // press and release, so shell code can tell the two apart (e.g.
@@ -982,8 +1166,8 @@ impl X11Backend {
                 };
                 Some(BackendEvent::ConfigureRequest { window: XWindow(e.window), requested })
             }
-            Event::ButtonPress(e) => self.translate_button(e.event, e.event_x, e.event_y, e.detail, true, e.time, u16::from(e.state)),
-            Event::ButtonRelease(e) => self.translate_button(e.event, e.event_x, e.event_y, e.detail, false, e.time, u16::from(e.state)),
+            Event::ButtonPress(e) => self.translate_button(e.event, e.child, e.event_x, e.event_y, e.detail, true, e.time, u16::from(e.state)),
+            Event::ButtonRelease(e) => self.translate_button(e.event, e.child, e.event_x, e.event_y, e.detail, false, e.time, u16::from(e.state)),
             Event::MotionNotify(e) => {
                 let local = Point::new(e.event_x as i32, e.event_y as i32);
                 let surface_local = if self.frame_to_client.contains_key(&e.event) {
@@ -2561,31 +2745,11 @@ impl Backend for X11Backend {
     }
 
     fn grab_pointer_for_drag(&mut self) -> DragHandle {
-        let event_mask = EventMask::BUTTON_RELEASE | EventMask::POINTER_MOTION;
-        match self.conn.grab_pointer(
-            true,
-            self.root,
-            event_mask,
-            GrabMode::ASYNC,
-            GrabMode::ASYNC,
-            NONE,
-            NONE,
-            CURRENT_TIME,
-        ) {
-            Ok(cookie) => {
-                if let Err(e) = cookie.reply() {
-                    tracing::warn!(?e, "grab_pointer reply error");
-                }
-            }
-            Err(e) => tracing::warn!(?e, "grab_pointer request failed"),
-        }
-        let _ = self.conn.flush();
-        DragHandle(0)
+        X11Backend::grab_pointer_for_drag(self)
     }
 
-    fn ungrab_pointer(&mut self, _handle: DragHandle) {
-        let _ = self.conn.ungrab_pointer(CURRENT_TIME);
-        let _ = self.conn.flush();
+    fn ungrab_pointer(&mut self, handle: DragHandle) {
+        X11Backend::ungrab_pointer(self, handle)
     }
 
     fn position_client(&mut self, window: Self::WindowId, pos: Point) {
@@ -2836,8 +3000,11 @@ impl Backend for X11Backend {
 /// windows without depending on `wm-core::Backend` — popups aren't
 /// clients, so they don't belong on that trait. Just thin delegation to
 /// the inherent shell-window methods above; `grab_pointer`/
-/// `ungrab_pointer` reuse `Backend::grab_pointer_for_drag`'s own
-/// implementation rather than duplicating the grab call.
+/// `ungrab_pointer` reuse the same inherent drag-grab pair
+/// `Backend::grab_pointer_for_drag` forwards to rather than duplicating
+/// the grab call — a popup's grab and a drag's grab are the same
+/// server-side resource, so they must also share the bookkeeping that
+/// keeps one from releasing the other's.
 impl wm_theme_api::PopupHost for X11Backend {
     type PopupId = Window;
 
@@ -2857,12 +3024,12 @@ impl wm_theme_api::PopupHost for X11Backend {
     }
 
     fn grab_pointer(&mut self) -> wm_theme_api::PopupGrab {
-        let handle = <Self as Backend>::grab_pointer_for_drag(self);
+        let handle = X11Backend::grab_pointer_for_drag(self);
         wm_theme_api::PopupGrab(handle.0)
     }
 
     fn ungrab_pointer(&mut self, grab: wm_theme_api::PopupGrab) {
-        <Self as Backend>::ungrab_pointer(self, DragHandle(grab.0));
+        X11Backend::ungrab_pointer(self, DragHandle(grab.0));
     }
 }
 

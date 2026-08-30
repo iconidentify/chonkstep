@@ -27,6 +27,14 @@
 //! same semantics, so this module only pins the *routing* decision and
 //! lets the seat pin the client-side focus.
 //!
+//! On top of that sits the drag grab ([`DragGrab`]): the same idea,
+//! with two differences that only matter for a window whose client drew
+//! its own chrome. It is taken by the window manager rather than by a
+//! press, and it takes the pointer away from the client under it
+//! entirely — the seat's click grab is dropped and the client is sent a
+//! leave — because for the length of that drag the gesture belongs to
+//! the desktop and not to the application it is happening over.
+//!
 //! Presses that hit nothing at all queue under [`ROOT_SHELL`] — the
 //! sentinel `Compositor::dispatch_pending` splits off into
 //! `Shell::on_root_press`, standing in for the root-window id the X11
@@ -65,13 +73,14 @@ use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::utils::{Logical, Point as LogicalPoint, SERIAL_COUNTER};
 
 use wm_core::{
-    BackendEvent, KeyCombo, Modifiers, MonitorInfo, MouseButton, ScrollDelta, SurfaceRef, WindowType,
+    BackendEvent, DragHandle, KeyCombo, Modifiers, MonitorInfo, MouseButton, ScrollDelta,
+    SurfaceRef, WindowType,
 };
 use wm_theme_api::Point;
 
 use crate::state::{
-    Compositor, ManagedSurface, StackEntry, WaylandBackend, WlFrameId, WlShellId, WlWindowId,
-    ROOT_SHELL,
+    Compositor, ManagedSurface, PointerGrabChange, StackEntry, WaylandBackend, WlFrameId,
+    WlShellId, WlWindowId, ROOT_SHELL,
 };
 
 /// The event shorthand every queue in this module speaks.
@@ -137,18 +146,113 @@ struct ImplicitGrab {
 
 /// Where a button press landed — the routing target its whole implicit
 /// grab inherits.
-#[derive(Clone, Copy)]
-enum PressTarget {
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PressTarget {
     Shell(WlShellId),
     Frame(WlFrameId),
     Content(WlWindowId),
     Root,
 }
 
-/// Runs `f` against the seat's [`InputState`], creating it on first
-/// use. Callers keep each access short — never across a seat call that
-/// re-enters the `Compositor` handlers — which the closure shape makes
-/// structural rather than a discipline.
+/// The pointer grab an interactive drag holds — `wm-core`'s
+/// `Backend::grab_pointer_for_drag`, and the shell's for its dock and
+/// launcher drags — parked on [`WaylandBackend`] because the verb that
+/// takes it can reach nothing else.
+///
+/// A compositor sees every pointer event before any client does, which
+/// is the entire condition an X11 pointer grab existed to create, and
+/// this verb used to do nothing on that reasoning. It held for a window
+/// wearing one of our frames: the titlebar IS our surface, so the
+/// press, every motion and the release come back to `wm-core` whether
+/// or not anything was grabbed. It is false for a window whose client
+/// drew its own titlebar. That window has no frame, so a drag begun
+/// with `xdg_toplevel.move` runs entirely over the client's own
+/// content: `wm-core` saw the motion as an ordinary hover, never saw
+/// the release, and left `active_move` set — the window followed the
+/// cursor with no button held, which is exactly what dragging
+/// LibreOffice's titlebar did. Seeing an event and being allowed to
+/// keep it are different things, and this is what records the
+/// difference.
+pub(crate) struct DragGrab {
+    /// The token `Backend::ungrab_pointer` must present to end this
+    /// grab, from the ledger's shared id counter: unique for the life
+    /// of the session, so a stale handle — the launcher strip hands one
+    /// back for a press whose release never arrived — cannot cancel the
+    /// drag that came after it.
+    handle: DragHandle,
+    /// Where this drag's pointer events go, latched on the first one
+    /// rather than passed in. The verb takes no argument (X11 needed
+    /// none — the server already knew which window the press was on),
+    /// and the honest answer is the target the press that started the
+    /// drag already pinned, which is the implicit grab's. Latched once,
+    /// so it outlives that grab: the release that ends the drag is the
+    /// event that clears the implicit grab and the one that most needs
+    /// somewhere to be sent.
+    target: Option<PressTarget>,
+}
+
+impl DragGrab {
+    pub(crate) fn new(handle: DragHandle) -> Self {
+        DragGrab { handle, target: None }
+    }
+
+    /// Whether `handle` names this grab, and so may end it.
+    pub(crate) fn holds(&self, handle: DragHandle) -> bool {
+        self.handle == handle
+    }
+
+    /// This drag's routing target, latching it on first use from the
+    /// implicit grab the press left behind — or, for a drag that
+    /// somehow began with no button down, from whatever is under the
+    /// pointer, which is the same answer that press would have given.
+    fn anchor(&mut self, implicit: Option<PressTarget>, hit: &Hit) -> PressTarget {
+        *self.target.get_or_insert_with(|| implicit.unwrap_or_else(|| press_target(hit)))
+    }
+
+    /// Whether the surface this drag anchored on still exists. A client
+    /// that dies mid-drag takes its record with it, and a drag with
+    /// nothing left to drag is over however firmly the user is still
+    /// holding the button.
+    fn anchor_alive(&self, backend: &WaylandBackend) -> bool {
+        match self.target {
+            // Nothing latched: no pointer event has reached this grab
+            // yet, so there is nothing that could have died under it.
+            None => true,
+            Some(PressTarget::Shell(shell)) => backend.shells.contains_key(&shell),
+            Some(PressTarget::Frame(frame)) => backend.frames.contains_key(&frame),
+            Some(PressTarget::Content(window)) => backend.windows.contains_key(&window),
+            // The desktop background outlives every drag made on it.
+            Some(PressTarget::Root) => true,
+        }
+    }
+
+    /// Whether this grab has outlived the drag it was taken for.
+    ///
+    /// An interactive drag exists only while a mouse button is held, so
+    /// once the last one lifts the drag is over whatever its owner
+    /// still believes — see [`reclaim_leaked_grab`], which is the only
+    /// caller and explains why the question is asked at all.
+    fn expired(&self, buttons_held: bool, anchor_alive: bool) -> bool {
+        !buttons_held || !anchor_alive
+    }
+}
+
+/// Where a pointer event is routed, decided before the hit under the
+/// pointer gets a say.
+#[derive(Clone, Copy)]
+struct Route {
+    /// The pinned target: a drag's anchor, else the implicit grab's.
+    /// `None` only when neither holds — no drag, no button down — and
+    /// the hit under the pointer decides for itself.
+    target: Option<PressTarget>,
+    /// Whether it was a drag that pinned it. The difference is what
+    /// happens to client content under the pointer: an implicit grab on
+    /// a client's own window is that client's drag and its events are
+    /// the client's, where a drag grab means the window manager is
+    /// moving the window and the client must be told nothing at all.
+    dragging: bool,
+}
+
 /// Drops any implicit pointer grab, because the presses that built it
 /// can no longer be trusted to have matching releases.
 ///
@@ -160,11 +264,122 @@ pub(crate) fn clear_implicit_grab(seat: &Seat<Compositor>) {
     with_input(seat, |input| input.implicit_grab = None);
 }
 
+/// Runs `f` against the seat's [`InputState`], creating it on first
+/// use. Callers keep each access short — never across a seat call that
+/// re-enters the `Compositor` handlers — which the closure shape makes
+/// structural rather than a discipline.
 fn with_input<T>(seat: &Seat<Compositor>, f: impl FnOnce(&mut InputState) -> T) -> T {
     let user_data = seat.user_data();
     user_data.insert_if_missing(|| RefCell::new(InputState::default()));
     let cell = user_data.get::<RefCell<InputState>>().unwrap();
     f(&mut cell.borrow_mut())
+}
+
+/// Where this pointer event goes, and who decided: a drag grab outranks
+/// the implicit grab, which outranks the hit under the pointer. Latches
+/// the drag's anchor on the way past, which is why it takes the ledger
+/// mutably.
+fn resolve_route(backend: &mut WaylandBackend, seat: &Seat<Compositor>, hit: &Hit) -> Route {
+    let implicit = with_input(seat, |input| input.implicit_grab.as_ref().map(|grab| grab.target));
+    match backend.pointer_grab.as_mut() {
+        Some(drag) => Route { target: Some(drag.anchor(implicit, hit)), dragging: true },
+        None => Route { target: implicit, dragging: false },
+    }
+}
+
+/// Takes back a drag grab whose drag is already over, and tells
+/// `wm-core` the drag ended.
+///
+/// This is the safety net the whole mechanism needs rather than a
+/// tidiness pass, because the failure it prevents is worse than the one
+/// the grab fixes: a grab nobody gives back routes every pointer event
+/// into a drag that finished, so no client can be clicked, no menu
+/// opens, and a window follows the cursor forever. There is no way out
+/// of that but killing the session.
+///
+/// So the compositor never depends on the grab's owner remembering. It
+/// does not have to guess either: a drag exists only while a mouse
+/// button is held (and only while the surface it anchored on exists),
+/// both of which this module already knows, so a grab still held on an
+/// event where neither is true has leaked. In the ordinary case there
+/// is nothing to find — `wm-core` and the shell release the pointer in
+/// the same dispatch pass as the release that ended their drag, before
+/// the next event arrives — which is what makes this a detector and not
+/// part of the flow.
+///
+/// [`BackendEvent::DragEnded`] goes with it: whatever left the grab
+/// behind is, by definition, something that has not noticed its drag is
+/// over, and a `wm-core` still holding `active_move` would carry on
+/// moving the window on the next motion even with the pointer handed
+/// back. Its handler is idempotent, so saying so costs nothing when the
+/// owner was the shell and no core drag existed.
+fn reclaim_leaked_grab(state: &mut Compositor, seat: &Seat<Compositor>) {
+    let buttons_held = with_input(seat, |input| input.implicit_grab.is_some());
+    let backend = state.wm.backend_mut();
+    let leaked = backend
+        .pointer_grab
+        .as_ref()
+        .is_some_and(|grab| grab.expired(buttons_held, grab.anchor_alive(backend)));
+    if !leaked {
+        return;
+    }
+    tracing::debug!(buttons_held, "reclaiming a pointer grab its drag outlived");
+    backend.end_pointer_grab();
+    backend.queue(WmEvent::DragEnded);
+}
+
+/// Applies a pointer-grab transition the ledger recorded, in the one
+/// place that can reach the seat (see
+/// [`WaylandBackend::pending_pointer_grab`] for why it is recorded
+/// rather than done where it is decided).
+///
+/// Both halves are about the client under the pointer, which is the
+/// half of a drag grab that routing alone cannot deliver.
+pub(crate) fn apply_pointer_grab_change(state: &mut Compositor) {
+    let Some(change) = state.wm.backend_mut().pending_pointer_grab.take() else {
+        return;
+    };
+    let Some(pointer) = state.seat.get_pointer() else {
+        return;
+    };
+    let serial = SERIAL_COUNTER.next_serial();
+    let time = state.start_time.elapsed().as_millis() as u32;
+    let location = state.pointer_location;
+    match change {
+        PointerGrabChange::Taken => {
+            // The press that started the drag installed smithay's own
+            // click grab, which pins the seat's focus to the surface it
+            // landed on until the button comes up — through every
+            // motion this drag is made of. Dropping it is what lets the
+            // leave below reach the client at all; without it the
+            // window manager moves the window while the client goes on
+            // receiving the same gesture as its own, which is the
+            // "mouse got stuck" half of the report: LibreOffice kept
+            // its titlebar drag running under ours.
+            pointer.unset_grab(state, serial, time);
+            // And one leave, now rather than whenever the pointer next
+            // moves, because a drag can be several seconds of a client
+            // believing the pointer is inside it.
+            pointer.motion(state, None, &MotionEvent { location, serial, time });
+            pointer.frame(state);
+        }
+        PointerGrabChange::Released => {
+            // Delivery resumes, and the client under the pointer has to
+            // be told: it was sent a leave when the drag began, and
+            // nothing else would send it an enter until the user moved
+            // the pointer again. A drag that ends with the cursor
+            // sitting still over a window — which is every drag that
+            // ends where it meant to — would otherwise leave that
+            // window unable to report so much as a hover.
+            let at = Point::new(location.x.floor() as i32, location.y.floor() as i32);
+            let focus = match hit_at(state.wm.backend(), at, location) {
+                Hit::Content { surface: Some(surface), origin, .. } => Some((surface, origin)),
+                _ => None,
+            };
+            pointer.motion(state, focus, &MotionEvent { location, serial, time });
+            pointer.frame(state);
+        }
+    }
 }
 
 /// One entry point for `run()`'s event loop: translate and route a
@@ -418,9 +633,13 @@ fn pointer_moved(state: &mut Compositor, position: LogicalPoint<f64, Logical>, t
     // is scene damage by definition — without this the arrow freezes
     // between window updates.
     state.pointer_location = position;
+    // Before anything routes by it: a grab left behind by a drag that
+    // is over must not decide where this event goes.
+    reclaim_leaked_grab(state, &seat);
     let hit = hit_at(state.wm.backend(), at, position);
+    let route = resolve_route(state.wm.backend_mut(), &seat, &hit);
 
-    // Enter/crossing detection, only while no implicit grab holds —
+    // Enter/crossing detection, only while nothing holds the pointer —
     // X11 suppressed crossing events for the duration of a grab too
     // (the drag's grab mask never selected them), and focus-follows-
     // mouse mid-drag would focus every window a fast drag brushes.
@@ -436,14 +655,13 @@ fn pointer_moved(state: &mut Compositor, position: LogicalPoint<f64, Logical>, t
         _ => None,
     };
     let entered = with_input(&seat, |input| {
-        if input.implicit_grab.is_some() || now_hovered == input.hovered {
+        if route.dragging || input.implicit_grab.is_some() || now_hovered == input.hovered {
             None
         } else {
             input.hovered = now_hovered;
             now_hovered
         }
     });
-    let grab_target = with_input(&seat, |input| input.implicit_grab.as_ref().map(|g| g.target));
 
     let backend = state.wm.backend_mut();
     backend.mark_damaged();
@@ -455,9 +673,24 @@ fn pointer_moved(state: &mut Compositor, position: LogicalPoint<f64, Logical>, t
     // the wl_pointer.leave a client under the pointer's previous
     // position expects). During a non-content implicit grab the focus
     // is pinned to None so a WM drag never leaks motion into whatever
-    // client windows it crosses — the X11 grab hid those too.
+    // client windows it crosses — the X11 grab hid those too — and a
+    // drag grab pins it to None over content as well, which is the one
+    // place the two differ.
     let mut focus: Option<(WlSurface, LogicalPoint<f64, Logical>)> = None;
-    match grab_target {
+    match route.target {
+        // A drag over client content, which is where a client-decorated
+        // window's own titlebar drag spends its entire life: `wm-core`
+        // gets the root coordinate every step of the move or resize is
+        // made of, and the client gets nothing. Without this arm those
+        // motions took the client branch below — the window manager
+        // never heard about the drag it had been asked to run, and the
+        // window only crept along when the pointer happened to cross
+        // the desktop behind it. The frame and shell arms need no such
+        // split: what they route to `wm-core` and the shell is already
+        // what a drag on them wants.
+        Some(PressTarget::Content(_)) if route.dragging => {
+            backend.queue(WmEvent::PointerMotion { root: at, surface_local: None });
+        }
         Some(PressTarget::Shell(shell)) => {
             if let Some(record) = backend.shells.get(&shell) {
                 backend
@@ -523,7 +756,9 @@ fn pointer_moved(state: &mut Compositor, position: LogicalPoint<f64, Logical>, t
 /// Button routing: the press's hit-test establishes (or joins) the
 /// implicit grab, and both press and release are dispatched against the
 /// grab's target — shell queue, WM event, client seat delivery, or a
-/// [`ROOT_SHELL`] click the loop feeds to `shell.on_root_press`.
+/// [`ROOT_SHELL`] click the loop feeds to `shell.on_root_press`. A
+/// [`DragGrab`] outranks that target while one is held, and the release
+/// that ends the drag is the reason it exists.
 fn on_pointer_button<I: InputBackend>(state: &mut Compositor, event: I::PointerButtonEvent) {
     let serial = SERIAL_COUNTER.next_serial();
     let time = event.time_msec();
@@ -544,8 +779,15 @@ fn on_pointer_button<I: InputBackend>(state: &mut Compositor, event: I::PointerB
         .map(|keyboard| combo_modifiers(&keyboard.modifier_state()))
         .unwrap_or_else(Modifiers::empty);
 
+    reclaim_leaked_grab(state, &seat);
     let hit = hit_at(state.wm.backend(), at, position);
-    let target = with_input(&seat, |input| {
+    let route = resolve_route(state.wm.backend_mut(), &seat, &hit);
+    // The implicit-grab bookkeeping runs whether or not a drag holds
+    // the pointer: it is what tracks which buttons are down, and a
+    // drag's own lifetime is measured in exactly those (see
+    // `reclaim_leaked_grab`). Its answer is only *used* when no drag
+    // outranks it.
+    let pressed_target = with_input(&seat, |input| {
         if pressed {
             match input.implicit_grab.as_mut() {
                 // A second button mid-grab joins the grab; the original
@@ -586,9 +828,18 @@ fn on_pointer_button<I: InputBackend>(state: &mut Compositor, event: I::PointerB
             }
         }
     });
+    let target = match route.target {
+        Some(anchor) if route.dragging => anchor,
+        _ => pressed_target,
+    };
 
     let backend = state.wm.backend_mut();
     let mut deliver_to_client = false;
+    // Whether `wm-core` has been told, by this event, that a drag
+    // ended: a left-button release reported against a surface it can
+    // resolve, which is the shape its `handle_pointer_button` reads as
+    // the end of one.
+    let mut release_reported = false;
     match target {
         PressTarget::Shell(shell) => {
             if let (Some(button), Some(record)) = (button, backend.shells.get(&shell)) {
@@ -610,6 +861,7 @@ fn on_pointer_button<I: InputBackend>(state: &mut Compositor, event: I::PointerB
                     time_ms: time,
                     mods,
                 });
+                release_reported = !pressed && button == MouseButton::Left;
             }
         }
         PressTarget::Content(window) => {
@@ -633,8 +885,14 @@ fn on_pointer_button<I: InputBackend>(state: &mut Compositor, event: I::PointerB
                     time_ms: time,
                     mods,
                 });
+                release_reported = !pressed && button == MouseButton::Left;
             }
-            deliver_to_client = true;
+            // Not while a drag holds the pointer: the click is the
+            // drag's — its release is what ends the move — and the
+            // client was sent a leave when the drag began, so handing
+            // it a button now would be a press or release arriving on a
+            // surface it believes the pointer is nowhere near.
+            deliver_to_client = !route.dragging;
         }
         PressTarget::Root => {
             // Background clicks travel the shell-click queue under the
@@ -646,6 +904,26 @@ fn on_pointer_button<I: InputBackend>(state: &mut Compositor, event: I::PointerB
                 backend.shell_clicks.push_back((ROOT_SHELL, at, button, pressed));
             }
         }
+    }
+
+    // A drag whose release this routing cannot name a surface for still
+    // has to end, and that is not an exotic shape: the anchor can be
+    // the desktop background, or a frame or window record that has gone
+    // since the drag latched onto it, and the button that comes up last
+    // can be one `wm_button` does not map at all. `PointerButton`
+    // carries none of those — it needs a `SurfaceRef` — and a release
+    // that goes unreported leaves the window glued to the cursor, which
+    // is the whole failure the grab exists to prevent. `DragEnded` says
+    // the one thing that is true without naming a surface. (`wm-x11`
+    // arrives at the same event from the other side: a release reported
+    // against the root with no child it recognizes underneath.)
+    //
+    // The shell-facing queues above are left alone, because a dock or
+    // launcher-strip drag is driven by exactly this release through
+    // exactly those queues: one physical release, two audiences,
+    // neither able to end the other's drag.
+    if route.dragging && !pressed && !release_reported {
+        backend.queue(WmEvent::DragEnded);
     }
 
     if deliver_to_client {
@@ -853,8 +1131,8 @@ fn route_shell_scroll<I: InputBackend>(state: &mut Compositor, event: &I::Pointe
     let position = state.pointer_location;
     let at = Point::new(position.x.floor() as i32, position.y.floor() as i32);
     let hit = hit_at(state.wm.backend(), at, position);
-    let target = with_input(&seat, |input| input.implicit_grab.as_ref().map(|grab| grab.target))
-        .unwrap_or_else(|| press_target(&hit));
+    let route = resolve_route(state.wm.backend_mut(), &seat, &hit);
+    let target = route.target.unwrap_or_else(|| press_target(&hit));
 
     let owner = match target {
         PressTarget::Shell(shell) => shell,
@@ -1046,10 +1324,14 @@ enum Hit {
     /// client through the seat. `frame` is the owning frame when one
     /// exists — `None` both for unmanaged override-redirect X11 windows
     /// and for managed windows whose client drew its own chrome;
-    /// `surface`/`origin` name the exact wl_surface to focus and its
-    /// global position (`None` surface for an X11 window whose
-    /// wl_surface has not been associated yet — nothing to deliver to,
-    /// but the WM still learns about the click). No local coordinate:
+    /// `surface` names the exact wl_surface to focus (`None` for an X11
+    /// window whose wl_surface has not been associated yet — nothing to
+    /// deliver to, but the WM still learns about the click) and
+    /// `origin` is the point the seat must subtract the pointer
+    /// position from to get the client's own coordinates, which is its
+    /// global position for every client drawing at 1x and something
+    /// else entirely for one that is not (see [`seat_origin`]). No
+    /// local coordinate:
     /// `wm-core` ignores it for `SurfaceRef::Client` events, and the
     /// button handler recomputes a content-local point from the record
     /// for the event shape.
@@ -1086,23 +1368,63 @@ fn content_hit(
         record.content.pos.x - record.content_offset.x,
         record.content.pos.y - record.content_offset.y,
     );
+    let anchor: LogicalPoint<f64, Logical> =
+        (content_origin.x as f64, content_origin.y as f64).into();
     let (surface, origin) = match &root_surface {
-        Some(root) => under_from_surface_tree(
-            root,
-            position,
-            (content_origin.x, content_origin.y),
-            WindowSurfaceType::ALL,
-        )
-        .map(|(surface, origin)| (Some(surface), origin.to_f64()))
-        .unwrap_or_else(|| {
-            (root_surface.clone(), (content_origin.x as f64, content_origin.y as f64).into())
-        }),
+        Some(root) => {
+            let scale = crate::xdg::committed_buffer_scale(root);
+            let probe = surface_probe(anchor, position, scale);
+            under_from_surface_tree(root, probe, (content_origin.x, content_origin.y), WindowSurfaceType::ALL)
+                .map(|(surface, found)| (Some(surface), seat_origin(position, probe, found.to_f64())))
+                .unwrap_or_else(|| (root_surface.clone(), seat_origin(position, probe, anchor)))
+        }
         // An X11 window whose wl_surface has not been associated yet:
         // nothing to deliver to, but the click still counts for
         // click-to-focus.
-        None => (None, (content_origin.x as f64, content_origin.y as f64).into()),
+        None => (None, anchor),
     };
     Some(Hit::Content { frame, window, surface, origin })
+}
+
+/// Moves a point into the space a client's surface tree is measured in.
+///
+/// Every rectangle this compositor stores is in device pixels, and so
+/// is `position`, but a surface's extent is its buffer divided by the
+/// scale that client committed: a window running at 2x covers 600
+/// device pixels of screen and reports a 300-pixel surface. Feeding the
+/// device-pixel offset to a walk that compares it against the reported
+/// extent finds only the top-left quarter of such a window, so a click
+/// anywhere else in it falls through to whatever is behind.
+///
+/// Only the *offset* from the anchor is divided; the anchor itself is
+/// passed to the walk untouched. Dividing both would round the window's
+/// position onto the client's coarser grid and move the hit rectangle
+/// off the drawn one by up to a device pixel per axis, which is exactly
+/// the disagreement this is here to remove.
+fn surface_probe(
+    anchor: LogicalPoint<f64, Logical>,
+    position: LogicalPoint<f64, Logical>,
+    scale: i32,
+) -> LogicalPoint<f64, Logical> {
+    let scale = scale.max(1) as f64;
+    (anchor.x + (position.x - anchor.x) / scale, anchor.y + (position.y - anchor.y) / scale).into()
+}
+
+/// The origin to hand the seat for a surface the walk found at `found`
+/// when probed at `probe`.
+///
+/// Not where the surface is on screen: smithay delivers `position -
+/// origin` to the client verbatim, and a client wants that difference
+/// in its own pixels, so this is wherever the surface would have to sit
+/// for the subtraction to come out right. For an unscaled client the
+/// probe *is* the position and this is the surface's screen origin,
+/// unchanged from before any of this existed.
+fn seat_origin(
+    position: LogicalPoint<f64, Logical>,
+    probe: LogicalPoint<f64, Logical>,
+    found: LogicalPoint<f64, Logical>,
+) -> LogicalPoint<f64, Logical> {
+    (position.x - (probe.x - found.x), position.y - (probe.y - found.y)).into()
 }
 
 /// Tests a window's xdg popup tree (context menus, dropdowns of native
@@ -1135,20 +1457,32 @@ fn popup_hit(
         record.content.pos.x - record.content_offset.x,
         record.content.pos.y - record.content_offset.y,
     );
+    // The offset is surface-local to the parent, so it is measured in
+    // the parent's pixels and converts by the parent's factor — while
+    // the popup's own tree is walked at the popup's, because a menu is
+    // a separate surface with a separately committed scale. Both halves
+    // are exactly what `renderer.rs`'s popup loop does, which is the
+    // agreement this function's doc comment demands: draw and hit-test
+    // have to describe one rectangle.
+    let parent_scale = crate::xdg::committed_buffer_scale(toplevel.wl_surface());
     for (popup, offset) in PopupManager::popups_for_surface(toplevel.wl_surface()) {
-        let popup_origin: LogicalPoint<i32, Logical> =
-            (content_origin.x + offset.x, content_origin.y + offset.y).into();
-        if let Some((surface, origin)) = under_from_surface_tree(
-            popup.wl_surface(),
-            position,
-            popup_origin,
-            WindowSurfaceType::ALL,
-        ) {
+        let popup_surface = popup.wl_surface();
+        let popup_origin: LogicalPoint<i32, Logical> = (
+            content_origin.x + crate::xdg::logical_to_physical(offset.x, parent_scale),
+            content_origin.y + crate::xdg::logical_to_physical(offset.y, parent_scale),
+        )
+            .into();
+        let anchor: LogicalPoint<f64, Logical> =
+            (popup_origin.x as f64, popup_origin.y as f64).into();
+        let probe = surface_probe(anchor, position, crate::xdg::committed_buffer_scale(popup_surface));
+        if let Some((surface, found)) =
+            under_from_surface_tree(popup_surface, probe, popup_origin, WindowSurfaceType::ALL)
+        {
             return Some(Hit::Content {
                 frame,
                 window,
                 surface: Some(surface),
-                origin: origin.to_f64(),
+                origin: seat_origin(position, probe, found.to_f64()),
             });
         }
     }
@@ -1353,5 +1687,193 @@ mod tests {
         let mut scroll = ScrollAccumulator::default();
         assert_eq!(scroll.fold(DOCK, 0.0, 0.0), None);
         assert_eq!(scroll.fold(DOCK, 0.3, -0.3), None);
+    }
+
+    // -- the drag grab -----------------------------------------------
+    // Routing a live drag needs a seat, a client and a populated
+    // ledger, so what is pinned here is the state machine underneath
+    // it: which target a drag's events go to, who is allowed to end
+    // the grab, and when the compositor takes it back on its own. A
+    // wrong answer to any of those is a desktop that stops responding
+    // to the mouse, which is the one failure mode worse than the bug
+    // the grab fixes.
+    //
+    // The ledger is real (a `Display` needs no socket and no GPU), so
+    // these run against the same `Backend` verbs `wm-core` calls.
+
+    use smithay::reexports::wayland_server::Display;
+    use wm_core::Backend;
+
+    fn ledger() -> WaylandBackend {
+        let display = Display::<Compositor>::new().expect("a display with no socket");
+        WaylandBackend::new(display.handle(), Vec::new())
+    }
+
+    const FRAME: WlFrameId = WlFrameId(11);
+    const WINDOW: WlWindowId = WlWindowId(12);
+
+    /// The anchor is latched once, from the press that started the
+    /// drag, and never revised. This is what makes the release
+    /// deliverable: the release is the event that clears the implicit
+    /// grab, so a drag that re-read it every time would find nothing
+    /// there at the one moment it has to name a target.
+    #[test]
+    fn a_drag_keeps_the_target_its_press_pinned() {
+        let mut grab = DragGrab::new(DragHandle(7));
+        let pressed_on = PressTarget::Content(WINDOW);
+        assert_eq!(grab.anchor(Some(pressed_on), &Hit::Root), pressed_on);
+        // The release: no implicit grab left, and the pointer has since
+        // wandered off the window onto the desktop.
+        assert_eq!(grab.anchor(None, &Hit::Root), pressed_on);
+    }
+
+    /// A drag that began with no button down — a client asking for a
+    /// move after its own press was already over — still has to route
+    /// somewhere, and what is under the pointer is the same answer that
+    /// press would have given.
+    #[test]
+    fn a_drag_with_no_press_behind_it_anchors_on_the_pointer() {
+        let mut grab = DragGrab::new(DragHandle(7));
+        let hit = Hit::FrameChrome { frame: FRAME, local: Point::new(3, 4) };
+        assert_eq!(grab.anchor(None, &hit), PressTarget::Frame(FRAME));
+    }
+
+    /// Only the handle that took the grab may end it. The launcher
+    /// strip hands a stale handle back when it supersedes a press whose
+    /// release never arrived; honoring that would cancel the drag the
+    /// user is making now.
+    #[test]
+    fn a_stale_handle_cannot_end_the_drag_that_replaced_it() {
+        let mut backend = ledger();
+        let first = backend.grab_pointer_for_drag();
+        let second = backend.grab_pointer_for_drag();
+        backend.ungrab_pointer(first);
+        assert!(backend.pointer_grab.is_some(), "the stale handle named a grab that was already gone");
+        backend.ungrab_pointer(second);
+        assert!(backend.pointer_grab.is_none());
+    }
+
+    /// Handles are unique for the life of the session and never zero —
+    /// `DragHandle(0)` is what a backend with no grabs of its own hands
+    /// back, and it must never name one of these.
+    #[test]
+    fn no_handle_is_ever_zero_or_reused() {
+        let mut backend = ledger();
+        let first = backend.grab_pointer_for_drag();
+        let second = backend.grab_pointer_for_drag();
+        assert_ne!(first, second);
+        assert_ne!(first, DragHandle(0));
+        assert_ne!(second, DragHandle(0));
+        assert!(!backend.pointer_grab.as_ref().unwrap().holds(DragHandle(0)));
+    }
+
+    /// Both ends of the grab ask the seat for the half routing cannot
+    /// do: the client under the pointer is sent a leave when a drag
+    /// takes it, and an enter when the drag gives it back.
+    #[test]
+    fn each_end_of_the_grab_is_announced_to_the_seat() {
+        let mut backend = ledger();
+        let handle = backend.grab_pointer_for_drag();
+        assert!(matches!(backend.pending_pointer_grab, Some(PointerGrabChange::Taken)));
+        backend.pending_pointer_grab = None;
+        backend.ungrab_pointer(handle);
+        assert!(matches!(backend.pending_pointer_grab, Some(PointerGrabChange::Released)));
+        // An ungrab that ends nothing announces nothing: a repeat would
+        // send the client under the pointer a second enter for a leave
+        // it never got.
+        backend.pending_pointer_grab = None;
+        backend.ungrab_pointer(handle);
+        assert!(backend.pending_pointer_grab.is_none());
+    }
+
+    /// The buttons are the drag's lifetime. A grab still held once they
+    /// are all up has been leaked by its owner, and a leaked grab
+    /// routes every pointer event into a gesture that finished — no
+    /// client clickable, no menu openable, until the session is killed.
+    #[test]
+    fn a_grab_outlives_neither_the_buttons_nor_its_surface() {
+        let grab = DragGrab::new(DragHandle(7));
+        assert!(!grab.expired(true, true), "a drag in progress is not expired");
+        assert!(grab.expired(false, true), "the last button lifted");
+        assert!(grab.expired(true, false), "nothing left to drag");
+    }
+
+    /// The surface half of that, against a real ledger: a client that
+    /// dies mid-drag takes its record with it, and the grab anchored on
+    /// it has nothing left to move however firmly the user is still
+    /// holding the button. An unlatched grab has seen no pointer event
+    /// yet, so nothing under it can have died.
+    #[test]
+    fn an_anchor_is_alive_only_while_its_record_is() {
+        let backend = ledger();
+        let mut grab = DragGrab::new(DragHandle(7));
+        assert!(grab.anchor_alive(&backend), "nothing latched yet");
+        grab.anchor(Some(PressTarget::Root), &Hit::Root);
+        assert!(grab.anchor_alive(&backend), "the desktop outlives every drag on it");
+
+        let mut grab = DragGrab::new(DragHandle(8));
+        grab.anchor(Some(PressTarget::Content(WINDOW)), &Hit::Root);
+        assert!(!grab.anchor_alive(&backend), "the window is not in the ledger");
+
+        let mut grab = DragGrab::new(DragHandle(9));
+        grab.anchor(Some(PressTarget::Frame(FRAME)), &Hit::Root);
+        assert!(!grab.anchor_alive(&backend), "the frame is not in the ledger");
+    }
+
+    // -- client buffer scale -----------------------------------------
+    // The hit walk has to describe the same rectangle the renderer
+    // draws, and for a client running at 2x those two used to be
+    // different rectangles.
+
+    fn probe_at(origin: (f64, f64), position: (f64, f64), scale: i32) -> (f64, f64) {
+        let point = surface_probe(origin.into(), position.into(), scale);
+        (point.x, point.y)
+    }
+
+    /// An unscaled client is measured exactly as it always was: the
+    /// probe is the pointer position itself, and the origin handed to
+    /// the seat is the surface's own.
+    #[test]
+    fn a_one_to_one_client_is_probed_where_the_pointer_is() {
+        assert_eq!(probe_at((100.0, 100.0), (460.0, 220.0), 1), (460.0, 220.0));
+        let origin = seat_origin((460.0, 220.0).into(), (460.0, 220.0).into(), (100.0, 100.0).into());
+        assert_eq!((origin.x, origin.y), (100.0, 100.0));
+    }
+
+    /// A 2x client covers 600 device pixels of screen and reports a
+    /// 300-pixel surface, so the offset into it halves. Without this
+    /// only the top-left quarter of such a window hit-tests at all —
+    /// every click in the rest of it fell through to whatever was
+    /// behind — and the coordinate the client was handed was twice what
+    /// it expected.
+    #[test]
+    fn a_two_x_client_is_probed_in_its_own_pixels() {
+        // 300 device pixels into a window at x=100 is 150 of the
+        // client's own.
+        assert_eq!(probe_at((100.0, 100.0), (400.0, 200.0), 2), (250.0, 150.0));
+        // The far edge of a 600-device-pixel-wide window still lands
+        // inside its 300-pixel surface, which is the half of the
+        // rectangle that used to be unreachable.
+        assert_eq!(probe_at((100.0, 100.0), (699.0, 100.0), 2).0, 399.5);
+    }
+
+    /// What the client is told, which is the other half: smithay
+    /// delivers `position - origin` verbatim, so the origin has to be
+    /// wherever makes that difference come out in the client's pixels.
+    #[test]
+    fn a_two_x_client_is_told_where_the_pointer_is_in_its_own_pixels() {
+        let position: LogicalPoint<f64, Logical> = (400.0, 200.0).into();
+        let anchor: LogicalPoint<f64, Logical> = (100.0, 100.0).into();
+        let probe = surface_probe(anchor, position, 2);
+        let origin = seat_origin(position, probe, anchor);
+        assert_eq!((position.x - origin.x, position.y - origin.y), (150.0, 50.0));
+    }
+
+    /// A scale the protocol forbids must not turn a window into a
+    /// division by zero or an inverted rectangle.
+    #[test]
+    fn an_impossible_scale_degrades_to_one() {
+        assert_eq!(probe_at((100.0, 100.0), (400.0, 200.0), 0), (400.0, 200.0));
+        assert_eq!(probe_at((100.0, 100.0), (400.0, 200.0), -2), (400.0, 200.0));
     }
 }
