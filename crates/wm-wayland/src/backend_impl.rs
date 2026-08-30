@@ -73,12 +73,23 @@ fn smithay_rect(rect: Rect) -> SmithayRect<i32, Logical> {
 /// assume for shm-style formats — so this is a plain copy, no channel
 /// swizzling or (un)premultiplying. `Abgr8888` because DRM fourcc names
 /// describe the packed little-endian word: bytes R,G,B,A in memory read
-/// back as the 32-bit value 0xAABBGGRR, i.e. ABGR. Scale is 1 — the
-/// theme already rasterizes at `CHONKSTEP_SCALE`, so its buffers are
-/// physical pixels, not logical ones needing another scale factor.
+/// back as the 32-bit value 0xAABBGGRR, i.e. ABGR.
+///
+/// Buffer scale 1, permanently — not "until the outputs advertise the
+/// session's scale", which they now do. The theme already rasterizes
+/// at `CHONKSTEP_SCALE`, so these buffers are physical pixels, and
+/// every damage tracker in this crate composes at scale 1 whatever the
+/// outputs say (see `state.rs::physical_damage_tracker`), so a scale-1
+/// declaration is what lands 1 buffer pixel on 1 screen pixel — with
+/// no `size / scale` integer division to shave a pixel off odd-sized
+/// chrome, which is what declaring the UI scale here would cost. (A
+/// `ui_scale` field once threaded through here for the declare-at-UI-
+/// scale design; it was removed as dead when the pinned-physical
+/// design landed.)
+///
 /// `None` for an empty buffer (nothing to show; callers keep whatever
 /// they had), mirroring `wm-x11`'s blit ignoring empty buffers.
-fn import_buffer(buffer: &DecorationBuffer, scale: i32) -> Option<MemoryRenderBuffer> {
+fn import_buffer(buffer: &DecorationBuffer) -> Option<MemoryRenderBuffer> {
     if buffer.width == 0 || buffer.height == 0 {
         return None;
     }
@@ -86,7 +97,7 @@ fn import_buffer(buffer: &DecorationBuffer, scale: i32) -> Option<MemoryRenderBu
         &buffer.pixels,
         Fourcc::Abgr8888,
         (buffer.width as i32, buffer.height as i32),
-        scale,
+        1,
         Transform::Normal,
         None,
     ))
@@ -195,7 +206,7 @@ impl Backend for WaylandBackend {
 
     fn paint_shell_surface(&mut self, id: Self::ShellId, buffer: &DecorationBuffer) {
         if let Some(shell) = self.shells.get_mut(&id) {
-            if let Some(imported) = import_buffer(buffer, self.ui_scale) {
+            if let Some(imported) = import_buffer(buffer) {
                 shell.buffer = Some(imported);
                 self.damage = true;
             }
@@ -210,7 +221,7 @@ impl Backend for WaylandBackend {
     fn paint_root_image(&mut self, buffer: &DecorationBuffer) {
         // An empty buffer keeps the previous background rather than
         // installing a zero-sized image nothing can render.
-        if let Some(imported) = import_buffer(buffer, self.ui_scale) {
+        if let Some(imported) = import_buffer(buffer) {
             self.root_background = RootBackground::Image(imported);
             self.damage = true;
         }
@@ -563,7 +574,7 @@ impl Backend for WaylandBackend {
 
     fn paint_decoration(&mut self, frame: Self::FrameId, buffer: &DecorationBuffer) {
         if let Some(record) = self.frames.get_mut(&frame) {
-            if let Some(imported) = import_buffer(buffer, self.ui_scale) {
+            if let Some(imported) = import_buffer(buffer) {
                 record.buffer = Some(imported);
                 self.damage = true;
             }
@@ -672,14 +683,13 @@ impl Backend for WaylandBackend {
                     // window is already unbounded by the time it first
                     // appears.
                     //
-                    // The session-wide `ui_scale` used to stand in here.
-                    // It is 1 on every session this compositor builds
-                    // (nothing tells outputs otherwise — see the note by
-                    // `WaylandBackend::new`), so the division was a
-                    // no-op, and for a client scaled by its environment
-                    // rather than by the protocol it was the wrong
-                    // question anyway: the desktop's idea of a scale
-                    // says nothing about what any one client drew.
+                    // The session-wide `ui_scale` used to stand in
+                    // here, and the outputs now advertising that scale
+                    // does not make it right again: the advertisement
+                    // is an invitation a client may decline (Xwayland
+                    // always does), so the desktop's idea of a scale
+                    // still says nothing about what any one client
+                    // actually drew.
                     let scale = crate::xdg::committed_buffer_scale(toplevel.wl_surface());
                     toplevel.with_pending_state(|state| {
                         state.size = Some((size.w as i32 / scale, size.h as i32 / scale).into());

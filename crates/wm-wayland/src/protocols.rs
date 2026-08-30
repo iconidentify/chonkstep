@@ -930,7 +930,8 @@ impl Dispatch<ZwlrScreencopyManagerV1, ()> for Compositor {
         use zwlr_screencopy_manager_v1::Request;
         match request {
             Request::CaptureOutput { frame, overlay_cursor, output } => {
-                let source = output_geometry(&output);
+                let source =
+                    output_geometry(&output).map(|(rect, transform, _scale)| (rect, transform));
                 new_frame(data_init, frame, source, overlay_cursor != 0);
             }
             Request::CaptureOutputRegion { frame, overlay_cursor, output, x, y, width, height } => {
@@ -940,18 +941,26 @@ impl Dispatch<ZwlrScreencopyManagerV1, ()> for Compositor {
                 // origin — which is why `grim` subtracts the output's
                 // logical position before asking. Translated into the
                 // compositor-global space here, since that is what the
-                // scene is drawn in.
+                // scene is drawn in — which includes multiplying by the
+                // output's advertised scale, because "logical" on the
+                // wire is the client's mode-over-scale view of a screen
+                // this compositor keeps in device pixels (see
+                // [`output_geometry`]).
                 //
                 // Saturating throughout: every number here came off the
                 // wire, and a compositor that a client can overflow into
                 // a panic is a client that can end the session.
-                let source = output_geometry(&output).and_then(|(output_rect, transform)| {
+                let source = output_geometry(&output).and_then(|(output_rect, transform, scale)| {
+                    let physical = |v: i32| (v as f64 * scale).round() as i32;
                     let requested = Rect::new(
                         Point::new(
-                            output_rect.pos.x.saturating_add(x),
-                            output_rect.pos.y.saturating_add(y),
+                            output_rect.pos.x.saturating_add(physical(x)),
+                            output_rect.pos.y.saturating_add(physical(y)),
                         ),
-                        Size::new(width.max(0) as u32, height.max(0) as u32),
+                        Size::new(
+                            physical(width.max(0)) as u32,
+                            physical(height.max(0)) as u32,
+                        ),
                     );
                     Some((intersection(requested, output_rect)?, transform))
                 });
@@ -1132,16 +1141,20 @@ fn service_captures(comp: &mut Compositor) {
 /// `Compositor::outputs`, because the client named a specific
 /// `wl_output` and `Output::from_resource` answers exactly that
 /// question — no index to keep in step with anything.
-fn output_geometry(output: &WlOutput) -> Option<(Rect, Transform)> {
+/// The third element is the output's advertised scale: the factor
+/// between the protocol's "output logical coordinates" (what a client
+/// like `grim` measures a region in, having read `wl_output.scale`)
+/// and the device pixels this compositor's scene — and therefore the
+/// returned rectangle — is in. The mode is *not* divided by it here:
+/// doing so is exactly how the first scale-advertising build handed
+/// `grim` a quarter-size capture of a scale-2 session, because the
+/// scene never shrank to match the story the protocol tells clients.
+fn output_geometry(output: &WlOutput) -> Option<(Rect, Transform, f64)> {
     let output = Output::from_resource(output)?;
     let mode = output.current_mode()?;
     let transform = output.current_transform();
     let scale = output.current_scale().fractional_scale();
-    let size = transform
-        .transform_size(mode.size)
-        .to_f64()
-        .to_logical(scale)
-        .to_i32_round::<i32>();
+    let size = transform.transform_size(mode.size);
     if size.w <= 0 || size.h <= 0 {
         return None;
     }
@@ -1152,6 +1165,7 @@ fn output_geometry(output: &WlOutput) -> Option<(Rect, Transform)> {
             Size::new(size.w as u32, size.h as u32),
         ),
         transform,
+        scale,
     ))
 }
 

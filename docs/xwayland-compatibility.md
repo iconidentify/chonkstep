@@ -124,62 +124,70 @@ since they answer in Motif hints instead of by staying quiet.
 
 ## UI scale and HiDPI
 
-### Native Wayland clients are not scaled, and why
+### Native Wayland clients scale from the outputs
 
-A native Wayland client — LibreOffice, and every GTK application — renders
-at 1x on a desktop configured at scale 2, next to chrome that is correctly
-scaled. This is the largest outstanding gap, and the cause is understood
-precisely enough to state, so that the next attempt does not repeat the one
-that failed.
+The outputs advertise the session's UI scale, rounded to a whole number
+(`wl_output.scale` carries only integers — `state.rs`,
+`advertised_output_scale`), every surface is told it entered them and,
+for clients binding `wl_surface` v6, told the number outright through
+`preferred_buffer_scale` (`xdg.rs`, the commit handler). A GTK client
+answers with `set_buffer_scale(2)` and renders itself at 2x; verified
+under `WAYLAND_DEBUG` with the whole loop closed — `wl_output.scale(2)`
+→ `wl_surface.enter` → `preferred_buffer_scale(2)` →
+`set_buffer_scale(2)` — and visually, a zenity dialog at exactly twice
+its 1x size next to pixel-identical chrome. A live scale change
+(config reload) re-advertises the outputs and re-sends the per-surface
+preference, and an already-mapped GTK dialog follows it both ways.
 
-**The environment variables cannot fix it.** The launcher puts `GDK_SCALE`
-and `QT_SCALE_FACTOR` in every child's environment, and for a Wayland client
-they do nothing: verified under `WAYLAND_DEBUG`, a GTK client launched with
-`GDK_SCALE=2` against an output advertising scale 1 makes **no
-`wl_surface.set_buffer_scale` call at all** and declares the same window
-geometry it would have at 1x. On Wayland, GTK takes its scale from
-`wl_output.scale`. The variables remain load-bearing for X11 and XWayland
-clients, which have no output scale to read.
+**The environment variables never could have fixed this.** The launcher
+puts `GDK_SCALE` and `QT_SCALE_FACTOR` in every child's environment, and
+for a Wayland client they do nothing: verified under `WAYLAND_DEBUG`, a
+GTK client launched with `GDK_SCALE=2` against an output advertising
+scale 1 makes **no `wl_surface.set_buffer_scale` call at all**. On
+Wayland, GTK takes its scale from the protocol. The variables remain
+load-bearing for X11 and XWayland clients, which have no output scale
+to read.
 
-**So the only fix is to advertise a real `wl_output` scale.** That was tried
-once and it broke the desktop badly — the dock vanished off the right edge
-of the screen, the wallpaper was clipped to a quarter, and the chrome
-collapsed into the top-left. The conclusion drawn at the time, that a
-physical-pixel compositor is fundamentally incompatible with a scaled
-output and needs a full logical/physical split first, was **wrong**, and
-believing it would cost whoever tries next a great deal of unnecessary work.
+Advertising the scale was tried once before and broke the desktop badly
+— the dock vanished off the right edge, the wallpaper was clipped to a
+quarter. The conclusion drawn at the time, that a physical-pixel
+compositor needs a full logical/physical split first, was **wrong**.
+The mechanism was narrower: smithay's damage trackers were reading
+their render scale from the outputs, and smithay sizes an element at
+its *logical* extent times that scale while leaving its physical
+position alone — so chrome the theme had already rasterized in device
+pixels was multiplied a second time. Element positions were never the
+problem.
 
-The actual mechanism is narrower. Element *positions* are physical in
-smithay either way, and were never the problem. What broke is that this
-compositor imports its own buffers — window chrome, the dock, the wallpaper,
-the pointer — declaring a buffer scale of `1` (`backend_impl.rs`,
-`import_buffer`), while the theme has already rasterized them at the UI
-scale. Smithay scales an element by `output_scale / buffer_scale`, so
-chrome drawn at 2x and imported as scale 1 is drawn at 2x *again*. Every
-symptom follows from that one factor of two: a dock 224px wide anchored at
-x=3728 runs past a 3840px screen, and a wallpaper sized to the screen covers
-four of them.
+The shipped design splits exactly along that line
+(`state.rs::physical_damage_tracker` carries the full account):
 
-The shape of the fix, then, is:
+- the advertisement is protocol metadata only — every damage tracker
+  and `DrmCompositor` in the crate is pinned to scale 1, so the
+  compositor composes in physical pixels end to end and chrome needs no
+  conversion at all (and no `size / scale` integer division that would
+  shave a pixel off odd-sized chrome);
+- each client surface tree is wrapped in a `RescaleRenderElement` by
+  its own committed buffer scale (`renderer.rs::push_surface_tree`),
+  putting its buffer back at 1 buffer pixel : 1 screen pixel — the size
+  the ledger recorded for it. A surface that ignores the advertisement
+  (Xwayland's always do) commits at scale 1 and the wrap is the
+  identity;
+- values crossing the ledger boundary convert by each surface's own
+  committed factor, never a session-wide one — the measure
+  (`xdg.rs::committed_content_size`), the configure
+  (`backend_impl.rs::resize_client`, where a session-wide factor makes
+  the round trip feed itself and a scaled window grow without bound),
+  and the input hit walk (`input.rs`);
+- screencopy converts the protocol's "output logical coordinates" back
+  into scene pixels (`protocols.rs::output_geometry`) — dividing the
+  mode by the advertised scale there is how the first working build
+  handed `grim` a quarter-size capture.
 
-- every buffer this compositor imports declares the scale it was actually
-  rasterized at, so `output_scale / buffer_scale` comes out at 1 and one
-  buffer pixel lands on one screen pixel;
-- outputs advertise the session's scale, rounded to a whole number, since
-  `wl_output.scale` carries only integers;
-- client surface trees render at the output scale, which is what
-  `render_elements_from_surface_tree`'s scale argument means — smithay
-  divides by each surface's own `set_buffer_scale` internally, so one value
-  is correct for a client that scaled itself and for one that did not (the
-  latter is upscaled, which is the right answer for it);
-- values crossing the ledger boundary convert by that same scale, because a
-  client works in logical pixels and this ledger is physical. Note the
-  configure path especially: converting with the wrong factor there makes
-  the round trip feed itself and a scaled window grows without bound on its
-  first map.
-
-Status: **not implemented.** Everything above is diagnosis, verified against
-a real session and a real client, not a description of shipped behaviour.
+A fractional session scale (1.5) advertises the nearest whole step (2):
+clients render crisp and somewhat larger than the chrome, and the
+ledger reflows their frames around what they actually commit. The exact
+fraction has no channel short of implementing `fractional-scale-v1`.
 
 ### XSETTINGS
 
