@@ -1840,8 +1840,20 @@ impl<B: Backend> WindowManager<B> {
 
     fn focus_client(&mut self, id: ClientId) {
         if self.focused == Some(id) {
+            // Re-assert input focus rather than assume it landed. This
+            // early return is the path a user takes to *repair* focus —
+            // they click the window that already looks focused — so it
+            // is the one place that must not trust `self.focused`. The
+            // two can genuinely disagree: a Wayland window focused
+            // before its `wl_surface` existed, an X11 focus the server
+            // refused. Both backends treat an unchanged focus as a
+            // no-op (Smithay short-circuits it outright), so this is
+            // free whenever they already agree.
             if let Some(client) = self.clients.get(id) {
-                if let Some(frame) = client.frame {
+                let window = client.window;
+                let frame = client.frame;
+                self.backend.set_input_focus(window);
+                if let Some(frame) = frame {
                     self.backend.raise(frame);
                 }
             }
@@ -2192,6 +2204,46 @@ mod tests {
         assert!(wm.client(id1).unwrap().flags.contains(ClientFlags::FOCUSED));
         assert!(!wm.client(id3).unwrap().flags.contains(ClientFlags::FOCUSED));
         assert!(!wm.client(id2).unwrap().flags.intersects(ClientFlags::FOCUSED), "a miniaturized client must never be cycled to");
+    }
+
+    /// Clicking the window that already looks focused is how a user
+    /// tries to *repair* focus, so that path must re-assert it rather
+    /// than trust `self.focused`. Regression test for a live Wayland
+    /// bug: an XWayland window focused before its `wl_surface` existed
+    /// left `wm-core` focused and the seat empty, and every click on
+    /// the window hit the "already focused" early return without
+    /// re-sending focus — so it stayed keyboard-dead until the user
+    /// focused a different window and came back.
+    #[test]
+    fn clicking_the_already_focused_window_reasserts_input_focus() {
+        let mut backend = FakeBackend::new();
+        let window = backend.create_window();
+        let mut wm = wm(backend);
+        wm.dispatch(BackendEvent::MapRequest(window));
+        let id = wm.client_for_window(window).unwrap();
+        let frame = wm.client(id).unwrap().frame.unwrap();
+        assert_eq!(wm.focused_client(), Some(id));
+        assert_eq!(wm.backend().focused_window, Some(window));
+
+        // Stands in for the display server never taking the focus the
+        // WM believes it set.
+        wm.backend_mut().focused_window = None;
+
+        wm.dispatch(BackendEvent::PointerButton {
+            surface: SurfaceRef::Frame(frame),
+            local: Point::new(200, 5),
+            button: MouseButton::Left,
+            pressed: true,
+            time_ms: 0,
+            mods: Modifiers::empty(),
+        });
+
+        assert_eq!(wm.focused_client(), Some(id), "the WM's own focus is unchanged");
+        assert_eq!(
+            wm.backend().focused_window,
+            Some(window),
+            "input focus must be re-asserted on the early-return path, not assumed"
+        );
     }
 
     /// Regression test: clicking a window's own *content* (not just its
