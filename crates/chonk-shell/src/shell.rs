@@ -113,11 +113,24 @@ const TERMINAL_MIN_SIZE: (u32, u32) = (640, 400);
 /// every theme restyles terminals along with the chrome. The scale for
 /// the font size is recovered from the already-scaled theme (titlebar
 /// font is 12px at 1x) rather than re-reading the environment.
-fn terminal_args(theme: &Theme, font_px: f32, screen: Size) -> Vec<String> {
+///
+/// Both the font size and the window size are given to the terminal in
+/// *its* pixels, which on the Wayland session are logical ones: the
+/// compositor tells it the output scale and it renders itself at that,
+/// so handing it pre-multiplied numbers would double the scale. The
+/// division is by the same factor the theme was scaled by, recovered
+/// the same way, so a 1x session divides by one and nothing moves.
+fn terminal_args(theme: &Theme, font_px: f32, screen: Size, client_scale: f32) -> Vec<String> {
     // foot wants bare RRGGBB, not the `#rrggbb` urxvt took.
     let hex = |c: wm_theme::model::Color| format!("{:02x}{:02x}{:02x}", c.r, c.g, c.b);
-    let px = (font_px * (theme.titlebar.font.size / 12.0)).round().max(8.0) as u32;
-    let (window_w, window_h) = terminal_window_size(theme, screen);
+    let ui_scale = theme.titlebar.font.size / 12.0;
+    let px = (font_px * ui_scale * (client_scale / ui_scale.max(0.01))).round().max(8.0) as u32;
+    let divisor = (ui_scale / client_scale.max(0.01)).max(1.0);
+    let logical_screen = Size::new(
+        ((screen.w as f32 / divisor) as u32).max(1),
+        ((screen.h as f32 / divisor) as u32).max(1),
+    );
+    let (window_w, window_h) = terminal_window_size(theme, logical_screen);
     let mut args = vec![
         "--font".to_string(),
         format!("JetBrainsMono Nerd Font:pixelsize={px},Noto Sans Symbols 2:pixelsize={px}"),
@@ -196,7 +209,13 @@ fn terminal_window_size(theme: &Theme, screen: Size) -> (u32, u32) {
 /// menu's Terminal item and the `spawn-terminal` keybinding, so the two
 /// gestures can never drift apart on font, geometry, or palette.
 fn spawn_terminal(theme: &Theme, font_px: f32, screen: Size) {
-    spawn_foot(terminal_args(theme, font_px, screen));
+    let ui_scale = theme.titlebar.font.size / 12.0;
+    let client_scale = match spawn::current_display_stack() {
+        // The compositor advertises the scale; foot applies it itself.
+        spawn::DisplayStack::Wayland => 1.0,
+        spawn::DisplayStack::X11 => ui_scale,
+    };
+    spawn_foot(terminal_args(theme, font_px, screen, client_scale));
 }
 
 /// The single foot spawn step: [`spawn_terminal`] passes the themed
@@ -229,7 +248,12 @@ fn launch_app(entry: &AppEntry, theme: &Theme, font_px: f32, screen: Size) {
         return;
     };
     if entry.terminal {
-        let mut argv = terminal_args(theme, font_px, screen);
+        let ui_scale = theme.titlebar.font.size / 12.0;
+        let terminal_scale = match spawn::current_display_stack() {
+            spawn::DisplayStack::Wayland => 1.0,
+            spawn::DisplayStack::X11 => ui_scale,
+        };
+        let mut argv = terminal_args(theme, font_px, screen, terminal_scale);
         argv.push("-e".to_string());
         argv.extend(entry.exec.iter().cloned());
         spawn_foot(argv);
@@ -261,8 +285,24 @@ fn launch_app(entry: &AppEntry, theme: &Theme, font_px: f32, screen: Size) {
     // receiving none of these fixups — not the scale flag, not the
     // secrets-service workaround, not the ozone platform — which is a
     // large part of why it behaved worse here than any other browser.
+    // Every scale fixup below exists to tell a client something the
+    // display server could not. Under the Wayland compositor the server
+    // now *can*: `wl_output` carries the scale and toolkits act on it
+    // (a GTK client answers `wl_output.scale(2)` with
+    // `set_buffer_scale(2)` on its own). Applying these there as well
+    // would have the client scale itself twice — GDK_SCALE=2 inside an
+    // output already declared 2x is a quadrupled interface — so on that
+    // stack the desktop says nothing and lets the protocol do it.
+    //
+    // The X11 session keeps every one of them. There is no output scale
+    // in X11 for a client to read, which is the whole reason this
+    // machinery was written.
+    let client_scale = match spawn::current_display_stack() {
+        spawn::DisplayStack::Wayland => 1.0,
+        spawn::DisplayStack::X11 => scale,
+    };
     if base.contains("chrom") || base.contains("chrome") || base.starts_with("microsoft-edge") || base.starts_with("brave") {
-        argv.extend(spawn::chromium_scale_args(scale));
+        argv.extend(spawn::chromium_scale_args(client_scale));
         argv.extend(spawn::chromium_avoid_secrets_service_hang_args());
         argv.extend(spawn::chromium_platform_args(spawn::current_display_stack()));
     }
@@ -271,7 +311,10 @@ fn launch_app(entry: &AppEntry, theme: &Theme, font_px: f32, screen: Size) {
     // environment rather than the session's: the scale can change while
     // the session runs, and the process environment cannot safely be
     // rewritten once threads exist. See `startup::xcursor_size_env`.
-    let mut env = spawn::gtk_qt_scale_env(scale);
+    let mut env = spawn::gtk_qt_scale_env(client_scale);
+    // The pointer is the exception that stays on both stacks: a client
+    // drawing its own cursor reads `XCURSOR_SIZE` and nothing else, and
+    // `wl_output.scale` does not reach it.
     env.extend(crate::startup::xcursor_size_env(scale));
     spawn::spawn_detached_with_env(program, &arg_refs, &env, &[]);
 }

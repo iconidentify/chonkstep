@@ -56,7 +56,7 @@ use smithay::{
 };
 
 use wm_core::{BackendEvent, NetState, NetStateAction};
-use wm_theme_api::{Rect, Size};
+use wm_theme_api::{Point, Rect, Size};
 
 use crate::state::{ClientState, Compositor, ManagedSurface, WindowRecord, WlFrameId, WlWindowId};
 
@@ -89,20 +89,39 @@ fn set_mapped_marker(surface: &WlSurface, value: bool) {
 /// this through `Backend::window_geometry` at map time (how big does
 /// the fresh client want to be), and `commit` compares it against the
 /// record to detect client-side resizes.
-fn committed_content_size(surface: &WlSurface) -> Option<Size> {
+/// Where the client's window starts inside its own buffer — the
+/// `xdg_surface.set_window_geometry` origin, which for a client drawing
+/// its own chrome is the drop-shadow margin. See
+/// `WindowRecord::content_offset`.
+fn committed_content_offset(surface: &WlSurface, scale: i32) -> Point {
+    with_states(surface, |states| {
+        let mut guard = states.cached_state.get::<SurfaceCachedState>();
+        guard.current().geometry
+    })
+    .filter(|geometry| geometry.size.w > 0 && geometry.size.h > 0)
+    .map(|geometry| Point::new(geometry.loc.x * scale, geometry.loc.y * scale))
+    .unwrap_or(Point::new(0, 0))
+}
+
+///
+/// `scale` converts the client's logical pixels into the physical ones
+/// this compositor's ledger is kept in. A client told the output is 2x
+/// declares a 300x226 window and commits a 600x452 buffer; 600x452 is
+/// what the frame has to be drawn around.
+fn committed_content_size(surface: &WlSurface, scale: i32) -> Option<Size> {
     let geometry = with_states(surface, |states| {
         let mut guard = states.cached_state.get::<SurfaceCachedState>();
         guard.current().geometry
     });
     if let Some(geometry) = geometry {
         if geometry.size.w > 0 && geometry.size.h > 0 {
-            return Some(Size::new(geometry.size.w as u32, geometry.size.h as u32));
+            return Some(Size::new((geometry.size.w * scale) as u32, (geometry.size.h * scale) as u32));
         }
     }
     with_renderer_surface_state(surface, |state| state.surface_size())
         .flatten()
         .filter(|size| size.w > 0 && size.h > 0)
-        .map(|size| Size::new(size.w as u32, size.h as u32))
+        .map(|size| Size::new((size.w * scale) as u32, (size.h * scale) as u32))
 }
 
 // -- wl_compositor -------------------------------------------------------
@@ -190,9 +209,9 @@ impl Compositor {
         let has_buffer =
             with_renderer_surface_state(&root, |state| state.buffer().is_some()).unwrap_or(false);
         let was_mapped = mapped_marker(&root);
-        let committed = committed_content_size(&root);
-
         let backend = self.wm.backend_mut();
+        let surface_scale = backend.ui_scale;
+        let committed = committed_content_size(&root, surface_scale);
         let Some(id) = backend.window_for_surface(&root) else {
             return;
         };
@@ -205,6 +224,10 @@ impl Compositor {
                 if let Some(record) = backend.windows.get_mut(&id) {
                     record.content.size = size;
                 }
+            }
+            let offset = committed_content_offset(&root, surface_scale);
+            if let Some(record) = backend.windows.get_mut(&id) {
+                record.content_offset = offset;
             }
             backend.queue(WmEvent::MapRequest(id));
         } else if !has_buffer && was_mapped {
@@ -634,6 +657,23 @@ impl XdgShellHandler for Compositor {
 
 impl XdgDecorationHandler for Compositor {
     fn new_decoration(&mut self, toplevel: ToplevelSurface) {
+        // Record that this toplevel negotiated at all. Silence is the
+        // protocol's way of saying "I decorate myself" (see
+        // `WindowRecord::negotiated_decoration`), so the only clients
+        // this desktop may frame are the ones that got as far as
+        // creating the object — and this is the one place that is
+        // observable.
+        let backend = self.wm.backend_mut();
+        if let Some(id) = backend.window_for_surface(toplevel.wl_surface()) {
+            if let Some(record) = backend.windows.get_mut(&id) {
+                record.negotiated_decoration = true;
+            }
+            // Version 2 of the interface lets a client create the object
+            // after it has already committed a buffer, which is after
+            // this backend emitted `MapRequest`. Re-asking is how such a
+            // late negotiation still gets a frame.
+            backend.queue(WmEvent::ChromeChanged(id));
+        }
         toplevel.with_pending_state(|state| {
             state.decoration_mode = Some(DecorationMode::ServerSide);
         });
