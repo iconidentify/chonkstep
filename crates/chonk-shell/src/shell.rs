@@ -209,10 +209,25 @@ fn terminal_window_size(theme: &Theme, screen: Size) -> (u32, u32) {
 /// menu's Terminal item and the `spawn-terminal` keybinding, so the two
 /// gestures can never drift apart on font, geometry, or palette.
 fn spawn_terminal(theme: &Theme, font_px: f32, screen: Size) {
-    // The scale the theme was built at, on both stacks — see the note
-    // in `launch_app` about why this is not withheld on Wayland.
-    let ui_scale = theme.titlebar.font.size / 12.0;
-    spawn_foot(terminal_args(theme, font_px, screen, ui_scale));
+    spawn_foot(terminal_args(theme, font_px, screen, terminal_client_scale(theme)));
+}
+
+/// The factor the terminal will scale itself by, which is what
+/// `terminal_args`'s `client_scale` means. Under the Wayland
+/// compositor the outputs advertise the session's scale and foot — a
+/// native Wayland client — renders at it, so the terminal gets logical
+/// numbers (client_scale 1) and the division in `terminal_args` maps
+/// the physical screen and the theme-scaled font back down; handing it
+/// pre-multiplied numbers there would double the scale, exactly as
+/// that function's own contract warns. On the X11 stack foot can only
+/// be talking to some *other* Wayland display (a dev session nesting
+/// the X11 desktop), which advertises nothing about this session's
+/// scale — so there the theme's factor rides along as it always has.
+fn terminal_client_scale(theme: &Theme) -> f32 {
+    match spawn::current_display_stack() {
+        spawn::DisplayStack::Wayland => 1.0,
+        spawn::DisplayStack::X11 => theme.titlebar.font.size / 12.0,
+    }
 }
 
 /// The single foot spawn step: [`spawn_terminal`] passes the themed
@@ -245,8 +260,7 @@ fn launch_app(entry: &AppEntry, theme: &Theme, font_px: f32, screen: Size) {
         return;
     };
     if entry.terminal {
-        let ui_scale = theme.titlebar.font.size / 12.0;
-        let mut argv = terminal_args(theme, font_px, screen, ui_scale);
+        let mut argv = terminal_args(theme, font_px, screen, terminal_client_scale(theme));
         argv.push("-e".to_string());
         argv.extend(entry.exec.iter().cloned());
         spawn_foot(argv);
@@ -282,31 +296,43 @@ fn launch_app(entry: &AppEntry, theme: &Theme, font_px: f32, screen: Size) {
     // display server could not. Under the Wayland compositor the server
     // now *can*: `wl_output` carries the scale and toolkits act on it
     // (a GTK client answers `wl_output.scale(2)` with
-    // `set_buffer_scale(2)` on its own). Applying these there as well
-    // would have the client scale itself twice — GDK_SCALE=2 inside an
-    // output already declared 2x is a quadrupled interface — so on that
-    // stack the desktop says nothing and lets the protocol do it.
+    // `set_buffer_scale(2)` on its own — see `state.rs`'s
+    // `advertise_scale` in `wm-wayland`). Applying these there as well
+    // would have the client scale itself twice — `QT_SCALE_FACTOR=2`
+    // *multiplies onto* the platform scale an output already declared,
+    // and Chromium's `--force-device-scale-factor` likewise — so on
+    // that stack the desktop says nothing and lets the protocol do it.
     //
     // The X11 session keeps every one of them. There is no output scale
     // in X11 for a client to read, which is the whole reason this
     // machinery was written.
-    // Applied on both stacks. This was briefly withheld on Wayland,
-    // on the reasoning that the compositor advertises an output scale
-    // there and a client acting on both would scale itself twice — but
-    // the compositor does not advertise one (see `WaylandBackend::new`),
-    // so withholding it left every launched client at 1x.
-    let client_scale = scale;
+    //
+    // This withholding has flip-flopped once, so the history is worth
+    // keeping: it was first withheld on exactly the reasoning above,
+    // back when the compositor did not yet advertise a scale — which
+    // left every launched client at 1x, and the withholding was
+    // reverted. The outputs advertise for real now, verified end to
+    // end under `WAYLAND_DEBUG`, so the reasoning has finally caught
+    // up with the code it was written for. Withheld means *absent*,
+    // not "passed as 1": every one of these is an override, and an
+    // explicit 1 would pin to 1x exactly the client the output is
+    // telling to draw at 2x.
+    let stack = spawn::current_display_stack();
+    let scale_fixups = matches!(stack, spawn::DisplayStack::X11);
     if base.contains("chrom") || base.contains("chrome") || base.starts_with("microsoft-edge") || base.starts_with("brave") {
-        argv.extend(spawn::chromium_scale_args(client_scale));
+        if scale_fixups {
+            argv.extend(spawn::chromium_scale_args(scale));
+        }
         argv.extend(spawn::chromium_avoid_secrets_service_hang_args());
-        argv.extend(spawn::chromium_platform_args(spawn::current_display_stack()));
+        argv.extend(spawn::chromium_platform_args(stack));
     }
     let arg_refs: Vec<&str> = argv.iter().map(String::as_str).collect();
     // Toolkit scaling *and* the pointer size, both in this child's own
     // environment rather than the session's: the scale can change while
     // the session runs, and the process environment cannot safely be
     // rewritten once threads exist. See `startup::xcursor_size_env`.
-    let mut env = spawn::gtk_qt_scale_env(client_scale);
+    let mut env =
+        if scale_fixups { spawn::gtk_qt_scale_env(scale) } else { Vec::new() };
     // The pointer is the exception that stays on both stacks: a client
     // drawing its own cursor reads `XCURSOR_SIZE` and nothing else, and
     // `wl_output.scale` does not reach it.

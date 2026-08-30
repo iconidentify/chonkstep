@@ -46,7 +46,7 @@ use smithay::desktop::PopupManager;
 use smithay::input::keyboard::XkbConfig;
 use smithay::input::pointer::CursorImageStatus;
 use smithay::input::{Seat, SeatState};
-use smithay::output::{Mode, Output, PhysicalProperties, Subpixel};
+use smithay::output::{Mode, Output, PhysicalProperties, Scale as OutputScale, Subpixel};
 use smithay::reexports::calloop::generic::Generic;
 use smithay::reexports::calloop::{EventLoop, Interest, LoopHandle, Mode as TriggerMode, PostAction, RegistrationToken};
 use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::State as XdgToplevelState;
@@ -367,24 +367,6 @@ pub struct WaylandBackend {
     /// advertises, and therefore the factor smithay applies to every
     /// element it composes.
     ///
-    /// This compositor positions elements in physical pixels and always
-    /// will — the theme rasterizes chrome in device pixels and the shell
-    /// lays the dock out against the monitor's device size. That is
-    /// compatible with a scaled output, because element *positions* are
-    /// physical either way; what is not compatible is a buffer that
-    /// claims a scale it was not drawn at. Smithay scales an element by
-    /// `output_scale / buffer_scale`, so chrome rasterized at 2x and
-    /// imported as scale 1 gets drawn twice again — which is exactly
-    /// how a first attempt at this put the dock off the right edge of
-    /// the screen and the wallpaper over four of them.
-    ///
-    /// So every buffer this compositor imports declares *this* scale,
-    /// and the arithmetic comes out at one buffer pixel per screen
-    /// pixel. Clients are told the same number and render themselves at
-    /// it, which is the only way a native Wayland client can learn the
-    /// desktop is scaled at all.
-    pub(crate) ui_scale: i32,
-
     /// Shared allocator for all three id spaces — window, frame, and
     /// shell ids never collide, which makes stray-id bugs loud in logs
     /// instead of silently aliasing. Starts at 1 so [`ROOT_SHELL`]
@@ -527,32 +509,10 @@ pub(crate) enum PointerGrabChange {
     Released,
 }
 
-/// The integer `wl_output.scale` for a configured UI scale.
-///
-/// `wl_output` carries a whole number, so a fractional UI scale has to
-/// be reported as one. Rounding rather than truncating makes 1.5
-/// advertise 2 — a client rendering slightly large and being scaled
-/// down reads far better than one rendering at half size — and the
-/// floor of 1 stops a nonsense configuration from telling clients their
-/// pixels are worth nothing.
-///
-/// Not called yet: this is the parked half of the output-scale work —
-/// it becomes the argument to `WaylandBackend::new` the moment the
-/// outputs advertise the same number, and until then every session
-/// passes 1 (see the note at `run`'s construction site).
-#[expect(dead_code)]
-pub(crate) fn integral_scale(scale: f32) -> i32 {
-    if !scale.is_finite() {
-        return 1;
-    }
-    (scale.round() as i32).max(1)
-}
-
 impl WaylandBackend {
-    pub(crate) fn new(display_handle: DisplayHandle, monitors: Vec<MonitorInfo>, ui_scale: i32) -> Self {
+    pub(crate) fn new(display_handle: DisplayHandle, monitors: Vec<MonitorInfo>) -> Self {
         let output_size = union_size(&monitors);
         Self {
-            ui_scale: ui_scale.max(1),
             next_id: 1,
             windows: HashMap::new(),
             frames: HashMap::new(),
@@ -727,7 +687,7 @@ impl OutputEntry {
     /// Advertises one output to clients and prepares it for rendering.
     fn new(setup: OutputSetup, display_handle: &DisplayHandle) -> Self {
         let _global = setup.output.create_global::<Compositor>(display_handle);
-        let damage_tracker = OutputDamageTracker::from_output(&setup.output);
+        let damage_tracker = physical_damage_tracker(&setup.output, setup.size);
         Self {
             output: setup.output,
             position: setup.position,
@@ -735,6 +695,89 @@ impl OutputEntry {
             damage_tracker,
             _global,
         }
+    }
+}
+
+/// A damage tracker for `output` pinned to scale 1, whatever scale the
+/// output advertises. Rebuilt (never `from_output`) on a mode change —
+/// see [`Compositor::on_output_resized`].
+///
+/// The pin is the whole reason advertising a real scale on the
+/// `wl_output` is safe, and it earns the space to say precisely why.
+/// What `OutputDamageTracker::render_output` reads from its mode source
+/// (smithay 0.7, `damage/mod.rs` + `output.rs`) is the mode size in
+/// physical pixels, the output's *fractional scale*, and its transform.
+/// The output rectangle it clips against is the physical mode size —
+/// that part is safe — but every element is asked for its rectangle
+/// through `Element::geometry(scale)` with that fractional scale, and
+/// both `MemoryRenderBufferRenderElement` and
+/// `WaylandSurfaceRenderElement` implement `geometry` as "my stored
+/// physical location, unchanged, with my *logical* size multiplied by
+/// the scale I was just passed" (`element/memory.rs`,
+/// `element/surface.rs`). A memory buffer's logical size is its pixel
+/// size divided by the buffer scale it was constructed with — 1 for
+/// every buffer this compositor makes, because the theme rasterizes in
+/// device pixels.
+///
+/// So the day `change_current_state(scale = 2)` was tried on the real
+/// 4K session with `from_output` trackers, every chrome element kept
+/// its device-pixel position and doubled in size: the 3840x2160
+/// wallpaper became a 7680x4320 element with only its top-left quarter
+/// inside the output, the dock's tiles grew out past the right edge
+/// and vanished, and the frames' titlebars painted at twice their
+/// width over the windows beside them. Mixed spaces, one multiply.
+///
+/// Pinning the tracker to 1.0 makes `geometry(1.0)` the identity on
+/// logical sizes: the compositor composes in physical pixels end to
+/// end, exactly as it did when the outputs said 1, and the advertised
+/// scale becomes what it should be — protocol metadata for clients,
+/// with the per-surface correction in `renderer::push_surface_tree`
+/// putting their scaled buffers back at 1 buffer pixel : 1 screen
+/// pixel. The session backend pins its `DrmCompositor`s the same way
+/// (`session::attach_output`); the two must never disagree.
+fn physical_damage_tracker(output: &Output, size: Size) -> OutputDamageTracker {
+    OutputDamageTracker::new(
+        SSize::<i32, Physical>::from((size.w as i32, size.h as i32)),
+        1.0,
+        output.current_transform(),
+    )
+}
+
+/// The scale every `wl_output` advertises for a session UI scale, and
+/// the only channel a native Wayland client actually listens on:
+/// verified under `WAYLAND_DEBUG`, GTK with `GDK_SCALE=2` against
+/// outputs at scale 1 makes no `set_buffer_scale` call at all. A
+/// client that hears 2 here answers `set_buffer_scale(2)`, renders
+/// twice the pixels, and the rest of this crate already meets it — the
+/// ledger measures its commits by the factor it committed
+/// (`xdg::committed_content_size`), configures it back in its own
+/// logical pixels (`resize_client`), hit-tests through the same factor
+/// (`input.rs`), and draws its buffer 1:1
+/// (`renderer::push_surface_tree`).
+///
+/// Integer, because `wl_output.scale` is an integer: a fractional
+/// session scale rounds to the nearest whole step (1.5 advertises 2),
+/// clamped to 1 and up. A client told 2 on a 1.5 session draws crisper
+/// and somewhat larger than the chrome, and the ledger reflows its
+/// frame around what it actually commits — larger but consistent,
+/// against no channel at all for the exact fraction short of
+/// implementing `fractional-scale-v1`. (`f32::max` returns 1.0 for a
+/// NaN scale, so the cast is always sane — same guard as
+/// `default_cursor_pixels`.)
+pub(crate) fn advertised_output_scale(scale: f32) -> OutputScale {
+    OutputScale::Integer(scale.max(1.0).round() as i32)
+}
+
+/// (Re-)advertises the session's UI scale on every output. smithay
+/// broadcasts the change to every bound `wl_output` (and its
+/// `xdg_output`) and clients follow with new buffers at the new scale;
+/// the damage trackers stay pinned at 1 (see
+/// [`physical_damage_tracker`]) so the compositor's own composition
+/// never hears about it.
+fn advertise_scale(outputs: &[OutputEntry], scale: f32) {
+    let advertised = advertised_output_scale(scale);
+    for entry in outputs {
+        entry.output.change_current_state(None, None, Some(advertised), None);
     }
 }
 
@@ -1048,6 +1091,41 @@ impl Compositor {
             self.cursors = CursorSet::build(scale);
             self.wm.backend_mut().mark_damaged();
             self.republish_xsettings();
+            // Native Wayland clients ride the same drain, through the
+            // one channel they listen on: the outputs re-advertise the
+            // scale (broadcast to every bound `wl_output`), and every
+            // managed surface is told its new preferred buffer scale
+            // directly, because `send_surface_state` only sends on
+            // change *per surface* and a window idling in the
+            // background commits nothing that would make the
+            // commit-time send in `xdg.rs` fire. Clients answer with
+            // rescaled buffers; the ledger reflows around those commits
+            // exactly as it does around any client resize.
+            advertise_scale(&self.outputs, scale);
+            let advertised = advertised_output_scale(scale).integer_scale();
+            let surfaces: Vec<WlSurface> = self
+                .wm
+                .backend()
+                .windows
+                .values()
+                // Xdg only: an Xwayland window's wl_surface belongs to
+                // the Xwayland server, which is told the scale through
+                // XSETTINGS/XCURSOR_SIZE above and must keep committing
+                // 1x buffers over the ledger's 1x rectangles.
+                .filter(|record| matches!(record.surface, ManagedSurface::Xdg(_)))
+                .filter(|record| record.surface.alive())
+                .filter_map(|record| record.surface.wl_surface())
+                .collect();
+            for surface in surfaces {
+                smithay::wayland::compositor::with_states(&surface, |states| {
+                    smithay::wayland::compositor::send_surface_state(
+                        &surface,
+                        states,
+                        advertised,
+                        Transform::Normal,
+                    );
+                });
+            }
         }
 
         // Damage means the scene changed; `redraw_pending` means a
@@ -1057,6 +1135,14 @@ impl Compositor {
         // with more than one output — see `session::redraw_pending`.
         if self.wm.backend().damage || crate::session::redraw_pending(&self.graphics) {
             crate::renderer::render_frame(self);
+        }
+
+        // The outputs remember every surface that entered them (the
+        // `wl_surface.enter` in `xdg.rs`'s commit handler) so they can
+        // dedup; smithay asks that the dead ones be pruned "at best
+        // before every wayland socket flush", which is here.
+        for entry in &self.outputs {
+            entry.output.cleanup();
         }
 
         // Protocol replies queued by everything above (configures,
@@ -1352,6 +1438,11 @@ impl Compositor {
         entry.output.change_current_state(Some(mode), None, None, None);
         entry.output.set_preferred(mode);
         entry.size = logical;
+        // The damage tracker was sized to the old mode and is pinned
+        // rather than output-tracking (see `physical_damage_tracker`),
+        // so a resize rebuilds it. A fresh tracker starts at age 0,
+        // which is what every frame here renders at anyway.
+        entry.damage_tracker = physical_damage_tracker(&entry.output, logical);
         let backend = self.wm.backend_mut();
         if let Some(monitor) = backend.monitors.first_mut() {
             monitor.geometry.size = logical;
@@ -1464,7 +1555,16 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
 
     // Wayland globals. Each `new::<Compositor>` registers the global
     // against the delegate impls in `xdg.rs`/`input.rs`/`xwayland.rs`.
-    let compositor_state = CompositorState::new::<Compositor>(&display_handle);
+    // v6, not smithay's default v5: version 6 is what carries
+    // `wl_surface.preferred_buffer_scale`, the direct statement of the
+    // session's scale that `xdg.rs`'s commit handler (and the
+    // live-rescale drain in `dispatch_pending`) sends per surface. The
+    // `wl_output.scale` advertisement alone also works for a client's
+    // first mapping, but a toolkit holding an already-mapped surface
+    // follows a *change* of scale far more reliably when told about
+    // its own surface than when left to re-derive it from the outputs
+    // it has entered.
+    let compositor_state = CompositorState::new_v6::<Compositor>(&display_handle);
     let xdg_shell_state = XdgShellState::new::<Compositor>(&display_handle);
     // xdg-decoration is what lets us tell clients "the server draws
     // your chrome" — without it every GTK/Qt app draws its own
@@ -1688,40 +1788,33 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
     let fonts = FontState::new();
     let engine = RasterThemeEngine::with_fonts(theme, fonts.clone());
 
+    // The outputs advertise the session's scale from here on — the only
+    // way a native Wayland client ever learns this desktop is scaled
+    // (the per-child `GDK_SCALE`/`QT_SCALE_FACTOR` environment the
+    // launcher sets is ignored by toolkits for buffer scale). The first
+    // attempt at this set `change_current_state(scale = 2)` alone and
+    // was reverted: with the damage trackers reading their scale from
+    // the outputs, every chrome element — a memory buffer at a
+    // device-pixel position with a device-pixel size — was multiplied
+    // to double size while the wallpaper stayed anchored at the origin
+    // and the dock at the right edge, so the wallpaper showed a
+    // quarter of itself and the dock grew off the screen. The full
+    // account of which coordinate space each half of smithay's
+    // pipeline works in lives on `physical_damage_tracker`, and the
+    // fix is split exactly along it: the advertisement is protocol
+    // metadata (here and in `advertise_scale`), the compositor's own
+    // composition stays pinned to physical pixels
+    // (`physical_damage_tracker`, `session::attach_output`), and
+    // client buffers are put back at 1 buffer pixel : 1 screen pixel
+    // per surface (`renderer::push_surface_tree`). `wm-core`, the
+    // theme and the shell remain physical end to end and never hear
+    // about any of it.
+    advertise_scale(&outputs, scale);
+
     // The desktop shell is built against the mutable backend before
     // `WindowManager::new` takes ownership — the exact construction
     // order the X11 binary uses, for the exact same borrow reason.
-    // Every output stays at scale 1 whatever the session's UI scale is.
-    //
-    // Advertising the real scale here is the right end state and was
-    // tried: a client answers `wl_output.scale(2)` with
-    // `set_buffer_scale(2)` and renders itself properly, which is the
-    // only way a native Wayland client can ever learn this desktop is
-    // scaled. But it cannot be done by this one line, because smithay
-    // composes an output in *logical* coordinates and everything in
-    // this compositor is physical: the theme rasterizes chrome in
-    // device pixels, the ledger stores device-pixel rectangles, and the
-    // shell lays the dock out against the monitor's device size.
-    // Declaring a 3840x2160 output to be scale 2 makes its logical
-    // extent 1920x1080, and every one of those coordinates then lands
-    // outside it — the dock anchored to the right edge disappears, the
-    // wallpaper is clipped to a quarter, and the chrome collapses into
-    // the top-left. Observed exactly that way on a real 4K session.
-    //
-    // Making it work needs the logical/physical split done properly
-    // through `wm-core`, the theme and the shell, not a scale on the
-    // output with conversions bolted on at the ledger boundary. Until
-    // then native clients render at 1x and are told the scale the only
-    // other way they will hear it: the per-child environment the
-    // launcher sets.
-    // Ledger scale 1, deliberately, for the reason the paragraphs
-    // above spell out: every output this session advertises is scale 1
-    // and every rect and buffer in the ledger is physical, so a buffer
-    // declared at any other scale would be composited smaller than the
-    // rectangle it was painted for. The `ui_scale` plumbing this feeds
-    // exists for the in-progress logical/physical split; it goes live
-    // by changing this argument alongside the output scale, not before.
-    let mut backend = WaylandBackend::new(display_handle.clone(), monitors, 1);
+    let mut backend = WaylandBackend::new(display_handle.clone(), monitors);
     // The whole screen, as the shell sizes the desktop against it: the
     // union of every monitor. Where the dock and the workareas land
     // inside that union is the shell's decision, not this loop's.
@@ -1955,10 +2048,9 @@ fn restart_in_place(nested: bool) -> ! {
 /// drawn by `renderer::push_cursor_elements` with no explicit size, so
 /// smithay sizes the element at the buffer's own dimensions divided by
 /// its buffer scale (`element::memory`'s `from_buffer`), and every
-/// output in this session stays at scale 1 (neither `run`'s winit
-/// output nor `session::attach_output` ever passes a scale to
-/// `change_current_state`, and the damage tracker takes its render
-/// scale from the output). A fixed 1x arrow therefore reached the
+/// damage tracker in this session renders at scale 1 whatever the
+/// outputs advertise (see `physical_damage_tracker`), so that size
+/// reaches the screen as-is. A fixed 1x arrow therefore reached the
 /// screen at 1x pixels next to `scaled(scale)` chrome and clients'
 /// `XCURSOR_SIZE`-sized pointers — the "tiny cursor over the desktop,
 /// right-sized cursor over a window" report.

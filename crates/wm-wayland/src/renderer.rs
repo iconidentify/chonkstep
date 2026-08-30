@@ -40,6 +40,30 @@
 //! more than one screen exists. The nested backend passes a zero
 //! offset, so its single output is the case where the subtraction does
 //! nothing.
+//!
+//! # Physical pixels everywhere, whatever the outputs advertise
+//!
+//! The `wl_output`s advertise the session's UI scale so native clients
+//! render sharp (see `state.rs`'s `advertised_output_scale`), but the
+//! composition here never hears about it: every damage tracker and
+//! `DrmCompositor` in this crate is pinned to scale 1, so the scale an
+//! element's `Element::geometry(scale)` is asked at is always 1.0 and
+//! "logical" equals the device pixels this whole compositor works in.
+//! That pin is what lets the chrome — memory buffers the theme already
+//! rasterized in device pixels, placed at device-pixel positions — land
+//! 1 buffer pixel : 1 screen pixel with no conversion at all.
+//!
+//! Client surfaces are the one place a second coordinate space leaks
+//! in: smithay sizes a `WaylandSurfaceRenderElement` at the surface's
+//! *logical* extent (buffer pixels divided by the scale the client
+//! committed), times the output scale it is rendered at. Under a
+//! scale-1 tracker a 2x client's element would come out at half its
+//! buffer, so [`push_surface_tree`] wraps every client element in a
+//! [`RescaleRenderElement`] that multiplies it back up by that
+//! surface's own committed buffer scale — restoring 1 buffer pixel :
+//! 1 screen pixel per surface, which is the size the ledger recorded
+//! for it (`xdg::committed_content_size`) and the frame was drawn
+//! around.
 
 use std::sync::Mutex;
 use std::time::Duration;
@@ -49,6 +73,7 @@ use smithay::backend::renderer::element::solid::SolidColorRenderElement;
 use smithay::backend::renderer::element::surface::{
     render_elements_from_surface_tree, WaylandSurfaceRenderElement,
 };
+use smithay::backend::renderer::element::utils::RescaleRenderElement;
 use smithay::backend::renderer::element::{Id, Kind};
 use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::backend::renderer::utils::CommitCounter;
@@ -57,6 +82,7 @@ use smithay::desktop::utils::send_frames_surface_tree;
 use smithay::desktop::PopupManager;
 use smithay::input::pointer::{CursorImageAttributes, CursorImageStatus};
 use smithay::render_elements;
+use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::utils::{IsAlive, Physical, Point as SPoint, Rectangle as SRect};
 use smithay::wayland::compositor::with_states;
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -71,7 +97,7 @@ render_elements! {
     /// `Vec` can carry client surfaces, decoration/wallpaper/cursor
     /// buffers, and solid fills through one `render_output` call.
     pub SceneElement<R> where R: ImportAll + ImportMem;
-    Surface = WaylandSurfaceRenderElement<R>,
+    Surface = RescaleRenderElement<WaylandSurfaceRenderElement<R>>,
     Memory = MemoryRenderBufferRenderElement<R>,
     Solid = SolidColorRenderElement,
 }
@@ -474,21 +500,16 @@ fn push_window_content(
         content.pos.y - viewport.y - record.content_offset.y,
     ));
     // Each surface is drawn at the buffer scale it itself committed,
-    // which is not the same thing as a scale for the session. Smithay
-    // divides a surface's buffer by its own `set_buffer_scale` to reach
-    // a logical size and then multiplies by whatever is passed here, so
-    // handing back that same scale is exactly what puts one buffer
-    // pixel on one screen pixel. Passing 1.0 instead is the bug this
-    // replaced: LibreOffice, launched with `GDK_SCALE=2`, drew four
-    // times the pixels and had them shrunk straight back down, so the
-    // whole application sat at half the size of the chrome around it.
+    // which is not the same thing as a scale for the session — see
+    // `push_surface_tree` for how that lands 1 buffer pixel on 1
+    // screen pixel.
     //
     // Reading the scale from the surface rather than the desktop is
     // what leaves everything else alone. An Xwayland window, or a
-    // toolkit that trusts only `wl_output` (pinned to scale 1 here),
-    // commits a 1x buffer, reports 1, and is drawn precisely as before.
-    // A session-wide factor would instead stretch those to double size
-    // over ledger rectangles that never grew with them.
+    // toolkit that trusts only `wl_output`, commits a 1x buffer,
+    // reports 1, and is drawn precisely as before. A session-wide
+    // factor would instead stretch those to double size over ledger
+    // rectangles that never grew with them.
     //
     // Chrome is not drawn through here — frames and shell surfaces are
     // memory buffers the theme already rasterized in physical pixels,
@@ -506,23 +527,53 @@ fn push_window_content(
                 crate::xdg::logical_to_physical(offset.x, scale),
                 crate::xdg::logical_to_physical(offset.y, scale),
             ));
-        elements.extend(render_elements_from_surface_tree(
-            renderer,
-            popup_surface,
-            location,
-            crate::xdg::committed_buffer_scale(popup_surface) as f64,
-            1.0,
-            Kind::Unspecified,
-        ));
+        push_surface_tree(elements, renderer, popup_surface, location, 1.0, Kind::Unspecified);
     }
-    elements.extend(render_elements_from_surface_tree(
-        renderer,
-        &surface,
-        origin,
-        scale as f64,
-        1.0,
-        Kind::Unspecified,
-    ));
+    push_surface_tree(elements, renderer, &surface, origin, 1.0, Kind::Unspecified);
+}
+
+/// Pushes one wayland surface tree (front to back), drawn so that each
+/// of its committed buffer pixels lands on exactly one screen pixel at
+/// `location` — the only size at which the tree agrees with the
+/// physical rectangle the ledger keeps for it.
+///
+/// The multiplication has to happen here because smithay's element
+/// machinery mixes two spaces (verified against the vendored 0.7
+/// source, `element/surface.rs` and `element/memory.rs`): an element's
+/// *location* is `Point<f64, Physical>` and passes through untouched,
+/// but its *size* is the surface's logical extent — buffer pixels
+/// divided by the `wl_surface.set_buffer_scale` the client committed —
+/// multiplied at draw time by whatever scale the damage tracker passes
+/// to `Element::geometry(scale)`. Every tracker in this crate is pinned
+/// to 1.0 so the chrome's device-pixel buffers stay exact (see the
+/// module docs), which leaves a 2x client's element at half its buffer.
+/// The [`RescaleRenderElement`] wrap multiplies the element's geometry
+/// (and its subsurface offsets, which the tree walk left logical by
+/// passing 1.0 below) back up by the tree's committed buffer scale,
+/// around `location` so the tree's own anchor never moves.
+///
+/// `render_scale` is 1.0 for the on-screen scene; `capture.rs` passes
+/// its thumbnail downscale, matching the tracker it then renders with.
+///
+/// One factor for the whole tree, read from its root: the protocol
+/// permits a subsurface to commit a different scale than its parent,
+/// but the offsets between them convert by a single number either way,
+/// and no toolkit this desktop runs mixes scales within one window.
+pub(crate) fn push_surface_tree(
+    elements: &mut Vec<SceneElement<GlesRenderer>>,
+    renderer: &mut GlesRenderer,
+    surface: &WlSurface,
+    location: SPoint<i32, Physical>,
+    render_scale: f64,
+    kind: Kind,
+) {
+    let buffer_scale = crate::xdg::committed_buffer_scale(surface) as f64;
+    let tree: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
+        render_elements_from_surface_tree(renderer, surface, location, render_scale, 1.0, kind);
+    elements.extend(
+        tree.into_iter()
+            .map(|element| RescaleRenderElement::from_element(element, location, buffer_scale).into()),
+    );
 }
 
 /// Pushes the pointer's elements, picking the image by what the
@@ -607,27 +658,25 @@ fn push_cursor_elements(
                     .map(|attrs| attrs.lock().unwrap().hotspot)
                     .unwrap_or_default()
             });
-            // A client cursor is drawn 1:1, never multiplied by the UI
-            // scale. Outputs here advertise scale 1 (nothing passes a
-            // scale to `change_current_state`), so a client's cursor
-            // buffer pixels *are* screen pixels; the session tells
-            // clients how large to draw through `XCURSOR_SIZE` (24 x
-            // scale, `chonk_shell::startup::ensure_xcursor_size`),
-            // which is the channel every toolkit actually reads.
-            // Scaling here would double-size exactly the clients that
-            // already look right. A client that commits a cursor at
-            // buffer scale 2 anyway is halved by smithay — and its
-            // hotspot, being surface-local, is in those same halved
-            // units, so the two stay consistent.
-            let position = (location - hotspot.to_f64()).to_physical(1.0).to_i32_round();
-            elements.extend(render_elements_from_surface_tree(
-                renderer,
-                surface,
-                position,
-                1.0,
-                1.0,
-                Kind::Cursor,
+            // A client cursor is drawn buffer pixel : screen pixel like
+            // every other surface (`push_surface_tree`), never
+            // multiplied by the UI scale on top. The outputs advertise
+            // that scale, so a native client commits its cursor at 2x
+            // into a buffer already sized for it; an Xwayland client
+            // hears `XCURSOR_SIZE` instead (24 x scale,
+            // `chonk_shell::startup::ensure_xcursor_size`) and commits
+            // the same pixels at buffer scale 1. Both land the same
+            // size. The hotspot is surface-local — the client's own
+            // logical units — so it converts by the same committed
+            // factor as the pixels it points into, or a 2x cursor
+            // would click half its arrow's length away from its tip.
+            let cursor_scale = crate::xdg::committed_buffer_scale(surface);
+            let hotspot_physical = SPoint::<f64, Physical>::from((
+                (hotspot.x * cursor_scale) as f64,
+                (hotspot.y * cursor_scale) as f64,
             ));
+            let position = (location.to_physical(1.0) - hotspot_physical).to_i32_round();
+            push_surface_tree(elements, renderer, surface, position, 1.0, Kind::Cursor);
         }
         _ => {
             // A client that never set a cursor (or set a `Named` shape)

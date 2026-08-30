@@ -1805,7 +1805,7 @@ mod tests {
         let display = Display::<Compositor>::new().expect("a display with no socket");
         // Ledger scale 1 — the value every running session passes today
         // (see the note at `run`'s construction site).
-        WaylandBackend::new(display.handle(), Vec::new(), 1)
+        WaylandBackend::new(display.handle(), Vec::new())
     }
 
     const FRAME: WlFrameId = WlFrameId(11);

@@ -88,16 +88,16 @@ fn set_mapped_marker(surface: &WlSurface, value: bool) {
 /// How many device pixels one of this surface's own pixels is worth:
 /// the `wl_surface.set_buffer_scale` it last committed, floored at 1.
 ///
-/// There is deliberately no session-wide answer to that question. Every
-/// `wl_output` here stays at scale 1 — the long note beside
-/// `WaylandBackend::new` in `state.rs` records what happened the day one
-/// did not — so a client never hears the desktop's scale from the
-/// protocol. It hears it, if at all, from the environment the launcher
-/// puts it in (`GDK_SCALE`, `QT_SCALE_FACTOR`), and toolkits differ on
-/// whether they read those at all. A GTK application started from the
-/// dock draws into a 2x buffer; the Xwayland server beside it, and any
-/// toolkit that only trusts `wl_output`, draws into a 1x one. Asking
-/// the session would get one of those two wrong every time.
+/// There is deliberately no session-wide answer to that question. The
+/// outputs advertise the session's scale
+/// (`state.rs::advertise_scale`), but that is an invitation, not a
+/// fact about any surface: a native toolkit accepts it and commits 2x
+/// buffers, while the Xwayland server beside it ignores it and keeps
+/// committing 1x ones — and a client is free to change its answer
+/// mid-session. What a surface's pixels are actually worth is whatever
+/// that surface last committed, so that is the only number the ledger,
+/// the renderer and the hit-test may multiply by. Asking the session
+/// instead would get every 1x client wrong.
 ///
 /// The number is read from the surface's double-buffered
 /// [`SurfaceAttributes`], whose `current()` half is by construction
@@ -226,6 +226,45 @@ impl CompositorHandler for Compositor {
         // renderer, and the hit-test's subsurface walk) reads the
         // RendererSurfaceState this maintains.
         on_commit_buffer_handler::<Self>(surface);
+        // Tell the surface where it is and how to draw for it. Both
+        // are how a client hears the session's scale, and a toolkit
+        // may honor either: `wl_surface.enter` names the outputs
+        // whose advertised scale (see `state.rs`'s `advertise_scale`)
+        // the client takes its maximum from, and
+        // `preferred_buffer_scale` states the number outright for
+        // clients binding `wl_surface` v6. Without the enter a GTK
+        // client never consults the output at all and stays at 1x.
+        // Every output, not the ones the surface overlaps: a window
+        // can be dragged across a boundary between two commits, and
+        // per-output enter/leave tracking buys nothing on a desktop
+        // whose outputs all advertise one session-wide scale. Both
+        // calls dedup internally (a set in smithay's `Output`, a
+        // per-surface cache in `send_surface_state`), so a commit —
+        // the hottest path in the protocol — sends nothing after the
+        // first time. Xwayland's own surfaces are exempt from the
+        // preferred-scale half: that server is told the scale through
+        // XSETTINGS and `XCURSOR_SIZE` and must keep committing 1x
+        // buffers over the ledger's 1x rectangles, so it is the one
+        // client this compositor deliberately never invites to scale
+        // itself. (Same reasoning as the Xdg-only filter in
+        // `dispatch_pending`'s rescale drain.)
+        let advertised = crate::state::advertised_output_scale(self.ui_scale).integer_scale();
+        for entry in &self.outputs {
+            entry.output.enter(surface);
+        }
+        let xwayland = surface
+            .client()
+            .is_some_and(|client| client.get_data::<XWaylandClientData>().is_some());
+        if !xwayland {
+            with_states(surface, |states| {
+                smithay::wayland::compositor::send_surface_state(
+                    surface,
+                    states,
+                    advertised,
+                    smithay::utils::Transform::Normal,
+                );
+            });
+        }
         self.popups.commit(surface);
 
         // Role logic runs against the tree's root: a subsurface commit

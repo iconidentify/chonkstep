@@ -79,7 +79,7 @@ use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::backend::session::libseat::LibSeatSession;
 use smithay::backend::session::{Event as SessionEvent, Session};
 use smithay::backend::udev::{all_gpus, primary_gpu, UdevBackend, UdevEvent};
-use smithay::output::{Mode as OutputMode, Output, PhysicalProperties};
+use smithay::output::{Mode as OutputMode, Output, OutputModeSource, PhysicalProperties};
 use smithay::reexports::calloop::LoopHandle;
 use smithay::reexports::drm::control::{
     connector, crtc, plane, Device as ControlDevice, Mode as DrmMode, ModeTypeFlags, PlaneType,
@@ -792,12 +792,22 @@ fn attach_output(
     // scan-out of *client* buffers, which cannot happen here (see
     // [`FRAME_FLAGS`]).
     let framebuffer_exporter = GbmFramebufferExporter::new(gbm.clone(), None);
-    // The output is handed over as the mode source, so the compositor
-    // re-reads size, scale and transform from it rather than caching
-    // them — and, crucially for multi-output, it takes only those: the
-    // output's *position* never enters the frame, so every element
-    // reaching `render_frame` must already be in this output's own
-    // space (which is what the renderer's viewport offset does).
+    // A *static* mode source, deliberately not the `Output`: the
+    // output advertises the session's UI scale to clients
+    // (`state.rs`'s `advertise_scale`), and an auto-tracking source
+    // would feed that scale into the `DrmCompositor`'s damage tracker,
+    // which multiplies every element's logical size by it while
+    // leaving its physical position alone — the doubled-chrome failure
+    // `state.rs::physical_damage_tracker` recounts, on the session
+    // backend this time. This compositor composes in physical pixels,
+    // so its render pipeline is pinned to the mode's pixel size at
+    // scale 1, matching the winit backend's pinned trackers. Static is
+    // safe here because this backend never changes a mode after setup
+    // (connector hotplug is scoped out — see the module docs); the day
+    // it does, `DrmCompositor::set_output_mode_source` is the lever.
+    // The output's *position* never enters the frame either way: every
+    // element reaching `render_frame` must already be in this output's
+    // own space (which is what the renderer's viewport offset does).
     // Which planes this crtc actually offers. Logged because a
     // missing cursor plane is invisible otherwise: the frame just
     // quietly composites the pointer, and the only clue is a trace
@@ -843,7 +853,11 @@ fn attach_output(
     );
 
     let drm_compositor = SessionDrmCompositor::new(
-        &output,
+        OutputModeSource::Static {
+            size: wl_mode.size,
+            scale: smithay::utils::Scale::from(1.0),
+            transform: Transform::Normal,
+        },
         surface,
         // Explicit planes: Smithay's own discovery, with any cursor
         // plane it wrongly dropped put back (see

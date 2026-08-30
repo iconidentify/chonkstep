@@ -66,7 +66,6 @@ use std::time::{Duration, Instant};
 
 use smithay::backend::allocator::Fourcc;
 use smithay::backend::renderer::damage::OutputDamageTracker;
-use smithay::backend::renderer::element::surface::render_elements_from_surface_tree;
 use smithay::backend::renderer::element::Kind;
 use smithay::backend::renderer::gles::{GlesRenderer, GlesTexture};
 use smithay::backend::renderer::{Bind, Color32F, ExportMem, Offscreen};
@@ -269,13 +268,17 @@ fn snapshot_window(
     let (size, scale) = snapshot_target(source, MAX_SNAPSHOT_EDGE)?;
     // The scene's own constructor, at capture scale: the GPU does the
     // downscale as part of drawing, so there is exactly one code path
-    // that turns a wayland surface into pixels.
-    let elements: Vec<SceneElement<GlesRenderer>> = render_elements_from_surface_tree(
+    // that turns a wayland surface into pixels — including the
+    // per-surface buffer-scale correction, which is what keeps a 2x
+    // client's thumbnail filling the content-rect-shaped target
+    // instead of its top-left quarter.
+    let mut elements: Vec<SceneElement<GlesRenderer>> = Vec::new();
+    crate::renderer::push_surface_tree(
+        &mut elements,
         renderer,
         surface,
         SPoint::<i32, Physical>::from((0, 0)),
         scale,
-        1.0,
         Kind::Unspecified,
     );
     if elements.is_empty() {
