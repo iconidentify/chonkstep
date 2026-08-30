@@ -4,9 +4,10 @@
 # smoke test that boots the release binary as the window manager of a
 # headless Xvfb display and asserts, from the outside with xprop, that
 # it actually took over the display (EWMH's _NET_SUPPORTING_WM_CHECK
-# handshake) and actually manages a real client (an xterm appearing in
-# _NET_CLIENT_LIST). The smoke test exists because everything the unit
-# suite cannot see - connection setup, substructure-redirect ownership,
+# handshake), actually manages real clients (they appear in
+# _NET_CLIENT_LIST), and frames exactly the ones that asked to be
+# framed. The smoke test exists because everything the unit suite
+# cannot see - connection setup, substructure-redirect ownership,
 # reparenting, property publishing - is exactly what breaks against a
 # real X server.
 name: ci
@@ -32,57 +33,249 @@ jobs:
         run: cargo test --workspace --exclude wm-wayland --exclude chonkstep-wayland
 
       - name: Install X11 smoke test dependencies
+        # libx11-dev is here for the undecorated-client probe built in
+        # the next step, and only for that; see its comment for why a
+        # compiled client rather than a shell one-liner.
         run: |
           sudo apt-get update
-          sudo apt-get install -y xvfb xterm x11-utils
+          sudo apt-get install -y xvfb xterm x11-utils libx11-dev
 
       - name: Build release binaries
         run: cargo build --release -p chonkstep
 
+      # A client that asks not to be decorated, for the framing
+      # assertions in the smoke test below. `xprop -f _MOTIF_WM_HINTS
+      # 32c -set _MOTIF_WM_HINTS "0x2, 0, 0, 0, 0"` is the obvious way
+      # to conjure one without a compiler, and it is subtly the wrong
+      # one: xprop derives a property's *type* from its format letter
+      # and has no syntax for naming one, so it writes those five words
+      # typed CARDINAL, while Motif, GTK, Qt, Chromium and Electron all
+      # write them typed with the _MOTIF_WM_HINTS atom itself. The
+      # reader in wm-x11 deliberately asks for AnyPropertyType and so
+      # would accept either — but that is the point. A probe that
+      # writes a type no real application writes turns this job into
+      # evidence about xprop rather than evidence about Edge and
+      # LibreOffice, and it would keep passing through a future change
+      # that narrowed the read back to a typed GetProperty, which is
+      # precisely the regression worth catching.
+      #
+      # Setting the hints before the first map is the other half of the
+      # argument: the property written onto an already-mapped, already-
+      # framed window exercises the ChromeChanged re-read path, which
+      # is a different code path with an unmap/remap race in front of
+      # it. Testing the common case — an application that was born
+      # saying "I draw my own titlebar" — wants a client that says so
+      # before its first map request, which no external tool can do.
+      - name: Build the undecorated-client probe
+        run: |
+          set -eux
+          cat > undecorated-probe.c <<'EOF'
+          #include <X11/Xlib.h>
+          #include <X11/Xutil.h>
+          #include <stdio.h>
+
+          int main(void) {
+              Display *d = XOpenDisplay(NULL);
+              if (!d) { fprintf(stderr, "undecorated-probe: cannot open display\n"); return 1; }
+
+              int s = DefaultScreen(d);
+              Window w = XCreateSimpleWindow(d, RootWindow(d, s), 0, 0, 320, 200, 0,
+                                             BlackPixel(d, s), WhitePixel(d, s));
+
+              /* flags = MWM_HINTS_DECORATIONS (1 << 1), decorations = 0:
+               * "I have drawn my own chrome, do not frame me." Typed with
+               * the _MOTIF_WM_HINTS atom itself, as real clients do. */
+              Atom motif = XInternAtom(d, "_MOTIF_WM_HINTS", False);
+              long hints[5] = { 2, 0, 0, 0, 0 };
+              XChangeProperty(d, w, motif, motif, 32, PropModeReplace,
+                              (unsigned char *) hints, 5);
+
+              /* WM_CLASS is how the smoke test picks this window out of
+               * _NET_CLIENT_LIST without guessing at window ids. */
+              XClassHint class_hint = { (char *) "undecorated-probe", (char *) "UndecoratedProbe" };
+              XSetClassHint(d, w, &class_hint);
+              XStoreName(d, w, "undecorated-probe");
+
+              XMapWindow(d, w);
+              XFlush(d);
+              printf("undecorated-probe: mapped window 0x%lx\n", w);
+              fflush(stdout);
+
+              /* Stay alive and connected until the job kills us; a client
+               * that exits takes its window with it. */
+              for (;;) { XEvent e; XNextEvent(d, &e); }
+          }
+          EOF
+          cc -o undecorated-probe undecorated-probe.c -lX11
+
       - name: X11 smoke test
+        # What this job can and cannot claim about XWayland. The rule
+        # being asserted here — a client that sets _MOTIF_WM_HINTS with
+        # the decorations bit clear is managed but never framed — lives
+        # in wm-core, above both backends, and an XWayland client
+        # reaches it through the same shared policy (its backend asks
+        # smithay, which reads the same five words off the same
+        # property). So this job genuinely covers the *policy* for
+        # XWayland clients. It does not cover the XWayland *plumbing*:
+        # the compositor's own surface handling, its frame geometry, or
+        # its property routing are not exercised by anything here, and
+        # cannot be — see the wayland job's comment for why a headless
+        # runner cannot boot a compositor at all.
         run: |
           set -eux
 
-          # A headless X server; :99 avoids any display the runner
-          # might already have.
-          Xvfb :99 -screen 0 1280x800x24 &
-          XVFB_PID=$!
-          sleep 2
+          # Everything below polls rather than sleeps: a fixed sleep is
+          # either longer than the runner needs or shorter than it needs
+          # on a bad day, and the second kind of wrong is a flaky job.
 
-          # The WM under test. Logs are captured so an assertion
-          # failure below can show what the WM itself saw.
-          DISPLAY=:99 RUST_LOG=info ./target/release/chonkstep > chonkstep.log 2>&1 &
-          WM_PID=$!
-          sleep 3
+          # await <seconds> <command...> — run the command until it
+          # succeeds or the budget expires. Tracing is off inside the
+          # loop because a quarter-second poll under `set -x` buries the
+          # rest of the log in noise.
+          await() {
+            local deadline=$((SECONDS + $1)); shift
+            local rc=1
+            { set +x; } 2>/dev/null
+            while :; do
+              if "$@" >/dev/null 2>&1; then rc=0; break; fi
+              [ "$SECONDS" -lt "$deadline" ] || break
+              sleep 0.25
+            done
+            set -x
+            return "$rc"
+          }
 
-          # A real client for the WM to manage.
-          DISPLAY=:99 xterm &
-          XTERM_PID=$!
-          sleep 3
+          # _NET_CLIENT_LIST comes back from xprop as
+          #   _NET_CLIENT_LIST(WINDOW): window id # 0x400003, 0x600003
+          # so drop everything through the '#' and split on commas.
+          client_ids() {
+            xprop -display :99 -root _NET_CLIENT_LIST 2>/dev/null \
+              | sed -n 's/.*#//p' | tr ',' '\n' | tr -d ' ' | grep '^0x' || true
+          }
+
+          client_ids_nonempty() { [ -n "$(client_ids)" ]; }
+
+          # The client window carrying WM_CLASS $1, searched only within
+          # _NET_CLIENT_LIST — so a hit is itself proof the window is
+          # managed rather than merely alive. It has to be the client
+          # window and not the frame: EWMH puts _NET_FRAME_EXTENTS on
+          # the client, which is also what _NET_CLIENT_LIST holds.
+          client_by_class() {
+            local id
+            for id in $(client_ids); do
+              if xprop -display :99 -id "$id" WM_CLASS 2>/dev/null | grep -q "\"$1\""; then
+                echo "$id"; return 0
+              fi
+            done
+            return 1
+          }
+
+          # left,right,top,bottom with the spaces squeezed out, or
+          # nothing at all when the property is absent — xprop prints
+          # "_NET_FRAME_EXTENTS:  not found." then, which has no '='.
+          frame_extents() {
+            xprop -display :99 -id "$1" _NET_FRAME_EXTENTS 2>/dev/null \
+              | sed -n 's/^_NET_FRAME_EXTENTS[^=]*= *//p' | tr -d ' '
+          }
+
+          # A framed window has a titlebar, so its top edge is the one
+          # that must be non-zero; left/right/bottom are theme border
+          # widths and a theme is entitled to make them 0.
+          framed() {
+            local top; top=$(frame_extents "$1" | cut -d, -f3)
+            [ -n "$top" ] && [ "$top" -gt 0 ] 2>/dev/null
+          }
+
+          # Not "no property": EWMH wants the WM to publish all-zero
+          # extents for a window it does not frame, and the difference
+          # between that and silence is the difference between a
+          # deliberate policy and a code path that never ran.
+          unframed() { [ "$(frame_extents "$1")" = "0,0,0,0" ]; }
 
           fail() {
             echo "FAIL: $1"
             echo "--- chonkstep log ---"
             cat chonkstep.log || true
+            echo "--- undecorated-probe log ---"
+            cat probe.log || true
+            echo "--- Xvfb log ---"
+            cat xvfb.log || true
             echo "--- root window properties ---"
             xprop -display :99 -root || true
+            echo "--- managed clients ---"
+            for id in $(client_ids); do
+              xprop -display :99 -id "$id" WM_CLASS WM_NAME _MOTIF_WM_HINTS _NET_FRAME_EXTENTS || true
+            done
             exit 1
           }
+
+          # A headless X server; :99 avoids any display the runner
+          # might already have. Its own output is captured rather than
+          # left on the job's stderr because the polling below opens a
+          # connection per attempt and Xvfb greets each one with the
+          # same block of xkbcomp warnings.
+          Xvfb :99 -screen 0 1280x800x24 > xvfb.log 2>&1 &
+          XVFB_PID=$!
+          await 15 xprop -display :99 -root \
+            || fail "Xvfb never accepted a connection on :99"
+
+          # The WM under test. Logs are captured so an assertion
+          # failure below can show what the WM itself saw.
+          DISPLAY=:99 RUST_LOG=info ./target/release/chonkstep > chonkstep.log 2>&1 &
+          WM_PID=$!
 
           # EWMH handshake: a compliant WM publishes a window id in
           # _NET_SUPPORTING_WM_CHECK on the root. Its absence means
           # chonkstep never became the WM (or died on startup).
-          xprop -display :99 -root _NET_SUPPORTING_WM_CHECK | grep -q "0x" \
+          wm_took_over() { xprop -display :99 -root _NET_SUPPORTING_WM_CHECK | grep -q "0x"; }
+          await 20 wm_took_over \
             || fail "_NET_SUPPORTING_WM_CHECK missing on the root window"
 
-          # Client management: the xterm must have been adopted into
-          # _NET_CLIENT_LIST. An empty or missing list means map
-          # requests are not being handled.
-          xprop -display :99 -root _NET_CLIENT_LIST | grep -q "0x" \
-            || fail "_NET_CLIENT_LIST is empty or missing"
+          # EWMH is explicit that a client must treat an atom missing
+          # from _NET_SUPPORTED as unsupported, so publishing frame
+          # extents without advertising them is publishing them to
+          # nobody: a client computing its own geometry from the frame
+          # has no reason to look.
+          xprop -display :99 -root _NET_SUPPORTED | grep -qw _NET_FRAME_EXTENTS \
+            || fail "_NET_FRAME_EXTENTS is not advertised in _NET_SUPPORTED"
 
-          echo "smoke test passed: WM handshake present, client managed"
-          kill "$XTERM_PID" "$WM_PID" "$XVFB_PID" || true
+          # Two real clients: one that expresses no preference and must
+          # therefore be framed, one that asked not to be.
+          DISPLAY=:99 xterm &
+          XTERM_PID=$!
+          DISPLAY=:99 ./undecorated-probe > probe.log 2>&1 &
+          PROBE_PID=$!
+
+          # Client management, the coarse version first: an empty or
+          # missing list means map requests are not being handled at
+          # all, which is worth distinguishing from either individual
+          # client failing to arrive.
+          await 30 client_ids_nonempty || fail "_NET_CLIENT_LIST is empty or missing"
+
+          await 30 client_by_class xterm \
+            || fail "the xterm never appeared in _NET_CLIENT_LIST"
+          XTERM_WIN=$(client_by_class xterm)
+
+          # The probe being in _NET_CLIENT_LIST is half the assertion:
+          # "do not decorate this window" must not be read as "ignore
+          # this window". It has to be focusable, movable, stackable
+          # and on a workspace like anything else — being in the list
+          # is the outside-visible proof that it is managed.
+          await 30 client_by_class UndecoratedProbe \
+            || fail "the undecorated probe never appeared in _NET_CLIENT_LIST — it was ignored, not merely left unframed"
+          PROBE_WIN=$(client_by_class UndecoratedProbe)
+
+          # Extents are published once the frame exists, which is a
+          # round trip or two after the window joins the client list.
+          await 15 framed "$XTERM_WIN" \
+            || fail "the xterm ($XTERM_WIN) is not framed: _NET_FRAME_EXTENTS is '$(frame_extents "$XTERM_WIN")', wanted a non-zero top edge"
+
+          # The two-titlebar bug, stated as an assertion.
+          await 15 unframed "$PROBE_WIN" \
+            || fail "the undecorated probe ($PROBE_WIN) was framed anyway: _NET_FRAME_EXTENTS is '$(frame_extents "$PROBE_WIN")', wanted 0,0,0,0"
+
+          echo "smoke test passed: WM handshake present, both clients managed, framing follows _MOTIF_WM_HINTS"
+          kill "$PROBE_PID" "$XTERM_PID" "$WM_PID" "$XVFB_PID" || true
 
   # The Wayland half of the dual architecture. There is no Xvfb
   # equivalent to smoke-test a compositor on a headless runner (the
@@ -224,11 +417,18 @@ jobs:
       # list — the choice made out loud is that a crate carved out of a
       # clean one starts clean and stays that way. `chonk-dock-proto`
       # is not here yet.
+      #
+      # `chonk-xsettings` was added the day it was written, which is the
+      # choice this list exists to make out loud: it arrived clean under
+      # `-D warnings` and under `#![deny(missing_docs)]`, and a crate
+      # that publishes a binary wire format to every X client on the
+      # session is not one to let drift.
       - name: Deny clippy warnings on the crates that are clean
         run: |
           cargo clippy --all-targets --no-deps \
             -p chonk-about \
             -p chonk-dock-widget \
+            -p chonk-xsettings \
             -p chonk-instruments \
             -p chonk-shell \
             -p chonk-ui \

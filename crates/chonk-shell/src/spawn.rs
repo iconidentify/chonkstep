@@ -291,15 +291,145 @@ pub fn chromium_avoid_secrets_service_hang_args() -> Vec<String> {
     vec!["--password-store=basic".to_string()]
 }
 
-/// Pins a Chromium-family browser to the X11 ozone backend. Omarchy is
+/// Which of the two display stacks this desktop is running as: the X11
+/// window manager (the `chonkstep` binary over `wm-x11`) or the Wayland
+/// compositor (`chonkstep-wayland` over `wm-wayland`).
+///
+/// Deliberately a different question from `CHONKSTEP_BACKEND`, which the
+/// compositor reads to pick between its DRM and winit halves. That one
+/// is about what the compositor renders *through*; this one is about
+/// which protocol the applications it launches should speak, and the
+/// two have no bearing on each other - a nested winit session is every
+/// bit as much a Wayland session to its clients as a DRM one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DisplayStack {
+    /// An X11 session: chonkstep is the window manager of an Xorg
+    /// server somebody else started.
+    X11,
+    /// A Wayland session: chonkstep *is* the display server, and the
+    /// apps it launches are its own clients.
+    Wayland,
+}
+
+/// The file name of the compositor binary, and so the whole of the
+/// evidence [`resolve_display_stack`] treats as positive proof of a
+/// Wayland session. `crates/chonkstep-wayland` is the only binary in
+/// the workspace that reaches `Shell` through `wm-wayland`, and
+/// `scripts/wayland-session.sh` and `scripts/install.sh` both point a
+/// real login session straight at `target/release/chonkstep-wayland`.
+const WAYLAND_SESSION_IMAGE: &str = "chonkstep-wayland";
+
+/// The stack this process is the desktop of.
+///
+/// The shell is generic over `Backend` and, by design, never learns
+/// which one it was handed - that ignorance is what keeps the desktop
+/// identical on both stacks. But *something* has to know here, because
+/// a Chromium-family browser has to be told at launch which display
+/// protocol to speak, and getting it wrong in the X11 direction means a
+/// browser that never appears at all. So the answer is worked out once,
+/// here, from the two facts a running process can be sure of.
+///
+/// The first and decisive one is the identity of the image actually
+/// executing: `current_exe` resolves `/proc/self/exe`, which is the
+/// kernel's own answer about which file this process is running, and
+/// nothing inherited from a parent can forge it. The shell already
+/// trusts it for the same class of question in `shell.rs`'s
+/// `about_binary_path`.
+///
+/// The tempting alternative - "is `WAYLAND_DISPLAY` set?" - cannot
+/// answer this on its own, and it is worth writing down why, because it
+/// looks like it should. The compositor does export it (`wm-wayland`
+/// sets it to its own socket before `Shell::new` runs, so that the apps
+/// the shell launches find the session), and `scripts/wayland-session.sh`
+/// clears both display variables at login precisely so that this kind of
+/// deduction is made from the truth. But the *X11* session is not
+/// always so clean: `scripts/dev-nested.sh` runs the X11 binary inside a
+/// Xephyr window on the developer's ordinary Wayland desktop, where it
+/// inherits that host's `WAYLAND_DISPLAY` alongside the Xephyr
+/// `DISPLAY`. Both variables are set in both sessions there (the
+/// compositor exports `DISPLAY` too, once XWayland is up), so no
+/// combination of them separates the stacks - and a browser told to use
+/// the Wayland platform in that session would connect to the *host*
+/// compositor and map its window on the host's desktop, outside the
+/// session that launched it.
+///
+/// `WAYLAND_DISPLAY` keeps a narrower job: a veto. The Wayland platform
+/// is only ever selected when there is a socket in the environment for
+/// the child to connect to, so the failure this whole area exists
+/// because of - "Failed to connect to Wayland display", then no window -
+/// stays impossible by construction rather than by argument.
+pub fn current_display_stack() -> DisplayStack {
+    let image = std::env::current_exe().ok();
+    let image_name = image.as_deref().and_then(|path| path.file_name()).and_then(|name| name.to_str());
+    resolve_display_stack(image_name, std::env::var("WAYLAND_DISPLAY").ok().as_deref())
+}
+
+/// Pure core of [`current_display_stack`], split out for the reason
+/// every resolver in [`crate::startup`] is: the rule is the interesting
+/// part, and a rule that can only be exercised by rewriting the process
+/// environment is a rule the tests cannot safely reach.
+///
+/// Anything unrecognized answers `X11`. That is not a coin toss - it is
+/// the answer that shipped unconditionally on both stacks until this
+/// function existed, and it is the survivable one: an X11 browser under
+/// the compositor is a browser with the wrong scaling and a doubled
+/// titlebar, while a Wayland browser under an X session is no browser.
+pub fn resolve_display_stack(image_name: Option<&str>, wayland_display: Option<&str>) -> DisplayStack {
+    let compositor = image_name == Some(WAYLAND_SESSION_IMAGE);
+    let socket_to_connect_to = wayland_display.is_some_and(|name| !name.is_empty());
+    if compositor && socket_to_connect_to {
+        DisplayStack::Wayland
+    } else {
+        DisplayStack::X11
+    }
+}
+
+/// Pins a Chromium-family browser to the ozone platform of the stack it
+/// is being launched from.
+///
+/// The X11 half is the older and the more urgent one. Omarchy is
 /// Wayland-first, and its Chromium configuration selects the Wayland
-/// platform - which does not exist inside this X11 session, so the
-/// browser prints "Failed to connect to Wayland display" and exits
-/// without ever mapping a window (confirmed live from the Applications
-/// menu). Chromium honors the *last* occurrence of a switch, and these
-/// launcher args are appended after any flags file, so this wins.
-pub fn chromium_x11_platform_args() -> Vec<String> {
-    vec!["--ozone-platform=x11".to_string()]
+/// platform (`~/.config/chromium-flags.conf` on this machine still opens
+/// with `--ozone-platform=wayland`) - which does not exist inside an X11
+/// session, so the browser printed "Failed to connect to Wayland
+/// display" and exited without ever mapping a window (confirmed live
+/// from the Applications menu). Chromium honors the *last* occurrence of
+/// a switch, and these launcher args are appended after any flags file -
+/// the `microsoft-edge-stable` wrapper script execs the browser with the
+/// config file's flags first and `"$@"` after - so this wins.
+///
+/// It used to be sent on both stacks, because it was written when there
+/// was only one. Under the compositor that quietly turned every
+/// Chromium-family browser into an XWayland client for no reason: it
+/// gave up the native Wayland scaling path, took its input through
+/// XWayland's translation rather than the compositor's own seat, and -
+/// because this desktop imposes server-side decorations - drew its own
+/// titlebar directly underneath the one the window manager draws. The
+/// browser should be a first-class client of whichever session it was
+/// launched from, the same argument the terminal comment in `shell.rs`
+/// makes for foot over urxvt.
+///
+/// Nothing is sent alongside the platform switch to make the server-side
+/// decorations stick, and that is a decision rather than an oversight.
+/// The compositor does not *ask* clients to accept them: `wm-wayland`'s
+/// `XdgDecorationHandler` answers `ServerSide` to every request and
+/// every unset, and a toplevel that never binds
+/// `zxdg_decoration_manager_v1` at all is configured `ServerSide` from
+/// its first configure anyway, so the protocol side needs no help from a
+/// command line. The only switch that could plausibly be added here is
+/// an `--enable-features=` entry, and that is exactly the switch that
+/// must not be appended blindly: last-occurrence-wins applies to a
+/// switch's entire value, so ours would not extend the user's
+/// `--enable-features=TouchpadOverscrollHistoryNavigation` line but
+/// replace it. Trading away a setting the user really has, for a feature
+/// name whose spelling and default have moved between Chromium
+/// versions, is the wrong side of the rule that a wrong flag which stops
+/// a browser launching costs far more than a missing nicety.
+pub fn chromium_platform_args(stack: DisplayStack) -> Vec<String> {
+    match stack {
+        DisplayStack::Wayland => vec!["--ozone-platform=wayland".to_string()],
+        DisplayStack::X11 => vec!["--ozone-platform=x11".to_string()],
+    }
 }
 
 /// Environment variables that make GTK/Qt-based UI — including the
@@ -409,5 +539,46 @@ mod tests {
     fn chromium_flag_carries_the_exact_scale() {
         let args = chromium_scale_args(2.25);
         assert_eq!(args, vec!["--force-device-scale-factor=2.25".to_string()]);
+    }
+
+    #[test]
+    fn the_compositors_own_image_launches_browsers_as_native_wayland_clients() {
+        // The whole point of the change: under `chonkstep-wayland` a
+        // browser is a first-class client of the session, not an
+        // XWayland guest wearing two titlebars.
+        assert_eq!(resolve_display_stack(Some("chonkstep-wayland"), Some("wayland-1")), DisplayStack::Wayland);
+        assert_eq!(chromium_platform_args(DisplayStack::Wayland), vec!["--ozone-platform=wayland".to_string()]);
+    }
+
+    #[test]
+    fn the_x11_window_manager_still_pins_x11_even_from_inside_a_wayland_desktop() {
+        // The load-bearing branch, and the reason the decision is not a
+        // bare `WAYLAND_DISPLAY` check: `scripts/dev-nested.sh` runs the
+        // X11 binary in a Xephyr window on a Wayland host, so the host's
+        // socket is right there in the environment. Choosing Wayland on
+        // that evidence would put the browser on the host's desktop; in
+        // a real X session it would produce no browser at all.
+        assert_eq!(resolve_display_stack(Some("chonkstep"), Some("wayland-1")), DisplayStack::X11);
+        assert_eq!(resolve_display_stack(Some("chonkstep"), None), DisplayStack::X11);
+        assert_eq!(chromium_platform_args(DisplayStack::X11), vec!["--ozone-platform=x11".to_string()]);
+    }
+
+    #[test]
+    fn a_compositor_with_no_socket_in_its_environment_declines_to_send_a_browser_at_one() {
+        // The veto half. This should be unreachable - the compositor
+        // exports its socket before the shell can launch anything - and
+        // it is asserted anyway because the failure it guards against is
+        // the silent one: a browser that connects to nothing and exits.
+        assert_eq!(resolve_display_stack(Some("chonkstep-wayland"), None), DisplayStack::X11);
+        assert_eq!(resolve_display_stack(Some("chonkstep-wayland"), Some("")), DisplayStack::X11);
+    }
+
+    #[test]
+    fn an_unrecognized_image_gets_the_answer_that_used_to_ship_unconditionally() {
+        // A test binary, a renamed build, some future embedder: none of
+        // them are proof of a Wayland session, and the safe default is
+        // the flag both stacks have been running with all along.
+        assert_eq!(resolve_display_stack(None, Some("wayland-1")), DisplayStack::X11);
+        assert_eq!(resolve_display_stack(Some("spawn-8f3c1d2e"), Some("wayland-1")), DisplayStack::X11);
     }
 }

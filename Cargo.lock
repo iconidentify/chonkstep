@@ -324,10 +324,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "chonk-xsettings"
+version = "0.1.0"
+dependencies = [
+ "thiserror 2.0.20",
+ "tracing",
+ "x11rb",
+]
+
+[[package]]
 name = "chonkstep"
 version = "0.1.0"
 dependencies = [
  "chonk-shell",
+ "chonk-xsettings",
  "libc",
  "tracing",
  "tracing-subscriber",
@@ -2794,6 +2804,7 @@ name = "wm-wayland"
 version = "0.1.0"
 dependencies = [
  "chonk-shell",
+ "chonk-xsettings",
  "smithay",
  "tiny-skia",
  "tracing",

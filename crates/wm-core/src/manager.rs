@@ -10,7 +10,7 @@ use crate::hittest::{hit_test, HitTarget};
 use crate::placement::{self, PlacementPolicy};
 use crate::resize;
 use crate::snap;
-use crate::types::{BackendEvent, KeyCombo, MouseButton, Modifiers, NetState, NetStateAction, SurfaceRef, WindowType};
+use crate::types::{BackendEvent, ClientChrome, KeyCombo, MouseButton, Modifiers, NetState, NetStateAction, SurfaceRef, WindowType};
 
 /// How close together (in ms) two presses on the same titlebar must land
 /// to count as a double-click (toggling maximize). Not backed by an
@@ -42,13 +42,19 @@ const XK_ALT_R: u32 = 0xffea;
 /// backend mid-teardown ever reach it.
 const NO_MONITOR_FALLBACK: Rect = Rect { pos: Point::new(0, 0), size: Size::new(800, 600) };
 
-/// An in-progress titlebar-drag move. `grab_offset` is the frame-local
-/// point that was clicked — since that's constant relative to the frame
-/// regardless of where the frame currently sits, the new frame position
-/// is simply `pointer_root - grab_offset` on every motion event.
-struct ActiveMove<B: Backend> {
+/// An in-progress move. `grab_offset` is the frame-local point that was
+/// grabbed — since that's constant relative to the frame regardless of
+/// where the frame currently sits, the new frame position is simply
+/// `pointer_root - grab_offset` on every motion event.
+///
+/// Deliberately does not name a frame. A move can be started by
+/// dragging our titlebar, and it can equally be started by the client
+/// asking for one (`BackendEvent::MoveRequest`) — and a client that
+/// asks is usually one that drew its own titlebar and therefore has no
+/// frame at all. Which surface actually gets moved is resolved per
+/// motion event from the client, so both kinds drag through one path.
+struct ActiveMove {
     client: ClientId,
-    frame: B::FrameId,
     grab_offset: Point,
 }
 
@@ -129,7 +135,7 @@ pub struct WindowManager<B: Backend> {
     window_index: HashMap<B::WindowId, ClientId>,
     frame_index: HashMap<B::FrameId, ClientId>,
     focused: Option<ClientId>,
-    active_move: Option<ActiveMove<B>>,
+    active_move: Option<ActiveMove>,
     active_resize: Option<ActiveResize>,
     active_button_press: Option<ActiveButtonPress>,
     /// The most recent press on a titlebar drag region, for double-click
@@ -492,18 +498,20 @@ impl<B: Backend> WindowManager<B> {
             if client.lifecycle != Lifecycle::Normal {
                 continue;
             }
-            let Some(frame) = client.frame else {
-                continue;
-            };
+            // No `frame` guard: a client that draws its own chrome has
+            // none and must still follow its workspace on and off the
+            // screen.
             if client.workspace == workspace {
-                self.backend.map_frame(frame);
+                self.show_client_surface(id);
                 // Same reasoning as `deminiaturize`: a remapped frame
                 // isn't guaranteed to still hold its old pixel content
                 // (no backing-store requested), so repaint explicitly
                 // rather than hope an `Expose` arrives and gets replayed.
+                // A no-op for a frameless window, which has no
+                // decoration of ours to repaint.
                 self.repaint_decoration(id);
             } else {
-                self.backend.unmap_frame(frame);
+                self.hide_client_surface(id);
             }
         }
 
@@ -538,15 +546,12 @@ impl<B: Backend> WindowManager<B> {
         }
         client.workspace = workspace;
         let window = client.window;
-        let frame = client.frame;
         // A move is precisely when a window's `_NET_WM_DESKTOP`
         // changes — pagers track membership from this property, not by
         // guessing from map/unmap traffic.
         self.backend.publish_window_desktop(window, workspace);
         if workspace != self.current_workspace {
-            if let Some(frame) = frame {
-                self.backend.unmap_frame(frame);
-            }
+            self.hide_client_surface(id);
             if self.focused == Some(id) {
                 if let Some(c) = self.clients.get_mut(id) {
                     c.flags.remove(ClientFlags::FOCUSED);
@@ -623,6 +628,8 @@ impl<B: Backend> WindowManager<B> {
                 }
             }
             BackendEvent::TitleChanged(window) => self.handle_title_changed(window),
+            BackendEvent::ChromeChanged(window) => self.handle_chrome_changed(window),
+            BackendEvent::MoveRequest(window) => self.handle_move_request(window),
             BackendEvent::KeyPress(combo) => self.handle_key_press(combo),
             BackendEvent::KeyRelease(combo) => self.handle_key_release(combo),
             BackendEvent::PointerEnter { surface } => self.handle_pointer_enter(surface),
@@ -683,16 +690,34 @@ impl<B: Backend> WindowManager<B> {
             WindowType::Normal => {}
         }
 
+        // The second half of the decoration question, and the one this
+        // window manager never used to ask: `WindowType` said what kind
+        // of window this is, but not whether its client has already
+        // drawn a titlebar. Asking both is what stops Edge, LibreOffice
+        // and every other client-decorated application from wearing two.
+        let chrome = if self.backend.client_draws_own_chrome(window) {
+            ClientChrome::ClientDrawn
+        } else {
+            ClientChrome::ServerDrawn
+        };
+
         let title = self.backend.window_title(window).unwrap_or_default();
         let content = self.backend.window_geometry(window);
         tracing::debug!(?window, ?content, "map request — client's own geometry at map time");
         let mut client = Client::new(window, title);
+        client.chrome = chrome;
         client.class = self.backend.window_class(window).map(|c| c.class).unwrap_or_default();
         client.geometry = content;
         client.workspace = self.current_workspace;
 
         let request = Self::decoration_request(&client, None);
-        let layout = self.theme.layout(&request);
+        // A client-decorated window is laid out as though the frame were
+        // exactly its content, so every placement and geometry
+        // calculation below reads the same for both kinds.
+        let layout = match chrome {
+            ClientChrome::ServerDrawn => self.theme.layout(&request),
+            ClientChrome::ClientDrawn => frameless_layout(content.size),
+        };
         // Place the FRAME at the client's own requested position rather
         // than deriving it by subtracting the chrome offset from it.
         // Most apps request (0, 0) as a "don't care, WM decides"
@@ -735,18 +760,36 @@ impl<B: Backend> WindowManager<B> {
             frame_geom.pos.y + layout.client_offset.y,
         );
 
-        let frame = self.backend.create_decoration(window, &layout);
-        self.backend.set_frame_geometry(frame, frame_geom);
-        let buffer = self.theme.render(&request, &layout);
-        self.backend.paint_decoration(frame, &buffer);
-        self.backend.map_frame(frame);
+        let frame = match chrome {
+            ClientChrome::ServerDrawn => {
+                let frame = self.backend.create_decoration(window, &layout);
+                self.backend.set_frame_geometry(frame, frame_geom);
+                let buffer = self.theme.render(&request, &layout);
+                self.backend.paint_decoration(frame, &buffer);
+                self.backend.map_frame(frame);
+                Some(frame)
+            }
+            ClientChrome::ClientDrawn => {
+                // No frame is created, so nothing reparents the client
+                // or maps it as a side effect the way `create_decoration`
+                // does: it has to be placed and shown directly. The
+                // position is the frame position, which for this layout
+                // is the content position.
+                self.backend.position_client(window, frame_geom.pos);
+                self.backend.resize_client(window, frame_geom.size);
+                self.backend.map_frameless(window);
+                None
+            }
+        };
 
-        client.frame = Some(frame);
+        client.frame = frame;
         client.layout = layout;
 
         let id = self.clients.insert(client);
         self.window_index.insert(window, id);
-        self.frame_index.insert(frame, id);
+        if let Some(frame) = frame {
+            self.frame_index.insert(frame, id);
+        }
         self.managed_order.push(window);
         self.backend.publish_client_list(&self.managed_order);
         // A fresh window's `_NET_WM_DESKTOP` — published once here (it
@@ -754,8 +797,14 @@ impl<B: Backend> WindowManager<B> {
         // move; a pager that never sees the property at all would have
         // to treat the window as on-every-desktop.
         self.backend.publish_window_desktop(window, self.current_workspace);
-        tracing::info!(?window, "mapped and decorated window");
+        match chrome {
+            ClientChrome::ServerDrawn => tracing::info!(?window, "mapped and decorated window"),
+            ClientChrome::ClientDrawn => {
+                tracing::info!(?window, "mapped window undecorated — its client draws its own chrome")
+            }
+        }
 
+        self.publish_frame_extents(id);
         self.notifications.push_back(Notification::Mapped(id));
         self.focus_client(id);
     }
@@ -1006,7 +1055,7 @@ impl<B: Backend> WindowManager<B> {
                     }
                 } else {
                     self.last_titlebar_press = Some((id, time_ms));
-                    self.active_move = Some(ActiveMove { client: id, frame, grab_offset: local });
+                    self.active_move = Some(ActiveMove { client: id, grab_offset: local });
                 }
             }
             // A shaded window has nothing to resize — the classic
@@ -1102,7 +1151,7 @@ impl<B: Backend> WindowManager<B> {
         let Some(active) = &self.active_move else {
             return;
         };
-        let (client_id, frame, grab_offset) = (active.client, active.frame, active.grab_offset);
+        let (client_id, grab_offset) = (active.client, active.grab_offset);
 
         let Some(client) = self.clients.get(client_id) else {
             self.active_move = None;
@@ -1121,6 +1170,7 @@ impl<B: Backend> WindowManager<B> {
         } else {
             client.layout.frame_size
         };
+        let (surface_frame, surface_window) = (client.frame, client.window);
         let raw_pos = Point::new(root.x - grab_offset.x, root.y - grab_offset.y);
 
         // Edge resistance/attraction: pull the dragged frame flush
@@ -1141,8 +1191,14 @@ impl<B: Backend> WindowManager<B> {
         }
         let new_frame_pos = snap::snap_position(Rect { pos: raw_pos, size: frame_size }, &targets, self.snap_threshold);
 
-        self.backend
-            .set_frame_geometry(frame, Rect { pos: new_frame_pos, size: frame_size });
+        // A framed window is moved by its frame; a client-decorated one
+        // has only itself to move, and its content sits at the frame
+        // origin (its layout has a zero offset), so the same computed
+        // position applies to both.
+        match (surface_frame, surface_window) {
+            (Some(frame), _) => self.backend.set_frame_geometry(frame, Rect { pos: new_frame_pos, size: frame_size }),
+            (None, window) => self.backend.position_client(window, new_frame_pos),
+        }
 
         let Some(client) = self.clients.get_mut(client_id) else {
             return;
@@ -1306,6 +1362,24 @@ impl<B: Backend> WindowManager<B> {
             self.backend.resize_client(window, monitor.size);
             return;
         }
+        // A client-decorated window has no chrome to lay out and no
+        // frame to move: its content *is* the window, positioned in root
+        // coordinates. Handled before the theme is consulted at all,
+        // for the same reason the fullscreen branch above is — asking a
+        // theme to describe chrome that is not drawn produces a layout
+        // every consumer would then have to second-guess.
+        if client.chrome == ClientChrome::ClientDrawn {
+            let content = client.geometry;
+            let window = client.window;
+            let layout = frameless_layout(content.size);
+            self.backend.position_client(window, content.pos);
+            self.backend.resize_client(window, content.size);
+            if let Some(client) = self.clients.get_mut(id) {
+                client.layout = layout;
+            }
+            self.publish_frame_extents(id);
+            return;
+        }
         let request = Self::decoration_request(client, None);
         let layout = self.theme.layout(&request);
         // Shaded windows show only the titlebar — the frame's *visible*
@@ -1343,6 +1417,7 @@ impl<B: Backend> WindowManager<B> {
         if let Some(client) = self.clients.get_mut(id) {
             client.layout = layout;
         }
+        self.publish_frame_extents(id);
     }
 
     /// Grows `id` to fill the usable screen area along `directions`,
@@ -1531,14 +1606,11 @@ impl<B: Backend> WindowManager<B> {
         }
         self.fullscreen_restore.insert(id, client.geometry);
         client.flags.insert(ClientFlags::FULLSCREEN);
-        let frame = client.frame;
         self.reflow_frame(id);
         // Raise on entering: fullscreen is a "take over the screen"
         // request — a video player going fullscreen *behind* other
         // windows would be useless.
-        if let Some(frame) = frame {
-            self.backend.raise(frame);
-        }
+        self.raise_client(id);
         self.publish_client_net_state(id);
         tracing::info!(?id, "entered fullscreen");
     }
@@ -1597,9 +1669,7 @@ impl<B: Backend> WindowManager<B> {
             return;
         };
         client.lifecycle = Lifecycle::Miniaturized;
-        if let Some(frame) = client.frame {
-            self.backend.unmap_frame(frame);
-        }
+        self.hide_client_surface(id);
         if self.focused == Some(id) {
             self.focused = None;
             self.backend.publish_active_window(None);
@@ -1619,7 +1689,6 @@ impl<B: Backend> WindowManager<B> {
         client.lifecycle = Lifecycle::Normal;
         let window = client.window;
         let content_size = client.geometry.size;
-        let frame = client.frame;
         // A window restores onto the workspace the user is looking at,
         // not the one it was miniaturized on. Icon tiles are visible on
         // every workspace, so restoring from a different one is a
@@ -1633,9 +1702,7 @@ impl<B: Backend> WindowManager<B> {
         // `_NET_WM_DESKTOP` republish pagers need.)
         let current = self.current_workspace;
         self.move_client_to_workspace(id, current);
-        if let Some(frame) = frame {
-            self.backend.map_frame(frame);
-        }
+        self.show_client_surface(id);
         // Same nudge unshade needs (see there): the client's own pixels
         // weren't retained while unmapped either.
         self.backend.refresh_client(window, content_size);
@@ -1914,13 +1981,9 @@ impl<B: Backend> WindowManager<B> {
             // refused. Both backends treat an unchanged focus as a
             // no-op (Smithay short-circuits it outright), so this is
             // free whenever they already agree.
-            if let Some(client) = self.clients.get(id) {
-                let window = client.window;
-                let frame = client.frame;
+            if let Some(window) = self.clients.get(id).map(|client| client.window) {
                 self.backend.set_input_focus(window);
-                if let Some(frame) = frame {
-                    self.backend.raise(frame);
-                }
+                self.raise_client(id);
             }
             return;
         }
@@ -1945,7 +2008,6 @@ impl<B: Backend> WindowManager<B> {
         };
         client.flags.insert(ClientFlags::FOCUSED);
         let window = client.window;
-        let frame = client.frame;
         self.focused = Some(id);
         // Ungrab: a focused client's own clicks (placing a text cursor,
         // clicking a button inside it, ...) should reach it directly,
@@ -1954,9 +2016,7 @@ impl<B: Backend> WindowManager<B> {
         self.backend.ungrab_button_passive(window, MouseButton::Left);
         self.backend.set_input_focus(window);
         self.backend.publish_active_window(Some(window));
-        if let Some(frame) = frame {
-            self.backend.raise(frame);
-        }
+        self.raise_client(id);
         self.repaint_decoration(id);
     }
 
@@ -1980,6 +2040,204 @@ impl<B: Backend> WindowManager<B> {
             // miniaturized state, and nothing else here qualifies.
             client.lifecycle == Lifecycle::Miniaturized,
         );
+    }
+
+    /// Put a managed client on screen, whichever way it is realized.
+    ///
+    /// Exists because "map this window" stopped being one call the day
+    /// a managed window could have no frame. Every caller — workspace
+    /// switch, deminiaturize, unshade — means the same thing and none
+    /// of them should have to know which kind of client it is holding.
+    fn show_client_surface(&mut self, id: ClientId) {
+        let Some(client) = self.clients.get(id) else {
+            return;
+        };
+        match (client.frame, client.window) {
+            (Some(frame), _) => self.backend.map_frame(frame),
+            (None, window) => self.backend.map_frameless(window),
+        }
+    }
+
+    /// The counterpart of [`Self::show_client_surface`]. A frameless
+    /// window that is not hidden here stays visible on every workspace
+    /// and survives being miniaturized, which is exactly the bug the
+    /// `unmap_frameless` backend verb exists to prevent.
+    fn hide_client_surface(&mut self, id: ClientId) {
+        let Some(client) = self.clients.get(id) else {
+            return;
+        };
+        match (client.frame, client.window) {
+            (Some(frame), _) => self.backend.unmap_frame(frame),
+            (None, window) => self.backend.unmap_frameless(window),
+        }
+    }
+
+    /// A managed client changed its mind about drawing its own chrome:
+    /// add or drop its frame to match, in place, without the window
+    /// blinking out of existence.
+    ///
+    /// This is not a hypothetical. Applications rewrite
+    /// `_MOTIF_WM_HINTS` on a mapped window — a browser leaving
+    /// fullscreen, an application whose "use system title bar" setting
+    /// is toggled — and a window manager that only reads the hint at
+    /// map time gets the answer permanently wrong for every one of
+    /// them.
+    ///
+    /// The content geometry is the fixed point across the transition,
+    /// not the frame: what the user is looking at is the application's
+    /// own pixels, and those must not jump. The frame is created around
+    /// them or taken away from around them.
+    fn handle_chrome_changed(&mut self, window: B::WindowId) {
+        let Some(&id) = self.window_index.get(&window) else {
+            return;
+        };
+        let wants = if self.backend.client_draws_own_chrome(window) {
+            ClientChrome::ClientDrawn
+        } else {
+            ClientChrome::ServerDrawn
+        };
+        let Some(client) = self.clients.get(id) else {
+            return;
+        };
+        if client.chrome == wants {
+            return;
+        }
+        let content = client.geometry;
+        let existing_frame = client.frame;
+
+        match wants {
+            ClientChrome::ClientDrawn => {
+                // `release_decoration`, never `destroy_decoration`: on
+                // X11 the client is a child of the frame, and destroying
+                // a parent destroys its children.
+                if let Some(frame) = existing_frame {
+                    self.backend.release_decoration(window, frame);
+                    self.frame_index.remove(&frame);
+                }
+                if let Some(client) = self.clients.get_mut(id) {
+                    client.frame = None;
+                    client.chrome = ClientChrome::ClientDrawn;
+                }
+            }
+            ClientChrome::ServerDrawn => {
+                let request = self
+                    .clients
+                    .get(id)
+                    .map(|client| Self::decoration_request(client, None))
+                    .unwrap_or_else(|| Self::decoration_request(&Client::new(window, String::new()), None));
+                let layout = self.theme.layout(&request);
+                let frame = self.backend.create_decoration(window, &layout);
+                // Anchor the *content* where it already is; the frame is
+                // built around it, extending up and left by the chrome's
+                // own offset.
+                let frame_geom = Rect {
+                    pos: Point::new(content.pos.x - layout.client_offset.x, content.pos.y - layout.client_offset.y),
+                    size: layout.frame_size,
+                };
+                self.backend.set_frame_geometry(frame, frame_geom);
+                let buffer = self.theme.render(&request, &layout);
+                self.backend.paint_decoration(frame, &buffer);
+                self.backend.map_frame(frame);
+                self.frame_index.insert(frame, id);
+                if let Some(client) = self.clients.get_mut(id) {
+                    client.frame = Some(frame);
+                    client.chrome = ClientChrome::ServerDrawn;
+                    client.layout = layout;
+                }
+            }
+        }
+        tracing::info!(?window, ?wants, "client changed its decoration preference");
+        self.reflow_frame(id);
+        // Whichever direction it went, the window's visibility has to be
+        // restated. Taking a frame away removes the only mapped surface
+        // a framed window had, and creating one maps the frame but says
+        // nothing about a window that should currently be hidden — so
+        // ask what this client's lifecycle and workspace say it should
+        // be, rather than assuming the transition left it right. Caught
+        // by `a_client_that_starts_drawing_its_own_chrome_loses_its_frame_in_place`,
+        // which found the window gone from the screen entirely.
+        let visible = self
+            .clients
+            .get(id)
+            .is_some_and(|client| client.lifecycle == Lifecycle::Normal && client.workspace == self.current_workspace);
+        if visible {
+            self.show_client_surface(id);
+        } else {
+            self.hide_client_surface(id);
+        }
+    }
+
+    /// Publish `_NET_FRAME_EXTENTS` for `id` from whatever its layout
+    /// currently says.
+    ///
+    /// Derived rather than remembered, and derived in one place, so the
+    /// property cannot drift from the chrome actually on screen: the
+    /// left and top edges are the offset the content sits at inside the
+    /// frame, and the right and bottom are whatever frame is left over
+    /// once the content is accounted for. A frameless window's layout
+    /// makes all four fall out as zero without a special case, and so
+    /// does a fullscreen one.
+    fn publish_frame_extents(&mut self, id: ClientId) {
+        let Some(client) = self.clients.get(id) else {
+            return;
+        };
+        let window = client.window;
+        let left = client.layout.client_offset.x.max(0) as u32;
+        let top = client.layout.client_offset.y.max(0) as u32;
+        let right = client.layout.frame_size.w.saturating_sub(left.saturating_add(client.geometry.size.w));
+        let bottom = client.layout.frame_size.h.saturating_sub(top.saturating_add(client.geometry.size.h));
+        self.backend.publish_frame_extents(window, left, right, top, bottom);
+    }
+
+    /// Bring a managed client to the front, whichever way it is
+    /// realized. The frameless counterpart of `Backend::raise`, and the
+    /// reason no raise site in this file names a frame directly any
+    /// more.
+    fn raise_client(&mut self, id: ClientId) {
+        let Some(client) = self.clients.get(id) else {
+            return;
+        };
+        match (client.frame, client.window) {
+            (Some(frame), _) => self.backend.raise(frame),
+            (None, window) => self.backend.raise_frameless(window),
+        }
+    }
+
+    /// The client asked to be moved — begin an interactive move from
+    /// wherever the pointer currently is.
+    ///
+    /// The grab offset is derived rather than reported: the client's
+    /// request carries no anchor, and the honest anchor is the pointer's
+    /// offset within the frame at the moment the request arrives, which
+    /// is exactly what a titlebar press would have recorded. Refused
+    /// outright while another drag is in flight, and refused when the
+    /// pointer's position is not yet known — a move anchored on a
+    /// guessed pointer position would teleport the window on its first
+    /// motion event.
+    fn handle_move_request(&mut self, window: B::WindowId) {
+        if self.active_move.is_some() || self.active_resize.is_some() {
+            return;
+        }
+        let Some(&id) = self.window_index.get(&window) else {
+            return;
+        };
+        // Asked of the server first: see `Backend::pointer_position`
+        // for why the remembered position is not good enough here.
+        let Some(pointer) = self.backend.pointer_position().or(self.last_pointer) else {
+            return;
+        };
+        let Some(client) = self.clients.get(id) else {
+            return;
+        };
+        let origin = Point::new(
+            client.geometry.pos.x - client.layout.client_offset.x,
+            client.geometry.pos.y - client.layout.client_offset.y,
+        );
+        self.active_move = Some(ActiveMove {
+            client: id,
+            grab_offset: Point::new(pointer.x - origin.x, pointer.y - origin.y),
+        });
+        tracing::debug!(?window, "client asked to be moved — interactive move begun");
     }
 
     fn repaint_decoration(&mut self, id: ClientId) {
@@ -2037,6 +2295,32 @@ impl<B: Backend> WindowManager<B> {
                 },
             ],
         }
+    }
+}
+
+/// The layout a window whose client draws its own chrome wears.
+///
+/// Every consumer of `Client::layout` — hit-testing, drag math,
+/// placement, the frame geometry the backend is told — reads it
+/// unconditionally, so a frameless window needs a layout that honestly
+/// describes having no chrome rather than an absent one: the frame is
+/// exactly the content, the content sits at the frame's origin, and
+/// there are no hitboxes because there is nothing to hit. That is the
+/// same shape `reflow_frame` already synthesises for a fullscreen
+/// window, and for the same reason.
+///
+/// `shaded_frame_height` is the full height: a client-decorated window
+/// cannot be shaded (there is no titlebar of ours to roll it into), and
+/// a zero here would let any code that shades one collapse it to
+/// nothing.
+fn frameless_layout(content: Size) -> DecorationLayout {
+    DecorationLayout {
+        frame_size: content,
+        client_offset: Point::new(0, 0),
+        titlebar_height: 0,
+        button_hitboxes: Vec::new(),
+        resize_hitboxes: Vec::new(),
+        shaded_frame_height: content.h,
     }
 }
 
@@ -2775,6 +3059,238 @@ mod tests {
         let frame = wm.client(id).unwrap().frame.unwrap();
         let frame_pos = wm.backend().last_frame_geometry.get(&frame).unwrap().pos;
         assert!(frame_pos.x >= 0 && frame_pos.y >= 0, "frame should stay on-screen, got {frame_pos:?}");
+    }
+
+    #[test]
+    fn a_client_that_draws_its_own_chrome_is_managed_but_never_framed() {
+        // The two-titlebar bug, stated as an assertion. Edge and
+        // LibreOffice ask not to be decorated; before this, the window
+        // manager framed them anyway and they wore both.
+        //
+        // "Managed but not framed" is the whole point: the window still
+        // has to be tracked, focused and workspaced like any other, so
+        // asserting the absence of a frame is only half of it.
+        let mut backend = FakeBackend::new();
+        let window = backend.create_window();
+        backend.set_geometry(window, Rect { pos: Point::new(40, 30), size: Size::new(800, 600) });
+        backend.set_client_draws_own_chrome(window, true);
+        let mut wm = wm(backend);
+
+        wm.dispatch(BackendEvent::MapRequest(window));
+
+        let id = wm.client_for_window(window).expect("a client-decorated window is still managed");
+        let client = wm.client(id).unwrap();
+        assert!(client.frame.is_none(), "a client that drew its own chrome must not be framed");
+        assert_eq!(client.chrome, ClientChrome::ClientDrawn);
+        assert!(wm.backend().mapped_frameless.contains(&window), "it still has to be shown");
+        // Its layout must describe having no chrome rather than being
+        // left at whatever the theme would have said: every hit-test and
+        // drag calculation reads these.
+        assert_eq!(client.layout.titlebar_height, 0);
+        assert_eq!(client.layout.client_offset, Point::new(0, 0));
+        assert_eq!(client.layout.frame_size, Size::new(800, 600));
+        // And it must publish four zeros rather than nothing at all. A
+        // client born undecorated never goes through `create_decoration`
+        // or `release_decoration`, so if the property were published by
+        // the backend's decoration verbs alone it would never appear for
+        // exactly the windows it matters most to. It is published from
+        // here, at the end of the map, for both kinds of window.
+        assert_eq!(
+            wm.backend().frame_extents.get(&window),
+            Some(&(0, 0, 0, 0)),
+            "a window born frameless must still publish its (zero) extents"
+        );
+    }
+
+    #[test]
+    fn a_client_that_starts_drawing_its_own_chrome_loses_its_frame_in_place() {
+        // Applications rewrite `_MOTIF_WM_HINTS` on a mapped window —
+        // a browser leaving fullscreen, a "use system title bar"
+        // setting being toggled. What must not happen is the content
+        // jumping: the user is looking at the application's pixels, and
+        // only the frame around them is going away.
+        let mut backend = FakeBackend::new();
+        let window = backend.create_window();
+        backend.set_geometry(window, Rect { pos: Point::new(40, 30), size: Size::new(800, 600) });
+        let mut wm = wm(backend);
+        wm.dispatch(BackendEvent::MapRequest(window));
+
+        let id = wm.client_for_window(window).unwrap();
+        let framed = wm.client(id).unwrap();
+        let frame = framed.frame.expect("it starts framed");
+        let content_before = framed.geometry;
+
+        wm.backend_mut().set_client_draws_own_chrome(window, true);
+        wm.dispatch(BackendEvent::ChromeChanged(window));
+
+        let client = wm.client(id).unwrap();
+        assert!(client.frame.is_none());
+        assert_eq!(client.chrome, ClientChrome::ClientDrawn);
+        assert_eq!(client.geometry, content_before, "the content must not move when the frame goes");
+        // `release_decoration`, not `destroy_decoration`: on X11 the
+        // client is a child of the frame, and destroying a parent
+        // destroys its children. Getting this wrong closes the
+        // application.
+        assert!(wm.backend().released_frames.contains(&frame), "the frame must be released, not destroyed");
+        assert!(wm.backend().mapped_frameless.contains(&window), "the window stays on screen throughout");
+    }
+
+    #[test]
+    fn a_client_that_stops_drawing_its_own_chrome_gains_a_frame_around_its_content() {
+        // The same transition in reverse, and the same fixed point: the
+        // frame is built around the content where it already is, which
+        // means the frame's own origin moves up and left by the chrome
+        // offset rather than the content moving down and right.
+        let mut backend = FakeBackend::new();
+        let window = backend.create_window();
+        backend.set_geometry(window, Rect { pos: Point::new(40, 30), size: Size::new(800, 600) });
+        backend.set_client_draws_own_chrome(window, true);
+        let mut wm = wm(backend);
+        wm.dispatch(BackendEvent::MapRequest(window));
+
+        let id = wm.client_for_window(window).unwrap();
+        let content_before = wm.client(id).unwrap().geometry;
+
+        wm.backend_mut().set_client_draws_own_chrome(window, false);
+        wm.dispatch(BackendEvent::ChromeChanged(window));
+
+        let client = wm.client(id).unwrap();
+        let frame = client.frame.expect("it must be framed again");
+        assert_eq!(client.chrome, ClientChrome::ServerDrawn);
+        assert_eq!(client.geometry, content_before, "the content must not move when the frame arrives");
+        assert!(client.layout.titlebar_height > 0, "it wears real chrome now");
+        assert!(wm.backend().mapped_frames.contains(&frame));
+        // The frame must be reachable by id again, or every later click
+        // on this window's chrome resolves to no client.
+        assert_eq!(wm.client_for_frame(frame), Some(id));
+    }
+
+    #[test]
+    fn a_frameless_window_follows_its_workspace_off_and_on_screen() {
+        // The `unmap_frameless` backend verb exists for exactly this:
+        // with the no-op default, a client-decorated window stays
+        // visible on every workspace at once.
+        let mut backend = FakeBackend::new();
+        let window = backend.create_window();
+        backend.set_geometry(window, Rect { pos: Point::new(0, 0), size: Size::new(400, 300) });
+        backend.set_client_draws_own_chrome(window, true);
+        let mut wm = wm(backend);
+        wm.dispatch(BackendEvent::MapRequest(window));
+        assert!(wm.backend().mapped_frameless.contains(&window));
+
+        wm.switch_workspace(1);
+        assert!(!wm.backend().mapped_frameless.contains(&window), "it must leave with its workspace");
+
+        wm.switch_workspace(0);
+        assert!(wm.backend().mapped_frameless.contains(&window), "and come back with it");
+    }
+
+    #[test]
+    fn frame_extents_describe_the_chrome_and_go_to_zero_when_it_does() {
+        // `_NET_FRAME_EXTENTS` is how a client learns how much bigger
+        // than its content the thing on screen is. Publishing zeros for
+        // a frameless window is not a degenerate case to skip: it is
+        // the message that the frame has gone.
+        let mut backend = FakeBackend::new();
+        let window = backend.create_window();
+        backend.set_geometry(window, Rect { pos: Point::new(40, 30), size: Size::new(800, 600) });
+        let mut wm = wm(backend);
+        wm.dispatch(BackendEvent::MapRequest(window));
+
+        let id = wm.client_for_window(window).unwrap();
+        let (left, right, top, bottom) = wm.backend().frame_extents[&window];
+        let layout = wm.client(id).unwrap().layout.clone();
+        assert_eq!(top, layout.client_offset.y as u32, "the top extent is the titlebar");
+        assert!(top > 0, "a framed window has chrome above its content");
+        assert_eq!(left, layout.client_offset.x as u32);
+        // The four must add up to the frame the window actually wears,
+        // or a client reasoning from them lands off by the difference.
+        assert_eq!(left + 800 + right, layout.frame_size.w);
+        assert_eq!(top + 600 + bottom, layout.frame_size.h);
+
+        wm.backend_mut().set_client_draws_own_chrome(window, true);
+        wm.dispatch(BackendEvent::ChromeChanged(window));
+        assert_eq!(wm.backend().frame_extents[&window], (0, 0, 0, 0), "losing the frame must be published, not just done");
+    }
+
+    #[test]
+    fn focusing_a_frameless_window_raises_it() {
+        // Every raise in this crate used to name a `FrameId`, guarded by
+        // `if let Some(frame)`. A client-decorated window has none, so
+        // it mapped at one depth and stayed there for the rest of its
+        // life: clicking it focused it and did not bring it forward.
+        // The bug is invisible in testing precisely because it only
+        // affects applications that draw their own titlebars.
+        let mut backend = FakeBackend::new();
+        let under = backend.create_window();
+        let over = backend.create_window();
+        backend.set_geometry(under, Rect { pos: Point::new(0, 0), size: Size::new(400, 300) });
+        backend.set_geometry(over, Rect { pos: Point::new(0, 0), size: Size::new(400, 300) });
+        backend.set_client_draws_own_chrome(over, true);
+        let mut wm = wm(backend);
+        wm.dispatch(BackendEvent::MapRequest(under));
+        wm.dispatch(BackendEvent::MapRequest(over));
+
+        let over_id = wm.client_for_window(over).unwrap();
+        let under_id = wm.client_for_window(under).unwrap();
+        wm.focus_client(under_id);
+        wm.backend_mut().raised_frameless.clear();
+
+        wm.focus_client(over_id);
+        assert_eq!(
+            wm.backend().raised_frameless.last(),
+            Some(&over),
+            "focusing a client-decorated window must bring it forward, not only focus it"
+        );
+    }
+
+    #[test]
+    fn a_client_decorated_window_can_still_be_moved_by_asking() {
+        // Taking our titlebar away takes away the only handle this
+        // window manager offered for dragging the window. If the
+        // client's own `_NET_WM_MOVERESIZE` is dropped as well — as
+        // both backends used to — the window becomes pinned wherever it
+        // first mapped, which is a worse outcome than the spare
+        // titlebar removing the chrome was meant to fix.
+        let mut backend = FakeBackend::new();
+        let window = backend.create_window();
+        backend.set_geometry(window, Rect { pos: Point::new(100, 100), size: Size::new(400, 300) });
+        backend.set_client_draws_own_chrome(window, true);
+        let mut wm = wm(backend);
+        wm.dispatch(BackendEvent::MapRequest(window));
+
+        // The pointer has to be somewhere known before a client can ask
+        // to be dragged by it.
+        wm.dispatch(BackendEvent::PointerMotion { root: Point::new(150, 120), surface_local: None });
+        wm.dispatch(BackendEvent::MoveRequest(window));
+        // Grab offset is (50, 20) into the window; dragging the pointer
+        // to (250, 220) must put the window's origin at (200, 200).
+        wm.dispatch(BackendEvent::PointerMotion { root: Point::new(250, 220), surface_local: None });
+
+        assert_eq!(
+            wm.backend().last_client_position.get(&window),
+            Some(&Point::new(200, 200)),
+            "the window must follow the pointer with the offset it was grabbed at"
+        );
+        let id = wm.client_for_window(window).unwrap();
+        assert_eq!(wm.client(id).unwrap().geometry.pos, Point::new(200, 200), "and the core must agree where it is");
+    }
+
+    #[test]
+    fn an_ordinary_client_is_still_framed() {
+        // The regression guard for the fix itself: the default answer
+        // to "does this client draw its own chrome" is no, and every
+        // ordinary X11 application depends on that staying true.
+        let mut backend = FakeBackend::new();
+        let window = backend.create_window();
+        backend.set_geometry(window, Rect { pos: Point::new(10, 10), size: Size::new(300, 200) });
+        let mut wm = wm(backend);
+
+        wm.dispatch(BackendEvent::MapRequest(window));
+
+        let client = wm.client(wm.client_for_window(window).unwrap()).unwrap();
+        assert_eq!(client.chrome, ClientChrome::ServerDrawn);
+        assert!(client.frame.is_some());
     }
 
     #[test]

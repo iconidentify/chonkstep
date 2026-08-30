@@ -13,9 +13,27 @@
 //! notify, and the `_NET_WM_STATE` request family. The differences are
 //! where smithay already digested the protocol (titles and classes come
 //! from `X11Surface` accessors, not GetProperty round-trips).
+//!
+//! One thing here has no counterpart in `wm-x11` at all: the selection
+//! callbacks at the bottom. On X11 the clipboard is the X server's
+//! business and a window manager never touches it. Here the compositor
+//! sits between two clipboards that know nothing about each other, so
+//! CLIPBOARD and PRIMARY are bridged in both directions — see those
+//! callbacks and `xdg.rs`'s `SelectionHandler` for the two halves.
+
+use std::os::fd::OwnedFd;
 
 use smithay::delegate_xwayland_shell;
 use smithay::utils::{Logical, Rectangle};
+use smithay::wayland::selection::data_device::{
+    clear_data_device_selection, current_data_device_selection_userdata,
+    request_data_device_client_selection, set_data_device_selection,
+};
+use smithay::wayland::selection::primary_selection::{
+    clear_primary_selection, current_primary_selection_userdata, request_primary_client_selection,
+    set_primary_selection,
+};
+use smithay::wayland::selection::SelectionTarget;
 use smithay::wayland::xwayland_shell::{XWaylandShellHandler, XWaylandShellState};
 use smithay::xwayland::xwm::{
     Reorder, ResizeEdge as X11ResizeEdge, WmWindowProperty, X11Window, XwmId,
@@ -159,7 +177,7 @@ impl XwmHandler for Compositor {
         let Some(id) = x11_window_id(backend, &window) else {
             return;
         };
-        backend.windows.remove(&id);
+        backend.forget_window(id);
         backend.mark_damaged();
         backend.queue(WmEvent::Destroyed(id));
     }
@@ -230,12 +248,17 @@ impl XwmHandler for Compositor {
     }
 
     fn property_notify(&mut self, _xwm: XwmId, window: X11Surface, property: WmWindowProperty) {
-        // The title watch `wm-x11` keeps via PropertyNotify on
-        // WM_NAME/_NET_WM_NAME — smithay already filtered to the
-        // interesting properties and parsed the value.
-        if property == WmWindowProperty::Title {
-            let backend = self.wm.backend_mut();
-            if let Some(id) = x11_window_id(backend, &window) {
+        // The property watch `wm-x11` keeps via PropertyNotify —
+        // smithay has already filtered to the interesting atoms and
+        // re-read the value into the surface before calling us, so both
+        // arms below are reads of parsed state rather than GetProperty
+        // round-trips.
+        let backend = self.wm.backend_mut();
+        let Some(id) = x11_window_id(backend, &window) else {
+            return;
+        };
+        match property {
+            WmWindowProperty::Title => {
                 if let Some(record) = backend.windows.get_mut(&id) {
                     // Keep the record's cache current per its contract
                     // (`WindowRecord::title`'s doc in state.rs); empty
@@ -246,6 +269,25 @@ impl XwmHandler for Compositor {
                 }
                 backend.queue(WmEvent::TitleChanged(id));
             }
+            // `_MOTIF_WM_HINTS`, which is where an X11 client says
+            // whether it wants to be decorated. Smithay has no
+            // "decorations changed" variant — `MotifHints` is the whole
+            // property, and the decoration bit is the only part of it
+            // this WM reads (`Backend::client_draws_own_chrome`), so
+            // this is as narrow a trigger as the enum allows. A
+            // spurious `ChromeChanged` costs `wm-core` one re-read that
+            // returns the same answer; a missed one leaves a window
+            // wearing two titlebars until it is remapped, which is the
+            // bug.
+            //
+            // Worth having even though most clients set the hint before
+            // mapping: Motif hints on a mapped window are how an app
+            // toggles its own titlebar off for a presentation or
+            // borderless mode, and several do.
+            WmWindowProperty::MotifHints => {
+                backend.queue(WmEvent::ChromeChanged(id));
+            }
+            _ => {}
         }
     }
 
@@ -282,14 +324,149 @@ impl XwmHandler for Compositor {
         _button: u32,
         _resize_edge: X11ResizeEdge,
     ) {
-        // `_NET_WM_MOVERESIZE`-style client-initiated drags: no
-        // BackendEvent shape exists and `wm-x11` dropped these client
-        // messages too — interactive move/resize is driven from our own
-        // chrome.
+        // The half of `_NET_WM_MOVERESIZE` that is still dropped: there
+        // is no `BackendEvent` shape for a client-initiated resize, and
+        // `wm-x11` dropped these client messages too. Resizing is driven
+        // from our own chrome's edges.
+        //
+        // Not symmetrical with `move_request` below, and the asymmetry
+        // is the point rather than an oversight. Taking our chrome away
+        // from a client-decorated window removes the only way to *move*
+        // it, so that one had to be answered; it does not remove the
+        // only way to resize one, because such a client draws its own
+        // resize grips and handles the drag itself.
     }
 
-    fn move_request(&mut self, _xwm: XwmId, _window: X11Surface, _button: u32) {
-        // Same rationale as `resize_request`.
+    fn move_request(&mut self, _xwm: XwmId, window: X11Surface, _button: u32) {
+        // `_NET_WM_MOVERESIZE` with a move direction — an application
+        // saying "the user has grabbed something I consider a titlebar;
+        // you take it from here". Dropped until this window manager
+        // could leave a managed window unframed, at which point dropping
+        // it stopped being a preference and became a regression: a
+        // client-decorated window has no chrome of ours to drag, so this
+        // request is the only handle on it that exists. `wm-core` starts
+        // the drag from the pointer's current offset and moves the
+        // client directly.
+        let backend = self.wm.backend_mut();
+        if let Some(id) = x11_window_id(backend, &window) {
+            backend.queue(WmEvent::MoveRequest(id));
+        }
+    }
+
+    // -- selections -------------------------------------------------------
+    // The X11 side of the clipboard bridge; `xdg.rs`'s `SelectionHandler`
+    // is the Wayland side. Between them, CLIPBOARD and PRIMARY are one
+    // selection each across both protocols, which is the only way a
+    // session that runs urxvt and a native editor side by side can feel
+    // like one desktop.
+    //
+    // Only selections. Drag-and-drop across the boundary is a separate
+    // negotiation (an XDND handshake driven from pointer grabs) and is
+    // deliberately not attempted here.
+
+    fn allow_selection_access(&mut self, xwm: XwmId, _selection: SelectionTarget) -> bool {
+        // The X clipboard has no focus rule of its own: any X client can
+        // ask the selection owner for the data at any time, and if we
+        // always said yes, a background X process could read whatever a
+        // Wayland client had copied without the user ever interacting
+        // with it. Gating on "an X11 window from this XWM currently
+        // holds the keyboard" is the same rule the Wayland protocols
+        // enforce on their own clients (`set_selection` requires focus),
+        // applied to the one client — Xwayland — that speaks for many.
+        let Some(keyboard) = self.seat.get_keyboard() else {
+            return false;
+        };
+        let Some(focused) = keyboard.current_focus() else {
+            return false;
+        };
+        let backend = self.wm.backend();
+        let Some(window) = backend.window_for_surface(&focused) else {
+            return false;
+        };
+        match backend.windows.get(&window).map(|record| &record.surface) {
+            // The XWM identity is checked, not just "is X11": one
+            // process could in principle manage a second Xwayland
+            // instance, and a selection request from that one must not
+            // be answered because a window of this one has focus.
+            Some(ManagedSurface::X11(surface)) => surface.xwm_id() == Some(xwm),
+            _ => false,
+        }
+    }
+
+    fn send_selection(
+        &mut self,
+        _xwm: XwmId,
+        selection: SelectionTarget,
+        mime_type: String,
+        fd: OwnedFd,
+    ) {
+        // An X client is pasting something a Wayland client owns. The
+        // owning client writes into `fd` itself (that is what
+        // `wl_data_source.send` does), so this hands the descriptor
+        // straight over and returns; Xwayland is already waiting to read
+        // the other end.
+        //
+        // Logged per arm rather than through a shared `Result`: the two
+        // helpers return same-named but distinct `SelectionRequestError`
+        // types, one per selection module. Either way a failure here is
+        // routine — X clients probe TEXT, STRING and UTF8_STRING in turn
+        // and the owner rarely offers all three — so it is a debug line,
+        // not a warning.
+        match selection {
+            SelectionTarget::Clipboard => {
+                if let Err(error) = request_data_device_client_selection(&self.seat, mime_type, fd)
+                {
+                    tracing::debug!(?error, "no Wayland clipboard data for an X11 paste");
+                }
+            }
+            SelectionTarget::Primary => {
+                if let Err(error) = request_primary_client_selection(&self.seat, mime_type, fd) {
+                    tracing::debug!(?error, "no Wayland primary selection for an X11 paste");
+                }
+            }
+        }
+    }
+
+    fn new_selection(&mut self, _xwm: XwmId, selection: SelectionTarget, mime_types: Vec<String>) {
+        // An X client copied something. Installing it as a
+        // *compositor-provided* selection is what makes it visible to
+        // Wayland clients: they see the offer and its mime types now,
+        // and the bytes are fetched lazily through
+        // `SelectionHandler::send_selection` if anyone actually pastes.
+        // Copying an X selection eagerly would mean an X round-trip per
+        // copy for data nobody may ever ask for — and X clients copy on
+        // every text selection.
+        let display_handle = self.display_handle.clone();
+        match selection {
+            SelectionTarget::Clipboard => {
+                set_data_device_selection(&display_handle, &self.seat, mime_types, ())
+            }
+            SelectionTarget::Primary => {
+                set_primary_selection(&display_handle, &self.seat, mime_types, ())
+            }
+        }
+    }
+
+    fn cleared_selection(&mut self, _xwm: XwmId, selection: SelectionTarget) {
+        // The X client that owned the selection dropped it (or exited).
+        // Only OUR selection is cleared — the user-data check asks "is
+        // the current selection one the compositor installed", i.e. one
+        // that came from X. Skipping it would let a disappearing xterm
+        // wipe a selection a Wayland client had set in the meantime,
+        // since Xwayland reports the X-side loss either way.
+        let display_handle = self.display_handle.clone();
+        match selection {
+            SelectionTarget::Clipboard => {
+                if current_data_device_selection_userdata(&self.seat).is_some() {
+                    clear_data_device_selection(&display_handle, &self.seat);
+                }
+            }
+            SelectionTarget::Primary => {
+                if current_primary_selection_userdata(&self.seat).is_some() {
+                    clear_primary_selection(&display_handle, &self.seat);
+                }
+            }
+        }
     }
 }
 

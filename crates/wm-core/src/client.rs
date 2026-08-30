@@ -2,6 +2,7 @@ use slotmap::new_key_type;
 use wm_theme_api::{DecorationLayout, Rect};
 
 use crate::backend::Backend;
+use crate::types::ClientChrome;
 
 new_key_type! {
     /// Core's own handle for a managed client, independent of any
@@ -107,6 +108,13 @@ pub struct Client<B: Backend> {
     pub class: String,
     /// Root-relative content geometry (standard X11 convention).
     pub geometry: Rect,
+    /// Who drew this window's chrome. `ClientDrawn` means `frame` stays
+    /// `None` for the window's whole life (or until the client changes
+    /// its mind — see `WindowManager::refresh_client_chrome`) while
+    /// everything else about being managed still applies: it is
+    /// focused, stacked, moved, assigned a workspace and listed to
+    /// pagers exactly like a framed window.
+    pub chrome: ClientChrome,
     pub layout: DecorationLayout,
     pub lifecycle: Lifecycle,
     pub flags: ClientFlags,
@@ -131,6 +139,9 @@ impl<B: Backend> Client<B> {
             title,
             class: String::new(),
             geometry: Rect::default(),
+            // Overwritten at map time from the backend's answer; the
+            // default is what keeps a client that says nothing framed.
+            chrome: ClientChrome::ServerDrawn,
             layout: DecorationLayout::default(),
             lifecycle: Lifecycle::Normal,
             flags: ClientFlags::empty(),

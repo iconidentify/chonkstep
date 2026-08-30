@@ -1,9 +1,11 @@
 //! Wayland protocol handlers on [`Compositor`]: wl_compositor/wl_shm/
-//! wl_seat/wl_output/wl_data_device plumbing plus the xdg-shell and
-//! xdg-decoration mapping that turns client requests into the exact
-//! `BackendEvent` shapes `wm-core` already speaks (read alongside
-//! `wm-x11`'s `translate_event`/`translate_client_message` — every
-//! event queued here mirrors a translation there).
+//! wl_seat/wl_output plumbing, the two selection protocols
+//! (wl_data_device and primary selection, whose handlers here are the
+//! Wayland end of the XWayland clipboard bridge in `xwayland.rs`), plus
+//! the xdg-shell and xdg-decoration mapping that turns client requests
+//! into the exact `BackendEvent` shapes `wm-core` already speaks (read
+//! alongside `wm-x11`'s `translate_event`/`translate_client_message` —
+//! every event queued here mirrors a translation there).
 //!
 //! The one deliberate divergence from X11's lifecycle: xdg toplevels
 //! have no MapRequest of their own. A toplevel "maps" by committing its
@@ -13,6 +15,7 @@
 //! `BackendEvent::Unmapped` the same way `wm-x11` translates
 //! UnmapNotify. `wm-core` cannot tell the difference, by construction.
 
+use std::os::fd::OwnedFd;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use smithay::backend::renderer::utils::{on_commit_buffer_handler, with_renderer_surface_state};
@@ -36,7 +39,10 @@ use smithay::wayland::selection::data_device::{
     set_data_device_focus, ClientDndGrabHandler, DataDeviceHandler, DataDeviceState,
     ServerDndGrabHandler,
 };
-use smithay::wayland::selection::SelectionHandler;
+use smithay::wayland::selection::primary_selection::{
+    set_primary_focus, PrimarySelectionHandler, PrimarySelectionState,
+};
+use smithay::wayland::selection::{SelectionHandler, SelectionSource, SelectionTarget};
 use smithay::wayland::shell::xdg::decoration::XdgDecorationHandler;
 use smithay::wayland::shell::xdg::{
     PopupSurface, PositionerState, SurfaceCachedState, ToplevelSurface, XdgShellHandler,
@@ -45,8 +51,8 @@ use smithay::wayland::shell::xdg::{
 use smithay::wayland::shm::{ShmHandler, ShmState};
 use smithay::xwayland::XWaylandClientData;
 use smithay::{
-    delegate_compositor, delegate_data_device, delegate_output, delegate_seat, delegate_shm,
-    delegate_xdg_decoration, delegate_xdg_shell,
+    delegate_compositor, delegate_data_device, delegate_output, delegate_primary_selection,
+    delegate_seat, delegate_shm, delegate_xdg_decoration, delegate_xdg_shell,
 };
 
 use wm_core::{BackendEvent, NetState, NetStateAction};
@@ -287,9 +293,15 @@ impl SeatHandler for Compositor {
     fn focus_changed(&mut self, seat: &Seat<Self>, target: Option<&WlSurface>) {
         // Keyboard focus carries clipboard access with it — without
         // this, paste silently targets whichever client focused first.
+        // Both selections follow it, and for the same reason: the
+        // protocols gate `set_selection` on the requesting client
+        // holding focus, and gate the offers a client is told about on
+        // the same thing, so a focus change that only moved one of them
+        // leaves the other reading a stale client's clipboard.
         let display_handle = self.display_handle.clone();
         let client = target.and_then(|surface| surface.client());
-        set_data_device_focus(&display_handle, seat, client);
+        set_data_device_focus(&display_handle, seat, client.clone());
+        set_primary_focus(&display_handle, seat, client);
     }
 
     fn cursor_image(&mut self, _seat: &Seat<Self>, image: CursorImageStatus) {
@@ -303,13 +315,78 @@ impl SeatHandler for Compositor {
 
 // -- selections / drag-and-drop ------------------------------------------
 
+/// The Wayland-to-X11 half of the clipboard bridge.
+///
+/// Both callbacks fire only for *client* requests — `set_selection` on
+/// a `wl_data_device` or a `zwp_primary_selection_device_v1` — never
+/// for the compositor-side selections `xwayland.rs` installs when an X
+/// client takes ownership. That asymmetry is what keeps the two halves
+/// from ping-ponging a selection back and forth forever, and it is a
+/// property of smithay's dispatch rather than of a guard here, so it is
+/// worth knowing before adding one.
 impl SelectionHandler for Compositor {
     type SelectionUserData = ();
+
+    fn new_selection(
+        &mut self,
+        ty: SelectionTarget,
+        source: Option<SelectionSource>,
+        _seat: Seat<Self>,
+    ) {
+        // A Wayland client copied something. Xwayland owns the X-side
+        // selection window, so it has to be told to claim CLIPBOARD (or
+        // PRIMARY) on the X server and advertise these mime types;
+        // `None` means the client dropped the selection, which releases
+        // the X ownership again. Before this existed, copying in a
+        // Wayland app and pasting in xterm produced nothing at all — X
+        // clients asked the X server who owned the selection and the
+        // answer was nobody.
+        let Some(xwm) = self.xwm.as_mut() else {
+            // XWayland is not running (or failed to start); there is no
+            // X server to mirror the selection onto and native clients
+            // already have it.
+            return;
+        };
+        if let Err(error) = xwm.new_selection(ty, source.map(|source| source.mime_types())) {
+            tracing::warn!(?error, ?ty, "could not hand the selection to XWayland");
+        }
+    }
+
+    fn send_selection(
+        &mut self,
+        ty: SelectionTarget,
+        mime_type: String,
+        fd: OwnedFd,
+        _seat: Seat<Self>,
+        _user_data: &(),
+    ) {
+        // A Wayland client is pasting a selection this compositor owns
+        // on behalf of an X client (the one `xwayland.rs`'s
+        // `new_selection` installed). Fetching the bytes is an X
+        // round-trip — INCR transfers included — so `X11Wm` runs it as
+        // a calloop source and writes into `fd` when it completes,
+        // which is why the loop handle goes with it. Nothing blocks
+        // here; the pasting client simply reads its pipe when data
+        // arrives.
+        let loop_handle = self.loop_handle.clone();
+        let Some(xwm) = self.xwm.as_mut() else {
+            return;
+        };
+        if let Err(error) = xwm.send_selection(ty, mime_type, fd, loop_handle) {
+            tracing::warn!(?error, ?ty, "could not read the X11 selection for a Wayland client");
+        }
+    }
 }
 
 impl DataDeviceHandler for Compositor {
     fn data_device_state(&self) -> &DataDeviceState {
         &self.data_device_state
+    }
+}
+
+impl PrimarySelectionHandler for Compositor {
+    fn primary_selection_state(&self) -> &PrimarySelectionState {
+        &self.primary_selection_state
     }
 }
 
@@ -388,13 +465,32 @@ impl XdgShellHandler for Compositor {
         // with a dedicated focus-target enum if it bites.
     }
 
-    fn move_request(&mut self, _surface: ToplevelSurface, _seat: WlSeat, _serial: Serial) {
-        // A client-initiated interactive move (CSD titlebar drag).
+    fn move_request(&mut self, surface: ToplevelSurface, _seat: WlSeat, _serial: Serial) {
+        // A client-initiated interactive move (a CSD titlebar drag).
         // Under server-side decorations moves start from OUR titlebar,
-        // which `wm-core` runs off frame button events — there is no
-        // BackendEvent shape for a client asking, exactly as there was
-        // none for X11's `_NET_WM_MOVERESIZE` (which `wm-x11` also
-        // drops).
+        // which `wm-core` runs off frame button events, and this request
+        // used to be dropped for that reason — the same reason X11's
+        // `_NET_WM_MOVERESIZE` was.
+        //
+        // What changed is that a managed window can now have no chrome
+        // of ours at all, and for one of those this request is not a
+        // second way to move the window, it is the only way. So it is
+        // answered for every toplevel rather than only the frameless
+        // ones: a framed client that asks gets the same drag it would
+        // have got from our titlebar, and `wm-core` refuses the request
+        // outright while another drag is in flight, so a client cannot
+        // steal a move the user is already making.
+        //
+        // The serial is not checked against a real button press. Doing
+        // so would need the seat's grab history threaded through here,
+        // and the failure it would prevent — a client starting a move
+        // with no pointer down — already ends the moment the user
+        // presses and releases a button, because `wm-core` anchors the
+        // drag on the pointer and finishes it on release.
+        let backend = self.wm.backend_mut();
+        if let Some(id) = backend.window_for_surface(surface.wl_surface()) {
+            backend.queue(WmEvent::MoveRequest(id));
+        }
     }
 
     fn resize_request(
@@ -404,7 +500,12 @@ impl XdgShellHandler for Compositor {
         _serial: Serial,
         _edges: smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::ResizeEdge,
     ) {
-        // Same rationale as `move_request`.
+        // Still dropped, where `move_request` no longer is: there is no
+        // `BackendEvent` shape for a client-initiated resize, and unlike
+        // a move it is not the only path left to an unframed window —
+        // a client that draws its own chrome draws its own resize grips
+        // with it and can resize itself by committing a new size, which
+        // `toplevel_committed` above already translates.
     }
 
     fn maximize_request(&mut self, surface: ToplevelSurface) {
@@ -510,7 +611,7 @@ impl XdgShellHandler for Compositor {
         // calls backend verbs that all tolerate the missing window.
         let backend = self.wm.backend_mut();
         if let Some(id) = backend.window_for_surface(surface.wl_surface()) {
-            backend.windows.remove(&id);
+            backend.forget_window(id);
             backend.queue(WmEvent::Destroyed(id));
             backend.mark_damaged();
         }
@@ -565,5 +666,6 @@ delegate_shm!(Compositor);
 delegate_output!(Compositor);
 delegate_seat!(Compositor);
 delegate_data_device!(Compositor);
+delegate_primary_selection!(Compositor);
 delegate_xdg_shell!(Compositor);
 delegate_xdg_decoration!(Compositor);

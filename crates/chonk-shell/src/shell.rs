@@ -244,12 +244,27 @@ fn launch_app(entry: &AppEntry, theme: &Theme, font_px: f32, screen: Size) {
     // startup on a D-Bus secrets service this session doesn't provide
     // (the whole story lives on the spawn.rs helpers). Confirmed live:
     // the first .desktop-launched Chromium hung exactly that way.
+    //
+    // The ozone platform is the one fixup that differs between the two
+    // stacks, and it is asked for as a question about the session
+    // rather than decided here: this function is as backend-blind as
+    // the rest of the shell, and `spawn::current_display_stack` is the
+    // single place that is allowed to know the answer and says at
+    // length why it can be trusted.
     let mut argv: Vec<String> = args.to_vec();
     let base = program.rsplit('/').next().unwrap_or(program);
-    if base.contains("chrom") || base.contains("chrome") || base == "microsoft-edge" || base.starts_with("brave") {
+    // `starts_with`, not `==`, for Edge: every Edge desktop entry on a
+    // real installation execs `/usr/bin/microsoft-edge-stable` (the
+    // beta and dev channels install `-beta` and `-dev` alongside it),
+    // and an exact match on `microsoft-edge` therefore matched no
+    // launch this desktop has ever performed. Edge was silently
+    // receiving none of these fixups — not the scale flag, not the
+    // secrets-service workaround, not the ozone platform — which is a
+    // large part of why it behaved worse here than any other browser.
+    if base.contains("chrom") || base.contains("chrome") || base.starts_with("microsoft-edge") || base.starts_with("brave") {
         argv.extend(spawn::chromium_scale_args(scale));
         argv.extend(spawn::chromium_avoid_secrets_service_hang_args());
-        argv.extend(spawn::chromium_x11_platform_args());
+        argv.extend(spawn::chromium_platform_args(spawn::current_display_stack()));
     }
     let arg_refs: Vec<&str> = argv.iter().map(String::as_str).collect();
     // Toolkit scaling *and* the pointer size, both in this child's own
