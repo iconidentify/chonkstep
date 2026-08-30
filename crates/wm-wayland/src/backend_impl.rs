@@ -22,14 +22,18 @@
 //! what lets the renderer and the pointer hit-test compare frame,
 //! content, and shell rects directly.
 //!
-//! Stacking: `stacking` holds frames and shell surfaces bottom-to-top,
-//! but the effective z-order is partitioned — `above: false` shells
-//! (desktop furniture) render below every frame, `above: true` shells
-//! (dock, menus) above them — with `stacking`'s relative order applying
-//! within each band. The reordering verbs here (`raise`, `restack`,
-//! `raise_shell_surface`) therefore only need to get the relative order
-//! within a band right; hit-testing must walk the same three bands
-//! top-down to agree with what the renderer paints.
+//! Stacking: `stacking` holds frames, client-decorated windows, and
+//! shell surfaces bottom-to-top, but the effective z-order is
+//! partitioned — `above: false` shells (desktop furniture) render below
+//! every frame, `above: true` shells (dock, menus) above them — with
+//! `stacking`'s relative order applying within each band. A managed
+//! window whose client draws its own chrome has no frame to hold its
+//! place, so it holds one itself (`StackEntry::Window`) in the frame
+//! band: same band, same order, one fewer buffer to paint. The
+//! reordering verbs here (`raise`, `restack`, `raise_shell_surface`)
+//! therefore only need to get the relative order within a band right;
+//! hit-testing must walk the same three bands top-down to agree with
+//! what the renderer paints.
 
 use smithay::backend::allocator::Fourcc;
 use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
@@ -47,8 +51,8 @@ use wm_core::{
 use wm_theme_api::{DecorationBuffer, DecorationLayout, Point, Rect, ResizeEdge, Size};
 
 use crate::state::{
-    FrameRecord, ManagedSurface, RootBackground, ShellRecord, StackEntry, WaylandBackend,
-    WlFrameId, WlShellId, WlWindowId,
+    ensure_stack_entry, raise_stack_entry, replace_stack_entry, FrameRecord, ManagedSurface,
+    RootBackground, ShellRecord, StackEntry, WaylandBackend, WlFrameId, WlShellId, WlWindowId,
 };
 
 /// `wm-theme` rect -> smithay logical rect. The theme side is
@@ -175,17 +179,7 @@ impl Backend for WaylandBackend {
     }
 
     fn raise_shell_surface(&mut self, id: Self::ShellId) {
-        // To the top of `stacking`; whether that puts it over managed
-        // frames is decided by its `above` flag (see the module doc's
-        // stacking bands), exactly like an override-redirect window's
-        // stacking versus reparented frames on X11.
-        if let Some(index) = self
-            .stacking
-            .iter()
-            .position(|entry| matches!(entry, StackEntry::Shell(s) if *s == id))
-        {
-            let entry = self.stacking.remove(index);
-            self.stacking.push(entry);
+        if raise_stack_entry(&mut self.stacking, StackEntry::Shell(id)) {
             self.damage = true;
         }
     }
@@ -487,7 +481,19 @@ impl Backend for WaylandBackend {
             frame,
             FrameRecord { window, geometry, buffer: None, mapped: false },
         );
-        self.stacking.push(StackEntry::Frame(frame));
+        // A window arriving here with a `StackEntry::Window` slot is one
+        // that changed its mind: it mapped client-decorated, and a
+        // `_MOTIF_WM_HINTS` rewrite has since made `wm-core` decide it
+        // wants a frame after all (`BackendEvent::ChromeChanged`). The
+        // frame's slot replaces the window's *in place*, so the window
+        // does not jump to the front of the stack merely for growing a
+        // titlebar; leaving both would draw and hit-test the client
+        // twice, at two different depths.
+        replace_stack_entry(
+            &mut self.stacking,
+            StackEntry::Window(window),
+            StackEntry::Frame(frame),
+        );
         frame
     }
 
@@ -497,6 +503,39 @@ impl Backend for WaylandBackend {
                 .retain(|entry| !matches!(entry, StackEntry::Frame(f) if *f == frame));
             self.damage = true;
         }
+    }
+
+    /// The other half of the chrome-changed round trip: the client now
+    /// draws its own titlebar, so the frame goes but the window stays —
+    /// mapped, focusable, and at the same depth it already had.
+    ///
+    /// The trait's default (plain `destroy_decoration`) is *nearly*
+    /// right here and would still be wrong twice. There is no
+    /// reparenting to undo — a frame in this ledger owns no client
+    /// window, which is exactly why the default was written for
+    /// backends like this one — but the frame's stacking slot is the
+    /// window's only slot, and dropping it would leave a mapped,
+    /// managed window with no entry in `stacking` at all: invisible to
+    /// the renderer's frame band and to the hit-test's, and so
+    /// unclickable rather than merely unframed. Reusing the slot also
+    /// keeps the z-order the user arranged, which a push-to-top would
+    /// silently rearrange in front of them.
+    ///
+    /// The client's own rect is deliberately left where it is. On X11
+    /// this verb reparents the client to the root at its current
+    /// absolute position, and the chrome simply vanishes from around
+    /// it; matching that keeps the window under the pointer that was
+    /// just interacting with it.
+    fn release_decoration(&mut self, window: Self::WindowId, frame: Self::FrameId) {
+        if self.frames.remove(&frame).is_none() {
+            return;
+        }
+        replace_stack_entry(
+            &mut self.stacking,
+            StackEntry::Frame(frame),
+            StackEntry::Window(window),
+        );
+        self.damage = true;
     }
 
     fn paint_decoration(&mut self, frame: Self::FrameId, buffer: &DecorationBuffer) {
@@ -643,6 +682,44 @@ impl Backend for WaylandBackend {
         }
     }
 
+    /// Shows a managed window that has no frame of its own.
+    ///
+    /// The trait's default forwards to `map_unmanaged`, and taking it
+    /// would be a real bug on this backend rather than a shortcut:
+    /// `map_unmanaged` records the ledger entry's `window_type` as
+    /// `Unmanaged`, and both the renderer and the hit-test read that
+    /// field to mean "override-redirect — draw and click me above
+    /// everything, outside `stacking` entirely". That is right for an
+    /// XWayland tooltip and wrong for Edge, which would then float over
+    /// the dock and every other window for as long as it was open. The
+    /// window type stays whatever it is; only the frame is missing.
+    ///
+    /// The stacking slot is what actually makes such a window visible
+    /// (see [`StackEntry::Window`]). A window mapping for the first time
+    /// gets one on top, which is where `create_decoration` puts a fresh
+    /// frame; a window already holding one — remapped after a workspace
+    /// switch or a deminiaturize — keeps its depth, because coming back
+    /// from another workspace is not a raise.
+    fn map_frameless(&mut self, window: Self::WindowId) {
+        let Some(record) = self.windows.get_mut(&window) else {
+            return;
+        };
+        record.mapped = true;
+        ensure_stack_entry(&mut self.stacking, StackEntry::Window(window));
+        self.damage = true;
+    }
+
+    /// Hides one again. The slot stays: `unmap_frame` leaves a hidden
+    /// window's frame in `stacking` for the same reason, so that a
+    /// workspace switched away from and back to comes back in the order
+    /// it was left rather than flattened into map order.
+    fn unmap_frameless(&mut self, window: Self::WindowId) {
+        if let Some(record) = self.windows.get_mut(&window) {
+            record.mapped = false;
+            self.damage = true;
+        }
+    }
+
     fn set_client_mapped(&mut self, window: Self::WindowId, mapped: bool) {
         // Shading, purely compositor-side: the renderer stops drawing
         // the content while the frame stays. The client never learns —
@@ -659,13 +736,26 @@ impl Backend for WaylandBackend {
     // -- stacking ---------------------------------------------------------
 
     fn raise(&mut self, frame: Self::FrameId) {
-        if let Some(index) = self
-            .stacking
-            .iter()
-            .position(|entry| matches!(entry, StackEntry::Frame(f) if *f == frame))
-        {
-            let entry = self.stacking.remove(index);
-            self.stacking.push(entry);
+        if raise_stack_entry(&mut self.stacking, StackEntry::Frame(frame)) {
+            self.damage = true;
+        }
+    }
+
+    /// The same raise for a window whose client draws its own chrome:
+    /// it holds its own slot in the frame band rather than borrowing a
+    /// frame's (see [`StackEntry::Window`]), so raising it is raising
+    /// that slot.
+    ///
+    /// Deliberately the identical call to `raise` above, against a
+    /// different spelling of the same place in the same vector. A
+    /// frameless window that restacked by its own rules would be a
+    /// second stacking path to keep in agreement with the first, and
+    /// the reason this verb exists at all is that `wm-core`'s raise
+    /// sites all named a `FrameId` and silently did nothing for these
+    /// windows — clicking one focused it without bringing it forward,
+    /// for the whole life of the window.
+    fn raise_frameless(&mut self, window: Self::WindowId) {
+        if raise_stack_entry(&mut self.stacking, StackEntry::Window(window)) {
             self.damage = true;
         }
     }
@@ -851,6 +941,73 @@ impl Backend for WaylandBackend {
         }
     }
 
+    fn client_draws_own_chrome(&self, window: Self::WindowId) -> bool {
+        let Some(record) = self.windows.get(&window) else {
+            return false;
+        };
+        match &record.surface {
+            // `_MOTIF_WM_HINTS` with the decorations bit present and
+            // clear: the client has *said* it draws its own titlebar.
+            // Smithay parses the property on every PropertyNotify and
+            // answers from the parsed copy, so this is a field read, not
+            // a round trip, and `property_notify` in `xwayland.rs` turns
+            // the same edge into `BackendEvent::ChromeChanged`. This is
+            // the whole two-titlebar bug: LibreOffice and Edge both set
+            // this hint, chonkstep framed them anyway, and they wore our
+            // chrome over their own.
+            ManagedSurface::X11(surface) => !surface.is_decorated(),
+            // Wayland toplevels get `false`, always — and the reason is
+            // worth writing down, because the obvious improvement does
+            // not work and someone will try it.
+            //
+            // A client that binds xdg-decoration is handled: this
+            // compositor forces `ServerSide` on every such toplevel (see
+            // `XdgDecorationHandler` in `xdg.rs`), the protocol lets a
+            // compositor impose that, and a client that has been told
+            // ServerSide and still draws a titlebar is broken rather
+            // than undetected. So the only population in question is the
+            // clients that never bind the protocol at all — GTK4 and
+            // libadwaita above all, which draw a headerbar and never
+            // negotiate. Those DO wear two titlebars here today.
+            //
+            // Detecting them means treating the *absence* of a request
+            // as an answer, and absence is doing two jobs at once. The
+            // xdg-decoration preamble does say "if compositor and client
+            // do not negotiate the use of a server-side decoration using
+            // this protocol, clients continue to self-decorate as they
+            // see fit" — but "as they see fit" includes drawing nothing.
+            // A toolkit with no decoration support (SDL2 or GLFW built
+            // without libdecor, a bare wl_egl demo) is indistinguishable
+            // from libadwaita by this signal and draws no titlebar at
+            // all; unframed, it is a rectangle that cannot be moved,
+            // resized or closed with the pointer. Trading LibreOffice's
+            // spare titlebar for that is not a fix.
+            //
+            // The second half is that the flag could not be kept honest
+            // even for the clients it did catch. `XdgDecorationHandler`
+            // reports `new_decoration` when a client creates a
+            // `zxdg_toplevel_decoration_v1`, so "has bound" is
+            // observable — but smithay 0.7 handles the object's
+            // `destroy` request internally and calls no handler for it,
+            // and destroying it is precisely how the protocol spells
+            // "switch back to a mode without any server-side
+            // decorations". A cached "did it bind" bit would therefore
+            // go stale on exactly the transition `ChromeChanged` exists
+            // to carry. (Version 2 of the interface also lets a client
+            // bind *after* committing a buffer, i.e. after this backend
+            // has already emitted `MapRequest`, so the map-time answer
+            // is not final either.)
+            //
+            // Flipping this is a one-line change once someone decides
+            // the trade is worth it — track `new_decoration` in the
+            // surface's data map the way `MappedMarker` is tracked in
+            // `xdg.rs`, and answer `!bound` here. It is a desktop-wide
+            // policy change (every GTK application loses chonkstep
+            // chrome), not a bug fix, which is why it is not made here.
+            ManagedSurface::Xdg(_) => false,
+        }
+    }
+
     fn map_unmanaged(&mut self, window: Self::WindowId) {
         // `wm-core` only calls this for windows `window_type` classified
         // `Unmanaged`, so record that on the ledger entry as well.
@@ -884,14 +1041,23 @@ impl Backend for WaylandBackend {
         // `pos` is frame-local (the chrome offset — see the trait doc:
         // this only fires when that offset changes, fullscreen in/out).
         // Translate to global against the owning frame.
-        let Some(frame_pos) = self
+        //
+        // A window with no frame is the exception, and it is not an
+        // error case: `wm-core`'s reflow for a client-decorated window
+        // calls this with the content rect's *root* position, because
+        // there is no frame for an offset to be relative to. Returning
+        // early here (which this did, back when every managed window
+        // had a frame) is what would pin such a window wherever it
+        // first mapped — no move, no workspace placement, no
+        // fullscreen. Frame-local coordinates against no frame ARE
+        // global ones, which is the same identity `input.rs` relies on
+        // for root-relative shell clicks.
+        let frame_pos = self
             .frames
             .values()
             .find(|record| record.window == window)
             .map(|record| record.geometry.pos)
-        else {
-            return;
-        };
+            .unwrap_or(Point::new(0, 0));
         let Some(record) = self.windows.get_mut(&window) else {
             return;
         };

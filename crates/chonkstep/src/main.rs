@@ -18,6 +18,7 @@ use wm_x11::X11Backend;
 use chonk_shell::dockapp::Farewell;
 use chonk_shell::shell::{Shell, ShellOutcome};
 use chonk_shell::startup::{ensure_xcursor_size, reload_requested, restart_requested, SessionState};
+use chonk_xsettings::{DesktopAppearance, XSettingsManager};
 use chonk_shell::spawn;
 
 fn main() {
@@ -84,6 +85,28 @@ fn main() {
     spawn::spawn_detached("pkill", &["-USR1", "-x", "picom"]);
 
     let existing = backend.scan_existing_windows();
+    // XSETTINGS: the standard way an X desktop tells every client its
+    // DPI, scaling factor and cursor size, and the only way one this
+    // session did not launch itself ever hears about them. The
+    // per-child environment variables `spawn` sets reach applications
+    // started from the Applications menu and nothing else — a terminal
+    // the user opens a program from passes on whatever it inherited,
+    // and neither mechanism can update an application that is already
+    // running.
+    //
+    // Failure here is a warning and a session that carries on, never a
+    // startup failure: another settings manager already owning the
+    // selection is a legitimate configuration (a user running
+    // `xsettingsd` themselves), and it is theirs, not ours to take.
+    let mut xsettings = match XSettingsManager::acquire(None) {
+        Ok(manager) => Some(manager),
+        Err(e) => {
+            tracing::warn!(?e, "could not become the XSETTINGS manager; X clients will not be told this desktop's scale");
+            None
+        }
+    };
+    publish_appearance(&mut xsettings, &state);
+
     let mut wm = WindowManager::new(backend, Box::new(engine));
     // Session policy — focus, placement, edge resistance, the keymap —
     // is applied through the very same call a live reload makes. The
@@ -122,7 +145,13 @@ fn main() {
         // throwing itself away — the restart then starts from it.
         if reload_requested() {
             tracing::info!("reload requested — re-reading the config and applying it in place");
-            shell.apply_session_state(&mut wm, SessionState::resolve(&wm_config::load()));
+            let next = SessionState::resolve(&wm_config::load());
+            // Before the shell, so that any application relaunched as a
+            // consequence of the new state already sees the new
+            // settings. Republishing is free when nothing moved — the
+            // manager compares and declines to write.
+            publish_appearance(&mut xsettings, &next);
+            shell.apply_session_state(&mut wm, next);
         }
 
         if restart_requested() {
@@ -396,6 +425,40 @@ fn exit_requested(shell: &mut Shell<X11Backend>, outcome: ShellOutcome) -> bool 
 
 
 
+
+/// Publishes this session's scale and theme to every X client through
+/// XSETTINGS, if this session managed to become the settings manager.
+///
+/// Takes the whole [`SessionState`] rather than a scale so that the
+/// call site cannot drift from what was actually applied, and so a
+/// later setting worth publishing (a font, an icon theme) is added in
+/// one place.
+fn publish_appearance(manager: &mut Option<XSettingsManager>, state: &SessionState) {
+    let Some(manager) = manager.as_mut() else {
+        return;
+    };
+    // Scale and DPI only, deliberately no theme name. Publishing
+    // `Gtk/ThemeName = "nextstep-classic"` would not make GTK clients
+    // look like this desktop — chonkstep ships no GTK theme and no
+    // Xcursor theme — it would make every GTK client on the display
+    // fail to find that theme, fall back to its own default, and in
+    // doing so override whatever the user configured in their own
+    // `gtk-3.0/settings.ini`. `DesktopAppearance::default` puts it
+    // best: say the true things about DPI and say nothing about taste.
+    // The Wayland session publishes exactly the same set, and the two
+    // must not drift.
+    let appearance = DesktopAppearance::new(state.scale, "");
+    match manager.publish_appearance(&appearance) {
+        // `false` means nothing moved and nothing was written, which is
+        // the common case on a reload that changed something else.
+        Ok(changed) => {
+            if changed {
+                tracing::info!(scale = state.scale, "published XSETTINGS to X clients");
+            }
+        }
+        Err(e) => tracing::warn!(?e, "failed to publish XSETTINGS"),
+    }
+}
 
 /// Re-execs the *on-disk* binary in place (same PID, replaces this
 /// process's image) rather than `std::env::current_exe()` — resolved

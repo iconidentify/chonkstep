@@ -58,6 +58,7 @@ use smithay::utils::{Point as SPoint, Size as SSize};
 use smithay::wayland::compositor::{CompositorClientState, CompositorState};
 use smithay::wayland::output::OutputManagerState;
 use smithay::wayland::selection::data_device::DataDeviceState;
+use smithay::wayland::selection::primary_selection::PrimarySelectionState;
 use smithay::wayland::shell::xdg::decoration::XdgDecorationState;
 use smithay::wayland::shell::xdg::{ToplevelSurface, XdgShellState};
 use smithay::wayland::shm::ShmState;
@@ -73,6 +74,7 @@ use wm_theme::{FontState, RasterThemeEngine};
 use wm_theme_api::{DecorationBuffer, Point, Rect, Size};
 
 use chonk_shell::dockapp::Farewell;
+use chonk_xsettings::{DesktopAppearance, ManagerState, XSettingsError, XSettingsManager};
 use chonk_shell::shell::{Shell, ShellOutcome};
 use chonk_shell::startup::{ensure_xcursor_size, reload_requested, restart_requested, SessionState};
 
@@ -122,7 +124,78 @@ pub(crate) const ROOT_SHELL: WlShellId = WlShellId(0);
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum StackEntry {
     Frame(WlFrameId),
+    /// A managed window that owns no frame because its client drew its
+    /// own chrome (`wm_core::ClientChrome::ClientDrawn` — Edge,
+    /// LibreOffice, anything that sets `_MOTIF_WM_HINTS` to ask not to
+    /// be decorated). It sits in the *frame* band, not above it: such
+    /// a window is managed in every other respect, so it has to layer
+    /// against its framed neighbours and below the dock exactly as a
+    /// framed window does. That is the whole reason it needs an entry
+    /// of its own — an override-redirect menu is deliberately outside
+    /// `stacking` and always on top, and a browser treated the same way
+    /// would sit over the dock forever.
+    Window(WlWindowId),
     Shell(WlShellId),
+}
+
+/// Re-spells one window's place in the frame band without moving it:
+/// window slot to frame slot when chrome is created, frame slot to
+/// window slot when it is released. Appends on top when there is no
+/// slot yet, which is the ordinary first-map case.
+///
+/// The depth is the whole point. A window that grows or loses a
+/// titlebar has not been raised, and re-appending it would put it in
+/// front of everything the user had stacked over it — a browser
+/// jumping to the foreground because the page went full-screen. It is
+/// also the only place the two spellings can be swapped atomically:
+/// leaving both in `stacking` draws the client twice, at two depths,
+/// and dropping both leaves a mapped window with no slot at all,
+/// invisible to the renderer and to the hit-test alike.
+pub(crate) fn replace_stack_entry(
+    stacking: &mut Vec<StackEntry>,
+    old: StackEntry,
+    new: StackEntry,
+) {
+    match stacking.iter().position(|entry| *entry == old) {
+        Some(index) => stacking[index] = new,
+        None => stacking.push(new),
+    }
+}
+
+/// Gives `entry` a slot on top if it does not already hold one.
+///
+/// Idempotent on purpose: a frameless window is mapped again on every
+/// return from another workspace and on every deminiaturize, and each
+/// of those must keep the depth it had rather than count as a raise.
+pub(crate) fn ensure_stack_entry(stacking: &mut Vec<StackEntry>, entry: StackEntry) {
+    if !stacking.contains(&entry) {
+        stacking.push(entry);
+    }
+}
+
+/// Moves `entry` to the top of `stacking`. Answers whether it was in
+/// there to move, which is every caller's damage test.
+///
+/// Top of the *vector*, which is top of the entry's own band: whether
+/// that lands it over managed frames is decided at paint time from a
+/// shell's `above` flag (see the module doc on stacking bands), exactly
+/// as an override-redirect window's stacking versus reparented frames
+/// is decided on X11.
+///
+/// All three raise verbs — `raise` on a frame, `raise_frameless` on a
+/// window whose client drew its own chrome, `raise_shell_surface` on
+/// the dock — are this one function under different names. That is the
+/// point rather than tidiness: a framed and a client-decorated window
+/// must restack *identically*, and the bug that made `raise_frameless`
+/// necessary in the first place was two stacking paths that quietly
+/// disagreed, so this one leaves no room for a second pair to.
+pub(crate) fn raise_stack_entry(stacking: &mut Vec<StackEntry>, entry: StackEntry) -> bool {
+    let Some(index) = stacking.iter().position(|held| *held == entry) else {
+        return false;
+    };
+    let held = stacking.remove(index);
+    stacking.push(held);
+    true
 }
 
 /// The protocol handle behind a managed window. Both kinds flow
@@ -184,6 +257,14 @@ pub(crate) struct WindowRecord {
     /// backend decides it from `_NET_WM_WINDOW_TYPE`: override-redirect
     /// XWayland windows (menus, tooltips) come through as `Unmanaged`
     /// and are rendered as-is with no frame.
+    ///
+    /// `Unmanaged` is the renderer's and the hit-test's entire test for
+    /// "outside `stacking`, above everything", so nothing else may
+    /// borrow it. In particular a managed window that has no frame
+    /// because its client draws its own chrome stays whatever it is
+    /// (usually `Normal`) — it is frameless, not unmanaged, and it
+    /// layers by its own [`StackEntry::Window`] slot like any framed
+    /// neighbour.
     pub window_type: WindowType,
     /// Most recent preview of this window's contents, refreshed by
     /// [`crate::capture`] while rendering and served back through
@@ -396,6 +477,24 @@ impl WaylandBackend {
             .find(|(_, record)| record.surface.wl_surface().as_ref() == Some(surface))
             .map(|(id, _)| *id)
     }
+
+    /// Drops a window's ledger entry *and* the stacking slot a
+    /// frameless one holds.
+    ///
+    /// Every removal site has to go through here now that
+    /// [`StackEntry::Window`] exists. A framed window's slot belongs to
+    /// its frame and `Backend::destroy_decoration` prunes it during
+    /// `wm-core`'s teardown, but a client-decorated window's slot is
+    /// keyed by the window id itself, and nothing else would ever
+    /// collect it: the renderer and the hit-test would keep walking a
+    /// stale entry, find no record behind it, and skip — quietly
+    /// growing the stack by one dead slot per client-decorated window
+    /// the session ever opened.
+    pub(crate) fn forget_window(&mut self, window: WlWindowId) {
+        self.windows.remove(&window);
+        self.stacking
+            .retain(|entry| !matches!(entry, StackEntry::Window(w) if *w == window));
+    }
 }
 
 /// Per-client data attached when a wayland client connects. Smithay's
@@ -541,6 +640,15 @@ pub struct Compositor {
     pub seat_state: SeatState<Compositor>,
     pub output_manager_state: OutputManagerState,
     pub data_device_state: DataDeviceState,
+    /// The middle-click clipboard. Advertised because the X11 half of
+    /// the session has always had one — PRIMARY is an X server concept
+    /// that XWayland clients use whether or not the Wayland side knows
+    /// about it — and the XWayland selection bridge in `xwayland.rs`
+    /// needs somewhere to put an X selection it is handed and somewhere
+    /// to read one from. Without the global, selecting text in xterm and
+    /// middle-clicking into a Wayland editor has nothing to travel
+    /// through.
+    pub primary_selection_state: PrimarySelectionState,
     pub xwayland_shell_state: XWaylandShellState,
     /// Tracks xdg popups (client menus, tooltips) so the renderer can
     /// draw them above their parent window — `wm-core` never learns
@@ -563,6 +671,25 @@ pub struct Compositor {
     /// XWayland's display number, mirrored into `DISPLAY` so children
     /// the shell spawns find it.
     pub xdisplay: Option<u32>,
+    /// The XSETTINGS manager publishing this session's DPI, scaling
+    /// factor and cursor size to every X client on the XWayland
+    /// display, once XWayland is up.
+    ///
+    /// `None` before that, and `None` for good if the selection was
+    /// already owned — a degraded session, never a dead one. See
+    /// [`Compositor::start_xsettings`] for what it publishes and, more
+    /// importantly, what it deliberately does not.
+    pub(crate) xsettings: Option<XSettingsManager>,
+    /// The UI scale everything in this session is drawn at.
+    ///
+    /// Held here because two things outside the theme engine are sized
+    /// from it and neither can ask anyone else: the compositor's own
+    /// pointer (rebuilt in [`Compositor::dispatch_pending`]) and the
+    /// XSETTINGS properties above, which have to be publishable at
+    /// XWayland-ready time — a moment that arrives asynchronously, long
+    /// after `run` has handed its `SessionState` to the shell and
+    /// dropped it.
+    pub(crate) ui_scale: f32,
 
     /// The graphics stack: a host window, or the hardware itself.
     pub(crate) graphics: Graphics,
@@ -743,10 +870,23 @@ impl Compositor {
         // nothing else. So the announcement is the only point both
         // paths cross, and a rebuild written into either one of them is
         // a pointer that silently stays the wrong size on the other.
+        //
+        // The XSETTINGS republish rides the same drain, for the same
+        // reason and not merely out of convenience: it answers the same
+        // question ("what is sized from the scale and cannot ask the
+        // theme engine?") for X clients that the pointer rebuild answers
+        // for this compositor, and it has the identical hazard of being
+        // written next to one of the two paths a scale change arrives
+        // by. One announcement, one drain, both consumers.
+        // Before the drain below, so a republish is never attempted on a
+        // selection this session has just been told it no longer owns.
+        self.poll_xsettings();
         if let Some(scale) = self.wm.backend_mut().pending_cursor_scale.take() {
             tracing::info!(scale, "rebuilding the compositor's own pointer for the new UI scale");
+            self.ui_scale = scale;
             self.default_cursor = build_default_cursor(scale);
             self.wm.backend_mut().mark_damaged();
+            self.republish_xsettings();
         }
 
         // Damage means the scene changed; `redraw_pending` means a
@@ -767,6 +907,166 @@ impl Compositor {
         // been closed. See `sync_dock_sources` for why that ordering is
         // the safety argument and not a tidiness one.
         self.sync_dock_sources();
+    }
+
+    /// What this session tells X clients about its own appearance.
+    ///
+    /// Scale and nothing else, deliberately. `DesktopAppearance` can
+    /// also carry a widget theme, an icon theme, a cursor theme and a
+    /// default font, and every one of those is left unstated because
+    /// this desktop does not ship them: there is no GTK theme named
+    /// "chonkstep" and no Xcursor theme either, so publishing the name
+    /// would not make applications look like chonkstep — it would make
+    /// every GTK client on the display fail to find the theme, fall
+    /// back to its default, and in the process *override* whatever the
+    /// user had configured in their own `gtk-3.0/settings.ini`. Saying
+    /// nothing leaves that setting alone, which is the honest answer to
+    /// a question this desktop has no opinion on. (`DesktopAppearance`
+    /// treats an empty theme name as exactly that — see its `Default`.)
+    ///
+    /// The scale it does state is the same number, from the same base,
+    /// that `chonk_shell::startup::xcursor_size_for` derives
+    /// `XCURSOR_SIZE` from. The two mechanisms overlap on purpose and
+    /// must not disagree: a client can be reached by either one, and a
+    /// pointer that changes size as it crosses a window border is what
+    /// disagreement looks like.
+    fn appearance(&self) -> DesktopAppearance {
+        DesktopAppearance::new(self.ui_scale, "")
+    }
+
+    /// Takes the XSETTINGS manager selection on the freshly-started
+    /// XWayland display and publishes this session's scale to it.
+    ///
+    /// # Why a second X connection
+    ///
+    /// This process already speaks X to Xwayland — that is what
+    /// `X11Wm` is — but that connection is smithay's, driven by
+    /// smithay's own calloop source, and `XSettingsManager` consumes
+    /// the connection it is given and reads its event queue. Two
+    /// readers on one queue would each swallow events meant for the
+    /// other, which on the window-manager connection means dropped map
+    /// requests. So the manager opens its own, exactly as an external
+    /// settings daemon would.
+    ///
+    /// # Why failure is not fatal
+    ///
+    /// Something else owning `_XSETTINGS_S0` is a legitimate
+    /// configuration — a user running `xsettingsd` for their own
+    /// reasons — and the crate reports it as a clean `AlreadyOwned`
+    /// rather than an error. Standing down is then the correct
+    /// behaviour, not a degraded one: two managers fighting over the
+    /// selection would leave clients following whichever wrote last.
+    /// Everything else that can go wrong here (a display that vanished
+    /// between `Ready` and this call, an X server refusing the window)
+    /// costs the session its live scale publishing and nothing else,
+    /// which is precisely what the session had before this existed.
+    fn start_xsettings(&mut self, display_number: u32) {
+        // The display is named explicitly rather than inherited from
+        // `DISPLAY`: this runs inside the same handler that sets that
+        // variable, and letting which display gets the settings depend
+        // on the order of two lines in one function is a trap worth not
+        // laying. (Called `display_name` because a bare `display` field
+        // in a `tracing` macro resolves to `tracing::field::display`,
+        // which the expansion has in scope, and a local of that name
+        // loses to it — silently, as a type error about `Value`.)
+        let display_name = format!(":{display_number}");
+        let mut manager = match XSettingsManager::acquire(Some(&display_name)) {
+            Ok(manager) => manager,
+            Err(error @ XSettingsError::AlreadyOwned { .. }) => {
+                tracing::info!(%error, display = display_name, "another XSETTINGS manager owns this display; leaving it alone");
+                return;
+            }
+            Err(error) => {
+                tracing::warn!(%error, display = display_name, "could not publish XSETTINGS; X11 clients will only get the scale their launcher gave them");
+                return;
+            }
+        };
+        let appearance = self.appearance();
+        if let Err(error) = manager.publish_appearance(&appearance) {
+            tracing::warn!(%error, "could not publish the initial XSETTINGS");
+            return;
+        }
+        tracing::info!(
+            display = display_name,
+            scale = appearance.ui_scale,
+            cursor_px = appearance.effective_cursor_size(),
+            "publishing XSETTINGS to XWayland clients"
+        );
+        self.xsettings = Some(manager);
+    }
+
+    /// Services the XSETTINGS connection: answers selection requests
+    /// and notices if another manager has taken over.
+    ///
+    /// Not optional bookkeeping. Two things go wrong without it, and
+    /// only one of them is ours. A client that asks to *convert* the
+    /// selection and gets no answer does not fail — it waits out its own
+    /// timeout, which the user experiences as an application that hangs
+    /// on startup for no reason. And a manager that never learns it was
+    /// superseded goes on rewriting a property it no longer owns, which
+    /// ICCCM forbids a former owner from doing and which leaves clients
+    /// following whichever of the two wrote last.
+    ///
+    /// Driven off this loop's existing wakeups rather than a calloop
+    /// source on the connection's descriptor: `poll` is non-blocking and
+    /// drains whatever has arrived, the loop already wakes at least
+    /// every `HOUSEKEEPING_INTERVAL`, and the crate's own documentation
+    /// says a timer is a sufficient home for it. The cost of being up to
+    /// 16ms late to notice a takeover is nothing; the cost of a second
+    /// event source is a second thing to unregister on teardown.
+    fn poll_xsettings(&mut self) {
+        let Some(manager) = self.xsettings.as_mut() else {
+            return;
+        };
+        match manager.poll() {
+            Ok(ManagerState::Owner) => {}
+            Ok(ManagerState::Superseded) => {
+                // The crate has already logged the takeover and latched
+                // itself into refusing writes; dropping the handle is
+                // this session agreeing, and stops every later scale
+                // change asking again.
+                tracing::info!("another XSETTINGS manager took the selection; standing down");
+                self.xsettings = None;
+            }
+            Err(error) => {
+                tracing::warn!(%error, "the XSETTINGS connection failed; giving up on it for this session");
+                self.xsettings = None;
+            }
+        }
+    }
+
+    /// Republishes the appearance after a live scale change.
+    ///
+    /// The whole reason the XSETTINGS crate exists: an environment
+    /// variable is read once at launch, so before this, changing the
+    /// scale left every already-running X application at the size it
+    /// started at until it was restarted. `publish_appearance` writes
+    /// the property only when a value actually moved, so calling this
+    /// on a reload that changed nothing else costs one map walk and no
+    /// round trip — which matters, because writing the property wakes
+    /// every client on the display and a GTK application answers by
+    /// re-laying out every window it has.
+    fn republish_xsettings(&mut self) {
+        let appearance = self.appearance();
+        let Some(manager) = self.xsettings.as_mut() else {
+            return;
+        };
+        match manager.publish_appearance(&appearance) {
+            Ok(true) => tracing::info!(
+                scale = appearance.ui_scale,
+                "told X11 clients about the new UI scale through XSETTINGS"
+            ),
+            Ok(false) => {}
+            Err(error) => {
+                // Losing the selection to another manager is one of the
+                // ways this fails, and the crate has already latched
+                // itself into standing down; dropping our handle stops
+                // this session asking again once per scale change for
+                // the rest of its life.
+                tracing::warn!(%error, "could not republish XSETTINGS; giving up on it for this session");
+                self.xsettings = None;
+            }
+        }
     }
 
     /// Brings the set of registered dockapp sources in line with what
@@ -1012,6 +1312,7 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
     let shm_state = ShmState::new::<Compositor>(&display_handle, vec![]);
     let output_manager_state = OutputManagerState::new_with_xdg_output::<Compositor>(&display_handle);
     let data_device_state = DataDeviceState::new::<Compositor>(&display_handle);
+    let primary_selection_state = PrimarySelectionState::new::<Compositor>(&display_handle);
     let xwayland_shell_state = XWaylandShellState::new::<Compositor>(&display_handle);
 
     let mut seat_state: SeatState<Compositor> = SeatState::new();
@@ -1285,6 +1586,13 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
                                 // X11 session's DISPLAY inheritance.
                                 std::env::set_var("DISPLAY", format!(":{display_number}"));
                                 tracing::info!(display = display_number, "XWayland ready");
+                                // The earliest moment an X selection can
+                                // be taken, and the only one worth
+                                // taking it at: there is no display to
+                                // own before this, and every X client
+                                // that will ever run in this session
+                                // connects after it.
+                                comp.start_xsettings(display_number);
                             }
                             Err(error) => {
                                 tracing::error!(?error, "failed to attach the X11 window manager to XWayland");
@@ -1314,7 +1622,7 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
                             .map(|(id, _)| *id)
                             .collect();
                         for id in orphaned {
-                            backend.windows.remove(&id);
+                            backend.forget_window(id);
                             backend.queue(BackendEvent::Destroyed(id));
                         }
                         backend.mark_damaged();
@@ -1339,6 +1647,7 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
         seat_state,
         output_manager_state,
         data_device_state,
+        primary_selection_state,
         xwayland_shell_state,
         popups: PopupManager::default(),
         dock_sources: Vec::new(),
@@ -1346,6 +1655,8 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
         outputs,
         xwm: None,
         xdisplay: None,
+        xsettings: None,
+        ui_scale: scale,
         graphics,
         dmabuf,
         protocols,
@@ -1667,6 +1978,136 @@ mod tests {
         let (_, width, height) = default_cursor_pixels(1.0);
         assert_eq!(default_cursor_pixels(0.25).1, width);
         assert_eq!(default_cursor_pixels(0.0).2, height);
+    }
+
+    // The stacking transforms behind a client-decorated window's place
+    // in the scene. They are pure `Vec<StackEntry>` arithmetic, which is
+    // the only part of that path a unit test can reach: `WindowRecord`
+    // holds a live `ToplevelSurface` or `X11Surface`, so the renderer's
+    // and the hit-test's walks over real records need a client on a
+    // socket, not a test.
+
+    fn frame(id: u64) -> StackEntry {
+        StackEntry::Frame(WlFrameId(id))
+    }
+
+    fn window(id: u64) -> StackEntry {
+        StackEntry::Window(WlWindowId(id))
+    }
+
+    #[test]
+    fn releasing_chrome_keeps_the_window_at_its_own_depth() {
+        // Edge rewrites `_MOTIF_WM_HINTS` while sitting in the middle of
+        // the stack. Losing its frame must not promote it over the two
+        // windows above it.
+        let mut stacking = vec![frame(1), frame(2), frame(3)];
+        replace_stack_entry(&mut stacking, frame(2), window(20));
+        assert_eq!(stacking, vec![frame(1), window(20), frame(3)]);
+    }
+
+    #[test]
+    fn growing_chrome_keeps_the_window_at_its_own_depth() {
+        // And the way back, which is the same requirement: a window that
+        // asks to be decorated again has not asked to be raised.
+        let mut stacking = vec![window(10), frame(2), window(30)];
+        replace_stack_entry(&mut stacking, window(30), frame(3));
+        assert_eq!(stacking, vec![window(10), frame(2), frame(3)]);
+    }
+
+    #[test]
+    fn a_window_is_never_left_in_the_stack_twice() {
+        // The double-draw this guards: both spellings present means the
+        // renderer paints the client at two depths and the hit-test
+        // resolves clicks at whichever it reaches first.
+        let mut stacking = vec![frame(1), window(20)];
+        replace_stack_entry(&mut stacking, window(20), frame(2));
+        assert_eq!(stacking.iter().filter(|entry| **entry == window(20)).count(), 0);
+        assert_eq!(stacking, vec![frame(1), frame(2)]);
+    }
+
+    #[test]
+    fn a_first_map_lands_on_top() {
+        // No slot to inherit: a window mapping for the first time goes
+        // where `create_decoration` puts a fresh frame.
+        let mut stacking = vec![frame(1)];
+        replace_stack_entry(&mut stacking, window(20), frame(2));
+        assert_eq!(stacking, vec![frame(1), frame(2)]);
+
+        let mut stacking = vec![frame(1)];
+        ensure_stack_entry(&mut stacking, window(20));
+        assert_eq!(stacking, vec![frame(1), window(20)]);
+    }
+
+    #[test]
+    fn remapping_a_frameless_window_is_not_a_raise() {
+        // Coming back from another workspace, or from the icon well,
+        // calls `map_frameless` again on a window that never lost its
+        // slot — which must stay exactly where it was.
+        let mut stacking = vec![window(10), frame(2), frame(3)];
+        ensure_stack_entry(&mut stacking, window(10));
+        assert_eq!(stacking, vec![window(10), frame(2), frame(3)]);
+    }
+
+    #[test]
+    fn raising_a_frameless_window_puts_it_above_a_framed_one() {
+        // The bug the `raise_frameless` verb was added for: every raise
+        // site in `wm-core` named a `FrameId`, so a client-decorated
+        // window stayed at the depth it mapped at forever — clicking it
+        // focused it and left it behind whatever was in front. Invisible
+        // to every application that lets us draw its titlebar, which is
+        // why it needs pinning here.
+        let mut stacking = vec![window(10), frame(2), frame(3)];
+        assert!(raise_stack_entry(&mut stacking, window(10)));
+        assert_eq!(stacking, vec![frame(2), frame(3), window(10)]);
+    }
+
+    #[test]
+    fn a_framed_window_still_raises_over_a_frameless_one() {
+        // And the converse, which is the actual requirement: the two
+        // kinds restack against each other by one order, not two. A
+        // frameless window that could only ever be raised *among* its
+        // own kind would be a separate stacking path pretending to be
+        // the same one.
+        let mut stacking = vec![frame(1), window(20)];
+        assert!(raise_stack_entry(&mut stacking, frame(1)));
+        assert_eq!(stacking, vec![window(20), frame(1)]);
+    }
+
+    #[test]
+    fn raising_something_with_no_slot_reports_nothing_to_redraw() {
+        // The answer is the caller's damage test (see
+        // `Backend::raise_frameless`), so a raise of a window that was
+        // never mapped — or was destroyed a pass ago — must not mark the
+        // scene dirty and wake a redraw for a frame that is identical.
+        let mut stacking = vec![frame(1)];
+        assert!(!raise_stack_entry(&mut stacking, window(20)));
+        assert_eq!(stacking, vec![frame(1)]);
+    }
+
+    #[test]
+    fn raising_the_top_entry_leaves_the_order_alone() {
+        // Click-to-focus re-raises the already-front window constantly
+        // (`focus_client`'s re-assert path does it on every click), and
+        // the removal-then-push must be a no-op there rather than a
+        // rotation.
+        let mut stacking = vec![frame(1), frame(2), window(30)];
+        assert!(raise_stack_entry(&mut stacking, window(30)));
+        assert_eq!(stacking, vec![frame(1), frame(2), window(30)]);
+    }
+
+    #[test]
+    fn shell_slots_are_never_disturbed() {
+        // Shell surfaces share the one `stacking` vector with frames
+        // (see `StackEntry`), and the bands are decided at paint time
+        // from `above`, so a chrome change must leave their relative
+        // order alone rather than shuffling the dock.
+        let mut stacking =
+            vec![StackEntry::Shell(WlShellId(9)), frame(2), StackEntry::Shell(WlShellId(8))];
+        replace_stack_entry(&mut stacking, frame(2), window(20));
+        assert_eq!(
+            stacking,
+            vec![StackEntry::Shell(WlShellId(9)), window(20), StackEntry::Shell(WlShellId(8))]
+        );
     }
 
     #[test]

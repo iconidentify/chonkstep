@@ -32,7 +32,32 @@ pub struct FakeBackend {
     /// `WindowType::Normal`, matching both the trait default and the
     /// EWMH fallback for windows that declare no type.
     window_types: HashMap<FakeWindowId, WindowType>,
+    /// Which windows claim to draw their own chrome (the fake's stand-in
+    /// for `_MOTIF_WM_HINTS` and xdg-decoration alike). Absent means
+    /// they do not, which is what keeps an ordinary window framed.
+    client_drawn_chrome: HashMap<FakeWindowId, bool>,
 
+    /// Windows currently shown *without* a frame — the frameless
+    /// counterpart of `mapped_frames`, recorded separately because a
+    /// test asserting a client-decorated window is on screen cannot
+    /// look for a frame that by definition does not exist.
+    pub mapped_frameless: HashSet<FakeWindowId>,
+    /// Frames handed back through `release_decoration` rather than
+    /// `destroy_decoration`. The distinction is the whole point of that
+    /// verb on X11, where the wrong one destroys the client along with
+    /// its frame, so the fake records which one a caller reached for.
+    pub released_frames: HashSet<FakeFrameId>,
+    /// The last `_NET_FRAME_EXTENTS` published per window, in EWMH's
+    /// own order: left, right, top, bottom. Recorded because the
+    /// property is the only thing that tells a client how big its
+    /// chrome is, and "published nothing" and "published zeros" mean
+    /// opposite things to one.
+    pub frame_extents: HashMap<FakeWindowId, (u32, u32, u32, u32)>,
+    /// Windows raised through `raise_frameless`, in call order. A list
+    /// rather than a set: "was it ever raised" is a weaker claim than
+    /// "was it raised when it was clicked", and only the second one is
+    /// the bug.
+    pub raised_frameless: Vec<FakeWindowId>,
     pub mapped_frames: HashSet<FakeFrameId>,
     pub unmapped_frames: HashSet<FakeFrameId>,
     pub destroyed_frames: HashSet<FakeFrameId>,
@@ -51,6 +76,11 @@ pub struct FakeBackend {
     /// though X11's server-side clipping would hide it.
     pub last_paint_size: HashMap<FakeFrameId, Size>,
     pub last_frame_geometry: HashMap<FakeFrameId, Rect>,
+    /// Where each client window was last positioned directly. For a
+    /// framed window this is its offset inside its frame; for a
+    /// frameless one it is a root position, and it is the only record
+    /// of where such a window actually is.
+    pub last_client_position: HashMap<FakeWindowId, Point>,
     pub close_requests: HashSet<FakeWindowId>,
     /// Monotonic id source for `create_shell_surface`.
     pub next_shell_id: u32,
@@ -184,6 +214,13 @@ impl FakeBackend {
     /// default. Lets tests exercise the `Unmanaged` map path.
     pub fn set_window_type(&mut self, window: FakeWindowId, window_type: WindowType) {
         self.window_types.insert(window, window_type);
+    }
+
+    /// Makes `window` claim it has already drawn its own titlebar — the
+    /// fake's `_MOTIF_WM_HINTS`. Settable after a map, because real
+    /// clients change their minds and the window manager has to follow.
+    pub fn set_client_draws_own_chrome(&mut self, window: FakeWindowId, draws: bool) {
+        self.client_drawn_chrome.insert(window, draws);
     }
 
     /// Stages a scroll for the next `take_shell_scroll` drain, as a
@@ -353,6 +390,35 @@ impl Backend for FakeBackend {
     }
     fn replay_pointer(&mut self) {
         self.replay_pointer_calls += 1;
+    }
+
+    fn publish_frame_extents(&mut self, window: Self::WindowId, left: u32, right: u32, top: u32, bottom: u32) {
+        self.frame_extents.insert(window, (left, right, top, bottom));
+    }
+
+    fn client_draws_own_chrome(&self, window: Self::WindowId) -> bool {
+        self.client_drawn_chrome.get(&window).copied().unwrap_or(false)
+    }
+
+    fn position_client(&mut self, window: Self::WindowId, pos: Point) {
+        self.last_client_position.insert(window, pos);
+    }
+
+    fn raise_frameless(&mut self, window: Self::WindowId) {
+        self.raised_frameless.push(window);
+    }
+
+    fn map_frameless(&mut self, window: Self::WindowId) {
+        self.mapped_frameless.insert(window);
+    }
+
+    fn unmap_frameless(&mut self, window: Self::WindowId) {
+        self.mapped_frameless.remove(&window);
+    }
+
+    fn release_decoration(&mut self, _window: Self::WindowId, frame: Self::FrameId) {
+        self.released_frames.insert(frame);
+        self.destroy_decoration(frame);
     }
 
     fn window_type(&self, window: Self::WindowId) -> WindowType {

@@ -95,6 +95,15 @@ pub struct X11Backend {
     /// live: Microsoft Edge miniaturized to a bare "?" icon).
     net_wm_name: Atom,
     utf8_string: Atom,
+    /// `_MOTIF_WM_HINTS` — the property a client sets to ask not to be
+    /// decorated. Motif itself is long gone, but nothing ever replaced
+    /// this: EWMH specifies no "don't decorate me" hint, so every
+    /// toolkit that draws its own titlebar (GTK3/4, Chromium and every
+    /// Electron app on top of it, LibreOffice's VCL) still says it
+    /// here, and a WM that doesn't read it frames those windows over
+    /// chrome they already drew — two titlebars, only one of which
+    /// moves the window.
+    motif_wm_hints: Atom,
     /// Every EWMH atom this backend publishes or reacts to — see
     /// `EwmhAtoms`.
     ewmh: EwmhAtoms,
@@ -186,6 +195,60 @@ impl X11Backend {
         }
     }
 
+    /// Selects `PropertyChange` on a client's own window, so the two
+    /// properties this WM keeps re-reading after the first map —
+    /// `WM_NAME`/`_NET_WM_NAME` for the titlebar text, and
+    /// `_MOTIF_WM_HINTS` for whether the client draws its own chrome —
+    /// actually generate the `PropertyNotify`s `translate_event` turns
+    /// into `TitleChanged`/`ChromeChanged`. A client selects its own
+    /// event mask for its own purposes, but `PropertyChangeMask` isn't
+    /// exclusive, so asking for it here doesn't disturb whatever the
+    /// client asked for.
+    ///
+    /// Done the moment the window becomes known — its `MapRequest`, or
+    /// the startup scan for windows that predate this WM — rather than
+    /// when it gets framed, which is where this used to live. A client
+    /// that draws its own chrome is fully managed but never framed, so
+    /// selecting inside `create_decoration` would leave exactly the
+    /// windows whose `_MOTIF_WM_HINTS` matters most permanently
+    /// unwatched: an app that turns its own titlebar off after mapping
+    /// could never be un-framed, and one that turns it back on could
+    /// never get its frame back.
+    ///
+    /// The cost of selecting that early is a handful of
+    /// `PropertyNotify`s from windows this WM turns out not to manage
+    /// at all (a dock, a tooltip), which `translate_event` reports and
+    /// the core drops. A few events nobody wanted is the right side of
+    /// this trade against missing the one that decides whether a window
+    /// wears two titlebars.
+    fn watch_client_properties(&self, window: Window) {
+        let _ = self
+            .conn
+            .change_window_attributes(window, &ChangeWindowAttributesAux::new().event_mask(EventMask::PROPERTY_CHANGE));
+    }
+
+    /// Maps or unmaps a client's *own* window, suppressing the
+    /// `UnmapNotify` the request generates. That event is
+    /// indistinguishable from the one a client sends when it withdraws
+    /// itself, so without recording the request's sequence number for
+    /// `should_ignore` every WM-driven hide — shading, a workspace
+    /// switch, miniaturizing a frameless window — would reach
+    /// `wm-core` as "this client is gone" and the window would be
+    /// dropped from tracking mid-session. The mapping direction needs
+    /// no suppression today (a `MapNotify` isn't translated at all),
+    /// but is recorded the same way so the pairing can't rot.
+    fn set_client_window_mapped(&mut self, window: Window, mapped: bool) {
+        let seqno = if mapped {
+            self.conn.map_window(window).ok().map(|c| c.sequence_number() as u16)
+        } else {
+            self.conn.unmap_window(window).ok().map(|c| c.sequence_number() as u16)
+        };
+        if let Some(seqno) = seqno {
+            self.record_ignored_sequence(seqno);
+        }
+        let _ = self.conn.flush();
+    }
+
     /// Connects to the X server and attempts to become the window
     /// manager (acquiring `SubstructureRedirect` on the root window).
     /// Fails loudly — via `X11BackendError::AnotherWmRunning` — if
@@ -218,6 +281,7 @@ impl X11Backend {
         let net_wm_pid = conn.intern_atom(false, b"_NET_WM_PID")?.reply()?.atom;
         let net_wm_name = conn.intern_atom(false, b"_NET_WM_NAME")?.reply()?.atom;
         let utf8_string = conn.intern_atom(false, b"UTF8_STRING")?.reply()?.atom;
+        let motif_wm_hints = conn.intern_atom(false, b"_MOTIF_WM_HINTS")?.reply()?.atom;
         let xrootpmap_id = conn.intern_atom(false, b"_XROOTPMAP_ID")?.reply()?.atom;
         let esetroot_pmap_id = conn.intern_atom(false, b"ESETROOT_PMAP_ID")?.reply()?.atom;
         let net_wm_window_opacity = conn.intern_atom(false, b"_NET_WM_WINDOW_OPACITY")?.reply()?.atom;
@@ -370,6 +434,7 @@ impl X11Backend {
             net_wm_pid,
             net_wm_name,
             utf8_string,
+            motif_wm_hints,
             ewmh,
             shutdown_emitted: false,
             known_clients: HashSet::new(),
@@ -606,6 +671,37 @@ impl X11Backend {
                 return;
             }
         }
+    }
+
+    /// Publishes EWMH `_NET_FRAME_EXTENTS` on a client's own window:
+    /// how many pixels of WM-drawn chrome sit on each side of it, in
+    /// the spec's `left, right, top, bottom` order (not the
+    /// clockwise/CSS order — getting that wrong reads as a window
+    /// mysteriously offset by a titlebar height). A client that reasons
+    /// about its own on-screen footprint — restoring a saved window
+    /// position, sizing itself to a fraction of the workarea — has no
+    /// other way to learn how much bigger than its content the thing
+    /// the user sees actually is, since the frame is a window it never
+    /// gets told about.
+    ///
+    /// A frameless (client-drawn) window publishes four zeros rather
+    /// than nothing: an absent property means "this WM never says", and
+    /// a client that has to guess guesses the chrome it would get if it
+    /// were framed. Saying zero is the whole point of the property for
+    /// exactly those windows.
+    ///
+    /// On the client window, never the frame, for the same reason as
+    /// `publish_net_state`: readers only ever learn client ids, from
+    /// `_NET_CLIENT_LIST`.
+    pub fn publish_frame_extents(&mut self, window: XWindow, left: u32, right: u32, top: u32, bottom: u32) {
+        let _ = self.conn.change_property32(
+            PropMode::REPLACE,
+            window.0,
+            self.ewmh.net_frame_extents,
+            AtomEnum::CARDINAL,
+            &[left, right, top, bottom],
+        );
+        let _ = self.conn.flush();
     }
 
     /// Creates an unmanaged shell window (dock panel, menu popup, ...) —
@@ -857,6 +953,14 @@ impl X11Backend {
         match event {
             Event::MapRequest(e) => {
                 self.known_clients.insert(e.window);
+                // Before the core is told about the window, so the
+                // answer `client_draws_own_chrome` is about to give it
+                // is already under watch: a client that rewrites
+                // `_MOTIF_WM_HINTS` in the same breath as mapping (GTK
+                // does this on realize) must not have that write fall
+                // into a gap between "we know the window" and "we
+                // selected for its property changes".
+                self.watch_client_properties(e.window);
                 Some(BackendEvent::MapRequest(XWindow(e.window)))
             }
             Event::UnmapNotify(e) => {
@@ -922,16 +1026,30 @@ impl X11Backend {
                 Some(BackendEvent::KeyRelease(KeyCombo { keysym, modifiers }))
             }
             Event::PropertyNotify(e) => {
+                if !self.known_clients.contains(&e.window) {
+                    return None;
+                }
                 // Watch both the legacy and EWMH title properties — a
                 // client that only ever sets `_NET_WM_NAME` (common for
                 // GTK/Chromium-based apps) would otherwise never trigger
                 // a title update after its first map.
-                let is_title_atom = e.atom == u32::from(AtomEnum::WM_NAME) || e.atom == self.net_wm_name;
-                if is_title_atom && self.known_clients.contains(&e.window) {
-                    Some(BackendEvent::TitleChanged(XWindow(e.window)))
-                } else {
-                    None
+                if e.atom == u32::from(AtomEnum::WM_NAME) || e.atom == self.net_wm_name {
+                    return Some(BackendEvent::TitleChanged(XWindow(e.window)));
                 }
+                // `_MOTIF_WM_HINTS` is not a map-time-only declaration.
+                // Real applications rewrite it on a window that is
+                // already up: LibreOffice swaps between its own
+                // titlebar and the WM's when the user changes that
+                // preference, and Chromium/Electron apps toggle it
+                // entering and leaving their own full-screen mode. The
+                // event says only that the property changed — deleted
+                // included, `PropertyNotify` reports that too — so the
+                // core re-reads rather than being handed a value, and
+                // a deletion correctly reads back as "decorate it".
+                if e.atom == self.motif_wm_hints {
+                    return Some(BackendEvent::ChromeChanged(XWindow(e.window)));
+                }
+                None
             }
             Event::RandrScreenChangeNotify(e) => {
                 self.screen_width = e.width;
@@ -991,6 +1109,33 @@ impl X11Backend {
         }
         if e.type_ == self.ewmh.net_close_window {
             return Some(BackendEvent::CloseRequested(XWindow(e.window)));
+        }
+        if e.type_ == self.ewmh.net_wm_moveresize {
+            // EWMH `_NET_WM_MOVERESIZE`: a client asking the window
+            // manager to take over an interactive drag it has decided
+            // has begun — which is what a client that drew its own
+            // titlebar sends the instant the user presses on it.
+            //
+            // Only the move directions are honoured. `data.l[2]` is the
+            // direction, where 8 is `_NET_WM_MOVERESIZE_MOVE` and 9 is
+            // the keyboard variant; the 0..=7 resize directions are
+            // deliberately dropped, because this window manager's own
+            // resize machinery is driven by its resizebar geometry and
+            // has nowhere to take an edge from a client that has none.
+            // A dropped request is what the spec asks for on anything
+            // unsupported, and it degrades to "cannot resize by
+            // dragging its own border", not to a broken window.
+            //
+            // Honouring the move half is not a nicety: a client-drawn
+            // titlebar is the only handle such a window has, since this
+            // WM deliberately draws none for it.
+            let direction = e.data.as_data32()[2];
+            const MOVE: u32 = 8;
+            const KEYBOARD_MOVE: u32 = 9;
+            if direction == MOVE || direction == KEYBOARD_MOVE {
+                return Some(BackendEvent::MoveRequest(XWindow(e.window)));
+            }
+            return None;
         }
         if e.type_ == self.ewmh.net_current_desktop {
             // EWMH "_NET_CURRENT_DESKTOP": data.l[0] is the desktop a
@@ -1060,6 +1205,7 @@ struct EwmhAtoms {
     net_supported: Atom,
     net_supporting_wm_check: Atom,
     net_active_window: Atom,
+    net_wm_moveresize: Atom,
     net_client_list: Atom,
     net_close_window: Atom,
     net_wm_state: Atom,
@@ -1087,6 +1233,7 @@ struct EwmhAtoms {
     net_current_desktop: Atom,
     net_wm_desktop: Atom,
     net_workarea: Atom,
+    net_frame_extents: Atom,
 }
 
 impl EwmhAtoms {
@@ -1095,6 +1242,7 @@ impl EwmhAtoms {
             net_supported: conn.intern_atom(false, b"_NET_SUPPORTED")?.reply()?.atom,
             net_supporting_wm_check: conn.intern_atom(false, b"_NET_SUPPORTING_WM_CHECK")?.reply()?.atom,
             net_active_window: conn.intern_atom(false, b"_NET_ACTIVE_WINDOW")?.reply()?.atom,
+            net_wm_moveresize: conn.intern_atom(false, b"_NET_WM_MOVERESIZE")?.reply()?.atom,
             net_client_list: conn.intern_atom(false, b"_NET_CLIENT_LIST")?.reply()?.atom,
             net_close_window: conn.intern_atom(false, b"_NET_CLOSE_WINDOW")?.reply()?.atom,
             net_wm_state: conn.intern_atom(false, b"_NET_WM_STATE")?.reply()?.atom,
@@ -1122,6 +1270,7 @@ impl EwmhAtoms {
             net_current_desktop: conn.intern_atom(false, b"_NET_CURRENT_DESKTOP")?.reply()?.atom,
             net_wm_desktop: conn.intern_atom(false, b"_NET_WM_DESKTOP")?.reply()?.atom,
             net_workarea: conn.intern_atom(false, b"_NET_WORKAREA")?.reply()?.atom,
+            net_frame_extents: conn.intern_atom(false, b"_NET_FRAME_EXTENTS")?.reply()?.atom,
         })
     }
 
@@ -1135,6 +1284,11 @@ impl EwmhAtoms {
             self.net_active_window,
             self.net_client_list,
             self.net_close_window,
+            // Advertised because a client checks this list before it
+            // will send one: a CSD toolkit that does not see
+            // `_NET_WM_MOVERESIZE` here falls back to moving itself
+            // with raw ConfigureRequests, or to not moving at all.
+            self.net_wm_moveresize,
             self.net_wm_state,
             self.net_wm_state_fullscreen,
             self.net_wm_state_maximized_horz,
@@ -1160,6 +1314,7 @@ impl EwmhAtoms {
             self.net_current_desktop,
             self.net_wm_desktop,
             self.net_workarea,
+            self.net_frame_extents,
             net_wm_name,
         ]
     }
@@ -1793,6 +1948,14 @@ impl Backend for X11Backend {
         X11Backend::set_ui_scale(self, scale)
     }
 
+    // Forwarded to the inherent method for the same reason as the two
+    // above: without this the trait's no-op default would quietly win
+    // at every generic call site, and the property would never be
+    // published despite the code to publish it existing.
+    fn publish_frame_extents(&mut self, window: Self::WindowId, left: u32, right: u32, top: u32, bottom: u32) {
+        X11Backend::publish_frame_extents(self, window, left, right, top, bottom)
+    }
+
     fn screen_size(&self) -> Size {
         X11Backend::screen_size(self)
     }
@@ -1819,6 +1982,10 @@ impl Backend for X11Backend {
             };
             if !attr.override_redirect && attr.map_state == MapState::VIEWABLE {
                 self.known_clients.insert(win);
+                // These windows never send a `MapRequest` — they were
+                // already up when this WM started — so this is their
+                // only chance to be put under property watch.
+                self.watch_client_properties(win);
                 result.push(XWindow(win));
             }
         }
@@ -1929,6 +2096,47 @@ impl Backend for X11Backend {
             return false;
         };
         reply.value32().map(|it| it.into_iter().any(|a| a == target)).unwrap_or(false)
+    }
+
+    fn client_draws_own_chrome(&self, window: Self::WindowId) -> bool {
+        // `_MOTIF_WM_HINTS` is five CARD32s — flags, functions,
+        // decorations, input_mode, status — of which two matter here.
+        // `MWM_HINTS_DECORATIONS` in `flags` is what makes the third
+        // field mean anything at all (the struct is always five words
+        // long, so an unflagged `decorations` is uninitialized memory
+        // as often as it is a zero), and a `decorations` field of zero
+        // is then the request every client-side-decorated toolkit
+        // makes: no titlebar, no borders, none of it.
+        const MWM_HINTS_DECORATIONS: u32 = 1 << 1;
+
+        // Read as `AnyPropertyType`, not `CARDINAL`: Motif types this
+        // property with the property atom itself, and a type-filtered
+        // `GetProperty` against the wrong type answers successfully
+        // with an empty value rather than failing — which would quietly
+        // report every client-decorated window in the wild as wanting a
+        // frame, i.e. exactly the bug this is here to fix, with no
+        // error anywhere to explain it.
+        let Ok(cookie) = self.conn.get_property(false, window.0, self.motif_wm_hints, AtomEnum::ANY, 0, 5) else {
+            return false;
+        };
+        let Ok(reply) = cookie.reply() else {
+            return false;
+        };
+        let fields: Vec<u32> = match reply.value32() {
+            Some(values) => values.take(3).collect(),
+            None => return false,
+        };
+        // Every way of failing to get an answer — property absent,
+        // unreadable, not 32-bit format, truncated before the
+        // `decorations` word, flag not set — converges on `false`
+        // deliberately. An ordinary X11 client says nothing about Motif
+        // hints and has relied on being decorated for forty years, so
+        // "we could not tell" must mean "decorate it"; the only thing
+        // that may un-frame a window is the client explicitly asking.
+        let (Some(&flags), Some(&decorations)) = (fields.first(), fields.get(2)) else {
+            return false;
+        };
+        flags & MWM_HINTS_DECORATIONS != 0 && decorations == 0
     }
 
     fn window_geometry(&self, window: Self::WindowId) -> Rect {
@@ -2043,16 +2251,6 @@ impl Backend for X11Backend {
             tracing::warn!(?e, "grab_server failed");
         }
         let _ = self.conn.change_save_set(SetMode::INSERT, window.0);
-        // A client sets its own event mask for its own purposes;
-        // PropertyChangeMask isn't exclusive, so the WM can separately
-        // select it on the same window to learn about title changes
-        // (`WM_NAME`) without touching whatever mask the client itself
-        // selected. Without this, a title set after the first map (very
-        // common — e.g. a terminal whose shell sets its title once the
-        // prompt is ready) would never reach `wm-core`.
-        let _ = self
-            .conn
-            .change_window_attributes(window.0, &ChangeWindowAttributesAux::new().event_mask(EventMask::PROPERTY_CHANGE));
         let seqno = match self.conn.reparent_window(
             window.0,
             frame,
@@ -2074,6 +2272,25 @@ impl Backend for X11Backend {
 
         self.frame_to_client.insert(frame, window.0);
         self.apply_opacity_rule(window.0, frame);
+
+        // The chrome this frame adds, published the moment it exists
+        // rather than waiting for the core's next relayout — a client
+        // that reads `_NET_FRAME_EXTENTS` does it while working out
+        // where to put itself, which is immediately after being mapped.
+        // The client's own window is still exactly the size the layout
+        // was computed from (reparenting doesn't resize it), so its
+        // geometry is what turns a frame size and a content offset into
+        // four per-side widths. Queried after the server ungrab above,
+        // not inside it: this is the one round trip on the path, and
+        // holding every other X client still for it would be a poor
+        // trade for a property nothing reads synchronously.
+        if let Some(content) = self.conn.get_geometry(window.0).ok().and_then(|c| c.reply().ok()) {
+            let left = layout.client_offset.x.max(0) as u32;
+            let top = layout.client_offset.y.max(0) as u32;
+            let right = layout.frame_size.w.saturating_sub(left + content.width as u32);
+            let bottom = layout.frame_size.h.saturating_sub(top + content.height as u32);
+            self.publish_frame_extents(window, left, right, top, bottom);
+        }
         XFrame(frame)
     }
 
@@ -2082,6 +2299,90 @@ impl Backend for X11Backend {
         self.painted.remove(&frame.0);
         self.frame_cursor.remove(&frame.0);
         let _ = self.conn.destroy_window(frame.0);
+        let _ = self.conn.flush();
+    }
+
+    fn release_decoration(&mut self, window: Self::WindowId, frame: Self::FrameId) {
+        // Where the client currently sits in root coordinates. This has
+        // to be asked before anything moves, and it has to be asked of
+        // the *client*: the frame's origin is the chrome's top-left,
+        // and reparenting the client there would shift its content up
+        // and left by the titlebar and border it is about to stop
+        // having. Reparenting is a move, so the number decides whether
+        // an application that turns its own titlebar on mid-session
+        // stays put or visibly jumps.
+        //
+        // If the client is already gone the translation fails, and the
+        // fallbacks get progressively worse (the frame's origin: off by
+        // the chrome; the screen corner: wrong but on screen). What
+        // none of them do is skip the reparent, because the frame is
+        // destroyed below either way and a client still parented to it
+        // when that happens is destroyed with it.
+        let position = self
+            .conn
+            .translate_coordinates(window.0, self.root, 0, 0)
+            .ok()
+            .and_then(|cookie| cookie.reply().ok())
+            .map(|reply| (reply.dst_x, reply.dst_y))
+            .or_else(|| {
+                self.conn
+                    .get_geometry(frame.0)
+                    .ok()
+                    .and_then(|cookie| cookie.reply().ok())
+                    .map(|geometry| (geometry.x, geometry.y))
+            })
+            .unwrap_or((0, 0));
+
+        if let Err(e) = self.conn.grab_server() {
+            tracing::warn!(?e, "grab_server failed");
+        }
+        // A `ReparentWindow` on a mapped window is three operations to
+        // the server: it unmaps the window, moves it, and maps it again
+        // — generating an `UnmapNotify`, a `ReparentNotify` and a
+        // `MapNotify`, all carrying this request's sequence number.
+        // That unmap is byte-for-byte the one a client sends when it
+        // withdraws itself, so without the ignore `wm-core` would be
+        // told the application had gone away at the exact moment it
+        // asked to keep its window and draw its own chrome. All three
+        // share one sequence number, so one recorded entry covers them,
+        // and the automatic remap is why nothing here maps the client
+        // back explicitly — doing so would also un-hide a window that
+        // was deliberately unmapped (miniaturized, or on another
+        // workspace) when its chrome changed.
+        let seqno = match self.conn.reparent_window(window.0, self.root, position.0, position.1) {
+            Ok(cookie) => Some(cookie.sequence_number() as u16),
+            Err(e) => {
+                tracing::warn!(?e, ?window, "reparent_window back to root failed");
+                None
+            }
+        };
+        if let Some(seqno) = seqno {
+            self.record_ignored_sequence(seqno);
+        }
+        // Out of the save-set `create_decoration` put it in: that
+        // entry exists so a client reparented *into* a frame is
+        // rescued back to the root if this WM dies, and a client that
+        // is already a child of the root has nothing to be rescued
+        // from. `create_decoration` re-inserts if the window is framed
+        // again later.
+        let _ = self.conn.change_save_set(SetMode::DELETE, window.0);
+        let _ = self.conn.ungrab_server();
+
+        // Only now the frame, and only because the reparent is already
+        // queued ahead of it: the server runs one client's requests in
+        // the order they were written, so by the time `DestroyWindow`
+        // executes the client is no longer a child of the frame and is
+        // not destroyed with it. This is the whole reason
+        // `release_decoration` exists rather than defaulting to
+        // `destroy_decoration` on this backend.
+        self.frame_to_client.remove(&frame.0);
+        self.painted.remove(&frame.0);
+        self.frame_cursor.remove(&frame.0);
+        let _ = self.conn.destroy_window(frame.0);
+        // No chrome around this window any more, said out loud — see
+        // `publish_frame_extents` on why zeros rather than deleting the
+        // property.
+        self.publish_frame_extents(window, 0, 0, 0, 0);
         let _ = self.conn.flush();
     }
 
@@ -2168,27 +2469,61 @@ impl Backend for X11Backend {
     }
 
     fn set_client_mapped(&mut self, window: Self::WindowId, mapped: bool) {
-        // Unmapping the client's own window (for shading) generates an
-        // UnmapNotify exactly like a real withdrawal would — record its
-        // sequence number so `should_ignore` filters it out before it
-        // reaches `translate_event`, the same trick already used for
-        // `reparent_window`'s generated events. Without this, shading a
-        // window would look identical to closing it and get forgotten.
-        let seqno = if mapped {
-            self.conn.map_window(window.0).ok().map(|c| c.sequence_number() as u16)
-        } else {
-            self.conn.unmap_window(window.0).ok().map(|c| c.sequence_number() as u16)
-        };
-        if let Some(seqno) = seqno {
-            self.record_ignored_sequence(seqno);
-        }
-        let _ = self.conn.flush();
+        // Shading hides the client's content while its frame stays up,
+        // so this touches the client window only — and therefore has to
+        // suppress its own `UnmapNotify`, or shading a window would be
+        // indistinguishable from closing it (see
+        // `set_client_window_mapped`).
+        self.set_client_window_mapped(window.0, mapped);
+    }
+
+    fn map_frameless(&mut self, window: Self::WindowId) {
+        // Identical to `map_unmanaged` today, and deliberately not
+        // written as a call to it: that one shows a window this WM
+        // decided *not* to manage (a dock, a tooltip) and is free to
+        // grow policy of its own, while this one shows a fully managed
+        // window that merely has no frame to map instead. A future edit
+        // to either must not silently become an edit to both.
+        self.set_client_window_mapped(window.0, true);
+    }
+
+    fn unmap_frameless(&mut self, window: Self::WindowId) {
+        // The frameless counterpart of `unmap_frame`: with no frame to
+        // hide, hiding the window means hiding the client itself, which
+        // is precisely the case `set_client_window_mapped`'s
+        // suppression exists for — an unsuppressed `UnmapNotify` here
+        // would have the core forget a window that was only switched
+        // away from, and it would never come back when the user
+        // switched back.
+        self.set_client_window_mapped(window.0, false);
+    }
+
+    // Asked of the server, because motion over a client's own window
+    // never reaches this window manager and the remembered position is
+    // therefore stale for exactly the windows that send
+    // `_NET_WM_MOVERESIZE`. A failed query degrades to `None` and the
+    // caller falls back, as it would for any backend that cannot answer.
+    fn pointer_position(&self) -> Option<Point> {
+        let reply = self.conn.query_pointer(self.root).ok()?.reply().ok()?;
+        Some(Point::new(reply.root_x as i32, reply.root_y as i32))
     }
 
     fn raise(&mut self, frame: Self::FrameId) {
         let _ = self
             .conn
             .configure_window(frame.0, &ConfigureWindowAux::new().stack_mode(StackMode::ABOVE));
+        let _ = self.conn.flush();
+    }
+
+    // The same request against the client window itself, for a managed
+    // window that has no frame because its client drew its own chrome.
+    // On X11 the two are the same operation on different windows: a
+    // frameless client is parented to the root, so restacking it is
+    // restacking exactly the thing on screen.
+    fn raise_frameless(&mut self, window: Self::WindowId) {
+        let _ = self
+            .conn
+            .configure_window(window.0, &ConfigureWindowAux::new().stack_mode(StackMode::ABOVE));
         let _ = self.conn.flush();
     }
 

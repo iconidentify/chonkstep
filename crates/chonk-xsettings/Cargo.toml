@@ -1,0 +1,23 @@
+[package]
+name = "chonk-xsettings"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "XSETTINGS manager (publisher) side: owns the _XSETTINGS_S<screen> selection and publishes DPI, scaling, cursor and theme settings to every X client at once."
+
+# Three dependencies, and the split between them is the shape of the
+# crate: `format` is pure and depends on nothing, `manager` is the only
+# module that touches X11, and `tracing` is how a failure the caller
+# cannot act on gets recorded instead of propagated.
+#
+# `x11rb` is pinned to the same "0.13" requirement `wm-x11` uses, so the
+# workspace resolves exactly one copy (0.13.2, per `Cargo.lock`). The
+# `randr` feature `wm-x11` enables is deliberately *not* repeated here:
+# nothing in this crate queries monitors, and cargo's feature unification
+# means asking for it would not change what a whole-workspace build
+# compiles. Building this crate on its own then honestly reflects what it
+# actually uses.
+[dependencies]
+tracing = "0.1"
+thiserror = "2"
+x11rb = "0.13"

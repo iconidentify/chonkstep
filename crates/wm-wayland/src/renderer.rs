@@ -11,6 +11,10 @@
 //! cursor. That is exactly the stacking the X11 session produces with
 //! real windows, reproduced here as a plain ordered walk.
 //!
+//! A managed window whose client draws its own chrome interleaves with
+//! the frames, in the same band and by the same `stacking` order — it
+//! is only the decoration buffer it lacks, not a place in the scene.
+//!
 //! Every redraw damages the full frame (`age = 0` to the damage
 //! tracker, full-output submit) rather than tracking per-element
 //! damage — correctness first: the X11 side made the same call by
@@ -133,6 +137,20 @@ pub(crate) fn build_scene(
     }
 
     for entry in backend.stacking.iter().rev() {
+        // A managed window whose client drew its own chrome has no
+        // frame and no decoration buffer — just its content, at the
+        // depth its own stacking slot gives it. Nothing else in this
+        // walk would draw it: the override-redirect pass above keys on
+        // `WindowType::Unmanaged`, which such a window is not, and the
+        // frame band below reaches clients only through their frames.
+        // Skipping it here is what would make Edge and LibreOffice
+        // invisible the moment they stop being framed.
+        if let StackEntry::Window(id) = entry {
+            let Some(record) = backend.windows.get(id) else { continue };
+            if record.mapped {
+                push_window_content(&mut elements, renderer, record.content, record, viewport);
+            }
+        }
         if let StackEntry::Frame(id) = entry {
             let Some(frame) = backend.frames.get(id) else { continue };
             if !frame.mapped {

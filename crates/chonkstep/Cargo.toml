@@ -15,6 +15,10 @@ wm-core = { path = "../wm-core" }
 wm-theme = { path = "../wm-theme" }
 wm-x11 = { path = "../wm-x11" }
 wm-config = { path = "../wm-config" }
+# Publishes DPI, scaling factor and cursor size to every X client at
+# once, which is the only way an application this session did not launch
+# itself ever learns the desktop's scale.
+chonk-xsettings = { path = "../chonk-xsettings" }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 x11rb = "0.13"

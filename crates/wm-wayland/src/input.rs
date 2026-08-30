@@ -5,11 +5,13 @@
 //!
 //! The routing authority here is the same top-down hit-test the
 //! renderer paints by: unmanaged override-redirect X11 windows, `above`
-//! shell surfaces, frames (each with its client's xdg popups floating
-//! over it), `below` shell surfaces (see `backend_impl.rs`'s module doc
-//! on stacking bands). On X11 this routing was the server's job —
-//! event windows, passive grabs, replay — and `wm-x11` merely
-//! translated what the server had already decided. A compositor IS the
+//! shell surfaces, the frame band (each frame with its client's xdg
+//! popups floating over it, and the managed windows whose clients drew
+//! their own chrome interleaved among them at their own depth), `below`
+//! shell surfaces (see `backend_impl.rs`'s module doc on stacking
+//! bands). On X11 this routing was the server's job — event windows,
+//! passive grabs, replay — and `wm-x11` merely translated what the
+//! server had already decided. A compositor IS the
 //! server, so the decisions live here, and the grab verbs on the
 //! backend (`grab_pointer_for_drag`, `grab_keyboard`) reduce to flags
 //! this module consults instead of round-trips that can fail.
@@ -62,7 +64,9 @@ use smithay::input::Seat;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::utils::{Logical, Point as LogicalPoint, SERIAL_COUNTER};
 
-use wm_core::{BackendEvent, KeyCombo, Modifiers, MonitorInfo, MouseButton, ScrollDelta, SurfaceRef};
+use wm_core::{
+    BackendEvent, KeyCombo, Modifiers, MonitorInfo, MouseButton, ScrollDelta, SurfaceRef, WindowType,
+};
 use wm_theme_api::Point;
 
 use crate::state::{
@@ -79,12 +83,22 @@ type WmEvent = BackendEvent<WlWindowId, WlFrameId>;
 /// map (see the module doc for why there and not on `Compositor`).
 #[derive(Default)]
 struct InputState {
-    /// The frame the pointer was inside (chrome or content) at the last
-    /// motion — crossing INTO a frame emits `BackendEvent::PointerEnter`
-    /// exactly once, which is what focus-follows-mouse keys off. X11
-    /// gave us EnterNotify for free; here the crossing is detected by
-    /// comparing consecutive hit-tests.
-    hovered_frame: Option<WlFrameId>,
+    /// The managed window the pointer was inside (chrome or content) at
+    /// the last motion — crossing INTO one emits
+    /// `BackendEvent::PointerEnter` exactly once, which is what
+    /// focus-follows-mouse keys off. X11 gave us EnterNotify for free;
+    /// here the crossing is detected by comparing consecutive
+    /// hit-tests.
+    ///
+    /// Named by frame where there is one and by window where there is
+    /// not, because a client-decorated window has no frame to name and
+    /// still has to be focusable by hovering it — `wm-core`'s
+    /// `handle_pointer_enter` resolves either spelling to the same
+    /// client. Comparing the whole `SurfaceRef` (rather than an
+    /// `Option<WlFrameId>` that collapses every frameless window to
+    /// `None`) is what makes moving the pointer from one such window
+    /// straight onto another count as a crossing.
+    hovered: Option<SurfaceRef<WlWindowId, WlFrameId>>,
     /// X11-style implicit pointer grab: set on the first button press,
     /// held until the last button release, and every pointer event in
     /// between routes to the press's target rather than whatever is
@@ -411,15 +425,21 @@ fn pointer_moved(state: &mut Compositor, position: LogicalPoint<f64, Logical>, t
     // (the drag's grab mask never selected them), and focus-follows-
     // mouse mid-drag would focus every window a fast drag brushes.
     let now_hovered = match &hit {
-        Hit::FrameChrome { frame, .. } => Some(*frame),
-        Hit::Content { frame, .. } => *frame,
+        Hit::FrameChrome { frame, .. } => Some(SurfaceRef::Frame(*frame)),
+        Hit::Content { frame: Some(frame), .. } => Some(SurfaceRef::Frame(*frame)),
+        // Content with no frame is either a client-decorated managed
+        // window — which must still report a crossing, or hovering it
+        // would never focus it — or an override-redirect menu, which
+        // has no client entry in `wm-core` for the enter to resolve to
+        // and is dropped there harmlessly.
+        Hit::Content { window, .. } => Some(SurfaceRef::Client(*window)),
         _ => None,
     };
     let entered = with_input(&seat, |input| {
-        if input.implicit_grab.is_some() || now_hovered == input.hovered_frame {
+        if input.implicit_grab.is_some() || now_hovered == input.hovered {
             None
         } else {
-            input.hovered_frame = now_hovered;
+            input.hovered = now_hovered;
             now_hovered
         }
     });
@@ -427,8 +447,8 @@ fn pointer_moved(state: &mut Compositor, position: LogicalPoint<f64, Logical>, t
 
     let backend = state.wm.backend_mut();
     backend.mark_damaged();
-    if let Some(frame) = entered {
-        backend.queue(WmEvent::PointerEnter { surface: SurfaceRef::Frame(frame) });
+    if let Some(surface) = entered {
+        backend.queue(WmEvent::PointerEnter { surface });
     }
     // The client focus this motion carries into the seat. Only content
     // routes focus a client; every other route clears it (generating
@@ -891,22 +911,32 @@ fn route_shell_scroll<I: InputBackend>(state: &mut Compositor, event: &I::Pointe
 
 /// The scene's input authority: what sits under a point, walking the
 /// SAME z-order the renderer paints — unmanaged override-redirect X11
-/// windows (menus, tooltips) on top, then `above` shells, frames (with
-/// each frame's xdg popups floating over its chrome), and `below`
-/// shells; the desktop background catches the rest. Any disagreement
-/// between this walk and the renderer's makes clicks land on things the
-/// user cannot see, so both sides cite `backend_impl.rs`'s
-/// stacking-band contract.
+/// windows (menus, tooltips) on top, then `above` shells, the frame
+/// band (each frame's xdg popups floating over its chrome, and the
+/// client-decorated windows that have no frame taking their turn in the
+/// same order), and `below` shells; the desktop background catches the
+/// rest. Any disagreement between this walk and the renderer's makes
+/// clicks land on things the user cannot see, so both sides cite
+/// `backend_impl.rs`'s stacking-band contract.
 fn hit_at(backend: &WaylandBackend, at: Point, position: LogicalPoint<f64, Logical>) -> Hit {
     // Unmanaged override-redirect X11 windows first: they self-position
     // over everything (an open menu overlapping the dock must win the
     // click), and being frameless they live outside `stacking`.
+    //
+    // Selected by window TYPE, not by "owns no frame". Those were the
+    // same test until managed windows could be frameless too, and the
+    // cheaper one now catches the wrong windows: a client-decorated
+    // browser has no frame either, and answering for it here would give
+    // it the always-on-top treatment a menu gets — clicks landing on it
+    // through the dock, and through every window drawn over it. It is
+    // walked with the frames below instead, where its stacking slot
+    // decides. `renderer.rs`'s override-redirect pass reads this same
+    // field, which is the agreement that keeps the two walks honest.
     for (&window, record) in backend.windows.iter() {
-        if !record.mapped || !record.content.contains(at) {
+        if record.window_type != WindowType::Unmanaged {
             continue;
         }
-        let has_frame = backend.frames.values().any(|frame| frame.window == window);
-        if has_frame {
+        if !record.mapped || !record.content.contains(at) {
             continue;
         }
         if let Some(hit) = content_hit(backend, None, window, position) {
@@ -929,6 +959,34 @@ fn hit_at(backend: &WaylandBackend, at: Point, position: LogicalPoint<f64, Logic
 
     // Frame band.
     for entry in backend.stacking.iter().rev() {
+        // A managed window with no frame is in this band at its own
+        // depth (see `StackEntry::Window`). Everything the frame arm
+        // below does applies to it but the chrome: popups first, then
+        // content. The difference that matters is what happens to a
+        // point this window does not cover — a frame swallows it as
+        // `FrameChrome` because the frame rect is bigger than the
+        // client rect by exactly the titlebar and borders, and here
+        // there is no such margin to swallow anything, so the point
+        // falls through to whatever is behind. That is right: this
+        // window's titlebar is inside its own content rect, and the
+        // point was already offered to it.
+        if let StackEntry::Window(window) = entry {
+            let Some(record) = backend.windows.get(window) else {
+                continue;
+            };
+            if !record.mapped {
+                continue;
+            }
+            if let Some(hit) = popup_hit(backend, None, *window, position) {
+                return hit;
+            }
+            if record.content.contains(at) {
+                if let Some(hit) = content_hit(backend, None, *window, position) {
+                    return hit;
+                }
+            }
+            continue;
+        }
         let StackEntry::Frame(frame) = entry else {
             continue;
         };
@@ -942,7 +1000,7 @@ fn hit_at(backend: &WaylandBackend, at: Point, position: LogicalPoint<f64, Logic
         // may extend beyond the frame rect entirely (a context menu
         // opened near an edge), so they are tested before — and
         // independent of — the frame's own geometry.
-        if let Some(hit) = popup_hit(backend, *frame, record.window, position) {
+        if let Some(hit) = popup_hit(backend, Some(*frame), record.window, position) {
             return hit;
         }
         if !record.geometry.contains(at) {
@@ -986,7 +1044,8 @@ enum Hit {
     FrameChrome { frame: WlFrameId, local: Point },
     /// Client content (or one of its xdg popups): input goes to the
     /// client through the seat. `frame` is the owning frame when one
-    /// exists (`None` for unmanaged override-redirect X11 windows);
+    /// exists — `None` both for unmanaged override-redirect X11 windows
+    /// and for managed windows whose client drew its own chrome;
     /// `surface`/`origin` name the exact wl_surface to focus and its
     /// global position (`None` surface for an X11 window whose
     /// wl_surface has not been associated yet — nothing to deliver to,
@@ -1039,7 +1098,9 @@ fn content_hit(
 }
 
 /// Tests a window's xdg popup tree (context menus, dropdowns of native
-/// Wayland clients). Popup offsets from
+/// Wayland clients). `frame` is threaded through to the resulting
+/// [`Hit::Content`] rather than used here, so a frameless window's
+/// popups report `None` exactly as its content does. Popup offsets from
 /// `PopupManager::popups_for_surface` are parent-surface-relative; the
 /// renderer resolves them against the content rect (`content.pos +
 /// offset` — see `renderer.rs`'s `push_window_content`) and this walk
@@ -1047,7 +1108,7 @@ fn content_hit(
 /// the user sees.
 fn popup_hit(
     backend: &WaylandBackend,
-    frame: WlFrameId,
+    frame: Option<WlFrameId>,
     window: WlWindowId,
     position: LogicalPoint<f64, Logical>,
 ) -> Option<Hit> {
@@ -1071,7 +1132,7 @@ fn popup_hit(
             WindowSurfaceType::ALL,
         ) {
             return Some(Hit::Content {
-                frame: Some(frame),
+                frame,
                 window,
                 surface: Some(surface),
                 origin: origin.to_f64(),

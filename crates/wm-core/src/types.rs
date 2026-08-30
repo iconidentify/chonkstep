@@ -161,6 +161,37 @@ pub enum WindowType {
     Unmanaged,
 }
 
+/// Who drew this window's chrome.
+///
+/// Deliberately separate from [`WindowType`], because they answer
+/// different questions and a single window answers both. `WindowType`
+/// says *what kind of window this is* — a dialog, a dock, a tooltip.
+/// This says *whether the client has already drawn a titlebar*, which
+/// no window type implies: an ordinary `Normal` toplevel may or may
+/// not have, and only the client knows.
+///
+/// Collapsing the two is what produces the two-titlebar bug. A client
+/// that draws its own chrome and is framed anyway wears both, and the
+/// window manager has no way to notice, because "Normal" was the only
+/// thing it ever asked.
+///
+/// Every client kind answers in its own dialect and the backends
+/// translate: Wayland toplevels through xdg-decoration, X11 and
+/// XWayland clients through `_MOTIF_WM_HINTS`. A client that says
+/// nothing at all is [`Self::ServerDrawn`] — the historic default, and
+/// the one that keeps an ordinary X11 application framed.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ClientChrome {
+    /// The window manager draws the frame. The default, and what every
+    /// client that expresses no preference gets.
+    #[default]
+    ServerDrawn,
+    /// The client drew its own titlebar and borders; this window must
+    /// be managed (focused, moved, stacked, put on a workspace) but
+    /// never framed.
+    ClientDrawn,
+}
+
 /// Events a `Backend` reports back to the core event loop.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum BackendEvent<Win, Frame> {
@@ -176,6 +207,29 @@ pub enum BackendEvent<Win, Frame> {
     /// (a hypothetical future one) simply never emit this — the titlebar
     /// then just keeps whatever title was known at map time.
     TitleChanged(Win),
+    /// The client may have changed its mind about drawing its own
+    /// chrome — re-read [`Backend::client_draws_own_chrome`] and add or
+    /// drop the frame to match.
+    ///
+    /// A separate event rather than folding into `TitleChanged`,
+    /// because the consequences are not comparable: a title change
+    /// repaints a titlebar, this one creates or destroys a window and
+    /// reparents a live client. Backends that cannot watch the hint
+    /// never emit it, and every window then keeps whatever the answer
+    /// was at map time.
+    ///
+    /// [`Backend::client_draws_own_chrome`]: crate::Backend::client_draws_own_chrome
+    ChromeChanged(Win),
+    /// The client asked the window manager to start moving it — X11's
+    /// `_NET_WM_MOVERESIZE`, or a Wayland toplevel's `move` request.
+    ///
+    /// A window whose client draws its own chrome has no titlebar of
+    /// *ours* to drag, so this is the only way it can ever be moved.
+    /// Dropping it (as both backends used to) turns every
+    /// client-decorated application into a rectangle pinned where it
+    /// first mapped — which is a worse bug than the spare titlebar that
+    /// removing our chrome was meant to fix.
+    MoveRequest(Win),
     PointerButton {
         surface: SurfaceRef<Win, Frame>,
         local: Point,

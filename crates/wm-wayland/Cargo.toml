@@ -14,6 +14,16 @@ wm-theme = { path = "../wm-theme" }
 wm-theme-api = { path = "../wm-theme-api" }
 wm-config = { path = "../wm-config" }
 chonk-shell = { path = "../chonk-shell" }
+# XSETTINGS publishing for XWayland clients. The compositor opens a
+# second, ordinary X11 connection to Xwayland for this — see
+# `Compositor::xsettings` — because that is the only channel a toolkit
+# will listen to for a *live* scale change, and the only one that
+# reaches an application the desktop's own launcher did not spawn.
+# Depended on unconditionally rather than behind the `xwayland` feature
+# gate: the crate is a few hundred lines of x11rb with no system
+# libraries of its own, and a build where it were absent would silently
+# be a build where terminal-launched GTK apps render at 1x.
+chonk-xsettings = { path = "../chonk-xsettings" }
 tracing = "0.1"
 # Screenshot encoding (see `capture.rs`) - the same rasterizer the
 # theme engine draws with, so no second image stack enters the graph.
