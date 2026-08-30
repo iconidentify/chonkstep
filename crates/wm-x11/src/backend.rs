@@ -1300,24 +1300,35 @@ impl X11Backend {
             // has begun — which is what a client that drew its own
             // titlebar sends the instant the user presses on it.
             //
-            // Only the move directions are honoured. `data.l[2]` is the
-            // direction, where 8 is `_NET_WM_MOVERESIZE_MOVE` and 9 is
-            // the keyboard variant; the 0..=7 resize directions are
-            // deliberately dropped, because this window manager's own
-            // resize machinery is driven by its resizebar geometry and
-            // has nowhere to take an edge from a client that has none.
-            // A dropped request is what the spec asks for on anything
-            // unsupported, and it degrades to "cannot resize by
-            // dragging its own border", not to a broken window.
-            //
-            // Honouring the move half is not a nicety: a client-drawn
-            // titlebar is the only handle such a window has, since this
-            // WM deliberately draws none for it.
+            // `data.l[2]` is the direction: 0..=7 are the spec's eight
+            // resize edges in the order below, 8 is MOVE and 9 its
+            // keyboard variant. Honouring these is not a nicety: a
+            // client-drawn titlebar and client-drawn grips are the only
+            // handles such a window has, since this WM deliberately
+            // draws no chrome for it. `wm-core` runs the drag from its
+            // own record either way; the client only names the edge.
+            // Anything else (the CANCEL and keyboard-size values) is
+            // dropped, which is what the spec asks for on anything
+            // unsupported.
             let direction = e.data.as_data32()[2];
             const MOVE: u32 = 8;
             const KEYBOARD_MOVE: u32 = 9;
             if direction == MOVE || direction == KEYBOARD_MOVE {
                 return Some(BackendEvent::MoveRequest(XWindow(e.window)));
+            }
+            let edge = match direction {
+                0 => Some(ResizeEdge::NorthWest),
+                1 => Some(ResizeEdge::North),
+                2 => Some(ResizeEdge::NorthEast),
+                3 => Some(ResizeEdge::East),
+                4 => Some(ResizeEdge::SouthEast),
+                5 => Some(ResizeEdge::South),
+                6 => Some(ResizeEdge::SouthWest),
+                7 => Some(ResizeEdge::West),
+                _ => None,
+            };
+            if let Some(edge) = edge {
+                return Some(BackendEvent::ResizeRequest { window: XWindow(e.window), edge });
             }
             return None;
         }
