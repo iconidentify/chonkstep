@@ -184,6 +184,28 @@ pub trait Backend {
     /// window unmaps, not continuously refreshed.
     fn capture_window_image(&self, window: Self::WindowId, size: Size) -> Option<DecorationBuffer>;
 
+    /// Asks the backend to serve `capture_window_image` at (up to)
+    /// `edge` pixels on a window's longest side, `None` to return to
+    /// its own default. The Overview sets this for the life of a
+    /// session: its cards are card-sized, not icon-sized, and a
+    /// backend that keeps throttled snapshots (the compositor) needs
+    /// to know before it takes them. A hint, not a contract — the X11
+    /// backend captures live at full size and ignores it, which is
+    /// the default here.
+    fn set_preview_edge(&mut self, edge: Option<u32>) {
+        let _ = edge;
+    }
+
+    /// A counter that advances when previews taken at the hinted edge
+    /// become available — how a caller that consumed
+    /// `capture_window_image` before the backend could honor
+    /// `set_preview_edge` learns it is worth asking again. Backends
+    /// that answer captures synchronously never advance it (the answer
+    /// was never stale), which is the default.
+    fn preview_generation(&self) -> u64 {
+        0
+    }
+
     // -- decoration realization ---------------------------------------------
     fn create_decoration(&mut self, window: Self::WindowId, layout: &DecorationLayout) -> Self::FrameId;
     fn destroy_decoration(&mut self, frame: Self::FrameId);

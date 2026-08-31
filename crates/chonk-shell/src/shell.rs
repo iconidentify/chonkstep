@@ -1173,6 +1173,11 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         // it does not own (a window menu opened from one of its cards)
         // fall through to the ordinary routing below.
         if self.desktop.overview_owns(surface) {
+            // The selection surface rides over the panel, so a click
+            // on the selected card lands surface-local to *it*; the
+            // translation folds both surfaces into the one coordinate
+            // space the layout hit-tests in.
+            let local = self.desktop.overview_panel_point(surface, local);
             return self.on_overview_click(wm, local, button, pressed);
         }
 
@@ -1526,10 +1531,15 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
             if self.desktop.overview_owns(surface) {
                 // Hover is the switcher's selection treatment applied
                 // by pointer: the card under the pointer becomes the
-                // selection. `select_overview_card` repaints only on
-                // an actual change, so motion wandering inside one
-                // card costs nothing — load-bearing for a full-screen
-                // buffer this large.
+                // selection. `select_overview_card` restages only on
+                // an actual change (and a change moves the small
+                // selection surface, never the panel buffer), so
+                // motion wandering inside one card costs nothing.
+                // Motion over the selection surface itself arrives
+                // local to it — translated back so leaving the
+                // selected card's plate onto a neighbor still selects
+                // the neighbor.
+                let local = self.desktop.overview_panel_point(surface, local);
                 if let OverviewHit::Card(index) = self.desktop.overview_hit(local) {
                     self.desktop.select_overview_card(wm.backend_mut(), &self.theme, index);
                 }
@@ -1659,6 +1669,22 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
     pub fn tick(&mut self, wm: &mut WindowManager<B>) {
         if let Some(target) = self.desktop.take_workspace_request() {
             wm.switch_workspace(target);
+        }
+        // The Overview's one-shot preview catch-up: the panel opened
+        // against whatever captures the backend had (icon-sized, on
+        // the compositor), the entry hinted the card size, and this
+        // fires exactly once when the backend reports card-sized
+        // captures exist — see `OverviewPanel`'s preview-resolution
+        // doc. Almost every call is one integer comparison.
+        let generation = wm.backend().preview_generation();
+        if self.desktop.overview_wants_fresh_previews(generation) {
+            let previews: Vec<Option<DecorationBuffer>> = self
+                .desktop
+                .overview_clients()
+                .into_iter()
+                .map(|client| wm.client_preview(client))
+                .collect();
+            self.desktop.update_overview_previews(wm.backend_mut(), &self.theme, previews, generation);
         }
         let (current, count) = (wm.current_workspace(), wm.workspace_count());
         self.desktop.set_workspace_display(wm.backend_mut(), &self.theme, current, count);

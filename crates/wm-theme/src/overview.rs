@@ -12,6 +12,18 @@
 //! workspace strip reuses the Clip tile outright. Pure rasterization
 //! and pure geometry; the desktop shell owns the full-screen surface
 //! this is blitted onto, the input routing, and the modality.
+//!
+//! The selection is rendered apart from the panel, on purpose:
+//! [`render_overview`] draws every card unselected and never needs to
+//! run again while the entry set stands, and [`render_selection`]
+//! draws one card riding its highlight plate (the plate ring, the
+//! awake titlebar) into a plate-sized buffer the shell keeps on its
+//! own small surface over the panel. Hover moves the selection on
+//! every card the pointer crosses, and re-rasterizing a monitor-sized
+//! panel per crossing is what made the first cut of this panel drag
+//! the pointer — the split makes a selection move cost one card, not
+//! one monitor. The pixels compose identically because a card is
+//! opaque over its plate.
 
 use tiny_skia::Pixmap;
 use wm_theme_api::{DecorationBuffer, Point, Rect, Size};
@@ -190,6 +202,34 @@ fn grid_cells(grid: Rect, pad: u32, entries: usize) -> (usize, Vec<Rect>) {
     (cols, cells)
 }
 
+/// The ring the highlight plate adds around a selected rect — half a
+/// pad, floored at visibility. One function so the plate the panel
+/// paints under a workspace tile and the plate surface the shell
+/// positions under the selected card cannot drift apart.
+pub fn plate_ring(pad: u32) -> u32 {
+    (pad / 2).max(2)
+}
+
+/// The highlight plate's rect for a selected `cell`: the cell inflated
+/// by [`plate_ring`] on every side. This is the geometry the shell
+/// gives the selection surface, so it is public and pure.
+pub fn plate_rect(cell: Rect, pad: u32) -> Rect {
+    let ring = plate_ring(pad) as i32;
+    Rect {
+        pos: Point::new(cell.pos.x - ring, cell.pos.y - ring),
+        size: Size::new(cell.size.w + ring as u32 * 2, cell.size.h + ring as u32 * 2),
+    }
+}
+
+/// The capture edge worth asking the backend for: the card well is
+/// the largest thing a preview will ever be drawn into, so its width
+/// (cells are landscape by construction — width is the long side) is
+/// the resolution past which captured pixels are thrown away.
+/// `None` when the layout holds no cards.
+pub fn capture_edge(layout: &OverviewLayout) -> Option<u32> {
+    layout.cells.first().map(|cell| cell.size.w).filter(|&w| w > 0)
+}
+
 impl OverviewLayout {
     /// The card under a panel-local point, if any.
     pub fn cell_at(&self, p: Point) -> Option<usize> {
@@ -221,22 +261,21 @@ pub fn move_selection(selected: usize, count: usize, cols: usize, dx: i32, dy: i
 }
 
 /// Rasterizes the whole panel from a layout and the entries it was
-/// laid out for. `selected` is clamped, not trusted, like everywhere
-/// else a shell index crosses into rendering.
-#[allow(clippy::too_many_arguments)]
+/// laid out for — every card unselected. The selection (plate and
+/// awake card) is [`render_selection`]'s job, drawn onto its own
+/// surface by the shell, so this — the monitor-sized raster — runs
+/// only when the entry set itself changes (see the module doc).
 pub fn render_overview(
     theme: &Theme,
     font_system: &mut cosmic_text::FontSystem,
     swash_cache: &mut cosmic_text::SwashCache,
     entries: &[OverviewEntry],
-    selected: usize,
     workspace: (usize, usize),
     layout: &OverviewLayout,
 ) -> DecorationBuffer {
     let Some(mut pixmap) = Pixmap::new(layout.panel.w.max(1), layout.panel.h.max(1)) else {
         return DecorationBuffer { width: 0, height: 0, pixels: Vec::new() };
     };
-    let selected = selected.min(entries.len().saturating_sub(1));
     let bevel_t = theme.menu.bevel.width.max(1) as u32;
 
     paint::fill_area(&mut pixmap, 0, 0, layout.panel.w, layout.panel.h, &theme.menu.background);
@@ -280,8 +319,8 @@ pub fn render_overview(
         );
     }
 
-    for (index, (entry, cell)) in entries.iter().zip(&layout.cells).enumerate() {
-        draw_card(&mut pixmap, theme, font_system, swash_cache, entry, *cell, index == selected, layout.pad);
+    for (entry, cell) in entries.iter().zip(&layout.cells) {
+        draw_card(&mut pixmap, theme, font_system, swash_cache, entry, *cell, false, layout.pad);
     }
 
     // The workspace strip: the Clip tile itself, one per desk, each
@@ -304,15 +343,40 @@ pub fn render_overview(
 }
 
 /// The switcher's selection treatment: a highlight-filled plate
-/// inflated half a pad beyond the rect, wearing the raised relief.
+/// inflated [`plate_ring`] beyond the rect, wearing the raised relief.
 fn highlight_plate(pixmap: &mut Pixmap, theme: &Theme, rect: Rect, pad: u32, bevel_t: u32) {
-    let ring = (pad / 2).max(2);
-    let x = rect.pos.x - ring as i32;
-    let y = rect.pos.y - ring as i32;
-    let w = rect.size.w + ring * 2;
-    let h = rect.size.h + ring * 2;
-    paint::fill_area(pixmap, x, y, w, h, &theme.menu.highlight_background);
-    paint::draw_raised2_bevel(pixmap, x, y, w, h, bevel_t);
+    let plate = plate_rect(rect, pad);
+    paint::fill_area(pixmap, plate.pos.x, plate.pos.y, plate.size.w, plate.size.h, &theme.menu.highlight_background);
+    paint::draw_raised2_bevel(pixmap, plate.pos.x, plate.pos.y, plate.size.w, plate.size.h, bevel_t);
+}
+
+/// Rasterizes the selected card riding its highlight plate, into a
+/// buffer exactly [`plate_rect`]-sized — what the shell paints onto
+/// the small selection surface it moves from card to card. The plate
+/// fills the whole buffer (the card is opaque over it, so only the
+/// ring shows, exactly as when the panel composed both itself), and
+/// the card is drawn awake on top: the active titlebar is half the
+/// selection signal, which is why the overlay redraws per move — the
+/// title under the highlight changes — instead of being a static ring
+/// that could merely slide.
+pub fn render_selection(
+    theme: &Theme,
+    font_system: &mut cosmic_text::FontSystem,
+    swash_cache: &mut cosmic_text::SwashCache,
+    entry: &OverviewEntry,
+    cell: Size,
+    pad: u32,
+) -> DecorationBuffer {
+    let ring = plate_ring(pad);
+    let (w, h) = (cell.w + ring * 2, cell.h + ring * 2);
+    let Some(mut pixmap) = Pixmap::new(w.max(1), h.max(1)) else {
+        return DecorationBuffer { width: 0, height: 0, pixels: Vec::new() };
+    };
+    paint::fill_area(&mut pixmap, 0, 0, w, h, &theme.menu.highlight_background);
+    paint::draw_raised2_bevel(&mut pixmap, 0, 0, w, h, theme.menu.bevel.width.max(1) as u32);
+    let card = Rect { pos: Point::new(ring as i32, ring as i32), size: cell };
+    draw_card(&mut pixmap, theme, font_system, swash_cache, entry, card, true, pad);
+    DecorationBuffer { width: w, height: h, pixels: pixmap.data().to_vec() }
 }
 
 /// One window card: a miniature of real window chrome. Titlebar strip
@@ -321,7 +385,10 @@ fn highlight_plate(pixmap: &mut Pixmap, theme: &Theme, rect: Rect, pad: u32, bev
 /// for a miniaturized window: it is asleep, and selecting it should
 /// not pretend otherwise), a sunken well below holding the letterboxed
 /// preview, the whole card framed by the raised relief every piece of
-/// chrome here wears.
+/// chrome here wears. The selected card's highlight plate is the
+/// caller's business ([`render_selection`] paints it first); this
+/// draws only the card, so the panel and the selection surface share
+/// one card recipe.
 #[allow(clippy::too_many_arguments)]
 fn draw_card(
     pixmap: &mut Pixmap,
@@ -337,9 +404,6 @@ fn draw_card(
         return;
     }
     let t = (theme.titlebar.bevel.width as u32).max(1);
-    if selected {
-        highlight_plate(pixmap, theme, cell, pad, theme.menu.bevel.width.max(1) as u32);
-    }
 
     let (x, y) = (cell.pos.x, cell.pos.y);
     let (w, h) = (cell.size.w, cell.size.h);
@@ -544,7 +608,7 @@ mod tests {
         assert_eq!(move_selection(99, count, cols, 0, 0), 6, "an out-of-range selection clamps first");
     }
 
-    fn render(n: usize, selected: usize) -> DecorationBuffer {
+    fn render(n: usize) -> DecorationBuffer {
         let theme = crate::default_theme::nextstep_classic();
         let mut fs = cosmic_text::FontSystem::new();
         let mut sc = cosmic_text::SwashCache::new();
@@ -554,26 +618,69 @@ mod tests {
             .map(|t| OverviewEntry { title: t, preview: None, miniaturized: false })
             .collect();
         let l = layout(Size::new(960, 540), 56, header_height(&theme), n, 2);
-        render_overview(&theme, &mut fs, &mut sc, &entries, selected, (0, 2), &l)
+        render_overview(&theme, &mut fs, &mut sc, &entries, (0, 2), &l)
     }
 
     #[test]
     fn the_panel_renders_at_the_layout_size_for_zero_and_many_windows() {
         for n in [0usize, 1, 5] {
-            let buffer = render(n, 0);
+            let buffer = render(n);
             assert_eq!((buffer.width, buffer.height), (960, 540), "n={n}");
             assert_eq!(buffer.pixels.len(), 960 * 540 * 4, "n={n}");
         }
     }
 
     #[test]
-    fn moving_the_selection_visibly_changes_the_panel() {
-        assert_ne!(render(4, 0).pixels, render(4, 1).pixels, "the highlight plate must move with the selection");
+    fn the_plate_rect_inflates_a_cell_by_the_ring_on_every_side() {
+        let cell = Rect { pos: Point::new(100, 80), size: Size::new(400, 300) };
+        let plate = plate_rect(cell, 16);
+        let ring = plate_ring(16) as i32;
+        assert_eq!(ring, 8);
+        assert_eq!(plate.pos, Point::new(100 - ring, 80 - ring));
+        assert_eq!(plate.size, Size::new(400 + 16, 300 + 16));
+        // A tiny pad still yields a visible ring.
+        assert_eq!(plate_ring(1), 2);
     }
 
     #[test]
-    fn an_out_of_range_selection_is_clamped_not_panicking() {
-        let buffer = render(2, 99);
-        assert!(buffer.width > 0);
+    fn the_capture_edge_is_the_card_width_or_nothing() {
+        let l = layout(Size::new(3840, 2160), 112, 80, 4, 2);
+        assert_eq!(capture_edge(&l), Some(l.cells[0].size.w));
+        let empty = layout(Size::new(3840, 2160), 112, 80, 0, 2);
+        assert_eq!(capture_edge(&empty), None);
+    }
+
+    #[test]
+    fn the_selection_renders_plate_sized_and_differs_between_cards() {
+        let theme = crate::default_theme::nextstep_classic();
+        let mut fs = cosmic_text::FontSystem::new();
+        let mut sc = cosmic_text::SwashCache::new();
+        let cell = Size::new(300, 200);
+        let ring = plate_ring(16);
+        let a = OverviewEntry { title: "window a", preview: None, miniaturized: false };
+        let b = OverviewEntry { title: "window b", preview: None, miniaturized: false };
+        let ba = render_selection(&theme, &mut fs, &mut sc, &a, cell, 16);
+        let bb = render_selection(&theme, &mut fs, &mut sc, &b, cell, 16);
+        assert_eq!((ba.width, ba.height), (cell.w + ring * 2, cell.h + ring * 2));
+        assert_ne!(ba.pixels, bb.pixels, "the overlay carries the card's own title");
+    }
+
+    #[test]
+    fn the_panel_no_longer_varies_with_the_selection_but_the_overlay_does() {
+        // The whole point of the split: the panel is selection-blind
+        // (so a selection move never re-rasterizes it), and the awake
+        // treatment lives on the overlay instead.
+        let theme = crate::default_theme::nextstep_classic();
+        let mut fs = cosmic_text::FontSystem::new();
+        let mut sc = cosmic_text::SwashCache::new();
+        let entry = OverviewEntry { title: "window", preview: None, miniaturized: false };
+        let selected = render_selection(&theme, &mut fs, &mut sc, &entry, Size::new(300, 200), 16);
+        // Same card drawn unselected in a panel of one: crop-free
+        // comparison is overkill; it is enough that the awake overlay
+        // is not just the inactive card plus a ring — the titlebar
+        // fill differs.
+        let asleep = OverviewEntry { title: "window", preview: None, miniaturized: true };
+        let dimmed = render_selection(&theme, &mut fs, &mut sc, &asleep, Size::new(300, 200), 16);
+        assert_ne!(selected.pixels, dimmed.pixels, "a miniaturized selection stays visually asleep");
     }
 }

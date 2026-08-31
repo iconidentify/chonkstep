@@ -79,13 +79,21 @@ use wm_theme_api::{DecorationBuffer, Point, Size};
 use crate::renderer::{build_scene, SceneElement};
 use crate::state::{Compositor, Graphics, WlWindowId};
 
-/// Longest edge of a stored snapshot. These feed 56-112px icon tiles
-/// and switcher thumbnails, both of which letterbox-scale whatever
-/// they are handed, so anything past this is pixels the shell will
-/// throw away - a full-resolution copy of every window once a second
-/// would be several megabytes of readback per second for no visible
-/// gain. Bilinear downscaling happens on the GPU during the capture
-/// render, not afterwards on the CPU.
+/// Longest edge of a stored snapshot when nobody has asked for more.
+/// These feed 56-112px icon tiles and switcher thumbnails, both of
+/// which letterbox-scale whatever they are handed, so anything past
+/// this is pixels the shell will throw away - a full-resolution copy
+/// of every window once a second would be several megabytes of
+/// readback per second for no visible gain. Bilinear downscaling
+/// happens on the GPU during the capture render, not afterwards on
+/// the CPU.
+///
+/// The Overview is the consumer this cap is *wrong* for - its cards
+/// are a third of a monitor wide, and a 256px capture blown up into
+/// one turns terminal text into mush - so it hints its card size
+/// through `Backend::set_preview_edge` and the pass below captures at
+/// that edge instead while the hint stands. See [`due_windows`] for
+/// how the hint changes the schedule.
 const MAX_SNAPSHOT_EDGE: u32 = 256;
 
 /// Minimum age of a snapshot before it is taken again. A preview is
@@ -122,7 +130,8 @@ pub(crate) fn refresh_snapshots(comp: &mut Compositor) {
     poll_screenshot_marker(comp);
 
     let now = Instant::now();
-    let due = due_windows(comp, now);
+    let boost = comp.wm.backend().preview_edge;
+    let due = due_windows(comp, now, boost);
     if due.is_empty() {
         return;
     }
@@ -133,18 +142,29 @@ pub(crate) fn refresh_snapshots(comp: &mut Compositor) {
     // reason (there is no `&mut self` method that could hand out both).
     let Compositor { wm, graphics, .. } = comp;
     let renderer = graphics_renderer(graphics);
+    let edge = boost.unwrap_or(MAX_SNAPSHOT_EDGE);
+    let mut boosted_landed = false;
     for (window, surface, size) in due {
         // Stamp before rendering, not after: a window whose capture
         // fails (a client that just died, an unimportable buffer) must
         // wait out the interval like any other, or it retries at frame
         // rate forever.
         LAST_SNAPSHOT.with(|last| last.borrow_mut().insert(window, now));
-        let Some(buffer) = snapshot_window(renderer, &surface, size) else {
+        let Some(buffer) = snapshot_window(renderer, &surface, size, edge) else {
             continue;
         };
         if let Some(record) = wm.backend_mut().windows.get_mut(&window) {
             record.snapshot = Some(buffer);
+            boosted_landed = boost.is_some();
         }
+    }
+    if boosted_landed {
+        // Tell the shell (through `Backend::preview_generation`) that
+        // previews fetched before this pass are now beatable - the
+        // Overview painted its first frame from the default snapshots
+        // and refreshes its cards exactly once when this moves.
+        let backend = wm.backend_mut();
+        backend.preview_generation = backend.preview_generation.wrapping_add(1);
     }
 }
 
@@ -217,23 +237,43 @@ fn graphics_renderer(graphics: &mut Graphics) -> &mut GlesRenderer {
 /// unspecified (hash order), and it does not need to be fair:
 /// everything left over is still due on the very next frame.
 ///
+/// With a `boost` edge hinted (an Overview session is open), the
+/// schedule changes shape entirely: every mapped window whose stored
+/// snapshot is smaller than the hinted edge would produce is due *now*
+/// and the batch is uncapped - the whole point of the hint is to have
+/// card-resolution captures on the very next frame, and paying N
+/// readbacks once at panel entry is the cost the Overview signed up
+/// for. Windows already captured at the hinted edge are not due at
+/// all, interval or no interval: the panel freezes its cards at entry
+/// (it repaints on state change, not per frame), so keeping N
+/// card-sized readbacks ticking behind a static picture would be pure
+/// heat. The per-second cadence resumes when the hint clears, and its
+/// first pass shrinks each oversized snapshot back to the default cap.
+///
 /// `Unmanaged` windows are skipped: XWayland override-redirect
 /// surfaces are menus and tooltips that own no frame, never
 /// miniaturize, and never appear in the switcher, so a preview of one
 /// could not be asked for.
-fn due_windows(comp: &Compositor, now: Instant) -> Vec<(WlWindowId, WlSurface, Size)> {
+fn due_windows(comp: &Compositor, now: Instant, boost: Option<u32>) -> Vec<(WlWindowId, WlSurface, Size)> {
     let backend = comp.wm.backend();
     LAST_SNAPSHOT.with(|last| {
         let mut last = last.borrow_mut();
         last.retain(|window, _| backend.windows.contains_key(window));
-        backend
-            .windows
-            .iter()
-            .filter(|(_, record)| {
-                record.mapped
-                    && record.window_type != WindowType::Unmanaged
-                    && record.surface.alive()
-            })
+        let eligible = backend.windows.iter().filter(|(_, record)| {
+            record.mapped && record.window_type != WindowType::Unmanaged && record.surface.alive()
+        });
+        if let Some(edge) = boost {
+            return eligible
+                .filter(|(_, record)| {
+                    let stored = record.snapshot.as_ref().map(|s| Size::new(s.width, s.height));
+                    needs_upgrade(stored, record.content.size, edge)
+                })
+                .filter_map(|(window, record)| {
+                    Some((*window, record.surface.wl_surface()?, record.content.size))
+                })
+                .collect();
+        }
+        eligible
             .filter(|(window, _)| {
                 last.get(window)
                     .is_none_or(|taken| now.duration_since(*taken) >= SNAPSHOT_INTERVAL)
@@ -244,6 +284,19 @@ fn due_windows(comp: &Compositor, now: Instant) -> Vec<(WlWindowId, WlSurface, S
             .take(MAX_SNAPSHOTS_PER_FRAME)
             .collect()
     })
+}
+
+/// Whether a stored snapshot is worth retaking at `edge`: it is when
+/// there is none, or when the one held is smaller on its long side
+/// than a capture at `edge` would come out (never larger - captures
+/// don't upscale, so a small window's full-size snapshot is already
+/// everything there is). Pure so the boost schedule above is testable
+/// without a GPU.
+fn needs_upgrade(stored: Option<Size>, source: Size, edge: u32) -> bool {
+    let Some((target, _)) = snapshot_target(source, edge) else {
+        return false;
+    };
+    stored.is_none_or(|held| held.w.max(held.h) < target.w.max(target.h))
 }
 
 /// Renders one window's client content into a downscaled RGBA buffer.
@@ -264,8 +317,9 @@ fn snapshot_window(
     renderer: &mut GlesRenderer,
     surface: &WlSurface,
     source: Size,
+    max_edge: u32,
 ) -> Option<DecorationBuffer> {
-    let (size, scale) = snapshot_target(source, MAX_SNAPSHOT_EDGE)?;
+    let (size, scale) = snapshot_target(source, max_edge)?;
     // The scene's own constructor, at capture scale: the GPU does the
     // downscale as part of drawing, so there is exactly one code path
     // that turns a wayland surface into pixels — including the
@@ -586,6 +640,29 @@ mod tests {
         // framebuffer is not a thing.
         let (size, _) = snapshot_target(Size::new(5000, 1), 256).unwrap();
         assert_eq!(size, Size::new(256, 1));
+    }
+
+    #[test]
+    fn a_missing_or_undersized_snapshot_wants_the_boosted_edge() {
+        // Nothing stored yet: worth taking.
+        assert!(needs_upgrade(None, Size::new(2560, 1440), 1200));
+        // A default 256-edge snapshot against a 1200-edge target.
+        assert!(needs_upgrade(Some(Size::new(256, 144)), Size::new(2560, 1440), 1200));
+        // Already at the target: not due, interval or no interval.
+        assert!(!needs_upgrade(Some(Size::new(1200, 675)), Size::new(2560, 1440), 1200));
+        // Larger than the target (a stale boost from a bigger card
+        // set): still not an upgrade.
+        assert!(!needs_upgrade(Some(Size::new(1600, 900)), Size::new(2560, 1440), 1200));
+    }
+
+    #[test]
+    fn a_window_smaller_than_the_boost_is_not_recaptured_past_its_own_size() {
+        // A 640x400 window captured whole is all the pixels there are;
+        // a 1200 boost must not retake it forever.
+        assert!(!needs_upgrade(Some(Size::new(640, 400)), Size::new(640, 400), 1200));
+        assert!(needs_upgrade(None, Size::new(640, 400), 1200));
+        // And a degenerate window is never due.
+        assert!(!needs_upgrade(None, Size::new(0, 400), 1200));
     }
 
     #[test]
