@@ -650,6 +650,15 @@ impl<B: Backend> WindowManager<B> {
             BackendEvent::MoveRequest(window) => self.handle_move_request(window),
             BackendEvent::DragEnded => self.end_active_drag(),
             BackendEvent::ResizeRequest { window, edge } => self.handle_resize_request(window, edge),
+            // Routed through the very same miniaturize the titlebar
+            // button runs, so the client's own button and ours are one
+            // behavior: frame unmapped, icon tile shown, the whole
+            // NeXTSTEP gesture rather than a taskbar-shaped hiding.
+            BackendEvent::MinimizeRequest(window) => {
+                if let Some(&id) = self.window_index.get(&window) {
+                    self.miniaturize(id);
+                }
+            }
             BackendEvent::KeyPress(combo) => self.handle_key_press(combo),
             BackendEvent::KeyRelease(combo) => self.handle_key_release(combo),
             BackendEvent::PointerEnter { surface } => self.handle_pointer_enter(surface),
@@ -3496,6 +3505,35 @@ mod tests {
 
         wm.dispatch(BackendEvent::Destroyed(window));
         assert_eq!(wm.backend().outstanding_pointer_grabs, 0, "the grab must not outlive the window");
+    }
+
+    #[test]
+    fn a_clients_own_minimize_button_miniaturizes_it() {
+        // A client-decorated window's minimize button is the only
+        // miniaturize gesture it has — this desktop draws no chrome
+        // for it. The request must land as the full NeXTSTEP gesture:
+        // frameless surface hidden, lifecycle Miniaturized, the
+        // notification that makes the shell draw an icon tile pushed.
+        let mut backend = FakeBackend::new();
+        let window = backend.create_window();
+        backend.set_geometry(window, Rect { pos: Point::new(0, 0), size: Size::new(400, 300) });
+        backend.set_client_draws_own_chrome(window, true);
+        let mut wm = wm(backend);
+        wm.dispatch(BackendEvent::MapRequest(window));
+
+        wm.dispatch(BackendEvent::MinimizeRequest(window));
+
+        let id = wm.client_for_window(window).unwrap();
+        assert_eq!(wm.client(id).unwrap().lifecycle, Lifecycle::Miniaturized);
+        assert!(!wm.backend().mapped_frameless.contains(&window), "the window must leave the screen");
+        assert!(
+            matches!(wm.take_notification(), Some(Notification::Mapped(_))),
+            "map notification first"
+        );
+        assert!(
+            matches!(wm.take_notification(), Some(Notification::Miniaturized(got, _)) if got == id),
+            "and the miniaturize notification the shell turns into an icon tile"
+        );
     }
 
     #[test]

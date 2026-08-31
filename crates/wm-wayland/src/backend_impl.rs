@@ -489,20 +489,24 @@ impl Backend for WaylandBackend {
         }
     }
 
-    /// Best-effort `None` for now: the miniaturize preview needs the
-    /// window's rendered pixels, which on this backend means rendering
-    /// the surface tree into an offscreen GLES target and reading it
-    /// back — a self-contained follow-up (the renderer module owns the
-    /// GLES context this needs). The icon/switcher SDK already designs
-    /// for missing previews, so the cost of shipping without it is a
-    /// generic tile instead of a live thumbnail, not a broken feature.
     fn capture_window_image(&self, window: Self::WindowId, _size: Size) -> Option<DecorationBuffer> {
         // Served from the snapshot the renderer keeps refreshing (see
         // `crate::capture` for why a compositor cannot answer this
         // synchronously the way the X11 backend does with XGetImage).
         // `size` is advisory: the shell's icon and switcher renderers
-        // scale whatever preview they are handed into their own wells.
+        // scale whatever preview they are handed into their own wells,
+        // and a caller that needs more pixels than the default
+        // snapshots carry hints it through `set_preview_edge` and
+        // re-asks when `preview_generation` moves.
         self.windows.get(&window).and_then(|record| record.snapshot.clone())
+    }
+
+    fn set_preview_edge(&mut self, edge: Option<u32>) {
+        self.preview_edge = edge;
+    }
+
+    fn preview_generation(&self) -> u64 {
+        self.preview_generation
     }
 
     // -- decoration realization -------------------------------------------
@@ -1125,7 +1129,14 @@ impl Backend for WaylandBackend {
             // destroys keeps its frame until it unmaps. No toolkit
             // observed here does that, and the alternative was leaving
             // every GTK window double-decorated.
-            ManagedSurface::Xdg(_) => !record.negotiated_decoration,
+            // Never negotiated: the protocol's own default, the client
+            // self-decorates. Negotiated and asked for client-side: the
+            // request is honored (see `WindowRecord::requested_client_side`
+            // for the Edge double-titlebar this ended). Negotiated and
+            // asked for server-side, or left the choice to us: ours.
+            ManagedSurface::Xdg(_) => {
+                !record.negotiated_decoration || record.requested_client_side == Some(true)
+            }
         }
     }
 
