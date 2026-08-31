@@ -38,5 +38,12 @@ cargo build -p chonkstep-wayland -p chonk-testkit --quiet
 echo "Running the end-to-end suite (one nested compositor at a time)..."
 cargo test -p chonk-testkit --test e2e -- --ignored --test-threads=1 "$@"
 
+# The living-desktop suite: session-layout persistence/restore and the
+# crash-recovery marker, same nesting requirements as the suite above.
+# (The crash *supervisor* itself needs no session at all — its tests
+# in tests/supervisor.rs run un-ignored under plain `cargo test`.)
+echo "Running the session-restore suite..."
+cargo test -p chonk-testkit --test session_restore -- --ignored --test-threads=1 "$@"
+
 echo
 echo "e2e suite passed. Artifacts (logs + screenshots) are under ${TMPDIR:-/tmp}/chonk-testkit/"

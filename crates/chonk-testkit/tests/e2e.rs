@@ -182,12 +182,12 @@ fn scale_2_composition_stays_intact() {
     // Reference run at scale 1: how wide is the same dialog?
     let width_at_1 = {
         let mut session =
-            Session::boot("scale-ref", SessionOptions { scale: Some(1.0) }).unwrap();
+            Session::boot("scale-ref", SessionOptions { scale: Some(1.0), ..SessionOptions::default() }).unwrap();
         let window = launch_question(&mut session, "TestScale");
         window.w
     };
 
-    let mut session = Session::boot("scale-2", SessionOptions { scale: Some(2.0) }).unwrap();
+    let mut session = Session::boot("scale-2", SessionOptions { scale: Some(2.0), ..SessionOptions::default() }).unwrap();
     let window = launch_question(&mut session, "TestScale");
     session.door().barrier().unwrap();
     let world = session.world().unwrap();
@@ -302,7 +302,7 @@ fn frameless_resize_works() {
 #[test]
 #[ignore = "needs a live Wayland session to nest in: scripts/e2e.sh, or cargo test -p chonk-testkit -- --ignored --test-threads=1"]
 fn live_reload_applies() {
-    let mut session = Session::boot("live-reload", SessionOptions { scale: Some(1.0) }).unwrap();
+    let mut session = Session::boot("live-reload", SessionOptions { scale: Some(1.0), ..SessionOptions::default() }).unwrap();
     session.door().barrier().unwrap();
     let before = session.world().unwrap();
     assert_eq!(before.scale, 1.0);

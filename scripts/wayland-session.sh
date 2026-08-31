@@ -24,8 +24,15 @@ set -u
 
 # Resolve the repo root from this script's own location so the session
 # works wherever the checkout lives (real hardware, VM, any username).
-BIN="$(cd "$(dirname "$0")/.." && pwd)/target/release/chonkstep-wayland"
-LOG_DIR="$HOME/.local/state/chonkstep"
+# CHONKSTEP_SESSION_BIN is the supervisor test's seam (see
+# crates/chonk-testkit/tests/supervisor.rs): the watchdog loop below is
+# exercised against a crashing stub instead of the real compositor.
+BIN="${CHONKSTEP_SESSION_BIN:-$(cd "$(dirname "$0")/.." && pwd)/target/release/chonkstep-wayland}"
+# The same state directory the compositor's own state files resolve to
+# (chonk_shell::startup::state_dir honors XDG_STATE_HOME first) — it
+# must be, because the recovery marker the watchdog drops below is read
+# from exactly there by the recovering compositor.
+LOG_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/chonkstep"
 mkdir -p "$LOG_DIR"
 
 # Its own log, not the X11 session's: both sessions write into the
@@ -134,8 +141,82 @@ fail() {
 # half — an app launched from the dock would not be able to talk to
 # the same app started from anywhere else. A TTY login usually has no
 # bus, and that is the case dbus-run-session exists for.
-if [ -n "${DBUS_SESSION_BUS_ADDRESS:-}" ] || ! command -v dbus-run-session >/dev/null 2>&1; then
-    exec "$BIN" >> "$LOG" 2>&1
+#
+# This used to `exec dbus-run-session -- $BIN` directly; now that a
+# watchdog loop supervises the compositor, the *script* has to stay
+# alive around every compositor run, so it re-execs ITSELF under the
+# bus once and then supervises from inside it. That also keeps one bus
+# spanning every recovery — a compositor re-execed after a crash finds
+# the same $DBUS_SESSION_BUS_ADDRESS its predecessor's clients were
+# on, so a restored app can still talk to whatever outlived the crash.
+# The recursion terminates because dbus-run-session sets the very
+# variable this condition checks; the marker export is a belt for the
+# suspenders — if dbus-run-session somehow ran us without a bus we log
+# and carry on rather than exec forever.
+if [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ] && [ -z "${_CHONKSTEP_BUS_WRAPPED:-}" ] \
+        && command -v dbus-run-session >/dev/null 2>&1; then
+    export _CHONKSTEP_BUS_WRAPPED=1
+    exec dbus-run-session -- "$0" "$@"
 fi
 
-exec dbus-run-session -- "$BIN" >> "$LOG" 2>&1
+# ---------------------------------------------------------------------
+# The crash watchdog. A compositor panic used to be a black screen and
+# a lost session; now an *abnormal* exit (nonzero status, or a signal —
+# the panic hook in chonkstep-wayland's main aborts, so every panic is
+# one) drops a recovery marker and re-execs the compositor, which sees
+# the marker, restores the recorded session layout, and — when
+# lock_command is configured — comes back locked. A clean exit (the
+# root menu's Exit, i.e. the user logging out) ends the loop and the
+# session. Note the compositor's own hot-restart (scripts/restart.sh,
+# the `restart` keybinding) never surfaces here at all: that is an
+# in-place exec inside the same process, not an exit.
+#
+# The brake: more than $MAX_CRASHES abnormal exits inside
+# $CRASH_WINDOW_SECS seconds means the compositor is crash-looping —
+# a broken build, a driver that dies on startup — and re-execing it
+# forever would sit the user in front of a flickering black screen
+# while filling the disk with logs. The loop stops, says so in the log
+# and on stderr (the display manager's journal), and exits nonzero so
+# the greeter comes back.
+MAX_CRASHES=3
+CRASH_WINDOW_SECS=60
+crash_times=""
+
+while :; do
+    "$BIN" >> "$LOG" 2>&1
+    status=$?
+
+    # A clean exit is the user logging out: the loop's one normal end.
+    if [ "$status" -eq 0 ]; then
+        break
+    fi
+
+    now=$(date +%s)
+    # Keep only the crashes still inside the window, then count this
+    # one against them.
+    kept=""
+    for t in $crash_times; do
+        if [ $((now - t)) -lt "$CRASH_WINDOW_SECS" ]; then
+            kept="$kept $t"
+        fi
+    done
+    crash_times="$kept $now"
+    # `wc -w` over the space-separated list — no arrays, so the loop
+    # stays portable to whatever /bin/sh-ish bash a rescue boots.
+    count=$(echo "$crash_times" | wc -w)
+
+    if [ "$count" -gt "$MAX_CRASHES" ]; then
+        printf 'chonkstep-wayland session: crash loop (%s abnormal exits in %ss) - giving up. See %s\n' \
+            "$count" "$CRASH_WINDOW_SECS" "$LOG" | tee -a "$LOG" >&2
+        exit 1
+    fi
+
+    printf 'chonkstep-wayland session: compositor exited abnormally (status %s), restarting (crash %s of %s in the last %ss)\n' \
+        "$status" "$count" "$MAX_CRASHES" "$CRASH_WINDOW_SECS" | tee -a "$LOG" >&2
+
+    # The marker the recovering compositor consumes at startup — the
+    # entire channel between this loop and the recovery behavior
+    # (prominent log line, session lock, layout restore). Dropped only
+    # on the abnormal path, so a logout can never look like a crash.
+    touch "$LOG_DIR/recovery"
+done

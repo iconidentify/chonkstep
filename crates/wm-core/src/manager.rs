@@ -844,6 +844,25 @@ impl<B: Backend> WindowManager<B> {
         self.reflow_frame(id);
     }
 
+    /// Explicitly moves *and* resizes a managed client's content to a
+    /// root-relative rectangle — the whole-geometry sibling of
+    /// [`Self::resize_client_content`], sharing its reflow path so the
+    /// result is exactly as "real" as any interactive move or resize.
+    ///
+    /// Exists for session-layout restore: a freshly mapped window that
+    /// the shell has a record for gets its remembered position back,
+    /// and position is otherwise entirely WM-managed once a client is
+    /// framed (see `handle_configure_request` — a client cannot ask
+    /// for this itself). A no-op for an unknown `id`, like every other
+    /// stale-id path here.
+    pub fn set_client_content_geometry(&mut self, id: ClientId, geometry: Rect) {
+        let Some(client) = self.clients.get_mut(id) else {
+            return;
+        };
+        client.geometry = geometry;
+        self.reflow_frame(id);
+    }
+
     fn handle_unmap(&mut self, window: B::WindowId) {
         if self.forget(window) {
             tracing::info!(?window, "unmapped, no longer tracked");
@@ -3876,6 +3895,35 @@ mod tests {
         let frame_pos_after = wm.backend().last_frame_geometry.get(&frame).unwrap().pos;
         assert_eq!(frame_pos_after, frame_pos_before, "frame must not move from a client's own configure request");
         assert_eq!(wm.client(id).unwrap().geometry.size, Size::new(120, 110));
+    }
+
+    /// Session restore's one demand on the core: put a mapped client's
+    /// content at an exact remembered root-relative rectangle. Position
+    /// is otherwise WM-managed (a client cannot request it once
+    /// framed), so this is the API restore rides — the frame must
+    /// follow the content to the new position with the theme's offset
+    /// intact, exactly as a reflow after an interactive move would.
+    #[test]
+    fn set_client_content_geometry_moves_and_resizes_through_the_frame() {
+        let mut backend = FakeBackend::new();
+        let window = backend.create_window();
+        backend.set_geometry(window, Rect { pos: Point::new(50, 50), size: Size::new(100, 100) });
+        let mut wm = wm(backend);
+        wm.dispatch(BackendEvent::MapRequest(window));
+        let id = wm.client_for_window(window).unwrap();
+        let frame = wm.client(id).unwrap().frame.unwrap();
+
+        let target = Rect { pos: Point::new(300, 200), size: Size::new(500, 400) };
+        wm.set_client_content_geometry(id, target);
+
+        let client = wm.client(id).unwrap();
+        assert_eq!(client.geometry, target, "the client's tracked geometry is exactly the record");
+        let frame_geom = *wm.backend().last_frame_geometry.get(&frame).unwrap();
+        assert_eq!(
+            frame_geom.pos,
+            Point::new(target.pos.x - client.layout.client_offset.x, target.pos.y - client.layout.client_offset.y),
+            "the frame follows the content, offset by the theme's chrome"
+        );
     }
 
     /// Regression test: a size-locked client's own `ConfigureRequest`

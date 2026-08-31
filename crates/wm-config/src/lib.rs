@@ -34,6 +34,8 @@
 //! placement = "smart"                # optional; "smart" | "cascade" | "center"
 //! edge_resistance = 10               # optional; px, 0 disables edge snapping
 //! terminal_font_px = 20              # optional; terminal font size at 1x
+//! restore_session = true             # optional; relaunch last session's windows
+//! lock_command = "swaylock"          # optional; locker for post-crash recovery
 //!
 //! [keybindings]
 //! "alt+shift+return" = "spawn-terminal"
@@ -150,6 +152,20 @@ pub struct Config {
     /// of the display it lands on. Not per-theme on purpose: a theme
     /// restyles the terminal's colors, never its metrics.
     pub terminal_font_px: f32,
+    /// Relaunch the previous session's windows at startup, restoring
+    /// each one's geometry, workspace and shape flags from the layout
+    /// file the shell keeps. Off by default — a session that spawns
+    /// applications the user did not just ask for has to be something
+    /// the user opted into, not something an update turned on.
+    pub restore_session: bool,
+    /// A screen locker command line (e.g. `"swaylock"`), split on
+    /// whitespace. Only consulted on the Wayland session, and only
+    /// when the compositor comes back up after a crash: the watchdog
+    /// re-execs a crashed compositor, and a desktop that reappears
+    /// with the user away from the keyboard must reappear locked. No
+    /// locker configured means the recovered session comes back
+    /// unlocked, and the compositor says so in the log.
+    pub lock_command: Option<String>,
     pub keybindings: Vec<(KeyCombo, Action)>,
 }
 
@@ -190,6 +206,8 @@ impl Config {
             placement: PlacementPolicy::Smart,
             edge_resistance: 10,
             terminal_font_px: DEFAULT_TERMINAL_FONT_PX,
+            restore_session: false,
+            lock_command: None,
             keybindings: vec![
                 bind("alt+shift+return", Action::SpawnTerminal),
                 bind("alt+shift+q", Action::Close),
@@ -462,6 +480,29 @@ pub fn parse(text: &str) -> Result<Config, String> {
                 None => tracing::warn!(
                     value = ?value,
                     "config: terminal_font_px must be a number between 6 and 96, keeping default"
+                ),
+            },
+            "restore_session" => match value {
+                toml::Value::Boolean(b) => config.restore_session = *b,
+                other => tracing::warn!(
+                    value = ?other,
+                    "config: restore_session must be a boolean, keeping default"
+                ),
+            },
+            "lock_command" => match value {
+                // An empty or whitespace-only command means the same
+                // thing as no key at all: nothing to run. Filtering it
+                // here keeps every consumer from having to guard
+                // against spawning "".
+                toml::Value::String(command) if !command.trim().is_empty() => {
+                    config.lock_command = Some(command.clone());
+                }
+                toml::Value::String(_) => tracing::warn!(
+                    "config: lock_command is empty, treating it as unset"
+                ),
+                other => tracing::warn!(
+                    value = ?other,
+                    "config: lock_command must be a command-line string, ignoring it"
                 ),
             },
             "keybindings" => match value {
@@ -1057,6 +1098,42 @@ mod tests {
         // The typo'd key changed nothing; the valid key still applied.
         assert!(!config.focus_follows_mouse);
         assert_eq!(config.theme.as_deref(), Some("nextstep-classic"));
+    }
+
+    // ---- parse: restore_session and lock_command ----------------------
+
+    #[test]
+    fn restore_session_defaults_off_and_parses_as_a_boolean() {
+        // Off by default: relaunching applications the user did not
+        // just ask for must be an explicit opt-in.
+        assert!(!Config::default_config().restore_session);
+        assert!(parse("restore_session = true").unwrap().restore_session);
+        assert!(!parse("restore_session = false").unwrap().restore_session);
+    }
+
+    #[test]
+    fn wrongly_typed_restore_session_keeps_the_default() {
+        for text in ["restore_session = \"yes\"", "restore_session = 1"] {
+            assert!(!parse(text).unwrap().restore_session, "text {text:?}");
+        }
+    }
+
+    #[test]
+    fn lock_command_defaults_unset_and_parses_as_a_string() {
+        assert_eq!(Config::default_config().lock_command, None);
+        assert_eq!(
+            parse("lock_command = \"swaylock -f -c 000000\"").unwrap().lock_command.as_deref(),
+            Some("swaylock -f -c 000000")
+        );
+    }
+
+    #[test]
+    fn empty_or_wrongly_typed_lock_command_stays_unset() {
+        // An empty command is indistinguishable in effect from no key,
+        // and normalizing it here means no consumer ever spawns "".
+        for text in ["lock_command = \"\"", "lock_command = \"   \"", "lock_command = 3", "lock_command = true"] {
+            assert_eq!(parse(text).unwrap().lock_command, None, "text {text:?}");
+        }
     }
 
     // ---- load ---------------------------------------------------------

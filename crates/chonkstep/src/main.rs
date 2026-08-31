@@ -480,7 +480,12 @@ fn publish_appearance(manager: &mut Option<XSettingsManager>, state: &SessionSta
 fn restart_in_place() -> ! {
     use std::os::unix::process::CommandExt;
     let bin = std::env::args_os().next().unwrap_or_else(|| "chonkstep".into());
-    let err = std::process::Command::new(&bin).exec();
+    // Tell the replacement it is a continuation of a session that
+    // never really ended — every client survives this exec via the
+    // SaveSet — so session-layout restore must not relaunch the
+    // recorded applications on top of their own live windows. See
+    // `chonk_shell::startup::session_continues`.
+    let err = std::process::Command::new(&bin).env("CHONKSTEP_SESSION_CONTINUES", "1").exec();
     tracing::error!(?err, bin = ?bin, "re-exec failed; exiting instead of restarting");
     std::process::exit(1);
 }
@@ -506,6 +511,8 @@ mod tests {
         assert!(!example.focus_follows_mouse, "example must leave focus_follows_mouse at its default (commented out)");
         assert!(example.scale.is_none(), "example must leave scale unset (commented out)");
         assert!(example.theme.is_none(), "example must leave theme unset (commented out)");
+        assert!(!example.restore_session, "example must leave restore_session at its default (commented out)");
+        assert!(example.lock_command.is_none(), "example must leave lock_command unset (commented out)");
 
         let as_set = |config: &wm_config::Config| {
             let mut bindings: Vec<(KeyCombo, Action)> = config.keybindings.clone();

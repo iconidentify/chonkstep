@@ -100,6 +100,27 @@
 # and the default of 20 is kept.
 #terminal_font_px = 20
 
+# Session restore: when true, the desktop records every window's
+# application, geometry, workspace and shape (maximized / shaded /
+# miniaturized) as you work, and relaunches that layout the next time
+# the session starts -- after a logout, and after a crash the watchdog
+# recovered from. Windows you closed are forgotten the moment you
+# close them; restore never resurrects anything you deliberately
+# dismissed. Matching is by application window class, first mapped
+# window first, so an application that opens several windows gets them
+# back in recorded order. Off by default: a session that spawns
+# applications you did not just ask for is something to opt into.
+#restore_session = true
+
+# Screen locker for crash recovery, Wayland session only. When the
+# compositor crashes, scripts/wayland-session.sh restarts it; if this
+# names a locker (any ext-session-lock client, e.g. "swaylock", split
+# on whitespace for arguments), the recovered session comes back
+# LOCKED instead of exposing your desktop to whoever walks past while
+# you are away. Unset, the recovered session comes back unlocked and
+# the log says so. This never runs on a normal login or logout.
+#lock_command = "swaylock"
+
 # Keybindings. Entries here merge OVER the defaults: listing a combo
 # overrides only that combo, and every unlisted default stays bound.
 # The special value "none" unbinds a combo outright.

@@ -13,6 +13,26 @@
 #[cfg(target_os = "linux")]
 fn main() {
     tracing_subscriber::fmt().with_env_filter(tracing_subscriber::EnvFilter::from_default_env()).init();
+
+    // A panic anywhere in this process must become an abnormal *process
+    // exit* — that is the entire signal the session watchdog
+    // (`scripts/wayland-session.sh`) has for telling a crash (re-exec,
+    // recover, lock) from a logout (stop). Rust's default only delivers
+    // it for the main thread: a panic on any other thread unwinds that
+    // thread and leaves the compositor running half-alive — the event
+    // loop pumping while whatever the dead thread owned never advances
+    // — which the supervisor can neither see nor fix. So: log through
+    // the same stream everything else uses (the default hook prints to
+    // raw stderr, which reaches the session log too, but unformatted),
+    // let the default hook say where and print the backtrace, then
+    // abort. SIGABRT is unambiguous to the supervisor and skips
+    // running destructors inside a process already known to be wrong.
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        tracing::error!(%info, "compositor panicked — aborting so the session supervisor can recover");
+        default_hook(info);
+        std::process::abort();
+    }));
     tracing::info!(
         version = env!("CARGO_PKG_VERSION"),
         "chonkstep-wayland starting \u{2014} the chonkstep desktop as a native Wayland compositor"

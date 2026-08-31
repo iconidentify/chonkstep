@@ -102,6 +102,15 @@ pub fn poll_until<T>(
 #[derive(Default)]
 pub struct SessionOptions {
     pub scale: Option<f32>,
+    /// Extra lines appended verbatim to the isolated config file —
+    /// how a test opts into keys the harness has no dedicated field
+    /// for (`restore_session = true`, `lock_command = ...`).
+    pub config_extra: String,
+    /// State files seeded into the isolated `state/chonkstep/`
+    /// directory *before* the compositor boots, as `(file name,
+    /// contents)` — how a restore test plants the previous session's
+    /// layout for the fresh compositor to find.
+    pub state_files: Vec<(String, String)>,
 }
 
 /// One booted nested compositor plus everything needed to drive and
@@ -142,8 +151,13 @@ impl Session {
         if let Some(scale) = options.scale {
             config.push_str(&format!("scale = {scale}\n"));
         }
+        config.push_str(&options.config_extra);
         std::fs::write(config_home.join("chonkstep/config.toml"), config)
             .map_err(|e| e.to_string())?;
+        for (name, contents) in &options.state_files {
+            std::fs::write(state_home.join("chonkstep").join(name), contents)
+                .map_err(|e| e.to_string())?;
+        }
 
         let door_path = dir.join("door.sock");
         let log_path = dir.join("compositor.log");
@@ -322,6 +336,40 @@ impl Session {
     /// The compositor's captured log so far.
     pub fn log(&self) -> String {
         std::fs::read_to_string(&self.log_path).unwrap_or_default()
+    }
+
+    /// A file in the isolated state directory — where the compositor's
+    /// own state files (`session`, `theme`, `dock`, ...) land, and what
+    /// a persistence test reads to assert on what would survive a
+    /// crash.
+    pub fn state_file(&self, name: &str) -> PathBuf {
+        self.dir.join("state/chonkstep").join(name)
+    }
+
+    /// Kills every client this session launched — the test-side stand-in
+    /// for the user closing their windows. Reaped with the same bounded
+    /// polls everything else uses.
+    pub fn kill_clients(&mut self) {
+        for client in &mut self.clients {
+            let _ = client.kill();
+        }
+        for client in &mut self.clients {
+            let _ = poll_until(Duration::from_secs(2), "a killed client to be reaped", || {
+                client.try_wait().ok().flatten()
+            });
+        }
+        self.clients.clear();
+    }
+
+    /// Kills the compositor with SIGKILL — the harshest crash there is
+    /// (no destructors, no flushes), for asserting that persisted state
+    /// really was already on disk beforehand. The `Session` remains
+    /// droppable afterwards; every later door call will simply fail.
+    pub fn kill_compositor(&mut self) {
+        let _ = self.compositor.kill();
+        let _ = poll_until(Duration::from_secs(2), "the killed compositor to be reaped", || {
+            self.compositor.try_wait().ok().flatten()
+        });
     }
 }
 
