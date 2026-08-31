@@ -26,17 +26,19 @@ import (
 // Protocol constants. See docs/dockapp-protocol.md section 3 for the
 // reasoning behind each value.
 const (
-	ProtocolVersion   = 1
-	TokenBytes        = 16
-	MaxMessageBytes   = 256 * 1024
-	MaxFrameBytes     = MaxMessageBytes - 64
-	MaxTilePx         = 256
-	MaxScale          = 8.0
-	MaxTileUnits      = 4
-	MaxIDBytes        = 64
-	MaxLogBytes       = 256
-	MaxThemeIDBytes   = 64
-	MaxThemeTOMLBytes = 128 * 1024
+	ProtocolVersion    = 1
+	TokenBytes         = 16
+	MaxMessageBytes    = 256 * 1024
+	MaxFrameBytes      = MaxMessageBytes - 64
+	MaxTilePx          = 256
+	MaxScale           = 8.0
+	MaxTileUnits       = 4
+	MaxIDBytes         = 64
+	MaxLogBytes        = 256
+	MaxThemeIDBytes    = 64
+	MaxThemeTOMLBytes  = 128 * 1024
+	MaxPanelPx         = 1024
+	MaxPanelFrameBytes = 4 * 1024 * 1024
 )
 
 // Message kinds. Client->shell in the low space, shell->client with
@@ -46,12 +48,18 @@ const (
 	kindFrame        = 0x02
 	kindPong         = 0x03
 	kindLog          = 0x04
+	kindOpenPanel    = 0x05
+	kindPanelFrame   = 0x06
+	kindClosePanel   = 0x07
 	kindWelcome      = 0x81
 	kindThemeChanged = 0x82
 	kindInput        = 0x83
 	kindVisibility   = 0x84
 	kindPing         = 0x85
 	kindGoodbye      = 0x86
+	kindPanelOpened  = 0x87
+	kindPanelClosed  = 0x88
+	kindPanelInput   = 0x89
 )
 
 // Input-mask bits for Hello's wants field.
@@ -70,6 +78,10 @@ const (
 	InputScroll  = 3
 	InputEnter   = 4
 	InputLeave   = 5
+	// InputMotion is hover tracking, PanelInput only: coords in panel
+	// device pixels, button 0. Never sent (and never accepted) as a
+	// tile Input.
+	InputMotion = 6
 )
 
 // InputEvent buttons (0 = none). Middle and Right exist on the wire
@@ -125,6 +137,32 @@ func (r GoodbyeReason) String() string {
 	}
 }
 
+// PanelCloseReason says why an instrument panel went away.
+type PanelCloseReason uint8
+
+// Panel close reasons.
+const (
+	PanelClosedByClient PanelCloseReason = 0 // you asked (ClosePanel)
+	PanelDismissed      PanelCloseReason = 1 // the user clicked away
+	PanelShutdown       PanelCloseReason = 2 // shell shutdown/evict (or the connection dropped)
+	PanelRefused        PanelCloseReason = 3 // the OpenPanel request was declined
+)
+
+func (r PanelCloseReason) String() string {
+	switch r {
+	case PanelClosedByClient:
+		return "closed"
+	case PanelDismissed:
+		return "dismissed"
+	case PanelShutdown:
+		return "shutdown"
+	case PanelRefused:
+		return "refused"
+	default:
+		return fmt.Sprintf("PanelCloseReason(%d)", uint8(r))
+	}
+}
+
 // DecodeError means the peer's bytes could not be read as a v1
 // message. A client's correct response is to drop the connection: the
 // two ends disagree about the protocol, and continuing would be
@@ -148,6 +186,11 @@ type ThemeState struct {
 	Scale     float32
 	ThemeID   string
 	ThemeTOML string
+	// Proto is the shell's protocol version, advertised in Welcome
+	// (and ThemeChanged). Shells that predate the field zero it, and
+	// zero decodes as 1: a protocol-1 shell, which has tiles but no
+	// instrument panels. Panels need Proto >= 2.
+	Proto uint16
 }
 
 // InputEvent is one pointer event, in coordinates local to this
@@ -160,14 +203,18 @@ type InputEvent struct {
 }
 
 // ServerMessage is one decoded shell->client datagram. Exactly one of
-// the payload fields is meaningful, selected by Kind.
+// the payload fields is meaningful, selected by Kind. A "panel_input"
+// carries its event in Input, in panel-local device pixels.
 type ServerMessage struct {
-	Kind    string // "welcome" | "theme_changed" | "input" | "visibility" | "ping" | "goodbye"
-	Theme   ThemeState
-	Input   InputEvent
-	Visible bool
-	Seq     uint32
-	Reason  GoodbyeReason
+	Kind        string // "welcome" | "theme_changed" | "input" | "visibility" | "ping" | "goodbye" | "panel_opened" | "panel_closed" | "panel_input"
+	Theme       ThemeState
+	Input       InputEvent
+	Visible     bool
+	Seq         uint32
+	Reason      GoodbyeReason
+	PanelW      uint32 // panel_opened: the granted width, device px
+	PanelH      uint32 // panel_opened: the granted height, device px
+	PanelReason PanelCloseReason
 }
 
 // IsValidID reports whether id satisfies the wire's id rule:
@@ -195,6 +242,32 @@ func FrameFits(tilePx uint32, tileUnits uint8) bool {
 		return false
 	}
 	return uint64(tilePx)*uint64(tilePx)*uint64(tileUnits)*4 <= MaxFrameBytes
+}
+
+// PanelFits reports whether a panel of this geometry is within the
+// panel caps: at most MaxPanelPx per edge, width*height*4 <= 4 MiB
+// (the shell's total-buffer allocation cap). Transport is not the
+// constraint: a PanelFrame is a *band*, so any grantable panel can be
+// streamed band by band.
+func PanelFits(width, height uint32) bool {
+	if width == 0 || width > MaxPanelPx || height == 0 || height > MaxPanelPx {
+		return false
+	}
+	return uint64(width)*uint64(height)*4 <= MaxPanelFrameBytes
+}
+
+// PanelBandRows is the tallest band a PanelFrame datagram can carry
+// at this width: MaxFrameBytes / (width*4) rows, capped at the panel
+// edge bound. The SDK slices full repaints with this.
+func PanelBandRows(width uint32) uint32 {
+	rows := uint32(MaxFrameBytes) / (width * 4)
+	if rows > MaxPanelPx {
+		rows = MaxPanelPx
+	}
+	if rows == 0 {
+		rows = 1
+	}
+	return rows
 }
 
 func header(kind byte, capacity int) []byte {
@@ -279,6 +352,64 @@ func EncodeLog(level uint8, text string) ([]byte, error) {
 	return out, nil
 }
 
+// EncodeOpenPanel builds the request for an instrument panel of
+// width x height device pixels. It is a request, not a grant: the
+// shell answers with PanelOpened (possibly clamped) or PanelClosed
+// with reason PanelRefused. Re-sending while a panel is open
+// renegotiates its size.
+func EncodeOpenPanel(width, height uint32) ([]byte, error) {
+	if !PanelFits(width, height) {
+		return nil, fmt.Errorf("chonkdock: panel geometry %dx%d is out of range", width, height)
+	}
+	out := header(kindOpenPanel, 8)
+	out = binary.LittleEndian.AppendUint32(out, width)
+	out = binary.LittleEndian.AppendUint32(out, height)
+	return out, nil
+}
+
+// EncodePanelFrame builds one panel *band*: rows y..y+bandHeight of
+// the panel, premultiplied RGBA8, top row first, no row padding.
+//
+// width must equal the granted width and y+bandHeight must stay
+// within the granted height, with the tile Frame's strictness — the
+// client layer enforces the grant half; this encoder enforces the
+// protocol bounds: each edge within MaxPanelPx, and the band's
+// width*bandHeight*4 <= MaxFrameBytes, which is what makes any
+// grantable panel streamable one datagram at a time. A full repaint
+// is a top-to-bottom band sequence sharing one generation; generation
+// carries the tile Frame's drop-attribution semantics.
+func EncodePanelFrame(generation, y, bandHeight, width uint32, pixels []byte) ([]byte, error) {
+	if width == 0 || width > MaxPanelPx {
+		return nil, fmt.Errorf("chonkdock: panel band width %d is out of range", width)
+	}
+	if bandHeight == 0 || bandHeight > MaxPanelPx {
+		return nil, fmt.Errorf("chonkdock: panel band height %d is out of range", bandHeight)
+	}
+	if uint64(y)+uint64(bandHeight) > MaxPanelPx {
+		return nil, fmt.Errorf("chonkdock: panel band rows %d..%d are out of range", y, y+bandHeight)
+	}
+	expected := int(width) * int(bandHeight) * 4
+	if expected > MaxFrameBytes {
+		return nil, fmt.Errorf("chonkdock: panel band of %d bytes exceeds MaxFrameBytes", expected)
+	}
+	if len(pixels) != expected {
+		return nil, fmt.Errorf("chonkdock: panel band needs %d pixel bytes, got %d", expected, len(pixels))
+	}
+	out := header(kindPanelFrame, 16+len(pixels))
+	out = binary.LittleEndian.AppendUint32(out, generation)
+	out = binary.LittleEndian.AppendUint32(out, y)
+	out = binary.LittleEndian.AppendUint32(out, bandHeight)
+	out = binary.LittleEndian.AppendUint32(out, width)
+	out = append(out, pixels...)
+	return out, nil
+}
+
+// EncodeClosePanel builds the message that takes the panel down; the
+// shell confirms with PanelClosed reason PanelClosedByClient.
+func EncodeClosePanel() []byte {
+	return header(kindClosePanel, 0)
+}
+
 func decodeThemeState(body []byte, what string) (ThemeState, error) {
 	if len(body) < 16 {
 		return ThemeState{}, decodeErr("%s ended inside its fixed fields", what)
@@ -286,8 +417,13 @@ func decodeThemeState(body []byte, what string) (ThemeState, error) {
 	tilePx := binary.LittleEndian.Uint32(body[0:4])
 	scaleBits := binary.LittleEndian.Uint32(body[4:8])
 	idLen := int(binary.LittleEndian.Uint16(body[8:10]))
-	if body[10] != 0 || body[11] != 0 {
-		return ThemeState{}, decodeErr("%s reserved field was not zero", what)
+	// The u16 that was reserved (and zero) in protocol 1 now carries
+	// the shell's protocol version: this is how a shell advertises
+	// panel support in Welcome. Zero is what protocol-1 shells always
+	// sent there, so zero decodes as 1.
+	proto := binary.LittleEndian.Uint16(body[10:12])
+	if proto == 0 {
+		proto = 1
 	}
 	tomlLen := int(binary.LittleEndian.Uint32(body[12:16]))
 	scale := math.Float32frombits(scaleBits)
@@ -311,7 +447,34 @@ func decodeThemeState(body []byte, what string) (ThemeState, error) {
 	if !utf8.Valid(id) || !utf8.Valid(toml) {
 		return ThemeState{}, decodeErr("%s carries invalid UTF-8", what)
 	}
-	return ThemeState{TilePx: tilePx, Scale: scale, ThemeID: string(id), ThemeTOML: string(toml)}, nil
+	return ThemeState{TilePx: tilePx, Scale: scale, ThemeID: string(id), ThemeTOML: string(toml), Proto: proto}, nil
+}
+
+func decodeInput(body []byte, what string, allowMotion bool) (InputEvent, error) {
+	var ev InputEvent
+	if len(body) != 16 {
+		return ev, decodeErr("%s is %d body bytes, want 16", what, len(body))
+	}
+	top := uint8(InputLeave)
+	if allowMotion {
+		top = InputMotion
+	}
+	if body[0] < InputPress || body[0] > top {
+		return ev, decodeErr("undefined input kind %d in %s", body[0], what)
+	}
+	if body[1] > ButtonRight {
+		return ev, decodeErr("undefined button %d", body[1])
+	}
+	if body[2] != 0 || body[3] != 0 {
+		return ev, decodeErr("%s reserved field was not zero", what)
+	}
+	return InputEvent{
+		Kind:   body[0],
+		Button: body[1],
+		X:      int32(binary.LittleEndian.Uint32(body[4:8])),
+		Y:      int32(binary.LittleEndian.Uint32(body[8:12])),
+		Delta:  int32(binary.LittleEndian.Uint32(body[12:16])),
+	}, nil
 }
 
 // DecodeServer decodes one shell->client datagram.
@@ -343,26 +506,47 @@ func DecodeServer(buf []byte) (ServerMessage, error) {
 			msg.Kind = "theme_changed"
 		}
 	case kindInput:
-		if len(body) != 16 {
-			return msg, decodeErr("Input is %d body bytes, want 16", len(body))
-		}
-		if body[0] < InputPress || body[0] > InputLeave {
-			return msg, decodeErr("undefined input kind %d", body[0])
-		}
-		if body[1] > ButtonRight {
-			return msg, decodeErr("undefined button %d", body[1])
-		}
-		if body[2] != 0 || body[3] != 0 {
-			return msg, decodeErr("Input reserved field was not zero")
+		ev, err := decodeInput(body, "Input", false)
+		if err != nil {
+			return msg, err
 		}
 		msg.Kind = "input"
-		msg.Input = InputEvent{
-			Kind:   body[0],
-			Button: body[1],
-			X:      int32(binary.LittleEndian.Uint32(body[4:8])),
-			Y:      int32(binary.LittleEndian.Uint32(body[8:12])),
-			Delta:  int32(binary.LittleEndian.Uint32(body[12:16])),
+		msg.Input = ev
+	case kindPanelInput:
+		// The payload is identical to Input; only the coordinate
+		// space differs (panel-local device pixels) — and PanelInput
+		// alone may carry Motion (kind 6, hover tracking).
+		ev, err := decodeInput(body, "PanelInput", true)
+		if err != nil {
+			return msg, err
 		}
+		msg.Kind = "panel_input"
+		msg.Input = ev
+	case kindPanelOpened:
+		if len(body) != 8 {
+			return msg, decodeErr("PanelOpened is %d body bytes, want 8", len(body))
+		}
+		w := binary.LittleEndian.Uint32(body[0:4])
+		h := binary.LittleEndian.Uint32(body[4:8])
+		if !PanelFits(w, h) {
+			return msg, decodeErr("PanelOpened grant %dx%d is out of range", w, h)
+		}
+		msg.Kind = "panel_opened"
+		msg.PanelW, msg.PanelH = w, h
+	case kindPanelClosed:
+		// reason u8 + 3 reserved zero bytes, the Goodbye/Visibility
+		// padding convention.
+		if len(body) != 4 {
+			return msg, decodeErr("PanelClosed is %d body bytes, want 4", len(body))
+		}
+		if body[1] != 0 || body[2] != 0 || body[3] != 0 {
+			return msg, decodeErr("PanelClosed reserved bytes were not zero")
+		}
+		if body[0] > uint8(PanelRefused) {
+			return msg, decodeErr("undefined panel-closed reason %d", body[0])
+		}
+		msg.Kind = "panel_closed"
+		msg.PanelReason = PanelCloseReason(body[0])
 	case kindVisibility:
 		if len(body) != 4 {
 			return msg, decodeErr("Visibility is %d body bytes, want 4", len(body))
