@@ -33,6 +33,7 @@ use wm_theme_api::{DecorationBuffer, Point, Rect, Size};
 
 use crate::dockapp::tile::{RemoteTile, ServiceContext, StopReason, TileState};
 use crate::dockapp::{self, DockHost, Farewell};
+use crate::overview::{OverviewHit, OverviewItem, OverviewPanel};
 use crate::wallpaper::Wallpaper;
 use crate::widgets::{
     run_detached, ClockWidget, DockInput, DockItem, DockWidget, Effect, NetTrafficWidget, PowerWidget, SamplerRegistry, SoundWidget, SupervisedWidget,
@@ -1094,6 +1095,12 @@ pub struct Desktop<B: Backend> {
     wallpaper: Wallpaper,
     /// The Alt-Tab switch panel, while a cycle session is live.
     switcher: Option<SwitcherPanel<B::ShellId>>,
+    /// The modal Overview panel — surface, entries, selection, layout.
+    /// The shell orchestrator owns the modality (opening, the keyboard
+    /// grab, key/click meaning); this is its drawing and hit-testing
+    /// half, held here because rendering needs the desktop's font
+    /// state. See `crate::overview`.
+    overview: OverviewPanel<B>,
     /// Stable id of the active theme — only used to bullet-mark the
     /// Theme submenu; the `Theme` itself lives with the shell
     /// orchestration (`crate::shell::Shell`).
@@ -1226,6 +1233,7 @@ impl<B: Backend> Desktop<B> {
             icon_drag: None,
             wallpaper,
             switcher: None,
+            overview: OverviewPanel::default(),
             theme_id,
             apps,
             logo,
@@ -1295,6 +1303,10 @@ impl<B: Backend> Desktop<B> {
         self.repaint_wallpaper(backend);
         self.redraw_dock(backend, theme);
         self.reposition_clip(backend, theme);
+        // A full-screen surface sized for the old arrangement can only
+        // be wrong on the new one; the next entry rebuilds it against
+        // the primary rect just stored.
+        self.overview.discard(backend);
     }
 
     /// Re-derives every metric this desktop measured from the UI scale
@@ -1356,6 +1368,12 @@ impl<B: Backend> Desktop<B> {
         self.reposition_clip(backend, theme);
         self.relayout_icons(backend, theme, previews);
         self.discard_switcher(backend);
+        // The Overview's surface and its stored layout are both sized
+        // and styled for the metrics that just changed; discarding lets
+        // the next entry rebuild them (and, if a session was somehow
+        // live — a reload marker can fire mid-session — releases its
+        // keyboard grab; see `OverviewPanel::discard`).
+        self.overview.discard(backend);
     }
 
     /// The clients that currently have an icon tile on the desktop.
@@ -2090,6 +2108,68 @@ impl<B: Backend> Desktop<B> {
             }
             panel.visible = false;
         }
+    }
+
+    // -- the Overview -----------------------------------------------------
+    //
+    // Thin delegation into `crate::overview::OverviewPanel`: the panel
+    // owns its surface, entries, selection and layout, but rendering
+    // needs this desktop's font state and metrics, so the shell drives
+    // it through these wrappers — the same split the menus use.
+
+    /// Opens (or re-populates, while open) the Overview over the
+    /// primary monitor with a fresh entry set. The shell captures the
+    /// entries — previews come from `WindowManager::client_preview`,
+    /// which this type cannot call while the backend is borrowed.
+    pub fn show_overview(
+        &mut self,
+        backend: &mut B,
+        theme: &Theme,
+        items: Vec<OverviewItem<B>>,
+        workspace: (usize, usize),
+        selected: usize,
+    ) {
+        let Self { overview, font_system, swash_cache, tile, primary, .. } = self;
+        overview.show(backend, theme, font_system, swash_cache, *primary, *tile, items, workspace, selected);
+    }
+
+    pub fn overview_visible(&self) -> bool {
+        self.overview.visible()
+    }
+
+    pub fn overview_owns(&self, surface: B::ShellId) -> bool {
+        self.overview.owns(surface)
+    }
+
+    pub fn overview_hit(&self, local: Point) -> OverviewHit {
+        self.overview.hit(local)
+    }
+
+    pub fn overview_selected(&self) -> usize {
+        self.overview.selected()
+    }
+
+    pub fn overview_item(&self, index: usize) -> Option<&OverviewItem<B>> {
+        self.overview.item(index)
+    }
+
+    /// Moves the selection to `index` (hover, click-arm), repainting
+    /// only when it actually changed.
+    pub fn select_overview_card(&mut self, backend: &mut B, theme: &Theme, index: usize) {
+        let Self { overview, font_system, swash_cache, .. } = self;
+        overview.select(backend, theme, font_system, swash_cache, index);
+    }
+
+    /// Arrow-key selection movement, clamped by the panel's grid math.
+    pub fn move_overview_selection(&mut self, backend: &mut B, theme: &Theme, dx: i32, dy: i32) {
+        let Self { overview, font_system, swash_cache, .. } = self;
+        overview.move_selection(backend, theme, font_system, swash_cache, dx, dy);
+    }
+
+    /// Closes the session, keeping the surface for the next entry.
+    /// The keyboard grab is the shell's to release — it took it.
+    pub fn hide_overview(&mut self, backend: &mut B) {
+        self.overview.hide(backend);
     }
 
     pub fn close_menu(&mut self, backend: &mut B)

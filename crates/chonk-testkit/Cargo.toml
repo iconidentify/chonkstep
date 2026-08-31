@@ -17,3 +17,12 @@ license.workspace = true
 # PNG decode for screenshot assertions — already in the workspace's
 # dependency graph (winit pulls it), so this adds no new code to vet.
 png = "0.17"
+
+[dev-dependencies]
+# The Overview e2e test aims its clicks with the same pure layout
+# math the shell renders and hit-tests through — asserting against the
+# real geometry instead of hand-tuned magic coordinates that break the
+# day a pad changes. Dev-only: the harness library itself stays free
+# of desktop code.
+wm-theme = { path = "../wm-theme" }
+wm-theme-api = { path = "../wm-theme-api" }

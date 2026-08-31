@@ -28,6 +28,10 @@
 //!   wells) every dock item and icon builds on - the core of the UI kit.
 //! - [`workspace::render_clip_tile`] renders the top-left Clip tile
 //!   (the classic desktop's workspace switcher).
+//! - [`overview::render_overview`] renders the modal Overview panel —
+//!   the Exposé-style grid of live window cards plus a Clip-tile
+//!   workspace strip — with [`overview::layout`] as the pure geometry
+//!   both rendering and the shell's hit-testing read from.
 //! - [`icon::render_icon_tile`] renders a themed square icon tile (what
 //!   a miniaturized window collapses to; also useful for any app that
 //!   wants a themed launcher/shelf icon).
@@ -52,6 +56,7 @@ pub mod model;
 pub mod netgraph;
 pub mod netload;
 pub mod nettraffic;
+pub mod overview;
 pub mod paint;
 pub mod panel;
 pub mod power;
