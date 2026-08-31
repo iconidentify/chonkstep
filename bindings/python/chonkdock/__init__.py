@@ -27,6 +27,8 @@ from .client import (  # noqa: F401
     Ctx,
     Dockapp,
     DockappError,
+    Panel,
+    PanelError,
     Refused,
     DEFAULT_REDRAW_INTERVAL,
 )
@@ -36,6 +38,7 @@ from .wire import (  # noqa: F401
     BUTTON_RIGHT,
     INPUT_ENTER,
     INPUT_LEAVE,
+    INPUT_MOTION,
     INPUT_PRESS,
     INPUT_RELEASE,
     INPUT_SCROLL,
@@ -43,7 +46,14 @@ from .wire import (  # noqa: F401
     LOG_ERROR,
     LOG_INFO,
     LOG_WARN,
+    MAX_PANEL_FRAME_BYTES,
+    MAX_PANEL_PX,
     MAX_TILE_UNITS,
+    PANEL_CLOSED_CLIENT,
+    PANEL_CLOSED_DISMISSED,
+    PANEL_CLOSED_NAMES,
+    PANEL_CLOSED_REFUSED,
+    PANEL_CLOSED_SHUTDOWN,
     PROTOCOL_VERSION,
     WANT_ALL,
     WANT_CROSSING,
@@ -56,11 +66,14 @@ from .wire import (  # noqa: F401
     ThemeState,
     frame_fits,
     is_valid_id,
+    panel_band_rows,
+    panel_fits,
 )
 
 __all__ = [
     "Dockapp", "Ctx", "DockappError", "Refused", "InputEvent",
+    "Panel", "PanelError", "PANEL_CLOSED_NAMES",
     "ThemeState", "DecodeError", "EncodeError", "frame_fits",
-    "is_valid_id", "PROTOCOL_VERSION",
+    "is_valid_id", "panel_fits", "panel_band_rows", "PROTOCOL_VERSION",
 ]
 __version__ = "0.1.0"

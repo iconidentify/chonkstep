@@ -36,6 +36,12 @@ const (
 	DefaultRedrawInterval = time.Second
 )
 
+// ErrPanelsUnsupported is returned by Ctx.OpenPanel on a protocol-1
+// shell: one that predates instrument panels, and would treat an
+// OpenPanel as a protocol error and close the whole connection — the
+// tile would die with the panel. The SDK refuses locally instead.
+var ErrPanelsUnsupported = errors.New("chonkdock: this shell predates instrument panels (protocol 1); OpenPanel needs a protocol-2 shell")
+
 // ErrRefused wraps the Goodbye reason when the shell declines or ends
 // a connection deliberately.
 type ErrRefused struct{ Reason GoodbyeReason }
@@ -61,11 +67,226 @@ type Ctx struct {
 	// beat a blank tile.
 	ThemeID   string
 	ThemeTOML string
+	// ShellProto is the shell's protocol version (from
+	// Welcome/ThemeChanged). 1 has tiles only; instrument panels need
+	// 2. Feature-gate any panel affordance on this rather than
+	// finding out the hard way.
+	ShellProto uint16
 	// Visible is false while the dock is hidden or this tile is
 	// scrolled out of view; stop sampling as well as drawing.
 	Visible bool
 
-	fd int
+	fd  int
+	app *Dockapp
+}
+
+// Panel is one instrument panel: a larger popup surface the shell
+// places near this dockapp's tile. Obtained from Ctx.OpenPanel; one
+// per dockapp. The lifecycle is asynchronous on purpose — the shell
+// answers an open request with a grant (possibly clamped) or a
+// refusal, and can dismiss the panel at any time — and the SDK
+// enforces the ordering the wire demands: no frame leaves before the
+// grant, and every frame is exactly the granted size.
+type Panel struct {
+	// Width and Height are the *granted* size in device pixels, zero
+	// until the shell's PanelOpened arrives. Draw at this size, never
+	// at the size you asked for.
+	Width, Height uint32
+	// Reason says why the panel went away, once Closed() is true.
+	Reason PanelCloseReason
+
+	reqW, reqH  uint32
+	opened      bool
+	closing     bool
+	closed      bool
+	mustPresent bool
+	buf         []byte
+	generation  uint32
+	fd          int
+}
+
+// Opened reports whether the shell's grant has arrived (and the panel
+// is not mid-renegotiation or closed). Until then no frame may cross
+// the wire, and Draw returns an error rather than letting you
+// protocol-error.
+func (p *Panel) Opened() bool { return p.opened }
+
+// Closed reports whether the panel is gone, for any reason.
+func (p *Panel) Closed() bool { return p.closed }
+
+// Requested returns the size last asked for, which the grant may have
+// clamped.
+func (p *Panel) Requested() (width, height uint32) { return p.reqW, p.reqH }
+
+// Draw pushes one full repaint, for panels not driven by the
+// DrawPanel callback: premultiplied RGBA8, top row first, exactly
+// Width*Height*4 bytes. The SDK slices it into maximal legal bands
+// and streams them under one generation — callers never think in
+// bands. It fails before the grant has arrived and after the panel
+// closed. Bands are sent with a bounded wait (see
+// PanelBandSendTimeout) rather than the tile's drop-on-EAGAIN,
+// because bands do not supersede each other.
+func (p *Panel) Draw(pixels []byte) error {
+	if err := p.checkStreamable(); err != nil {
+		return err
+	}
+	if expected := int(p.Width) * int(p.Height) * 4; len(pixels) != expected {
+		return fmt.Errorf("chonkdock: panel frame needs %d bytes for the granted %dx%d, got %d", expected, p.Width, p.Height, len(pixels))
+	}
+	return p.streamBands(0, pixels)
+}
+
+// DrawRows pushes a partial update — rows y.. of the panel, for
+// hover-highlight economy. pixels is premultiplied RGBA8, a whole
+// number of Width-wide rows, and y plus that row count must stay
+// within the granted height. Same grant and lifecycle rules as Draw.
+func (p *Panel) DrawRows(y uint32, pixels []byte) error {
+	if err := p.checkStreamable(); err != nil {
+		return err
+	}
+	stride := int(p.Width) * 4
+	if len(pixels) == 0 || len(pixels)%stride != 0 {
+		return fmt.Errorf("chonkdock: partial update must be whole %dpx rows (%d bytes each), got %d bytes", p.Width, stride, len(pixels))
+	}
+	rows := uint32(len(pixels) / stride)
+	if uint64(y)+uint64(rows) > uint64(p.Height) {
+		return fmt.Errorf("chonkdock: rows %d..%d fall outside the granted height %d", y, y+rows, p.Height)
+	}
+	return p.streamBands(y, pixels)
+}
+
+func (p *Panel) checkStreamable() error {
+	if p.closed {
+		return errors.New("chonkdock: this panel is closed")
+	}
+	if !p.opened {
+		return errors.New("chonkdock: the shell has not granted this panel yet; frames before PanelOpened are a protocol error")
+	}
+	return nil
+}
+
+// errBandStalled means the shell stopped taking panel bands within
+// the bounded wait; the update should be retried whole, later.
+var errBandStalled = errors.New("chonkdock: the shell stopped taking panel bands (send timed out)")
+
+// PanelBandSendTimeout is how long one panel band send may wait for
+// socket space. Unlike tile frames, bands do not supersede each other
+// — a dropped band is a stale stripe, not a skipped frame — so they
+// are sent with a bounded wait instead of drop-on-EAGAIN. A healthy
+// shell drains its socket far faster than this.
+const PanelBandSendTimeout = time.Second
+
+// sendBand is the bounded-wait send bands need: blocking, with
+// SO_SNDTIMEO, so a momentarily full buffer waits for the shell to
+// drain rather than holing the repaint.
+func sendBand(fd int, msg []byte) error {
+	tv := syscall.NsecToTimeval(PanelBandSendTimeout.Nanoseconds())
+	_ = syscall.SetsockoptTimeval(fd, syscall.SOL_SOCKET, syscall.SO_SNDTIMEO, &tv)
+	for {
+		_, err := syscall.SendmsgN(fd, msg, nil, nil, syscall.MSG_NOSIGNAL)
+		switch err {
+		case nil:
+			return nil
+		case syscall.EINTR:
+			continue
+		case syscall.EAGAIN: // == EWOULDBLOCK on Linux
+			return errBandStalled // SO_SNDTIMEO elapsed
+		default:
+			return fmt.Errorf("chonkdock: send panel band: %w", err)
+		}
+	}
+}
+
+// streamBands sends one update top-to-bottom as bands that each fit a
+// datagram, sharing one generation. Returns errBandStalled when the
+// shell stopped taking them; callers retry the update rather than
+// treating that as a dead connection.
+func (p *Panel) streamBands(y uint32, pixels []byte) error {
+	stride := int(p.Width) * 4
+	totalRows := uint32(len(pixels) / stride)
+	perBand := PanelBandRows(p.Width)
+	p.generation++
+	for row := uint32(0); row < totalRows; {
+		rows := perBand
+		if totalRows-row < rows {
+			rows = totalRows - row
+		}
+		band := pixels[int(row)*stride : int(row+rows)*stride]
+		msg, err := EncodePanelFrame(p.generation, y+row, rows, p.Width, band)
+		if err != nil {
+			return err
+		}
+		if err := sendBand(p.fd, msg); err != nil {
+			return err
+		}
+		row += rows
+	}
+	return nil
+}
+
+// Close asks the shell to take the panel down; OnPanelClosed fires
+// with PanelClosedByClient when the shell confirms. Safe to call
+// twice.
+func (p *Panel) Close() {
+	if p.closed || p.closing {
+		return
+	}
+	p.closing = true
+	p.opened = false
+	_, _ = syscall.SendmsgN(p.fd, EncodeClosePanel(), nil, nil, syscall.MSG_NOSIGNAL)
+}
+
+// Panel returns the current instrument panel (requested or open), or
+// nil.
+func (c *Ctx) Panel() *Panel { return c.app.panel }
+
+// OpenPanel requests an instrument panel of width x height device
+// pixels (at most MaxPanelPx per edge). It returns the handle
+// immediately; the shell's answer arrives later — either a grant
+// (Opened becomes true at the possibly-clamped Width x Height, and
+// OnPanelOpened fires) or a refusal (OnPanelClosed with PanelRefused).
+// Called again while the panel is open, it renegotiates the size on
+// the same handle; frames pause until the new grant.
+//
+// A shell predating panels treats the request as a protocol error and
+// closes the whole connection.
+func (c *Ctx) OpenPanel(width, height uint32) (*Panel, error) {
+	d := c.app
+	if d.shellProto < 2 {
+		return nil, ErrPanelsUnsupported
+	}
+	if !PanelFits(width, height) {
+		return nil, fmt.Errorf("chonkdock: panel geometry %dx%d is out of range (at most %d per edge)", width, height, MaxPanelPx)
+	}
+	p := d.panel
+	if p != nil && p.closed {
+		p = nil
+	}
+	if p != nil && p.closing {
+		// The old panel's PanelClosed is still in flight; SEQPACKET
+		// ordering guarantees it arrives before the new grant, so park
+		// it and attribute the next PanelClosed to it.
+		d.retired = append(d.retired, p)
+		p = nil
+	}
+	if p == nil {
+		p = &Panel{reqW: width, reqH: height, fd: c.fd}
+		d.panel = p
+	} else {
+		// Renegotiation: same handle, frames blocked until the fresh
+		// grant — a frame at the old size could otherwise race the
+		// shell's re-grant and be rejected as mismatched.
+		p.reqW, p.reqH = width, height
+		p.opened = false
+	}
+	msg, err := EncodeOpenPanel(width, height)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := syscall.SendmsgN(c.fd, msg, nil, nil, syscall.MSG_NOSIGNAL); err != nil {
+		return nil, fmt.Errorf("chonkdock: send OpenPanel: %w", err)
+	}
+	return p, nil
 }
 
 // Log says something in the shell's journal (a dockapp's stdout and
@@ -106,6 +327,81 @@ type Dockapp struct {
 	// OnTheme is called after each successful handshake and theme
 	// change, before the next Draw. Optional.
 	OnTheme func(ctx *Ctx)
+
+	// DrawPanel is Draw's sibling for the instrument panel: called on
+	// the redraw cadence once the panel is open, with buf a
+	// premultiplied-RGBA8 buffer of the granted Width*Height*4 bytes;
+	// return whether anything changed. Optional (push frames with
+	// Panel.Draw instead).
+	DrawPanel func(ctx *Ctx, p *Panel, buf []byte) bool
+	// OnPanelOpened fires when the shell's grant arrives — useful for
+	// push-style drawing. Optional.
+	OnPanelOpened func(ctx *Ctx, p *Panel)
+	// OnPanelInput receives one pointer event in panel-local device
+	// pixels and returns whether it wants an immediate panel repaint.
+	// Optional.
+	OnPanelInput func(ctx *Ctx, p *Panel, ev InputEvent) bool
+	// OnPanelClosed fires when the panel is gone, for any reason:
+	// PanelClosedByClient (you asked), PanelDismissed (the user
+	// clicked away), PanelShutdown (the shell is going away, or the
+	// connection dropped), PanelRefused (the open request was declined
+	// and the panel never existed). The handle is dead afterwards;
+	// open a fresh one. Optional.
+	OnPanelClosed func(ctx *Ctx, p *Panel, reason PanelCloseReason)
+
+	panel      *Panel
+	retired    []*Panel // closed by us, PanelClosed confirmation pending
+	shellProto uint16   // what the last Welcome/ThemeChanged said
+}
+
+func (d *Dockapp) grantPanel(ctx *Ctx, w, h uint32) {
+	p := d.panel
+	if p == nil || p.closed || p.closing {
+		return // a grant that crossed our ClosePanel; already gone
+	}
+	p.Width, p.Height = w, h
+	p.opened = true
+	p.buf = make([]byte, int(w)*int(h)*4)
+	p.mustPresent = true // the shell has nothing to show yet
+	if d.OnPanelOpened != nil {
+		d.OnPanelOpened(ctx, p)
+	}
+}
+
+func (d *Dockapp) finishPanel(ctx *Ctx, reason PanelCloseReason) {
+	var p *Panel
+	if len(d.retired) > 0 {
+		p, d.retired = d.retired[0], d.retired[1:]
+	} else {
+		p, d.panel = d.panel, nil
+	}
+	if p == nil || p.closed {
+		return
+	}
+	p.closed = true
+	p.opened = false
+	p.Reason = reason
+	if d.OnPanelClosed != nil {
+		d.OnPanelClosed(ctx, p, reason)
+	}
+}
+
+// dropPanel: the connection is gone; whatever panel it carried is
+// too. The shell could not tell us, so synthesize the close locally —
+// a dockapp should not have to special-case an EOF to learn its panel
+// died.
+func (d *Dockapp) dropPanel(ctx *Ctx) {
+	for len(d.retired) > 0 {
+		// These were closed by us; only the confirmation was lost.
+		d.finishPanel(ctx, PanelClosedByClient)
+	}
+	if p := d.panel; p != nil {
+		reason := PanelShutdown
+		if p.closing {
+			reason = PanelClosedByClient
+		}
+		d.finishPanel(ctx, reason)
+	}
 }
 
 // Run connects to the dock and serves until the shell says Shutdown
@@ -280,18 +576,28 @@ func (d *Dockapp) serve(fd int, state ThemeState, visible bool) (string, ThemeSt
 		return "", state, 0, fmt.Errorf("chonkdock: a %dpx x %d-unit tile cannot cross the socket", state.TilePx, d.TileUnits)
 	}
 	ctx := &Ctx{
-		TilePx:    state.TilePx,
-		TileUnits: d.TileUnits,
-		Height:    state.TilePx * uint32(d.TileUnits),
-		Scale:     state.Scale,
-		ThemeID:   state.ThemeID,
-		ThemeTOML: state.ThemeTOML,
-		Visible:   visible,
-		fd:        fd,
+		TilePx:     state.TilePx,
+		TileUnits:  d.TileUnits,
+		Height:     state.TilePx * uint32(d.TileUnits),
+		Scale:      state.Scale,
+		ThemeID:    state.ThemeID,
+		ThemeTOML:  state.ThemeTOML,
+		ShellProto: state.Proto,
+		Visible:    visible,
+		fd:         fd,
+		app:        d,
 	}
+	d.shellProto = state.Proto
 	frame := make([]byte, int(ctx.TilePx)*int(ctx.Height)*4)
 	if d.OnTheme != nil {
 		d.OnTheme(ctx)
+	}
+
+	// Every outcome except a retheme ends this connection, and a
+	// panel does not outlive its connection.
+	done := func(outcome string, reason GoodbyeReason, err error) (string, ThemeState, GoodbyeReason, error) {
+		d.dropPanel(ctx)
+		return outcome, state, reason, err
 	}
 
 	recv := make([]byte, MaxMessageBytes)
@@ -300,49 +606,85 @@ func (d *Dockapp) serve(fd int, state ThemeState, visible bool) (string, ThemeSt
 	nextDraw := time.Now()
 	for {
 		now := time.Now()
-		if ctx.Visible && (mustPresent || !now.Before(nextDraw)) {
+		due := !now.Before(nextDraw)
+		if ctx.Visible && (mustPresent || due) {
 			changed := d.Draw(ctx, frame)
 			if changed || mustPresent {
 				generation++
 				msg, err := EncodeFrame(generation, ctx.TilePx, ctx.Height, frame)
 				if err != nil {
-					return "", state, 0, err
+					return done("", 0, err)
 				}
 				if err := send(fd, msg); err != nil {
-					return "disconnected", state, 0, nil
+					return done("disconnected", 0, nil)
 				}
 			}
 			mustPresent = false
 			nextDraw = now.Add(d.RedrawInterval)
 		}
+		// The panel paints on the same cadence as the tile — a
+		// sibling, not a second clock. It is not gated on tile
+		// visibility: an open panel is on screen by definition.
+		if p := d.panel; p != nil && p.opened && (p.mustPresent || due) {
+			stalled := false
+			if d.DrawPanel != nil {
+				changed := d.DrawPanel(ctx, p, p.buf)
+				if changed || p.mustPresent {
+					if err := p.streamBands(0, p.buf); err != nil {
+						if !errors.Is(err, errBandStalled) {
+							return done("disconnected", 0, nil)
+						}
+						// A stalled shell is behind, not gone: retry
+						// the whole repaint next tick.
+						stalled = true
+					}
+				}
+			}
+			p.mustPresent = stalled
+			if due && !ctx.Visible {
+				nextDraw = now.Add(d.RedrawInterval)
+			}
+		}
 
 		deadline := nextDraw
-		if !ctx.Visible {
-			// While hidden, wake only for messages.
+		if p := d.panel; !ctx.Visible && (p == nil || !p.opened) {
+			// While hidden with no panel, wake only for messages.
 			deadline = time.Now().Add(d.RedrawInterval)
 		}
 		data, ok, err := recvDeadline(fd, recv, deadline)
 		if err != nil {
-			return "", state, 0, err
+			return done("", 0, err)
 		}
 		if !ok {
 			continue
 		}
 		if len(data) == 0 {
-			return "disconnected", state, 0, nil
+			return done("disconnected", 0, nil)
 		}
 		msg, err := DecodeServer(data)
 		if err != nil {
 			// The two ends genuinely disagree about the protocol;
 			// continuing would be guessing.
-			return "disconnected", state, 0, nil
+			return done("disconnected", 0, nil)
 		}
 		switch msg.Kind {
 		case "welcome", "theme_changed":
+			// Same connection, new palette: the panel (if any) stays
+			// open across a retheme.
 			return "retheme", msg.Theme, 0, nil
 		case "input":
 			if d.OnInput != nil && d.OnInput(ctx, msg.Input) {
 				mustPresent = true
+			}
+		case "panel_opened":
+			d.grantPanel(ctx, msg.PanelW, msg.PanelH)
+		case "panel_closed":
+			d.finishPanel(ctx, msg.PanelReason)
+		case "panel_input":
+			if p := d.panel; p != nil && p.opened && d.OnPanelInput != nil {
+				if d.OnPanelInput(ctx, p, msg.Input) {
+					p.mustPresent = true
+				}
 			}
 		case "visibility":
 			becameVisible := msg.Visible && !ctx.Visible
@@ -350,13 +692,13 @@ func (d *Dockapp) serve(fd int, state ThemeState, visible bool) (string, ThemeSt
 			mustPresent = mustPresent || becameVisible
 		case "ping":
 			if err := send(fd, EncodePong(msg.Seq)); err != nil {
-				return "disconnected", state, 0, nil
+				return done("disconnected", 0, nil)
 			}
 		case "goodbye":
 			if msg.Reason == GoodbyeShutdown {
-				return "shutdown", state, 0, nil
+				return done("shutdown", 0, nil)
 			}
-			return "refused", state, msg.Reason, nil
+			return done("refused", msg.Reason, nil)
 		}
 	}
 }
