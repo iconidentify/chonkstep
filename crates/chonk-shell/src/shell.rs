@@ -20,6 +20,7 @@ use wm_theme_api::{DecorationBuffer, Point, PopupHost, Rect, Size};
 use crate::apps::{self, AppEntry};
 use crate::desktop::{Desktop, IconDragResult, MenuAction, RootMenuAction, WindowMenuAction, WindowMenuContext};
 use crate::dockapp::Farewell;
+use chonk_dock_proto::wire::PanelCloseReason;
 use crate::launchdock::{LaunchDock, LaunchDockAction};
 use crate::overview::{OverviewHit, OverviewItem};
 use crate::session_layout::{RelaunchPlan, SessionLayout, WindowRecord};
@@ -667,6 +668,13 @@ pub struct Shell<B: Backend + PopupHost<PopupId = B::ShellId>> {
     /// `take_shell_click` on a later loop iteration than the motion
     /// that preceded it.
     pointer_root: Point,
+    /// Set by [`Shell::keymap_action`] when the panel-dismiss Escape
+    /// lands, consumed by [`Shell::tick`]. Parked rather than acted on
+    /// inline because `keymap_action` has no `WindowManager` to close
+    /// the panel with — the same two-phase shape the Overview's parked
+    /// combo uses, and `tick` runs later in the very same loop
+    /// iteration, so the dismissal is never a frame behind.
+    panel_escape: bool,
 }
 
 impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
@@ -754,6 +762,7 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
             theme,
             fonts,
             pointer_root: Point::new(0, 0),
+            panel_escape: false,
         }
     }
 
@@ -988,6 +997,20 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
             self.overview_key = Some(*combo);
             return Some(Action::Overview);
         }
+        // The instrument panel's Escape. The key is only grabbed while
+        // a panel is up (`Desktop::set_panel_key_grab`), so this arm is
+        // unreachable otherwise; the dismissal itself is parked for
+        // `tick`, which runs later in this same loop iteration and has
+        // the `WindowManager` this method does not. The combo still
+        // answers `None` — Escape is bound to nothing in the keymap,
+        // and swallowing the flow-through would break the rule the
+        // switcher relies on.
+        if self.desktop.instrument_panel_visible()
+            && combo.modifiers.is_empty()
+            && combo.keysym == crate::desktop::PANEL_DISMISS_KEYSYM
+        {
+            self.panel_escape = true;
+        }
         self.keymap.get(combo).cloned()
     }
 
@@ -1105,6 +1128,12 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
     /// failed to create would leave a desk with dead keys and nothing
     /// on screen explaining why.
     fn open_overview(&mut self, wm: &mut WindowManager<B>) {
+        // The Overview covers the monitor the panel hangs on, and its
+        // modal grab would eat the panel's Escape: exactly one of the
+        // two shell modes at a time.
+        if self.desktop.instrument_panel_visible() {
+            self.desktop.dismiss_instrument_panel(wm.backend_mut(), PanelCloseReason::Dismissed);
+        }
         self.populate_overview(wm);
         if self.desktop.overview_visible() {
             wm.backend_mut().grab_keyboard();
@@ -1264,6 +1293,12 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
     /// binary's to route through [`Shell::on_shell_click`], whose
     /// launcher-release offer must still see them (see its doc).
     pub fn on_root_press(&mut self, wm: &mut WindowManager<B>, at: Point, button: MouseButton) -> ShellOutcome {
+        // Any press on the bare desktop is a click away from an open
+        // instrument panel; the press then keeps meaning what it always
+        // did (a right press still opens the root menu).
+        if self.desktop.instrument_panel_visible() {
+            self.desktop.dismiss_instrument_panel(wm.backend_mut(), PanelCloseReason::Dismissed);
+        }
         if button == MouseButton::Right {
             self.desktop.open_root_menu(wm.backend_mut(), &self.theme, at);
         } else {
@@ -1317,6 +1352,24 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
             // space the layout hit-tests in.
             let local = self.desktop.overview_panel_point(surface, local);
             return self.on_overview_click(wm, local, button, pressed);
+        }
+
+        // The instrument panel. Clicks on its own surface go to the
+        // owning dockapp as `PanelInput` (chrome is inert); a *press*
+        // on any other shell surface is the click-away that dismisses
+        // it — and then keeps routing, so the press still does what it
+        // always did. The dock surface is exempted here because its
+        // routing owns the subtler half (the owning tile's re-click is
+        // a toggle whose press must be consumed) — see
+        // `Desktop::dock_input`.
+        if self.desktop.instrument_panel_visible() {
+            if self.desktop.instrument_panel_owns(surface) {
+                self.desktop.instrument_panel_click(&self.theme, local, button, pressed);
+                return ShellOutcome::Continue;
+            }
+            if pressed && surface != self.desktop.dock_window() {
+                self.desktop.dismiss_instrument_panel(wm.backend_mut(), PanelCloseReason::Dismissed);
+            }
         }
 
         // A release first offers itself to an in-progress strip drag
@@ -1529,7 +1582,8 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
     /// delta; inventing a rule that folds `right` into it would make
     /// two different gestures indistinguishable to every tile.
     pub fn on_shell_scroll(&mut self, wm: &mut WindowManager<B>, surface: B::ShellId, local: Point, delta: ScrollDelta) {
-        if surface != self.desktop.dock_window() {
+        let panel = self.desktop.instrument_panel_owns(surface);
+        if !panel && surface != self.desktop.dock_window() {
             return;
         }
         let notches = delta.up;
@@ -1543,7 +1597,13 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         }
         let step = notches.signum();
         for _ in 0..steps {
-            self.desktop.dock_input(wm.backend_mut(), &self.theme, DockInput::Scroll { local, delta: step });
+            // The panel rides the same replay-as-discrete-steps rule as
+            // the dock, for the same third-party-code reason.
+            if panel {
+                self.desktop.instrument_panel_scroll(&self.theme, local, step);
+            } else {
+                self.desktop.dock_input(wm.backend_mut(), &self.theme, DockInput::Scroll { local, delta: step });
+            }
         }
     }
 
@@ -1661,6 +1721,9 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         // and a tile that never receives `Leave` latches into a
         // permanent hover state. See `Desktop::update_dock_hover`.
         self.desktop.update_dock_hover(wm.backend_mut(), &self.theme, root);
+        // The panel's Enter/Leave, from the same root-motion stream and
+        // for the same never-latch reason.
+        self.desktop.update_panel_hover(&self.theme, root);
         self.launchdock.handle_motion(wm.backend_mut(), &self.theme, root);
         // Menu hover rides the same cadence: every motion over a shell
         // surface also arrives as a root-relative motion event (that is
@@ -1832,6 +1895,13 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         }
         if let Some(target) = self.desktop.take_workspace_request() {
             wm.switch_workspace(target);
+        }
+        // The instrument panel's parked Escape (see `keymap_action`) —
+        // consumed here because this is the first point after the key
+        // event where a `WindowManager` is in hand, still inside the
+        // same loop iteration.
+        if std::mem::take(&mut self.panel_escape) {
+            self.desktop.dismiss_instrument_panel(wm.backend_mut(), PanelCloseReason::Dismissed);
         }
         // The Overview's one-shot preview catch-up: the panel opened
         // against whatever captures the backend had (icon-sized, on

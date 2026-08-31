@@ -49,6 +49,10 @@ $ scripts/chonk-get remove py-dockclock
 - `examples/chonk-switch` — the appearance switch: light/dark mode as
   a machined toggle, and the Python SDK's worked example — one
   stdlib-only script, tested headless against a fake shell.
+- `examples/chonk-net` — the network instrument and the panel
+  concept's showcase: live link state on the tile, a click-open
+  detail panel listing nearby Wi-Fi networks — read-only, from a
+  frozen whitelist of `nmcli`/`iw`/sysfs reads.
 - `bindings/python/chonkdock` and `bindings/go/chonkdock` — complete
   protocol implementations with no dependencies beyond each language's
   standard library, each with a working clock example.
@@ -136,6 +140,33 @@ compositor; an instrument does not.
 `Goodbye` with a reason — wrong protocol version, bad token, a tile
 too large for the transport — at connect time, once, rather than as a
 per-frame mystery (`handshake.rs`, `validate_hello`).
+
+## The instrument panel
+
+A tile is 56 logical pixels of glanceable reading; the **panel** is the
+detail view behind it. Click an instrument's tile and a framed detail
+panel unfolds beside the dock — the full traffic graph behind the
+network sparkline, the nearby-networks list behind the link tile —
+streamed by the same process over the same socket (`OpenPanel` /
+`PanelFrame`, protocol 2; `docs/dockapp-protocol.md` section 11), with
+the shell drawing the desktop's chiseled chrome around the pixels and
+owning the surface, its placement, and every dismissal gesture
+(click-away, Escape, re-clicking the tile). One panel per instrument;
+exactly one on screen desktop-wide — a panel is a popover, not a
+window, and it takes no keyboard focus, ever.
+
+Every guarantee above extends to it unchanged, because it is enforced
+at the same seams: **the desktop never blocks on a panel** (the same
+non-blocking socket, the same bounded queues; frames arrive in bounded
+bands and presentation is metered), and a hung instrument's panel dies
+by the same ping machinery as its tile — three unanswered pings and the
+detail view is torn down, because a frozen panel is a stale reading at
+ten times the size. A crashed or evicted instrument's panel goes with
+it; a dockapp readopted across a shell restart comes back panel-less
+and reopens on the next click. The panel never sees the keyboard, is
+never told where it is on screen, and is clamped by the shell to the
+caps and the workarea — the shell grants a size, and the instrument
+draws exactly that. `examples/chonk-net` is the concept's showcase.
 
 ## Writing one
 

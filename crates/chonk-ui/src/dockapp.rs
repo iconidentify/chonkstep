@@ -450,6 +450,15 @@ where
                 send(socket, &ClientMessage::Pong { seq })?;
             }
             Ok(ServerMessage::Goodbye { reason }) => return Ok(Outcome::Goodbye(reason)),
+            // The v2 panel family. This SDK loop does not open panels
+            // yet, so nothing here can be addressed to it: a stray
+            // `PanelClosed` (e.g. the ack racing a shell-side dismissal
+            // of a predecessor's panel) is ignored rather than treated
+            // as a protocol disagreement — these are known kinds, not
+            // undecodable ones.
+            Ok(ServerMessage::PanelOpened { .. })
+            | Ok(ServerMessage::PanelClosed { .. })
+            | Ok(ServerMessage::PanelInput(_)) => {}
             Err(e) => {
                 // The shell is the trusted end of this socket, so a
                 // message that does not decode means the two ends
@@ -564,7 +573,7 @@ mod tests {
     use super::*;
 
     fn state(theme_id: &str, theme_toml: String) -> ThemeState {
-        ThemeState { tile_px: 56, scale: 1.0, theme_id: theme_id.to_string(), theme_toml }
+        ThemeState { tile_px: 56, scale: 1.0, proto: chonk_dock_proto::SHELL_PROTOCOL_VERSION, theme_id: theme_id.to_string(), theme_toml }
     }
 
     /// A `ThemeState` at the stock geometry with `scale` replaced — the

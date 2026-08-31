@@ -61,6 +61,14 @@
 //!                                                 top row first, no padding
 //!   0x03 Pong    seq:u32
 //!   0x04 Log     level:u8 rsv:u8 text_len:u16 text:[u8;text_len]
+//!   0x05 OpenPanel   width:u32 height:u32     a request, answered by
+//!                                             PanelOpened or PanelClosed{3}
+//!   0x06 PanelFrame  generation:u32 y:u32 band_height:u32 width:u32
+//!                    pixels:[u8; width*band_height*4]  one horizontal band
+//!                                                      of the granted panel;
+//!                                                      premultiplied RGBA8,
+//!                                                      top row first
+//!   0x07 ClosePanel  (no payload)
 //! shell -> dockapp
 //!   0x81 Welcome       tile_px:u32 scale:f32(bits) theme_id_len:u16 rsv:u16
 //!                      theme_toml_len:u32 theme_id:[u8] theme_toml:[u8]
@@ -69,25 +77,37 @@
 //!   0x84 Visibility    visible:u8 rsv:[u8;3]
 //!   0x85 Ping          seq:u32
 //!   0x86 Goodbye       reason:u8 rsv:[u8;3]
+//!   0x87 PanelOpened   width:u32 height:u32   the granted size
+//!   0x88 PanelClosed   reason:u8 rsv:[u8;3]
+//!   0x89 PanelInput    (identical body to Input, panel-local coordinates;
+//!                       additionally admits kind 6 = Motion, which 0x83
+//!                       never carries)
 //! ```
 
 use std::fmt;
 
 use crate::{
-    MAX_FRAME_BYTES, MAX_ID_BYTES, MAX_LOG_BYTES, MAX_MESSAGE_BYTES, MAX_SCALE,
-    MAX_THEME_ID_BYTES, MAX_THEME_TOML_BYTES, MAX_TILE_PX, MAX_TILE_UNITS, TOKEN_BYTES,
+    MAX_FRAME_BYTES, MAX_ID_BYTES, MAX_LOG_BYTES, MAX_MESSAGE_BYTES, MAX_PANEL_PX,
+    MAX_SCALE, MAX_THEME_ID_BYTES, MAX_THEME_TOML_BYTES, MAX_TILE_PX, MAX_TILE_UNITS,
+    TOKEN_BYTES,
 };
 
 const KIND_HELLO: u8 = 0x01;
 const KIND_FRAME: u8 = 0x02;
 const KIND_PONG: u8 = 0x03;
 const KIND_LOG: u8 = 0x04;
+const KIND_OPEN_PANEL: u8 = 0x05;
+const KIND_PANEL_FRAME: u8 = 0x06;
+const KIND_CLOSE_PANEL: u8 = 0x07;
 const KIND_WELCOME: u8 = 0x81;
 const KIND_THEME_CHANGED: u8 = 0x82;
 const KIND_INPUT: u8 = 0x83;
 const KIND_VISIBILITY: u8 = 0x84;
 const KIND_PING: u8 = 0x85;
 const KIND_GOODBYE: u8 = 0x86;
+const KIND_PANEL_OPENED: u8 = 0x87;
+const KIND_PANEL_CLOSED: u8 = 0x88;
+const KIND_PANEL_INPUT: u8 = 0x89;
 
 const HEADER_BYTES: usize = 4;
 
@@ -143,6 +163,10 @@ impl InputMask {
             InputKind::Release => self.wants(Self::RELEASE),
             InputKind::Scroll => self.wants(Self::SCROLL),
             InputKind::Enter | InputKind::Leave => self.wants(Self::CROSSING),
+            // Panel-only on the wire, and the mask is a *tile* hint:
+            // no mask bit exists to ask for it, so a tile never gets
+            // one whatever it set.
+            InputKind::Motion => false,
         }
     }
 }
@@ -154,6 +178,17 @@ pub enum InputKind {
     Scroll,
     Enter,
     Leave,
+    /// The pointer moved inside the panel — coordinates are its
+    /// position in panel device pixels, `button` 0, `delta` 0.
+    ///
+    /// **Valid only in `PanelInput` (0x89), never in tile `Input`
+    /// (0x83)**, and both codecs enforce it. Tiles are 56 logical
+    /// pixels of glanceable instrument, and per-motion wakeups there
+    /// are traffic without a use; a panel is a detail view where hover
+    /// UX (a highlighted row, a scrubbed graph) is the point. The
+    /// shell throttles it to its dispatch cadence — never more than
+    /// one per pointer-motion dispatch.
+    Motion,
 }
 
 impl InputKind {
@@ -164,6 +199,7 @@ impl InputKind {
             Self::Scroll => 3,
             Self::Enter => 4,
             Self::Leave => 5,
+            Self::Motion => 6,
         }
     }
 
@@ -174,6 +210,7 @@ impl InputKind {
             3 => Some(Self::Scroll),
             4 => Some(Self::Enter),
             5 => Some(Self::Leave),
+            6 => Some(Self::Motion),
             _ => None,
         }
     }
@@ -300,6 +337,48 @@ impl GoodbyeReason {
     }
 }
 
+/// Why the shell is (or is not) taking a dockapp's panel down.
+///
+/// Distinct from [`GoodbyeReason`] because the two end different
+/// things: a `Goodbye` ends the *connection*, a `PanelClosed` ends one
+/// panel and the tile keeps drawing. Codes start at 0, exactly as the
+/// protocol document publishes them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PanelCloseReason {
+    /// The dockapp sent `ClosePanel`; this is the acknowledgement.
+    ClientRequest,
+    /// The user dismissed it: a click away from the panel, Escape, or
+    /// re-clicking the owning tile.
+    Dismissed,
+    /// The shell is shutting the panel's owner down — session end,
+    /// eviction, crash teardown, or a structural change (a monitor
+    /// rearrangement) that invalidated the panel's place on screen.
+    Shutdown,
+    /// The `OpenPanel` was refused outright; no panel exists.
+    Refused,
+}
+
+impl PanelCloseReason {
+    fn code(self) -> u8 {
+        match self {
+            Self::ClientRequest => 0,
+            Self::Dismissed => 1,
+            Self::Shutdown => 2,
+            Self::Refused => 3,
+        }
+    }
+
+    fn from_code(code: u8) -> Option<Self> {
+        match code {
+            0 => Some(Self::ClientRequest),
+            1 => Some(Self::Dismissed),
+            2 => Some(Self::Shutdown),
+            3 => Some(Self::Refused),
+            _ => None,
+        }
+    }
+}
+
 /// One pointer event, in coordinates local to the dockapp's own tile —
 /// the dockapp is never told where its tile is on screen, or that other
 /// tiles exist.
@@ -349,6 +428,42 @@ pub enum ClientMessage {
         level: LogLevel,
         text: String,
     },
+    /// A request for an instrument panel of this size in device pixels
+    /// — a request, not a command: the shell answers `PanelOpened`
+    /// (possibly clamped) or `PanelClosed { Refused }`. One panel per
+    /// dockapp; an `OpenPanel` while one is open re-negotiates the size
+    /// in place.
+    OpenPanel {
+        width: u32,
+        height: u32,
+    },
+    /// One horizontal band of the granted panel — premultiplied RGBA8,
+    /// top row first, no row padding, under the same
+    /// length-must-agree strictness as `Frame`.
+    ///
+    /// Banded because a whole panel at the caps is sixteen datagrams'
+    /// worth of pixels: the shell keeps one buffer per grant and blits
+    /// each band at row `y` on receipt. A full repaint is a
+    /// top-to-bottom sequence of bands with **no atomicity across
+    /// them** — repaint fast and top-down, so a half-applied repaint
+    /// reads as a shear for one pass, not as interleaved garbage.
+    ///
+    /// `width` MUST equal the granted width and `y + band_height` MUST
+    /// stay within the granted height; the shell treats anything else
+    /// like a wrong-sized `Frame` (logged and discarded, connection
+    /// kept). `generation` carries the same drop-attribution semantics
+    /// as `Frame`'s: the client's own repaint counter, echoed nowhere —
+    /// under flow control the shell may drop a band whose generation is
+    /// older than the newest it has seen.
+    PanelFrame {
+        generation: u32,
+        y: u32,
+        band_height: u32,
+        width: u32,
+        pixels: Vec<u8>,
+    },
+    /// The dockapp is done with its panel. No payload.
+    ClosePanel,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -373,6 +488,21 @@ pub enum ServerMessage {
     Goodbye {
         reason: GoodbyeReason,
     },
+    /// The answer to an accepted `OpenPanel`: the granted size, which
+    /// is the request clamped to the caps and the current workarea.
+    /// Every `PanelFrame` band must match its width and stay inside its
+    /// height.
+    PanelOpened {
+        width: u32,
+        height: u32,
+    },
+    /// The panel is gone (or was never opened, for `Refused`).
+    PanelClosed {
+        reason: PanelCloseReason,
+    },
+    /// A pointer event inside the panel, in panel device pixels —
+    /// body identical to `Input`.
+    PanelInput(InputEvent),
 }
 
 /// The tile geometry and palette a dockapp draws with. Two theme
@@ -399,6 +529,20 @@ pub struct ThemeState {
     /// its own hand-computed geometry, the same job `chonk_ui::App::scale`
     /// does for a windowed SDK app.
     pub scale: f32,
+    /// The shell's protocol version — [`crate::SHELL_PROTOCOL_VERSION`]
+    /// from a current shell. Rides in the u16 that was reserved (and
+    /// required zero) in protocol 1, which is why **zero means 1**: a
+    /// protocol-1 shell always sent zero there, and this field is how a
+    /// panel-capable client discovers whether `OpenPanel` is a request
+    /// (`proto >= 2`) or a connection-costing unknown kind. Kept as the
+    /// raw wire value rather than normalized, so encode/decode stays
+    /// canonical; read it through [`ThemeState::panels_supported`].
+    ///
+    /// This is the one deliberate exception to the reserved-bytes rule,
+    /// and it is exactly the shape the rule's own text predicts: "a
+    /// reserved byte that starts meaning something is a version bump" —
+    /// this byte *is* the version.
+    pub proto: u16,
     pub theme_id: String,
     pub theme_toml: String,
 }
@@ -431,8 +575,16 @@ impl ThemeState {
     pub fn same_as(&self, other: &Self) -> bool {
         self.tile_px == other.tile_px
             && self.scale.to_bits() == other.scale.to_bits()
+            && self.proto == other.proto
             && self.theme_id == other.theme_id
             && self.theme_toml == other.theme_toml
+    }
+
+    /// Whether the shell that sent this state accepts the panel family.
+    /// Zero is what a protocol-1 shell always put in the field (it was
+    /// reserved), so zero and one both mean "tiles only".
+    pub fn panels_supported(&self) -> bool {
+        self.proto >= 2
     }
 }
 
@@ -488,6 +640,14 @@ pub enum DecodeError {
     BadEnum { field: &'static str, value: u8 },
     /// `width`/`height` outside the permitted tile geometry.
     FrameGeometry { width: u32, height: u32 },
+    /// `width`/`height` outside the permitted panel geometry — a zero
+    /// edge, an edge past [`MAX_PANEL_PX`], a band outside the tallest
+    /// grantable panel or over [`crate::MAX_FRAME_BYTES`]'s one-datagram
+    /// budget. Its own variant rather than a reuse of
+    /// [`FrameGeometry`](Self::FrameGeometry) because the two bounds
+    /// differ by a factor of four per edge, and a log line that names
+    /// the wrong limit sends the reader to the wrong table row.
+    PanelGeometry { width: u32, height: u32 },
     /// `pixels.len()` disagreed with `width * height * 4`. Note this is
     /// impossible to get wrong *silently*: the pixel payload is the
     /// remainder of the datagram, so a lying header is a mismatch here
@@ -518,6 +678,7 @@ impl fmt::Display for DecodeError {
             Self::IdCharset => write!(f, "id contains characters outside [A-Za-z0-9._:-]"),
             Self::BadEnum { field, value } => write!(f, "field `{field}` has undefined value {value}"),
             Self::FrameGeometry { width, height } => write!(f, "frame geometry {width}x{height} is out of range"),
+            Self::PanelGeometry { width, height } => write!(f, "panel geometry {width}x{height} is out of range"),
             Self::FrameLengthMismatch { expected, actual } => {
                 write!(f, "frame declared {expected} pixel bytes but carried {actual}")
             }
@@ -543,6 +704,9 @@ pub enum EncodeError {
     FrameLengthMismatch { expected: usize, actual: usize },
     /// The encoded message would exceed [`MAX_MESSAGE_BYTES`].
     TooLarge { len: usize },
+    /// `InputKind::Motion` in a tile `Input` — kind 6 is defined only
+    /// for `PanelInput`.
+    MotionOutsidePanel,
 }
 
 impl fmt::Display for EncodeError {
@@ -555,6 +719,7 @@ impl fmt::Display for EncodeError {
                 write!(f, "frame geometry needs {expected} pixel bytes but was given {actual}")
             }
             Self::TooLarge { len } => write!(f, "message of {len} bytes exceeds the {MAX_MESSAGE_BYTES}-byte cap"),
+            Self::MotionOutsidePanel => write!(f, "InputKind::Motion is defined only for PanelInput"),
         }
     }
 }
@@ -779,22 +944,86 @@ fn theme_state_encode(kind: u8, state: &ThemeState) -> Result<Vec<u8>, EncodeErr
     out.extend_from_slice(&state.tile_px.to_le_bytes());
     out.extend_from_slice(&state.scale.to_bits().to_le_bytes());
     out.extend_from_slice(&(state.theme_id.len() as u16).to_le_bytes());
-    out.extend_from_slice(&0u16.to_le_bytes());
+    out.extend_from_slice(&state.proto.to_le_bytes());
     out.extend_from_slice(&(state.theme_toml.len() as u32).to_le_bytes());
     out.extend_from_slice(state.theme_id.as_bytes());
     out.extend_from_slice(state.theme_toml.as_bytes());
     finish(out)
 }
 
+/// The 16-byte body `Input` and `PanelInput` share. One encoder and one
+/// decoder for both kinds, so the two layouts cannot drift — "identical
+/// to `Input`" is the protocol document's own definition of
+/// `PanelInput`, and sharing the code is what keeps that sentence true
+/// by construction.
+fn input_event_encode(kind: u8, event: &InputEvent) -> Result<Vec<u8>, EncodeError> {
+    // Motion is the panel family's kind alone: a tile `Input` carrying
+    // it is a message this protocol does not define, and refusing to
+    // build one keeps that a compile-visible local bug instead of a
+    // peer-side rejection.
+    if event.kind == InputKind::Motion && kind != KIND_PANEL_INPUT {
+        return Err(EncodeError::MotionOutsidePanel);
+    }
+    let mut out = start(kind, 16);
+    out.push(event.kind.code());
+    out.push(event.button.map_or(0, Button::code));
+    out.extend_from_slice(&0u16.to_le_bytes());
+    out.extend_from_slice(&event.x.to_le_bytes());
+    out.extend_from_slice(&event.y.to_le_bytes());
+    out.extend_from_slice(&event.delta.to_le_bytes());
+    finish(out)
+}
+
+fn input_event_decode(r: &mut Reader<'_>, allow_motion: bool) -> Result<InputEvent, DecodeError> {
+    let kind_code = r.u8("input.kind")?;
+    let input_kind = InputKind::from_code(kind_code).ok_or(DecodeError::BadEnum { field: "input.kind", value: kind_code })?;
+    if input_kind == InputKind::Motion && !allow_motion {
+        // Kind 6 exists only in PanelInput; in a tile Input it is as
+        // undefined as kind 7.
+        return Err(DecodeError::BadEnum { field: "input.kind", value: kind_code });
+    }
+    let button_code = r.u8("input.button")?;
+    let button = Button::from_code(button_code).ok_or(DecodeError::BadEnum { field: "input.button", value: button_code })?;
+    r.reserved(2, "input.reserved")?;
+    let x = r.i32("x")?;
+    let y = r.i32("y")?;
+    let delta = r.i32("delta")?;
+    Ok(InputEvent { kind: input_kind, button, x, y, delta })
+}
+
+/// The bounds a whole-panel geometry (`PanelOpened`'s grant) must sit
+/// inside — [`crate::panel_fits`], named locally so the decode arms
+/// read like the rest of this module.
+fn panel_geometry_ok(width: u32, height: u32) -> bool {
+    crate::panel_fits(width, height)
+}
+
+/// The bounds one `PanelFrame` band must sit inside: a real width
+/// within the panel edge cap, a real height, the band's *end row*
+/// within the tallest panel the protocol can grant, and the band's
+/// bytes within one datagram's frame budget. All arithmetic in u64 so
+/// no header can overflow its way past a check.
+fn panel_band_ok(y: u32, band_height: u32, width: u32) -> bool {
+    width != 0
+        && width <= MAX_PANEL_PX
+        && band_height != 0
+        && (y as u64) + (band_height as u64) <= MAX_PANEL_PX as u64
+        && crate::panel_band_fits(width, band_height)
+}
+
 fn theme_state_decode(reader: &mut Reader<'_>) -> Result<ThemeState, DecodeError> {
     let tile_px = reader.u32("tile_px")?;
     let scale = reader.f32_usable("scale", MAX_SCALE)?;
     let theme_id_len = reader.u16("theme_id_len")? as usize;
-    reader.reserved(2, "theme.reserved")?;
+    // The u16 that was reserved-and-zero in protocol 1 now carries the
+    // shell's protocol version (zero therefore reads as a protocol-1
+    // shell — see `ThemeState::proto`). Any value decodes: a version is
+    // an advertisement, not a claim the codec can falsify.
+    let proto = reader.u16("theme.proto")?;
     let theme_toml_len = reader.u32("theme_toml_len")? as usize;
     let theme_id = reader.string(theme_id_len, MAX_THEME_ID_BYTES, "theme_id")?;
     let theme_toml = reader.string(theme_toml_len, MAX_THEME_TOML_BYTES, "theme_toml")?;
-    Ok(ThemeState { tile_px, scale, theme_id, theme_toml })
+    Ok(ThemeState { tile_px, scale, proto, theme_id, theme_toml })
 }
 
 // ---------------------------------------------------------------------
@@ -859,6 +1088,37 @@ impl ClientMessage {
                 out.extend_from_slice(text.as_bytes());
                 finish(out)
             }
+            Self::OpenPanel { width, height } => {
+                // A request may exceed the caps — the shell clamps it —
+                // but a zero edge is not a size anything can clamp to.
+                if *width == 0 || *height == 0 {
+                    return Err(EncodeError::FrameGeometry { width: *width, height: *height });
+                }
+                let mut out = start(KIND_OPEN_PANEL, 8);
+                out.extend_from_slice(&width.to_le_bytes());
+                out.extend_from_slice(&height.to_le_bytes());
+                finish(out)
+            }
+            Self::PanelFrame { generation, y, band_height, width, pixels } => {
+                // A band the datagram cannot carry fails here, at the
+                // call site, rather than as a mysterious EMSGSIZE from
+                // `send` — the whole reason the band bound exists.
+                if !panel_band_ok(*y, *band_height, *width) {
+                    return Err(EncodeError::FrameGeometry { width: *width, height: *band_height });
+                }
+                let expected = (*width as usize) * (*band_height as usize) * 4;
+                if pixels.len() != expected {
+                    return Err(EncodeError::FrameLengthMismatch { expected, actual: pixels.len() });
+                }
+                let mut out = start(KIND_PANEL_FRAME, 16 + pixels.len());
+                out.extend_from_slice(&generation.to_le_bytes());
+                out.extend_from_slice(&y.to_le_bytes());
+                out.extend_from_slice(&band_height.to_le_bytes());
+                out.extend_from_slice(&width.to_le_bytes());
+                out.extend_from_slice(pixels);
+                finish(out)
+            }
+            Self::ClosePanel => finish(start(KIND_CLOSE_PANEL, 0)),
         }
     }
 
@@ -936,6 +1196,38 @@ impl ClientMessage {
                 // shape, print, or put in a tracing field.
                 Self::Log { level, text: sanitize_text(&text, MAX_LOG_BYTES) }
             }
+            KIND_OPEN_PANEL => {
+                let width = r.u32("panel.width")?;
+                let height = r.u32("panel.height")?;
+                // A request above the caps is legal — the shell clamps
+                // it when granting — so only the unclampable zero is
+                // rejected here. Contrast `PanelFrame` below, whose
+                // geometry claims real bytes and is bounds-checked in
+                // full.
+                if width == 0 || height == 0 {
+                    return Err(DecodeError::PanelGeometry { width, height });
+                }
+                Self::OpenPanel { width, height }
+            }
+            KIND_PANEL_FRAME => {
+                let generation = r.u32("panel.generation")?;
+                let y = r.u32("panel.y")?;
+                let band_height = r.u32("panel.band_height")?;
+                let width = r.u32("panel.width")?;
+                // Bounds before the multiply, exactly as for `Frame`,
+                // with all the arithmetic in u64 so no header can
+                // overflow its way past a check.
+                if !panel_band_ok(y, band_height, width) {
+                    return Err(DecodeError::PanelGeometry { width, height: band_height });
+                }
+                let expected = (width as usize) * (band_height as usize) * 4;
+                let pixels = r.rest();
+                if pixels.len() != expected {
+                    return Err(DecodeError::FrameLengthMismatch { expected, actual: pixels.len() });
+                }
+                Self::PanelFrame { generation, y, band_height, width, pixels: pixels.to_vec() }
+            }
+            KIND_CLOSE_PANEL => Self::ClosePanel,
             _ => return Err(DecodeError::UnknownKind { kind }),
         };
         r.finish()?;
@@ -952,16 +1244,7 @@ impl ServerMessage {
         match self {
             Self::Welcome(state) => theme_state_encode(KIND_WELCOME, state),
             Self::ThemeChanged(state) => theme_state_encode(KIND_THEME_CHANGED, state),
-            Self::Input(event) => {
-                let mut out = start(KIND_INPUT, 16);
-                out.push(event.kind.code());
-                out.push(event.button.map_or(0, Button::code));
-                out.extend_from_slice(&0u16.to_le_bytes());
-                out.extend_from_slice(&event.x.to_le_bytes());
-                out.extend_from_slice(&event.y.to_le_bytes());
-                out.extend_from_slice(&event.delta.to_le_bytes());
-                finish(out)
-            }
+            Self::Input(event) => input_event_encode(KIND_INPUT, event),
             Self::Visibility { visible } => {
                 let mut out = start(KIND_VISIBILITY, 4);
                 out.push(u8::from(*visible));
@@ -979,6 +1262,30 @@ impl ServerMessage {
                 out.extend_from_slice(&[0, 0, 0]);
                 finish(out)
             }
+            Self::PanelOpened { width, height } => {
+                // A grant is the shell's own construction: refusing to
+                // encode one outside the caps keeps a shell bug at the
+                // shell, instead of shipping a size every conformant
+                // client will refuse to draw at.
+                if !panel_geometry_ok(*width, *height) {
+                    return Err(EncodeError::FrameGeometry { width: *width, height: *height });
+                }
+                let mut out = start(KIND_PANEL_OPENED, 8);
+                out.extend_from_slice(&width.to_le_bytes());
+                out.extend_from_slice(&height.to_le_bytes());
+                finish(out)
+            }
+            Self::PanelClosed { reason } => {
+                // Same shape as `Goodbye` and `Visibility`: a one-byte
+                // code padded to four with reserved zeros, so every
+                // fixed-body message in the catalog keeps one
+                // convention.
+                let mut out = start(KIND_PANEL_CLOSED, 4);
+                out.push(reason.code());
+                out.extend_from_slice(&[0, 0, 0]);
+                finish(out)
+            }
+            Self::PanelInput(event) => input_event_encode(KIND_PANEL_INPUT, event),
         }
     }
 
@@ -987,19 +1294,7 @@ impl ServerMessage {
         let message = match kind {
             KIND_WELCOME => Self::Welcome(theme_state_decode(&mut r)?),
             KIND_THEME_CHANGED => Self::ThemeChanged(theme_state_decode(&mut r)?),
-            KIND_INPUT => {
-                let kind_code = r.u8("input.kind")?;
-                let input_kind =
-                    InputKind::from_code(kind_code).ok_or(DecodeError::BadEnum { field: "input.kind", value: kind_code })?;
-                let button_code = r.u8("input.button")?;
-                let button =
-                    Button::from_code(button_code).ok_or(DecodeError::BadEnum { field: "input.button", value: button_code })?;
-                r.reserved(2, "input.reserved")?;
-                let x = r.i32("x")?;
-                let y = r.i32("y")?;
-                let delta = r.i32("delta")?;
-                Self::Input(InputEvent { kind: input_kind, button, x, y, delta })
-            }
+            KIND_INPUT => Self::Input(input_event_decode(&mut r, false)?),
             KIND_VISIBILITY => {
                 let visible = r.u8("visible")?;
                 if visible > 1 {
@@ -1015,6 +1310,25 @@ impl ServerMessage {
                 r.reserved(3, "goodbye.reserved")?;
                 Self::Goodbye { reason }
             }
+            KIND_PANEL_OPENED => {
+                let width = r.u32("panel.width")?;
+                let height = r.u32("panel.height")?;
+                // The client's protection against a hostile or broken
+                // shell, exactly as the theme bounds are: a grant no
+                // panel can be drawn at is rejected, never allocated.
+                if !panel_geometry_ok(width, height) {
+                    return Err(DecodeError::PanelGeometry { width, height });
+                }
+                Self::PanelOpened { width, height }
+            }
+            KIND_PANEL_CLOSED => {
+                let code = r.u8("panel.reason")?;
+                let reason =
+                    PanelCloseReason::from_code(code).ok_or(DecodeError::BadEnum { field: "panel.reason", value: code })?;
+                r.reserved(3, "panel_closed.reserved")?;
+                Self::PanelClosed { reason }
+            }
+            KIND_PANEL_INPUT => Self::PanelInput(input_event_decode(&mut r, true)?),
             _ => return Err(DecodeError::UnknownKind { kind }),
         };
         r.finish()?;
@@ -1061,6 +1375,7 @@ mod tests {
         ThemeState {
             tile_px: 112,
             scale: 2.0,
+            proto: crate::SHELL_PROTOCOL_VERSION,
             theme_id: "nextstep-classic".to_string(),
             theme_toml: "id = \"nextstep-classic\"\n".to_string(),
         }
@@ -1075,6 +1390,12 @@ mod tests {
             frame(56, 56),
             ClientMessage::Pong { seq: u32::MAX },
             ClientMessage::Log { level: LogLevel::Warn, text: "battery sampler timed out".to_string() },
+            ClientMessage::OpenPanel { width: 448, height: 168 },
+            // Above the caps on purpose: a request is clamped by the
+            // shell, not rejected by the codec.
+            ClientMessage::OpenPanel { width: u32::MAX, height: u32::MAX },
+            ClientMessage::PanelFrame { generation: 3, y: 8, band_height: 2, width: 4, pixels: vec![0x42; 32] },
+            ClientMessage::ClosePanel,
         ];
         for message in messages {
             let bytes = message.encode().expect("encodes");
@@ -1099,6 +1420,11 @@ mod tests {
             ServerMessage::Visibility { visible: false },
             ServerMessage::Ping { seq: 9 },
             ServerMessage::Goodbye { reason: GoodbyeReason::Shutdown },
+            ServerMessage::PanelOpened { width: 448, height: 168 },
+            ServerMessage::PanelClosed { reason: PanelCloseReason::Dismissed },
+            ServerMessage::PanelClosed { reason: PanelCloseReason::Refused },
+            ServerMessage::PanelInput(InputEvent { kind: InputKind::Press, button: Some(Button::Left), x: 40, y: 12, delta: 0 }),
+            ServerMessage::PanelInput(InputEvent { kind: InputKind::Motion, button: None, x: 3, y: 4, delta: 0 }),
         ];
         for message in messages {
             let bytes = message.encode().expect("encodes");
@@ -1129,7 +1455,7 @@ mod tests {
         // somebody else's binary.
         let bytes = hello().encode().unwrap();
         assert_eq!(&bytes[0..4], &[0x01, 0, 0, 0], "kind + reserved");
-        assert_eq!(&bytes[4..8], &1u32.to_le_bytes(), "proto");
+        assert_eq!(&bytes[4..8], &crate::PROTOCOL_VERSION.to_le_bytes(), "proto");
         assert_eq!(bytes[8], 1, "tile_units");
         assert_eq!(bytes[9], InputMask::PRESS | InputMask::CROSSING, "wants");
         assert_eq!(bytes[10], 5, "id_len");
@@ -1173,6 +1499,191 @@ mod tests {
         }
     }
 
+    // -- the panel family ----------------------------------------------
+
+    #[test]
+    fn panel_messages_have_the_documented_byte_layouts() {
+        // Pinned like `Hello`: the protocol document publishes these
+        // tables and the language bindings are built against them.
+        let bytes = ClientMessage::OpenPanel { width: 448, height: 168 }.encode().unwrap();
+        assert_eq!(&bytes[0..4], &[0x05, 0, 0, 0], "kind + reserved");
+        assert_eq!(&bytes[4..8], &448u32.to_le_bytes(), "width");
+        assert_eq!(&bytes[8..12], &168u32.to_le_bytes(), "height");
+        assert_eq!(bytes.len(), 12);
+
+        let bytes = ClientMessage::PanelFrame { generation: 9, y: 100, band_height: 1, width: 2, pixels: vec![0xAA; 8] }
+            .encode()
+            .unwrap();
+        assert_eq!(&bytes[0..4], &[0x06, 0, 0, 0]);
+        assert_eq!(&bytes[4..8], &9u32.to_le_bytes(), "generation");
+        assert_eq!(&bytes[8..12], &100u32.to_le_bytes(), "y");
+        assert_eq!(&bytes[12..16], &1u32.to_le_bytes(), "band_height");
+        assert_eq!(&bytes[16..20], &2u32.to_le_bytes(), "width");
+        assert_eq!(&bytes[20..], &[0xAA; 8], "pixels are the rest of the datagram");
+
+        let bytes = ClientMessage::ClosePanel.encode().unwrap();
+        assert_eq!(bytes, vec![0x07, 0, 0, 0], "ClosePanel is the bare header");
+
+        let bytes = ServerMessage::PanelOpened { width: 300, height: 200 }.encode().unwrap();
+        assert_eq!(&bytes[0..4], &[0x87, 0, 0, 0]);
+        assert_eq!(&bytes[4..8], &300u32.to_le_bytes());
+        assert_eq!(&bytes[8..12], &200u32.to_le_bytes());
+        assert_eq!(bytes.len(), 12);
+
+        let bytes = ServerMessage::PanelClosed { reason: PanelCloseReason::Refused }.encode().unwrap();
+        assert_eq!(bytes, vec![0x88, 0, 0, 0, 3, 0, 0, 0], "reason padded to four bytes, the Goodbye convention");
+    }
+
+    #[test]
+    fn the_version_u16_lives_at_body_offset_ten_of_welcome() {
+        // The interop-critical byte: both SDKs read the shell's
+        // protocol version from the u16 at offset 10 of the
+        // Welcome/ThemeChanged *body* (offset 14 of the datagram) —
+        // the u16 that was reserved-and-zero in protocol 1. A current
+        // shell emits 2 there; zero decodes as 1.
+        let bytes = ServerMessage::Welcome(theme_state()).encode().unwrap();
+        assert_eq!(&bytes[14..16], &crate::SHELL_PROTOCOL_VERSION.to_le_bytes(), "proto at body offset 10");
+
+        let mut v1 = bytes.clone();
+        v1[14] = 0;
+        v1[15] = 0;
+        let ServerMessage::Welcome(decoded) = ServerMessage::decode(&v1).unwrap() else { panic!("kind") };
+        assert_eq!(decoded.proto, 0, "kept raw for canonical re-encoding");
+        assert!(!decoded.panels_supported(), "and zero reads as a protocol-1, tiles-only shell");
+    }
+
+    #[test]
+    fn motion_is_a_panel_only_input_kind() {
+        // Kind 6 exists for hover UX inside a panel and nowhere else:
+        // the tile Input codec treats it exactly like kind 7.
+        let motion = InputEvent { kind: InputKind::Motion, button: None, x: 30, y: 40, delta: 0 };
+        let bytes = ServerMessage::PanelInput(motion).encode().unwrap();
+        assert_eq!(bytes[4], 6);
+        assert_eq!(ServerMessage::decode(&bytes), Ok(ServerMessage::PanelInput(motion)));
+
+        assert_eq!(ServerMessage::Input(motion).encode(), Err(EncodeError::MotionOutsidePanel));
+        let mut forged = bytes.clone();
+        forged[0] = 0x83;
+        assert_eq!(ServerMessage::decode(&forged), Err(DecodeError::BadEnum { field: "input.kind", value: 6 }));
+    }
+
+    #[test]
+    fn panel_input_is_byte_identical_to_input_except_for_its_kind() {
+        // "Payload layout identical to Input" is the published
+        // definition; this is that sentence as an assertion.
+        let event = InputEvent { kind: InputKind::Press, button: Some(Button::Left), x: 17, y: -4, delta: 0 };
+        let input = ServerMessage::Input(event).encode().unwrap();
+        let panel = ServerMessage::PanelInput(event).encode().unwrap();
+        assert_eq!(panel.len(), 20, "same fixed twenty bytes");
+        assert_eq!(panel[0], 0x89);
+        assert_eq!(&panel[1..], &input[1..], "identical after the kind byte");
+    }
+
+    #[test]
+    fn panel_close_reasons_cover_exactly_the_published_codes() {
+        for (reason, code) in [
+            (PanelCloseReason::ClientRequest, 0u8),
+            (PanelCloseReason::Dismissed, 1),
+            (PanelCloseReason::Shutdown, 2),
+            (PanelCloseReason::Refused, 3),
+        ] {
+            let bytes = ServerMessage::PanelClosed { reason }.encode().unwrap();
+            assert_eq!(bytes[4], code);
+            assert_eq!(ServerMessage::decode(&bytes), Ok(ServerMessage::PanelClosed { reason }));
+        }
+        let bad = vec![0x88, 0, 0, 0, 4, 0, 0, 0];
+        assert_eq!(ServerMessage::decode(&bad), Err(DecodeError::BadEnum { field: "panel.reason", value: 4 }));
+        let unpadded = vec![0x88, 0, 0, 0, 1];
+        assert!(ServerMessage::decode(&unpadded).is_err(), "the reserved padding is part of the layout");
+    }
+
+    #[test]
+    fn a_zero_sized_panel_request_is_rejected_but_an_oversized_one_is_not() {
+        // Zero cannot be clamped into a size; over the caps is the
+        // shell's clamp to make. The decoder polices only the first.
+        let zero = [&[0x05u8, 0, 0, 0][..], &0u32.to_le_bytes(), &10u32.to_le_bytes()].concat();
+        assert_eq!(ClientMessage::decode(&zero), Err(DecodeError::PanelGeometry { width: 0, height: 10 }));
+        let big = ClientMessage::OpenPanel { width: MAX_PANEL_PX * 4, height: 2 };
+        assert!(ClientMessage::decode(&big.encode().unwrap()).is_ok(), "an over-cap request decodes; the grant clamps it");
+    }
+
+    #[test]
+    fn a_panel_grant_outside_the_caps_never_decodes() {
+        // The client's protection against a hostile or broken shell,
+        // exactly as the theme bounds are.
+        let mut bytes = vec![0x87u8, 0, 0, 0];
+        bytes.extend_from_slice(&(MAX_PANEL_PX + 1).to_le_bytes());
+        bytes.extend_from_slice(&4u32.to_le_bytes());
+        assert_eq!(
+            ServerMessage::decode(&bytes),
+            Err(DecodeError::PanelGeometry { width: MAX_PANEL_PX + 1, height: 4 })
+        );
+        assert!(matches!(
+            ServerMessage::PanelOpened { width: 0, height: 4 }.encode(),
+            Err(EncodeError::FrameGeometry { .. })
+        ));
+    }
+
+    fn band(generation: u32, y: u32, band_height: u32, width: u32) -> Vec<u8> {
+        let mut bytes = vec![0x06u8, 0, 0, 0];
+        bytes.extend_from_slice(&generation.to_le_bytes());
+        bytes.extend_from_slice(&y.to_le_bytes());
+        bytes.extend_from_slice(&band_height.to_le_bytes());
+        bytes.extend_from_slice(&width.to_le_bytes());
+        bytes
+    }
+
+    #[test]
+    fn panel_band_geometry_is_bounds_checked_before_the_multiply() {
+        // An edge past the cap, whatever the payload says.
+        assert_eq!(
+            ClientMessage::decode(&band(1, 0, 1, MAX_PANEL_PX + 1)),
+            Err(DecodeError::PanelGeometry { width: MAX_PANEL_PX + 1, height: 1 })
+        );
+        // A band whose end row runs past the tallest grantable panel —
+        // including the u32-overflow shape, which the u64 sum catches.
+        assert_eq!(
+            ClientMessage::decode(&band(1, MAX_PANEL_PX, 1, 4)),
+            Err(DecodeError::PanelGeometry { width: 4, height: 1 })
+        );
+        assert_eq!(
+            ClientMessage::decode(&band(1, u32::MAX, 2, 4)),
+            Err(DecodeError::PanelGeometry { width: 4, height: 2 })
+        );
+        // A band over the one-datagram budget is refused as geometry
+        // even when (as here, truncated) the payload is short.
+        assert_eq!(
+            ClientMessage::decode(&band(1, 0, 200, 1024)),
+            Err(DecodeError::PanelGeometry { width: 1024, height: 200 })
+        );
+    }
+
+    #[test]
+    fn a_panel_band_whose_payload_disagrees_with_its_header_is_rejected() {
+        let mut bytes = band(1, 0, 2, 2);
+        bytes.extend_from_slice(&[0u8; 15]); // 16 expected
+        assert_eq!(ClientMessage::decode(&bytes), Err(DecodeError::FrameLengthMismatch { expected: 16, actual: 15 }));
+    }
+
+    #[test]
+    fn close_panel_with_a_payload_is_two_messages_pretending_to_be_one() {
+        let bytes = vec![0x07u8, 0, 0, 0, 0x00];
+        assert_eq!(ClientMessage::decode(&bytes), Err(DecodeError::TrailingBytes { extra: 1 }));
+    }
+
+    #[test]
+    fn a_band_the_transport_cannot_carry_fails_at_the_encoder() {
+        // 512 x 512 in one band is over the datagram frame budget: the
+        // encoder refuses at the call site instead of letting `send`
+        // fail mysteriously. The same panel repainted in 127-row bands
+        // (the tallest legal band at this width) encodes fine, which is
+        // the whole point of banding.
+        let message = ClientMessage::PanelFrame { generation: 1, y: 0, band_height: 512, width: 512, pixels: vec![0; 512 * 512 * 4] };
+        assert!(matches!(message.encode(), Err(EncodeError::FrameGeometry { .. })));
+        let band_ok = ClientMessage::PanelFrame { generation: 1, y: 385, band_height: 127, width: 512, pixels: vec![0; 512 * 127 * 4] };
+        assert!(band_ok.encode().is_ok());
+    }
+
     // -- malformed input -----------------------------------------------
 
     #[test]
@@ -1189,7 +1700,7 @@ mod tests {
 
     #[test]
     fn unknown_kinds_are_rejected() {
-        for kind in [0x00u8, 0x05, 0x7F, 0x80, 0x87, 0xFF] {
+        for kind in [0x00u8, 0x08, 0x7F, 0x80, 0x8A, 0xFF] {
             let buf = [kind, 0, 0, 0];
             assert!(matches!(ClientMessage::decode(&buf), Err(DecodeError::UnknownKind { .. })), "kind {kind:#04x}");
             assert!(matches!(ServerMessage::decode(&buf), Err(DecodeError::UnknownKind { .. })), "kind {kind:#04x}");
@@ -1409,7 +1920,7 @@ mod tests {
         // breaking change to a crate the shell was being written
         // against. It is cheaper now than it will ever be again, so the
         // check moved to the one place both sides share.
-        let state = ThemeState { tile_px: 56, scale: f32::NAN, theme_id: "x".into(), theme_toml: String::new() };
+        let state = ThemeState { tile_px: 56, scale: f32::NAN, proto: 2, theme_id: "x".into(), theme_toml: String::new() };
         let bytes = ServerMessage::Welcome(state).encode().unwrap();
         assert_eq!(
             ServerMessage::decode(&bytes),
@@ -1445,7 +1956,7 @@ mod tests {
             1e30,
         ];
         for scale in interesting {
-            let state = ThemeState { tile_px: 56, scale, theme_id: "x".into(), theme_toml: String::new() };
+            let state = ThemeState { tile_px: 56, scale, proto: 2, theme_id: "x".into(), theme_toml: String::new() };
             let bytes = ServerMessage::ThemeChanged(state).encode().unwrap();
             let Ok(decoded) = ServerMessage::decode(&bytes) else { continue };
             assert_eq!(decoded, decoded, "scale {scale} decoded to something not equal to itself");
@@ -1462,7 +1973,7 @@ mod tests {
         // quietly substituting 1.0 would put a wrongly-sized tile on
         // screen and call it success.
         for scale in [0.0f32, -0.0, -1.0, f32::INFINITY, f32::NEG_INFINITY, 1e30, MAX_SCALE + 0.1] {
-            let state = ThemeState { tile_px: 56, scale, theme_id: "x".into(), theme_toml: String::new() };
+            let state = ThemeState { tile_px: 56, scale, proto: 2, theme_id: "x".into(), theme_toml: String::new() };
             let bytes = ServerMessage::ThemeChanged(state).encode().unwrap();
             assert_eq!(
                 ServerMessage::decode(&bytes),
@@ -1477,7 +1988,7 @@ mod tests {
         // The bound has to be generous enough never to reject a real
         // desktop; that is half of what makes rejecting the rest safe.
         for scale in [0.5f32, 1.0, 1.25, 1.5, 2.0, 2.25, 3.0, 4.0, MAX_SCALE] {
-            let state = ThemeState { tile_px: 56, scale, theme_id: "x".into(), theme_toml: String::new() };
+            let state = ThemeState { tile_px: 56, scale, proto: 2, theme_id: "x".into(), theme_toml: String::new() };
             let bytes = ServerMessage::Welcome(state.clone()).encode().unwrap();
             assert_eq!(ServerMessage::decode(&bytes), Ok(ServerMessage::Welcome(state)), "scale {scale} is a real session");
         }
@@ -1489,7 +2000,7 @@ mod tests {
         // own `ThemeState` and never decodes it, so `BadFloat` cannot
         // cover it; `same_as` is what makes "has it changed?" a total
         // question there.
-        let nan = ThemeState { tile_px: 56, scale: f32::NAN, theme_id: "x".into(), theme_toml: String::new() };
+        let nan = ThemeState { tile_px: 56, scale: f32::NAN, proto: 2, theme_id: "x".into(), theme_toml: String::new() };
         assert_ne!(nan, nan, "the derive is not reflexive, which is exactly the trap");
         assert!(nan.same_as(&nan), "`same_as` is");
 

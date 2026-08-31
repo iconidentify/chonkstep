@@ -98,7 +98,24 @@ pub use wire::{ClientMessage, DecodeError, EncodeError, ServerMessage};
 /// a `>=` range, because a dockapp built against a *newer* protocol is
 /// just as unreadable as one built against an older one, and "reject
 /// with a reason" beats "misparse a frame into garbage pixels".
+///
+/// Note this is the *handshake* version a client presents, and it did
+/// **not** bump for the v2 instrument-panel family: a panel-capable
+/// client still draws tiles exactly as a v1 client does, so refusing it
+/// at the door would orphan every working dockapp for a feature it may
+/// never use. The shell's side of the story is
+/// [`SHELL_PROTOCOL_VERSION`], advertised in `Welcome` — that is what a
+/// client probes before sending `OpenPanel`.
 pub const PROTOCOL_VERSION: u32 = 1;
+
+/// The protocol version the *shell* speaks, advertised in the
+/// `Welcome`/`ThemeChanged` body (the u16 that was reserved-and-zero in
+/// protocol 1 — see [`wire::ThemeState::proto`]). A client must see
+/// `>= 2` here before sending any panel message: a v1 shell treats
+/// `OpenPanel` as an unknown kind, which is a protocol error that costs
+/// the connection, and this field is exactly the probe that prevents
+/// that.
+pub const SHELL_PROTOCOL_VERSION: u16 = 2;
 
 /// A dockapp authenticates by echoing back a 128-bit nonce the shell
 /// minted for its slot and passed in `CHONKSTEP_DOCK_TOKEN`. 128 bits
@@ -181,6 +198,50 @@ pub const MAX_THEME_ID_BYTES: usize = 64;
 /// no more reason to trust its peer than the shell has to trust it.
 pub const MAX_THEME_TOML_BYTES: usize = 128 * 1024;
 
+/// Widest instrument-panel edge the protocol will name, in device
+/// pixels. A panel is a detail view beside the dock, not a window: a
+/// dockapp asking for more than 1024 on a side is asking for the
+/// desktop, and the shell would clamp it to the workarea long before
+/// this bound mattered on most screens.
+pub const MAX_PANEL_PX: u32 = 1024;
+
+/// Ceiling on one panel's pixel area, as `width * height * 4` bytes —
+/// 1024 x 1024 RGBA8 exactly. This is what bounds the persistent panel
+/// buffer the shell allocates per grant, so it is enforced when a grant
+/// is made and again by the codec on every geometry it decodes.
+///
+/// A whole panel at this cap is sixteen times what one `AF_UNIX`
+/// datagram can carry (see [`MAX_MESSAGE_BYTES`]), which is why
+/// `PanelFrame` is *banded*: each message repaints a horizontal strip
+/// of the granted surface, and one strip must fit the same
+/// [`MAX_FRAME_BYTES`] ceiling a tile frame lives under
+/// ([`panel_band_fits`]). The shell blits bands into its per-grant
+/// buffer on receipt; a full repaint is a top-to-bottom sequence of
+/// bands, with no atomicity across them.
+pub const MAX_PANEL_BYTES: usize = 4 * 1024 * 1024;
+
+/// Whether a panel of this size may be granted at all: both edges
+/// within [`MAX_PANEL_PX`], area within [`MAX_PANEL_BYTES`]. The
+/// panel-family sibling of [`frame_fits`]; the shell clamps every
+/// `OpenPanel` request through the same bounds before granting.
+pub fn panel_fits(width: u32, height: u32) -> bool {
+    width != 0
+        && height != 0
+        && width <= MAX_PANEL_PX
+        && height <= MAX_PANEL_PX
+        && (width as u64) * (height as u64) * 4 <= MAX_PANEL_BYTES as u64
+}
+
+/// Whether one `PanelFrame` band can be carried by a single datagram:
+/// `width * band_height * 4` within [`MAX_FRAME_BYTES`]. A client
+/// repainting a panel wider than this allows for its full height sends
+/// several bands, top to bottom; at the widest legal panel (1024 px)
+/// a band may still be 63 rows tall, so a full repaint is never more
+/// than seventeen messages.
+pub fn panel_band_fits(width: u32, band_height: u32) -> bool {
+    width != 0 && band_height != 0 && (width as u64) * (band_height as u64) * 4 <= MAX_FRAME_BYTES as u64
+}
+
 /// Whether a tile of this geometry can be carried by the v1 inline
 /// transport. The shell calls this while validating a `Hello` and
 /// refuses the connection when it returns `false`, rather than
@@ -236,5 +297,32 @@ mod tests {
     #[test]
     fn frame_payload_can_never_overflow_a_message() {
         const { assert!(MAX_FRAME_BYTES < MAX_MESSAGE_BYTES, "the header has to fit too") };
+    }
+
+    #[test]
+    fn the_panel_sizes_an_instrument_actually_wants_are_grantable() {
+        // A detail panel is a real readout beside the dock — including
+        // ones far larger than a single datagram, which is the whole
+        // reason PanelFrame is banded.
+        for (w, h) in [(224, 168), (448, 140), (600, 400), (1024, 768), (MAX_PANEL_PX, MAX_PANEL_PX)] {
+            assert!(panel_fits(w, h), "{w}x{h} should be grantable");
+        }
+        assert!(!panel_fits(0, 100), "degenerate geometry never fits");
+        assert!(!panel_fits(100, 0));
+        assert!(!panel_fits(MAX_PANEL_PX + 1, 1));
+    }
+
+    #[test]
+    fn every_grantable_panel_can_be_repainted_in_bounded_bands() {
+        // The banding arithmetic that makes the 4 MiB cap honest: even
+        // the widest legal panel gets a band tall enough that a full
+        // repaint is a short message sequence, not a degenerate
+        // row-at-a-time crawl.
+        let tallest_band_at = |width: u32| (MAX_FRAME_BYTES as u64 / 4 / width as u64) as u32;
+        assert!(tallest_band_at(MAX_PANEL_PX) >= 63);
+        assert!(panel_band_fits(MAX_PANEL_PX, tallest_band_at(MAX_PANEL_PX)));
+        assert!(!panel_band_fits(MAX_PANEL_PX, tallest_band_at(MAX_PANEL_PX) + 1));
+        assert!(panel_band_fits(600, 100), "the e2e probe's band shape");
+        assert!(!panel_band_fits(600, 0));
     }
 }

@@ -17,6 +17,12 @@ license.workspace = true
 # PNG decode for screenshot assertions — already in the workspace's
 # dependency graph (winit pulls it), so this adds no new code to vet.
 png = "0.17"
+# The instrument-panel e2e drives a real dockapp against the nested
+# shell: `src/bin/chonk-panel-probe.rs` is that dockapp, speaking the
+# wire protocol directly through the reference crate rather than
+# through an SDK — the probe is scripted test apparatus, and the fewer
+# layers between the test and the bytes, the more the test says.
+chonk-dock-proto = { path = "../chonk-dock-proto" }
 
 [dev-dependencies]
 # The Overview e2e test aims its clicks with the same pure layout

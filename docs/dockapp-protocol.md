@@ -117,8 +117,8 @@ offset 0  kind      u8
 offset 1  reserved  [u8; 3]   must be zero
 ```
 
-Client→shell kinds use the low number space (`0x01`–`0x04`);
-shell→client kinds have the high bit set (`0x81`–`0x86`), so a message
+Client→shell kinds use the low number space (`0x01`–`0x07`);
+shell→client kinds have the high bit set (`0x81`–`0x89`), so a message
 fed back down the socket it came from is a clean "unknown kind" rather
 than a misparse.
 
@@ -139,10 +139,17 @@ rejects — never clamps, truncates, or ignores:
 - frame geometry outside the tile bounds, or a pixel payload whose
   length disagrees with `width * height * 4`.
 
-There is no forward compatibility by design: the protocol version is
+There is no forward compatibility by design: the `Hello` version is
 checked for **equality** at handshake, so there is no such thing as a
 peer speaking a different version that gets to keep talking. A reserved
-byte that starts meaning something is a version bump.
+byte that starts meaning something is a version bump — and exactly one
+has: protocol 2 turned the reserved u16 in the `Welcome` body into the
+**shell's** version advertisement (section 4.2), which is how a client
+discovers the instrument-panel family (section 11) without risking its
+connection on a probe. The `Hello` version deliberately did not bump
+for it: a panel-capable client draws tiles exactly as a version-1
+client does, and refusing it at the door would orphan every working
+dockapp for a feature it may never use.
 
 ## 3. Limits
 
@@ -159,6 +166,8 @@ byte that starts meaning something is a version bump.
 | `MAX_LOG_BYTES` | 256 | A `Log` line's text budget, bounded before it is ever shaped — a 10 MB "tooltip" handed to a text engine is a rendering denial of service that costs the attacker one `write()`. |
 | `MAX_THEME_ID_BYTES` | 64 | Theme ids are kebab-case registry keys. |
 | `MAX_THEME_TOML_BYTES` | 131072 (128 KiB) | The serialized-theme correctness path. The shell generates it, so this bound protects a *dockapp* from a hostile or broken shell — the SDK has no more reason to trust its peer than the shell has. |
+| `MAX_PANEL_PX` | 1024 | Widest instrument-panel edge, per side, in device pixels. A panel is a detail view beside the dock, not a window; the workarea clamp usually bites long before this cap does. |
+| `MAX_PANEL_BYTES` | 4194304 (4 MiB) | Ceiling on one panel's pixel area (`width * height * 4`); 1024 x 1024 RGBA8 exactly. This bounds the persistent per-panel buffer the shell allocates at grant time. A whole panel at this cap is sixteen datagrams' worth of pixels, which is why `PanelFrame` is *banded* — one band rides under the existing `MAX_FRAME_BYTES` (262080) budget. |
 
 A tile geometry "fits" when `tile_px` is in `1..=256`, `tile_units` is
 in `1..=4`, **and** `tile_px * tile_px * tile_units * 4 <=
@@ -252,6 +261,12 @@ wrong tile that looks like a rendering bug in the dockapp; cropping
 would be worse. The dockapp receives a `ThemeChanged` carrying the new
 `tile_px` and its next frame is correct.
 
+#### `0x05 OpenPanel`, `0x06 PanelFrame`, `0x07 ClosePanel`
+
+The instrument-panel family, protocol 2. Byte layouts and semantics in
+section 11 — do not send any of them before reading the shell's
+`proto` in `Welcome`.
+
 #### `0x03 Pong`
 
 ```
@@ -289,11 +304,19 @@ different theme, the scale changes, or the tile size changes.
 tile_px        u32    device pixels per tile edge
 scale          u32    IEEE-754 f32 bit pattern, little-endian
 theme_id_len   u16
-reserved       u16    zero
+proto          u16    the shell's protocol version; 0 decodes as 1
 theme_toml_len u32
 theme_id       [u8; theme_id_len]      at most 64 bytes
 theme_toml     [u8; theme_toml_len]    at most 131072 bytes
 ```
+
+`proto` is the u16 that was reserved (and required zero) in protocol
+1, at offset 10 of the body — which is why **zero decodes as 1**: a
+protocol-1 shell always sent zero there. A current shell sends **2**.
+This field is the *only* sanctioned way to learn whether the shell
+accepts the instrument-panel messages (section 11): a version-1 shell
+treats `OpenPanel` as an unknown kind, which is a protocol error that
+costs the connection, so probe here, never by sending.
 
 This is the **ThemeState contract**:
 
@@ -304,6 +327,10 @@ This is the **ThemeState contract**:
   and 2.25 are real values; a tile drawn at 1.4999999 lands its bevel a
   pixel off). Decoders must reject NaN, infinities, zero, negatives,
   and values above 8.0.
+- `proto` — the shell's protocol version, the panel-support probe
+  described above. It changes only across a shell upgrade, so treat a
+  changed value in `ThemeChanged` like any other state change: re-read
+  it, do not restart.
 - `theme_id` is the fast path: a client that ships the built-in
   palettes looks the id up and parses nothing. Note that an id no
   longer names one palette: the session's light/dark appearance picks
@@ -398,6 +425,10 @@ something better than a bare EOF.
 | 6 | `Overflow` | You stopped reading and the shell's send queue stayed full (section 6). Almost always followed by the fd closing immediately — a peer in this state is by definition not reading this message either. |
 | 7 | `Removed` | The user removed the tile from the dock. |
 
+#### `0x87 PanelOpened`, `0x88 PanelClosed`, `0x89 PanelInput`
+
+The shell's half of the instrument-panel family — section 11.
+
 ## 5. The handshake
 
 1. `connect()` to `CHONKSTEP_DOCK_SOCKET`. Use a non-blocking connect:
@@ -461,6 +492,30 @@ the shell's limiter would have coalesced them to the same outcome.
 
 Practical cadence: built-in instruments update at 1 Hz. Draw only when
 something changed; the 30 Hz cap is a ceiling on abuse, not a target.
+
+**The panel refinement of both rules** (section 11 has the messages).
+A tile frame is a whole picture, so newest-wins coalescing is always
+safe; a panel repaint is a *sequence of bands*, and both directions
+change accordingly:
+
+- **Client side: bounded wait, not drop.** Bands do not supersede each
+  other — dropping one on `EAGAIN` would paint a stale stripe into an
+  otherwise-fresh repaint — and two back-to-back full bands genuinely
+  can overrun a stock socket buffer. So a client blocks up to ~1 s per
+  band send; if the wait expires, it abandons the *whole repaint* and
+  retries it from the top on its next tick. This is the one sanctioned
+  exception to "drop on your own EAGAIN", and it is safe because the
+  shell's read side holds up its half:
+- **Shell side: drain promptly, drop only whole generations.** The
+  shell reads panel bands on every servicing pass (which is what makes
+  the client's bounded wait invisible in practice), blits each band
+  into the panel buffer on receipt, and meters only the *presentation*
+  of that buffer to the screen (~30 Hz). When it must drop, it drops by
+  `generation`, never by individual band: once any band of repaint N is
+  blitted, later bands of N keep landing until a band of a *newer*
+  generation arrives — at which point all remaining traffic from N is
+  stale as a whole and is discarded. Dropping single bands mid-repaint
+  would leave a torn panel on screen with no repaint coming to fix it.
 
 ## 7. Restart survival and readoption
 
@@ -567,3 +622,175 @@ end-to-end sequence a shell expects is written out longhand in
 `crates/chonk-ui/tests/dockapp_conformance.rs`, and
 `examples/chonk-dockclock` is the shipped conformance dockapp. Language
 bindings that implement this document live in `bindings/`.
+
+## 11. Instrument panels (protocol 2)
+
+A dock tile is 56 logical pixels of glanceable instrument. The panel is
+what unfolds when the user asks for more: click the tile, and a detail
+view opens beside the dock — a full traffic graph behind the network
+tile's sparkline, a device mixer behind the sound tile's meter. The
+*dockapp* draws every pixel of the panel's content, exactly as it draws
+its tile; the *shell* owns the surface, draws the desktop's chiseled
+frame around the content, decides where the panel sits (anchored beside
+the owning tile, clamped to the workarea), and enforces every rule
+below. The same split as the tile, at a larger size — and the same
+invariant: **the desktop never blocks on a panel.** A hung instrument's
+panel dies by the same ping machinery as its tile (three unanswered
+pings close it with reason 2); a slow one costs the desktop a stale
+panel and nothing else.
+
+Two cardinalities, both enforced by the shell: **one panel per
+dockapp** (an `OpenPanel` while yours is open re-negotiates it in
+place), and **exactly one panel on screen desktop-wide** — opening
+yours closes whoever else's was up, with reason 1. A panel is a
+popover, not a window.
+
+### 11.1 Probe before you speak
+
+Read `proto` from your `Welcome` (section 4.2). Panels need `proto >=
+2`; a version-1 shell treats `0x05` as an unknown kind and closes your
+connection with `Goodbye { ProtocolError }`. The field exists so that
+finding out never costs you the connection.
+
+### 11.2 Opening: `0x05 OpenPanel` → `0x87 PanelOpened` / `0x88 PanelClosed{3}`
+
+```
+0x05 OpenPanel      width:u32 height:u32      device pixels, both nonzero
+0x87 PanelOpened    width:u32 height:u32      the granted size
+```
+
+`OpenPanel` is a **request, not a command**. The shell answers with
+`PanelOpened` carrying the granted size — your request clamped to the
+caps (`MAX_PANEL_PX` per edge, `MAX_PANEL_BYTES` of area) and to the
+current workarea beside the dock — or refuses outright with
+`PanelClosed { reason: 3 }` (a degenerate request, or a workarea with
+no room). A request above the caps is legal and simply clamps; a zero
+edge is a decode error. Draw at the granted size, always: it is the
+size every band must fit, and it can differ from what you asked for on
+any screen smaller than your ambition.
+
+The natural open gesture is your own tile's `Input`: the shell forwards
+the click to you, and you answer with `OpenPanel`. (Re-clicking the
+tile while your panel is open is the shell's *toggle*: it dismisses the
+panel and deliberately does not forward that click, so you cannot
+accidentally fight the user by reopening.)
+
+### 11.3 Streaming: `0x06 PanelFrame`, banded
+
+```
+0x06 PanelFrame     generation:u32 y:u32 band_height:u32 width:u32
+                    pixels:[u8; width * band_height * 4]
+```
+
+Premultiplied RGBA8, top row first, no row padding — byte-identical in
+format to `0x02 Frame`, and under the same length-must-agree
+strictness. But where a tile frame is the whole tile, a panel frame is
+**one horizontal band** of the granted surface, because a whole panel
+at the caps (4 MiB) is sixteen times what one `AF_UNIX` datagram can
+carry. The shell keeps one persistent buffer per grant and blits each
+band at row `y` on receipt.
+
+The rules, all checked in the strict reject-don't-rescale spirit of
+`Frame`:
+
+- `width` MUST equal the granted width, and `y + band_height` MUST
+  stay within the granted height. A band that does not is logged and
+  discarded — the connection survives, exactly like a wrong-sized
+  `Frame`, because a band drawn against a superseded grant is in
+  flight at exactly the moment a renegotiation lands.
+- One band's bytes must fit the `MAX_FRAME_BYTES` (262080) datagram
+  budget; the codec rejects a band over it. At the widest legal panel
+  that still allows 63 rows per band, so a full repaint is never more
+  than seventeen messages.
+- **A full repaint is a top-to-bottom sequence of bands, with no
+  atomicity across them.** Repaint fast and top-down: a half-applied
+  repaint is on screen for at most one present interval, and top-down
+  order makes it read as a shear rather than interleaved garbage.
+- `generation` is your own repaint counter, echoed nowhere — the same
+  drop-attribution job as `Frame`'s. Give every band of one repaint
+  the same generation and increment per repaint: under flow control
+  the shell drops *whole stale generations* (a band older than the
+  newest generation it has seen), never individual bands of the
+  current one. Section 6 has both halves of the flow-control story,
+  including the client-side bounded-wait rule that replaces
+  drop-on-EAGAIN for bands.
+
+The shell meters *presentation*, not receipt: bands are blitted as
+they arrive, and the assembled buffer reaches the screen at most ~30
+times a second. Before your first band lands, the shell draws its
+framed empty well — send your first repaint promptly after
+`PanelOpened`, the way you send your first tile frame after `Welcome`.
+
+### 11.4 Input: `0x89 PanelInput`
+
+Payload layout identical to `0x83 Input`; coordinates are in panel
+device pixels, content-local (the shell's chrome border is not part of
+your coordinate space — a click on the frame is the shell's, and you
+never see it).
+
+What you can receive: `Press`/`Release` (Left only), `Scroll`,
+`Enter`/`Leave`, and — new in protocol 2, and **valid only in
+`PanelInput`, never in `0x83`** — kind **6, `Motion`**: the pointer's
+position while it moves inside the panel (`button` 0, `delta` 0),
+throttled to the shell's dispatch cadence and deduplicated while the
+pointer is still. Motion exists because hover UX (a highlighted row, a
+scrubbed graph) is the point of a detail view; tiles never get it
+because per-motion wakeups on a 56-pixel instrument are traffic
+without a use. A v2 client must tolerate Motion arriving; a decoder
+that rejects kind 6 in `PanelInput` is not conformant. Middle and
+Right stay reserved exactly as for tiles; the `wants` mask from your
+`Hello` does *not* gate panel input — a dockapp that opened a panel
+has asked for its input.
+
+**The panel takes no keyboard focus, ever.** No key events exist in
+this protocol. Escape is a shell-level dismiss gesture — while a panel
+is open the shell grabs bare Escape, so the focused application does
+not receive it either; that is a deliberate, documented cost of the
+gesture. A panel that needs text input is an application, not a panel.
+
+### 11.5 Closing: `0x07 ClosePanel` and `0x88 PanelClosed`
+
+```
+0x07 ClosePanel     (no payload)
+0x88 PanelClosed    reason:u8 rsv:[u8;3]
+```
+
+| reason | meaning | what to do |
+| --- | --- | --- |
+| 0 | You asked (`ClosePanel`); this is the acknowledgement. | Nothing — you already stopped. |
+| 1 | Dismissed by the user: a click away from the panel (the desktop, the dock, any shell chrome), Escape, re-clicking your tile, or another dockapp's panel opening (one panel desktop-wide). | Stop streaming. Do **not** reopen on your own; wait for the next click. |
+| 2 | Shell teardown: session ending, your eviction, your tile hung, or a structural change (a monitor rearrangement) that invalidated the panel. | Stop streaming; your tile's own lifecycle tells you the rest. |
+| 3 | Your `OpenPanel` was refused; no panel exists. | Draw the detail into your tile as best you can, or ask smaller. |
+
+After a `PanelClosed`, bands you had already sent race it in flight;
+the shell drops them silently — streaming against an unseen close is a
+race, not a protocol error. Every teardown path converges here: a
+dockapp that crashes or is evicted has its panel torn down with it
+(reason 2 when there is still a socket to say so; with a dead peer the
+EOF is the same fact). A dockapp readopted across a shell restart
+(section 7) starts **panel-less** — the token survives the handoff,
+the panel deliberately does not; reopen on the user's next click.
+
+Visibility: protocol 2 has no hidden-panel state. A panel is either
+open and on screen or closed — every "the user can no longer see it"
+transition is a real `PanelClosed`, never a `Visibility 0`, so there
+is no state in which panel bands are silently eaten while the panel
+officially exists. (The `Visibility` message continues to govern your
+*tile* only.)
+
+### 11.6 Panel conformance
+
+A panel-capable client additionally:
+
+- [ ] reads `proto` from `Welcome` and sends no panel message unless
+      it is `>= 2`;
+- [ ] draws at the granted size, never the requested one, and
+      re-validates the grant before allocating;
+- [ ] streams full repaints as top-to-bottom bands sharing one
+      generation, incremented per repaint;
+- [ ] bounded-waits (~1 s) on a band send instead of dropping it, and
+      abandons-then-retries the whole repaint on timeout (section 6);
+- [ ] treats `PanelClosed { 1 }` as the user's decision and does not
+      reopen unprompted;
+- [ ] tolerates `Motion` (kind 6) in `PanelInput`, and never expects
+      keyboard events.

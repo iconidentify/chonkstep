@@ -31,7 +31,10 @@ use wm_theme::{icon, paint, panel, tile, Theme};
 // `Backend` as their only bound.
 use wm_theme_api::{DecorationBuffer, Point, Rect, Size};
 
-use crate::dockapp::tile::{RemoteTile, ServiceContext, StopReason, TileState};
+use chonk_dock_proto::wire::{InputEvent, InputKind, PanelCloseReason};
+
+use crate::dockapp::panel::{self as instrument, InstrumentPanel};
+use crate::dockapp::tile::{reserved_filter, RemoteTile, ServiceContext, StopReason, TileState};
 use crate::dockapp::{self, DockHost, Farewell};
 use crate::overview::{OverviewHit, OverviewItem, OverviewPanel};
 use crate::wallpaper::Wallpaper;
@@ -39,6 +42,12 @@ use crate::widgets::{
     run_detached, ClockWidget, DockInput, DockItem, DockWidget, Effect, NetTrafficWidget, PowerWidget, SamplerRegistry, SoundWidget, SupervisedWidget,
     SysLoadWidget, WifiWidget, WorkspaceShared,
 };
+
+/// The keysym the open instrument panel grabs for its dismissal —
+/// bare Escape (`XK_Escape`). Grabbed only while a panel is up, and
+/// released with it; while grabbed, Escape is a shell gesture and is
+/// not delivered to the focused client (stated in the protocol doc).
+pub(crate) const PANEL_DISMISS_KEYSYM: u32 = 0xff1b;
 
 /// The desktop background color — a cool lavender-gray sampled from a
 /// reference NeXTSTEP desktop screenshot, not the neutral gray this
@@ -1110,6 +1119,21 @@ pub struct Desktop<B: Backend> {
     /// half, held here because rendering needs the desktop's font
     /// state. See `crate::overview`.
     overview: OverviewPanel<B>,
+    /// The one open instrument panel's surface and identity —
+    /// desktop-wide singleton by construction. The panel's *pixels*
+    /// live with the owning [`RemoteTile`]; see
+    /// [`crate::dockapp::panel`] for the split.
+    instrument_panel: InstrumentPanel<B>,
+    /// Whether the shell holds the bare-Escape key grab that makes
+    /// panel dismissal work while the panel is up. Tracked so the grab
+    /// and its release are exactly paired whatever order the teardown
+    /// paths fire in.
+    panel_key_grabbed: bool,
+    /// A tile id whose next `Release` is swallowed: the toggle gesture
+    /// consumed its `Press` (re-clicking the owning tile dismisses the
+    /// panel), and delivering the orphan release would hand the dockapp
+    /// half a click it never saw the start of.
+    panel_swallow_release: Option<String>,
     /// Stable id of the active theme — only used to bullet-mark the
     /// Theme submenu; the `Theme` itself lives with the shell
     /// orchestration (`crate::shell::Shell`).
@@ -1244,6 +1268,9 @@ impl<B: Backend> Desktop<B> {
             appearance,
             switcher: None,
             overview: OverviewPanel::default(),
+            instrument_panel: InstrumentPanel::default(),
+            panel_key_grabbed: false,
+            panel_swallow_release: None,
             theme_id,
             apps,
             logo,
@@ -1317,6 +1344,12 @@ impl<B: Backend> Desktop<B> {
         // be wrong on the new one; the next entry rebuilds it against
         // the primary rect just stored.
         self.overview.discard(backend);
+        // The panel surface likewise — but the *grant* survives with
+        // the owning tile, so the next servicing pass restages the
+        // panel beside the dock's new position (clamped into the new
+        // workarea) rather than dismissing the user's detail view for
+        // a monitor coming or going.
+        self.instrument_panel.discard(backend);
     }
 
     /// Re-derives every metric this desktop measured from the UI scale
@@ -1392,6 +1425,11 @@ impl<B: Backend> Desktop<B> {
         // live — a reload marker can fire mid-session — releases its
         // keyboard grab; see `OverviewPanel::discard`).
         self.overview.discard(backend);
+        // The panel's chrome is themed, so a restyle repaints it: the
+        // surface is discarded here and restaged — same grant, same
+        // owner, new theme — by the next `sync_instrument_panel` pass.
+        // This is the "repaint the chrome on ThemeChanged" contract.
+        self.instrument_panel.discard(backend);
     }
 
     /// The clients that currently have an icon tile on the desktop.
@@ -1496,6 +1534,9 @@ impl<B: Backend> Desktop<B> {
         // after would show every dockapp frame one pass (16ms) late for
         // no reason.
         self.service_dockapps(theme);
+        // The panel rides the same cadence: reconcile what the tiles
+        // negotiated this pass onto the one panel surface.
+        self.sync_instrument_panel(backend, theme);
         self.samplers.refresh();
         let mut changed = false;
         {
@@ -1691,6 +1732,28 @@ impl<B: Backend> Desktop<B> {
         let Some((index, rect)) = self.item_slots().into_iter().find(|(_, rect)| rect.contains(local)) else {
             return false;
         };
+        // The panel's toggle and click-away, resolved before delivery.
+        // A press on the tile whose panel is open is the toggle: the
+        // panel closes and the press is *consumed* — forwarding it
+        // would invite the dockapp to reopen what the user just closed
+        // — and its release is swallowed with it, so the client never
+        // sees half a click. A press on any other tile is an ordinary
+        // click-away that then routes normally.
+        if let DockInput::Press { .. } = input {
+            if self.instrument_panel.visible() {
+                let owner_clicked = self.instrument_panel.owner() == Some(self.items[index].id());
+                self.dismiss_instrument_panel(backend, PanelCloseReason::Dismissed);
+                if owner_clicked {
+                    self.panel_swallow_release = Some(self.items[index].id().to_string());
+                    return true;
+                }
+            }
+        }
+        if let DockInput::Release { .. } = input {
+            if self.panel_swallow_release.take().is_some_and(|id| id == self.items[index].id()) {
+                return true;
+            }
+        }
         let effects = self.items[index].on_input(input.translated(rect.pos), self.tile);
         self.apply_effects(backend, theme, effects);
         true
@@ -1768,7 +1831,14 @@ impl<B: Backend> Desktop<B> {
         for admission in admissions {
             dockapp::admit(self.items.iter_mut().filter_map(|item| item.remote_mut()), admission, theme_state, now);
         }
-        let mut ctx = ServiceContext { now, theme: theme_state, socket_path: &socket_path, scratch: &mut scratch };
+        // The largest panel *content* the workarea beside the dock can
+        // hold: everything left of the dock's column, minus the chrome
+        // the shell will draw around the grant. Recomputed per pass for
+        // the same reason the tile edge is — a monitor change moves it.
+        let workarea = self.primary_workarea();
+        let chrome = instrument::chrome_inset(theme) * 2;
+        let panel_bounds = (workarea.size.w.saturating_sub(chrome), workarea.size.h.saturating_sub(chrome));
+        let mut ctx = ServiceContext { now, theme: theme_state, socket_path: &socket_path, scratch: &mut scratch, panel_bounds };
         for item in &mut self.items {
             // A tile the supervisor evicted is one the dock has
             // disowned, and continuing to run its process would leave a
@@ -1791,6 +1861,197 @@ impl<B: Backend> Desktop<B> {
         // allocation rather than asking the allocator for a quarter of
         // a megabyte on the repaint thread.
         *self.dockapps.scratch() = scratch;
+    }
+
+    // -----------------------------------------------------------------
+    // The instrument panel
+    // -----------------------------------------------------------------
+
+    /// Reconciles the one panel surface with what the tiles negotiated
+    /// this pass: the newest opener wins the screen (closing any other
+    /// tile's panel with `Dismissed`), a dead owner's surface is taken
+    /// down, and a live owner's pixels are presented on the panel's own
+    /// 30 Hz meter. Pure reconciliation, so it also restages a panel
+    /// whose surface a relayout discarded — the tile still holds the
+    /// grant, and this notices the surface is missing and rebuilds it
+    /// against the current theme and geometry.
+    fn sync_instrument_panel(&mut self, backend: &mut B, theme: &Theme) {
+        let now = std::time::Instant::now();
+        // Exactly one panel desktop-wide: the last open this pass wins.
+        let mut winner: Option<String> = None;
+        for item in &mut self.items {
+            if let Some(tile) = item.remote_mut() {
+                if tile.take_panel_just_opened() {
+                    winner = Some(tile.id().to_string());
+                }
+            }
+        }
+        if let Some(winner) = &winner {
+            for item in &mut self.items {
+                if let Some(tile) = item.remote_mut() {
+                    if tile.id() != winner && tile.panel_open() {
+                        tile.close_panel(PanelCloseReason::Dismissed, now);
+                    }
+                }
+            }
+        }
+
+        // Whoever holds an open grant now owns the screen (at most one,
+        // by the arbitration above).
+        let owner = self.items.iter().find_map(|item| {
+            item.remote().filter(|tile| tile.panel_open()).map(|tile| tile.id().to_string())
+        });
+        let Some(owner) = owner else {
+            if self.instrument_panel.visible() {
+                self.instrument_panel.hide(backend);
+            }
+            self.set_panel_key_grab(backend, false);
+            return;
+        };
+
+        // Geometry: beside the dock, level with the owning tile's slot.
+        let Some(slot_top) = self
+            .item_slots()
+            .into_iter()
+            .find(|(index, _)| self.items[*index].id() == owner)
+            .map(|(_, rect)| rect.pos.y)
+        else {
+            // The tile left the column while holding a grant (removed
+            // mid-pass); its shutdown path closes the panel, and the
+            // next pass lands in the no-owner arm above.
+            return;
+        };
+        let Some(tile) = self.items.iter_mut().filter_map(|item| item.remote_mut()).find(|tile| tile.id() == owner) else {
+            return;
+        };
+        let Some(granted) = tile.panel_granted() else { return };
+        let ready = tile.take_panel_ready(now);
+
+        let dock_height = stacked_dock_height(self.tile, self.primary.size.h, &self.items);
+        let dock_geom = dock_geometry(self.primary, self.dock_width, dock_height);
+        let inset = instrument::chrome_inset(theme);
+        let geometry = instrument::place(granted, inset, dock_geom, slot_top, self.primary_workarea());
+
+        let restage = !self.instrument_panel.visible()
+            || self.instrument_panel.owner() != Some(owner.as_str())
+            || self.instrument_panel.geometry() != geometry;
+        // Split borrows: the frame lives in `items`, the surface in
+        // `instrument_panel` — disjoint fields of `self`.
+        let frame = self
+            .items
+            .iter()
+            .find_map(|item| item.remote().filter(|tile| tile.id() == owner))
+            .and_then(RemoteTile::panel_frame);
+        if restage {
+            self.instrument_panel.show(backend, theme, &owner, granted, geometry, frame);
+            self.set_panel_key_grab(backend, true);
+        } else if ready {
+            self.instrument_panel.repaint(backend, theme, frame);
+        }
+    }
+
+    /// Pairs the bare-Escape grab exactly with panel visibility. The
+    /// grab is what routes Escape to the shell while a panel is up —
+    /// and it is also why Escape does not reach the focused client
+    /// then, which the protocol document states plainly.
+    fn set_panel_key_grab(&mut self, backend: &mut B, wanted: bool) {
+        if wanted == self.panel_key_grabbed {
+            return;
+        }
+        let combo = wm_core::KeyCombo { keysym: PANEL_DISMISS_KEYSYM, modifiers: wm_core::Modifiers::empty() };
+        if wanted {
+            backend.grab_key(combo);
+        } else {
+            backend.ungrab_key(combo);
+        }
+        self.panel_key_grabbed = wanted;
+    }
+
+    /// Whether an instrument panel is on screen.
+    pub fn instrument_panel_visible(&self) -> bool {
+        self.instrument_panel.visible()
+    }
+
+    /// Whether `surface` is the open panel's.
+    pub fn instrument_panel_owns(&self, surface: B::ShellId) -> bool {
+        self.instrument_panel.owns(surface)
+    }
+
+    /// Closes the open panel (if any) and tells its owner why. The one
+    /// funnel every dismissal gesture ends in: click-away, Escape, the
+    /// tile toggle, the Overview opening over it, and the teardown
+    /// paths that outlive a dockapp.
+    pub fn dismiss_instrument_panel(&mut self, backend: &mut B, reason: PanelCloseReason) {
+        let now = std::time::Instant::now();
+        for item in &mut self.items {
+            if let Some(tile) = item.remote_mut() {
+                if tile.panel_open() {
+                    tile.close_panel(reason, now);
+                }
+            }
+        }
+        if self.instrument_panel.visible() {
+            self.instrument_panel.hide(backend);
+        }
+        self.set_panel_key_grab(backend, false);
+    }
+
+    /// A click on the panel surface: content-local points go to the
+    /// owning dockapp as `PanelInput`; the chrome border is inert (the
+    /// border is the shell's, and a click on it is neither the client's
+    /// nor a dismissal). Left only — the dock's reserved-button policy
+    /// applies to panels exactly as to tiles.
+    pub fn instrument_panel_click(&mut self, theme: &Theme, local: Point, button: wm_core::MouseButton, pressed: bool) {
+        let Some(point) = self.instrument_panel.content_point(theme, local) else { return };
+        let Some(button) = reserved_filter(button) else { return };
+        let kind = if pressed { InputKind::Press } else { InputKind::Release };
+        let event = InputEvent { kind, button: Some(button), x: point.x, y: point.y, delta: 0 };
+        self.deliver_panel_event(event);
+    }
+
+    /// One scroll step inside the panel; the shell replays a multi-notch
+    /// gesture as discrete steps, exactly as it does for tiles.
+    pub fn instrument_panel_scroll(&mut self, theme: &Theme, local: Point, step: i32) {
+        let Some(point) = self.instrument_panel.content_point(theme, local) else { return };
+        let event = InputEvent { kind: InputKind::Scroll, button: None, x: point.x, y: point.y, delta: step };
+        self.deliver_panel_event(event);
+    }
+
+    /// Tracks the pointer against the panel's content area and delivers
+    /// `Enter`/`Leave` once per crossing — the panel twin of
+    /// [`update_dock_hover`](Self::update_dock_hover), driven from root
+    /// motion for the same reason: only root motion reports the moment
+    /// the pointer leaves.
+    pub fn update_panel_hover(&mut self, theme: &Theme, root: Point) {
+        if !self.instrument_panel.visible() {
+            return;
+        }
+        let geometry = self.instrument_panel.geometry();
+        let local = Point::new(root.x - geometry.pos.x, root.y - geometry.pos.y);
+        let content = self.instrument_panel.content_point(theme, local);
+        let inside = content.is_some();
+        if inside != self.instrument_panel.hovered() {
+            self.instrument_panel.set_hovered(inside);
+            let kind = if inside { InputKind::Enter } else { InputKind::Leave };
+            self.deliver_panel_event(InputEvent { kind, button: None, x: 0, y: 0, delta: 0 });
+        }
+        // `Motion`, the panel-only kind: the pointer's position inside
+        // the content, throttled by construction — this method runs
+        // once per coalesced motion dispatch, and a stationary pointer
+        // is deduplicated entirely.
+        if let Some(point) = content {
+            if self.instrument_panel.note_motion(point) {
+                self.deliver_panel_event(InputEvent { kind: InputKind::Motion, button: None, x: point.x, y: point.y, delta: 0 });
+            }
+        }
+    }
+
+    fn deliver_panel_event(&mut self, event: InputEvent) {
+        let Some(owner) = self.instrument_panel.owner().map(str::to_string) else { return };
+        let now = std::time::Instant::now();
+        if let Some(tile) = self.items.iter_mut().filter_map(|item| item.remote_mut()).find(|tile| tile.id() == owner) {
+            tile.panel_input(event, now);
+        }
     }
 
     /// Opens a dock tile's own right-click menu, if the tile at `local`

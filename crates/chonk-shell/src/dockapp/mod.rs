@@ -72,6 +72,7 @@
 //! and cannot enumerate or capture your windows.
 
 pub(crate) mod handoff;
+pub(crate) mod panel;
 pub(crate) mod registry;
 pub(crate) mod tile;
 
@@ -177,7 +178,7 @@ impl ThemeBroadcast {
         // Placeholder until the first `refresh`, which happens on the
         // first servicing pass — before any dockapp can have connected,
         // since connecting requires a tile that has launched.
-        Self { source: None, state: ThemeState { tile_px: 0, scale: 1.0, theme_id: String::new(), theme_toml: String::new() } }
+        Self { source: None, state: ThemeState { tile_px: 0, scale: 1.0, proto: chonk_dock_proto::SHELL_PROTOCOL_VERSION, theme_id: String::new(), theme_toml: String::new() } }
     }
 
     fn refresh(&mut self, tile_px: u32, scale: f32, theme: &Theme) {
@@ -192,6 +193,10 @@ impl ThemeBroadcast {
         self.state = ThemeState {
             tile_px,
             scale,
+            // How the shell advertises that the panel family is open
+            // for business — the probe a client reads before its first
+            // `OpenPanel`.
+            proto: chonk_dock_proto::SHELL_PROTOCOL_VERSION,
             theme_id: theme.id.clone(),
             // The correctness path beside the fast one: a dockapp built
             // against a different `wm-theme`, or a session running a
@@ -647,6 +652,192 @@ mod tests {
     }
 }
 
+/// The instrument panel's wire contract, end to end over a real socket.
+///
+/// Same shape as [`restart_tests`]: the shell half is the *real* one —
+/// a real `SeqpacketListener`, a real `DockHost`, a real `RemoteTile`,
+/// the real `admit` and the real servicing pass — and the dockapp is a
+/// scripted peer doing exactly what a conformant panel client does:
+/// handshake, read the version advert, open a panel, stream banded
+/// frames, receive input, get dismissed. What a unit test on
+/// `RemoteTile` cannot see (and these can) is the socket seam itself:
+/// that every reply actually reaches the wire, in order, on the same
+/// connection.
+#[cfg(test)]
+mod panel_wire_tests {
+    use super::*;
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::time::Duration;
+
+    use chonk_dock_proto::handshake::hello;
+    use chonk_dock_proto::transport::mint_token;
+    use chonk_dock_proto::wire::{InputEvent, InputKind, InputMask, PanelCloseReason};
+
+    use crate::dockapp::registry::{DockappEntry, RestartPolicy};
+    use crate::dockapp::tile::{RemoteTile, ServiceContext, TileState};
+
+    static COUNTER: AtomicU32 = AtomicU32::new(0);
+
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn new() -> Self {
+            let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
+            let dir = std::env::temp_dir().join(format!("chonk-panel-wire-{}-{unique}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::set_permissions(&dir, std::os::unix::fs::PermissionsExt::from_mode(0o700)).unwrap();
+            Self(dir)
+        }
+
+        fn socket(&self) -> PathBuf {
+            self.0.join("dock-test.sock")
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// One shell: host, one registered tile, and the servicing pass its
+    /// event loop runs — including the panel bounds the desktop would
+    /// compute from its workarea.
+    struct Harness {
+        host: DockHost,
+        tile: RemoteTile,
+        scratch: Vec<u8>,
+        theme: ThemeState,
+    }
+
+    impl Harness {
+        fn start(socket: &Path, now: Instant) -> Self {
+            let host = DockHost::bind_at(socket.to_path_buf());
+            let entry = DockappEntry {
+                id: "gauge".to_string(),
+                name: "GGE".to_string(),
+                exec: vec!["/nonexistent/chonk-test-gauge".to_string()],
+                tile_units: 1,
+                restart: RestartPolicy::Never,
+                source: PathBuf::from("/test/gauge.dockapp"),
+            };
+            let theme = ThemeState {
+                tile_px: 56,
+                scale: 1.0,
+                proto: chonk_dock_proto::SHELL_PROTOCOL_VERSION,
+                theme_id: "nextstep-classic".into(),
+                theme_toml: String::new(),
+            };
+            Self { host, tile: RemoteTile::new(entry, 56, now), scratch: Vec::new(), theme }
+        }
+
+        fn pass(&mut self, now: Instant) {
+            for admission in self.host.service(now) {
+                admit(std::iter::once(&mut self.tile), admission, &self.theme, now);
+            }
+            let socket_path = self.host.socket_path().clone();
+            let mut ctx = ServiceContext {
+                now,
+                theme: &self.theme,
+                socket_path: &socket_path,
+                scratch: &mut self.scratch,
+                panel_bounds: (800, 600),
+            };
+            self.tile.service(&mut ctx);
+        }
+    }
+
+    fn drain(peer: &Seqpacket) -> Vec<ServerMessage> {
+        let mut buffer = vec![0u8; MAX_MESSAGE_BYTES];
+        let mut messages = Vec::new();
+        loop {
+            match peer.recv(&mut buffer) {
+                Ok(0) => return messages,
+                Ok(n) => messages.push(ServerMessage::decode(&buffer[..n]).expect("decodable")),
+                Err(_) => return messages,
+            }
+        }
+    }
+
+    /// The scripted client's whole session, the way the concept demo
+    /// runs it: connect, prove the shell advertises panels, open one,
+    /// stream a banded repaint, receive input, be dismissed — with the
+    /// tile alive and drawing throughout.
+    #[test]
+    fn a_scripted_dockapp_opens_streams_receives_input_and_is_dismissed() {
+        let scratch = Scratch::new();
+        let base = Instant::now();
+        let mut shell = Harness::start(&scratch.socket(), base);
+        let token = mint_token().unwrap();
+        shell.tile.pretend_launched(token, base);
+
+        // -- handshake, and the version probe ---------------------------
+        let peer = Seqpacket::connect(&scratch.socket()).expect("connect");
+        peer.send(&hello("gauge", 1, token, InputMask::all()).encode().unwrap()).unwrap();
+        shell.pass(base);
+        let welcome = drain(&peer)
+            .into_iter()
+            .find_map(|message| match message {
+                ServerMessage::Welcome(state) => Some(state),
+                _ => None,
+            })
+            .expect("welcomed");
+        assert!(welcome.panels_supported(), "the Welcome advertises protocol {} — the probe a client reads before OpenPanel", welcome.proto);
+
+        // -- the tile draws, then asks for its panel --------------------
+        peer.send(&ClientMessage::Frame { generation: 1, width: 56, height: 56, pixels: vec![9; 56 * 56 * 4] }.encode().unwrap()).unwrap();
+        peer.send(&ClientMessage::OpenPanel { width: 4000, height: 120 }.encode().unwrap()).unwrap();
+        shell.pass(base + Duration::from_millis(16));
+        assert_eq!(
+            drain(&peer),
+            vec![ServerMessage::PanelOpened { width: 800, height: 120 }],
+            "the grant is the request clamped to the workarea, on the wire"
+        );
+
+        // -- a banded repaint -------------------------------------------
+        for (step, y) in (0..120u32).step_by(40).enumerate() {
+            let band = ClientMessage::PanelFrame {
+                generation: 1,
+                y,
+                band_height: 40,
+                width: 800,
+                pixels: vec![step as u8 + 1; 800 * 40 * 4],
+            };
+            peer.send(&band.encode().unwrap()).unwrap();
+        }
+        shell.pass(base + Duration::from_millis(32));
+        let frame = shell.tile.panel_frame().expect("all three bands assembled");
+        assert_eq!((frame.width, frame.height), (800, 120));
+        assert_eq!(frame.pixels[0], 1, "top band");
+        assert_eq!(frame.pixels[(800 * 119 * 4) + 3], 3, "bottom band");
+
+        // -- input flows back as PanelInput -----------------------------
+        let press = InputEvent { kind: InputKind::Press, button: Some(chonk_dock_proto::wire::Button::Left), x: 700, y: 90, delta: 0 };
+        let motion = InputEvent { kind: InputKind::Motion, button: None, x: 701, y: 91, delta: 0 };
+        shell.tile.panel_input(press, base);
+        shell.tile.panel_input(motion, base);
+        assert_eq!(
+            drain(&peer),
+            vec![ServerMessage::PanelInput(press), ServerMessage::PanelInput(motion)],
+            "panel input — the panel-only Motion included — reaches the wire in order"
+        );
+
+        // -- the user clicks away ---------------------------------------
+        shell.tile.close_panel(PanelCloseReason::Dismissed, base);
+        assert_eq!(drain(&peer), vec![ServerMessage::PanelClosed { reason: PanelCloseReason::Dismissed }]);
+        assert!(shell.tile.poll_fd().is_some(), "the dismissal cost the panel, not the tile");
+        assert_eq!(shell.tile.state(), TileState::Live, "which is still drawing");
+
+        // -- and a late band for the closed panel is quietly nothing ----
+        let late = ClientMessage::PanelFrame { generation: 2, y: 0, band_height: 1, width: 800, pixels: vec![7; 800 * 4] };
+        peer.send(&late.encode().unwrap()).unwrap();
+        shell.pass(base + Duration::from_millis(48));
+        assert!(shell.tile.poll_fd().is_some(), "streaming against an unseen PanelClosed is a race, not a crime");
+        assert!(drain(&peer).is_empty(), "and provokes no reply");
+    }
+}
+
 /// Restart survival, end to end over a real socket.
 ///
 /// The shell half here is the *real* one — a real `SeqpacketListener`, a
@@ -713,7 +904,7 @@ mod restart_tests {
     }
 
     fn state(tile_px: u32, theme_id: &str) -> ThemeState {
-        ThemeState { tile_px, scale: 1.0, theme_id: theme_id.into(), theme_toml: String::new() }
+        ThemeState { tile_px, scale: 1.0, proto: chonk_dock_proto::SHELL_PROTOCOL_VERSION, theme_id: theme_id.into(), theme_toml: String::new() }
     }
 
     /// One shell instance: its listener, its tiles, and the servicing
@@ -750,7 +941,7 @@ mod restart_tests {
                 admit(self.tiles.iter_mut(), admission, theme, now);
             }
             let socket_path = self.host.socket_path().clone();
-            let mut ctx = ServiceContext { now, theme, socket_path: &socket_path, scratch: &mut self.scratch };
+            let mut ctx = ServiceContext { now, theme, socket_path: &socket_path, scratch: &mut self.scratch, panel_bounds: (1024, 1024) };
             for tile in &mut self.tiles {
                 tile.service(&mut ctx);
             }

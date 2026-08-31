@@ -111,6 +111,12 @@ pub struct SessionOptions {
     /// contents)` — how a restore test plants the previous session's
     /// layout for the fresh compositor to find.
     pub state_files: Vec<(String, String)>,
+    /// Files seeded into the isolated `config/chonkstep/` directory
+    /// before boot, as `(relative path, contents)` — parent directories
+    /// created as needed. How the instrument-panel e2e registers a
+    /// dockapp (`dockapps/probe.dockapp`) with the fresh shell, which
+    /// scans that directory at startup.
+    pub config_files: Vec<(String, String)>,
 }
 
 /// One booted nested compositor plus everything needed to drive and
@@ -157,6 +163,13 @@ impl Session {
         for (name, contents) in &options.state_files {
             std::fs::write(state_home.join("chonkstep").join(name), contents)
                 .map_err(|e| e.to_string())?;
+        }
+        for (name, contents) in &options.config_files {
+            let path = config_home.join("chonkstep").join(name);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+            }
+            std::fs::write(path, contents).map_err(|e| e.to_string())?;
         }
 
         let door_path = dir.join("door.sock");
@@ -407,16 +420,25 @@ fn compositor_binary() -> Result<PathBuf, String> {
     if let Some(path) = std::env::var_os("CHONKSTEP_WAYLAND_BIN") {
         return Ok(PathBuf::from(path));
     }
+    profile_binary("chonkstep-wayland")
+}
+
+/// A sibling binary from the same build profile as the running test —
+/// how a test finds `chonkstep-wayland` and this crate's own
+/// `chonk-panel-probe` without hardcoding a target directory. A
+/// missing binary fails with the command that builds it rather than a
+/// bare ENOENT.
+pub fn profile_binary(name: &str) -> Result<PathBuf, String> {
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-    // target/debug/deps/e2e-... -> target/debug/chonkstep-wayland
+    // target/debug/deps/e2e-... -> target/debug/<name>
     let profile_dir = exe
         .parent()
         .and_then(Path::parent)
         .ok_or("cannot locate the target profile directory")?;
-    let bin = profile_dir.join("chonkstep-wayland");
+    let bin = profile_dir.join(name);
     if !bin.exists() {
         return Err(format!(
-            "{} not found — build it first: cargo build -p chonkstep-wayland (scripts/e2e.sh does this)",
+            "{} not found — build it first: cargo build -p chonkstep-wayland -p chonk-testkit (scripts/e2e.sh does this)",
             bin.display()
         ));
     }

@@ -53,7 +53,7 @@ fn recv_until<T>(peer: &Seqpacket, mut want: impl FnMut(ClientMessage) -> Option
 }
 
 fn theme_state(tile_px: u32, scale: f32, theme_id: &str) -> ThemeState {
-    ThemeState { tile_px, scale, theme_id: theme_id.to_string(), theme_toml: String::new() }
+    ThemeState { tile_px, scale, proto: chonk_dock_proto::SHELL_PROTOCOL_VERSION, theme_id: theme_id.to_string(), theme_toml: String::new() }
 }
 
 #[test]

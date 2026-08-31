@@ -9,7 +9,7 @@ members = ["crates/*", "examples/*"]
 # A dockapp does not have to be Rust — the socket protocol is
 # language-agnostic — and `chonk-switch` is Python. Excluded so the
 # `examples/*` member glob above doesn't demand a Cargo.toml of it.
-exclude = ["examples/chonk-switch"]
+exclude = ["examples/chonk-switch", "examples/chonk-net"]
 
 [workspace.package]
 version = "0.2.0"
