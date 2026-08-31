@@ -31,6 +31,7 @@
 //! focus_follows_mouse = false        # optional; default false
 //! scale = 2.0                        # optional; UI scale factor
 //! theme = "nextstep-classic"         # optional; theme name
+//! appearance = "dark"                # optional; "light" | "dark"
 //! placement = "smart"                # optional; "smart" | "cascade" | "center"
 //! edge_resistance = 10               # optional; px, 0 disables edge snapping
 //! terminal_font_px = 20              # optional; terminal font size at 1x
@@ -139,6 +140,16 @@ pub struct Config {
     pub focus_follows_mouse: bool,
     pub scale: Option<f32>,
     pub theme: Option<String>,
+    /// The session-wide light/dark appearance the desktop starts in:
+    /// `"light"` or `"dark"`, validated at parse time so only those two
+    /// spellings ever reach a caller. Kept an `Option<String>` for the
+    /// same reason `theme` is: the shell's precedence rules (the
+    /// published appearance state file over this value over the
+    /// selected theme's own native mood) must be able to tell "user
+    /// said nothing" apart from "user chose dark". The enum itself
+    /// lives in `wm-theme`, which this crate deliberately does not
+    /// depend on.
+    pub appearance: Option<String>,
     /// Where newly mapped windows go when the client expressed no
     /// position preference. Fed to the WM's placement engine verbatim.
     pub placement: PlacementPolicy,
@@ -199,6 +210,7 @@ impl Config {
             focus_follows_mouse: false,
             scale: None,
             theme: None,
+            appearance: None,
             // Smart is the classic default placement, and 10px
             // matches the stock edge-resistance feel: strong enough
             // to catch a deliberate drag toward an edge, weak enough
@@ -459,6 +471,22 @@ pub fn parse(text: &str) -> Result<Config, String> {
                 other => tracing::warn!(
                     value = ?other,
                     "config: theme must be a string, ignoring it"
+                ),
+            },
+            // Trimmed and case-insensitive like every other name in
+            // this file, and normalized here so consumers only ever
+            // see the two canonical spellings. An unknown mood is
+            // skipped, not guessed at: "drak" must cost the user this
+            // one setting, never a mode they did not ask for.
+            "appearance" => match value {
+                toml::Value::String(name)
+                    if matches!(name.trim().to_ascii_lowercase().as_str(), "light" | "dark") =>
+                {
+                    config.appearance = Some(name.trim().to_ascii_lowercase());
+                }
+                other => tracing::warn!(
+                    value = ?other,
+                    "config: appearance must be \"light\" or \"dark\", ignoring it"
                 ),
             },
             "placement" => match placement_from_value(value) {
@@ -1098,6 +1126,36 @@ mod tests {
         // The typo'd key changed nothing; the valid key still applied.
         assert!(!config.focus_follows_mouse);
         assert_eq!(config.theme.as_deref(), Some("nextstep-classic"));
+    }
+
+    // ---- parse: appearance --------------------------------------------
+
+    #[test]
+    fn appearance_defaults_unset_and_parses_both_moods() {
+        assert_eq!(Config::default_config().appearance, None);
+        assert_eq!(parse("").unwrap().appearance, None);
+        assert_eq!(parse("appearance = \"dark\"").unwrap().appearance.as_deref(), Some("dark"));
+        assert_eq!(parse("appearance = \"light\"").unwrap().appearance.as_deref(), Some("light"));
+    }
+
+    #[test]
+    fn appearance_is_trimmed_and_case_insensitive_and_normalized() {
+        for text in ["appearance = \"Dark\"", "appearance = \"DARK\"", "appearance = \" dark \""] {
+            assert_eq!(parse(text).unwrap().appearance.as_deref(), Some("dark"), "text {text:?}");
+        }
+    }
+
+    #[test]
+    fn unknown_or_wrongly_typed_appearance_stays_unset() {
+        for text in [
+            "appearance = \"dusk\"",
+            "appearance = \"auto\"",
+            "appearance = \"\"",
+            "appearance = 1",
+            "appearance = true",
+        ] {
+            assert_eq!(parse(text).unwrap().appearance, None, "text {text:?}");
+        }
     }
 
     // ---- parse: restore_session and lock_command ----------------------

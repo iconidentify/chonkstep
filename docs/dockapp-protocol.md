@@ -305,11 +305,21 @@ This is the **ThemeState contract**:
   pixel off). Decoders must reject NaN, infinities, zero, negatives,
   and values above 8.0.
 - `theme_id` is the fast path: a client that ships the built-in
-  palettes looks the id up and parses nothing.
+  palettes looks the id up and parses nothing. Note that an id no
+  longer names one palette: the session's light/dark appearance picks
+  between a theme's two renditions (see `docs/appearance.md`). A
+  fast-path client should read the appearance too — from the
+  `appearance` tag inside `theme_toml`, from the
+  `CHONKSTEP_APPEARANCE` launch variable, or from the published
+  `$XDG_STATE_HOME/chonkstep/appearance` file — or simply take the
+  correctness path below, which always carries the resolved rendition.
 - `theme_toml` is the correctness path: a serialized theme table, so a
   client built against a different theme version — or a session running
   a user-defined theme with no built-in id — still gets the real
-  palette by deserializing it. It may be empty.
+  palette by deserializing it. It may be empty. It carries an
+  `appearance = "light" | "dark"` key naming the rendition it is;
+  streams from desktops older than the appearance axis lack the key,
+  and absent means dark.
 - A client that can use neither falls back to its own default palette.
   The worst case is a tile in the wrong colors, never a tile that fails
   to draw.

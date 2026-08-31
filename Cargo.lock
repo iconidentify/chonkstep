@@ -2808,6 +2808,7 @@ dependencies = [
  "cosmic-text",
  "serde",
  "tiny-skia",
+ "toml",
  "tracing",
  "wm-theme-api",
 ]

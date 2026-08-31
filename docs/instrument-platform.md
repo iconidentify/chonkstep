@@ -37,6 +37,7 @@ standing on.
 ```
 $ scripts/chonk-get install bindings/python       # a Python clock tile
 $ scripts/chonk-get install examples/chonk-shelf  # the Shelf: clipboard history
+$ scripts/chonk-get install examples/chonk-switch # the light/dark toggle
 $ scripts/chonk-get list
 $ scripts/chonk-get remove py-dockclock
 ```
@@ -45,6 +46,9 @@ $ scripts/chonk-get remove py-dockclock
   `chonk-ui`'s SDK; the conformance dockapp CI builds on every push.
 - `examples/chonk-shelf` — the Shelf as a three-tile clipboard-history
   stack: copy anything, see it appear; click an entry to copy it back.
+- `examples/chonk-switch` — the appearance switch: light/dark mode as
+  a machined toggle, and the Python SDK's worked example — one
+  stdlib-only script, tested headless against a fake shell.
 - `bindings/python/chonkdock` and `bindings/go/chonkdock` — complete
   protocol implementations with no dependencies beyond each language's
   standard library, each with a working clock example.

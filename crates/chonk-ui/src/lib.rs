@@ -98,12 +98,24 @@ pub fn scale_factor() -> f32 {
 /// Note that this reads what it is *told*. The launcher has to export
 /// `CHONKSTEP_THEME` for a child to see it; with the variable absent
 /// the behavior is exactly what it was before — the flagship theme.
+/// `CHONKSTEP_APPEARANCE` rides beside it (`"light"` / `"dark"`) and
+/// picks which of the theme's two renditions to resolve; absent or
+/// unrecognized, the theme's own native rendition is used — exactly
+/// what `theme_by_id` answered before the appearance axis existed, so
+/// an app launched by an older desktop looks the way it always did.
 pub fn active_theme() -> model::Theme {
     let Some(id) = std::env::var("CHONKSTEP_THEME").ok() else {
         return nextstep_theme();
     };
     let id = id.trim();
-    match wm_theme::default_theme::theme_by_id(id) {
+    let appearance = std::env::var("CHONKSTEP_APPEARANCE")
+        .ok()
+        .and_then(|mode| wm_theme::Appearance::from_name(&mode));
+    let theme = match appearance {
+        Some(appearance) => wm_theme::default_theme::theme_variant(id, appearance),
+        None => wm_theme::default_theme::theme_by_id(id),
+    };
+    match theme {
         Some(theme) => theme,
         None => {
             tracing::warn!(theme = id, "CHONKSTEP_THEME names an unknown theme; using the default instead");

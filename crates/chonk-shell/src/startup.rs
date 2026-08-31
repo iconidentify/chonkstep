@@ -21,7 +21,7 @@
 
 use wm_config::{Action, Config};
 use wm_core::{FocusPolicy, KeyCombo, PlacementPolicy};
-use wm_theme::Theme;
+use wm_theme::{Appearance, Theme};
 
 use crate::theme_select;
 
@@ -46,8 +46,13 @@ use crate::theme_select;
 /// is what lets the scale change twice without the chrome drifting.
 #[derive(Clone, Debug)]
 pub struct SessionState {
-    /// The chosen theme at 1x — the thing `scale` multiplies.
+    /// The chosen theme at 1x — the thing `scale` multiplies. Always
+    /// the rendition of its id that matches [`Self::appearance`].
     pub base_theme: Theme,
+    /// The session-wide light/dark mode `base_theme` was resolved in —
+    /// see [`crate::appearance`] for the resolution layers and the
+    /// published/request file contract.
+    pub appearance: Appearance,
     /// UI scale factor; always finite and positive (see
     /// [`resolve_scale`]).
     pub scale: f32,
@@ -74,8 +79,10 @@ impl SessionState {
     /// — a reload that resolved by different rules than the startup it
     /// replaces would make "restart to be sure" true again.
     pub fn resolve(config: &Config) -> Self {
+        let (base_theme, appearance) = resolve_look(config.theme.as_deref(), config.appearance.as_deref());
         Self {
-            base_theme: resolve_theme(config.theme.as_deref()),
+            base_theme,
+            appearance,
             scale: read_scale_factor(config.scale),
             focus: if read_focus_follows_mouse(config.focus_follows_mouse) {
                 FocusPolicy::FocusFollowsMouse
@@ -159,6 +166,24 @@ pub fn resolve_theme(config_theme: Option<&str>) -> Theme {
     theme_select::load()
 }
 
+/// [`resolve_theme`] with the appearance axis on top: which theme, and
+/// which of its two renditions.
+///
+/// The identity question resolves first, exactly as before (persisted
+/// menu choice over config over flagship, all in the theme's native
+/// rendition). The appearance then resolves through
+/// [`crate::appearance::resolve`] — published state, else the config's
+/// `appearance`, else the theme's own native mood — and the chosen id
+/// is re-dressed in that rendition. The native-mood floor is what
+/// makes the axis invisible until it is used: with nothing published
+/// and nothing configured, every theme looks exactly as it always has.
+pub fn resolve_look(config_theme: Option<&str>, config_appearance: Option<&str>) -> (Theme, Appearance) {
+    let native = resolve_theme(config_theme);
+    let appearance = crate::appearance::resolve(config_appearance, native.appearance);
+    let theme = wm_theme::default_theme::theme_variant(&native.id, appearance).unwrap_or(native);
+    (theme, appearance)
+}
+
 /// The config-file layer of [`resolve_theme`], kept free of filesystem
 /// access so its edges are testable: `None` when no theme is
 /// configured, and - critically - `None` with a warning, not an error,
@@ -193,9 +218,9 @@ pub fn persisted_theme_choice_exists() -> bool {
 }
 
 /// Where this session keeps the small state files it writes for
-/// itself: the theme-menu choice, the dock order, and the two
-/// request markers below.
-fn state_dir() -> std::path::PathBuf {
+/// itself: the theme-menu choice, the dock order, the published
+/// appearance (see `crate::appearance`), and the request markers below.
+pub(crate) fn state_dir() -> std::path::PathBuf {
     if let Some(root) = std::env::var_os("XDG_STATE_HOME") {
         return std::path::PathBuf::from(root).join("chonkstep");
     }
@@ -417,6 +442,7 @@ mod tests {
         let base = wm_theme::default_theme::nextstep_classic();
         let state = SessionState {
             base_theme: base.clone(),
+            appearance: Appearance::Dark,
             scale: 2.0,
             focus: FocusPolicy::ClickToFocus,
             placement: PlacementPolicy::Smart,
