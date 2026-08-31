@@ -1249,11 +1249,19 @@ impl Backend for WaylandBackend {
             // Smithay parses the property on every PropertyNotify and
             // answers from the parsed copy, so this is a field read, not
             // a round trip, and `property_notify` in `xwayland.rs` turns
-            // the same edge into `BackendEvent::ChromeChanged`. This is
-            // the whole two-titlebar bug: LibreOffice and Edge both set
-            // this hint, chonkstep framed them anyway, and they wore our
-            // chrome over their own.
-            ManagedSurface::X11(surface) => !surface.is_decorated(),
+            // the same edge into `BackendEvent::ChromeChanged`.
+            //
+            // Read smithay's method as `is_client_side_decorated`: it
+            // answers true only when the decorations field is present
+            // and ZERO — despite a name that suggests "wants a frame",
+            // it means the opposite, and `wm-x11`'s own Motif read
+            // (`flags bit set && decorations == 0`) agrees with this
+            // orientation, not the negation. A `!` here once inverted
+            // the whole table: Spotify, which asks for MWM_DECOR_ALL,
+            // was stripped of its frame, controls and resize bars —
+            // unnoticed for days because LibreOffice and Edge run
+            // native Wayland and never take this arm.
+            ManagedSurface::X11(surface) => surface.is_decorated(),
             // A Wayland toplevel that never negotiated decorations is
             // stating, by the protocol's own rule, that it decorates
             // itself. The xdg-decoration preamble: "if compositor and
