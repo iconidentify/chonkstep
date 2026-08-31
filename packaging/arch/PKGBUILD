@@ -1,0 +1,136 @@
+# Maintainer: Chris Kearney <chris@kearneymail.com>
+#
+# chonkstep, from a release tarball. The -git twin next to this file
+# builds from the branch head instead.
+#
+# The dependency list is not copied from anywhere: the hard depends are
+# what the built binaries actually load and spawn - checked with ldd
+# against a release build (libxkbcommon, libinput, libseat->seatd,
+# libudev->systemd-libs, libgbm->mesa, libdrm), plus what is loaded at
+# runtime rather than linked (EGL/GLES through libglvnd, the Wayland
+# client libraries for nested mode) and what the desktop execs (Xwayland
+# at boot, foot as its terminal, dbus-run-session around the session).
+# The X11 session's own server and everything theme-optional is in
+# optdepends, so a Wayland-only install stays lean.
+
+pkgname=chonkstep
+pkgver=0.2.0
+pkgrel=1
+pkgdesc="A NeXTSTEP-style desktop for Linux: one shell, two real login sessions (X11 window manager and Wayland compositor)"
+arch=('x86_64' 'aarch64')
+url="https://github.com/iconidentify/chonkstep"
+license=('GPL-3.0-only')
+depends=(
+  'gcc-libs'
+  'glibc'
+  'libxkbcommon'     # seat keymaps, both backends
+  'libglvnd'         # EGL/GLES, loaded at runtime by the renderer
+  'mesa'             # libgbm: session-backend buffer allocation
+  'libdrm'           # mode setting on the graphics device
+  'libinput'         # real keyboards, mice, touchpads
+  'seatd'            # libseat; the daemon itself is only needed without logind
+  'systemd-libs'     # libudev: device discovery and hot-plug
+  'wayland'          # client libraries, loaded at runtime for nested mode
+  'xorg-xwayland'    # spawned at boot so X11 apps run in the Wayland session
+  'foot'             # the terminal the desktop spawns
+  'dbus'             # dbus-run-session around both sessions
+  'ttf-dejavu'       # the chiseled chrome's typeface
+)
+optdepends=(
+  'xorg-server: the X11 session (the Wayland session needs no X server)'
+  'xorg-xinit: start the X11 session with startx from a TTY'
+  'picom: translucent terminals on the X11 session (the compositor composites itself)'
+  'wireplumber: wpctl, which the dock sound instrument reads and controls'
+  'gsfonts: Nimbus Sans, for the NeXT Lavender theme'
+  'ttf-jetbrains-mono-nerd: the terminal typeface the themes configure'
+  'noto-fonts: fallback glyph coverage'
+  'swaylock: a session locker for lock_command and locked crash recovery'
+  'xdg-desktop-portal: portal frontend for screen sharing and portal screenshots'
+  'xdg-desktop-portal-wlr: the ScreenCast/Screenshot backend the shipped portal map selects'
+  'xdg-desktop-portal-gtk: the fallback portal backend (file chooser and friends)'
+  'pipewire: carries screen-share frames from portal backend to application'
+  'git: chonk-get install from a git URL'
+  'python: dockapps written against the Python binding'
+)
+makedepends=('rust')
+# Pin the real checksum when tagging a release: makepkg -g in this
+# directory prints it once v$pkgver exists upstream.
+source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('SKIP')
+
+prepare() {
+  cd "$pkgname-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+  cd "$pkgname-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR=target
+  # --frozen: build exactly the dependency tree the repository ships.
+  cargo build --release --frozen --workspace
+}
+
+check() {
+  cd "$pkgname-$pkgver"
+  export RUSTUP_TOOLCHAIN=stable
+  export CARGO_TARGET_DIR=target
+  # The backend-generic crates and the config round-trip; the Wayland
+  # backend's suite needs the system libraries above and runs too.
+  cargo test --frozen --workspace
+}
+
+package() {
+  cd "$pkgname-$pkgver"
+
+  # The two session binaries, and the dockapp package manager.
+  install -Dm755 target/release/chonkstep "$pkgdir/usr/bin/chonkstep"
+  install -Dm755 target/release/chonkstep-wayland "$pkgdir/usr/bin/chonkstep-wayland"
+  install -Dm755 scripts/chonk-get "$pkgdir/usr/bin/chonk-get"
+
+  # Session launcher scripts. These resolve the binary themselves:
+  # from /usr/lib/chonkstep they find no sibling checkout and fall
+  # back to the /usr/bin names installed above.
+  install -Dm755 scripts/xsession.sh "$pkgdir/usr/lib/chonkstep/xsession.sh"
+  install -Dm755 scripts/wayland-session.sh "$pkgdir/usr/lib/chonkstep/wayland-session.sh"
+  install -Dm755 scripts/reload.sh "$pkgdir/usr/lib/chonkstep/reload.sh"
+  install -Dm755 scripts/restart.sh "$pkgdir/usr/lib/chonkstep/restart.sh"
+
+  # Session entries, one per stack, so a login manager offers both.
+  install -d "$pkgdir/usr/share/xsessions" "$pkgdir/usr/share/wayland-sessions"
+  cat > "$pkgdir/usr/share/xsessions/chonkstep.desktop" <<'DESKTOP'
+[Desktop Entry]
+Name=chonkstep
+Comment=A NeXTSTEP-style window manager with chiseled chrome
+Exec=/usr/lib/chonkstep/xsession.sh
+Type=Application
+DESKTOP
+  cat > "$pkgdir/usr/share/wayland-sessions/chonkstep.desktop" <<'DESKTOP'
+[Desktop Entry]
+Name=chonkstep (Wayland)
+Comment=The chonkstep desktop as a native Wayland compositor
+Exec=/usr/lib/chonkstep/wayland-session.sh
+DesktopNames=chonkstep
+Type=Application
+DESKTOP
+
+  # Portal backend map: ScreenCast/Screenshot to xdg-desktop-portal-wlr
+  # (chonkstep-wayland advertises zwlr_screencopy), the rest to the GTK
+  # backend. Matched by XDG_CURRENT_DESKTOP=chonkstep, which the session
+  # script exports and the .desktop entry's DesktopNames sets.
+  install -Dm644 packaging/portal/chonkstep-portals.conf \
+    "$pkgdir/usr/share/xdg-desktop-portal/chonkstep-portals.conf"
+
+  # Documentation, config template first: the desktop runs with no
+  # config file at all, and this is the fully commented starting point
+  # to copy to ~/.config/chonkstep/config.toml.
+  install -Dm644 docs/config.example.toml -t "$pkgdir/usr/share/doc/$pkgname"
+  install -Dm644 docs/quickstart.md -t "$pkgdir/usr/share/doc/$pkgname"
+  install -Dm644 docs/keybindings.md -t "$pkgdir/usr/share/doc/$pkgname"
+  install -Dm644 docs/instrument-platform.md -t "$pkgdir/usr/share/doc/$pkgname"
+  install -Dm644 docs/dockapp-protocol.md -t "$pkgdir/usr/share/doc/$pkgname"
+  install -Dm644 docs/xwayland-compatibility.md -t "$pkgdir/usr/share/doc/$pkgname"
+  install -Dm644 docs/screen-sharing.md -t "$pkgdir/usr/share/doc/$pkgname"
+  install -Dm644 README.md CHANGELOG.md -t "$pkgdir/usr/share/doc/$pkgname"
+}

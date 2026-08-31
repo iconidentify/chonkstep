@@ -12,9 +12,17 @@
 # shell environment. Keep this self-contained; don't assume dotfiles ran.
 set -u
 
-# Resolve the repo root from this script's own location so the session
-# works wherever the checkout lives (real hardware, VM, any username).
+# Resolve the WM binary. This script runs from two homes and must work
+# from both: a git checkout (scripts/install.sh points the session
+# entry here, and the binary is a sibling target/release), and a
+# package install (/usr/lib/chonkstep/xsession.sh, where the binary is
+# on PATH as /usr/bin/chonkstep). The checkout wins when both exist,
+# because someone running from a checkout is running it to test the
+# checkout.
 BIN="$(cd "$(dirname "$0")/.." && pwd)/target/release/chonkstep"
+if [ ! -x "$BIN" ]; then
+    BIN="$(command -v chonkstep || echo "$BIN")"
+fi
 LOG_DIR="$HOME/.local/state/chonkstep"
 mkdir -p "$LOG_DIR"
 

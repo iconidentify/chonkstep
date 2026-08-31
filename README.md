@@ -1,16 +1,21 @@
 # chonkstep
 
-A NeXTSTEP-style desktop written in Rust, running as an X11 window
-manager or as a Wayland compositor over one shared shell. The chrome is
-chiseled and specified to the pixel - titlebar metrics, the raised
-relief recipe, the 10x10 button glyph bitmaps, the 8px resizebar with
-28px corner grips - under a dock of live instruments and real
-workspaces, then extended with the conveniences a modern desktop
-expects: resize from every edge and corner with macOS-style cursors, a
-theme engine, translucent terminals, HiDPI scaling applied live, and
-in-place hot restarts that keep your windows open.
+A NeXTSTEP-style desktop for Linux, written in Rust: one shell behind
+two real login sessions - an X11 window manager and a Wayland
+compositor - so a feature lands once and both stacks get it by
+construction. The chrome is chiseled and specified to the pixel, under
+a dock of crash-proof out-of-process instruments, real workspaces, a
+modal Overview, and eight themes that apply live with nothing closed.
+Sessions survive: layout restore across logins and crashes, a
+supervised compositor that comes back locked, and hot restarts that
+keep your windows open on X11.
 
-![Theme menu on the Teal Blueprint theme](docs/screenshots/theme-menu.png)
+![The chonkstep desktop on the NeXTSTEP Classic theme](site/shots/hero.png)
+
+There is a longer illustrated tour in [site/index.html](site/index.html),
+a walkthrough from install to first hour in
+[docs/quickstart.md](docs/quickstart.md), and the release history in
+[CHANGELOG.md](CHANGELOG.md).
 
 ## Features
 
@@ -37,6 +42,29 @@ in-place hot restarts that keep your windows open.
   is released, Escape cancels, Shift+Tab steps backward. The panel is
   drawn in the active theme's language - the same chiseled chrome as
   everything else on screen, not a generic overlay.
+- **The Overview.** `super+up` (the bindable `overview` action) lays
+  every window on the desk out as a card in miniature real chrome with
+  a live capture, over a strip of genuine workspace tiles: arrows
+  move, Return or a click focuses, right-click opens the real window
+  commands menu, clicking a workspace tile switches desks, Escape
+  dismisses. Captures are served at card resolution while it is open,
+  so terminal text stays legible.
+- **The Living Desktop.** `restore_session = true` records every
+  window's application, geometry, workspace and shape as you work and
+  relaunches that layout at the next login - and after a crash, which
+  the Wayland session script supervises: abnormal exits restart the
+  compositor with the recorded layout (a crash loop trips a brake
+  instead), and with `lock_command` set the recovered session comes
+  back locked. Restore never resurrects a window you closed.
+- **The Instrument Platform.** Every dock tile is a separate process
+  that pushes finished pixels over a private socket and gets theme,
+  scale, input and supervision in return - so a widget that crashes,
+  hangs or loops shows a dead face in its own tile and cannot take the
+  desktop with it. The wire protocol is specified byte-for-byte
+  ([docs/dockapp-protocol.md](docs/dockapp-protocol.md)), Python and
+  Go bindings ship dependency-free, and `chonk-get` installs a dockapp
+  from a git URL or local path. See
+  [docs/instrument-platform.md](docs/instrument-platform.md).
 - **Theme engine with eight built-in themes.** NeXTSTEP Classic, Amber
   Phosphor, Teal Blueprint, Graphite, NeXT Lavender, Jade Lacquer,
   Ivory Halftone, and Indigo Filament. A theme restyles everything at
@@ -107,6 +135,19 @@ in-place hot restarts that keep your windows open.
 ![Translucent terminal on the Amber Phosphor theme](docs/screenshots/translucent-terminal.png)
 
 ## Installing on Omarchy (or any Arch)
+
+Two routes. As a package (binaries to `/usr/bin`, session scripts to
+`/usr/lib/chonkstep/`, both session entries installed):
+
+```sh
+git clone https://github.com/iconidentify/chonkstep.git
+cd chonkstep/packaging/arch
+makepkg -si -p PKGBUILD-git   # the branch head; plain PKGBUILD pins the
+                              # v0.2.0 release tag once it is published
+```
+
+Or straight from the checkout, which is what `scripts/update.sh`
+(pull, rebuild, hot-restart) keeps current:
 
 ```sh
 git clone https://github.com/iconidentify/chonkstep.git
@@ -241,14 +282,19 @@ What the session backend does not do yet, stated plainly:
   copy. The result is the odd one out on this list: an out-of-process
   dock tile gets a guarantee across a restart that no ordinary Wayland
   client on this desktop can have.
-- **No EWMH-analog protocols.** `wlr-foreign-toplevel-management`,
-  `wlr-output-management`, layer-shell, screencopy, idle-inhibit, and
-  DRM leasing are all absent, so external taskbars, pagers, bars,
-  screen recorders, and remote-desktop tools have nothing to talk to.
-  The X11 side's EWMH surface - which `wmctrl`, `xdotool`, and pagers
-  drive - has no counterpart here yet. The desktop's own dock, Clip,
-  and menus need none of it: they are drawn by the compositor, not by
-  clients.
+- **The ecosystem protocols it speaks, and the ones it does not yet.**
+  Present: wlr-layer-shell (launchers, bars, notification daemons),
+  ext-session-lock (lockers - and while locked, the scene is lock
+  surfaces over black and nothing else, on screen and in every capture
+  path), idle-notify with idle-inhibit, wlr-screencopy (`grim` and
+  friends - the site's screenshots are captured through it), and
+  wlr-foreign-toplevel-management. EWMH is also published to the
+  XWayland root - client list, active window, desktops, workarea,
+  frame extents - read-only for now: a pager can see everything and
+  command nothing yet. Still absent: wlr-output-management (no
+  `wlr-randr`), DRM leasing, and the command half of the EWMH story.
+  The desktop's own dock, Clip, and menus need none of it: they are
+  drawn by the compositor, not by clients.
 
 **Nested** remains the way to develop the compositor, and the way to
 look at it without logging out: it opens a regular window on your
