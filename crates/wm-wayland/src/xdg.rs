@@ -396,8 +396,44 @@ impl Compositor {
             // so `wm-core` reflows the decoration around the client's
             // real size. Converges: `wm-core` answers via
             // `resize_client`, which updates the record to match.
+            //
+            // With one gate, and the gate is load-bearing: a commit is
+            // only a *client-initiated* resize if the client is caught
+            // up with us. While one of our configures is still in
+            // flight (sent, not yet acked), a mismatched commit is the
+            // client's OLD size crossing our NEW one on the wire, and
+            // adopting it reverts the geometry we just set. Observed
+            // live as maximize bouncing full → old-size → full within
+            // 60ms — and, when the race ended the other way, as a
+            // "maximized" terminal parked at its old size in the
+            // screen's corner. During an interactive resize the same
+            // misreading fed the drag a stream of stale sizes to fight,
+            // which is half of the Edge resize-flicker report (the
+            // other half was min-size hints returned in logical units).
+            // A caught-up client's snap (foot acking our configure and
+            // committing the nearest cell grid) has no pending
+            // configure left, so it still adopts exactly as before.
+            let client_behind = with_states(&root, |states| {
+                states
+                    .data_map
+                    .get::<XdgToplevelSurfaceData>()
+                    .map(|data| !data.lock().unwrap().pending_configures().is_empty())
+            })
+            .unwrap_or(false);
+            // A commit whose size matches anything we recently asked
+            // for is the client obeying us — possibly obeying an ask
+            // from two configures ago, because acks are immediate while
+            // commits trail rendering. Obedience, prompt or tardy, is
+            // never a resize request. See `WindowRecord::recent_asks`
+            // for the ping-pong this gate broke.
+            let echoes_ask = committed.is_some_and(|size| {
+                backend
+                    .windows
+                    .get(&id)
+                    .is_some_and(|record| record.recent_asks.contains(&size))
+            });
             if let (Some(size), Some(record)) = (committed, backend.windows.get(&id)) {
-                if record.mapped && size != record.content.size {
+                if record.mapped && !client_behind && !echoes_ask && size != record.content.size {
                     let requested = Rect { pos: record.content.pos, size };
                     backend.queue(WmEvent::ConfigureRequest { window: id, requested });
                 }

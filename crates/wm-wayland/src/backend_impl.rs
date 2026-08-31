@@ -391,9 +391,26 @@ impl Backend for WaylandBackend {
                     let cached = guard.current();
                     (cached.min_size, cached.max_size)
                 });
+                // Logical, like every size a client declares — and the
+                // constraint engine these feed works in physical
+                // pixels, so they convert by the surface's committed
+                // buffer scale like everything else crossing this
+                // boundary. Returning them raw halved a scaled
+                // client's real minimum in the ledger's eyes: an
+                // interactive resize dragged below it pushed a size
+                // the client refused, the client answered with its
+                // true minimum, the mismatch came back as a
+                // ConfigureRequest, and the next motion pushed the
+                // refused size again — the window flickering
+                // larger/smaller at drag rate, observed live resizing
+                // Microsoft Edge at scale 2.
+                let hint_scale = crate::xdg::committed_buffer_scale(toplevel.wl_surface());
                 let to_size = |size: smithay::utils::Size<i32, Logical>| {
                     if size.w > 0 && size.h > 0 {
-                        Some(Size::new(size.w as u32, size.h as u32))
+                        Some(Size::new(
+                            crate::xdg::logical_to_physical(size.w, hint_scale) as u32,
+                            crate::xdg::logical_to_physical(size.h, hint_scale) as u32,
+                        ))
                     } else {
                         None
                     }
@@ -691,10 +708,23 @@ impl Backend for WaylandBackend {
                     // still says nothing about what any one client
                     // actually drew.
                     let scale = crate::xdg::committed_buffer_scale(toplevel.wl_surface());
+                    let logical = (size.w as i32 / scale, size.h as i32 / scale);
                     toplevel.with_pending_state(|state| {
-                        state.size = Some((size.w as i32 / scale, size.h as i32 / scale).into());
+                        state.size = Some(logical.into());
                     });
                     let _ = toplevel.send_pending_configure();
+                    // What the client will commit if it obeys: the
+                    // logical ask times its own scale — NOT `size`,
+                    // which integer division may have shaved a pixel
+                    // off. See `WindowRecord::recent_asks`.
+                    let expected = Size::new(
+                        (logical.0 * scale) as u32,
+                        (logical.1 * scale) as u32,
+                    );
+                    record.recent_asks.push_back(expected);
+                    while record.recent_asks.len() > 8 {
+                        record.recent_asks.pop_front();
+                    }
                 }
             }
             ManagedSurface::X11(surface) => {
