@@ -61,13 +61,16 @@ else takes its toolkit's default: GTK and Qt applications prefer Wayland when
 `WAYLAND_DISPLAY` is set, while Wine, Steam, JetBrains' JBR and most Electron
 builds land on XWayland.
 
-The consequence worth stating plainly: **under the Wayland session, XWayland
-clients get no EWMH root properties from chonkstep.** The `publish_*` family
-is left at its no-op defaults there, deliberately —
-`crates/wm-wayland/src/backend_impl.rs` says so directly — so an XWayland
-client sees only the minimal `_NET_SUPPORTED`/`_NET_SUPPORTING_WM_CHECK` that
-smithay's own `X11Wm` publishes. X11 automation tools do not work inside that
-session, and neither does `_NET_FRAME_EXTENTS`.
+Under the Wayland session, XWayland clients now get real EWMH from
+chonkstep (`crates/wm-wayland/src/xewmh.rs`): the compositor opens its
+own client connection to the XWayland display and publishes
+`_NET_SUPPORTING_WM_CHECK`, `_NET_SUPPORTED`, the client list, active
+window, desktops, per-window desktop, workarea (dock reservation
+included) and `_NET_FRAME_EXTENTS` — verified live with `xprop`,
+including the maximize/fullscreen/hidden state atoms changing as the
+window manager acts. Publishing only: inbound client messages (a pager
+asking to switch desks) are not translated, so `wmctrl -l`-style
+*reading* works while `wmctrl -s`-style *control* does not yet.
 
 ## Decorations
 
@@ -92,7 +95,7 @@ and re-decide rather than reading once at map time.
 | | X11 session | Wayland session, XWayland client | Wayland session, native client |
 |---|---|---|---|
 | Honours `_MOTIF_WM_HINTS` | **Asserted in CI** | **From the code** (`backend_impl.rs` asks smithay's `X11Surface::is_decorated`, which parses the same five words) | n/a |
-| Publishes `_NET_FRAME_EXTENTS` | **Asserted in CI** — real geometry when framed, four zeros when not | **Not implemented** — no EWMH is published to XWayland | n/a |
+| Publishes `_NET_FRAME_EXTENTS` | **Asserted in CI** — real geometry when framed, four zeros when not | **From the code, verified live once** — published via `xewmh.rs`, `xprop` shows real chrome values | n/a |
 | xdg-decoration | n/a | n/a | Server-side forced on every toplevel |
 
 The CI assertion lives in the `test` job of `.github/workflows/ci.yml`: it
@@ -201,18 +204,18 @@ every GTK client fail to find it and fall back — overriding whatever the user
 set in their own `gtk-3.0/settings.ini`. The desktop says true things about
 DPI and nothing about taste.
 
-**This works on the X11 session and is currently inert under the Wayland
-compositor. Verified, both halves.** On a plain X server chonkstep acquires
-the selection and the published bytes decode to the right values for the
-session's scale. Under the compositor it does not: XWayland claims
-`_XSETTINGS_S0` for itself the moment it starts, and publishes an *empty*
-settings block (a bare 12-byte header, zero settings). Standing down is the
-correct response to an existing owner — two managers fighting is worse than
-either winning, and ICCCM says so — but the practical result is that X11
-applications under the Wayland session still get no DPI from this mechanism,
-and fall back to the per-child environment variables described below. Taking
-the selection away from XWayland by force is possible and is not currently
-done; it needs deciding, not just coding.
+**This now works on both sessions, and the Wayland half required a
+policy call worth recording.** XWayland claims `_XSETTINGS_S0` the
+moment it starts and publishes an *empty* settings block — a
+placeholder, not a manager, and its emptiness meant X11 toolkits under
+the compositor got no DPI at all. The manager now classifies the
+current owner before deciding: an owner whose property is absent or a
+valid zero-settings block is a placeholder and is taken over
+(ICCCM-correct, `SelectionClear` to the old owner); an owner publishing
+even one real setting — a user's own `xsettingsd` — is refused exactly
+as before. Both paths are pinned by live tests against a real X
+server, and the takeover was verified against a live XWayland: the
+session log shows the selection acquired and scale 2.0 published.
 
 Where it does apply, it reaches clients this session did not launch — which
 the per-child environment variables below can never do — and it is
@@ -336,16 +339,19 @@ deliberately. See above.
 **Live UI scale changes.** Applications read the scale once, at launch. Not
 implemented, deferred deliberately.
 
-**EWMH inside the Wayland session.** `wmctrl`, `xdotool`, X11 pagers and
-taskbars have nothing to talk to, because chonkstep publishes no root
-properties to XWayland. Native Wayland tooling uses
-`wlr-foreign-toplevel-management` instead, which X11 clients cannot see.
+**EWMH control messages inside the Wayland session.** Reading works
+now (see above); *control* does not: a pager's `_NET_CURRENT_DESKTOP`
+or `_NET_ACTIVE_WINDOW` client message to the XWayland root is not
+translated into the window manager. `wmctrl -l` lists, `wmctrl -a`
+does nothing.
 
-**`_NET_WM_STATE` feedback to XWayland clients.** The compositor maximises and
-fullscreens an X11 window but never tells it: `X11Surface::set_maximized`,
-`set_fullscreen` and `set_minimized` are never called, so the client's
-`_NET_WM_STATE` goes stale. An application that draws differently when it
-believes itself maximised will draw the wrong thing.
+**`_NET_WM_STATE` feedback.** Fixed, on both client kinds:
+`publish_net_state` pushes maximize/fullscreen/hidden back to X11
+surfaces through smithay's setters, and sets the matching
+`xdg_toplevel` states for native Wayland clients — which also never
+used to hear they were maximized. Shading remains unpublished on the
+Wayland session (no protocol vocabulary for it) and is omitted from
+`_NET_SUPPORTED` there accordingly.
 
 **Client-initiated resize.** `_NET_WM_MOVERESIZE`'s eight *resize* directions
 are dropped: this window manager's resize machinery is driven by its own

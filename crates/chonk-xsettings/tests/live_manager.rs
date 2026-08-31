@@ -22,10 +22,19 @@
 //! is precisely the resource the crate exists to hold exclusively;
 //! running them concurrently would have them fail each other on purpose.
 
-use x11rb::protocol::xproto::{AtomEnum, ConnectionExt as _};
+use x11rb::COPY_DEPTH_FROM_PARENT;
+use x11rb::connection::Connection as _;
+use x11rb::protocol::Event;
+use x11rb::protocol::xproto::{
+    AtomEnum, ConnectionExt as _, CreateWindowAux, PropMode, WindowClass,
+};
 use x11rb::rust_connection::RustConnection;
+use x11rb::wrapper::ConnectionExt as _;
 
-use chonk_xsettings::{DesktopAppearance, ManagerState, XSettingsError, XSettingsManager, keys};
+use chonk_xsettings::{
+    AcquisitionPolicy, DesktopAppearance, ManagerState, Settings, XSettingsError, XSettingsManager,
+    keys,
+};
 
 /// An observer connection, standing in for an X client that wants to
 /// know what the settings manager is publishing. Separate from the
@@ -88,6 +97,92 @@ impl Observer {
         );
         assert_eq!(reply.format, 8, "the property must be at format 8");
         Some(reply.value)
+    }
+}
+
+/// A pretend incumbent: a connection that owns `_XSETTINGS_S0` the way
+/// XWayland does, publishing whatever bytes the test hands it. Built
+/// with raw `x11rb` rather than through `XSettingsManager` on purpose —
+/// the thing being played here is precisely a selection owner that is
+/// *not* this crate, and the placeholder case must reproduce XWayland's
+/// stub exactly: an owner window, an empty (or not) settings block, and
+/// no intention of ever standing down by itself.
+struct FakeOwner {
+    conn: RustConnection,
+    window: u32,
+}
+
+impl FakeOwner {
+    /// Takes the selection and publishes `property` on the owner
+    /// window; `None` owns the selection with no property at all.
+    fn claiming(property: Option<&[u8]>) -> Self {
+        let (conn, screen_num) = RustConnection::connect(None).expect("a display to squat on");
+        let screen = &conn.setup().roots[screen_num];
+        let selection = conn
+            .intern_atom(false, format!("_XSETTINGS_S{screen_num}").as_bytes())
+            .unwrap()
+            .reply()
+            .unwrap()
+            .atom;
+        let settings_atom = conn
+            .intern_atom(false, b"_XSETTINGS_SETTINGS")
+            .unwrap()
+            .reply()
+            .unwrap()
+            .atom;
+
+        let window = conn.generate_id().unwrap();
+        conn.create_window(
+            COPY_DEPTH_FROM_PARENT,
+            window,
+            screen.root,
+            -1,
+            -1,
+            1,
+            1,
+            0,
+            WindowClass::INPUT_OUTPUT,
+            0,
+            &CreateWindowAux::new().override_redirect(1),
+        )
+        .unwrap()
+        .check()
+        .unwrap();
+        if let Some(bytes) = property {
+            conn.change_property8(PropMode::REPLACE, window, settings_atom, settings_atom, bytes)
+                .unwrap()
+                .check()
+                .unwrap();
+        }
+        // `CurrentTime` would be wrong in the real manager; for a test
+        // stub it matches what XWayland effectively does and keeps the
+        // helper simple.
+        conn.set_selection_owner(window, selection, 0u32)
+            .unwrap()
+            .check()
+            .unwrap();
+        conn.flush().unwrap();
+        assert_eq!(
+            conn.get_selection_owner(selection).unwrap().reply().unwrap().owner,
+            window,
+            "the fake owner must actually own the selection before the test means anything"
+        );
+        // The server stamped the selection with its clock just now; a
+        // takeover's own timestamp must be strictly later, so give the
+        // clock a tick to move before the contender fetches one.
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        Self { conn, window }
+    }
+
+    /// Blocks until the server tells this owner it lost the selection.
+    fn lost_the_selection(&self) -> bool {
+        loop {
+            match self.conn.wait_for_event() {
+                Ok(Event::SelectionClear(event)) => return event.owner == self.window,
+                Ok(_) => continue,
+                Err(_) => return false,
+            }
+        }
     }
 }
 
@@ -218,6 +313,89 @@ fn dropping_the_manager_releases_the_selection_too() {
         0,
         "a dropped manager must not leave a stale property behind the selection"
     );
+}
+
+#[test]
+#[ignore = "needs an X server; see the module documentation"]
+fn a_placeholder_owner_is_taken_over_when_the_caller_opts_in() {
+    // The XWayland situation, reproduced: the selection is owned, the
+    // property behind it is a valid block with zero settings, and
+    // nothing will ever be published there.
+    let squatter = FakeOwner::claiming(Some(&Settings::new().serialize()));
+    let observer = Observer::new();
+    assert_eq!(observer.owner(), squatter.window);
+
+    let mut manager =
+        XSettingsManager::acquire_with_policy(None, AcquisitionPolicy::TakeOverPlaceholder)
+            .expect("a placeholder owner must be taken over");
+    assert_eq!(
+        observer.owner(),
+        manager.window(),
+        "the selection must now resolve to the new manager's window"
+    );
+    assert!(
+        squatter.lost_the_selection(),
+        "ICCCM's notice to the old owner is the SelectionClear the server sends it"
+    );
+
+    // And the takeover ends somewhere useful: real settings, readable
+    // by a client, where the placeholder had published nothing.
+    assert!(manager
+        .publish_appearance(&DesktopAppearance::new(2.0, "NeXT"))
+        .unwrap());
+    let published = observer.property(manager.window()).unwrap();
+    assert!(header_count(&published) > 0);
+    assert!(String::from_utf8_lossy(&published).contains(keys::XFT_DPI));
+    assert_eq!(manager.poll().unwrap(), ManagerState::Owner);
+}
+
+#[test]
+#[ignore = "needs an X server; see the module documentation"]
+fn a_real_owner_is_refused_even_when_takeover_is_asked_for() {
+    // One setting is all it takes to be real: a manager publishing
+    // anything is doing the job, and displacing it would flip that
+    // setting under every client on the display.
+    let mut published = Settings::new();
+    assert!(published.set("Xft/DPI", 98304));
+    let incumbent = FakeOwner::claiming(Some(&published.serialize()));
+
+    match XSettingsManager::acquire_with_policy(None, AcquisitionPolicy::TakeOverPlaceholder) {
+        Err(XSettingsError::AlreadyOwned { selection, owner }) => {
+            assert_eq!(selection, "_XSETTINGS_S0");
+            assert_eq!(owner, incumbent.window, "the error must name the manager that was respected");
+        }
+        Err(other) => panic!("expected AlreadyOwned, got {other}"),
+        Ok(_) => panic!("a manager with settings must never be taken over"),
+    }
+
+    let observer = Observer::new();
+    assert_eq!(observer.owner(), incumbent.window, "the incumbent must be untouched");
+    assert_eq!(
+        observer.property(incumbent.window).as_deref(),
+        Some(published.serialize().as_slice()),
+        "and so must its property"
+    );
+}
+
+#[test]
+#[ignore = "needs an X server; see the module documentation"]
+fn the_default_policy_refuses_even_a_placeholder() {
+    // The takeover is opt-in, and this is the test that keeps it so:
+    // without the policy, an empty-block owner is refused exactly the
+    // way any owner always was.
+    let squatter = FakeOwner::claiming(Some(&Settings::new().serialize()));
+
+    match XSettingsManager::acquire(None) {
+        Err(XSettingsError::AlreadyOwned { selection, owner }) => {
+            assert_eq!(selection, "_XSETTINGS_S0");
+            assert_eq!(owner, squatter.window);
+        }
+        Err(other) => panic!("expected AlreadyOwned, got {other}"),
+        Ok(_) => panic!("the default policy must not fight anybody, placeholder or not"),
+    }
+
+    let observer = Observer::new();
+    assert_eq!(observer.owner(), squatter.window);
 }
 
 #[test]

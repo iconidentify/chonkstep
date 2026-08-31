@@ -613,6 +613,66 @@ pub fn serialize_with_byte_order(settings: &Settings, byte_order: ByteOrder) -> 
     w.bytes
 }
 
+/// The decoded twelve-byte header of a `_XSETTINGS_SETTINGS` property.
+///
+/// This is as much of a *reader* as this crate has, and it is exactly as
+/// much as it needs. The crate's charter is the manager side only — it
+/// does not follow other desktops' settings, so it has no use for a full
+/// parser — but [`crate::manager`] now has one question to ask about a
+/// property some *other* manager wrote: "is this a well-formed block
+/// that contains nothing?" That question is answerable from the header
+/// alone, so the header is all that is decoded, here, next to the code
+/// that writes the same twelve bytes and against the same layout
+/// comment.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Header {
+    /// The byte order the first byte of the property declared, and the
+    /// one the other two fields were decoded with.
+    pub byte_order: ByteOrder,
+    /// The manager serial from the header.
+    pub serial: u32,
+    /// How many setting records the header claims follow it.
+    pub n_settings: u32,
+}
+
+/// Decodes the header of a `_XSETTINGS_SETTINGS` property, strictly.
+///
+/// Returns `None` unless the bytes *begin with* a well-formed header:
+/// at least twelve bytes long, a byte-order byte that is `0` or `1`,
+/// and the three padding bytes zero as the specification requires of a
+/// writer. The records after the header are not walked — see
+/// [`Header`] for why there is no full parser — so a `Some` says "the
+/// header is valid", not "the property is".
+///
+/// The strictness is the point. The one caller is
+/// [`crate::manager`]'s placeholder classification, where the cost of
+/// the two errors is wildly asymmetric: treating a real manager's
+/// property as garbage merely leaves the incumbent alone (today's
+/// behaviour), while treating garbage as a valid empty block would
+/// license taking a selection away from an owner nothing is actually
+/// known about. So anything this function is not certain of, it
+/// declines to parse.
+pub fn parse_header(bytes: &[u8]) -> Option<Header> {
+    let (header, _) = bytes.split_first_chunk::<12>()?;
+    let byte_order = match header[0] {
+        0 => ByteOrder::LsbFirst,
+        1 => ByteOrder::MsbFirst,
+        _ => return None,
+    };
+    if header[1..4] != [0, 0, 0] {
+        return None;
+    }
+    let field = |bytes: [u8; 4]| match byte_order {
+        ByteOrder::LsbFirst => u32::from_le_bytes(bytes),
+        ByteOrder::MsbFirst => u32::from_be_bytes(bytes),
+    };
+    Some(Header {
+        byte_order,
+        serial: field(header[4..8].try_into().expect("four bytes")),
+        n_settings: field(header[8..12].try_into().expect("four bytes")),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -934,6 +994,54 @@ mod tests {
             }),
             Some(MAX_STRING_BYTES)
         );
+    }
+
+    #[test]
+    fn the_header_parser_agrees_with_the_serializer_in_both_byte_orders() {
+        let mut settings = Settings::new();
+        settings.set("Xft/DPI", 98304);
+        settings.set("Gtk/ThemeName", "NeXT");
+
+        for byte_order in [ByteOrder::LsbFirst, ByteOrder::MsbFirst] {
+            let bytes = serialize_with_byte_order(&settings, byte_order);
+            let header = parse_header(&bytes).expect("our own output must parse");
+            assert_eq!(header.byte_order, byte_order);
+            assert_eq!(header.serial, settings.serial());
+            assert_eq!(header.n_settings, 2);
+        }
+    }
+
+    #[test]
+    fn the_header_parser_reads_the_empty_block_this_crate_publishes_at_acquisition() {
+        // The exact bytes XWayland's placeholder publishes, and also the
+        // exact bytes this crate itself puts on the window before it has
+        // been told anything: a bare header, zero settings.
+        let bytes = Settings::new().serialize();
+        assert_eq!(bytes.len(), 12);
+        assert_eq!(
+            parse_header(&bytes),
+            Some(Header {
+                byte_order: ByteOrder::LsbFirst,
+                serial: 0,
+                n_settings: 0,
+            })
+        );
+    }
+
+    #[test]
+    fn the_header_parser_declines_what_it_is_not_certain_of() {
+        // Too short to be a header at all.
+        assert_eq!(parse_header(&[]), None);
+        assert_eq!(parse_header(&[0; 11]), None);
+        // A byte-order code the specification does not define.
+        let mut bad_order = [0u8; 12];
+        bad_order[0] = 2;
+        assert_eq!(parse_header(&bad_order), None);
+        assert_eq!(parse_header(&[0xff; 12]), None);
+        // Padding the specification says a writer must zero.
+        let mut bad_padding = [0u8; 12];
+        bad_padding[2] = 1;
+        assert_eq!(parse_header(&bad_padding), None);
     }
 
     #[test]

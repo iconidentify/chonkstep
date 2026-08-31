@@ -24,6 +24,12 @@ chonk-shell = { path = "../chonk-shell" }
 # libraries of its own, and a build where it were absent would silently
 # be a build where terminal-launched GTK apps render at 1x.
 chonk-xsettings = { path = "../chonk-xsettings" }
+# EWMH publishing to the XWayland root (see `xewmh.rs`) — a third
+# ordinary X11 client connection beside smithay's XWM and the
+# XSETTINGS manager's, because smithay exposes no property-write
+# access to its own. Pinned to the same "0.13" requirement `wm-x11`
+# and `chonk-xsettings` use so the workspace resolves one copy.
+x11rb = "0.13"
 tracing = "0.1"
 # Screenshot encoding (see `capture.rs`) - the same rasterizer the
 # theme engine draws with, so no second image stack enters the graph.

@@ -2831,6 +2831,7 @@ dependencies = [
  "wm-core",
  "wm-theme",
  "wm-theme-api",
+ "x11rb",
 ]
 
 [[package]]

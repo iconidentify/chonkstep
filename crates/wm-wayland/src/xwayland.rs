@@ -164,6 +164,20 @@ impl XwmHandler for Compositor {
         backend.queue(WmEvent::MapRequest(id));
     }
 
+    fn map_window_notify(&mut self, _xwm: XwmId, window: X11Surface) {
+        // Smithay has just APPENDed this window to the root's
+        // `_NET_CLIENT_LIST` on its own connection — after our EWMH
+        // flush already REPLACEd the property with `wm-core`'s list
+        // (the manage runs off the map *request*, one step earlier),
+        // so the window is now listed twice. Re-dirty the list so the
+        // next `xewmh::flush` REPLACEs it again, now ordered after
+        // smithay's append on the server; see
+        // `EwmhLedger::mark_client_list_dirty` for the observed
+        // failure.
+        let _ = window;
+        self.wm.backend_mut().ewmh.mark_client_list_dirty();
+    }
+
     fn unmapped_window(&mut self, _xwm: XwmId, window: X11Surface) {
         let backend = self.wm.backend_mut();
         let Some(id) = x11_window_id(backend, &window) else {
