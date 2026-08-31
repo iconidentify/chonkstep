@@ -34,6 +34,9 @@ mod protocols;
 mod renderer;
 mod session;
 mod state;
+// End-to-end test injection door — inert unless CHONKSTEP_TEST_SOCKET
+// is set; see its module docs for the three regressions it exists for.
+mod test_door;
 mod xdg;
 mod xwayland;
 

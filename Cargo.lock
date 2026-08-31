@@ -312,6 +312,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "chonk-testkit"
+version = "0.1.0"
+dependencies = [
+ "png",
+]
+
+[[package]]
 name = "chonk-ui"
 version = "0.1.0"
 dependencies = [
