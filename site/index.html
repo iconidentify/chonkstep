@@ -1,0 +1,320 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>chonkstep — a NeXTSTEP-style desktop for Linux</title>
+<meta name="description" content="A NeXTSTEP-style desktop written in Rust: one shell, two real login sessions — an X11 window manager and a Wayland compositor.">
+<style>
+  :root {
+    --bg: #23242a;
+    --panel: #2c2d34;
+    --ink: #d6d6d0;
+    --ink-dim: #9a9a94;
+    --accent: #e8a33d;
+    --hi: #55565e;
+    --lo: #101014;
+    --chrome: #aeaeae;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font: 16px/1.6 "DejaVu Sans", system-ui, sans-serif;
+  }
+  a { color: var(--accent); }
+  code, pre {
+    font-family: "JetBrains Mono", "DejaVu Sans Mono", monospace;
+    font-size: 0.88em;
+  }
+  pre {
+    background: var(--lo);
+    border-top: 1px solid #000;
+    border-left: 1px solid #000;
+    border-right: 1px solid var(--hi);
+    border-bottom: 1px solid var(--hi);
+    padding: 14px 16px;
+    overflow-x: auto;
+    line-height: 1.45;
+  }
+  pre .c { color: var(--ink-dim); }
+  .wrap { max-width: 1060px; margin: 0 auto; padding: 0 20px; }
+
+  /* The titlebar: the one piece of chrome the page borrows from the desktop. */
+  header.titlebar {
+    background: linear-gradient(#3a3a3a, #191919);
+    border-top: 1px solid #6a6a6a;
+    border-bottom: 2px solid #000;
+    color: #fff;
+    padding: 8px 0;
+  }
+  header.titlebar .wrap {
+    display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  }
+  header.titlebar .title { font-weight: bold; letter-spacing: 0.04em; }
+  header.titlebar nav a { color: #cfcfcf; text-decoration: none; margin-left: 16px; font-size: 14px; }
+  header.titlebar nav a:hover { color: #fff; }
+
+  .hero { padding: 44px 0 8px; }
+  .hero h1 { font-size: 34px; margin: 0 0 10px; letter-spacing: 0.01em; }
+  .hero p.lede { font-size: 19px; max-width: 62ch; color: var(--ink); margin: 0 0 8px; }
+  .hero p.sub { color: var(--ink-dim); max-width: 70ch; margin-top: 10px; }
+
+  figure { margin: 28px 0; }
+  figure img {
+    width: 100%; height: auto; display: block;
+    border: 1px solid #000;
+    outline: 1px solid var(--hi);
+    box-shadow: 0 12px 40px rgba(0,0,0,0.45);
+  }
+  figcaption { color: var(--ink-dim); font-size: 14px; margin-top: 10px; }
+
+  section { padding: 36px 0 8px; }
+  h2 {
+    font-size: 24px; margin: 0 0 6px;
+    padding-bottom: 6px;
+    border-bottom: 1px solid var(--hi);
+  }
+  h2 + p.kicker { color: var(--ink-dim); margin-top: 6px; max-width: 75ch; }
+
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 14px; margin: 22px 0; }
+  .card {
+    background: var(--panel);
+    border-top: 1px solid var(--hi);
+    border-left: 1px solid var(--hi);
+    border-right: 1px solid #000;
+    border-bottom: 2px solid #000;
+    padding: 16px 18px;
+  }
+  .card h3 { margin: 0 0 8px; font-size: 16px; color: #fff; }
+  .card p { margin: 0; font-size: 14.5px; color: var(--ink); }
+  .card p + p { margin-top: 8px; }
+  .card .how { color: var(--ink-dim); font-size: 13px; margin-top: 10px; }
+
+  .themes { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin: 22px 0; }
+  .themes figure { margin: 0; }
+  @media (max-width: 720px) { .themes { grid-template-columns: 1fr; } }
+
+  table.keys { border-collapse: collapse; margin: 18px 0; font-size: 14.5px; }
+  table.keys td { padding: 4px 18px 4px 0; vertical-align: top; }
+  table.keys td:first-child { font-family: "JetBrains Mono", monospace; color: var(--accent); white-space: nowrap; }
+
+  footer {
+    margin-top: 56px; padding: 26px 0 40px;
+    border-top: 1px solid var(--hi);
+    color: var(--ink-dim); font-size: 14px;
+  }
+  .fineprint { color: var(--ink-dim); font-size: 13.5px; max-width: 78ch; }
+</style>
+</head>
+<body>
+
+<header class="titlebar">
+  <div class="wrap">
+    <span class="title">chonkstep</span>
+    <nav>
+      <a href="#guarantees">Guarantees</a>
+      <a href="#overview">Overview</a>
+      <a href="#themes">Themes</a>
+      <a href="#instruments">Instruments</a>
+      <a href="#install">Install</a>
+      <a href="https://github.com/iconidentify/chonkstep">Source</a>
+    </nav>
+  </div>
+</header>
+
+<div class="hero wrap">
+  <h1>A NeXTSTEP-style desktop for Linux.</h1>
+  <p class="lede">
+    chonkstep is one desktop with two faces: an X11 window manager and a
+    Wayland compositor, wired to the same shell, so a feature lands once
+    and both sessions get it by construction. The chrome is chiseled and
+    specified to the pixel; under it sit a dock of crash-proof
+    instruments, real workspaces, and a session that survives.
+  </p>
+  <p class="sub">
+    Written in Rust. GPL-3.0. Runs as a real login session on
+    DRM/KMS/libinput hardware, or nested in a window on the desktop you
+    already have.
+  </p>
+</div>
+
+<div class="wrap">
+  <figure>
+    <img src="shots/hero.png" alt="The chonkstep desktop: two terminals in chiseled chrome over the Lavender Grid wallpaper, with the dock instruments on the right, the workspace Clip top-left, and a miniaturized window's icon tile bottom-left.">
+    <figcaption>The Wayland session, NeXTSTEP Classic theme. Every screenshot on this
+    page is a real capture of the compositor in this repository, taken through its
+    own screencopy protocol.</figcaption>
+  </figure>
+</div>
+
+<section id="guarantees" class="wrap">
+  <h2>The guarantees</h2>
+  <p class="kicker">Each of these is a mechanism in the code with tests behind it,
+  not a roadmap item. File references are into the repository.</p>
+  <div class="cards">
+    <div class="card">
+      <h3>A dock widget cannot take the desktop down.</h3>
+      <p>Every dock tile is a separate process that pushes finished pixels
+      over a private socket. A widget that crashes, hangs, leaks or loops
+      shows a dead face in its own tile — and nothing else happens. The
+      shell never blocks on a dockapp: not on send, not on accept, not on
+      a handshake.</p>
+      <p class="how">Enforced, not advised: "a dock widget must not do I/O"
+      is a build error (clippy <code>disallowed_methods</code>/<code>disallowed_types</code>,
+      denied in CI), and the protocol's failure modes have tests.</p>
+    </div>
+    <div class="card">
+      <h3>Live everything.</h3>
+      <p>A theme pick, a UI scale change, and any config edit apply to the
+      running session in place — nothing closed, no window lost, every
+      dockapp kept. Restart exists for exactly one thing a running process
+      cannot apply to itself: a new build.</p>
+      <p class="how">One path (<code>apply_session_state</code>) serves startup
+      and reload, so a setting cannot be reloadable but not startable.</p>
+    </div>
+    <div class="card">
+      <h3>Sessions survive.</h3>
+      <p>With <code>restore_session = true</code>, the desktop records each
+      window's app, geometry, workspace and shape as you work, and brings
+      the layout back at the next login — and after a crash the watchdog
+      recovered from. A window you closed is never resurrected.</p>
+      <p class="how">The session script supervises the compositor: abnormal
+      exits restart it with the recorded layout; more than three crashes in
+      a minute trips a brake instead of crash-looping.</p>
+    </div>
+    <div class="card">
+      <h3>It locks.</h3>
+      <p>ext-session-lock, with an absolute contract: while locked, the
+      scene is lock surfaces over black and nothing else — on screen and in
+      every capture path. Set <code>lock_command</code> and a crash-recovered
+      session comes back locked, not exposed.</p>
+      <p class="how">The lock lifecycle is a pure state machine whose tests
+      pin exactly the transitions that must not exist. Layer-shell and
+      idle-notify ship alongside it, so lockers, bars and launchers from
+      the wlroots ecosystem run here.</p>
+    </div>
+  </div>
+</section>
+
+<section id="overview" class="wrap">
+  <h2>The Overview</h2>
+  <p class="kicker">Every window on the desk, drawn in the desktop's own language:
+  cards in miniature real chrome with live captures, over a strip of genuine
+  workspace tiles. <code>super+up</code>, arrows, Return. Captures are served at card
+  resolution while it is open, so terminal text stays legible instead of
+  arriving as smear.</p>
+  <figure>
+    <img src="shots/overview.png" alt="The Overview: three windows as cards with live captures — a git log, the commented config file, fastfetch — each wearing a miniature titlebar, with the workspace strip at the bottom.">
+    <figcaption>The Overview over three terminals. The selected card wears
+    the focused titlebar; a miniaturized window would appear asleep.</figcaption>
+  </figure>
+</section>
+
+<section id="themes" class="wrap">
+  <h2>Eight themes, applied on the spot</h2>
+  <p class="kicker">A theme restyles everything at once — chrome, menus, wallpaper,
+  dock, instruments, and the palette of every terminal launched from then on —
+  live, with nothing closed. NeXTSTEP Classic, Amber Phosphor, Teal Blueprint,
+  Graphite, NeXT Lavender, Jade Lacquer, Ivory Halftone, Indigo Filament.</p>
+  <div class="themes">
+    <figure>
+      <img src="shots/theme-amber-phosphor.png" alt="Amber Phosphor theme: amber LED wallpaper, amber terminal text, amber instrument panel.">
+      <figcaption>Amber Phosphor</figcaption>
+    </figure>
+    <figure>
+      <img src="shots/theme-teal-blueprint.png" alt="Teal Blueprint theme: drafting-table wallpaper, teal terminal, teal chrome.">
+      <figcaption>Teal Blueprint</figcaption>
+    </figure>
+    <figure>
+      <img src="shots/theme-ivory-halftone.png" alt="Ivory Halftone theme: press-cream paper terminal and halftone artwork, with the dark focused titlebar kept.">
+      <figcaption>Ivory Halftone — the light one. The focused titlebar stays
+      dark, which is what keeps focus legible on a light desktop.</figcaption>
+    </figure>
+    <figure>
+      <img src="shots/theme-indigo-filament.png" alt="Indigo Filament theme: filament-wave wallpaper in indigo and violet, dark chrome.">
+      <figcaption>Indigo Filament</figcaption>
+    </figure>
+  </div>
+  <figure>
+    <img src="shots/menu.png" alt="The root menu with the Theme cascade posted, current theme marked, over the Jade Lacquer theme's Jade Terrace wallpaper.">
+    <figcaption>The root menu's Theme cascade, on Jade Lacquer. The dot marks
+    the live theme; picking another applies it immediately.</figcaption>
+  </figure>
+</section>
+
+<section id="instruments" class="wrap">
+  <h2>The Instrument Platform</h2>
+  <p class="kicker">The dock is not a bar that renders plugins — it is a host for
+  out-of-process instruments. You can write one in any language that can open
+  a Unix socket. This is a complete dockapp, in Python, stdlib only:</p>
+<pre><code>from chonkdock import Dockapp
+
+class Hello(Dockapp):
+    def draw(self, ctx, buf):
+        for i in range(0, len(buf), 4):
+            buf[i:i + 4] = b"\x30\x60\x90\xff"   <span class="c"># one opaque blue tile</span>
+        return True
+
+Hello("hello-instrument").run()</code></pre>
+  <p>Install it — or anything with a git URL — with <code>chonk-get</code>, and the
+  tile appears at the next shell restart, themed, supervised, and unable to
+  freeze the desktop:</p>
+<pre><code>$ chonk-get install ./hello-instrument
+$ chonk-get install bindings/python        <span class="c"># the shipped Python clock</span>
+$ chonk-get install examples/chonk-shelf   <span class="c"># the Shelf: clipboard history</span>
+$ chonk-get list</code></pre>
+  <p class="fineprint">The wire protocol is specified byte-for-byte in
+  <a href="https://github.com/iconidentify/chonkstep/blob/main/docs/dockapp-protocol.md">docs/dockapp-protocol.md</a>;
+  <a href="https://github.com/iconidentify/chonkstep/blob/main/docs/instrument-platform.md">docs/instrument-platform.md</a>
+  traces each guarantee to the mechanism that enforces it. Python and Go
+  bindings ship in the repository, dependency-free. Dockapps are ordinary
+  processes running as you — not sandboxed — so install one with the same
+  care as any other program.</p>
+</section>
+
+<section id="install" class="wrap">
+  <h2>Install</h2>
+  <p class="kicker">Arch (and Omarchy). You get two real login sessions —
+  "chonkstep" and "chonkstep (Wayland)" — in your display manager's picker,
+  or startable from a TTY.</p>
+<pre><code><span class="c"># As a package:</span>
+git clone https://github.com/iconidentify/chonkstep.git
+cd chonkstep/packaging/arch
+makepkg -si -p PKGBUILD-git   <span class="c"># plain PKGBUILD pins the release tag</span>
+
+<span class="c"># Or from the checkout (nothing is copied out; scripts/update.sh is the upgrade):</span>
+cd chonkstep
+scripts/install.sh
+
+<span class="c"># Or just look at it first, nested in a window on your current desktop:</span>
+cargo build --release -p chonkstep-wayland
+./target/release/chonkstep-wayland</code></pre>
+  <p>Then read the
+  <a href="https://github.com/iconidentify/chonkstep/blob/main/docs/quickstart.md">quickstart</a> —
+  install to first hour — and the
+  <a href="https://github.com/iconidentify/chonkstep/blob/main/docs/keybindings.md">keybinding card</a>.
+  The ones to learn first:</p>
+  <table class="keys">
+    <tr><td>alt+shift+return</td><td>terminal</td></tr>
+    <tr><td>super+up</td><td>the Overview</td></tr>
+    <tr><td>alt+tab (hold)</td><td>the modal window switcher</td></tr>
+    <tr><td>alt+ctrl+left/right</td><td>previous / next workspace</td></tr>
+    <tr><td>right-click the desktop</td><td>root menu: applications, themes, exit</td></tr>
+  </table>
+</section>
+
+<footer>
+  <div class="wrap">
+    <p>chonkstep is GPL-3.0-only, written in Rust on
+    <a href="https://github.com/Smithay/smithay">Smithay</a> (Wayland) and x11rb (X11).
+    X11 applications are first-class in the Wayland session through XWayland;
+    what works, what doesn't, and how to verify both is written down plainly in
+    <a href="https://github.com/iconidentify/chonkstep/blob/main/docs/xwayland-compatibility.md">docs/xwayland-compatibility.md</a>.</p>
+    <p><a href="https://github.com/iconidentify/chonkstep">github.com/iconidentify/chonkstep</a></p>
+  </div>
+</footer>
+
+</body>
+</html>

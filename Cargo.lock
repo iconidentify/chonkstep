@@ -243,7 +243,7 @@ dependencies = [
 
 [[package]]
 name = "chonk-about"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chonk-ui",
  "cosmic-text",
@@ -252,14 +252,14 @@ dependencies = [
 
 [[package]]
 name = "chonk-dock-proto"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "libc",
 ]
 
 [[package]]
 name = "chonk-dock-widget"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "cosmic-text",
  "wm-core",
@@ -269,7 +269,7 @@ dependencies = [
 
 [[package]]
 name = "chonk-dockapp-torture"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chonk-dock-proto",
  "chonk-ui",
@@ -277,14 +277,14 @@ dependencies = [
 
 [[package]]
 name = "chonk-dockclock"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chonk-ui",
 ]
 
 [[package]]
 name = "chonk-instruments"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chonk-dock-widget",
  "cosmic-text",
@@ -294,7 +294,7 @@ dependencies = [
 
 [[package]]
 name = "chonk-shelf"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chonk-dock-proto",
  "chonk-ui",
@@ -304,7 +304,7 @@ dependencies = [
 
 [[package]]
 name = "chonk-shell"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chonk-dock-proto",
  "chonk-dock-widget",
@@ -323,7 +323,7 @@ dependencies = [
 
 [[package]]
 name = "chonk-testkit"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "png",
  "wm-theme",
@@ -332,7 +332,7 @@ dependencies = [
 
 [[package]]
 name = "chonk-ui"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chonk-dock-proto",
  "tiny-skia",
@@ -344,7 +344,7 @@ dependencies = [
 
 [[package]]
 name = "chonk-xsettings"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "thiserror 2.0.20",
  "tracing",
@@ -353,7 +353,7 @@ dependencies = [
 
 [[package]]
 name = "chonkstep"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chonk-shell",
  "chonk-xsettings",
@@ -369,7 +369,7 @@ dependencies = [
 
 [[package]]
 name = "chonkstep-wayland"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "tracing",
  "tracing-subscriber",
@@ -2782,7 +2782,7 @@ checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
 
 [[package]]
 name = "wm-config"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
  "toml",
@@ -2792,7 +2792,7 @@ dependencies = [
 
 [[package]]
 name = "wm-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "bitflags 2.13.1",
  "slotmap",
@@ -2802,7 +2802,7 @@ dependencies = [
 
 [[package]]
 name = "wm-theme"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "cosmic-text",
  "serde",
@@ -2813,14 +2813,14 @@ dependencies = [
 
 [[package]]
 name = "wm-theme-api"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "wm-wayland"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "chonk-shell",
  "chonk-xsettings",
@@ -2836,7 +2836,7 @@ dependencies = [
 
 [[package]]
 name = "wm-x11"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "thiserror 2.0.20",
  "tracing",
