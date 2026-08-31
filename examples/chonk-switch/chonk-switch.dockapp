@@ -1,0 +1,18 @@
+# Registration for the appearance switch, the light/dark toggle
+# dockapp. Install by copying to one of:
+#   $XDG_DATA_DIRS/chonkstep/dockapps/
+#   $XDG_CONFIG_HOME/chonkstep/dockapps/   (per-user)
+# or with `scripts/chonk-get install examples/chonk-switch`
+# (chonk-get rewrites the relative exec path below to its absolute
+# installed location; build.sh vendors the Python SDK next to it).
+
+id = "chonk-switch"
+name = "SW"
+exec = ["chonk-switch.py"]
+tile_units = 1
+
+# The switch has no reason to exit on its own — a missing state
+# directory is created, an unreadable mode file reads as light — so
+# any exit is a fault worth relaunching after, under the shell's
+# crash-loop cutoff like everything else.
+restart = "on-crash"

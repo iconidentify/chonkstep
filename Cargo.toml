@@ -6,6 +6,10 @@ resolver = "2"
 # ship like one. `chonk-dockclock` in particular is a conformance test —
 # see its module doc — and it only tests anything if CI builds it.
 members = ["crates/*", "examples/*"]
+# A dockapp does not have to be Rust — the socket protocol is
+# language-agnostic — and `chonk-switch` is Python. Excluded so the
+# `examples/*` member glob above doesn't demand a Cargo.toml of it.
+exclude = ["examples/chonk-switch"]
 
 [workspace.package]
 version = "0.2.0"
