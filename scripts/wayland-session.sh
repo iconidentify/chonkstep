@@ -22,12 +22,26 @@
 # don't assume dotfiles ran.
 set -u
 
-# Resolve the repo root from this script's own location so the session
-# works wherever the checkout lives (real hardware, VM, any username).
-# CHONKSTEP_SESSION_BIN is the supervisor test's seam (see
-# crates/chonk-testkit/tests/supervisor.rs): the watchdog loop below is
-# exercised against a crashing stub instead of the real compositor.
-BIN="${CHONKSTEP_SESSION_BIN:-$(cd "$(dirname "$0")/.." && pwd)/target/release/chonkstep-wayland}"
+# Resolve the compositor binary. This script runs from two homes and
+# must work from both: a git checkout (scripts/install.sh points the
+# session entry here, and the binary is a sibling target/release), and
+# a package install (/usr/lib/chonkstep/wayland-session.sh, where the
+# binary is on PATH as /usr/bin/chonkstep-wayland). The checkout wins
+# when both exist, because someone running from a checkout is running
+# it to test the checkout. CHONKSTEP_SESSION_BIN is the supervisor
+# test's seam (see crates/chonk-testkit/tests/supervisor.rs): the
+# watchdog loop below is exercised against a crashing stub instead of
+# the real compositor.
+BIN="${CHONKSTEP_SESSION_BIN:-}"
+if [ -z "$BIN" ]; then
+    checkout_bin="$(cd "$(dirname "$0")/.." && pwd)/target/release/chonkstep-wayland"
+    if [ -x "$checkout_bin" ]; then
+        BIN="$checkout_bin"
+    else
+        BIN="$(command -v chonkstep-wayland || echo "$checkout_bin")"
+    fi
+    unset checkout_bin
+fi
 # The same state directory the compositor's own state files resolve to
 # (chonk_shell::startup::state_dir honors XDG_STATE_HOME first) — it
 # must be, because the recovery marker the watchdog drops below is read
@@ -47,6 +61,17 @@ export RUST_LOG="${RUST_LOG:-info}"
 # allowed to prefer its Wayland path. Nothing in chonkstep reads it —
 # this is for the clients.
 export XDG_SESSION_TYPE=wayland
+
+# What xdg-desktop-portal keys its backend choice off: with this set,
+# the portal service reads chonkstep-portals.conf (shipped in
+# packaging/portal/, installed by scripts/install.sh) and routes
+# ScreenCast/Screenshot to xdg-desktop-portal-wlr — which is what makes
+# screen sharing in a browser call work — and everything else to the
+# GTK backend. Exported unconditionally: this *is* the chonkstep
+# session, and a display manager that read DesktopNames from our own
+# .desktop entry set the same value anyway. Toolkits also read it, but
+# only for desktop-specific quirks; an unknown name is a safe default.
+export XDG_CURRENT_DESKTOP=chonkstep
 
 # Deliberately NO CHONKSTEP_BACKEND export. The compositor decides for
 # itself which half of its dual backend to run: an existing
@@ -121,10 +146,11 @@ fail() {
     exit 1
 }
 
-# Not built, or the checkout moved out from under the session entry
-# installed by scripts/install.sh.
+# Not built, not installed, or the checkout moved out from under the
+# session entry installed by scripts/install.sh.
 [ -x "$BIN" ] || fail "$BIN is missing or not executable; build it with \
-'cargo build --release --workspace' in the checkout, or re-run scripts/install.sh if the checkout moved"
+'cargo build --release --workspace' in the checkout (or re-run scripts/install.sh \
+if the checkout moved), or install the chonkstep package"
 
 # The compositor cannot create its Wayland socket without this; on a
 # systemd machine pam_systemd sets it at login, so its absence means
@@ -158,6 +184,55 @@ if [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ] && [ -z "${_CHONKSTEP_BUS_WRAPPED:-}" 
     export _CHONKSTEP_BUS_WRAPPED=1
     exec dbus-run-session -- "$0" "$@"
 fi
+
+# ---------------------------------------------------------------------
+# Publish the session's environment to D-Bus activation and the systemd
+# user instance, for the services that are NOT children of the
+# compositor. The portals (xdg-desktop-portal and its backends — the
+# path a browser's "share your screen" takes) are D-Bus-activated into
+# the systemd user session, so they inherit nothing from this script or
+# from the compositor; unless someone tells that environment which
+# WAYLAND_DISPLAY to open and which desktop this is, the wlr backend
+# connects to nothing and screen sharing silently fails. The standard
+# cure is `dbus-update-activation-environment --systemd ...` — but it
+# can only run once the socket exists, and only the compositor knows
+# which name it allocated (it exports WAYLAND_DISPLAY to its own
+# children, not to us: $BIN runs in the foreground below).
+#
+# So: a background watcher tails the compositor's own startup line —
+# state.rs logs `wayland socket listening socket="wayland-N"` — and
+# publishes the name whenever it changes. "Whenever", not "once",
+# because a crash recovery re-execs the compositor, which may allocate
+# a different socket; the portals must be repointed or they hold a dead
+# one. Silently a no-op when the tooling is absent (non-systemd, or the
+# supervisor test's scratch environment, where the stub compositor
+# never logs a socket line).
+publish_portal_env() {
+    command -v dbus-update-activation-environment >/dev/null 2>&1 || return 0
+    local published="" sock
+    while :; do
+        # The value is the line's one quoted string; matched by its
+        # "wayland-" shape rather than by the `socket=` key, because
+        # tracing colors the key with ANSI escapes even into a file.
+        sock=$(sed -n '/wayland socket listening/s/.*"\(wayland-[^"]*\)".*/\1/p' \
+            "$LOG" 2>/dev/null | tail -n 1)
+        if [ -n "$sock" ] && [ "$sock" != "$published" ] \
+                && [ -S "$XDG_RUNTIME_DIR/$sock" ]; then
+            dbus-update-activation-environment --systemd \
+                "WAYLAND_DISPLAY=$sock" \
+                "XDG_CURRENT_DESKTOP=$XDG_CURRENT_DESKTOP" \
+                "XDG_SESSION_TYPE=$XDG_SESSION_TYPE" \
+                >>"$LOG" 2>&1 || true
+            published="$sock"
+        fi
+        sleep 1
+    done
+}
+publish_portal_env &
+_env_watcher=$!
+# The watcher must not outlive the session: it holds the log open and
+# would republish a stale socket into the next login's environment.
+trap 'kill "$_env_watcher" 2>/dev/null' EXIT
 
 # ---------------------------------------------------------------------
 # The crash watchdog. A compositor panic used to be a black screen and
