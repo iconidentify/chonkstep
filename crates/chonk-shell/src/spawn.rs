@@ -432,26 +432,31 @@ pub fn chromium_platform_args(stack: DisplayStack) -> Vec<String> {
     }
 }
 
-/// Environment variables that make GTK/Qt-based UI — including the
-/// native file-open/save dialogs a Chromium browser itself delegates to
-/// GTK for on Linux — honor this desktop's scale too. There's no
-/// running XSETTINGS daemon or desktop portal in this WM to advertise
-/// DPI the way a full desktop environment would, so external toolkits
-/// are told directly through the env vars they already fall back to.
+/// Environment variables that make Qt-based UI — including the native
+/// file-open/save dialogs a Chromium browser itself delegates to on
+/// Linux — honor this desktop's scale too.
 ///
-/// `GDK_SCALE` only accepts a whole number (it's a literal backing-store
-/// pixel-doubling factor, not a DPI hint), so any fractional remainder
-/// of `scale` is carried by `GDK_DPI_SCALE` instead — GTK's own
-/// documented recipe for fractional scaling is exactly this pairing,
-/// and the two intentionally multiply back out to `scale` (e.g. 1.5 →
-/// `GDK_SCALE=2`, `GDK_DPI_SCALE=0.75`). `QT_SCALE_FACTOR` handles the
-/// Qt side directly since it accepts a plain float.
+/// GTK is deliberately absent from this list. It used to be here
+/// (`GDK_SCALE`/`GDK_DPI_SCALE`), from back when this WM ran no
+/// XSETTINGS daemon and had no other way to tell a GTK client its
+/// scale. `chonk_xsettings::XSettingsManager` (wired up in `main.rs`)
+/// replaced that: it publishes `Gdk/WindowScalingFactor`, `Xft/DPI` and
+/// `Gdk/UnscaledDPI`, which is the same mechanism a full desktop
+/// environment uses and — unlike the env var — doesn't double-scale.
+/// Setting `GDK_SCALE` puts a GTK client's X11 screen into "fixed window
+/// scale" mode, and GTK's own xsettings client only substitutes
+/// `Gdk/UnscaledDPI` for `Xft/DPI` when *not* in that mode (see
+/// `gdk/x11/xsettings-client.c`) — so a client handed both the env var
+/// and this desktop's XSETTINGS drew at the scale twice: once from the
+/// forced backing-store scale, once more from the now-unguarded, already
+/// -scaled `Xft/DPI` (confirmed live: LibreOffice, a GTK3 app, rendered
+/// at 4x on a 2x-scale session). Qt has no equivalent XSETTINGS client,
+/// so it still needs telling directly.
+///
+/// `QT_SCALE_FACTOR` accepts a plain float, unlike `GDK_SCALE`, so no
+/// integer/remainder split is needed here.
 pub fn gtk_qt_scale_env(scale: f32) -> Vec<(String, String)> {
-    let integer_scale = scale.round().max(1.0);
-    let dpi_remainder = scale / integer_scale;
     vec![
-        ("GDK_SCALE".to_string(), (integer_scale as u32).to_string()),
-        ("GDK_DPI_SCALE".to_string(), format!("{dpi_remainder:.4}")),
         ("QT_SCALE_FACTOR".to_string(), format!("{scale:.4}")),
         ("QT_AUTO_SCREEN_SCALE_FACTOR".to_string(), "0".to_string()),
     ]
@@ -462,20 +467,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn gtk_dpi_scale_and_gdk_scale_multiply_back_to_the_requested_scale() {
+    fn qt_scale_factor_carries_the_exact_requested_scale() {
         for scale in [1.0f32, 1.5, 2.0, 3.0, 2.25] {
             let env = gtk_qt_scale_env(scale);
-            let gdk_scale: f32 = env.iter().find(|(k, _)| k == "GDK_SCALE").unwrap().1.parse().unwrap();
-            let dpi_scale: f32 = env.iter().find(|(k, _)| k == "GDK_DPI_SCALE").unwrap().1.parse().unwrap();
-            assert!((gdk_scale * dpi_scale - scale).abs() < 0.01, "scale {scale}: {gdk_scale} * {dpi_scale} should reconstruct it");
+            let qt_scale: f32 = env.iter().find(|(k, _)| k == "QT_SCALE_FACTOR").unwrap().1.parse().unwrap();
+            assert!((qt_scale - scale).abs() < 0.01, "scale {scale}: QT_SCALE_FACTOR should reconstruct it exactly");
         }
     }
 
     #[test]
-    fn gdk_scale_is_always_a_whole_number_even_for_fractional_input() {
+    fn gdk_scale_is_not_set_xsettings_owns_gtk_scale_now() {
         let env = gtk_qt_scale_env(1.5);
-        let gdk_scale = &env.iter().find(|(k, _)| k == "GDK_SCALE").unwrap().1;
-        assert_eq!(gdk_scale, "2");
+        assert!(env.iter().all(|(k, _)| k != "GDK_SCALE" && k != "GDK_DPI_SCALE"), "GDK_SCALE/GDK_DPI_SCALE would fix a GTK client's window scale and disable the Gdk/UnscaledDPI xsettings override, double-scaling it");
     }
 
     #[test]

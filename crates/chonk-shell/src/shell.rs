@@ -279,13 +279,15 @@ fn launch_app(entry: &AppEntry, theme: &Theme, font_px: f32, screen: Size) {
     }
     // External GUI launches get the environment/argument fixups the
     // old dedicated browser launcher carried, now applied generically:
-    // every app is told the desktop's scale through the GTK/Qt env
-    // vars (no XSETTINGS daemon or portal here to advertise it), and
-    // the Chromium family additionally gets its own scale flag plus
-    // `--password-store=basic` — without which Chromium blocks ~25s at
-    // startup on a D-Bus secrets service this session doesn't provide
-    // (the whole story lives on the spawn.rs helpers). Confirmed live:
-    // the first .desktop-launched Chromium hung exactly that way.
+    // every app is told the desktop's scale through the Qt env vars —
+    // GTK clients get theirs from `chonk_xsettings::XSettingsManager`
+    // instead (see `gtk_qt_scale_env`'s doc comment for why the two
+    // can't both hand a GTK client the scale) — and the Chromium family
+    // additionally gets its own scale flag plus `--password-store=basic`
+    // — without which Chromium blocks ~25s at startup on a D-Bus secrets
+    // service this session doesn't provide (the whole story lives on the
+    // spawn.rs helpers). Confirmed live: the first .desktop-launched
+    // Chromium hung exactly that way.
     //
     // The ozone platform is the one fixup that differs between the two
     // stacks, and it is asked for as a question about the session
