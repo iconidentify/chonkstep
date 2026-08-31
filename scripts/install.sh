@@ -72,12 +72,20 @@ echo "Installing dependencies (sudo)..."
 #
 # All of these are already present on essentially any graphical Arch
 # system; --needed makes listing them free.
+# The portal stack (last line): what a browser's "share your screen"
+# talks to. xdg-desktop-portal is the D-Bus frontend, xdg-desktop-
+# portal-wlr the ScreenCast/Screenshot backend that speaks the
+# zwlr_screencopy protocol chonkstep-wayland advertises, xdg-desktop-
+# portal-gtk the fallback for everything else (file chooser and
+# friends), and pipewire carries the frames from backend to browser.
+# See docs/screen-sharing.md.
 sudo pacman -S --needed --noconfirm \
     xorg-server xorg-xinit xorg-xauth \
     rxvt-unicode picom wireplumber \
     ttf-dejavu gsfonts ttf-jetbrains-mono-nerd noto-fonts \
     libxkbcommon libglvnd mesa xorg-xwayland \
-    libdrm libinput systemd-libs seatd
+    libdrm libinput systemd-libs seatd \
+    pipewire xdg-desktop-portal xdg-desktop-portal-wlr xdg-desktop-portal-gtk
 
 if ! command -v cargo >/dev/null 2>&1; then
     echo "Installing Rust toolchain..."
@@ -106,14 +114,27 @@ DESKTOP
 # the input devices itself through libseat. The name carries the
 # "(Wayland)" suffix because both entries land in the same picker and
 # "chonkstep" twice would be a coin flip for the user.
+# DesktopNames is what a display manager exports as XDG_CURRENT_DESKTOP
+# for the session — the key xdg-desktop-portal matches against
+# chonkstep-portals.conf (installed below) to pick the ScreenCast
+# backend. The session script also exports it, for TTY logins that
+# never see this file; both spell it the same.
 sudo install -d /usr/share/wayland-sessions
 sudo tee /usr/share/wayland-sessions/chonkstep.desktop >/dev/null <<DESKTOP
 [Desktop Entry]
 Name=chonkstep (Wayland)
 Comment=The chonkstep desktop as a native Wayland compositor
 Exec=${repo}/scripts/wayland-session.sh
+DesktopNames=chonkstep
 Type=Application
 DESKTOP
+
+# The portal backend map: ScreenCast/Screenshot to the wlr backend
+# (screen sharing — see docs/screen-sharing.md), the rest to GTK. The
+# file is matched by the XDG_CURRENT_DESKTOP value set above, and a
+# user can override it in ~/.config/xdg-desktop-portal/.
+sudo install -Dm644 packaging/portal/chonkstep-portals.conf \
+    /usr/share/xdg-desktop-portal/chonkstep-portals.conf
 
 # Seed the user's config from the fully-commented example, so tuning
 # scale/keybindings starts from a documented template instead of a
