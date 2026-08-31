@@ -1204,6 +1204,11 @@ impl Compositor {
         // been closed. See `sync_dock_sources` for why that ordering is
         // the safety argument and not a tidiness one.
         self.sync_dock_sources();
+
+        // Test-door barriers ack only after the frame above has landed
+        // and the flush has gone out — a no-op in a user session (the
+        // door never opens without CHONKSTEP_TEST_SOCKET).
+        crate::test_door::after_frame(self);
     }
 
     /// What this session tells X clients about its own appearance.
@@ -2044,6 +2049,11 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
         running: true,
         restart: false,
     };
+
+    // The end-to-end test door: a control socket for injected input,
+    // opened only when CHONKSTEP_TEST_SOCKET is set (a user session
+    // pays one env lookup here and nothing else). See `test_door.rs`.
+    crate::test_door::init(&comp.loop_handle);
 
     tracing::info!("entering compositor loop");
     while comp.running {

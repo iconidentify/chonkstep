@@ -1,0 +1,19 @@
+# The end-to-end harness. Not shipped, not depended on by anything:
+# this crate exists so the regressions the fake-backend unit tests
+# cannot see — real input routing, the real renderer — have somewhere
+# to be asserted. See src/lib.rs for the whole story.
+#
+# NOTE for CI: `.github/workflows/ci.yml`'s second clippy gate lists
+# clean crates explicitly; this crate is new and should be added there
+# (it is `-D warnings` clean at birth).
+[package]
+name = "chonk-testkit"
+description = "End-to-end test harness: boots a nested compositor, injects input, screenshots, asserts"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+# PNG decode for screenshot assertions — already in the workspace's
+# dependency graph (winit pulls it), so this adds no new code to vet.
+png = "0.17"
