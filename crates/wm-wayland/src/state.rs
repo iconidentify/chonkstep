@@ -78,7 +78,7 @@ use crate::input::DragGrab;
 use chonk_shell::dockapp::Farewell;
 use chonk_xsettings::{DesktopAppearance, ManagerState, XSettingsError, XSettingsManager};
 use chonk_shell::shell::{Shell, ShellOutcome};
-use chonk_shell::startup::{ensure_xcursor_size, reload_requested, restart_requested, SessionState};
+use chonk_shell::startup::{ensure_xcursor_size, recovering_from_crash, reload_requested, restart_requested, SessionState};
 
 /// A managed client window (an xdg toplevel or an XWayland surface) in
 /// the id space `wm-core` reasons about. Plain integers rather than
@@ -2076,6 +2076,42 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
     // pays one env lookup here and nothing else). See `test_door.rs`.
     crate::test_door::init(&comp.loop_handle);
 
+    // Crash recovery, the moment the session is otherwise up: the
+    // supervisor in `scripts/wayland-session.sh` drops the `recovery`
+    // marker only when it re-execs us after an *abnormal* exit, and
+    // consuming it here (a destructive read, beside the restart/reload
+    // markers the loop below polls) is how this process learns it is a
+    // resurrection. A crashed desktop comes back with the user quite
+    // possibly away from the keyboard, so if a locker is configured it
+    // is spawned right now — it connects to the socket exported above
+    // and locks through the ext-session-lock implementation in
+    // `lock.rs` like any other locker would. Spawned before the first
+    // dispatch on purpose: the lock lands before any client the
+    // restored session relaunches can draw a frame of the user's work.
+    if recovering_from_crash() {
+        tracing::error!(
+            "RECOVERED FROM A CRASH: the previous compositor process exited abnormally and the session supervisor restarted it"
+        );
+        match config.lock_command.as_deref() {
+            Some(command) => {
+                let mut parts = command.split_whitespace();
+                // The config layer already rejects empty strings, so
+                // `parts` always yields a program here — but a config
+                // key is user input, and "impossible" input does not
+                // get to panic the recovered session it exists to
+                // protect.
+                if let Some(program) = parts.next() {
+                    let args: Vec<&str> = parts.collect();
+                    tracing::warn!(locker = command, "locking the recovered session");
+                    chonk_shell::spawn::spawn_detached(program, &args);
+                }
+            }
+            None => tracing::warn!(
+                "no lock_command configured — the recovered session is coming back UNLOCKED; set lock_command in config.toml to lock after a crash"
+            ),
+        }
+    }
+
     tracing::info!("entering compositor loop");
     while comp.running {
         // Hot-restart marker from `scripts/restart.sh`, polled once
@@ -2151,6 +2187,16 @@ fn restart_in_place(nested: bool) -> ! {
     // themselves are stale after the exec either way, so they are
     // cleared rather than handed to the new process.
     command.env("CHONKSTEP_BACKEND", if nested { "winit" } else { "drm" });
+    // A deliberate hot restart is a continuation of the same session,
+    // not a fresh login — session-layout restore must not fire from
+    // it. On this stack the distinction is subtle (the clients die
+    // with the socket either way), but relaunching here would also
+    // relaunch on every `scripts/update.sh`, turning "pick up a new
+    // build" into "and also spawn last week's window list". The crash
+    // path never runs through here — a crashed compositor is re-execed
+    // by the session supervisor with a fresh environment, which is
+    // exactly when restore *should* fire.
+    command.env("CHONKSTEP_SESSION_CONTINUES", "1");
     if !nested {
         command.env_remove("WAYLAND_DISPLAY");
         command.env_remove("DISPLAY");

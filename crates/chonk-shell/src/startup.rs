@@ -55,6 +55,12 @@ pub struct SessionState {
     pub placement: PlacementPolicy,
     pub edge_resistance: u32,
     pub terminal_font_px: f32,
+    /// Whether the shell should relaunch the previous session's layout
+    /// at startup — see `crate::session_layout`. Startup-only in
+    /// effect (a reload cannot un-launch what a fresh start launched),
+    /// but carried here so it resolves through the same one path as
+    /// everything else the config sets.
+    pub restore_session: bool,
     pub keybindings: Vec<(KeyCombo, Action)>,
 }
 
@@ -79,6 +85,7 @@ impl SessionState {
             placement: config.placement,
             edge_resistance: config.edge_resistance,
             terminal_font_px: config.terminal_font_px,
+            restore_session: config.restore_session,
             keybindings: config.keybindings.clone(),
         }
     }
@@ -223,6 +230,43 @@ pub fn reload_requested() -> bool {
     std::fs::remove_file(state_dir().join("reload")).is_ok()
 }
 
+/// Whether the previous compositor process *crashed* and the session
+/// supervisor (`scripts/wayland-session.sh`) restarted it — the
+/// supervisor drops a `recovery` marker in the state directory right
+/// before re-execing after an abnormal exit, and only then.
+///
+/// A destructive read like [`restart_requested`], and for the same
+/// reason: recovery is acknowledged exactly once. Call it once at
+/// startup — the marker is a statement about how *this* process came
+/// to exist, not something to poll.
+pub fn recovering_from_crash() -> bool {
+    std::fs::remove_file(state_dir().join("recovery")).is_ok()
+}
+
+/// The state-file path the session layout store persists to — beside
+/// the theme, wallpaper and dock files it behaves like. Exposed from
+/// here (rather than duplicated in `session_layout`) so every state
+/// file resolves through the one `state_dir` rule.
+pub fn session_layout_path() -> std::path::PathBuf {
+    state_dir().join("session")
+}
+
+/// Whether this process is the continuation of a session that is still
+/// running in every way that matters — a hot restart (`Action::Restart`,
+/// `scripts/restart.sh`) re-execing the on-disk binary in place. Both
+/// binaries set the marker variable in their `restart_in_place` before
+/// exec, and the environment is exactly what survives an exec.
+///
+/// Session-layout restore must not fire on a continuation: on the X11
+/// stack every client *survives* the re-exec via the SaveSet, so
+/// relaunching the recorded layout there would duplicate every window
+/// on the screen. A crash recovery is not a continuation — the
+/// supervisor starts a fresh process with a fresh environment — which
+/// is exactly the case restore exists for.
+pub fn session_continues() -> bool {
+    std::env::var_os("CHONKSTEP_SESSION_CONTINUES").is_some()
+}
+
 /// Whether `XCURSOR_SIZE` was the user's own when this session started,
 /// rather than something [`ensure_xcursor_size`] put there.
 ///
@@ -254,11 +298,48 @@ fn xcursor_size_for(scale: f32) -> u32 {
 /// gets a correctly sized cursor, and an app that was already running
 /// does not. Xcursor reads this once, at the point a client sets up its
 /// cursor theme, and there is no protocol for telling it again.
+///
+/// # The value is per-stack, and being explicit about it is the fix
+///
+/// On the Wayland session the variable is handed over *unscaled* (the
+/// 24px base), and explicitly rather than absent: absent would mean
+/// "inherit the process environment", which [`ensure_xcursor_size`]
+/// already scaled. The convention every Wayland client follows is that
+/// `XCURSOR_SIZE` is a **logical** size — the client multiplies it by
+/// the output scale the protocol advertises when it loads its cursor
+/// theme. Handing a native client the pre-multiplied number therefore
+/// scales the pointer twice: observed live as foot drawing a 96px
+/// cursor on a scale-2 session whose every other pointer was 48px —
+/// exactly the double-scaling `terminal_args`' font math and the
+/// launcher's withheld `GDK_SCALE` already guard against elsewhere.
+/// The X11 session keeps the pre-multiplied value, because there is no
+/// output scale there for a client to multiply by; that is the whole
+/// reason the multiplication exists.
+///
+/// The known cost, accepted on purpose: an X11-only application under
+/// XWayland reads this without multiplying, so it now sees the 1x base
+/// and draws a small pointer — unless it speaks XSETTINGS, where
+/// `Gtk/CursorThemeSize` still carries the scaled size (see
+/// `chonk-xsettings`). One environment variable cannot be right for
+/// both client families at once, and native clients are the common
+/// case on the stack whose protocol can correct the rest.
 pub fn xcursor_size_env(scale: f32) -> Option<(String, String)> {
     if XCURSOR_SIZE_WAS_PRESET.get().copied().unwrap_or(false) {
         return None;
     }
-    Some(("XCURSOR_SIZE".to_string(), xcursor_size_for(scale).to_string()))
+    let effective = xcursor_env_scale(crate::spawn::current_display_stack(), scale);
+    Some(("XCURSOR_SIZE".to_string(), xcursor_size_for(effective).to_string()))
+}
+
+/// The pure per-stack rule behind [`xcursor_size_env`]: the scale the
+/// child should multiply into `XCURSOR_SIZE`'s base — 1 where the
+/// display protocol will tell the client the real scale (Wayland),
+/// the session's own scale where nothing else can (X11).
+pub fn xcursor_env_scale(stack: crate::spawn::DisplayStack, scale: f32) -> f32 {
+    match stack {
+        crate::spawn::DisplayStack::Wayland => 1.0,
+        crate::spawn::DisplayStack::X11 => scale,
+    }
 }
 
 /// Sets `XCURSOR_SIZE` on this process (inherited by every app the
@@ -323,6 +404,7 @@ mod tests {
             placement: PlacementPolicy::Smart,
             edge_resistance: 10,
             terminal_font_px: 20.0,
+            restore_session: false,
             keybindings: Vec::new(),
         };
         assert_eq!(state.theme(), base.scaled(2.0));
@@ -332,6 +414,20 @@ mod tests {
         // scaled theme would drift a little further from the original
         // every time the scale changed.
         assert_eq!(state.base_theme, base);
+    }
+
+    #[test]
+    fn the_xcursor_env_scale_is_withheld_exactly_where_the_protocol_carries_it() {
+        use crate::spawn::DisplayStack;
+        // Wayland clients multiply XCURSOR_SIZE by the advertised
+        // output scale themselves — handing them the session's factor
+        // doubles the pointer (observed live: a 96px cursor over the
+        // terminal on a scale-2 session). X11 clients have no such
+        // channel, which is why the multiplication exists at all.
+        assert_eq!(xcursor_env_scale(DisplayStack::Wayland, 2.0), 1.0);
+        assert_eq!(xcursor_env_scale(DisplayStack::X11, 2.0), 2.0);
+        assert_eq!(xcursor_size_for(xcursor_env_scale(DisplayStack::Wayland, 2.0)), 24);
+        assert_eq!(xcursor_size_for(xcursor_env_scale(DisplayStack::X11, 2.0)), 48);
     }
 
     #[test]

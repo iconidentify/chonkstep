@@ -116,7 +116,7 @@ fn assert_overview_closed(session: &mut Session, why: &str) {
 #[test]
 #[ignore = "needs a live Wayland session to nest in: scripts/e2e.sh, or cargo test -p chonk-testkit -- --ignored --test-threads=1"]
 fn overview_opens_navigates_and_commits() {
-    let mut session = Session::boot("overview", SessionOptions { scale: Some(2.0) }).unwrap();
+    let mut session = Session::boot("overview", SessionOptions { scale: Some(2.0), ..SessionOptions::default() }).unwrap();
     launch_terminal(&mut session, "OverviewA");
     launch_terminal(&mut session, "OverviewB");
 
@@ -181,7 +181,7 @@ fn overview_opens_navigates_and_commits() {
 #[test]
 #[ignore = "needs a live Wayland session to nest in: scripts/e2e.sh, or cargo test -p chonk-testkit -- --ignored --test-threads=1"]
 fn overview_on_an_empty_desk_is_quiet_not_a_crash() {
-    let mut session = Session::boot("overview-empty", SessionOptions { scale: Some(2.0) }).unwrap();
+    let mut session = Session::boot("overview-empty", SessionOptions { scale: Some(2.0), ..SessionOptions::default() }).unwrap();
     open_overview(&mut session);
     session.door().barrier().unwrap();
     session.screenshot("overview-empty").unwrap();

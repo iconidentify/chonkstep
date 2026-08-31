@@ -13,7 +13,7 @@
 use std::collections::HashMap;
 
 use wm_config::Action;
-use wm_core::{Backend, BackendEvent, ClientFlags, ClientId, KeyCombo, Lifecycle, MonitorInfo, MouseButton, Notification, ScrollDelta, WindowManager};
+use wm_core::{Backend, BackendEvent, ClientFlags, ClientId, KeyCombo, Lifecycle, MaximizeDirections, MonitorInfo, MouseButton, Notification, ScrollDelta, WindowManager};
 use wm_theme::{FontState, RasterThemeEngine, Theme};
 use wm_theme_api::{DecorationBuffer, Point, PopupHost, Rect, Size};
 
@@ -22,6 +22,7 @@ use crate::desktop::{Desktop, IconDragResult, MenuAction, RootMenuAction, Window
 use crate::dockapp::Farewell;
 use crate::launchdock::{LaunchDock, LaunchDockAction};
 use crate::overview::{OverviewHit, OverviewItem};
+use crate::session_layout::{RelaunchPlan, SessionLayout, WindowRecord};
 use crate::startup::SessionState;
 use crate::widgets::DockInput;
 use crate::{spawn, theme_select, wallpaper};
@@ -210,7 +211,7 @@ fn terminal_window_size(theme: &Theme, screen: Size) -> (u32, u32) {
 /// menu's Terminal item and the `spawn-terminal` keybinding, so the two
 /// gestures can never drift apart on font, geometry, or palette.
 fn spawn_terminal(theme: &Theme, font_px: f32, screen: Size) {
-    spawn_foot(terminal_args(theme, font_px, screen, terminal_client_scale(theme)));
+    spawn_foot(terminal_args(theme, font_px, screen, terminal_client_scale(theme)), theme.titlebar.font.size / 12.0);
 }
 
 /// The factor the terminal will scale itself by, which is what
@@ -235,9 +236,18 @@ fn terminal_client_scale(theme: &Theme) -> f32 {
 /// args alone, [`launch_app`] appends `-e` plus a `.desktop` entry's
 /// command line for `Terminal=true` apps. Factored so the two callers
 /// can never drift on how the arg list actually reaches the process.
-fn spawn_foot(args: Vec<String>) {
+///
+/// `scale` feeds the per-child `XCURSOR_SIZE` — passed explicitly
+/// rather than inherited, because the inherited process value is the
+/// X11-flavored pre-multiplied one and foot, a native Wayland client,
+/// multiplies whatever it reads by the output scale on its own. The
+/// terminal was the client this shipped visibly wrong on: a scale-2
+/// session's pointer doubled to 96px the moment it crossed onto a
+/// terminal. See `startup::xcursor_size_env` for the per-stack rule.
+fn spawn_foot(args: Vec<String>, scale: f32) {
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-    spawn::spawn_detached("foot", &arg_refs);
+    let env: Vec<(String, String)> = crate::startup::xcursor_size_env(scale).into_iter().collect();
+    spawn::spawn_detached_with_env("foot", &arg_refs, &env, &[]);
 }
 
 /// Launches one `.desktop` entry — the shared dispatch behind both the
@@ -264,7 +274,7 @@ fn launch_app(entry: &AppEntry, theme: &Theme, font_px: f32, screen: Size) {
         let mut argv = terminal_args(theme, font_px, screen, terminal_client_scale(theme));
         argv.push("-e".to_string());
         argv.extend(entry.exec.iter().cloned());
-        spawn_foot(argv);
+        spawn_foot(argv, scale);
         return;
     }
     // External GUI launches get the environment/argument fixups the
@@ -334,9 +344,11 @@ fn launch_app(entry: &AppEntry, theme: &Theme, font_px: f32, screen: Size) {
     // rewritten once threads exist. See `startup::xcursor_size_env`.
     let mut env =
         if scale_fixups { spawn::gtk_qt_scale_env(scale) } else { Vec::new() };
-    // The pointer is the exception that stays on both stacks: a client
-    // drawing its own cursor reads `XCURSOR_SIZE` and nothing else, and
-    // `wl_output.scale` does not reach it.
+    // The pointer rides both stacks, but the *value* is per-stack: a
+    // Wayland client treats `XCURSOR_SIZE` as a logical size and
+    // multiplies the output scale in itself, so it gets the unscaled
+    // base, while an X11 client has nothing to multiply by and gets
+    // the pre-multiplied size. `xcursor_size_env` owns that rule.
     env.extend(crate::startup::xcursor_size_env(scale));
     spawn::spawn_detached_with_env(program, &arg_refs, &env, &[]);
 }
@@ -470,6 +482,31 @@ fn running_pairs<B: Backend>(wm: &WindowManager<B>) -> Vec<(String, B::WindowId)
     wm.iter_clients().map(|(_, client)| (client.class.clone(), client.window)).collect()
 }
 
+/// The live client set as session-layout records — what the layout
+/// store debounces and persists (see `crate::session_layout`). Windows
+/// with no class are skipped: there is nothing to relaunch them by and
+/// nothing to match them back to, so a record would only ever expire.
+/// A maximized window records its *pre-maximize* geometry (the flag
+/// re-derives the maximize against the next session's workarea), which
+/// also keeps restore-then-unmaximize exact.
+fn layout_snapshot<B: Backend>(wm: &WindowManager<B>, apps: &[AppEntry]) -> Vec<WindowRecord> {
+    wm.iter_clients()
+        .filter(|(_, client)| !client.class.is_empty())
+        .map(|(_, client)| {
+            let maximized = client.flags.intersects(ClientFlags::MAXIMIZED_H | ClientFlags::MAXIMIZED_V);
+            WindowRecord {
+                class: client.class.clone(),
+                app: apps::match_window_class(apps, &client.class).map(|index| apps[index].id.clone()),
+                geometry: if maximized { client.restore_geometry.unwrap_or(client.geometry) } else { client.geometry },
+                workspace: client.workspace,
+                maximized,
+                shaded: client.flags.contains(ClientFlags::SHADED),
+                miniaturized: client.lifecycle == Lifecycle::Miniaturized,
+            }
+        })
+        .collect()
+}
+
 /// Moves the focused client to `workspace` and follows it there — the
 /// keyboard "carry" gesture — move to the next or previous workspace
 /// with the window in hand. The refocus at the end is load-bearing:
@@ -549,6 +586,11 @@ pub struct Shell<B: Backend + PopupHost<PopupId = B::ShellId>> {
     /// separately is two chances to leak a grab.
     grabbed: Vec<KeyCombo>,
     keymap: HashMap<KeyCombo, Action>,
+    /// The session-layout store: records the live window arrangement
+    /// (debounced, from `tick`) and holds the previous session's
+    /// records while a restore is matching mapped windows against
+    /// them. See `crate::session_layout` for all the rules.
+    layout: SessionLayout,
     /// The key press an open Overview session intercepted, parked
     /// between the two halves of the binaries' key protocol:
     /// [`Shell::keymap_action`] resolves a combo, [`Shell::run_action`]
@@ -608,6 +650,25 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         // sits on rather than against every head at once.
         let launchdock = LaunchDock::new(backend, &theme, primary, crate::desktop::tile_px(scale), &apps);
 
+        // Session-layout restore, opt-in and only for a genuinely new
+        // session: a hot restart on the X11 stack keeps every client
+        // alive through the SaveSet, and relaunching the recorded
+        // layout into that session would duplicate every window on
+        // the screen — `session_continues` is that continuation's
+        // marker. Launches ride the exact paths the menus use
+        // (`spawn_terminal`, `launch_app`), so a restored application
+        // gets the same scale/platform fixups a hand-launched one
+        // would; the windows are then matched and re-placed as they
+        // map, in `on_notification`.
+        let restore = state.restore_session && !crate::startup::session_continues();
+        let (layout, relaunch) = SessionLayout::start(restore, &apps, std::time::Instant::now());
+        for plan in relaunch {
+            match plan {
+                RelaunchPlan::Terminal => spawn_terminal(&theme, state.terminal_font_px, primary.size),
+                RelaunchPlan::App(entry) => launch_app(&entry, &theme, state.terminal_font_px, primary.size),
+            }
+        }
+
         // Take the configured grabs through the same delta the applier
         // uses, from an empty starting set: one implementation, so a
         // fresh session and a reloaded one cannot end up holding
@@ -624,6 +685,7 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
             keymap: build_keymap(&state.keybindings),
             overview_key: None,
             grabbed: to_grab,
+            layout,
             state: state.clone(),
             theme,
             fonts,
@@ -1369,12 +1431,12 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
                 // a running dockapp additionally gets `ThemeChanged`
                 // pushed down its socket — this env var is only how a
                 // freshly-spawned one learns the theme it starts in.
-                spawn::spawn_detached_with_env(
-                    &about_binary_path(),
-                    &[],
-                    &[("CHONKSTEP_THEME".to_string(), self.theme.id.clone())],
-                    &[],
-                );
+                let mut env = vec![("CHONKSTEP_THEME".to_string(), self.theme.id.clone())];
+                // Same per-stack cursor-size rule as every other
+                // launch — chonk-about is a native client and must not
+                // inherit the pre-multiplied process value.
+                env.extend(crate::startup::xcursor_size_env(self.state.scale));
+                spawn::spawn_detached_with_env(&about_binary_path(), &[], &env, &[]);
             }
             // Indexes the same apps vec the desktop's menu was built
             // from, so `i` means the same entry on both sides; the
@@ -1505,7 +1567,39 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
             Notification::Deminiaturized(id) | Notification::Removed(id) => {
                 self.desktop.remove_icon_for_client(wm.backend_mut(), id);
             }
-            Notification::Mapped(_) => {}
+            // A freshly mapped window is where session restore lands:
+            // the first pending record with this window's class claims
+            // it (first-come-first-matched — see `session_layout`) and
+            // its remembered geometry, workspace and shape are applied
+            // through the same public calls the menus and keybindings
+            // use. A window with no record — the steady state once
+            // restore is over — follows normal placement untouched.
+            Notification::Mapped(id) => {
+                let Some(class) = wm.client(id).map(|client| client.class.clone()) else {
+                    return;
+                };
+                let Some(record) = self.layout.claim(&class, std::time::Instant::now()) else {
+                    return;
+                };
+                tracing::info!(class = %record.class, ?record.geometry, workspace = record.workspace, "restoring a recorded window");
+                wm.set_client_content_geometry(id, record.geometry);
+                if record.workspace != wm.current_workspace() {
+                    wm.move_client_to_workspace(id, record.workspace);
+                }
+                // Geometry before flags, deliberately: maximize records
+                // the current geometry as its restore point, so the
+                // remembered rect must be in place first for a later
+                // unmaximize to return to it.
+                if record.maximized {
+                    wm.maximize(id, MaximizeDirections::FULL);
+                }
+                if record.shaded {
+                    wm.shade(id);
+                }
+                if record.miniaturized {
+                    wm.miniaturize(id);
+                }
+            }
             Notification::CycleUpdated => {
                 if let Some((candidates, selected)) = wm.cycle_state() {
                     // Previews are captured once per session (and again
@@ -1576,6 +1670,11 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         // changed.
         let running = running_pairs(wm);
         self.launchdock.update_running(wm.backend_mut(), &self.theme, &running);
+        // The session-layout store rides the same cadence: hand it the
+        // live arrangement and let its debounce decide whether the
+        // moment has come to write. Almost every call is a comparison
+        // that finds nothing changed and returns.
+        self.layout.service(layout_snapshot(wm, &self.apps), std::time::Instant::now());
     }
 
     /// Winds the session down, in the way the binary says it is ending.
@@ -1595,6 +1694,11 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
     /// dock order was already persisted at the moment the user
     /// committed a drag.
     pub fn shut_down(&mut self, farewell: Farewell) {
+        // The layout does need one thing on the way out that the
+        // paragraph above says nothing else does: a window closed
+        // moments before this must be forgotten *now*, not after a
+        // debounce that will never elapse.
+        self.layout.flush();
         self.desktop.shut_down_dockapps(farewell);
     }
 
