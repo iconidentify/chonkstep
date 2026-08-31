@@ -26,3 +26,8 @@ png = "0.17"
 # of desktop code.
 wm-theme = { path = "../wm-theme" }
 wm-theme-api = { path = "../wm-theme-api" }
+# The EWMH e2e test plays the part of an X11 pager against the nested
+# session's XWayland: it sends the control ClientMessages and reads the
+# root properties back. Same version requirement as every other x11rb
+# user in the workspace.
+x11rb = "0.13"

@@ -912,7 +912,7 @@ impl Backend for WaylandBackend {
         // after every dispatch/notification pass and performs the seat
         // focus (plus `X11Surface::set_activated` for XWayland
         // windows) with the whole `Compositor` in hand.
-        self.pending_focus = Some(window);
+        self.pending_focus = Some(crate::state::FocusIntent::Window(window));
     }
 
     fn send_close(&mut self, window: Self::WindowId) {
@@ -1074,6 +1074,25 @@ impl Backend for WaylandBackend {
 
     fn publish_active_window(&mut self, window: Option<Self::WindowId>) {
         self.ewmh.note_active_window(window);
+        // `None` is `wm-core` saying "no window is focused any more"
+        // (miniaturize, the focused window closing, a workspace switch
+        // away) with no `set_input_focus` to follow — every one of its
+        // call sites is a focus *loss*, not a move. The seat must
+        // follow it: left alone, keyboard focus stayed parked on the
+        // hidden surface and its `Activated` state stayed set, so the
+        // eventual restore of the very same window changed nothing on
+        // the wire — no `wl_keyboard.enter`, no configure — and a
+        // client that had minimized *itself* (Edge's own Minimize
+        // item sends `xdg_toplevel.set_minimized`) kept believing it
+        // was minimized and discarded all input until a click
+        // elsewhere and back forced a real focus change. Deferred via
+        // the same detour `set_input_focus` takes; see
+        // [`crate::state::FocusIntent`]. `Some(_)` stays ledger-only
+        // because `focus_client` always pairs it with
+        // `set_input_focus`, which records the same intent.
+        if window.is_none() {
+            self.pending_focus = Some(crate::state::FocusIntent::Nothing);
+        }
     }
 
     fn publish_workspaces(&mut self, count: usize, current: usize) {
@@ -1119,9 +1138,18 @@ impl Backend for WaylandBackend {
     ///   single-axis maximize publishes as not-maximized rather than
     ///   half-claiming a state the protocol cannot spell.
     /// * `hidden` (miniaturized) maps to X11's `_NET_WM_STATE_HIDDEN`
-    ///   via `set_suspended`; xdg has no equivalent state short of the
-    ///   v6 Suspended hint, which is deliberately not sent here (it
-    ///   means "stop rendering", stronger than miniaturized wants).
+    ///   via `set_suspended`, and to xdg's v6 Suspended state. An
+    ///   earlier version withheld Suspended on the reasoning that
+    ///   "stop rendering" was stronger than miniaturized wants — but
+    ///   a miniaturized window renders only its icon-tile preview,
+    ///   captured *before* the hide, so every frame the client keeps
+    ///   producing is thrown away; Suspended is the protocol's exact
+    ///   word for that. It is also half of how a self-minimized
+    ///   Chromium learns it is visible again: the unset on restore is
+    ///   a state change, so a configure actually goes out. Smithay
+    ///   filters the state away for clients whose bound xdg_toplevel
+    ///   predates v6, so old toolkits never see a word their version
+    ///   cannot spell.
     /// * `shaded` has no vocabulary on either side (no smithay setter,
     ///   no xdg state) and is deliberately unpublished — which is why
     ///   `xewmh.rs` leaves `_NET_WM_STATE_SHADED` out of
@@ -1145,6 +1173,11 @@ impl Backend for WaylandBackend {
                             state.states.set(XdgToplevelState::Fullscreen);
                         } else {
                             state.states.unset(XdgToplevelState::Fullscreen);
+                        }
+                        if hidden {
+                            state.states.set(XdgToplevelState::Suspended);
+                        } else {
+                            state.states.unset(XdgToplevelState::Suspended);
                         }
                     });
                     // Dedup-send: unchanged states produce no configure,

@@ -346,3 +346,216 @@ fn live_reload_applies() {
         );
     }
 }
+
+/// Counts lines in a client's `WAYLAND_DEBUG=1` stream that mention
+/// `object` receiving `event` — e.g. (`"wl_keyboard#"`, `".enter("`).
+/// The client's own protocol log is the same ground truth the
+/// restore-input bug below was diagnosed from: the ledger can say
+/// "focused" all it wants, only the wire says what the client was
+/// told.
+fn wire_events(log: &std::path::Path, object: &str, event: &str) -> usize {
+    std::fs::read_to_string(log)
+        .unwrap_or_default()
+        .lines()
+        .filter(|line| line.contains(object) && line.contains(event))
+        .count()
+}
+
+/// The regression: restoring a miniaturized client-decorated window
+/// left it input-dead until the user clicked another window and came
+/// back. Miniaturize set `wm-core`'s focus to `None` but the seat
+/// kept keyboard focus on the hidden surface and its toplevel kept
+/// `Activated`, so the restore — refocusing the *same* window —
+/// deduplicated into nothing: no `wl_keyboard.enter`, no configure.
+/// A client that had minimized itself (`xdg_toplevel.set_minimized`,
+/// Edge's own Minimize menu item) was still waiting for exactly that
+/// configure to learn it was unminimized, and until one arrived it
+/// discarded every key and click the seat kept delivering.
+///
+/// The invariant this pins, from the client's own WAYLAND_DEBUG
+/// stream: hiding the focused window carries a real
+/// `wl_keyboard.leave` to it, and restoring it a fresh
+/// `wl_keyboard.enter` — the cycle is visible on the wire, never a
+/// dedup. (`publish_active_window(None)` → `FocusIntent::Nothing` in
+/// `wm-wayland`; the zenity guinea pig is CSD and frameless-managed,
+/// the same shape as Edge.)
+#[test]
+#[ignore = "needs a live Wayland session to nest in: scripts/e2e.sh, or cargo test -p chonk-testkit -- --ignored --test-threads=1"]
+fn restore_after_miniaturize_is_a_real_focus_cycle() {
+    let mut session = Session::boot("miniaturize-restore-focus", SessionOptions::default()).unwrap();
+    session
+        .launch("env", &["WAYLAND_DEBUG=1", "zenity", "--question", "--title", "TestMini", "--text", "hide me"])
+        .expect("zenity should launch");
+    let window = session.wait_for_window("TestMini").expect("the zenity dialog should map");
+    let log = session.dir.join("client-0-env.log");
+
+    // Focus it with a click in its content and wait until the client
+    // itself has seen keyboard focus at least once.
+    session
+        .door()
+        .click(window.x as f64 + window.w as f64 / 2.0, window.y as f64 + window.h as f64 / 3.0)
+        .unwrap();
+    poll_until(ACT, "the client to see a wl_keyboard.enter", || {
+        (wire_events(&log, "wl_keyboard#", ".enter(") >= 1).then_some(())
+    })
+    .expect("the focus click never reached the client's keyboard");
+
+    let enters_before = wire_events(&log, "wl_keyboard#", ".enter(");
+    let leaves_before = wire_events(&log, "wl_keyboard#", ".leave(");
+    let shells_before: Vec<u64> =
+        session.door().windows().unwrap().shells.iter().map(|s| s.id).collect();
+
+    // Miniaturize via the default alt+shift+m chord. Two modifiers,
+    // so the raw key path rather than `Door::chord` (which holds one).
+    {
+        let door = session.door();
+        door.key(56, true).unwrap(); // KEY_LEFTALT
+        door.key(42, true).unwrap(); // KEY_LEFTSHIFT
+        door.tap_key(50).unwrap(); // KEY_M
+        door.key(42, false).unwrap();
+        door.key(56, false).unwrap();
+        door.barrier().unwrap();
+    }
+
+    // The hide must be real to the client: ledger unmapped AND a
+    // keyboard leave on its wire.
+    {
+        let door = session.door();
+        poll_until(ACT, "the ledger to show the window hidden", || {
+            let world = door.windows().ok()?;
+            let now = world.windows.iter().find(|w| w.title.contains("TestMini"))?;
+            (!now.mapped).then_some(())
+        })
+        .expect("the miniaturize chord never hid the window");
+    }
+    poll_until(ACT, "the client to see a wl_keyboard.leave", || {
+        (wire_events(&log, "wl_keyboard#", ".leave(") > leaves_before).then_some(())
+    })
+    .expect(
+        "the hidden window never got a wl_keyboard.leave — the seat is still parked on it, \
+         and the restore will dedup into an input-dead window",
+    );
+
+    // Restore via the icon tile: the one mapped shell surface that
+    // appeared with the miniaturize.
+    let tile = session
+        .door()
+        .windows()
+        .unwrap()
+        .shells
+        .into_iter()
+        .find(|s| s.mapped && !shells_before.contains(&s.id))
+        .expect("miniaturizing should have grown an icon tile shell");
+    session
+        .door()
+        .click(tile.x as f64 + tile.w as f64 / 2.0, tile.y as f64 + tile.h as f64 / 2.0)
+        .unwrap();
+
+    {
+        let door = session.door();
+        poll_until(ACT, "the ledger to show the window restored", || {
+            let world = door.windows().ok()?;
+            world.window_matching("TestMini").map(|_| ())
+        })
+        .expect("clicking the icon tile never restored the window");
+    }
+    // And the client was told: a fresh enter, not a dedup.
+    poll_until(ACT, "the client to see a fresh wl_keyboard.enter", || {
+        (wire_events(&log, "wl_keyboard#", ".enter(") > enters_before).then_some(())
+    })
+    .expect(
+        "the restored window never got a fresh wl_keyboard.enter — restore was a dedup, \
+         and a self-minimized client stays input-dead",
+    );
+}
+
+/// The inbound half of EWMH on the Wayland stack: an X11 pager's
+/// `_NET_CURRENT_DESKTOP` ClientMessage to the XWayland root must
+/// actually switch the workspace. Before `xewmh.rs` grew its inbound
+/// drain, publishing was one-way — a pager could read every property
+/// and change nothing, because the control messages (sent to the root
+/// with the SubstructureRedirect|SubstructureNotify mask) landed on a
+/// connection that never looked.
+///
+/// This test *is* a minimal pager: it connects to the nested
+/// session's XWayland display with x11rb, sends the message the spec
+/// prescribes, and asserts the round trip — the compositor switches
+/// (growing the workspace row on demand, same as the keybinding) and
+/// republishes `_NET_CURRENT_DESKTOP` with the new index, which is
+/// exactly what a real pager reads to move its highlight.
+#[test]
+#[ignore = "needs a live Wayland session to nest in: scripts/e2e.sh, or cargo test -p chonk-testkit -- --ignored --test-threads=1"]
+fn an_x11_pager_can_switch_the_workspace() {
+    use x11rb::connection::Connection as _;
+    use x11rb::protocol::xproto::{
+        AtomEnum, ClientMessageEvent, ConnectionExt as _, EventMask, CLIENT_MESSAGE_EVENT,
+    };
+
+    let session = Session::boot("ewmh-inbound-desktop", SessionOptions::default()).unwrap();
+
+    // XWayland starts with the session; its display number is
+    // announced in the log once the server is ready. tracing writes
+    // ANSI color escapes between the key and the value (the same trap
+    // `Session::boot` documents for the socket line), so the escapes
+    // are stripped before parsing.
+    let display = poll_until(Duration::from_secs(30), "XWayland to announce its display", || {
+        let log = session.log();
+        let line = log.lines().find(|line| line.contains("XWayland ready"))?;
+        let plain: String = {
+            let mut out = String::new();
+            let mut chars = line.chars();
+            while let Some(c) = chars.next() {
+                if c == '\u{1b}' {
+                    // Skip to the terminating 'm' of the CSI sequence.
+                    for e in chars.by_ref() {
+                        if e == 'm' {
+                            break;
+                        }
+                    }
+                } else {
+                    out.push(c);
+                }
+            }
+            out
+        };
+        plain.split("display=").nth(1)?.trim().parse::<u32>().ok()
+    })
+    .expect("the nested session never brought XWayland up");
+
+    let (conn, screen_num) =
+        x11rb::rust_connection::RustConnection::connect(Some(&format!(":{display}")))
+            .expect("connecting to the nested XWayland display");
+    let root = conn.setup().roots[screen_num].root;
+    let net_current_desktop = conn
+        .intern_atom(false, b"_NET_CURRENT_DESKTOP")
+        .unwrap()
+        .reply()
+        .unwrap()
+        .atom;
+
+    // The spec's gesture, verbatim: a ClientMessage to the root,
+    // data[0] = the desktop index, sent with the redirect|notify mask.
+    let message = ClientMessageEvent::new(32, root, net_current_desktop, [1, 0, 0, 0, 0]);
+    conn.send_event(
+        false,
+        root,
+        EventMask::SUBSTRUCTURE_REDIRECT | EventMask::SUBSTRUCTURE_NOTIFY,
+        message,
+    )
+    .unwrap();
+    conn.flush().unwrap();
+    assert_eq!(message.response_type, CLIENT_MESSAGE_EVENT);
+
+    // The observable round trip: the compositor heard the message,
+    // switched, and republished the property a pager highlights from.
+    poll_until(ACT, "_NET_CURRENT_DESKTOP to read back as 1", || {
+        let reply = conn
+            .get_property(false, root, net_current_desktop, AtomEnum::CARDINAL, 0, 1)
+            .ok()?
+            .reply()
+            .ok()?;
+        let value = reply.value32()?.next()?;
+        (value == 1).then_some(())
+    })
+    .expect("the pager's desktop-switch message never took effect");
+}

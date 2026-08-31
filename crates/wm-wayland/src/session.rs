@@ -441,6 +441,14 @@ impl SessionGraphics {
     pub(crate) fn renderer(&mut self) -> &mut GlesRenderer {
         &mut self.renderer
     }
+
+    /// The KMS device's fd, cloned for whoever needs to import into
+    /// it — today that is the explicit-sync global
+    /// (`dmabuf::init_syncobj`), which imports client syncobj
+    /// timelines into this device to wait on them.
+    pub(crate) fn drm_device_fd(&self) -> DrmDeviceFd {
+        self.drm.device_fd().clone()
+    }
 }
 
 /// What [`init`] hands back to `run`: the graphics stack plus every

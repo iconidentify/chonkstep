@@ -397,6 +397,31 @@ pub(crate) enum RootBackground {
     Image(MemoryRenderBuffer),
 }
 
+/// What the seat's keyboard should hold after the current pass — a
+/// window, or deliberately nothing.
+///
+/// `Nothing` is not a missing feature dressed up as a variant; its
+/// absence was a shipped bug. When `wm-core` miniaturized the focused
+/// window it set its own `focused = None` and published
+/// `active_window(None)`, but the seat kept keyboard focus on the
+/// hidden surface and its toplevel kept the `Activated` state. The
+/// restore then re-focused the *same* window, so smithay deduplicated
+/// the `set_focus` (no `wl_keyboard.enter`) and the unchanged
+/// `Activated` produced no configure — the whole cycle was invisible
+/// on the wire. A client that had minimized *itself*
+/// (`xdg_toplevel.set_minimized` — Edge's own Minimize menu item)
+/// was still waiting for a configure to tell it it was unminimized,
+/// and until one arrived it discarded every key and click the seat
+/// delivered. Clearing the seat and the `Activated` flags at
+/// miniaturize time makes the restore a real re-enter and a real
+/// state change, which is exactly the wake-up such a client listens
+/// for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum FocusIntent {
+    Window(WlWindowId),
+    Nothing,
+}
+
 /// The `Backend` the `WindowManager` owns: pure bookkeeping the
 /// protocol handlers write into and the renderer reads out of. See the
 /// module docs for why no display connection lives here.
@@ -474,15 +499,22 @@ pub struct WaylandBackend {
     /// protocol state directly (client credentials for `window_pid`,
     /// disconnecting a client for `kill_client`).
     pub(crate) display_handle: DisplayHandle,
-    /// Focus intent recorded by `Backend::set_input_focus`. The
-    /// keyboard lives on the seat, the seat lives on [`Compositor`],
-    /// and applying focus needs `&mut Compositor` — which a backend
-    /// verb, running inside the `WindowManager`'s `&mut self`, can
-    /// never have. So the verb records the intent here and
+    /// Focus intent recorded by `Backend::set_input_focus` (a window)
+    /// or by `publish_active_window(None)` (nothing). The keyboard
+    /// lives on the seat, the seat lives on [`Compositor`], and
+    /// applying focus needs `&mut Compositor` — which a backend verb,
+    /// running inside the `WindowManager`'s `&mut self`, can never
+    /// have. So the verb records the intent here and
     /// [`Compositor::dispatch_pending`] applies it after the drain,
     /// the same each-loop cadence X11 focus changes effectively land
     /// on.
-    pub(crate) pending_focus: Option<WlWindowId>,
+    ///
+    /// The `Nothing` intent exists because "no window is focused" is a
+    /// real state `wm-core` enters (miniaturize, the focused window
+    /// closing, a workspace switch away) and the seat must follow it.
+    /// See [`FocusIntent`] for the Edge bug that shipped while it
+    /// didn't.
+    pub(crate) pending_focus: Option<FocusIntent>,
     /// The preview edge the shell hinted through
     /// `Backend::set_preview_edge` — the Overview's card size while a
     /// session is open, `None` the rest of the time. Read by the
@@ -981,6 +1013,13 @@ pub struct Compositor {
     /// dispatch in a login session never has an unreachable panic on
     /// a screen with no console to read it from.
     pub(crate) dmabuf: crate::dmabuf::DmabufSupport,
+    /// Explicit sync (`wp_linux_drm_syncobj_v1`), present only when a
+    /// DRM session backend's device can wait on syncobj timelines.
+    /// `None` on the nested backend and on devices without
+    /// `syncobj_eventfd` — see `dmabuf::init_syncobj` for why the
+    /// global is the difference between Edge flickering and not on
+    /// NVIDIA.
+    pub(crate) syncobj: Option<smithay::wayland::drm_syncobj::DrmSyncobjState>,
     /// The wlr protocol surface external tools bind: the
     /// foreign-toplevel window list and screencopy capture. The
     /// Wayland counterpart to the X11 session's EWMH properties.
@@ -1598,12 +1637,14 @@ impl Compositor {
         backend.damage = true;
     }
 
-    /// Lands a deferred `set_input_focus` on the seat's keyboard. A
-    /// window that died in the meantime clears focus rather than
-    /// leaving it on the previous window — matching what the X11 server
-    /// does when a focused window disappears. A window that is still
-    /// alive but has no `wl_surface` *yet* is retried instead, see
-    /// below.
+    /// Lands a deferred focus intent on the seat's keyboard — a
+    /// window from `set_input_focus`, or nothing from
+    /// `publish_active_window(None)` (see [`FocusIntent`] for the bug
+    /// the second kind exists to prevent). A window that died in the
+    /// meantime clears focus rather than leaving it on the previous
+    /// window — matching what the X11 server does when a focused
+    /// window disappears. A window that is still alive but has no
+    /// `wl_surface` *yet* is retried instead, see below.
     fn apply_pending_focus(&mut self) {
         // While a session lock holds the seat, the intent stays parked
         // (an `Option` check per pass) rather than being applied or
@@ -1613,8 +1654,12 @@ impl Compositor {
         if self.wm.backend().locked {
             return;
         }
-        let Some(id) = self.wm.backend_mut().pending_focus.take() else {
+        let Some(intent) = self.wm.backend_mut().pending_focus.take() else {
             return;
+        };
+        let target = match intent {
+            FocusIntent::Window(id) => Some(id),
+            FocusIntent::Nothing => None,
         };
         // An XWayland window exists as an X11 window before Xwayland
         // binds a `wl_surface` to it, and that bind can land one or
@@ -1628,15 +1673,16 @@ impl Compositor {
         // else and came back. So put the request back and retry on the
         // next pass; the association arrives (and this lands), or the
         // window dies (and the lookup below clears focus for real).
-        let awaiting_surface = self
-            .wm
-            .backend()
-            .windows
-            .get(&id)
-            .filter(|record| record.surface.alive())
-            .is_some_and(|record| record.surface.wl_surface().is_none());
+        let awaiting_surface = target.is_some_and(|id| {
+            self.wm
+                .backend()
+                .windows
+                .get(&id)
+                .filter(|record| record.surface.alive())
+                .is_some_and(|record| record.surface.wl_surface().is_none())
+        });
         if awaiting_surface {
-            self.wm.backend_mut().pending_focus = Some(id);
+            self.wm.backend_mut().pending_focus = Some(intent);
             return;
         }
         // Focus is two things to a client: the seat's keyboard focus,
@@ -1646,9 +1692,13 @@ impl Compositor {
         // leaves every client permanently drawing itself as background
         // furniture, so both kinds of surface get the flag here, and
         // every window gets it (not just the newly focused one) so the
-        // one losing focus repaints inactive.
+        // one losing focus repaints inactive. When the intent is
+        // `Nothing`, every window loses the flag — which is the half of
+        // this that wakes a self-minimized Chromium on restore: the
+        // unset here is a real state change, so the restore's re-set
+        // produces a real configure instead of a dedup.
         for (window_id, record) in self.wm.backend().windows.iter() {
-            let active = *window_id == id;
+            let active = Some(*window_id) == target;
             match &record.surface {
                 // xdg-shell carries it as a toplevel state on the next
                 // configure; `send_pending_configure` dedups, so an
@@ -1681,11 +1731,13 @@ impl Compositor {
         if self.layer_shell.exclusive_focus.is_some() {
             return;
         }
-        let surface = self
-            .wm
-            .backend()
-            .windows
-            .get(&id)
+        // A `Nothing` intent falls through here with no surface, which
+        // is the point: the seat drops the hidden window, so the keys
+        // typed while it is miniaturized stop landing on it, and the
+        // eventual restore is a real `wl_keyboard.enter` rather than a
+        // smithay-deduplicated no-op.
+        let surface = target
+            .and_then(|id| self.wm.backend().windows.get(&id))
             .filter(|record| record.surface.alive())
             .and_then(|record| record.surface.wl_surface());
         if let Some(keyboard) = self.seat.get_keyboard() {
@@ -1876,6 +1928,11 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
     // GPU clients read its absence as "this compositor has no GPU".
     // Both backends own a `GlesRenderer`, so one call serves both.
     let dmabuf = crate::dmabuf::init_for_graphics(&display_handle, &mut graphics);
+    // Explicit sync rides the same timing rule, and additionally only
+    // exists where a DRM device backs the session — its global is what
+    // lets a client (Chromium on NVIDIA, most famously) tell us when a
+    // dmabuf is actually finished instead of us sampling mid-render.
+    let syncobj = crate::dmabuf::init_syncobj(&display_handle, &graphics);
     // Same timing rule as dmabuf: bound before any client can connect.
     let protocols = crate::protocols::init(&display_handle);
     // The ecosystem protocols, under the same timing rule. Layer-shell
@@ -2135,6 +2192,7 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
         ui_scale: scale,
         graphics,
         dmabuf,
+        syncobj,
         protocols,
         layer_shell,
         session_lock,
