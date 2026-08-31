@@ -500,6 +500,23 @@ pub struct WaylandBackend {
     /// did this from a per-window cursor attribute, and this map is
     /// that attribute's ledger spelling.
     pub(crate) frame_cursors: HashMap<WlFrameId, ResizeEdge>,
+    /// Every wlr-layer-shell surface, in creation order (which is the
+    /// z-order within a layer band — newest on top). On the ledger,
+    /// not the [`Compositor`], because the renderer's scene walk and
+    /// the input hit walk read only the ledger, and a surface family
+    /// either of them cannot see would be drawn but unclickable or the
+    /// reverse. See `layers.rs`.
+    pub(crate) layers: Vec<crate::layers::LayerRecord>,
+    /// Whether an ext-session-lock holds the session. THE flag the
+    /// renderer and the input path branch on: while set, only
+    /// [`WaylandBackend::lock_surfaces`] render and receive input —
+    /// everything else in this ledger is treated as nonexistent. Set
+    /// and cleared only by `lock.rs`'s handler; a locker crashing
+    /// clears the surfaces but never this flag (see `lock.rs`'s module
+    /// docs for why that asymmetry is the security property).
+    pub(crate) locked: bool,
+    /// The lock client's surfaces, one per output it has covered.
+    pub(crate) lock_surfaces: Vec<crate::lock::LockSurfaceEntry>,
 }
 
 /// Which way a drag grab just moved, for the seat-side half that
@@ -536,6 +553,9 @@ impl WaylandBackend {
             pending_pointer_grab: None,
             pointer: None,
             frame_cursors: HashMap::new(),
+            layers: Vec::new(),
+            locked: false,
+            lock_surfaces: Vec::new(),
         }
     }
 
@@ -893,6 +913,16 @@ pub struct Compositor {
     /// foreign-toplevel window list and screencopy capture. The
     /// Wayland counterpart to the X11 session's EWMH properties.
     pub(crate) protocols: crate::protocols::ProtocolState,
+    /// wlr-layer-shell: launchers, bars, notification daemons, OSDs —
+    /// protocol state plus the focus/reservation bookkeeping in
+    /// `layers.rs` (the surface records themselves live on the ledger).
+    pub(crate) layer_shell: crate::layers::LayerShell,
+    /// ext-session-lock: the lock lifecycle machine and the
+    /// confirmation owed to a locking client — see `lock.rs`.
+    pub(crate) session_lock: crate::lock::SessionLock,
+    /// ext-idle-notify + idle-inhibit: the timers `swayidle` runs on,
+    /// reset from the input path — see `idle.rs`.
+    pub(crate) idle: crate::idle::Idle,
 
     /// Latest pointer position in compositor space, maintained by
     /// `input.rs` — the renderer draws the cursor here, and hit-tests
@@ -1055,6 +1085,21 @@ impl Compositor {
         // same state the desktop just settled into, before the damage
         // test so a capture request can mark the frame it needs.
         crate::protocols::refresh(self);
+        // Layer surfaces settle beside them and before the damage test
+        // for the same reason: a bar that just changed its exclusive
+        // zone must reflow the workareas and render on this frame, not
+        // the next. After `Shell::tick` and the drains deliberately —
+        // anything in this pass that re-applied the shell's baseline
+        // workareas has already run, so the layer-composed rects land
+        // last (see `layers::apply_workareas`).
+        crate::layers::refresh(self);
+        // Lock upkeep (re-configures on resize, keyboard onto a late
+        // lock surface); a no-op the instant the test above it — the
+        // ledger's `locked` flag — is clear.
+        crate::lock::refresh(self);
+        // Idle inhibition follows visibility, which everything above
+        // may have changed.
+        crate::idle::refresh(self);
 
         // The UI scale moved: rebuild the built-in pointer, the one
         // thing this session draws that is sized from that scale and
@@ -1136,6 +1181,11 @@ impl Compositor {
         if self.wm.backend().damage || crate::session::redraw_pending(&self.graphics) {
             crate::renderer::render_frame(self);
         }
+
+        // A locking client is owed its `locked` event only after a
+        // frame built under the lock has been presented — which, if it
+        // happened at all this pass, happened just above.
+        crate::lock::confirm_after_frame(self);
 
         // The outputs remember every surface that entered them (the
         // `wl_surface.enter` in `xdg.rs`'s commit handler) so they can
@@ -1462,6 +1512,14 @@ impl Compositor {
     /// alive but has no `wl_surface` *yet* is retried instead, see
     /// below.
     fn apply_pending_focus(&mut self) {
+        // While a session lock holds the seat, the intent stays parked
+        // (an `Option` check per pass) rather than being applied or
+        // dropped: applied, it would point the keyboard at a client
+        // behind the lock; dropped, the unlock would restore focus to
+        // a window `wm-core` had already moved on from.
+        if self.wm.backend().locked {
+            return;
+        }
         let Some(id) = self.wm.backend_mut().pending_focus.take() else {
             return;
         };
@@ -1520,6 +1578,15 @@ impl Compositor {
                     }
                 }
             }
+        }
+        // A layer surface holding *exclusive* keyboard interactivity
+        // outranks window focus on the seat (the protocol's demand —
+        // it is what a launcher types into). The activated flags above
+        // still applied, so `wm-core`'s idea of the focused window
+        // stays current and the seat returns to it the moment the
+        // layer surface lets go (`layers::sync_keyboard`).
+        if self.layer_shell.exclusive_focus.is_some() {
+            return;
         }
         let surface = self
             .wm
@@ -1718,6 +1785,29 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
     let dmabuf = crate::dmabuf::init_for_graphics(&display_handle, &mut graphics);
     // Same timing rule as dmabuf: bound before any client can connect.
     let protocols = crate::protocols::init(&display_handle);
+    // The ecosystem protocols, under the same timing rule. Layer-shell
+    // is what fuzzel/mako/waybar look for the moment they connect;
+    // session-lock is unfiltered (any client may lock — swaylock is
+    // just a client, and a filter would only be worth its complexity
+    // with a sandboxing story this desktop does not have); the idle
+    // notifier's timers live on this very event loop.
+    let layer_shell = crate::layers::LayerShell::new(
+        smithay::wayland::shell::wlr_layer::WlrLayerShellState::new::<Compositor>(&display_handle),
+    );
+    let session_lock = crate::lock::SessionLock::new(
+        smithay::wayland::session_lock::SessionLockManagerState::new::<Compositor, _>(
+            &display_handle,
+            |_| true,
+        ),
+    );
+    let idle = crate::idle::Idle::new(
+        smithay::wayland::idle_notify::IdleNotifierState::<Compositor>::new(
+            &display_handle,
+            loop_handle.clone(),
+        ),
+        smithay::wayland::idle_inhibit::IdleInhibitManagerState::new::<Compositor>(&display_handle),
+    );
+    tracing::info!("layer-shell, session-lock and idle-notify advertised");
 
     // The listening socket clients connect to, plus the display's own
     // fd so wayland-server processes client requests — both plain
@@ -1944,6 +2034,9 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
         graphics,
         dmabuf,
         protocols,
+        layer_shell,
+        session_lock,
+        idle,
         pointer_location: (0.0, 0.0).into(),
         cursor_status: CursorImageStatus::default_named(),
         cursors: CursorSet::build(scale),

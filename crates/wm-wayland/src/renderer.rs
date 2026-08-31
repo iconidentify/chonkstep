@@ -85,6 +85,7 @@ use smithay::render_elements;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::utils::{IsAlive, Physical, Point as SPoint, Rectangle as SRect};
 use smithay::wayland::compositor::with_states;
+use smithay::wayland::shell::wlr_layer::Layer as WlrLayer;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use wm_theme_api::{Point, Rect};
@@ -143,6 +144,45 @@ pub(crate) fn build_scene(
         viewport,
     );
 
+    // A locked session is a different scene, not a filtered one: only
+    // the lock client's surfaces exist, over a black clear. The branch
+    // sits here — after the cursor, before anything of the desktop —
+    // so no code path below can leak a frame of the scene behind the
+    // lock, and every consumer of this function (the on-screen frame,
+    // screencopy, the screenshot marker) inherits the same blank. An
+    // output the locker has not covered (its surface not committed
+    // yet, its process dead, a monitor that just appeared) simply
+    // finds no element inside its viewport and clears to black, which
+    // is what the protocol demands for the gap.
+    if backend.locked {
+        for entry in &backend.lock_surfaces {
+            if !entry.surface.alive() {
+                continue;
+            }
+            let Some(monitor) = backend.monitors.get(entry.output) else {
+                continue;
+            };
+            let origin = SPoint::<i32, Physical>::from((
+                monitor.geometry.pos.x - viewport.x,
+                monitor.geometry.pos.y - viewport.y,
+            ));
+            push_surface_tree(
+                &mut elements,
+                renderer,
+                entry.surface.wl_surface(),
+                origin,
+                1.0,
+                Kind::Unspecified,
+            );
+        }
+        return (elements, Color32F::new(0.0, 0.0, 0.0, 1.0));
+    }
+
+    // The `Overlay` layer band beats everything but the cursor —
+    // that is what the protocol reserves it for (OSDs, screen
+    // annotations) — including the desktop's own dock and menus.
+    push_layer_band(&mut elements, renderer, backend, WlrLayer::Overlay, viewport);
+
     for entry in backend.stacking.iter().rev() {
         if let StackEntry::Shell(id) = entry {
             let Some(record) = backend.shells.get(id) else { continue };
@@ -151,6 +191,13 @@ pub(crate) fn build_scene(
             }
         }
     }
+
+    // `Top` layer surfaces (bars, notification daemons) sit below the
+    // shell's `above` band on purpose: a mako notification must not
+    // cover the menu the user just opened or the dock's tiles, while
+    // still floating over every managed window. The input walk in
+    // `input.rs::hit_at` slots the band identically.
+    push_layer_band(&mut elements, renderer, backend, WlrLayer::Top, viewport);
 
     // XWayland override-redirect windows (menus, tooltips —
     // `WindowType::Unmanaged`, so they own no frame and no
@@ -215,6 +262,12 @@ pub(crate) fn build_scene(
         }
     }
 
+    // `Bottom` layers ride under the managed windows and over the
+    // shell's `below` furniture; `Background` (a wallpaper client like
+    // swaybg, should someone run one) under everything but the root
+    // wallpaper itself.
+    push_layer_band(&mut elements, renderer, backend, WlrLayer::Bottom, viewport);
+
     for entry in backend.stacking.iter().rev() {
         if let StackEntry::Shell(id) = entry {
             let Some(record) = backend.shells.get(id) else { continue };
@@ -223,6 +276,8 @@ pub(crate) fn build_scene(
             }
         }
     }
+
+    push_layer_band(&mut elements, renderer, backend, WlrLayer::Background, viewport);
 
     // Root background. A solid color is simply the clear color —
     // with full-frame damage every pixel gets cleared, so no
@@ -272,6 +327,42 @@ pub(crate) fn send_frame_callbacks(
     cursor_status: &CursorImageStatus,
     elapsed: Duration,
 ) {
+    // While locked, ONLY lock surfaces hear about frames: withholding
+    // callbacks from everything else freezes those clients for the
+    // duration, which the spec explicitly sanctions and which stops a
+    // fullscreen video burning a GPU behind a lock screen. (Their next
+    // commit after unlock un-freezes them — commits were never
+    // refused, only unanswered.)
+    if backend.locked {
+        for entry in &backend.lock_surfaces {
+            if entry.surface.alive() {
+                send_frames_surface_tree(
+                    entry.surface.wl_surface(),
+                    output,
+                    elapsed,
+                    Some(Duration::ZERO),
+                    |_, _| Some(output.clone()),
+                );
+            }
+        }
+        return;
+    }
+    // Layer surfaces animate too (a bar's clock, mako's timeout fade),
+    // popups included.
+    for record in &backend.layers {
+        if !record.mapped || !record.surface.alive() {
+            continue;
+        }
+        let surface = record.surface.wl_surface();
+        send_frames_surface_tree(surface, output, elapsed, Some(Duration::ZERO), |_, _| {
+            Some(output.clone())
+        });
+        for (popup, _) in PopupManager::popups_for_surface(surface) {
+            send_frames_surface_tree(popup.wl_surface(), output, elapsed, Some(Duration::ZERO), |_, _| {
+                Some(output.clone())
+            });
+        }
+    }
     // Frame callbacks: clients gate their next commit on these, so
     // every mapped window (and its popups, and a client-provided
     // cursor surface) hears about the frame it just appeared in. The
@@ -412,6 +503,44 @@ fn render_frame_winit(comp: &mut Compositor) {
     note_frame_success();
     send_frame_callbacks(wm.backend(), output, cursor_status, start_time.elapsed());
     wm.backend_mut().damage = false;
+}
+
+/// Pushes one layer band's surfaces (front to back — newest record
+/// first, so the newest surface in a band draws on top, matching the
+/// hit walk), each with its xdg popups floating above it exactly as a
+/// managed window's do. Layer surfaces are ordinary client surfaces:
+/// they go through [`push_surface_tree`] like every other, or a 2x
+/// client's bar would land at half size.
+fn push_layer_band(
+    elements: &mut Vec<SceneElement<GlesRenderer>>,
+    renderer: &mut GlesRenderer,
+    backend: &WaylandBackend,
+    band: WlrLayer,
+    viewport: Point,
+) {
+    for record in backend.layers.iter().rev() {
+        if record.layer != band || !record.mapped || !record.surface.alive() {
+            continue;
+        }
+        let surface = record.surface.wl_surface();
+        let origin = SPoint::<i32, Physical>::from((
+            record.geometry.pos.x - viewport.x,
+            record.geometry.pos.y - viewport.y,
+        ));
+        // Popups above their parent, offsets converted by the parent's
+        // committed factor — the identical arithmetic
+        // `push_window_content` uses, for the identical reason.
+        let scale = crate::xdg::committed_buffer_scale(surface);
+        for (popup, offset) in PopupManager::popups_for_surface(surface) {
+            let location = origin
+                + SPoint::<i32, Physical>::from((
+                    crate::xdg::logical_to_physical(offset.x, scale),
+                    crate::xdg::logical_to_physical(offset.y, scale),
+                ));
+            push_surface_tree(elements, renderer, popup.wl_surface(), location, 1.0, Kind::Unspecified);
+        }
+        push_surface_tree(elements, renderer, surface, origin, 1.0, Kind::Unspecified);
+    }
 }
 
 /// Pushes one shell surface's elements (front to back): its painted
