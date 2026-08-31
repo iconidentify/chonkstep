@@ -257,6 +257,16 @@ pub enum BackendEvent<Win, Frame> {
     /// was grabbed; the geometry the drag starts from is this window
     /// manager's own record, never the client's claim.
     ResizeRequest { window: Win, edge: ResizeEdge },
+    /// The client asked to be minimized — a Wayland toplevel's
+    /// `set_minimized`, or X11's iconify client message.
+    ///
+    /// The third sibling of Move/ResizeRequest, for the same window: a
+    /// client that draws its own chrome draws its own minimize button,
+    /// and that button is the only miniaturize gesture it has. Dropping
+    /// the request (as this desktop used to, on the reasoning that
+    /// miniaturization is a WM gesture) left the button dead in every
+    /// client-decorated application — reported live from LibreOffice.
+    MinimizeRequest(Win),
     PointerButton {
         surface: SurfaceRef<Win, Frame>,
         local: Point,

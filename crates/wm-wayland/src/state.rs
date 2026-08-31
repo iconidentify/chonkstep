@@ -288,6 +288,22 @@ pub(crate) struct WindowRecord {
     /// Always false for XWayland surfaces, which answer the same
     /// question through `_MOTIF_WM_HINTS` instead.
     pub negotiated_decoration: bool,
+    /// What the client explicitly asked xdg-decoration for, when it
+    /// asked: `Some(true)` is a requested client-side mode, `Some(false)`
+    /// server-side, `None` no explicit request (bound the manager and
+    /// left the choice to us, or never bound at all).
+    ///
+    /// Honored, not overridden. This compositor used to impose
+    /// ServerSide on every toplevel that bound the manager — protocol-
+    /// legal, and broken in practice: Chromium requests ClientSide and
+    /// draws its frame regardless of the imposition, so Microsoft Edge
+    /// wore both titlebars, and every short-lived Chromium transient
+    /// got a chonkstep frame flashed around it for the second it
+    /// lived — observed live as "the edges flicker", one framed birth
+    /// and death every ~30 seconds in the session log. Honoring the
+    /// request is also what KWin and the wlroots compositors settled
+    /// on, for exactly this reason.
+    pub requested_client_side: Option<bool>,
     /// Where this surface's *window* starts inside its own buffer, from
     /// `xdg_surface.set_window_geometry`.
     ///
@@ -341,6 +357,7 @@ impl WindowRecord {
             snapshot: None,
             // Silence means client-side; only `new_decoration` sets this.
             negotiated_decoration: false,
+            requested_client_side: None,
             content_offset: Point::new(0, 0),
             recent_asks: std::collections::VecDeque::new(),
         }
@@ -466,6 +483,20 @@ pub struct WaylandBackend {
     /// the same each-loop cadence X11 focus changes effectively land
     /// on.
     pub(crate) pending_focus: Option<WlWindowId>,
+    /// The preview edge the shell hinted through
+    /// `Backend::set_preview_edge` — the Overview's card size while a
+    /// session is open, `None` the rest of the time. Read by the
+    /// capture pass (`crate::capture`), which sizes the per-window
+    /// snapshots from it; the reason it is a ledger field and not a
+    /// capture-module local is the same `pending_focus` story: the
+    /// verb runs inside the `WindowManager`'s `&mut self`, and the
+    /// capture pass runs later with the renderer in hand.
+    pub(crate) preview_edge: Option<u32>,
+    /// Advanced by the capture pass each time it lands snapshots taken
+    /// at the hinted [`WaylandBackend::preview_edge`] — the shell polls
+    /// it (`Backend::preview_generation`) to learn that previews it
+    /// fetched before those captures ran are worth fetching again.
+    pub(crate) preview_generation: u64,
     /// A UI scale change `Shell::apply_session_state` has announced,
     /// waiting for [`Compositor::dispatch_pending`] to rebuild the
     /// compositor's own pointer from it.
@@ -569,6 +600,8 @@ impl WaylandBackend {
             damage: true,
             display_handle,
             pending_focus: None,
+            preview_edge: None,
+            preview_generation: 0,
             pending_cursor_scale: None,
             pointer_grab: None,
             pending_pointer_grab: None,

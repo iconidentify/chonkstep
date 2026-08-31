@@ -783,11 +783,19 @@ impl XdgShellHandler for Compositor {
         }
     }
 
-    fn minimize_request(&mut self, _surface: ToplevelSurface) {
-        // Miniaturization is a WM gesture (titlebar button, keybinding)
-        // with no request-shaped path into `wm-core` — the X11 backend
-        // had no `_NET_WM_STATE_HIDDEN` request translation either.
-        // Ignoring is protocol-legal: minimize has no required reply.
+    fn minimize_request(&mut self, surface: ToplevelSurface) {
+        // This used to be ignored on the reasoning that miniaturization
+        // is a WM gesture with no request-shaped path into `wm-core`.
+        // That reasoning died with client-side decorations: a window
+        // whose client draws its own chrome draws its own minimize
+        // button, and this request is that button. Dropping it left
+        // LibreOffice's minimize dead. `MinimizeRequest` routes into
+        // the same miniaturize the titlebar button runs, so the client
+        // ends up as an icon tile exactly as if ours had been clicked.
+        let backend = self.wm.backend_mut();
+        if let Some(id) = backend.window_for_surface(surface.wl_surface()) {
+            backend.queue(WmEvent::MinimizeRequest(id));
+        }
     }
 
     fn title_changed(&mut self, surface: ToplevelSurface) {
@@ -903,9 +911,29 @@ impl XdgDecorationHandler for Compositor {
         // unset_mode follow immediately and send one.
     }
 
-    fn request_mode(&mut self, toplevel: ToplevelSurface, _mode: DecorationMode) {
+    fn request_mode(&mut self, toplevel: ToplevelSurface, mode: DecorationMode) {
+        // Honored, both directions. The imposed-ServerSide answer this
+        // used to give is what put two titlebars on Edge — Chromium
+        // requests ClientSide and draws its frame whatever we configure
+        // — and framed every one of its short-lived transients into a
+        // visible flash. A client that asks for server-side gets ours;
+        // one that asks for client-side keeps its own, and the frame
+        // comes off (or never goes on) through the same ChromeChanged
+        // path a Motif hint rewrite takes.
+        let wants_client_side = mode == DecorationMode::ClientSide;
+        let backend = self.wm.backend_mut();
+        if let Some(id) = backend.window_for_surface(toplevel.wl_surface()) {
+            if let Some(record) = backend.windows.get_mut(&id) {
+                record.requested_client_side = Some(wants_client_side);
+            }
+            backend.queue(WmEvent::ChromeChanged(id));
+        }
         toplevel.with_pending_state(|state| {
-            state.decoration_mode = Some(DecorationMode::ServerSide);
+            state.decoration_mode = Some(if wants_client_side {
+                DecorationMode::ClientSide
+            } else {
+                DecorationMode::ServerSide
+            });
         });
         if toplevel.is_initial_configure_sent() {
             let _ = toplevel.send_pending_configure();
@@ -913,6 +941,15 @@ impl XdgDecorationHandler for Compositor {
     }
 
     fn unset_mode(&mut self, toplevel: ToplevelSurface) {
+        // No preference means the choice is genuinely ours, and ours is
+        // server-side: this desktop's chrome is the product.
+        let backend = self.wm.backend_mut();
+        if let Some(id) = backend.window_for_surface(toplevel.wl_surface()) {
+            if let Some(record) = backend.windows.get_mut(&id) {
+                record.requested_client_side = None;
+            }
+            backend.queue(WmEvent::ChromeChanged(id));
+        }
         toplevel.with_pending_state(|state| {
             state.decoration_mode = Some(DecorationMode::ServerSide);
         });
