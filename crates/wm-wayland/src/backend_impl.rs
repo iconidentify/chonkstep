@@ -37,6 +37,7 @@
 
 use smithay::backend::allocator::Fourcc;
 use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
+use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::State as XdgToplevelState;
 use smithay::reexports::wayland_server::backend::protocol::ProtocolError;
 use smithay::reexports::wayland_server::Resource;
 use smithay::utils::{Logical, Rectangle as SmithayRect, Transform};
@@ -119,6 +120,18 @@ fn xdg_attribute<T>(
         let attributes = data.lock().ok()?;
         read(&attributes)
     })
+}
+
+/// The one honest projection of `wm-core`'s two maximize axes into the
+/// single "maximized" both protocols speak (smithay's
+/// `X11Surface::set_maximized` sets both `_NET_WM_STATE_MAXIMIZED_*`
+/// atoms as a pair; xdg has one `Maximized` state): both axes set means
+/// maximized, anything less means not. A half-maximized window
+/// therefore publishes as unmaximized — the alternative, claiming the
+/// full state for one axis, would have a toolkit square its corners
+/// and pin its geometry for a shape it does not have.
+fn both_axes_maximized(max_h: bool, max_v: bool) -> bool {
+    max_h && max_v
 }
 
 impl Backend for WaylandBackend {
@@ -1045,10 +1058,123 @@ impl Backend for WaylandBackend {
     }
 
     // -- EWMH-shaped policy reads/acts ------------------------------------
-    // The publish_* family stays at the trait's no-op defaults: a
-    // Wayland session has no EWMH root properties to publish. A later
-    // foreign-toplevel-management pass can override them to feed
-    // Wayland-native taskbars the same information.
+    // The publish_* family buffers into the ledger's `EwmhLedger`, and
+    // `Compositor::dispatch_pending` flushes it to the XWayland root
+    // through the compositor's own X11 connection (see `xewmh.rs`) —
+    // the record-now/act-later detour every deferred field on this
+    // ledger takes, plus one more reason particular to these: the
+    // connection may simply not exist yet (XWayland readiness is
+    // asynchronous) or ever (it failed to start), and a verb must not
+    // care. Wayland-native taskbars get the same information through
+    // the wlr foreign-toplevel list in `protocols.rs`.
+
+    fn publish_client_list(&mut self, clients: &[Self::WindowId]) {
+        self.ewmh.note_client_list(clients);
+    }
+
+    fn publish_active_window(&mut self, window: Option<Self::WindowId>) {
+        self.ewmh.note_active_window(window);
+    }
+
+    fn publish_workspaces(&mut self, count: usize, current: usize) {
+        self.ewmh.note_workspaces(count, current);
+    }
+
+    fn publish_workarea(&mut self, area: Rect, workspace_count: usize) {
+        self.ewmh.note_workarea(area, workspace_count);
+    }
+
+    fn publish_window_desktop(&mut self, window: Self::WindowId, desktop: usize) {
+        self.ewmh.note_window_desktop(window, desktop);
+    }
+
+    fn publish_frame_extents(&mut self, window: Self::WindowId, left: u32, right: u32, top: u32, bottom: u32) {
+        // Buffered for every managed window; the flush drops the
+        // entries whose window turns out not to be X11 — an xdg
+        // toplevel has no property to carry the answer, and no
+        // Wayland protocol says "frame extents" at all.
+        self.ewmh.note_frame_extents(window, left, right, top, bottom);
+    }
+
+    /// Pushes `wm-core`'s authoritative state flags back onto the
+    /// client — the half of the `_NET_WM_STATE` round trip that was
+    /// missing: requests flowed in (`NetStateRequested`), but a client
+    /// that asked to maximize was never *told* it is maximized, so an
+    /// X11 app that draws differently when maximized drew wrong and
+    /// its `_NET_WM_STATE` read stale to anything that looked, and a
+    /// Wayland client never got the Maximized/Fullscreen toplevel
+    /// states its toolkit styles from (squared corners, no shadow).
+    ///
+    /// Unlike its root-property siblings above this acts inline, not
+    /// through the EWMH ledger: both targets are client handles the
+    /// ledger already owns — no `Compositor` access needed — and for
+    /// X11 the property write must go through smithay's `X11Surface`
+    /// setters, which rewrite `_NET_WM_STATE` from their own cached
+    /// set (a second writer on our own connection would race them).
+    ///
+    /// The vocabulary mapping, stated honestly:
+    /// * `wm-core` maximizes per axis; X11's smithay setter and xdg's
+    ///   Maximized state are both single both-axes concepts, so
+    ///   both-axes-set = maximized (the conventional reading) and a
+    ///   single-axis maximize publishes as not-maximized rather than
+    ///   half-claiming a state the protocol cannot spell.
+    /// * `hidden` (miniaturized) maps to X11's `_NET_WM_STATE_HIDDEN`
+    ///   via `set_suspended`; xdg has no equivalent state short of the
+    ///   v6 Suspended hint, which is deliberately not sent here (it
+    ///   means "stop rendering", stronger than miniaturized wants).
+    /// * `shaded` has no vocabulary on either side (no smithay setter,
+    ///   no xdg state) and is deliberately unpublished — which is why
+    ///   `xewmh.rs` leaves `_NET_WM_STATE_SHADED` out of
+    ///   `_NET_SUPPORTED`.
+    fn publish_net_state(&mut self, window: Self::WindowId, fullscreen: bool, max_h: bool, max_v: bool, shaded: bool, hidden: bool) {
+        let _ = shaded;
+        let Some(record) = self.windows.get(&window) else {
+            return;
+        };
+        let maximized = both_axes_maximized(max_h, max_v);
+        match &record.surface {
+            ManagedSurface::Xdg(toplevel) => {
+                if toplevel.alive() {
+                    toplevel.with_pending_state(|state| {
+                        if maximized {
+                            state.states.set(XdgToplevelState::Maximized);
+                        } else {
+                            state.states.unset(XdgToplevelState::Maximized);
+                        }
+                        if fullscreen {
+                            state.states.set(XdgToplevelState::Fullscreen);
+                        } else {
+                            state.states.unset(XdgToplevelState::Fullscreen);
+                        }
+                    });
+                    // Dedup-send: unchanged states produce no configure,
+                    // so `wm-core` republishing on every transition (it
+                    // does, from six call sites) costs nothing on the
+                    // wire.
+                    let _ = toplevel.send_pending_configure();
+                }
+            }
+            ManagedSurface::X11(surface) => {
+                // Smithay's setters own the `_NET_WM_STATE` property on
+                // the client window and dedup internally (no property
+                // rewrite when nothing changed). Errors are logged and
+                // dropped like every other X11 call on this backend:
+                // the client may be mid-teardown, and state styling is
+                // not worth failing anything over.
+                if surface.alive() {
+                    if let Err(error) = surface.set_fullscreen(fullscreen) {
+                        tracing::warn!(?error, ?window, "X11 set_fullscreen failed");
+                    }
+                    if let Err(error) = surface.set_maximized(maximized) {
+                        tracing::warn!(?error, ?window, "X11 set_maximized failed");
+                    }
+                    if let Err(error) = surface.set_suspended(hidden) {
+                        tracing::warn!(?error, ?window, "X11 set_suspended failed");
+                    }
+                }
+            }
+        }
+    }
 
     fn window_type(&self, window: Self::WindowId) -> WindowType {
         let Some(record) = self.windows.get(&window) else {
@@ -1249,4 +1375,22 @@ impl wm_theme_api::PopupHost for WaylandBackend {
     }
 
     fn ungrab_pointer(&mut self, _grab: wm_theme_api::PopupGrab) {}
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Everything else in this file needs a live client on a socket;
+    // the state-flag projection is the pure decision underneath
+    // `publish_net_state`, and the one a slipped `||` would silently
+    // break in both protocols at once.
+
+    #[test]
+    fn only_both_axes_read_as_maximized() {
+        assert!(both_axes_maximized(true, true));
+        assert!(!both_axes_maximized(true, false));
+        assert!(!both_axes_maximized(false, true));
+        assert!(!both_axes_maximized(false, false));
+    }
 }

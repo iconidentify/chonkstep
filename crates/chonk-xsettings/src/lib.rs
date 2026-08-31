@@ -85,7 +85,12 @@
 //! has no use for it: it is the desktop, and if something else already
 //! owns the selection the right answer is to leave that manager alone
 //! (see [`manager`]'s "Losing gracefully"), not to start following its
-//! opinions.
+//! opinions. One carve-out exists, because XWayland forced the issue:
+//! an owner that is publishing *nothing* — XWayland claims the
+//! selection at startup and puts an empty settings block behind it —
+//! can be taken over via [`manager::AcquisitionPolicy`], and the only
+//! parsing this crate does of anyone else's property is the header
+//! check that decides it ([`format::parse_header`]).
 //!
 //! Nor does it replace the per-child environment variables. The two
 //! overlap but neither subsumes the other: XSETTINGS reaches every X
@@ -106,5 +111,8 @@ pub use appearance::{
     UNSCALED_XFT_DPI, XFT_DPI_UNITS_PER_POINT, cursor_size_for_scale, keys, sanitize_ui_scale,
     window_scaling_factor_for_scale, xft_dpi_for_scale,
 };
-pub use format::{ByteOrder, MAX_NAME_BYTES, MAX_STRING_BYTES, SettingValue, Settings, serialize};
-pub use manager::{ManagerState, XSettingsError, XSettingsManager};
+pub use format::{
+    ByteOrder, Header, MAX_NAME_BYTES, MAX_STRING_BYTES, SettingValue, Settings, parse_header,
+    serialize,
+};
+pub use manager::{AcquisitionPolicy, ManagerState, XSettingsError, XSettingsManager};

@@ -569,6 +569,13 @@ pub struct WaylandBackend {
     pub(crate) locked: bool,
     /// The lock client's surfaces, one per output it has covered.
     pub(crate) lock_surfaces: Vec<crate::lock::LockSurfaceEntry>,
+    /// Buffered EWMH publishes waiting for `dispatch_pending` to flush
+    /// them to the XWayland root — the record-now/act-later detour the
+    /// `Backend::publish_*` verbs take for the reason `pending_focus`
+    /// documents: the connection (when it exists at all) hangs off
+    /// [`Compositor`], which a backend verb can never reach. See
+    /// `xewmh.rs`.
+    pub(crate) ewmh: crate::xewmh::EwmhLedger,
 }
 
 /// Which way a drag grab just moved, for the seat-side half that
@@ -610,6 +617,7 @@ impl WaylandBackend {
             layers: Vec::new(),
             locked: false,
             lock_surfaces: Vec::new(),
+            ewmh: crate::xewmh::EwmhLedger::default(),
         }
     }
 
@@ -675,6 +683,10 @@ impl WaylandBackend {
         self.windows.remove(&window);
         self.stacking
             .retain(|entry| !matches!(entry, StackEntry::Window(w) if *w == window));
+        // Same collection duty for the pending EWMH properties: keyed
+        // by window id, and nothing downstream would ever drain an
+        // entry whose window no longer resolves.
+        self.ewmh.prune_window(window);
     }
 }
 
@@ -944,6 +956,12 @@ pub struct Compositor {
     /// [`Compositor::start_xsettings`] for what it publishes and, more
     /// importantly, what it deliberately does not.
     pub(crate) xsettings: Option<XSettingsManager>,
+    /// The EWMH publisher for the XWayland root — a second ordinary X
+    /// connection beside the XSETTINGS one, same lifecycle: `None`
+    /// before XWayland is ready, `None` for good after a failure
+    /// (degraded to exactly what the session did before it existed —
+    /// X tools see nothing). See `xewmh.rs`.
+    pub(crate) xewmh: Option<crate::xewmh::XEwmh>,
     /// The UI scale everything in this session is drawn at.
     ///
     /// Held here because two things outside the theme engine are sized
@@ -1139,6 +1157,12 @@ impl Compositor {
         // same state the desktop just settled into, before the damage
         // test so a capture request can mark the frame it needs.
         crate::protocols::refresh(self);
+        // The X11 tools' equivalent of the wlr window list above rides
+        // the same timing: flush the buffered EWMH publishes to the
+        // XWayland root after the drains, so `xprop`/`wmctrl` read the
+        // state the desktop just settled into, never a half-applied
+        // pass. A no-op until XWayland is ready (see `xewmh::flush`).
+        crate::xewmh::flush(self);
         // Layer surfaces settle beside them and before the damage test
         // for the same reason: a bar that just changed its exclusive
         // zone must reflow the workareas and render on this frame, not
@@ -1326,7 +1350,17 @@ impl Compositor {
         // which the expansion has in scope, and a local of that name
         // loses to it — silently, as a type error about `Value`.)
         let display_name = format!(":{display_number}");
-        let mut manager = match XSettingsManager::acquire(Some(&display_name)) {
+        // TakeOverPlaceholder: XWayland claims this selection at startup
+        // and publishes an empty settings block — a squatter, not a
+        // manager, and its emptiness is why X11 toolkits under this
+        // compositor got no DPI at all. The policy takes over only an
+        // owner whose property is absent or a valid zero-settings
+        // block; a real manager (a user's own xsettingsd) still gets
+        // the same respectful refusal as before.
+        let mut manager = match XSettingsManager::acquire_with_policy(
+            Some(&display_name),
+            chonk_xsettings::AcquisitionPolicy::TakeOverPlaceholder,
+        ) {
             Ok(manager) => manager,
             Err(error @ XSettingsError::AlreadyOwned { .. }) => {
                 tracing::info!(%error, display = display_name, "another XSETTINGS manager owns this display; leaving it alone");
@@ -2026,6 +2060,10 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
                                 // that will ever run in this session
                                 // connects after it.
                                 comp.start_xsettings(display_number);
+                                // And the EWMH publisher, on its own
+                                // connection for the same two-readers
+                                // reason `start_xsettings` gives.
+                                crate::xewmh::start(comp, display_number);
                             }
                             Err(error) => {
                                 tracing::error!(?error, "failed to attach the X11 window manager to XWayland");
@@ -2047,6 +2085,10 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
                         // exactly as it would for one window closing.
                         comp.xwm = None;
                         comp.xdisplay = None;
+                        // The EWMH connection pointed at the display
+                        // that just died; its next write would only
+                        // fail noisily.
+                        comp.xewmh = None;
                         let backend = comp.wm.backend_mut();
                         let orphaned: Vec<WlWindowId> = backend
                             .windows
@@ -2089,6 +2131,7 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
         xwm: None,
         xdisplay: None,
         xsettings: None,
+        xewmh: None,
         ui_scale: scale,
         graphics,
         dmabuf,

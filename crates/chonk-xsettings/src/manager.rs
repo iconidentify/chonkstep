@@ -20,8 +20,12 @@
 //! The sequence [`XSettingsManager::acquire`] performs, and why each
 //! step is where it is:
 //!
-//! 1. **Ask who owns the selection.** If anybody does, stop. See
-//!    "Losing gracefully" below.
+//! 1. **Ask who owns the selection.** If anybody does, stop — unless
+//!    the caller opted into [`AcquisitionPolicy::TakeOverPlaceholder`]
+//!    *and* the owner turns out to be publishing nothing, in which case
+//!    the sequence continues and step 5's `SetSelectionOwner` performs
+//!    the ICCCM takeover. See "Losing gracefully" below, including the
+//!    placeholder exception.
 //! 2. **Create the owner window.** Unmapped, 1×1, `override-redirect`,
 //!    off-screen. It is never drawn; it exists to be a name a client can
 //!    hang a `PropertyNotify` selection on and to die with this process.
@@ -66,6 +70,45 @@
 //! theme settings that work. So [`XSettingsError::AlreadyOwned`] comes
 //! back, the caller logs it and carries on with the rest of the desktop,
 //! and the X clients keep the settings they had.
+//!
+//! ## The placeholder exception
+//!
+//! The argument above has one honest hole in it, found the hard way:
+//! it assumes the existing owner is *managing* something. Under this
+//! desktop's own Wayland session it is not — XWayland claims
+//! `_XSETTINGS_S0` at startup and publishes an empty settings block, a
+//! bare twelve-byte header with zero settings (verified live: `xprop`
+//! on the owner shows twelve zero bytes). That owner is squatting, not
+//! managing: standing down in its favour means every X11 toolkit on the
+//! display gets no DPI at all, which is precisely the failure this
+//! crate exists to prevent. Both halves of the "we never fight" case
+//! collapse for it — there are no published settings for a handover to
+//! flip, and the incumbent is not, by construction or otherwise,
+//! publishing anything that works.
+//!
+//! So there is an opt-in, [`AcquisitionPolicy::TakeOverPlaceholder`],
+//! and it is deliberately narrow. The current owner's
+//! `_XSETTINGS_SETTINGS` property is read and classified: *absent*, or
+//! a block whose header parses cleanly and declares zero settings, is a
+//! placeholder and is taken over — `SetSelectionOwner` with our fresh
+//! timestamp, which is the ICCCM manager takeover and delivers the old
+//! owner a `SelectionClear`, then the same read-back as always to prove
+//! it worked. Anything else — settings present, bytes that do not
+//! parse, a property of the wrong type, a read that fails — is a real
+//! manager or something unknowable, and is refused exactly as before,
+//! with the same [`XSettingsError::AlreadyOwned`]. ICCCM's polite
+//! handover also has the new manager wait for the old owner to destroy
+//! its window; XWayland keeps its window forever, so this crate does
+//! not wait — the `SelectionClear` is the old owner's notice, and the
+//! read-back is this manager's proof.
+//!
+//! The classification can, in principle, misfire on a real manager
+//! caught in the instant between acquiring its selection and publishing
+//! its first setting — this crate's own step 4 exists to keep that
+//! window shut, but not every manager is so careful. That risk is
+//! accepted, and it is why the takeover is opt-in rather than the
+//! default: the caller that opts in is saying it would rather win a
+//! race that rare than leave every X client unscaled behind a stub.
 //!
 //! The mirror image is handled too: if another manager takes the
 //! selection away from *this* one later, the server sends a
@@ -188,6 +231,72 @@ pub enum ManagerState {
     Superseded,
 }
 
+/// What to do when the selection already has an owner.
+///
+/// An enum rather than a second constructor per entry point, because
+/// there are two entry points ([`XSettingsManager::acquire`] and
+/// [`XSettingsManager::acquire_with_connection`]) and one policy
+/// decision, and the decision deserves a name at the call site: a
+/// reader of `acquire_with_policy(display, TakeOverPlaceholder)` knows
+/// what was opted into without visiting the documentation. The default
+/// is the behaviour this crate has always had.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum AcquisitionPolicy {
+    /// Any existing owner wins, no questions asked: acquisition fails
+    /// with [`XSettingsError::AlreadyOwned`] and the incumbent is left
+    /// alone. The default, and the "Losing gracefully" argument in the
+    /// module documentation is its rationale.
+    #[default]
+    RespectAnyOwner,
+    /// An owner that is publishing *nothing* — no
+    /// `_XSETTINGS_SETTINGS` property, or a well-formed block with zero
+    /// settings — is taken over; an owner publishing anything else, or
+    /// anything unclassifiable, is respected exactly as
+    /// [`RespectAnyOwner`](Self::RespectAnyOwner) would. See "The
+    /// placeholder exception" in the module documentation for why this
+    /// exists (XWayland squats on the selection with an empty block)
+    /// and why it is this narrow.
+    TakeOverPlaceholder,
+}
+
+/// What the current owner's `_XSETTINGS_SETTINGS` property says the
+/// owner is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OwnerClass {
+    /// Publishing nothing: no property, or a valid block that is empty.
+    /// Taking over costs no client any setting it currently has.
+    Placeholder,
+    /// Publishing settings, or bytes this crate cannot vouch for.
+    /// Either way, not ours to displace.
+    Real,
+}
+
+/// Classifies an owner from its property bytes, `None` meaning the
+/// property is absent.
+///
+/// Pure, so the boundary of the takeover — the one judgement call in
+/// this policy — is unit-tested without a server. The rules, and the
+/// direction every doubt resolves in:
+///
+/// - **Absent property**: placeholder. An XSETTINGS manager's entire
+///   job is that property; an owner without one is not doing the job.
+/// - **A valid header declaring zero settings, and nothing after it**:
+///   placeholder — the XWayland stub, byte for byte. The length check
+///   matters: a header that claims zero settings but trails extra bytes
+///   is self-contradictory, and self-contradictory means unknowable.
+/// - **Everything else**: real. Settings present means a working
+///   manager; unparseable means no licence to conclude anything, and
+///   [`crate::format::parse_header`] is strict for exactly this caller.
+fn classify_owner_property(property: Option<&[u8]>) -> OwnerClass {
+    match property {
+        None => OwnerClass::Placeholder,
+        Some(bytes) => match crate::format::parse_header(bytes) {
+            Some(header) if header.n_settings == 0 && bytes.len() == 12 => OwnerClass::Placeholder,
+            _ => OwnerClass::Real,
+        },
+    }
+}
+
 /// An XSETTINGS manager: owns the selection, owns the window, owns the
 /// settings map.
 ///
@@ -234,9 +343,23 @@ impl XSettingsManager<RustConnection> {
     ///
     /// The connection this opens is separate from any the caller already
     /// has, deliberately; see the module documentation.
+    ///
+    /// Any existing owner is respected
+    /// ([`AcquisitionPolicy::RespectAnyOwner`]); use
+    /// [`acquire_with_policy`](Self::acquire_with_policy) to opt into
+    /// taking over a placeholder.
     pub fn acquire(display_name: Option<&str>) -> Result<Self, XSettingsError> {
+        Self::acquire_with_policy(display_name, AcquisitionPolicy::default())
+    }
+
+    /// [`acquire`](Self::acquire), with the already-owned case handled
+    /// per an explicit [`AcquisitionPolicy`].
+    pub fn acquire_with_policy(
+        display_name: Option<&str>,
+        policy: AcquisitionPolicy,
+    ) -> Result<Self, XSettingsError> {
         let (conn, screen_num) = RustConnection::connect(display_name)?;
-        Self::acquire_with_connection(conn, screen_num)
+        Self::acquire_with_connection_and_policy(conn, screen_num, policy)
     }
 }
 
@@ -246,7 +369,22 @@ impl<C: Connection> XSettingsManager<C> {
     ///
     /// Every event on `conn` from here on belongs to this manager; see
     /// the module documentation for why that has to be true.
+    ///
+    /// Any existing owner is respected; see
+    /// [`acquire_with_connection_and_policy`](Self::acquire_with_connection_and_policy)
+    /// for the placeholder takeover.
     pub fn acquire_with_connection(conn: C, screen_num: usize) -> Result<Self, XSettingsError> {
+        Self::acquire_with_connection_and_policy(conn, screen_num, AcquisitionPolicy::default())
+    }
+
+    /// [`acquire_with_connection`](Self::acquire_with_connection), with
+    /// the already-owned case handled per an explicit
+    /// [`AcquisitionPolicy`].
+    pub fn acquire_with_connection_and_policy(
+        conn: C,
+        screen_num: usize,
+        policy: AcquisitionPolicy,
+    ) -> Result<Self, XSettingsError> {
         let available = conn.setup().roots.len();
         let root = conn
             .setup()
@@ -266,13 +404,26 @@ impl<C: Connection> XSettingsManager<C> {
 
         // Step 1: is somebody already doing this job? Asked before any
         // resource is created, so the common "xsettingsd is running"
-        // case costs one round trip and leaves nothing behind.
+        // case costs one round trip and leaves nothing behind. Under
+        // the takeover policy, "somebody" gets one further question —
+        // is it actually publishing anything? — and only a placeholder
+        // (see "The placeholder exception" in the module documentation)
+        // lets the acquisition continue past it.
         let existing = conn.get_selection_owner(selection)?.reply()?.owner;
         if existing != NONE {
-            return Err(XSettingsError::AlreadyOwned {
-                selection: selection_name,
-                owner: existing,
-            });
+            let takeover = policy == AcquisitionPolicy::TakeOverPlaceholder
+                && Self::owner_is_placeholder(&conn, existing, settings_atom);
+            if !takeover {
+                return Err(XSettingsError::AlreadyOwned {
+                    selection: selection_name,
+                    owner: existing,
+                });
+            }
+            tracing::info!(
+                selection = %selection_name,
+                owner = existing,
+                "the current XSETTINGS owner publishes no settings; taking the selection over"
+            );
         }
 
         // Step 2: the owner window. Off-screen, 1x1, override-redirect
@@ -355,6 +506,54 @@ impl<C: Connection> XSettingsManager<C> {
                 })
             }
         }
+    }
+
+    /// Reads the current owner's `_XSETTINGS_SETTINGS` property and
+    /// answers the one question the takeover policy asks: is this owner
+    /// a placeholder?
+    ///
+    /// The judgement itself lives in [`classify_owner_property`], which
+    /// is pure and tested; this method only fetches the bytes and folds
+    /// the fetch's failure modes into the conservative side. A property
+    /// that exists but is not typed `_XSETTINGS_SETTINGS` at format 8
+    /// is not a property this crate can vouch for, and a read that
+    /// fails outright — the usual cause being an owner that died
+    /// between the two round trips — proves nothing about anything.
+    /// Both classify as real, which refuses the takeover; a wrongly
+    /// refused takeover is a log line and the status quo, a wrongly
+    /// granted one is a fight with a live manager.
+    fn owner_is_placeholder(conn: &C, owner: Window, settings_atom: Atom) -> bool {
+        let reply = match conn
+            .get_property(false, owner, settings_atom, AtomEnum::ANY, 0, u32::MAX / 4)
+            .map_err(XSettingsError::from)
+            .and_then(|cookie| cookie.reply().map_err(XSettingsError::from))
+        {
+            Ok(reply) => reply,
+            Err(error) => {
+                tracing::debug!(
+                    ?error,
+                    owner,
+                    "could not read the current owner's settings property; not taking over"
+                );
+                return false;
+            }
+        };
+        // `type_` of `None` is the server's way of saying the property
+        // does not exist at all — the absent case classify handles.
+        let property = if reply.type_ == NONE {
+            None
+        } else if reply.type_ == settings_atom && reply.format == 8 {
+            Some(reply.value.as_slice())
+        } else {
+            tracing::debug!(
+                owner,
+                type_ = reply.type_,
+                format = reply.format,
+                "the current owner's settings property has the wrong type; not taking over"
+            );
+            return false;
+        };
+        classify_owner_property(property) == OwnerClass::Placeholder
     }
 
     /// Steps 3 to 6 of the acquisition sequence, factored out so that
@@ -772,5 +971,65 @@ mod tests {
     fn losing_the_selection_is_a_distinguishable_error() {
         let error = XSettingsError::SelectionLost("_XSETTINGS_S0".to_string());
         assert!(error.to_string().contains("_XSETTINGS_S0"));
+    }
+
+    #[test]
+    fn an_owner_with_no_settings_property_is_a_placeholder() {
+        // A manager's entire job is that property; an owner without one
+        // is not doing the job.
+        assert_eq!(classify_owner_property(None), OwnerClass::Placeholder);
+    }
+
+    #[test]
+    fn an_owner_publishing_an_empty_block_is_a_placeholder() {
+        // The XWayland stub, byte for byte: a bare LSB-first header,
+        // serial zero, zero settings — twelve zero bytes.
+        assert_eq!(
+            classify_owner_property(Some(&[0u8; 12])),
+            OwnerClass::Placeholder
+        );
+        // And the same judgement for an empty block that has a nonzero
+        // serial or the other byte order: emptiness is what matters,
+        // not which manager wrote the header.
+        let mut serialed = [0u8; 12];
+        serialed[4] = 7;
+        assert_eq!(
+            classify_owner_property(Some(&serialed)),
+            OwnerClass::Placeholder
+        );
+        let mut msb = [0u8; 12];
+        msb[0] = 1;
+        assert_eq!(classify_owner_property(Some(&msb)), OwnerClass::Placeholder);
+    }
+
+    #[test]
+    fn an_owner_publishing_even_one_setting_is_real() {
+        let mut settings = Settings::new();
+        assert!(settings.set("Xft/DPI", 98304));
+        assert_eq!(
+            classify_owner_property(Some(&settings.serialize())),
+            OwnerClass::Real
+        );
+    }
+
+    #[test]
+    fn an_owner_publishing_garbage_is_treated_as_real_and_left_alone() {
+        // Every doubt resolves toward refusal: bytes this crate cannot
+        // vouch for must not license taking a selection away.
+        let cases: &[&[u8]] = &[
+            b"",                        // no header at all
+            &[0u8; 11],                 // one byte short of a header
+            &[2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], // undefined byte-order code
+            &[0xff; 12],                // noise
+            &[0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], // nonzero header padding
+            &[0u8; 13],                 // claims zero settings, then trails a byte
+        ];
+        for bytes in cases {
+            assert_eq!(
+                classify_owner_property(Some(bytes)),
+                OwnerClass::Real,
+                "{bytes:?} must not classify as a placeholder"
+            );
+        }
     }
 }

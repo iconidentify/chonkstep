@@ -38,6 +38,7 @@ mod state;
 // is set; see its module docs for the three regressions it exists for.
 mod test_door;
 mod xdg;
+mod xewmh;
 mod xwayland;
 
 pub use state::{run, Compositor, WaylandBackend, WlFrameId, WlShellId, WlWindowId};
