@@ -15,6 +15,7 @@
 //! `DecorationBuffer`s, and anything a backend cannot express belongs
 //! in that backend's binary, not here.
 
+pub mod appearance;
 pub mod apps;
 pub mod desktop;
 pub mod dockapp;

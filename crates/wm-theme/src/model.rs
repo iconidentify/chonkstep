@@ -1,6 +1,64 @@
 use serde::{Deserialize, Serialize};
 use wm_theme_api::ButtonKind;
 
+/// The session-wide light/dark axis every theme is rendered along.
+///
+/// An appearance is not a theme: the theme decides *which* desktop you
+/// have (Amber Phosphor, Teal Blueprint, ...) and the appearance
+/// decides which of that theme's two renditions you are looking at.
+/// Every built-in theme ships both — same identity, same chrome
+/// geometry, two deliberate palettes — and
+/// `default_theme::theme_variant` resolves an `(id, Appearance)` pair
+/// to the right one. A [`Theme`] value records which rendition it is
+/// in [`Theme::appearance`], so anything holding a resolved theme
+/// (the shell, a dockapp fed `theme_toml`) can tell without asking.
+///
+/// Serialized in kebab-lowercase (`"light"` / `"dark"`) — the same
+/// spelling the config file, the published state file and the
+/// appearance-request IPC file all use, so there is exactly one
+/// vocabulary for the axis everywhere it appears.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Appearance {
+    Light,
+    /// The default: seven of the eight built-ins are natively dark,
+    /// and a value that deserializes from a source too old to name an
+    /// appearance should look like that source did when it was written.
+    #[default]
+    Dark,
+}
+
+impl Appearance {
+    /// Parses the one vocabulary (`"light"` / `"dark"`, trimmed,
+    /// case-insensitive). `None` for anything else — every caller
+    /// (config parsing, the request file) wants to warn-and-skip
+    /// rather than guess.
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name.trim().to_ascii_lowercase().as_str() {
+            "light" => Some(Self::Light),
+            "dark" => Some(Self::Dark),
+            _ => None,
+        }
+    }
+
+    /// The canonical spelling, for files and logs.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Light => "light",
+            Self::Dark => "dark",
+        }
+    }
+
+    /// The other rendition — what an `appearance-request` of `toggle`
+    /// resolves to.
+    pub const fn toggled(self) -> Self {
+        match self {
+            Self::Light => Self::Dark,
+            Self::Dark => Self::Light,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Color {
     pub r: u8,
@@ -182,9 +240,17 @@ pub struct MenuStyle {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Theme {
     /// Stable kebab-case identity — what gets persisted when the user
-    /// picks a theme, so `name` can be reworded freely.
+    /// picks a theme, so `name` can be reworded freely. Both of a
+    /// theme's renditions share this id: the appearance axis picks
+    /// between them, it never forks the identity.
     pub id: String,
     pub name: String,
+    /// Which rendition of the theme this value is — see [`Appearance`].
+    /// `#[serde(default)]` (= `Dark`) so a `theme_toml` written before
+    /// the axis existed still deserializes, wearing the mood it was
+    /// authored in.
+    #[serde(default)]
+    pub appearance: Appearance,
     pub titlebar: TitlebarStyle,
     pub resize_bar: ResizeBarStyle,
     pub border: BorderStyle,

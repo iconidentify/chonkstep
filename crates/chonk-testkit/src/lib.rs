@@ -170,6 +170,11 @@ impl Session {
             .env("CHONKSTEP_BACKEND", "winit")
             .env("CHONKSTEP_TEST_SOCKET", &door_path)
             .env("RUST_LOG", "info")
+            // GSettings is per-user, not per-scratch-dir: without this,
+            // a posed session switching its appearance would run
+            // `gsettings set` against the developer's real preferences.
+            // The shell checks the variable before propagating.
+            .env("CHONKSTEP_NO_APPEARANCE_PROPAGATION", "1")
             // The developer's shell may carry CHONKSTEP_SCALE (the
             // dev-nested script exports it); it would silently beat
             // the config file this harness just wrote.

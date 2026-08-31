@@ -191,6 +191,26 @@ impl SpawnedChild {
             libc::kill(self.pid as libc::pid_t, libc::SIGTERM);
         }
     }
+
+    /// Delivers an arbitrary signal to the child, if it has not been
+    /// observed to exit.
+    ///
+    /// Exists for the terminals: foot swaps between its
+    /// `colors-dark`/`colors-light` sections on SIGUSR1/SIGUSR2, which
+    /// is how a live appearance switch reaches terminals that are
+    /// already running. The same pid-race argument as
+    /// [`Self::terminate`] applies: this process reaps its own
+    /// children, so an unreaped pid is provably still this child's.
+    pub fn signal(&self, signal: i32) {
+        if self.exited().is_some() {
+            return;
+        }
+        // SAFETY: `kill` with a pid this process spawned and has not
+        // yet reaped; the only effect is delivering a signal.
+        unsafe {
+            libc::kill(self.pid as libc::pid_t, signal);
+        }
+    }
 }
 
 /// Like [`spawn_detached_with_env`], but the caller keeps a handle that

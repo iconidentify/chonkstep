@@ -68,5 +68,5 @@ pub mod tile;
 pub mod wifi;
 pub mod workspace;
 
-pub use model::Theme;
+pub use model::{Appearance, Theme};
 pub use raster::{FontState, RasterThemeEngine};

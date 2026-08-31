@@ -123,8 +123,6 @@ const TERMINAL_MIN_SIZE: (u32, u32) = (640, 400);
 /// division is by the same factor the theme was scaled by, recovered
 /// the same way, so a 1x session divides by one and nothing moves.
 fn terminal_args(theme: &Theme, font_px: f32, screen: Size, client_scale: f32) -> Vec<String> {
-    // foot wants bare RRGGBB, not the `#rrggbb` urxvt took.
-    let hex = |c: wm_theme::model::Color| format!("{:02x}{:02x}{:02x}", c.r, c.g, c.b);
     let ui_scale = theme.titlebar.font.size / 12.0;
     let px = (font_px * ui_scale * (client_scale / ui_scale.max(0.01))).round().max(8.0) as u32;
     let divisor = (ui_scale / client_scale.max(0.01)).max(1.0);
@@ -138,19 +136,48 @@ fn terminal_args(theme: &Theme, font_px: f32, screen: Size, client_scale: f32) -
         format!("JetBrainsMono Nerd Font:pixelsize={px},Noto Sans Symbols 2:pixelsize={px}"),
         "--window-size-pixels".to_string(),
         format!("{window_w}x{window_h}"),
+        // Which of the two populated sections the terminal starts in —
+        // the appearance the resolved theme is wearing right now.
         "--override".to_string(),
-        "initial-color-theme=dark".to_string(),
-        "--override".to_string(),
-        format!("colors-dark.foreground={}", hex(theme.terminal.fg)),
-        "--override".to_string(),
-        format!("colors-dark.background={}", hex(theme.terminal.bg)),
-        // `cursor` is a *pair*: the text color drawn inside the cursor
-        // block, then the block itself. urxvt's `-cr` set only the
-        // block, so the background goes in the text slot to keep the
-        // classic reversed look the themes were written against.
-        "--override".to_string(),
-        format!("colors-dark.cursor={} {}", hex(theme.terminal.bg), hex(theme.terminal.cursor)),
+        format!("initial-color-theme={}", theme.appearance.name()),
     ];
+    // BOTH of foot's color sections are populated — this rendition's
+    // palette in its own section and the counterpart rendition's in
+    // the other — so a running terminal can follow a live appearance
+    // switch: foot swaps sections on SIGUSR1 (dark) / SIGUSR2 (light),
+    // which `Shell::retint_terminals` sends on every switch. A
+    // terminal spawned in one mood and switched to the other is
+    // indistinguishable from one spawned there.
+    let counterpart = wm_theme::default_theme::theme_variant(&theme.id, theme.appearance.toggled())
+        .map(|other| other.terminal)
+        // A theme this build cannot name in the other mood (nothing
+        // built-in today) keeps its one palette in both sections: the
+        // switch then changes nothing, rather than half of something.
+        .unwrap_or_else(|| theme.terminal.clone());
+    let (dark, light) = match theme.appearance {
+        wm_theme::Appearance::Dark => (&theme.terminal, &counterpart),
+        wm_theme::Appearance::Light => (&counterpart, &theme.terminal),
+    };
+    push_palette_args(&mut args, "colors-dark", dark);
+    push_palette_args(&mut args, "colors-light", light);
+    args
+}
+
+/// Appends one `TerminalPalette` as foot `--override`s for one of its
+/// color sections (`colors-dark` / `colors-light`).
+fn push_palette_args(args: &mut Vec<String>, section: &str, palette: &wm_theme::model::TerminalPalette) {
+    // foot wants bare RRGGBB, not the `#rrggbb` urxvt took.
+    let hex = |c: wm_theme::model::Color| format!("{:02x}{:02x}{:02x}", c.r, c.g, c.b);
+    args.push("--override".to_string());
+    args.push(format!("{section}.foreground={}", hex(palette.fg)));
+    args.push("--override".to_string());
+    args.push(format!("{section}.background={}", hex(palette.bg)));
+    // `cursor` is a *pair*: the text color drawn inside the cursor
+    // block, then the block itself. urxvt's `-cr` set only the
+    // block, so the background goes in the text slot to keep the
+    // classic reversed look the themes were written against.
+    args.push("--override".to_string());
+    args.push(format!("{section}.cursor={} {}", hex(palette.bg), hex(palette.cursor)));
     // The theme's glass, applied by the terminal itself rather than by
     // a compositor opacity rule. On X11 that rule is what produces
     // translucency (`add_opacity_rule("URxvt", ..)` in the X11
@@ -160,23 +187,24 @@ fn terminal_args(theme: &Theme, font_px: f32, screen: Size, client_scale: f32) -
     // there is no per-app opacity rule on the Wayland side at all, so
     // without this the themes' `opacity` would simply do nothing, and
     // foot's own alpha is a clean premultiplied surface the compositor
-    // composites correctly.
-    if let Some(opacity) = theme.terminal.opacity {
+    // composites correctly. Alpha is a per-section key, so each
+    // rendition carries its own glass — pale glass spends less
+    // contrast on the wallpaper, so light renditions run more opaque.
+    if let Some(opacity) = palette.opacity {
         args.push("--override".to_string());
-        args.push(format!("colors-dark.alpha={:.3}", f32::from(opacity) / 100.0));
+        args.push(format!("{section}.alpha={:.3}", f32::from(opacity) / 100.0));
     }
-    for (index, color) in theme.terminal.ansi.iter().enumerate() {
+    for (index, color) in palette.ansi.iter().enumerate() {
         // 0-7 are the regular ANSI slots, 8-15 the bright ones; the
         // theme stores them as one flat 16-slot array.
         let key = if index < 8 {
-            format!("colors-dark.regular{index}")
+            format!("{section}.regular{index}")
         } else {
-            format!("colors-dark.bright{}", index - 8)
+            format!("{section}.bright{}", index - 8)
         };
         args.push("--override".to_string());
         args.push(format!("{key}={}", hex(*color)));
     }
-    args
 }
 
 /// The head a freshly launched terminal has to fit — the primary
@@ -210,8 +238,13 @@ fn terminal_window_size(theme: &Theme, screen: Size) -> (u32, u32) {
 /// Launches the theme-styled terminal — the one path shared by the root
 /// menu's Terminal item and the `spawn-terminal` keybinding, so the two
 /// gestures can never drift apart on font, geometry, or palette.
-fn spawn_terminal(theme: &Theme, font_px: f32, screen: Size) {
-    spawn_foot(terminal_args(theme, font_px, screen, terminal_client_scale(theme)), theme.titlebar.font.size / 12.0);
+///
+/// The returned handle is how a live appearance switch reaches this
+/// terminal later (`Shell::retint_terminals` signals it); a caller
+/// that drops it launches a terminal that simply keeps its palette.
+#[must_use]
+fn spawn_terminal(theme: &Theme, font_px: f32, screen: Size) -> Option<spawn::SpawnedChild> {
+    spawn_foot(terminal_args(theme, font_px, screen, terminal_client_scale(theme)), theme.titlebar.font.size / 12.0)
 }
 
 /// The factor the terminal will scale itself by, which is what
@@ -244,10 +277,16 @@ fn terminal_client_scale(theme: &Theme) -> f32 {
 /// terminal was the client this shipped visibly wrong on: a scale-2
 /// session's pointer doubled to 96px the moment it crossed onto a
 /// terminal. See `startup::xcursor_size_env` for the per-stack rule.
-fn spawn_foot(args: Vec<String>, scale: f32) {
+/// Supervised rather than fire-and-forget (`spawn_supervised`, not
+/// `spawn_detached_with_env`) so the shell can hold a handle to every
+/// terminal it launched: a live appearance switch retints running
+/// terminals by signal (foot's SIGUSR1/SIGUSR2 color-theme switch),
+/// and a signal needs a pid that is provably still the terminal's —
+/// which the supervised reaper guarantees (see `SpawnedChild::signal`).
+fn spawn_foot(args: Vec<String>, scale: f32) -> Option<spawn::SpawnedChild> {
     let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
     let env: Vec<(String, String)> = crate::startup::xcursor_size_env(scale).into_iter().collect();
-    spawn::spawn_detached_with_env("foot", &arg_refs, &env, &[]);
+    spawn::spawn_supervised("foot", &arg_refs, &env, &[])
 }
 
 /// Launches one `.desktop` entry — the shared dispatch behind both the
@@ -261,21 +300,23 @@ fn spawn_foot(args: Vec<String>, scale: f32) {
 /// readable as "terminal options, then the thing to run".
 /// An empty parsed command line — a malformed entry the scanner let
 /// through — is a logged no-op, never a panic.
-fn launch_app(entry: &AppEntry, theme: &Theme, font_px: f32, screen: Size) {
+/// Returns a supervised handle when the launch went through the themed
+/// terminal (`Terminal=true`), so appearance switches can retint it —
+/// `None` for GUI launches and failures.
+fn launch_app(entry: &AppEntry, theme: &Theme, font_px: f32, screen: Size) -> Option<spawn::SpawnedChild> {
     // Scale recovered from the already-scaled theme (titlebar font is
     // 12px at 1x) — the same trick `terminal_args` uses, so launch
     // fixups need no separate scale plumbing.
     let scale = theme.titlebar.font.size / 12.0;
     let Some((program, args)) = entry.exec.split_first() else {
         tracing::warn!(app = %entry.id, "desktop entry has an empty command line; not launching");
-        return;
+        return None;
     };
     if entry.terminal {
         let mut argv = terminal_args(theme, font_px, screen, terminal_client_scale(theme));
         argv.push("-e".to_string());
         argv.extend(entry.exec.iter().cloned());
-        spawn_foot(argv, scale);
-        return;
+        return spawn_foot(argv, scale);
     }
     // External GUI launches get the environment/argument fixups the
     // old dedicated browser launcher carried, now applied generically:
@@ -353,6 +394,7 @@ fn launch_app(entry: &AppEntry, theme: &Theme, font_px: f32, screen: Size) {
     // the pre-multiplied size. `xcursor_size_env` owns that rule.
     env.extend(crate::startup::xcursor_size_env(scale));
     spawn::spawn_detached_with_env(program, &arg_refs, &env, &[]);
+    None
 }
 
 /// Path to the `chonk-about` demo binary — resolved relative to the
@@ -606,6 +648,15 @@ pub struct Shell<B: Backend + PopupHost<PopupId = B::ShellId>> {
     /// `run_action` `take()`s, so a stale combo cannot leak into a
     /// later session.
     overview_key: Option<KeyCombo>,
+    /// Every terminal this shell launched that has not been observed
+    /// to exit — the retint list for live appearance switches. foot
+    /// swaps its color sections on SIGUSR1/SIGUSR2, and these handles
+    /// are the only pids the shell can prove are still its terminals
+    /// (their reaper threads keep the pids from being recycled — see
+    /// `spawn::SpawnedChild`). Pruned on every switch; a terminal the
+    /// user opened by hand is not in here and simply keeps its colors,
+    /// which `docs/appearance.md` says out loud.
+    terminals: Vec<spawn::SpawnedChild>,
     /// The pointer's last known root-relative position, recorded by
     /// every [`Shell::on_motion`] call. Shell button events carry only
     /// surface-local coordinates, but the launcher strip's release/pin
@@ -641,7 +692,7 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         let apps = apps::scan_applications();
         tracing::info!(count = apps.len(), "application entries scanned");
 
-        let desktop = Desktop::new(backend, screen, primary, scale, theme.id.clone(), apps.clone());
+        let desktop = Desktop::new(backend, screen, primary, scale, theme.id.clone(), state.appearance, apps.clone());
         // The launcher strip below the Clip. Its tile size mirrors
         // `Desktop::new`'s own derivation (56px at 1x, scaled, floored
         // at 16) rather than inventing a second number: the strip's
@@ -664,12 +715,22 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         // map, in `on_notification`.
         let restore = state.restore_session && !crate::startup::session_continues();
         let (layout, relaunch) = SessionLayout::start(restore, &apps, std::time::Instant::now());
+        let mut terminals = Vec::new();
         for plan in relaunch {
-            match plan {
+            let terminal = match plan {
                 RelaunchPlan::Terminal => spawn_terminal(&theme, state.terminal_font_px, primary.size),
                 RelaunchPlan::App(entry) => launch_app(&entry, &theme, state.terminal_font_px, primary.size),
-            }
+            };
+            terminals.extend(terminal);
         }
+
+        // Publish the resolved appearance so the contract's reader half
+        // (`$XDG_STATE_HOME/chonkstep/appearance`) is present from the
+        // session's first frame — a dockapp that polls it must never
+        // find nothing there. Publishing is not propagating: GSettings
+        // is only touched when the mode actually *changes*, so booting
+        // rewrites no one's preferences.
+        crate::appearance::publish(state.appearance);
 
         // Take the configured grabs through the same delta the applier
         // uses, from an empty starting set: one implementation, so a
@@ -688,6 +749,7 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
             overview_key: None,
             grabbed: to_grab,
             layout,
+            terminals,
             state: state.clone(),
             theme,
             fonts,
@@ -740,6 +802,7 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         let theme = next.theme();
         let scale_changed = self.desktop.set_scale(next.scale);
         let theme_changed = theme != self.theme;
+        let appearance_changed = next.appearance != self.state.appearance;
         self.state = next;
         if !scale_changed && !theme_changed {
             // Nothing that is drawn has moved. Repainting anyway would
@@ -748,8 +811,25 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         }
         self.theme = theme;
         self.desktop.set_theme_id(self.theme.id.clone());
+        if appearance_changed {
+            // Before the relayout below repaints anything: the desktop
+            // must already know which rendition of the wallpaper to
+            // compose, and the published file must already say the new
+            // mode by the time the first repainted frame is visible
+            // (a dockapp reading it must never see the old word over
+            // the new desktop).
+            self.desktop.set_appearance(self.state.appearance);
+            crate::appearance::publish(self.state.appearance);
+            // Running terminals follow by signal, everything foreign
+            // follows through GSettings/the portal — both are fire-and
+            // -forget from here; the desktop's own repaint is not
+            // gated on any other process noticing.
+            self.retint_terminals();
+            crate::appearance::propagate_to_applications(self.state.appearance);
+        }
         tracing::info!(
             theme = %self.theme.id,
+            appearance = %self.state.appearance.name(),
             scale = self.state.scale,
             scale_changed,
             theme_changed,
@@ -787,6 +867,61 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         let mut next = self.state.clone();
         next.base_theme = base;
         self.apply_session_state(wm, next);
+    }
+
+    /// Moves the session to the other side of the light/dark axis (or
+    /// to an explicitly named side): the current theme re-resolves in
+    /// its `mode` rendition and applies through the exact path a theme
+    /// pick takes. A no-op when the session is already there.
+    pub fn set_appearance(&mut self, wm: &mut WindowManager<B>, mode: crate::appearance::Appearance) {
+        if mode == self.state.appearance {
+            return;
+        }
+        let mut next = self.state.clone();
+        next.appearance = mode;
+        match wm_theme::default_theme::theme_variant(&next.base_theme.id, mode) {
+            Some(base) => next.base_theme = base,
+            // A theme with no rendition on that side (nothing built-in
+            // today): the mode still flips — published file, terminals,
+            // GSettings — and the chrome keeps the one dress it has.
+            None => tracing::warn!(
+                theme = %next.base_theme.id,
+                mode = mode.name(),
+                "theme has no rendition for this appearance; switching the mode around it"
+            ),
+        }
+        self.apply_session_state(wm, next);
+    }
+
+    /// The side of the light/dark axis this session is currently on.
+    pub fn appearance(&self) -> crate::appearance::Appearance {
+        self.state.appearance
+    }
+
+    /// The whole resolved session state, read-only — for the pieces a
+    /// binary still publishes itself (the X11 binary's XSETTINGS).
+    pub fn session_state(&self) -> &SessionState {
+        &self.state
+    }
+
+    /// Signals every terminal this shell launched to swap to the color
+    /// section matching the current appearance — foot's documented
+    /// SIGUSR1 (dark) / SIGUSR2 (light) color-theme switch, against
+    /// the `colors-dark`/`colors-light` sections `terminal_args`
+    /// populated at spawn. Exited terminals are pruned first, so a
+    /// recycled pid can never be signaled.
+    fn retint_terminals(&mut self) {
+        self.terminals.retain(|terminal| terminal.exited().is_none());
+        let signal = match self.state.appearance {
+            crate::appearance::Appearance::Dark => libc::SIGUSR1,
+            crate::appearance::Appearance::Light => libc::SIGUSR2,
+        };
+        for terminal in &self.terminals {
+            terminal.signal(signal);
+        }
+        if !self.terminals.is_empty() {
+            tracing::info!(count = self.terminals.len(), appearance = self.state.appearance.name(), "retinted running terminals");
+        }
     }
 
     /// The theme every surface (the shell's own chrome included) is
@@ -869,7 +1004,8 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
     pub fn run_action(&mut self, wm: &mut WindowManager<B>, action: &Action) -> ShellOutcome {
         match action {
             Action::SpawnTerminal => {
-                spawn_terminal(&self.theme, self.state.terminal_font_px, terminal_screen(self))
+                let terminal = spawn_terminal(&self.theme, self.state.terminal_font_px, terminal_screen(self));
+                self.terminals.extend(terminal);
             }
             Action::Close => {
                 if let Some(id) = wm.focused_client() {
@@ -1200,7 +1336,8 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
             if let Some(action) = self.launchdock.handle_click(wm.backend_mut(), &self.theme, local, pressed, &running) {
                 match action {
                     LaunchDockAction::Launch(entry) => {
-                        launch_app(&entry, &self.theme, self.state.terminal_font_px, terminal_screen(self))
+                        let terminal = launch_app(&entry, &self.theme, self.state.terminal_font_px, terminal_screen(self));
+                        self.terminals.extend(terminal);
                     }
                     // The same activate path a pager's
                     // _NET_ACTIVE_WINDOW message rides — focuses,
@@ -1416,7 +1553,8 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
     fn run_root_menu_action(&mut self, wm: &mut WindowManager<B>, action: RootMenuAction) {
         match action {
             RootMenuAction::LaunchTerminal => {
-                spawn_terminal(&self.theme, self.state.terminal_font_px, terminal_screen(self))
+                let terminal = spawn_terminal(&self.theme, self.state.terminal_font_px, terminal_screen(self));
+                self.terminals.extend(terminal);
             }
             RootMenuAction::LaunchAbout => {
                 // `CHONKSTEP_THEME` is the one published channel by
@@ -1438,7 +1576,14 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
                 // a running dockapp additionally gets `ThemeChanged`
                 // pushed down its socket — this env var is only how a
                 // freshly-spawned one learns the theme it starts in.
-                let mut env = vec![("CHONKSTEP_THEME".to_string(), self.theme.id.clone())];
+                let mut env = vec![
+                    ("CHONKSTEP_THEME".to_string(), self.theme.id.clone()),
+                    // The appearance rides beside the theme id for the
+                    // same reason and through the same kind of channel:
+                    // `chonk_ui::active_theme` resolves the pair to the
+                    // exact rendition this desktop is wearing.
+                    ("CHONKSTEP_APPEARANCE".to_string(), self.state.appearance.name().to_string()),
+                ];
                 // Same per-stack cursor-size rule as every other
                 // launch — chonk-about is a native client and must not
                 // inherit the pre-multiplied process value.
@@ -1452,7 +1597,8 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
             // doesn't get to panic.
             RootMenuAction::LaunchApp(i) => {
                 if let Some(entry) = self.apps.get(i) {
-                    launch_app(entry, &self.theme, self.state.terminal_font_px, terminal_screen(self));
+                    let terminal = launch_app(entry, &self.theme, self.state.terminal_font_px, terminal_screen(self));
+                    self.terminals.extend(terminal);
                 } else {
                     tracing::warn!(index = i, count = self.apps.len(), "menu fired an out-of-range application index");
                 }
@@ -1467,7 +1613,10 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
                 // reachable from the menu, which is generated from the
                 // same list — but this is also the path a future
                 // scripted theme change would take.
-                let Some(base) = wm_theme::default_theme::theme_by_id(id) else {
+                // Resolved in the session's *current* appearance: a
+                // theme pick changes which desktop you have, never
+                // which side of the light/dark axis you are on.
+                let Some(base) = wm_theme::default_theme::theme_variant(id, self.state.appearance) else {
                     tracing::warn!(theme = id, "theme menu named a theme that does not exist; keeping the current one");
                     return;
                 };
@@ -1669,6 +1818,18 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
     /// the authoritative state into the shared cell so the widget tick
     /// repaints the tile exactly when it changed.
     pub fn tick(&mut self, wm: &mut WindowManager<B>) {
+        // The appearance-request file, consumed the way the binaries
+        // consume the reload/restart markers and on the same cadence:
+        // this method runs once per event-loop wakeup (~16ms), and the
+        // check costs one failed read on a path that is almost never
+        // there. Consumed-then-acted so a request is honored exactly
+        // once; a request naming the mode the session is already in is
+        // consumed and does nothing (`set_appearance`'s no-op arm).
+        if let Some(request) = crate::appearance::take_request() {
+            let mode = request.resolve(self.state.appearance);
+            tracing::info!(requested = ?request, resolved = mode.name(), "appearance-request received");
+            self.set_appearance(wm, mode);
+        }
         if let Some(target) = self.desktop.take_workspace_request() {
             wm.switch_workspace(target);
         }

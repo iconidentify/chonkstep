@@ -46,6 +46,11 @@ use crate::widgets::{
 /// in that reference either: icons sit directly on this same color.
 pub const DESKTOP_BG: (u8, u8, u8) = (128, 129, 159);
 
+/// The light-appearance counterpart of [`DESKTOP_BG`]: the same
+/// classic lavender lifted to paper, for the solid-color wallpaper's
+/// light rendition.
+pub const DESKTOP_BG_LIGHT: (u8, u8, u8) = (198, 199, 216);
+
 /// Remembering the order the user put the dock's tiles in.
 ///
 /// # Why this had to exist before dockapps did
@@ -1093,6 +1098,10 @@ pub struct Desktop<B: Backend> {
     icons: HashMap<B::ShellId, IconTile<B::ShellId>>,
     icon_drag: Option<IconDrag<B::ShellId>>,
     wallpaper: Wallpaper,
+    /// Which rendition of the wallpaper artwork (and dock ground) this
+    /// desktop is composed in — see `crate::appearance`. Kept beside
+    /// `wallpaper` because the pair is what `repaint_wallpaper` reads.
+    appearance: wm_theme::Appearance,
     /// The Alt-Tab switch panel, while a cycle session is live.
     switcher: Option<SwitcherPanel<B::ShellId>>,
     /// The modal Overview panel — surface, entries, selection, layout.
@@ -1123,7 +1132,7 @@ impl<B: Backend> Desktop<B> {
     /// hangs on. On a single-monitor session the two agree, and every
     /// caller must still pass both — the shell cannot recover the
     /// primary's origin from a size.
-    pub fn new(backend: &mut B, screen: Size, primary: Rect, scale: f32, theme_id: String, apps: Vec<crate::apps::AppEntry>) -> Self {
+    pub fn new(backend: &mut B, screen: Size, primary: Rect, scale: f32, theme_id: String, appearance: wm_theme::Appearance, apps: Vec<crate::apps::AppEntry>) -> Self {
         let tile = tile_px(scale);
         let pad = icon_pad_px(scale);
         // The dock is exactly one tile wide, tiles touch directly with
@@ -1194,14 +1203,14 @@ impl<B: Backend> Desktop<B> {
         let dock_height = stacked_dock_height(tile, primary.size.h, &items);
         let dock_geom = dock_geometry(primary, dock_width, dock_height);
         let dock_window = backend
-            .create_shell_surface(dock_geom, wallpaper.dock_color(), true)
+            .create_shell_surface(dock_geom, wallpaper.dock_color(appearance), true)
             .expect("failed to create dock window");
         backend.map_shell_surface(dock_window);
         backend.raise_shell_surface(dock_window);
 
         let clip_geom = clip_geometry(primary, tile);
         let clip_window = backend
-            .create_shell_surface(clip_geom, wallpaper.dock_color(), true)
+            .create_shell_surface(clip_geom, wallpaper.dock_color(appearance), true)
             .expect("failed to create clip window");
         backend.map_shell_surface(clip_window);
         backend.raise_shell_surface(clip_window);
@@ -1232,6 +1241,7 @@ impl<B: Backend> Desktop<B> {
             icons: HashMap::new(),
             icon_drag: None,
             wallpaper,
+            appearance,
             switcher: None,
             overview: OverviewPanel::default(),
             theme_id,
@@ -1342,6 +1352,14 @@ impl<B: Backend> Desktop<B> {
     /// The active theme's id, for the Themes submenu's bullet. Set by
     /// the shell when a theme is applied live; the `Theme` itself lives
     /// with the shell orchestration, not here.
+    /// Records which appearance the desktop composes its wallpaper in.
+    /// Cheap on purpose (no repaint): the appearance only ever changes
+    /// together with the theme, and the `relayout` that theme change
+    /// triggers repaints the wallpaper from this value.
+    pub fn set_appearance(&mut self, appearance: wm_theme::Appearance) {
+        self.appearance = appearance;
+    }
+
     pub fn set_theme_id(&mut self, id: String) {
         self.theme_id = id;
     }
@@ -2037,9 +2055,12 @@ impl<B: Backend> Desktop<B> {
     }
 
     fn repaint_wallpaper(&self, backend: &mut B) {
-        match self.wallpaper.render(self.screen_size()) {
+        match self.wallpaper.render(self.screen_size(), self.appearance) {
             Some(buffer) => backend.paint_root_image(&buffer),
-            None => backend.paint_root_color(DESKTOP_BG),
+            // The solid-color artwork (and any artwork that fails to
+            // decode) falls back to its own quiet color in the current
+            // mood, so even the fallback follows the axis.
+            None => backend.paint_root_color(self.wallpaper.dock_color(self.appearance)),
         }
     }
 
@@ -2453,7 +2474,7 @@ mod tests {
         let primary = Rect { pos: Point::new(0, 0), size: TEST_SCREEN };
         let mut backend = FakeBackend::new();
         let mut desktop: Desktop<FakeBackend> =
-            Desktop::new(&mut backend, TEST_SCREEN, primary, 1.0, "nextstep-classic".to_string(), Vec::new());
+            Desktop::new(&mut backend, TEST_SCREEN, primary, 1.0, "nextstep-classic".to_string(), wm_theme::Appearance::Dark, Vec::new());
 
         let area = desktop.primary_workarea();
         assert_eq!(area.size.w, TEST_SCREEN.w - tile_px(1.0), "one dock column reserved on the right");
@@ -2470,7 +2491,7 @@ mod tests {
 
         let primary = Rect { pos: Point::new(0, 0), size: TEST_SCREEN };
         let build = |backend: &mut FakeBackend, scale: f32| -> Desktop<FakeBackend> {
-            Desktop::new(backend, TEST_SCREEN, primary, scale, "nextstep-classic".to_string(), Vec::new())
+            Desktop::new(backend, TEST_SCREEN, primary, scale, "nextstep-classic".to_string(), wm_theme::Appearance::Dark, Vec::new())
         };
 
         let mut backend = FakeBackend::new();
@@ -2506,7 +2527,7 @@ mod tests {
         let primary = Rect { pos: Point::new(0, 0), size: TEST_SCREEN };
         let mut backend = FakeBackend::new();
         let mut desktop: Desktop<FakeBackend> =
-            Desktop::new(&mut backend, TEST_SCREEN, primary, 1.0, "nextstep-classic".to_string(), Vec::new());
+            Desktop::new(&mut backend, TEST_SCREEN, primary, 1.0, "nextstep-classic".to_string(), wm_theme::Appearance::Dark, Vec::new());
 
         let dock = desktop.dock_window();
         let clip = desktop.clip_window();

@@ -50,7 +50,7 @@
 #   "graphite"
 #   "next-lavender"
 #   "jade-lacquer"
-#   "ivory-halftone"   (the light one)
+#   "ivory-halftone"   (natively light; every theme has both moods)
 #   "indigo-filament"
 # A theme picked from the root menu's Themes submenu is persisted and
 # wins over this value on every later startup -- the menu is the more
@@ -60,6 +60,29 @@
 # and every dockapp restyle without the session restarting. Terminals
 # already open keep the palette they were launched with.
 #theme = "nextstep-classic"
+
+# Which side of the light/dark axis the desktop starts on: "light" or
+# "dark". This is a separate axis from `theme` -- every built-in theme
+# has a deliberate rendition for each side (chrome, menus, tiles,
+# terminal palette, and the wallpaper artwork itself change mood; the
+# theme's identity and geometry do not) -- and it is session-wide: a
+# switch restyles the chrome, retints running terminals, and tells
+# GTK/portal applications to follow, live.
+#
+# Precedence mirrors `theme`'s spirit: the running desktop publishes
+# its current mode to $XDG_STATE_HOME/chonkstep/appearance and reads
+# that file back at startup, so this line only decides the very first
+# session (or a fresh state directory). With neither said, the selected
+# theme's own native mood applies -- dark for seven of the built-ins,
+# light for ivory-halftone -- so leaving this alone changes nothing.
+#
+# The live way to switch is not this file but the request file: write
+# "light", "dark" or "toggle" to
+# $XDG_STATE_HOME/chonkstep/appearance-request and the session applies
+# it within a tick. See docs/appearance.md for the whole chain,
+# including exactly which applications follow live and which wait for
+# their next launch. An unknown value is warned about and ignored.
+#appearance = "dark"
 
 # Where a newly mapped window goes when the application itself asked
 # for no particular position (an explicit position, like a terminal's

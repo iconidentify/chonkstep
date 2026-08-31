@@ -6,9 +6,10 @@
 use std::path::PathBuf;
 
 use tiny_skia::{FilterQuality, Pixmap, PixmapPaint, Transform};
+use wm_theme::Appearance;
 use wm_theme_api::{DecorationBuffer, Size};
 
-use crate::desktop::DESKTOP_BG;
+use crate::desktop::{DESKTOP_BG, DESKTOP_BG_LIGHT};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Wallpaper {
@@ -84,38 +85,60 @@ impl Wallpaper {
         std::fs::write(path, self.id())
     }
 
-    /// The quiet color at the right edge of each artwork, used behind
-    /// the dock so the sidebar belongs to the selected composition.
-    pub const fn dock_color(self) -> (u8, u8, u8) {
-        match self {
-            Self::LavenderGrid => (129, 130, 153),
-            Self::AmberTerminal => (12, 11, 9),
-            Self::TealBlueprint => (5, 70, 73),
-            Self::GraphiteFold => (24, 24, 24),
-            Self::ClassicLavender => DESKTOP_BG,
-            Self::JadeTerrace => (30, 60, 45),
-            Self::IvoryOrb => (250, 247, 234),
-            Self::IndigoWaves => (29, 32, 45),
+    /// The quiet color at the right edge of each artwork's rendition,
+    /// used behind the dock so the sidebar belongs to the selected
+    /// composition in the selected mood.
+    pub const fn dock_color(self, appearance: Appearance) -> (u8, u8, u8) {
+        match (self, appearance) {
+            (Self::LavenderGrid, Appearance::Dark) => (129, 130, 153),
+            (Self::LavenderGrid, Appearance::Light) => (198, 199, 216),
+            (Self::AmberTerminal, Appearance::Dark) => (12, 11, 9),
+            (Self::AmberTerminal, Appearance::Light) => (246, 236, 211),
+            (Self::TealBlueprint, Appearance::Dark) => (5, 70, 73),
+            (Self::TealBlueprint, Appearance::Light) => (222, 240, 238),
+            (Self::GraphiteFold, Appearance::Dark) => (24, 24, 24),
+            (Self::GraphiteFold, Appearance::Light) => (235, 235, 233),
+            (Self::ClassicLavender, Appearance::Dark) => DESKTOP_BG,
+            (Self::ClassicLavender, Appearance::Light) => DESKTOP_BG_LIGHT,
+            (Self::JadeTerrace, Appearance::Dark) => (30, 60, 45),
+            (Self::JadeTerrace, Appearance::Light) => (166, 196, 172),
+            (Self::IvoryOrb, Appearance::Light) => (250, 247, 234),
+            (Self::IvoryOrb, Appearance::Dark) => (18, 17, 16),
+            (Self::IndigoWaves, Appearance::Dark) => (29, 32, 45),
+            (Self::IndigoWaves, Appearance::Light) => (226, 228, 236),
         }
     }
 
-    fn png(self) -> Option<&'static [u8]> {
-        match self {
-            Self::LavenderGrid => Some(include_bytes!("../assets/wallpapers/lavender-grid.png")),
-            Self::AmberTerminal => Some(include_bytes!("../assets/wallpapers/amber-terminal.png")),
-            Self::TealBlueprint => Some(include_bytes!("../assets/wallpapers/teal-blueprint.png")),
-            Self::GraphiteFold => Some(include_bytes!("../assets/wallpapers/graphite-fold.png")),
-            Self::ClassicLavender => None,
-            Self::JadeTerrace => Some(include_bytes!("../assets/wallpapers/jade-terrace.png")),
-            Self::IvoryOrb => Some(include_bytes!("../assets/wallpapers/ivory-orb.png")),
-            Self::IndigoWaves => Some(include_bytes!("../assets/wallpapers/indigo-waves.png")),
+    /// The embedded artwork for one appearance. Every artwork ships a
+    /// rendition per side of the axis — the counterparts are derived
+    /// from the originals by `scripts/gen-wallpaper-renditions.py`, see
+    /// `assets/wallpapers/SOURCES.md` — so a theme's wallpaper id never
+    /// forks across the axis: the same composition changes mood.
+    fn png(self, appearance: Appearance) -> Option<&'static [u8]> {
+        match (self, appearance) {
+            (Self::LavenderGrid, Appearance::Dark) => Some(include_bytes!("../assets/wallpapers/lavender-grid.png")),
+            (Self::LavenderGrid, Appearance::Light) => Some(include_bytes!("../assets/wallpapers/lavender-grid-light.png")),
+            (Self::AmberTerminal, Appearance::Dark) => Some(include_bytes!("../assets/wallpapers/amber-terminal.png")),
+            (Self::AmberTerminal, Appearance::Light) => Some(include_bytes!("../assets/wallpapers/amber-terminal-light.png")),
+            (Self::TealBlueprint, Appearance::Dark) => Some(include_bytes!("../assets/wallpapers/teal-blueprint.png")),
+            (Self::TealBlueprint, Appearance::Light) => Some(include_bytes!("../assets/wallpapers/teal-blueprint-light.png")),
+            (Self::GraphiteFold, Appearance::Dark) => Some(include_bytes!("../assets/wallpapers/graphite-fold.png")),
+            (Self::GraphiteFold, Appearance::Light) => Some(include_bytes!("../assets/wallpapers/graphite-fold-light.png")),
+            (Self::ClassicLavender, _) => None,
+            (Self::JadeTerrace, Appearance::Dark) => Some(include_bytes!("../assets/wallpapers/jade-terrace.png")),
+            (Self::JadeTerrace, Appearance::Light) => Some(include_bytes!("../assets/wallpapers/jade-terrace-light.png")),
+            (Self::IvoryOrb, Appearance::Light) => Some(include_bytes!("../assets/wallpapers/ivory-orb.png")),
+            (Self::IvoryOrb, Appearance::Dark) => Some(include_bytes!("../assets/wallpapers/ivory-orb-dark.png")),
+            (Self::IndigoWaves, Appearance::Dark) => Some(include_bytes!("../assets/wallpapers/indigo-waves.png")),
+            (Self::IndigoWaves, Appearance::Light) => Some(include_bytes!("../assets/wallpapers/indigo-waves-light.png")),
         }
     }
 
-    /// Decodes and scales the selected image to cover `screen`, cropping
-    /// equally from opposite edges when its aspect ratio differs.
-    pub fn render(self, screen: Size) -> Option<DecorationBuffer> {
-        let source = Pixmap::decode_png(self.png()?).ok()?;
+    /// Decodes and scales the selected image's rendition for
+    /// `appearance` to cover `screen`, cropping equally from opposite
+    /// edges when its aspect ratio differs.
+    pub fn render(self, screen: Size, appearance: Appearance) -> Option<DecorationBuffer> {
+        let source = Pixmap::decode_png(self.png(appearance)?).ok()?;
         let mut dest = Pixmap::new(screen.w.max(1), screen.h.max(1))?;
         let scale =
             (screen.w as f32 / source.width() as f32).max(screen.h as f32 / source.height() as f32);
@@ -159,25 +182,61 @@ mod tests {
     use super::*;
 
     #[test]
-    fn every_art_wallpaper_decodes_and_covers_the_requested_size() {
-        for wallpaper in Wallpaper::ALL
-            .into_iter()
-            .filter(|w| *w != Wallpaper::ClassicLavender)
-        {
-            let rendered = wallpaper
-                .render(Size::new(320, 180))
-                .expect("embedded wallpaper should decode");
-            assert_eq!((rendered.width, rendered.height), (320, 180));
-            assert_eq!(rendered.pixels.len(), 320 * 180 * 4);
+    fn every_art_wallpaper_decodes_and_covers_the_requested_size_in_both_moods() {
+        for appearance in [Appearance::Light, Appearance::Dark] {
+            for wallpaper in Wallpaper::ALL
+                .into_iter()
+                .filter(|w| *w != Wallpaper::ClassicLavender)
+            {
+                let rendered = wallpaper
+                    .render(Size::new(320, 180), appearance)
+                    .expect("embedded wallpaper should decode");
+                assert_eq!((rendered.width, rendered.height), (320, 180));
+                assert_eq!(rendered.pixels.len(), 320 * 180 * 4);
+            }
+        }
+    }
+
+    /// The two renditions of an artwork actually carry their moods: on
+    /// every artwork, the light rendition's average luminance clearly
+    /// exceeds the dark one's. This is what "the wallpaper's art works
+    /// in both moods" means as a testable claim.
+    #[test]
+    fn light_renditions_are_actually_lighter_than_dark_ones() {
+        let mean = |buffer: &wm_theme_api::DecorationBuffer| {
+            let sum: u64 = buffer.pixels.chunks_exact(4).map(|px| (px[0] as u64 + px[1] as u64 + px[2] as u64) / 3).sum();
+            (sum / (u64::from(buffer.width) * u64::from(buffer.height))) as i64
+        };
+        for wallpaper in Wallpaper::ALL.into_iter().filter(|w| *w != Wallpaper::ClassicLavender) {
+            let light = wallpaper.render(Size::new(160, 90), Appearance::Light).unwrap();
+            let dark = wallpaper.render(Size::new(160, 90), Appearance::Dark).unwrap();
+            assert!(
+                mean(&light) - mean(&dark) > 40,
+                "{}: light rendition (mean {}) must be clearly lighter than dark ({})",
+                wallpaper.id(),
+                mean(&light),
+                mean(&dark)
+            );
+        }
+        let lum = |(r, g, b): (u8, u8, u8)| (r as i64 + g as i64 + b as i64) / 3;
+        for wallpaper in Wallpaper::ALL {
+            assert!(
+                lum(wallpaper.dock_color(Appearance::Light)) > lum(wallpaper.dock_color(Appearance::Dark)),
+                "{}: dock colors must follow the artwork's moods",
+                wallpaper.id()
+            );
         }
     }
 
     #[test]
     fn classic_wallpaper_uses_the_solid_color_path() {
-        assert!(Wallpaper::ClassicLavender
-            .render(Size::new(320, 180))
-            .is_none());
-        assert_eq!(Wallpaper::ClassicLavender.dock_color(), DESKTOP_BG);
+        for appearance in [Appearance::Light, Appearance::Dark] {
+            assert!(Wallpaper::ClassicLavender
+                .render(Size::new(320, 180), appearance)
+                .is_none());
+        }
+        assert_eq!(Wallpaper::ClassicLavender.dock_color(Appearance::Dark), DESKTOP_BG);
+        assert_eq!(Wallpaper::ClassicLavender.dock_color(Appearance::Light), DESKTOP_BG_LIGHT);
     }
 
     #[test]

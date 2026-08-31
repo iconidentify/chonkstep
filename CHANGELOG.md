@@ -3,6 +3,45 @@
 All notable changes to chonkstep. Versions are workspace-wide: every
 crate and both session binaries carry the same number.
 
+## [Unreleased]
+
+### Light and dark, everywhere
+
+- Every theme now has two deliberate renditions of itself - a light
+  one and a dark one - along a new session-wide `appearance` axis.
+  Same identity, same chrome geometry, two designed dresses: fills,
+  chisel ramps, menu palettes, the full 16-color terminal scheme and
+  the wallpaper artwork's own mood each exist per side. The focused
+  titlebar stays ink on both sides (focus must stay legible on a pale
+  desk), light-mode selection highlights use each theme's accent
+  rather than inverting to white, and every wallpaper artwork gained a
+  counterpart rendition so the composition survives the mood change.
+  With nothing configured, each theme wears its native mood - dark for
+  seven of the eight, light for Ivory Halftone - so nothing changes
+  until you ask.
+- Switching is live and scriptable: write `light`, `dark` or `toggle`
+  to `$XDG_STATE_HOME/chonkstep/appearance-request` and the session
+  applies it within a tick through the same in-place path a theme pick
+  takes; the current mode is published (atomically) at
+  `$XDG_STATE_HOME/chonkstep/appearance` for anything - a dockapp, a
+  script - to read. `appearance = "light"|"dark"` in the config seeds
+  a first session. See the new `docs/appearance.md` for the whole
+  contract.
+- Applications follow. Terminals the desktop spawns get both foot
+  color sections plus the current `initial-color-theme`, and running
+  ones are retinted on the spot via foot's SIGUSR1/SIGUSR2 color-theme
+  switch. GTK4/libadwaita/Electron apps follow live through GSettings
+  `color-scheme` and the desktop portal; GTK3 follows when the
+  `gtk-theme` in play is a member of an installed light/dark pair
+  (Adwaita/Adwaita-dark and friends - a hand-picked theme is never
+  overwritten); the X11 session republishes the pair member over
+  XSETTINGS. Dockapps follow through the existing `ThemeChanged`
+  broadcast, whose `theme_toml` now carries an `appearance` tag, and
+  SDK apps get `CHONKSTEP_APPEARANCE` beside `CHONKSTEP_THEME`.
+  `docs/appearance.md` has the honest table of what follows live and
+  what waits for its next launch (Qt, notably, is documented rather
+  than forced).
+
 ## [0.2.0] - 2026-08-30
 
 The release where the desktop stopped asking you to restart it, and

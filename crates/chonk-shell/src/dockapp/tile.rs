@@ -1025,12 +1025,21 @@ impl RemoteTile {
         };
         self.token = token;
 
-        let env = vec![
+        let mut env = vec![
             (ENV_SOCKET.to_string(), ctx.socket_path.to_string_lossy().into_owned()),
             (ENV_TOKEN.to_string(), transport::token_to_hex(&token)),
             ("CHONKSTEP_SCALE".to_string(), format!("{:.4}", ctx.theme.scale)),
             ("CHONKSTEP_THEME".to_string(), ctx.theme.theme_id.clone()),
         ];
+        // Like CHONKSTEP_THEME: only how a freshly spawned dockapp
+        // learns the mood it starts in — a running one is pushed the
+        // full resolved palette (appearance tag included) through
+        // `ThemeChanged`. Read from the published state file, which the
+        // shell wrote before any tile could launch; absent (never a
+        // session's normal state) means say nothing rather than guess.
+        if let Some(mode) = crate::appearance::load_published() {
+            env.push(("CHONKSTEP_APPEARANCE".to_string(), mode.name().to_string()));
+        }
         let args: Vec<&str> = self.entry.exec[1..].iter().map(String::as_str).collect();
         match spawn::spawn_supervised(&self.entry.exec[0], &args, &env, &DISPLAY_SERVER_ENV) {
             Some(child) => {

@@ -106,6 +106,7 @@ fn main() {
         }
     };
     publish_appearance(&mut xsettings, &state);
+    let mut published_appearance = state.appearance;
 
     let mut wm = WindowManager::new(backend, Box::new(engine));
     // Session policy — focus, placement, edge resistance, the keymap —
@@ -150,6 +151,7 @@ fn main() {
             // consequence of the new state already sees the new
             // settings. Republishing is free when nothing moved — the
             // manager compares and declines to write.
+            published_appearance = next.appearance;
             publish_appearance(&mut xsettings, &next);
             shell.apply_session_state(&mut wm, next);
         }
@@ -300,6 +302,16 @@ fn main() {
         // tick rather than per event.
         shell.tick(&mut wm);
 
+        // The tick above may have consumed an appearance-request and
+        // switched the session's mode; XSETTINGS is the binary's to
+        // publish (the manager lives here), so mirror the change out
+        // to X clients. Comparing first keeps this a no-op integer
+        // check on the 60Hz path.
+        if shell.appearance() != published_appearance {
+            published_appearance = shell.appearance();
+            publish_appearance(&mut xsettings, shell.session_state());
+        }
+
         // Blocks until the X11 socket actually has something to read,
         // instead of a fixed sleep — the entire reason drags/resizes
         // used to feel like they were catching up to the cursor in
@@ -437,17 +449,21 @@ fn publish_appearance(manager: &mut Option<XSettingsManager>, state: &SessionSta
     let Some(manager) = manager.as_mut() else {
         return;
     };
-    // Scale and DPI only, deliberately no theme name. Publishing
-    // `Gtk/ThemeName = "nextstep-classic"` would not make GTK clients
-    // look like this desktop — chonkstep ships no GTK theme and no
-    // Xcursor theme — it would make every GTK client on the display
-    // fail to find that theme, fall back to its own default, and in
-    // doing so override whatever the user configured in their own
-    // `gtk-3.0/settings.ini`. `DesktopAppearance::default` puts it
-    // best: say the true things about DPI and say nothing about taste.
-    // The Wayland session publishes exactly the same set, and the two
-    // must not drift.
-    let appearance = DesktopAppearance::new(state.scale, "");
+    // Scale and DPI always; a theme name only when it is *true*. The
+    // original rule here was "say the true things about DPI and say
+    // nothing about taste", because publishing a theme name GTK cannot
+    // find (chonkstep ships no GTK theme) makes every GTK client fall
+    // back to its default while overriding the user's own
+    // `gtk-3.0/settings.ini`. The light/dark appearance axis earns a
+    // narrow exception: when a known light/dark GTK theme *pair* is
+    // verifiably installed (`chonk_shell::appearance::gtk_theme_name`
+    // checks the theme directories for real gtk-3.0/gtk-4.0 payloads —
+    // Adwaita/Adwaita-dark on a stock system), the member matching the
+    // session's mode is published so X11/XWayland GTK clients follow a
+    // switch live via XSETTINGS. No pair installed, no name — exactly
+    // the old behavior.
+    let theme_name = chonk_shell::appearance::gtk_theme_name(state.appearance).unwrap_or("");
+    let appearance = DesktopAppearance::new(state.scale, theme_name);
     match manager.publish_appearance(&appearance) {
         // `false` means nothing moved and nothing was written, which is
         // the common case on a reload that changed something else.

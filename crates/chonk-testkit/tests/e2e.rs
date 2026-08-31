@@ -559,3 +559,68 @@ fn an_x11_pager_can_switch_the_workspace() {
     })
     .expect("the pager's desktop-switch message never took effect");
 }
+
+#[test]
+#[ignore = "needs a live Wayland session to nest in: scripts/e2e.sh, or cargo test -p chonk-testkit -- --ignored --test-threads=1"]
+fn appearance_request_flips_the_desktop_live() {
+    let mut session =
+        Session::boot("appearance-switch", SessionOptions { scale: Some(1.0), ..SessionOptions::default() }).unwrap();
+    session.door().barrier().unwrap();
+
+    // The contract's reader half is present from the first frame: the
+    // published mode, which with nothing configured is the flagship
+    // theme's native dark.
+    let published = session.state_file("appearance");
+    let read_mode = || std::fs::read_to_string(&published).map(|s| s.trim().to_string()).unwrap_or_default();
+    assert_eq!(read_mode(), "dark", "a fresh session publishes its resolved appearance");
+
+    let dark = session.screenshot("dark").unwrap();
+
+    // The writer half: drop `light` into the request file and only
+    // watch — the shell must consume the marker (delete it), publish
+    // the new mode, and repaint, all with no further prodding.
+    let request = session.state_file("appearance-request");
+    std::fs::write(&request, "light").unwrap();
+    poll_until(Duration::from_secs(30), "the appearance request to be consumed and published", || {
+        (!request.exists() && read_mode() == "light").then_some(())
+    })
+    .expect("the appearance switch never landed");
+    assert!(session.compositor_alive(), "the appearance switch killed the compositor");
+
+    session.door().barrier().unwrap();
+    let light = session.screenshot("light").unwrap();
+
+    // The whole ground changes mood: mean brightness over the full
+    // frame must rise decisively (flagship dark wallpaper -> its light
+    // rendition, dark dock ground -> pale one). The threshold is
+    // coarse on purpose — this asserts "the desktop flipped", the
+    // per-theme design is judged from the posed screenshots.
+    let mean = |shot: &chonk_testkit::Screenshot| {
+        let m = shot.mean_rgb(0, 0, shot.width, shot.height);
+        (m[0] + m[1] + m[2]) / 3.0
+    };
+    assert!(
+        mean(&light) > mean(&dark) + 25.0,
+        "light mode should be visibly lighter: dark {:.1} vs light {:.1} ({}, {})",
+        mean(&dark),
+        mean(&light),
+        dark.path.display(),
+        light.path.display()
+    );
+
+    // `toggle` goes back — and a torn read is never observable, so the
+    // published file says exactly one of the two words afterwards.
+    std::fs::write(&request, "toggle").unwrap();
+    poll_until(Duration::from_secs(30), "the toggle to land", || {
+        (!request.exists() && read_mode() == "dark").then_some(())
+    })
+    .expect("the toggle never landed");
+    session.door().barrier().unwrap();
+    let back = session.screenshot("dark-again").unwrap();
+    assert!(
+        (mean(&back) - mean(&dark)).abs() < 12.0,
+        "toggling back should restore the dark composition: originally {:.1}, now {:.1}",
+        mean(&dark),
+        mean(&back)
+    );
+}
