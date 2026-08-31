@@ -221,6 +221,16 @@ impl CompositorHandler for Compositor {
         panic!("unknown client data type");
     }
 
+    fn new_surface(&mut self, surface: &WlSurface) {
+        // Every surface gets the buffer-readiness pre-commit hook: a
+        // commit whose dmabuf the client's GPU is still drawing into
+        // must not land until it is finished (explicit syncobj acquire
+        // point, or the dmabuf's own implicit fence). Sampling early is
+        // not hypothetical — it is the Edge-on-NVIDIA flicker report;
+        // see `dmabuf::install_readiness_hook` for the mechanism.
+        crate::dmabuf::install_readiness_hook(surface);
+    }
+
     fn commit(&mut self, surface: &WlSurface) {
         // Buffer bookkeeping first — everything below (and the
         // renderer, and the hit-test's subsurface walk) reads the

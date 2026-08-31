@@ -14,16 +14,23 @@
 //! argument). Root properties don't require being the window manager;
 //! any client may set them.
 //!
-//! # Publishing only — inbound is out of scope
+//! # Inbound control, the two messages that matter
 //!
-//! This module WRITES `_NET_*` properties; it deliberately handles no
-//! client messages. A pager asking to switch desktops or activate a
-//! window sends a ClientMessage to the *root*, which arrives on
-//! smithay's XWM connection (it holds SubstructureRedirect), not this
-//! one — routing those into `wm-core` is follow-up work on the
-//! `xwayland.rs` side, not here. Until then a pager can *see*
-//! everything and change nothing, which is strictly better than the
-//! previous state of seeing nothing.
+//! Publishing alone left a pager able to *see* everything and change
+//! nothing: its `_NET_ACTIVE_WINDOW` and `_NET_CURRENT_DESKTOP`
+//! ClientMessages went nowhere. Those messages are sent to the *root*
+//! with the `SubstructureRedirect | SubstructureNotify` event mask
+//! (the spec's spelling), and while only smithay's XWM may hold
+//! SubstructureRedirect, any number of clients may select
+//! SubstructureNotify — so this connection selects it at connect time
+//! and [`flush`] drains the resulting events (non-blocking, once per
+//! pass) before writing. The two messages translate into the exact
+//! `BackendEvent`s the Wayland-native paths already queue
+//! (`ActivateRequested` from wlr-foreign-toplevel and xdg-activation,
+//! `DesktopSwitchRequested` from the shell's pager), so an X pager
+//! and a Wayland taskbar can never disagree about what "activate"
+//! means. Everything else SubstructureNotify carries (Map/Configure
+//! notifies of root children) is ignored in the same drain.
 //!
 //! # Two writers, one root
 //!
@@ -329,6 +336,15 @@ impl XEwmh {
             supported.push(conn.intern_atom(false, name.as_bytes())?.reply()?.atom);
         }
         conn.change_property32(PropMode::REPLACE, root, atoms.net_supported, AtomEnum::ATOM, &supported)?;
+        // Inbound half: pagers address their control ClientMessages to
+        // the root with the SubstructureNotify mask set, so selecting
+        // it here is what makes them arrive on this connection at all
+        // (SubstructureRedirect is smithay's alone; Notify is shared).
+        conn.change_window_attributes(
+            root,
+            &x11rb::protocol::xproto::ChangeWindowAttributesAux::new()
+                .event_mask(x11rb::protocol::xproto::EventMask::SUBSTRUCTURE_NOTIFY),
+        )?;
         conn.flush()?;
 
         Ok(Self { conn, root, atoms })
@@ -486,6 +502,10 @@ pub(crate) fn flush(comp: &mut Compositor) {
     if comp.xewmh.is_none() {
         return;
     }
+    // Inbound before outbound, and before the writes-empty early
+    // return: a pager's click must be heard even on a pass where the
+    // desktop published nothing.
+    drain_inbound(comp);
     let writes = take_writes(comp.wm.backend_mut());
     if writes.is_empty() {
         return;
@@ -496,6 +516,57 @@ pub(crate) fn flush(comp: &mut Compositor) {
     if let Err(error) = xewmh.apply(&writes) {
         tracing::warn!(%error, "EWMH publishing failed; giving up on it for this session");
         comp.xewmh = None;
+    }
+}
+
+/// Drains this connection's event queue (non-blocking) and translates
+/// the two control messages a pager sends — activate this window,
+/// switch to this desktop — into the same `BackendEvent`s the
+/// Wayland-native request paths queue, so both kinds of tool drive
+/// one `wm-core` behavior. Every other event SubstructureNotify
+/// delivers is dropped here; this connection redirects nothing and
+/// manages nothing.
+fn drain_inbound(comp: &mut Compositor) {
+    use x11rb::protocol::Event;
+    type WmEvent = wm_core::BackendEvent<WlWindowId, crate::state::WlFrameId>;
+    // Collected first, applied after: `poll_for_event` borrows the
+    // connection inside `comp`, and queueing borrows the backend.
+    let mut requests: Vec<WmEvent> = Vec::new();
+    {
+        let Some(xewmh) = comp.xewmh.as_ref() else {
+            return;
+        };
+        while let Ok(Some(event)) = xewmh.conn.poll_for_event() {
+            let Event::ClientMessage(message) = event else {
+                continue;
+            };
+            if message.type_ == xewmh.atoms.net_active_window {
+                // The message names an X window; the ledger speaks
+                // WlWindowId. A window this compositor is not managing
+                // (already gone, or never mapped) is silently ignored,
+                // exactly as `wm-x11` ignores stale ids.
+                let target = comp
+                    .wm
+                    .backend()
+                    .windows
+                    .iter()
+                    .find(|(_, record)| match &record.surface {
+                        ManagedSurface::X11(surface) => surface.window_id() == message.window,
+                        ManagedSurface::Xdg(_) => false,
+                    })
+                    .map(|(&id, _)| id);
+                if let Some(id) = target {
+                    requests.push(WmEvent::ActivateRequested(id));
+                }
+            } else if message.type_ == xewmh.atoms.net_current_desktop {
+                let desktop = message.data.as_data32()[0] as usize;
+                requests.push(WmEvent::DesktopSwitchRequested(desktop));
+            }
+        }
+    }
+    let backend = comp.wm.backend_mut();
+    for request in requests {
+        backend.queue(request);
     }
 }
 

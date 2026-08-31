@@ -273,3 +273,144 @@ impl DmabufHandler for Compositor {
 }
 
 delegate_dmabuf!(Compositor);
+
+// -- buffer readiness (explicit and implicit sync) -----------------------
+//
+// A dmabuf handed over on commit is a handle to memory the client's GPU
+// may still be writing. Sampling it anyway shows whatever half-drawn
+// state the write has reached — on screen as flicker and stale garbage
+// that scales with how fast the client redraws, which is why the report
+// that led here read "typing in Edge's URL bar flickers; loading a site
+// really kicks it off". Two mechanisms close the gap, and both work by
+// *blocking the commit* (smithay's transaction blockers) rather than
+// stalling the render thread:
+//
+// * Explicit sync (`wp_linux_drm_syncobj_v1`): the client attaches an
+//   acquire timeline point to the commit and the compositor waits for
+//   it. This is the only mechanism that works on NVIDIA's driver,
+//   which never supported implicit dmabuf fencing — precisely the
+//   hardware the live desktop runs (two GA102s), and precisely why the
+//   flicker shipped. Advertised only when the DRM device supports
+//   `syncobj_eventfd` (the wait primitive), which is the same gate
+//   Mutter and cosmic-comp apply.
+//
+// * Implicit sync fallback: for a client that speaks no syncobj, the
+//   dmabuf's own fd is pollable and becomes readable when the
+//   producer's implicit fence signals. `Dmabuf::generate_blocker`
+//   returns `AlreadyReady` for an idle buffer, so the steady state —
+//   a client that finished drawing before committing — costs nothing.
+
+use smithay::delegate_drm_syncobj;
+use smithay::reexports::calloop::Interest;
+use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
+use smithay::reexports::wayland_server::Resource as _;
+use smithay::wayland::compositor::CompositorHandler as _;
+use smithay::wayland::compositor::{
+    add_blocker, add_pre_commit_hook, with_states, BufferAssignment, SurfaceAttributes,
+};
+use smithay::wayland::dmabuf::get_dmabuf;
+use smithay::wayland::drm_syncobj::{
+    supports_syncobj_eventfd, DrmSyncobjCachedState, DrmSyncobjHandler, DrmSyncobjState,
+};
+
+impl DrmSyncobjHandler for Compositor {
+    fn drm_syncobj_state(&mut self) -> Option<&mut DrmSyncobjState> {
+        self.syncobj.as_mut()
+    }
+}
+
+delegate_drm_syncobj!(Compositor);
+
+/// Registers the `wp_linux_drm_syncobj_v1` global when the session's
+/// DRM device can wait on syncobj timelines. The nested (winit)
+/// backend registers nothing: it owns no DRM device to import a
+/// timeline into, and the host compositor already syncs the buffers it
+/// passes on.
+pub(crate) fn init_syncobj(
+    display: &DisplayHandle,
+    graphics: &crate::state::Graphics,
+) -> Option<DrmSyncobjState> {
+    let crate::state::Graphics::Session(session) = graphics else {
+        return None;
+    };
+    let device = session.drm_device_fd();
+    if !supports_syncobj_eventfd(&device) {
+        tracing::info!("DRM device lacks syncobj_eventfd; explicit sync not advertised");
+        return None;
+    }
+    tracing::info!("explicit sync (wp_linux_drm_syncobj_v1) advertised");
+    Some(DrmSyncobjState::new::<Compositor>(display, device))
+}
+
+/// Installs the per-surface pre-commit hook that keeps a commit from
+/// landing before its buffer is finished. Called once per surface from
+/// `CompositorHandler::new_surface`; the hook then runs on every
+/// commit of that surface, before smithay merges pending state.
+pub(crate) fn install_readiness_hook(surface: &WlSurface) {
+    add_pre_commit_hook::<Compositor, _>(surface, |state, _dh, surface| {
+        // Explicit first: an acquire point on the commit is the
+        // client's own statement of readiness and outranks any
+        // guess from the buffer fd.
+        let acquire = with_states(surface, |states| {
+            states
+                .cached_state
+                .get::<DrmSyncobjCachedState>()
+                .pending()
+                .acquire_point
+                .clone()
+        });
+        if let Some(point) = acquire {
+            if let Ok((blocker, source)) = point.generate_blocker() {
+                let Some(client) = surface.client() else {
+                    return;
+                };
+                let inserted = state.loop_handle.insert_source(source, move |_, _, comp| {
+                    let handle = comp.display_handle.clone();
+                    let client_state = comp.client_compositor_state(&client);
+                    client_state.blocker_cleared(comp, &handle);
+                    Ok(())
+                });
+                if inserted.is_ok() {
+                    add_blocker(surface, blocker);
+                }
+            }
+            // A blocker that could not be generated degrades to the
+            // pre-explicit-sync behaviour (sample and hope) instead of
+            // stalling the client forever; the eventfd support was
+            // probed at init, so this is a transient failure, not a
+            // capability gap.
+            return;
+        }
+        // Implicit fallback: block on the committed dmabuf's own
+        // readability. `AlreadyReady` — the overwhelmingly common
+        // case — adds nothing to the commit.
+        let committed_dmabuf = with_states(surface, |states| {
+            states
+                .cached_state
+                .get::<SurfaceAttributes>()
+                .pending()
+                .buffer
+                .as_ref()
+                .and_then(|assignment| match assignment {
+                    BufferAssignment::NewBuffer(buffer) => get_dmabuf(buffer).cloned().ok(),
+                    _ => None,
+                })
+        });
+        if let Some(dmabuf) = committed_dmabuf {
+            if let Ok((blocker, source)) = dmabuf.generate_blocker(Interest::READ) {
+                let Some(client) = surface.client() else {
+                    return;
+                };
+                let inserted = state.loop_handle.insert_source(source, move |_, _, comp| {
+                    let handle = comp.display_handle.clone();
+                    let client_state = comp.client_compositor_state(&client);
+                    client_state.blocker_cleared(comp, &handle);
+                    Ok(())
+                });
+                if inserted.is_ok() {
+                    add_blocker(surface, blocker);
+                }
+            }
+        }
+    });
+}
