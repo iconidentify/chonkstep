@@ -304,6 +304,26 @@ pub(crate) struct WindowRecord {
     /// Zero for surfaces that declare no geometry, which is the
     /// overwhelming majority.
     pub content_offset: Point,
+    /// The last few content sizes this compositor has *asked* the
+    /// client to be (physical, newest last, capped small).
+    ///
+    /// Exists to answer one question on every commit: "is this the
+    /// client obeying us, or the client asking for something?" A commit
+    /// whose size matches any recent ask is an echo of our own
+    /// configure — possibly a stale one, because clients ack a
+    /// configure immediately but draw and commit asynchronously, so
+    /// the commit in hand routinely pairs with the ack *before* the
+    /// one most recently recorded. Reading `last_acked` at commit time
+    /// therefore mis-pairs, and treating those echoes as
+    /// client-initiated resizes put the two size authorities into a
+    /// sustained ping-pong: maximize → stale old-size commit adopted →
+    /// reconfigure → stale new-size commit adopted → forever, observed
+    /// live as an alternating 1218/700 configure stream that outlived
+    /// the maximize that started it. Membership here is what breaks
+    /// the cycle; a size we never asked for (a terminal's cell snap, a
+    /// spontaneous client resize) is in no ring and is adopted exactly
+    /// as before.
+    pub recent_asks: std::collections::VecDeque<Size>,
 }
 
 impl WindowRecord {
@@ -322,6 +342,7 @@ impl WindowRecord {
             // Silence means client-side; only `new_decoration` sets this.
             negotiated_decoration: false,
             content_offset: Point::new(0, 0),
+            recent_asks: std::collections::VecDeque::new(),
         }
     }
 }
