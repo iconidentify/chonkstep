@@ -26,7 +26,10 @@
 mod backend_impl;
 mod capture;
 mod dmabuf;
+mod idle;
 mod input;
+mod layers;
+mod lock;
 mod protocols;
 mod renderer;
 mod session;

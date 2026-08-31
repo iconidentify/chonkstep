@@ -71,6 +71,7 @@ use smithay::input::pointer::{AxisFrame, ButtonEvent, MotionEvent};
 use smithay::input::Seat;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::utils::{Logical, Point as LogicalPoint, SERIAL_COUNTER};
+use smithay::wayland::shell::wlr_layer;
 
 use wm_core::{
     BackendEvent, DragHandle, KeyCombo, Modifiers, MonitorInfo, MouseButton, ScrollDelta,
@@ -151,6 +152,10 @@ pub(crate) enum PressTarget {
     Shell(WlShellId),
     Frame(WlFrameId),
     Content(WlWindowId),
+    /// A wlr-layer-shell surface: client territory, like `Content`,
+    /// but with no managed window behind it for `wm-core` to hear
+    /// about.
+    Layer(crate::layers::LayerId),
     Root,
 }
 
@@ -228,6 +233,9 @@ impl DragGrab {
             Some(PressTarget::Shell(shell)) => backend.shells.contains_key(&shell),
             Some(PressTarget::Frame(frame)) => backend.frames.contains_key(&frame),
             Some(PressTarget::Content(window)) => backend.windows.contains_key(&window),
+            Some(PressTarget::Layer(layer)) => {
+                backend.layers.iter().any(|record| record.id == layer)
+            }
             // The desktop background outlives every drag made on it.
             Some(PressTarget::Root) => true,
         }
@@ -394,6 +402,20 @@ pub(crate) fn apply_pointer_grab_change(state: &mut Compositor) {
 /// winit dev loop and a future libinput session share every line of
 /// routing policy — only the raw event types differ.
 pub(crate) fn process_input_event<I: InputBackend>(state: &mut Compositor, event: InputEvent<I>) {
+    // Every real input event is user activity to the idle timers,
+    // decided here — at the one funnel both backends' raw events pass
+    // through — rather than per handler, where a new event kind would
+    // silently not reset the screen locker's countdown.
+    if matches!(
+        event,
+        InputEvent::Keyboard { .. }
+            | InputEvent::PointerMotionAbsolute { .. }
+            | InputEvent::PointerMotion { .. }
+            | InputEvent::PointerButton { .. }
+            | InputEvent::PointerAxis { .. }
+    ) {
+        crate::idle::note_activity(state);
+    }
     match event {
         InputEvent::Keyboard { event } => on_keyboard_key::<I>(state, event),
         InputEvent::PointerMotionAbsolute { event } => on_pointer_move_absolute::<I>(state, event),
@@ -463,6 +485,17 @@ fn on_keyboard_key<I: InputBackend>(state: &mut Compositor, event: I::KeyboardKe
                     }
                 }
                 let backend = data.wm.backend_mut();
+                // Under a session lock every key belongs to the lock
+                // surface — WM keybindings, the modal grab, all of it
+                // stands aside (only the VT switch above outranks the
+                // lock, deliberately: it is the user's escape hatch on
+                // real hardware and the spec leaves it to the
+                // compositor). Intercepting a bound combo here would
+                // both swallow a password character and run a desktop
+                // action behind the lock.
+                if backend.locked {
+                    return FilterResult::Forward;
+                }
                 if backend.keyboard_grabbed || backend.grabbed_combos.contains(&combo) {
                     backend.queue(WmEvent::KeyPress(combo));
                     with_input(&seat, |input| input.suppressed_keys.push(keycode));
@@ -473,7 +506,11 @@ fn on_keyboard_key<I: InputBackend>(state: &mut Compositor, event: I::KeyboardKe
             }
             KeyState::Released => {
                 let backend = data.wm.backend_mut();
-                if backend.keyboard_grabbed {
+                // The suppressed-release bookkeeping below still runs
+                // while locked (a combo pressed before the lock landed
+                // owes its release-swallow either way); only the modal
+                // grab's KeyRelease stream stops.
+                if backend.keyboard_grabbed && !backend.locked {
                     backend.queue(WmEvent::KeyRelease(combo));
                 }
                 let suppressed = with_input(&seat, |input| {
@@ -644,6 +681,18 @@ fn pointer_moved(state: &mut Compositor, position: LogicalPoint<f64, Logical>, t
     // answer without reaching the `Compositor` — see that verb for the
     // stale-anchor bug the mirror exists to prevent.
     state.wm.backend_mut().pointer = Some(at);
+    // A locked session's pointer exists only for the lock surfaces:
+    // one seat motion against whichever covers the position, and none
+    // of the routing below — no hover bookkeeping, no shell queues, no
+    // WM events. The branch sits this early so no pre-lock grab state
+    // can decide anything while the lock holds.
+    if state.wm.backend().locked {
+        state.wm.backend_mut().mark_damaged();
+        let focus = lock_hit(state.wm.backend(), position);
+        pointer.motion(state, focus, &MotionEvent { location: position, serial, time });
+        pointer.frame(state);
+        return;
+    }
     // Before anything routes by it: a grab left behind by a drag that
     // is over must not decide where this event goes.
     reclaim_leaked_grab(state, &seat);
@@ -726,6 +775,15 @@ fn pointer_moved(state: &mut Compositor, position: LogicalPoint<f64, Logical>, t
                 focus = Some((surface.clone(), *origin));
             }
         }
+        Some(PressTarget::Layer(_)) => {
+            // A drag pinned on a layer surface is that client's own
+            // gesture (a slider on an OSD): the seat's click grab is
+            // already carrying it, so the hit under the pointer passes
+            // through exactly as the `Content` arm's does.
+            if let Hit::Layer { surface, origin, .. } = &hit {
+                focus = Some((surface.clone(), *origin));
+            }
+        }
         Some(PressTarget::Root) => {
             backend.queue(WmEvent::PointerMotion { root: at, surface_local: None });
         }
@@ -751,6 +809,12 @@ fn pointer_moved(state: &mut Compositor, position: LogicalPoint<f64, Logical>, t
                 if let Some(surface) = surface {
                     focus = Some((surface.clone(), *origin));
                 }
+            }
+            Hit::Layer { surface, origin, .. } => {
+                // Client territory too — a bar's hover highlights ride
+                // on these motions; `wm-core` hears nothing, exactly
+                // as for content.
+                focus = Some((surface.clone(), *origin));
             }
             Hit::Root => {
                 backend.queue(WmEvent::PointerMotion { root: at, surface_local: None });
@@ -789,6 +853,19 @@ fn on_pointer_button<I: InputBackend>(state: &mut Compositor, event: I::PointerB
         .get_keyboard()
         .map(|keyboard| combo_modifiers(&keyboard.modifier_state()))
         .unwrap_or_else(Modifiers::empty);
+
+    // Locked: the click is the lock surface's (the seat's focus was
+    // pinned there by the motion path) and nobody else's — no shell
+    // queues, no WM events, no implicit-grab bookkeeping to inherit
+    // after unlock.
+    if state.wm.backend().locked {
+        pointer.button(
+            state,
+            &ButtonEvent { serial, time, button: event.button_code(), state: event.state() },
+        );
+        pointer.frame(state);
+        return;
+    }
 
     reclaim_leaked_grab(state, &seat);
     let hit = hit_at(state.wm.backend(), at, position);
@@ -910,6 +987,13 @@ fn on_pointer_button<I: InputBackend>(state: &mut Compositor, event: I::PointerB
             // surface it believes the pointer is nowhere near.
             deliver_to_client = !route.dragging;
         }
+        PressTarget::Layer(_) => {
+            // A layer surface's click is the client's alone — `wm-core`
+            // manages no window here, so there is nothing to tell it.
+            // The keyboard-interactivity side of the click is handled
+            // below, after the borrow of the ledger ends.
+            deliver_to_client = !route.dragging;
+        }
         PressTarget::Root => {
             // Background clicks travel the shell-click queue under the
             // sentinel id; `dispatch_pending` splits presses off to
@@ -942,12 +1026,71 @@ fn on_pointer_button<I: InputBackend>(state: &mut Compositor, event: I::PointerB
         backend.queue(WmEvent::DragEnded);
     }
 
+    // On-demand keyboard interactivity: a press on a layer surface
+    // that asked for keyboard focus takes it; a press anywhere else
+    // hands it back to whatever window `wm-core` calls focused. The
+    // second half cannot ride the normal click-to-focus path alone,
+    // because clicking the window that is *already* focused re-queues
+    // nothing — `wm-core`'s early return — and the keyboard would stay
+    // on the bar forever.
+    if pressed && !route.dragging {
+        match target {
+            PressTarget::Layer(layer) => claim_on_demand_focus(state, layer, serial),
+            _ => release_on_demand_focus(state, serial),
+        }
+    }
+
     if deliver_to_client {
         pointer.button(
             state,
             &ButtonEvent { serial, time, button: event.button_code(), state: event.state() },
         );
         pointer.frame(state);
+    }
+}
+
+/// Gives the keyboard to a clicked layer surface that declared
+/// on-demand (or exclusive) interactivity. A surface that declared
+/// `None` refused the keyboard outright, and clicking it changes
+/// nothing — not even releasing a previous on-demand holder, since the
+/// user aimed at a surface that cannot take what would be released.
+fn claim_on_demand_focus(state: &mut Compositor, layer: crate::layers::LayerId, serial: smithay::utils::Serial) {
+    if !crate::layers::accepts_focus_on_click(state.wm.backend(), layer) {
+        return;
+    }
+    let surface = state
+        .wm
+        .backend()
+        .layers
+        .iter()
+        .find(|record| record.id == layer)
+        .map(|record| record.surface.wl_surface().clone());
+    let Some(surface) = surface else {
+        return;
+    };
+    state.layer_shell.on_demand_focus = Some(layer);
+    // An exclusive claimant outranks a click — the protocol's own
+    // ordering — so the seat only moves when none holds it.
+    if state.layer_shell.exclusive_focus.is_some() {
+        return;
+    }
+    if let Some(keyboard) = state.seat.get_keyboard() {
+        keyboard.set_focus(state, Some(surface), serial);
+    }
+}
+
+/// Returns the keyboard from an on-demand layer surface to the window
+/// `wm-core` believes focused, on the first click anywhere else.
+fn release_on_demand_focus(state: &mut Compositor, serial: smithay::utils::Serial) {
+    if state.layer_shell.on_demand_focus.take().is_none() {
+        return;
+    }
+    if state.layer_shell.exclusive_focus.is_some() {
+        return;
+    }
+    let target = crate::layers::focused_window_surface(state);
+    if let Some(keyboard) = state.seat.get_keyboard() {
+        keyboard.set_focus(state, target, serial);
     }
 }
 
@@ -965,6 +1108,7 @@ fn press_target(hit: &Hit) -> PressTarget {
         Hit::Shell { shell, .. } => PressTarget::Shell(*shell),
         Hit::FrameChrome { frame, .. } => PressTarget::Frame(*frame),
         Hit::Content { window, .. } => PressTarget::Content(*window),
+        Hit::Layer { layer, .. } => PressTarget::Layer(*layer),
         Hit::Root => PressTarget::Root,
     }
 }
@@ -1125,6 +1269,11 @@ fn take_whole(residual: &mut f64) -> i32 {
 /// backends. Without this, the two would disagree in precisely the
 /// situation nobody tests by hand.
 fn route_shell_scroll<I: InputBackend>(state: &mut Compositor, event: &I::PointerAxisEvent) -> bool {
+    // Locked: nothing here is the shell's — the axis flows to the seat
+    // and lands on the lock surface like every other locked input.
+    if state.wm.backend().locked {
+        return false;
+    }
     // Signs. `wl_pointer.axis` defines a positive vertical value as
     // motion toward the BOTTOM of the screen, while `ScrollDelta::up`
     // is named for the gesture, so the vertical axis inverts here and
@@ -1162,8 +1311,9 @@ fn route_shell_scroll<I: InputBackend>(state: &mut Compositor, event: &I::Pointe
         // binds no scroll gesture (`wm-x11` drops those notches
         // outright), and content is the client's — both fall through
         // to the seat below, which is where they went before this
-        // channel existed.
-        PressTarget::Frame(_) | PressTarget::Content(_) => {
+        // channel existed. A layer surface is a client too (a bar
+        // scrolling through workspaces wants the continuous axis).
+        PressTarget::Frame(_) | PressTarget::Content(_) | PressTarget::Layer(_) => {
             with_input(&seat, |input| input.scroll.reset());
             return false;
         }
@@ -1213,6 +1363,15 @@ fn route_shell_scroll<I: InputBackend>(state: &mut Compositor, event: &I::Pointe
 /// clicks land on things the user cannot see, so both sides cite
 /// `backend_impl.rs`'s stacking-band contract.
 fn hit_at(backend: &WaylandBackend, at: Point, position: LogicalPoint<f64, Logical>) -> Hit {
+    // The `Overlay` layer band beats everything — the renderer draws
+    // it in front of even the dock and the shell's menus, so it must
+    // win the click there too (every band insertion in this walk
+    // mirrors a `push_layer_band` call in `build_scene`; the two lists
+    // must stay one list read twice).
+    if let Some(hit) = layer_band_hit(backend, wlr_layer::Layer::Overlay, at, position) {
+        return hit;
+    }
+
     // Unmanaged override-redirect X11 windows first: they self-position
     // over everything (an open menu overlapping the dock must win the
     // click), and being frameless they live outside `stacking`.
@@ -1249,6 +1408,12 @@ fn hit_at(backend: &WaylandBackend, at: Point, position: LogicalPoint<f64, Logic
                 return Hit::Shell { shell: *shell, local: local_to(at, record.geometry.pos) };
             }
         }
+    }
+
+    // `Top` layer surfaces: over every managed window, under the
+    // dock and the shell's menus — where the renderer draws them.
+    if let Some(hit) = layer_band_hit(backend, wlr_layer::Layer::Top, at, position) {
+        return hit;
     }
 
     // Frame band.
@@ -1312,6 +1477,12 @@ fn hit_at(backend: &WaylandBackend, at: Point, position: LogicalPoint<f64, Logic
         return Hit::FrameChrome { frame: *frame, local: local_to(at, record.geometry.pos) };
     }
 
+    // `Bottom` layers under the windows, then the `below` shell band,
+    // then `Background` layers over only the wallpaper.
+    if let Some(hit) = layer_band_hit(backend, wlr_layer::Layer::Bottom, at, position) {
+        return hit;
+    }
+
     // `below` shell band (desktop-level furniture).
     for entry in backend.stacking.iter().rev() {
         let StackEntry::Shell(shell) = entry else {
@@ -1324,7 +1495,114 @@ fn hit_at(backend: &WaylandBackend, at: Point, position: LogicalPoint<f64, Logic
         }
     }
 
+    if let Some(hit) = layer_band_hit(backend, wlr_layer::Layer::Background, at, position) {
+        return hit;
+    }
+
     Hit::Root
+}
+
+/// Tests one layer band, topmost (newest) record first — the same
+/// order [`crate::renderer`]'s `push_layer_band` draws. A surface's
+/// xdg popups are tested before (and independent of) its own
+/// geometry, exactly as a frame's are; a point inside the geometry
+/// that the surface tree declines (an input region carved out — a
+/// notification daemon shapes its input to the visible bubbles) falls
+/// through to whatever is behind, which is what lets the desktop stay
+/// clickable around mako's corner.
+fn layer_band_hit(
+    backend: &WaylandBackend,
+    band: wlr_layer::Layer,
+    at: Point,
+    position: LogicalPoint<f64, Logical>,
+) -> Option<Hit> {
+    for record in backend.layers.iter().rev() {
+        if record.layer != band || !record.mapped || !record.surface.alive() {
+            continue;
+        }
+        let root = record.surface.wl_surface();
+        let scale = crate::xdg::committed_buffer_scale(root);
+        for (popup, offset) in PopupManager::popups_for_surface(root) {
+            let popup_surface = popup.wl_surface();
+            let popup_origin: LogicalPoint<i32, Logical> = (
+                record.geometry.pos.x + crate::xdg::logical_to_physical(offset.x, scale),
+                record.geometry.pos.y + crate::xdg::logical_to_physical(offset.y, scale),
+            )
+                .into();
+            let anchor: LogicalPoint<f64, Logical> =
+                (popup_origin.x as f64, popup_origin.y as f64).into();
+            let probe =
+                surface_probe(anchor, position, crate::xdg::committed_buffer_scale(popup_surface));
+            if let Some((surface, found)) =
+                under_from_surface_tree(popup_surface, probe, popup_origin, WindowSurfaceType::ALL)
+            {
+                return Some(Hit::Layer {
+                    layer: record.id,
+                    surface,
+                    origin: seat_origin(position, probe, found.to_f64()),
+                });
+            }
+        }
+        if !record.geometry.contains(at) {
+            continue;
+        }
+        let anchor: LogicalPoint<f64, Logical> =
+            (record.geometry.pos.x as f64, record.geometry.pos.y as f64).into();
+        let probe = surface_probe(anchor, position, scale);
+        if let Some((surface, found)) = under_from_surface_tree(
+            root,
+            probe,
+            (record.geometry.pos.x, record.geometry.pos.y),
+            WindowSurfaceType::ALL,
+        ) {
+            return Some(Hit::Layer {
+                layer: record.id,
+                surface,
+                origin: seat_origin(position, probe, found.to_f64()),
+            });
+        }
+    }
+    None
+}
+
+/// The lock surface (and seat origin) under a position, for the locked
+/// input path: each lock surface covers its whole output, so this is a
+/// monitor lookup plus the same tree walk every other surface family
+/// gets. `None` over an output the locker has not covered — the seat
+/// focuses nothing there, which over a blanked screen is the truth.
+fn lock_hit(
+    backend: &WaylandBackend,
+    position: LogicalPoint<f64, Logical>,
+) -> Option<(WlSurface, LogicalPoint<f64, Logical>)> {
+    let at = Point::new(position.x.floor() as i32, position.y.floor() as i32);
+    for entry in &backend.lock_surfaces {
+        if !entry.surface.alive() {
+            continue;
+        }
+        let Some(monitor) = backend.monitors.get(entry.output) else {
+            continue;
+        };
+        if !monitor.geometry.contains(at) {
+            continue;
+        }
+        let root = entry.surface.wl_surface();
+        let anchor: LogicalPoint<f64, Logical> =
+            (monitor.geometry.pos.x as f64, monitor.geometry.pos.y as f64).into();
+        let probe = surface_probe(anchor, position, crate::xdg::committed_buffer_scale(root));
+        return match under_from_surface_tree(
+            root,
+            probe,
+            (monitor.geometry.pos.x, monitor.geometry.pos.y),
+            WindowSurfaceType::ALL,
+        ) {
+            Some((surface, found)) => Some((surface, seat_origin(position, probe, found.to_f64()))),
+            // The walk declining (a buffer briefly smaller than the
+            // output mid-resize) still delivers to the root surface —
+            // a locker must never find the pointer unreachable.
+            None => Some((root.clone(), seat_origin(position, probe, anchor))),
+        };
+    }
+    None
 }
 
 /// What the compositor's own pointer should look like, answered from
@@ -1358,6 +1636,16 @@ pub(crate) fn pointer_subject(
     backend: &WaylandBackend,
     position: LogicalPoint<f64, Logical>,
 ) -> PointerSubject {
+    // Locked: the locker's own cursor choice applies over its surface
+    // (swaylock hides the pointer, and that statement must hold);
+    // everywhere else — a blanked output — the compositor's arrow.
+    if backend.locked {
+        return if lock_hit(backend, position).is_some() {
+            PointerSubject::Client
+        } else {
+            PointerSubject::Desktop
+        };
+    }
     if let Some(grab) = &backend.pointer_grab {
         return match grab.target() {
             Some(PressTarget::Frame(frame)) => {
@@ -1368,7 +1656,9 @@ pub(crate) fn pointer_subject(
     }
     let at = Point::new(position.x.floor() as i32, position.y.floor() as i32);
     match hit_at(backend, at, position) {
-        Hit::Content { .. } => PointerSubject::Client,
+        // A layer surface is client territory like any window content:
+        // its `set_cursor` choice applies while the pointer is on it.
+        Hit::Content { .. } | Hit::Layer { .. } => PointerSubject::Client,
         Hit::FrameChrome { frame, .. } => {
             PointerSubject::Frame(backend.frame_cursors.get(&frame).copied())
         }
@@ -1404,6 +1694,16 @@ enum Hit {
         frame: Option<WlFrameId>,
         window: WlWindowId,
         surface: Option<WlSurface>,
+        origin: LogicalPoint<f64, Logical>,
+    },
+    /// A wlr-layer-shell surface (or one of its popups): client
+    /// territory with no `wm-core` window behind it. Same seat
+    /// delivery contract as `Content` — `surface` is the exact
+    /// wl_surface to focus and `origin` the point the seat subtracts
+    /// from (see [`seat_origin`]).
+    Layer {
+        layer: crate::layers::LayerId,
+        surface: WlSurface,
         origin: LogicalPoint<f64, Logical>,
     },
     /// The desktop background.

@@ -274,6 +274,18 @@ impl CompositorHandler for Compositor {
             root = parent;
         }
 
+        // Layer surfaces first: their commit lifecycle (initial
+        // configure, map/unmap edges, re-arrangement around the
+        // committed size) lives in `layers.rs`, and a surface wearing
+        // the layer role is by definition not a toplevel or popup.
+        // Lock surfaces need no branch of their own — smithay's role
+        // hooks police their commits, and the damage mark below is all
+        // the compositor-side reaction a lock commit requires.
+        if crate::layers::handle_commit(self, &root) {
+            self.wm.backend_mut().mark_damaged();
+            return;
+        }
+
         let toplevel = self
             .xdg_shell_state
             .toplevel_surfaces()

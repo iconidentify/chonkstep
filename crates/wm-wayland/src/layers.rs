@@ -1,0 +1,819 @@
+//! wlr-layer-shell: the protocol every launcher, bar, notification
+//! daemon and OSD targets (fuzzel, mako, waybar, wob — none of them
+//! opens an xdg toplevel). Without this global those tools connect,
+//! find no `zwlr_layer_shell_v1`, and exit; with it they become part
+//! of the scene this compositor already composes by hand.
+//!
+//! Smithay ships the protocol plumbing (`wayland::shell::wlr_layer`:
+//! roles, cached state, configure bookkeeping) and its reference
+//! compositors integrate it through `desktop::Space`/`LayerMap`. This
+//! compositor has no Space — `renderer.rs` composes an explicit
+//! front-to-back walk and `input.rs` routes by an explicit hit walk,
+//! both over the [`WaylandBackend`] ledger — so the integration here is
+//! the same shape as every other surface family: a ledger record per
+//! layer surface ([`LayerRecord`] on the backend, where the renderer
+//! and the hit-test can see it), and one reconciliation pass per
+//! dispatch ([`refresh`]) that turns the protocol's cached state into
+//! ledger geometry.
+//!
+//! # Where the four layers sit in the scene
+//!
+//! Bottom to top: wallpaper, `Background`, `below` shell surfaces,
+//! `Bottom`, the frame band (managed windows), `Top`, `above` shell
+//! surfaces (the dock and the shell's own menus), `Overlay`, the
+//! cursor. Two of those placements are choices worth defending:
+//! `Top` sits *below* the dock and the shell menus because a
+//! notification daemon must not cover the menu the user just opened,
+//! while `Overlay` sits above them because the protocol reserves it
+//! for surfaces that must beat everything (an OSD, a keyboard
+//! overlay) — and the input walk in `input.rs::hit_at` mirrors both,
+//! because a band the renderer draws above the dock that the hit-test
+//! walks below it is a click landing on something the user cannot see.
+//!
+//! # One coordinate discipline, again
+//!
+//! The ledger is in physical pixels; a layer client speaks its own
+//! logical ones. Every number that crosses the boundary converts by a
+//! per-surface factor exactly as `xdg.rs` does for toplevels: sizes,
+//! margins and exclusive zones a client requests are multiplied up by
+//! the factor it renders at, and the sizes this compositor configures
+//! back are divided by it. Before a surface has committed a buffer
+//! that factor is a prediction — the outputs' advertised scale, which
+//! is what a scale-aware client will adopt — and from the first mapped
+//! commit onward it is the scale the surface actually committed, the
+//! only number that makes the drawn rectangle and the hit rectangle
+//! the same rectangle (`renderer::push_surface_tree` draws 1 buffer
+//! pixel : 1 screen pixel by that same factor).
+//!
+//! # Exclusive zones feed the workareas
+//!
+//! A bar that reserves an edge strip must push maximized windows out
+//! of it. The shell owns the baseline workareas (the Dock's column on
+//! the primary — `Shell::apply_workareas` re-asserts them from several
+//! paths this module never sees: theme reloads, screen resizes), so
+//! rather than hooking every one of those paths, [`apply_workareas`]
+//! recomputes the composed answer once per dispatch pass while any
+//! layer reservation exists: the shell's per-monitor baseline (its
+//! primary workarea; full geometry elsewhere — exactly what
+//! `Desktop::workareas` produces) intersected with the monitor minus
+//! the layer insets, pushed through the same `set_workareas` call. The
+//! pass runs after everything that could have reset the areas, so the
+//! composed rects always land last; when no reservation exists the
+//! module goes silent and the shell's own areas stand untouched.
+
+use smithay::delegate_layer_shell;
+use smithay::backend::renderer::utils::with_renderer_surface_state;
+use smithay::output::Output;
+use smithay::reexports::wayland_server::protocol::wl_output::WlOutput;
+use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
+use smithay::utils::SERIAL_COUNTER;
+use smithay::wayland::compositor::with_states;
+use smithay::wayland::shell::wlr_layer::{
+    Anchor, ExclusiveZone, KeyboardInteractivity, Layer, LayerSurface, LayerSurfaceCachedState,
+    Margins, WlrLayerShellHandler, WlrLayerShellState,
+};
+use smithay::wayland::shell::xdg::PopupSurface;
+
+use wm_theme_api::{Point, Rect, Size};
+
+use crate::state::Compositor;
+
+/// A layer surface in the ledger's id space — same discipline as
+/// `WlShellId`/`WlWindowId`: `Copy` ids from the shared allocator, so
+/// routing state (`input.rs`'s `PressTarget`) can name a surface
+/// without holding its protocol handle.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub(crate) struct LayerId(pub u64);
+
+/// Ledger entry for one layer surface, on [`crate::state::WaylandBackend`]
+/// beside the shell and window records for the same reason they are
+/// there: the renderer and the hit-test read the ledger and nothing
+/// else, and a surface family kept anywhere else would be invisible to
+/// one of them.
+pub(crate) struct LayerRecord {
+    pub id: LayerId,
+    pub surface: LayerSurface,
+    /// Index into `Compositor::outputs`/`WaylandBackend::monitors` —
+    /// the output this surface is arranged against. Resolved at
+    /// creation from the client's `wl_output` (the primary when it
+    /// named none, which the protocol leaves to the compositor).
+    pub output: usize,
+    /// The committed layer; a client may move between layers with
+    /// `set_layer`, so [`refresh`] re-reads it every pass.
+    pub layer: Layer,
+    /// The committed keyboard interactivity, cached beside the layer
+    /// for the focus logic (`sync_keyboard`, and `input.rs`'s
+    /// on-demand click handling).
+    pub interactivity: KeyboardInteractivity,
+    /// Physical, global — the space every other rect in the ledger is
+    /// in. Written by [`refresh`], read by the renderer and the hit
+    /// walk.
+    pub geometry: Rect,
+    pub mapped: bool,
+    /// The namespace the client declared ("launcher", "notifications").
+    /// Kept for logs — it is the only human-readable identity a layer
+    /// surface has.
+    pub namespace: String,
+}
+
+/// Compositor-side state this module keeps between passes.
+pub(crate) struct LayerShell {
+    pub state: WlrLayerShellState,
+    /// The layer surface currently holding *exclusive* keyboard focus,
+    /// if any — see [`sync_keyboard`].
+    pub exclusive_focus: Option<LayerId>,
+    /// The layer surface holding *on-demand* keyboard focus (the user
+    /// clicked it; `input.rs` sets and clears this).
+    pub on_demand_focus: Option<LayerId>,
+    /// Per-output insets the mapped exclusive zones reserved last
+    /// pass, in `monitors` order. Read by [`apply_workareas`].
+    pub reserved: Vec<EdgeInsets>,
+    /// Whether the previous pass had any reservation at all — the
+    /// transition back to zero must re-apply the shell's baseline
+    /// once, or the strip a departed bar reserved stays reserved
+    /// forever.
+    pub reserved_last_pass: bool,
+}
+
+impl LayerShell {
+    pub(crate) fn new(state: WlrLayerShellState) -> Self {
+        Self {
+            state,
+            exclusive_focus: None,
+            on_demand_focus: None,
+            reserved: Vec::new(),
+            reserved_last_pass: false,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------
+// The pure geometry: anchors, margins, exclusive zones.
+// All of it in physical pixels; the caller converts the client's
+// logical values by the surface's factor before it gets here.
+// ---------------------------------------------------------------------
+
+/// Space reserved off each edge of an output by exclusive zones.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+pub(crate) struct EdgeInsets {
+    pub left: i32,
+    pub right: i32,
+    pub top: i32,
+    pub bottom: i32,
+}
+
+impl EdgeInsets {
+    pub(crate) fn is_zero(&self) -> bool {
+        *self == EdgeInsets::default()
+    }
+}
+
+/// The edge an exclusive zone reserves from, per the protocol's rule:
+/// meaningful only when the surface is anchored to exactly one edge,
+/// or to one edge plus both edges perpendicular to it (a full-width
+/// bar: `TOP | LEFT | RIGHT` reserves from the top). Any other anchor
+/// combination — none, a corner, two parallel edges, all four — has no
+/// single edge to reserve from and is treated as neutral, which is
+/// what the spec says to do rather than a guess.
+pub(crate) fn exclusive_edge(anchor: Anchor) -> Option<Anchor> {
+    for (edge, span) in [
+        (Anchor::TOP, Anchor::LEFT | Anchor::RIGHT),
+        (Anchor::BOTTOM, Anchor::LEFT | Anchor::RIGHT),
+        (Anchor::LEFT, Anchor::TOP | Anchor::BOTTOM),
+        (Anchor::RIGHT, Anchor::TOP | Anchor::BOTTOM),
+    ] {
+        if anchor == edge || anchor == edge | span {
+            return Some(edge);
+        }
+    }
+    None
+}
+
+/// Shrinks `area` by `insets`, clamping so a pathological reservation
+/// (two bars wider than the screen) degenerates to an empty rect at
+/// the far corner instead of an inside-out one.
+pub(crate) fn shrink(area: Rect, insets: EdgeInsets) -> Rect {
+    let left = insets.left.max(0);
+    let top = insets.top.max(0);
+    let width = (area.size.w as i32 - left - insets.right.max(0)).max(0);
+    let height = (area.size.h as i32 - top - insets.bottom.max(0)).max(0);
+    Rect::new(
+        Point::new(area.pos.x + left.min(area.size.w as i32), area.pos.y + top.min(area.size.h as i32)),
+        Size::new(width as u32, height as u32),
+    )
+}
+
+/// One axis of anchored placement: where a `len`-long surface starts
+/// inside an `area_len`-long box. Anchored to the near edge it hugs
+/// it (plus margin); the far edge likewise; both or neither centers —
+/// both-anchored with an explicit size is the protocol's "stretch
+/// intent, fixed size" case and centering is what every wlr
+/// compositor does with it.
+fn axis_place(area_start: i32, area_len: i32, len: i32, near: bool, far: bool, margin_near: i32, margin_far: i32) -> i32 {
+    match (near, far) {
+        (true, false) => area_start + margin_near,
+        (false, true) => area_start + area_len - margin_far - len,
+        _ => area_start + (area_len - len) / 2,
+    }
+}
+
+/// One axis of size resolution: a client-requested 0 means "stretch
+/// across the anchored axis" (the protocol only allows it when both
+/// edges of the axis are anchored), which is the area minus both
+/// margins; anything else is the client's own number. Floored at 1 so
+/// a margin wider than the output cannot invert the rectangle.
+fn axis_size(requested: i32, area_len: i32, margin_near: i32, margin_far: i32) -> i32 {
+    if requested > 0 {
+        requested
+    } else {
+        (area_len - margin_near - margin_far).max(1)
+    }
+}
+
+/// Places one layer surface inside `area` (physical): resolves its
+/// size (stretch axes filled from the area), then anchors it. `size`
+/// and `margins` are already physical.
+pub(crate) fn anchored_rect(area: Rect, size: Size, anchor: Anchor, margins: EdgeInsets) -> Rect {
+    let x = axis_place(
+        area.pos.x,
+        area.size.w as i32,
+        size.w as i32,
+        anchor.contains(Anchor::LEFT),
+        anchor.contains(Anchor::RIGHT),
+        margins.left,
+        margins.right,
+    );
+    let y = axis_place(
+        area.pos.y,
+        area.size.h as i32,
+        size.h as i32,
+        anchor.contains(Anchor::TOP),
+        anchor.contains(Anchor::BOTTOM),
+        margins.top,
+        margins.bottom,
+    );
+    Rect::new(Point::new(x, y), size)
+}
+
+/// Resolves the physical size a surface should be configured to inside
+/// `area`: the client's request where it made one, the anchored span
+/// (minus margins) where it asked to stretch.
+pub(crate) fn resolved_size(requested: Size, area: Rect, margins: EdgeInsets) -> Size {
+    Size::new(
+        axis_size(requested.w as i32, area.size.w as i32, margins.left, margins.right) as u32,
+        axis_size(requested.h as i32, area.size.h as i32, margins.top, margins.bottom) as u32,
+    )
+}
+
+/// Adds one mapped surface's exclusive reservation to `insets` and
+/// answers the inset the *next* surface's usable area should lose.
+/// The zone is measured from the surface's anchored edge and, per the
+/// spec, includes the margin on that edge — a bar 30 tall with a 10
+/// margin reserves 40.
+pub(crate) fn reserve(insets: &mut EdgeInsets, edge: Anchor, zone: i32, margins: EdgeInsets) {
+    let zone = zone.max(0);
+    match edge {
+        Anchor::TOP => insets.top += zone + margins.top.max(0),
+        Anchor::BOTTOM => insets.bottom += zone + margins.bottom.max(0),
+        Anchor::LEFT => insets.left += zone + margins.left.max(0),
+        Anchor::RIGHT => insets.right += zone + margins.right.max(0),
+        _ => {}
+    }
+}
+
+/// The overlapping part of two rects, or `None` when disjoint —
+/// [`apply_workareas`] composes the shell's baseline with the layer
+/// reservation through it. (protocols.rs carries its own private
+/// copy; both are four lines and neither module may reach the other's.)
+fn intersect(a: Rect, b: Rect) -> Option<Rect> {
+    let left = a.pos.x.max(b.pos.x);
+    let top = a.pos.y.max(b.pos.y);
+    let right = (a.pos.x + a.size.w as i32).min(b.pos.x + b.size.w as i32);
+    let bottom = (a.pos.y + a.size.h as i32).min(b.pos.y + b.size.h as i32);
+    if right <= left || bottom <= top {
+        return None;
+    }
+    Some(Rect::new(Point::new(left, top), Size::new((right - left) as u32, (bottom - top) as u32)))
+}
+
+// ---------------------------------------------------------------------
+// Reconciliation.
+// ---------------------------------------------------------------------
+
+/// The factor between this surface's logical pixels and the ledger's
+/// physical ones. Once mapped it is the scale the surface committed —
+/// the factor the renderer draws it at, so layout and drawing describe
+/// one rectangle. Before the first buffer there is nothing committed
+/// to read (the attribute would answer its default of 1), so the
+/// prediction is the outputs' advertised scale: that is the number a
+/// scale-aware client is about to adopt, and configuring fuzzel's
+/// stretch width in physical pixels on a 2x session would have it
+/// commit a double-width buffer. A client that then ignores the
+/// advertisement and maps at 1x is re-measured by what it actually
+/// committed on the very next pass.
+fn surface_factor(record: &LayerRecord, advertised: i32) -> i32 {
+    if record.mapped {
+        crate::xdg::committed_buffer_scale(record.surface.wl_surface())
+    } else {
+        advertised.max(1)
+    }
+}
+
+/// The physical size of the surface's committed buffer contents, when
+/// it has any — the truth the geometry must be kept around, exactly as
+/// `xdg.rs::committed_content_size` keeps toplevel frames honest.
+fn committed_physical_size(surface: &WlSurface, factor: i32) -> Option<Size> {
+    with_renderer_surface_state(surface, |state| state.surface_size())
+        .flatten()
+        .filter(|size| size.w > 0 && size.h > 0)
+        .map(|size| {
+            Size::new(
+                crate::xdg::logical_to_physical(size.w, factor) as u32,
+                crate::xdg::logical_to_physical(size.h, factor) as u32,
+            )
+        })
+}
+
+/// Client-committed layer state, read once per surface per pass.
+fn cached_state(surface: &WlSurface) -> LayerSurfaceCachedState {
+    with_states(surface, |states| {
+        let mut guard = states.cached_state.get::<LayerSurfaceCachedState>();
+        *guard.current()
+    })
+}
+
+fn physical_margins(margin: Margins, factor: i32) -> EdgeInsets {
+    EdgeInsets {
+        left: crate::xdg::logical_to_physical(margin.left, factor),
+        right: crate::xdg::logical_to_physical(margin.right, factor),
+        top: crate::xdg::logical_to_physical(margin.top, factor),
+        bottom: crate::xdg::logical_to_physical(margin.bottom, factor),
+    }
+}
+
+/// The whole per-pass reconciliation: prune dead records, lay every
+/// layer surface out against its output, send the configures those
+/// layouts imply, settle exclusive keyboard focus, and feed the
+/// exclusive zones into the workareas. Called once per dispatch pass
+/// (beside `protocols::refresh`, before the damage test so a layout
+/// change renders this frame) and from the commit handler for the
+/// initial-configure case, where a client is blocked waiting on it.
+pub(crate) fn refresh(comp: &mut Compositor) {
+    arrange(comp);
+    sync_keyboard(comp);
+    apply_workareas(comp);
+}
+
+/// Lays out every layer surface and records the reserved insets.
+///
+/// Two passes per output, mirroring the protocol's model: mapped
+/// surfaces with a usable exclusive zone claim their strips first
+/// (top-most layer first, then creation order — deterministic, and the
+/// order wlroots allocates in), progressively shrinking the usable
+/// area; then everything neutral is placed inside what remains, and
+/// `DontCare` surfaces against the full output, which is exactly what
+/// that value asks for.
+fn arrange(comp: &mut Compositor) {
+    let advertised = crate::state::advertised_output_scale(comp.ui_scale).integer_scale();
+    let backend = comp.wm.backend_mut();
+    let outputs: Vec<Rect> = backend.monitors.iter().map(|m| m.geometry).collect();
+    let had_dead = backend.layers.iter().any(|record| !record.surface.alive());
+    if had_dead {
+        backend.layers.retain(|record| record.surface.alive());
+        backend.mark_damaged();
+    }
+
+    let mut reserved = vec![EdgeInsets::default(); outputs.len()];
+    // (record index, resolved plan) for the configure sends below.
+    for (output_index, full) in outputs.iter().copied().enumerate() {
+        let mut insets = EdgeInsets::default();
+        // Pass 1: exclusive strips, overlay-first.
+        for band in [Layer::Overlay, Layer::Top, Layer::Bottom, Layer::Background] {
+            for index in 0..backend.layers.len() {
+                if backend.layers[index].output != output_index {
+                    continue;
+                }
+                let cached = cached_state(backend.layers[index].surface.wl_surface());
+                if cached.layer != band {
+                    continue;
+                }
+                let record = &backend.layers[index];
+                let (Some(edge), ExclusiveZone::Exclusive(zone)) =
+                    (exclusive_edge(cached.anchor), cached.exclusive_zone)
+                else {
+                    continue;
+                };
+                let factor = surface_factor(record, advertised);
+                let margins = physical_margins(cached.margin, factor);
+                let usable = shrink(full, insets);
+                plan_surface(backend, index, cached, usable, factor);
+                if backend.layers[index].mapped {
+                    reserve(
+                        &mut insets,
+                        edge,
+                        crate::xdg::logical_to_physical(zone.min(i32::MAX as u32) as i32, factor),
+                        margins,
+                    );
+                }
+            }
+        }
+        // Pass 2: everything else, inside the remaining usable area —
+        // or the full output for a surface that said `DontCare`.
+        let usable = shrink(full, insets);
+        for index in 0..backend.layers.len() {
+            if backend.layers[index].output != output_index {
+                continue;
+            }
+            let cached = cached_state(backend.layers[index].surface.wl_surface());
+            let exclusive = matches!(
+                (exclusive_edge(cached.anchor), cached.exclusive_zone),
+                (Some(_), ExclusiveZone::Exclusive(_))
+            );
+            if exclusive {
+                continue; // already placed in pass 1
+            }
+            let area = match cached.exclusive_zone {
+                ExclusiveZone::DontCare => full,
+                _ => usable,
+            };
+            let factor = surface_factor(&backend.layers[index], advertised);
+            plan_surface(backend, index, cached, area, factor);
+        }
+        reserved[output_index] = insets;
+    }
+    comp.layer_shell.reserved = reserved;
+}
+
+/// Lays out one surface inside `area`: updates its ledger record
+/// (layer, interactivity, geometry) and sends the configure the layout
+/// implies. Damage only when the visible geometry actually moved — a
+/// pass over an idle desktop must not wake the renderer.
+fn plan_surface(
+    backend: &mut crate::state::WaylandBackend,
+    index: usize,
+    cached: LayerSurfaceCachedState,
+    area: Rect,
+    factor: i32,
+) {
+    let margins = physical_margins(cached.margin, factor);
+    let requested = Size::new(
+        crate::xdg::logical_to_physical(cached.size.w, factor).max(0) as u32,
+        crate::xdg::logical_to_physical(cached.size.h, factor).max(0) as u32,
+    );
+    let configured = resolved_size(requested, area, margins);
+    // The geometry is anchored around what the client actually drew
+    // once it has drawn anything — a bottom-anchored surface hangs
+    // from the bottom edge by its real height, not the configured one
+    // it has not acked yet.
+    let record = &backend.layers[index];
+    let actual = record
+        .mapped
+        .then(|| committed_physical_size(record.surface.wl_surface(), factor))
+        .flatten()
+        .unwrap_or(configured);
+    let geometry = anchored_rect(area, actual, cached.anchor, margins);
+
+    // Configure in the client's own units. A fixed axis echoes the
+    // client's number verbatim (dividing the multiplied value back
+    // would round-trip identically, but the client's literal is the
+    // safer identity); a stretch axis is the physical span converted
+    // down by the factor the client renders at.
+    let factor = factor.max(1);
+    let configure_logical: (u32, u32) = (
+        if cached.size.w > 0 { cached.size.w as u32 } else { (configured.w as i32 / factor).max(1) as u32 },
+        if cached.size.h > 0 { cached.size.h as u32 } else { (configured.h as i32 / factor).max(1) as u32 },
+    );
+    let record = &mut backend.layers[index];
+    record.layer = cached.layer;
+    record.interactivity = cached.keyboard_interactivity;
+    if record.geometry != geometry {
+        record.geometry = geometry;
+        backend.damage = true;
+    }
+    let surface = backend.layers[index].surface.clone();
+    surface.with_pending_state(|state| {
+        state.size = Some((configure_logical.0 as i32, configure_logical.1 as i32).into());
+    });
+    // Deduped internally: sends the initial configure a fresh surface
+    // is blocked on, sends again when the size moved, stays silent on
+    // every idle pass.
+    surface.send_pending_configure();
+}
+
+/// Pins the keyboard to the top-most mapped `Top`/`Overlay` surface
+/// that asked for *exclusive* interactivity — the lock-screen-adjacent
+/// half of the protocol, and what a launcher like fuzzel relies on to
+/// type into itself the instant it opens. When the holder goes away
+/// the keyboard returns to whatever window `wm-core` believes is
+/// focused, because `wm-core` was never told about the excursion —
+/// deliberately: focus *policy* stays in the policy brain, and this is
+/// a seat-level override with a seat-level end.
+fn sync_keyboard(comp: &mut Compositor) {
+    let want = {
+        let backend = comp.wm.backend();
+        // Overlay outranks Top; within a band the newest mapped
+        // claimant wins, which is the "most recently opened wins"
+        // behavior every wlr compositor exhibits.
+        let claimant = |band: Layer| {
+            backend
+                .layers
+                .iter()
+                .rev()
+                .find(|record| {
+                    record.mapped
+                        && record.layer == band
+                        && record.interactivity == KeyboardInteractivity::Exclusive
+                        && record.surface.alive()
+                })
+                .map(|record| (record.id, record.surface.wl_surface().clone()))
+        };
+        claimant(Layer::Overlay).or_else(|| claimant(Layer::Top))
+    };
+    let want_id = want.as_ref().map(|(id, _)| *id);
+    if want_id == comp.layer_shell.exclusive_focus {
+        return;
+    }
+    comp.layer_shell.exclusive_focus = want_id;
+    if comp.wm.backend().locked {
+        // The lock owns the keyboard outright; the bookkeeping above
+        // still records who would hold it, for the unlock to restore.
+        return;
+    }
+    let target = match want {
+        Some((_, surface)) => Some(surface),
+        None => focused_window_surface(comp),
+    };
+    let Some(keyboard) = comp.seat.get_keyboard() else {
+        return;
+    };
+    keyboard.set_focus(comp, target, SERIAL_COUNTER.next_serial());
+}
+
+/// The surface of the window `wm-core` currently calls focused — where
+/// the keyboard returns when a layer surface stops holding it.
+pub(crate) fn focused_window_surface(comp: &Compositor) -> Option<WlSurface> {
+    let focused = comp.wm.focused_client()?;
+    let (_, client) = comp.wm.clients().find(|(id, _)| *id == focused)?;
+    let record = comp.wm.backend().windows.get(&client.window)?;
+    record.surface.alive().then(|| record.surface.wl_surface()).flatten()
+}
+
+/// Composes the layer reservations into the workareas — see the module
+/// docs for why this re-asserts per pass instead of hooking the
+/// shell's own workarea paths. Silent (and cheap: one `any()` over a
+/// short vec) whenever no layer surface reserves anything and none did
+/// last pass.
+fn apply_workareas(comp: &mut Compositor) {
+    let any = comp.layer_shell.reserved.iter().any(|insets| !insets.is_zero());
+    if !any && !comp.layer_shell.reserved_last_pass {
+        return;
+    }
+    comp.layer_shell.reserved_last_pass = any;
+    let output_size = comp.wm.backend().output_size;
+    let monitors = comp.wm.monitors();
+    let areas: Vec<Rect> = monitors
+        .iter()
+        .enumerate()
+        .map(|(index, monitor)| {
+            // The shell's baseline: its primary workarea (the Dock's
+            // reservation), full geometry elsewhere — the same rects
+            // `Shell::apply_workareas` would set.
+            let base = if monitor.primary {
+                comp.shell.workarea(output_size)
+            } else {
+                monitor.geometry
+            };
+            let insets = comp.layer_shell.reserved.get(index).copied().unwrap_or_default();
+            let carved = shrink(monitor.geometry, insets);
+            // Disjoint only when a bar reserved the very strip the
+            // shell's own area is — hand the carved rect through then,
+            // because "the layer client owns that edge" is the truer
+            // of the two claims.
+            intersect(base, carved).unwrap_or(carved)
+        })
+        .collect();
+    comp.wm.set_workareas(areas);
+}
+
+/// The commit-time half of the lifecycle, called from
+/// `CompositorHandler::commit` for surfaces wearing the layer role.
+/// Returns whether the surface was one, so the caller skips the
+/// toplevel/popup role logic.
+///
+/// The initial-configure case is why this cannot wait for the next
+/// dispatch pass's [`refresh`]: the client's first commit carries its
+/// anchors and no buffer, and the client then *blocks* until a
+/// configure arrives, so the arrangement (which computes the size that
+/// configure must carry) runs right here.
+pub(crate) fn handle_commit(comp: &mut Compositor, root: &WlSurface) -> bool {
+    let backend = comp.wm.backend_mut();
+    let Some(index) = backend
+        .layers
+        .iter()
+        .position(|record| record.surface.wl_surface() == root)
+    else {
+        return false;
+    };
+    let has_buffer = with_renderer_surface_state(root, |state| state.buffer().is_some()).unwrap_or(false);
+    let record = &mut backend.layers[index];
+    if record.mapped != has_buffer {
+        record.mapped = has_buffer;
+        backend.mark_damaged();
+    }
+    // Whether this was the blocked initial commit or a later one, the
+    // full pass answers it: the initial configure goes out (the send
+    // is deduped, so nothing extra travels otherwise), the geometry
+    // absorbs whatever size the client actually committed, exclusive
+    // zones re-reserve, and keyboard focus settles.
+    refresh(comp);
+    true
+}
+
+/// Whether a layer surface may take keyboard focus from a click —
+/// on-demand interactivity, consulted by `input.rs`'s button routing.
+pub(crate) fn accepts_focus_on_click(backend: &crate::state::WaylandBackend, id: LayerId) -> bool {
+    backend
+        .layers
+        .iter()
+        .find(|record| record.id == id)
+        .is_some_and(|record| record.interactivity != KeyboardInteractivity::None)
+}
+
+// ---------------------------------------------------------------------
+// Protocol handler.
+// ---------------------------------------------------------------------
+
+impl WlrLayerShellHandler for Compositor {
+    fn shell_state(&mut self) -> &mut WlrLayerShellState {
+        &mut self.layer_shell.state
+    }
+
+    fn new_layer_surface(
+        &mut self,
+        surface: LayerSurface,
+        wl_output: Option<WlOutput>,
+        layer: Layer,
+        namespace: String,
+    ) {
+        // The client's output by name, the primary when it named none
+        // (the protocol leaves that choice to the compositor, and the
+        // primary is where this desktop's user is looking).
+        let output = wl_output
+            .as_ref()
+            .and_then(Output::from_resource)
+            .and_then(|named| self.outputs.iter().position(|entry| entry.output == named))
+            .unwrap_or(0);
+        let backend = self.wm.backend_mut();
+        let id = LayerId(backend.alloc_id());
+        tracing::info!(id = id.0, ?layer, %namespace, output, "new layer surface");
+        backend.layers.push(LayerRecord {
+            id,
+            surface,
+            output,
+            layer,
+            interactivity: KeyboardInteractivity::None,
+            geometry: Rect::default(),
+            mapped: false,
+            namespace,
+        });
+        // No configure yet: the protocol forbids one before the
+        // client's initial commit, which is where `handle_commit`
+        // sends it.
+    }
+
+    fn new_popup(&mut self, _parent: LayerSurface, popup: PopupSurface) {
+        // Tracked like any xdg popup; the renderer and the hit walk
+        // find it through `PopupManager::popups_for_surface` on the
+        // layer surface, exactly as they do for a toplevel's menus.
+        if let Err(error) = self.popups.track_popup(smithay::desktop::PopupKind::from(popup)) {
+            tracing::warn!(?error, "failed to track a layer surface's popup");
+        }
+    }
+
+    fn layer_destroyed(&mut self, surface: LayerSurface) {
+        let backend = self.wm.backend_mut();
+        if let Some(record) = backend.layers.iter().find(|record| record.surface == surface) {
+            tracing::info!(id = record.id.0, namespace = %record.namespace, "layer surface destroyed");
+        }
+        backend.layers.retain(|record| record.surface != surface);
+        backend.mark_damaged();
+        // Focus, exclusive zones and workareas settle on the pass this
+        // destroy was dispatched in — `refresh` runs before the damage
+        // test either way.
+    }
+}
+
+delegate_layer_shell!(Compositor);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // The layout arithmetic is the part a protocol test cannot reach
+    // without a client on a socket, and the part whose failures are
+    // silent: a bar drawn at the wrong edge, a launcher off-center, a
+    // workarea that never gave the strip back. All physical pixels, as
+    // the callers convert before calling.
+
+    fn output() -> Rect {
+        Rect::new(Point::new(0, 0), Size::new(2560, 1600))
+    }
+
+    #[test]
+    fn a_full_width_bar_hugs_its_edge_and_stretches_between_margins() {
+        // A waybar: TOP|LEFT|RIGHT, height 40, no margins.
+        let anchor = Anchor::TOP | Anchor::LEFT | Anchor::RIGHT;
+        let size = resolved_size(Size::new(0, 40), output(), EdgeInsets::default());
+        assert_eq!(size, Size::new(2560, 40));
+        let rect = anchored_rect(output(), size, anchor, EdgeInsets::default());
+        assert_eq!(rect, Rect::new(Point::new(0, 0), Size::new(2560, 40)));
+    }
+
+    #[test]
+    fn margins_inset_both_the_stretch_and_the_anchor() {
+        let anchor = Anchor::BOTTOM | Anchor::LEFT | Anchor::RIGHT;
+        let margins = EdgeInsets { left: 10, right: 10, top: 0, bottom: 8 };
+        let size = resolved_size(Size::new(0, 60), output(), margins);
+        assert_eq!(size, Size::new(2540, 60));
+        let rect = anchored_rect(output(), size, anchor, margins);
+        // 10 in from the left, 8 up from the bottom.
+        assert_eq!(rect.pos, Point::new(10, 1600 - 8 - 60));
+    }
+
+    #[test]
+    fn an_unanchored_surface_is_centered() {
+        // fuzzel's launcher panel: fixed size, no anchors.
+        let rect = anchored_rect(output(), Size::new(600, 400), Anchor::empty(), EdgeInsets::default());
+        assert_eq!(rect.pos, Point::new((2560 - 600) / 2, (1600 - 400) / 2));
+    }
+
+    #[test]
+    fn a_corner_anchor_lands_in_the_corner() {
+        // mako's default: TOP|RIGHT with margins.
+        let margins = EdgeInsets { left: 0, right: 10, top: 10, bottom: 0 };
+        let rect = anchored_rect(output(), Size::new(300, 100), Anchor::TOP | Anchor::RIGHT, margins);
+        assert_eq!(rect.pos, Point::new(2560 - 10 - 300, 10));
+    }
+
+    #[test]
+    fn the_exclusive_edge_is_the_single_anchored_edge_or_the_bars() {
+        assert_eq!(exclusive_edge(Anchor::TOP), Some(Anchor::TOP));
+        assert_eq!(
+            exclusive_edge(Anchor::TOP | Anchor::LEFT | Anchor::RIGHT),
+            Some(Anchor::TOP)
+        );
+        assert_eq!(exclusive_edge(Anchor::LEFT | Anchor::TOP | Anchor::BOTTOM), Some(Anchor::LEFT));
+        // A corner, two parallel edges, everything, nothing: no single
+        // edge to reserve from — the spec's "treat as neutral" cases.
+        assert_eq!(exclusive_edge(Anchor::TOP | Anchor::LEFT), None);
+        assert_eq!(exclusive_edge(Anchor::LEFT | Anchor::RIGHT), None);
+        assert_eq!(exclusive_edge(Anchor::all()), None);
+        assert_eq!(exclusive_edge(Anchor::empty()), None);
+    }
+
+    #[test]
+    fn reservations_stack_and_include_the_edge_margin() {
+        let mut insets = EdgeInsets::default();
+        reserve(&mut insets, Anchor::TOP, 40, EdgeInsets { top: 10, ..Default::default() });
+        assert_eq!(insets.top, 50, "the zone includes its margin per the spec");
+        reserve(&mut insets, Anchor::TOP, 20, EdgeInsets::default());
+        assert_eq!(insets.top, 70, "two bars on one edge stack");
+        reserve(&mut insets, Anchor::LEFT, 64, EdgeInsets::default());
+        assert_eq!((insets.left, insets.right, insets.bottom), (64, 0, 0));
+    }
+
+    #[test]
+    fn shrinking_by_the_reservation_yields_the_usable_area() {
+        let insets = EdgeInsets { top: 40, left: 64, right: 0, bottom: 0 };
+        let usable = shrink(output(), insets);
+        assert_eq!(usable, Rect::new(Point::new(64, 40), Size::new(2560 - 64, 1600 - 40)));
+        // A later surface stretched inside it never overlaps the bar.
+        let rect = anchored_rect(
+            usable,
+            resolved_size(Size::new(0, 0), usable, EdgeInsets::default()),
+            Anchor::all(),
+            EdgeInsets::default(),
+        );
+        assert_eq!(rect, usable);
+    }
+
+    #[test]
+    fn a_pathological_reservation_degrades_to_an_empty_rect() {
+        // Two "bars" together taller than the screen must clamp, not
+        // invert: an inside-out workarea would place windows at
+        // negative sizes.
+        let insets = EdgeInsets { top: 1000, bottom: 1000, left: 0, right: 0 };
+        let usable = shrink(output(), insets);
+        assert_eq!(usable.size.h, 0);
+        assert!(usable.size.w == 2560);
+    }
+
+    #[test]
+    fn a_zero_inset_is_recognized_as_no_reservation() {
+        // `apply_workareas` goes silent on this test — the common case
+        // of a desktop with no bar running must not re-set workareas
+        // sixty times a second.
+        assert!(EdgeInsets::default().is_zero());
+        assert!(!EdgeInsets { top: 1, ..Default::default() }.is_zero());
+    }
+}
