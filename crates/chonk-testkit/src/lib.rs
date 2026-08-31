@@ -506,6 +506,33 @@ impl Door {
         self.send(&format!("button {button} {}", if pressed { "press" } else { "release" }))
     }
 
+    /// Keyboard key by *evdev* keycode (`KEY_*` from
+    /// input-event-codes.h — e.g. 125 LEFTMETA, 103 UP, 28 ENTER, 1
+    /// ESC); the door applies the xkb +8 offset itself. `pressed` true
+    /// for press.
+    pub fn key(&mut self, code: u32, pressed: bool) -> Result<(), String> {
+        self.send(&format!("key {code} {}", if pressed { "press" } else { "release" }))
+    }
+
+    /// A full tap: press, settle, release, settle — the two edges in
+    /// different dispatch passes, the way a human's land.
+    pub fn tap_key(&mut self, code: u32) -> Result<(), String> {
+        self.key(code, true)?;
+        self.barrier()?;
+        self.key(code, false)?;
+        self.barrier()
+    }
+
+    /// A modified tap — hold `modifier`, tap `code`, release — for
+    /// injecting a keybinding chord like super+up.
+    pub fn chord(&mut self, modifier: u32, code: u32) -> Result<(), String> {
+        self.key(modifier, true)?;
+        self.barrier()?;
+        self.tap_key(code)?;
+        self.key(modifier, false)?;
+        self.barrier()
+    }
+
     /// Waits until everything sent so far has been dispatched and a
     /// frame rendered — the door's `barrier`, and the only ordering
     /// guarantee any test relies on. The read timeout bounds it.

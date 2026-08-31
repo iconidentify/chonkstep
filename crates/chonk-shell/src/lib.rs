@@ -19,6 +19,7 @@ pub mod apps;
 pub mod desktop;
 pub mod dockapp;
 pub mod launchdock;
+pub mod overview;
 pub mod shell;
 pub mod spawn;
 pub mod startup;

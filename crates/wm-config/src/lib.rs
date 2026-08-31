@@ -78,6 +78,14 @@ pub enum Action {
     WorkspacePrev,
     WorkspaceCarryNext,
     WorkspaceCarryPrev,
+    /// Toggle the modal Overview: every window on the current
+    /// workspace as a grid of live thumbnails plus a workspace strip,
+    /// drawn and driven by the desktop shell. One verb on purpose —
+    /// while the Overview is open the shell owns the whole keyboard
+    /// (arrows move, Return commits, Escape dismisses), so those keys
+    /// are modal machinery like the Alt-Tab switcher's, not
+    /// per-binding config.
+    Overview,
     /// Re-read this file and apply it to the running session — theme,
     /// UI scale, focus policy, placement, edge resistance and these
     /// very bindings, with no restart and nothing closed.
@@ -106,6 +114,7 @@ fn action_from_name(name: &str) -> Option<Action> {
         "workspace-prev" => Some(Action::WorkspacePrev),
         "workspace-carry-next" => Some(Action::WorkspaceCarryNext),
         "workspace-carry-prev" => Some(Action::WorkspaceCarryPrev),
+        "overview" => Some(Action::Overview),
         "reload" => Some(Action::Reload),
         "restart" => Some(Action::Restart),
         _ => None,
@@ -192,6 +201,11 @@ impl Config {
                 bind("alt+ctrl+left", Action::WorkspacePrev),
                 bind("alt+shift+right", Action::WorkspaceCarryNext),
                 bind("alt+shift+left", Action::WorkspaceCarryPrev),
+                // Super+Up "steps back" from the desk for the modal
+                // Overview: the whole super row is otherwise free, and
+                // the arrow pairs with the arrows that then drive the
+                // selection inside it.
+                bind("super+up", Action::Overview),
             ],
         }
     }
@@ -698,6 +712,7 @@ mod tests {
             (combo(0xff51, alt_ctrl), Action::WorkspacePrev),
             (combo(0xff53, alt_shift), Action::WorkspaceCarryNext),
             (combo(0xff51, alt_shift), Action::WorkspaceCarryPrev),
+            (combo(0xff52, Modifiers::SUPER), Action::Overview),
         ];
         let config = Config::default_config();
         assert_eq!(config.keybindings, expected);
@@ -760,8 +775,8 @@ mod tests {
         assert_eq!(action_for(&config, "super+f11"), Some(Action::ToggleFullscreen));
         assert_eq!(action_for(&config, "alt+shift+x"), Some(Action::ToggleMaximize));
         assert_eq!(action_for(&config, "alt+shift+left"), Some(Action::WorkspaceCarryPrev));
-        // 10 defaults - 1 unbound + 2 new = 11.
-        assert_eq!(config.keybindings.len(), 11);
+        // 11 defaults - 1 unbound + 2 new = 12.
+        assert_eq!(config.keybindings.len(), 12);
     }
 
     #[test]
@@ -777,6 +792,7 @@ mod tests {
             ("workspace-prev", Action::WorkspacePrev),
             ("workspace-carry-next", Action::WorkspaceCarryNext),
             ("workspace-carry-prev", Action::WorkspaceCarryPrev),
+            ("overview", Action::Overview),
             ("restart", Action::Restart),
         ];
         let mut text = String::from("[keybindings]\n");
@@ -806,14 +822,14 @@ mod tests {
         assert_eq!(action_for(&config, "alt+shift+x"), Some(Action::Close));
         // Every other default is untouched, and no entry was duplicated.
         assert_eq!(action_for(&config, "alt+shift+q"), Some(Action::Close));
-        assert_eq!(config.keybindings.len(), 10);
+        assert_eq!(config.keybindings.len(), 11);
     }
 
     #[test]
     fn none_unbinds_a_default() {
         let config = parse("[keybindings]\n\"alt+shift+q\" = \"none\"\n").unwrap();
         assert_eq!(action_for(&config, "alt+shift+q"), None);
-        assert_eq!(config.keybindings.len(), 9);
+        assert_eq!(config.keybindings.len(), 10);
         assert!(!config.keybindings.iter().any(|(_, a)| *a == Action::Close));
     }
 
@@ -823,7 +839,7 @@ mod tests {
         // through an alias/case variant of the default's spelling works.
         let config = parse("[keybindings]\n\"ALT+CONTROL+RIGHT\" = \"None\"\n").unwrap();
         assert_eq!(action_for(&config, "alt+ctrl+right"), None);
-        assert_eq!(config.keybindings.len(), 9);
+        assert_eq!(config.keybindings.len(), 10);
     }
 
     #[test]
@@ -881,8 +897,8 @@ mod tests {
         // ...the bad ones were skipped without binding anything...
         assert_eq!(action_for(&config, "super+u"), None);
         assert_eq!(action_for(&config, "super+v"), None);
-        // ...and the untouched defaults survived: 10 - 1 + 1 = 10.
-        assert_eq!(config.keybindings.len(), 10);
+        // ...and the untouched defaults survived: 11 - 1 + 1 = 11.
+        assert_eq!(config.keybindings.len(), 11);
         assert_eq!(action_for(&config, "alt+shift+x"), Some(Action::ToggleMaximize));
     }
 
@@ -908,7 +924,7 @@ mod tests {
         assert_eq!(config.theme, None);
         assert_eq!(config.placement, PlacementPolicy::Smart);
         assert_eq!(config.edge_resistance, 10);
-        assert_eq!(config.keybindings.len(), 10);
+        assert_eq!(config.keybindings.len(), 11);
     }
 
     #[test]

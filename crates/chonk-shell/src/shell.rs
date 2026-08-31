@@ -13,7 +13,7 @@
 use std::collections::HashMap;
 
 use wm_config::Action;
-use wm_core::{Backend, BackendEvent, ClientFlags, ClientId, KeyCombo, MonitorInfo, MouseButton, Notification, ScrollDelta, WindowManager};
+use wm_core::{Backend, BackendEvent, ClientFlags, ClientId, KeyCombo, Lifecycle, MonitorInfo, MouseButton, Notification, ScrollDelta, WindowManager};
 use wm_theme::{FontState, RasterThemeEngine, Theme};
 use wm_theme_api::{DecorationBuffer, Point, PopupHost, Rect, Size};
 
@@ -21,6 +21,7 @@ use crate::apps::{self, AppEntry};
 use crate::desktop::{Desktop, IconDragResult, MenuAction, RootMenuAction, WindowMenuAction, WindowMenuContext};
 use crate::dockapp::Farewell;
 use crate::launchdock::{LaunchDock, LaunchDockAction};
+use crate::overview::{OverviewHit, OverviewItem};
 use crate::startup::SessionState;
 use crate::widgets::DockInput;
 use crate::{spawn, theme_select, wallpaper};
@@ -390,6 +391,52 @@ fn build_keymap(bindings: &[(KeyCombo, Action)]) -> HashMap<KeyCombo, Action> {
     bindings.iter().cloned().collect()
 }
 
+// The keysyms the modal Overview owns, spelled as the X11 values both
+// backends deliver (the same table `wm_config::parse_key` speaks).
+const XK_LEFT: u32 = 0xff51;
+const XK_UP: u32 = 0xff52;
+const XK_RIGHT: u32 = 0xff53;
+const XK_DOWN: u32 = 0xff54;
+const XK_RETURN: u32 = 0xff0d;
+const XK_KP_ENTER: u32 = 0xff8d;
+
+/// What one key press means inside an open Overview session.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum OverviewIntent {
+    /// Step the selection one card in `(dx, dy)`.
+    Move(i32, i32),
+    /// Focus + raise the selected card and leave.
+    Commit,
+    /// Leave without committing.
+    Dismiss,
+}
+
+/// Resolves a key pressed while the Overview holds the keyboard.
+/// Bare arrows move, bare Return (either Enter) commits, and
+/// *everything else* dismisses — Escape by convention, and any other
+/// key because a modal panel that silently eats typing is worse than
+/// one that steps aside (the Alt-Tab switcher treats a stray key the
+/// same way, for the same reason). Modified arrows dismiss rather
+/// than move so a workspace chord like alt+ctrl+right pressed out of
+/// habit closes the panel instead of invisibly rebinding itself to
+/// selection movement. The toggle binding itself is resolved by the
+/// caller against the keymap before this is consulted, so a
+/// super+up-style binding closes the panel rather than reading as a
+/// modified arrow.
+fn overview_intent(combo: &KeyCombo) -> OverviewIntent {
+    if !combo.modifiers.is_empty() {
+        return OverviewIntent::Dismiss;
+    }
+    match combo.keysym {
+        XK_LEFT => OverviewIntent::Move(-1, 0),
+        XK_RIGHT => OverviewIntent::Move(1, 0),
+        XK_UP => OverviewIntent::Move(0, -1),
+        XK_DOWN => OverviewIntent::Move(0, 1),
+        XK_RETURN | XK_KP_ENTER => OverviewIntent::Commit,
+        _ => OverviewIntent::Dismiss,
+    }
+}
+
 /// The outcome half of a root-menu pick, split from the side effects in
 /// `run_root_menu_action` so the contract the binary's control flow
 /// hangs on — Exit ends the session, SetTheme demands a restart,
@@ -502,6 +549,19 @@ pub struct Shell<B: Backend + PopupHost<PopupId = B::ShellId>> {
     /// separately is two chances to leak a grab.
     grabbed: Vec<KeyCombo>,
     keymap: HashMap<KeyCombo, Action>,
+    /// The key press an open Overview session intercepted, parked
+    /// between the two halves of the binaries' key protocol:
+    /// [`Shell::keymap_action`] resolves a combo, [`Shell::run_action`]
+    /// runs the resolved action, and the action type
+    /// (`wm_config::Action`) deliberately stays a closed set of config
+    /// verbs with one `Overview` entry rather than growing internal
+    /// move/commit variants no config file may name. So while the
+    /// Overview is modal, `keymap_action` answers `Overview` for every
+    /// key and parks the combo here for `run_action` to route. The two
+    /// calls are adjacent in both binaries' loops by construction;
+    /// `run_action` `take()`s, so a stale combo cannot leak into a
+    /// later session.
+    overview_key: Option<KeyCombo>,
     /// The pointer's last known root-relative position, recorded by
     /// every [`Shell::on_motion`] call. Shell button events carry only
     /// surface-local coordinates, but the launcher strip's release/pin
@@ -562,6 +622,7 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
             launchdock,
             apps,
             keymap: build_keymap(&state.keybindings),
+            overview_key: None,
             grabbed: to_grab,
             state: state.clone(),
             theme,
@@ -710,7 +771,24 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
     /// switcher grabs the whole keyboard, and Tab/Escape/any-other-key
     /// arrive as ordinary `KeyPress` events that appear in no keymap;
     /// swallowing them would wedge the switcher open.
-    pub fn keymap_action(&self, combo: &KeyCombo) -> Option<Action> {
+    ///
+    /// The one exception is the shell's own modal session: while the
+    /// Overview is open it holds the keyboard the same way the
+    /// switcher does, and *every* press resolves to
+    /// [`Action::Overview`] (the combo parked in `overview_key` for
+    /// `run_action` to route — arrows move, Return commits, anything
+    /// else dismisses). Nothing may flow through to `wm-core` then:
+    /// an Alt+Tab leaking past an open Overview would start a second
+    /// modal session on top of the first, and the two would fight over
+    /// one keyboard grab. No Alt+Tab session can be live at that
+    /// moment for the miss rule above to serve — the Overview declines
+    /// to open during one (see `run_action`) and its grab intercepts
+    /// the keys that would start one.
+    pub fn keymap_action(&mut self, combo: &KeyCombo) -> Option<Action> {
+        if self.desktop.overview_visible() {
+            self.overview_key = Some(*combo);
+            return Some(Action::Overview);
+        }
         self.keymap.get(combo).cloned()
     }
 
@@ -760,6 +838,38 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
                     wm.switch_workspace(wm.current_workspace() - 1);
                 }
             }
+            // The modal Overview. Closed: open it (declined during a
+            // live Alt+Tab session — two modal keyboard owners cannot
+            // share one grab). Open: route the parked key press. The
+            // toggle's own combo is recognized through the keymap
+            // rather than hardcoded, so however the user rebinds
+            // `overview`, a second press of that binding closes it.
+            Action::Overview => {
+                let key = self.overview_key.take();
+                if !self.desktop.overview_visible() {
+                    if wm.cycle_state().is_none() {
+                        self.open_overview(wm);
+                    }
+                } else {
+                    let rebound_toggle =
+                        key.as_ref().is_some_and(|combo| self.keymap.get(combo) == Some(&Action::Overview));
+                    match key {
+                        Some(combo) if !rebound_toggle => match overview_intent(&combo) {
+                            OverviewIntent::Move(dx, dy) => {
+                                self.desktop.move_overview_selection(wm.backend_mut(), &self.theme, dx, dy)
+                            }
+                            OverviewIntent::Commit => self.commit_overview(wm),
+                            OverviewIntent::Dismiss => self.close_overview(wm),
+                        },
+                        // The rebound toggle, or (defensively) no
+                        // parked key at all: close. A missing key can
+                        // only mean a caller ran the action without
+                        // resolving a combo first, and "the toggle
+                        // toggles" is the only safe reading.
+                        _ => self.close_overview(wm),
+                    }
+                }
+            }
             Action::WorkspaceCarryNext => carry_focused_to_workspace(wm, wm.current_workspace() + 1),
             Action::WorkspaceCarryPrev => {
                 if wm.current_workspace() > 0 {
@@ -784,6 +894,163 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
             // how a session picks up a *new build* of itself, which is
             // the one thing it cannot do without exec.
             Action::Restart => return ShellOutcome::Restart,
+        }
+        ShellOutcome::Continue
+    }
+
+    /// Opens the Overview and takes the modal keyboard grab — the same
+    /// `Backend::grab_keyboard` the Alt-Tab cycle uses, taken from the
+    /// shell layer because this modality lives here. Grabbed only if
+    /// the panel actually came up: grabbing beside a surface that
+    /// failed to create would leave a desk with dead keys and nothing
+    /// on screen explaining why.
+    fn open_overview(&mut self, wm: &mut WindowManager<B>) {
+        self.populate_overview(wm);
+        if self.desktop.overview_visible() {
+            wm.backend_mut().grab_keyboard();
+        }
+    }
+
+    /// Captures the current workspace into the panel — fresh previews
+    /// every time, because windows change constantly and a stale
+    /// thumbnail defeats the whole "live overview" promise. Shared by
+    /// entry, the workspace-strip switch, and the mid-session refresh
+    /// `on_notification` triggers when a card's window closes or
+    /// miniaturizes under an open panel (a right-click menu pick can
+    /// do both), so the grid can never keep showing a window that is
+    /// gone.
+    ///
+    /// Miniaturized windows are included, visually asleep (dimmed
+    /// preview, inactive titlebar — see `wm_theme::overview`):
+    /// they live on this desk too, and the Overview restoring one in a
+    /// single gesture is strictly more useful than pretending it is
+    /// not there. Their preview is whatever the capture path can still
+    /// produce for an unmapped window — `None` degrades to the empty
+    /// well, never an error.
+    fn populate_overview(&mut self, wm: &mut WindowManager<B>) {
+        let current = wm.current_workspace();
+        let mut items: Vec<OverviewItem<B>> = wm
+            .iter_clients()
+            .filter(|(_, client)| {
+                client.workspace == current
+                    && matches!(client.lifecycle, Lifecycle::Normal | Lifecycle::Miniaturized)
+            })
+            .map(|(id, client)| OverviewItem {
+                client: id,
+                window: client.window,
+                title: client.title.clone(),
+                preview: None,
+                miniaturized: client.lifecycle == Lifecycle::Miniaturized,
+            })
+            .collect();
+        // Previews in a second pass: `client_preview` borrows the WM
+        // immutably, which the iteration above also does — but the
+        // panel handoff below needs `backend_mut`, so everything is
+        // gathered before the mutable borrow starts (the same
+        // collect-then-paint dance `icon_clients` documents).
+        for item in &mut items {
+            item.preview = wm.client_preview(item.client);
+        }
+        let selected = wm
+            .focused_client()
+            .and_then(|focused| items.iter().position(|item| item.client == focused))
+            .unwrap_or(0);
+        let workspace = (current, wm.workspace_count());
+        self.desktop.show_overview(wm.backend_mut(), &self.theme, items, workspace, selected);
+    }
+
+    /// Ends the session without committing: grab released first, so
+    /// even a hide that finds no surface leaves the keyboard live.
+    /// Any open menu goes with it — a window menu opened from one of
+    /// the panel's cards would otherwise be left floating over the
+    /// bare desktop after an Escape, commanding a card that no longer
+    /// exists on screen. A no-op when no menu is open.
+    fn close_overview(&mut self, wm: &mut WindowManager<B>) {
+        wm.backend_mut().ungrab_keyboard();
+        self.desktop.close_menu(wm.backend_mut());
+        self.desktop.hide_overview(wm.backend_mut());
+    }
+
+    /// Commits the selection: close, then focus + raise the chosen
+    /// window through the public `ActivateRequested` path (the same
+    /// one a pager's `_NET_ACTIVE_WINDOW` message and the launcher
+    /// strip ride), deminiaturizing first when the card was asleep —
+    /// activating an unmapped window would set focus on nothing
+    /// visible. Closing before activating keeps the raise honest: the
+    /// full-screen panel is already gone when the window comes up.
+    fn commit_overview(&mut self, wm: &mut WindowManager<B>) {
+        let target = self
+            .desktop
+            .overview_item(self.desktop.overview_selected())
+            .map(|item| (item.client, item.window, item.miniaturized));
+        self.close_overview(wm);
+        if let Some((client, window, miniaturized)) = target {
+            if miniaturized {
+                wm.deminiaturize(client);
+            }
+            wm.dispatch(BackendEvent::ActivateRequested(window));
+        }
+    }
+
+    /// A click on the open Overview, both edges. The arm-on-press /
+    /// commit-on-release convention every button in this theme
+    /// follows: pressing a card selects it (visibly, on the highlight
+    /// plate), releasing over the same card commits — so a press
+    /// dragged off a card and released elsewhere changes the selection
+    /// but commits nothing, exactly like backing out of a menu row.
+    fn on_overview_click(&mut self, wm: &mut WindowManager<B>, local: Point, button: MouseButton, pressed: bool) -> ShellOutcome {
+        let hit = self.desktop.overview_hit(local);
+        if pressed {
+            match (button, hit) {
+                (MouseButton::Left, OverviewHit::Card(index)) => {
+                    self.desktop.select_overview_card(wm.backend_mut(), &self.theme, index);
+                }
+                // Right-click: the same window-commands menu a
+                // titlebar right-click opens, for the window this card
+                // shows. The menu is its own shell surface stacked
+                // over the panel and resolves through the ordinary
+                // menu routing; a pick that changes the desk (close,
+                // miniaturize) reaches the panel back through
+                // `on_notification`'s refresh.
+                (MouseButton::Right, OverviewHit::Card(index)) => {
+                    self.desktop.select_overview_card(wm.backend_mut(), &self.theme, index);
+                    if let Some(id) = self.desktop.overview_item(index).map(|item| item.client) {
+                        if let Some(client) = wm.client(id) {
+                            let ctx = WindowMenuContext {
+                                client: id,
+                                title: client.title.clone(),
+                                shaded: client.flags.contains(ClientFlags::SHADED),
+                                maximized: client.flags.intersects(ClientFlags::MAXIMIZED_H | ClientFlags::MAXIMIZED_V),
+                                fullscreen: client.flags.contains(ClientFlags::FULLSCREEN),
+                                workspace: client.workspace,
+                                workspace_count: wm.workspace_count(),
+                            };
+                            let at = self.pointer_root;
+                            self.desktop.open_window_menu(wm.backend_mut(), &self.theme, at, ctx);
+                        }
+                    }
+                }
+                // A workspace tile switches the desk under the open
+                // panel and re-populates the grid with fresh captures
+                // of what just became visible — the panel stays up,
+                // which is the point of having the strip at all.
+                (MouseButton::Left, OverviewHit::Workspace(target)) => {
+                    if target != wm.current_workspace() {
+                        wm.switch_workspace(target);
+                        self.populate_overview(wm);
+                    }
+                }
+                // Pressing the empty panel backs out, like clicking
+                // away from a menu.
+                (MouseButton::Left, OverviewHit::Background) => self.close_overview(wm),
+                _ => {}
+            }
+        } else if button == MouseButton::Left {
+            if let OverviewHit::Card(index) = hit {
+                if index == self.desktop.overview_selected() {
+                    self.commit_overview(wm);
+                }
+            }
         }
         ShellOutcome::Continue
     }
@@ -837,6 +1104,16 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         button: MouseButton,
         pressed: bool,
     ) -> ShellOutcome {
+        // The modal Overview first: while it is open it covers the
+        // primary monitor, so a click on its surface can mean nothing
+        // else — and no strip/icon drag can be in progress under a
+        // panel that was opened from the keyboard. Clicks on surfaces
+        // it does not own (a window menu opened from one of its cards)
+        // fall through to the ordinary routing below.
+        if self.desktop.overview_owns(surface) {
+            return self.on_overview_click(wm, local, button, pressed);
+        }
+
         // A release first offers itself to an in-progress strip drag
         // (drag-off-the-strip unpins); one that no strip drag consumes
         // falls through to the ordinary routing below, including the
@@ -1184,7 +1461,19 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
             hover = Some(entry);
         }
         if let Some((surface, local)) = hover {
-            self.desktop.hover_menu(wm.backend_mut(), &self.theme, surface, local);
+            if self.desktop.overview_owns(surface) {
+                // Hover is the switcher's selection treatment applied
+                // by pointer: the card under the pointer becomes the
+                // selection. `select_overview_card` repaints only on
+                // an actual change, so motion wandering inside one
+                // card costs nothing — load-bearing for a full-screen
+                // buffer this large.
+                if let OverviewHit::Card(index) = self.desktop.overview_hit(local) {
+                    self.desktop.select_overview_card(wm.backend_mut(), &self.theme, index);
+                }
+            } else {
+                self.desktop.hover_menu(wm.backend_mut(), &self.theme, surface, local);
+            }
         }
     }
 
@@ -1193,6 +1482,21 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
     /// miniaturized windows, the Alt+Tab switcher, and the titlebar
     /// right-click window menu.
     pub fn on_notification(&mut self, wm: &mut WindowManager<B>, notification: Notification) {
+        // An open Overview must track the desk it is showing: a window
+        // that closed, mapped, miniaturized or restored while the
+        // panel sat there (a right-click menu pick, an app exiting on
+        // its own) would otherwise leave a card pointing at nothing —
+        // and a click on that card would activate a ghost. Decided
+        // before the match consumes the notification, applied after
+        // the ordinary handling so icon tiles and the panel agree.
+        let refresh_overview = self.desktop.overview_visible()
+            && matches!(
+                &notification,
+                Notification::Miniaturized(..)
+                    | Notification::Deminiaturized(_)
+                    | Notification::Removed(_)
+                    | Notification::Mapped(_)
+            );
         match notification {
             Notification::Miniaturized(id, preview) => {
                 let title = wm.client(id).map(|c| c.title.clone()).unwrap_or_default();
@@ -1244,6 +1548,9 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
                     self.desktop.open_window_menu(wm.backend_mut(), &self.theme, at, ctx);
                 }
             }
+        }
+        if refresh_overview {
+            self.populate_overview(wm);
         }
     }
 
@@ -1438,6 +1745,34 @@ mod tests {
         // behaves the way it always did.
         let screen = Size::new(1600, 1200);
         assert_eq!(primary_rect(&[], screen), Rect { pos: Point::new(0, 0), size: screen });
+    }
+
+    #[test]
+    fn bare_arrows_and_return_drive_the_overview_and_everything_else_dismisses() {
+        use wm_core::Modifiers;
+        let bare = |keysym| KeyCombo { keysym, modifiers: Modifiers::empty() };
+        assert_eq!(overview_intent(&bare(XK_LEFT)), OverviewIntent::Move(-1, 0));
+        assert_eq!(overview_intent(&bare(XK_RIGHT)), OverviewIntent::Move(1, 0));
+        assert_eq!(overview_intent(&bare(XK_UP)), OverviewIntent::Move(0, -1));
+        assert_eq!(overview_intent(&bare(XK_DOWN)), OverviewIntent::Move(0, 1));
+        assert_eq!(overview_intent(&bare(XK_RETURN)), OverviewIntent::Commit);
+        assert_eq!(overview_intent(&bare(XK_KP_ENTER)), OverviewIntent::Commit);
+        // Escape dismisses by convention; any other stray key steps
+        // aside the way the Alt-Tab switcher does rather than eating
+        // the user's typing.
+        assert_eq!(overview_intent(&bare(0xff1b)), OverviewIntent::Dismiss);
+        assert_eq!(overview_intent(&bare('a' as u32)), OverviewIntent::Dismiss);
+    }
+
+    #[test]
+    fn modified_arrows_dismiss_instead_of_moving_the_selection() {
+        // A workspace chord (alt+ctrl+right) pressed out of habit over
+        // an open Overview must close it, not invisibly become
+        // selection movement bound to nothing the user chose.
+        let chord = KeyCombo { keysym: XK_RIGHT, modifiers: Modifiers::ALT | Modifiers::CONTROL };
+        assert_eq!(overview_intent(&chord), OverviewIntent::Dismiss);
+        let super_up = KeyCombo { keysym: XK_UP, modifiers: Modifiers::SUPER };
+        assert_eq!(overview_intent(&super_up), OverviewIntent::Dismiss);
     }
 
     #[test]

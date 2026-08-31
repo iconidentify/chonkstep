@@ -114,7 +114,8 @@
 # Actions (kebab-case, a closed set):
 #   spawn-terminal, close, toggle-maximize, toggle-shade, miniaturize,
 #   toggle-fullscreen, workspace-next, workspace-prev,
-#   workspace-carry-next, workspace-carry-prev, reload, restart, none
+#   workspace-carry-next, workspace-carry-prev, overview, reload,
+#   restart, none
 #
 # "reload" re-reads this file and applies it in place; "restart"
 # re-execs the on-disk binary to pick up a new build. See the note at
@@ -139,6 +140,15 @@
 "alt+ctrl+left" = "workspace-prev"          # previous workspace (stops at the first)
 "alt+shift+right" = "workspace-carry-next"  # carry the focused window along
 "alt+shift+left" = "workspace-carry-prev"   # carry the focused window back
+"super+up" = "overview"                     # the modal Overview (see below)
+
+# "overview" opens a modal view of every window on the current desk as
+# a grid of live thumbnails, with a workspace strip along the bottom.
+# While it is open the keys are fixed modal machinery, like the Alt+Tab
+# switcher's: arrows move the selection, Return (or clicking a tile)
+# focuses and raises that window, clicking a workspace tile switches
+# desks, and Escape, a second press of this binding, or any other key
+# dismisses it.
 
 # Both are unbound by default. Give "reload" a key and this file
 # applies itself without you touching a terminal; give "restart" one

@@ -94,7 +94,9 @@ pub fn render_switcher(
 /// title are usually both meaningful (app name, document name), the
 /// middle least so. The 0.75 average-advance estimate suits the bold
 /// titlebar face; `draw_text` clips whatever still overflows.
-fn elide(title: &str, width: u32, font_size: f32) -> String {
+/// Crate-shared: the Overview's window cards elide their titles by
+/// this same rule, so a title reads identically on both panels.
+pub(crate) fn elide(title: &str, width: u32, font_size: f32) -> String {
     let fits = ((width as f32) / (font_size * 0.75)).max(4.0) as usize;
     let chars: Vec<char> = title.chars().collect();
     if chars.len() <= fits {
@@ -123,7 +125,7 @@ pub fn panel_background(theme: &Theme) -> (u8, u8, u8) {
 /// clipping to the destination. Both sides are straight RGBA at full
 /// alpha (see `paint::draw_text`'s doc comment for why that equals
 /// tiny-skia's premultiplied storage here).
-fn blit_buffer(pixmap: &mut Pixmap, buffer: &DecorationBuffer, x: i32, y: i32) {
+pub(crate) fn blit_buffer(pixmap: &mut Pixmap, buffer: &DecorationBuffer, x: i32, y: i32) {
     let (dw, dh) = (pixmap.width() as i32, pixmap.height() as i32);
     let pixels = pixmap.pixels_mut();
     for row in 0..buffer.height as i32 {
