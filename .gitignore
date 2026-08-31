@@ -3,3 +3,5 @@
 # Agent worktrees and scratch state the Claude Code harness creates in
 # the checkout. Never part of the project.
 /.claude/worktrees/
+__pycache__/
+*.pyc

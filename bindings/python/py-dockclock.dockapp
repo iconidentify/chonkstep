@@ -1,0 +1,16 @@
+# Registration for the Python binding's example clock. Install this
+# directory with:
+#
+#   scripts/chonk-get install bindings/python
+#
+# chonk-get rewrites the relative exec path below to its absolute
+# installed location; the registry itself only accepts what it can run.
+
+id = "py-dockclock"
+name = "PY"
+exec = ["chonkdock/examples/clock.py"]
+tile_units = 1
+
+# A clock has no reason to exit, so any exit is a fault worth
+# relaunching after — still under the shell's crash-loop cutoff.
+restart = "on-crash"

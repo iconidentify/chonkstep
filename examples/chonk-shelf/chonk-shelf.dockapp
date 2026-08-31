@@ -1,0 +1,23 @@
+# Registration for the Shelf, the clipboard-history dockapp. Install by
+# copying to one of:
+#   $XDG_DATA_DIRS/chonkstep/dockapps/
+#   $XDG_CONFIG_HOME/chonkstep/dockapps/   (per-user)
+# or with `scripts/chonk-get install examples/chonk-shelf`.
+
+id = "chonk-shelf"
+name = "SHLF"
+
+# Bare rather than absolute so a development build on $PATH and an
+# installed one resolve the same way. To pin the display its wl-paste/
+# wl-copy helpers talk to (needed with nested compositors), wrap it:
+#   exec = ["env", "CHONK_SHELF_WAYLAND_DISPLAY=wayland-1", "chonk-shelf"]
+exec = ["chonk-shelf"]
+
+# Three stacked tiles: one clipboard entry per tile, newest on top.
+tile_units = 3
+
+# The shelf has no reason to exit on its own — even a missing
+# wl-clipboard degrades it to a labeled tile rather than an exit — so
+# any exit is a fault worth relaunching after, under the crash-loop
+# cutoff like everything else.
+restart = "on-crash"
