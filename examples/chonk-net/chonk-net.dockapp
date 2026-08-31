@@ -1,0 +1,17 @@
+# Registration for chonk-net, the network instrument. Install by
+# copying to one of:
+#   $XDG_DATA_DIRS/chonkstep/dockapps/
+#   $XDG_CONFIG_HOME/chonkstep/dockapps/   (per-user)
+# or with `scripts/chonk-get install examples/chonk-net`
+# (chonk-get rewrites the relative exec path below to its absolute
+# installed location; build.sh vendors the Python SDK next to it).
+
+id = "chonk-net"
+name = "NET"
+exec = ["chonk-net.py"]
+tile_units = 1
+
+# Sampling never raises out of the data layer (an absent tool is an
+# "unavailable" face, not an exit), so any exit is a fault worth
+# relaunching after, under the shell's crash-loop cutoff.
+restart = "on-crash"
