@@ -22,6 +22,19 @@
 //!   drops rather than blocks, and a token bucket that coalesces rather
 //!   than queues.
 //!
+//! # For third-party authors
+//!
+//! The whole contract is also written out language-neutrally, byte by
+//! byte, in `docs/dockapp-protocol.md` at the repository root — that
+//! document is what to hand an author who will never read Rust.
+//! Reference implementations against it live in `bindings/python` and
+//! `bindings/go` (stdlib-only, each with a runnable clock example),
+//! `scripts/chonk-get` installs and registers a dockapp from a git URL
+//! or a directory, and `docs/instrument-platform.md` traces each of the
+//! platform's guarantees back to the mechanism in this crate that
+//! enforces it. When the wire format changes, those documents and
+//! bindings change in the same commit or they are lying.
+//!
 //! # The one invariant that matters
 //!
 //! **The shell must never block on a dockapp.** This desktop already

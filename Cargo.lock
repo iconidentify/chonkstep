@@ -293,6 +293,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "chonk-shelf"
+version = "0.1.0"
+dependencies = [
+ "chonk-dock-proto",
+ "chonk-ui",
+ "cosmic-text",
+ "tracing",
+]
+
+[[package]]
 name = "chonk-shell"
 version = "0.1.0"
 dependencies = [
@@ -316,6 +326,8 @@ name = "chonk-testkit"
 version = "0.1.0"
 dependencies = [
  "png",
+ "wm-theme",
+ "wm-theme-api",
 ]
 
 [[package]]

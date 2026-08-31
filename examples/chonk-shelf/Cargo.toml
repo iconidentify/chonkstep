@@ -1,0 +1,24 @@
+[package]
+name = "chonk-shelf"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The Shelf as a dockapp: a clipboard-history tile stack, out of process, on the public chonk-ui SDK."
+publish = false
+
+[dependencies]
+# `default-features = false` drops `x11rb`, for the same reason
+# `chonk-dockclock` does: a dockapp holds no display connection, and a
+# binary that does not even link a display client library is the
+# plainest evidence for the claim.
+chonk-ui = { path = "../../crates/chonk-ui", default-features = false }
+# The protocol crate itself, for `frame_fits` — the predicate that says
+# whether a three-tile stack can cross the socket at a given scale. A
+# dockapp may link this crate; it is the published contract.
+chonk-dock-proto = { path = "../../crates/chonk-dock-proto" }
+# For `paint::draw_text`'s FontSystem/SwashCache parameters. The same
+# version `wm-theme` pins, so cargo unifies them into one crate and the
+# types line up; this is a public crates.io dependency, not an internal
+# API.
+cosmic-text = "0.12"
+tracing = "0.1"

@@ -435,6 +435,7 @@ jobs:
             -p chonk-ui \
             -p chonkstep \
             -p chonkstep-wayland \
+            -p chonk-shelf \
             -p wm-config \
             -p wm-core \
             -p wm-theme-api \

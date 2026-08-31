@@ -1,0 +1,289 @@
+#!/usr/bin/env bash
+# chonk-get — install, list and remove third-party chonkstep dockapps.
+#
+# A dockapp reaches the dock in two pieces, and this tool manages both:
+#
+#   1. The program itself. Sources are cloned/copied to
+#        ${XDG_DATA_HOME:-~/.local/share}/chonkstep/dockapps/<name>/
+#      and built there if a build.sh, Cargo.toml or Makefile is present.
+#   2. The registration. The shell's registry scans two places for
+#      *.dockapp files ($XDG_DATA_DIRS/chonkstep/dockapps/ for packaged
+#      ones, then $XDG_CONFIG_HOME/chonkstep/dockapps/ for the user's
+#      own, which win id collisions — see
+#      crates/chonk-shell/src/dockapp/registry.rs). chonk-get writes to
+#      the config-home directory, the one the registry always reads.
+#
+# The registration format (one TOML file per dockapp):
+#
+#   id = "name"              # 1-64 chars of [A-Za-z0-9._-]; the registry
+#                            # additionally refuses the reserved builtin: prefix
+#   name = "TAG"             # optional; label for the dead/starting tile face
+#   exec = ["prog", "arg"]   # argv array, exec[0] is the program
+#   tile_units = 1           # optional, 1..=4
+#   restart = "on-crash"     # optional: on-crash | always | never
+#
+# If the source ships its own <anything>.dockapp file it is used as the
+# registration, with one adjustment: any exec[] element that names a
+# file inside the checkout (e.g. "clock.py", "target/release/foo") is
+# rewritten to its absolute installed path, so a repo can describe
+# itself without knowing where it will land.
+#
+# Dockapps are ordinary processes running as you — not sandboxed.
+# Install one with the same care you would install any other program.
+
+set -euo pipefail
+
+SRC_ROOT="${XDG_DATA_HOME:-$HOME/.local/share}/chonkstep/dockapps"
+REG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/chonkstep/dockapps"
+
+usage() {
+    cat <<'EOF'
+usage:
+  chonk-get install <git-url | local-path> [options]
+  chonk-get list
+  chonk-get remove <name>
+
+install options:
+  --name NAME         install under this name (default: source basename)
+  --exec PATH         program to register, relative to the source root
+                      (default: the shipped .dockapp file, or autodetected)
+  --tile-units N      stacked tiles, 1-4 (default 1)
+  --restart POLICY    on-crash | always | never (default on-crash)
+  --label TAG         short label for the tile's dead/starting face
+
+A newly installed dockapp appears in the dock at the next shell restart.
+EOF
+    exit "${1:-0}"
+}
+
+die() {
+    echo "chonk-get: $*" >&2
+    exit 1
+}
+
+# The same id rule the registry and the wire enforce ([A-Za-z0-9._-],
+# 1-64 bytes; ':' is legal on the wire but reserved for builtins, so it
+# is not offered here). Rejected where a human sees the error rather
+# than at a handshake nobody is watching.
+valid_name() {
+    case "$1" in
+        '' | *[!A-Za-z0-9._-]*) return 1 ;;
+    esac
+    [ "${#1}" -le 64 ]
+}
+
+cmd_list() {
+    if [ ! -d "$REG_DIR" ] || ! ls "$REG_DIR"/*.dockapp >/dev/null 2>&1; then
+        echo "no dockapps installed (none registered in $REG_DIR)"
+        return 0
+    fi
+    for f in "$REG_DIR"/*.dockapp; do
+        id=$(sed -n 's/^id[[:space:]]*=[[:space:]]*"\(.*\)".*/\1/p' "$f" | head -n1)
+        prog=$(sed -n 's/^exec[[:space:]]*=[[:space:]]*\[[[:space:]]*"\([^"]*\)".*/\1/p' "$f" | head -n1)
+        printf '%-24s %s\n' "${id:-?}" "${prog:-?}"
+    done
+}
+
+cmd_remove() {
+    name="$1"
+    valid_name "$name" || die "'$name' is not a valid dockapp name"
+    removed=0
+    if [ -e "$REG_DIR/$name.dockapp" ]; then
+        rm -- "$REG_DIR/$name.dockapp"
+        echo "removed registration $REG_DIR/$name.dockapp"
+        removed=1
+    fi
+    if [ -d "$SRC_ROOT/$name" ]; then
+        rm -rf -- "${SRC_ROOT:?}/$name"
+        echo "removed sources $SRC_ROOT/$name"
+        removed=1
+    fi
+    [ "$removed" = 1 ] || die "nothing installed under '$name'"
+    echo "the tile disappears at the next shell restart"
+}
+
+# Builds the checkout in place, if it says how.
+build_source() {
+    dir="$1"
+    if [ -x "$dir/build.sh" ]; then
+        echo "building with build.sh ..."
+        (cd "$dir" && ./build.sh)
+    elif [ -f "$dir/Cargo.toml" ]; then
+        command -v cargo >/dev/null 2>&1 || die "the source is a Rust crate but cargo is not installed"
+        echo "building with cargo (release) ..."
+        (cd "$dir" && cargo build --release)
+    elif [ -f "$dir/Makefile" ]; then
+        command -v make >/dev/null 2>&1 || die "the source has a Makefile but make is not installed"
+        echo "building with make ..."
+        (cd "$dir" && make)
+    fi
+}
+
+# Prints the best guess at the built program, relative to the checkout.
+detect_exec() {
+    dir="$1" name="$2"
+    for candidate in \
+        "target/release/$name" \
+        "bin/$name" \
+        "$name" \
+        "$name.py" "$name.sh" "main.py" "clock.py"; do
+        if [ -f "$dir/$candidate" ] && [ -x "$dir/$candidate" ]; then
+            echo "$candidate"
+            return 0
+        fi
+    done
+    # Any single executable in target/release (a crate whose binary
+    # name differs from the directory's).
+    if [ -d "$dir/target/release" ]; then
+        found=$(find "$dir/target/release" -maxdepth 1 -type f -perm -u+x \
+            ! -name '*.d' ! -name '*.so' ! -name '*.rlib' | head -n1)
+        if [ -n "$found" ]; then
+            echo "${found#"$dir"/}"
+            return 0
+        fi
+    fi
+    return 1
+}
+
+# Emits the exec = [...] line for a program path, using the file's
+# shebang implicitly (the shell exec()s argv[0] directly, so the file
+# must be executable; a bare .py without the +x bit gets python3
+# prepended instead).
+exec_line_for() {
+    prog="$1"
+    if [ -x "$prog" ]; then
+        printf 'exec = ["%s"]\n' "$prog"
+    else
+        case "$prog" in
+            *.py) printf 'exec = ["python3", "%s"]\n' "$prog" ;;
+            *) die "$prog is not executable" ;;
+        esac
+    fi
+}
+
+# Copies a shipped .dockapp registration, absolutizing every exec[]
+# element that names a file inside the checkout.
+rewrite_registration() {
+    src_file="$1" dir="$2" out="$3"
+    : >"$out"
+    while IFS= read -r line; do
+        case "$line" in
+            exec*=*)
+                rewritten="$line"
+                # Each quoted argv element in turn; an element that
+                # resolves to a file in the checkout becomes absolute.
+                while IFS= read -r element; do
+                    inner="${element#\"}"
+                    inner="${inner%\"}"
+                    case "$inner" in /* | '') continue ;; esac
+                    if [ -e "$dir/$inner" ]; then
+                        rewritten=${rewritten/"\"$inner\""/"\"$dir/$inner\""}
+                    fi
+                done < <(grep -o '"[^"]*"' <<<"$line")
+                printf '%s\n' "$rewritten" >>"$out"
+                ;;
+            *) printf '%s\n' "$line" >>"$out" ;;
+        esac
+    done <"$src_file"
+}
+
+cmd_install() {
+    source="" name="" exec_rel="" tile_units="" restart="" label=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --name) name="${2:?--name needs a value}"; shift 2 ;;
+            --exec) exec_rel="${2:?--exec needs a value}"; shift 2 ;;
+            --tile-units) tile_units="${2:?--tile-units needs a value}"; shift 2 ;;
+            --restart) restart="${2:?--restart needs a value}"; shift 2 ;;
+            --label) label="${2:?--label needs a value}"; shift 2 ;;
+            -h | --help) usage ;;
+            -*) die "unknown option $1" ;;
+            *)
+                [ -z "$source" ] || die "only one source per install"
+                source="$1"
+                shift
+                ;;
+        esac
+    done
+    [ -n "$source" ] || usage 1
+
+    if [ -z "$name" ]; then
+        name=$(basename "$source" .git)
+    fi
+    valid_name "$name" || die "'$name' is not a valid dockapp name (1-64 chars of [A-Za-z0-9._-])"
+    case "$name" in builtin:*) die "the builtin: namespace is reserved" ;; esac
+    if [ -n "$tile_units" ]; then
+        case "$tile_units" in [1-4]) ;; *) die "--tile-units must be 1-4 (the dock is a strip, not a canvas)" ;; esac
+    fi
+    if [ -n "$restart" ]; then
+        case "$restart" in on-crash | always | never) ;; *) die "--restart must be on-crash, always or never" ;; esac
+    fi
+
+    dest="$SRC_ROOT/$name"
+    mkdir -p "$SRC_ROOT" "$REG_DIR"
+    rm -rf -- "$dest"
+
+    case "$source" in
+        http://* | https://* | git://* | git@* | ssh://*)
+            command -v git >/dev/null 2>&1 || die "git is not installed"
+            echo "cloning $source ..."
+            git clone --depth 1 -- "$source" "$dest"
+            ;;
+        *)
+            [ -d "$source" ] || die "$source is not a directory (or a recognized git URL)"
+            echo "copying $source ..."
+            mkdir -p "$dest"
+            # Copy contents, dot-files included, without the checkout's
+            # own VCS history.
+            (cd "$source" && tar --exclude=.git -cf - .) | (cd "$dest" && tar -xf -)
+            ;;
+    esac
+
+    build_source "$dest"
+
+    reg="$REG_DIR/$name.dockapp"
+    shipped=$(find "$dest" -maxdepth 1 -name '*.dockapp' | head -n1)
+    if [ -n "$exec_rel" ]; then
+        [ -e "$dest/$exec_rel" ] || die "--exec $exec_rel does not exist in the source"
+        {
+            printf 'id = "%s"\n' "$name"
+            [ -n "$label" ] && printf 'name = "%s"\n' "$label"
+            exec_line_for "$dest/$exec_rel"
+            [ -n "$tile_units" ] && printf 'tile_units = %s\n' "$tile_units"
+            [ -n "$restart" ] && printf 'restart = "%s"\n' "$restart"
+        } >"$reg"
+    elif [ -n "$shipped" ]; then
+        echo "using the shipped registration $(basename "$shipped")"
+        rewrite_registration "$shipped" "$dest" "$reg"
+    else
+        exec_rel=$(detect_exec "$dest" "$name") \
+            || die "could not find a program to run; pass --exec <path relative to the source>"
+        {
+            printf 'id = "%s"\n' "$name"
+            [ -n "$label" ] && printf 'name = "%s"\n' "$label"
+            exec_line_for "$dest/$exec_rel"
+            [ -n "$tile_units" ] && printf 'tile_units = %s\n' "$tile_units"
+            [ -n "$restart" ] && printf 'restart = "%s"\n' "$restart"
+        } >"$reg"
+    fi
+
+    echo "installed '$name':"
+    echo "  sources       $dest"
+    echo "  registration  $reg"
+    sed 's/^/    /' "$reg"
+    echo "the tile appears at the next shell restart"
+}
+
+case "${1:-}" in
+    install)
+        shift
+        cmd_install "$@"
+        ;;
+    list) cmd_list ;;
+    remove)
+        [ $# -ge 2 ] || usage 1
+        cmd_remove "$2"
+        ;;
+    -h | --help | help | '') usage ;;
+    *) die "unknown command '${1}' (try: install, list, remove)" ;;
+esac
