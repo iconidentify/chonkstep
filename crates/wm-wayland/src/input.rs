@@ -1521,18 +1521,28 @@ fn layer_band_hit(
             continue;
         }
         let root = record.surface.wl_surface();
-        let scale = crate::xdg::committed_buffer_scale(root);
+        let output_scale = backend.scale_at(record.geometry);
+        let scale = crate::xdg::effective_surface_scale(
+            crate::xdg::committed_surface_scale(root),
+            output_scale,
+        );
         for (popup, offset) in PopupManager::popups_for_surface(root) {
             let popup_surface = popup.wl_surface();
             let popup_origin: LogicalPoint<i32, Logical> = (
-                record.geometry.pos.x + crate::xdg::logical_to_physical(offset.x, scale),
-                record.geometry.pos.y + crate::xdg::logical_to_physical(offset.y, scale),
+                record.geometry.pos.x + crate::xdg::scale_length(offset.x, scale),
+                record.geometry.pos.y + crate::xdg::scale_length(offset.y, scale),
             )
                 .into();
             let anchor: LogicalPoint<f64, Logical> =
                 (popup_origin.x as f64, popup_origin.y as f64).into();
-            let probe =
-                surface_probe(anchor, position, crate::xdg::committed_buffer_scale(popup_surface));
+            let probe = surface_probe(
+                anchor,
+                position,
+                crate::xdg::effective_surface_scale(
+                    crate::xdg::committed_surface_scale(popup_surface),
+                    output_scale,
+                ),
+            );
             if let Some((surface, found)) =
                 under_from_surface_tree(popup_surface, probe, popup_origin, WindowSurfaceType::ALL)
             {
@@ -1588,7 +1598,14 @@ fn lock_hit(
         let root = entry.surface.wl_surface();
         let anchor: LogicalPoint<f64, Logical> =
             (monitor.geometry.pos.x as f64, monitor.geometry.pos.y as f64).into();
-        let probe = surface_probe(anchor, position, crate::xdg::committed_buffer_scale(root));
+        let probe = surface_probe(
+            anchor,
+            position,
+            crate::xdg::effective_surface_scale(
+                crate::xdg::committed_surface_scale(root),
+                backend.scale_at(monitor.geometry),
+            ),
+        );
         return match under_from_surface_tree(
             root,
             probe,
@@ -1769,7 +1786,7 @@ fn content_hit(
         (content_origin.x as f64, content_origin.y as f64).into();
     let (surface, origin) = match &root_surface {
         Some(root) => {
-            let scale = crate::xdg::committed_buffer_scale(root);
+            let scale = backend.window_surface_scale(record);
             let probe = surface_probe(anchor, position, scale);
             under_from_surface_tree(root, probe, (content_origin.x, content_origin.y), WindowSurfaceType::ALL)
                 .map(|(surface, found)| (Some(surface), seat_origin(position, probe, found.to_f64())))
@@ -1801,9 +1818,9 @@ fn content_hit(
 fn surface_probe(
     anchor: LogicalPoint<f64, Logical>,
     position: LogicalPoint<f64, Logical>,
-    scale: i32,
+    scale: f64,
 ) -> LogicalPoint<f64, Logical> {
-    let scale = scale.max(1) as f64;
+    let scale = if scale.is_finite() && scale >= 0.125 { scale } else { 1.0 };
     (anchor.x + (position.x - anchor.x) / scale, anchor.y + (position.y - anchor.y) / scale).into()
 }
 
@@ -1861,17 +1878,24 @@ fn popup_hit(
     // are exactly what `renderer.rs`'s popup loop does, which is the
     // agreement this function's doc comment demands: draw and hit-test
     // have to describe one rectangle.
-    let parent_scale = crate::xdg::committed_buffer_scale(toplevel.wl_surface());
+    let parent_scale = backend.window_surface_scale(record);
     for (popup, offset) in PopupManager::popups_for_surface(toplevel.wl_surface()) {
         let popup_surface = popup.wl_surface();
         let popup_origin: LogicalPoint<i32, Logical> = (
-            content_origin.x + crate::xdg::logical_to_physical(offset.x, parent_scale),
-            content_origin.y + crate::xdg::logical_to_physical(offset.y, parent_scale),
+            content_origin.x + crate::xdg::scale_length(offset.x, parent_scale),
+            content_origin.y + crate::xdg::scale_length(offset.y, parent_scale),
         )
             .into();
         let anchor: LogicalPoint<f64, Logical> =
             (popup_origin.x as f64, popup_origin.y as f64).into();
-        let probe = surface_probe(anchor, position, crate::xdg::committed_buffer_scale(popup_surface));
+        let probe = surface_probe(
+            anchor,
+            position,
+            crate::xdg::effective_surface_scale(
+                crate::xdg::committed_surface_scale(popup_surface),
+                backend.scale_at(record.content),
+            ),
+        );
         if let Some((surface, found)) =
             under_from_surface_tree(popup_surface, probe, popup_origin, WindowSurfaceType::ALL)
         {
@@ -2105,7 +2129,7 @@ mod tests {
         let display = Display::<Compositor>::new().expect("a display with no socket");
         // Ledger scale 1 — the value every running session passes today
         // (see the note at `run`'s construction site).
-        WaylandBackend::new(display.handle(), Vec::new())
+        WaylandBackend::new(display.handle(), Vec::new(), 1.0)
     }
 
     const FRAME: WlFrameId = WlFrameId(11);
@@ -2341,7 +2365,7 @@ mod tests {
     // draws, and for a client running at 2x those two used to be
     // different rectangles.
 
-    fn probe_at(origin: (f64, f64), position: (f64, f64), scale: i32) -> (f64, f64) {
+    fn probe_at(origin: (f64, f64), position: (f64, f64), scale: f64) -> (f64, f64) {
         let point = surface_probe(origin.into(), position.into(), scale);
         (point.x, point.y)
     }
@@ -2351,7 +2375,7 @@ mod tests {
     /// the seat is the surface's own.
     #[test]
     fn a_one_to_one_client_is_probed_where_the_pointer_is() {
-        assert_eq!(probe_at((100.0, 100.0), (460.0, 220.0), 1), (460.0, 220.0));
+        assert_eq!(probe_at((100.0, 100.0), (460.0, 220.0), 1.0), (460.0, 220.0));
         let origin = seat_origin((460.0, 220.0).into(), (460.0, 220.0).into(), (100.0, 100.0).into());
         assert_eq!((origin.x, origin.y), (100.0, 100.0));
     }
@@ -2366,11 +2390,11 @@ mod tests {
     fn a_two_x_client_is_probed_in_its_own_pixels() {
         // 300 device pixels into a window at x=100 is 150 of the
         // client's own.
-        assert_eq!(probe_at((100.0, 100.0), (400.0, 200.0), 2), (250.0, 150.0));
+        assert_eq!(probe_at((100.0, 100.0), (400.0, 200.0), 2.0), (250.0, 150.0));
         // The far edge of a 600-device-pixel-wide window still lands
         // inside its 300-pixel surface, which is the half of the
         // rectangle that used to be unreachable.
-        assert_eq!(probe_at((100.0, 100.0), (699.0, 100.0), 2).0, 399.5);
+        assert_eq!(probe_at((100.0, 100.0), (699.0, 100.0), 2.0).0, 399.5);
     }
 
     /// What the client is told, which is the other half: smithay
@@ -2380,7 +2404,7 @@ mod tests {
     fn a_two_x_client_is_told_where_the_pointer_is_in_its_own_pixels() {
         let position: LogicalPoint<f64, Logical> = (400.0, 200.0).into();
         let anchor: LogicalPoint<f64, Logical> = (100.0, 100.0).into();
-        let probe = surface_probe(anchor, position, 2);
+        let probe = surface_probe(anchor, position, 2.0);
         let origin = seat_origin(position, probe, anchor);
         assert_eq!((position.x - origin.x, position.y - origin.y), (150.0, 50.0));
     }
@@ -2389,7 +2413,15 @@ mod tests {
     /// division by zero or an inverted rectangle.
     #[test]
     fn an_impossible_scale_degrades_to_one() {
-        assert_eq!(probe_at((100.0, 100.0), (400.0, 200.0), 0), (400.0, 200.0));
-        assert_eq!(probe_at((100.0, 100.0), (400.0, 200.0), -2), (400.0, 200.0));
+        assert_eq!(probe_at((100.0, 100.0), (400.0, 200.0), 0.0), (400.0, 200.0));
+        assert_eq!(probe_at((100.0, 100.0), (400.0, 200.0), -2.0), (400.0, 200.0));
+        assert_eq!(probe_at((100.0, 100.0), (400.0, 200.0), f64::NAN), (400.0, 200.0));
+    }
+
+    /// A fractional-scale client divides by its exact fraction: 300
+    /// device pixels into a 1.5x window is 200 of the client's own.
+    #[test]
+    fn a_fractional_client_is_probed_by_its_exact_fraction() {
+        assert_eq!(probe_at((100.0, 100.0), (400.0, 250.0), 1.5), (300.0, 200.0));
     }
 }

@@ -175,7 +175,14 @@ impl Backend for WaylandBackend {
         let id = WlShellId(self.alloc_id());
         self.shells.insert(
             id,
-            ShellRecord { geometry, buffer: None, background, above, mapped: false },
+            ShellRecord {
+                geometry,
+                buffer: None,
+                background,
+                above,
+                mapped: false,
+                fill_id: smithay::backend::renderer::element::Id::new(),
+            },
         );
         self.stacking.push(StackEntry::Shell(id));
         // Not visible until mapped — no damage yet.
@@ -417,12 +424,12 @@ impl Backend for WaylandBackend {
                 // refused size again — the window flickering
                 // larger/smaller at drag rate, observed live resizing
                 // Microsoft Edge at scale 2.
-                let hint_scale = crate::xdg::committed_buffer_scale(toplevel.wl_surface());
+                let hint_scale = self.window_surface_scale(record);
                 let to_size = |size: smithay::utils::Size<i32, Logical>| {
                     if size.w > 0 && size.h > 0 {
                         Some(Size::new(
-                            crate::xdg::logical_to_physical(size.w, hint_scale) as u32,
-                            crate::xdg::logical_to_physical(size.h, hint_scale) as u32,
+                            crate::xdg::scale_length(size.w, hint_scale) as u32,
+                            crate::xdg::scale_length(size.h, hint_scale) as u32,
                         ))
                     } else {
                         None
@@ -690,6 +697,13 @@ impl Backend for WaylandBackend {
     }
 
     fn resize_client(&mut self, window: Self::WindowId, size: Size) {
+        // The factor is read before the mutable borrow below — it needs
+        // the whole ledger (`window_surface_scale` consults the monitor
+        // list), and the answer cannot change between these two lines.
+        let factor = match self.windows.get(&window) {
+            Some(record) => self.window_surface_scale(record),
+            None => return,
+        };
         let Some(record) = self.windows.get_mut(&window) else {
             return;
         };
@@ -724,19 +738,22 @@ impl Backend for WaylandBackend {
                     // always does), so the desktop's idea of a scale
                     // still says nothing about what any one client
                     // actually drew.
-                    let scale = crate::xdg::committed_buffer_scale(toplevel.wl_surface());
-                    let logical = (size.w as i32 / scale, size.h as i32 / scale);
+                    let logical = (
+                        crate::xdg::physical_to_logical(size.w as i32, factor),
+                        crate::xdg::physical_to_logical(size.h as i32, factor),
+                    );
                     toplevel.with_pending_state(|state| {
                         state.size = Some(logical.into());
                     });
                     let _ = toplevel.send_pending_configure();
                     // What the client will commit if it obeys: the
-                    // logical ask times its own scale — NOT `size`,
-                    // which integer division may have shaved a pixel
-                    // off. See `WindowRecord::recent_asks`.
+                    // logical ask times its own factor — NOT `size`,
+                    // which the round trip through logical units may
+                    // have moved by a pixel (a certainty at fractional
+                    // factors). See `WindowRecord::recent_asks`.
                     let expected = Size::new(
-                        (logical.0 * scale) as u32,
-                        (logical.1 * scale) as u32,
+                        crate::xdg::scale_length(logical.0, factor) as u32,
+                        crate::xdg::scale_length(logical.1, factor) as u32,
                     );
                     record.recent_asks.push_back(expected);
                     while record.recent_asks.len() > 8 {
@@ -775,10 +792,20 @@ impl Backend for WaylandBackend {
                 // xdg clients never configure themselves, so `wm-core`
                 // only reaches here via a translated size request —
                 // answer with a configure for the size half; position
-                // isn't a concept the protocol lets us grant.
+                // isn't a concept the protocol lets us grant. In the
+                // client's own logical units, by the same factor as
+                // `resize_client` — the ledger's size is physical and
+                // a scaled client asked in its own pixels.
                 if toplevel.alive() {
+                    let factor = crate::xdg::committed_surface_scale(toplevel.wl_surface());
                     toplevel.with_pending_state(|state| {
-                        state.size = Some((geometry.size.w as i32, geometry.size.h as i32).into());
+                        state.size = Some(
+                            (
+                                crate::xdg::physical_to_logical(geometry.size.w as i32, factor),
+                                crate::xdg::physical_to_logical(geometry.size.h as i32, factor),
+                            )
+                                .into(),
+                        );
                     });
                     let _ = toplevel.send_pending_configure();
                 }

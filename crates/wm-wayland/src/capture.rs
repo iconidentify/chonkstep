@@ -144,13 +144,13 @@ pub(crate) fn refresh_snapshots(comp: &mut Compositor) {
     let renderer = graphics_renderer(graphics);
     let edge = boost.unwrap_or(MAX_SNAPSHOT_EDGE);
     let mut boosted_landed = false;
-    for (window, surface, size) in due {
+    for (window, surface, size, factor) in due {
         // Stamp before rendering, not after: a window whose capture
         // fails (a client that just died, an unimportable buffer) must
         // wait out the interval like any other, or it retries at frame
         // rate forever.
         LAST_SNAPSHOT.with(|last| last.borrow_mut().insert(window, now));
-        let Some(buffer) = snapshot_window(renderer, &surface, size, edge) else {
+        let Some(buffer) = snapshot_window(renderer, &surface, size, factor, edge) else {
             continue;
         };
         if let Some(record) = wm.backend_mut().windows.get_mut(&window) {
@@ -254,7 +254,11 @@ fn graphics_renderer(graphics: &mut Graphics) -> &mut GlesRenderer {
 /// surfaces are menus and tooltips that own no frame, never
 /// miniaturize, and never appear in the switcher, so a preview of one
 /// could not be asked for.
-fn due_windows(comp: &Compositor, now: Instant, boost: Option<u32>) -> Vec<(WlWindowId, WlSurface, Size)> {
+fn due_windows(
+    comp: &Compositor,
+    now: Instant,
+    boost: Option<u32>,
+) -> Vec<(WlWindowId, WlSurface, Size, f64)> {
     let backend = comp.wm.backend();
     LAST_SNAPSHOT.with(|last| {
         let mut last = last.borrow_mut();
@@ -269,7 +273,12 @@ fn due_windows(comp: &Compositor, now: Instant, boost: Option<u32>) -> Vec<(WlWi
                     needs_upgrade(stored, record.content.size, edge)
                 })
                 .filter_map(|(window, record)| {
-                    Some((*window, record.surface.wl_surface()?, record.content.size))
+                    Some((
+                        *window,
+                        record.surface.wl_surface()?,
+                        record.content.size,
+                        backend.window_surface_scale(record),
+                    ))
                 })
                 .collect();
         }
@@ -279,7 +288,12 @@ fn due_windows(comp: &Compositor, now: Instant, boost: Option<u32>) -> Vec<(WlWi
                     .is_none_or(|taken| now.duration_since(*taken) >= SNAPSHOT_INTERVAL)
             })
             .filter_map(|(window, record)| {
-                Some((*window, record.surface.wl_surface()?, record.content.size))
+                Some((
+                    *window,
+                    record.surface.wl_surface()?,
+                    record.content.size,
+                    backend.window_surface_scale(record),
+                ))
             })
             .take(MAX_SNAPSHOTS_PER_FRAME)
             .collect()
@@ -317,6 +331,7 @@ fn snapshot_window(
     renderer: &mut GlesRenderer,
     surface: &WlSurface,
     source: Size,
+    factor: f64,
     max_edge: u32,
 ) -> Option<DecorationBuffer> {
     let (size, scale) = snapshot_target(source, max_edge)?;
@@ -332,6 +347,7 @@ fn snapshot_window(
         renderer,
         surface,
         SPoint::<i32, Physical>::from((0, 0)),
+        factor,
         scale,
         Kind::Unspecified,
     );

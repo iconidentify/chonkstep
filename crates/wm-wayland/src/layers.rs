@@ -311,25 +311,28 @@ fn intersect(a: Rect, b: Rect) -> Option<Rect> {
 /// commit a double-width buffer. A client that then ignores the
 /// advertisement and maps at 1x is re-measured by what it actually
 /// committed on the very next pass.
-fn surface_factor(record: &LayerRecord, advertised: i32) -> i32 {
+fn surface_factor(record: &LayerRecord, output_scale: f64) -> f64 {
     if record.mapped {
-        crate::xdg::committed_buffer_scale(record.surface.wl_surface())
+        crate::xdg::effective_surface_scale(
+            crate::xdg::committed_surface_scale(record.surface.wl_surface()),
+            output_scale,
+        )
     } else {
-        advertised.max(1)
+        output_scale.max(0.125)
     }
 }
 
 /// The physical size of the surface's committed buffer contents, when
 /// it has any — the truth the geometry must be kept around, exactly as
 /// `xdg.rs::committed_content_size` keeps toplevel frames honest.
-fn committed_physical_size(surface: &WlSurface, factor: i32) -> Option<Size> {
+fn committed_physical_size(surface: &WlSurface, factor: f64) -> Option<Size> {
     with_renderer_surface_state(surface, |state| state.surface_size())
         .flatten()
         .filter(|size| size.w > 0 && size.h > 0)
         .map(|size| {
             Size::new(
-                crate::xdg::logical_to_physical(size.w, factor) as u32,
-                crate::xdg::logical_to_physical(size.h, factor) as u32,
+                crate::xdg::scale_length(size.w, factor) as u32,
+                crate::xdg::scale_length(size.h, factor) as u32,
             )
         })
 }
@@ -342,12 +345,12 @@ fn cached_state(surface: &WlSurface) -> LayerSurfaceCachedState {
     })
 }
 
-fn physical_margins(margin: Margins, factor: i32) -> EdgeInsets {
+fn physical_margins(margin: Margins, factor: f64) -> EdgeInsets {
     EdgeInsets {
-        left: crate::xdg::logical_to_physical(margin.left, factor),
-        right: crate::xdg::logical_to_physical(margin.right, factor),
-        top: crate::xdg::logical_to_physical(margin.top, factor),
-        bottom: crate::xdg::logical_to_physical(margin.bottom, factor),
+        left: crate::xdg::scale_length(margin.left, factor),
+        right: crate::xdg::scale_length(margin.right, factor),
+        top: crate::xdg::scale_length(margin.top, factor),
+        bottom: crate::xdg::scale_length(margin.bottom, factor),
     }
 }
 
@@ -374,9 +377,14 @@ pub(crate) fn refresh(comp: &mut Compositor) {
 /// `DontCare` surfaces against the full output, which is exactly what
 /// that value asks for.
 fn arrange(comp: &mut Compositor) {
-    let advertised = crate::state::advertised_output_scale(comp.ui_scale).integer_scale();
     let backend = comp.wm.backend_mut();
     let outputs: Vec<Rect> = backend.monitors.iter().map(|m| m.geometry).collect();
+    // Each output's own fractional scale — the factor an unmapped
+    // surface on it is predicted to adopt, and the correction basis for
+    // a mapped one (`surface_factor`).
+    let output_scales: Vec<f64> = (0..outputs.len())
+        .map(|index| backend.monitor_scales.get(index).copied().unwrap_or(1.0))
+        .collect();
     let had_dead = backend.layers.iter().any(|record| !record.surface.alive());
     if had_dead {
         backend.layers.retain(|record| record.surface.alive());
@@ -403,7 +411,7 @@ fn arrange(comp: &mut Compositor) {
                 else {
                     continue;
                 };
-                let factor = surface_factor(record, advertised);
+                let factor = surface_factor(record, output_scales[output_index]);
                 let margins = physical_margins(cached.margin, factor);
                 let usable = shrink(full, insets);
                 plan_surface(backend, index, cached, usable, factor);
@@ -411,7 +419,7 @@ fn arrange(comp: &mut Compositor) {
                     reserve(
                         &mut insets,
                         edge,
-                        crate::xdg::logical_to_physical(zone.min(i32::MAX as u32) as i32, factor),
+                        crate::xdg::scale_length(zone.min(i32::MAX as u32) as i32, factor),
                         margins,
                     );
                 }
@@ -436,7 +444,7 @@ fn arrange(comp: &mut Compositor) {
                 ExclusiveZone::DontCare => full,
                 _ => usable,
             };
-            let factor = surface_factor(&backend.layers[index], advertised);
+            let factor = surface_factor(&backend.layers[index], output_scales[output_index]);
             plan_surface(backend, index, cached, area, factor);
         }
         reserved[output_index] = insets;
@@ -453,12 +461,12 @@ fn plan_surface(
     index: usize,
     cached: LayerSurfaceCachedState,
     area: Rect,
-    factor: i32,
+    factor: f64,
 ) {
     let margins = physical_margins(cached.margin, factor);
     let requested = Size::new(
-        crate::xdg::logical_to_physical(cached.size.w, factor).max(0) as u32,
-        crate::xdg::logical_to_physical(cached.size.h, factor).max(0) as u32,
+        crate::xdg::scale_length(cached.size.w, factor).max(0) as u32,
+        crate::xdg::scale_length(cached.size.h, factor).max(0) as u32,
     );
     let configured = resolved_size(requested, area, margins);
     // The geometry is anchored around what the client actually drew
@@ -475,13 +483,21 @@ fn plan_surface(
 
     // Configure in the client's own units. A fixed axis echoes the
     // client's number verbatim (dividing the multiplied value back
-    // would round-trip identically, but the client's literal is the
-    // safer identity); a stretch axis is the physical span converted
-    // down by the factor the client renders at.
-    let factor = factor.max(1);
+    // would not round-trip identically at a fractional factor, and the
+    // client's literal is the safer identity either way); a stretch
+    // axis is the physical span converted down by the factor the
+    // client renders at.
     let configure_logical: (u32, u32) = (
-        if cached.size.w > 0 { cached.size.w as u32 } else { (configured.w as i32 / factor).max(1) as u32 },
-        if cached.size.h > 0 { cached.size.h as u32 } else { (configured.h as i32 / factor).max(1) as u32 },
+        if cached.size.w > 0 {
+            cached.size.w as u32
+        } else {
+            crate::xdg::physical_to_logical(configured.w as i32, factor).max(1) as u32
+        },
+        if cached.size.h > 0 {
+            cached.size.h as u32
+        } else {
+            crate::xdg::physical_to_logical(configured.h as i32, factor).max(1) as u32
+        },
     );
     let record = &mut backend.layers[index];
     record.layer = cached.layer;
