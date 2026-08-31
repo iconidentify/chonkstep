@@ -59,7 +59,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use chonk_dock_proto::transport::{Seqpacket, ENV_SOCKET, ENV_TOKEN};
-use chonk_dock_proto::wire::{frame_matches_tile, Button, InputEvent, InputKind, InputMask, LogLevel, ThemeState};
+use chonk_dock_proto::wire::{frame_matches_tile, Button, InputEvent, InputKind, InputMask, LogLevel, PanelCloseReason, ThemeState};
 use chonk_dock_proto::wire::GoodbyeReason;
 use chonk_dock_proto::{transport, ClientMessage, FrameLimiter, SendOutcome, SendQueue, ServerMessage, TOKEN_BYTES};
 use wm_theme::model::{Color, Fill};
@@ -301,6 +301,73 @@ struct Connection {
     told: ThemeState,
 }
 
+/// How often a streaming panel's pixels are re-presented to the
+/// screen, at most. The panel equivalent of the tile's 30 Hz frame
+/// budget — but where a tile frame is a whole picture the
+/// [`FrameLimiter`] can coalesce newest-wins, a panel repaint is a
+/// *sequence of bands* blitted into a persistent buffer, so the
+/// metering moves from "which frame" to "when does the buffer reach
+/// the screen". Bands are always blitted (each is one bounded memcpy);
+/// this bounds the expensive half, the surface upload.
+pub(crate) const PANEL_PRESENT_INTERVAL: Duration = Duration::from_millis(33);
+
+/// The pixels and bookkeeping of one open instrument panel — the
+/// dockapp-facing half. The shell surface it is drawn on, its chrome,
+/// and its place beside the dock belong to the desktop
+/// (`crate::dockapp::panel`); this half owns what came over the wire.
+///
+/// `PanelFrame` is banded — each message repaints a horizontal strip —
+/// so the shell keeps one persistent, grant-sized buffer per panel
+/// (allocation bounded by `MAX_PANEL_BYTES`) and blits bands into it
+/// on receipt. There is no atomicity across bands, by contract: a
+/// half-applied repaint is on screen for at most one present interval.
+struct PanelState {
+    /// The size the grant promised — every band's `width` must equal
+    /// `granted.0` and its rows must stay inside `granted.1`.
+    granted: (u32, u32),
+    /// The persistent panel surface bands are blitted into.
+    /// Transparent until streamed, so the desktop's empty well shows
+    /// through regions the client has not painted yet.
+    buffer: DecorationBuffer,
+    /// Whether any band has ever landed — before that, the desktop
+    /// draws the bare well rather than a transparent buffer.
+    streamed: bool,
+    /// The newest `generation` seen. Bands from an older repaint may be
+    /// dropped under flow control (the contract's drop rule); newness
+    /// is a wrapping comparison so the counter rolling over is not a
+    /// stuck panel.
+    newest_generation: u32,
+    /// The buffer changed since the desktop last presented it.
+    dirty: bool,
+    /// When the desktop last presented, for [`PANEL_PRESENT_INTERVAL`].
+    last_present: Option<Instant>,
+    /// The desktop must (re)stage the surface: a fresh open, or a
+    /// renegotiation that may have changed the size.
+    just_opened: bool,
+}
+
+/// Clamps an `OpenPanel` request to what the shell will grant: the
+/// protocol caps and the workarea beside the dock (`bounds`, the
+/// largest *content* area available, in device pixels). `None` means
+/// nothing sensible can be granted — a degenerate request or workarea —
+/// and the request is refused.
+pub(crate) fn clamp_panel_grant(width: u32, height: u32, bounds: (u32, u32)) -> Option<(u32, u32)> {
+    let max_w = bounds.0.min(chonk_dock_proto::MAX_PANEL_PX);
+    let max_h = bounds.1.min(chonk_dock_proto::MAX_PANEL_PX);
+    if max_w == 0 || max_h == 0 || width == 0 || height == 0 {
+        return None;
+    }
+    let (w, h) = (width.min(max_w), height.min(max_h));
+    chonk_dock_proto::panel_fits(w, h).then_some((w, h))
+}
+
+/// Whether `candidate` is a newer generation than `reference`, in the
+/// wrapping sense (the same arithmetic TCP sequence numbers use). Equal
+/// counts as "not older", so several bands of one repaint all land.
+fn generation_newer(candidate: u32, reference: u32) -> bool {
+    candidate != reference && candidate.wrapping_sub(reference) < u32::MAX / 2
+}
+
 /// Everything one servicing pass needs from the shell.
 pub(crate) struct ServiceContext<'a> {
     pub now: Instant,
@@ -326,6 +393,12 @@ pub(crate) struct ServiceContext<'a> {
     /// worse use of the repaint thread than anything a dockapp could do
     /// to it.
     pub scratch: &'a mut Vec<u8>,
+    /// The largest panel *content* area the workarea beside the dock
+    /// can hold right now, in device pixels — what an `OpenPanel`
+    /// request is clamped against. From the servicing context for the
+    /// same reason `theme` is: a monitor change moves it, and a value
+    /// recomputed per pass cannot be the one nobody updated.
+    pub panel_bounds: (u32, u32),
 }
 
 /// One out-of-process dock tile.
@@ -368,6 +441,11 @@ pub(crate) struct RemoteTile {
     /// Whether the pointer is inside this tile, so `Enter`/`Leave` are
     /// each sent once per crossing rather than once per motion event.
     hovered: bool,
+    /// The open instrument panel, if this dockapp has one. At most one
+    /// per dockapp by construction (an `OpenPanel` renegotiates it in
+    /// place); at most one desktop-wide by the desktop's arbitration
+    /// (`Desktop::sync_instrument_panel`).
+    panel: Option<PanelState>,
 }
 
 impl RemoteTile {
@@ -388,6 +466,7 @@ impl RemoteTile {
             tile_px,
             dirty: true,
             hovered: false,
+            panel: None,
         }
     }
 
@@ -520,6 +599,12 @@ impl RemoteTile {
             return None;
         }
         self.connection = None;
+        // The panel does not survive the restart: the incoming shell
+        // inherits the token, not the panel state, and the survivor's
+        // reconnect starts panel-less by contract. Dropped silently for
+        // the same reason no `Goodbye` is sent — the bare EOF is the
+        // whole message here.
+        self.panel = None;
         // Dropped, not terminated. `SpawnedChild` has no `Drop` of its
         // own — killing is `terminate()`, which is exactly what is not
         // being called here — so letting go of the handle leaves the
@@ -687,7 +772,131 @@ impl RemoteTile {
                 self.disconnected(ctx.now, "duplicate Hello");
                 false
             }
+            ClientMessage::OpenPanel { width, height } => {
+                self.on_open_panel(width, height, ctx);
+                true
+            }
+            ClientMessage::PanelFrame { generation, y, band_height, width, pixels } => {
+                self.on_panel_frame(generation, y, band_height, width, pixels, ctx)
+            }
+            ClientMessage::ClosePanel => {
+                // A `ClosePanel` racing a dismissal the client has not
+                // seen yet is expected traffic, not an error: with no
+                // panel open it is silently nothing.
+                if self.panel.is_some() {
+                    self.close_panel(PanelCloseReason::ClientRequest, ctx.now);
+                }
+                true
+            }
         }
+    }
+
+    /// An `OpenPanel` arrived: grant a clamped size, or refuse.
+    ///
+    /// A request while a panel is already open re-negotiates in place —
+    /// same connection, same panel slot, a fresh grant. The stored
+    /// frame survives only if the new grant is the same size; a frame
+    /// for the old grant is exactly the wrong-sized blit the equality
+    /// check exists to refuse.
+    fn on_open_panel(&mut self, width: u32, height: u32, ctx: &ServiceContext) {
+        match clamp_panel_grant(width, height, ctx.panel_bounds) {
+            Some(granted) => {
+                // Renegotiation keeps the streamed pixels only when the
+                // grant is byte-compatible; a buffer for the old grant
+                // is exactly the wrong-sized blit the band checks
+                // refuse.
+                let kept = self.panel.take().filter(|panel| panel.granted == granted);
+                tracing::info!(
+                    id = %self.entry.id,
+                    asked = format!("{width}x{height}"),
+                    granted = format!("{}x{}", granted.0, granted.1),
+                    "opening an instrument panel"
+                );
+                self.panel = Some(match kept {
+                    Some(mut panel) => {
+                        panel.just_opened = true;
+                        panel.dirty = true;
+                        panel
+                    }
+                    None => PanelState {
+                        granted,
+                        buffer: DecorationBuffer {
+                            width: granted.0,
+                            height: granted.1,
+                            // Transparent until streamed: the chrome's
+                            // well shows through unpainted regions.
+                            pixels: vec![0; (granted.0 as usize) * (granted.1 as usize) * 4],
+                        },
+                        streamed: false,
+                        newest_generation: 0,
+                        dirty: true,
+                        last_present: None,
+                        just_opened: true,
+                    },
+                });
+                self.enqueue(ServerMessage::PanelOpened { width: granted.0, height: granted.1 }, ctx.now);
+                self.flush(ctx.now);
+            }
+            None => {
+                // Nothing sensible can be granted — a degenerate
+                // request or a workarea with no room beside the dock.
+                tracing::warn!(id = %self.entry.id, asked = format!("{width}x{height}"), "refusing an instrument panel request");
+                self.enqueue(ServerMessage::PanelClosed { reason: PanelCloseReason::Refused }, ctx.now);
+                self.flush(ctx.now);
+            }
+        }
+    }
+
+    /// One panel band arrived. Same reject-don't-rescale rule as
+    /// [`on_frame`](Self::on_frame): the band's width is compared
+    /// against the grant by equality and its rows against the granted
+    /// height, a mismatch is logged and discarded, and the connection
+    /// stays up — a band drawn against a superseded grant is in flight
+    /// at exactly the moment a renegotiation lands.
+    ///
+    /// A band with no panel open is also silently dropped: the client
+    /// may legitimately still be streaming against a `PanelClosed` it
+    /// has not read yet, and punishing that race would make every
+    /// dismissal a coin-flip disconnection.
+    fn on_panel_frame(&mut self, generation: u32, y: u32, band_height: u32, width: u32, pixels: Vec<u8>, ctx: &ServiceContext) -> bool {
+        let Some(panel) = self.panel.as_mut() else {
+            tracing::debug!(id = %self.entry.id, "dropping a panel band for a panel that is no longer open");
+            return true;
+        };
+        if width != panel.granted.0 || (y as u64) + (band_height as u64) > panel.granted.1 as u64 {
+            tracing::warn!(
+                id = %self.entry.id,
+                generation,
+                got = format!("rows {y}..{} at width {width}", y as u64 + band_height as u64),
+                want = format!("{}x{}", panel.granted.0, panel.granted.1),
+                "rejecting a panel band outside the granted geometry"
+            );
+            return true;
+        }
+        // The codec already guarantees the length; asserted here at the
+        // one place a wrong answer would blit out of bounds, exactly as
+        // the tile's frame path does.
+        if pixels.len() != (width as usize) * (band_height as usize) * 4 {
+            tracing::warn!(id = %self.entry.id, "rejecting a panel band whose payload does not match its header");
+            self.stop_connection(GoodbyeReason::ProtocolError);
+            self.disconnected(ctx.now, "malformed panel band");
+            return false;
+        }
+        // The contract's flow-control drop: a band from an older
+        // repaint than the newest seen may be dropped, and is — the
+        // newest repaint will cover those rows again anyway, and
+        // blitting stale rows over fresh ones would repaint backwards.
+        if generation_newer(panel.newest_generation, generation) {
+            tracing::debug!(id = %self.entry.id, generation, newest = panel.newest_generation, "dropping a stale-generation panel band");
+            return true;
+        }
+        panel.newest_generation = generation;
+        // Bands are full-width, so one band is one contiguous memcpy.
+        let offset = (y as usize) * (width as usize) * 4;
+        panel.buffer.pixels[offset..offset + pixels.len()].copy_from_slice(&pixels);
+        panel.streamed = true;
+        panel.dirty = true;
+        true
     }
 
     /// A frame arrived. The geometry check is an equality test and the
@@ -763,6 +972,17 @@ impl RemoteTile {
             );
             self.state = TileState::Hung { since: now };
             self.dirty = true;
+            // The crash-isolation invariant, panel edition: a hung
+            // instrument's panel dies by the same ping machinery as its
+            // tile. The tile stays (dimmed, informative); the panel is a
+            // transient detail view and a frozen one is a stale reading
+            // at ten times the size, so it comes down. `Shutdown` on the
+            // wire — the process is not being asked to reopen it — and
+            // the message is a courtesy to a peer that has, by
+            // definition, stopped reading.
+            if self.panel.is_some() {
+                self.close_panel(PanelCloseReason::Shutdown, now);
+            }
         }
     }
 
@@ -909,6 +1129,11 @@ impl RemoteTile {
             .as_ref()
             .is_some_and(|connection| now.saturating_duration_since(connection.since) >= CRASH_LOOP_WINDOW);
         self.connection = None;
+        // A dead dockapp's panel is torn down with it. There is nobody
+        // left to send `PanelClosed { Shutdown }` to — the EOF that
+        // brought us here is the same fact — so the state is simply
+        // dropped, and the desktop unmaps the surface on its next pass.
+        self.panel = None;
         self.dirty = true;
 
         // Three crash signals, and this is where the second one is
@@ -1066,6 +1291,9 @@ impl RemoteTile {
     /// might have changed since the last five failures.
     pub(crate) fn user_restart(&mut self, now: Instant) {
         tracing::info!(id = %self.entry.id, "user asked to restart a dockapp; clearing its crash-loop budget");
+        if self.panel.is_some() {
+            self.close_panel(PanelCloseReason::Shutdown, now);
+        }
         self.stop_connection(GoodbyeReason::Removed);
         self.connection = None;
         if let Some(child) = self.child.take() {
@@ -1079,6 +1307,9 @@ impl RemoteTile {
     /// The user removed the tile, or the session is ending. Stops the
     /// process and stays stopped.
     pub(crate) fn shut_down(&mut self, reason: GoodbyeReason) {
+        if self.panel.is_some() {
+            self.close_panel(PanelCloseReason::Shutdown, Instant::now());
+        }
         self.stop_connection(reason);
         self.connection = None;
         if let Some(child) = self.child.take() {
@@ -1103,6 +1334,81 @@ impl RemoteTile {
         // which is the correct amount of wrong.
         self.last_frame = None;
         self.dirty = true;
+    }
+
+    // -----------------------------------------------------------------
+    // The instrument panel
+    // -----------------------------------------------------------------
+
+    /// Whether this dockapp has an open panel.
+    pub(crate) fn panel_open(&self) -> bool {
+        self.panel.is_some()
+    }
+
+    /// The size every panel frame must match — the last grant.
+    pub(crate) fn panel_granted(&self) -> Option<(u32, u32)> {
+        self.panel.as_ref().map(|panel| panel.granted)
+    }
+
+    /// The panel buffer the desktop is entitled to draw. `None` while
+    /// the panel is open but no band has landed yet — the desktop shows
+    /// the empty well, never a transparent buffer pretending to be
+    /// content.
+    pub(crate) fn panel_frame(&self) -> Option<&DecorationBuffer> {
+        self.panel.as_ref().filter(|panel| panel.streamed).map(|panel| &panel.buffer)
+    }
+
+    /// True once per open/renegotiation: the desktop must (re)stage the
+    /// panel surface. Take-semantics so one open is one staging.
+    pub(crate) fn take_panel_just_opened(&mut self) -> bool {
+        self.panel.as_mut().map(|panel| std::mem::take(&mut panel.just_opened)).unwrap_or(false)
+    }
+
+    /// Whether the desktop should present the panel buffer now: the
+    /// pixels changed, and at least [`PANEL_PRESENT_INTERVAL`] has
+    /// passed since the last present (the first present is immediate —
+    /// the meter starts full, like the tile limiter's bucket).
+    /// Take-semantics: answering `true` books the present.
+    pub(crate) fn take_panel_ready(&mut self, now: Instant) -> bool {
+        let Some(panel) = self.panel.as_mut() else { return false };
+        if !panel.dirty {
+            return false;
+        }
+        if panel.last_present.is_some_and(|at| now.saturating_duration_since(at) < PANEL_PRESENT_INTERVAL) {
+            return false;
+        }
+        panel.dirty = false;
+        panel.last_present = Some(now);
+        true
+    }
+
+    /// Closes the panel and tells the client why. Idempotent: closing a
+    /// panel that is not open is nothing. The message is queued *and*
+    /// flushed (both non-blocking) so an immediately following
+    /// connection teardown cannot strand it in the queue, and so it
+    /// stays ordered behind any `PanelOpened` queued this same pass.
+    pub(crate) fn close_panel(&mut self, reason: PanelCloseReason, now: Instant) {
+        if self.panel.take().is_none() {
+            return;
+        }
+        tracing::info!(id = %self.entry.id, ?reason, "closing an instrument panel");
+        self.enqueue(ServerMessage::PanelClosed { reason }, now);
+        self.flush(now);
+    }
+
+    /// One pointer event inside the panel, in panel device pixels.
+    ///
+    /// Deliberately not gated on the `Hello` input mask: the mask is a
+    /// wake-avoidance hint for the *tile*, and a dockapp that asked for
+    /// a panel has asked for its input. The dock's reserved-button
+    /// policy still applies upstream — the shell routes only Left and
+    /// Scroll here, exactly as for tiles.
+    pub(crate) fn panel_input(&mut self, event: InputEvent, now: Instant) {
+        if self.panel.is_none() || self.connection.is_none() {
+            return;
+        }
+        self.enqueue(ServerMessage::PanelInput(event), now);
+        self.flush(now);
     }
 }
 
@@ -1322,7 +1628,7 @@ fn wire_event(input: &DockInput) -> Option<InputEvent> {
 /// that reserving them stays a *policy* decision visible at a call site
 /// rather than a hole in the format that would need a version bump to
 /// undo.
-fn reserved_filter(button: wm_core::MouseButton) -> Option<Button> {
+pub(crate) fn reserved_filter(button: wm_core::MouseButton) -> Option<Button> {
     match button {
         wm_core::MouseButton::Left => Some(Button::Left),
         wm_core::MouseButton::Middle | wm_core::MouseButton::Right => None,
@@ -1676,7 +1982,7 @@ mod tests {
     }
 
     fn welcome() -> ThemeState {
-        ThemeState { tile_px: 56, scale: 1.0, theme_id: "nextstep-classic".to_string(), theme_toml: String::new() }
+        ThemeState { tile_px: 56, scale: 1.0, proto: chonk_dock_proto::SHELL_PROTOCOL_VERSION, theme_id: "nextstep-classic".to_string(), theme_toml: String::new() }
     }
 
     /// **The whole deliverable, stated as a test.**
@@ -1721,7 +2027,7 @@ mod tests {
             // every one of these queues another message at a peer that
             // is not reading.
             let now = base + PING_INTERVAL * (step as u32 + 1);
-            let mut ctx = ServiceContext { now, theme: &welcome(), socket_path: &socket_path, scratch: &mut scratch };
+            let mut ctx = ServiceContext { now, theme: &welcome(), socket_path: &socket_path, scratch: &mut scratch, panel_bounds: (1024, 1024) };
             tile.service(&mut ctx);
         }
         let elapsed = start.elapsed();
@@ -1747,7 +2053,7 @@ mod tests {
 
         let socket_path = PathBuf::from("/test/dock.sock");
         let mut scratch = Vec::new();
-        let mut ctx = ServiceContext { now: base + PING_INTERVAL, theme: &welcome(), socket_path: &socket_path, scratch: &mut scratch };
+        let mut ctx = ServiceContext { now: base + PING_INTERVAL, theme: &welcome(), socket_path: &socket_path, scratch: &mut scratch, panel_bounds: (1024, 1024) };
         tile.service(&mut ctx);
 
         assert!(tile.poll_fd().is_none(), "the connection is gone");
@@ -1771,7 +2077,7 @@ mod tests {
         let mut scratch = Vec::new();
         let mut pass = |tile: &mut RemoteTile, step: u32| {
             let now = base + PING_INTERVAL * step;
-            let mut ctx = ServiceContext { now, theme: &welcome(), socket_path: &socket_path, scratch: &mut scratch };
+            let mut ctx = ServiceContext { now, theme: &welcome(), socket_path: &socket_path, scratch: &mut scratch, panel_bounds: (1024, 1024) };
             tile.service(&mut ctx);
         };
 
@@ -1848,8 +2154,8 @@ mod tests {
 
         // A theme pick: new id, new palette, and — because the theme
         // menu is also how the scale is changed — a new tile edge.
-        let next = ThemeState { tile_px: 112, scale: 2.0, theme_id: "amber-phosphor".into(), theme_toml: "id = \"amber-phosphor\"".into() };
-        let mut ctx = ServiceContext { now: base, theme: &next, socket_path: &socket_path, scratch: &mut scratch };
+        let next = ThemeState { tile_px: 112, scale: 2.0, proto: chonk_dock_proto::SHELL_PROTOCOL_VERSION, theme_id: "amber-phosphor".into(), theme_toml: "id = \"amber-phosphor\"".into() };
+        let mut ctx = ServiceContext { now: base, theme: &next, socket_path: &socket_path, scratch: &mut scratch, panel_bounds: (1024, 1024) };
         tile.service(&mut ctx);
 
         assert_eq!(themes_pushed(&drain(&peer)), vec![next.clone()], "the dockapp is told, over its existing connection");
@@ -1876,14 +2182,14 @@ mod tests {
         let _ = drain(&peer);
 
         let at_56 = welcome();
-        let ctx = ServiceContext { now: base, theme: &at_56, socket_path: &socket_path, scratch: &mut scratch };
+        let ctx = ServiceContext { now: base, theme: &at_56, socket_path: &socket_path, scratch: &mut scratch, panel_bounds: (1024, 1024) };
         assert!(tile.on_frame(1, 56, 56, vec![9; 56 * 56 * 4], &ctx), "the dock is laid out at 56");
         assert!(tile.last_frame.is_some());
 
         // The relayout. The tile edge is now 112 and the frame the
         // dockapp is about to send was drawn for 56.
         let at_112 = ThemeState { tile_px: 112, scale: 2.0, ..welcome() };
-        let mut ctx = ServiceContext { now: base, theme: &at_112, socket_path: &socket_path, scratch: &mut scratch };
+        let mut ctx = ServiceContext { now: base, theme: &at_112, socket_path: &socket_path, scratch: &mut scratch, panel_bounds: (1024, 1024) };
         tile.service(&mut ctx);
 
         assert!(tile.last_frame.is_none(), "the stored 56px frame is dropped rather than drawn into a 112px slot");
@@ -1917,7 +2223,7 @@ mod tests {
         let steady = welcome();
         for step in 0..1_000u32 {
             let mut ctx =
-                ServiceContext { now: base + Duration::from_millis(16 * step as u64), theme: &steady, socket_path: &socket_path, scratch: &mut scratch };
+                ServiceContext { now: base + Duration::from_millis(16 * step as u64), theme: &steady, socket_path: &socket_path, scratch: &mut scratch, panel_bounds: (1024, 1024) };
             tile.service(&mut ctx);
         }
         assert!(themes_pushed(&drain(&peer)).is_empty(), "a dock that did not change told the dockapp nothing");
@@ -1955,7 +2261,7 @@ mod tests {
         assert_ne!(nan, nan, "the premise: derived equality is not reflexive here");
         for step in 0..1_000u32 {
             let mut ctx =
-                ServiceContext { now: base + Duration::from_millis(16 * step as u64), theme: &nan, socket_path: &socket_path, scratch: &mut scratch };
+                ServiceContext { now: base + Duration::from_millis(16 * step as u64), theme: &nan, socket_path: &socket_path, scratch: &mut scratch, panel_bounds: (1024, 1024) };
             tile.service(&mut ctx);
         }
         // Layered, and both layers are asserted. `same_as` stopped the
@@ -1986,7 +2292,7 @@ mod tests {
         tile.adopt(ours, InputMask::none(), welcome(), base);
         let socket_path = PathBuf::from("/test/dock.sock");
         let mut scratch = Vec::new();
-        let ctx = ServiceContext { now: base, theme: &welcome(), socket_path: &socket_path, scratch: &mut scratch };
+        let ctx = ServiceContext { now: base, theme: &welcome(), socket_path: &socket_path, scratch: &mut scratch, panel_bounds: (1024, 1024) };
 
         assert!(tile.on_frame(1, 56, 112, vec![0; 56 * 112 * 4], &ctx), "two units of 56px is exactly this tile");
         assert!(tile.last_frame.is_some());
@@ -2020,7 +2326,7 @@ mod tests {
         let steady = welcome();
 
         // Still inside the window: held open, nothing launched.
-        let mut ctx = ServiceContext { now: base + REJOIN_WINDOW / 2, theme: &steady, socket_path: &socket_path, scratch: &mut scratch };
+        let mut ctx = ServiceContext { now: base + REJOIN_WINDOW / 2, theme: &steady, socket_path: &socket_path, scratch: &mut scratch, panel_bounds: (1024, 1024) };
         tile.service(&mut ctx);
         assert_eq!(tile.state, TileState::Rejoining { until: base + REJOIN_WINDOW });
         assert_eq!(tile.budget.recent_failures(), 0);
@@ -2029,7 +2335,7 @@ mod tests {
         // the launch itself fails and books exactly one failure — the
         // number to look at, because going through `disconnected` for the
         // expiry as well would have made it two.
-        let mut ctx = ServiceContext { now: base + REJOIN_WINDOW, theme: &steady, socket_path: &socket_path, scratch: &mut scratch };
+        let mut ctx = ServiceContext { now: base + REJOIN_WINDOW, theme: &steady, socket_path: &socket_path, scratch: &mut scratch, panel_bounds: (1024, 1024) };
         tile.service(&mut ctx);
         assert_eq!(tile.budget.recent_failures(), 1, "the failed launch, and only the failed launch");
         assert!(matches!(tile.state, TileState::Waiting { .. }), "backing off to try the program again");
@@ -2066,5 +2372,289 @@ mod tests {
     fn a_remote_tile_declares_no_sources() {
         let now = Instant::now();
         assert!(RemoteTile::new(entry(RestartPolicy::Always, 1), 56, now).sources().is_empty());
+    }
+
+    // -----------------------------------------------------------------
+    // The instrument panel
+    // -----------------------------------------------------------------
+
+    /// A connected tile with an adopted socket pair, ready for panel
+    /// traffic, plus the context one servicing pass needs.
+    fn panel_fixture() -> (RemoteTile, Seqpacket, Instant) {
+        let (ours, peer) = seqpacket_pair();
+        let base = Instant::now();
+        let mut tile = RemoteTile::new(entry(RestartPolicy::Never, 1), 56, base);
+        tile.adopt(ours, InputMask::all(), welcome(), base);
+        tile.state = TileState::Live;
+        // One pass to flush the queued Welcome/Visibility, then drain
+        // them so every test starts from a quiet wire.
+        service_once(&mut tile, base, (1024, 1024));
+        let _ = drain(&peer);
+        (tile, peer, base)
+    }
+
+    fn service_once(tile: &mut RemoteTile, now: Instant, bounds: (u32, u32)) {
+        let socket_path = PathBuf::from("/test/dock.sock");
+        let mut scratch = Vec::new();
+        let mut ctx =
+            ServiceContext { now, theme: &welcome(), socket_path: &socket_path, scratch: &mut scratch, panel_bounds: bounds };
+        tile.service(&mut ctx);
+    }
+
+    fn server_messages(datagrams: &[Vec<u8>]) -> Vec<ServerMessage> {
+        datagrams.iter().filter_map(|bytes| ServerMessage::decode(bytes).ok()).collect()
+    }
+
+    #[test]
+    fn a_panel_request_is_clamped_to_the_caps_and_the_workarea() {
+        assert_eq!(clamp_panel_grant(300, 200, (1024, 1024)), Some((300, 200)), "a fitting request is granted verbatim");
+        assert_eq!(clamp_panel_grant(4000, 4000, (1024, 1024)), Some((1024, 1024)), "the protocol caps clamp");
+        assert_eq!(clamp_panel_grant(600, 400, (500, 300)), Some((500, 300)), "the workarea clamps");
+        assert_eq!(clamp_panel_grant(0, 200, (1024, 1024)), None, "a zero edge cannot be clamped into a size");
+        assert_eq!(clamp_panel_grant(300, 200, (0, 300)), None, "a degenerate workarea refuses");
+    }
+
+    /// The open handshake over a real socket: `OpenPanel` in,
+    /// `PanelOpened` out with the clamped grant.
+    #[test]
+    fn an_open_panel_request_is_answered_with_a_clamped_grant() {
+        let (mut tile, peer, base) = panel_fixture();
+        peer.send(&ClientMessage::OpenPanel { width: 4000, height: 300 }.encode().unwrap()).unwrap();
+        service_once(&mut tile, base, (600, 400));
+
+        assert!(tile.panel_open());
+        assert_eq!(tile.panel_granted(), Some((600, 300)));
+        assert_eq!(
+            server_messages(&drain(&peer)),
+            vec![ServerMessage::PanelOpened { width: 600, height: 300 }],
+            "the grant is the request clamped, told to the client"
+        );
+        assert!(tile.panel_frame().is_none(), "nothing streamed yet: the desktop shows the well, not a fake frame");
+    }
+
+    #[test]
+    fn a_panel_request_nothing_can_satisfy_is_refused_not_granted() {
+        let (mut tile, peer, base) = panel_fixture();
+        peer.send(&ClientMessage::OpenPanel { width: 300, height: 200 }.encode().unwrap()).unwrap();
+        service_once(&mut tile, base, (0, 0));
+        assert!(!tile.panel_open());
+        assert_eq!(
+            server_messages(&drain(&peer)),
+            vec![ServerMessage::PanelClosed { reason: PanelCloseReason::Refused }]
+        );
+        assert!(tile.poll_fd().is_some(), "a refusal is an answer, not a disconnection");
+    }
+
+    /// Bands land in the persistent buffer at their row offset — the
+    /// assembled picture is what the desktop blits.
+    #[test]
+    fn panel_bands_assemble_into_the_granted_buffer() {
+        let (mut tile, peer, base) = panel_fixture();
+        peer.send(&ClientMessage::OpenPanel { width: 4, height: 4 }.encode().unwrap()).unwrap();
+        service_once(&mut tile, base, (1024, 1024));
+        let _ = drain(&peer);
+
+        let top = ClientMessage::PanelFrame { generation: 1, y: 0, band_height: 2, width: 4, pixels: vec![0x11; 32] };
+        let bottom = ClientMessage::PanelFrame { generation: 1, y: 2, band_height: 2, width: 4, pixels: vec![0x22; 32] };
+        peer.send(&top.encode().unwrap()).unwrap();
+        peer.send(&bottom.encode().unwrap()).unwrap();
+        service_once(&mut tile, base + Duration::from_millis(16), (1024, 1024));
+
+        let frame = tile.panel_frame().expect("streamed");
+        assert_eq!((frame.width, frame.height), (4, 4));
+        assert!(frame.pixels[..32].iter().all(|&b| b == 0x11), "rows 0..2 are the first band");
+        assert!(frame.pixels[32..].iter().all(|&b| b == 0x22), "rows 2..4 are the second");
+        assert!(tile.take_panel_ready(base + Duration::from_millis(16)), "new pixels are ready to present");
+    }
+
+    /// The reject-don't-rescale rule, band edition: wrong width or rows
+    /// past the grant are discarded, the connection and the buffer both
+    /// survive.
+    #[test]
+    fn a_band_outside_the_grant_is_refused_without_costing_the_connection() {
+        let (mut tile, peer, base) = panel_fixture();
+        peer.send(&ClientMessage::OpenPanel { width: 4, height: 4 }.encode().unwrap()).unwrap();
+        service_once(&mut tile, base, (1024, 1024));
+        peer.send(&ClientMessage::PanelFrame { generation: 1, y: 0, band_height: 4, width: 4, pixels: vec![0x33; 64] }.encode().unwrap()).unwrap();
+        service_once(&mut tile, base, (1024, 1024));
+        assert!(tile.panel_frame().is_some());
+
+        // Wrong width, and rows off the bottom of the grant.
+        let wrong_width = ClientMessage::PanelFrame { generation: 2, y: 0, band_height: 1, width: 2, pixels: vec![0xFF; 8] };
+        let off_bottom = ClientMessage::PanelFrame { generation: 2, y: 3, band_height: 2, width: 4, pixels: vec![0xFF; 32] };
+        peer.send(&wrong_width.encode().unwrap()).unwrap();
+        peer.send(&off_bottom.encode().unwrap()).unwrap();
+        service_once(&mut tile, base + Duration::from_millis(16), (1024, 1024));
+
+        assert!(tile.poll_fd().is_some(), "a wrong-sized band does not cost the connection");
+        let frame = tile.panel_frame().unwrap();
+        assert!(frame.pixels.iter().all(|&b| b == 0x33), "and above all is never blitted");
+    }
+
+    /// The contract's flow-control drop: a band from an older repaint
+    /// than the newest seen is dropped rather than painted backwards.
+    #[test]
+    fn a_stale_generation_band_is_dropped() {
+        let (mut tile, peer, base) = panel_fixture();
+        peer.send(&ClientMessage::OpenPanel { width: 4, height: 2 }.encode().unwrap()).unwrap();
+        service_once(&mut tile, base, (1024, 1024));
+
+        let newer = ClientMessage::PanelFrame { generation: 7, y: 0, band_height: 2, width: 4, pixels: vec![0x77; 32] };
+        let stale = ClientMessage::PanelFrame { generation: 6, y: 0, band_height: 2, width: 4, pixels: vec![0x66; 32] };
+        peer.send(&newer.encode().unwrap()).unwrap();
+        peer.send(&stale.encode().unwrap()).unwrap();
+        service_once(&mut tile, base + Duration::from_millis(16), (1024, 1024));
+
+        assert!(tile.panel_frame().unwrap().pixels.iter().all(|&b| b == 0x77), "the newest repaint's rows stand");
+    }
+
+    #[test]
+    fn generation_newness_wraps_like_a_sequence_number() {
+        assert!(generation_newer(1, 0));
+        assert!(!generation_newer(0, 1));
+        assert!(generation_newer(0, u32::MAX), "the counter rolling over is not a stuck panel");
+        assert!(!generation_newer(u32::MAX, 0));
+        assert!(!generation_newer(5, 5), "equal is not older: several bands of one repaint all land");
+    }
+
+    /// `ClosePanel` is acknowledged with `PanelClosed { ClientRequest }`;
+    /// a shell-side dismissal says `Dismissed`. The client can always
+    /// tell whose decision ended its panel.
+    #[test]
+    fn a_panel_close_is_acknowledged_and_a_dismissal_is_attributed() {
+        let (mut tile, peer, base) = panel_fixture();
+        peer.send(&ClientMessage::OpenPanel { width: 8, height: 8 }.encode().unwrap()).unwrap();
+        service_once(&mut tile, base, (1024, 1024));
+        let _ = drain(&peer);
+
+        peer.send(&ClientMessage::ClosePanel.encode().unwrap()).unwrap();
+        service_once(&mut tile, base, (1024, 1024));
+        assert!(!tile.panel_open());
+        assert_eq!(server_messages(&drain(&peer)), vec![ServerMessage::PanelClosed { reason: PanelCloseReason::ClientRequest }]);
+
+        // Reopen, then the user clicks away.
+        peer.send(&ClientMessage::OpenPanel { width: 8, height: 8 }.encode().unwrap()).unwrap();
+        service_once(&mut tile, base, (1024, 1024));
+        let _ = drain(&peer);
+        tile.close_panel(PanelCloseReason::Dismissed, base);
+        assert_eq!(server_messages(&drain(&peer)), vec![ServerMessage::PanelClosed { reason: PanelCloseReason::Dismissed }]);
+        assert!(tile.poll_fd().is_some(), "a dismissal costs the panel, never the tile");
+    }
+
+    /// An `OpenPanel` while one is open renegotiates in place: a fresh
+    /// grant, and the streamed pixels survive only a size-identical
+    /// renegotiation.
+    #[test]
+    fn a_second_open_renegotiates_in_place() {
+        let (mut tile, peer, base) = panel_fixture();
+        peer.send(&ClientMessage::OpenPanel { width: 4, height: 2 }.encode().unwrap()).unwrap();
+        service_once(&mut tile, base, (1024, 1024));
+        peer.send(&ClientMessage::PanelFrame { generation: 1, y: 0, band_height: 2, width: 4, pixels: vec![0x44; 32] }.encode().unwrap()).unwrap();
+        service_once(&mut tile, base, (1024, 1024));
+        assert!(tile.panel_frame().is_some());
+        let _ = drain(&peer);
+
+        // Same size: the pixels survive.
+        peer.send(&ClientMessage::OpenPanel { width: 4, height: 2 }.encode().unwrap()).unwrap();
+        service_once(&mut tile, base, (1024, 1024));
+        assert_eq!(server_messages(&drain(&peer)), vec![ServerMessage::PanelOpened { width: 4, height: 2 }]);
+        assert!(tile.panel_frame().is_some(), "a size-identical renegotiation keeps the streamed pixels");
+
+        // Different size: fresh buffer, stale pixels gone.
+        peer.send(&ClientMessage::OpenPanel { width: 8, height: 2 }.encode().unwrap()).unwrap();
+        service_once(&mut tile, base, (1024, 1024));
+        assert_eq!(tile.panel_granted(), Some((8, 2)));
+        assert!(tile.panel_frame().is_none(), "pixels for the old grant are exactly the wrong-sized blit the checks refuse");
+    }
+
+    /// The crash-isolation invariant, panel edition: a hung instrument's
+    /// panel dies by the same ping machinery as its tile.
+    #[test]
+    fn a_hung_dockapp_loses_its_panel_by_the_ping_machinery() {
+        let (mut tile, peer, base) = panel_fixture();
+        peer.send(&ClientMessage::OpenPanel { width: 8, height: 8 }.encode().unwrap()).unwrap();
+        service_once(&mut tile, base, (1024, 1024));
+        assert!(tile.panel_open());
+        let _ = drain(&peer);
+
+        // Stops answering pings without closing its socket.
+        for step in 1..=UNANSWERED_PINGS_BEFORE_HUNG + 1 {
+            service_once(&mut tile, base + PING_INTERVAL * step, (1024, 1024));
+        }
+        assert!(matches!(tile.state(), TileState::Hung { .. }));
+        assert!(!tile.panel_open(), "a frozen detail view is a stale reading at ten times the size");
+        let closes: Vec<_> = server_messages(&drain(&peer))
+            .into_iter()
+            .filter(|message| matches!(message, ServerMessage::PanelClosed { .. }))
+            .collect();
+        assert_eq!(closes, vec![ServerMessage::PanelClosed { reason: PanelCloseReason::Shutdown }]);
+    }
+
+    /// A dockapp that dies takes its panel state with it — nothing for
+    /// the desktop to keep staging.
+    #[test]
+    fn a_dead_dockapps_panel_is_torn_down_with_it() {
+        let (mut tile, peer, base) = panel_fixture();
+        peer.send(&ClientMessage::OpenPanel { width: 8, height: 8 }.encode().unwrap()).unwrap();
+        service_once(&mut tile, base, (1024, 1024));
+        assert!(tile.panel_open());
+        drop(peer);
+        // The kernel's teardown of the far end is not synchronous with
+        // the `drop`; poll boundedly, as the restart tests do.
+        for step in 0..500 {
+            service_once(&mut tile, base + Duration::from_millis(16 + step), (1024, 1024));
+            if tile.poll_fd().is_none() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        assert!(tile.poll_fd().is_none(), "the connection is gone");
+        assert!(!tile.panel_open(), "and the panel with it");
+    }
+
+    /// Panel input goes down the wire as `0x89` with content-local
+    /// coordinates, untouched.
+    #[test]
+    fn panel_input_reaches_the_wire_as_panel_input() {
+        let (mut tile, peer, base) = panel_fixture();
+        peer.send(&ClientMessage::OpenPanel { width: 100, height: 50 }.encode().unwrap()).unwrap();
+        service_once(&mut tile, base, (1024, 1024));
+        let _ = drain(&peer);
+
+        let event = InputEvent { kind: InputKind::Press, button: Some(Button::Left), x: 40, y: 12, delta: 0 };
+        tile.panel_input(event, base);
+        assert_eq!(server_messages(&drain(&peer)), vec![ServerMessage::PanelInput(event)]);
+
+        // ...and none at all once the panel is gone: input to a closed
+        // panel is dropped, not queued for a surface that left.
+        tile.close_panel(PanelCloseReason::Dismissed, base);
+        let _ = drain(&peer);
+        tile.panel_input(event, base);
+        assert!(server_messages(&drain(&peer)).is_empty());
+    }
+
+    /// The present meter: pixels reach the screen at most once per
+    /// [`PANEL_PRESENT_INTERVAL`], however fast the client streams, and
+    /// the first present is immediate.
+    #[test]
+    fn panel_presents_are_metered_not_per_band() {
+        let (mut tile, peer, base) = panel_fixture();
+        peer.send(&ClientMessage::OpenPanel { width: 4, height: 2 }.encode().unwrap()).unwrap();
+        service_once(&mut tile, base, (1024, 1024));
+
+        let mut presents = 0;
+        for step in 0..10u32 {
+            let now = base + Duration::from_millis(4 * step as u64);
+            let band = ClientMessage::PanelFrame { generation: step, y: 0, band_height: 2, width: 4, pixels: vec![step as u8; 32] };
+            peer.send(&band.encode().unwrap()).unwrap();
+            service_once(&mut tile, now, (1024, 1024));
+            if tile.take_panel_ready(now) {
+                presents += 1;
+            }
+        }
+        // Ten repaints across 36ms: the first present is immediate, the
+        // meter allows at most one more.
+        assert!(presents <= 2, "{presents} presents for a 250Hz stream is not a meter");
+        assert!(presents >= 1, "a streaming panel must reach the screen at all");
     }
 }

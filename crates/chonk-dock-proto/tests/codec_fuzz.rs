@@ -69,9 +69,9 @@
 
 use chonk_dock_proto::wire::{
     is_valid_id, sanitize_text, Button, ClientMessage, DecodeError, GoodbyeReason, InputEvent, InputKind, InputMask,
-    LogLevel, ServerMessage, ThemeState,
+    LogLevel, PanelCloseReason, ServerMessage, ThemeState,
 };
-use chonk_dock_proto::{MAX_FRAME_BYTES, MAX_ID_BYTES, MAX_LOG_BYTES, MAX_MESSAGE_BYTES, TOKEN_BYTES};
+use chonk_dock_proto::{MAX_FRAME_BYTES, MAX_ID_BYTES, MAX_LOG_BYTES, MAX_MESSAGE_BYTES, MAX_PANEL_PX, TOKEN_BYTES};
 
 // ---------------------------------------------------------------------
 // A deterministic RNG
@@ -267,7 +267,25 @@ fn bounded_client(message: &ClientMessage, bytes: &[u8], origin: &str) {
                 "a control character survived the decoder ({origin}): {text:?}"
             );
         }
-        ClientMessage::Pong { .. } => {}
+        ClientMessage::PanelFrame { y, band_height, width, pixels, .. } => {
+            assert_eq!(
+                pixels.len(),
+                (*width as usize) * (*band_height as usize) * 4,
+                "a decoded panel band's payload disagrees with its geometry ({origin})"
+            );
+            assert!(*width <= MAX_PANEL_PX, "a panel band wider than the cap decoded from {origin}");
+            assert!(
+                (*y as u64) + (*band_height as u64) <= MAX_PANEL_PX as u64,
+                "a band past the tallest grantable panel decoded from {origin}"
+            );
+            assert!(pixels.len() <= MAX_FRAME_BYTES, "a band over the datagram frame budget decoded from {origin}");
+        }
+        ClientMessage::OpenPanel { width, height } => {
+            // A request may exceed the caps (the shell clamps it), but
+            // a zero edge must never decode.
+            assert!(*width > 0 && *height > 0, "a zero-sized panel request decoded from {origin}");
+        }
+        ClientMessage::Pong { .. } | ClientMessage::ClosePanel => {}
     }
     assert!(bytes.len() <= MAX_MESSAGE_BYTES, "a message over the transport cap decoded ({origin})");
 }
@@ -375,6 +393,11 @@ fn client_corpus() -> Vec<(&'static str, Vec<u8>)> {
         ("log", ClientMessage::Log { level: LogLevel::Debug, text: "battery sampler timed out".into() }),
         ("log/max", ClientMessage::Log { level: LogLevel::Warn, text: "x".repeat(MAX_LOG_BYTES) }),
         ("log/wide", ClientMessage::Log { level: LogLevel::Info, text: "CPU 42% · 3.4 GHz ünïcödé".into() }),
+        ("open-panel", ClientMessage::OpenPanel { width: 448, height: 168 }),
+        ("open-panel/over-cap", ClientMessage::OpenPanel { width: u32::MAX, height: u32::MAX }),
+        ("panel-frame/1x1", ClientMessage::PanelFrame { generation: 0, y: 0, band_height: 1, width: 1, pixels: vec![0x7E; 4] }),
+        ("panel-frame/band", ClientMessage::PanelFrame { generation: 5, y: 30, band_height: 2, width: 4, pixels: vec![0x2A; 32] }),
+        ("close-panel", ClientMessage::ClosePanel),
     ];
     corpus
         .drain(..)
@@ -389,6 +412,7 @@ fn server_corpus() -> Vec<(&'static str, Vec<u8>)> {
     let state = |toml: &str| ThemeState {
         tile_px: 56,
         scale: 1.5,
+        proto: chonk_dock_proto::SHELL_PROTOCOL_VERSION,
         theme_id: "nextstep-classic".into(),
         theme_toml: toml.to_string(),
     };
@@ -421,6 +445,22 @@ fn server_corpus() -> Vec<(&'static str, Vec<u8>)> {
         ("visibility/false", ServerMessage::Visibility { visible: false }),
         ("ping", ServerMessage::Ping { seq: 12345 }),
         ("goodbye", ServerMessage::Goodbye { reason: GoodbyeReason::Overflow }),
+        ("panel-opened", ServerMessage::PanelOpened { width: 448, height: 168 }),
+        ("panel-closed", ServerMessage::PanelClosed { reason: PanelCloseReason::Dismissed }),
+        ("panel-input", ServerMessage::PanelInput(InputEvent {
+            kind: InputKind::Release,
+            button: Some(Button::Left),
+            x: 7,
+            y: 9,
+            delta: 0,
+        })),
+        ("panel-input/motion", ServerMessage::PanelInput(InputEvent {
+            kind: InputKind::Motion,
+            button: None,
+            x: 320,
+            y: 200,
+            delta: 0,
+        })),
     ];
     corpus
         .drain(..)
@@ -442,7 +482,8 @@ fn server_corpus() -> Vec<(&'static str, Vec<u8>)> {
 /// re-testing `UnknownKind`. This generator spends its budget past the
 /// header, where the interesting branches are.
 fn structured(rng: &mut Rng) -> Vec<u8> {
-    const KINDS: [u8; 10] = [0x01, 0x02, 0x03, 0x04, 0x81, 0x82, 0x83, 0x84, 0x85, 0x86];
+    const KINDS: [u8; 16] =
+        [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x81, 0x82, 0x83, 0x84, 0x85, 0x86, 0x87, 0x88, 0x89];
     let mut out = Vec::with_capacity(64);
     out.push(if rng.below(8) == 0 { rng.next_u8() } else { KINDS[rng.below(KINDS.len())] });
     // Usually the well-formed zeros, occasionally not, so the
@@ -741,6 +782,7 @@ fn random_server_message(rng: &mut Rng) -> ServerMessage {
                     4 => 0.0,
                     _ => 1.0 + (rng.below(400) as f32) / 100.0,
                 },
+                proto: (rng.next_u32() & 0xFFFF) as u16,
                 theme_id: "abcdef".chars().take(1 + rng.below(6)).collect(),
                 theme_toml: "k = 1\n".repeat(rng.below(20)),
             };

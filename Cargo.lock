@@ -325,6 +325,7 @@ dependencies = [
 name = "chonk-testkit"
 version = "0.2.0"
 dependencies = [
+ "chonk-dock-proto",
  "png",
  "wm-theme",
  "wm-theme-api",

@@ -185,7 +185,7 @@ struct FakeShell {
 }
 
 fn theme_state() -> ThemeState {
-    ThemeState { tile_px: TILE_PX, scale: 1.0, theme_id: "nextstep-classic".into(), theme_toml: String::new() }
+    ThemeState { tile_px: TILE_PX, scale: 1.0, proto: chonk_dock_proto::SHELL_PROTOCOL_VERSION, theme_id: "nextstep-classic".into(), theme_toml: String::new() }
 }
 
 /// Binds a socket, launches the given torture mode, and completes the

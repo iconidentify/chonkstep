@@ -158,7 +158,7 @@ mod tests {
     }
 
     fn theme_state() -> ThemeState {
-        ThemeState { tile_px: 56, scale: 1.0, theme_id: "nextstep-classic".into(), theme_toml: String::new() }
+        ThemeState { tile_px: 56, scale: 1.0, proto: crate::SHELL_PROTOCOL_VERSION, theme_id: "nextstep-classic".into(), theme_toml: String::new() }
     }
 
     #[test]
