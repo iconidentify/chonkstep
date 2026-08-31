@@ -30,6 +30,7 @@ mod idle;
 mod input;
 mod layers;
 mod lock;
+mod output_mgmt;
 mod protocols;
 mod renderer;
 mod session;

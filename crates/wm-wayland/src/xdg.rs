@@ -133,10 +133,134 @@ const fn usable_buffer_scale(scale: i32) -> i32 {
 }
 
 /// Converts one surface-local length into the device pixels this
-/// compositor stores and draws in. `buffer_scale` is the owning
-/// surface's [`committed_buffer_scale`].
-pub(crate) const fn logical_to_physical(logical: i32, buffer_scale: i32) -> i32 {
-    logical * usable_buffer_scale(buffer_scale)
+/// compositor stores and draws in: the length times the surface's
+/// [`committed_surface_scale`], rounded to the nearest pixel — an
+/// integer factor makes the rounding exact, so the whole-number cases
+/// behave precisely as the old integer multiply did. Rounding is what
+/// the
+/// fractional-scale protocol itself specifies for buffer sizes, so
+/// measuring a client's commit with the same rule is what makes the
+/// ledger's rectangle land on the buffer the client actually drew.
+pub(crate) fn scale_length(logical: i32, factor: f64) -> i32 {
+    (logical as f64 * usable_surface_scale(factor)).round() as i32
+}
+
+/// The return leg: device pixels back into one surface's own logical
+/// units, rounded. Every configure this compositor sends travels
+/// through here, and it must be the exact inverse discipline of
+/// [`scale_length`] or the configure/commit round trip drifts by a
+/// pixel per pass (see `resize_client`'s unbounded-growth story).
+pub(crate) fn physical_to_logical(physical: i32, factor: f64) -> i32 {
+    (physical as f64 / usable_surface_scale(factor)).round() as i32
+}
+
+/// Floors a fractional factor at 1/8 — far below any real scale, but a
+/// zero or negative factor is a divisor and a multiplier on everything
+/// crossing the ledger boundary, and it must not annihilate a window
+/// (same reasoning as [`usable_buffer_scale`], continuous edition).
+fn usable_surface_scale(factor: f64) -> f64 {
+    if factor.is_finite() && factor >= 0.125 {
+        factor
+    } else {
+        1.0
+    }
+}
+
+/// The granularity of the fractional-scale protocol: scales travel the
+/// wire as multiples of 1/120, so a factor recovered from a buffer/
+/// viewport ratio is snapped onto that grid before anyone multiplies by
+/// it. 120 is divisible by 2, 3, 4, 5, 6, 8 and 10 — the protocol
+/// chose it so every plausible scale (1.25, 1.5, 1.75, 2.4) is exact.
+const SCALE_DENOMINATOR: f64 = 120.0;
+
+/// How many device pixels one of this surface's logical units is worth,
+/// fractions included — the factor the renderer draws the surface at,
+/// the ledger measures its commits with, and the hit-test divides by.
+///
+/// Two statements a client can make, in precedence order:
+///
+/// - A `wp_viewport` destination together with the attached buffer: a
+///   fractional-scale client told 1.5 commits a `round(w × 1.5)` px
+///   buffer and sets the viewport destination to `w` logical — the
+///   ratio between the two *is* its scale, stated more precisely than
+///   `set_buffer_scale`'s integers ever could. The ratio is trusted
+///   only when it is the same in both axes (to within the rounding the
+///   protocol itself allows) and at least 1: a non-uniform or shrinking
+///   ratio is a viewport used for *stretching* content, not a density
+///   statement, and smithay's surface view applies that stretch inside
+///   the element, so the right factor for the tree is the plain
+///   integer one.
+/// - Otherwise `wl_surface.set_buffer_scale`, exactly as
+///   [`committed_buffer_scale`] has always read it.
+pub(crate) fn committed_surface_scale(surface: &WlSurface) -> f64 {
+    let integer = committed_buffer_scale(surface) as f64;
+    let sizes = with_renderer_surface_state(surface, |state| {
+        let buffer_logical = state.buffer_size()?;
+        let dst = state.surface_size()?;
+        // Reconstruct the buffer's raw pixel extent: `buffer_size` is
+        // already divided by the committed integer scale.
+        Some((
+            (buffer_logical.w * state.buffer_scale(), buffer_logical.h * state.buffer_scale()),
+            (dst.w, dst.h),
+        ))
+    })
+    .flatten();
+    let Some((buffer, dst)) = sizes else {
+        return integer;
+    };
+    ratio_scale(buffer, dst).unwrap_or(integer)
+}
+
+/// The scale a buffer/destination pair states, if it states one: the
+/// buffer's pixel extent over the viewport destination, snapped onto
+/// the protocol's 1/120 grid — provided both axes agree with the
+/// snapped factor to within the pixel of rounding the protocol permits
+/// (`round(size × scale)`) and the factor is at least 1. A non-uniform
+/// or shrinking ratio is a viewport used for *stretching* content, not
+/// a density statement, and answers `None`. Split from
+/// [`committed_surface_scale`] because this arithmetic is the half that
+/// fails silently, and it needs no live surface to pin down.
+fn ratio_scale(buffer: (i32, i32), dst: (i32, i32)) -> Option<f64> {
+    let ((buffer_w, buffer_h), (dst_w, dst_h)) = (buffer, dst);
+    if dst_w <= 0 || dst_h <= 0 || buffer_w <= 0 || buffer_h <= 0 {
+        return None;
+    }
+    let ratio_w = buffer_w as f64 / dst_w as f64;
+    let snapped = (ratio_w * SCALE_DENOMINATOR).round() / SCALE_DENOMINATOR;
+    if snapped < 1.0 {
+        return None;
+    }
+    let agrees = |buffer: i32, dst: i32| ((dst as f64 * snapped).round() - buffer as f64).abs() < 1.0;
+    (agrees(buffer_w, dst_w) && agrees(buffer_h, dst_h)).then_some(snapped)
+}
+
+/// The factor a surface is actually composed at on an output of
+/// fractional scale `output_scale`, given the `declared` factor the
+/// client committed ([`committed_surface_scale`]).
+///
+/// Almost always `declared` — a surface's pixels are worth what its
+/// client said they are worth, the doctrine every comment in this file
+/// repeats. The one exception is the integral *fallback* of a
+/// fractional output: `wl_output.scale` cannot say 1.5, so such an
+/// output advertises the ceiling ([`crate::state::advertised_output_scale`]
+/// rounds UP on purpose), a client without fractional-scale renders at
+/// 2x, and the extra density has to be put somewhere. Drawing it 1:1
+/// would make every fallback client a third larger than its
+/// fractional-aware neighbours; composing it at the output's real
+/// factor instead downscales a crisp 2x buffer to 1.5x — sharper than
+/// upscaling a 1x one, which is the entire reason the fallback rounds
+/// up. Only that exact case is corrected: a client whose declared
+/// factor is the ceiling of a genuinely fractional output scale. A
+/// deliberate 2x commit on an integer-scale output (LibreOffice under
+/// `GDK_SCALE=2` on a scale-1 desktop) is left alone, as it always was.
+pub(crate) fn effective_surface_scale(declared: f64, output_scale: f64) -> f64 {
+    let declared_is_integer = (declared - declared.round()).abs() < 1e-9;
+    let output_fractional = (output_scale - output_scale.round()).abs() > 1e-9;
+    if declared_is_integer && output_fractional && (declared - output_scale.ceil()).abs() < 1e-9 {
+        output_scale
+    } else {
+        declared
+    }
 }
 
 /// Where the client's window starts inside its own buffer — the
@@ -148,17 +272,14 @@ pub(crate) const fn logical_to_physical(logical: i32, buffer_scale: i32) -> i32 
 /// the renderer draws with: the offset positions a rectangle measured
 /// in physical pixels, and an inset scaled by anything else slides the
 /// window out from under its own frame by the difference.
-fn committed_content_offset(surface: &WlSurface, scale: i32) -> Point {
+fn committed_content_offset(surface: &WlSurface, factor: f64) -> Point {
     with_states(surface, |states| {
         let mut guard = states.cached_state.get::<SurfaceCachedState>();
         guard.current().geometry
     })
     .filter(|geometry| geometry.size.w > 0 && geometry.size.h > 0)
     .map(|geometry| {
-        Point::new(
-            logical_to_physical(geometry.loc.x, scale),
-            logical_to_physical(geometry.loc.y, scale),
-        )
+        Point::new(scale_length(geometry.loc.x, factor), scale_length(geometry.loc.y, factor))
     })
     .unwrap_or(Point::new(0, 0))
 }
@@ -178,7 +299,7 @@ fn committed_content_offset(surface: &WlSurface, scale: i32) -> Point {
 /// any other number and the three descriptions of one window stop
 /// agreeing: the frame is drawn to one rectangle, the pointer routed by
 /// a second, and the client's pixels land in a third.
-fn committed_content_size(surface: &WlSurface, scale: i32) -> Option<Size> {
+fn committed_content_size(surface: &WlSurface, factor: f64) -> Option<Size> {
     let geometry = with_states(surface, |states| {
         let mut guard = states.cached_state.get::<SurfaceCachedState>();
         guard.current().geometry
@@ -186,8 +307,8 @@ fn committed_content_size(surface: &WlSurface, scale: i32) -> Option<Size> {
     if let Some(geometry) = geometry {
         if geometry.size.w > 0 && geometry.size.h > 0 {
             return Some(Size::new(
-                logical_to_physical(geometry.size.w, scale) as u32,
-                logical_to_physical(geometry.size.h, scale) as u32,
+                scale_length(geometry.size.w, factor) as u32,
+                scale_length(geometry.size.h, factor) as u32,
             ));
         }
     }
@@ -195,10 +316,7 @@ fn committed_content_size(surface: &WlSurface, scale: i32) -> Option<Size> {
         .flatten()
         .filter(|size| size.w > 0 && size.h > 0)
         .map(|size| {
-            Size::new(
-                logical_to_physical(size.w, scale) as u32,
-                logical_to_physical(size.h, scale) as u32,
-            )
+            Size::new(scale_length(size.w, factor) as u32, scale_length(size.h, factor) as u32)
         })
 }
 
@@ -258,14 +376,29 @@ impl CompositorHandler for Compositor {
         // client this compositor deliberately never invites to scale
         // itself. (Same reasoning as the Xdg-only filter in
         // `dispatch_pending`'s rescale drain.)
-        let advertised = crate::state::advertised_output_scale(self.ui_scale).integer_scale();
         for entry in &self.outputs {
             entry.output.enter(surface);
+        }
+        // Role logic (and the scale lookup below) runs against the
+        // tree's root: a subsurface commit must not re-trigger toplevel
+        // lifecycle, and a subsurface's scale is its window's.
+        let mut root = surface.clone();
+        while let Some(parent) = get_parent(&root) {
+            root = parent;
         }
         let xwayland = surface
             .client()
             .is_some_and(|client| client.get_data::<XWaylandClientData>().is_some());
         if !xwayland {
+            // Which output's scale this surface should draw for. The
+            // integer is the ceiling fallback (`advertised_output_scale`
+            // rounds up on purpose); the exact fraction goes to any
+            // fractional-scale object the client created. Both dedup
+            // per surface inside smithay, so the hot path sends nothing
+            // after the first commit at a given scale.
+            let preferred = self.preferred_scale_for(&root);
+            let advertised =
+                crate::state::advertised_output_scale(preferred as f32).integer_scale();
             with_states(surface, |states| {
                 smithay::wayland::compositor::send_surface_state(
                     surface,
@@ -273,16 +406,12 @@ impl CompositorHandler for Compositor {
                     advertised,
                     smithay::utils::Transform::Normal,
                 );
+                smithay::wayland::fractional_scale::with_fractional_scale(states, |fractional| {
+                    fractional.set_preferred_scale(preferred);
+                });
             });
         }
         self.popups.commit(surface);
-
-        // Role logic runs against the tree's root: a subsurface commit
-        // must not re-trigger toplevel lifecycle.
-        let mut root = surface.clone();
-        while let Some(parent) = get_parent(&root) {
-            root = parent;
-        }
 
         // Layer surfaces first: their commit lifecycle (initial
         // configure, map/unmap edges, re-arrangement around the
@@ -323,6 +452,35 @@ impl CompositorHandler for Compositor {
 }
 
 impl Compositor {
+    /// The fractional scale a surface should render for: the scale of
+    /// the output its window (or layer surface, or lock surface) lives
+    /// on, falling back to the primary output's for a surface not yet
+    /// anchored anywhere — which is every surface's state at its first
+    /// commit, when the primary is the only honest guess.
+    pub(crate) fn preferred_scale_for(&self, root: &WlSurface) -> f64 {
+        let backend = self.wm.backend();
+        if let Some(id) = backend.window_for_surface(root) {
+            if let Some(record) = backend.windows.get(&id) {
+                return backend.scale_at(record.content);
+            }
+        }
+        if let Some(record) = backend
+            .layers
+            .iter()
+            .find(|record| record.surface.wl_surface() == root)
+        {
+            return backend.scale_at(record.geometry);
+        }
+        for entry in &backend.lock_surfaces {
+            if entry.surface.wl_surface() == root {
+                if let Some(monitor) = backend.monitors.get(entry.output) {
+                    return backend.scale_at(monitor.geometry);
+                }
+            }
+        }
+        self.outputs.first().map(|entry| entry.scale).unwrap_or(1.0)
+    }
+
     /// The xdg toplevel lifecycle, driven from commits (see the module
     /// doc): initial configure, then buffer-presence edges into
     /// MapRequest/Unmapped, then client-side resize drift into
@@ -349,11 +507,20 @@ impl Compositor {
             with_renderer_surface_state(&root, |state| state.buffer().is_some()).unwrap_or(false);
         let was_mapped = mapped_marker(&root);
         let backend = self.wm.backend_mut();
-        let surface_scale = committed_buffer_scale(&root);
-        let committed = committed_content_size(&root, surface_scale);
         let Some(id) = backend.window_for_surface(&root) else {
             return;
         };
+        // The factor everything below measures by: the client's own
+        // committed statement (viewport ratio or integer buffer scale),
+        // corrected for the integral-fallback case on this window's
+        // output — one number, shared with the renderer and the
+        // hit-test through `window_surface_scale`.
+        let surface_scale = backend
+            .windows
+            .get(&id)
+            .map(|record| backend.window_surface_scale(record))
+            .unwrap_or(1.0);
+        let committed = committed_content_size(&root, surface_scale);
         if has_buffer && !was_mapped {
             set_mapped_marker(&root, true);
             // Seed the record with the client's own size so
@@ -969,6 +1136,29 @@ impl XdgDecorationHandler for Compositor {
     }
 }
 
+// -- fractional-scale / viewporter ---------------------------------------
+
+impl smithay::wayland::fractional_scale::FractionalScaleHandler for Compositor {
+    fn new_fractional_scale(&mut self, surface: WlSurface) {
+        // Answer immediately: a toolkit decides its first buffer's size
+        // from this, and one that hears nothing before its first commit
+        // renders at 1x and resizes visibly a frame later.
+        let mut root = surface.clone();
+        while let Some(parent) = get_parent(&root) {
+            root = parent;
+        }
+        let preferred = self.preferred_scale_for(&root);
+        with_states(&surface, |states| {
+            smithay::wayland::fractional_scale::with_fractional_scale(states, |fractional| {
+                fractional.set_preferred_scale(preferred);
+            });
+        });
+    }
+}
+
+smithay::delegate_fractional_scale!(Compositor);
+smithay::delegate_viewporter!(Compositor);
+
 delegate_compositor!(Compositor);
 delegate_shm!(Compositor);
 delegate_output!(Compositor);
@@ -989,9 +1179,9 @@ mod tests {
     /// Xwayland window and every toolkit that ignores `GDK_SCALE`.
     #[test]
     fn a_one_to_one_surface_is_measured_unchanged() {
-        assert_eq!(logical_to_physical(300, 1), 300);
-        assert_eq!(logical_to_physical(0, 1), 0);
-        assert_eq!(logical_to_physical(-24, 1), -24);
+        assert_eq!(scale_length(300, 1.0), 300);
+        assert_eq!(scale_length(0, 1.0), 0);
+        assert_eq!(scale_length(-24, 1.0), -24);
     }
 
     /// The bug this conversion exists for, in numbers: LibreOffice with
@@ -1000,22 +1190,102 @@ mod tests {
     /// half the size of the pixels inside it.
     #[test]
     fn a_two_x_surface_is_measured_in_the_pixels_it_drew() {
-        assert_eq!(logical_to_physical(300, 2), 600);
-        assert_eq!(logical_to_physical(226, 2), 452);
+        assert_eq!(scale_length(300, 2.0), 600);
+        assert_eq!(scale_length(226, 2.0), 452);
         // Window-geometry origins are converted by the same factor, and
         // a client-drawn drop shadow makes them negative as often as
         // not.
-        assert_eq!(logical_to_physical(-13, 2), -26);
+        assert_eq!(scale_length(-13, 2.0), -26);
     }
 
-    /// A scale below 1 cannot arrive over the protocol, and the point
-    /// of the floor is that if one ever did it would not silently
+    /// A fractional client is measured by its exact fraction, rounded
+    /// the way the protocol rounds buffer sizes: 640 logical at 1.5 is
+    /// 960 physical, and an odd extent rounds to the nearest pixel
+    /// rather than truncating a half away.
+    #[test]
+    fn a_fractional_surface_is_measured_by_its_fraction() {
+        assert_eq!(scale_length(640, 1.5), 960);
+        assert_eq!(scale_length(333, 1.5), 500); // 499.5 rounds up
+        assert_eq!(scale_length(100, 1.25), 125);
+    }
+
+    /// A scale below the floor cannot arrive over the protocol, and the
+    /// point of the floor is that if one ever did it would not silently
     /// annihilate the window: 0 would collapse every size to nothing.
     #[test]
     fn an_absent_or_impossible_scale_degrades_to_one() {
-        assert_eq!(logical_to_physical(300, 0), 300);
-        assert_eq!(logical_to_physical(300, -2), 300);
-        assert_eq!(logical_to_physical(300, i32::MIN), 300);
+        assert_eq!(scale_length(300, 0.0), 300);
+        assert_eq!(scale_length(300, -2.0), 300);
+        assert_eq!(scale_length(300, f64::NAN), 300);
+        assert_eq!(physical_to_logical(300, 0.0), 300);
+    }
+
+    /// The configure/commit round trip at a fractional factor: the
+    /// physical ask converts to logical and back to the physical size
+    /// the client will actually commit, and the two legs must be exact
+    /// inverses of each other's rounding or every configure drifts the
+    /// window by a pixel (`resize_client`'s unbounded-growth story, in
+    /// fractional form).
+    #[test]
+    fn the_fractional_round_trip_is_stable() {
+        for physical in [200, 333, 501, 960, 1279] {
+            for factor in [1.0, 1.25, 1.5, 2.0] {
+                let logical = physical_to_logical(physical, factor);
+                let expected = scale_length(logical, factor);
+                // One more round trip lands exactly where the first did.
+                assert_eq!(physical_to_logical(expected, factor), logical, "{physical} @ {factor}");
+                assert_eq!(scale_length(logical, factor), expected);
+            }
+        }
+    }
+
+    /// The buffer/viewport ratio is a scale statement only when it is
+    /// uniform, at least 1, and lands on the protocol's 1/120 grid to
+    /// within the rounding the protocol itself allows.
+    #[test]
+    fn a_viewport_ratio_is_read_as_a_scale_only_when_it_is_one() {
+        // The canonical fractional client: round(w × 1.5) buffer over a
+        // w-logical destination.
+        assert_eq!(ratio_scale((960, 720), (640, 480)), Some(1.5));
+        // Odd extents round, and the snap still recovers the factor.
+        assert_eq!(ratio_scale((500, 350), (333, 233)), Some(1.5));
+        // GTK4's spelling of 2x: viewport-backed rather than
+        // set_buffer_scale.
+        assert_eq!(ratio_scale((1280, 960), (640, 480)), Some(2.0));
+        // 1.25, the other common step.
+        assert_eq!(ratio_scale((800, 600), (640, 480)), Some(1.25));
+        // A video player stretching 640 to 1280 is not rendering at
+        // half density — the ratio shrinks, so it is not a scale.
+        assert_eq!(ratio_scale((640, 480), (1280, 960)), None);
+        // A non-uniform stretch is not a scale either.
+        assert_eq!(ratio_scale((960, 480), (640, 480)), None);
+        // Degenerate extents answer nothing rather than infinity.
+        assert_eq!(ratio_scale((960, 720), (0, 480)), None);
+    }
+
+    /// The integral-fallback correction fires for exactly one shape of
+    /// mismatch: an integer declaration that is the ceiling of a
+    /// fractional output scale. Everything else keeps the client's own
+    /// number — most importantly a deliberate 2x commit on an integer
+    /// output, which is the case the per-surface doctrine exists for.
+    #[test]
+    fn only_the_ceiling_fallback_is_composed_at_the_outputs_fraction() {
+        // A 2x buffer on a 1.5 output is the fallback: downscale.
+        assert_eq!(effective_surface_scale(2.0, 1.5), 1.5);
+        assert_eq!(effective_surface_scale(2.0, 1.25), 1.25);
+        // A fractional-aware client already matches; untouched.
+        assert_eq!(effective_surface_scale(1.5, 1.5), 1.5);
+        // LibreOffice under GDK_SCALE=2 on a scale-1 desktop: the
+        // ledger holds its 600px buffer, exactly as always.
+        assert_eq!(effective_surface_scale(2.0, 1.0), 2.0);
+        // An Xwayland-style 1x commit on a fractional output stays 1x —
+        // its pixels are 1:1 by construction.
+        assert_eq!(effective_surface_scale(1.0, 1.5), 1.0);
+        // A 3x commit on a 1.5 output is not the ceiling; the client's
+        // word stands.
+        assert_eq!(effective_surface_scale(3.0, 1.5), 3.0);
+        // Integer output, integer client: identity.
+        assert_eq!(effective_surface_scale(2.0, 2.0), 2.0);
     }
 
     /// Every compass point of `xdg_toplevel.resize` maps to the edge of

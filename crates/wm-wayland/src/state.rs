@@ -386,6 +386,13 @@ pub(crate) struct ShellRecord {
     pub background: (u8, u8, u8),
     pub above: bool,
     pub mapped: bool,
+    /// A stable render-element id for the background fill drawn while
+    /// `buffer` is `None`. Minted once at creation: the damage tracker
+    /// keys element history by id, so a fresh `Id::new()` per frame
+    /// reads as "everything old vanished, everything new appeared" —
+    /// harmless under full-frame redraws, and exactly what makes
+    /// incremental damage useless the moment they stop.
+    pub fill_id: smithay::backend::renderer::element::Id,
 }
 
 /// The desktop background, as last painted by the shell through
@@ -486,6 +493,21 @@ pub struct WaylandBackend {
     /// the pointer, so this is the ledger's whole idea of the physical
     /// screen layout.
     pub(crate) monitors: Vec<MonitorInfo>,
+    /// The fractional UI scale of each monitor, parallel to
+    /// [`WaylandBackend::monitors`] (same indices, same order). On the
+    /// ledger rather than on [`Compositor`] because the `Backend` verbs
+    /// that convert between a client's logical units and this ledger's
+    /// physical ones (`resize_client`, `size_hints`) run inside the
+    /// `WindowManager`'s `&mut self` and can reach nothing else — the
+    /// standing rule every deferred field above documents. Kept in step
+    /// with `Compositor::outputs` by `advertise_scale` and the
+    /// output-management apply path; nowhere else writes it.
+    ///
+    /// Not a field on `MonitorInfo`, deliberately: that type belongs to
+    /// `wm-core` and is shared with the X11 backend, where a per-monitor
+    /// scale has no meaning (the X session is scaled by rasterizing the
+    /// theme larger, not by telling anyone a factor).
+    pub(crate) monitor_scales: Vec<f64>,
     /// The union bounding box of [`WaylandBackend::monitors`] — what
     /// `Backend::screen_size` reports, and the space every rect in this
     /// ledger lives in. With one output it is that output's size, which
@@ -618,8 +640,9 @@ pub(crate) enum PointerGrabChange {
 }
 
 impl WaylandBackend {
-    pub(crate) fn new(display_handle: DisplayHandle, monitors: Vec<MonitorInfo>) -> Self {
+    pub(crate) fn new(display_handle: DisplayHandle, monitors: Vec<MonitorInfo>, scale: f32) -> Self {
         let output_size = union_size(&monitors);
+        let monitor_scales = vec![scale.max(0.125) as f64; monitors.len()];
         Self {
             next_id: 1,
             windows: HashMap::new(),
@@ -635,6 +658,7 @@ impl WaylandBackend {
             keyboard_grabbed: false,
             root_background: RootBackground::Color((0, 0, 0)),
             monitors,
+            monitor_scales,
             output_size,
             damage: true,
             display_handle,
@@ -686,6 +710,43 @@ impl WaylandBackend {
         if self.pointer_grab.take().is_some() {
             self.pending_pointer_grab = Some(PointerGrabChange::Released);
         }
+    }
+
+    /// The fractional UI scale of the monitor containing `rect`'s
+    /// center — the factor a surface anchored there is composed at.
+    /// Falls back to the primary monitor's scale (index 0) for a rect
+    /// in dead space or an empty layout, and to 1.0 when there are no
+    /// monitors at all, which no running session has.
+    ///
+    /// The center, not the top-left corner: a window straddling two
+    /// screens has to be measured by *one* factor, and the monitor
+    /// holding most of it is the least surprising choice — the same
+    /// tie-break `wm-core` uses for placement.
+    pub(crate) fn scale_at(&self, rect: Rect) -> f64 {
+        scale_for_rect(&self.monitors, &self.monitor_scales, rect)
+    }
+
+    /// The factor one managed window's surface is composed at: what the
+    /// client itself committed, corrected only for the integral-fallback
+    /// case (`xdg::effective_surface_scale`) on the output the window
+    /// lives on. The single definition the renderer, the hit-test, the
+    /// ledger measurement and the configure path all call — four sites
+    /// describing one rectangle must multiply by one number.
+    pub(crate) fn window_surface_scale(&self, record: &WindowRecord) -> f64 {
+        let Some(surface) = record.surface.wl_surface() else {
+            return 1.0;
+        };
+        // Xwayland is the one client this compositor never invites to
+        // scale itself (it is told through XSETTINGS instead and keeps
+        // committing 1x buffers over 1x rectangles), so the fallback
+        // correction must not apply to it either.
+        if matches!(record.surface, ManagedSurface::X11(_)) {
+            return crate::xdg::committed_buffer_scale(&surface) as f64;
+        }
+        crate::xdg::effective_surface_scale(
+            crate::xdg::committed_surface_scale(&surface),
+            self.scale_at(record.content),
+        )
     }
 
     /// Resolves a `wl_surface` back to the managed window it belongs
@@ -771,6 +832,13 @@ pub(crate) struct OutputSetup {
     pub output: Output,
     pub position: Point,
     pub size: Size,
+    /// Every mode this output can drive, current/preferred first. One
+    /// entry on the nested backend (the host window has no modes to
+    /// offer); the connector's full EDID mode list on the session
+    /// backend. Carried so wlr-output-management can enumerate honest
+    /// alternatives instead of pretending the current mode is the only
+    /// one.
+    pub modes: Vec<Mode>,
 }
 
 /// One output the compositor drives, everything the session needs to
@@ -788,6 +856,15 @@ pub(crate) struct OutputEntry {
     /// the one shared scene into this output's framebuffer.
     pub position: Point,
     pub size: Size,
+    /// This output's fractional UI scale — what fractional-scale-v1
+    /// tells clients on it, what `wl_output.scale` advertises the
+    /// ceiling of, and what `WaylandBackend::monitor_scales` mirrors
+    /// for the ledger's arithmetic. Starts at the session scale
+    /// (`advertise_scale` writes every entry); wlr-output-management
+    /// can then move one output's value on its own.
+    pub scale: f64,
+    /// The modes this output can drive — see [`OutputSetup::modes`].
+    pub modes: Vec<Mode>,
     /// Only the nested backend renders through this: the session
     /// backend's `DrmCompositor` owns damage tracking per crtc itself.
     /// It is built from the `Output`, so a resize of that output
@@ -810,6 +887,8 @@ impl OutputEntry {
             output: setup.output,
             position: setup.position,
             size: setup.size,
+            scale: 1.0,
+            modes: setup.modes,
             damage_tracker,
             _global,
         }
@@ -853,7 +932,7 @@ impl OutputEntry {
 /// putting their scaled buffers back at 1 buffer pixel : 1 screen
 /// pixel. The session backend pins its `DrmCompositor`s the same way
 /// (`session::attach_output`); the two must never disagree.
-fn physical_damage_tracker(output: &Output, size: Size) -> OutputDamageTracker {
+pub(crate) fn physical_damage_tracker(output: &Output, size: Size) -> OutputDamageTracker {
     OutputDamageTracker::new(
         SSize::<i32, Physical>::from((size.w as i32, size.h as i32)),
         1.0,
@@ -874,16 +953,19 @@ fn physical_damage_tracker(output: &Output, size: Size) -> OutputDamageTracker {
 /// (`renderer::push_surface_tree`).
 ///
 /// Integer, because `wl_output.scale` is an integer: a fractional
-/// session scale rounds to the nearest whole step (1.5 advertises 2),
-/// clamped to 1 and up. A client told 2 on a 1.5 session draws crisper
-/// and somewhat larger than the chrome, and the ledger reflows its
-/// frame around what it actually commits — larger but consistent,
-/// against no channel at all for the exact fraction short of
-/// implementing `fractional-scale-v1`. (`f32::max` returns 1.0 for a
-/// NaN scale, so the cast is always sane — same guard as
-/// `default_cursor_pixels`.)
+/// session scale rounds UP to the next whole step (1.5 — and 1.25 —
+/// advertise 2), clamped to 1 and up. Rounding up is deliberate and
+/// the direction matters: this integer is the *fallback* for clients
+/// that never bind `fractional-scale-v1`, and a fallback client told
+/// the ceiling renders MORE pixels than the output needs, which the
+/// compositor then downscales to the true factor
+/// (`xdg::effective_surface_scale`) — crisp. Told the floor it would
+/// render too few and be upscaled — blurry. Clients that do bind
+/// fractional-scale hear the exact fraction and the ceiling never
+/// applies to them. (`f32::max` returns 1.0 for a NaN scale, so the
+/// cast is always sane — same guard as `default_cursor_pixels`.)
 pub(crate) fn advertised_output_scale(scale: f32) -> OutputScale {
-    OutputScale::Integer(scale.max(1.0).round() as i32)
+    OutputScale::Integer(scale.max(1.0).ceil() as i32)
 }
 
 /// (Re-)advertises the session's UI scale on every output. smithay
@@ -892,11 +974,26 @@ pub(crate) fn advertised_output_scale(scale: f32) -> OutputScale {
 /// the damage trackers stay pinned at 1 (see
 /// [`physical_damage_tracker`]) so the compositor's own composition
 /// never hears about it.
-fn advertise_scale(outputs: &[OutputEntry], scale: f32) {
+/// A session-wide scale change: every output's fractional scale moves
+/// to the session's (any per-output value wlr-output-management set is
+/// deliberately superseded — a config reload states the whole desktop's
+/// scale, and honoring half of it would leave no way to say "put
+/// everything back").
+fn advertise_scale(outputs: &mut [OutputEntry], scale: f32) {
     let advertised = advertised_output_scale(scale);
-    for entry in outputs {
+    for entry in outputs.iter_mut() {
+        entry.scale = scale.max(0.125) as f64;
         entry.output.change_current_state(None, None, Some(advertised), None);
     }
+}
+
+/// Re-advertises ONE output's own fractional scale: the integer ceiling
+/// on its `wl_output`, the exact fraction to every fractional-scale
+/// client. The per-output half of what [`advertise_scale`] does for the
+/// session; wlr-output-management's apply path is the caller.
+pub(crate) fn advertise_output_scale_change(entry: &OutputEntry) {
+    let advertised = advertised_output_scale(entry.scale as f32);
+    entry.output.change_current_state(None, None, Some(advertised), None);
 }
 
 /// The union bounding box of every monitor: what `Backend::screen_size`
@@ -911,7 +1008,24 @@ fn advertise_scale(outputs: &[OutputEntry], scale: f32) {
 /// need `wm-core` and the shell to stop assuming the screen starts at
 /// (0, 0). Moving that assumption is the real cost of arbitrary output
 /// positioning; the layout code is the easy half.
-fn union_size(monitors: &[MonitorInfo]) -> Size {
+/// The pure half of [`WaylandBackend::scale_at`]: the scale of the
+/// monitor containing `rect`'s center, else the primary's (index 0),
+/// else 1.0. The center rather than a corner because a window
+/// straddling two screens has to be measured by ONE factor, and the
+/// monitor holding most of it is the least surprising choice.
+pub(crate) fn scale_for_rect(monitors: &[MonitorInfo], scales: &[f64], rect: Rect) -> f64 {
+    let center = Point::new(
+        rect.pos.x + (rect.size.w / 2) as i32,
+        rect.pos.y + (rect.size.h / 2) as i32,
+    );
+    let index = monitors
+        .iter()
+        .position(|monitor| monitor.geometry.contains(center))
+        .unwrap_or(0);
+    scales.get(index).copied().unwrap_or(1.0)
+}
+
+pub(crate) fn union_size(monitors: &[MonitorInfo]) -> Size {
     let mut width: i32 = 0;
     let mut height: i32 = 0;
     for monitor in monitors {
@@ -958,6 +1072,16 @@ pub struct Compositor {
     /// through.
     pub primary_selection_state: PrimarySelectionState,
     pub xwayland_shell_state: XWaylandShellState,
+    /// fractional-scale-v1: the channel that can say "1.5" to a client,
+    /// where `wl_output.scale` can only say its ceiling. Serving it is
+    /// most of what makes a fractional session scale first-class — see
+    /// `xdg.rs`'s commit handler and `xdg::committed_surface_scale`.
+    pub fractional_scale_state: smithay::wayland::fractional_scale::FractionalScaleManagerState,
+    /// wp_viewporter: how a fractional-scale client actually commits at
+    /// 1.5x — a `round(w × 1.5)` px buffer with a viewport destination
+    /// of `w` logical. smithay's surface state resolves the viewport;
+    /// the ledger recovers the factor from the ratio.
+    pub viewporter_state: smithay::wayland::viewporter::ViewporterState,
     /// Tracks xdg popups (client menus, tooltips) so the renderer can
     /// draw them above their parent window — `wm-core` never learns
     /// about them, exactly as it never learns about X11
@@ -1024,6 +1148,9 @@ pub struct Compositor {
     /// foreign-toplevel window list and screencopy capture. The
     /// Wayland counterpart to the X11 session's EWMH properties.
     pub(crate) protocols: crate::protocols::ProtocolState,
+    /// wlr-output-management: what `wlr-randr` and `kanshi` list and
+    /// configure outputs through — see `output_mgmt.rs`.
+    pub(crate) output_mgmt: crate::output_mgmt::OutputManagement,
     /// wlr-layer-shell: launchers, bars, notification daemons, OSDs —
     /// protocol state plus the focus/reservation bookkeeping in
     /// `layers.rs` (the surface records themselves live on the ledger).
@@ -1196,6 +1323,10 @@ impl Compositor {
         // same state the desktop just settled into, before the damage
         // test so a capture request can mark the frame it needs.
         crate::protocols::refresh(self);
+        // Output management settles beside the other protocol
+        // reconciliations and before the damage test, so an applied
+        // configuration's re-layout renders on this very pass.
+        crate::output_mgmt::refresh(self);
         // The X11 tools' equivalent of the wlr window list above rides
         // the same timing: flush the buffered EWMH publishes to the
         // XWayland root after the drains, so `xprop`/`wmctrl` read the
@@ -1263,7 +1394,8 @@ impl Compositor {
             // commit-time send in `xdg.rs` fire. Clients answer with
             // rescaled buffers; the ledger reflows around those commits
             // exactly as it does around any client resize.
-            advertise_scale(&self.outputs, scale);
+            advertise_scale(&mut self.outputs, scale);
+            self.sync_monitor_scales();
             let advertised = advertised_output_scale(scale).integer_scale();
             let surfaces: Vec<WlSurface> = self
                 .wm
@@ -1286,6 +1418,12 @@ impl Compositor {
                         advertised,
                         Transform::Normal,
                     );
+                    // The exact fraction, for clients that bound
+                    // fractional-scale-v1 — the integer above is only
+                    // their fallback. Dedup'd per surface by smithay.
+                    smithay::wayland::fractional_scale::with_fractional_scale(states, |fractional| {
+                        fractional.set_preferred_scale(scale.max(0.125) as f64);
+                    });
                 });
             }
         }
@@ -1637,6 +1775,16 @@ impl Compositor {
         backend.damage = true;
     }
 
+    /// Copies each output's fractional scale onto the ledger
+    /// (`WaylandBackend::monitor_scales`), which is where the `Backend`
+    /// verbs and the renderer read it from. Called after anything
+    /// changes an `OutputEntry::scale` — the two lists must never
+    /// disagree, and this is the one direction data flows.
+    pub(crate) fn sync_monitor_scales(&mut self) {
+        let scales: Vec<f64> = self.outputs.iter().map(|entry| entry.scale).collect();
+        self.wm.backend_mut().monitor_scales = scales;
+    }
+
     /// Lands a deferred focus intent on the seat's keyboard — a
     /// window from `set_input_focus`, or nothing from
     /// `publish_active_window(None)` (see [`FocusIntent`] for the bug
@@ -1787,6 +1935,15 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
     let data_device_state = DataDeviceState::new::<Compositor>(&display_handle);
     let primary_selection_state = PrimarySelectionState::new::<Compositor>(&display_handle);
     let xwayland_shell_state = XWaylandShellState::new::<Compositor>(&display_handle);
+    // The fractional-scale pair. Both are plain globals with no failure
+    // mode; registered here so they exist before any client can bind —
+    // the same timing rule as every global below.
+    let fractional_scale_state =
+        smithay::wayland::fractional_scale::FractionalScaleManagerState::new::<Compositor>(
+            &display_handle,
+        );
+    let viewporter_state =
+        smithay::wayland::viewporter::ViewporterState::new::<Compositor>(&display_handle);
 
     let mut seat_state: SeatState<Compositor> = SeatState::new();
     let mut seat: Seat<Compositor> = seat_state.new_wl_seat(&display_handle, "chonkstep");
@@ -1884,14 +2041,14 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
         // multi-monitor path rather than a path of its own.
         (
             Graphics::Winit(winit_backend),
-            vec![OutputSetup { output, position: Point::new(0, 0), size }],
+            vec![OutputSetup { output, position: Point::new(0, 0), size, modes: vec![mode] }],
         )
     } else {
         tracing::info!("session backend: taking over the DRM device and input");
         let init = crate::session::init(&loop_handle, &display_handle)?;
         (init.graphics, init.outputs)
     };
-    let outputs: Vec<OutputEntry> = output_setups
+    let mut outputs: Vec<OutputEntry> = output_setups
         .into_iter()
         .map(|setup| OutputEntry::new(setup, &display_handle))
         .collect();
@@ -1935,6 +2092,7 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
     let syncobj = crate::dmabuf::init_syncobj(&display_handle, &graphics);
     // Same timing rule as dmabuf: bound before any client can connect.
     let protocols = crate::protocols::init(&display_handle);
+    let output_mgmt = crate::output_mgmt::init(&display_handle);
     // The ecosystem protocols, under the same timing rule. Layer-shell
     // is what fuzzel/mako/waybar look for the moment they connect;
     // session-lock is unfiltered (any client may lock — swaylock is
@@ -2048,13 +2206,14 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
     // client buffers are put back at 1 buffer pixel : 1 screen pixel
     // per surface (`renderer::push_surface_tree`). `wm-core`, the
     // theme and the shell remain physical end to end and never hear
-    // about any of it.
-    advertise_scale(&outputs, scale);
+    // about any of it. Fractional-scale clients additionally hear the
+    // exact fraction per surface (see `xdg.rs`'s commit handler).
+    advertise_scale(&mut outputs, scale);
 
     // The desktop shell is built against the mutable backend before
     // `WindowManager::new` takes ownership — the exact construction
     // order the X11 binary uses, for the exact same borrow reason.
-    let mut backend = WaylandBackend::new(display_handle.clone(), monitors);
+    let mut backend = WaylandBackend::new(display_handle.clone(), monitors, scale);
     // The whole screen, as the shell sizes the desktop against it: the
     // union of every monitor. Where the dock and the workareas land
     // inside that union is the shell's decision, not this loop's.
@@ -2181,6 +2340,8 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
         data_device_state,
         primary_selection_state,
         xwayland_shell_state,
+        fractional_scale_state,
+        viewporter_state,
         popups: PopupManager::default(),
         dock_sources: Vec::new(),
         seat,
@@ -2194,6 +2355,7 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
         dmabuf,
         syncobj,
         protocols,
+        output_mgmt,
         layer_shell,
         session_lock,
         idle,
@@ -2961,6 +3123,62 @@ mod tests {
             stacking,
             vec![StackEntry::Shell(WlShellId(9)), window(20), StackEntry::Shell(WlShellId(8))]
         );
+    }
+
+    // Per-output scale resolution: the mixed-DPI question ("which
+    // factor does this window get?") answered without a display, which
+    // is the only way a single-monitor test box can pin the two-monitor
+    // arithmetic.
+
+    #[test]
+    fn a_window_takes_the_scale_of_the_monitor_holding_its_center() {
+        let monitors = [monitor(0, 0, 1920, 1080), monitor(1920, 0, 2560, 1440)];
+        let scales = [1.0, 1.5];
+        // Entirely on the second monitor.
+        let rect = Rect { pos: Point::new(2000, 100), size: Size::new(400, 300) };
+        assert_eq!(scale_for_rect(&monitors, &scales, rect), 1.5);
+        // Entirely on the first.
+        let rect = Rect { pos: Point::new(100, 100), size: Size::new(400, 300) };
+        assert_eq!(scale_for_rect(&monitors, &scales, rect), 1.0);
+        // Straddling, with most of it (its center) on the right: one
+        // factor, the right screen's.
+        let rect = Rect { pos: Point::new(1800, 100), size: Size::new(400, 300) };
+        assert_eq!(scale_for_rect(&monitors, &scales, rect), 1.5);
+        // Straddling with the center on the left keeps the left's.
+        let rect = Rect { pos: Point::new(1600, 100), size: Size::new(400, 300) };
+        assert_eq!(scale_for_rect(&monitors, &scales, rect), 1.0);
+    }
+
+    #[test]
+    fn dead_space_and_unplaced_windows_take_the_primary_scale() {
+        let monitors = [monitor(0, 0, 1920, 1080), monitor(1920, 0, 1280, 720)];
+        let scales = [2.0, 1.0];
+        // Below the shorter second monitor: covered by no screen.
+        let rect = Rect { pos: Point::new(2000, 900), size: Size::new(100, 100) };
+        assert_eq!(scale_for_rect(&monitors, &scales, rect), 2.0);
+        // A fresh window's empty rect at the origin resolves to the
+        // primary too — the honest guess at first-commit time.
+        assert_eq!(scale_for_rect(&monitors, &scales, Rect::default()), 2.0);
+        // No monitors at all (never true in a running session) is 1.0,
+        // not a panic.
+        assert_eq!(scale_for_rect(&[], &[], Rect::default()), 1.0);
+    }
+
+    #[test]
+    fn the_integral_fallback_advertises_the_ceiling() {
+        // Round UP: the fallback client renders more pixels than the
+        // output needs and is downscaled — the crisp direction. 1.25
+        // used to round to 1 (blurry upscale); now both fractional
+        // steps advertise 2.
+        assert_eq!(advertised_output_scale(1.0).integer_scale(), 1);
+        assert_eq!(advertised_output_scale(1.25).integer_scale(), 2);
+        assert_eq!(advertised_output_scale(1.5).integer_scale(), 2);
+        assert_eq!(advertised_output_scale(2.0).integer_scale(), 2);
+        assert_eq!(advertised_output_scale(2.25).integer_scale(), 3);
+        // Degenerate inputs stay sane (the NaN guard `f32::max`
+        // documents).
+        assert_eq!(advertised_output_scale(0.0).integer_scale(), 1);
+        assert_eq!(advertised_output_scale(f32::NAN).integer_scale(), 1);
     }
 
     #[test]

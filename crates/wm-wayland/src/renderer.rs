@@ -15,11 +15,21 @@
 //! the frames, in the same band and by the same `stacking` order — it
 //! is only the decoration buffer it lacks, not a place in the scene.
 //!
-//! Every redraw damages the full frame (`age = 0` to the damage
-//! tracker, full-output submit) rather than tracking per-element
-//! damage — correctness first: the X11 side made the same call by
-//! running picom with `--no-use-damage`, trading a little GPU fill for
-//! never chasing partial-damage artifacts. Revisit only with evidence.
+//! Redraws are incrementally damaged on both backends: the winit path
+//! renders at the EGL surface's real buffer age and the session path
+//! trusts the `DrmCompositor`'s per-element tracking, so an idle
+//! desktop's only per-frame work is whatever actually changed (a
+//! blinking cursor's rectangle, a dock LED). This used to be a
+//! deliberate full-frame repaint (`age = 0`, the picom
+//! `--no-use-damage` trade); the evidence that retired it is in
+//! `session.rs` at the `full_damage_forced` site, and that same
+//! environment variable (`CHONKSTEP_FULL_DAMAGE=1`) restores the old
+//! behaviour on every path without a compiler. What incremental damage
+//! demands of THIS file is stable element identity: every element's id
+//! must survive across frames (the buffers' own ids do; solid fills
+//! carry `ShellRecord::fill_id`), because the tracker reads a fresh id
+//! as "old element gone, new element appeared" and re-damages both.
+//! `CHONKSTEP_DAMAGE_LOG=1` prints each drawn frame's damage.
 //!
 //! # One scene, one output at a time
 //!
@@ -56,14 +66,18 @@
 //! Client surfaces are the one place a second coordinate space leaks
 //! in: smithay sizes a `WaylandSurfaceRenderElement` at the surface's
 //! *logical* extent (buffer pixels divided by the scale the client
-//! committed), times the output scale it is rendered at. Under a
-//! scale-1 tracker a 2x client's element would come out at half its
-//! buffer, so [`push_surface_tree`] wraps every client element in a
+//! committed, or the viewport destination when one is set), times the
+//! output scale it is rendered at. Under a scale-1 tracker a 2x
+//! client's element would come out at half its buffer, so
+//! [`push_surface_tree`] wraps every client element in a
 //! [`RescaleRenderElement`] that multiplies it back up by that
-//! surface's own committed buffer scale — restoring 1 buffer pixel :
-//! 1 screen pixel per surface, which is the size the ledger recorded
-//! for it (`xdg::committed_content_size`) and the frame was drawn
-//! around.
+//! surface's factor — fractional since fractional-scale-v1
+//! (`xdg::committed_surface_scale` corrected by
+//! `xdg::effective_surface_scale`), restoring 1 buffer pixel :
+//! 1 screen pixel for a client that committed at the output's factor,
+//! and a GPU down/upscale for one that committed at some other — which
+//! is the size the ledger recorded for it
+//! (`xdg::committed_content_size`) and the frame was drawn around.
 
 use std::sync::Mutex;
 use std::time::Duration;
@@ -74,7 +88,7 @@ use smithay::backend::renderer::element::surface::{
     render_elements_from_surface_tree, WaylandSurfaceRenderElement,
 };
 use smithay::backend::renderer::element::utils::RescaleRenderElement;
-use smithay::backend::renderer::element::{Id, Kind};
+use smithay::backend::renderer::element::Kind;
 use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::backend::renderer::utils::CommitCounter;
 use smithay::backend::renderer::{Color32F, ImportAll, ImportMem};
@@ -166,11 +180,18 @@ pub(crate) fn build_scene(
                 monitor.geometry.pos.x - viewport.x,
                 monitor.geometry.pos.y - viewport.y,
             ));
+            // A locker commits at whatever scale its output told it —
+            // the same effective-factor rule as every other client.
+            let factor = crate::xdg::effective_surface_scale(
+                crate::xdg::committed_surface_scale(entry.surface.wl_surface()),
+                backend.scale_at(monitor.geometry),
+            );
             push_surface_tree(
                 &mut elements,
                 renderer,
                 entry.surface.wl_surface(),
                 origin,
+                factor,
                 1.0,
                 Kind::Unspecified,
             );
@@ -206,7 +227,7 @@ pub(crate) fn build_scene(
     // window in practice.
     for record in backend.windows.values() {
         if record.window_type == wm_core::WindowType::Unmanaged && record.mapped {
-            push_window_content(&mut elements, renderer, record.content, record, viewport);
+            push_window_content(&mut elements, renderer, backend, record.content, record, viewport);
         }
     }
 
@@ -222,7 +243,7 @@ pub(crate) fn build_scene(
         if let StackEntry::Window(id) = entry {
             let Some(record) = backend.windows.get(id) else { continue };
             if record.mapped {
-                push_window_content(&mut elements, renderer, record.content, record, viewport);
+                push_window_content(&mut elements, renderer, backend, record.content, record, viewport);
             }
         }
         if let StackEntry::Frame(id) = entry {
@@ -238,7 +259,7 @@ pub(crate) fn build_scene(
             // falls out naturally here.
             if let Some(record) = window {
                 if record.mapped {
-                    push_window_content(&mut elements, renderer, record.content, record, viewport);
+                    push_window_content(&mut elements, renderer, backend, record.content, record, viewport);
                 }
             }
             if let Some(buffer) = &frame.buffer {
@@ -460,7 +481,31 @@ fn render_frame_winit(comp: &mut Compositor) {
     let output = &entry.output;
     let damage_tracker = &mut entry.damage_tracker;
 
-    {
+    // Make the EGL surface current before asking its buffer age:
+    // `EGL_BUFFER_AGE_EXT` is defined only for the current surface, and
+    // asked without this the driver answers `BAD_SURFACE` once per
+    // frame. The first bind's borrow ends on this line; the render bind
+    // below re-binds, which is a cheap make-current of an
+    // already-current context.
+    if let Err(error) = winit_backend.bind() {
+        if note_frame_failure() {
+            tracing::warn!(?error, "could not bind the winit framebuffer; skipping frame");
+        }
+        return;
+    }
+    // Real buffer age — the whole point of damage tracking. The age
+    // says how many frames old this buffer's contents are, and the
+    // tracker then repaints only what changed since; `None` (an EGL
+    // stack without `EGL_EXT_buffer_age`) degrades to 0, which is the
+    // old always-full-frame behaviour, honestly forced rather than
+    // silently assumed. `CHONKSTEP_FULL_DAMAGE=1` forces 0 for the same
+    // escape-hatch reason `session.rs` documents.
+    let age = if crate::session::full_damage_forced() {
+        0
+    } else {
+        winit_backend.buffer_age().unwrap_or(0)
+    };
+    let drew = {
         let (renderer, mut framebuffer) = match winit_backend.bind() {
             Ok(bound) => bound,
             Err(error) => {
@@ -480,29 +525,67 @@ fn render_frame_winit(comp: &mut Compositor) {
             Point::new(0, 0),
         );
 
-        // Age 0 = "assume every pixel stale": the deliberate
-        // full-frame redraw described in the module docs.
-        if let Err(error) =
-            damage_tracker.render_output(renderer, &mut framebuffer, 0, &elements, clear_color)
+        match damage_tracker.render_output(renderer, &mut framebuffer, age, &elements, clear_color)
         {
+            Ok(result) => {
+                log_damage(age, result.damage.map(Vec::as_slice));
+                result.damage.is_some()
+            }
+            Err(error) => {
+                if note_frame_failure() {
+                    tracing::warn!(?error, "render failed; keeping damage for a retry");
+                }
+                return;
+            }
+        }
+    };
+
+    if drew {
+        // The buffer holds a complete frame either way (the tracker
+        // repainted every stale pixel for this buffer's age), so the
+        // full-window swap rect is correct; the damage rects computed
+        // above only bounded the GPU work. Handing the host compositor
+        // the precise rects would additionally shrink *its* recomposite,
+        // but the winit swap's damage is in a different orientation
+        // than the tracker's output space under this backend's
+        // `Flipped180`, and a wrong rect here shows as smearing on the
+        // host — full is the honest choice for a dev backend.
+        let size = winit_backend.window_size();
+        if let Err(error) = winit_backend.submit(Some(&[SRect::from_size(size)])) {
             if note_frame_failure() {
-                tracing::warn!(?error, "render failed; keeping damage for a retry");
+                tracing::warn!(?error, "swap failed; keeping damage for a retry");
             }
             return;
         }
     }
 
-    let size = winit_backend.window_size();
-    if let Err(error) = winit_backend.submit(Some(&[SRect::from_size(size)])) {
-        if note_frame_failure() {
-            tracing::warn!(?error, "swap failed; keeping damage for a retry");
-        }
-        return;
-    }
-
     note_frame_success();
     send_frame_callbacks(wm.backend(), output, cursor_status, start_time.elapsed());
     wm.backend_mut().damage = false;
+}
+
+/// Damage-rect telemetry, on when `CHONKSTEP_DAMAGE_LOG` is set: one
+/// line per drawn frame with the buffer age it rendered at, how many
+/// rects the tracker produced, and their total area. This is the
+/// honest measurement the damage work is judged by — an idle desktop
+/// must log nothing (no frame at all), a blinking cursor a few hundred
+/// square pixels, a fullscreen video the video's rectangle.
+pub(crate) fn log_damage(age: usize, damage: Option<&[SRect<i32, Physical>]>) {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let enabled = *ENABLED.get_or_init(|| {
+        std::env::var_os("CHONKSTEP_DAMAGE_LOG").is_some_and(|value| value != "0")
+    });
+    if !enabled {
+        return;
+    }
+    match damage {
+        Some(rects) => {
+            let area: i64 =
+                rects.iter().map(|rect| rect.size.w as i64 * rect.size.h as i64).sum();
+            tracing::info!(age, rects = rects.len(), area, "frame damage");
+        }
+        None => tracing::info!(age, "frame damage: none (no repaint)"),
+    }
 }
 
 /// Pushes one layer band's surfaces (front to back — newest record
@@ -530,16 +613,24 @@ fn push_layer_band(
         // Popups above their parent, offsets converted by the parent's
         // committed factor — the identical arithmetic
         // `push_window_content` uses, for the identical reason.
-        let scale = crate::xdg::committed_buffer_scale(surface);
+        let factor = crate::xdg::effective_surface_scale(
+            crate::xdg::committed_surface_scale(surface),
+            backend.scale_at(record.geometry),
+        );
         for (popup, offset) in PopupManager::popups_for_surface(surface) {
+            let popup_surface = popup.wl_surface();
+            let popup_factor = crate::xdg::effective_surface_scale(
+                crate::xdg::committed_surface_scale(popup_surface),
+                backend.scale_at(record.geometry),
+            );
             let location = origin
                 + SPoint::<i32, Physical>::from((
-                    crate::xdg::logical_to_physical(offset.x, scale),
-                    crate::xdg::logical_to_physical(offset.y, scale),
+                    crate::xdg::scale_length(offset.x, factor),
+                    crate::xdg::scale_length(offset.y, factor),
                 ));
-            push_surface_tree(elements, renderer, popup.wl_surface(), location, 1.0, Kind::Unspecified);
+            push_surface_tree(elements, renderer, popup_surface, location, popup_factor, 1.0, Kind::Unspecified);
         }
-        push_surface_tree(elements, renderer, surface, origin, 1.0, Kind::Unspecified);
+        push_surface_tree(elements, renderer, surface, origin, factor, 1.0, Kind::Unspecified);
     }
 }
 
@@ -578,12 +669,15 @@ fn push_shell_elements(
                 (record.geometry.pos.x - viewport.x, record.geometry.pos.y - viewport.y).into(),
                 (record.geometry.size.w as i32, record.geometry.size.h as i32).into(),
             );
-            // A fresh Id each frame would normally defeat damage
-            // tracking, but full-frame redraws (age 0) never consult
-            // element history — see the module docs.
+            // The record's own stable id: the damage tracker keys
+            // element history by it, and this compositor now renders
+            // with real buffer ages (see `render_frame_winit` and the
+            // session backend's per-element default), so a fresh id per
+            // frame would re-damage every never-painted shell surface
+            // every frame.
             elements.push(
                 SolidColorRenderElement::new(
-                    Id::new(),
+                    record.fill_id.clone(),
                     geometry,
                     CommitCounter::default(),
                     Color32F::new(r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, 1.0),
@@ -609,6 +703,7 @@ fn push_shell_elements(
 fn push_window_content(
     elements: &mut Vec<SceneElement<GlesRenderer>>,
     renderer: &mut GlesRenderer,
+    backend: &WaylandBackend,
     content: Rect,
     record: &crate::state::WindowRecord,
     viewport: Point,
@@ -644,21 +739,25 @@ fn push_window_content(
     // memory buffers the theme already rasterized in physical pixels,
     // pushed at 1:1 elsewhere in this file — so the two do not have to
     // agree beyond meeting at the same rectangle.
-    let scale = crate::xdg::committed_buffer_scale(&surface);
+    let factor = backend.window_surface_scale(record);
     for (popup, offset) in PopupManager::popups_for_surface(&surface) {
         // The offset is surface-local to the parent, so it converts by
         // the parent's factor; the popup's tree then renders at the
         // popup's own, because a menu is a separate surface with its own
         // committed scale and the protocol never promises the two match.
         let popup_surface = popup.wl_surface();
+        let popup_factor = crate::xdg::effective_surface_scale(
+            crate::xdg::committed_surface_scale(popup_surface),
+            backend.scale_at(content),
+        );
         let location = origin
             + SPoint::<i32, Physical>::from((
-                crate::xdg::logical_to_physical(offset.x, scale),
-                crate::xdg::logical_to_physical(offset.y, scale),
+                crate::xdg::scale_length(offset.x, factor),
+                crate::xdg::scale_length(offset.y, factor),
             ));
-        push_surface_tree(elements, renderer, popup_surface, location, 1.0, Kind::Unspecified);
+        push_surface_tree(elements, renderer, popup_surface, location, popup_factor, 1.0, Kind::Unspecified);
     }
-    push_surface_tree(elements, renderer, &surface, origin, 1.0, Kind::Unspecified);
+    push_surface_tree(elements, renderer, &surface, origin, factor, 1.0, Kind::Unspecified);
 }
 
 /// Pushes one wayland surface tree (front to back), drawn so that each
@@ -684,24 +783,32 @@ fn push_window_content(
 /// `render_scale` is 1.0 for the on-screen scene; `capture.rs` passes
 /// its thumbnail downscale, matching the tracker it then renders with.
 ///
-/// One factor for the whole tree, read from its root: the protocol
-/// permits a subsurface to commit a different scale than its parent,
-/// but the offsets between them convert by a single number either way,
-/// and no toolkit this desktop runs mixes scales within one window.
+/// One factor for the whole tree, passed in by the caller: every site
+/// that anchors a tree also measured its rectangle, and the two must
+/// multiply by the same number (`WaylandBackend::window_surface_scale`
+/// for managed windows, `xdg::effective_surface_scale` compositions for
+/// the rest). The factor is fractional since fractional-scale-v1: a
+/// client told 1.5 commits a viewport-backed buffer whose ratio *is*
+/// 1.5, and an integral-fallback client's 2x buffer is composed at the
+/// output's real 1.5 (a GPU downscale — the sharp direction).
+/// The protocol permits a subsurface to commit a different scale than
+/// its parent, but the offsets between them convert by a single number
+/// either way, and no toolkit this desktop runs mixes scales within
+/// one window.
 pub(crate) fn push_surface_tree(
     elements: &mut Vec<SceneElement<GlesRenderer>>,
     renderer: &mut GlesRenderer,
     surface: &WlSurface,
     location: SPoint<i32, Physical>,
+    factor: f64,
     render_scale: f64,
     kind: Kind,
 ) {
-    let buffer_scale = crate::xdg::committed_buffer_scale(surface) as f64;
     let tree: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
         render_elements_from_surface_tree(renderer, surface, location, render_scale, 1.0, kind);
     elements.extend(
         tree.into_iter()
-            .map(|element| RescaleRenderElement::from_element(element, location, buffer_scale).into()),
+            .map(|element| RescaleRenderElement::from_element(element, location, factor).into()),
     );
 }
 
@@ -799,13 +906,13 @@ fn push_cursor_elements(
             // logical units — so it converts by the same committed
             // factor as the pixels it points into, or a 2x cursor
             // would click half its arrow's length away from its tip.
-            let cursor_scale = crate::xdg::committed_buffer_scale(surface);
+            let cursor_scale = crate::xdg::committed_surface_scale(surface);
             let hotspot_physical = SPoint::<f64, Physical>::from((
-                (hotspot.x * cursor_scale) as f64,
-                (hotspot.y * cursor_scale) as f64,
+                hotspot.x as f64 * cursor_scale,
+                hotspot.y as f64 * cursor_scale,
             ));
             let position = (location.to_physical(1.0) - hotspot_physical).to_i32_round();
-            push_surface_tree(elements, renderer, surface, position, 1.0, Kind::Cursor);
+            push_surface_tree(elements, renderer, surface, position, cursor_scale, 1.0, Kind::Cursor);
         }
         _ => {
             // A client that never set a cursor (or set a `Named` shape)

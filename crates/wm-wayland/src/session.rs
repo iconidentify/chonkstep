@@ -19,18 +19,14 @@
 //!   its own page-flip bookkeeping (the kernel reports flips per crtc,
 //!   so nothing about frame scheduling can be shared between outputs).
 //!   A second GPU's outputs are dark.
-//! - **No output layout policy.** Outputs are placed left to right in
-//!   connector-enumeration order at their mode sizes, with no gaps and
-//!   no overlap. That is a guess, not a configuration: nothing here
-//!   applies a client-requested layout (`xdg-output` only *reports*
-//!   one) and nothing reads a saved one, so nothing in the session can
-//!   tell us that the laptop panel is *below* the desktop monitor, or
-//!   that the two should mirror. Mirroring,
-//!   arbitrary positioning, per-output scale and rotation are all
-//!   future work, and all of them are changes to how [`init`] assigns
-//!   `position` — not to the render path, which already draws each
-//!   output through a viewport offset (see
-//!   [`crate::renderer::build_scene`]).
+//! - **The startup layout is a guess; the running layout is
+//!   configurable.** Outputs come up left to right in
+//!   connector-enumeration order at their preferred modes — nothing at
+//!   *startup* knows the laptop panel sits below the desktop monitor.
+//!   Once up, `wlr-output-management` (`output_mgmt.rs`) can reposition
+//!   outputs, change their modes ([`apply_mode`] re-programs the crtc)
+//!   and set per-output scales — which is how `kanshi` gives a session
+//!   a remembered layout. Mirroring and rotation remain future work.
 //! - **No per-surface output tracking.** Nothing sends
 //!   `wl_surface.enter`/`leave`, so a client is never told which screen
 //!   it is on. That was invisible while there was one screen and one
@@ -322,7 +318,7 @@ const LOOP_BLOCK_GRACE: Duration = Duration::from_millis(250);
 /// Read once and cached: this sits in the per-output frame path, and a
 /// per-frame environment lookup is exactly the kind of small syscall
 /// that this file has spent its recent history removing.
-fn full_damage_forced() -> bool {
+pub(crate) fn full_damage_forced() -> bool {
     static FORCED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *FORCED.get_or_init(|| {
         let forced = std::env::var_os("CHONKSTEP_FULL_DAMAGE").is_some_and(|value| value != "0");
@@ -407,6 +403,10 @@ struct SessionOutput {
     position: Point,
     /// Swapchain, mode setting, and page flips for this output.
     drm_compositor: SessionDrmCompositor,
+    /// The kernel modes behind the wayland modes this output advertises,
+    /// index-aligned with `OutputEntry::modes` for the same output —
+    /// what a wlr-output-management `set_mode` resolves against.
+    drm_modes: Vec<DrmMode>,
     /// The page flip in flight, if any — set on a successful
     /// `queue_frame`, cleared by the completion event that answers it.
     /// While it is `Some`, [`render_frame_session`] refuses to draw this
@@ -781,6 +781,19 @@ fn attach_output(
         Some((position.x, position.y).into()),
     );
     let size = Size::new(wl_mode.size.w.max(0) as u32, wl_mode.size.h.max(0) as u32);
+    // The connector's full mode list, current-first and deduplicated by
+    // (size, refresh): what wlr-output-management enumerates, and the
+    // catalogue `apply_mode` matches a requested mode against. Kernel
+    // order otherwise — the EDID's own preference ranking.
+    let mut modes: Vec<OutputMode> = vec![wl_mode];
+    let mut drm_modes: Vec<DrmMode> = vec![*mode];
+    for candidate in info.modes() {
+        let candidate_wl = OutputMode::from(*candidate);
+        if !modes.iter().any(|held| held.size == candidate_wl.size && held.refresh == candidate_wl.refresh) {
+            modes.push(candidate_wl);
+            drm_modes.push(*candidate);
+        }
+    }
 
     // The DRM surface binds crtc + connector + mode; the compositor
     // wraps it with the swapchain and the damage tracking that turn a
@@ -891,11 +904,12 @@ fn attach_output(
             crtc: *crtc,
             position,
             drm_compositor,
+            drm_modes,
             frame_pending: None,
             // Nothing has ever been drawn on it.
             dirty: true,
         },
-        OutputSetup { output, position, size },
+        OutputSetup { output, position, size, modes },
     ))
 }
 
@@ -1047,6 +1061,80 @@ fn service_pending_flips(session: &mut SessionGraphics) -> bool {
         output.dirty = true;
     }
     true
+}
+
+/// Whether a mode change to `mode_index` on output `index` could be
+/// honored on this graphics stack. The nested backend's output is the
+/// host window — it has exactly one mode and keeps it; the session
+/// backend can set any mode the connector advertised.
+pub(crate) fn mode_is_applicable(graphics: &Graphics, index: usize, mode_index: usize) -> bool {
+    match graphics {
+        Graphics::Winit(_) => mode_index == 0,
+        Graphics::Session(session) => session
+            .outputs
+            .get(index)
+            .is_some_and(|output| mode_index < output.drm_modes.len()),
+    }
+}
+
+/// Re-programs one output's crtc to the mode at `mode_index` in its
+/// advertised list — the real half of a wlr-output-management mode
+/// change. The `DrmCompositor` performs the modeset on its next frame;
+/// the static mode source it renders against is retuned here so the
+/// swapchain and damage arithmetic follow the new size (see
+/// `attach_output` for why the source is static in the first place).
+pub(crate) fn apply_mode(
+    graphics: &mut Graphics,
+    index: usize,
+    mode_index: usize,
+) -> Result<(), String> {
+    match graphics {
+        Graphics::Winit(_) => {
+            if mode_index == 0 {
+                Ok(())
+            } else {
+                Err("the nested output is the host window and keeps its size".into())
+            }
+        }
+        Graphics::Session(session) => {
+            let output = session
+                .outputs
+                .get_mut(index)
+                .ok_or_else(|| format!("no session output at index {index}"))?;
+            let mode = *output
+                .drm_modes
+                .get(mode_index)
+                .ok_or_else(|| format!("no mode {mode_index} on {}", output.name))?;
+            output
+                .drm_compositor
+                .use_mode(mode)
+                .map_err(|error| format!("modeset refused: {error}"))?;
+            let size = smithay::utils::Size::from((mode.size().0 as i32, mode.size().1 as i32));
+            output.drm_compositor.set_output_mode_source(OutputModeSource::Static {
+                size,
+                scale: smithay::utils::Scale::from(1.0),
+                transform: Transform::Normal,
+            });
+            output.dirty = true;
+            Ok(())
+        }
+    }
+}
+
+/// Mirrors the (position, size) layout wlr-output-management just
+/// applied onto the session backend's per-crtc viewports — the offset
+/// `render_frame_session` hands `build_scene`. A no-op on the nested
+/// backend, whose single output never moves.
+pub(crate) fn sync_positions(graphics: &mut Graphics, layout: &[(Point, Size)]) {
+    let Graphics::Session(session) = graphics else {
+        return;
+    };
+    for (output, (position, _)) in session.outputs.iter_mut().zip(layout) {
+        if output.position != *position {
+            output.position = *position;
+            output.dirty = true;
+        }
+    }
 }
 
 /// Switches the seat to virtual terminal `vt`, reporting whether this
