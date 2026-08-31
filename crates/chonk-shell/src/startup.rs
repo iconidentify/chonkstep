@@ -362,6 +362,24 @@ pub fn ensure_xcursor_size(scale: f32) {
     // `scale` line. The marker survives the exec precisely because the
     // environment does, so a value this desktop set is recognized as
     // its own and recomputed rather than honored.
+    //
+    // THE ONE CASE THIS CANNOT REPAIR is the session that was already
+    // running when the marker was introduced. Its `XCURSOR_SIZE`
+    // predates the variable that would identify it, so the test below
+    // reads it as a user preference and stands down — and no hot
+    // restart can clear it, because preserving the environment across
+    // the exec is the very mechanism the marker depends on. The
+    // symptom is the double-scaled pointer `xcursor_size_env` exists
+    // to prevent, still there after the fix has landed: observed live
+    // as a session carrying a pre-marker `XCURSOR_SIZE=48` across
+    // every restart for two days. Only a full logout sheds it, since
+    // that is the only path that starts the compositor from an
+    // environment this desktop did not hand itself. Deliberately not
+    // papered over by adopting any value that happens to equal
+    // `xcursor_size_for(scale)`: that would silently overwrite the
+    // preference of a user who really did pin 48 on a scale-2 session,
+    // which is exactly who the marker is here to protect. A one-time
+    // logout is the cheaper price, and it is paid once per install.
     let ours = std::env::var_os("CHONKSTEP_OWNS_XCURSOR_SIZE").is_some();
     let preset = std::env::var_os("XCURSOR_SIZE").is_some() && !ours;
     // Recorded before the early return, so the answer is available
