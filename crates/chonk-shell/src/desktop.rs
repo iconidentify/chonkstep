@@ -2141,6 +2141,40 @@ impl<B: Backend> Desktop<B> {
         self.overview.owns(surface)
     }
 
+    /// Maps a point local to any surface the Overview owns (the panel
+    /// or the selection surface over it) into panel-local coordinates
+    /// — what `overview_hit` expects.
+    pub fn overview_panel_point(&self, surface: B::ShellId, local: Point) -> Point {
+        self.overview.panel_point(surface, local)
+    }
+
+    /// Whether the open Overview is still owed sharper previews than
+    /// the backend answered with at entry, and the backend has since
+    /// produced them — see `OverviewPanel::wants_fresh_previews`.
+    pub fn overview_wants_fresh_previews(&self, generation: u64) -> bool {
+        self.overview.wants_fresh_previews(generation)
+    }
+
+    /// The open Overview's clients in card order, for the caller to
+    /// fetch previews against — the same collect-then-paint dance
+    /// `icon_clients` documents.
+    pub fn overview_clients(&self) -> Vec<ClientId> {
+        self.overview.clients()
+    }
+
+    /// Installs freshly fetched previews (in `overview_clients` order)
+    /// and repaints the panel once.
+    pub fn update_overview_previews(
+        &mut self,
+        backend: &mut B,
+        theme: &Theme,
+        previews: Vec<Option<DecorationBuffer>>,
+        generation: u64,
+    ) {
+        let Self { overview, font_system, swash_cache, .. } = self;
+        overview.update_previews(backend, theme, font_system, swash_cache, previews, generation);
+    }
+
     pub fn overview_hit(&self, local: Point) -> OverviewHit {
         self.overview.hit(local)
     }
