@@ -41,6 +41,101 @@ crate and both session binaries carry the same number.
   `docs/appearance.md` has the honest table of what follows live and
   what waits for its next launch (Qt, notably, is documented rather
   than forced).
+- `chonk-switch` (`examples/chonk-switch`): the appearance switch as a
+  dock tile - a machined slide toggle in the desktop's chiseled idiom,
+  sun and moon trading places at the midpoint of a quarter-second
+  throw. Built purely on the platform's public surfaces (the Python
+  SDK for the tile, the appearance files for the mode), which makes it
+  the citizenship test a third-party instrument would take: it knows
+  nothing the docs don't say. It follows the mode file rather than its
+  own optimism - a click throws immediately but settles back if the
+  desktop refuses - and a hidden tile samples nothing.
+
+### Instrument panels
+
+- The Instrument Platform grows its second surface: click an
+  instrument's tile and a framed detail panel unfolds beside the dock,
+  streamed by the same process over the same socket, with the shell
+  drawing the chiseled chrome and owning placement and every dismissal
+  gesture (click-away, Escape, a tile re-click). One panel on screen
+  at a time; a panel is a popover, not a window, and never takes
+  keyboard focus. Every platform guarantee extends to it unchanged: the
+  desktop never blocks on a panel, and a hung instrument's panel is
+  torn down by the same ping machinery as its tile.
+- The wire grew honestly: panel frames cross the transport as bounded
+  top-to-bottom bands under one generation (a full-size panel cannot
+  fit one datagram), flow control drops only whole generations so a
+  repaint can never tear mid-stripe, panels get the one input kind
+  tiles never needed (Motion, for hover), and the shell now says its
+  protocol version in Welcome so a client can ask before speaking
+  panel messages. Protocol 2, specified byte-for-byte in
+  `docs/dockapp-protocol.md` section 11.
+- Both SDKs speak it: `open_panel` in Python and Go, with banding kept
+  out of authors' hands - draw whole panels and the SDK slices them
+  into maximal legal bands; `draw_rows` exists for the economical case
+  (a hover highlight is one narrow band, not a repaint). Illegal states
+  are unrepresentable: no frame before the grant, and a panel request
+  on a version-1 shell fails with a clean local error instead of
+  letting the shell disconnect the dockapp. The spec was negotiated
+  adversarially - two consumers built from the written contract alone,
+  every discrepancy ruled on and folded back until all three
+  implementations agreed byte for byte - and the conformance probe
+  (`chonk-panel-probe` in `chonk-testkit`) plays the whole conversation
+  over a real socket.
+- One limitation documented rather than fudged: a click inside an
+  application window does not reach the shell on either backend, so it
+  does not dismiss the panel. Escape, the tile re-click, and
+  panel-replacement cover the gap.
+
+### Real hardware
+
+- wlr-output-management: `wlr-randr` and `kanshi` can list and
+  configure outputs. Scale applies live - fractionally - and a
+  primary-scale change restyles the whole chrome through the same path
+  a config reload takes. What the backend cannot honor (disabling an
+  output, transforms) is refused with `failed()` and a named log line
+  rather than accepted and botched.
+- Fractional scale, end to end: fractional-scale-v1 and viewporter are
+  in, each output carries its own scale, and the integral `wl_output`
+  fallback advertises the ceiling - a client without the protocol
+  renders sharp and is downscaled, never blurred up. Watched on the
+  wire: foot at preferred scale 1.5 committing pixel-crisp into its
+  viewport, and a live `wlr-randr --scale 1.25` mid-session with the
+  client re-committing to match.
+- Real damage tracking with EGL buffer age: the nested renderer used to
+  admit full-frame damage every frame. Now the idle desktop repaints
+  about 1% of what it did, truly idle periods render nothing, and
+  `CHONKSTEP_FULL_DAMAGE=1` remains the escape hatch.
+
+### XWayland and application fixes
+
+- The last EWMH gap: the XWayland root now listens as well as speaks.
+  A pager's `_NET_ACTIVE_WINDOW` and `_NET_CURRENT_DESKTOP` client
+  messages translate into the same activation and desktop-switch
+  events every other path queues - proven by a pager round-tripping a
+  workspace switch in the end-to-end suite. `wmctrl -a` commands the
+  Wayland session now, not just reads it.
+- Input no longer dies after a window minimizes itself (Edge's own
+  menu does this): "no window focused" now clears seat focus and the
+  Activated state for real, so hiding and restoring the same window is
+  a real leave, enter, and configure. Miniaturized windows are told
+  Suspended - the protocol's word for them.
+- Explicit GPU sync on DRM sessions that support syncobj
+  (`wp_linux_drm_syncobj_v1`), with a readiness blocker on every
+  dmabuf commit - the canonical Chromium-on-NVIDIA flicker (sampling a
+  buffer the client's GPU was still writing) fixed at the compositor.
+- An XWayland client asking to be decorated is decorated: smithay's
+  `is_decorated` answers "is client-side decorated", not "wants
+  decorations", and the X11 arm of the chrome policy read it with the
+  sign flipped - every XWayland client's decoration decision was
+  inverted. Found by Spotify arriving frameless with `MWM_DECOR_ALL`
+  set; one sign flip, verified live.
+- GTK3 X11 apps are no longer double-scaled: the desktop's XSETTINGS
+  manager already publishes the scaling story
+  (`Gdk/WindowScalingFactor`, `Xft/DPI`, `Gdk/UnscaledDPI`), so the
+  launcher stopped forcing `GDK_SCALE` on top of it - LibreOffice
+  rendered at 4x on a scale-2 session while both were in play. Qt has
+  no XSETTINGS client, so `QT_SCALE_FACTOR` stays.
 
 ## [0.2.0] - 2026-08-30
 

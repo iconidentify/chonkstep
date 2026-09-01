@@ -5,7 +5,8 @@ two real login sessions - an X11 window manager and a Wayland
 compositor - so a feature lands once and both stacks get it by
 construction. The chrome is chiseled and specified to the pixel, under
 a dock of crash-proof out-of-process instruments, real workspaces, a
-modal Overview, and eight themes that apply live with nothing closed.
+modal Overview, and eight themes - each in a hand-designed light and
+dark rendition - that apply live with nothing closed.
 Sessions survive: layout restore across logins and crashes, a
 supervised compositor that comes back locked, and hot restarts that
 keep your windows open on X11.
@@ -60,10 +61,14 @@ a walkthrough from install to first hour in
   that pushes finished pixels over a private socket and gets theme,
   scale, input and supervision in return - so a widget that crashes,
   hangs or loops shows a dead face in its own tile and cannot take the
-  desktop with it. The wire protocol is specified byte-for-byte
-  ([docs/dockapp-protocol.md](docs/dockapp-protocol.md)), Python and
-  Go bindings ship dependency-free, and `chonk-get` installs a dockapp
-  from a git URL or local path. See
+  desktop with it. A tile can also open an **instrument panel**: click
+  it and a framed detail view unfolds beside the dock, streamed by the
+  same process, chiseled chrome and dismissal owned by the shell - one
+  panel at a time, never any keyboard focus, torn down by the same
+  ping machinery as a hung tile. The wire protocol is specified
+  byte-for-byte ([docs/dockapp-protocol.md](docs/dockapp-protocol.md)),
+  Python and Go bindings ship dependency-free - panels included - and
+  `chonk-get` installs a dockapp from a git URL or local path. See
   [docs/instrument-platform.md](docs/instrument-platform.md).
 - **Theme engine with eight built-in themes.** NeXTSTEP Classic, Amber
   Phosphor, Teal Blueprint, Graphite, NeXT Lavender, Jade Lacquer,
@@ -72,10 +77,22 @@ a walkthrough from install to first hour in
   16-color palette - and switching from the root menu applies on the
   spot: no restart, nothing closed, every window and dockapp where you
   left it. (Terminals already open keep the palette they launched
-  with; new ones get the new one.) Ivory Halftone is the light one: it
-  keeps the dark focused titlebar (inverting *that* is what stops a
-  light desktop from showing which window has the keyboard) and turns
-  everything the bars sit on to press-cream paper.
+  with; new ones get the new one.)
+- **Light and dark, everywhere.** Appearance is a second axis, not a
+  fork of the theme list: every theme carries two hand-designed
+  renditions of itself - fills, bevel ramps, menu palette, the full
+  16-color terminal scheme, and the wallpaper artwork's own mood each
+  drawn per side. Light is not inverted dark: the focused titlebar
+  stays ink on both sides (inverting *that* is what stops a light
+  desktop from showing which window has the keyboard). Switching is
+  live and scriptable - write `light`, `dark` or `toggle` to a state
+  file and the whole desktop re-dresses in place, running terminals
+  retinted, GTK/portal applications told to follow - and
+  `examples/chonk-switch` puts the toggle in the dock as a machined
+  slide switch. With nothing configured each theme wears its native
+  mood (dark for seven, light for Ivory Halftone), so nothing changes
+  until you ask. The file contract is public:
+  [docs/appearance.md](docs/appearance.md).
 - **Translucent terminals.** Each theme sets a glass opacity for the
   terminals it spawns, composited as true alpha through a session
   compositor. The window manager creates 32-bit ARGB frames so client
@@ -88,7 +105,11 @@ a walkthrough from install to first hour in
   the dock and Clip re-measure, the pointer cursors are redrawn, and
   every dockapp is told its new tile size. Applications already running
   keep the font and cursor sizes they were launched with, since those
-  are read once at their own startup.
+  are read once at their own startup. On the Wayland session scale is
+  also per-output and honestly fractional - fractional-scale-v1 plus
+  viewporter, a `wlr-randr --scale 1.25` applies mid-session, and a
+  client without the protocol renders sharp and is downscaled, never
+  blurred up.
 - **Live reload, and hot restart.** Two different things, and the
   first is the one you usually want. `scripts/reload.sh` (or the
   bindable `reload` action) re-reads the config file and applies all of
@@ -124,13 +145,17 @@ a walkthrough from install to first hour in
   mirrored up/down history matrix, CPU and memory load, sound volume
   with click-zone control, wifi/ethernet link state, battery/power) -
   miniaturized-window icon tiles with drag-to-place, and
-  eight built-in wallpaper artworks. Real workspaces, too: a dock
+  eight built-in wallpaper artworks, each with a rendition per
+  appearance mood. Real workspaces, too: a dock
   Clip - the workspace tile, drawn on the same recipes as the rest of
   the dock - sits at the top-left corner: clipped-corner arrows advance
   (growing workspaces on demand) and rewind, Alt+Ctrl+Left/Right
   switches, Alt+Shift+Left/Right carries the focused window
   along, and pagers can drive it all via `_NET_CURRENT_DESKTOP` and
   `_NET_WM_DESKTOP`.
+
+![Teal Blueprint in its dark rendition](site/shots/appearance-dark.png)
+![The same session one file write later: Teal Blueprint in its light rendition](site/shots/appearance-light.png)
 
 ![Translucent terminal on the Amber Phosphor theme](docs/screenshots/translucent-terminal.png)
 
@@ -251,8 +276,15 @@ What the session backend does not do yet, stated plainly:
   flips, and place in the desktop layout; a second GPU's outputs stay
   dark. Nothing hot-plugs: a monitor or GPU that appears mid-session is
   logged and ignored, so docking a laptop means restarting the session.
-  Output layout is left to right in connector order - there is no
-  configuration for arrangement, mirroring, or per-output scale yet.
+  Arrangement is configurable now, not compiled in: the compositor
+  speaks wlr-output-management, so `wlr-randr` and `kanshi` list and
+  configure outputs - position, mode, and per-output scale (fractional
+  included), applied live. What the backend cannot honor - disabling
+  an output, transforms - is refused with a named log line rather than
+  accepted and botched. Stated honestly: the multi-output plumbing has
+  been driven end to end on the nested backend and over the protocol,
+  but a many-monitor DRM session has not yet been proven on physical
+  hardware.
 - **The hardware cursor depends on your driver.** The pointer is asked
   for the display controller's cursor plane, which is what makes it
   track the hand instead of the frame rate. Whether it gets one is the
@@ -287,14 +319,26 @@ What the session backend does not do yet, stated plainly:
   ext-session-lock (lockers - and while locked, the scene is lock
   surfaces over black and nothing else, on screen and in every capture
   path), idle-notify with idle-inhibit, wlr-screencopy (`grim` and
-  friends - the site's screenshots are captured through it), and
-  wlr-foreign-toplevel-management. EWMH is also published to the
+  friends - the site's screenshots are captured through it),
+  wlr-foreign-toplevel-management, wlr-output-management (`wlr-randr`,
+  `kanshi`), fractional-scale-v1 with viewporter, and explicit GPU
+  sync (`wp_linux_drm_syncobj_v1`) on DRM sessions whose device
+  supports it. Screen sharing works through the standard portal chain
+  (xdg-desktop-portal-wlr over screencopy into PipeWire), verified end
+  to end - [docs/screen-sharing.md](docs/screen-sharing.md) is the
+  map, including the one upstream limitation: the wlr portal backend
+  captures whole outputs only, so "share entire screen" works and
+  "share a single window" is not offered. EWMH is published to the
   XWayland root - client list, active window, desktops, workarea,
-  frame extents - read-only for now: a pager can see everything and
-  command nothing yet. Still absent: wlr-output-management (no
-  `wlr-randr`), DRM leasing, and the command half of the EWMH story.
-  The desktop's own dock, Clip, and menus need none of it: they are
-  drawn by the compositor, not by clients.
+  frame extents - and the command half works too: a pager's
+  `_NET_ACTIVE_WINDOW` and `_NET_CURRENT_DESKTOP` messages drive the
+  desktop (`wmctrl -l` lists, `wmctrl -a` activates, `wmctrl -s`
+  switches desks). Still absent: DRM leasing, and text-input/IME - a
+  CJK input method cannot compose into native Wayland clients on this
+  desktop yet. X11-to-Wayland drag-and-drop does not cross the
+  boundary in either direction (each world drags within itself). The
+  desktop's own dock, Clip, and menus need none of it: they are drawn
+  by the compositor, not by clients.
 
 **Nested** remains the way to develop the compositor, and the way to
 look at it without logging out: it opens a regular window on your
@@ -340,16 +384,22 @@ about and skipped, and a completely unreadable file just means the
 defaults. See [docs/config.example.toml](docs/config.example.toml) for
 a fully commented example of every option.
 
-Five settings and a keybinding table are available:
+Nine settings and a keybinding table are available:
 `focus_follows_mouse` (click-to-focus by default), `scale` (HiDPI UI
 scaling; the `CHONKSTEP_SCALE` environment variable overrides it),
 `theme` (a theme picked live from the root menu is persisted and wins
-over it), `placement` (where new windows land: `smart` by default, or
-`cascade` / `center`), and `edge_resistance` (how close, in pixels, a
-dragged window gets to a screen or window edge before snapping flush;
-`0` disables snapping). Keybindings merge over the defaults - list a
-combo to change it, set it to `"none"` to unbind it, and every
-unlisted default stays.
+over it), `appearance` (`"light"` or `"dark"` - the axis every theme
+has two renditions along; the running session's own persisted mode
+wins after the first start, and the live way to switch is the request
+file in [docs/appearance.md](docs/appearance.md)), `placement` (where
+new windows land: `smart` by default, or `cascade` / `center`),
+`edge_resistance` (how close, in pixels, a dragged window gets to a
+screen or window edge before snapping flush; `0` disables snapping),
+`terminal_font_px` (the terminal's type size at 1x scale, with the
+launch geometry derived from the monitor), `restore_session` and
+`lock_command` (the Living Desktop pair above). Keybindings merge
+over the defaults - list a combo to change it, set it to `"none"` to
+unbind it, and every unlisted default stays.
 
 Edits apply to the running session: `scripts/reload.sh` re-reads this
 file and applies all of it in place - nothing closed, no window lost -
@@ -371,6 +421,7 @@ The default bindings:
 | alt+ctrl+left    | Previous workspace                           |
 | alt+shift+right  | Carry the focused window to the next         |
 | alt+shift+left   | Carry the focused window to the previous     |
+| super+up         | The modal Overview                           |
 
 Alt+Tab window cycling is part of the modal switcher machinery and is
 always available; it is not rebindable from the config file.

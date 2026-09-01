@@ -81,7 +81,7 @@ echo "Installing dependencies (sudo)..."
 # See docs/screen-sharing.md.
 sudo pacman -S --needed --noconfirm \
     xorg-server xorg-xinit xorg-xauth \
-    rxvt-unicode picom wireplumber \
+    rxvt-unicode foot picom wireplumber \
     ttf-dejavu gsfonts ttf-jetbrains-mono-nerd noto-fonts \
     libxkbcommon libglvnd mesa xorg-xwayland \
     libdrm libinput systemd-libs seatd \
