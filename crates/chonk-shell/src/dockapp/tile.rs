@@ -298,7 +298,24 @@ struct Connection {
     /// Kept per connection rather than per tile because it is a fact
     /// about a conversation: a dockapp that reconnects has been told
     /// nothing yet, whatever the tile knew about its predecessor.
+    ///
+    /// Held *unmasked* — the change comparison in
+    /// [`RemoteTile::push_theme`] runs against the broadcast state once
+    /// per pass, and masking is applied only at the send
+    /// ([`ThemeState::for_client`]), so the comparison never sees two
+    /// differently-masked copies of the same fact.
     told: ThemeState,
+    /// The protocol version this connection's `Hello` announced.
+    ///
+    /// Two decisions key on it, and both are the same incident wearing
+    /// different hats: what may be put in the formerly-reserved `proto`
+    /// u16 of `Welcome`/`ThemeChanged` (a version-1 client gets the
+    /// byte-exact v1 wire, zeros included — a strict v1 decoder
+    /// rightly dies on anything else), and whether the panel family
+    /// (`0x05`–`0x07`) is legal from this peer at all (it needs `>= 2`
+    /// — a client that said 1 was told `proto` 0 and has no business
+    /// sending them).
+    proto: u32,
 }
 
 /// How often a streaming panel's pixels are re-presented to the
@@ -619,15 +636,32 @@ impl RemoteTile {
 
     /// Accepts an authenticated connection. The caller has already run
     /// `chonk_dock_proto::validate_hello` against
-    /// [`token`](Self::token).
-    pub(crate) fn adopt(&mut self, socket: Seqpacket, wants: InputMask, welcome: ThemeState, now: Instant) {
-        let mut connection =
-            Connection { socket, send: SendQueue::new(), wants, ping_seq: 0, last_ping: now, unanswered: 0, since: now, told: welcome.clone() };
+    /// [`token`](Self::token); `client_proto` is the version that
+    /// `Hello` announced (`Accepted::proto`), which decides what the
+    /// `Welcome` may carry in its formerly-reserved `proto` field —
+    /// see [`Connection::proto`].
+    pub(crate) fn adopt(&mut self, socket: Seqpacket, wants: InputMask, client_proto: u32, welcome: ThemeState, now: Instant) {
+        let mut connection = Connection {
+            socket,
+            send: SendQueue::new(),
+            wants,
+            ping_seq: 0,
+            last_ping: now,
+            unanswered: 0,
+            since: now,
+            told: welcome.clone(),
+            proto: client_proto,
+        };
         // Queued, not sent inline, for exactly the reason every other
         // send is queued — see `flush`. The first message is not an
         // exception worth carving out, and a `Welcome` that blocked
         // would be a frozen desktop at the moment a tile appears.
-        for message in [ServerMessage::Welcome(welcome), ServerMessage::Visibility { visible: true }] {
+        //
+        // `for_client` is the incident gate: to a version-1 Hello this
+        // Welcome must be byte-identical to a protocol-1 shell's,
+        // reserved zeros included, or a strict v1 decoder dies at the
+        // handshake and crash-loops into the crash brake.
+        for message in [ServerMessage::Welcome(welcome.for_client(client_proto)), ServerMessage::Visibility { visible: true }] {
             if let Ok(bytes) = message.encode() {
                 let _ = connection.send.push(bytes, now);
             }
@@ -730,6 +764,23 @@ impl RemoteTile {
 
     /// Returns whether the connection survived this message.
     fn handle(&mut self, message: ClientMessage, ctx: &ServiceContext) -> bool {
+        // The panel family exists only for a connection whose `Hello`
+        // announced protocol 2 or newer. A client that said 1 was told
+        // `proto` 0 in its `Welcome` — the field its protocol declared
+        // reserved — so it has been told, in its own wire dialect, that
+        // panels do not exist here; sending one anyway is the same
+        // protocol error the document has always promised for an
+        // unknown kind on a v1 connection.
+        let panel_family = matches!(
+            message,
+            ClientMessage::OpenPanel { .. } | ClientMessage::PanelFrame { .. } | ClientMessage::ClosePanel
+        );
+        if panel_family && self.connection.as_ref().is_some_and(|connection| connection.proto < 2) {
+            tracing::warn!(id = %self.entry.id, "a protocol-1 dockapp sent an instrument-panel message");
+            self.stop_connection(GoodbyeReason::ProtocolError);
+            self.disconnected(ctx.now, "panel message from a protocol-1 client");
+            return false;
+        }
         match message {
             ClientMessage::Frame { generation, width, height, pixels } => self.on_frame(generation, width, height, pixels, ctx),
             ClientMessage::Pong { seq } => {
@@ -1044,7 +1095,13 @@ impl RemoteTile {
         if let Some(connection) = self.connection.as_mut() {
             connection.told = next.clone();
         }
-        self.enqueue(ServerMessage::ThemeChanged(next), ctx.now);
+        // Masked per connection at the send, exactly as the `Welcome`
+        // was: a version-1 client must never see a nonzero value in the
+        // u16 its protocol declared reserved. `told` above stays
+        // unmasked so the change comparison keeps comparing like with
+        // like.
+        let client_proto = self.connection.as_ref().map_or(0, |connection| connection.proto);
+        self.enqueue(ServerMessage::ThemeChanged(next.for_client(client_proto)), ctx.now);
     }
 
     /// Sends whatever the socket will take.
@@ -2017,7 +2074,7 @@ mod tests {
         // the tile off trying to launch a program: the property under
         // test is about the socket, not about `fork`.
         let mut tile = RemoteTile::new(entry(RestartPolicy::Never, 1), 56, base);
-        tile.adopt(ours, InputMask::all(), welcome(), base);
+        tile.adopt(ours, InputMask::all(), chonk_dock_proto::PROTOCOL_VERSION, welcome(), base);
 
         let socket_path = PathBuf::from("/test/dock.sock");
         let mut scratch = Vec::new();
@@ -2048,7 +2105,7 @@ mod tests {
         let (ours, peer) = seqpacket_pair();
         let base = Instant::now();
         let mut tile = RemoteTile::new(entry(RestartPolicy::Never, 1), 56, base);
-        tile.adopt(ours, InputMask::all(), welcome(), base);
+        tile.adopt(ours, InputMask::all(), chonk_dock_proto::PROTOCOL_VERSION, welcome(), base);
         drop(peer);
 
         let socket_path = PathBuf::from("/test/dock.sock");
@@ -2070,7 +2127,7 @@ mod tests {
         let (ours, theirs) = seqpacket_pair();
         let base = Instant::now();
         let mut tile = RemoteTile::new(entry(RestartPolicy::Never, 1), 56, base);
-        tile.adopt(ours, InputMask::all(), welcome(), base);
+        tile.adopt(ours, InputMask::all(), chonk_dock_proto::PROTOCOL_VERSION, welcome(), base);
         tile.state = TileState::Live;
 
         let socket_path = PathBuf::from("/test/dock.sock");
@@ -2146,7 +2203,7 @@ mod tests {
         let (ours, peer) = seqpacket_pair();
         let base = Instant::now();
         let mut tile = RemoteTile::new(entry(RestartPolicy::Always, 1), 56, base);
-        tile.adopt(ours, InputMask::all(), welcome(), base);
+        tile.adopt(ours, InputMask::all(), chonk_dock_proto::PROTOCOL_VERSION, welcome(), base);
         tile.state = TileState::Live;
         let socket_path = PathBuf::from("/test/dock.sock");
         let mut scratch = Vec::new();
@@ -2176,7 +2233,7 @@ mod tests {
         let (ours, peer) = seqpacket_pair();
         let base = Instant::now();
         let mut tile = RemoteTile::new(entry(RestartPolicy::Always, 1), 56, base);
-        tile.adopt(ours, InputMask::none(), welcome(), base);
+        tile.adopt(ours, InputMask::none(), chonk_dock_proto::PROTOCOL_VERSION, welcome(), base);
         let socket_path = PathBuf::from("/test/dock.sock");
         let mut scratch = Vec::new();
         let _ = drain(&peer);
@@ -2214,7 +2271,7 @@ mod tests {
         let (ours, peer) = seqpacket_pair();
         let base = Instant::now();
         let mut tile = RemoteTile::new(entry(RestartPolicy::Always, 1), 56, base);
-        tile.adopt(ours, InputMask::none(), welcome(), base);
+        tile.adopt(ours, InputMask::none(), chonk_dock_proto::PROTOCOL_VERSION, welcome(), base);
         tile.state = TileState::Live;
         let socket_path = PathBuf::from("/test/dock.sock");
         let mut scratch = Vec::new();
@@ -2251,7 +2308,7 @@ mod tests {
         let (ours, peer) = seqpacket_pair();
         let base = Instant::now();
         let mut tile = RemoteTile::new(entry(RestartPolicy::Always, 1), 56, base);
-        tile.adopt(ours, InputMask::none(), welcome(), base);
+        tile.adopt(ours, InputMask::none(), chonk_dock_proto::PROTOCOL_VERSION, welcome(), base);
         tile.state = TileState::Live;
         let socket_path = PathBuf::from("/test/dock.sock");
         let mut scratch = Vec::new();
@@ -2289,7 +2346,7 @@ mod tests {
         let (ours, _peer) = seqpacket_pair();
         let base = Instant::now();
         let mut tile = RemoteTile::new(entry(RestartPolicy::Never, 2), 56, base);
-        tile.adopt(ours, InputMask::none(), welcome(), base);
+        tile.adopt(ours, InputMask::none(), chonk_dock_proto::PROTOCOL_VERSION, welcome(), base);
         let socket_path = PathBuf::from("/test/dock.sock");
         let mut scratch = Vec::new();
         let ctx = ServiceContext { now: base, theme: &welcome(), socket_path: &socket_path, scratch: &mut scratch, panel_bounds: (1024, 1024) };
@@ -2384,7 +2441,7 @@ mod tests {
         let (ours, peer) = seqpacket_pair();
         let base = Instant::now();
         let mut tile = RemoteTile::new(entry(RestartPolicy::Never, 1), 56, base);
-        tile.adopt(ours, InputMask::all(), welcome(), base);
+        tile.adopt(ours, InputMask::all(), chonk_dock_proto::PROTOCOL_VERSION, welcome(), base);
         tile.state = TileState::Live;
         // One pass to flush the queued Welcome/Visibility, then drain
         // them so every test starts from a quiet wire.

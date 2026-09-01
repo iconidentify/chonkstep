@@ -481,7 +481,7 @@ pub(crate) fn admit<'a>(
             if rejoining {
                 tracing::info!(%id, "readopted a dockapp that outlived the shell restart");
             }
-            tile.adopt(socket, accepted.wants, welcome.clone(), now);
+            tile.adopt(socket, accepted.wants, accepted.proto, welcome.clone(), now);
         }
         Err(reason) => {
             tracing::warn!(%id, ?reason, rejoining, "refusing a dockapp connection");
@@ -835,6 +835,333 @@ mod panel_wire_tests {
         shell.pass(base + Duration::from_millis(48));
         assert!(shell.tile.poll_fd().is_some(), "streaming against an unseen PanelClosed is a race, not a crime");
         assert!(drain(&peer).is_empty(), "and provokes no reply");
+    }
+}
+
+/// The regression test for the deployed-v1 incident, against the real
+/// shell half over a real socket.
+///
+/// What happened: the v2 amendment put the shell's protocol version in
+/// the u16 at body offset 10 of `Welcome`/`ThemeChanged` — a field
+/// protocol 1 declared reserved-and-zero — and sent it to *every*
+/// client. Every strictly conforming deployed v1 decoder (obeying the
+/// protocol document's own "reject a nonzero reserved byte" rule) died
+/// at the handshake, crash-looped, and was benched by the crash brake.
+///
+/// So the client in these tests is deliberately **not** the SDK: it is
+/// a hand-written protocol-1 decoder exactly as strict as the one that
+/// died in the field — any nonzero reserved byte is fatal, offset 10
+/// included. Do not relax it; its strictness *is* the test. If the
+/// shell half ever again puts a nonzero byte where protocol 1 kept
+/// zeros, this fails here instead of in someone's dock.
+#[cfg(test)]
+mod v1_compat_wire_tests {
+    use super::*;
+    use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::time::Duration;
+
+    use chonk_dock_proto::transport::mint_token;
+    use chonk_dock_proto::wire::InputMask;
+    use chonk_dock_proto::TOKEN_BYTES;
+
+    use crate::dockapp::registry::{DockappEntry, RestartPolicy};
+    use crate::dockapp::tile::{RemoteTile, ServiceContext, TileState};
+
+    static COUNTER: AtomicU32 = AtomicU32::new(0);
+
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn new() -> Self {
+            let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
+            let dir = std::env::temp_dir().join(format!("chonk-v1-compat-{}-{unique}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::set_permissions(&dir, std::os::unix::fs::PermissionsExt::from_mode(0o700)).unwrap();
+            Self(dir)
+        }
+
+        fn socket(&self) -> PathBuf {
+            self.0.join("dock-test.sock")
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// What the strict decoder understood a shell message to be. Only
+    /// the kinds protocol 1 defined — a v1 client has never heard of
+    /// the panel family, so those kinds are as unknown as 0xFF.
+    #[derive(Debug, PartialEq)]
+    enum V1Message {
+        Welcome { proto_field: u16, theme_id: String },
+        ThemeChanged { proto_field: u16, theme_id: String },
+        Visibility(bool),
+        Ping(u32),
+        Goodbye(u8),
+    }
+
+    /// A minimal protocol-1 decoder with the reference decoder's full
+    /// strictness — the deployed decoder the incident killed, re-armed.
+    /// **Every reserved byte must be zero**, including the u16 at body
+    /// offset 10 of Welcome/ThemeChanged, which protocol 1 reserved
+    /// and protocol 2 reassigned. Deliberately not written in terms of
+    /// `chonk-dock-proto`, whose current decoder knows the field.
+    fn strict_v1_decode(buf: &[u8]) -> Result<V1Message, String> {
+        if buf.len() < 4 {
+            return Err("message ended inside the header".into());
+        }
+        if buf[1..4] != [0, 0, 0] {
+            return Err("reserved header bytes were not zero".into());
+        }
+        let u16_at = |i: usize| u16::from_le_bytes([buf[i], buf[i + 1]]);
+        let u32_at = |i: usize| u32::from_le_bytes([buf[i], buf[i + 1], buf[i + 2], buf[i + 3]]);
+        match buf[0] {
+            kind @ (0x81 | 0x82) => {
+                if buf.len() < 20 {
+                    return Err("theme state ended inside its fixed fields".into());
+                }
+                let theme_id_len = u16_at(12) as usize;
+                // THE line from the incident: `if reserved != 0: raise
+                // DecodeError` on the u16 at body offset 10 (datagram
+                // offset 14). Protocol 1 says it is reserved; this
+                // decoder conforms.
+                let reserved = u16_at(14);
+                if reserved != 0 {
+                    return Err(format!("reserved field at body offset 10 was not zero (got {reserved})"));
+                }
+                let toml_len = u32_at(16) as usize;
+                if buf.len() != 20 + theme_id_len + toml_len {
+                    return Err("theme state length disagrees with its headers".into());
+                }
+                let theme_id = std::str::from_utf8(&buf[20..20 + theme_id_len]).map_err(|_| "bad utf-8")?.to_string();
+                Ok(if kind == 0x81 {
+                    V1Message::Welcome { proto_field: reserved, theme_id }
+                } else {
+                    V1Message::ThemeChanged { proto_field: reserved, theme_id }
+                })
+            }
+            0x84 => {
+                if buf.len() != 8 || buf[5..8] != [0, 0, 0] {
+                    return Err("bad Visibility".into());
+                }
+                Ok(V1Message::Visibility(buf[4] == 1))
+            }
+            0x85 => {
+                if buf.len() != 8 {
+                    return Err("bad Ping".into());
+                }
+                Ok(V1Message::Ping(u32_at(4)))
+            }
+            0x86 => {
+                if buf.len() != 8 || buf[5..8] != [0, 0, 0] {
+                    return Err("bad Goodbye".into());
+                }
+                Ok(V1Message::Goodbye(buf[4]))
+            }
+            kind => Err(format!("unknown message kind {kind:#04x}")),
+        }
+    }
+
+    /// One registered tile plus the real servicing pass, as in the
+    /// sibling test modules.
+    struct Harness {
+        host: DockHost,
+        tile: RemoteTile,
+        scratch: Vec<u8>,
+        theme: ThemeState,
+    }
+
+    impl Harness {
+        fn start(socket: &Path, now: Instant) -> Self {
+            let host = DockHost::bind_at(socket.to_path_buf());
+            let entry = DockappEntry {
+                id: "wmnet".to_string(),
+                name: "NET".to_string(),
+                exec: vec!["/nonexistent/chonk-test-wmnet".to_string()],
+                tile_units: 1,
+                restart: RestartPolicy::Never,
+                source: PathBuf::from("/test/wmnet.dockapp"),
+            };
+            let theme = ThemeState {
+                tile_px: 56,
+                scale: 1.0,
+                proto: chonk_dock_proto::SHELL_PROTOCOL_VERSION,
+                theme_id: "nextstep-classic".into(),
+                theme_toml: String::new(),
+            };
+            Self { host, tile: RemoteTile::new(entry, 56, now), scratch: Vec::new(), theme }
+        }
+
+        fn pass(&mut self, now: Instant) {
+            for admission in self.host.service(now) {
+                admit(std::iter::once(&mut self.tile), admission, &self.theme, now);
+            }
+            let socket_path = self.host.socket_path().clone();
+            let mut ctx = ServiceContext {
+                now,
+                theme: &self.theme,
+                socket_path: &socket_path,
+                scratch: &mut self.scratch,
+                panel_bounds: (800, 600),
+            };
+            self.tile.service(&mut ctx);
+        }
+    }
+
+    /// Everything queued for the client right now, run through the
+    /// strict v1 decoder — a decode failure here is the incident.
+    fn drain_strict(peer: &Seqpacket) -> (Vec<V1Message>, bool) {
+        let mut buffer = vec![0u8; MAX_MESSAGE_BYTES];
+        let mut messages = Vec::new();
+        loop {
+            match peer.recv(&mut buffer) {
+                Ok(0) => return (messages, true),
+                Ok(n) => messages.push(
+                    strict_v1_decode(&buffer[..n])
+                        .unwrap_or_else(|error| panic!("the strict v1 decoder rejected a shell message: {error}")),
+                ),
+                Err(_) => return (messages, false),
+            }
+        }
+    }
+
+    /// The v1 `Hello`, encoded by hand for the same reason the decoder
+    /// is: this client predates the current crate.
+    fn v1_hello(id: &str, token: [u8; TOKEN_BYTES]) -> Vec<u8> {
+        let mut b = vec![0x01u8, 0, 0, 0];
+        b.extend_from_slice(&1u32.to_le_bytes()); // proto = 1
+        b.push(1); // tile_units
+        b.push(InputMask::all().bits());
+        b.push(id.len() as u8);
+        b.push(0);
+        b.extend_from_slice(&token);
+        b.extend_from_slice(id.as_bytes());
+        b
+    }
+
+    fn v1_frame(edge: u32) -> Vec<u8> {
+        let mut b = vec![0x02u8, 0, 0, 0];
+        b.extend_from_slice(&1u32.to_le_bytes());
+        b.extend_from_slice(&edge.to_le_bytes());
+        b.extend_from_slice(&edge.to_le_bytes());
+        b.extend(std::iter::repeat_n(0x5Au8, (edge * edge * 4) as usize));
+        b
+    }
+
+    /// **The incident, as a regression test.** A strictly conforming
+    /// protocol-1 client — the deployed kind, the kind the crash brake
+    /// benched — completes the handshake against the current shell
+    /// half, sees only bytes its protocol defined (reserved zeros where
+    /// protocol 1 put them), draws a frame, and is Live. Survives a
+    /// theme change too, since `ThemeChanged` shares the amended body.
+    #[test]
+    fn a_strict_deployed_v1_client_survives_the_current_shell() {
+        let scratch = Scratch::new();
+        let base = Instant::now();
+        let mut shell = Harness::start(&scratch.socket(), base);
+        let token = mint_token().unwrap();
+        shell.tile.pretend_launched(token, base);
+
+        let peer = Seqpacket::connect(&scratch.socket()).expect("connect");
+        peer.send(&v1_hello("wmnet", token)).unwrap();
+        shell.pass(base);
+
+        let (messages, eof) = drain_strict(&peer);
+        assert!(!eof, "the connection must survive the handshake");
+        let welcome = messages
+            .iter()
+            .find_map(|m| match m {
+                V1Message::Welcome { proto_field, theme_id } => Some((*proto_field, theme_id.clone())),
+                _ => None,
+            })
+            .expect("a Welcome the strict decoder accepted");
+        assert_eq!(welcome, (0, "nextstep-classic".to_string()), "reserved zero on the wire, exactly the v1 layout");
+        assert!(!messages.iter().any(|m| matches!(m, V1Message::Goodbye(_))), "and no refusal");
+
+        // One frame: the tile goes Live, which is the whole point of a
+        // dockapp existing.
+        peer.send(&v1_frame(56)).unwrap();
+        shell.pass(base + Duration::from_millis(16));
+        assert_eq!(shell.tile.state(), TileState::Live, "the v1 instrument draws");
+
+        // A theme pick mid-session: ThemeChanged rides the same amended
+        // body, so it must be masked for this connection too.
+        shell.theme = ThemeState { theme_id: "amber-phosphor".into(), ..shell.theme.clone() };
+        shell.pass(base + Duration::from_millis(32));
+        let (messages, eof) = drain_strict(&peer);
+        assert!(!eof);
+        assert!(
+            messages
+                .iter()
+                .any(|m| matches!(m, V1Message::ThemeChanged { proto_field: 0, theme_id } if theme_id == "amber-phosphor")),
+            "the restyle reaches a strict v1 decoder intact: {messages:?}"
+        );
+    }
+
+    /// The other half of the version key: a client that announces 2 is
+    /// told the shell's real version in the same field.
+    #[test]
+    fn a_version_2_hello_is_told_the_shells_real_version() {
+        let scratch = Scratch::new();
+        let base = Instant::now();
+        let mut shell = Harness::start(&scratch.socket(), base);
+        let token = mint_token().unwrap();
+        shell.tile.pretend_launched(token, base);
+
+        let peer = Seqpacket::connect(&scratch.socket()).expect("connect");
+        peer.send(&chonk_dock_proto::handshake::hello("wmnet", 1, token, InputMask::all()).encode().unwrap()).unwrap();
+        shell.pass(base);
+
+        let mut buffer = vec![0u8; MAX_MESSAGE_BYTES];
+        let mut welcome = None;
+        while let Ok(n) = peer.recv(&mut buffer) {
+            if n == 0 {
+                break;
+            }
+            if let Ok(ServerMessage::Welcome(state)) = ServerMessage::decode(&buffer[..n]) {
+                welcome = Some(state);
+            }
+        }
+        let welcome = welcome.expect("welcomed");
+        assert_eq!(welcome.proto, chonk_dock_proto::SHELL_PROTOCOL_VERSION);
+        assert!(welcome.panels_supported(), "which is the panel probe a v2 client reads");
+    }
+
+    /// A protocol-1 client has no panel family — it was told `proto` 0,
+    /// its own protocol calls `0x05` undefined, and the documented
+    /// answer to sending one anyway is `Goodbye { ProtocolError }`.
+    #[test]
+    fn a_protocol_1_client_sending_a_panel_message_is_refused_as_documented() {
+        let scratch = Scratch::new();
+        let base = Instant::now();
+        let mut shell = Harness::start(&scratch.socket(), base);
+        let token = mint_token().unwrap();
+        shell.tile.pretend_launched(token, base);
+
+        let peer = Seqpacket::connect(&scratch.socket()).expect("connect");
+        peer.send(&v1_hello("wmnet", token)).unwrap();
+        shell.pass(base);
+        let (_, eof) = drain_strict(&peer);
+        assert!(!eof, "admitted first");
+
+        // 0x05 OpenPanel 300x200 — a kind this client's own protocol
+        // does not define, sent anyway.
+        let mut open = vec![0x05u8, 0, 0, 0];
+        open.extend_from_slice(&300u32.to_le_bytes());
+        open.extend_from_slice(&200u32.to_le_bytes());
+        peer.send(&open).unwrap();
+        shell.pass(base + Duration::from_millis(16));
+
+        let (messages, _) = drain_strict(&peer);
+        assert!(
+            messages.iter().any(|m| matches!(m, V1Message::Goodbye(2))),
+            "the documented ProtocolError refusal: {messages:?}"
+        );
+        assert!(shell.tile.poll_fd().is_none(), "and the connection is over");
     }
 }
 

@@ -41,12 +41,18 @@
 //! at will. See [`DecodeError::BadFloat`] and [`ThemeState::same_as`].
 //!
 //! Rejecting unknown bits rather than ignoring them costs forward
-//! compatibility, which is deliberate: [`crate::PROTOCOL_VERSION`] is
-//! checked for *equality* at handshake, so there is no such thing as a
-//! peer that speaks a different version and gets to keep talking. A
-//! reserved byte that suddenly means something is a version bump. The
-//! failure mode this buys out of is the bad one — a v1 shell silently
-//! ignoring the field that said "these pixels are BGRA now".
+//! compatibility, which is deliberate: the `Hello` version is checked
+//! at handshake (the shell accepts `1..=`[`crate::PROTOCOL_VERSION`]
+//! and refuses anything newer), so there is no such thing as a peer
+//! that speaks an unknown version and gets to keep talking. A reserved
+//! byte that suddenly means something is a version bump — **and the
+//! sender may only put a nonzero value there for a peer whose
+//! announced version knows the field** ([`ThemeState::for_client`] is
+//! the one live example, and the incident recorded on
+//! [`crate::PROTOCOL_VERSION`] is why the second half of that sentence
+//! is now written down). The failure mode this buys out of is the bad
+//! one — a v1 shell silently ignoring the field that said "these
+//! pixels are BGRA now".
 //!
 //! # Message table
 //!
@@ -542,6 +548,15 @@ pub struct ThemeState {
     /// and it is exactly the shape the rule's own text predicts: "a
     /// reserved byte that starts meaning something is a version bump" —
     /// this byte *is* the version.
+    ///
+    /// **The shell may only send a nonzero value here to a client whose
+    /// `Hello` announced version 2 or newer.** A strictly conforming v1
+    /// decoder rejects any nonzero reserved byte — the protocol document
+    /// tells it to — so a nonzero value sent to a v1 client kills the
+    /// handshake of exactly the deployed instruments the field was
+    /// supposed to spare. [`ThemeState::for_client`] applies the gate;
+    /// the incident that made it law is recorded on
+    /// [`crate::PROTOCOL_VERSION`].
     pub proto: u16,
     pub theme_id: String,
     pub theme_toml: String,
@@ -585,6 +600,31 @@ impl ThemeState {
     /// reserved), so zero and one both mean "tiles only".
     pub fn panels_supported(&self) -> bool {
         self.proto >= 2
+    }
+
+    /// The state as it may be put on the wire *for this client*, keyed
+    /// on the version its `Hello` announced.
+    ///
+    /// The `proto` field rides in a u16 that protocol 1 declared
+    /// reserved-and-zero, and a strictly conforming v1 decoder rejects
+    /// any nonzero reserved byte — the protocol document instructs it
+    /// to. So to a client that said `Hello` version 1, the field is
+    /// sent as zero and the encoded `Welcome`/`ThemeChanged` is
+    /// **byte-identical** to what a protocol-1 shell always sent; only
+    /// a client that announced version 2 or newer — and therefore knows
+    /// the field — is told the shell's real version. This is the
+    /// general law stated on [`crate::PROTOCOL_VERSION`], applied at
+    /// the one field that currently needs it.
+    ///
+    /// The shell calls this at every `Welcome` and `ThemeChanged` send;
+    /// it is deliberately cheap to hold the *unmasked* state for
+    /// change-comparison and mask only at the send.
+    pub fn for_client(&self, client_proto: u32) -> Self {
+        if client_proto >= 2 {
+            self.clone()
+        } else {
+            Self { proto: 0, ..self.clone() }
+        }
     }
 }
 
@@ -1550,6 +1590,37 @@ mod tests {
         let ServerMessage::Welcome(decoded) = ServerMessage::decode(&v1).unwrap() else { panic!("kind") };
         assert_eq!(decoded.proto, 0, "kept raw for canonical re-encoding");
         assert!(!decoded.panels_supported(), "and zero reads as a protocol-1, tiles-only shell");
+    }
+
+    #[test]
+    fn a_version_1_client_is_sent_the_byte_exact_v1_welcome() {
+        // The incident test at the codec layer. Protocol 1 declared the
+        // u16 at body offset 10 reserved-and-zero, and its decoders
+        // reject any nonzero reserved byte — the protocol document
+        // tells them to. So what a current shell sends to a client
+        // whose Hello said 1 must be *byte-identical* to what a
+        // protocol-1 shell always sent: this is the layout below,
+        // written out by hand as a v1 shell would have produced it,
+        // zeros where v1 kept zeros.
+        let state = theme_state();
+        let captured_v1_welcome: Vec<u8> = {
+            let mut b = vec![0x81u8, 0, 0, 0];
+            b.extend_from_slice(&112u32.to_le_bytes()); // tile_px
+            b.extend_from_slice(&2.0f32.to_bits().to_le_bytes()); // scale
+            b.extend_from_slice(&(state.theme_id.len() as u16).to_le_bytes());
+            b.extend_from_slice(&0u16.to_le_bytes()); // reserved in v1: zero
+            b.extend_from_slice(&(state.theme_toml.len() as u32).to_le_bytes());
+            b.extend_from_slice(state.theme_id.as_bytes());
+            b.extend_from_slice(state.theme_toml.as_bytes());
+            b
+        };
+        let sent = ServerMessage::Welcome(state.for_client(1)).encode().unwrap();
+        assert_eq!(sent, captured_v1_welcome, "a strict v1 decoder must see exactly the wire it was built against");
+        // A client that announced version 2 (or newer) knows the field
+        // and is told the shell's real version, untouched.
+        for v2_client in [2u32, 3, u32::MAX] {
+            assert!(state.for_client(v2_client).same_as(&state), "a v2 client sees the unmasked state");
+        }
     }
 
     #[test]

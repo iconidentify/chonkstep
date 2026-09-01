@@ -12,8 +12,13 @@
 //!    launched for. (The socket's 0600 mode in a 0700 directory is the
 //!    outer lock; `SO_PEERCRED` is the third. None of them is load
 //!    bearing alone.)
-//! 2. **Do we speak the same protocol.** [`crate::PROTOCOL_VERSION`],
-//!    by equality — see [`crate::wire`] on why not a range.
+//! 2. **Do we speak the same protocol.** The `Hello` version must be
+//!    in `1..=`[`crate::PROTOCOL_VERSION`] — every version this build
+//!    knows is accepted (and remembered: what the shell may put in a
+//!    formerly-reserved field is keyed on it, see
+//!    [`crate::wire::ThemeState::for_client`]), while a *newer* one is
+//!    refused, because a peer from the future is as unreadable as one
+//!    presenting garbage — see [`crate::wire`].
 //! 3. **Can this tile physically work.** A geometry the v1 inline
 //!    transport cannot carry is rejected *here*, at connect time, with
 //!    a reason — rather than accepted and then failing on every single
@@ -36,6 +41,14 @@ pub struct Accepted {
     pub id: String,
     pub tile_units: u8,
     pub wants: InputMask,
+    /// The protocol version the client announced, `1..=`
+    /// [`PROTOCOL_VERSION`]. The shell keys two things on it: what it
+    /// may put in the formerly-reserved `proto` u16 of
+    /// `Welcome`/`ThemeChanged` ([`ThemeState::for_client`] — a
+    /// version-1 client must see the byte-exact v1 wire, zeros
+    /// included), and whether the panel family (`0x05`–`0x07`) is
+    /// legal from this connection at all (it needs `>= 2`).
+    pub proto: u32,
 }
 
 /// Decides whether a `Hello` earns a tile.
@@ -57,7 +70,14 @@ pub fn validate_hello(
     let ClientMessage::Hello { proto, id, tile_units, token, wants } = message else {
         return Err(GoodbyeReason::ProtocolError);
     };
-    if *proto != PROTOCOL_VERSION {
+    // Every version this build knows is welcome; only a *newer* one is
+    // refused (a peer from the future is unreadable, and "reject with a
+    // reason" beats misparsing). Rejecting version 1 here would be the
+    // Welcome-field incident from the other side: a wire change that
+    // orphans every deployed conformant client. Which version was said
+    // is carried out in `Accepted::proto` — the shell keys the
+    // formerly-reserved `Welcome` field and the panel-family gate on it.
+    if *proto == 0 || *proto > PROTOCOL_VERSION {
         return Err(GoodbyeReason::ProtocolError);
     }
     // Checked before the geometry so that a wrong token never learns
@@ -68,7 +88,7 @@ pub fn validate_hello(
     if !frame_fits(tile_px, *tile_units) {
         return Err(GoodbyeReason::TileTooLarge);
     }
-    Ok(Accepted { id: id.clone(), tile_units: *tile_units, wants: *wants })
+    Ok(Accepted { id: id.clone(), tile_units: *tile_units, wants: *wants, proto: *proto })
 }
 
 /// Builds the `Hello` a dockapp opens with.
@@ -167,7 +187,7 @@ mod tests {
         let message = hello("clock", 1, token, InputMask::all());
         assert_eq!(
             validate_hello(&message, &token, 56),
-            Ok(Accepted { id: "clock".into(), tile_units: 1, wants: InputMask::all() })
+            Ok(Accepted { id: "clock".into(), tile_units: 1, wants: InputMask::all(), proto: PROTOCOL_VERSION })
         );
     }
 
@@ -181,15 +201,38 @@ mod tests {
     }
 
     #[test]
-    fn a_wrong_protocol_version_is_refused_in_both_directions() {
+    fn every_hello_version_this_build_knows_is_accepted_and_remembered() {
+        // The range check, not equality: refusing version 1 here would
+        // be the Welcome-field incident from the other side — a
+        // deployed, conformant v1 instrument orphaned by an upgrade it
+        // never asked for. The version is carried out in `Accepted`
+        // because the shell keys the formerly-reserved `Welcome` field
+        // and the panel-family gate on it.
         let token = mint_token().unwrap();
-        for proto in [0, PROTOCOL_VERSION - 1, PROTOCOL_VERSION + 1, u32::MAX] {
+        for proto in 1..=PROTOCOL_VERSION {
+            let message =
+                ClientMessage::Hello { proto, id: "clock".into(), tile_units: 1, token, wants: InputMask::none() };
+            assert_eq!(
+                validate_hello(&message, &token, 56),
+                Ok(Accepted { id: "clock".into(), tile_units: 1, wants: InputMask::none(), proto }),
+                "version {proto} is one this build speaks and must keep working"
+            );
+        }
+    }
+
+    #[test]
+    fn a_protocol_version_from_the_future_is_refused() {
+        // A newer peer is as unreadable as one presenting garbage, and
+        // "reject with a reason" beats misparsing. Zero is not a
+        // version anything ever announced.
+        let token = mint_token().unwrap();
+        for proto in [0, PROTOCOL_VERSION + 1, u32::MAX] {
             let message =
                 ClientMessage::Hello { proto, id: "clock".into(), tile_units: 1, token, wants: InputMask::none() };
             assert_eq!(
                 validate_hello(&message, &token, 56),
                 Err(GoodbyeReason::ProtocolError),
-                "proto {proto} must not be accepted; a newer peer is as unreadable as an older one"
+                "proto {proto} must not be accepted"
             );
         }
     }
@@ -200,7 +243,10 @@ mod tests {
         let token = mint_token().unwrap();
         let message = hello("huge", 4, token, InputMask::none());
         assert_eq!(validate_hello(&message, &token, 168), Err(GoodbyeReason::TileTooLarge));
-        assert_eq!(validate_hello(&message, &token, 112), Ok(Accepted { id: "huge".into(), tile_units: 4, wants: InputMask::none() }));
+        assert_eq!(
+            validate_hello(&message, &token, 112),
+            Ok(Accepted { id: "huge".into(), tile_units: 4, wants: InputMask::none(), proto: PROTOCOL_VERSION })
+        );
     }
 
     #[test]

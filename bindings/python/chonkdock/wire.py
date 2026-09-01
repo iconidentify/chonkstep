@@ -1,4 +1,4 @@
-"""The chonkstep dockapp wire codec, protocol version 1.
+"""The chonkstep dockapp wire codec, protocol versions 1 and 2.
 
 A line-for-line transcription of ``crates/chonk-dock-proto/src/wire.rs``
 into stdlib Python. Everything here is pure: bytes in, messages out, no
@@ -22,7 +22,12 @@ from __future__ import annotations
 import struct
 from dataclasses import dataclass
 
-PROTOCOL_VERSION = 1
+# The Hello version this SDK announces. 2 says "I know the
+# formerly-reserved proto u16 in the Welcome body" — the shell
+# advertises its own version there only to a client that announced
+# >= 2, and keeps the byte-exact v1 wire (zeros there) for a client
+# that said 1. The shell accepts 1..=its own version.
+PROTOCOL_VERSION = 2
 TOKEN_BYTES = 16
 MAX_MESSAGE_BYTES = 256 * 1024
 MAX_FRAME_BYTES = MAX_MESSAGE_BYTES - 64
@@ -122,7 +127,7 @@ _ID_CHARS = frozenset(
 
 
 class DecodeError(ValueError):
-    """The peer's bytes could not be read as a v1 message."""
+    """The peer's bytes could not be read as a protocol message."""
 
 
 class EncodeError(ValueError):

@@ -92,29 +92,53 @@ pub use queue::{FrameLimiter, SendOutcome, SendQueue};
 pub use transport::{Seqpacket, SeqpacketListener};
 pub use wire::{ClientMessage, DecodeError, EncodeError, ServerMessage};
 
-/// Bumped whenever the byte layout in [`wire`] changes in a way an
-/// older peer would misread. The shell rejects a `Hello` that does not
-/// present exactly this value — deliberately an equality check and not
-/// a `>=` range, because a dockapp built against a *newer* protocol is
-/// just as unreadable as one built against an older one, and "reject
-/// with a reason" beats "misparse a frame into garbage pixels".
+/// The newest protocol this build speaks, presented in `Hello`. Bumped
+/// whenever the byte layout in [`wire`] changes in a way an older peer
+/// would misread — and, since 2, whenever a formerly-reserved field is
+/// reassigned, because announcing that you *know* the field is the only
+/// thing that makes reassigning it safe (see below).
 ///
-/// Note this is the *handshake* version a client presents, and it did
-/// **not** bump for the v2 instrument-panel family: a panel-capable
-/// client still draws tiles exactly as a v1 client does, so refusing it
-/// at the door would orphan every working dockapp for a feature it may
-/// never use. The shell's side of the story is
-/// [`SHELL_PROTOCOL_VERSION`], advertised in `Welcome` — that is what a
-/// client probes before sending `OpenPanel`.
-pub const PROTOCOL_VERSION: u32 = 1;
+/// The shell accepts any `Hello` version in `1..=PROTOCOL_VERSION` and
+/// remembers which one the client said; it still refuses a version
+/// *newer* than its own, because a dockapp built against a newer
+/// protocol is just as unreadable as one built against a version zero,
+/// and "reject with a reason" beats "misparse a frame into garbage
+/// pixels".
+///
+/// # Why this stopped being an equality check
+///
+/// The first cut of the v2 amendment left this at 1 and had the shell
+/// check `Hello` by equality, on the theory that a panel-capable client
+/// draws tiles exactly as a v1 client does. That theory was half right
+/// and the wrong half shipped: the shell then advertised its own
+/// version in the u16 at body offset 10 of `Welcome` — a field protocol
+/// 1 declared reserved-and-zero — to *every* client, and every strictly
+/// conforming v1 decoder (obeying the protocol document's own "reject a
+/// nonzero reserved byte" rule) died at the handshake and crash-looped
+/// into the crash brake. The lesson, now law: **a reserved field may be
+/// reassigned only gated on the peer having announced a version that
+/// knows it.** `Hello` arrives before `Welcome` and carries exactly
+/// that announcement, so version 2 here is a client saying "you may put
+/// your version where protocol 1 kept zeros"; to a version-1 `Hello`
+/// the shell keeps the v1 wire byte-identical, zeros included. See
+/// [`wire::ThemeState::for_client`].
+pub const PROTOCOL_VERSION: u32 = 2;
 
 /// The protocol version the *shell* speaks, advertised in the
 /// `Welcome`/`ThemeChanged` body (the u16 that was reserved-and-zero in
-/// protocol 1 — see [`wire::ThemeState::proto`]). A client must see
-/// `>= 2` here before sending any panel message: a v1 shell treats
-/// `OpenPanel` as an unknown kind, which is a protocol error that costs
-/// the connection, and this field is exactly the probe that prevents
-/// that.
+/// protocol 1 — see [`wire::ThemeState::proto`]) — but **only to a
+/// client whose `Hello` said version 2 or newer**. A client that said 1
+/// is sent zero there, exactly as a protocol-1 shell always did,
+/// because a strict v1 decoder rejects any nonzero reserved byte and is
+/// right to ([`wire::ThemeState::for_client`] is the gate).
+///
+/// A client must see `>= 2` here before sending any panel message: a v1
+/// shell treats `OpenPanel` as an unknown kind, which is a protocol
+/// error that costs the connection, and this field is exactly the probe
+/// that prevents that. (A current shell enforces the same gate from its
+/// side: panel messages from a connection whose `Hello` said 1 are a
+/// protocol error — such a client was told zero here and has no
+/// business sending them.)
 pub const SHELL_PROTOCOL_VERSION: u16 = 2;
 
 /// A dockapp authenticates by echoing back a 128-bit nonce the shell

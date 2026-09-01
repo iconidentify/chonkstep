@@ -1,4 +1,4 @@
-# The chonkstep dockapp protocol, version 1
+# The chonkstep dockapp protocol, versions 1 and 2
 
 This is the complete wire contract between a *dockapp* — a separate
 process that draws one or a few dock tiles — and the chonkstep shell.
@@ -139,23 +139,47 @@ rejects — never clamps, truncates, or ignores:
 - frame geometry outside the tile bounds, or a pixel payload whose
   length disagrees with `width * height * 4`.
 
-There is no forward compatibility by design: the `Hello` version is
-checked for **equality** at handshake, so there is no such thing as a
-peer speaking a different version that gets to keep talking. A reserved
-byte that starts meaning something is a version bump — and exactly one
-has: protocol 2 turned the reserved u16 in the `Welcome` body into the
-**shell's** version advertisement (section 4.2), which is how a client
-discovers the instrument-panel family (section 11) without risking its
-connection on a probe. The `Hello` version deliberately did not bump
-for it: a panel-capable client draws tiles exactly as a version-1
-client does, and refusing it at the door would orphan every working
-dockapp for a feature it may never use.
+There is no forward compatibility by design: the shell accepts a
+`Hello` whose version is one it speaks (`1..=2` today) and refuses
+anything **newer** — there is no such thing as a peer speaking an
+unknown version that gets to keep talking. A reserved byte that starts
+meaning something is a version bump — and exactly one has: protocol 2
+turned the reserved u16 in the `Welcome` body into the **shell's**
+version advertisement (section 4.2), which is how a client discovers
+the instrument-panel family (section 11) without risking its
+connection on a probe.
+
+**The reassignment law.** A reserved field may be reassigned only
+gated on the peer having announced a version that knows it — the
+sender keeps the old wire byte-identical, zeros included, for any peer
+that announced less. This is written down because the first cut of
+protocol 2 broke it: the shell advertised its version in that u16 to
+*every* client, including ones whose `Hello` said 1, and every
+strictly conforming deployed v1 decoder — obeying this document's own
+"reject any non-zero reserved byte" rule, exactly as instructed — died
+at the handshake, crash-looped, and was benched by the crash brake
+(section 8). The strictness rule and the reassignment law are two
+halves of one contract: decoders reject what their version calls
+reserved, and senders never put anything there for a peer of that
+version. Accordingly the `Hello` version *did* bump for protocol 2 —
+not because a v2 client draws tiles any differently (it does not), but
+because `Hello` arrives before `Welcome` and is precisely the
+announcement the gate needs. A version-1 `Hello` remains accepted
+forever under this law, and is answered with the byte-exact version-1
+wire.
+
+**Vendored SDKs freeze wire behavior.** An instrument that vendors an
+SDK copy at install time (as `examples/chonk-switch`'s `build.sh`
+does) speaks the wire exactly as of that install, whatever this
+document or the repository say since — which is why the law above is
+stated for *deployed* decoders, not current ones. Reinstalling
+re-vendors and picks up the current SDK.
 
 ## 3. Limits
 
 | Constant | Value | Why this value |
 | --- | --- | --- |
-| `PROTOCOL_VERSION` | 1 | Checked by equality, not `>=`: a dockapp built against a newer protocol is as unreadable as an older one, and "reject with a reason" beats "misparse a frame into garbage pixels". |
+| `PROTOCOL_VERSION` | 2 | The newest `Hello` version the shell speaks; it accepts `1..=2` and refuses anything newer — a dockapp built against a future protocol is as unreadable as one presenting garbage, and "reject with a reason" beats "misparse a frame into garbage pixels". Announcing 2 tells the shell you know the formerly-reserved `proto` u16 in the `Welcome` body (section 4.2); announcing 1 gets you the byte-exact version-1 wire, zeros included (section 2's reassignment law). |
 | `TOKEN_BYTES` | 16 | 128 bits, because the token is the only thing standing between a stray process of this user and a tile in the dock. |
 | `MAX_MESSAGE_BYTES` | 262144 (256 KiB) | Derived, not picked. `AF_UNIX` refuses a datagram larger than `SO_SNDBUF - 32`; `SO_SNDBUF` is clamped to `net.core.wmem_max` (stock Linux: 212992) and then doubled by the kernel. Both ends ask for widened buffers (~416 KiB effective ceiling); 256 KiB is the largest round number that clears the widened floor with room to spare while staying close enough to the un-widened one (~208 KiB) that a failed widening is a bug, not a catastrophe. Enforced by every decode before a byte is copied. |
 | `MAX_FRAME_BYTES` | 262080 (`MAX_MESSAGE_BYTES - 64`) | Ceiling on one `Frame`'s pixel payload. Covers every tile geometry this desktop plausibly has — a four-tile stack at scale 2, a two-tile stack at scale 3 — and stops short of a four-tile stack at scale 3 (451 KB), which is the documented trigger for a future v2 shared-memory transport. |
@@ -186,7 +210,9 @@ Field layouts below start immediately after the 4-byte header.
 #### `0x01 Hello`
 
 ```
-proto       u32        must equal 1
+proto       u32        the version you speak: 2 for a current client;
+                       1 (still accepted) predates the Welcome proto
+                       field; anything newer than the shell is refused
 tile_units  u8         stacked tiles requested, 1..=4
 wants       u8         input-mask bits (below)
 id_len      u8
@@ -212,12 +238,20 @@ paints avoid being woken for pointer traffic):
 
 Any other bit set is a decode error.
 
-Worked example — `Hello` for id `clock`, protocol 1, one tile, wanting
+The version you announce here decides what the shell may send *you*:
+a client that says 2 is told the shell's version in the
+formerly-reserved u16 of `Welcome` (section 4.2) and may use the panel
+family once the shell advertises `>= 2` there; a client that says 1
+gets zeros in every field its protocol reserved — and must never send
+a panel message (the shell answers one with `Goodbye
+{ ProtocolError }`, section 11.1).
+
+Worked example — `Hello` for id `clock`, protocol 2, one tile, wanting
 Press+Crossing, token `AB` repeated (33 bytes total):
 
 ```
 01 00 00 00              kind + reserved
-01 00 00 00              proto = 1
+02 00 00 00              proto = 2
 01                       tile_units
 09                       wants = PRESS | CROSSING
 05                       id_len
@@ -264,8 +298,9 @@ would be worse. The dockapp receives a `ThemeChanged` carrying the new
 #### `0x05 OpenPanel`, `0x06 PanelFrame`, `0x07 ClosePanel`
 
 The instrument-panel family, protocol 2. Byte layouts and semantics in
-section 11 — do not send any of them before reading the shell's
-`proto` in `Welcome`.
+section 11 — they are legal only on a connection whose `Hello`
+announced version 2, and not before reading the shell's `proto` in
+`Welcome`.
 
 #### `0x03 Pong`
 
@@ -312,11 +347,18 @@ theme_toml     [u8; theme_toml_len]    at most 131072 bytes
 
 `proto` is the u16 that was reserved (and required zero) in protocol
 1, at offset 10 of the body — which is why **zero decodes as 1**: a
-protocol-1 shell always sent zero there. A current shell sends **2**.
-This field is the *only* sanctioned way to learn whether the shell
-accepts the instrument-panel messages (section 11): a version-1 shell
-treats `OpenPanel` as an unknown kind, which is a protocol error that
-costs the connection, so probe here, never by sending.
+protocol-1 shell always sent zero there. A current shell sends **2 —
+but only to a client whose `Hello` announced version 2 or newer**. To
+a client that announced 1 it sends zero, keeping the message
+byte-identical to the version-1 wire: that client's decoder is
+required by section 2 to reject any non-zero reserved byte, and the
+reassignment law exists precisely so it never has to (the deployed v1
+instruments that died when an earlier shell ignored this are the
+reason the law is written down). This field is the *only* sanctioned
+way to learn whether the shell accepts the instrument-panel messages
+(section 11): a version-1 shell treats `OpenPanel` as an unknown kind,
+which is a protocol error that costs the connection, so probe here,
+never by sending.
 
 This is the **ThemeState contract**:
 
@@ -452,11 +494,15 @@ The shell's half of the instrument-panel family — section 11.
    from its event loop in a repaint pass or two, so two seconds is
    three orders of magnitude of slack.
 
-The shell validates in this order: `proto == 1` (else
-`ProtocolError`), then the token in constant time (checked before
+The shell validates in this order: `1 <= proto <= 2` (every version
+the shell speaks is accepted and remembered, anything newer — or zero
+— is `ProtocolError`), then the token in constant time (checked before
 geometry, so a wrong token never learns anything from *which* rejection
 it got — else `Unauthorized`), then that the tile fits (else
-`TileTooLarge`).
+`TileTooLarge`). The version you announced governs the rest of the
+connection: it decides what the shell puts in the formerly-reserved
+`proto` u16 of your `Welcome`/`ThemeChanged` (section 4.2) and whether
+the panel family is legal from you at all (section 11.1).
 
 On the shell's side, a launched process has **10 seconds**
 (`HANDSHAKE_GRACE`) to complete the handshake before it is counted as a
@@ -647,10 +693,16 @@ popover, not a window.
 
 ### 11.1 Probe before you speak
 
-Read `proto` from your `Welcome` (section 4.2). Panels need `proto >=
-2`; a version-1 shell treats `0x05` as an unknown kind and closes your
-connection with `Goodbye { ProtocolError }`. The field exists so that
-finding out never costs you the connection.
+Two gates, one per direction. First, your own `Hello` must have
+announced version 2 (section 4.1): a connection whose `Hello` said 1
+was told `proto` 0 in its `Welcome` — the byte-exact version-1 wire —
+and the shell answers any panel message (`0x05`–`0x07`) from it with
+`Goodbye { ProtocolError }`. Second, read `proto` from your `Welcome`
+(section 4.2): panels need `proto >= 2`, and a version-1 shell treats
+`0x05` as an unknown kind and closes your connection with `Goodbye
+{ ProtocolError }`. The field exists so that finding out never costs
+you the connection — an SDK's `open_panel` refuses locally when the
+shell advertised less than 2, and never probes by sending.
 
 ### 11.2 Opening: `0x05 OpenPanel` → `0x87 PanelOpened` / `0x88 PanelClosed{3}`
 
@@ -782,6 +834,8 @@ officially exists. (The `Visibility` message continues to govern your
 
 A panel-capable client additionally:
 
+- [ ] announces version 2 in its own `Hello` (section 11.1 — the
+      shell refuses panel messages from a version-1 connection);
 - [ ] reads `proto` from `Welcome` and sends no panel message unless
       it is `>= 2`;
 - [ ] draws at the granted size, never the requested one, and

@@ -24,7 +24,7 @@ func TestHelloHasTheDocumentedByteLayout(t *testing.T) {
 	if !bytes.Equal(msg[0:4], []byte{0x01, 0, 0, 0}) {
 		t.Errorf("header = % x", msg[0:4])
 	}
-	if binary.LittleEndian.Uint32(msg[4:8]) != 1 {
+	if binary.LittleEndian.Uint32(msg[4:8]) != ProtocolVersion {
 		t.Errorf("proto = %d", binary.LittleEndian.Uint32(msg[4:8]))
 	}
 	if msg[8] != 1 || msg[9] != WantPress|WantCrossing || msg[10] != 5 || msg[11] != 0 {

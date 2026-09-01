@@ -236,7 +236,7 @@ class ShellHarness(unittest.TestCase):
             self.conn.recv(262144))
         self.assertEqual(name, "hello")
         self.assertEqual((proto, units, token, ident),
-                         (1, 1, TOKEN, "panel-probe"))
+                         (wire.PROTOCOL_VERSION, 1, TOKEN, "panel-probe"))
         self.conn.send(enc_welcome(proto=self.SHELL_PROTO))
         # The mandatory first tile frame; after this the tile is quiet.
         name, (_, w, h, _) = self.next_message()

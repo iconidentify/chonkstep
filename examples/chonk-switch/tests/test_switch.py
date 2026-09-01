@@ -138,7 +138,9 @@ class Harness(unittest.TestCase):
         name, (proto, units, wants, token, ident) = dec_client(
             self.conn.recv(262144))
         self.assertEqual(name, "hello", "the first message must be Hello")
-        self.assertEqual(proto, 1)
+        # The SDK announces protocol 2 ("I know the formerly-reserved
+        # proto u16 in the Welcome body"); the shell accepts 1..=2.
+        self.assertEqual(proto, 2)
         self.assertEqual(units, 1, "the switch is a single tile")
         self.assertEqual(token, TOKEN)
         self.assertEqual(ident, "chonk-switch")

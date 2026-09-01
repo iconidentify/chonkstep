@@ -1,5 +1,5 @@
 // Package chonkdock implements the chonkstep dockapp protocol,
-// version 1, in stdlib Go.
+// versions 1 and 2, in stdlib Go.
 //
 // A dockapp is a separate process that draws one (or a few) chonkstep
 // dock tiles and pushes finished pixels to the desktop shell over a
@@ -26,7 +26,12 @@ import (
 // Protocol constants. See docs/dockapp-protocol.md section 3 for the
 // reasoning behind each value.
 const (
-	ProtocolVersion    = 1
+	// ProtocolVersion is the Hello version this SDK announces. 2 says
+	// "I know the formerly-reserved proto u16 in the Welcome body" —
+	// the shell advertises its own version there only to a client that
+	// announced >= 2, and keeps the byte-exact v1 wire (zeros) for a
+	// client that said 1. The shell accepts 1..=its own version.
+	ProtocolVersion    = 2
 	TokenBytes         = 16
 	MaxMessageBytes    = 256 * 1024
 	MaxFrameBytes      = MaxMessageBytes - 64
