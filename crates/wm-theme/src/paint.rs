@@ -603,7 +603,7 @@ mod tests {
         let (plain_min, plain_max) = ink_row_bounds(&plain_pixmap, 100).unwrap();
         let baseline_center = (plain_min + plain_max) as f32 / 2.0;
 
-        for text in ["\u{25D0} chonkstep-rust-wm-milestone-1", "\u{2733} Claude Code"] {
+        for text in ["\u{25D0} chonkstep-rust-wm-milestone-1", "\u{2733} weechat \u{2014} irc"] {
             let mut pixmap = Pixmap::new(w, h).unwrap();
             fill_rect(&mut pixmap, 0, 0, w, h, Color::rgb(10, 10, 12));
             draw_text(&mut pixmap, &mut font_system, &mut swash_cache, text, &font, Color::rgb(255, 255, 255), 0, 0, w, h, TextAlign::Center);
