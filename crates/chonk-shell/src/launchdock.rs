@@ -427,15 +427,21 @@ fn drag_threshold_for_tile(tile: u32) -> i32 {
     ((4.0 * tile as f32 / 56.0).round() as i32).max(2)
 }
 
-/// Root position of the strip's top-left corner: the primary
-/// monitor's left edge, directly below the Clip (which is `tile` x
-/// `tile` in that monitor's corner). Anchoring to the *monitor* rather
-/// than the desktop origin is what keeps the strip attached to the
-/// Clip on a multi-head layout - with a second screen to the left of
-/// the primary the desktop origin is off on that other monitor, and a
-/// root-anchored strip would sit there by itself.
-fn strip_origin(primary: Rect, tile: u32) -> Point {
-    Point::new(primary.pos.x, primary.pos.y + tile as i32)
+/// Root position of the strip's top-left corner: the primary monitor's
+/// own top-left corner.
+///
+/// This used to start one tile down, because the Clip owned the corner
+/// above it and the strip hung off its bottom edge. The Clip has since
+/// moved to the bottom-right (see `desktop::clip_geometry`), so holding
+/// the old offset would leave an empty tile of desktop above the strip
+/// — a gap shaped exactly like the thing that is no longer there.
+/// Anchoring to the *monitor* rather than the desktop origin is what
+/// keeps the strip on the primary in a multi-head layout - with a
+/// second screen to the left of the primary the desktop origin is off
+/// on that other monitor, and a root-anchored strip would sit there by
+/// itself.
+fn strip_origin(primary: Rect, _tile: u32) -> Point {
+    primary.pos
 }
 
 /// Which of `slots` tile slots the root-relative `root` falls in, for
@@ -655,18 +661,20 @@ mod tests {
         let primary = Rect { pos: Point::new(0, 0), size: Size::new(1920, 1200) };
         let origin = strip_origin(primary, 56);
 
-        // Three pins: y = 56..224 on the left edge, one slot per tile.
-        assert_eq!(slot_at(origin, 56, 3, Point::new(10, 60)), Some(0));
-        assert_eq!(slot_at(origin, 56, 3, Point::new(55, 223)), Some(2));
-        assert_eq!(slot_at(origin, 56, 3, Point::new(10, 224)), None, "below the last tile");
-        assert_eq!(slot_at(origin, 56, 3, Point::new(56, 60)), None, "right of the strip");
-        assert_eq!(slot_at(origin, 56, 3, Point::new(10, 30)), None, "the Clip's tile is not the strip");
+        // Three pins: y = 0..168 on the left edge, one slot per tile.
+        // The strip now starts at the corner itself, the Clip having
+        // moved to the bottom-right, so the first tile is slot 0.
+        assert_eq!(slot_at(origin, 56, 3, Point::new(10, 4)), Some(0));
+        assert_eq!(slot_at(origin, 56, 3, Point::new(55, 167)), Some(2));
+        assert_eq!(slot_at(origin, 56, 3, Point::new(10, 168)), None, "below the last tile");
+        assert_eq!(slot_at(origin, 56, 3, Point::new(56, 4)), None, "right of the strip");
+        assert_eq!(slot_at(origin, 56, 3, Point::new(10, -1)), None, "above the strip is not the strip");
 
         // The empty strip's pin zone is its would-be first slot: the
         // caller clamps a zero pin count up to one before asking, so
         // one is the number that actually reaches `slot_at`.
-        assert_eq!(slot_at(origin, 56, 1, Point::new(10, 60)), Some(0));
-        assert_eq!(slot_at(origin, 56, 1, Point::new(10, 120)), None);
+        assert_eq!(slot_at(origin, 56, 1, Point::new(10, 4)), Some(0));
+        assert_eq!(slot_at(origin, 56, 1, Point::new(10, 60)), None);
     }
 
     /// The strip follows the primary monitor rather than the desktop
@@ -726,7 +734,7 @@ mod tests {
         let mut backend = FakeBackend::new();
         let start = Rect { pos: Point::new(0, 0), size: Size::new(1920, 1200) };
         let mut dock: LaunchDock<FakeBackend> = LaunchDock::new(&mut backend, &theme, start, 56, &[], wm_theme::FontState::new());
-        assert_eq!(strip_origin(dock.primary, 56), Point::new(0, 56));
+        assert_eq!(strip_origin(dock.primary, 56), Point::new(0, 0));
 
         // A second display arrives to the left, so the primary's
         // origin moves right.
@@ -736,8 +744,8 @@ mod tests {
         assert_eq!(dock.primary, moved, "the strip must adopt the new primary");
         assert_eq!(
             strip_origin(dock.primary, 56),
-            Point::new(1600, 56),
-            "and sit below the Clip on that monitor, not on the old one"
+            Point::new(1600, 0),
+            "and sit in that monitor's corner, not on the old one"
         );
 
         // Repositioning to where it already is changes nothing.
@@ -749,10 +757,10 @@ mod tests {
     fn the_strip_anchors_to_the_primary_monitor_not_the_desktop_origin() {
         let primary = Rect { pos: Point::new(1600, 0), size: Size::new(1920, 1200) };
         let origin = strip_origin(primary, 56);
-        assert_eq!(origin, Point::new(1600, 56), "below the Clip, in the primary's corner");
+        assert_eq!(origin, Point::new(1600, 0), "the primary's own corner, which the Clip has vacated");
 
-        assert_eq!(slot_at(origin, 56, 3, Point::new(1610, 60)), Some(0), "hit-testing follows the strip");
-        assert_eq!(slot_at(origin, 56, 3, Point::new(10, 60)), None, "the other monitor is not the strip");
+        assert_eq!(slot_at(origin, 56, 3, Point::new(1610, 4)), Some(0), "hit-testing follows the strip");
+        assert_eq!(slot_at(origin, 56, 3, Point::new(10, 4)), None, "the other monitor is not the strip");
     }
 
     #[test]

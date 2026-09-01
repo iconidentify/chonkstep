@@ -911,10 +911,33 @@ fn dock_geometry(primary: Rect, dock_width: u32, dock_height: u32) -> Rect {
     }
 }
 
-/// Root geometry of the Clip: a single tile in the primary monitor's
-/// top-left corner (the Clip's stock position).
+/// Root geometry of the Clip: a single tile tucked into the primary
+/// monitor's bottom-right corner, under the dock column it belongs to.
+///
+/// The stock position is the top-left, and that is where this sat until
+/// it became the thing most in the way: the Clip is above-band furniture
+/// like the dock, so at the top-left it painted over the corner of every
+/// maximized window — the one corner a title bar's own buttons live in.
+/// Moved down and right it joins the dock's column instead of competing
+/// with the window area, and a maximized window keeps its whole top
+/// edge.
+///
+/// Known and not handled: the dock is top-anchored on this same edge and
+/// grows downward with each instrument, so on a screen short enough — or
+/// a dock long enough — for it to reach the bottom, the two overlap.
+/// Nothing resolves that today; the dock would need to stop a tile short
+/// of the Clip, or the Clip to step left. Left alone because the dock
+/// runs to `tile * (1 + instruments)` and reaching 1600px takes more
+/// instruments than exist, but it is a real edge and this is where to
+/// start when it bites.
 fn clip_geometry(primary: Rect, tile: u32) -> Rect {
-    Rect { pos: primary.pos, size: Size::new(tile, tile) }
+    Rect {
+        pos: Point::new(
+            primary.pos.x + primary.size.w.saturating_sub(tile) as i32,
+            primary.pos.y + primary.size.h.saturating_sub(tile) as i32,
+        ),
+        size: Size::new(tile, tile),
+    }
 }
 
 /// The dock/Clip/icon tile edge at `scale`, in device pixels.
@@ -2547,11 +2570,21 @@ impl<B: Backend> Desktop<B> {
         let pos = self.icon_slot_position(slot);
         let geom = Rect { pos, size: Size::new(self.tile, self.tile) };
 
-        let Some(window) = backend.create_shell_surface(geom, DESKTOP_BG, true) else {
+        // `above: false` — an icon tile is desktop furniture, not chrome.
+        // It used to be created in the above band and raised, which put a
+        // miniaturized window's icon on top of every real window: drag a
+        // terminal across one and the icon painted over it, as though the
+        // thing you had put away were in front of the thing you were
+        // using. The classic desktop lays icons *on the desk*, and the
+        // renderer already partitions on exactly this flag, so the whole
+        // fix is which band it is born into.
+        let Some(window) = backend.create_shell_surface(geom, DESKTOP_BG, false) else {
             tracing::warn!(?client, "failed to create icon tile window");
             return;
         };
         backend.map_shell_surface(window);
+        // Still raised, but now only against its own band: this orders
+        // icons among themselves without lifting them over any frame.
         backend.raise_shell_surface(window);
         let buffer = icon::render_icon_tile(theme, &mut self.fonts.system(), &mut self.fonts.swash(), self.tile, title, preview);
         backend.paint_shell_surface(window, &buffer);
@@ -2939,12 +2972,24 @@ mod tests {
 
     #[test]
     fn the_clip_sits_in_the_primary_monitors_own_corner() {
-        assert_eq!(clip_geometry(PRIMARY, 56), Rect { pos: Point::new(0, 0), size: Size::new(56, 56) });
+        // Bottom-right, tucked under the dock's column rather than in
+        // the top-left corner every maximized window wants.
+        assert_eq!(
+            clip_geometry(PRIMARY, 56),
+            Rect { pos: Point::new(1600 - 56, 1200 - 56), size: Size::new(56, 56) }
+        );
         // On a primary that is *not* at the desktop's origin, the Clip
-        // follows the monitor rather than staying at root (0, 0) — which
-        // on this arrangement is still on the primary only by accident.
+        // follows the monitor rather than measuring from root — the
+        // corner it lands in must be the primary's own.
         let right_primary = Rect { pos: Point::new(1920, 0), size: Size::new(1600, 1200) };
-        assert_eq!(clip_geometry(right_primary, 56), Rect { pos: Point::new(1920, 0), size: Size::new(56, 56) });
+        assert_eq!(
+            clip_geometry(right_primary, 56),
+            Rect { pos: Point::new(1920 + 1600 - 56, 1200 - 56), size: Size::new(56, 56) }
+        );
+        // A monitor smaller than one tile must not wrap the corner
+        // negative — saturating_sub pins it at the monitor's origin.
+        let tiny = Rect { pos: Point::new(0, 0), size: Size::new(40, 40) };
+        assert_eq!(clip_geometry(tiny, 56).pos, Point::new(0, 0));
     }
 
     #[test]
