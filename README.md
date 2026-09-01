@@ -470,4 +470,10 @@ copy.
 
 ## License
 
-GPL-3.0-only. See [LICENSE](LICENSE).
+GPL-3.0-only for the desktop — see [LICENSE](LICENSE).
+
+The dockapp SDKs (`bindings/`) and the example instruments
+(`examples/`) are MIT — see [bindings/LICENSE](bindings/LICENSE) —
+so an instrument you build on them can carry any license you like.
+The socket protocol itself is just a document; nothing about
+implementing it obliges you to either license.
