@@ -22,10 +22,37 @@ combo to `"none"` unbinds it.
 | `alt+shift+right`  | `workspace-carry-next` | Carry the focused window to the next          |
 | `alt+shift+left`   | `workspace-carry-prev` | Carry the focused window back                 |
 | `super+up`         | `overview`             | The modal Overview: every window as a card    |
+| `control+escape`   | `window-menu`          | Window commands menu, no titlebar required    |
 
 Window-targeted actions (`close`, `toggle-maximize`, `toggle-shade`,
-`miniaturize`, `toggle-fullscreen`) act on the focused window and do
-nothing when no window is focused.
+`miniaturize`, `toggle-fullscreen`, `window-menu`) act on the focused
+window and do nothing when no window is focused.
+
+## The mouse gestures
+
+| Gesture                  | What it does                                        |
+|--------------------------|-----------------------------------------------------|
+| Drag a titlebar          | Move the window, with edge snapping                 |
+| Drag an edge or corner   | Resize from there — all eight, with cursor shapes   |
+| Double-click a titlebar  | Shade; +Ctrl / +Shift / +both maximize an axis      |
+| Right-click a titlebar   | The window commands menu                            |
+| `alt` + drag, left       | Move the window, from anywhere on it                |
+| `alt` + drag, right      | Resize the window, from anywhere on it              |
+
+The last two are the ones that matter for a window with no titlebar.
+A client is allowed to draw its own chrome — a browser whose frame is
+part of its tab strip does, and this desktop believes it — and some
+clients ask for that right and then draw nothing at all. Those windows
+have no titlebar to drag and no resize bar to pull, so the gesture is
+grabbed on the window's own content and works on every window, framed
+or not; `control+escape` reaches its commands menu for the same reason.
+Window Maker binds both the same way, and for the same case.
+
+The modifier is `drag_modifier` in the config: `"alt"` by default,
+`"super"` if an application (CAD, GIMP, Blender) wants Alt+drag for
+itself, `"none"` to turn the gesture off. To give a bare window its
+titlebar back permanently instead, name it in `[decorations]
+server_side` — see `docs/config.example.toml`.
 
 Two more actions exist and are deliberately unbound by default —
 give them keys in your config:

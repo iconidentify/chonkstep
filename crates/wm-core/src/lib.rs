@@ -11,6 +11,7 @@ mod client;
 mod focus;
 mod hittest;
 mod manager;
+mod motif;
 mod placement;
 mod resize;
 mod snap;
@@ -31,10 +32,11 @@ pub use backend::Backend;
 pub use client::{Client, ClientFlags, ClientId, Lifecycle, MaximizeDirections, MonitorId, MonitorInfo};
 pub use focus::FocusPolicy;
 pub use hittest::{hit_test, HitTarget};
-pub use manager::{Notification, WindowManager};
+pub use manager::{Notification, WindowManager, DEFAULT_DRAG_MODIFIER};
+pub use motif::{hints_say_client_decorates, MIN_HINT_WORDS};
 pub use placement::{place_frame, PlacementPolicy};
 pub use snap::snap_position;
 pub use types::{
-    BackendEvent, ClientChrome, DragHandle, KeyCombo, Modifiers, MouseButton, NetState,
+    BackendEvent, ClientChrome, DecorationRules, DragHandle, KeyCombo, Modifiers, MouseButton, NetState,
     NetStateAction, ScrollDelta, SizeHints, SurfaceRef, WindowType, WmClass, WmProtocol,
 };

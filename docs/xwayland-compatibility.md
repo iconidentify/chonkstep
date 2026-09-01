@@ -371,11 +371,24 @@ its own titlebar is the only handle it has. Both stacks translate the request
 into the same interactive move the window manager runs for its own titlebar
 drags, edge snapping included.
 
-**GTK4/libadwaita double titlebars.** Fixed: a toplevel that never
-negotiates xdg-decoration is client-decorated by the protocol's own
-default rule and is no longer framed, so GTK4 and libadwaita windows
-wear exactly their own headerbar. This entry is kept because earlier
-revisions of this document listed it as known wrong.
+**GTK double titlebars.** Fixed, and not the way this document
+previously said. The claim here used to be that a toplevel which never
+negotiates xdg-decoration is client-decorated by the protocol's default
+rule and so goes unframed — which is what the specification says, and
+which is the wrong reading for GTK, because GTK never binds
+xdg-decoration *at all*. It implements only KDE's older
+`org_kde_kwin_server_decoration`, so a compositor advertising just the
+standard interface hears silence from every GTK application on the
+system and cannot tell a libadwaita headerbar from an SDL2 window that
+draws nothing.
+
+The desktop now advertises that second protocol with `default_mode =
+Server`, as KWin, Sway, labwc and Hyprland all do. GTK reads it through
+`gdk_wayland_display_prefers_ssd()`, and the split falls where it
+should: a GTK application with no header bar of its own (LibreOffice)
+stops drawing a titlebar and takes ours, while one whose header bar is
+part of its interface (Nautilus, anything libadwaita) keeps it and goes
+unframed. See `crates/wm-wayland/src/decoration.rs`.
 
 **Drag icons.** Not drawn during a native Wayland drag.
 

@@ -170,6 +170,13 @@ pub struct X11Backend {
     /// real WM does this; skipping it is the classic "my keybinding
     /// stopped working because NumLock is on" bug.
     numlock_mask: u16,
+    /// Per-application decoration overrides — see
+    /// `wm_core::DecorationRules`. Matched against `WM_CLASS`.
+    decoration_rules: wm_core::DecorationRules,
+    /// The modifier currently grabbed for the move/resize gesture on
+    /// every managed client, so a change can ungrab exactly what it
+    /// installed. `None` when the gesture is disabled.
+    drag_gesture_modifier: Option<Modifiers>,
     cursors: Cursors,
     /// The cursor last set on each frame — `set_frame_cursor` checks
     /// this before issuing a `ChangeWindowAttributes` so a stationary or
@@ -458,6 +465,8 @@ impl X11Backend {
             pending_screen_resize: None,
             keyboard_map,
             numlock_mask,
+            decoration_rules: wm_core::DecorationRules::default(),
+            drag_gesture_modifier: None,
             cursors,
             frame_cursor: HashMap::new(),
             drag_grab: None,
@@ -2068,6 +2077,26 @@ fn from_server_bytes(data: &[u8], width: u32, height: u32, order: ImageOrder) ->
     Some(DecorationBuffer { width, height, pixels })
 }
 
+impl X11Backend {
+    /// The string a `[decorations]` rule matches this window on: its
+    /// `WM_CLASS` instance if there is one, else its class.
+    ///
+    /// Instance first because it is the more specific half and the one
+    /// a user reads off `xprop`, and because the rules match by prefix,
+    /// so naming the class still catches every instance under it. The
+    /// compositor's XWayland arm resolves the identity the same way.
+    fn window_identity(&self, window: XWindow) -> Option<String> {
+        let cookie = self.conn.get_property(false, window.0, AtomEnum::WM_CLASS, AtomEnum::STRING, 0, u32::MAX).ok()?;
+        let reply = cookie.reply().ok()?;
+        let mut parts = reply.value.split(|&b| b == 0).map(|s| String::from_utf8_lossy(s).into_owned());
+        let instance = parts.next().unwrap_or_default();
+        if !instance.is_empty() {
+            return Some(instance);
+        }
+        parts.next().filter(|class| !class.is_empty())
+    }
+}
+
 impl Backend for X11Backend {
     type WindowId = XWindow;
     type FrameId = XFrame;
@@ -2299,16 +2328,18 @@ impl Backend for X11Backend {
         reply.value32().map(|it| it.into_iter().any(|a| a == target)).unwrap_or(false)
     }
 
+    fn set_decoration_rules(&mut self, rules: wm_core::DecorationRules) {
+        self.decoration_rules = rules;
+    }
+
     fn client_draws_own_chrome(&self, window: Self::WindowId) -> bool {
-        // `_MOTIF_WM_HINTS` is five CARD32s — flags, functions,
-        // decorations, input_mode, status — of which two matter here.
-        // `MWM_HINTS_DECORATIONS` in `flags` is what makes the third
-        // field mean anything at all (the struct is always five words
-        // long, so an unflagged `decorations` is uninitialized memory
-        // as often as it is a zero), and a `decorations` field of zero
-        // is then the request every client-side-decorated toolkit
-        // makes: no titlebar, no borders, none of it.
-        const MWM_HINTS_DECORATIONS: u32 = 1 << 1;
+        // A `[decorations]` rule outranks the property, in both
+        // directions — the same override the compositor honors, on the
+        // same strings, so a config file written for one session means
+        // the same thing in the other.
+        if let Some(force_server_side) = self.decoration_rules.decision_for(self.window_identity(window).as_deref()) {
+            return !force_server_side;
+        }
 
         // Read as `AnyPropertyType`, not `CARDINAL`: Motif types this
         // property with the property atom itself, and a type-filtered
@@ -2317,27 +2348,32 @@ impl Backend for X11Backend {
         // report every client-decorated window in the wild as wanting a
         // frame, i.e. exactly the bug this is here to fix, with no
         // error anywhere to explain it.
+        //
+        // Five words asked for, three required: see
+        // `wm_core::hints_say_client_decorates`, which is the one
+        // reader all three legs of this desktop now share. They had
+        // drifted — this one accepted the three-word short form and the
+        // compositor's XWayland arm (through smithay) demanded five —
+        // so the same window could be framed in one session and not the
+        // other.
         let Ok(cookie) = self.conn.get_property(false, window.0, self.motif_wm_hints, AtomEnum::ANY, 0, 5) else {
             return false;
         };
         let Ok(reply) = cookie.reply() else {
             return false;
         };
-        let fields: Vec<u32> = match reply.value32() {
-            Some(values) => values.take(3).collect(),
-            None => return false,
+        let Some(values) = reply.value32() else {
+            return false;
         };
         // Every way of failing to get an answer — property absent,
         // unreadable, not 32-bit format, truncated before the
-        // `decorations` word, flag not set — converges on `false`
-        // deliberately. An ordinary X11 client says nothing about Motif
-        // hints and has relied on being decorated for forty years, so
-        // "we could not tell" must mean "decorate it"; the only thing
-        // that may un-frame a window is the client explicitly asking.
-        let (Some(&flags), Some(&decorations)) = (fields.first(), fields.get(2)) else {
-            return false;
-        };
-        flags & MWM_HINTS_DECORATIONS != 0 && decorations == 0
+        // `decorations` word, flag not set — converges on "decorate it"
+        // inside the shared reader, deliberately. An ordinary X11
+        // client says nothing about Motif hints and has relied on being
+        // decorated for forty years, so "we could not tell" must mean
+        // "decorate it"; the only thing that may un-frame a window is
+        // the client explicitly asking.
+        wm_core::hints_say_client_decorates(&values.collect::<Vec<u32>>())
     }
 
     fn window_geometry(&self, window: Self::WindowId) -> Rect {
@@ -2864,6 +2900,57 @@ impl Backend for X11Backend {
         ) {
             tracing::warn!(?e, ?window, "grab_button (passive) failed");
         }
+        let _ = self.conn.flush();
+    }
+
+    fn set_drag_gesture_grab(&mut self, window: Self::WindowId, modifier: Option<Modifiers>) {
+        // Distinct from the click-to-focus grab above in every way that
+        // matters: that one is installed on *unfocused* clients only,
+        // is removed the moment a window takes focus, and replays the
+        // click onward. This one stays for the window's whole life,
+        // because the window it has to work over is usually the focused
+        // one, and its click is the window manager's alone — a client
+        // that also received it would start a selection under a window
+        // the user is only trying to move.
+        //
+        // Both buttons, both meanings: left drags, right resizes. That
+        // is Window Maker's binding (which also accepts middle for a
+        // move), and its grab is on the client window for exactly this
+        // reason — a window with no titlebar has nothing else to grab.
+        let previous = self.drag_gesture_modifier.take();
+        for mods in previous.into_iter() {
+            let base = modifiers_to_x11_mask(mods);
+            for extra in lock_key_variants(self.numlock_mask) {
+                let _ = self.conn.ungrab_button(ButtonIndex::M1, window.0, base | extra);
+                let _ = self.conn.ungrab_button(ButtonIndex::M3, window.0, base | extra);
+            }
+        }
+        if let Some(mods) = modifier {
+            let base = modifiers_to_x11_mask(mods);
+            // Every lock-key combination, or the gesture stops working
+            // the moment Num Lock is on — the same trap the keybinding
+            // grabs above already avoid, and the same fix.
+            for extra in lock_key_variants(self.numlock_mask) {
+                for button in [ButtonIndex::M1, ButtonIndex::M3] {
+                    if let Err(e) = self.conn.grab_button(
+                        // `owner_events: false`: this click is ours, and
+                        // must not also be reported to the client.
+                        false,
+                        window.0,
+                        EventMask::BUTTON_PRESS | EventMask::BUTTON_RELEASE | EventMask::POINTER_MOTION,
+                        GrabMode::ASYNC,
+                        GrabMode::ASYNC,
+                        NONE,
+                        NONE,
+                        button,
+                        base | extra,
+                    ) {
+                        tracing::warn!(?e, ?window, "grab_button for the modifier-drag failed");
+                    }
+                }
+            }
+        }
+        self.drag_gesture_modifier = modifier;
         let _ = self.conn.flush();
     }
 

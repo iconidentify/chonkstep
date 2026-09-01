@@ -800,6 +800,15 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         wm.set_focus_policy(next.focus);
         wm.set_placement_policy(next.placement);
         wm.set_snap_threshold(next.edge_resistance);
+        wm.set_drag_modifier(next.drag_modifier);
+        // Straight through to the backend, which is what answers the
+        // decoration protocols and decides who gets a frame...
+        wm.backend_mut().set_decoration_rules(next.decorations.clone());
+        // ...and then re-ask for every window already on the desk. A
+        // rule that only reached windows opened after it was written
+        // would mean closing and reopening the very window whose chrome
+        // the user is trying to fix.
+        wm.refresh_all_client_chrome();
         self.keymap = build_keymap(&next.keybindings);
         let (to_ungrab, to_grab) = grab_delta(&self.grabbed, &next.keybindings);
         for combo in &to_ungrab {
@@ -1059,6 +1068,15 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
                     wm.toggle_fullscreen(id);
                 }
             }
+            // The window commands menu, from the keyboard. The whole
+            // point is the window that has no titlebar to right-click:
+            // a client that draws its own chrome gets no frame from us,
+            // and before this verb the only route to its commands was
+            // the Overview. `wm-core` reports the request through the
+            // same `WindowMenuRequested` notification a titlebar
+            // right-click raises, so the menu, its items and its
+            // dispatch are shared verbatim.
+            Action::WindowMenu => wm.request_window_menu_for_focused(),
             Action::WorkspaceNext => wm.switch_workspace(wm.current_workspace() + 1),
             Action::WorkspacePrev => {
                 if wm.current_workspace() > 0 {

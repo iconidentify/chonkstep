@@ -1,7 +1,7 @@
 use wm_theme_api::{DecorationBuffer, DecorationLayout, Rect, ResizeEdge, Size, Point};
 
 use crate::client::MonitorInfo;
-use crate::types::{BackendEvent, DragHandle, KeyCombo, MouseButton, ScrollDelta, SizeHints, WmClass, WmProtocol, WindowType};
+use crate::types::{BackendEvent, DecorationRules, DragHandle, KeyCombo, Modifiers, MouseButton, ScrollDelta, SizeHints, WmClass, WmProtocol, WindowType};
 
 /// Everything the protocol-agnostic core needs from a windowing backend
 /// (X11 today via `wm-x11`, a future Wayland/Smithay backend later).
@@ -367,6 +367,31 @@ pub trait Backend {
     /// Maps a window this WM has decided not to manage (see
     /// `WindowType::Unmanaged`) exactly as the client created it.
     fn map_unmanaged(&mut self, _window: Self::WindowId) {}
+    /// Installs (or removes) the passive pointer grabs the move/resize
+    /// modifier-drag needs on one managed client's own window.
+    ///
+    /// Only a backend that does not already see every input event needs
+    /// this. The compositor sees them all and does nothing here; an X11
+    /// window manager sees a click on a client's own window only if it
+    /// has grabbed it, and the whole point of this gesture is to work
+    /// over a client's content — including a focused client's, which is
+    /// not passively grabbed for focus.
+    ///
+    /// `None` removes the grabs. Called when a window is managed and
+    /// whenever the configured modifier changes.
+    fn set_drag_gesture_grab(&mut self, _window: Self::WindowId, _modifier: Option<Modifiers>) {}
+    /// Hands the backend the user's per-application decoration
+    /// overrides, so [`Self::client_draws_own_chrome`] can consult them.
+    ///
+    /// On the backend rather than in `wm-core` because the rules have
+    /// to reach further than the framing decision: both decoration
+    /// protocols answer clients on the wire, and a rule that changed
+    /// the frame without changing the answer would tell a client
+    /// "decorate yourself" and then decorate it anyway.
+    ///
+    /// Defaulted to a no-op for a backend with no decoration protocol
+    /// to override.
+    fn set_decoration_rules(&mut self, _rules: DecorationRules) {}
     /// Whether the client has already drawn its own window chrome, and
     /// so must not be framed. See [`ClientChrome`] for why this is not
     /// derivable from [`Self::window_type`].

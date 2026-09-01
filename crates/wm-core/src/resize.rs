@@ -3,7 +3,7 @@
 //! No I/O, no backend dependency, trivially unit-tested — matches this
 //! crate's `hittest`/`snap` modules in spirit.
 
-use wm_theme_api::Size;
+use wm_theme_api::{Point, ResizeEdge, Size};
 
 use crate::types::SizeHints;
 
@@ -80,5 +80,85 @@ mod tests {
         let hints = SizeHints { min_size: Some(Size::new(200, 200)), max_size: Some(Size::new(100, 100)), resize_increment: None };
         let result = constrain_size(Size::new(500, 500), hints);
         assert_eq!(result, Size::new(200, 200));
+    }
+}
+
+/// Which edge or corner a modifier-drag resize should pull, given where
+/// in a frame of `size` the press landed.
+///
+/// Thirds on each axis, so the frame is a noughts-and-crosses board:
+/// the four corner cells pull their corner, the four edge cells pull
+/// their edge, and the middle cell — the one place with no nearest edge
+/// worth guessing at — pulls the bottom-right corner, where this
+/// theme's resize bar lives and where a user reaching for "just resize
+/// it" is already aiming.
+///
+/// Window Maker and KWin both quantise this way rather than by true
+/// nearest edge, and the reason is that it makes the gesture aimable
+/// without being precise: the target for "the right edge" is a third of
+/// the window, not a few pixels of border.
+pub fn resize_edge_for_point(size: Size, at: Point) -> ResizeEdge {
+    // A degenerate frame has no thirds to speak of; the bottom-right
+    // fallback is as good an answer as any and cannot divide by zero.
+    let (w, h) = (size.w as i32, size.h as i32);
+    if w <= 0 || h <= 0 {
+        return ResizeEdge::SouthEast;
+    }
+    // -1 west/north, 0 middle, 1 east/south.
+    let third = |v: i32, extent: i32| -> i32 {
+        if v * 3 < extent {
+            -1
+        } else if v * 3 >= extent * 2 {
+            1
+        } else {
+            0
+        }
+    };
+    match (third(at.x, w), third(at.y, h)) {
+        (-1, -1) => ResizeEdge::NorthWest,
+        (0, -1) => ResizeEdge::North,
+        (1, -1) => ResizeEdge::NorthEast,
+        (-1, 0) => ResizeEdge::West,
+        (1, 0) => ResizeEdge::East,
+        (-1, 1) => ResizeEdge::SouthWest,
+        (0, 1) => ResizeEdge::South,
+        (1, 1) => ResizeEdge::SouthEast,
+        // The middle cell, and the only arm the matrix above does not
+        // name: no edge is nearest, so take the classic one.
+        _ => ResizeEdge::SouthEast,
+    }
+}
+
+#[cfg(test)]
+mod resize_edge_tests {
+    use super::*;
+
+    #[test]
+    fn each_ninth_pulls_its_own_edge() {
+        let size = Size::new(300, 300);
+        assert_eq!(resize_edge_for_point(size, Point::new(10, 10)), ResizeEdge::NorthWest);
+        assert_eq!(resize_edge_for_point(size, Point::new(150, 10)), ResizeEdge::North);
+        assert_eq!(resize_edge_for_point(size, Point::new(290, 10)), ResizeEdge::NorthEast);
+        assert_eq!(resize_edge_for_point(size, Point::new(10, 150)), ResizeEdge::West);
+        assert_eq!(resize_edge_for_point(size, Point::new(290, 150)), ResizeEdge::East);
+        assert_eq!(resize_edge_for_point(size, Point::new(10, 290)), ResizeEdge::SouthWest);
+        assert_eq!(resize_edge_for_point(size, Point::new(150, 290)), ResizeEdge::South);
+        assert_eq!(resize_edge_for_point(size, Point::new(290, 290)), ResizeEdge::SouthEast);
+    }
+
+    /// The middle has no nearest edge, and refusing to resize there
+    /// would make the gesture fail in the largest part of the window.
+    #[test]
+    fn the_middle_pulls_the_corner_the_resize_bar_lives_in() {
+        assert_eq!(resize_edge_for_point(Size::new(300, 300), Point::new(150, 150)), ResizeEdge::SouthEast);
+    }
+
+    /// A press outside the frame (a grab that began before a
+    /// configure landed) must still name an edge, not panic.
+    #[test]
+    fn a_degenerate_frame_or_an_outside_point_still_answers() {
+        assert_eq!(resize_edge_for_point(Size::new(0, 0), Point::new(5, 5)), ResizeEdge::SouthEast);
+        assert_eq!(resize_edge_for_point(Size::new(100, 100), Point::new(-50, -50)), ResizeEdge::NorthWest);
+        assert_eq!(resize_edge_for_point(Size::new(100, 100), Point::new(500, 500)), ResizeEdge::SouthEast);
     }
 }

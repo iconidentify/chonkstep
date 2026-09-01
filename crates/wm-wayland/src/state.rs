@@ -52,13 +52,14 @@ use smithay::reexports::calloop::{EventLoop, Interest, LoopHandle, Mode as Trigg
 use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::State as XdgToplevelState;
 use smithay::reexports::wayland_server::backend::{ClientData, ClientId, DisconnectReason, GlobalId};
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
-use smithay::reexports::wayland_server::{Display, DisplayHandle};
+use smithay::reexports::wayland_server::{Display, DisplayHandle, Resource};
 use smithay::utils::{Logical, Physical, Transform, SERIAL_COUNTER};
 use smithay::utils::{Point as SPoint, Size as SSize};
 use smithay::wayland::compositor::{CompositorClientState, CompositorState};
 use smithay::wayland::output::OutputManagerState;
 use smithay::wayland::selection::data_device::DataDeviceState;
 use smithay::wayland::selection::primary_selection::PrimarySelectionState;
+use smithay::wayland::shell::kde::decoration::KdeDecorationState;
 use smithay::wayland::shell::xdg::decoration::XdgDecorationState;
 use smithay::wayland::shell::xdg::{ToplevelSurface, XdgShellState};
 use smithay::wayland::shm::ShmState;
@@ -274,36 +275,21 @@ pub(crate) struct WindowRecord {
     /// snapshot (or forever, for a window that never maps), which the
     /// shell's icon and switcher renderers already handle.
     pub snapshot: Option<DecorationBuffer>,
-    /// Whether this toplevel ever created a `zxdg_toplevel_decoration_v1`,
-    /// i.e. whether it negotiated decorations with us at all.
+    /// Everything the two decoration protocols have said about this
+    /// toplevel — see [`crate::decoration`], which also holds the
+    /// policy that reads it.
     ///
-    /// The xdg-decoration preamble is explicit about what silence means:
-    /// "if compositor and client do not negotiate the use of a
-    /// server-side decoration using this protocol, clients continue to
-    /// self-decorate as they see fit". So a toplevel that never creates
-    /// the object is stating, by the protocol's own rule, that it draws
-    /// its own chrome — and framing it anyway is what put two titlebars
-    /// on LibreOffice and every GTK application on this desktop.
+    /// The pair of fields this replaced (`negotiated_decoration` and
+    /// `requested_client_side`) were written in three places and read
+    /// in none: the decision had been moved to an `app_id` prefix list
+    /// and the protocol's own answer was being collected and discarded.
+    /// A Chrome web-app window asked for server-side decorations, was
+    /// told server-side, and was then left unframed because its
+    /// `app_id` began with "chrome".
     ///
-    /// Always false for XWayland surfaces, which answer the same
+    /// Always default for XWayland surfaces, which answer the same
     /// question through `_MOTIF_WM_HINTS` instead.
-    pub negotiated_decoration: bool,
-    /// What the client explicitly asked xdg-decoration for, when it
-    /// asked: `Some(true)` is a requested client-side mode, `Some(false)`
-    /// server-side, `None` no explicit request (bound the manager and
-    /// left the choice to us, or never bound at all).
-    ///
-    /// Honored, not overridden. This compositor used to impose
-    /// ServerSide on every toplevel that bound the manager — protocol-
-    /// legal, and broken in practice: Chromium requests ClientSide and
-    /// draws its frame regardless of the imposition, so Microsoft Edge
-    /// wore both titlebars, and every short-lived Chromium transient
-    /// got a chonkstep frame flashed around it for the second it
-    /// lived — observed live as "the edges flicker", one framed birth
-    /// and death every ~30 seconds in the session log. Honoring the
-    /// request is also what KWin and the wlroots compositors settled
-    /// on, for exactly this reason.
-    pub requested_client_side: Option<bool>,
+    pub decoration: crate::decoration::DecorationNegotiation,
     /// Where this surface's *window* starts inside its own buffer, from
     /// `xdg_surface.set_window_geometry`.
     ///
@@ -355,9 +341,7 @@ impl WindowRecord {
             app_id: None,
             window_type: WindowType::Normal,
             snapshot: None,
-            // Silence means client-side; only `new_decoration` sets this.
-            negotiated_decoration: false,
-            requested_client_side: None,
+            decoration: crate::decoration::DecorationNegotiation::default(),
             content_offset: Point::new(0, 0),
             recent_asks: std::collections::VecDeque::new(),
         }
@@ -443,12 +427,12 @@ pub struct WaylandBackend {
     /// (id 0) stays forever unallocated.
     next_id: u64,
     pub(crate) windows: HashMap<WlWindowId, WindowRecord>,
-    /// `app_id` prefixes allowed to decorate themselves — see
-    /// `wm_config::Config::self_decorating_apps`. Held on the backend
-    /// because both the decoration decision (`client_draws_own_chrome`)
-    /// and the negotiation answer (`XdgDecorationHandler::request_mode`)
-    /// consult it, and a live config reload must move both at once.
-    pub(crate) self_decorating_apps: Vec<String>,
+    /// Per-application decoration overrides — see
+    /// `wm_config::DecorationRules`. Held on the backend because both
+    /// the decoration decision (`client_draws_own_chrome`) and the
+    /// answers sent on both decoration protocols consult it, and a live
+    /// config reload must move all of them at once.
+    pub(crate) decoration_rules: wm_config::DecorationRules,
     pub(crate) frames: HashMap<WlFrameId, FrameRecord>,
     pub(crate) shells: HashMap<WlShellId, ShellRecord>,
     /// Bottom-to-top: frames and shell surfaces interleaved — see
@@ -645,80 +629,43 @@ pub(crate) enum PointerGrabChange {
     Released,
 }
 
-/// The allowlist match behind [`WaylandBackend::client_declares_self_decoration`],
-/// as a free function so the policy can be tested without a compositor.
-///
-/// A window with no `app_id` yet answers `false` — the safe direction:
-/// a frame can be taken off later through `ChromeChanged`, but a window
-/// the user cannot grab is not recoverable from the user's side.
-pub(crate) fn app_id_is_self_decorating(app_id: Option<&str>, allowed: &[String]) -> bool {
-    let Some(app_id) = app_id else {
-        return false;
-    };
-    let app_id = app_id.to_ascii_lowercase();
-    allowed.iter().any(|a| !a.is_empty() && app_id.starts_with(a.as_str()))
-}
-
-#[cfg(test)]
-mod decoration_policy_tests {
-    use super::app_id_is_self_decorating as matches;
-
-    fn list() -> Vec<String> {
-        wm_config::default_self_decorating_apps()
-    }
-
-    /// The bug this policy exists for: a terminal that asks for
-    /// client-side decorations and then draws none must still be framed.
-    #[test]
-    fn a_terminal_that_draws_nothing_is_not_taken_at_its_word() {
-        assert!(!matches(Some("Alacritty"), &list()));
-        assert!(!matches(Some("foot"), &list()));
-        assert!(!matches(Some("org.gnome.TextEditor"), &list()));
-    }
-
-    /// The case the allowlist protects: Chromium draws a titlebar
-    /// whatever we configure, so framing it gives two.
-    #[test]
-    fn the_chromium_family_is_taken_at_its_word() {
-        assert!(matches(Some("chrome"), &list()));
-        assert!(matches(Some("google-chrome"), &list()) || matches(Some("chrome-beta"), &list()));
-        assert!(matches(Some("chromium"), &list()));
-        assert!(matches(Some("msedge"), &list()));
-    }
-
-    /// Prefix, case-insensitive — one entry covers a family, including
-    /// the per-profile ids Chromium invents.
-    #[test]
-    fn matching_is_a_case_insensitive_prefix() {
-        assert!(matches(Some("CHROMIUM-browser"), &list()));
-        assert!(matches(Some("chrome-instance-2"), &list()));
-    }
-
-    /// Absent or empty inputs must never unframe a window.
-    #[test]
-    fn nothing_unframes_a_window_by_accident() {
-        assert!(!matches(None, &list()), "a window with no app_id yet is framed");
-        assert!(!matches(Some("chrome"), &[]), "an empty list unframes nothing");
-        assert!(
-            !matches(Some("anything"), &["".to_string()]),
-            "an empty entry must not become a prefix that matches everything"
-        );
-    }
-}
-
 impl WaylandBackend {
-    /// Whether this client is one of the few that genuinely draws its
-    /// own window chrome, and may therefore be taken at its word when it
-    /// asks for client-side decorations.
+    /// Whether this window's client draws its own chrome, from what it
+    /// has actually told us — the decoration protocols first, and a
+    /// `[decorations]` override above them.
     ///
-    /// Matched as a case-insensitive prefix of `app_id`, so one entry
-    /// covers a family (`chrome` catches `chrome`, `chrome-beta`, and
-    /// the per-profile ids Chromium invents). A window with no `app_id`
-    /// yet answers `false` — the safe direction, since a frame can be
-    /// taken off later through `ChromeChanged` but a window the user
-    /// cannot grab is not recoverable from the user's side.
-    pub(crate) fn client_declares_self_decoration(&self, record: &WindowRecord) -> bool {
-        app_id_is_self_decorating(record.app_id.as_deref(), &self.self_decorating_apps)
+    /// The whole policy lives in [`crate::decoration`]; this is the
+    /// lookup that feeds it the record's evidence and identity. The
+    /// KDE-manager bind is a property of the *client*, not the surface,
+    /// so it is folded in here rather than duplicated onto every
+    /// record the client owns.
+    pub(crate) fn xdg_client_draws_own_chrome(&self, record: &WindowRecord) -> bool {
+        crate::decoration::client_draws_own_chrome(
+            &self.decoration_rules,
+            record.app_id.as_deref(),
+            self.decoration_evidence(record),
+        )
+    }
+
+    /// This record's negotiation, with `kde_manager_bound` resolved
+    /// against the live client set.
+    pub(crate) fn decoration_evidence(&self, record: &WindowRecord) -> crate::decoration::DecorationEvidence {
+        let mut negotiation = record.decoration;
+        negotiation.kde_manager_bound = self.client_bound_kde_decoration(record);
+        negotiation.evidence()
+    }
+
+    /// Whether the client owning this surface has bound the KDE
+    /// decoration manager.
+    fn client_bound_kde_decoration(&self, record: &WindowRecord) -> bool {
+        let ManagedSurface::Xdg(toplevel) = &record.surface else {
+            return false;
+        };
+        toplevel
+            .wl_surface()
+            .client()
+            .and_then(|client| client.get_data::<ClientState>().map(|data| data.kde_decoration_bound.load(std::sync::atomic::Ordering::Relaxed)))
+            .unwrap_or(false)
     }
 
     pub(crate) fn new(display_handle: DisplayHandle, monitors: Vec<MonitorInfo>, scale: f32) -> Self {
@@ -727,7 +674,7 @@ impl WaylandBackend {
         Self {
             next_id: 1,
             windows: HashMap::new(),
-            self_decorating_apps: wm_config::default_self_decorating_apps(),
+            decoration_rules: wm_config::DecorationRules::default(),
             frames: HashMap::new(),
             shells: HashMap::new(),
             stacking: Vec::new(),
@@ -867,10 +814,26 @@ impl WaylandBackend {
 
 /// Per-client data attached when a wayland client connects. Smithay's
 /// compositor protocol machinery requires each client to carry its
-/// `CompositorClientState`; nothing else is needed per-client yet.
+/// `CompositorClientState`; the decoration flag rides along beside it.
 #[derive(Default)]
 pub struct ClientState {
     pub compositor_state: CompositorClientState,
+    /// Whether this client has bound
+    /// `org_kde_kwin_server_decoration_manager`.
+    ///
+    /// Load-bearing evidence, not a statistic: a GTK4 client that binds
+    /// the manager and then creates no decoration object for a toplevel
+    /// is declining this desktop's chrome for it, and telling that
+    /// apart from a client that never spoke at all is what keeps a
+    /// libadwaita headerbar from wearing our titlebar above it. See
+    /// `crate::decoration`.
+    ///
+    /// Per-client rather than a set on the backend so it cannot outlive
+    /// the client: `ClientData::disconnected` gets no access to the
+    /// compositor, so a set would have leaked one entry per client that
+    /// ever spoke this protocol. Atomic because the bind handler holds
+    /// only `&ClientState`.
+    pub kde_decoration_bound: std::sync::atomic::AtomicBool,
 }
 
 impl ClientData for ClientState {
@@ -1140,6 +1103,14 @@ pub struct Compositor {
     pub compositor_state: CompositorState,
     pub xdg_shell_state: XdgShellState,
     pub xdg_decoration_state: XdgDecorationState,
+    /// KDE's older `org_kde_kwin_server_decoration`, advertised beside
+    /// the xdg one because GTK — GTK3 and GTK4 alike — implements only
+    /// this interface and never binds the standard one. Offering only
+    /// xdg-decoration made every GTK application on the system a silent
+    /// client, which is what put two titlebars on LibreOffice. KWin,
+    /// Sway, labwc and Hyprland all advertise it too. See
+    /// `crate::decoration`.
+    pub kde_decoration: KdeDecorationState,
     pub shm_state: ShmState,
     pub seat_state: SeatState<Compositor>,
     pub output_manager_state: OutputManagerState,
@@ -2026,6 +1997,10 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
     // your chrome" — without it every GTK/Qt app draws its own
     // titlebar and our chiseled frames would double up.
     let xdg_decoration_state = XdgDecorationState::new::<Compositor>(&display_handle);
+    // `Server` is the whole point: `gdk_wayland_display_prefers_ssd()`
+    // is a plain equality test against this value, and it decides
+    // whether every GTK window on the desk draws its own titlebar.
+    let kde_decoration = KdeDecorationState::new::<Compositor>(&display_handle, crate::decoration::KDE_DEFAULT_MODE);
     let shm_state = ShmState::new::<Compositor>(&display_handle, vec![]);
     let output_manager_state = OutputManagerState::new_with_xdg_output::<Compositor>(&display_handle);
     let data_device_state = DataDeviceState::new::<Compositor>(&display_handle);
@@ -2310,10 +2285,6 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
     // `WindowManager::new` takes ownership — the exact construction
     // order the X11 binary uses, for the exact same borrow reason.
     let mut backend = WaylandBackend::new(display_handle.clone(), monitors, scale);
-    // Whose word to take on client-side decorations. Held on the backend
-    // rather than read per-window so a live reload can move the policy
-    // for every window at once (see the reload arm below).
-    backend.self_decorating_apps = config.self_decorating_apps.clone();
     // The whole screen, as the shell sizes the desktop against it: the
     // union of every monitor. Where the dock and the workareas land
     // inside that union is the shell's decision, not this loop's.
@@ -2434,6 +2405,7 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
         compositor_state,
         xdg_shell_state,
         xdg_decoration_state,
+        kde_decoration,
         shm_state,
         seat_state,
         output_manager_state,
@@ -2528,11 +2500,12 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
         if reload_requested() {
             tracing::info!("reload requested — re-reading the config and applying it in place");
             let reloaded = wm_config::load();
-            // The decoration policy is the backend's, not the shell's,
-            // so it does not travel with `SessionState` — move it here
-            // or an edited `self_decorating_apps` would need a restart
-            // while everything beside it in the same file did not.
-            comp.wm.backend_mut().self_decorating_apps = reloaded.self_decorating_apps.clone();
+            // Everything this reload touches — decoration rules and
+            // the drag modifier included — travels through
+            // `SessionState`, so the marker file and the bound `reload`
+            // key apply exactly the same set. They did not: the
+            // decoration policy was assigned here and nowhere else, so
+            // the key silently skipped it.
             let state = SessionState::resolve(&reloaded);
             comp.shell.apply_session_state(&mut comp.wm, state);
         }

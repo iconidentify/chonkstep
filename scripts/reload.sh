@@ -5,8 +5,16 @@
 # and applies the config the instant it sees it.
 #
 # What this applies: the theme, the UI scale, focus policy, window
-# placement, edge resistance, the terminal font size, and the
-# keybindings themselves.
+# placement, edge resistance, the terminal font size, the keybindings
+# themselves, the move/resize drag modifier, and the [decorations]
+# overrides — which re-decide the chrome of every window already open,
+# not just the next one to map.
+#
+# That list is the same one the bound `reload` action applies, and it
+# has to stay that way: everything here travels through one path
+# (SessionState), so the two routes cannot drift. They had — an edited
+# decoration policy applied through this script and was silently
+# skipped by the key.
 #
 # The difference from scripts/restart.sh is what it costs you. A reload
 # keeps everything: your windows, their client connections, and your

@@ -331,3 +331,61 @@ pub enum BackendEvent<Win, Frame> {
     /// grab may simply never be emitted.
     KeyRelease(KeyCombo),
 }
+
+/// Per-application overrides of the decoration negotiation, matched as
+/// case-insensitive prefixes of a client's `app_id` (Wayland) or its
+/// `WM_CLASS` instance or class (X11 and XWayland).
+///
+/// Both directions exist on purpose, and the asymmetry of the older
+/// one-directional list is the reason. Every mature window manager
+/// ships a force-decoration-*on* rule — KWin's "No titlebar and frame"
+/// at *Force* strength, labwc's `serverDecoration="yes"`, Openbox's
+/// `<decor>`, Window Maker's `IgnoreDecorationChanges` — because the
+/// failure that actually strands a user is a window with chrome from
+/// neither side, and that is the one an off-only list cannot rescue.
+///
+/// Neither list needs an entry for correctness: the decoration
+/// protocols answer the question for every client observed here
+/// (see `wm-wayland`'s `DecorationEvidence`). They exist for the
+/// clients that answer it *wrongly* — a terminal configured
+/// `decorations = "None"` for a tiling desktop asks for client-side
+/// and then draws nothing, which `server_side` fixes in one line.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct DecorationRules {
+    /// Draw this desktop's chrome whatever the client asks for. The
+    /// rescue direction: a client that asks to decorate itself and then
+    /// draws nothing is a bare rectangle, and this is how a user says
+    /// so once and never thinks about it again.
+    pub server_side: Vec<String>,
+    /// Never draw chrome for these; the client's own is the only one.
+    /// The direction the old `self_decorating_apps` list held alone.
+    pub client_side: Vec<String>,
+}
+
+impl DecorationRules {
+    /// The override for `identity`, if any: `Some(true)` to force this
+    /// desktop's chrome, `Some(false)` to suppress it, `None` to leave
+    /// the client's own negotiation in charge.
+    ///
+    /// `server_side` wins a tie. A user who has written an application
+    /// into both lists has asked for two contradictory things, and the
+    /// tie has to break toward the window that stays usable.
+    pub fn decision_for(&self, identity: Option<&str>) -> Option<bool> {
+        let identity = identity?.to_ascii_lowercase();
+        let hit = |list: &[String]| list.iter().any(|entry| !entry.is_empty() && identity.starts_with(entry.as_str()));
+        if hit(&self.server_side) {
+            Some(true)
+        } else if hit(&self.client_side) {
+            Some(false)
+        } else {
+            None
+        }
+    }
+
+    /// Whether any override at all is configured — for the log line
+    /// that explains a decoration decision without making the common
+    /// case say "no rules matched" on every window.
+    pub fn is_empty(&self) -> bool {
+        self.server_side.is_empty() && self.client_side.is_empty()
+    }
+}

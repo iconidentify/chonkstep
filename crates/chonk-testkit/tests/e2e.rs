@@ -41,20 +41,26 @@ use chonk_testkit::{is_dark, poll_until, Session, SessionOptions, WindowInfo};
 /// events (crossing a drag threshold, re-committing at a new scale).
 const ACT: Duration = Duration::from_secs(10);
 
-/// Session options for the CSD tests below: zenity opted onto
-/// `self_decorating_apps`.
+/// Session options for the CSD tests below: zenity pinned to
+/// client-side decorations by rule.
 ///
-/// It has to be said out loud now. Asking for client-side decorations
-/// stopped being enough to go unframed — a client that asks and then
-/// draws nothing (a terminal configured `decorations = "None"`) used to
-/// end up with chrome from neither side, so the desktop now frames
-/// everything but the clients it is told draw their own. zenity really
-/// is one of those; it just is not on the shipped default list, which
-/// covers the Chromium family. Naming it here keeps these tests
-/// exercising the CSD path they were written for, and keeps them honest
-/// about the policy rather than silently depending on the old default.
+/// These tests are about what happens to a window with no frame — its
+/// drag path, its click coordinates, its scaling — so which client
+/// plays the part is incidental, and depending on the negotiation to
+/// cast it would make them a test of zenity's build rather than of this
+/// desktop. Pinning it says what the test needs out loud.
+///
+/// It is also no longer safe to assume: zenity is a GTK3 program, and
+/// with `org_kde_kwin_server_decoration` advertised (which is what
+/// stopped LibreOffice wearing two titlebars) a GTK3 dialog without its
+/// own header bar now asks for *server*-side decorations and gets them.
+/// That is the fix working, and it would silently turn these into tests
+/// of a framed window.
 fn csd_options() -> SessionOptions {
-    SessionOptions { config_extra: "self_decorating_apps = [\"zenity\"]\n".to_string(), ..SessionOptions::default() }
+    SessionOptions {
+        config_extra: "[decorations]\nclient_side = [\"zenity\"]\n".to_string(),
+        ..SessionOptions::default()
+    }
 }
 
 /// Launches a zenity question dialog and waits for it to map. The

@@ -926,6 +926,10 @@ fn on_pointer_button<I: InputBackend>(state: &mut Compositor, event: I::PointerB
     // it — the whole LibreOffice investigation ran on this line.
     tracing::debug!(?target, ?button, pressed, dragging = route.dragging, "pointer button routed");
 
+    // Read before the ledger is borrowed: this is the window
+    // manager's policy, and the routing below needs it while holding
+    // `backend`.
+    let drag_gesture = state.wm.is_drag_gesture(mods);
     let backend = state.wm.backend_mut();
     let mut deliver_to_client = false;
     // Whether `wm-core` has been told, by this event, that a drag
@@ -964,6 +968,17 @@ fn on_pointer_button<I: InputBackend>(state: &mut Compositor, event: I::PointerB
             // the very next lines deliver the click to the client
             // themselves; no passive-grab race exists to replay
             // around).
+            //
+            // It is also where the modifier-drag starts, and that one
+            // is the window manager's click alone: `wm-core` turns it
+            // into a move or a resize, and a client that also received
+            // it would place a text cursor, start a selection, or fire
+            // a button under a window the user is only trying to shove
+            // out of the way. Decided here rather than after the fact
+            // because delivery is settled before `wm-core` processes
+            // the queued event.
+            let wm_drag_gesture =
+                pressed && drag_gesture && matches!(button, Some(MouseButton::Left) | Some(MouseButton::Right));
             if let Some(button) = button {
                 let local = backend
                     .windows
@@ -984,8 +999,9 @@ fn on_pointer_button<I: InputBackend>(state: &mut Compositor, event: I::PointerB
             // drag's — its release is what ends the move — and the
             // client was sent a leave when the drag began, so handing
             // it a button now would be a press or release arriving on a
-            // surface it believes the pointer is nowhere near.
-            deliver_to_client = !route.dragging;
+            // surface it believes the pointer is nowhere near. Nor when
+            // the press *begins* a modifier-drag, which is ours.
+            deliver_to_client = !route.dragging && !wm_drag_gesture;
         }
         PressTarget::Layer(_) => {
             // A layer surface's click is the client's alone — `wm-core`

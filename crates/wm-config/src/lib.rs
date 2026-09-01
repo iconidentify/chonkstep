@@ -35,9 +35,13 @@
 //! placement = "smart"                # optional; "smart" | "cascade" | "center"
 //! edge_resistance = 10               # optional; px, 0 disables edge snapping
 //! terminal_font_px = 20              # optional; terminal font size at 1x
-//! self_decorating_apps = ["chrome"]  # optional; app_ids that draw their own chrome
+//! drag_modifier = "alt"              # optional; move/resize drag modifier, or "none"
 //! restore_session = true             # optional; relaunch last session's windows
 //! lock_command = "swaylock"          # optional; locker for post-crash recovery
+//!
+//! [decorations]                      # optional; per-application overrides
+//! server_side = ["alacritty"]        # force this desktop's chrome
+//! client_side = ["some.app"]         # never frame it
 //!
 //! [keybindings]
 //! "alt+shift+return" = "spawn-terminal"
@@ -57,6 +61,7 @@
 use std::path::PathBuf;
 
 pub use wm_core::FocusPolicy;
+pub use wm_core::DecorationRules;
 use wm_core::{KeyCombo, Modifiers, PlacementPolicy};
 
 /// Everything a keybinding can do. Deliberately a closed set of verbs
@@ -90,6 +95,16 @@ pub enum Action {
     /// are modal machinery like the Alt-Tab switcher's, not
     /// per-binding config.
     Overview,
+    /// Open the window commands menu for the focused window, at the
+    /// keyboard rather than by right-clicking a titlebar.
+    ///
+    /// The titlebar is not always there to right-click: a client that
+    /// negotiated client-side decorations has no chrome of ours at all,
+    /// and before this verb existed the only route to its commands was
+    /// the Overview. Window Maker's `Control+Escape`, and its inspector
+    /// says why it exists: "To access the window commands menu of a
+    /// window without its titlebar, press Control+Esc."
+    WindowMenu,
     /// Re-read this file and apply it to the running session — theme,
     /// UI scale, focus policy, placement, edge resistance and these
     /// very bindings, with no restart and nothing closed.
@@ -119,6 +134,7 @@ fn action_from_name(name: &str) -> Option<Action> {
         "workspace-carry-next" => Some(Action::WorkspaceCarryNext),
         "workspace-carry-prev" => Some(Action::WorkspaceCarryPrev),
         "overview" => Some(Action::Overview),
+        "window-menu" => Some(Action::WindowMenu),
         "reload" => Some(Action::Reload),
         "restart" => Some(Action::Restart),
         _ => None,
@@ -164,22 +180,26 @@ pub struct Config {
     /// of the display it lands on. Not per-theme on purpose: a theme
     /// restyles the terminal's colors, never its metrics.
     pub terminal_font_px: f32,
-    /// `app_id` prefixes of clients that genuinely draw their own window
-    /// chrome, and may therefore be taken at their word when they ask
-    /// for client-side decorations.
+    /// Per-application decoration overrides, in both directions. Empty
+    /// by default: the decoration protocols answer this question
+    /// correctly for every client observed, and a list is the exception,
+    /// not the mechanism.
+    pub decorations: DecorationRules,
+    /// The modifier that turns a drag anywhere on a window into a move
+    /// (left button) or a resize (right button), the way every stacking
+    /// window manager since the eighties has offered.
     ///
-    /// Everything else this desktop frames, whatever it asks for. That
-    /// asymmetry is deliberate: asking for client-side decorations is
-    /// not a promise to *draw* any, and the client that forced this list
-    /// — a terminal configured `decorations = "None"` for a tiling
-    /// desktop — draws none at all. Honouring it produced a window with
-    /// chrome from neither side: nothing to drag, close or resize. Being
-    /// wrong the other way costs a second titlebar, which is visible and
-    /// fixed by adding an entry here; being wrong this way costs a
-    /// window you cannot use at all.
-    ///
-    /// Matched as a case-insensitive prefix of the client's `app_id`.
-    pub self_decorating_apps: Vec<String>,
+    /// This is the floor under the whole decoration policy, not a
+    /// convenience: a window whose client asked to draw its own chrome
+    /// and then drew none has no titlebar to grab, and without this
+    /// gesture it cannot be moved or resized at all. Window Maker binds
+    /// it to Alt and grabs on the *client* window for exactly that
+    /// reason; KWin moved to Meta in Plasma 5.20 and labwc to Super in
+    /// 0.9.0, because Alt collides with CAD and creative applications.
+    /// Alt is the default here to match the ancestor this desktop
+    /// imitates; `drag_modifier = "super"` picks the modern convention,
+    /// and `"none"` disables the gesture.
+    pub drag_modifier: Option<Modifiers>,
     /// Relaunch the previous session's windows at startup, restoring
     /// each one's geometry, workspace and shape flags from the layout
     /// file the shell keeps. Off by default — a session that spawns
@@ -200,12 +220,9 @@ pub struct Config {
 /// Terminal font size when the config says nothing, in 1x pixels.
 pub const DEFAULT_TERMINAL_FONT_PX: f32 = 20.0;
 
-/// The clients known to draw their own chrome when they ask to.
-/// Chromium and its rebrands draw a titlebar whatever the compositor
-/// configures, which is the double titlebar this list prevents.
-pub fn default_self_decorating_apps() -> Vec<String> {
-    ["chrome", "chromium", "msedge", "microsoft-edge", "brave"].iter().map(|s| s.to_string()).collect()
-}
+/// The modifier the move/resize drag gesture rides on when the config
+/// says nothing: Alt, as Window Maker has always bound it.
+pub const DEFAULT_DRAG_MODIFIER: Modifiers = Modifiers::ALT;
 
 /// The range a `terminal_font_px` value has to land in. Below the floor
 /// the terminal is unreadable; above the ceiling a default-sized window
@@ -242,7 +259,16 @@ impl Config {
             placement: PlacementPolicy::Smart,
             edge_resistance: 10,
             terminal_font_px: DEFAULT_TERMINAL_FONT_PX,
-            self_decorating_apps: default_self_decorating_apps(),
+            // Deliberately empty. The shipped list this replaced held
+            // the Chromium family, and it was wrong in both directions
+            // within a day: it matched `chrome-<host>-<profile>` (a
+            // `--app` window, which asks for *server*-side decorations
+            // and draws none) while missing `google-chrome` (the
+            // browser window, which asks for client-side and draws its
+            // own). Reading the negotiation gets both right with no
+            // list at all.
+            decorations: DecorationRules::default(),
+            drag_modifier: Some(DEFAULT_DRAG_MODIFIER),
             restore_session: false,
             lock_command: None,
             keybindings: vec![
@@ -261,6 +287,13 @@ impl Config {
                 // the arrow pairs with the arrows that then drive the
                 // selection inside it.
                 bind("super+up", Action::Overview),
+                // The window commands menu, reachable without a
+                // titlebar to right-click. Window Maker binds exactly
+                // this, on exactly this key, and documents it as the
+                // way into a window with `NoTitlebar` — the escape
+                // hatch that makes honoring a client's request to
+                // decorate itself a safe policy rather than a gamble.
+                bind("control+escape", Action::WindowMenu),
             ],
         }
     }
@@ -558,23 +591,53 @@ pub fn parse(text: &str) -> Result<Config, String> {
                     "config: lock_command must be a command-line string, ignoring it"
                 ),
             },
+            // The one-directional ancestor of `[decorations]`, kept
+            // reading so an existing config file does not start
+            // warning about an unknown key and silently lose the
+            // override it was written for. It only ever meant "do not
+            // frame these", which is exactly `decorations.client_side`.
             "self_decorating_apps" => match value {
-                toml::Value::Array(items) => {
-                    config.self_decorating_apps = items
-                        .iter()
-                        .filter_map(|v| match v {
-                            toml::Value::String(name) => Some(name.trim().to_ascii_lowercase()),
-                            other => {
-                                tracing::warn!(value = ?other, "config: self_decorating_apps entries must be strings, skipping one");
-                                None
-                            }
-                        })
-                        .filter(|name| !name.is_empty())
-                        .collect();
+                toml::Value::Array(_) => {
+                    tracing::warn!(
+                        "config: self_decorating_apps is now decorations.client_side — reading it as that; \
+                         see docs/config.example.toml for the [decorations] table, which also forces chrome ON"
+                    );
+                    config.decorations.client_side = string_list(value, "self_decorating_apps");
                 }
                 other => tracing::warn!(
                     value = ?other,
-                    "config: self_decorating_apps must be an array of strings, keeping the default list"
+                    "config: self_decorating_apps must be an array of strings, ignoring it"
+                ),
+            },
+            "drag_modifier" => match value {
+                toml::Value::String(name) => match drag_modifier_from_name(name) {
+                    Some(mods) => config.drag_modifier = mods,
+                    None => tracing::warn!(
+                        value = %name,
+                        "config: drag_modifier must be \"alt\", \"super\", \"control\" or \"none\", keeping default"
+                    ),
+                },
+                other => tracing::warn!(
+                    value = ?other,
+                    "config: drag_modifier must be a string, keeping default"
+                ),
+            },
+            "decorations" => match value {
+                toml::Value::Table(entries) => {
+                    for (key, value) in entries {
+                        match key.as_str() {
+                            "server_side" => config.decorations.server_side = string_list(value, "decorations.server_side"),
+                            "client_side" => config.decorations.client_side = string_list(value, "decorations.client_side"),
+                            unknown => tracing::warn!(
+                                key = %unknown,
+                                "config: unknown key in [decorations], ignoring it"
+                            ),
+                        }
+                    }
+                }
+                other => tracing::warn!(
+                    value = ?other,
+                    "config: [decorations] must be a table, ignoring it"
                 ),
             },
             "keybindings" => match value {
@@ -591,6 +654,41 @@ pub fn parse(text: &str) -> Result<Config, String> {
         }
     }
     Ok(config)
+}
+
+/// A TOML array of strings, trimmed and lowercased for the
+/// case-insensitive prefix matching every identity list here does.
+/// Non-string entries are skipped individually rather than voiding the
+/// whole list — one typo'd entry should cost one entry.
+fn string_list(value: &toml::Value, what: &str) -> Vec<String> {
+    let toml::Value::Array(items) = value else {
+        tracing::warn!(value = ?value, key = %what, "config: expected an array of strings, ignoring it");
+        return Vec::new();
+    };
+    items
+        .iter()
+        .filter_map(|v| match v {
+            toml::Value::String(name) => Some(name.trim().to_ascii_lowercase()),
+            other => {
+                tracing::warn!(value = ?other, key = %what, "config: entries must be strings, skipping one");
+                None
+            }
+        })
+        .filter(|name| !name.is_empty())
+        .collect()
+}
+
+/// Parses `drag_modifier`. The outer `Option` is "was this a valid
+/// name"; the inner one is the setting itself, where `None` is the
+/// explicit `"none"` that turns the gesture off.
+fn drag_modifier_from_name(name: &str) -> Option<Option<Modifiers>> {
+    match name.trim().to_ascii_lowercase().as_str() {
+        "alt" | "mod1" => Some(Some(Modifiers::ALT)),
+        "super" | "mod4" | "win" => Some(Some(Modifiers::SUPER)),
+        "control" | "ctrl" => Some(Some(Modifiers::CONTROL)),
+        "none" | "off" => Some(None),
+        _ => None,
+    }
 }
 
 /// Where the config file lives: `$XDG_CONFIG_HOME/chonkstep/config.toml`
@@ -826,6 +924,7 @@ mod tests {
             (combo(0xff53, alt_shift), Action::WorkspaceCarryNext),
             (combo(0xff51, alt_shift), Action::WorkspaceCarryPrev),
             (combo(0xff52, Modifiers::SUPER), Action::Overview),
+            (combo(0xff1b, Modifiers::CONTROL), Action::WindowMenu),
         ];
         let config = Config::default_config();
         assert_eq!(config.keybindings, expected);
@@ -834,6 +933,67 @@ mod tests {
         assert_eq!(config.theme, None);
         assert_eq!(config.placement, PlacementPolicy::Smart);
         assert_eq!(config.edge_resistance, 10);
+        // The decoration policy ships no per-application list at all:
+        // the protocols answer for every client observed, and an entry
+        // here is a correction, not the mechanism.
+        assert_eq!(config.decorations, DecorationRules::default());
+        assert_eq!(config.drag_modifier, Some(DEFAULT_DRAG_MODIFIER));
+    }
+
+    /// The gesture that makes an undecorated window usable at all, and
+    /// the one the old policy's comments claimed already existed.
+    #[test]
+    fn the_drag_modifier_is_configurable_and_can_be_turned_off() {
+        assert_eq!(parse("drag_modifier = \"super\"\n").unwrap().drag_modifier, Some(Modifiers::SUPER));
+        assert_eq!(parse("drag_modifier = \"MOD1\"\n").unwrap().drag_modifier, Some(Modifiers::ALT));
+        assert_eq!(parse("drag_modifier = \"none\"\n").unwrap().drag_modifier, None);
+        // A typo keeps the default rather than silently disabling the
+        // only way to move a window that has no titlebar.
+        assert_eq!(parse("drag_modifier = \"hyper\"\n").unwrap().drag_modifier, Some(DEFAULT_DRAG_MODIFIER));
+    }
+
+    /// Both directions, matched as a case-insensitive prefix, with the
+    /// rescue direction winning a contradiction.
+    #[test]
+    fn decoration_rules_override_in_both_directions() {
+        let config = parse(
+            "[decorations]\nserver_side = [\"Alacritty\"]\nclient_side = [\"google-chrome\"]\n",
+        )
+        .unwrap();
+        assert_eq!(config.decorations.decision_for(Some("alacritty")), Some(true));
+        assert_eq!(config.decorations.decision_for(Some("google-chrome")), Some(false));
+        // Prefix, so one entry covers a family's per-profile ids.
+        assert_eq!(config.decorations.decision_for(Some("GOOGLE-CHROME-beta")), Some(false));
+        // Unmatched clients are left to their own negotiation, which is
+        // the whole point: the lists are exceptions, not the policy.
+        assert_eq!(config.decorations.decision_for(Some("foot")), None);
+        assert_eq!(config.decorations.decision_for(None), None);
+    }
+
+    #[test]
+    fn a_client_in_both_lists_keeps_its_chrome() {
+        let rules = DecorationRules {
+            server_side: vec!["contested".to_string()],
+            client_side: vec!["contested".to_string()],
+        };
+        assert_eq!(rules.decision_for(Some("contested")), Some(true), "the usable window wins the tie");
+    }
+
+    /// An existing config file must not lose the override it was
+    /// written for just because the key was renamed.
+    #[test]
+    fn the_old_one_directional_key_still_reads_as_client_side() {
+        let config = parse("self_decorating_apps = [\"zenity\"]\n").unwrap();
+        assert_eq!(config.decorations.client_side, vec!["zenity".to_string()]);
+        assert!(config.decorations.server_side.is_empty());
+    }
+
+    /// An empty entry must never become a prefix that matches every
+    /// window on the desk.
+    #[test]
+    fn an_empty_entry_matches_nothing() {
+        let rules = DecorationRules { server_side: vec![String::new()], client_side: Vec::new() };
+        assert_eq!(rules.decision_for(Some("anything")), None);
     }
 
     // ---- parse: whole-file behavior -----------------------------------
@@ -888,8 +1048,8 @@ mod tests {
         assert_eq!(action_for(&config, "super+f11"), Some(Action::ToggleFullscreen));
         assert_eq!(action_for(&config, "alt+shift+x"), Some(Action::ToggleMaximize));
         assert_eq!(action_for(&config, "alt+shift+left"), Some(Action::WorkspaceCarryPrev));
-        // 11 defaults - 1 unbound + 2 new = 12.
-        assert_eq!(config.keybindings.len(), 12);
+        // 12 defaults - 1 unbound + 2 new = 13.
+        assert_eq!(config.keybindings.len(), 13);
     }
 
     #[test]
@@ -906,16 +1066,21 @@ mod tests {
             ("workspace-carry-next", Action::WorkspaceCarryNext),
             ("workspace-carry-prev", Action::WorkspaceCarryPrev),
             ("overview", Action::Overview),
+            ("window-menu", Action::WindowMenu),
             ("restart", Action::Restart),
         ];
+        // One letter per action rather than one function key: the list
+        // outgrew F12 when the window-menu verb was added, and a test
+        // that silently stops covering the tail is worse than useless.
+        let spec_for = |n: usize| format!("super+{}", (b'a' + n as u8) as char);
+        assert!(names.len() <= 26, "one binding per letter");
         let mut text = String::from("[keybindings]\n");
         for (n, (name, _)) in names.iter().enumerate() {
-            text.push_str(&format!("\"super+f{}\" = \"{}\"\n", n + 1, name));
+            text.push_str(&format!("\"{}\" = \"{}\"\n", spec_for(n), name));
         }
         let config = parse(&text).unwrap();
         for (n, (name, action)) in names.iter().enumerate() {
-            let spec = format!("super+f{}", n + 1);
-            assert_eq!(action_for(&config, &spec).as_ref(), Some(action), "action {name:?}");
+            assert_eq!(action_for(&config, &spec_for(n)).as_ref(), Some(action), "action {name:?}");
         }
     }
 
@@ -935,14 +1100,14 @@ mod tests {
         assert_eq!(action_for(&config, "alt+shift+x"), Some(Action::Close));
         // Every other default is untouched, and no entry was duplicated.
         assert_eq!(action_for(&config, "alt+shift+q"), Some(Action::Close));
-        assert_eq!(config.keybindings.len(), 11);
+        assert_eq!(config.keybindings.len(), 12);
     }
 
     #[test]
     fn none_unbinds_a_default() {
         let config = parse("[keybindings]\n\"alt+shift+q\" = \"none\"\n").unwrap();
         assert_eq!(action_for(&config, "alt+shift+q"), None);
-        assert_eq!(config.keybindings.len(), 10);
+        assert_eq!(config.keybindings.len(), 11);
         assert!(!config.keybindings.iter().any(|(_, a)| *a == Action::Close));
     }
 
@@ -952,7 +1117,7 @@ mod tests {
         // through an alias/case variant of the default's spelling works.
         let config = parse("[keybindings]\n\"ALT+CONTROL+RIGHT\" = \"None\"\n").unwrap();
         assert_eq!(action_for(&config, "alt+ctrl+right"), None);
-        assert_eq!(config.keybindings.len(), 10);
+        assert_eq!(config.keybindings.len(), 11);
     }
 
     #[test]
@@ -1010,8 +1175,8 @@ mod tests {
         // ...the bad ones were skipped without binding anything...
         assert_eq!(action_for(&config, "super+u"), None);
         assert_eq!(action_for(&config, "super+v"), None);
-        // ...and the untouched defaults survived: 11 - 1 + 1 = 11.
-        assert_eq!(config.keybindings.len(), 11);
+        // ...and the untouched defaults survived: 12 - 1 + 1 = 12.
+        assert_eq!(config.keybindings.len(), 12);
         assert_eq!(action_for(&config, "alt+shift+x"), Some(Action::ToggleMaximize));
     }
 
@@ -1037,7 +1202,7 @@ mod tests {
         assert_eq!(config.theme, None);
         assert_eq!(config.placement, PlacementPolicy::Smart);
         assert_eq!(config.edge_resistance, 10);
-        assert_eq!(config.keybindings.len(), 11);
+        assert_eq!(config.keybindings.len(), 12);
     }
 
     #[test]

@@ -122,6 +122,26 @@ fn xdg_attribute<T>(
     })
 }
 
+/// The string a `[decorations]` rule matches an XWayland window on: its
+/// `WM_CLASS` instance if there is one, else its class.
+///
+/// Instance first because that is the more specific half and the one a
+/// user reads off `xprop` — `WM_CLASS(STRING) = "libreoffice",
+/// "libreoffice-writer"` — and because the rules match by prefix, so
+/// naming the class still catches every instance under it.
+fn x11_identity(surface: &smithay::xwayland::X11Surface) -> Option<String> {
+    let instance = surface.instance();
+    if !instance.is_empty() {
+        return Some(instance);
+    }
+    let class = surface.class();
+    if class.is_empty() {
+        None
+    } else {
+        Some(class)
+    }
+}
+
 /// The one honest projection of `wm-core`'s two maximize axes into the
 /// single "maximized" both protocols speak (smithay's
 /// `X11Surface::set_maximized` sets both `_NET_WM_STATE_MAXIMIZED_*`
@@ -1266,6 +1286,10 @@ impl Backend for WaylandBackend {
         }
     }
 
+    fn set_decoration_rules(&mut self, rules: wm_core::DecorationRules) {
+        self.decoration_rules = rules;
+    }
+
     fn client_draws_own_chrome(&self, window: Self::WindowId) -> bool {
         let Some(record) = self.windows.get(&window) else {
             return false;
@@ -1288,61 +1312,43 @@ impl Backend for WaylandBackend {
             // was stripped of its frame, controls and resize bars —
             // unnoticed for days because LibreOffice and Edge run
             // native Wayland and never take this arm.
-            ManagedSurface::X11(surface) => surface.is_decorated(),
-            // A Wayland toplevel that never negotiated decorations is
-            // stating, by the protocol's own rule, that it decorates
-            // itself. The xdg-decoration preamble: "if compositor and
-            // client do not negotiate the use of a server-side
-            // decoration using this protocol, clients continue to
-            // self-decorate as they see fit." Neither GTK3 nor GTK4
-            // ever creates the object — confirmed here by running a GTK
-            // client under `WAYLAND_DEBUG`, which shows the global being
-            // advertised and no request against it, ever — so under the
-            // previous rule (frame everything that did not ask)
-            // LibreOffice and every other GTK application wore our
-            // titlebar over their own headerbar.
-            //
-            // The objection to reading silence this way is real and is
-            // not dismissed: a toolkit with no decoration support at all
-            // (SDL2 or GLFW built without libdecor, a bare wl_egl demo)
-            // is silent for the opposite reason and draws nothing, and
-            // unframed it is a rectangle with no titlebar to grab. Two
-            // things make that survivable rather than a worse bug than
-            // the one being fixed. The protocol says such a client is
-            // self-decorating whatever it actually draws, so this is
-            // conformance and not a guess — a client that wants our
-            // chrome need only ask for it, which is one request. And a
-            // frameless window is no longer stuck: it can be dragged
-            // with the modifier-drag every window answers to, and it can
-            // ask to be moved through `MoveRequest`.
-            //
-            // One known staleness: smithay 0.7 handles the decoration
-            // object's `destroy` internally and calls no handler, and
-            // destroying it is how a client spells "back to
-            // self-decorating". A client that negotiates and then
-            // destroys keeps its frame until it unmaps. No toolkit
-            // observed here does that, and the alternative was leaving
-            // every GTK window double-decorated.
-            // Both disjuncts now require *positive evidence* that the
-            // client draws chrome, which is its `app_id` appearing in
-            // `self_decorating_apps`. Neither an explicit ClientSide ask
-            // nor silence is evidence on its own:
-            //
-            //  - The ask is not a promise to draw anything. A terminal
-            //    configured `decorations = "None"` for a tiling desktop
-            //    asks for client-side and then draws nothing, and this
-            //    returning true left it with no chrome from either side
-            //    — unmovable, unresizable, uncloseable.
-            //  - Silence used to mean "I decorate myself", which is the
-            //    protocol's default but not a safe one here: a toolkit
-            //    that never binds the interface at all gets swept up.
-            //
-            // A client we frame that draws its own titlebar anyway wears
-            // two, which is visible and fixed by adding its `app_id` to
-            // the list. A client we leave bare that draws nothing is a
-            // window the user cannot use. The failure modes are not
-            // symmetric, so the default is to frame.
-            ManagedSurface::Xdg(_) => self.client_declares_self_decoration(record),
+            ManagedSurface::X11(surface) => {
+                // A `[decorations]` rule reaches this leg too. It did
+                // not before: the override was consulted only on the
+                // native Wayland arm, and `record.app_id` was never
+                // populated for an X11 surface at all, so a user told
+                // to name their application in the config got silence
+                // from every XWayland window on the desk.
+                let identity = record.app_id.clone().or_else(|| x11_identity(surface));
+                if let Some(force_server_side) = self.decoration_rules.decision_for(identity.as_deref()) {
+                    return !force_server_side;
+                }
+                // `_MOTIF_WM_HINTS` with the decorations bit present and
+                // clear: the client has *said* it draws its own
+                // titlebar. Read through `wm-core`'s shared reader, so
+                // this leg, the X11 session's window manager, and any
+                // future one cannot drift apart on what the property
+                // means — they had, over the property's minimum length.
+                //
+                // Read smithay's method as `is_client_side_decorated`:
+                // it answers true only when the decorations field is
+                // present and ZERO — despite a name that suggests
+                // "wants a frame", it means the opposite, and
+                // `wm-x11`'s own Motif read agrees with this
+                // orientation, not the negation. A `!` here once
+                // inverted the whole table: Spotify, which asks for
+                // MWM_DECOR_ALL, was stripped of its frame, controls
+                // and resize bars — unnoticed for days because
+                // LibreOffice and Edge run native Wayland and never
+                // take this arm.
+                surface.is_decorated()
+            }
+            // Everything a native Wayland toplevel has told us, on
+            // either decoration protocol, with a `[decorations]`
+            // override above it. The reasoning — including why silence
+            // is framed and why the KDE protocol has to be advertised
+            // at all — lives in `crate::decoration`.
+            ManagedSurface::Xdg(_) => self.xdg_client_draws_own_chrome(record),
         }
     }
 

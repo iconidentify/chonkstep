@@ -1022,8 +1022,20 @@ impl XdgShellHandler for Compositor {
         });
         let backend = self.wm.backend_mut();
         if let Some(id) = backend.window_for_surface(surface.wl_surface()) {
+            let changed = backend.windows.get(&id).is_some_and(|record| record.app_id != app_id);
             if let Some(record) = backend.windows.get_mut(&id) {
                 record.app_id = app_id;
+            }
+            // The identity is an input to the decoration decision — it
+            // is what a `[decorations]` rule matches on — and it is not
+            // guaranteed to arrive before the window maps. Nothing
+            // re-asked, so a client that set its `app_id` after mapping
+            // kept whatever chrome it was given for the rest of its
+            // life, and a rule naming it did nothing at all. (LibreOffice
+            // sets `soffice` and then immediately `libreoffice-writer`,
+            // so this is not a hypothetical.)
+            if changed {
+                backend.queue(WmEvent::ChromeChanged(id));
             }
         }
     }
@@ -1070,39 +1082,38 @@ fn wm_resize_edge(
 }
 
 // -- xdg-decoration ------------------------------------------------------
-// The policy: this desktop draws the chrome unless the client is one of
-// the few known to draw its own (`Config::self_decorating_apps`). The
-// chiseled frames are the whole point, and a client drawing its own
-// titlebar under one would wear two hats — but a client that asks for
-// client-side decorations has not promised to draw *any*, and one that
-// draws none while we honour the ask ends up with chrome from neither
-// side. The protocol explicitly allows the compositor to impose
-// ServerSide, and for everything off the list that is what it does.
+// The standard decoration protocol, and — this being the surprise that
+// took a swarm to find — not the one most of this desktop's clients
+// speak. GTK binds only KDE's older interface; see `crate::decoration`,
+// which holds the whole policy, the evidence model, and the KDE half.
 //
-// (This comment used to read "always", while the code below honoured
-// every ClientSide ask — the two had drifted a long way apart.)
+// What is left here is bookkeeping and one rule: the mode configured on
+// the wire is computed from the same decision that decides whether a
+// frame gets built, so the two cannot disagree. They did. A Chrome
+// web-app window asked for server-side decorations, was answered
+// server-side, and was then left unframed because the framing decision
+// consulted an `app_id` list instead of the answer we had just given
+// it — chrome from neither side, on the most-used window on the desk.
 
 impl XdgDecorationHandler for Compositor {
     fn new_decoration(&mut self, toplevel: ToplevelSurface) {
-        // Record that this toplevel negotiated at all. Silence is the
-        // protocol's way of saying "I decorate myself" (see
-        // `WindowRecord::negotiated_decoration`), so the only clients
-        // this desktop may frame are the ones that got as far as
-        // creating the object — and this is the one place that is
-        // observable.
         let backend = self.wm.backend_mut();
+        let mut client_side = false;
         if let Some(id) = backend.window_for_surface(toplevel.wl_surface()) {
             if let Some(record) = backend.windows.get_mut(&id) {
-                record.negotiated_decoration = true;
+                record.decoration.xdg_object = true;
             }
-            // Version 2 of the interface lets a client create the object
-            // after it has already committed a buffer, which is after
-            // this backend emitted `MapRequest`. Re-asking is how such a
-            // late negotiation still gets a frame.
+            // Creating the object without asking for a mode means "you
+            // decide", and this desktop decides its own chrome — unless
+            // a rule says otherwise, which is checked here so the very
+            // first configure already carries the final answer.
+            if let Some(record) = backend.windows.get(&id) {
+                client_side = backend.xdg_client_draws_own_chrome(record);
+            }
             backend.queue(WmEvent::ChromeChanged(id));
         }
         toplevel.with_pending_state(|state| {
-            state.decoration_mode = Some(DecorationMode::ServerSide);
+            state.decoration_mode = Some(if client_side { DecorationMode::ClientSide } else { DecorationMode::ServerSide });
         });
         // No configure here: if this races the initial commit, the
         // initial configure carries the mode; otherwise request_mode/
@@ -1110,64 +1121,85 @@ impl XdgDecorationHandler for Compositor {
     }
 
     fn request_mode(&mut self, toplevel: ToplevelSurface, mode: DecorationMode) {
-        // A ServerSide ask is honored outright. A ClientSide ask is
-        // honored only from a client on `self_decorating_apps` — the
-        // Chromium family, which requests ClientSide and draws its frame
-        // whatever we configure, and which imposing ServerSide once gave
-        // two titlebars and a visible flash on every short-lived
-        // transient. Off that list a ClientSide ask is answered
-        // ServerSide, because the ask is not a promise to draw anything:
-        // a terminal configured `decorations = "None"` for a tiling
-        // desktop asks for client-side and then draws nothing at all,
-        // and honouring it left a window with no chrome from either
-        // side. The frame comes off (or goes on) through the same
-        // ChromeChanged path a Motif hint rewrite takes.
+        // The ask is recorded, then read back through the one policy
+        // every other decoration path goes through. A ClientSide ask is
+        // honored — which is what KWin, labwc and cosmic-comp do, and
+        // what the protocol is shaped for — because the clients that
+        // ask for it and mean it (a browser whose frame is fused with
+        // its tab strip, a libadwaita headerbar) cannot drop their
+        // chrome on request, so imposing ours gives two titlebars with
+        // no way back. The client that asks and then draws nothing is
+        // real too (a terminal configured `decorations = "None"` for a
+        // tiling desktop), and it is answered by the modifier-drag that
+        // moves and resizes any window, and by one line of
+        // `[decorations] server_side` if the user wants its frame back.
         let backend = self.wm.backend_mut();
-        let mut wants_client_side = mode == DecorationMode::ClientSide;
+        let asked_client_side = mode == DecorationMode::ClientSide;
+        let mut client_side = asked_client_side;
         if let Some(id) = backend.window_for_surface(toplevel.wl_surface()) {
-            if wants_client_side {
-                let declares = backend
-                    .windows
-                    .get(&id)
-                    .is_some_and(|record| backend.client_declares_self_decoration(record));
-                if !declares {
-                    tracing::debug!(?id, "client asked for its own decorations but is not known to draw any — imposing server-side");
-                    wants_client_side = false;
-                }
-            }
             if let Some(record) = backend.windows.get_mut(&id) {
-                record.requested_client_side = Some(wants_client_side);
+                record.decoration.xdg_object = true;
+                record.decoration.xdg_client_side = Some(asked_client_side);
+            }
+            if let Some(record) = backend.windows.get(&id) {
+                client_side = backend.xdg_client_draws_own_chrome(record);
+            }
+            if client_side != asked_client_side {
+                tracing::debug!(?id, asked_client_side, "a [decorations] rule overrides this client's decoration request");
             }
             backend.queue(WmEvent::ChromeChanged(id));
         }
         toplevel.with_pending_state(|state| {
-            state.decoration_mode = Some(if wants_client_side {
-                DecorationMode::ClientSide
-            } else {
-                DecorationMode::ServerSide
-            });
+            state.decoration_mode = Some(if client_side { DecorationMode::ClientSide } else { DecorationMode::ServerSide });
         });
-        if toplevel.is_initial_configure_sent() {
-            let _ = toplevel.send_pending_configure();
-        }
+        send_decoration_configure(&toplevel);
     }
 
     fn unset_mode(&mut self, toplevel: ToplevelSurface) {
         // No preference means the choice is genuinely ours, and ours is
         // server-side: this desktop's chrome is the product.
         let backend = self.wm.backend_mut();
+        let mut client_side = false;
         if let Some(id) = backend.window_for_surface(toplevel.wl_surface()) {
             if let Some(record) = backend.windows.get_mut(&id) {
-                record.requested_client_side = None;
+                record.decoration.xdg_object = true;
+                record.decoration.xdg_client_side = None;
+            }
+            if let Some(record) = backend.windows.get(&id) {
+                client_side = backend.xdg_client_draws_own_chrome(record);
             }
             backend.queue(WmEvent::ChromeChanged(id));
         }
         toplevel.with_pending_state(|state| {
-            state.decoration_mode = Some(DecorationMode::ServerSide);
+            state.decoration_mode = Some(if client_side { DecorationMode::ClientSide } else { DecorationMode::ServerSide });
         });
-        if toplevel.is_initial_configure_sent() {
-            let _ = toplevel.send_pending_configure();
-        }
+        send_decoration_configure(&toplevel);
+    }
+}
+
+/// Sends the configure a decoration request has to be answered with,
+/// and does so even when nothing else about the surface changed.
+///
+/// The subtlety that made this a function rather than a line: smithay's
+/// `send_pending_configure` sends nothing when `has_pending_changes()`
+/// is false, and that predicate does not consider whether the
+/// *decoration* configure has been sent — only `send_configure` does.
+/// Because a toplevel is primed with `ServerSide` the moment it is
+/// created, imposing `ServerSide` on a client that asked for
+/// `ClientSide` is a no-op state change, so a client that binds the
+/// decoration object after its first (buffer-less) commit could ask,
+/// be answered with silence, and — forbidden by the protocol from
+/// attaching a buffer before its first decoration configure — never map
+/// at all.
+fn send_decoration_configure(toplevel: &ToplevelSurface) {
+    if !toplevel.is_initial_configure_sent() {
+        // The initial configure will carry the mode when it goes.
+        return;
+    }
+    if toplevel.send_pending_configure().is_none() {
+        // Nothing else changed, so force one: the client is waiting on
+        // the decoration configure specifically.
+        toplevel.send_configure();
     }
 }
 

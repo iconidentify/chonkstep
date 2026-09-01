@@ -20,7 +20,7 @@
 //! parallel threads of one process cannot use safely.
 
 use wm_config::{Action, Config};
-use wm_core::{FocusPolicy, KeyCombo, PlacementPolicy};
+use wm_core::{DecorationRules, FocusPolicy, KeyCombo, Modifiers, PlacementPolicy};
 use wm_theme::{Appearance, Theme};
 
 use crate::theme_select;
@@ -66,6 +66,19 @@ pub struct SessionState {
     /// but carried here so it resolves through the same one path as
     /// everything else the config sets.
     pub restore_session: bool,
+    /// Per-application decoration overrides, handed to the backend.
+    ///
+    /// Carried here rather than read straight off the config by each
+    /// backend for the reason the doc comment above gives: this is the
+    /// one path config takes into a running session, and a setting that
+    /// travels beside it cannot be the one a reload forgets. It was —
+    /// the marker-file reload updated the decoration policy and the
+    /// bound `reload` key did not, so the same edit applied or did not
+    /// depending on how the user asked for it.
+    pub decorations: DecorationRules,
+    /// The modifier for the move/resize drag gesture. `None` disables
+    /// it.
+    pub drag_modifier: Option<Modifiers>,
     pub keybindings: Vec<(KeyCombo, Action)>,
 }
 
@@ -93,6 +106,8 @@ impl SessionState {
             edge_resistance: config.edge_resistance,
             terminal_font_px: config.terminal_font_px,
             restore_session: config.restore_session,
+            decorations: config.decorations.clone(),
+            drag_modifier: config.drag_modifier,
             keybindings: config.keybindings.clone(),
         }
     }
@@ -449,6 +464,8 @@ mod tests {
             edge_resistance: 10,
             terminal_font_px: 20.0,
             restore_session: false,
+            decorations: DecorationRules::default(),
+            drag_modifier: Some(wm_core::DEFAULT_DRAG_MODIFIER),
             keybindings: Vec::new(),
         };
         assert_eq!(state.theme(), base.scaled(2.0));

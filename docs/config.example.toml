@@ -135,6 +135,26 @@
 # applications you did not just ask for is something to opt into.
 #restore_session = true
 
+# The modifier for the move/resize drag gesture: hold it and drag with
+# the LEFT button anywhere on a window to move it, or with the RIGHT
+# button to resize it from whichever third of the window you grabbed
+# (a corner ninth pulls that corner; the middle pulls the bottom-right,
+# where the resize bar lives). One of "alt" (the default, and what
+# Window Maker has always used), "super", "control", or "none" to turn
+# the gesture off.
+#
+# This is not only a convenience. A window whose client draws its own
+# chrome has no titlebar of ours to drag and no resize bar to pull, and
+# if that client then draws nothing -- a terminal configured
+# `decorations = "None"` for a tiling desktop does exactly that -- this
+# gesture is the only way to move or resize it at all. Control+Escape
+# opens its window commands menu for the same reason.
+#
+# Set it to "super" if you use an application that wants Alt+drag for
+# itself (CAD programs, GIMP, Blender); KDE and labwc both moved to the
+# super key for that reason.
+#drag_modifier = "alt"
+
 # Screen locker for crash recovery, Wayland session only. When the
 # compositor crashes, scripts/wayland-session.sh restarts it; if this
 # names a locker (any ext-session-lock client, e.g. "swaylock", split
@@ -158,15 +178,15 @@
 # Actions (kebab-case, a closed set):
 #   spawn-terminal, close, toggle-maximize, toggle-shade, miniaturize,
 #   toggle-fullscreen, workspace-next, workspace-prev,
-#   workspace-carry-next, workspace-carry-prev, overview, reload,
-#   restart, none
+#   workspace-carry-next, workspace-carry-prev, overview, window-menu,
+#   reload, restart, none
 #
 # "reload" re-reads this file and applies it in place; "restart"
 # re-execs the on-disk binary to pick up a new build. See the note at
 # the top of this file for which one you want.
 #
 # Window-targeted actions (close, toggle-maximize, toggle-shade,
-# miniaturize, toggle-fullscreen) act on the focused window and do
+# miniaturize, toggle-fullscreen, window-menu) act on the focused window and do
 # nothing when no window is focused. The Alt+Tab window switcher is
 # part of the window manager's modal machinery and is not rebindable
 # here.
@@ -180,6 +200,7 @@
 "alt+shift+s" = "toggle-shade"              # roll the window up into its titlebar
 "alt+shift+m" = "miniaturize"               # collapse to an icon tile
 "alt+shift+f" = "toggle-fullscreen"         # borderless fullscreen on / off
+"control+escape" = "window-menu"            # window commands menu, no titlebar needed
 "alt+ctrl+right" = "workspace-next"         # next workspace (grows on demand)
 "alt+ctrl+left" = "workspace-prev"          # previous workspace (stops at the first)
 "alt+shift+right" = "workspace-carry-next"  # carry the focused window along
@@ -204,3 +225,41 @@
 # rest of the defaults. For example, to free alt+shift+q for some other
 # application:
 #"alt+shift+q" = "none"
+
+# Per-application decoration overrides. You should not need these.
+#
+# Who draws a window's titlebar is a question the client already
+# answers, on one of two protocols: the standard xdg-decoration, and
+# KDE's older org_kde_kwin_server_decoration, which is the only one GTK
+# speaks. This desktop advertises both and believes what it is told, so
+# a browser whose frame is part of its tab strip keeps its own chrome,
+# a web app that asks for a titlebar gets a chiseled one, and
+# LibreOffice -- which asks for a titlebar on the KDE protocol -- wears
+# exactly one.
+#
+# These lists exist for the clients that answer wrongly, and each is a
+# case-insensitive PREFIX of the application's app_id (Wayland) or its
+# WM_CLASS (X11 and XWayland), so one entry covers a family. Whichever
+# session you log into, the same entry means the same thing.
+#
+# The name to write is in the session log, on the line that reports how
+# the window was mapped:
+#
+#     mapped window undecorated -- its client says it draws its own
+#     chrome app=Alacritty
+#
+#[decorations]
+# Draw this desktop's chrome whatever the client asks for. The rescue
+# direction, and the reason it exists: Omarchy ships alacritty
+# configured `decorations = "None"`, which is right under a tiling
+# compositor that draws no titlebars. Under this desktop that client
+# asks for client-side decorations and then draws none, leaving a bare
+# rectangle. One line here gives it a real titlebar back. (Until you
+# write that line it is still movable and resizable -- see
+# drag_modifier above -- just bare.)
+#server_side = ["alacritty", "kitty"]
+#
+# Never draw chrome for these; the client's own is the only one. For an
+# application that insists on drawing a titlebar without asking for the
+# right to.
+#client_side = ["some.stubborn.app"]

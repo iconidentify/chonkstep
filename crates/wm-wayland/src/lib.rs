@@ -25,6 +25,7 @@
 
 mod backend_impl;
 mod capture;
+mod decoration;
 mod dmabuf;
 mod idle;
 mod input;

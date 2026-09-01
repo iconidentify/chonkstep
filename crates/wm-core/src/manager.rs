@@ -42,6 +42,12 @@ const XK_ALT_R: u32 = 0xffea;
 /// backend mid-teardown ever reach it.
 const NO_MONITOR_FALLBACK: Rect = Rect { pos: Point::new(0, 0), size: Size::new(800, 600) };
 
+/// The modifier the move/resize drag gesture rides on when nothing
+/// configures one: Alt, as Window Maker has bound it since 1997. The
+/// config file's `drag_modifier` overrides it, and `wm-config` carries
+/// the same constant for the parser's default.
+pub const DEFAULT_DRAG_MODIFIER: Modifiers = Modifiers::ALT;
+
 /// An in-progress move. `grab_offset` is the frame-local point that was
 /// grabbed — since that's constant relative to the frame regardless of
 /// where the frame currently sits, the new frame position is simply
@@ -186,6 +192,19 @@ pub struct WindowManager<B: Backend> {
     /// Edge-attraction distance for move drags — see `crate::snap`.
     /// Configurable (`set_snap_threshold`); `0` disables snapping.
     snap_threshold: i32,
+    /// The modifier that turns a press anywhere on a window's *content*
+    /// into a move (left button) or a resize (right button). `None`
+    /// disables the gesture entirely.
+    ///
+    /// This is what makes it safe to take a client at its word when it
+    /// says it draws its own chrome. Such a window has no titlebar of
+    /// ours to grab and no resize bar to pull, and if it then draws
+    /// nothing — a terminal configured `decorations = "None"` for a
+    /// tiling desktop does exactly that — the gesture is the only way
+    /// to move or resize it that does not depend on the client
+    /// cooperating. Window Maker has bound it to Alt since 1997 and
+    /// grabs it on the client window for precisely this case.
+    drag_modifier: Option<Modifiers>,
     notifications: VecDeque<Notification>,
     focus_policy: FocusPolicy,
     /// 0-based, matching `Client::workspace`. Grows on demand the first
@@ -241,6 +260,7 @@ impl<B: Backend> WindowManager<B> {
             placement_policy: PlacementPolicy::Smart,
             placements: 0,
             snap_threshold: SNAP_THRESHOLD_PX,
+            drag_modifier: Some(DEFAULT_DRAG_MODIFIER),
             notifications: VecDeque::new(),
             focus_policy: FocusPolicy::default(),
             current_workspace: 0,
@@ -271,6 +291,42 @@ impl<B: Backend> WindowManager<B> {
     /// entirely (every position passes through untouched).
     pub fn set_snap_threshold(&mut self, px: u32) {
         self.snap_threshold = px.min(i32::MAX as u32) as i32;
+    }
+
+    /// Sets the modifier for the move/resize drag gesture — the config
+    /// file's `drag_modifier` entry. `None` turns the gesture off.
+    ///
+    /// A backend that takes passive pointer grabs (the X11 session
+    /// does) has to re-grab when this changes; the compositor reads it
+    /// per event and needs nothing.
+    pub fn set_drag_modifier(&mut self, modifier: Option<Modifiers>) {
+        if self.drag_modifier == modifier {
+            return;
+        }
+        self.drag_modifier = modifier;
+        let windows: Vec<B::WindowId> = self.clients.iter().map(|(_, client)| client.window).collect();
+        for window in windows {
+            self.backend.set_drag_gesture_grab(window, modifier);
+        }
+    }
+
+    /// The modifier currently driving the move/resize gesture, for a
+    /// backend that has to decide whether a press belongs to the window
+    /// manager or the client *before* `wm-core` sees it.
+    pub fn drag_modifier(&self) -> Option<Modifiers> {
+        self.drag_modifier
+    }
+
+    /// Whether `mods` is exactly the drag modifier: the gesture's own
+    /// modifier held, and no other.
+    ///
+    /// Exact rather than "contains" on purpose. Alt+Shift is this
+    /// desktop's binding prefix for eleven window commands, and a
+    /// gesture that fired on any superset of Alt would turn every one
+    /// of those chords into a latent window drag the moment the user's
+    /// hand touched the mouse.
+    pub fn is_drag_gesture(&self, mods: Modifiers) -> bool {
+        self.drag_modifier.is_some_and(|wanted| mods == wanted)
     }
 
     /// Swaps the decoration engine and re-lays-out every managed client
@@ -820,17 +876,29 @@ impl<B: Backend> WindowManager<B> {
             self.frame_index.insert(frame, id);
         }
         self.managed_order.push(window);
+        // The gesture has to reach this window's own content, which on
+        // X11 means a passive grab the backend installs per window.
+        self.backend.set_drag_gesture_grab(window, self.drag_modifier);
         self.backend.publish_client_list(&self.managed_order);
         // A fresh window's `_NET_WM_DESKTOP` — published once here (it
         // lands on the current workspace) and again on every later
         // move; a pager that never sees the property at all would have
         // to treat the window as on-every-desktop.
         self.backend.publish_window_desktop(window, self.current_workspace);
+        // The identity goes in both lines on purpose. A user whose
+        // window arrived with the wrong chrome has exactly one thing to
+        // do about it — name the application in `[decorations]` — and
+        // the log was the only place that string could have come from,
+        // while naming nothing but an opaque `WlWindowId(102)`.
+        let identity = self.clients.get(id).map(|c| c.class.clone()).unwrap_or_default();
         match chrome {
-            ClientChrome::ServerDrawn => tracing::info!(?window, "mapped and decorated window"),
-            ClientChrome::ClientDrawn => {
-                tracing::info!(?window, "mapped window undecorated — its client draws its own chrome")
-            }
+            ClientChrome::ServerDrawn => tracing::info!(?window, app = %identity, "mapped and decorated window"),
+            ClientChrome::ClientDrawn => tracing::info!(
+                ?window,
+                app = %identity,
+                "mapped window undecorated — its client says it draws its own chrome \
+                 (decorations.server_side = [\"…\"] overrides this)"
+            ),
         }
 
         self.publish_frame_extents(id);
@@ -1022,7 +1090,7 @@ impl<B: Backend> WindowManager<B> {
         }
         match surface {
             SurfaceRef::Frame(frame) => self.handle_frame_button(frame, local, button, pressed, time_ms, mods),
-            SurfaceRef::Client(window) => self.handle_client_button(window, pressed),
+            SurfaceRef::Client(window) => self.handle_client_button(window, local, button, pressed, mods),
         }
     }
 
@@ -1043,9 +1111,33 @@ impl<B: Backend> WindowManager<B> {
         }
     }
 
-    fn handle_client_button(&mut self, window: B::WindowId, pressed: bool) {
+    fn handle_client_button(
+        &mut self,
+        window: B::WindowId,
+        local: Point,
+        button: MouseButton,
+        pressed: bool,
+        mods: Modifiers,
+    ) {
         if !pressed {
             return;
+        }
+        // The modifier-drag: a move or a resize begun over a window's
+        // own content, reaching windows a titlebar cannot.
+        //
+        // Every window answers to it, framed or not, because the
+        // gesture's whole job is to not depend on chrome. For a framed
+        // window it is a convenience — the titlebar is right there. For
+        // a client-decorated one it is the only pointer route to a
+        // move or a resize that exists, and the reason this desktop can
+        // honor a client's request to decorate itself without risking a
+        // window nobody can shift off the corner it opened in.
+        if let Some(&id) = self.window_index.get(&window) {
+            if self.is_drag_gesture(mods) && matches!(button, MouseButton::Left | MouseButton::Right) {
+                self.focus_client(id);
+                self.begin_modifier_drag(id, local, button);
+                return;
+            }
         }
         if let Some(&id) = self.window_index.get(&window) {
             self.focus_client(id);
@@ -1627,6 +1719,20 @@ impl<B: Backend> WindowManager<B> {
         if client.flags.contains(ClientFlags::SHADED) {
             return;
         }
+        // Shading rolls a window up *into its titlebar*, and a
+        // client-decorated window has none of ours to roll into. Doing
+        // it anyway unmapped the content and left nothing on screen at
+        // all: `reflow_frame` returns early for this kind of window,
+        // before it ever reaches the shaded-frame branch, so the
+        // renderer and the hit-test both skipped it and the window
+        // became invisible and unclickable — recoverable only through
+        // Alt+Tab or the Overview, neither of which is where a user
+        // looks for a window they just watched vanish. Refusing is the
+        // honest answer: there is no titlebar to leave behind.
+        if client.chrome == ClientChrome::ClientDrawn {
+            tracing::debug!(?id, "shade refused: this client draws its own chrome, so there is no titlebar to roll up into");
+            return;
+        }
         client.flags.insert(ClientFlags::SHADED);
         let window = client.window;
         self.backend.set_client_mapped(window, false);
@@ -2197,6 +2303,13 @@ impl<B: Backend> WindowManager<B> {
     /// them or taken away from around them.
     fn handle_chrome_changed(&mut self, window: B::WindowId) {
         let Some(&id) = self.window_index.get(&window) else {
+            // Not mapped yet, and that is the common case rather than
+            // an error: a client negotiates decorations before it
+            // commits its first buffer, so most of these events arrive
+            // before `handle_map_request` has put the window in the
+            // index. Nothing is lost by dropping them — the map itself
+            // asks the backend the same question, and reads whatever
+            // the negotiation has settled on by then.
             return;
         };
         let wants = if self.backend.client_draws_own_chrome(window) {
@@ -2353,6 +2466,58 @@ impl<B: Backend> WindowManager<B> {
         tracing::debug!(?window, "client asked to be moved — interactive move begun");
     }
 
+    /// Starts a move (left button) or a resize (right button) from a
+    /// modifier-held press over a window's content, at `local` — a
+    /// point in the client's own coordinates.
+    ///
+    /// The resize edge is chosen from where in the window the press
+    /// landed, thirds on each axis: a press in a corner ninth resizes
+    /// that corner, an edge third resizes that edge, and the middle
+    /// ninth — where there is no nearest edge worth guessing — resizes
+    /// the bottom-right, the corner every resize bar in this theme
+    /// lives in. That is Window Maker's rule and KWin's both, and it
+    /// means the gesture never has to be aimed.
+    fn begin_modifier_drag(&mut self, id: ClientId, local: Point, button: MouseButton) {
+        let Some(client) = self.clients.get(id) else {
+            return;
+        };
+        // `local` is content-local; both drags are anchored on the
+        // frame, which the content sits `client_offset` inside of.
+        let offset = client.layout.client_offset;
+        let frame_pos = Point::new(client.geometry.pos.x - offset.x, client.geometry.pos.y - offset.y);
+        let frame_size = client.layout.frame_size;
+        let shaded = client.flags.contains(ClientFlags::SHADED);
+        match button {
+            MouseButton::Left => {
+                // Same un-maximize gesture the titlebar drag performs:
+                // a window dragged out of its maximized rect is no
+                // longer maximized, and leaving the flag set makes the
+                // next Maximize pick teleport it somewhere the user
+                // last saw minutes ago.
+                self.break_maximize(id);
+                self.active_move = Some(ActiveMove {
+                    client: id,
+                    grab_offset: Point::new(local.x + offset.x, local.y + offset.y),
+                });
+                self.begin_drag_grab();
+                tracing::debug!(?id, "modifier-drag move begun");
+            }
+            // A shaded window has no content to reshape — the same
+            // refusal the resize bars make.
+            MouseButton::Right if !shaded => {
+                let edge = crate::resize::resize_edge_for_point(frame_size, Point::new(local.x + offset.x, local.y + offset.y));
+                self.active_resize = Some(ActiveResize {
+                    client: id,
+                    edge,
+                    start_frame: Rect { pos: frame_pos, size: frame_size },
+                });
+                self.begin_drag_grab();
+                tracing::debug!(?id, ?edge, "modifier-drag resize begun");
+            }
+            _ => {}
+        }
+    }
+
     /// Takes the pointer for a drag that is starting, if one is not
     /// already held. Idempotent: a second press mid-drag must not
     /// strand the first grab.
@@ -2361,6 +2526,56 @@ impl<B: Backend> WindowManager<B> {
             return;
         }
         self.drag_grab = Some(self.backend.grab_pointer_for_drag());
+    }
+
+    /// Asks the shell for the focused window's commands menu, as the
+    /// `window-menu` keybinding does — the route into a window that has
+    /// no titlebar of ours to right-click.
+    ///
+    /// The menu opens at the window's top-left corner rather than under
+    /// the pointer: this gesture came from the keyboard, and the
+    /// pointer may be nowhere near the window it acts on. Silently does
+    /// nothing when no window is focused, which is the same thing every
+    /// other window-targeted keybinding does.
+    pub fn request_window_menu_for_focused(&mut self) {
+        let Some(id) = self.focused else {
+            return;
+        };
+        let Some(client) = self.clients.get(id) else {
+            return;
+        };
+        let at = Point::new(
+            client.geometry.pos.x - client.layout.client_offset.x,
+            client.geometry.pos.y - client.layout.client_offset.y,
+        );
+        self.notifications.push_back(Notification::WindowMenuRequested { id, at });
+    }
+
+    /// Re-asks the backend whether this client draws its own chrome and
+    /// applies the answer, adding or removing the frame in place.
+    ///
+    /// The documented-but-missing method `Client`'s own doc comment has
+    /// referred to for some time. Two things need it and neither had
+    /// it: a config reload that changes a decoration override has to
+    /// reach windows that are already open, and a client whose `app_id`
+    /// arrives *after* it mapped (which is legal, and which Wayland
+    /// clients do) has to be re-judged against it. Without this, both
+    /// cases required closing and reopening the window.
+    pub fn refresh_client_chrome(&mut self, id: ClientId) {
+        let Some(client) = self.clients.get(id) else {
+            return;
+        };
+        self.handle_chrome_changed(client.window);
+    }
+
+    /// [`Self::refresh_client_chrome`] for every managed client — what a
+    /// config reload calls, since a changed rule list can move any
+    /// window in either direction.
+    pub fn refresh_all_client_chrome(&mut self) {
+        let windows: Vec<B::WindowId> = self.clients.iter().map(|(_, client)| client.window).collect();
+        for window in windows {
+            self.handle_chrome_changed(window);
+        }
     }
 
     /// Ends any interactive drag and releases the pointer.
@@ -3340,6 +3555,196 @@ mod tests {
         assert_eq!(wm.client_for_frame(frame), Some(id));
     }
 
+    // ---- the modifier-drag: the floor under the decoration policy ----
+
+    /// A window whose client draws its own chrome has no titlebar to
+    /// grab and no resize bar to pull. Before this gesture existed
+    /// there was no way to move one at all — and a comment in the
+    /// compositor claimed there was, which is part of how honoring a
+    /// client's request to decorate itself came to look safe.
+    #[test]
+    fn a_frameless_window_moves_by_modifier_drag() {
+        let mut backend = FakeBackend::new();
+        let window = backend.create_window();
+        backend.set_geometry(window, Rect { pos: Point::new(100, 100), size: Size::new(400, 300) });
+        backend.set_client_draws_own_chrome(window, true);
+        let mut wm = wm(backend);
+        wm.dispatch(BackendEvent::MapRequest(window));
+        let id = wm.client_for_window(window).unwrap();
+        assert!(wm.client(id).unwrap().frame.is_none(), "the premise: no chrome of ours to grab");
+
+        // Press with the modifier held, 20px into the content, then
+        // drag 60px right and 40px down.
+        wm.dispatch(BackendEvent::PointerButton {
+            surface: SurfaceRef::Client(window),
+            local: Point::new(20, 20),
+            button: MouseButton::Left,
+            pressed: true,
+            time_ms: 0,
+            mods: DEFAULT_DRAG_MODIFIER,
+        });
+        wm.dispatch(BackendEvent::PointerMotion { root: Point::new(180, 160), surface_local: None });
+
+        assert_eq!(
+            wm.client(id).unwrap().geometry.pos,
+            Point::new(160, 140),
+            "the window follows the pointer, anchored where it was grabbed"
+        );
+    }
+
+    /// Right button resizes, and the edge comes from where in the
+    /// window the press landed rather than from a border the user would
+    /// have to hit.
+    #[test]
+    fn a_frameless_window_resizes_by_modifier_drag() {
+        let mut backend = FakeBackend::new();
+        let window = backend.create_window();
+        backend.set_geometry(window, Rect { pos: Point::new(100, 100), size: Size::new(300, 300) });
+        backend.set_client_draws_own_chrome(window, true);
+        let mut wm = wm(backend);
+        wm.dispatch(BackendEvent::MapRequest(window));
+        let id = wm.client_for_window(window).unwrap();
+
+        // Bottom-right ninth: pull the south-east corner.
+        wm.dispatch(BackendEvent::PointerButton {
+            surface: SurfaceRef::Client(window),
+            local: Point::new(290, 290),
+            button: MouseButton::Right,
+            pressed: true,
+            time_ms: 0,
+            mods: DEFAULT_DRAG_MODIFIER,
+        });
+        wm.dispatch(BackendEvent::PointerMotion { root: Point::new(500, 450), surface_local: None });
+
+        let size = wm.client(id).unwrap().geometry.size;
+        assert!(size.w > 300 && size.h > 300, "dragging away from the origin grows the window, got {size:?}");
+    }
+
+    /// The gesture is not the only thing Alt does. Alt+Shift is this
+    /// desktop's binding prefix for eleven window commands, so a
+    /// gesture that fired on any superset of the modifier would turn
+    /// every one of those chords into a latent drag.
+    #[test]
+    fn a_superset_of_the_modifier_is_not_the_gesture() {
+        let mut backend = FakeBackend::new();
+        let window = backend.create_window();
+        backend.set_geometry(window, Rect { pos: Point::new(100, 100), size: Size::new(400, 300) });
+        backend.set_client_draws_own_chrome(window, true);
+        let mut wm = wm(backend);
+        wm.dispatch(BackendEvent::MapRequest(window));
+        let id = wm.client_for_window(window).unwrap();
+        let before = wm.client(id).unwrap().geometry.pos;
+
+        wm.dispatch(BackendEvent::PointerButton {
+            surface: SurfaceRef::Client(window),
+            local: Point::new(20, 20),
+            button: MouseButton::Left,
+            pressed: true,
+            time_ms: 0,
+            mods: DEFAULT_DRAG_MODIFIER | Modifiers::SHIFT,
+        });
+        wm.dispatch(BackendEvent::PointerMotion { root: Point::new(400, 400), surface_local: None });
+
+        assert_eq!(wm.client(id).unwrap().geometry.pos, before, "an ordinary click must not move the window");
+    }
+
+    /// A framed window answers to it too — the gesture's job is to not
+    /// depend on chrome, not to be a consolation prize for lacking it.
+    #[test]
+    fn a_framed_window_answers_to_the_gesture_as_well() {
+        let mut backend = FakeBackend::new();
+        let window = backend.create_window();
+        backend.set_geometry(window, Rect { pos: Point::new(100, 100), size: Size::new(400, 300) });
+        let mut wm = wm(backend);
+        wm.dispatch(BackendEvent::MapRequest(window));
+        let id = wm.client_for_window(window).unwrap();
+        let before = wm.client(id).unwrap().geometry.pos;
+
+        wm.dispatch(BackendEvent::PointerButton {
+            surface: SurfaceRef::Client(window),
+            local: Point::new(10, 10),
+            button: MouseButton::Left,
+            pressed: true,
+            time_ms: 0,
+            mods: DEFAULT_DRAG_MODIFIER,
+        });
+        wm.dispatch(BackendEvent::PointerMotion { root: Point::new(300, 300), surface_local: None });
+
+        assert_ne!(wm.client(id).unwrap().geometry.pos, before);
+    }
+
+    /// Turning the gesture off must actually turn it off, or the
+    /// config knob is a lie to a user whose application needs Alt.
+    #[test]
+    fn the_gesture_can_be_disabled() {
+        let mut backend = FakeBackend::new();
+        let window = backend.create_window();
+        backend.set_geometry(window, Rect { pos: Point::new(100, 100), size: Size::new(400, 300) });
+        backend.set_client_draws_own_chrome(window, true);
+        let mut wm = wm(backend);
+        wm.set_drag_modifier(None);
+        wm.dispatch(BackendEvent::MapRequest(window));
+        let id = wm.client_for_window(window).unwrap();
+        let before = wm.client(id).unwrap().geometry.pos;
+
+        wm.dispatch(BackendEvent::PointerButton {
+            surface: SurfaceRef::Client(window),
+            local: Point::new(20, 20),
+            button: MouseButton::Left,
+            pressed: true,
+            time_ms: 0,
+            mods: DEFAULT_DRAG_MODIFIER,
+        });
+        wm.dispatch(BackendEvent::PointerMotion { root: Point::new(400, 400), surface_local: None });
+
+        assert_eq!(wm.client(id).unwrap().geometry.pos, before);
+    }
+
+    /// Shading a window with no titlebar of ours unmapped its content
+    /// and left nothing on screen at all: `reflow_frame` returns early
+    /// for a client-decorated window, before the shaded-frame branch,
+    /// so the window went invisible and unclickable.
+    #[test]
+    fn shading_a_frameless_window_does_not_make_it_vanish() {
+        let mut backend = FakeBackend::new();
+        let window = backend.create_window();
+        backend.set_geometry(window, Rect { pos: Point::new(50, 50), size: Size::new(400, 300) });
+        backend.set_client_draws_own_chrome(window, true);
+        let mut wm = wm(backend);
+        wm.dispatch(BackendEvent::MapRequest(window));
+        let id = wm.client_for_window(window).unwrap();
+
+        wm.shade(id);
+
+        assert!(!wm.client(id).unwrap().flags.contains(ClientFlags::SHADED), "there is no titlebar to roll up into");
+        assert_ne!(
+            wm.backend().client_mapped.get(&window),
+            Some(&false),
+            "the content must still be on screen"
+        );
+    }
+
+    /// The identity a decoration rule matches on is not guaranteed to
+    /// arrive before the window maps, and nothing used to re-ask.
+    #[test]
+    fn a_chrome_refresh_re_asks_the_backend() {
+        let mut backend = FakeBackend::new();
+        let window = backend.create_window();
+        backend.set_geometry(window, Rect { pos: Point::new(40, 30), size: Size::new(800, 600) });
+        let mut wm = wm(backend);
+        wm.dispatch(BackendEvent::MapRequest(window));
+        let id = wm.client_for_window(window).unwrap();
+        assert!(wm.client(id).unwrap().frame.is_some());
+
+        // The answer changes after the fact — a late `app_id`, or a
+        // reloaded config naming this application.
+        wm.backend_mut().set_client_draws_own_chrome(window, true);
+        wm.refresh_client_chrome(id);
+
+        assert!(wm.client(id).unwrap().frame.is_none(), "the frame must come off without closing the window");
+        assert_eq!(wm.client(id).unwrap().chrome, ClientChrome::ClientDrawn);
+    }
+
     #[test]
     fn a_frameless_window_follows_its_workspace_off_and_on_screen() {
         // The `unmap_frameless` backend verb exists for exactly this:
@@ -4146,7 +4551,6 @@ mod tests {
         assert_eq!(wm.client(id).unwrap().geometry.size, sized_at_release, "motion after release must not keep resizing");
     }
 
-    #[test]
     /// Regression test for the reported "maximize just snaps it to the
     /// top-left" bug. A toolkit re-asking for its pre-maximize size
     /// used to have that size adopted while the window kept the
@@ -4221,6 +4625,7 @@ mod tests {
         assert_eq!(wm.client(id).unwrap().geometry.size, Size::new(640, 480));
     }
 
+    #[test]
     fn maximize_fills_the_usable_area_and_saves_restore_geometry() {
         let mut backend = FakeBackend::new();
         let window = backend.create_window();
