@@ -123,6 +123,10 @@ pub struct FakeBackend {
     pub window_classes: HashMap<FakeWindowId, String>,
     pub focused_window: Option<FakeWindowId>,
     pub raised_frames: Vec<FakeFrameId>,
+    /// Declared transient parents, as `xdg_toplevel.set_parent` and
+    /// `WM_TRANSIENT_FOR` report them — see
+    /// [`Self::set_window_parent`].
+    pub parents: std::collections::HashMap<FakeWindowId, FakeWindowId>,
     /// Whether each client's own content window is currently mapped —
     /// defaults to "mapped" (absent from the map) the moment a window is
     /// created, matching a real client that maps itself before the WM
@@ -229,6 +233,12 @@ impl FakeBackend {
     /// clients change their minds and the window manager has to follow.
     pub fn set_client_draws_own_chrome(&mut self, window: FakeWindowId, draws: bool) {
         self.client_drawn_chrome.insert(window, draws);
+    }
+
+    /// Declares `child` a transient (dialog) child of `parent`, the way
+    /// `xdg_toplevel.set_parent` and `WM_TRANSIENT_FOR` do.
+    pub fn set_window_parent(&mut self, child: FakeWindowId, parent: FakeWindowId) {
+        self.parents.insert(child, parent);
     }
 
     /// Stages a scroll for the next `take_shell_scroll` drain, as a
@@ -362,6 +372,10 @@ impl Backend for FakeBackend {
 
     fn set_client_mapped(&mut self, window: Self::WindowId, mapped: bool) {
         self.client_mapped.insert(window, mapped);
+    }
+
+    fn window_parent(&self, window: Self::WindowId) -> Option<Self::WindowId> {
+        self.parents.get(&window).copied()
     }
 
     fn raise(&mut self, frame: Self::FrameId) {

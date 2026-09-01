@@ -1286,6 +1286,29 @@ impl Backend for WaylandBackend {
         }
     }
 
+    fn window_parent(&self, window: Self::WindowId) -> Option<Self::WindowId> {
+        let record = self.windows.get(&window)?;
+        match &record.surface {
+            ManagedSurface::Xdg(toplevel) => {
+                let parent = toplevel.parent()?;
+                self.window_for_surface(&parent)
+            }
+            ManagedSurface::X11(surface) => {
+                let parent = surface.is_transient_for()?;
+                // smithay reports the parent as an X window id; the
+                // ledger is keyed by our own ids, so find the record
+                // wearing that id.
+                self.windows
+                    .iter()
+                    .find(|(_, other)| match &other.surface {
+                        ManagedSurface::X11(other) => other.window_id() == parent,
+                        ManagedSurface::Xdg(_) => false,
+                    })
+                    .map(|(id, _)| *id)
+            }
+        }
+    }
+
     fn set_decoration_rules(&mut self, rules: wm_core::DecorationRules) {
         self.decoration_rules = rules;
     }

@@ -2328,6 +2328,27 @@ impl Backend for X11Backend {
         reply.value32().map(|it| it.into_iter().any(|a| a == target)).unwrap_or(false)
     }
 
+    fn window_parent(&self, window: Self::WindowId) -> Option<Self::WindowId> {
+        // `WM_TRANSIENT_FOR`: one window id, the dialog's parent. ICCCM
+        // has said for forty years that a window manager should keep
+        // one above the other; this desktop did not, and a modal dialog
+        // buried behind the document it belongs to is a document whose
+        // close button appears broken.
+        let cookie = self
+            .conn
+            .get_property(false, window.0, AtomEnum::WM_TRANSIENT_FOR, AtomEnum::WINDOW, 0, 1)
+            .ok()?;
+        let reply = cookie.reply().ok()?;
+        let parent = reply.value32()?.next()?;
+        // A window transient for itself, or for something this window
+        // manager does not manage (the root, a destroyed window), has
+        // no parent as far as stacking is concerned.
+        if parent == window.0 || parent == self.root || !self.known_clients.contains(&parent) {
+            return None;
+        }
+        Some(XWindow(parent))
+    }
+
     fn set_decoration_rules(&mut self, rules: wm_core::DecorationRules) {
         self.decoration_rules = rules;
     }

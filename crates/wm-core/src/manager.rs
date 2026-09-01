@@ -2415,12 +2415,58 @@ impl<B: Backend> WindowManager<B> {
     /// reason no raise site in this file names a frame directly any
     /// more.
     fn raise_client(&mut self, id: ClientId) {
+        self.raise_client_and_children(id, 0);
+    }
+
+    /// Raises `id`, then every window that names it as a parent, so a
+    /// dialog ends up above the window it belongs to.
+    ///
+    /// This is what `WM_TRANSIENT_FOR` and `xdg_toplevel.set_parent`
+    /// have always been for, and this desktop honored neither: a modal
+    /// dialog could sit *behind* its own parent, invisible, while the
+    /// application refused every command the parent was given because a
+    /// modal was open. LibreOffice's "Welcome" dialog does exactly that,
+    /// and the visible symptom is a titlebar close button that appears
+    /// to do nothing — the request is sent, and the application is
+    /// right to refuse it.
+    ///
+    /// Depth-capped rather than cycle-checked: a client is free to
+    /// declare nonsense (a parent chain that loops), and the honest
+    /// response is to stop, not to hang the compositor. Real chains are
+    /// two or three deep — a document, its dialog, that dialog's own
+    /// confirmation.
+    fn raise_client_and_children(&mut self, id: ClientId, depth: usize) {
+        /// Deep enough for any real dialog chain; shallow enough that a
+        /// malicious or confused client cannot cost anything.
+        const MAX_TRANSIENT_DEPTH: usize = 8;
+
         let Some(client) = self.clients.get(id) else {
             return;
         };
-        match (client.frame, client.window) {
+        let window = client.window;
+        match (client.frame, window) {
             (Some(frame), _) => self.backend.raise(frame),
             (None, window) => self.backend.raise_frameless(window),
+        }
+        if depth >= MAX_TRANSIENT_DEPTH {
+            return;
+        }
+        // Asked of the backend per raise rather than cached at map
+        // time: a client may parent a dialog after mapping it, and
+        // LibreOffice does — its "Welcome" dialog maps first and is
+        // parented to the document window a moment later.
+        let children: Vec<ClientId> = self
+            .clients
+            .iter()
+            .filter(|(other_id, other)| {
+                *other_id != id
+                    && other.lifecycle == Lifecycle::Normal
+                    && self.backend.window_parent(other.window) == Some(window)
+            })
+            .map(|(other_id, _)| other_id)
+            .collect();
+        for child in children {
+            self.raise_client_and_children(child, depth + 1);
         }
     }
 
@@ -3553,6 +3599,59 @@ mod tests {
         // The frame must be reachable by id again, or every later click
         // on this window's chrome resolves to no client.
         assert_eq!(wm.client_for_frame(frame), Some(id));
+    }
+
+    // ---- transient (dialog) stacking ---------------------------------
+
+    /// A modal dialog must never end up behind the window it belongs
+    /// to. Reported as "the close button on LibreOffice doesn't work":
+    /// the close request was sent and the application refused it,
+    /// correctly, because a "Welcome" dialog was open — and that dialog
+    /// was invisible underneath the document window, so the refusal
+    /// looked like a broken button.
+    #[test]
+    fn raising_a_window_brings_its_dialog_with_it() {
+        let mut backend = FakeBackend::new();
+        let parent = backend.create_window();
+        let dialog = backend.create_window();
+        backend.set_geometry(parent, Rect { pos: Point::new(0, 0), size: Size::new(800, 600) });
+        backend.set_geometry(dialog, Rect { pos: Point::new(100, 100), size: Size::new(300, 200) });
+        let mut wm = wm(backend);
+        wm.dispatch(BackendEvent::MapRequest(parent));
+        wm.dispatch(BackendEvent::MapRequest(dialog));
+        // Parented after mapping, which is what LibreOffice does.
+        let parent_id = wm.client_for_window(parent).unwrap();
+        wm.backend_mut().set_window_parent(dialog, parent);
+        let dialog_frame = wm.client(wm.client_for_window(dialog).unwrap()).unwrap().frame.unwrap();
+        let parent_frame = wm.client(parent_id).unwrap().frame.unwrap();
+
+        wm.backend_mut().raised_frames.clear();
+        wm.focus_client(parent_id);
+
+        let raises = &wm.backend().raised_frames;
+        let parent_at = raises.iter().position(|f| *f == parent_frame).expect("the parent was raised");
+        let dialog_at = raises.iter().position(|f| *f == dialog_frame).expect("its dialog was raised too");
+        assert!(dialog_at > parent_at, "the dialog must be raised after — and so above — its parent: {raises:?}");
+    }
+
+    /// A client is free to declare a parent chain that loops. The
+    /// honest response is to stop, not to recurse until the stack goes.
+    #[test]
+    fn a_looping_parent_chain_terminates() {
+        let mut backend = FakeBackend::new();
+        let a = backend.create_window();
+        let b = backend.create_window();
+        backend.set_geometry(a, Rect { pos: Point::new(0, 0), size: Size::new(400, 300) });
+        backend.set_geometry(b, Rect { pos: Point::new(50, 50), size: Size::new(400, 300) });
+        let mut wm = wm(backend);
+        wm.dispatch(BackendEvent::MapRequest(a));
+        wm.dispatch(BackendEvent::MapRequest(b));
+        wm.backend_mut().set_window_parent(a, b);
+        wm.backend_mut().set_window_parent(b, a);
+
+        // Terminating at all is the assertion.
+        let a_id = wm.client_for_window(a).unwrap();
+        wm.focus_client(a_id);
     }
 
     // ---- the modifier-drag: the floor under the decoration policy ----

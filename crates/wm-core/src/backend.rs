@@ -367,6 +367,20 @@ pub trait Backend {
     /// Maps a window this WM has decided not to manage (see
     /// `WindowType::Unmanaged`) exactly as the client created it.
     fn map_unmanaged(&mut self, _window: Self::WindowId) {}
+    /// The window this one is a transient child of — its dialog parent:
+    /// `xdg_toplevel.set_parent` on Wayland, `WM_TRANSIENT_FOR` on X11.
+    ///
+    /// Asked fresh rather than cached at map time, because a client is
+    /// free to state it late and several do: LibreOffice maps its
+    /// "Welcome" dialog and only then parents it to the document window
+    /// it belongs to.
+    ///
+    /// Defaulted to `None` for a backend that cannot report it; such a
+    /// backend simply gets flat stacking, which is what every backend
+    /// had before this existed.
+    fn window_parent(&self, _window: Self::WindowId) -> Option<Self::WindowId> {
+        None
+    }
     /// Installs (or removes) the passive pointer grabs the move/resize
     /// modifier-drag needs on one managed client's own window.
     ///
