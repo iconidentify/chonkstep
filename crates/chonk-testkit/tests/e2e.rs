@@ -624,3 +624,130 @@ fn appearance_request_flips_the_desktop_live() {
         mean(&back)
     );
 }
+
+/// The regression: mid-interactive-resize at scale 2, Chromium (and
+/// Edge, same engine) visibly flashed to 1x and its geometry bounced.
+/// The wire capture that pinned it: for every drag frame Chromium
+/// attaches a tile-rounded over-allocated buffer (2560x2048 for a
+/// 2108x1568 window) and presents a `wp_viewport.set_source` crop of
+/// it; `committed_surface_scale` measured the full buffer against the
+/// destination, rejected the ratio as a non-uniform stretch, and fell
+/// back to integer scale 1. Every mid-drag commit was then measured at
+/// half its physical size, one of them was adopted as a client resize
+/// (the visible snap), and after the release the misfactored
+/// configure/commit loop grew the window 16px per round, forever.
+///
+/// The observable contract this pins, with a real Chromium: during a
+/// corner drag the ledger's idea of the window never collapses below
+/// its starting size, and after the release the geometry is *stable* —
+/// no configure ping-pong left running.
+#[test]
+#[ignore = "needs a live Wayland session to nest in: scripts/e2e.sh, or cargo test -p chonk-testkit -- --ignored --test-threads=1"]
+fn chromium_resize_at_scale_2_keeps_its_scale() {
+    // Chromium is the one client that exhibits the over-allocate+crop
+    // commit pattern; without it there is nothing to test against. A
+    // PATH scan rather than `Command::status` — the workspace bans the
+    // blocking wait, and existence is all that is being asked.
+    let chromium_on_path = std::env::var_os("PATH").is_some_and(|path| {
+        std::env::split_paths(&path).any(|dir| dir.join("chromium").is_file())
+    });
+    if !chromium_on_path {
+        eprintln!("chromium not installed; skipping");
+        return;
+    }
+    let mut session = Session::boot(
+        "chromium-resize-scale2",
+        SessionOptions { scale: Some(2.0), ..SessionOptions::default() },
+    )
+    .unwrap();
+    let data_dir = session.dir.join("chromium-data");
+    std::fs::create_dir_all(&data_dir).unwrap();
+    let data = format!("--user-data-dir={}", data_dir.display());
+    session
+        .launch(
+            "chromium",
+            &[
+                "--ozone-platform=wayland",
+                &data,
+                "--no-first-run",
+                "--no-default-browser-check",
+                "about:blank",
+            ],
+        )
+        .unwrap();
+    session.wait_for_window("hromium").unwrap();
+    session.door().barrier().unwrap();
+    let window = session.world().unwrap().window_matching("hromium").cloned().unwrap();
+
+    // Corner drag, frameless CSD style: grip just outside the content
+    // rect (the shadow margin), cross the drag threshold in small
+    // steps, then cruise.
+    let grip = (window.x as f64 + window.w as f64 + 2.0, window.y as f64 + window.h as f64 + 2.0);
+    session.door().motion(grip.0, grip.1).unwrap();
+    session.door().barrier().unwrap();
+    session.door().button("left", true).unwrap();
+    session.door().barrier().unwrap();
+    for d in [2.0, 5.0, 9.0] {
+        session.door().motion(grip.0 + d, grip.1 + d).unwrap();
+        session.door().barrier().unwrap();
+    }
+    {
+        let door = session.door();
+        poll_until(ACT, "the drag to engage the resize", || {
+            let world = door.windows().ok()?;
+            let now = world.window_matching("hromium")?;
+            (now.w != window.w || now.h != window.h).then_some(())
+        })
+        .expect("the corner drag never engaged a resize");
+    }
+    for step in 1..=16 {
+        let d = 9.0 + step as f64 * 20.0;
+        session.door().motion(grip.0 + d, grip.1 + d).unwrap();
+        session.door().barrier().unwrap();
+        // The mid-drag half of the regression: a commit measured at
+        // the wrong scale was adopted as a client resize and snapped
+        // the ledger to roughly HALF the physical size. Growing
+        // monotonically is client-timing-dependent; never collapsing
+        // is the invariant.
+        let now = session.world().unwrap().window_matching("hromium").cloned().unwrap();
+        assert!(
+            now.w >= window.w && now.h >= window.h,
+            "mid-drag the ledger collapsed to {}x{} from {}x{} — a commit was measured at \
+             the wrong scale and adopted as a client resize",
+            now.w,
+            now.h,
+            window.w,
+            window.h
+        );
+    }
+    session.door().button("left", false).unwrap();
+    session.door().barrier().unwrap();
+
+    let released = session.world().unwrap().window_matching("hromium").cloned().unwrap();
+    assert!(
+        released.w > window.w && released.h > window.h,
+        "the drag should have grown the window ({}x{} -> {}x{})",
+        window.w,
+        window.h,
+        released.w,
+        released.h
+    );
+
+    // The post-release half: the misfactored echo loop kept adopting
+    // and re-configuring, growing the window ~16px per round-trip
+    // indefinitely. Settled means settled: the ledger must report the
+    // same size across a full second of quiet.
+    {
+        let door = session.door();
+        poll_until(Duration::from_secs(20), "the geometry to stop moving", || {
+            let first = door.windows().ok()?.window_matching("hromium")?.clone();
+            std::thread::sleep(Duration::from_millis(1000));
+            let second = door.windows().ok()?.window_matching("hromium")?.clone();
+            (first.w == second.w && first.h == second.h).then_some(())
+        })
+        .expect(
+            "the window never stopped resizing after the release — the configure/commit \
+             loop is running at mismatched scales",
+        );
+    }
+}

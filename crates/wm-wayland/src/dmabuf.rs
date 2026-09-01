@@ -300,13 +300,19 @@ delegate_dmabuf!(Compositor);
 //   returns `AlreadyReady` for an idle buffer, so the steady state —
 //   a client that finished drawing before committing — costs nothing.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+use std::time::Duration;
+
 use smithay::delegate_drm_syncobj;
+use smithay::reexports::calloop::timer::{TimeoutAction, Timer};
 use smithay::reexports::calloop::Interest;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::reexports::wayland_server::Resource as _;
 use smithay::wayland::compositor::CompositorHandler as _;
 use smithay::wayland::compositor::{
-    add_blocker, add_pre_commit_hook, with_states, BufferAssignment, SurfaceAttributes,
+    add_blocker, add_pre_commit_hook, with_states, Blocker, BlockerState, BufferAssignment,
+    SurfaceAttributes,
 };
 use smithay::wayland::dmabuf::get_dmabuf;
 use smithay::wayland::drm_syncobj::{
@@ -342,10 +348,69 @@ pub(crate) fn init_syncobj(
     Some(DrmSyncobjState::new::<Compositor>(display, device))
 }
 
+/// How long a readiness blocker may hold a commit before the commit
+/// lands anyway. The invariant: **a blocker may delay a commit, never
+/// park it** — a fence that never signals (a hung client GPU context, a
+/// driver that drops a syncobj point on the floor, an fd whose producer
+/// died mid-frame) must not freeze the surface's transaction queue
+/// forever, because every later commit of that surface queues behind
+/// the blocked one and the window goes wholly non-responsive on
+/// screen while its client believes it is drawing. Past the deadline
+/// the frame degrades to the pre-explicit-sync behaviour (sample
+/// whatever the buffer holds — at worst one torn frame) instead.
+///
+/// One second is far beyond any fence a live frame legitimately waits
+/// on (a heavy game under full GPU load signals within a frame or
+/// three) and far below "the user assumes the window is dead".
+const BLOCKER_DEADLINE: Duration = Duration::from_secs(1);
+
+/// A readiness blocker with the deadline above built in: reports the
+/// inner blocker's state until [`BLOCKER_DEADLINE`] declares the wait
+/// over, then reports `Released` — the commit lands, the frame is
+/// sampled as-is. `Released` and not `Cancelled` on purpose:
+/// cancelling discards the client's pending state, which turns a late
+/// fence into a dropped frame *and* a desynced client; releasing keeps
+/// the protocol stream intact and costs at most one torn frame.
+struct BoundedBlocker<B> {
+    inner: B,
+    flags: Arc<BlockerFlags>,
+}
+
+/// Shared between a [`BoundedBlocker`] and its deadline timer.
+#[derive(Default)]
+struct BlockerFlags {
+    /// Set by the timer: the wait is over regardless of the fence.
+    expired: AtomicBool,
+    /// Set by the blocker the moment its inner state is seen to be
+    /// anything but `Pending` — how the timer knows a fence resolved
+    /// in time and its own firing is the routine no-op, not a stall.
+    settled: AtomicBool,
+}
+
+impl<B: Blocker> Blocker for BoundedBlocker<B> {
+    fn state(&self) -> BlockerState {
+        if self.flags.expired.load(Ordering::Relaxed) {
+            return BlockerState::Released;
+        }
+        let state = self.inner.state();
+        if !matches!(state, BlockerState::Pending) {
+            self.flags.settled.store(true, Ordering::Relaxed);
+        }
+        state
+    }
+}
+
 /// Installs the per-surface pre-commit hook that keeps a commit from
 /// landing before its buffer is finished. Called once per surface from
 /// `CompositorHandler::new_surface`; the hook then runs on every
 /// commit of that surface, before smithay merges pending state.
+///
+/// Every blocker armed here is wrapped in a [`BoundedBlocker`] and
+/// paired with a one-shot timer that re-runs the transaction check at
+/// the deadline — the event loop itself is never blocked by a
+/// transaction blocker (smithay queues the state and moves on), so the
+/// timer is the only thing guaranteed to come back for a fence that
+/// never signals.
 pub(crate) fn install_readiness_hook(surface: &WlSurface) {
     add_pre_commit_hook::<Compositor, _>(surface, |state, _dh, surface| {
         // Explicit first: an acquire point on the commit is the
@@ -364,6 +429,7 @@ pub(crate) fn install_readiness_hook(surface: &WlSurface) {
                 let Some(client) = surface.client() else {
                     return;
                 };
+                let timer_client = client.clone();
                 let inserted = state.loop_handle.insert_source(source, move |_, _, comp| {
                     let handle = comp.display_handle.clone();
                     let client_state = comp.client_compositor_state(&client);
@@ -371,7 +437,9 @@ pub(crate) fn install_readiness_hook(surface: &WlSurface) {
                     Ok(())
                 });
                 if inserted.is_ok() {
-                    add_blocker(surface, blocker);
+                    let flags = Arc::new(BlockerFlags::default());
+                    arm_blocker_deadline(state, timer_client, flags.clone());
+                    add_blocker(surface, BoundedBlocker { inner: blocker, flags });
                 }
             }
             // A blocker that could not be generated degrades to the
@@ -401,6 +469,7 @@ pub(crate) fn install_readiness_hook(surface: &WlSurface) {
                 let Some(client) = surface.client() else {
                     return;
                 };
+                let timer_client = client.clone();
                 let inserted = state.loop_handle.insert_source(source, move |_, _, comp| {
                     let handle = comp.display_handle.clone();
                     let client_state = comp.client_compositor_state(&client);
@@ -408,9 +477,106 @@ pub(crate) fn install_readiness_hook(surface: &WlSurface) {
                     Ok(())
                 });
                 if inserted.is_ok() {
-                    add_blocker(surface, blocker);
+                    let flags = Arc::new(BlockerFlags::default());
+                    arm_blocker_deadline(state, timer_client, flags.clone());
+                    add_blocker(surface, BoundedBlocker { inner: blocker, flags });
                 }
             }
         }
     });
+}
+
+/// The deadline half of [`BoundedBlocker`]: a one-shot timer that
+/// flips the expiry flag and re-runs the client's transaction check,
+/// which now sees `Released` and lets the commit land. Firing after
+/// the fence already signalled is the common case and costs one no-op
+/// `blocker_cleared` pass; the flag flip is meaningless by then
+/// because the blocker it governed has already been consumed.
+fn arm_blocker_deadline(
+    state: &mut Compositor,
+    client: smithay::reexports::wayland_server::Client,
+    flags: Arc<BlockerFlags>,
+) {
+    let timer_flags = flags.clone();
+    let inserted = state.loop_handle.insert_source(
+        Timer::from_duration(BLOCKER_DEADLINE),
+        move |_, _, comp| {
+            // A fence that was ever seen resolved makes this firing
+            // the routine cleanup case: nothing to release, nothing to
+            // say. Only a blocker still pending at the deadline is a
+            // stall worth a log line.
+            if !timer_flags.settled.load(Ordering::Relaxed)
+                && !timer_flags.expired.swap(true, Ordering::Relaxed)
+            {
+                tracing::warn!(
+                    "a commit readiness blocker overran its deadline; releasing the commit \
+                     (the frame degrades to sample-and-hope for this one buffer)"
+                );
+            }
+            let handle = comp.display_handle.clone();
+            let client_state = comp.client_compositor_state(&client);
+            client_state.blocker_cleared(comp, &handle);
+            TimeoutAction::Drop
+        },
+    );
+    if inserted.is_err() {
+        // No timer means no bounded escape: rather than arm a blocker
+        // that nothing is guaranteed to come back for, expire it now
+        // and fall back to the pre-explicit-sync behaviour outright.
+        flags.expired.store(true, Ordering::Relaxed);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A stand-in fence: answers whatever the test last set.
+    struct FakeBlocker(std::sync::Mutex<BlockerState>);
+
+    impl Blocker for FakeBlocker {
+        fn state(&self) -> BlockerState {
+            *self.0.lock().unwrap()
+        }
+    }
+
+    /// The bounded escape's whole contract: pending stays pending
+    /// until the deadline flag flips, after which the commit is
+    /// released no matter what the fence says — and a fence seen
+    /// resolving marks itself settled so the timer knows its firing
+    /// was routine.
+    #[test]
+    fn a_blocker_past_its_deadline_releases_the_commit() {
+        let flags = Arc::new(BlockerFlags::default());
+        let bounded = BoundedBlocker {
+            inner: FakeBlocker(std::sync::Mutex::new(BlockerState::Pending)),
+            flags: flags.clone(),
+        };
+        // In time: the fence's word stands.
+        assert!(matches!(bounded.state(), BlockerState::Pending));
+        assert!(!flags.settled.load(Ordering::Relaxed));
+        // Past the deadline: released, even though the fence never
+        // signalled — the invariant "a blocker may delay a commit,
+        // never park it".
+        flags.expired.store(true, Ordering::Relaxed);
+        assert!(matches!(bounded.state(), BlockerState::Released));
+
+        // The other life: a fence that resolves is observed settled.
+        let flags = Arc::new(BlockerFlags::default());
+        let bounded = BoundedBlocker {
+            inner: FakeBlocker(std::sync::Mutex::new(BlockerState::Released)),
+            flags: flags.clone(),
+        };
+        assert!(matches!(bounded.state(), BlockerState::Released));
+        assert!(flags.settled.load(Ordering::Relaxed));
+        // A cancelled fence settles too — cancellation is smithay's
+        // own teardown path and must not be reported as a stall.
+        let flags = Arc::new(BlockerFlags::default());
+        let bounded = BoundedBlocker {
+            inner: FakeBlocker(std::sync::Mutex::new(BlockerState::Cancelled)),
+            flags: flags.clone(),
+        };
+        assert!(matches!(bounded.state(), BlockerState::Cancelled));
+        assert!(flags.settled.load(Ordering::Relaxed));
+    }
 }

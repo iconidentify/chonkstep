@@ -1324,6 +1324,18 @@ pub(crate) fn render_frame_session(comp: &mut Compositor) {
                     tracing::trace!(output = %output.name, "frame produced no crtc changes; no page flip queued");
                 }
                 Err(error) => {
+                    // The prepared frame was consumed and its
+                    // swapchain slot marked submitted before the
+                    // ioctl failed (smithay's `queue_frame` order), so
+                    // the damage tracker now believes that frame
+                    // reached the screen. Left alone, the retry pass
+                    // could render "nothing changed", report an empty
+                    // frame, and clear `dirty` with the *previous*
+                    // frame still on the crtc — dirty-but-never-
+                    // flipped, resolved only by the next unrelated
+                    // damage. Resetting the buffer ages makes the
+                    // retry a full-frame render and a real flip.
+                    output.drm_compositor.reset_buffer_ages();
                     tracing::warn!(?error, output = %output.name, "queueing the page flip failed; keeping this output dirty for a retry");
                     continue;
                 }

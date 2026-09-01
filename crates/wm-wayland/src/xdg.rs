@@ -179,59 +179,75 @@ const SCALE_DENOMINATOR: f64 = 120.0;
 ///
 /// Two statements a client can make, in precedence order:
 ///
-/// - A `wp_viewport` destination together with the attached buffer: a
-///   fractional-scale client told 1.5 commits a `round(w × 1.5)` px
-///   buffer and sets the viewport destination to `w` logical — the
-///   ratio between the two *is* its scale, stated more precisely than
-///   `set_buffer_scale`'s integers ever could. The ratio is trusted
-///   only when it is the same in both axes (to within the rounding the
-///   protocol itself allows) and at least 1: a non-uniform or shrinking
-///   ratio is a viewport used for *stretching* content, not a density
-///   statement, and smithay's surface view applies that stretch inside
-///   the element, so the right factor for the tree is the plain
-///   integer one.
+/// - A `wp_viewport` destination together with the pixels the client
+///   *presents*: a fractional-scale client told 1.5 commits a
+///   `round(w × 1.5)` px buffer and sets the viewport destination to
+///   `w` logical — the ratio between the two *is* its scale, stated
+///   more precisely than `set_buffer_scale`'s integers ever could.
+///   "Presents" and not "attached": a client may over-allocate its
+///   buffer and show only a `wp_viewport.set_source` crop of it —
+///   Chromium does exactly this for every frame of an interactive
+///   resize, attaching a tile-rounded buffer (2560x2048 for a
+///   2108x1568 window) and cropping the window out of its top-left
+///   corner. The density statement is the crop over the destination
+///   (exactly 2.0 in that trace); the buffer's slack rows say nothing.
+///   The ratio is trusted only when it is the same in both axes (to
+///   within the rounding the protocol itself allows) and at least 1: a
+///   non-uniform or shrinking ratio is a viewport used for
+///   *stretching* content, not a density statement, and smithay's
+///   surface view applies that stretch inside the element, so the
+///   right factor for the tree is the plain integer one.
 /// - Otherwise `wl_surface.set_buffer_scale`, exactly as
 ///   [`committed_buffer_scale`] has always read it.
 pub(crate) fn committed_surface_scale(surface: &WlSurface) -> f64 {
     let integer = committed_buffer_scale(surface) as f64;
     let sizes = with_renderer_surface_state(surface, |state| {
-        let buffer_logical = state.buffer_size()?;
+        // The surface view's `src` is the shown region in
+        // buffer-logical units (already divided by the integer scale):
+        // the `wp_viewport.set_source` crop when one is committed, the
+        // whole buffer otherwise. Times the integer scale it is the
+        // raw pixel extent the client actually presents.
+        let view = state.view()?;
         let dst = state.surface_size()?;
-        // Reconstruct the buffer's raw pixel extent: `buffer_size` is
-        // already divided by the committed integer scale.
-        Some((
-            (buffer_logical.w * state.buffer_scale(), buffer_logical.h * state.buffer_scale()),
-            (dst.w, dst.h),
-        ))
+        let scale = state.buffer_scale() as f64;
+        Some(((view.src.size.w * scale, view.src.size.h * scale), (dst.w, dst.h)))
     })
     .flatten();
-    let Some((buffer, dst)) = sizes else {
+    let Some((shown, dst)) = sizes else {
         return integer;
     };
-    ratio_scale(buffer, dst).unwrap_or(integer)
+    ratio_scale(shown, dst).unwrap_or(integer)
 }
 
-/// The scale a buffer/destination pair states, if it states one: the
-/// buffer's pixel extent over the viewport destination, snapped onto
-/// the protocol's 1/120 grid — provided both axes agree with the
-/// snapped factor to within the pixel of rounding the protocol permits
+/// The scale a shown-pixels/destination pair states, if it states one:
+/// the presented region's pixel extent (the viewport source crop when
+/// set, else the whole buffer — fractional because `set_source` speaks
+/// wl_fixed) over the viewport destination, snapped onto the
+/// protocol's 1/120 grid — provided both axes agree with the snapped
+/// factor to within the pixel of rounding the protocol permits
 /// (`round(size × scale)`) and the factor is at least 1. A non-uniform
 /// or shrinking ratio is a viewport used for *stretching* content, not
 /// a density statement, and answers `None`. Split from
 /// [`committed_surface_scale`] because this arithmetic is the half that
 /// fails silently, and it needs no live surface to pin down.
-fn ratio_scale(buffer: (i32, i32), dst: (i32, i32)) -> Option<f64> {
-    let ((buffer_w, buffer_h), (dst_w, dst_h)) = (buffer, dst);
-    if dst_w <= 0 || dst_h <= 0 || buffer_w <= 0 || buffer_h <= 0 {
+fn ratio_scale(shown: (f64, f64), dst: (i32, i32)) -> Option<f64> {
+    let ((shown_w, shown_h), (dst_w, dst_h)) = (shown, dst);
+    if dst_w <= 0
+        || dst_h <= 0
+        || !shown_w.is_finite()
+        || !shown_h.is_finite()
+        || shown_w <= 0.0
+        || shown_h <= 0.0
+    {
         return None;
     }
-    let ratio_w = buffer_w as f64 / dst_w as f64;
+    let ratio_w = shown_w / dst_w as f64;
     let snapped = (ratio_w * SCALE_DENOMINATOR).round() / SCALE_DENOMINATOR;
     if snapped < 1.0 {
         return None;
     }
-    let agrees = |buffer: i32, dst: i32| ((dst as f64 * snapped).round() - buffer as f64).abs() < 1.0;
-    (agrees(buffer_w, dst_w) && agrees(buffer_h, dst_h)).then_some(snapped)
+    let agrees = |shown: f64, dst: i32| ((dst as f64 * snapped).round() - shown).abs() < 1.0;
+    (agrees(shown_w, dst_w) && agrees(shown_h, dst_h)).then_some(snapped)
 }
 
 /// The factor a surface is actually composed at on an output of
@@ -1246,21 +1262,52 @@ mod tests {
     fn a_viewport_ratio_is_read_as_a_scale_only_when_it_is_one() {
         // The canonical fractional client: round(w × 1.5) buffer over a
         // w-logical destination.
-        assert_eq!(ratio_scale((960, 720), (640, 480)), Some(1.5));
+        assert_eq!(ratio_scale((960.0, 720.0), (640, 480)), Some(1.5));
         // Odd extents round, and the snap still recovers the factor.
-        assert_eq!(ratio_scale((500, 350), (333, 233)), Some(1.5));
+        assert_eq!(ratio_scale((500.0, 350.0), (333, 233)), Some(1.5));
         // GTK4's spelling of 2x: viewport-backed rather than
         // set_buffer_scale.
-        assert_eq!(ratio_scale((1280, 960), (640, 480)), Some(2.0));
+        assert_eq!(ratio_scale((1280.0, 960.0), (640, 480)), Some(2.0));
         // 1.25, the other common step.
-        assert_eq!(ratio_scale((800, 600), (640, 480)), Some(1.25));
+        assert_eq!(ratio_scale((800.0, 600.0), (640, 480)), Some(1.25));
         // A video player stretching 640 to 1280 is not rendering at
         // half density — the ratio shrinks, so it is not a scale.
-        assert_eq!(ratio_scale((640, 480), (1280, 960)), None);
+        assert_eq!(ratio_scale((640.0, 480.0), (1280, 960)), None);
         // A non-uniform stretch is not a scale either.
-        assert_eq!(ratio_scale((960, 480), (640, 480)), None);
+        assert_eq!(ratio_scale((960.0, 480.0), (640, 480)), None);
         // Degenerate extents answer nothing rather than infinity.
-        assert_eq!(ratio_scale((960, 720), (0, 480)), None);
+        assert_eq!(ratio_scale((960.0, 720.0), (0, 480)), None);
+        assert_eq!(ratio_scale((f64::NAN, 720.0), (640, 480)), None);
+    }
+
+    /// The mid-resize scale flash, from the captured wire (Chromium
+    /// `--ozone-platform=wayland` at scale 2, corner drag): each drag
+    /// frame attaches a tile-rounded over-allocation and presents a
+    /// `set_source` crop of it. The evidence handed to [`ratio_scale`]
+    /// must be the crop over the destination — exactly the session
+    /// scale — while the raw buffer over the destination is the
+    /// non-uniform garbage that used to collapse the factor to 1 and
+    /// flash the window (then bounce its geometry through the
+    /// client-resize adoption path).
+    #[test]
+    fn a_cropped_over_allocated_buffer_still_states_its_scale() {
+        // Captured commits: buffer 2560x2048 raw, src crop / dst pairs
+        // from three consecutive drag motions.
+        for (src, dst) in [
+            ((2108.0, 1568.0), (1054, 784)),
+            ((2112.0, 1572.0), (1056, 786)),
+            ((2128.0, 1588.0), (1064, 794)),
+        ] {
+            assert_eq!(ratio_scale(src, dst), Some(2.0), "{src:?} over {dst:?}");
+        }
+        // The regression, pinned: the full buffer extent over the same
+        // destinations is NOT a scale statement (2560/1054 and
+        // 2048/784 do not even agree), which is why the crop — not the
+        // allocation — must be what is measured.
+        assert_eq!(ratio_scale((2560.0, 2048.0), (1054, 784)), None);
+        // Fractional crops (set_source speaks wl_fixed) still land on
+        // the grid within the protocol's own rounding.
+        assert_eq!(ratio_scale((832.5, 619.5), (666, 496)), Some(1.25));
     }
 
     /// The integral-fallback correction fires for exactly one shape of
