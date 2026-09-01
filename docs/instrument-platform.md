@@ -49,10 +49,6 @@ $ scripts/chonk-get remove py-dockclock
 - `examples/chonk-switch` — the appearance switch: light/dark mode as
   a machined toggle, and the Python SDK's worked example — one
   stdlib-only script, tested headless against a fake shell.
-- `examples/chonk-net` — the network instrument and the panel
-  concept's showcase: live link state on the tile, a click-open
-  detail panel listing nearby Wi-Fi networks — read-only, from a
-  frozen whitelist of `nmcli`/`iw`/sysfs reads.
 - `bindings/python/chonkdock` and `bindings/go/chonkdock` — complete
   protocol implementations with no dependencies beyond each language's
   standard library, each with a working clock example.
@@ -166,7 +162,8 @@ it; a dockapp readopted across a shell restart comes back panel-less
 and reopens on the next click. The panel never sees the keyboard, is
 never told where it is on screen, and is clamped by the shell to the
 caps and the workarea — the shell grants a size, and the instrument
-draws exactly that. `examples/chonk-net` is the concept's showcase.
+draws exactly that. The conformance probe in `chonk-testkit`
+(`chonk-panel-probe`) exercises the whole conversation end to end.
 
 ## Writing one
 
