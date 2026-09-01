@@ -443,6 +443,12 @@ pub struct WaylandBackend {
     /// (id 0) stays forever unallocated.
     next_id: u64,
     pub(crate) windows: HashMap<WlWindowId, WindowRecord>,
+    /// `app_id` prefixes allowed to decorate themselves — see
+    /// `wm_config::Config::self_decorating_apps`. Held on the backend
+    /// because both the decoration decision (`client_draws_own_chrome`)
+    /// and the negotiation answer (`XdgDecorationHandler::request_mode`)
+    /// consult it, and a live config reload must move both at once.
+    pub(crate) self_decorating_apps: Vec<String>,
     pub(crate) frames: HashMap<WlFrameId, FrameRecord>,
     pub(crate) shells: HashMap<WlShellId, ShellRecord>,
     /// Bottom-to-top: frames and shell surfaces interleaved — see
@@ -639,13 +645,89 @@ pub(crate) enum PointerGrabChange {
     Released,
 }
 
+/// The allowlist match behind [`WaylandBackend::client_declares_self_decoration`],
+/// as a free function so the policy can be tested without a compositor.
+///
+/// A window with no `app_id` yet answers `false` — the safe direction:
+/// a frame can be taken off later through `ChromeChanged`, but a window
+/// the user cannot grab is not recoverable from the user's side.
+pub(crate) fn app_id_is_self_decorating(app_id: Option<&str>, allowed: &[String]) -> bool {
+    let Some(app_id) = app_id else {
+        return false;
+    };
+    let app_id = app_id.to_ascii_lowercase();
+    allowed.iter().any(|a| !a.is_empty() && app_id.starts_with(a.as_str()))
+}
+
+#[cfg(test)]
+mod decoration_policy_tests {
+    use super::app_id_is_self_decorating as matches;
+
+    fn list() -> Vec<String> {
+        wm_config::default_self_decorating_apps()
+    }
+
+    /// The bug this policy exists for: a terminal that asks for
+    /// client-side decorations and then draws none must still be framed.
+    #[test]
+    fn a_terminal_that_draws_nothing_is_not_taken_at_its_word() {
+        assert!(!matches(Some("Alacritty"), &list()));
+        assert!(!matches(Some("foot"), &list()));
+        assert!(!matches(Some("org.gnome.TextEditor"), &list()));
+    }
+
+    /// The case the allowlist protects: Chromium draws a titlebar
+    /// whatever we configure, so framing it gives two.
+    #[test]
+    fn the_chromium_family_is_taken_at_its_word() {
+        assert!(matches(Some("chrome"), &list()));
+        assert!(matches(Some("google-chrome"), &list()) || matches(Some("chrome-beta"), &list()));
+        assert!(matches(Some("chromium"), &list()));
+        assert!(matches(Some("msedge"), &list()));
+    }
+
+    /// Prefix, case-insensitive — one entry covers a family, including
+    /// the per-profile ids Chromium invents.
+    #[test]
+    fn matching_is_a_case_insensitive_prefix() {
+        assert!(matches(Some("CHROMIUM-browser"), &list()));
+        assert!(matches(Some("chrome-instance-2"), &list()));
+    }
+
+    /// Absent or empty inputs must never unframe a window.
+    #[test]
+    fn nothing_unframes_a_window_by_accident() {
+        assert!(!matches(None, &list()), "a window with no app_id yet is framed");
+        assert!(!matches(Some("chrome"), &[]), "an empty list unframes nothing");
+        assert!(
+            !matches(Some("anything"), &["".to_string()]),
+            "an empty entry must not become a prefix that matches everything"
+        );
+    }
+}
+
 impl WaylandBackend {
+    /// Whether this client is one of the few that genuinely draws its
+    /// own window chrome, and may therefore be taken at its word when it
+    /// asks for client-side decorations.
+    ///
+    /// Matched as a case-insensitive prefix of `app_id`, so one entry
+    /// covers a family (`chrome` catches `chrome`, `chrome-beta`, and
+    /// the per-profile ids Chromium invents). A window with no `app_id`
+    /// yet answers `false` — the safe direction, since a frame can be
+    /// taken off later through `ChromeChanged` but a window the user
+    /// cannot grab is not recoverable from the user's side.
+    pub(crate) fn client_declares_self_decoration(&self, record: &WindowRecord) -> bool {
+        app_id_is_self_decorating(record.app_id.as_deref(), &self.self_decorating_apps)
+    }
+
     pub(crate) fn new(display_handle: DisplayHandle, monitors: Vec<MonitorInfo>, scale: f32) -> Self {
         let output_size = union_size(&monitors);
         let monitor_scales = vec![scale.max(0.125) as f64; monitors.len()];
         Self {
             next_id: 1,
             windows: HashMap::new(),
+            self_decorating_apps: wm_config::default_self_decorating_apps(),
             frames: HashMap::new(),
             shells: HashMap::new(),
             stacking: Vec::new(),
@@ -2228,6 +2310,10 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
     // `WindowManager::new` takes ownership — the exact construction
     // order the X11 binary uses, for the exact same borrow reason.
     let mut backend = WaylandBackend::new(display_handle.clone(), monitors, scale);
+    // Whose word to take on client-side decorations. Held on the backend
+    // rather than read per-window so a live reload can move the policy
+    // for every window at once (see the reload arm below).
+    backend.self_decorating_apps = config.self_decorating_apps.clone();
     // The whole screen, as the shell sizes the desktop against it: the
     // union of every monitor. Where the dock and the workareas land
     // inside that union is the shell's decision, not this loop's.
@@ -2441,7 +2527,13 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
         // restart with the same file would have done.
         if reload_requested() {
             tracing::info!("reload requested — re-reading the config and applying it in place");
-            let state = SessionState::resolve(&wm_config::load());
+            let reloaded = wm_config::load();
+            // The decoration policy is the backend's, not the shell's,
+            // so it does not travel with `SessionState` — move it here
+            // or an edited `self_decorating_apps` would need a restart
+            // while everything beside it in the same file did not.
+            comp.wm.backend_mut().self_decorating_apps = reloaded.self_decorating_apps.clone();
+            let state = SessionState::resolve(&reloaded);
             comp.shell.apply_session_state(&mut comp.wm, state);
         }
         // Blocks on every source at once (wayland clients, winit

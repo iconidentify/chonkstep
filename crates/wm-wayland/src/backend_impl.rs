@@ -1323,14 +1323,26 @@ impl Backend for WaylandBackend {
             // destroys keeps its frame until it unmaps. No toolkit
             // observed here does that, and the alternative was leaving
             // every GTK window double-decorated.
-            // Never negotiated: the protocol's own default, the client
-            // self-decorates. Negotiated and asked for client-side: the
-            // request is honored (see `WindowRecord::requested_client_side`
-            // for the Edge double-titlebar this ended). Negotiated and
-            // asked for server-side, or left the choice to us: ours.
-            ManagedSurface::Xdg(_) => {
-                !record.negotiated_decoration || record.requested_client_side == Some(true)
-            }
+            // Both disjuncts now require *positive evidence* that the
+            // client draws chrome, which is its `app_id` appearing in
+            // `self_decorating_apps`. Neither an explicit ClientSide ask
+            // nor silence is evidence on its own:
+            //
+            //  - The ask is not a promise to draw anything. A terminal
+            //    configured `decorations = "None"` for a tiling desktop
+            //    asks for client-side and then draws nothing, and this
+            //    returning true left it with no chrome from either side
+            //    — unmovable, unresizable, uncloseable.
+            //  - Silence used to mean "I decorate myself", which is the
+            //    protocol's default but not a safe one here: a toolkit
+            //    that never binds the interface at all gets swept up.
+            //
+            // A client we frame that draws its own titlebar anyway wears
+            // two, which is visible and fixed by adding its `app_id` to
+            // the list. A client we leave bare that draws nothing is a
+            // window the user cannot use. The failure modes are not
+            // symmetric, so the default is to frame.
+            ManagedSurface::Xdg(_) => self.client_declares_self_decoration(record),
         }
     }
 

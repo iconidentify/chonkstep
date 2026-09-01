@@ -1070,12 +1070,17 @@ fn wm_resize_edge(
 }
 
 // -- xdg-decoration ------------------------------------------------------
-// The policy is one line long: this desktop draws the chrome, always —
-// the chiseled frames are the whole point, and a client drawing its own
-// titlebar under one would wear two hats. Clients keep asking for
-// ClientSide (GTK does, universally); the answer is configured
-// ServerSide every time, which the protocol explicitly allows the
-// compositor to impose.
+// The policy: this desktop draws the chrome unless the client is one of
+// the few known to draw its own (`Config::self_decorating_apps`). The
+// chiseled frames are the whole point, and a client drawing its own
+// titlebar under one would wear two hats — but a client that asks for
+// client-side decorations has not promised to draw *any*, and one that
+// draws none while we honour the ask ends up with chrome from neither
+// side. The protocol explicitly allows the compositor to impose
+// ServerSide, and for everything off the list that is what it does.
+//
+// (This comment used to read "always", while the code below honoured
+// every ClientSide ask — the two had drifted a long way apart.)
 
 impl XdgDecorationHandler for Compositor {
     fn new_decoration(&mut self, toplevel: ToplevelSurface) {
@@ -1105,17 +1110,31 @@ impl XdgDecorationHandler for Compositor {
     }
 
     fn request_mode(&mut self, toplevel: ToplevelSurface, mode: DecorationMode) {
-        // Honored, both directions. The imposed-ServerSide answer this
-        // used to give is what put two titlebars on Edge — Chromium
-        // requests ClientSide and draws its frame whatever we configure
-        // — and framed every one of its short-lived transients into a
-        // visible flash. A client that asks for server-side gets ours;
-        // one that asks for client-side keeps its own, and the frame
-        // comes off (or never goes on) through the same ChromeChanged
-        // path a Motif hint rewrite takes.
-        let wants_client_side = mode == DecorationMode::ClientSide;
+        // A ServerSide ask is honored outright. A ClientSide ask is
+        // honored only from a client on `self_decorating_apps` — the
+        // Chromium family, which requests ClientSide and draws its frame
+        // whatever we configure, and which imposing ServerSide once gave
+        // two titlebars and a visible flash on every short-lived
+        // transient. Off that list a ClientSide ask is answered
+        // ServerSide, because the ask is not a promise to draw anything:
+        // a terminal configured `decorations = "None"` for a tiling
+        // desktop asks for client-side and then draws nothing at all,
+        // and honouring it left a window with no chrome from either
+        // side. The frame comes off (or goes on) through the same
+        // ChromeChanged path a Motif hint rewrite takes.
         let backend = self.wm.backend_mut();
+        let mut wants_client_side = mode == DecorationMode::ClientSide;
         if let Some(id) = backend.window_for_surface(toplevel.wl_surface()) {
+            if wants_client_side {
+                let declares = backend
+                    .windows
+                    .get(&id)
+                    .is_some_and(|record| backend.client_declares_self_decoration(record));
+                if !declares {
+                    tracing::debug!(?id, "client asked for its own decorations but is not known to draw any — imposing server-side");
+                    wants_client_side = false;
+                }
+            }
             if let Some(record) = backend.windows.get_mut(&id) {
                 record.requested_client_side = Some(wants_client_side);
             }

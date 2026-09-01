@@ -35,6 +35,7 @@
 //! placement = "smart"                # optional; "smart" | "cascade" | "center"
 //! edge_resistance = 10               # optional; px, 0 disables edge snapping
 //! terminal_font_px = 20              # optional; terminal font size at 1x
+//! self_decorating_apps = ["chrome"]  # optional; app_ids that draw their own chrome
 //! restore_session = true             # optional; relaunch last session's windows
 //! lock_command = "swaylock"          # optional; locker for post-crash recovery
 //!
@@ -163,6 +164,22 @@ pub struct Config {
     /// of the display it lands on. Not per-theme on purpose: a theme
     /// restyles the terminal's colors, never its metrics.
     pub terminal_font_px: f32,
+    /// `app_id` prefixes of clients that genuinely draw their own window
+    /// chrome, and may therefore be taken at their word when they ask
+    /// for client-side decorations.
+    ///
+    /// Everything else this desktop frames, whatever it asks for. That
+    /// asymmetry is deliberate: asking for client-side decorations is
+    /// not a promise to *draw* any, and the client that forced this list
+    /// — a terminal configured `decorations = "None"` for a tiling
+    /// desktop — draws none at all. Honouring it produced a window with
+    /// chrome from neither side: nothing to drag, close or resize. Being
+    /// wrong the other way costs a second titlebar, which is visible and
+    /// fixed by adding an entry here; being wrong this way costs a
+    /// window you cannot use at all.
+    ///
+    /// Matched as a case-insensitive prefix of the client's `app_id`.
+    pub self_decorating_apps: Vec<String>,
     /// Relaunch the previous session's windows at startup, restoring
     /// each one's geometry, workspace and shape flags from the layout
     /// file the shell keeps. Off by default — a session that spawns
@@ -182,6 +199,13 @@ pub struct Config {
 
 /// Terminal font size when the config says nothing, in 1x pixels.
 pub const DEFAULT_TERMINAL_FONT_PX: f32 = 20.0;
+
+/// The clients known to draw their own chrome when they ask to.
+/// Chromium and its rebrands draw a titlebar whatever the compositor
+/// configures, which is the double titlebar this list prevents.
+pub fn default_self_decorating_apps() -> Vec<String> {
+    ["chrome", "chromium", "msedge", "microsoft-edge", "brave"].iter().map(|s| s.to_string()).collect()
+}
 
 /// The range a `terminal_font_px` value has to land in. Below the floor
 /// the terminal is unreadable; above the ceiling a default-sized window
@@ -218,6 +242,7 @@ impl Config {
             placement: PlacementPolicy::Smart,
             edge_resistance: 10,
             terminal_font_px: DEFAULT_TERMINAL_FONT_PX,
+            self_decorating_apps: default_self_decorating_apps(),
             restore_session: false,
             lock_command: None,
             keybindings: vec![
@@ -531,6 +556,25 @@ pub fn parse(text: &str) -> Result<Config, String> {
                 other => tracing::warn!(
                     value = ?other,
                     "config: lock_command must be a command-line string, ignoring it"
+                ),
+            },
+            "self_decorating_apps" => match value {
+                toml::Value::Array(items) => {
+                    config.self_decorating_apps = items
+                        .iter()
+                        .filter_map(|v| match v {
+                            toml::Value::String(name) => Some(name.trim().to_ascii_lowercase()),
+                            other => {
+                                tracing::warn!(value = ?other, "config: self_decorating_apps entries must be strings, skipping one");
+                                None
+                            }
+                        })
+                        .filter(|name| !name.is_empty())
+                        .collect();
+                }
+                other => tracing::warn!(
+                    value = ?other,
+                    "config: self_decorating_apps must be an array of strings, keeping the default list"
                 ),
             },
             "keybindings" => match value {

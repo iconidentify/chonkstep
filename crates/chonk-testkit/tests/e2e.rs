@@ -41,11 +41,27 @@ use chonk_testkit::{is_dark, poll_until, Session, SessionOptions, WindowInfo};
 /// events (crossing a drag threshold, re-committing at a new scale).
 const ACT: Duration = Duration::from_secs(10);
 
+/// Session options for the CSD tests below: zenity opted onto
+/// `self_decorating_apps`.
+///
+/// It has to be said out loud now. Asking for client-side decorations
+/// stopped being enough to go unframed — a client that asks and then
+/// draws nothing (a terminal configured `decorations = "None"`) used to
+/// end up with chrome from neither side, so the desktop now frames
+/// everything but the clients it is told draw their own. zenity really
+/// is one of those; it just is not on the shipped default list, which
+/// covers the Chromium family. Naming it here keeps these tests
+/// exercising the CSD path they were written for, and keeps them honest
+/// about the policy rather than silently depending on the old default.
+fn csd_options() -> SessionOptions {
+    SessionOptions { config_extra: "self_decorating_apps = [\"zenity\"]\n".to_string(), ..SessionOptions::default() }
+}
+
 /// Launches a zenity question dialog and waits for it to map. The
-/// standard CSD guinea pig: GTK draws its own titlebar (chonkstep must
-/// not frame it — see the `negotiated_decoration` story in
-/// `wm-wayland/src/state.rs`), and its header drag exercises the
-/// client-initiated move path the drag regression lived in.
+/// standard CSD guinea pig: GTK draws its own titlebar, and its header
+/// drag exercises the client-initiated move path the drag regression
+/// lived in. Boot the session with [`csd_options`] so the desktop
+/// treats it as self-decorating and leaves it unframed.
 fn launch_question(session: &mut Session, title: &str) -> WindowInfo {
     session
         .launch("zenity", &["--question", "--title", title, "--text", "Click OK"])
@@ -67,7 +83,7 @@ fn launch_question(session: &mut Session, title: &str) -> WindowInfo {
 #[test]
 #[ignore = "needs a live Wayland session to nest in: scripts/e2e.sh, or cargo test -p chonk-testkit -- --ignored --test-threads=1"]
 fn drag_ends_when_the_button_comes_up() {
-    let mut session = Session::boot("drag-ends", SessionOptions::default()).unwrap();
+    let mut session = Session::boot("drag-ends", csd_options()).unwrap();
     let window = launch_question(&mut session, "TestDrag");
     let start = (window.x, window.y);
 
@@ -142,7 +158,7 @@ fn drag_ends_when_the_button_comes_up() {
 #[test]
 #[ignore = "needs a live Wayland session to nest in: scripts/e2e.sh, or cargo test -p chonk-testkit -- --ignored --test-threads=1"]
 fn click_lands_where_it_visually_lands() {
-    let mut session = Session::boot("click-lands", SessionOptions::default()).unwrap();
+    let mut session = Session::boot("click-lands", csd_options()).unwrap();
     let window = launch_question(&mut session, "TestClick");
     session.screenshot("dialog-open").unwrap();
 
@@ -182,12 +198,12 @@ fn scale_2_composition_stays_intact() {
     // Reference run at scale 1: how wide is the same dialog?
     let width_at_1 = {
         let mut session =
-            Session::boot("scale-ref", SessionOptions { scale: Some(1.0), ..SessionOptions::default() }).unwrap();
+            Session::boot("scale-ref", SessionOptions { scale: Some(1.0), ..csd_options() }).unwrap();
         let window = launch_question(&mut session, "TestScale");
         window.w
     };
 
-    let mut session = Session::boot("scale-2", SessionOptions { scale: Some(2.0), ..SessionOptions::default() }).unwrap();
+    let mut session = Session::boot("scale-2", SessionOptions { scale: Some(2.0), ..csd_options() }).unwrap();
     let window = launch_question(&mut session, "TestScale");
     session.door().barrier().unwrap();
     let world = session.world().unwrap();
@@ -259,7 +275,7 @@ fn scale_2_composition_stays_intact() {
 #[test]
 #[ignore = "needs a live Wayland session to nest in: scripts/e2e.sh, or cargo test -p chonk-testkit -- --ignored --test-threads=1"]
 fn frameless_resize_works() {
-    let mut session = Session::boot("frameless-resize", SessionOptions::default()).unwrap();
+    let mut session = Session::boot("frameless-resize", csd_options()).unwrap();
     let text = session.dir.join("resize-me.txt");
     std::fs::write(&text, "resize me\n").unwrap();
     session
