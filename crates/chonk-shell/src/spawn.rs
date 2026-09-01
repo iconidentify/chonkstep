@@ -378,10 +378,60 @@ const WAYLAND_SESSION_IMAGE: &str = "chonkstep-wayland";
 /// the child to connect to, so the failure this whole area exists
 /// because of - "Failed to connect to Wayland display", then no window -
 /// stays impossible by construction rather than by argument.
+/// What the running binary *told* us it is, which beats any amount of
+/// deduction about it. `None` until a binary says.
+static DECLARED_STACK: std::sync::OnceLock<DisplayStack> = std::sync::OnceLock::new();
+
+/// Declares which session this process is the desktop of. Called once,
+/// early, by each of the two binaries.
+///
+/// This exists because the deduction below was wrong in a way nobody
+/// would guess and nothing would report. `current_exe` resolves
+/// `/proc/self/exe`, and when the file behind a running process is
+/// REPLACED — a rebuild, a package upgrade, `cargo build` while the
+/// session it built is still running — the kernel answers with the path
+/// plus a literal " (deleted)" suffix. The file name stops matching,
+/// the compositor stops recognising itself, every Chromium-family
+/// launch is told `--ozone-platform=x11` and
+/// `--force-device-scale-factor`, and the browser comes back on
+/// XWayland at double scale: text and layout wrong, clicks landing
+/// somewhere other than where they were aimed. Reported as "X.com is
+/// formatting weird and my clicks register in the wrong place", which
+/// is not a description anyone would map onto a rebuilt binary.
+///
+/// The deduction was a good-faith answer to a real constraint (the
+/// shell is generic over its backend and must not learn which one it
+/// has), but it was inferring something the process already knew for
+/// certain. A binary that links `wm-wayland` IS the Wayland session;
+/// there is nothing to work out.
+pub fn declare_display_stack(stack: DisplayStack) {
+    // A second, differing declaration would mean two binaries in one
+    // process, which cannot happen — so the first answer stands and a
+    // repeat is harmless.
+    let _ = DECLARED_STACK.set(stack);
+}
+
 pub fn current_display_stack() -> DisplayStack {
     let image = std::env::current_exe().ok();
     let image_name = image.as_deref().and_then(|path| path.file_name()).and_then(|name| name.to_str());
-    resolve_display_stack(image_name, std::env::var("WAYLAND_DISPLAY").ok().as_deref())
+    stack_with_declaration(
+        DECLARED_STACK.get().copied(),
+        image_name,
+        std::env::var("WAYLAND_DISPLAY").ok().as_deref(),
+    )
+}
+
+/// Pure core of [`current_display_stack`]: a declaration is the answer
+/// when there is one, and the deduction is the fallback. Split out for
+/// the same reason [`resolve_display_stack`] is — a rule reachable only
+/// by setting a process-global is a rule the tests cannot exercise
+/// twice.
+fn stack_with_declaration(
+    declared: Option<DisplayStack>,
+    image_name: Option<&str>,
+    wayland_display: Option<&str>,
+) -> DisplayStack {
+    declared.unwrap_or_else(|| resolve_display_stack(image_name, wayland_display))
 }
 
 /// Pure core of [`current_display_stack`], split out for the reason
@@ -395,6 +445,13 @@ pub fn current_display_stack() -> DisplayStack {
 /// the compositor is a browser with the wrong scaling and a doubled
 /// titlebar, while a Wayland browser under an X session is no browser.
 pub fn resolve_display_stack(image_name: Option<&str>, wayland_display: Option<&str>) -> DisplayStack {
+    // `/proc/self/exe` answers with a " (deleted)" suffix once the file
+    // behind a running process has been replaced, which is the ordinary
+    // state of any session whose binary was rebuilt or upgraded under
+    // it. Stripping it keeps this fallback honest for the same reason
+    // `declare_display_stack` exists; with both binaries declaring,
+    // nothing reaches here but the tests.
+    let image_name = image_name.map(|name| name.strip_suffix(" (deleted)").unwrap_or(name));
     let compositor = image_name == Some(WAYLAND_SESSION_IMAGE);
     let socket_to_connect_to = wayland_display.is_some_and(|name| !name.is_empty());
     if compositor && socket_to_connect_to {
@@ -571,6 +628,52 @@ mod tests {
         // XWayland guest wearing two titlebars.
         assert_eq!(resolve_display_stack(Some("chonkstep-wayland"), Some("wayland-1")), DisplayStack::Wayland);
         assert_eq!(chromium_platform_args(DisplayStack::Wayland), vec!["--ozone-platform=wayland".to_string()]);
+    }
+
+    /// The reported bug, as the kernel actually presents it. Rebuild a
+    /// running session's binary — `cargo build`, a package upgrade —
+    /// and `/proc/self/exe` starts answering with a " (deleted)"
+    /// suffix. The compositor stopped recognising its own image, every
+    /// browser it launched was pushed onto XWayland at double scale,
+    /// and the user saw "the page is formatted weird and my clicks land
+    /// in the wrong place".
+    #[test]
+    fn a_rebuilt_binary_is_still_the_compositor() {
+        assert_eq!(
+            resolve_display_stack(Some("chonkstep-wayland (deleted)"), Some("wayland-1")),
+            DisplayStack::Wayland,
+            "a replaced-on-disk compositor must not start launching X11 browsers"
+        );
+        // The X11 half of the same trap.
+        assert_eq!(resolve_display_stack(Some("chonkstep (deleted)"), Some("wayland-1")), DisplayStack::X11);
+        // And the suffix is only ever stripped from the end, so it
+        // cannot smuggle an unrelated name into a match.
+        assert_eq!(resolve_display_stack(Some("chonkstep-wayland (deleted) x"), Some("wayland-1")), DisplayStack::X11);
+    }
+
+    /// Better than any deduction: the binary says which session it is,
+    /// and nothing about the file it was loaded from can contradict it.
+    #[test]
+    fn a_declared_stack_beats_the_deduction() {
+        // The case that was broken in the wild: a compositor whose
+        // binary has been replaced under it, which the deduction reads
+        // as X11 and a declaration reads correctly.
+        assert_eq!(
+            stack_with_declaration(Some(DisplayStack::Wayland), Some("chonkstep-wayland (deleted)"), None),
+            DisplayStack::Wayland,
+            "a declaration outranks both the image name and the missing socket"
+        );
+        assert_eq!(
+            stack_with_declaration(Some(DisplayStack::X11), Some("chonkstep-wayland"), Some("wayland-1")),
+            DisplayStack::X11,
+            "the X11 binary nested in a Wayland desktop stays X11 whatever the environment says"
+        );
+        // With nothing declared, the deduction still answers.
+        assert_eq!(
+            stack_with_declaration(None, Some("chonkstep-wayland"), Some("wayland-1")),
+            DisplayStack::Wayland
+        );
+        assert_eq!(stack_with_declaration(None, Some("chonkstep"), Some("wayland-1")), DisplayStack::X11);
     }
 
     #[test]

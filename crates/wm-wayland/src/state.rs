@@ -2219,6 +2219,12 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
         )
         .map_err(|error| format!("failed to register the wayland display source: {error}"))?;
 
+    // This binary IS the Wayland session, and says so rather than
+    // leaving the shell to deduce it from `/proc/self/exe` — which
+    // answers " (deleted)" for any session whose binary has been
+    // rebuilt under it, and silently launched every browser on
+    // XWayland at double scale when it did.
+    chonk_shell::spawn::declare_display_stack(chonk_shell::spawn::DisplayStack::Wayland);
     // Children the shell spawns find the session through the
     // environment, so it must be set before `Shell::new` (which may
     // autostart things) and before XWayland comes up. `DISPLAY`

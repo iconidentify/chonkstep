@@ -28,6 +28,11 @@ fn main() {
         "chonkstep starting \u{2014} a modern window manager in the classic NeXTSTEP style"
     );
 
+    // This binary IS the X11 session, and says so rather than leaving
+    // the shell to deduce it from the name of the file it is running —
+    // see `chonk_shell::spawn::declare_display_stack`.
+    chonk_shell::spawn::declare_display_stack(chonk_shell::spawn::DisplayStack::X11);
+
     // User configuration is loaded before anything scale- or theme-
     // dependent is built. `wm_config::load()` never fails by contract:
     // no file yields the defaults, and a broken file logs what is wrong
