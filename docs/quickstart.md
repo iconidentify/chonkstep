@@ -115,12 +115,35 @@ dockapps, and the palette of every terminal launched from then on —
 with nothing closed and no restart. The pick is persisted and wins
 over the config file's `theme =` line on later startups.
 
+Every theme also has a **light and a dark rendition** — a second,
+session-wide axis, independent of which theme you picked. Switch it
+live from anywhere:
+
+```sh
+echo toggle > ~/.local/state/chonkstep/appearance-request
+```
+
+The desktop re-dresses in place — chrome, menus, wallpaper mood, the
+dock — the terminals it spawned retint on the spot (scrollback
+included), and GTK/portal applications follow through the standard
+color-scheme setting. `light` and `dark` work in place of `toggle`,
+and `appearance = "light"` in the config seeds a first session. With
+nothing said, each theme wears its native mood — dark for seven of
+the eight, light for Ivory Halftone. The whole contract, including
+which applications follow live and which wait for their next launch,
+is [appearance.md](appearance.md). And if you'd rather click than
+echo: `chonk-get install examples/chonk-switch` (from a checkout)
+puts a machined light/dark toggle in the dock.
+
 ## 6. Put something in the dock: `chonk-get`
 
 The dock's tiles are **instruments**: separate processes that push
 finished pixels over a private socket and get the desktop's theme,
 scale, input and supervision in return. A crashed, hung or looping
 tile shows a dead face in its tile; it cannot take the desktop down.
+An instrument can also open a framed detail panel beside the dock
+when you click its tile — streamed by the same process, dismissed by
+the shell (click the tile again, or Escape).
 You can write one in any language that can open a Unix socket —
 [instrument-platform.md](instrument-platform.md) has a complete
 Python one in ten lines.
@@ -130,6 +153,7 @@ Try the shipped ones (paths are relative to a checkout):
 ```sh
 chonk-get install bindings/python        # a Python clock tile
 chonk-get install examples/chonk-shelf   # the Shelf: clipboard history
+chonk-get install examples/chonk-switch  # the light/dark toggle
 chonk-get list
 chonk-get remove py-dockclock
 ```

@@ -117,6 +117,7 @@
       <a href="#guarantees">Guarantees</a>
       <a href="#overview">Overview</a>
       <a href="#themes">Themes</a>
+      <a href="#appearance">Light &amp; dark</a>
       <a href="#instruments">Instruments</a>
       <a href="#install">Install</a>
       <a href="https://github.com/iconidentify/chonkstep">Source</a>
@@ -131,7 +132,8 @@
     Wayland compositor, wired to the same shell, so a feature lands once
     and both sessions get it by construction. The chrome is chiseled and
     specified to the pixel; under it sit a dock of crash-proof
-    instruments, real workspaces, and a session that survives.
+    instruments, real workspaces, eight themes each in a light and a
+    dark rendition, and a session that survives.
   </p>
   <p class="sub">
     Written in Rust. GPL-3.0. Runs as a real login session on
@@ -142,10 +144,11 @@
 
 <div class="wrap">
   <figure>
-    <img src="shots/hero.png" alt="The chonkstep desktop: two terminals in chiseled chrome over the Lavender Grid wallpaper, with the dock instruments on the right, the workspace Clip top-left, and a miniaturized window's icon tile bottom-left.">
-    <figcaption>The Wayland session, NeXTSTEP Classic theme. Every screenshot on this
-    page is a real capture of the compositor in this repository, taken through its
-    own screencopy protocol.</figcaption>
+    <img src="shots/hero.png" alt="The chonkstep desktop: two terminals in chiseled chrome over the Lavender Grid wallpaper, with the dock instruments, the analog clock and the light/dark switch tile on the right, and the workspace Clip top-left.">
+    <figcaption>The Wayland session, NeXTSTEP Classic theme — the light/dark switch
+    is the bottom tile in the dock. Every screenshot on this page is a real capture
+    of the compositor in this repository, taken through its own screencopy
+    protocol.</figcaption>
   </figure>
 </div>
 
@@ -167,7 +170,8 @@
     </div>
     <div class="card">
       <h3>Live everything.</h3>
-      <p>A theme pick, a UI scale change, and any config edit apply to the
+      <p>A theme pick, a light/dark switch, a UI scale change (fractional
+      included, via <code>wlr-randr</code>), and any config edit apply to the
       running session in place — nothing closed, no window lost, every
       dockapp kept. Restart exists for exactly one thing a running process
       cannot apply to itself: a new build.</p>
@@ -194,6 +198,19 @@
       pin exactly the transitions that must not exist. Layer-shell and
       idle-notify ship alongside it, so lockers, bars and launchers from
       the wlroots ecosystem run here.</p>
+    </div>
+    <div class="card">
+      <h3>It shares its screen.</h3>
+      <p>Browser video calls capture the desktop through the standard portal
+      chain — xdg-desktop-portal-wlr over the compositor's screencopy into
+      PipeWire — verified end to end: node returned, frames flowing, pixels
+      correct. The session script publishes the compositor's socket into the
+      portal's environment automatically, which is the classic silent
+      failure on wlroots-adjacent desktops.</p>
+      <p class="how">The map, the verification transcript, and the one
+      upstream limitation (the wlr backend captures whole outputs, so
+      "share a single window" is not offered) are in
+      <a href="https://github.com/iconidentify/chonkstep/blob/main/docs/screen-sharing.md">docs/screen-sharing.md</a>.</p>
     </div>
   </div>
 </section>
@@ -229,8 +246,8 @@
     </figure>
     <figure>
       <img src="shots/theme-ivory-halftone.png" alt="Ivory Halftone theme: press-cream paper terminal and halftone artwork, with the dark focused titlebar kept.">
-      <figcaption>Ivory Halftone — the light one. The focused titlebar stays
-      dark, which is what keeps focus legible on a light desktop.</figcaption>
+      <figcaption>Ivory Halftone, in its native light mood. The focused titlebar
+      stays dark, which is what keeps focus legible on a light desktop.</figcaption>
     </figure>
     <figure>
       <img src="shots/theme-indigo-filament.png" alt="Indigo Filament theme: filament-wave wallpaper in indigo and violet, dark chrome.">
@@ -242,6 +259,39 @@
     <figcaption>The root menu's Theme cascade, on Jade Lacquer. The dot marks
     the live theme; picking another applies it immediately.</figcaption>
   </figure>
+</section>
+
+<section id="appearance" class="wrap">
+  <h2>Light and dark are renditions, not themes</h2>
+  <p class="kicker">Appearance is a second axis. Every theme carries two
+  hand-designed renditions of itself — fills, bevel ramps, menu palette, the
+  full 16-color terminal scheme, and the wallpaper artwork's own mood, each
+  drawn per side. Light is not inverted dark: the focused titlebar stays ink
+  on both sides, because that is what keeps keyboard focus legible on a pale
+  desk. Write <code>light</code>, <code>dark</code> or <code>toggle</code> to
+  one state file and the whole desktop re-dresses in place — running
+  terminals retint on the spot, scrollback included, and GTK and portal
+  applications follow through the standard color-scheme setting. The two
+  shots below are the same session, one file write apart.</p>
+  <div class="themes">
+    <figure>
+      <img src="shots/appearance-dark.png" alt="Teal Blueprint in its dark rendition: deep teal drafting-table wallpaper, dark terminal, red-crosshair accents.">
+      <figcaption>Teal Blueprint, dark rendition.</figcaption>
+    </figure>
+    <figure>
+      <img src="shots/appearance-light.png" alt="The same Teal Blueprint session in its light rendition: pale blueprint-paper wallpaper, paper terminal, the same composition.">
+      <figcaption>The same session after <code>echo toggle &gt;
+      ~/.local/state/chonkstep/appearance-request</code> — same theme, same
+      windows, same scrollback, the light rendition.</figcaption>
+    </figure>
+  </div>
+  <p class="fineprint">The dock's bottom tile in both shots is
+  <code>chonk-switch</code>, the appearance switch: a dockapp built purely on
+  the platform's public surfaces — the Python SDK for the tile, the two
+  state files for the mode. The file contract is public and small:
+  <a href="https://github.com/iconidentify/chonkstep/blob/main/docs/appearance.md">docs/appearance.md</a>,
+  including the honest table of which applications follow live and which
+  wait for their next launch.</p>
 </section>
 
 <section id="instruments" class="wrap">
@@ -264,7 +314,21 @@ Hello("hello-instrument").run()</code></pre>
 <pre><code>$ chonk-get install ./hello-instrument
 $ chonk-get install bindings/python        <span class="c"># the shipped Python clock</span>
 $ chonk-get install examples/chonk-shelf   <span class="c"># the Shelf: clipboard history</span>
+$ chonk-get install examples/chonk-switch  <span class="c"># the light/dark toggle</span>
 $ chonk-get list</code></pre>
+  <p>A tile is 56 logical pixels of glanceable reading; the <strong>instrument
+  panel</strong> is the detail view behind it. Click a tile and a framed panel
+  unfolds beside the dock — streamed by the same process over the same
+  socket, with the shell drawing the chiseled chrome and owning placement
+  and every dismissal gesture (click-away, Escape, a tile re-click). One
+  panel on screen at a time, and it never takes keyboard focus: a panel is a
+  popover, not a window. Every platform guarantee extends to it unchanged —
+  the desktop never blocks on a panel, and a hung instrument's panel is torn
+  down by the same ping machinery as its tile. Panel frames cross the wire
+  as bounded bands (protocol 2, specified in the protocol doc's section 11),
+  both SDKs speak it with the banding kept out of authors' hands, and a
+  conformance probe in <code>chonk-testkit</code> plays the whole
+  conversation over a real socket.</p>
   <p class="fineprint">The wire protocol is specified byte-for-byte in
   <a href="https://github.com/iconidentify/chonkstep/blob/main/docs/dockapp-protocol.md">docs/dockapp-protocol.md</a>;
   <a href="https://github.com/iconidentify/chonkstep/blob/main/docs/instrument-platform.md">docs/instrument-platform.md</a>

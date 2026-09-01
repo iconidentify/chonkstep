@@ -68,9 +68,12 @@ own client connection to the XWayland display and publishes
 window, desktops, per-window desktop, workarea (dock reservation
 included) and `_NET_FRAME_EXTENTS` — verified live with `xprop`,
 including the maximize/fullscreen/hidden state atoms changing as the
-window manager acts. Publishing only: inbound client messages (a pager
-asking to switch desks) are not translated, so `wmctrl -l`-style
-*reading* works while `wmctrl -s`-style *control* does not yet.
+window manager acts. Inbound client messages are translated too: a
+pager's `_NET_ACTIVE_WINDOW` and `_NET_CURRENT_DESKTOP` messages to
+the XWayland root are routed into the same activation and
+desktop-switch events every other input path queues (proven by an
+x11rb pager round-tripping a workspace switch in the end-to-end
+suite), so `wmctrl -l` reads and `wmctrl -a` / `wmctrl -s` command.
 
 ## Decorations
 
@@ -94,7 +97,7 @@ and re-decide rather than reading once at map time.
 
 | | X11 session | Wayland session, XWayland client | Wayland session, native client |
 |---|---|---|---|
-| Honours `_MOTIF_WM_HINTS` | **Asserted in CI** | **From the code** (`backend_impl.rs` asks smithay's `X11Surface::is_decorated`, which parses the same five words) | n/a |
+| Honours `_MOTIF_WM_HINTS` | **Asserted in CI** | **From the code, verified live once** (`backend_impl.rs` asks smithay's `X11Surface::is_decorated`, which parses the same five words - note its name reads "wants decorations" but it answers "is client-side decorated"; the sign was once inverted here, found and fixed when Spotify arrived frameless with `MWM_DECOR_ALL` set) | n/a |
 | Publishes `_NET_FRAME_EXTENTS` | **Asserted in CI** — real geometry when framed, four zeros when not | **From the code, verified live once** — published via `xewmh.rs`, `xprop` shows real chrome values | n/a |
 | xdg-decoration | n/a | n/a | Server-side forced on every toplevel |
 
@@ -339,11 +342,13 @@ deliberately. See above.
 **Live UI scale changes.** Applications read the scale once, at launch. Not
 implemented, deferred deliberately.
 
-**EWMH control messages inside the Wayland session.** Reading works
-now (see above); *control* does not: a pager's `_NET_CURRENT_DESKTOP`
-or `_NET_ACTIVE_WINDOW` client message to the XWayland root is not
-translated into the window manager. `wmctrl -l` lists, `wmctrl -a`
-does nothing.
+**EWMH control messages inside the Wayland session.** Fixed: a
+pager's `_NET_CURRENT_DESKTOP` or `_NET_ACTIVE_WINDOW` client message
+to the XWayland root is translated into the window manager's own
+activation and desktop-switch events, covered by the end-to-end
+suite. `wmctrl -l` lists, `wmctrl -a` activates, `wmctrl -s` switches
+desks. This entry is kept because earlier revisions listed it as not
+implemented.
 
 **`_NET_WM_STATE` feedback.** Fixed, on both client kinds:
 `publish_net_state` pushes maximize/fullscreen/hidden back to X11
