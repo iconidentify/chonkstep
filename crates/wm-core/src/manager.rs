@@ -968,8 +968,27 @@ impl<B: Backend> WindowManager<B> {
             tracing::debug!(?id, ?requested, "configure request from a size-locked client — ignored");
             return;
         }
-        tracing::debug!(?id, ?requested, "configure request from a managed client — applying");
-        client.geometry.size = requested.size;
+        // A maximized axis is the WM's to decide, not the client's. A
+        // client that re-asks for its pre-maximize size — which toolkits
+        // do, on a font change, a DPI change, or just late in startup —
+        // used to have that size adopted wholesale while the window kept
+        // the maximized *origin*. The result is the reported bug: the
+        // window parks at the work area's top-left corner at its old
+        // size, looking like a failed maximize, while still flagged
+        // maximized. Clamp per axis rather than ignoring the request
+        // outright, so a vertically-maximized window can still be given
+        // a new width.
+        let maximized_h = client.flags.contains(ClientFlags::MAXIMIZED_H);
+        let maximized_v = client.flags.contains(ClientFlags::MAXIMIZED_V);
+        let mut size = requested.size;
+        if maximized_h {
+            size.w = client.geometry.size.w;
+        }
+        if maximized_v {
+            size.h = client.geometry.size.h;
+        }
+        tracing::debug!(?id, ?requested, ?size, maximized_h, maximized_v, "configure request from a managed client — applying");
+        client.geometry.size = size;
         self.reflow_frame(id);
     }
 
@@ -1118,6 +1137,13 @@ impl<B: Backend> WindowManager<B> {
                     }
                 } else {
                     self.last_titlebar_press = Some((id, time_ms));
+                    // Dragging a maximized window is the gesture that
+                    // un-maximizes it. Without this the window travels
+                    // under the pointer still flagged maximized: the
+                    // titlebar menu keeps reporting "maximized", and the
+                    // next Maximize pick runs *unmaximize* and teleports
+                    // it back to a corner the user last saw minutes ago.
+                    self.break_maximize(id);
                     self.active_move = Some(ActiveMove { client: id, grab_offset: local });
                     self.begin_drag_grab();
                 }
@@ -2032,6 +2058,24 @@ impl<B: Backend> WindowManager<B> {
     pub fn client_preview(&self, id: ClientId) -> Option<DecorationBuffer> {
         let client = self.clients.get(id)?;
         self.backend.capture_window_image(client.window, client.geometry.size)
+    }
+
+    /// Drops the maximized state without moving the window: it is
+    /// already exactly where the user is putting it, so there is nothing
+    /// to restore *to* and `restore_geometry` goes with the flags. The
+    /// counterpart to `unmaximize`, which restores geometry precisely
+    /// because the user did not choose the current position.
+    fn break_maximize(&mut self, id: ClientId) {
+        let Some(client) = self.clients.get_mut(id) else {
+            return;
+        };
+        if !client.flags.intersects(ClientFlags::MAXIMIZED_H | ClientFlags::MAXIMIZED_V) {
+            return;
+        }
+        client.flags.remove(ClientFlags::MAXIMIZED_H | ClientFlags::MAXIMIZED_V);
+        client.restore_geometry = None;
+        self.publish_client_net_state(id);
+        tracing::debug!(?id, "drag broke the maximized state");
     }
 
     fn focus_client(&mut self, id: ClientId) {
@@ -4103,6 +4147,80 @@ mod tests {
     }
 
     #[test]
+    /// Regression test for the reported "maximize just snaps it to the
+    /// top-left" bug. A toolkit re-asking for its pre-maximize size
+    /// used to have that size adopted while the window kept the
+    /// maximized origin — a small window parked in the work area's
+    /// corner, still flagged maximized.
+    #[test]
+    fn a_maximized_client_that_asks_for_its_old_size_stays_maximized() {
+        let mut backend = FakeBackend::new();
+        let window = backend.create_window();
+        backend.set_geometry(window, Rect { pos: Point::new(50, 50), size: Size::new(100, 100) });
+        backend.set_monitor(Rect { pos: Point::new(0, 0), size: Size::new(800, 600) });
+        let mut wm = wm(backend);
+        wm.dispatch(BackendEvent::MapRequest(window));
+        let id = wm.client_for_window(window).unwrap();
+
+        wm.maximize(id, MaximizeDirections::FULL);
+        let maximized = wm.client(id).unwrap().geometry.size;
+
+        // The client asks for its old, small size — as toolkits do on a
+        // font or DPI change, or simply late in startup.
+        wm.dispatch(BackendEvent::ConfigureRequest {
+            window,
+            requested: Rect { pos: Point::new(50, 50), size: Size::new(100, 100) },
+        });
+
+        let client = wm.client(id).unwrap();
+        assert_eq!(client.geometry.size, maximized, "a maximized window keeps its extent on both axes");
+        assert!(client.flags.contains(ClientFlags::MAXIMIZED_H | ClientFlags::MAXIMIZED_V));
+    }
+
+    /// The clamp is per axis, not a blanket veto: a half-maximized
+    /// window must still be resizable along the axis it does not own.
+    #[test]
+    fn a_vertically_maximized_client_still_adopts_a_new_width() {
+        let mut backend = FakeBackend::new();
+        let window = backend.create_window();
+        backend.set_geometry(window, Rect { pos: Point::new(50, 50), size: Size::new(100, 100) });
+        backend.set_monitor(Rect { pos: Point::new(0, 0), size: Size::new(800, 600) });
+        let mut wm = wm(backend);
+        wm.dispatch(BackendEvent::MapRequest(window));
+        let id = wm.client_for_window(window).unwrap();
+
+        wm.maximize(id, MaximizeDirections::VERTICAL);
+        let maximized_h = wm.client(id).unwrap().geometry.size.h;
+
+        wm.dispatch(BackendEvent::ConfigureRequest {
+            window,
+            requested: Rect { pos: Point::new(50, 50), size: Size::new(321, 100) },
+        });
+
+        let client = wm.client(id).unwrap();
+        assert_eq!(client.geometry.size.w, 321, "the free axis still honors the client");
+        assert_eq!(client.geometry.size.h, maximized_h, "the maximized axis does not");
+    }
+
+    /// The clamp must not grow into a general veto of client resizes.
+    #[test]
+    fn an_unmaximized_client_configure_is_still_adopted_verbatim() {
+        let mut backend = FakeBackend::new();
+        let window = backend.create_window();
+        backend.set_geometry(window, Rect { pos: Point::new(50, 50), size: Size::new(100, 100) });
+        backend.set_monitor(Rect { pos: Point::new(0, 0), size: Size::new(800, 600) });
+        let mut wm = wm(backend);
+        wm.dispatch(BackendEvent::MapRequest(window));
+        let id = wm.client_for_window(window).unwrap();
+
+        wm.dispatch(BackendEvent::ConfigureRequest {
+            window,
+            requested: Rect { pos: Point::new(50, 50), size: Size::new(640, 480) },
+        });
+
+        assert_eq!(wm.client(id).unwrap().geometry.size, Size::new(640, 480));
+    }
+
     fn maximize_fills_the_usable_area_and_saves_restore_geometry() {
         let mut backend = FakeBackend::new();
         let window = backend.create_window();
