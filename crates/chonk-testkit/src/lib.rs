@@ -72,6 +72,43 @@ const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
 /// the condition becoming true, coarse enough to cost nothing.
 const POLL_STEP: Duration = Duration::from_millis(25);
 
+/// Drops ANSI CSI escape sequences (`\x1b[...m` and friends) from a
+/// line, so a log assertion matches the text a human reads rather
+/// than the bytes a colorizer wrote around it.
+///
+/// Two writers on the harness's log files color them: `tracing`
+/// colors the compositor's log unconditionally, and libwayland (1.26
+/// on this machine) colors `WAYLAND_DEBUG` output whenever
+/// `FORCE_COLOR` is in the client's environment — even into a plain
+/// file. The escapes land *inside* the tokens tests match on
+/// (`wl_keyboard\x1b[35m#15\x1b[36m.enter\x1b[0m(`), so a substring
+/// like `"wl_keyboard#"` silently never matches again the day the
+/// environment starts forcing color — which is exactly how the
+/// miniaturize-restore e2e went red with a perfectly healthy
+/// compositor. Every log matcher in this crate and its tests goes
+/// through here first; none may grep raw bytes.
+pub fn strip_ansi(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' {
+            // CSI: ESC '[' parameters, terminated by a byte in @..~.
+            if chars.next() == Some('[') {
+                for end in chars.by_ref() {
+                    if ('\u{40}'..='\u{7e}').contains(&end) {
+                        break;
+                    }
+                }
+            }
+            // A bare ESC (or ESC + one non-CSI byte) is dropped too;
+            // no log this crate reads contains one legitimately.
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 /// Runs `condition` until it yields `Some`, at most until `timeout`
 /// has elapsed. The only wait primitive in this crate — every use
 /// names the observable condition it polls, which is the whole
@@ -234,12 +271,16 @@ impl Session {
             Door::connect(&door_path).ok()
         })?;
         // Connecting only proves the listener is bound (that happens
-        // before the event loop starts, and the first pass then pays
-        // for the whole initial desktop paint — ~11s in a debug
-        // build). A session is booted when it *answers*: one barrier
-        // round-trip, bounded by the door's own read deadline, and
-        // every later wait in a test starts against a responsive
-        // compositor instead of eating that first-paint stall.
+        // before the event loop starts). A session is booted when it
+        // *answers*: one barrier round-trip, bounded by the door's own
+        // read deadline, and every later wait in a test starts against
+        // a responsive compositor. (The first pass used to pay ~11s
+        // re-painting the whole desktop for winit's no-op initial
+        // resize in an unoptimized build; both halves of that are
+        // fixed — `on_output_resized`'s same-size guard, and the
+        // workspace `[profile.dev.package.*]` opt-levels — but the
+        // barrier stays, because "booted" should mean "answers", not
+        // "probably fast now".)
         session
             .door
             .barrier()
@@ -268,6 +309,15 @@ impl Session {
             .env("WAYLAND_DISPLAY", &self.wayland_display)
             .env_remove("DISPLAY")
             .env("GDK_BACKEND", "wayland")
+            // The client's log is machine-read (`WAYLAND_DEBUG`
+            // assertions match substrings), and libwayland ≥1.26
+            // honors these by coloring its debug stream even into a
+            // file — escapes landing mid-token. Tests strip ANSI
+            // anyway (`strip_ansi`), but a harness that ASKS for
+            // plain logs fails one environment change later instead
+            // of two.
+            .env_remove("FORCE_COLOR")
+            .env_remove("CLICOLOR_FORCE")
             .stdout(Stdio::from(log))
             .stderr(Stdio::from(log_err))
             .spawn()
@@ -891,5 +941,21 @@ mod tests {
     #[test]
     fn a_mangled_line_is_rejected_not_misparsed() {
         assert!(parse_window_line("window id=oops x=1 y=1 w=1 h=1 mapped=true").is_none());
+    }
+
+    /// The exact bytes libwayland 1.26 writes under `FORCE_COLOR`,
+    /// verbatim from a captured zenity log: the escapes sit *inside*
+    /// the `object#id.event(` token, so a raw substring match for
+    /// `wl_keyboard#` finds nothing while the wire plainly carried
+    /// the enter. Stripping must restore the token exactly.
+    #[test]
+    fn ansi_stripping_reassembles_the_tokens_assertions_match_on() {
+        let colored = "\u{1b}[32m[06:02:44.472322] \u{1b}[33m{Default Queue} \u{1b}[31m\u{1b}[0m\u{1b}[34mwl_keyboard\u{1b}[35m#15\u{1b}[36m.enter\u{1b}[0m(4, wl_surface#8, array[0])\u{1b}[0m";
+        assert!(!colored.contains("wl_keyboard#"), "the raw bytes must not match, or this test pins nothing");
+        let plain = strip_ansi(colored);
+        assert_eq!(plain, "[06:02:44.472322] {Default Queue} wl_keyboard#15.enter(4, wl_surface#8, array[0])");
+        assert!(plain.contains("wl_keyboard#") && plain.contains(".enter("));
+        // Uncolored logs pass through untouched.
+        assert_eq!(strip_ansi("wl_pointer#18.button(6, 11224, 272, 1)"), "wl_pointer#18.button(6, 11224, 272, 1)");
     }
 }

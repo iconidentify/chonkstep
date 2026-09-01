@@ -88,15 +88,17 @@ pub struct LaunchDock<B: Backend> {
     /// shell passes into `handle_click`.
     lit: Vec<bool>,
     drag: Option<StripDrag>,
-    font_system: cosmic_text::FontSystem,
-    swash_cache: cosmic_text::SwashCache,
+    /// The session's one shared font database — see
+    /// `wm_theme::FontState` ("call it once per session"); the strip
+    /// used to scan its own.
+    fonts: wm_theme::FontState,
 }
 
 impl<B: Backend> LaunchDock<B> {
     /// Loads persisted pins (resolving desktop-file ids against
     /// `apps`; stale ids are dropped with a warning) and creates the
     /// strip surface when there is anything to show.
-    pub fn new(backend: &mut B, theme: &Theme, primary: Rect, tile: u32, apps: &[AppEntry]) -> Self {
+    pub fn new(backend: &mut B, theme: &Theme, primary: Rect, tile: u32, apps: &[AppEntry], fonts: wm_theme::FontState) -> Self {
         let tile = tile.max(1);
         let state_path = state_path();
         let pins = state_path.as_deref().map(|path| load_pins(path, apps)).unwrap_or_default();
@@ -111,8 +113,7 @@ impl<B: Backend> LaunchDock<B> {
             pins,
             lit,
             drag: None,
-            font_system: cosmic_text::FontSystem::new(),
-            swash_cache: cosmic_text::SwashCache::new(),
+            fonts,
         };
         dock.sync_window(backend, theme);
         dock
@@ -395,8 +396,8 @@ impl<B: Backend> LaunchDock<B> {
             let lit = self.lit.get(index).copied().unwrap_or(false);
             let buffer = wm_theme::launcher::render_launcher_tile(
                 theme,
-                &mut self.font_system,
-                &mut self.swash_cache,
+                &mut self.fonts.system(),
+                &mut self.fonts.swash(),
                 self.tile,
                 &pin.name,
                 lit,
@@ -697,7 +698,7 @@ mod tests {
         let mut backend = FakeBackend::new();
         let primary = Rect { pos: Point::new(0, 0), size: Size::new(640, 480) };
 
-        let mut restyled: LaunchDock<FakeBackend> = LaunchDock::new(&mut backend, &theme, primary, 56, &[]);
+        let mut restyled: LaunchDock<FakeBackend> = LaunchDock::new(&mut backend, &theme, primary, 56, &[], wm_theme::FontState::new());
         restyled.restyle(&mut backend, &theme, 112);
 
         // Compared against the shared derivation rather than against a
@@ -724,7 +725,7 @@ mod tests {
         let theme = wm_theme::default_theme::nextstep_classic();
         let mut backend = FakeBackend::new();
         let start = Rect { pos: Point::new(0, 0), size: Size::new(1920, 1200) };
-        let mut dock: LaunchDock<FakeBackend> = LaunchDock::new(&mut backend, &theme, start, 56, &[]);
+        let mut dock: LaunchDock<FakeBackend> = LaunchDock::new(&mut backend, &theme, start, 56, &[], wm_theme::FontState::new());
         assert_eq!(strip_origin(dock.primary, 56), Point::new(0, 56));
 
         // A second display arrives to the left, so the primary's

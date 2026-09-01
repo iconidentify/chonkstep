@@ -353,10 +353,19 @@ fn live_reload_applies() {
 /// restore-input bug below was diagnosed from: the ledger can say
 /// "focused" all it wants, only the wire says what the client was
 /// told.
+///
+/// Lines are ANSI-stripped before matching, and that is load-bearing:
+/// libwayland 1.26 colors its debug stream when `FORCE_COLOR` is in
+/// the client's environment, writing escapes *inside* these very
+/// tokens (`wl_keyboard\x1b[35m#15\x1b[36m.enter\x1b[0m(`), which
+/// made this counter report zero enters from a wire that plainly
+/// carried them — a red test against a healthy compositor, for as
+/// long as the diagnosis also grepped the raw bytes.
 fn wire_events(log: &std::path::Path, object: &str, event: &str) -> usize {
     std::fs::read_to_string(log)
         .unwrap_or_default()
         .lines()
+        .map(chonk_testkit::strip_ansi)
         .filter(|line| line.contains(object) && line.contains(event))
         .count()
 }
@@ -501,23 +510,7 @@ fn an_x11_pager_can_switch_the_workspace() {
     let display = poll_until(Duration::from_secs(30), "XWayland to announce its display", || {
         let log = session.log();
         let line = log.lines().find(|line| line.contains("XWayland ready"))?;
-        let plain: String = {
-            let mut out = String::new();
-            let mut chars = line.chars();
-            while let Some(c) = chars.next() {
-                if c == '\u{1b}' {
-                    // Skip to the terminating 'm' of the CSI sequence.
-                    for e in chars.by_ref() {
-                        if e == 'm' {
-                            break;
-                        }
-                    }
-                } else {
-                    out.push(c);
-                }
-            }
-            out
-        };
+        let plain = chonk_testkit::strip_ansi(line);
         plain.split("display=").nth(1)?.trim().parse::<u32>().ok()
     })
     .expect("the nested session never brought XWayland up");

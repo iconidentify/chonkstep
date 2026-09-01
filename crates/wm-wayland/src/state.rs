@@ -1755,6 +1755,20 @@ impl Compositor {
         let Some(entry) = self.outputs.first_mut() else {
             return;
         };
+        // A resize to the size the output already has changes nothing
+        // and must cost nothing. This is not a hypothetical: winit
+        // replays the host's configure as a `Resized` event on the
+        // loop's first pass, so a nested session's very first dispatch
+        // used to rebuild the damage tracker and — through
+        // `pending_resize` → `Shell::on_screen_resize` — re-decode and
+        // re-scale the wallpaper and repaint every piece of chrome it
+        // had all just painted at this exact size during `Shell::new`.
+        // At 2560x1600 in a debug build that is ~11 seconds of the
+        // event loop answering nobody: a client's `get_registry` sat
+        // queued behind a repaint of pixels that did not change.
+        if entry.size == logical {
+            return;
+        }
         entry.output.change_current_state(Some(mode), None, None, None);
         entry.output.set_preferred(mode);
         entry.size = logical;

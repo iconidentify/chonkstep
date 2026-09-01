@@ -700,7 +700,11 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         let apps = apps::scan_applications();
         tracing::info!(count = apps.len(), "application entries scanned");
 
-        let desktop = Desktop::new(backend, screen, primary, scale, theme.id.clone(), state.appearance, apps.clone());
+        // Both chrome owners get handles to the caller's font state —
+        // the one `FontSystem` this session ever builds. They used to
+        // construct their own, which cost two more full font scans at
+        // boot for databases identical to the one already in hand.
+        let desktop = Desktop::new(backend, screen, primary, scale, theme.id.clone(), state.appearance, apps.clone(), fonts.clone());
         // The launcher strip below the Clip. Its tile size mirrors
         // `Desktop::new`'s own derivation (56px at 1x, scaled, floored
         // at 16) rather than inventing a second number: the strip's
@@ -709,7 +713,7 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         // It is handed the *primary's* size rather than the screen's,
         // so the strip's height clamp is measured against the head it
         // sits on rather than against every head at once.
-        let launchdock = LaunchDock::new(backend, &theme, primary, crate::desktop::tile_px(scale), &apps);
+        let launchdock = LaunchDock::new(backend, &theme, primary, crate::desktop::tile_px(scale), &apps, fonts.clone());
 
         // Session-layout restore, opt-in and only for a genuinely new
         // session: a hot restart on the X11 stack keeps every client

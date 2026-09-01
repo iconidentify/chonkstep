@@ -15,3 +15,36 @@ exclude = ["examples/chonk-switch"]
 version = "0.2.0"
 edition = "2021"
 license = "GPL-3.0-only"
+
+# The debug build's startup budget is spent almost entirely inside a
+# handful of pure-computation raster and text dependencies, and the
+# gap is not a rounding error: painting the wallpaper once at
+# 2560x1600 (png decode + tiny-skia bicubic scale) measured ~10.7s
+# unoptimized against ~50ms of everything else, which is most of the
+# nested-compositor boot the e2e harness pays per test — and the same
+# crates dominate every restyle (~11s measured live, see
+# chonk-testkit's barrier deadline comments). Building just these
+# dependencies optimized keeps our own crates fully debuggable while
+# making a debug session behave like a desktop instead of a
+# slideshow. Release builds are untouched — this section exists only
+# for the dev/test loop.
+[profile.dev.package.tiny-skia]
+opt-level = 3
+[profile.dev.package.tiny-skia-path]
+opt-level = 3
+[profile.dev.package.png]
+opt-level = 3
+[profile.dev.package.fdeflate]
+opt-level = 3
+[profile.dev.package.cosmic-text]
+opt-level = 3
+[profile.dev.package.rustybuzz]
+opt-level = 3
+[profile.dev.package.ttf-parser]
+opt-level = 3
+[profile.dev.package.fontdb]
+opt-level = 3
+[profile.dev.package.swash]
+opt-level = 3
+[profile.dev.package.zeno]
+opt-level = 3

@@ -52,6 +52,29 @@ impl FontState {
         }
     }
 
+    /// The shared `FontSystem`, mutably. Shaping and measuring need
+    /// `&mut`; the `RefMut` is the loan. Callers keep the loan short
+    /// and never hold it across a call that could re-enter this state
+    /// (the single-threaded discipline the type's doc describes) —
+    /// in practice each borrow lives for exactly one render call.
+    ///
+    /// Public so the *shell's* text (dock tiles, icon labels, menus,
+    /// the switcher) rasterizes out of the same one-per-session
+    /// database as the decoration engine. Before this existed, the
+    /// desktop and the launcher strip each ran their own
+    /// `FontSystem::new()` scan — three font databases in one process
+    /// for a type whose whole reason to exist is "exactly once per
+    /// session".
+    pub fn system(&self) -> std::cell::RefMut<'_, cosmic_text::FontSystem> {
+        self.font_system.borrow_mut()
+    }
+
+    /// The shared glyph raster cache, mutably — [`FontState::system`]'s
+    /// companion, under the same short-loan discipline.
+    pub fn swash(&self) -> std::cell::RefMut<'_, cosmic_text::SwashCache> {
+        self.swash_cache.borrow_mut()
+    }
+
     /// Whether the database holds a face for `family`. Used to warn
     /// once per engine build that a theme names a font this machine
     /// does not have.

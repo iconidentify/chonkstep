@@ -1035,8 +1035,12 @@ pub struct Desktop<B: Backend> {
     /// like every other dock/icon dimension so it feels the same at any
     /// `CHONKSTEP_SCALE`.
     drag_threshold: i32,
-    font_system: cosmic_text::FontSystem,
-    swash_cache: cosmic_text::SwashCache,
+    /// The session's one font database, shared with the decoration
+    /// engine and the launcher strip (see `wm_theme::FontState`:
+    /// "call it once per session and clone the handle thereafter").
+    /// This used to be an owned `FontSystem::new()` — a second
+    /// full fontconfig scan for a database the process already had.
+    fonts: wm_theme::FontState,
     /// The one open menu session — root menu or per-window commands
     /// menu, whichever opened last — riding on `wm_theme::cascade::
     /// CascadeMenu`, a generic, reusable SDK primitive rather than
@@ -1156,7 +1160,8 @@ impl<B: Backend> Desktop<B> {
     /// hangs on. On a single-monitor session the two agree, and every
     /// caller must still pass both — the shell cannot recover the
     /// primary's origin from a size.
-    pub fn new(backend: &mut B, screen: Size, primary: Rect, scale: f32, theme_id: String, appearance: wm_theme::Appearance, apps: Vec<crate::apps::AppEntry>) -> Self {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(backend: &mut B, screen: Size, primary: Rect, scale: f32, theme_id: String, appearance: wm_theme::Appearance, apps: Vec<crate::apps::AppEntry>, fonts: wm_theme::FontState) -> Self {
         let tile = tile_px(scale);
         let pad = icon_pad_px(scale);
         // The dock is exactly one tile wide, tiles touch directly with
@@ -1249,8 +1254,7 @@ impl<B: Backend> Desktop<B> {
             tile,
             pad,
             drag_threshold: drag_threshold_px(scale),
-            font_system: cosmic_text::FontSystem::new(),
-            swash_cache: cosmic_text::SwashCache::new(),
+            fonts,
             menu: ShellMenu::new(),
             items,
             dockapps,
@@ -1476,7 +1480,7 @@ impl<B: Backend> Desktop<B> {
                 .iter()
                 .find(|(id, _)| *id == client)
                 .and_then(|(_, preview)| preview.as_ref());
-            let buffer = icon::render_icon_tile(theme, &mut self.font_system, &mut self.swash_cache, tile, &title, preview);
+            let buffer = icon::render_icon_tile(theme, &mut self.fonts.system(), &mut self.fonts.swash(), tile, &title, preview);
             backend.paint_shell_surface(window, &buffer);
             if let Some(icon) = self.icons.get_mut(&window) {
                 icon.pos = pos;
@@ -1574,7 +1578,7 @@ impl<B: Backend> Desktop<B> {
     fn repaint_clip(&mut self, backend: &mut B, theme: &Theme) {
         let (current, count) = self.clip_drawn;
         let current = if current == usize::MAX { 0 } else { current };
-        let buffer = workspace::render_clip_tile(theme, &mut self.font_system, &mut self.swash_cache, self.tile, current, count.max(1));
+        let buffer = workspace::render_clip_tile(theme, &mut self.fonts.system(), &mut self.fonts.swash(), self.tile, current, count.max(1));
         backend.paint_shell_surface(self.clip_window, &buffer);
     }
 
@@ -2069,7 +2073,7 @@ impl<B: Backend> Desktop<B> {
         let Some(tile) = self.items[index].remote() else { return false };
         let (id, title, items) = (tile.id().to_string(), dock_item_menu_title(tile.name()), dock_item_menu_items(tile, now));
         let bounds = self.screen_size();
-        self.menu.open_dock_item(backend, theme, &mut self.font_system, id, title, items, root, bounds);
+        self.menu.open_dock_item(backend, theme, &mut self.fonts.system(), id, title, items, root, bounds);
         true
     }
 
@@ -2241,11 +2245,11 @@ impl<B: Backend> Desktop<B> {
             // as a hole punched in the column. The widget's own name is
             // the label, so the dock says *which* one went dark without
             // the user having to find the log.
-            let buffer = match self.items[index].render(theme, self.tile, &mut self.font_system, &mut self.swash_cache) {
+            let buffer = match self.items[index].render(theme, self.tile, &mut self.fonts.system(), &mut self.fonts.swash()) {
                 Some(buffer) => buffer,
                 None => {
                     let label = self.items[index].name();
-                    panel::render_dead_tile(theme, &mut self.font_system, &mut self.swash_cache, self.tile, label)
+                    panel::render_dead_tile(theme, &mut self.fonts.system(), &mut self.fonts.swash(), self.tile, label)
                 }
             };
             blit_into(&mut pixmap, rect.pos.x as u32, rect.pos.y as u32, &buffer);
@@ -2278,7 +2282,7 @@ impl<B: Backend> Desktop<B> {
     {
         let bounds = self.screen_size();
         let items = root_menu_items(self.wallpaper, &self.theme_id, &self.apps);
-        self.menu.open_root(backend, theme, &mut self.font_system, items, self.apps.len(), at, bounds);
+        self.menu.open_root(backend, theme, &mut self.fonts.system(), items, self.apps.len(), at, bounds);
     }
 
     /// The stored application index `RootMenuAction::LaunchApp`'s
@@ -2300,7 +2304,7 @@ impl<B: Backend> Desktop<B> {
         B: wm_theme_api::PopupHost<PopupId = B::ShellId>,
     {
         let bounds = self.screen_size();
-        self.menu.open_window(backend, theme, &mut self.font_system, &ctx, at, bounds);
+        self.menu.open_window(backend, theme, &mut self.fonts.system(), &ctx, at, bounds);
     }
 
     /// Applies a built-in wallpaper immediately and repaints the dock to
@@ -2339,11 +2343,12 @@ impl<B: Backend> Desktop<B> {
             }
             (None, _) => {}
         }
-        let Self { switcher, font_system, swash_cache, tile, primary, .. } = self;
+        let Self { switcher, fonts, tile, primary, .. } = self;
+        let (mut font_system, mut swash_cache) = (fonts.system(), fonts.swash());
         let Some(panel) = switcher.as_mut() else {
             return;
         };
-        let buffer = switcher::render_switcher(theme, font_system, swash_cache, &panel.entries, selected, *tile);
+        let buffer = switcher::render_switcher(theme, &mut font_system, &mut swash_cache, &panel.entries, selected, *tile);
         if buffer.width == 0 || buffer.height == 0 {
             return;
         }
@@ -2411,8 +2416,9 @@ impl<B: Backend> Desktop<B> {
         workspace: (usize, usize),
         selected: usize,
     ) {
-        let Self { overview, font_system, swash_cache, tile, primary, .. } = self;
-        overview.show(backend, theme, font_system, swash_cache, *primary, *tile, items, workspace, selected);
+        let Self { overview, fonts, tile, primary, .. } = self;
+        let (mut font_system, mut swash_cache) = (fonts.system(), fonts.swash());
+        overview.show(backend, theme, &mut font_system, &mut swash_cache, *primary, *tile, items, workspace, selected);
     }
 
     pub fn overview_visible(&self) -> bool {
@@ -2453,8 +2459,9 @@ impl<B: Backend> Desktop<B> {
         previews: Vec<Option<DecorationBuffer>>,
         generation: u64,
     ) {
-        let Self { overview, font_system, swash_cache, .. } = self;
-        overview.update_previews(backend, theme, font_system, swash_cache, previews, generation);
+        let Self { overview, fonts, .. } = self;
+        let (mut font_system, mut swash_cache) = (fonts.system(), fonts.swash());
+        overview.update_previews(backend, theme, &mut font_system, &mut swash_cache, previews, generation);
     }
 
     pub fn overview_hit(&self, local: Point) -> OverviewHit {
@@ -2472,14 +2479,16 @@ impl<B: Backend> Desktop<B> {
     /// Moves the selection to `index` (hover, click-arm), repainting
     /// only when it actually changed.
     pub fn select_overview_card(&mut self, backend: &mut B, theme: &Theme, index: usize) {
-        let Self { overview, font_system, swash_cache, .. } = self;
-        overview.select(backend, theme, font_system, swash_cache, index);
+        let Self { overview, fonts, .. } = self;
+        let (mut font_system, mut swash_cache) = (fonts.system(), fonts.swash());
+        overview.select(backend, theme, &mut font_system, &mut swash_cache, index);
     }
 
     /// Arrow-key selection movement, clamped by the panel's grid math.
     pub fn move_overview_selection(&mut self, backend: &mut B, theme: &Theme, dx: i32, dy: i32) {
-        let Self { overview, font_system, swash_cache, .. } = self;
-        overview.move_selection(backend, theme, font_system, swash_cache, dx, dy);
+        let Self { overview, fonts, .. } = self;
+        let (mut font_system, mut swash_cache) = (fonts.system(), fonts.swash());
+        overview.move_selection(backend, theme, &mut font_system, &mut swash_cache, dx, dy);
     }
 
     /// Closes the session, keeping the surface for the next entry.
@@ -2508,14 +2517,14 @@ impl<B: Backend> Desktop<B> {
     where
         B: wm_theme_api::PopupHost<PopupId = B::ShellId>,
     {
-        self.menu.click(backend, theme, &mut self.font_system, window, local)
+        self.menu.click(backend, theme, &mut self.fonts.system(), window, local)
     }
 
     pub fn hover_menu(&mut self, backend: &mut B, theme: &Theme, window: B::ShellId, local: Point)
     where
         B: wm_theme_api::PopupHost<PopupId = B::ShellId>,
     {
-        self.menu.hover(backend, theme, &mut self.font_system, window, local);
+        self.menu.hover(backend, theme, &mut self.fonts.system(), window, local);
     }
 
     /// Opens whatever submenu has been hovered long enough — called once
@@ -2524,7 +2533,7 @@ impl<B: Backend> Desktop<B> {
     where
         B: wm_theme_api::PopupHost<PopupId = B::ShellId>,
     {
-        self.menu.tick(backend, theme, &mut self.font_system);
+        self.menu.tick(backend, theme, &mut self.fonts.system());
     }
 
     /// Shows an icon tile for a client that was just miniaturized —
@@ -2544,7 +2553,7 @@ impl<B: Backend> Desktop<B> {
         };
         backend.map_shell_surface(window);
         backend.raise_shell_surface(window);
-        let buffer = icon::render_icon_tile(theme, &mut self.font_system, &mut self.swash_cache, self.tile, title, preview);
+        let buffer = icon::render_icon_tile(theme, &mut self.fonts.system(), &mut self.fonts.swash(), self.tile, title, preview);
         backend.paint_shell_surface(window, &buffer);
 
         self.icons.insert(window, IconTile { window, client, title: title.to_string(), pos, auto_slot: Some(slot) });
@@ -2735,7 +2744,7 @@ mod tests {
         let primary = Rect { pos: Point::new(0, 0), size: TEST_SCREEN };
         let mut backend = FakeBackend::new();
         let mut desktop: Desktop<FakeBackend> =
-            Desktop::new(&mut backend, TEST_SCREEN, primary, 1.0, "nextstep-classic".to_string(), wm_theme::Appearance::Dark, Vec::new());
+            Desktop::new(&mut backend, TEST_SCREEN, primary, 1.0, "nextstep-classic".to_string(), wm_theme::Appearance::Dark, Vec::new(), wm_theme::FontState::new());
 
         let area = desktop.primary_workarea();
         assert_eq!(area.size.w, TEST_SCREEN.w - tile_px(1.0), "one dock column reserved on the right");
@@ -2752,7 +2761,7 @@ mod tests {
 
         let primary = Rect { pos: Point::new(0, 0), size: TEST_SCREEN };
         let build = |backend: &mut FakeBackend, scale: f32| -> Desktop<FakeBackend> {
-            Desktop::new(backend, TEST_SCREEN, primary, scale, "nextstep-classic".to_string(), wm_theme::Appearance::Dark, Vec::new())
+            Desktop::new(backend, TEST_SCREEN, primary, scale, "nextstep-classic".to_string(), wm_theme::Appearance::Dark, Vec::new(), wm_theme::FontState::new())
         };
 
         let mut backend = FakeBackend::new();
@@ -2788,7 +2797,7 @@ mod tests {
         let primary = Rect { pos: Point::new(0, 0), size: TEST_SCREEN };
         let mut backend = FakeBackend::new();
         let mut desktop: Desktop<FakeBackend> =
-            Desktop::new(&mut backend, TEST_SCREEN, primary, 1.0, "nextstep-classic".to_string(), wm_theme::Appearance::Dark, Vec::new());
+            Desktop::new(&mut backend, TEST_SCREEN, primary, 1.0, "nextstep-classic".to_string(), wm_theme::Appearance::Dark, Vec::new(), wm_theme::FontState::new());
 
         let dock = desktop.dock_window();
         let clip = desktop.clip_window();
