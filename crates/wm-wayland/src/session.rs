@@ -192,7 +192,9 @@ fn plane_kind(drm: &DrmDeviceFd, plane: plane::Handle) -> Option<PlaneType> {
 }
 
 /// The cursor goes on the hardware cursor plane; everything else is
-/// composited into the swapchain buffer and page-flipped from there.
+/// composited into the swapchain buffer and page-flipped from there —
+/// unless `CHONKSTEP_NO_CURSOR_PLANE=1` says otherwise; see
+/// [`frame_flags`].
 ///
 /// The cursor plane is not an optimization here, it is the expected
 /// behavior of a Wayland compositor: the display controller scans the
@@ -221,6 +223,104 @@ fn plane_kind(drm: &DrmDeviceFd, plane: plane::Handle) -> Option<PlaneType> {
 /// commit when nothing but the cursor moved, which is the one update
 /// this compositor most wants to deliver.
 const FRAME_FLAGS: FrameFlags = FrameFlags::ALLOW_CURSOR_PLANE_SCANOUT;
+
+/// The frame flags actually used, honoring `CHONKSTEP_NO_CURSOR_PLANE`.
+///
+/// The variable exists as a live diagnostic for cursor-related flicker
+/// on NVIDIA: smithay re-renders the cursor plane's buffer on every
+/// cursor *content* change (a fresh GBM buffer, a fresh framebuffer
+/// object, and a cursor-plane FB swap in the next atomic commit), and a
+/// hover that flips a client cursor between arrow and hand churns
+/// exactly that path at input rate. Whether that churn flickers is a
+/// property of the display driver that only the live session can
+/// answer — a nested backend has no planes — so the off switch ships as
+/// configuration: set `CHONKSTEP_NO_CURSOR_PLANE=1`, restart the
+/// session, and the pointer is composited into every frame instead
+/// (costing pointer-motion recomposites, the trade [`FRAME_FLAGS`]
+/// documents). If the flicker follows the switch, the cursor plane was
+/// the culprit and the default deserves revisiting; if it stays, that
+/// hypothesis is dead and the switch cost one experiment.
+pub(crate) fn frame_flags() -> FrameFlags {
+    static FLAGS: std::sync::OnceLock<FrameFlags> = std::sync::OnceLock::new();
+    *FLAGS.get_or_init(|| {
+        let flags = cursor_plane_flags(std::env::var_os("CHONKSTEP_NO_CURSOR_PLANE"));
+        if flags.is_empty() {
+            tracing::info!(
+                "CHONKSTEP_NO_CURSOR_PLANE is set; compositing the pointer instead of using \
+                 the DRM cursor plane"
+            );
+        }
+        flags
+    })
+}
+
+/// The pure half of [`frame_flags`], split out so the parse is
+/// testable without mutating process environment: unset or `0` keeps
+/// the default flags, anything else empties them (no cursor plane).
+fn cursor_plane_flags(env: Option<std::ffi::OsString>) -> FrameFlags {
+    match env {
+        Some(value) if value != "0" => FrameFlags::empty(),
+        _ => FRAME_FLAGS,
+    }
+}
+
+/// Whether a client buffer's release is deferred to the completion of
+/// the page flip that sampled it (`SessionOutput::sampled_scene`).
+///
+/// The race this closes: smithay signals a buffer's explicit-sync
+/// release point (and sends `wl_buffer.release`) from the CPU the
+/// moment the last reference to the buffer drops, and with the
+/// per-frame element list dying at the end of the render pass, that
+/// moment is "the client's next commit merged" — which can precede the
+/// GPU actually executing the queued commands that sample the old
+/// buffer. A client that honors explicit sync (Chromium ≥ its syncobj
+/// default, confirmed live: Edge 152 sets acquire *and release* points
+/// on every dmabuf commit) then starts rewriting the buffer while the
+/// compositor's GPU is still reading it. On Mesa drivers the kernel's
+/// implicit dmabuf fencing quietly serializes that write behind the
+/// read, so nobody ever sees the early signal; NVIDIA's driver does no
+/// implicit dmabuf fencing — the same property that made the original
+/// flicker — so the write lands mid-read and the sampled frame shows
+/// it: flicker that scales with how fast the client recommits, i.e.
+/// hover-effect repaints.
+///
+/// Holding the frame's elements until the flip completes makes the
+/// release honest: the atomic commit carried the render fence as its
+/// in-fence (`EGL_ANDROID_native_fence_sync`, present on this driver),
+/// so a completed flip proves the sampling commands retired. Where the
+/// fence could not be exported, `render_frame_session` already waited
+/// on the CPU before queueing, which proves the same thing earlier.
+///
+/// The default is on for NVIDIA only (`nvidia` in the DRM driver name)
+/// because everywhere else the kernel provides the ordering for free
+/// and holding buffers a frame longer would be pure overhead;
+/// `CHONKSTEP_STRICT_BUFFER_RELEASE=1`/`0` overrides either way, so
+/// the heuristic never needs a compiler to correct.
+fn strict_release_configured(env: Option<std::ffi::OsString>, nvidia_driver: bool) -> bool {
+    match env {
+        Some(value) => value != "0",
+        None => nvidia_driver,
+    }
+}
+
+/// Whether the DRM device is driven by NVIDIA's kernel driver
+/// (`nvidia-drm`) — the heuristic input to
+/// [`strict_release_configured`]. A device whose driver cannot be read
+/// answers `false`: the strict default exists to paper over one known
+/// driver's missing implicit sync, and an unknown driver is far more
+/// likely to be a VM or a fresh Mesa stack than an unlabeled NVIDIA.
+fn driver_is_nvidia(fd: &DrmDeviceFd) -> bool {
+    use smithay::reexports::drm::Device as _;
+    fd.get_driver()
+        .map(|driver| {
+            driver
+                .name()
+                .to_string_lossy()
+                .to_ascii_lowercase()
+                .contains("nvidia")
+        })
+        .unwrap_or(false)
+}
 
 /// Flags every DRM node is opened with: read-write mode setting, closed
 /// across `exec` so a spawned terminal cannot inherit the GPU, detached
@@ -377,6 +477,10 @@ pub(crate) struct SessionGraphics {
     /// consecutive visits is how long the main thread was away, which
     /// is time no flip should be charged for — see [`LOOP_BLOCK_GRACE`].
     last_service: Instant,
+    /// Whether client buffers are held until the page flip that sampled
+    /// them completes — see [`strict_release_configured`] for the
+    /// mechanism and the NVIDIA-shaped reason it exists.
+    strict_release: bool,
 }
 
 /// One output being scanned out: its crtc, its place in the global
@@ -422,6 +526,25 @@ struct SessionOutput {
     /// into the many, and [`redraw_pending`] is what keeps the dispatch
     /// loop coming back until every output has caught up.
     dirty: bool,
+    /// The render elements of the frame whose page flip is in flight,
+    /// held only while [`SessionGraphics::strict_release`] is on.
+    ///
+    /// Each `WaylandSurfaceRenderElement` in here owns a clone of
+    /// smithay's `Buffer` handle for the client buffer it sampled, and
+    /// dropping the *last* clone is what sends `wl_buffer.release` and
+    /// CPU-signals the buffer's explicit-sync release point
+    /// (`InnerBuffer::drop` in smithay's `renderer/utils/wayland.rs`).
+    /// Without this holder that last clone can die the moment a
+    /// client's next commit merges — before the GPU has necessarily
+    /// executed the sampling commands of the frame just queued — and a
+    /// client that trusts the release (which explicit sync entitles it
+    /// to) rewrites a buffer the compositor is still reading. See
+    /// [`strict_release_configured`] for why only NVIDIA users see
+    /// that race. Cleared by the vblank handler once the flip
+    /// completes, which is the moment the commit's in-fence (the
+    /// render fence covering those sampling commands) has provably
+    /// signalled.
+    sampled_scene: Vec<crate::renderer::SceneElement<GlesRenderer>>,
 }
 
 /// A page flip the kernel has accepted and not yet reported back.
@@ -594,6 +717,12 @@ pub(crate) fn init(
                         return;
                     };
                     output.frame_pending = None;
+                    // The flip that just completed carried the render
+                    // fence as its in-fence, so every client buffer this
+                    // frame sampled is provably done being read — the
+                    // one moment their releases become honest. See
+                    // `SessionOutput::sampled_scene`.
+                    output.sampled_scene.clear();
                     if let Err(error) = output.drm_compositor.frame_submitted() {
                         // The swapchain slot could not be recycled.
                         // Rendering continues; if this repeats the next
@@ -665,9 +794,13 @@ pub(crate) fn init(
                     // — the device is gone — so dropping it keeps the
                     // render path from waiting forever for a vblank that
                     // cannot arrive. Every output's, because the device
-                    // going away takes all of them.
+                    // going away takes all of them. The held scenes go
+                    // with them: their vblank is never coming either,
+                    // and the foreign session about to own the GPU has
+                    // preempted whatever sampling was still queued.
                     for output in session.outputs.iter_mut() {
                         output.frame_pending = None;
+                        output.sampled_scene.clear();
                     }
                 }
                 SessionEvent::ActivateSession => {
@@ -705,6 +838,7 @@ pub(crate) fn init(
                         // session painted over the screen.
                         output.drm_compositor.reset_buffers();
                         output.frame_pending = None;
+                        output.sampled_scene.clear();
                     }
                     // Marks every output dirty on the next render pass
                     // (see `render_frame_session`), which is what
@@ -719,6 +853,15 @@ pub(crate) fn init(
     // 6. Hand the assembled stack back to `run`, which registers an
     //    output global per output and builds the damage trackers from
     //    them.
+    let strict_release = strict_release_configured(
+        std::env::var_os("CHONKSTEP_STRICT_BUFFER_RELEASE"),
+        driver_is_nvidia(drm.device_fd()),
+    );
+    tracing::info!(
+        enabled = strict_release,
+        "strict buffer release (hold client buffers until their page flip completes; \
+         CHONKSTEP_STRICT_BUFFER_RELEASE overrides)"
+    );
     Ok(SessionInit {
         graphics: Graphics::Session(Box::new(SessionGraphics {
             seat_session,
@@ -727,6 +870,7 @@ pub(crate) fn init(
             outputs: session_outputs,
             libinput,
             last_service: Instant::now(),
+            strict_release,
         })),
         outputs: setups,
     })
@@ -908,6 +1052,7 @@ fn attach_output(
             frame_pending: None,
             // Nothing has ever been drawn on it.
             dirty: true,
+            sampled_scene: Vec::new(),
         },
         OutputSetup { output, position, size, modes },
     ))
@@ -1058,6 +1203,10 @@ fn service_pending_flips(session: &mut SessionGraphics) -> bool {
         // pending, which smithay answers `Ok(None)`. Harmless, and the
         // same shape the pause/resume path has always had.
         output.frame_pending = None;
+        // The abandoned flip's scene goes too: its vblank will never
+        // clear it, and a device being reset out from under a stuck
+        // flip has bigger problems than one racy release.
+        output.sampled_scene.clear();
         output.dirty = true;
     }
     true
@@ -1217,7 +1366,8 @@ pub(crate) fn render_frame_session(comp: &mut Compositor) {
         service_pending_flips(session);
     }
 
-    let SessionGraphics { renderer, outputs: session_outputs, .. } = &mut **session;
+    let SessionGraphics { renderer, outputs: session_outputs, strict_release, .. } = &mut **session;
+    let strict_release = *strict_release;
     let mut drew_any = false;
     for output in session_outputs.iter_mut() {
         if output.frame_pending.is_some() {
@@ -1282,7 +1432,7 @@ pub(crate) fn render_frame_session(comp: &mut Compositor) {
 
         let rendered = match output
             .drm_compositor
-            .render_frame(renderer, &elements, clear_color, FRAME_FLAGS)
+            .render_frame(renderer, &elements, clear_color, frame_flags())
         {
             Ok(result) => {
                 // The GPU may still be drawing into the buffer we are
@@ -1339,6 +1489,21 @@ pub(crate) fn render_frame_session(comp: &mut Compositor) {
                     tracing::warn!(?error, output = %output.name, "queueing the page flip failed; keeping this output dirty for a retry");
                     continue;
                 }
+            }
+            // Keep this frame's elements — and through them the client
+            // buffers it sampled — alive until the flip completes, so
+            // no release (implicit `wl_buffer.release` or explicit
+            // syncobj release point, both fired by the buffer handle's
+            // last drop) can precede the GPU's reads. The slot being
+            // replaced here was cleared by the previous flip's vblank —
+            // rendering only happens with no flip in flight — so this
+            // replacement never drops a buffer whose reads are still
+            // queued. The `EmptyFrame` case keeps its scene too: with
+            // no vblank coming, deferring those releases to the next
+            // real flip errs on the side the whole mechanism exists
+            // for. See `SessionOutput::sampled_scene`.
+            if strict_release {
+                output.sampled_scene = elements;
             }
         }
         output.dirty = false;
@@ -1649,4 +1814,39 @@ fn crtc_for(
 /// it, so logs here line up with `drm_info` and `wayland-info` output.
 fn connector_name(connector: &connector::Info) -> String {
     format!("{}-{}", connector.interface().as_str(), connector.interface_id())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The strict-release default follows the driver: on for NVIDIA
+    /// (no implicit dmabuf fencing to mask an early release), off
+    /// everywhere else (the kernel already orders client writes behind
+    /// compositor reads, so holding buffers longer buys nothing). The
+    /// environment overrides both directions, because a heuristic
+    /// about driver behaviour must never need a compiler to correct.
+    #[test]
+    fn strict_release_defaults_to_the_driver_and_bows_to_the_environment() {
+        assert!(strict_release_configured(None, true));
+        assert!(!strict_release_configured(None, false));
+        // Forced on where the default says off…
+        assert!(strict_release_configured(Some("1".into()), false));
+        // …and off where the default says on.
+        assert!(!strict_release_configured(Some("0".into()), true));
+        // Any non-"0" value is a request to enable, matching the
+        // crate's other env switches (`CHONKSTEP_FULL_DAMAGE` et al).
+        assert!(strict_release_configured(Some("yes".into()), false));
+    }
+
+    /// The cursor-plane switch: unset and `0` keep the hardware
+    /// cursor, anything else composites the pointer — the live A/B
+    /// lever for NVIDIA cursor-plane flicker.
+    #[test]
+    fn the_cursor_plane_is_on_unless_explicitly_disabled() {
+        assert_eq!(cursor_plane_flags(None), FRAME_FLAGS);
+        assert_eq!(cursor_plane_flags(Some("0".into())), FRAME_FLAGS);
+        assert_eq!(cursor_plane_flags(Some("1".into())), FrameFlags::empty());
+        assert_eq!(cursor_plane_flags(Some("true".into())), FrameFlags::empty());
+    }
 }

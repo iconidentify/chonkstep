@@ -68,7 +68,8 @@
 //! tranche, no preference tranches. Preference tranches exist to steer
 //! clients toward buffers a *plane* can scan out directly, and the
 //! session composites every frame through the GLES renderer instead
-//! (`session.rs`'s `FRAME_FLAGS` is empty) — so there is no scanout
+//! (`session.rs`'s `FRAME_FLAGS` allows only the cursor plane, which
+//! never scans out a client buffer directly) — so there is no scanout
 //! tranche to declare, and one advertising formats the main device
 //! cannot render would be actively wrong. That ordering is deliberate:
 //! this global is the prerequisite for direct scan-out, so scan-out is
@@ -299,6 +300,18 @@ delegate_dmabuf!(Compositor);
 //   producer's implicit fence signals. `Dmabuf::generate_blocker`
 //   returns `AlreadyReady` for an idle buffer, so the steady state —
 //   a client that finished drawing before committing — costs nothing.
+//   Know its limit: on NVIDIA the driver attaches no implicit fences
+//   to the dmabuf at all, so the fd polls readable instantly and the
+//   fallback is a no-op — a non-syncobj dmabuf client on that driver
+//   is still sampled on trust, and no compositor-side wait can invent
+//   a fence the driver never exported. See docs/nvidia-sync.md.
+//
+// Both mechanisms above are the ACQUIRE half — "do not read before the
+// client finished writing". The RELEASE half — "do not tell the client
+// we finished reading before the GPU actually has" — lives in
+// `session.rs` (`SessionOutput::sampled_scene` and
+// `strict_release_configured`), because only the page-flip machinery
+// knows when the sampling commands provably retired.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
