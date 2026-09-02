@@ -70,11 +70,19 @@
 //! ```text
 //! scale 2
 //! output 1280 800
+//! theme id="nextstep-classic" name="NeXTSTEP Classic" appearance=dark following=""
 //! window id=3 x=100 y=80 w=400 h=300 mapped=true app="org.gnome.zenity" title="Question"
 //! frame id=4 window=3 x=96 y=52 w=408 h=332 mapped=true
 //! shell id=1 x=1216 y=0 w=64 h=320 mapped=true above=true
 //! done
 //! ```
+//!
+//! The `theme` line is the shell's own account of what it is dressed
+//! in — the id and display name of the theme at 1x, the appearance
+//! it resolved in, and `following` (`"omarchy"` while the session
+//! follows Omarchy's current theme, empty otherwise) — so a harness
+//! can assert a theme *took* without inferring it from pixels, and
+//! then use pixels for the half a ledger cannot vouch for.
 //!
 //! Geometry is in the same physical-pixel space the ledger keeps
 //! (`WindowRecord::content` / `FrameRecord::geometry`), which is also
@@ -472,6 +480,14 @@ fn handle_command(line: &str, stream: &mut UnixStream, comp: &mut Compositor) {
             reply.push_str(&format!(
                 "output {} {}\n",
                 backend.output_size.w, backend.output_size.h
+            ));
+            let state = comp.shell.session_state();
+            reply.push_str(&format!(
+                "theme id={:?} name={:?} appearance={} following={:?}\n",
+                state.base_theme.id,
+                state.base_theme.name,
+                state.appearance.name(),
+                comp.shell.following().unwrap_or(""),
             ));
             for (id, record) in &backend.windows {
                 reply.push_str(&format!(

@@ -80,7 +80,7 @@ pub fn scale_factor() -> f32 {
 ///
 /// Reads the environment for exactly the reason [`scale_factor`] does,
 /// and with the same constraint: an SDK app must be buildable against
-/// this crate alone, so it cannot call `chonk_shell::startup::resolve_theme`
+/// this crate alone, so it cannot call `chonk_shell::startup::resolve_look`
 /// or read the shell's private state file. The environment variable is
 /// the session's one published channel for "which theme is active", and
 /// `wm-theme`'s own `theme_by_id` — the same lookup `startup.rs` makes —
@@ -103,11 +103,24 @@ pub fn scale_factor() -> f32 {
 /// unrecognized, the theme's own native rendition is used — exactly
 /// what `theme_by_id` answered before the appearance axis existed, so
 /// an app launched by an older desktop looks the way it always did.
+///
+/// `CHONKSTEP_THEME=omarchy` means the desk follows Omarchy's current
+/// theme (`wm_theme::omarchy`): the app reads the same `colors.toml`
+/// the shell did, so it wears what the desk wears. The appearance
+/// variable is moot there — an Omarchy palette has one mood, its own.
+/// With no readable palette the flagship stands in, as it does on the
+/// desk.
 pub fn active_theme() -> model::Theme {
     let Some(id) = std::env::var("CHONKSTEP_THEME").ok() else {
         return nextstep_theme();
     };
     let id = id.trim();
+    if id == wm_theme::omarchy::ID {
+        return wm_theme::omarchy::load_current().unwrap_or_else(|reason| {
+            tracing::warn!(reason, "CHONKSTEP_THEME says to follow Omarchy, but its palette is unreadable; using the default instead");
+            nextstep_theme()
+        });
+    }
     let appearance = std::env::var("CHONKSTEP_APPEARANCE")
         .ok()
         .and_then(|mode| wm_theme::Appearance::from_name(&mode));

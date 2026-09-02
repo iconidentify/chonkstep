@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "id": "chonkstep.workspaces",
+  "name": "chonkstep Workspaces",
+  "version": "1.0.0",
+  "author": "chonkstep",
+  "license": "GPL-3.0-only",
+  "description": "Workspace number indicators for the chonkstep compositor, read from its control socket",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "Widget.qml"
+  },
+  "barWidget": {
+    "displayName": "Workspaces (chonkstep)",
+    "description": "Workspace number indicators; click to switch",
+    "category": "Compositor",
+    "allowMultiple": false,
+    "defaultSection": "left",
+    "defaults": {
+      "hideEmpty": false
+    },
+    "schema": [
+      {
+        "key": "hideEmpty",
+        "type": "boolean",
+        "label": "Hide empty workspaces",
+        "description": "Leave workspaces with no windows out of the strip instead of dimming them. The current workspace always shows.",
+        "defaultValue": false
+      }
+    ]
+  }
+}

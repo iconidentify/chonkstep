@@ -56,6 +56,7 @@ pub mod model;
 pub mod netgraph;
 pub mod netload;
 pub mod nettraffic;
+pub mod omarchy;
 pub mod overview;
 pub mod paint;
 pub mod panel;

@@ -89,7 +89,7 @@ pub mod wire;
 
 pub use handshake::{validate_hello, Accepted};
 pub use queue::{FrameLimiter, SendOutcome, SendQueue};
-pub use transport::{Seqpacket, SeqpacketListener};
+pub use transport::{Seqpacket, SeqpacketListener, Stream, StreamListener};
 pub use wire::{ClientMessage, DecodeError, EncodeError, ServerMessage};
 
 /// The newest protocol this build speaks, presented in `Hello`. Bumped

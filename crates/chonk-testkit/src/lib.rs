@@ -154,6 +154,20 @@ pub struct SessionOptions {
     /// dockapp (`dockapps/probe.dockapp`) with the fresh shell, which
     /// scans that directory at startup.
     pub config_files: Vec<(String, String)>,
+    /// Extra environment for the compositor process, as `(name,
+    /// value)` — how a test points the shell at something it discovers
+    /// from the environment rather than from config, such as a scratch
+    /// `OMARCHY_PATH` holding a menu definition of the test's own
+    /// making. Applied after the harness's own variables, so a test
+    /// can also deliberately override one of those.
+    pub env: Vec<(String, String)>,
+    /// Files seeded into the isolated `XDG_STATE_HOME` root itself
+    /// (not under `chonkstep/`) before boot, as `(relative path,
+    /// contents)` — for state that belongs to *another* program the
+    /// session reads: the Omarchy e2e plants
+    /// `omarchy/current/theme/colors.toml` and `omarchy/current/theme.name`
+    /// here, exactly where `omarchy-theme-set` would put them.
+    pub state_root_files: Vec<(String, String)>,
 }
 
 /// One booted nested compositor plus everything needed to drive and
@@ -208,6 +222,13 @@ impl Session {
             }
             std::fs::write(path, contents).map_err(|e| e.to_string())?;
         }
+        for (name, contents) in &options.state_root_files {
+            let path = state_home.join(name);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+            }
+            std::fs::write(path, contents).map_err(|e| e.to_string())?;
+        }
 
         let door_path = dir.join("door.sock");
         let log_path = dir.join("compositor.log");
@@ -246,6 +267,7 @@ impl Session {
             // it stops propagating, but a harness must not depend on
             // the thing it is testing having already fixed itself.
             .env_remove("CHONKSTEP_SESSION_CONTINUES")
+            .envs(options.env.iter().map(|(name, value)| (name.as_str(), value.as_str())))
             .stdout(Stdio::from(log))
             .stderr(Stdio::from(log_err))
             .spawn()
@@ -559,12 +581,24 @@ pub struct ShellInfo {
     pub above: bool,
 }
 
+/// The shell's own account of its dress, from the `theme` line.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct ThemeInfo {
+    pub id: String,
+    pub name: String,
+    /// `"light"` or `"dark"`.
+    pub appearance: String,
+    /// `"omarchy"` while the session follows Omarchy, else empty.
+    pub following: String,
+}
+
 /// One `windows` reply: the compositor's whole idea of the screen.
 #[derive(Clone, Debug, Default)]
 pub struct World {
     pub scale: f32,
     pub output_w: u32,
     pub output_h: u32,
+    pub theme: ThemeInfo,
     pub windows: Vec<WindowInfo>,
     pub frames: Vec<FrameInfo>,
     pub shells: Vec<ShellInfo>,
@@ -745,6 +779,13 @@ impl Door {
                 let mut parts = rest.split(' ');
                 world.output_w = parts.next().and_then(|v| v.parse().ok()).unwrap_or(0);
                 world.output_h = parts.next().and_then(|v| v.parse().ok()).unwrap_or(0);
+            } else if line.starts_with("theme ") {
+                world.theme = ThemeInfo {
+                    id: quoted_field(&line, "id"),
+                    name: quoted_field(&line, "name"),
+                    appearance: field::<String>(&line, "appearance=").unwrap_or_default(),
+                    following: quoted_field(&line, "following"),
+                };
             } else if line.starts_with("window ") {
                 if let Some(window) = parse_window_line(&line) {
                     world.windows.push(window);

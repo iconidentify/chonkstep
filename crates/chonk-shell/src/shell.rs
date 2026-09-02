@@ -19,6 +19,7 @@ use wm_theme_api::{DecorationBuffer, Point, PopupHost, Rect, Size};
 
 use crate::apps::{self, AppEntry};
 use crate::desktop::{Desktop, IconDragResult, MenuAction, RootMenuAction, WindowMenuAction, WindowMenuContext};
+use crate::control::{self, ControlSocket};
 use crate::dockapp::Farewell;
 use chonk_dock_proto::wire::PanelCloseReason;
 use crate::launchdock::{LaunchDock, LaunchDockAction};
@@ -475,20 +476,55 @@ fn launch_app(
         argv.extend(spawn::chromium_platform_args(stack));
     }
     let arg_refs: Vec<&str> = argv.iter().map(String::as_str).collect();
-    // Toolkit scaling *and* the pointer size, both in this child's own
-    // environment rather than the session's: the scale can change while
-    // the session runs, and the process environment cannot safely be
-    // rewritten once threads exist. See `startup::xcursor_size_env`.
-    let mut env =
-        if scale_fixups { spawn::gtk_qt_scale_env(scale) } else { Vec::new() };
-    // The pointer rides both stacks, but the *value* is per-stack: a
-    // Wayland client treats `XCURSOR_SIZE` as a logical size and
-    // multiplies the output scale in itself, so it gets the unscaled
-    // base, while an X11 client has nothing to multiply by and gets
-    // the pre-multiplied size. `xcursor_size_env` owns that rule.
-    env.extend(crate::startup::xcursor_size_env(scale));
-    spawn::spawn_detached_with_env(program, &arg_refs, &env, &[]);
+    spawn::spawn_detached_with_env(program, &arg_refs, &launch_env(scale), &[]);
     None
+}
+
+/// The Omarchy submenu's source for a session state: `None` when the
+/// key is off or no Omarchy menu is installed. A fresh handle each
+/// time — the read is two small files, and a fresh handle is what
+/// makes "reload" mean re-read.
+fn omarchy_menu_for(state: &SessionState) -> Option<crate::omarchy_menu::OmarchyMenu> {
+    if !state.omarchy_menu {
+        return None;
+    }
+    let menu = crate::omarchy_menu::OmarchyMenu::discover();
+    if menu.is_none() {
+        tracing::info!("no Omarchy menu definition installed; the root menu carries no Omarchy submenu");
+    }
+    menu
+}
+
+/// The environment every detached GUI launch from the shell carries:
+/// toolkit scaling *and* the pointer size, both in the child's own
+/// environment rather than the session's, because the scale can change
+/// while the session runs and the process environment cannot safely be
+/// rewritten once threads exist. See `startup::xcursor_size_env`.
+///
+/// The toolkit scale variables ride the X11 stack only — the reasoning
+/// is spelled out at length in `launch_app`, whose fixups these are.
+/// The pointer size rides both, but the *value* is per-stack: a
+/// Wayland client treats `XCURSOR_SIZE` as a logical size and
+/// multiplies the output scale in itself, so it gets the unscaled
+/// base, while an X11 client has nothing to multiply by and gets the
+/// pre-multiplied size. `xcursor_size_env` owns that rule.
+fn launch_env(scale: f32) -> Vec<(String, String)> {
+    let scale_fixups = matches!(spawn::current_display_stack(), spawn::DisplayStack::X11);
+    let mut env = if scale_fixups { spawn::gtk_qt_scale_env(scale) } else { Vec::new() };
+    env.extend(crate::startup::xcursor_size_env(scale));
+    env
+}
+
+/// Runs one Omarchy menu command exactly as `omarchy-shell` does —
+/// `bash -lc <command>`, detached, never waited on — with the same
+/// launch environment every other GUI the shell starts gets, since
+/// most Omarchy actions end in a window (a webapp, a floating
+/// terminal, a picker).
+fn run_omarchy_command(command: &str, theme: &Theme) {
+    let scale = theme.titlebar.font.size / 12.0;
+    let (program, args) = crate::omarchy_menu::action_argv(command);
+    tracing::info!(command, "running omarchy menu command");
+    spawn::spawn_detached_with_env(program, &args, &launch_env(scale), &[]);
 }
 
 /// Path to the `chonk-about` demo binary — resolved relative to the
@@ -604,6 +640,7 @@ fn root_action_outcome(action: &RootMenuAction) -> ShellOutcome {
         RootMenuAction::LaunchTerminal
         | RootMenuAction::LaunchAbout
         | RootMenuAction::LaunchApp(_)
+        | RootMenuAction::OmarchyCommand { .. }
         | RootMenuAction::SetWallpaper(_) => ShellOutcome::Continue,
     }
 }
@@ -761,6 +798,10 @@ pub struct Shell<B: Backend + PopupHost<PopupId = B::ShellId>> {
     /// `take_shell_click` on a later loop iteration than the motion
     /// that preceded it.
     pointer_root: Point,
+    /// The control socket third-party bars read the desktop through
+    /// (`docs/control-socket.md`). Serviced in [`Shell::tick`]; costs
+    /// nothing while no bar is connected.
+    control: ControlSocket,
     /// Set by [`Shell::keymap_action`] when the panel-dismiss Escape
     /// lands, consumed by [`Shell::tick`]. Parked rather than acted on
     /// inline because `keymap_action` has no `WindowManager` to close
@@ -768,6 +809,10 @@ pub struct Shell<B: Backend + PopupHost<PopupId = B::ShellId>> {
     /// combo uses, and `tick` runs later in the very same loop
     /// iteration, so the dismissal is never a frame behind.
     panel_escape: bool,
+    /// Notices Omarchy switching its theme underneath a session that
+    /// follows it (`SessionState::following`); asked once a second from
+    /// [`Shell::tick`], and only while following.
+    omarchy: crate::omarchy_follow::Watch,
 }
 
 impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
@@ -797,7 +842,16 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         // the one `FontSystem` this session ever builds. They used to
         // construct their own, which cost two more full font scans at
         // boot for databases identical to the one already in hand.
-        let desktop = Desktop::new(backend, screen, primary, scale, theme.id.clone(), state.appearance, apps.clone(), fonts.clone());
+        let mut desktop = Desktop::new(backend, screen, primary, scale, theme.id.clone(), state.appearance, apps.clone(), fonts.clone());
+        desktop.set_omarchy_menu(omarchy_menu_for(state));
+        // The control socket, bound here — after the dock socket it
+        // sits beside, and before the first process this session
+        // launches (the layout relaunch and autostart below), so
+        // `CHONKSTEP_CONTROL_SOCKET` is in every child's environment.
+        // Binding declares the path to `spawn`, which is what puts it
+        // there; a failed bind declares nothing and the session simply
+        // has no control socket.
+        let control = ControlSocket::new(&crate::dockapp::current_display());
         // The launcher strip below the Clip. Its tile size mirrors
         // `Desktop::new`'s own derivation (56px at 1x, scaled, floored
         // at 16) rather than inventing a second number: the strip's
@@ -877,7 +931,9 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
             theme,
             fonts,
             pointer_root: Point::new(0, 0),
+            control,
             panel_escape: false,
+            omarchy: crate::omarchy_follow::Watch::new(),
         }
     }
 
@@ -930,6 +986,10 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         }
         self.grabbed.retain(|combo| !to_ungrab.contains(combo));
         self.grabbed.extend(to_grab);
+        // The Omarchy submenu is policy too: re-resolved from the key
+        // on every pass, which also re-reads the definition files —
+        // a reload is the user's way of saying "look again".
+        self.desktop.set_omarchy_menu(omarchy_menu_for(&next));
 
         // 2. Metrics.
         let theme = next.theme();
@@ -994,12 +1054,23 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         self.apply_workareas(wm);
     }
 
-    /// Dresses the session in a different theme, keeping every other
+    /// Dresses the session in a built-in theme, keeping every other
     /// piece of session state as it is. The theme menu's whole job.
+    /// Picking a built-in is also how a session stops following Omarchy
+    /// — the choice is now a theme, not "whatever Omarchy says".
     fn apply_theme(&mut self, wm: &mut WindowManager<B>, base: Theme) {
         let mut next = self.state.clone();
         next.base_theme = base;
+        next.following = None;
         self.apply_session_state(wm, next);
+    }
+
+    /// Re-resolves the whole session from the config file and applies
+    /// it — what a reload does, and what following Omarchy does when
+    /// Omarchy's theme changes. One function so the two cannot resolve
+    /// by different rules.
+    fn reresolve(&mut self, wm: &mut WindowManager<B>) {
+        self.apply_session_state(wm, SessionState::resolve(&wm_config::load()));
     }
 
     /// Moves the session to the other side of the light/dark axis (or
@@ -1008,6 +1079,23 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
     /// pick takes. A no-op when the session is already there.
     pub fn set_appearance(&mut self, wm: &mut WindowManager<B>, mode: crate::appearance::Appearance) {
         if mode == self.state.appearance {
+            return;
+        }
+        if self.state.following.is_some() {
+            // An Omarchy theme has exactly one rendition, and its mode
+            // is the session's appearance for as long as the session
+            // follows it (`startup::resolve_look`). Re-deriving a
+            // second mood would paint colours the theme's author never
+            // chose while every Omarchy terminal beside them kept the
+            // real ones; flipping the published mode over unchanged
+            // chrome would desynchronise dockapps and GTK from the
+            // desk. So the request is declined, out loud. Omarchy's own
+            // light/dark switch is to set a light or dark theme.
+            tracing::warn!(
+                requested = mode.name(),
+                current = self.state.appearance.name(),
+                "appearance request ignored: this session follows Omarchy, whose theme decides the mode"
+            );
             return;
         }
         let mut next = self.state.clone();
@@ -1029,6 +1117,14 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
     /// The side of the light/dark axis this session is currently on.
     pub fn appearance(&self) -> crate::appearance::Appearance {
         self.state.appearance
+    }
+
+    /// `Some("omarchy")` while the session's theme choice is to follow
+    /// Omarchy's current theme, `None` while it wears a built-in — see
+    /// `SessionState::following`. What the control socket's `theme`
+    /// event reports as `following`.
+    pub fn following(&self) -> Option<&'static str> {
+        self.state.following
     }
 
     /// The whole resolved session state, read-only — for the pieces a
@@ -1242,9 +1338,7 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
             // alone, it moves the session to the defaults. That is the
             // same thing a restart with a broken file has always done,
             // and the warning it logs is the same one.
-            Action::Reload => {
-                self.apply_session_state(wm, SessionState::resolve(&wm_config::load()));
-            }
+            Action::Reload => self.reresolve(wm),
             // Re-exec the on-disk binary. Since `Action::Reload` exists
             // this is no longer the config hot-reload gesture; it is
             // how a session picks up a *new build* of itself, which is
@@ -1694,7 +1788,9 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
     /// a 16ms housekeeping bound, so a missing fd costs a dockapp frame
     /// up to 16ms and nothing else.
     pub fn extra_poll_fds(&self) -> Vec<std::os::fd::RawFd> {
-        self.desktop.extra_poll_fds()
+        let mut fds = self.desktop.extra_poll_fds();
+        fds.extend(self.control.poll_fds());
+        fds
     }
 
     /// A scroll over a shell surface, resolved to a dock tile the same
@@ -1774,7 +1870,7 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
                 // exactly the mismatch the SDK exists to prevent.
                 //
                 // Deliberately not a state-file read inside `chonk-ui`:
-                // that would duplicate `startup::resolve_theme`'s
+                // that would duplicate `startup::resolve_look`'s
                 // precedence (env, then config, then default) in a
                 // second crate and drift from it silently. The launcher
                 // knows the live answer; it should say so.
@@ -1810,8 +1906,32 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
                     tracing::warn!(index = i, count = self.apps.len(), "menu fired an out-of-range application index");
                 }
             }
+            RootMenuAction::OmarchyCommand { index, generation } => {
+                match self.desktop.omarchy_command(index, generation) {
+                    Some(command) => {
+                        run_omarchy_command(&command, &self.theme);
+                        self.desktop.note_omarchy_action_fired();
+                    }
+                    // Not a bug to shout about: the menu was open
+                    // across a reload of the definition, and the
+                    // generation guard did its job.
+                    None => tracing::info!(index, generation, "omarchy menu pick outlived its definition; ignoring it"),
+                }
+            }
             RootMenuAction::SetWallpaper(wallpaper) => {
                 self.desktop.set_wallpaper(wm.backend_mut(), &self.theme, wallpaper);
+            }
+            RootMenuAction::SetTheme(id) if id == wm_theme::omarchy::ID => {
+                // Following is a choice, not a theme: persist the choice
+                // and re-resolve the session through the one path, which
+                // reads Omarchy's palette (or wears the flagship and
+                // waits, if there is none yet — `startup::resolve_look`).
+                if let Err(e) = theme_select::persist(id) {
+                    tracing::warn!(?e, id, "failed to persist theme selection");
+                }
+                let next = SessionState::resolve(&wm_config::load());
+                self.adopt_wallpaper_of(wm, &next.base_theme);
+                self.apply_session_state(wm, next);
             }
             RootMenuAction::SetTheme(id) => {
                 // Resolved first: a pick naming a theme that does not
@@ -1830,21 +1950,24 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
                 if let Err(e) = theme_select::persist(id) {
                     tracing::warn!(?e, id, "failed to persist theme selection");
                 }
-                // A theme implies its wallpaper. Applied *and*
-                // persisted: applied because the desktop holds its
-                // wallpaper as loaded state that a restyle does not
-                // re-read, and persisted so the next session composes
-                // the same full look. The Wallpaper menu can still
-                // override it afterward.
-                if let Some(paper) = wallpaper::Wallpaper::from_id(&base.wallpaper) {
-                    if let Err(e) = paper.persist() {
-                        tracing::warn!(?e, id, "failed to persist theme wallpaper");
-                    }
-                    self.desktop.set_wallpaper(wm.backend_mut(), &self.theme, paper);
-                }
+                self.adopt_wallpaper_of(wm, &base);
                 self.apply_theme(wm, base);
             }
             RootMenuAction::Exit => {}
+        }
+    }
+
+    /// A theme implies its wallpaper. Applied *and* persisted: applied
+    /// because the desktop holds its wallpaper as loaded state that a
+    /// restyle does not re-read, and persisted so the next session
+    /// composes the same full look. The Wallpaper menu can still
+    /// override it afterward.
+    fn adopt_wallpaper_of(&mut self, wm: &mut WindowManager<B>, base: &Theme) {
+        if let Some(paper) = wallpaper::Wallpaper::from_id(&base.wallpaper) {
+            if let Err(e) = paper.persist() {
+                tracing::warn!(?e, theme = %base.id, "failed to persist theme wallpaper");
+            }
+            self.desktop.set_wallpaper(wm.backend_mut(), &self.theme, paper);
         }
     }
 
@@ -2040,9 +2163,18 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
             tracing::info!(requested = ?request, resolved = mode.name(), "appearance-request received");
             self.set_appearance(wm, mode);
         }
+        // Following Omarchy: when its current theme changes on disk,
+        // re-resolve exactly as a reload would. The watch rate-limits
+        // itself to a look per second and is not consulted at all while
+        // the session wears a built-in.
+        if self.state.following.is_some() && self.omarchy.changed(std::time::Instant::now()) {
+            tracing::info!("Omarchy's current theme changed; re-dressing");
+            self.reresolve(wm);
+        }
         if let Some(target) = self.desktop.take_workspace_request() {
             wm.switch_workspace(target);
         }
+        self.service_control(wm);
         // The instrument panel's parked Escape (see `keymap_action`) —
         // consumed here because this is the first point after the key
         // event where a `WindowManager` is in hand, still inside the
@@ -2106,6 +2238,54 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         // debounce that will never elapse.
         self.layout.flush();
         self.desktop.shut_down_dockapps(farewell);
+        // Bars are told nothing but EOF, on both kinds of exit: a hot
+        // restart rebinds the same path, and the spec tells a client
+        // that loses the connection to reconnect and take the fresh
+        // snapshot — which is also the whole recovery story, so there
+        // is no farewell message to design.
+        self.control.shut_down();
+    }
+
+    /// One pass of the control socket (`crate::control`): admit new
+    /// bars, answer requests, publish what changed.
+    ///
+    /// The snapshot is taken only once someone is connected, so a
+    /// desktop without a bar pays one `accept` that returns nothing.
+    /// A `focus-workspace` a client asked for is applied here and the
+    /// result published in the same pass, so the client's answer is
+    /// the `workspaces` event the switch produced, not one a tick late.
+    fn service_control(&mut self, wm: &mut WindowManager<B>) {
+        self.control.accept();
+        if !self.control.has_clients() {
+            return;
+        }
+        let commands = self.control.service(&self.control_snapshot(wm));
+        if commands.is_empty() {
+            return;
+        }
+        for command in commands {
+            match command {
+                control::Command::FocusWorkspace(index) => wm.switch_workspace(index),
+            }
+        }
+        self.control.publish(&self.control_snapshot(wm));
+    }
+
+    fn control_snapshot(&self, wm: &WindowManager<B>) -> control::Snapshot {
+        control::snapshot(
+            wm,
+            &control::Surroundings {
+                theme: &self.theme,
+                appearance: self.state.appearance,
+                scale: self.state.scale,
+                pointer_root: self.pointer_root,
+                // The *choice* to follow, not whether the palette was
+                // found: a bar showing "Omarchy" while the flagship
+                // stands in is telling the truth about what the desk
+                // will wear the moment `omarchy-theme-set` runs.
+                following: self.state.following.map(str::to_string),
+            },
+        )
     }
 
     /// The screen/output arrangement changed (the binary drained the
@@ -2291,6 +2471,7 @@ mod tests {
             RootMenuAction::LaunchTerminal,
             RootMenuAction::LaunchAbout,
             RootMenuAction::LaunchApp(0),
+            RootMenuAction::OmarchyCommand { index: 0, generation: 1 },
             RootMenuAction::SetWallpaper(Wallpaper::LavenderGrid),
         ] {
             assert_eq!(root_action_outcome(&action), ShellOutcome::Continue);

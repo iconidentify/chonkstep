@@ -168,6 +168,14 @@ pub fn socket_path(display: &str) -> io::Result<PathBuf> {
     Ok(socket_dir()?.join(format!("dock-{}.sock", sanitize_display(display))))
 }
 
+/// `$XDG_RUNTIME_DIR/chonkstep/control-<display>.sock` — the shell's
+/// control socket (`docs/control-socket.md`), beside the dock socket
+/// and keyed the same way for the same reason: a bar that sees EOF
+/// across a hot restart reconnects to the name it already knows.
+pub fn control_socket_path(display: &str) -> io::Result<PathBuf> {
+    Ok(socket_dir()?.join(format!("control-{}.sock", sanitize_display(display))))
+}
+
 /// Creates the socket directory 0700, or verifies an existing one.
 ///
 /// The verification is the point. The socket file gets `chmod 0600`
@@ -344,13 +352,12 @@ impl Seqpacket {
     /// relaunch — both strictly better than waiting forever on a peer
     /// that may never accept.
     pub fn connect(path: &Path) -> io::Result<Self> {
-        let (addr, len) = sockaddr_un(path)?;
-        let raw = cvt(unsafe {
-            libc::socket(libc::AF_UNIX, libc::SOCK_SEQPACKET | libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK, 0)
-        })?;
-        let fd = unsafe { OwnedFd::from_raw_fd(raw) };
+        let fd = connect_nonblocking(path, libc::SOCK_SEQPACKET)?;
+        // After the connect rather than before: `SO_SNDBUF` is consulted
+        // at each `send`, not captured at connect time, so the order is
+        // free — and keeping the connect generic is what lets the
+        // control socket's stream probe share it.
         widen_socket_buffers(fd.as_raw_fd());
-        cvt(unsafe { libc::connect(fd.as_raw_fd(), (&addr as *const libc::sockaddr_un).cast(), len) })?;
         Ok(Self { fd })
     }
 
@@ -439,24 +446,13 @@ impl Seqpacket {
     /// user's processes" an enforced statement rather than an inference
     /// from filesystem permissions.
     pub fn peer_credentials(&self) -> io::Result<PeerCredentials> {
-        let mut cred: libc::ucred = unsafe { std::mem::zeroed() };
-        let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
-        cvt(unsafe {
-            libc::getsockopt(
-                self.fd.as_raw_fd(),
-                libc::SOL_SOCKET,
-                libc::SO_PEERCRED,
-                (&mut cred as *mut libc::ucred).cast(),
-                &mut len,
-            )
-        })?;
-        Ok(PeerCredentials { pid: cred.pid, uid: cred.uid, gid: cred.gid })
+        peer_credentials_of(self.fd.as_raw_fd())
     }
 
     /// Whether the peer is this same user. The shell refuses a
     /// connection from anyone else.
     pub fn peer_is_this_user(&self) -> io::Result<bool> {
-        Ok(self.peer_credentials()?.uid == unsafe { libc::geteuid() })
+        peer_is_this_user_on(self.fd.as_raw_fd())
     }
 
     /// Blocks (with `poll`) until one message arrives or `deadline`
@@ -515,107 +511,19 @@ pub struct SeqpacketListener {
 
 impl SeqpacketListener {
     /// Creates the directory, clears a stale socket, binds, chmods
-    /// 0600, and listens.
-    ///
-    /// The stale-socket handling is the interesting part. A Unix socket
-    /// file outlives the process that bound it, so a crashed session
-    /// leaves one behind and the next `bind()` fails with `EADDRINUSE`.
-    /// Blindly unlinking would let a second live shell steal the first
-    /// one's dockapps, so this *connects to it first*: a socket that
-    /// accepts a connection has a live owner and is left alone (with an
-    /// error naming the situation); one that refuses is debris and is
-    /// removed.
+    /// 0600, and listens — see [`bind_listener`], which is the body,
+    /// shared with the control socket's [`StreamListener`] so the two
+    /// cannot drift on the properties that matter.
     pub fn bind(path: &Path) -> io::Result<Self> {
-        if let Some(parent) = path.parent() {
-            ensure_socket_dir(parent)?;
-        }
-        Self::clear_stale_socket(path)?;
-
-        let (addr, len) = sockaddr_un(path)?;
-        // SOCK_NONBLOCK at creation, so there is no instant in this
-        // process's life where the listening fd could block an
-        // `accept()` on an event-loop pass that turned out to have no
-        // pending connection.
-        let raw = cvt(unsafe {
-            libc::socket(libc::AF_UNIX, libc::SOCK_SEQPACKET | libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK, 0)
-        })?;
-        let fd = unsafe { OwnedFd::from_raw_fd(raw) };
-        cvt(unsafe { libc::bind(fd.as_raw_fd(), (&addr as *const libc::sockaddr_un).cast(), len) })?;
-
-        // `bind()` applied the process umask, so tighten explicitly.
-        // The window between bind and chmod is real; the 0700 parent
-        // directory is what actually makes it unreachable, and this is
-        // the second lock.
-        let c_path = std::ffi::CString::new(path.as_os_str().as_bytes())
-            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "socket path contains a NUL byte"))?;
-        cvt(unsafe { libc::chmod(c_path.as_ptr(), 0o600) })?;
-
-        cvt(unsafe { libc::listen(fd.as_raw_fd(), BACKLOG) })?;
+        let fd = bind_listener(path, libc::SOCK_SEQPACKET)?;
         Ok(Self { fd, path: path.to_path_buf() })
     }
 
-    fn clear_stale_socket(path: &Path) -> io::Result<()> {
-        if !path.exists() {
-            return Ok(());
-        }
-        match Seqpacket::connect(path) {
-            Ok(_) => Err(io::Error::new(
-                io::ErrorKind::AddrInUse,
-                format!("{} is already accepting connections; another chonkstep session owns this display", path.display()),
-            )),
-            // `EAGAIN` from the now-non-blocking probe means the socket
-            // *is* listening and its backlog is momentarily full — a
-            // live owner, not debris. This case has to be named
-            // explicitly: falling into the `Err` arm below would unlink
-            // a socket somebody is still serving, which is precisely
-            // the "second shell silently steals the first one's
-            // dockapps" outcome the probe exists to prevent. (Before
-            // `connect` was made non-blocking this case could not
-            // return at all; it hung instead, which is why the arm is
-            // new and not merely rearranged.)
-            Err(e) if e.kind() == io::ErrorKind::WouldBlock => Err(io::Error::new(
-                io::ErrorKind::AddrInUse,
-                format!(
-                    "{} is listening but its backlog is full; something owns this display and is not accepting",
-                    path.display()
-                ),
-            )),
-            Err(_) => std::fs::remove_file(path),
-        }
-    }
-
     /// Accepts one pending connection, or `Ok(None)` if none is
-    /// waiting.
-    ///
-    /// `accept4` with `SOCK_NONBLOCK`, not `accept` followed by
-    /// `fcntl`. The difference is that there is no interval — not even
-    /// an unlikely one, not even one an early `return` could skip past
-    /// — during which a connected dockapp socket exists in this process
-    /// in blocking mode. Given that a blocking send on one of these is
-    /// a frozen desktop (see [`Seqpacket::send`]), the property is
-    /// worth having by construction rather than by discipline. This is
-    /// what `accept_returns_a_socket_that_cannot_block` asserts.
-    ///
-    /// `SOCK_CLOEXEC` in the same call for the same reason in
-    /// miniature: a dockapp launched between `accept` and a separate
-    /// `fcntl` would inherit another dockapp's socket.
+    /// waiting — already `O_NONBLOCK`, by construction rather than by
+    /// discipline; see [`accept_nonblocking`].
     pub fn accept(&self) -> io::Result<Option<Seqpacket>> {
-        let raw = unsafe {
-            libc::accept4(
-                self.fd.as_raw_fd(),
-                std::ptr::null_mut(),
-                std::ptr::null_mut(),
-                libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC,
-            )
-        };
-        if raw < 0 {
-            let err = io::Error::last_os_error();
-            return match err.kind() {
-                io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted => Ok(None),
-                _ => Err(err),
-            };
-        }
-        let fd = unsafe { OwnedFd::from_raw_fd(raw) };
+        let Some(fd) = accept_nonblocking(self.fd.as_raw_fd())? else { return Ok(None) };
         widen_socket_buffers(fd.as_raw_fd());
         Ok(Some(Seqpacket::from_fd(fd)))
     }
@@ -639,6 +547,318 @@ impl Drop for SeqpacketListener {
     /// is running.
     fn drop(&mut self) {
         let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+// ---------------------------------------------------------------------
+// The socket calls both flavours share
+// ---------------------------------------------------------------------
+//
+// `SeqpacketListener` (the dock) and `StreamListener` (the control
+// socket, `docs/control-socket.md`) differ in exactly one argument to
+// `socket(2)`. Everything that makes either of them safe to run on the
+// compositor's repaint thread — the 0700 directory, the stale-socket
+// probe that refuses to evict a live owner, `SOCK_NONBLOCK` at creation
+// and at `accept4`, the 0600 chmod — is written once here, so the two
+// cannot drift apart on the property that matters.
+
+/// A non-blocking `connect()` of a fresh `AF_UNIX` socket of `kind`.
+///
+/// `SOCK_NONBLOCK` at creation, so the `connect()` itself cannot
+/// block. This was previously a *blocking* connect, on the stated
+/// reasoning that "an `AF_UNIX` `connect()` to a listening socket
+/// completes without a round trip, so there is no latency to save".
+/// That reasoning is true right up until the listener's backlog is
+/// full, and then it is wrong in the worst available way: a blocking
+/// `AF_UNIX` `connect()` to a socket whose backlog is full **waits,
+/// indefinitely**, for the owner to call `accept()`
+/// (`unix_wait_for_peer` in the kernel). Measured in Phase 5
+/// hardening, not inferred: a probe that filled a `listen(1)` backlog
+/// and then made one blocking connect was still inside it three
+/// seconds later, with no timeout in sight.
+///
+/// Two callers made that reachable. The SDK's, where the cost is one
+/// dockapp that never starts — bad but contained. And the stale-socket
+/// probe in [`bind_listener`], where the cost is the *shell* hanging at
+/// startup because some other process of this user is squatting the
+/// socket path with a backlog it never drains. A compositor that will
+/// not start is a worse outcome than one that stutters, and this whole
+/// crate exists on the principle that an unbounded wait is never the
+/// answer.
+///
+/// A full backlog surfaces as `ErrorKind::WouldBlock`. There is no
+/// `EINPROGRESS` case to handle: `AF_UNIX` connects are not
+/// asynchronous, so the call either completes or reports `EAGAIN`.
+fn connect_nonblocking(path: &Path, kind: libc::c_int) -> io::Result<OwnedFd> {
+    let (addr, len) = sockaddr_un(path)?;
+    let raw = cvt(unsafe { libc::socket(libc::AF_UNIX, kind | libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK, 0) })?;
+    let fd = unsafe { OwnedFd::from_raw_fd(raw) };
+    cvt(unsafe { libc::connect(fd.as_raw_fd(), (&addr as *const libc::sockaddr_un).cast(), len) })?;
+    Ok(fd)
+}
+
+/// Creates the directory, clears a stale socket, binds, chmods 0600,
+/// and listens — the body of both `bind`s.
+///
+/// The stale-socket handling is the interesting part. A Unix socket
+/// file outlives the process that bound it, so a crashed session
+/// leaves one behind and the next `bind()` fails with `EADDRINUSE`.
+/// Blindly unlinking would let a second live shell steal the first
+/// one's clients, so this *connects to it first*
+/// ([`clear_stale_socket`]): a socket that accepts a connection has a
+/// live owner and is left alone (with an error naming the situation);
+/// one that refuses is debris and is removed. The probe is made with
+/// the same socket `kind` as the bind, because the kernel answers a
+/// type mismatch (`EPROTOTYPE`) exactly as it answers debris, and a
+/// live listener of the other flavour would otherwise be evicted as if
+/// it were dead.
+fn bind_listener(path: &Path, kind: libc::c_int) -> io::Result<OwnedFd> {
+    if let Some(parent) = path.parent() {
+        ensure_socket_dir(parent)?;
+    }
+    clear_stale_socket(path, kind)?;
+
+    let (addr, len) = sockaddr_un(path)?;
+    // SOCK_NONBLOCK at creation, so there is no instant in this
+    // process's life where the listening fd could block an
+    // `accept()` on an event-loop pass that turned out to have no
+    // pending connection.
+    let raw = cvt(unsafe { libc::socket(libc::AF_UNIX, kind | libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK, 0) })?;
+    let fd = unsafe { OwnedFd::from_raw_fd(raw) };
+    cvt(unsafe { libc::bind(fd.as_raw_fd(), (&addr as *const libc::sockaddr_un).cast(), len) })?;
+
+    // `bind()` applied the process umask, so tighten explicitly.
+    // The window between bind and chmod is real; the 0700 parent
+    // directory is what actually makes it unreachable, and this is
+    // the second lock.
+    let c_path = std::ffi::CString::new(path.as_os_str().as_bytes())
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "socket path contains a NUL byte"))?;
+    cvt(unsafe { libc::chmod(c_path.as_ptr(), 0o600) })?;
+
+    cvt(unsafe { libc::listen(fd.as_raw_fd(), BACKLOG) })?;
+    Ok(fd)
+}
+
+fn clear_stale_socket(path: &Path, kind: libc::c_int) -> io::Result<()> {
+    if !path.exists() {
+        return Ok(());
+    }
+    match connect_nonblocking(path, kind) {
+        Ok(_) => Err(io::Error::new(
+            io::ErrorKind::AddrInUse,
+            format!("{} is already accepting connections; another chonkstep session owns this display", path.display()),
+        )),
+        // `EAGAIN` from the now-non-blocking probe means the socket
+        // *is* listening and its backlog is momentarily full — a
+        // live owner, not debris. This case has to be named
+        // explicitly: falling into the `Err` arm below would unlink
+        // a socket somebody is still serving, which is precisely
+        // the "second shell silently steals the first one's
+        // dockapps" outcome the probe exists to prevent. (Before
+        // `connect` was made non-blocking this case could not
+        // return at all; it hung instead, which is why the arm is
+        // new and not merely rearranged.)
+        Err(e) if e.kind() == io::ErrorKind::WouldBlock => Err(io::Error::new(
+            io::ErrorKind::AddrInUse,
+            format!(
+                "{} is listening but its backlog is full; something owns this display and is not accepting",
+                path.display()
+            ),
+        )),
+        // `EPROTOTYPE` means something *is* listening here, just not
+        // with the socket type we probed with — a stream listener seen
+        // through a SEQPACKET probe or vice versa. Two flavours now
+        // share this directory (the dock socket and the control
+        // socket), so the arm exists to make "wrong kind" read as
+        // "live owner" rather than as debris to be unlinked. The two
+        // never share a filename, so in practice this only fires when
+        // something else has put its own socket where ours goes; the
+        // right answer is still to refuse, not to steal.
+        Err(e) if e.raw_os_error() == Some(libc::EPROTOTYPE) => Err(io::Error::new(
+            io::ErrorKind::AddrInUse,
+            format!("{} is a live socket of another type; refusing to replace it", path.display()),
+        )),
+        Err(_) => std::fs::remove_file(path),
+    }
+}
+
+/// `accept4(SOCK_NONBLOCK | SOCK_CLOEXEC)`, or `Ok(None)` when nothing
+/// is waiting.
+///
+/// `accept4` with `SOCK_NONBLOCK`, not `accept` followed by `fcntl`.
+/// The difference is that there is no interval — not even an unlikely
+/// one, not even one an early `return` could skip past — during which
+/// a connected peer socket exists in this process in blocking mode.
+/// Given that a blocking send on one of these is a frozen desktop (see
+/// [`Seqpacket::send`]), the property is worth having by construction
+/// rather than by discipline. This is what
+/// `accept_returns_a_socket_that_cannot_block` asserts, for both
+/// flavours.
+///
+/// `SOCK_CLOEXEC` in the same call for the same reason in miniature: a
+/// process launched between `accept` and a separate `fcntl` would
+/// inherit another peer's socket.
+fn accept_nonblocking(listener: RawFd) -> io::Result<Option<OwnedFd>> {
+    let raw = unsafe {
+        libc::accept4(listener, std::ptr::null_mut(), std::ptr::null_mut(), libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC)
+    };
+    if raw < 0 {
+        let err = io::Error::last_os_error();
+        return match err.kind() {
+            io::ErrorKind::WouldBlock | io::ErrorKind::Interrupted => Ok(None),
+            _ => Err(err),
+        };
+    }
+    Ok(Some(unsafe { OwnedFd::from_raw_fd(raw) }))
+}
+
+/// `SO_PEERCRED` on a borrowed descriptor — see
+/// [`Seqpacket::peer_credentials`].
+pub fn peer_credentials_of(fd: RawFd) -> io::Result<PeerCredentials> {
+    let mut cred: libc::ucred = unsafe { std::mem::zeroed() };
+    let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+    cvt(unsafe { libc::getsockopt(fd, libc::SOL_SOCKET, libc::SO_PEERCRED, (&mut cred as *mut libc::ucred).cast(), &mut len) })?;
+    Ok(PeerCredentials { pid: cred.pid, uid: cred.uid, gid: cred.gid })
+}
+
+/// [`Seqpacket::peer_is_this_user`] on a borrowed descriptor.
+pub fn peer_is_this_user_on(fd: RawFd) -> io::Result<bool> {
+    Ok(peer_credentials_of(fd)?.uid == unsafe { libc::geteuid() })
+}
+
+// ---------------------------------------------------------------------
+// Stream
+// ---------------------------------------------------------------------
+
+/// The `SOCK_STREAM` sibling of [`SeqpacketListener`], for the shell's
+/// control socket (`docs/control-socket.md`).
+///
+/// Stream rather than SEQPACKET because the control socket's clients
+/// are not SDK processes this project ships: they are Quickshell's
+/// `Socket`, `socat`, and `nc -U`, and every one of those speaks a
+/// byte stream. Framing is the protocol's problem there (one JSON
+/// object per newline); the transport's job is unchanged — the same
+/// 0700 directory, the same stale-socket probe, the same
+/// non-blocking-by-construction accept — which is why this is a second
+/// type over the same [`bind_listener`] rather than a second copy of
+/// it.
+#[derive(Debug)]
+pub struct StreamListener {
+    fd: OwnedFd,
+    path: PathBuf,
+}
+
+impl StreamListener {
+    /// See [`SeqpacketListener::bind`]; identical apart from the socket
+    /// type, including the refusal to evict a live owner.
+    pub fn bind(path: &Path) -> io::Result<Self> {
+        let fd = bind_listener(path, libc::SOCK_STREAM)?;
+        Ok(Self { fd, path: path.to_path_buf() })
+    }
+
+    /// Accepts one pending connection as a socket that is already
+    /// `O_NONBLOCK` and `CLOEXEC`, or `Ok(None)` if none is waiting.
+    /// See [`accept_nonblocking`] for why it is `accept4` and not
+    /// `accept` + `fcntl`.
+    pub fn accept(&self) -> io::Result<Option<Stream>> {
+        Ok(accept_nonblocking(self.fd.as_raw_fd())?.map(Stream::from_fd))
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl AsRawFd for StreamListener {
+    fn as_raw_fd(&self) -> RawFd {
+        self.fd.as_raw_fd()
+    }
+}
+
+impl Drop for StreamListener {
+    /// Unlinks the socket file — the same reasoning as
+    /// [`SeqpacketListener`]'s `Drop`.
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
+}
+
+/// One connected `SOCK_STREAM` socket, either end, non-blocking on
+/// every call by construction.
+#[derive(Debug)]
+pub struct Stream {
+    fd: OwnedFd,
+}
+
+impl Stream {
+    /// A non-blocking connect — see [`connect_nonblocking`]. Used by
+    /// tests and by anything in this workspace that wants to read the
+    /// control socket without being a shell.
+    pub fn connect(path: &Path) -> io::Result<Self> {
+        Ok(Self { fd: connect_nonblocking(path, libc::SOCK_STREAM)? })
+    }
+
+    pub fn from_fd(fd: OwnedFd) -> Self {
+        Self { fd }
+    }
+
+    /// Whether `O_NONBLOCK` is actually set on this fd right now — the
+    /// subject of an assertion, as for [`Seqpacket::is_nonblocking`].
+    pub fn is_nonblocking(&self) -> io::Result<bool> {
+        let flags = cvt(unsafe { libc::fcntl(self.fd.as_raw_fd(), libc::F_GETFL) })?;
+        Ok(flags & libc::O_NONBLOCK != 0)
+    }
+
+    /// Writes as much of `bytes` as the socket will take right now and
+    /// returns how much that was. `MSG_DONTWAIT | MSG_NOSIGNAL`, for
+    /// the reasons [`Seqpacket::send`] spells out; the one difference
+    /// from the datagram send is that a stream *may* take part of the
+    /// buffer, so the caller keeps the remainder for the next pass
+    /// rather than treating a short write as a failure.
+    pub fn send(&self, bytes: &[u8]) -> io::Result<usize> {
+        send_on(self.fd.as_raw_fd(), bytes)
+    }
+
+    /// Reads whatever is available. `Ok(0)` is EOF: the peer closed.
+    /// `MSG_DONTWAIT`, so an idle socket answers `WouldBlock` rather
+    /// than parking the caller.
+    pub fn recv(&self, buffer: &mut [u8]) -> io::Result<usize> {
+        cvt_size(unsafe { libc::recv(self.fd.as_raw_fd(), buffer.as_mut_ptr().cast(), buffer.len(), libc::MSG_DONTWAIT) })
+    }
+
+    pub fn peer_is_this_user(&self) -> io::Result<bool> {
+        peer_is_this_user_on(self.fd.as_raw_fd())
+    }
+
+    /// Blocks (with `poll`) until bytes arrive or `deadline` passes —
+    /// for a *client* only, exactly as [`Seqpacket::recv_until`] is.
+    /// `Ok(None)` on timeout, `Ok(Some(0))` on EOF.
+    pub fn recv_until(&self, buffer: &mut [u8], deadline: std::time::Instant) -> io::Result<Option<usize>> {
+        loop {
+            match self.recv(buffer) {
+                Ok(n) => return Ok(Some(n)),
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {}
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                Err(e) => return Err(e),
+            }
+            let now = std::time::Instant::now();
+            if now >= deadline {
+                return Ok(None);
+            }
+            if !wait_readable(self.as_raw_fd(), Some(deadline - now))? {
+                continue;
+            }
+        }
+    }
+
+    pub fn into_fd(self) -> OwnedFd {
+        self.fd
+    }
+}
+
+impl AsRawFd for Stream {
+    fn as_raw_fd(&self) -> RawFd {
+        self.fd.as_raw_fd()
     }
 }
 
@@ -1007,6 +1227,28 @@ mod tests {
     }
 
     #[test]
+    fn the_control_socket_lives_beside_the_dock_socket_under_the_same_display_key() {
+        // The spec (`docs/control-socket.md` §1) promises the control
+        // socket is sanitised exactly as the dock socket is, so a bar
+        // author can derive one path from the other; pin the two to
+        // the same sanitiser rather than trusting two format strings
+        // to agree.
+        //
+        // Both paths hang off `socket_dir()`, which reads the
+        // environment; a runner without `XDG_RUNTIME_DIR` must see the
+        // two refuse together rather than one of them fall back.
+        match (socket_path("wayland-1"), control_socket_path("wayland-1")) {
+            (Ok(dock), Ok(control)) => {
+                assert_eq!(dock.parent(), control.parent());
+                assert_eq!(control.file_name().unwrap(), "control-wayland-1.sock");
+                assert_eq!(control_socket_path(":1").unwrap().file_name().unwrap(), "control-1.sock");
+            }
+            (Err(_), Err(_)) => {}
+            (dock, control) => panic!("the two paths must agree on whether a runtime dir exists: {dock:?} vs {control:?}"),
+        }
+    }
+
+    #[test]
     fn the_socket_path_is_stable_across_a_shell_restart() {
         // Restart survival depends on the name not carrying a pid or a
         // start time; if it did, a reconnecting dockapp could never
@@ -1169,5 +1411,107 @@ mod tests {
         let mut off_by_first = token;
         off_by_first[0] ^= 0x80;
         assert!(!tokens_match(&token, &off_by_first));
+    }
+
+    // -----------------------------------------------------------------
+    // The stream flavour — what the control socket rides on
+    // -----------------------------------------------------------------
+    //
+    // The bind/probe/accept machinery is shared with the SEQPACKET
+    // listener above, so most of the properties are inherited. These
+    // tests pin the places where the flavour matters: the probe must
+    // use a stream socket (a SEQPACKET probe against a stream listener
+    // fails with EPROTOTYPE, which looks like debris), and the accepted
+    // fd must still come back non-blocking.
+
+    #[test]
+    fn an_accepted_stream_is_nonblocking_on_both_ends() {
+        let scratch = Scratch::new();
+        let listener = StreamListener::bind(&scratch.socket()).unwrap();
+        let client = Stream::connect(listener.path()).unwrap();
+        let server = wait_for_stream(&listener);
+        assert!(server.is_nonblocking().unwrap(), "an accepted control client must be O_NONBLOCK");
+        assert!(client.is_nonblocking().unwrap());
+    }
+
+    #[test]
+    fn a_stream_carries_bytes_in_order_and_reports_eof() {
+        let scratch = Scratch::new();
+        let listener = StreamListener::bind(&scratch.socket()).unwrap();
+        let client = Stream::connect(listener.path()).unwrap();
+        let server = wait_for_stream(&listener);
+        assert_eq!(client.send(b"{\"request\":\"snapshot\"}\n").unwrap(), 23);
+        let mut buffer = [0u8; 64];
+        let n = wait_recv(&server, &mut buffer);
+        assert_eq!(&buffer[..n], b"{\"request\":\"snapshot\"}\n");
+        drop(client);
+        // A closed peer reads as EOF, never as an error and never as a
+        // wait — the shell's tick must be able to tell "gone" from
+        // "quiet" without parking.
+        assert_eq!(wait_recv(&server, &mut buffer), 0);
+    }
+
+    #[test]
+    fn a_stale_stream_socket_is_replaced_and_a_live_one_is_kept() {
+        let scratch = Scratch::new();
+        let path = scratch.socket();
+        std::fs::write(&path, b"").unwrap();
+        let first = StreamListener::bind(&path).expect("debris left by a killed session is cleared");
+        assert!(Stream::connect(first.path()).is_ok());
+        // With a live owner the second bind must refuse rather than
+        // steal — two shells on one display is the bug, not the fix.
+        let err = StreamListener::bind(&path).expect_err("a live listener must not be evicted");
+        assert_eq!(err.kind(), io::ErrorKind::AddrInUse);
+        assert!(Stream::connect(first.path()).is_ok(), "the refused bind must not have unlinked the live socket");
+    }
+
+    #[test]
+    fn a_stream_listener_removes_its_socket_when_dropped() {
+        let scratch = Scratch::new();
+        let path = scratch.socket();
+        let listener = StreamListener::bind(&path).unwrap();
+        assert!(path.exists());
+        drop(listener);
+        assert!(!path.exists(), "a clean shutdown must not leave debris for the next session to probe");
+    }
+
+    #[test]
+    fn a_seqpacket_probe_does_not_mistake_a_live_stream_listener_for_debris() {
+        // The reason `clear_stale_socket` takes the socket kind: the
+        // dock and control sockets live in the same directory, and a
+        // probe of the wrong flavour returns EPROTOTYPE, which a naive
+        // "any error means stale" rule would treat as permission to
+        // unlink someone else's live socket.
+        let scratch = Scratch::new();
+        let path = scratch.socket();
+        let stream = StreamListener::bind(&path).unwrap();
+        let err = SeqpacketListener::bind(&path).expect_err("a live stream listener is not debris");
+        assert_eq!(err.kind(), io::ErrorKind::AddrInUse);
+        assert!(path.exists());
+        assert!(Stream::connect(stream.path()).is_ok());
+    }
+
+    fn wait_for_stream(listener: &StreamListener) -> Stream {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            if let Some(stream) = listener.accept().unwrap() {
+                return stream;
+            }
+            assert!(Instant::now() < deadline, "no connection arrived");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    fn wait_recv(stream: &Stream, buffer: &mut [u8]) -> usize {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match stream.recv(buffer) {
+                Ok(n) => return n,
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {}
+                Err(e) => panic!("recv failed: {e}"),
+            }
+            assert!(Instant::now() < deadline, "nothing arrived");
+            std::thread::sleep(Duration::from_millis(1));
+        }
     }
 }

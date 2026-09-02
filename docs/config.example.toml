@@ -52,6 +52,16 @@
 #   "jade-lacquer"
 #   "ivory-halftone"   (natively light; every theme has both moods)
 #   "indigo-filament"
+# or "omarchy", which is not a theme of its own but an instruction:
+# follow Omarchy. The desktop reads the palette Omarchy is currently
+# wearing (~/.local/state/omarchy/current/theme/colors.toml, the file
+# `omarchy-theme-set` maintains) and dresses in it -- chrome, dock,
+# menus, terminal palette -- keeping chonkstep's own geometry. It keeps
+# watching that file, so `omarchy-theme-set catppuccin-latte` re-dresses
+# this desk within a second, light or dark as the palette says. With
+# Omarchy absent or its palette unreadable, the flagship stands in
+# (warned once) until one appears. The same entry appears in the Themes
+# submenu as "Omarchy (<theme>)" whenever there is a palette to follow.
 # A theme picked from the root menu's Themes submenu is persisted and
 # wins over this value on every later startup -- the menu is the more
 # recent gesture; this line is only the starting point. An unknown id
@@ -75,6 +85,11 @@
 # session (or a fresh state directory). With neither said, the selected
 # theme's own native mood applies -- dark for seven of the built-ins,
 # light for ivory-halftone -- so leaving this alone changes nothing.
+#
+# While following Omarchy (theme = "omarchy") the palette's own `mode`
+# decides, and this line -- and any request written to the file below --
+# is declined with a note in the log: an Omarchy palette has one mood,
+# and the way to change it is `omarchy-theme-set`.
 #
 # The live way to switch is not this file but the request file: write
 # "light", "dark" or "toggle" to
@@ -134,6 +149,26 @@
 # back in recorded order. Off by default: a session that spawns
 # applications you did not just ask for is something to opt into.
 #restore_session = true
+
+# Omarchy's own command menu, hosted as the `Omarchy` submenu of the
+# root menu (right-click the desktop): Learn, Trigger, Style, Setup,
+# Install, Remove, Update, About, System -- every entry Omarchy's shell
+# offers under its Super+Alt+Space menu, read from Omarchy's own
+# definition (`$OMARCHY_PATH/default/omarchy/omarchy-menu.jsonc` plus
+# your `~/.config/omarchy/extensions/omarchy-menu.jsonc`) each time it
+# changes, so an Omarchy upgrade or an extension you write shows up
+# without chonkstep knowing anything about it. Entries run exactly as
+# Omarchy runs them (`bash -lc <action>`), and their `when`/`checked`/
+# `disabled` conditions are evaluated the way Omarchy evaluates them,
+# in the background, never on the desktop's own thread. Entries that
+# would command Hyprland (`hyprctl`, `omarchy-hyprland-*`) are left
+# out; Omarchy's launcher-backed submenus (Apps, Font) are too, since
+# the Applications submenu above is the same thing.
+#
+# On by default, and inert on a machine without Omarchy -- no
+# definition file, no submenu. Set it to false to keep the root menu
+# to chonkstep's own rows.
+#omarchy_menu = true
 
 # The modifier for the move/resize drag gesture: hold it and drag with
 # the LEFT button anywhere on a window to move it, or with the RIGHT

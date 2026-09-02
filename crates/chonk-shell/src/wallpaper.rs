@@ -114,7 +114,7 @@ impl Wallpaper {
     /// from the originals by `scripts/gen-wallpaper-renditions.py`, see
     /// `assets/wallpapers/SOURCES.md` — so a theme's wallpaper id never
     /// forks across the axis: the same composition changes mood.
-    fn png(self, appearance: Appearance) -> Option<&'static [u8]> {
+    pub(crate) fn png(self, appearance: Appearance) -> Option<&'static [u8]> {
         match (self, appearance) {
             (Self::LavenderGrid, Appearance::Dark) => Some(include_bytes!("../assets/wallpapers/lavender-grid.png")),
             (Self::LavenderGrid, Appearance::Light) => Some(include_bytes!("../assets/wallpapers/lavender-grid-light.png")),

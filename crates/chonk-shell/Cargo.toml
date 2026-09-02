@@ -24,6 +24,14 @@ cosmic-text = "0.12"
 # owning the `wait` that must stay on its own thread.
 libc = "0.2"
 serde = { version = "1", features = ["derive"] }
+# Two wires need JSON. Omarchy's menu definition (`omarchy_menu`) is
+# JSONC; order is kept by a hand-written visitor rather than the
+# `preserve_order` feature, so the dependency stays the plain one any
+# other crate can share. The control socket (`control.rs`) speaks
+# newline-framed JSON to third-party bars; the wire is fixed by
+# `docs/control-socket.md`, so the serialisation goes through typed
+# structs rather than hand-built strings.
+serde_json = "1"
 tiny-skia = "0.11"
 # `.dockapp` registration files. Already a workspace dependency (the
 # config, the theme model, and `chonk-ui` all speak it), so a dockapp

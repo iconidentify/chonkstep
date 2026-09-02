@@ -67,7 +67,7 @@ use wm_theme::{panel, tile as tilekit, Theme};
 use wm_theme_api::{DecorationBuffer, Point};
 
 use crate::dockapp::registry::{DockappEntry, RestartPolicy};
-use crate::spawn::{self, SpawnedChild, DISPLAY_SERVER_ENV};
+use crate::spawn::{self, SpawnedChild, DOCKAPP_WITHHELD_ENV};
 use crate::widgets::{DockInput, DockWidget, Effect, Samples};
 
 /// How often the shell asks a connected dockapp whether it is still
@@ -1283,8 +1283,9 @@ impl RemoteTile {
     ///   correctly rather than redrawn after a round trip.
     /// * What it *loses*: `WAYLAND_DISPLAY` and `DISPLAY`, removed
     ///   rather than merely unset — see
-    ///   [`DISPLAY_SERVER_ENV`](crate::spawn::DISPLAY_SERVER_ENV). This
-    ///   is mandatory, not tidy. The headline claim of the dockapp
+    ///   [`DISPLAY_SERVER_ENV`](crate::spawn::DISPLAY_SERVER_ENV) — and
+    ///   `CHONKSTEP_CONTROL_SOCKET` with them, for the reason
+    ///   [`DOCKAPP_WITHHELD_ENV`] gives. This is mandatory, not tidy. The headline claim of the dockapp
     ///   boundary is that a dockapp holds no display connection, so
     ///   `wl_shm`, `zwlr_screencopy_v1` and
     ///   `zwlr_foreign_toplevel_management_v1` are *unreachable* rather
@@ -1323,7 +1324,7 @@ impl RemoteTile {
             env.push(("CHONKSTEP_APPEARANCE".to_string(), mode.name().to_string()));
         }
         let args: Vec<&str> = self.entry.exec[1..].iter().map(String::as_str).collect();
-        match spawn::spawn_supervised(&self.entry.exec[0], &args, &env, &DISPLAY_SERVER_ENV) {
+        match spawn::spawn_supervised(&self.entry.exec[0], &args, &env, &DOCKAPP_WITHHELD_ENV) {
             Some(child) => {
                 tracing::info!(id = %self.entry.id, pid = child.pid(), program = %self.entry.exec[0], "launched dockapp");
                 self.child = Some(child);

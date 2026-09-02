@@ -213,6 +213,44 @@ logind already hands the active session its devices. On a machine
 without logind, enable `seatd` and join the `seat` group; the installer
 prints this only when it finds logind missing.
 
+Once you are in, right-click the desktop: the `Omarchy` submenu of the
+root menu *is* Omarchy's own menu - the same Learn / Trigger / Style /
+Setup / Install / Remove / Update / System tree Omarchy's shell offers,
+read from Omarchy's own `omarchy-menu.jsonc` (and your extension file)
+every time either changes, with every entry running exactly as Omarchy
+runs it and every `when`/`checked`/`disabled` condition answered the way
+Omarchy answers it. chonkstep keeps no list of its own, so an Omarchy
+upgrade shows up in the menu on its own; the only entries left out are
+the ones that would command Hyprland. `omarchy_menu = false` in the
+config turns the submenu off.
+
+chonkstep can also dress in Omarchy's theme. `theme = "omarchy"` in
+the config (or the `Omarchy (...)` row in the root menu's Themes
+submenu) makes the desktop read the palette `omarchy-theme-set` leaves
+under `~/.local/state/omarchy/current/theme/` and wear it - chrome,
+dock, menus, terminals, light or dark as the palette says - on
+chonkstep's own geometry, and keep watching it, so switching themes in
+Omarchy restyles this desk within a second. The other direction is
+`omarchy-export-themes`, built alongside the shell, which writes the
+eight built-in themes as Omarchy themes into `~/.config/omarchy/themes/`
+so `omarchy-theme-set amber-phosphor` dresses the rest of the machine
+to match. Details in [docs/appearance.md](docs/appearance.md).
+
+Omarchy's bar, and anything else that wants to draw the desktop's
+state, talks to the shell over a small socket at
+`$XDG_RUNTIME_DIR/chonkstep/control-<display>.sock` - newline-framed
+JSON, one line per fact: workspaces, outputs, the focused window, the
+theme, each re-sent when it changes. It is always on, on both sessions;
+every process the shell launches finds the path in
+`CHONKSTEP_CONTROL_SOCKET`. The protocol is written down in full in
+[`docs/control-socket.md`](docs/control-socket.md), and
+`socat - UNIX-CONNECT:$CHONKSTEP_CONTROL_SOCKET` is enough to watch it.
+Its first clients are two Omarchy bar widgets under
+[`omarchy/plugins/`](omarchy/README.md) - `chonkstep.workspaces`, the
+workspace strip Omarchy's own widget cannot draw here because it asks
+Hyprland, and `chonkstep.theme`, the active theme's name - which
+install like any other Omarchy plugin and import nothing from Hyprland.
+
 On a HiDPI display, set `scale = 2.0` in
 `~/.config/chonkstep/config.toml` - it scales chrome, dock, cursors,
 and the terminal font as one system.

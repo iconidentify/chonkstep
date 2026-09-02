@@ -37,6 +37,47 @@ pub fn spawn_detached(program: &str, args: &[&str]) -> Option<u32> {
 /// something it gets for free by calling a toolkit's `init()`.
 pub const DISPLAY_SERVER_ENV: [&str; 2] = ["WAYLAND_DISPLAY", "DISPLAY"];
 
+/// The variable every process the shell launches finds the control
+/// socket (`docs/control-socket.md` §1.1) under.
+pub const CONTROL_SOCKET_ENV: &str = "CHONKSTEP_CONTROL_SOCKET";
+
+/// What a dockapp is launched *without*: the display servers, and the
+/// control socket. The socket is not a display connection, but it
+/// answers "which windows exist, what is focused" and switches
+/// workspaces — the window list is one of the things
+/// [`DISPLAY_SERVER_ENV`] exists to keep out of a tile's reach, so
+/// handing it the same list by another route would undo the hurdle.
+/// A dockapp that wants any of it should be an application instead.
+pub const DOCKAPP_WITHHELD_ENV: [&str; 3] = ["WAYLAND_DISPLAY", "DISPLAY", CONTROL_SOCKET_ENV];
+
+/// Where the control socket was bound, once it has been. `None` until
+/// `control::ControlSocket::new` says, and forever in a session whose
+/// bind failed — a child should not be told about a socket nobody is
+/// listening on.
+static CONTROL_SOCKET: std::sync::OnceLock<std::path::PathBuf> = std::sync::OnceLock::new();
+
+/// Makes the control socket's path part of the environment of every
+/// process this shell launches from now on.
+///
+/// Why a process-global read at spawn time, and not `std::env::set_var`
+/// once at bind time: by the time `Shell::new` binds the socket, the
+/// dock's sampler threads are already running `Command::output()`,
+/// which walks `environ` — and `setenv` racing a reader of `environ` is
+/// a use-after-free the Rust standard library documents as such (the
+/// `XCURSOR_SIZE` export in `startup.rs` is safe only because it runs
+/// before any thread exists). Injecting at [`apply_env`] instead
+/// touches only the `Command` being built, needs no unsafety, reaches
+/// every launch path the shell has — autostart, `[commands]`, menus,
+/// terminals, session-layout relaunches — because they all go through
+/// that one function, and is checkable with `Command::get_envs`. A hot
+/// restart is a fresh process that binds and declares again, so the
+/// once-only cell is never stale.
+pub fn declare_control_socket(path: std::path::PathBuf) {
+    // The socket is bound once per process; a second declaration would
+    // be a second bind, which `StreamListener::bind` already refuses.
+    let _ = CONTROL_SOCKET.set(path);
+}
+
 /// Same as [`spawn_detached`], with extra environment variables set on
 /// top of whatever chonkstep's own process already has (which the child
 /// inherits regardless — `Command` doesn't clear the parent environment
@@ -271,6 +312,11 @@ pub fn spawn_supervised(program: &str, args: &[&str], env: &[(String, String)], 
 /// of an ambiguous instruction, and for [`DISPLAY_SERVER_ENV`] it is
 /// the only acceptable one.
 fn apply_env(command: &mut Command, env: &[(String, String)], unset: &[&str]) {
+    // First, so a caller's own `env` can override it and a caller's
+    // `unset` can withhold it (as a dockapp's does).
+    if let Some(path) = CONTROL_SOCKET.get() {
+        command.env(CONTROL_SOCKET_ENV, path);
+    }
     for (key, value) in env {
         command.env(key, value);
     }
@@ -589,6 +635,27 @@ mod tests {
         apply_env(&mut command, &[("DISPLAY".to_string(), ":0".to_string())], &["DISPLAY"]);
         let display = command.get_envs().find(|(key, _)| *key == std::ffi::OsStr::new("DISPLAY"));
         assert_eq!(display.map(|(_, value)| value), Some(None));
+    }
+
+    #[test]
+    fn a_declared_control_socket_reaches_every_launch_but_a_dockapps() {
+        // The route `declare_control_socket` documents, asserted on the
+        // `Command` rather than on a spawned process: the cell is
+        // process-global, so this is the one test in the binary that
+        // sets it, and it sets it to a path no other test looks for.
+        declare_control_socket(std::path::PathBuf::from("/run/user/1000/chonkstep/control-test.sock"));
+        let mut launch = Command::new("/bin/true");
+        apply_env(&mut launch, &[], &[]);
+        let exported = launch.get_envs().find(|(key, _)| *key == std::ffi::OsStr::new(CONTROL_SOCKET_ENV));
+        assert_eq!(
+            exported.and_then(|(_, value)| value),
+            Some(std::ffi::OsStr::new("/run/user/1000/chonkstep/control-test.sock")),
+            "an ordinary launch inherits the control socket"
+        );
+        let mut dockapp = Command::new("/bin/true");
+        apply_env(&mut dockapp, &[], &DOCKAPP_WITHHELD_ENV);
+        let withheld = dockapp.get_envs().find(|(key, _)| *key == std::ffi::OsStr::new(CONTROL_SOCKET_ENV));
+        assert_eq!(withheld.map(|(_, value)| value), Some(None), "a dockapp has it removed, not merely unset");
     }
 
     #[test]

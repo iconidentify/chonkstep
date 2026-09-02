@@ -15,6 +15,19 @@ new_key_type! {
     pub struct MonitorId;
 }
 
+impl ClientId {
+    /// The key as one opaque integer, for wire formats that name a
+    /// window without wanting to know what a slotmap is (the control
+    /// socket's `focus.window.id`). Stable for the client's lifetime,
+    /// never reused for a different window while this one lives —
+    /// exactly the slotmap key's own guarantee, which is why this is a
+    /// plain re-encoding of the key rather than a separate counter to
+    /// keep in step with it. Not meaningful across a shell restart.
+    pub fn as_u64(self) -> u64 {
+        slotmap::Key::data(&self).as_ffi()
+    }
+}
+
 /// A physical output as reported by the backend. Note this has no
 /// `MonitorId` — that's a slotmap key only the core can mint (backends
 /// can't construct one), so a future monitor registry inside

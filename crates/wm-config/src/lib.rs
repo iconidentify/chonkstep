@@ -38,6 +38,7 @@
 //! drag_modifier = "alt"              # optional; move/resize drag modifier, or "none"
 //! restore_session = true             # optional; relaunch last session's windows
 //! lock_command = "swaylock"          # optional; locker for post-crash recovery
+//! omarchy_menu = true                # optional; Omarchy's menu under right-click
 //!
 //! [decorations]                      # optional; per-application overrides
 //! server_side = ["alacritty"]        # force this desktop's chrome
@@ -281,6 +282,14 @@ pub struct Config {
     /// ask for is the thing `restore_session` is deliberately opt-in to
     /// avoid, and this is the same rule.
     pub autostart: Vec<Vec<String>>,
+    /// Whether the root menu carries an `Omarchy` submenu mirroring
+    /// Omarchy's own JSONC-defined command menu (see
+    /// `chonk_shell::omarchy_menu`). On by default, and inert on a
+    /// machine without Omarchy — the submenu only appears when the menu
+    /// definition file exists — so the key is there to turn the
+    /// integration *off* on a machine that has Omarchy but wants a
+    /// plain chonkstep root menu.
+    pub omarchy_menu: bool,
     pub keybindings: Vec<(KeyCombo, Action)>,
 }
 
@@ -341,6 +350,7 @@ impl Config {
             commands: BTreeMap::new(),
             terminal: None,
             autostart: Vec::new(),
+            omarchy_menu: true,
             keybindings: vec![
                 bind("alt+shift+return", Action::SpawnTerminal),
                 bind("alt+shift+q", Action::Close),
@@ -670,6 +680,13 @@ pub fn parse(text: &str) -> Result<Config, String> {
                 other => tracing::warn!(
                     value = ?other,
                     "config: restore_session must be a boolean, keeping default"
+                ),
+            },
+            "omarchy_menu" => match value {
+                toml::Value::Boolean(b) => config.omarchy_menu = *b,
+                other => tracing::warn!(
+                    value = ?other,
+                    "config: omarchy_menu must be a boolean, keeping default"
                 ),
             },
             "lock_command" => match value {
@@ -1593,6 +1610,22 @@ mod tests {
     fn wrongly_typed_restore_session_keeps_the_default() {
         for text in ["restore_session = \"yes\"", "restore_session = 1"] {
             assert!(!parse(text).unwrap().restore_session, "text {text:?}");
+        }
+    }
+
+    #[test]
+    fn omarchy_menu_defaults_on_and_parses_as_a_boolean() {
+        // On by default: the submenu is invisible without Omarchy, so
+        // the default costs nothing on a machine that lacks it.
+        assert!(Config::default_config().omarchy_menu);
+        assert!(!parse("omarchy_menu = false").unwrap().omarchy_menu);
+        assert!(parse("omarchy_menu = true").unwrap().omarchy_menu);
+    }
+
+    #[test]
+    fn wrongly_typed_omarchy_menu_keeps_the_default() {
+        for text in ["omarchy_menu = \"off\"", "omarchy_menu = 0"] {
+            assert!(parse(text).unwrap().omarchy_menu, "text {text:?}");
         }
     }
 

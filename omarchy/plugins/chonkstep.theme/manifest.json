@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "id": "chonkstep.theme",
+  "name": "chonkstep Theme",
+  "version": "1.0.0",
+  "author": "chonkstep",
+  "license": "GPL-3.0-only",
+  "description": "The active chonkstep theme name, read from its control socket",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "Widget.qml"
+  },
+  "barWidget": {
+    "displayName": "Theme (chonkstep)",
+    "description": "Active theme name and appearance",
+    "category": "Compositor",
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "showAppearance": true
+    },
+    "schema": [
+      {
+        "key": "showAppearance",
+        "type": "boolean",
+        "label": "Show appearance",
+        "description": "Append the theme's dark or light appearance after its name.",
+        "defaultValue": true
+      }
+    ]
+  }
+}

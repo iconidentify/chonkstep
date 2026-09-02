@@ -37,3 +37,7 @@ wm-theme-api = { path = "../wm-theme-api" }
 # root properties back. Same version requirement as every other x11rb
 # user in the workspace.
 x11rb = "0.13"
+# The control-socket e2e is a bar written the way a third party would
+# write one: a `UnixStream` and `serde_json`, nothing from the shell.
+# Already in the graph through `chonk-shell`.
+serde_json = "1"

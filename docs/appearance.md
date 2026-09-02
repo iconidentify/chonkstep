@@ -36,7 +36,57 @@ restart, nothing closed, one repaint.
   on screen.
 
 A theme pick keeps the current appearance; an appearance switch keeps
-the current theme. The two axes never reach across each other.
+the current theme. The two axes never reach across each other -- with
+one exception, below.
+
+## Following Omarchy
+
+`theme = "omarchy"` (or the `Omarchy (...)` row in the Themes
+submenu) is not a ninth theme but an instruction: wear whatever
+[Omarchy](https://omarchy.org) is wearing. The desktop reads the palette
+`omarchy-theme-set` leaves at
+`~/.local/state/omarchy/current/theme/colors.toml` (`$XDG_STATE_HOME`
+honoured), maps its named colours onto chonkstep's chrome -- the
+focused titlebar in the palette's darkest ground with the foreground
+as ink, the unfocused bar in its `muted`, menus on
+`lighter_background`, the highlight in its `accent` with black or
+white text by contrast, the terminal palette slot for slot as
+Omarchy's own alacritty template lays it out -- and keeps chonkstep's
+geometry: the 23 px titlebar, the bevels, the dock tile, the fonts.
+The theme is named after Omarchy's: `Omarchy (Tokyo Night)`.
+
+The session then watches that file about once a second and re-dresses
+when it changes, so `omarchy-theme-set catppuccin-latte` -- or a pick
+from Omarchy's own theme menu -- restyles this desk too, live, along
+with every dockapp. Applications launched under the follow (a foot, a
+`chonk_ui` app reading `CHONKSTEP_THEME=omarchy`) read the same file
+and wear the same palette; as with any theme pick, a terminal already
+open keeps the palette it was launched with.
+
+**Here the appearance axis defers.** An Omarchy palette has one mood,
+its `mode` (`light` or `dark`, inferred from the background when the
+file omits it), and that mood *is* the session's appearance: it is
+published to the `appearance` file like any other, so GTK and portal
+applications follow a light Omarchy theme as a light desk. While
+following, `appearance = ...` in the config and any
+`appearance-request` are consumed and declined, with a line in the
+session log saying why -- the way to change mood is to change the
+Omarchy theme. Picking a built-in from the Themes submenu ends the
+follow and hands the axis back.
+
+With Omarchy not installed, or its palette missing or unparsable, the
+flagship stands in and the log says so once; the choice to follow
+stands, and the watch picks the palette up the moment one appears.
+The Themes submenu only offers the Omarchy row when there is a
+palette to follow.
+
+The bridge runs the other way too: `omarchy-export-themes` (built with
+the shell, `cargo build -p chonk-shell`) writes each built-in theme as
+an Omarchy theme -- `colors.toml` derived from the theme itself plus
+its wallpaper under `backgrounds/` -- into `~/.config/omarchy/themes/`
+(or a directory you name), after which `omarchy-theme-set
+amber-phosphor` dresses the rest of the machine to match. The export
+is generated, never hand-edited: change the built-in and run it again.
 
 ## The file contract (public -- dockapps build on this)
 

@@ -228,6 +228,14 @@ pub enum RootMenuAction {
     /// backend binary hot-restarts in place to redress every surface
     /// at once.
     SetTheme(&'static str),
+    /// A command picked from the Omarchy submenu: `index` into the
+    /// flat action list of the `omarchy_menu::OmarchyMenu` model that
+    /// was current when the menu opened, identified by `generation`.
+    /// The dispatch hands both back to the model, which refuses an
+    /// index from a generation it has since rebuilt — a menu opened
+    /// before an Omarchy upgrade landed cannot run the command that
+    /// now sits at that index.
+    OmarchyCommand { index: usize, generation: u64 },
     Exit,
 }
 
@@ -317,7 +325,9 @@ pub enum DockItemMenuAction {
 // guard, the ranges keep the ids honest and debuggable:
 //   1..=99    root menu one-off entries
 //   100..=199 root Wallpaper submenu (`ACTION_WALLPAPER_BASE` + index)
-//   200..=299 root Theme submenu (`ACTION_THEME_BASE` + index)
+//   200..=299 root Theme submenu (`ACTION_THEME_BASE` + index into
+//             `CHOICES`; `ACTION_THEME_OMARCHY`, one past the last
+//             built-in, is the follow-Omarchy entry)
 //   300..=399 window menu commands (`ACTION_WINDOW_*`)
 //   400..     window menu Move To entries (`ACTION_MOVE_TO_BASE` + n,
 //             where n == the workspace count means "New Workspace")
@@ -328,17 +338,35 @@ pub enum DockItemMenuAction {
 //             the session check genuinely is the guard rather than the
 //             suspenders: a session that opened a dock tile's menu will
 //             not resolve a Move To id, and vice versa
+//   600       the Omarchy submenu's `disabled` rows, which resolve to
+//             nothing (the same device as the dock About rows)
 //   1000..    root Applications entries (`ACTION_APP_BASE` + the
 //             app's index into the stored `.desktop` index) —
 //             numerically past any Move To id a real session reaches,
 //             but both ranges are open-ended, so here the session
-//             check genuinely is the guard, not just the suspenders
+//             check genuinely is the guard, not just the suspenders.
+//             Bounded above by `ACTION_OMARCHY_BASE`: an app index of
+//             a million would need a `.desktop` corpus no machine has.
+//   1000000.. root Omarchy submenu commands (`ACTION_OMARCHY_BASE` +
+//             the command's index into `omarchy_menu::OmarchyMenu`'s
+//             flat action list; a few hundred in Omarchy 4)
 const ACTION_LAUNCH_TERMINAL: u32 = 1;
 const ACTION_LAUNCH_ABOUT: u32 = 2;
 const ACTION_EXIT: u32 = 3;
 const ACTION_WALLPAPER_BASE: u32 = 100;
 const ACTION_THEME_BASE: u32 = 200;
+/// The Theme submenu's follow-Omarchy row: the slot right after the
+/// built-ins, so it lives in the Theme range without displacing the
+/// built-ins' indices. Only *offered* when Omarchy has a palette to
+/// follow (`root_menu_items` takes its label as an `Option`), but
+/// always *resolvable*: `resolve_action` is bounds, not availability,
+/// and the shell's `SetTheme` path copes with a palette that has gone.
+const ACTION_THEME_OMARCHY: u32 = ACTION_THEME_BASE + wm_theme::default_theme::CHOICES.len() as u32;
 const ACTION_WINDOW_MAXIMIZE: u32 = 300;
+// The Omarchy row must stay inside the Themes range; a ninth built-in
+// would still leave room, a hundredth would not, and this says so at
+// compile time rather than as a menu that quietly opens the wrong thing.
+const _: () = assert!(ACTION_THEME_OMARCHY < ACTION_WINDOW_MAXIMIZE);
 const ACTION_WINDOW_MINIATURIZE: u32 = 301;
 const ACTION_WINDOW_SHADE: u32 = 302;
 const ACTION_WINDOW_FULLSCREEN: u32 = 303;
@@ -353,7 +381,13 @@ const ACTION_DOCK_REMOVE: u32 = 501;
 /// one to the theme SDK to grey out four lines of diagnostics would be
 /// a change to every menu in the desktop for the benefit of this one.
 const ACTION_DOCK_ABOUT_ROW: u32 = 550;
+/// An Omarchy row whose `disabled` condition holds — "Vim" in the
+/// Install list when vim is installed. Listed with the marker, fires
+/// nothing; the row stays so the list reads as a catalogue with the
+/// installed items ticked, which is how Omarchy's own menu shows it.
+const ACTION_OMARCHY_INERT_ROW: u32 = 600;
 const ACTION_APP_BASE: u32 = 1000;
+const ACTION_OMARCHY_BASE: u32 = 1_000_000;
 
 /// The root menu's fixed title — also what a fresh `ShellMenu` is
 /// titled before any session opens.
@@ -363,7 +397,7 @@ const ROOT_MENU_TITLE: &str = "chonkstep";
 /// row, matching spaces on every other row so all labels in the column
 /// start at the same x. Used by the root menu's Theme and Wallpaper
 /// submenus and the window menu's Move To submenu alike.
-fn bullet_label(selected: bool, label: &str) -> String {
+pub(crate) fn bullet_label(selected: bool, label: &str) -> String {
     if selected {
         format!("\u{2022} {label}")
     } else {
@@ -403,7 +437,28 @@ fn applications_items(apps: &[crate::apps::AppEntry]) -> Vec<MenuItem> {
         .collect()
 }
 
-fn root_menu_items(selected_wallpaper: Wallpaper, selected_theme_id: &str, apps: &[crate::apps::AppEntry]) -> Vec<MenuItem> {
+/// What a root menu was built against, and therefore what its fired
+/// ids may resolve to: the resolver's bounds. `app_count` is the
+/// length of the app index the Applications submenu came from;
+/// `omarchy_count` and `omarchy_generation` are the Omarchy model's
+/// flat action count and its generation stamp (zero of each when the
+/// submenu is absent, which refuses every Omarchy id).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RootMenuBounds {
+    pub app_count: usize,
+    pub omarchy_count: usize,
+    pub omarchy_generation: u64,
+}
+
+/// `follow_omarchy` is the follow-Omarchy theme row's label when Omarchy
+/// has a current palette on this machine (`Omarchy (Tokyo Night)`, or
+/// plain `Omarchy` before any theme is set), `None` to leave the row out
+/// — a desk without Omarchy should not offer to follow it. `omarchy` is
+/// the Omarchy submenu's rows, already rendered against the current
+/// condition snapshot; empty means no submenu (Omarchy not installed,
+/// the key turned off, or nothing visible yet). The two are independent:
+/// the palette lives in Omarchy's state, the menu in its share dir.
+fn root_menu_items(selected_wallpaper: Wallpaper, selected_theme_id: &str, apps: &[crate::apps::AppEntry], follow_omarchy: Option<&str>, omarchy: Vec<MenuItem>) -> Vec<MenuItem> {
     let wallpaper_items = Wallpaper::ALL
         .into_iter()
         .enumerate()
@@ -419,41 +474,60 @@ fn root_menu_items(selected_wallpaper: Wallpaper, selected_theme_id: &str, apps:
             label: bullet_label(*id == selected_theme_id, label),
             action: ACTION_THEME_BASE + index as u32,
         })
+        .chain(follow_omarchy.map(|label| MenuItem::Action {
+            label: bullet_label(selected_theme_id == wm_theme::omarchy::ID, label),
+            action: ACTION_THEME_OMARCHY,
+        }))
         .collect();
 
-    vec![
+    let mut items = vec![
         MenuItem::Action { label: "Terminal".to_string(), action: ACTION_LAUNCH_TERMINAL },
         MenuItem::Submenu { label: "Applications".to_string(), items: applications_items(apps) },
         MenuItem::Submenu { label: "Theme".to_string(), items: theme_items },
         MenuItem::Submenu { label: "Wallpaper".to_string(), items: wallpaper_items },
-        MenuItem::Action { label: "Exit".to_string(), action: ACTION_EXIT },
-    ]
+    ];
+    // After chonkstep's own choices and before Exit: it is a guest's
+    // menu inside the host's, so it sits below the host's rows and
+    // above the one row that ends the session.
+    if !omarchy.is_empty() {
+        items.push(MenuItem::Submenu { label: "Omarchy".to_string(), items: omarchy });
+    }
+    items.push(MenuItem::Action { label: "Exit".to_string(), action: ACTION_EXIT });
+    items
 }
 
-/// `app_count` bounds the `ACTION_APP_BASE +` range: the length of the
-/// app index the fired menu was built from, so a stale or corrupt id
-/// past the vec's end dissolves to `None` instead of indexing out of
-/// bounds downstream.
-fn resolve_action(action: u32, app_count: usize) -> Option<RootMenuAction> {
+/// `bounds.app_count` bounds the `ACTION_APP_BASE +` range: the length
+/// of the app index the fired menu was built from, so a stale or
+/// corrupt id past the vec's end dissolves to `None` instead of
+/// indexing out of bounds downstream. `bounds.omarchy_count` does the
+/// same for the `ACTION_OMARCHY_BASE +` range.
+fn resolve_action(action: u32, bounds: RootMenuBounds) -> Option<RootMenuAction> {
     match action {
         ACTION_LAUNCH_TERMINAL => Some(RootMenuAction::LaunchTerminal),
         ACTION_LAUNCH_ABOUT => Some(RootMenuAction::LaunchAbout),
         ACTION_EXIT => Some(RootMenuAction::Exit),
         // Subtraction-then-compare rather than a `Range::contains`:
-        // `ACTION_APP_BASE + app_count as u32` could in principle
-        // overflow u32, and the subtraction form has no such edge.
-        action if action >= ACTION_APP_BASE
-            && ((action - ACTION_APP_BASE) as usize) < app_count =>
+        // `ACTION_OMARCHY_BASE + omarchy_count as u32` could in
+        // principle overflow u32, and the subtraction form has no such
+        // edge. Checked before the app range, whose upper bound is
+        // this range's base.
+        action if action >= ACTION_OMARCHY_BASE
+            && ((action - ACTION_OMARCHY_BASE) as usize) < bounds.omarchy_count =>
+            Some(RootMenuAction::OmarchyCommand {
+                index: (action - ACTION_OMARCHY_BASE) as usize,
+                generation: bounds.omarchy_generation,
+            }),
+        action if (ACTION_APP_BASE..ACTION_OMARCHY_BASE).contains(&action)
+            && ((action - ACTION_APP_BASE) as usize) < bounds.app_count =>
             Some(RootMenuAction::LaunchApp((action - ACTION_APP_BASE) as usize)),
         action if (ACTION_WALLPAPER_BASE..ACTION_WALLPAPER_BASE + Wallpaper::ALL.len() as u32)
             .contains(&action) => Some(RootMenuAction::SetWallpaper(
             Wallpaper::ALL[(action - ACTION_WALLPAPER_BASE) as usize],
         )),
-        action if (ACTION_THEME_BASE
-            ..ACTION_THEME_BASE + wm_theme::default_theme::CHOICES.len() as u32)
-            .contains(&action) => Some(RootMenuAction::SetTheme(
+        action if (ACTION_THEME_BASE..ACTION_THEME_OMARCHY).contains(&action) => Some(RootMenuAction::SetTheme(
             wm_theme::default_theme::CHOICES[(action - ACTION_THEME_BASE) as usize].0,
         )),
+        ACTION_THEME_OMARCHY => Some(RootMenuAction::SetTheme(wm_theme::omarchy::ID)),
         _ => None,
     }
 }
@@ -553,11 +627,12 @@ fn resolve_window_action(action: u32, workspace_count: usize) -> Option<WindowMe
 /// id ranges load-bearing for correctness instead of merely tidy.
 enum MenuSession {
     Root {
-        /// The app-index length the Applications submenu was built
-        /// against: the resolver's bound for mapping `ACTION_APP_BASE
-        /// + i` back into `LaunchApp(i)` — the root-session twin of
-        /// the window session's `workspace_count`.
-        app_count: usize,
+        /// What the Applications and Omarchy submenus were built
+        /// against: the resolver's bounds for mapping `ACTION_APP_BASE
+        /// + i` back into `LaunchApp(i)` and `ACTION_OMARCHY_BASE + i`
+        /// into `OmarchyCommand` — the root-session twin of the window
+        /// session's `workspace_count`.
+        bounds: RootMenuBounds,
     },
     /// A dock tile's own menu. Keyed by the tile's persistence id, not
     /// its slot: a middle-drag or a crash can change the column while
@@ -587,7 +662,7 @@ enum MenuSession {
 /// rather than assumed.
 fn resolve_session_action(session: &MenuSession, action: u32) -> Option<MenuAction> {
     match session {
-        MenuSession::Root { app_count } => resolve_action(action, *app_count).map(MenuAction::Root),
+        MenuSession::Root { bounds } => resolve_action(action, *bounds).map(MenuAction::Root),
         MenuSession::DockItem { id } => resolve_dock_item_action(action).map(|command| MenuAction::DockItem(id.clone(), command)),
         MenuSession::Window { client, workspace_count } => {
             resolve_window_action(action, *workspace_count)
@@ -682,11 +757,11 @@ struct ShellMenu<Id> {
 
 impl<Id: Copy + Eq + std::fmt::Debug> ShellMenu<Id> {
     fn new() -> Self {
-        // `app_count: 0` before any session opens: with no popup on
+        // Zero bounds before any session opens: with no popup on
         // screen no click can reach the resolver, so the placeholder
-        // bound is never consulted — and zero is the value that would
-        // refuse every app id anyway.
-        Self { menu: CascadeMenu::new(ROOT_MENU_TITLE, DESKTOP_BG), session: MenuSession::Root { app_count: 0 } }
+        // is never consulted — and zero is the value that would refuse
+        // every app and Omarchy id anyway.
+        Self { menu: CascadeMenu::new(ROOT_MENU_TITLE, DESKTOP_BG), session: MenuSession::Root { bounds: RootMenuBounds::default() } }
     }
 
     /// Swaps in a fresh controller titled for the session about to
@@ -704,10 +779,11 @@ impl<Id: Copy + Eq + std::fmt::Debug> ShellMenu<Id> {
         self.session = session;
     }
 
-    /// `app_count` must be the length of the same app index `items`
-    /// was built from (`Desktop::open_root_menu` reads both from its
-    /// one stored vec) — it becomes the session's bound for resolving
-    /// `ACTION_APP_BASE +` ids back into `LaunchApp` indices.
+    /// `bounds` must describe the same app index and Omarchy model
+    /// `items` was built from (`Desktop::open_root_menu` reads both
+    /// from its own stored state) — it becomes the session's bounds
+    /// for resolving `ACTION_APP_BASE +` and `ACTION_OMARCHY_BASE +`
+    /// ids back into indices.
     // Eight arguments, three over clippy's default. Grouping them into
     // a struct would only move the same eight values one line up at the
     // single call site, and this signature is deliberately a mirror of
@@ -722,11 +798,11 @@ impl<Id: Copy + Eq + std::fmt::Debug> ShellMenu<Id> {
         theme: &Theme,
         font_system: &mut cosmic_text::FontSystem,
         items: Vec<MenuItem>,
-        app_count: usize,
+        root_bounds: RootMenuBounds,
         at: Point,
         bounds: Size,
     ) {
-        self.begin_session(host, MenuSession::Root { app_count }, ROOT_MENU_TITLE.to_string());
+        self.begin_session(host, MenuSession::Root { bounds: root_bounds }, ROOT_MENU_TITLE.to_string());
         self.menu.open(host, theme, font_system, items, at, bounds, true);
     }
 
@@ -1171,6 +1247,12 @@ pub struct Desktop<B: Backend> {
     /// startup: rescanning on a schedule is future work, and a stale
     /// menu entry merely fails to launch rather than misfiring.
     apps: Vec<crate::apps::AppEntry>,
+    /// Omarchy's own menu, mirrored as the root menu's `Omarchy`
+    /// submenu — `None` when Omarchy is not installed or the
+    /// `omarchy_menu` key is off. Owned here rather than by the shell
+    /// because it is a menu-building input like `apps`, and the tick
+    /// that keeps its conditions fresh runs beside `tick_menu`.
+    omarchy: Option<crate::omarchy_menu::OmarchyMenu>,
     logo: Pixmap,
 }
 
@@ -1300,6 +1382,7 @@ impl<B: Backend> Desktop<B> {
             panel_swallow_release: None,
             theme_id,
             apps,
+            omarchy: None,
             logo,
         };
         desktop.repaint_wallpaper(backend);
@@ -2304,8 +2387,20 @@ impl<B: Backend> Desktop<B> {
         B: wm_theme_api::PopupHost<PopupId = B::ShellId>,
     {
         let bounds = self.screen_size();
-        let items = root_menu_items(self.wallpaper, &self.theme_id, &self.apps);
-        self.menu.open_root(backend, theme, &mut self.fonts.system(), items, self.apps.len(), at, bounds);
+        let omarchy_items = self.omarchy.as_ref().map(|menu| menu.items(ACTION_OMARCHY_BASE, ACTION_OMARCHY_INERT_ROW)).unwrap_or_default();
+        let root_bounds = RootMenuBounds {
+            app_count: self.apps.len(),
+            omarchy_count: self.omarchy.as_ref().map_or(0, |menu| menu.action_count()),
+            omarchy_generation: self.omarchy.as_ref().map_or(0, |menu| menu.generation()),
+        };
+        // Omarchy's presence is checked when the menu opens, not cached:
+        // the row must appear the moment `omarchy-theme-set` first runs
+        // and vanish if Omarchy is removed, and a menu open is a user
+        // gesture that can afford two file reads.
+        let follow_omarchy = wm_theme::omarchy::is_available()
+            .then(|| wm_theme::omarchy::display_name(&wm_theme::omarchy::current_theme_name().map(|n| wm_theme::omarchy::title_case(&n)).unwrap_or_default()));
+        let items = root_menu_items(self.wallpaper, &self.theme_id, &self.apps, follow_omarchy.as_deref(), omarchy_items);
+        self.menu.open_root(backend, theme, &mut self.fonts.system(), items, root_bounds, at, bounds);
     }
 
     /// The stored application index `RootMenuAction::LaunchApp`'s
@@ -2314,6 +2409,29 @@ impl<B: Backend> Desktop<B> {
     /// same app on both sides of the menu round-trip.
     pub fn apps(&self) -> &[crate::apps::AppEntry] {
         &self.apps
+    }
+
+    /// Installs, replaces or removes the Omarchy submenu's source. The
+    /// shell calls this at startup and on every reload from the
+    /// resolved `omarchy_menu` key, so a reload can turn the submenu
+    /// on or off in place and re-reads the definition either way.
+    pub fn set_omarchy_menu(&mut self, menu: Option<crate::omarchy_menu::OmarchyMenu>) {
+        self.omarchy = menu;
+    }
+
+    /// The Omarchy command behind a fired `RootMenuAction::
+    /// OmarchyCommand`, or `None` if the model has been rebuilt since
+    /// the menu that fired it opened.
+    pub fn omarchy_command(&self, index: usize, generation: u64) -> Option<String> {
+        self.omarchy.as_ref().and_then(|menu| menu.command(generation, index)).map(str::to_string)
+    }
+
+    /// An Omarchy command was just run: schedule the condition refresh
+    /// that lets its `checked` marker catch up.
+    pub fn note_omarchy_action_fired(&mut self) {
+        if let Some(menu) = self.omarchy.as_mut() {
+            menu.note_action_fired(std::time::Instant::now());
+        }
     }
 
     /// Opens the per-window commands menu at `at` (root coordinates —
@@ -2557,6 +2675,12 @@ impl<B: Backend> Desktop<B> {
         B: wm_theme_api::PopupHost<PopupId = B::ShellId>,
     {
         self.menu.tick(backend, theme, &mut self.fonts.system());
+        // The Omarchy source's own housekeeping — the mtime poll and
+        // the condition batch — rides the same once-per-iteration
+        // cadence. Both are non-blocking; the batch runs on its thread.
+        if let Some(omarchy) = self.omarchy.as_mut() {
+            omarchy.tick(std::time::Instant::now());
+        }
     }
 
     /// Shows an icon tile for a client that was just miniaturized —
@@ -3084,7 +3208,7 @@ mod tests {
     fn wallpaper_actions_resolve_to_every_built_in_wallpaper() {
         for (index, wallpaper) in Wallpaper::ALL.into_iter().enumerate() {
             assert!(matches!(
-                resolve_action(ACTION_WALLPAPER_BASE + index as u32, 0),
+                resolve_action(ACTION_WALLPAPER_BASE + index as u32, RootMenuBounds::default()),
                 Some(RootMenuAction::SetWallpaper(resolved)) if resolved == wallpaper
             ));
         }
@@ -3092,11 +3216,48 @@ mod tests {
 
     #[test]
     fn wallpaper_submenu_marks_the_current_selection() {
-        let items = root_menu_items(Wallpaper::TealBlueprint, "nextstep-classic", &[]);
+        let items = root_menu_items(Wallpaper::TealBlueprint, "nextstep-classic", &[], None, Vec::new());
         let submenu = items.iter().find(|item| item.label() == "Wallpaper").expect("wallpaper submenu");
         let MenuItem::Submenu { items, .. } = submenu else { panic!("expected submenu") };
         assert_eq!(items.len(), Wallpaper::ALL.len());
         assert!(items.iter().any(|item| item.label() == "\u{2022} Teal Blueprint"));
+    }
+
+    fn theme_submenu(selected: &str, omarchy: Option<&str>) -> Vec<MenuItem> {
+        let items = root_menu_items(Wallpaper::TealBlueprint, selected, &[], omarchy, Vec::new());
+        let submenu = items.iter().find(|item| item.label() == "Theme").expect("theme submenu");
+        let MenuItem::Submenu { items, .. } = submenu else { panic!("expected submenu") };
+        items.clone()
+    }
+
+    #[test]
+    fn theme_submenu_offers_omarchy_only_when_it_has_a_palette_to_follow() {
+        let without = theme_submenu("nextstep-classic", None);
+        assert_eq!(without.len(), wm_theme::default_theme::CHOICES.len());
+        assert!(!without.iter().any(|item| item.label().contains("Omarchy")));
+
+        let with = theme_submenu("nextstep-classic", Some("Omarchy (Tokyo Night)"));
+        assert_eq!(with.len(), wm_theme::default_theme::CHOICES.len() + 1);
+        let row = with.last().unwrap();
+        assert_eq!(row.label(), "  Omarchy (Tokyo Night)", "labelled with the current Omarchy theme, unbulleted while not following");
+        assert!(matches!(row, MenuItem::Action { action, .. } if *action == ACTION_THEME_OMARCHY));
+    }
+
+    #[test]
+    fn theme_submenu_bullets_omarchy_while_following_and_no_built_in() {
+        let items = theme_submenu(wm_theme::omarchy::ID, Some("Omarchy (Rose Pine)"));
+        assert_eq!(items.last().unwrap().label(), "\u{2022} Omarchy (Rose Pine)");
+        assert_eq!(items.iter().filter(|item| item.label().starts_with('\u{2022}')).count(), 1, "exactly one bullet");
+    }
+
+    #[test]
+    fn the_omarchy_theme_action_resolves_and_the_slot_after_it_does_not() {
+        assert!(matches!(resolve_action(ACTION_THEME_OMARCHY, RootMenuBounds::default()), Some(RootMenuAction::SetTheme(wm_theme::omarchy::ID))));
+        assert!(resolve_action(ACTION_THEME_OMARCHY + 1, RootMenuBounds::default()).is_none(), "the Theme range ends at the Omarchy row");
+        // The built-ins keep their slots below it.
+        for (index, (id, _)) in wm_theme::default_theme::CHOICES.iter().enumerate() {
+            assert!(matches!(resolve_action(ACTION_THEME_BASE + index as u32, RootMenuBounds::default()), Some(RootMenuAction::SetTheme(resolved)) if resolved == *id));
+        }
     }
 
     /// A minimal scanned entry — only `name` and `category` matter to
@@ -3129,7 +3290,7 @@ mod tests {
     /// menu build so these tests exercise the real assembly path, not
     /// `applications_items` in isolation.
     fn applications_submenu(apps: &[AppEntry]) -> Vec<MenuItem> {
-        let items = root_menu_items(Wallpaper::TealBlueprint, "nextstep-classic", apps);
+        let items = root_menu_items(Wallpaper::TealBlueprint, "nextstep-classic", apps, None, Vec::new());
         let submenu = items.iter().find(|item| item.label() == "Applications").expect("Applications submenu");
         let MenuItem::Submenu { items, .. } = submenu else { panic!("expected a submenu") };
         items.clone()
@@ -3172,7 +3333,7 @@ mod tests {
             let MenuItem::Submenu { items, .. } = cascade else { continue };
             for item in items {
                 let MenuItem::Action { label, action } = item else { panic!("app rows are actions") };
-                let Some(RootMenuAction::LaunchApp(index)) = resolve_action(*action, apps.len()) else {
+                let Some(RootMenuAction::LaunchApp(index)) = resolve_action(*action, apps_only(apps.len())) else {
                     panic!("app id {action} must resolve to LaunchApp");
                 };
                 // The resolved index names the very app the label
@@ -3191,9 +3352,56 @@ mod tests {
         // First id past the vec's end, and the base id against an
         // empty index: both out of bounds, both must dissolve rather
         // than index into the stored vec downstream.
-        assert!(resolve_action(ACTION_APP_BASE + apps.len() as u32, apps.len()).is_none());
-        assert!(resolve_action(ACTION_APP_BASE, 0).is_none());
-        assert!(resolve_action(u32::MAX, apps.len()).is_none());
+        assert!(resolve_action(ACTION_APP_BASE + apps.len() as u32, apps_only(apps.len())).is_none());
+        assert!(resolve_action(ACTION_APP_BASE, RootMenuBounds::default()).is_none());
+        assert!(resolve_action(u32::MAX, apps_only(apps.len())).is_none());
+    }
+
+    /// Bounds for a root menu with an app index and no Omarchy submenu.
+    fn apps_only(app_count: usize) -> RootMenuBounds {
+        RootMenuBounds { app_count, ..RootMenuBounds::default() }
+    }
+
+    #[test]
+    fn omarchy_ids_resolve_within_their_count_and_carry_the_generation() {
+        let bounds = RootMenuBounds { app_count: 4, omarchy_count: 3, omarchy_generation: 7 };
+        assert!(matches!(
+            resolve_action(ACTION_OMARCHY_BASE, bounds),
+            Some(RootMenuAction::OmarchyCommand { index: 0, generation: 7 })
+        ));
+        assert!(matches!(
+            resolve_action(ACTION_OMARCHY_BASE + 2, bounds),
+            Some(RootMenuAction::OmarchyCommand { index: 2, generation: 7 })
+        ));
+        assert!(resolve_action(ACTION_OMARCHY_BASE + 3, bounds).is_none());
+        assert!(resolve_action(ACTION_OMARCHY_BASE, apps_only(4)).is_none());
+        // The inert row an installed `disabled` entry fires means
+        // nothing: the pick dismisses the menu.
+        assert!(resolve_action(ACTION_OMARCHY_INERT_ROW, bounds).is_none());
+    }
+
+    #[test]
+    fn the_app_range_stops_where_the_omarchy_range_begins() {
+        // An app count large enough to reach past `ACTION_OMARCHY_BASE`
+        // is not a real index, and an id in the Omarchy range must
+        // never come back as an app even against one: the two
+        // open-ended ranges are kept disjoint by the app arm's ceiling.
+        let huge = RootMenuBounds { app_count: usize::MAX, omarchy_count: 0, omarchy_generation: 0 };
+        assert!(matches!(resolve_action(ACTION_OMARCHY_BASE - 1, huge), Some(RootMenuAction::LaunchApp(_))));
+        assert!(resolve_action(ACTION_OMARCHY_BASE, huge).is_none());
+        assert!(resolve_action(ACTION_OMARCHY_BASE + 5, huge).is_none());
+    }
+
+    #[test]
+    fn the_omarchy_submenu_sits_between_wallpaper_and_exit_only_when_it_has_rows() {
+        let without = root_menu_items(Wallpaper::TealBlueprint, "nextstep-classic", &[], None, Vec::new());
+        let labels: Vec<&str> = without.iter().map(MenuItem::label).collect();
+        assert_eq!(labels, ["Terminal", "Applications", "Theme", "Wallpaper", "Exit"]);
+
+        let rows = vec![MenuItem::Action { label: "About".to_string(), action: ACTION_OMARCHY_BASE }];
+        let with = root_menu_items(Wallpaper::TealBlueprint, "nextstep-classic", &[], None, rows);
+        let labels: Vec<&str> = with.iter().map(MenuItem::label).collect();
+        assert_eq!(labels, ["Terminal", "Applications", "Theme", "Wallpaper", "Omarchy", "Exit"]);
     }
 
     #[test]
@@ -3291,7 +3499,7 @@ mod tests {
     #[test]
     fn action_ids_resolve_only_within_their_own_sessions_namespace() {
         let window_session = MenuSession::Window { client: ClientId::default(), workspace_count: 2 };
-        let root_session = MenuSession::Root { app_count: 3 };
+        let root_session = MenuSession::Root { bounds: apps_only(3) };
 
         // A root-menu id fired during a window session (stale event,
         // stray id — however it happened) must dissolve into nothing,
@@ -3376,8 +3584,8 @@ mod tests {
         }
 
         fn open_root(&mut self) {
-            let items = root_menu_items(Wallpaper::TealBlueprint, "nextstep-classic", &[]);
-            self.menu.open_root(&mut self.host, &self.theme, &mut self.font_system, items, 0, Point::new(0, 0), Size::new(1600, 1000));
+            let items = root_menu_items(Wallpaper::TealBlueprint, "nextstep-classic", &[], None, Vec::new());
+            self.menu.open_root(&mut self.host, &self.theme, &mut self.font_system, items, RootMenuBounds::default(), Point::new(0, 0), Size::new(1600, 1000));
         }
 
         fn open_window(&mut self, ctx: &WindowMenuContext) {
@@ -3438,7 +3646,7 @@ mod tests {
         assert_eq!(f.host.open.len(), 1);
 
         let window = f.only_open_window();
-        let items = root_menu_items(Wallpaper::TealBlueprint, "nextstep-classic", &[]);
+        let items = root_menu_items(Wallpaper::TealBlueprint, "nextstep-classic", &[], None, Vec::new());
         let row = f.row_point(ROOT_MENU_TITLE, &items, 0);
         assert!(matches!(
             f.click(window, row),

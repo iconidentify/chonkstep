@@ -266,30 +266,37 @@ pub fn nextstep_classic() -> Theme {
 /// bold titles — comes from `build_chrome`, so every
 /// theme hit-tests and lays out identically and only the dress
 /// changes.
-struct ChromeSpec {
-    id: &'static str,
-    name: &'static str,
-    appearance: Appearance,
-    wallpaper: &'static str,
-    font_family: &'static str,
-    active: Fill,
-    inactive: Fill,
-    text_active: Color,
-    text_inactive: Color,
-    border: Color,
-    resizebar: Fill,
-    bevel: Bevel,
-    menu_title_bg: Fill,
-    menu_title_text: Color,
-    menu_bg: Fill,
-    menu_text: Color,
-    menu_highlight_bg: Fill,
-    menu_highlight_text: Color,
-    terminal: TerminalPalette,
-    tile: (Color, Color),
+///
+/// Crate-visible (not just this module's) so a theme derived from
+/// somewhere else — `crate::omarchy` pours an Omarchy palette into
+/// it — is built through the same recipe rather than a copy of it:
+/// there is exactly one statement of the chrome geometry, and a
+/// derived theme cannot drift from the built-ins any more than the
+/// built-ins can drift from each other.
+pub(crate) struct ChromeSpec {
+    pub(crate) id: String,
+    pub(crate) name: String,
+    pub(crate) appearance: Appearance,
+    pub(crate) wallpaper: &'static str,
+    pub(crate) font_family: &'static str,
+    pub(crate) active: Fill,
+    pub(crate) inactive: Fill,
+    pub(crate) text_active: Color,
+    pub(crate) text_inactive: Color,
+    pub(crate) border: Color,
+    pub(crate) resizebar: Fill,
+    pub(crate) bevel: Bevel,
+    pub(crate) menu_title_bg: Fill,
+    pub(crate) menu_title_text: Color,
+    pub(crate) menu_bg: Fill,
+    pub(crate) menu_text: Color,
+    pub(crate) menu_highlight_bg: Fill,
+    pub(crate) menu_highlight_text: Color,
+    pub(crate) terminal: TerminalPalette,
+    pub(crate) tile: (Color, Color),
 }
 
-fn build_chrome(spec: ChromeSpec) -> Theme {
+pub(crate) fn build_chrome(spec: ChromeSpec) -> Theme {
     let font = |weight| FontSpec {
         family: spec.font_family.to_string(),
         size: 12.0,
@@ -297,8 +304,8 @@ fn build_chrome(spec: ChromeSpec) -> Theme {
         style: FontStyle::Normal,
     };
     Theme {
-        id: spec.id.to_string(),
-        name: spec.name.to_string(),
+        id: spec.id,
+        name: spec.name,
         appearance: spec.appearance,
         wallpaper: spec.wallpaper.to_string(),
         terminal: spec.terminal,
@@ -346,8 +353,8 @@ fn build_chrome(spec: ChromeSpec) -> Theme {
 /// warm.
 pub fn amber_phosphor() -> Theme {
     build_chrome(ChromeSpec {
-        id: "amber-phosphor",
-        name: "Amber Phosphor",
+        id: "amber-phosphor".into(),
+        name: "Amber Phosphor".into(),
         appearance: Appearance::Dark,
         wallpaper: "amber-terminal",
         font_family: "DejaVu Sans",
@@ -396,8 +403,8 @@ pub fn amber_phosphor() -> Theme {
 /// teal-blueprint artwork.
 pub fn teal_blueprint() -> Theme {
     build_chrome(ChromeSpec {
-        id: "teal-blueprint",
-        name: "Teal Blueprint",
+        id: "teal-blueprint".into(),
+        name: "Teal Blueprint".into(),
         appearance: Appearance::Dark,
         wallpaper: "teal-blueprint",
         font_family: "DejaVu Sans",
@@ -446,8 +453,8 @@ pub fn teal_blueprint() -> Theme {
 /// composed with the graphite-fold artwork.
 pub fn graphite() -> Theme {
     build_chrome(ChromeSpec {
-        id: "graphite",
-        name: "Graphite",
+        id: "graphite".into(),
+        name: "Graphite".into(),
         appearance: Appearance::Dark,
         wallpaper: "graphite-fold",
         font_family: "DejaVu Sans",
@@ -500,8 +507,8 @@ pub fn graphite() -> Theme {
 /// shipped with originally.
 pub fn next_lavender() -> Theme {
     build_chrome(ChromeSpec {
-        id: "next-lavender",
-        name: "NeXT Lavender",
+        id: "next-lavender".into(),
+        name: "NeXT Lavender".into(),
         appearance: Appearance::Dark,
         wallpaper: "classic-lavender",
         font_family: "Nimbus Sans",
@@ -564,8 +571,8 @@ pub fn next_lavender() -> Theme {
 /// reads a diff as one undifferentiated wash.
 pub fn jade_lacquer() -> Theme {
     build_chrome(ChromeSpec {
-        id: "jade-lacquer",
-        name: "Jade Lacquer",
+        id: "jade-lacquer".into(),
+        name: "Jade Lacquer".into(),
         appearance: Appearance::Dark,
         wallpaper: "jade-terrace",
         font_family: "DejaVu Sans",
@@ -625,8 +632,8 @@ pub fn jade_lacquer() -> Theme {
 /// since on cream the most legible color is the darkest one.
 pub fn ivory_halftone() -> Theme {
     build_chrome(ChromeSpec {
-        id: "ivory-halftone",
-        name: "Ivory Halftone",
+        id: "ivory-halftone".into(),
+        name: "Ivory Halftone".into(),
         appearance: Appearance::Light,
         wallpaper: "ivory-orb",
         font_family: "DejaVu Sans",
@@ -684,8 +691,8 @@ pub fn indigo_filament() -> Theme {
         to: Color::rgb(0x11, 0x11, 0x1B),
     });
     build_chrome(ChromeSpec {
-        id: "indigo-filament",
-        name: "Indigo Filament",
+        id: "indigo-filament".into(),
+        name: "Indigo Filament".into(),
         appearance: Appearance::Dark,
         wallpaper: "indigo-waves",
         font_family: "DejaVu Sans",
@@ -808,8 +815,8 @@ pub fn nextstep_classic_light() -> Theme {
 /// a solid amber the pale menu can actually show.
 pub fn amber_phosphor_light() -> Theme {
     build_chrome(ChromeSpec {
-        id: "amber-phosphor",
-        name: "Amber Phosphor",
+        id: "amber-phosphor".into(),
+        name: "Amber Phosphor".into(),
         appearance: Appearance::Light,
         wallpaper: "amber-terminal",
         font_family: "DejaVu Sans",
@@ -860,8 +867,8 @@ pub fn amber_phosphor_light() -> Theme {
 /// stays the deep-teal slab (the drawing board under the sheet).
 pub fn teal_blueprint_light() -> Theme {
     build_chrome(ChromeSpec {
-        id: "teal-blueprint",
-        name: "Teal Blueprint",
+        id: "teal-blueprint".into(),
+        name: "Teal Blueprint".into(),
         appearance: Appearance::Light,
         wallpaper: "teal-blueprint",
         font_family: "DejaVu Sans",
@@ -912,8 +919,8 @@ pub fn teal_blueprint_light() -> Theme {
 /// terminal in the same desaturated set.
 pub fn graphite_light() -> Theme {
     build_chrome(ChromeSpec {
-        id: "graphite",
-        name: "Graphite",
+        id: "graphite".into(),
+        name: "Graphite".into(),
         appearance: Appearance::Light,
         wallpaper: "graphite-fold",
         font_family: "DejaVu Sans",
@@ -965,8 +972,8 @@ pub fn graphite_light() -> Theme {
 /// signature and the light desk's focus anchor at once.
 pub fn next_lavender_light() -> Theme {
     build_chrome(ChromeSpec {
-        id: "next-lavender",
-        name: "NeXT Lavender",
+        id: "next-lavender".into(),
+        name: "NeXT Lavender".into(),
         appearance: Appearance::Light,
         wallpaper: "classic-lavender",
         font_family: "Nimbus Sans",
@@ -1029,8 +1036,8 @@ pub fn next_lavender_light() -> Theme {
 /// lacquer slab with its warm sand title.
 pub fn jade_lacquer_light() -> Theme {
     build_chrome(ChromeSpec {
-        id: "jade-lacquer",
-        name: "Jade Lacquer",
+        id: "jade-lacquer".into(),
+        name: "Jade Lacquer".into(),
         appearance: Appearance::Light,
         wallpaper: "jade-terrace",
         font_family: "DejaVu Sans",
@@ -1081,8 +1088,8 @@ pub fn jade_lacquer_light() -> Theme {
 /// same press's night shift rather than a different press.
 pub fn ivory_halftone_dark() -> Theme {
     build_chrome(ChromeSpec {
-        id: "ivory-halftone",
-        name: "Ivory Halftone",
+        id: "ivory-halftone".into(),
+        name: "Ivory Halftone".into(),
         appearance: Appearance::Dark,
         wallpaper: "ivory-orb",
         font_family: "DejaVu Sans",
@@ -1139,8 +1146,8 @@ pub fn indigo_filament_light() -> Theme {
         to: Color::rgb(0x11, 0x11, 0x1B),
     });
     build_chrome(ChromeSpec {
-        id: "indigo-filament",
-        name: "Indigo Filament",
+        id: "indigo-filament".into(),
+        name: "Indigo Filament".into(),
         appearance: Appearance::Light,
         wallpaper: "indigo-waves",
         font_family: "DejaVu Sans",

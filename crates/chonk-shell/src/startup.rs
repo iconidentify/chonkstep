@@ -54,6 +54,15 @@ pub struct SessionState {
     /// see [`crate::appearance`] for the resolution layers and the
     /// published/request file contract.
     pub appearance: Appearance,
+    /// `Some(wm_theme::omarchy::ID)` while this session *follows*
+    /// Omarchy — its theme choice is "whatever Omarchy's current theme
+    /// is" rather than one of the built-ins — and `None` otherwise.
+    /// Set from the choice, not from success: a session that chose to
+    /// follow but found no palette wears the flagship *and* keeps
+    /// following, so the poll in `Shell::tick` picks the palette up the
+    /// moment Omarchy writes one. The control socket reports this as
+    /// the theme event's `following`.
+    pub following: Option<&'static str>,
     /// UI scale factor; always finite and positive (see
     /// [`resolve_scale`]).
     pub scale: f32,
@@ -67,6 +76,13 @@ pub struct SessionState {
     /// but carried here so it resolves through the same one path as
     /// everything else the config sets.
     pub restore_session: bool,
+    /// Whether the root menu hosts Omarchy's own command menu as an
+    /// `Omarchy` submenu (`crate::omarchy_menu`). Carried here so a
+    /// reload can add or drop the submenu in place, like every other
+    /// setting; the shell also re-reads the menu definition itself on
+    /// every reload, which is how a fresh `omarchy update` reaches the
+    /// menu without a restart.
+    pub omarchy_menu: bool,
     /// Per-application decoration overrides, handed to the backend.
     ///
     /// Carried here rather than read straight off the config by each
@@ -109,10 +125,11 @@ impl SessionState {
     /// — a reload that resolved by different rules than the startup it
     /// replaces would make "restart to be sure" true again.
     pub fn resolve(config: &Config) -> Self {
-        let (base_theme, appearance) = resolve_look(config.theme.as_deref(), config.appearance.as_deref());
+        let look = resolve_look(config.theme.as_deref(), config.appearance.as_deref());
         Self {
-            base_theme,
-            appearance,
+            base_theme: look.theme,
+            appearance: look.appearance,
+            following: look.following,
             scale: read_scale_factor(config.scale),
             focus: if read_focus_follows_mouse(config.focus_follows_mouse) {
                 FocusPolicy::FocusFollowsMouse
@@ -123,6 +140,7 @@ impl SessionState {
             edge_resistance: config.edge_resistance,
             terminal_font_px: config.terminal_font_px,
             restore_session: config.restore_session,
+            omarchy_menu: config.omarchy_menu,
             decorations: config.decorations.clone(),
             drag_modifier: config.drag_modifier,
             commands: config.commands.clone(),
@@ -181,75 +199,105 @@ pub fn resolve_focus_follows_mouse(env: Option<&str>, config: bool) -> bool {
     }
 }
 
-/// The theme this session dresses in. Precedence: the persisted
-/// theme-menu choice wins over the config file's `theme`, which wins
-/// over the flagship default - the menu is the more recent, more
-/// deliberate gesture (picking a theme from it restarts on the spot),
-/// so a config line written once must not keep overriding it forever.
+/// Which theme this session dresses in, by id. Precedence: the
+/// persisted theme-menu choice wins over the config file's `theme`,
+/// which wins over the flagship default - the menu is the more recent,
+/// more deliberate gesture (picking a theme from it restarts on the
+/// spot), so a config line written once must not keep overriding it
+/// forever.
 ///
-/// [`theme_select::load`] already implements the outer two layers
-/// (state file, else flagship); the config layer slots between them
-/// here rather than inside that module, which is a pure persist/recall
-/// mechanism the menu itself also uses. Which theme wins at *startup*
-/// is session policy.
-pub fn resolve_theme(config_theme: Option<&str>) -> Theme {
-    if !persisted_theme_choice_exists() {
-        if let Some(theme) = config_theme_fallback(config_theme) {
-            return theme;
-        }
-    }
-    theme_select::load()
+/// [`theme_select::load_id`] already implements the outer layer (the
+/// state file, when it names something this build knows); the config
+/// layer slots after it here rather than inside that module, which is
+/// a pure persist/recall mechanism the menu itself also uses. Which
+/// theme wins at *startup* is session policy.
+///
+/// The id may be [`wm_theme::omarchy::ID`] from either layer — the
+/// "follow Omarchy" choice is a theme id like any other here, and only
+/// [`resolve_look`] knows it is resolved by reading a file rather than
+/// by lookup.
+pub fn resolve_theme_id(config_theme: Option<&str>) -> String {
+    theme_select::load_id()
+        .or_else(|| config_theme_fallback(config_theme))
+        .unwrap_or_else(|| wm_theme::default_theme::nextstep_classic().id)
 }
 
-/// [`resolve_theme`] with the appearance axis on top: which theme, and
-/// which of its two renditions.
+/// What [`resolve_look`] decides: the theme at 1x, the appearance it
+/// was resolved in, and whether the session is following Omarchy.
+#[derive(Clone, Debug)]
+pub struct Look {
+    pub theme: Theme,
+    pub appearance: Appearance,
+    pub following: Option<&'static str>,
+}
+
+/// [`resolve_theme_id`] with the appearance axis on top: which theme,
+/// and which of its two renditions.
 ///
-/// The identity question resolves first, exactly as before (persisted
-/// menu choice over config over flagship, all in the theme's native
-/// rendition). The appearance then resolves through
+/// The identity question resolves first (persisted menu choice over
+/// config over flagship). The appearance then resolves through
 /// [`crate::appearance::resolve`] — published state, else the config's
 /// `appearance`, else the theme's own native mood — and the chosen id
 /// is re-dressed in that rendition. The native-mood floor is what
 /// makes the axis invisible until it is used: with nothing published
 /// and nothing configured, every theme looks exactly as it always has.
-pub fn resolve_look(config_theme: Option<&str>, config_appearance: Option<&str>) -> (Theme, Appearance) {
-    let native = resolve_theme(config_theme);
+///
+/// When the id is [`wm_theme::omarchy::ID`] the theme is built from
+/// Omarchy's current `colors.toml` instead, and **the palette's `mode`
+/// is the appearance** — a light Omarchy theme is a light desk, no
+/// matter what was published or configured. An Omarchy theme has one
+/// rendition, the one its author wrote; there is no other to switch to,
+/// and re-deriving one would put colours on screen the author never
+/// chose while every Omarchy terminal beside them kept the real ones.
+/// When Omarchy has no readable palette (not installed, no theme set,
+/// a file that does not parse) the session wears the flagship exactly
+/// as it would for an unknown id, warns once per distinct reason, and
+/// keeps `following` set so a palette appearing later is picked up.
+pub fn resolve_look(config_theme: Option<&str>, config_appearance: Option<&str>) -> Look {
+    let id = resolve_theme_id(config_theme);
+    let following = (id == wm_theme::omarchy::ID).then_some(wm_theme::omarchy::ID);
+    if following.is_some() {
+        match wm_theme::omarchy::load_current() {
+            Ok(theme) => {
+                omarchy_trouble(None);
+                return Look { appearance: theme.appearance, theme, following };
+            }
+            Err(reason) => omarchy_trouble(Some(reason)),
+        }
+    }
+    let native = wm_theme::default_theme::theme_by_id(&id).unwrap_or_else(wm_theme::default_theme::nextstep_classic);
     let appearance = crate::appearance::resolve(config_appearance, native.appearance);
     let theme = wm_theme::default_theme::theme_variant(&native.id, appearance).unwrap_or(native);
-    (theme, appearance)
+    Look { theme, appearance, following }
 }
 
-/// The config-file layer of [`resolve_theme`], kept free of filesystem
-/// access so its edges are testable: `None` when no theme is
+/// Warns about an unreadable Omarchy palette once per distinct reason
+/// rather than once per resolve: `resolve_look` runs on every reload
+/// and on every change the Omarchy poll sees, and a machine without
+/// Omarchy that was told to follow it should say so once, not on a
+/// timer. `None` clears the memory so the next failure is reported.
+fn omarchy_trouble(reason: Option<String>) {
+    static LAST: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+    let mut last = LAST.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if reason.is_some() && *last != reason {
+        tracing::warn!(reason = reason.as_deref().unwrap_or_default(), "following Omarchy, but its current theme has no readable colors.toml; wearing the default until it does");
+    }
+    *last = reason;
+}
+
+/// The config-file layer of [`resolve_theme_id`], kept free of
+/// filesystem access so its edges are testable: `None` when no theme is
 /// configured, and - critically - `None` with a warning, not an error,
 /// when the configured id names a theme this build does not ship. A
 /// misspelled theme must cost the user the flagship look for one
 /// session, never the session itself.
-pub fn config_theme_fallback(config_theme: Option<&str>) -> Option<Theme> {
+pub fn config_theme_fallback(config_theme: Option<&str>) -> Option<String> {
     let requested = config_theme?;
-    let theme = wm_theme::default_theme::theme_by_id(requested);
-    if theme.is_none() {
+    if !theme_select::is_known(requested) {
         tracing::warn!(theme = requested, "config names an unknown theme; using the default instead");
+        return None;
     }
-    theme
-}
-
-/// `true` exactly when [`theme_select::load`] would return a persisted
-/// menu choice rather than its flagship fallback: the state file
-/// exists and names a theme this build still ships. Must stay in
-/// lockstep with `theme_select`'s own state path.
-pub fn persisted_theme_choice_exists() -> bool {
-    let path = if let Some(root) = std::env::var_os("XDG_STATE_HOME") {
-        std::path::PathBuf::from(root).join("chonkstep/theme")
-    } else if let Some(home) = std::env::var_os("HOME") {
-        std::path::PathBuf::from(home).join(".local/state/chonkstep/theme")
-    } else {
-        return false;
-    };
-    std::fs::read_to_string(path)
-        .ok()
-        .map(|id| id.trim().to_string())
-        .is_some_and(|id| wm_theme::default_theme::theme_by_id(&id).is_some())
+    Some(requested.to_string())
 }
 
 /// Where this session keeps the small state files it writes for
@@ -518,6 +566,7 @@ mod tests {
         let state = SessionState {
             base_theme: base.clone(),
             appearance: Appearance::Dark,
+            following: None,
             scale: 2.0,
             focus: FocusPolicy::ClickToFocus,
             placement: PlacementPolicy::Smart,
@@ -527,6 +576,7 @@ mod tests {
             commands: BTreeMap::new(),
             terminal: None,
             autostart: Vec::new(),
+            omarchy_menu: true,
             decorations: DecorationRules::default(),
             drag_modifier: Some(wm_core::DEFAULT_DRAG_MODIFIER),
             keybindings: Vec::new(),
@@ -612,13 +662,16 @@ mod tests {
     #[test]
     fn config_theme_resolves_known_ids() {
         for id in ["nextstep-classic", "amber-phosphor", "teal-blueprint", "graphite", "next-lavender"] {
-            let theme = config_theme_fallback(Some(id));
-            assert_eq!(theme.map(|t| t.id), Some(id.to_string()), "built-in theme id {id} must resolve from config");
+            assert_eq!(config_theme_fallback(Some(id)), Some(id.to_string()), "built-in theme id {id} must resolve from config");
         }
     }
     #[test]
+    fn config_theme_omarchy_is_the_follow_choice() {
+        assert_eq!(config_theme_fallback(Some("omarchy")), Some(wm_theme::omarchy::ID.to_string()));
+    }
+    #[test]
     fn unknown_config_theme_degrades_to_none() {
-        // `resolve_theme` then falls through to the flagship — a
+        // `resolve_theme_id` then falls through to the flagship — a
         // misspelled theme name must never cost the user the session.
         assert!(config_theme_fallback(Some("no-such-theme")).is_none());
         assert!(config_theme_fallback(Some("")).is_none());

@@ -71,6 +71,52 @@ impl Color {
     pub const fn rgb(r: u8, g: u8, b: u8) -> Self {
         Self { r, g, b, a: 255 }
     }
+
+    /// Parses `#rrggbb` (case-insensitive; a trailing `aa` byte is
+    /// accepted and dropped, since every consumer of this type paints
+    /// chrome opaque). `None` for anything else — callers that read
+    /// user-authored palettes want to warn and derive, not guess.
+    pub fn from_hex(text: &str) -> Option<Self> {
+        let hex = text.trim().strip_prefix('#')?;
+        if hex.len() != 6 && hex.len() != 8 {
+            return None;
+        }
+        let byte = |i: usize| u8::from_str_radix(&hex[i..i + 2], 16).ok();
+        Some(Self::rgb(byte(0)?, byte(2)?, byte(4)?))
+    }
+
+    /// The `#rrggbb` spelling every palette file in the wild uses —
+    /// the inverse of [`Color::from_hex`], alpha omitted.
+    pub fn hex(self) -> String {
+        format!("#{:02x}{:02x}{:02x}", self.r, self.g, self.b)
+    }
+
+    /// Linear interpolation toward `other` by `amount` in `0.0..=1.0`
+    /// (clamped), rounded half-up per channel — the same arithmetic
+    /// Omarchy's own `mix_color` performs, so a shade this derives
+    /// matches the one its template engine would have written.
+    pub fn mix(self, other: Self, amount: f32) -> Self {
+        let amount = amount.clamp(0.0, 1.0);
+        let channel = |a: u8, b: u8| (a as f32 * (1.0 - amount) + b as f32 * amount + 0.5).floor() as u8;
+        Self::rgb(channel(self.r, other.r), channel(self.g, other.g), channel(self.b, other.b))
+    }
+
+    /// WCAG relative luminance in `0.0..=1.0` (sRGB linearized, Rec.709
+    /// weights) — the perceptual brightness contrast decisions are made
+    /// from, not the plain channel mean.
+    pub fn relative_luminance(self) -> f32 {
+        let linear = |c: u8| {
+            let c = c as f32 / 255.0;
+            if c <= 0.03928 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }
+        };
+        0.2126 * linear(self.r) + 0.7152 * linear(self.g) + 0.0722 * linear(self.b)
+    }
+
+    /// WCAG contrast ratio between two colors, `1.0..=21.0`; symmetric.
+    pub fn contrast_ratio(self, other: Self) -> f32 {
+        let (a, b) = (self.relative_luminance() + 0.05, other.relative_luminance() + 0.05);
+        if a > b { a / b } else { b / a }
+    }
 }
 
 /// How a background surface is painted. Textured/pixmap fills are part
