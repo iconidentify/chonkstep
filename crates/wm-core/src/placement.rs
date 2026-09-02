@@ -224,7 +224,10 @@ fn center_of(workarea: Rect, frame: Size) -> Point {
     )
 }
 
-fn clamp_to(workarea: Rect, frame: Size, pos: Point) -> Point {
+/// `pos` pulled inside `workarea`, for a frame of size `frame`: the
+/// top-left edge wins when the frame is bigger than the area, because
+/// that is the edge the titlebar is on.
+pub(crate) fn clamp_to(workarea: Rect, frame: Size, pos: Point) -> Point {
     let max_x = workarea.pos.x + (workarea.size.w.saturating_sub(frame.w)) as i32;
     let max_y = workarea.pos.y + (workarea.size.h.saturating_sub(frame.h)) as i32;
     Point::new(pos.x.clamp(workarea.pos.x, max_x.max(workarea.pos.x)), pos.y.clamp(workarea.pos.y, max_y.max(workarea.pos.y)))

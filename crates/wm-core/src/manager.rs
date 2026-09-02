@@ -2345,7 +2345,8 @@ impl<B: Backend> WindowManager<B> {
     /// The content geometry is the fixed point across the transition,
     /// not the frame: what the user is looking at is the application's
     /// own pixels, and those must not jump. The frame is created around
-    /// them or taken away from around them.
+    /// them or taken away from around them — with one exception, when
+    /// the frame would land off the screen; see the `ServerDrawn` arm.
     fn handle_chrome_changed(&mut self, window: B::WindowId) {
         let Some(&id) = self.window_index.get(&window) else {
             // Not mapped yet, and that is the common case rather than
@@ -2396,10 +2397,32 @@ impl<B: Backend> WindowManager<B> {
                 // Anchor the *content* where it already is; the frame is
                 // built around it, extending up and left by the chrome's
                 // own offset.
-                let frame_geom = Rect {
+                let mut frame_geom = Rect {
                     pos: Point::new(content.pos.x - layout.client_offset.x, content.pos.y - layout.client_offset.y),
                     size: layout.frame_size,
                 };
+                // ...unless that puts the chrome off the screen. A bare
+                // window sitting in the corner of its output — where a
+                // floating terminal launched without chrome tends to be
+                // — would grow a titlebar into the pixels *above* the
+                // display: a window with a frame it cannot reach is no
+                // better than one with none. So the content does move
+                // in that one case, by exactly as much as it takes to
+                // bring the frame inside the workarea; the fixed point
+                // yields to the reason for having a frame at all.
+                let center = Point::new(
+                    frame_geom.pos.x + frame_geom.size.w as i32 / 2,
+                    frame_geom.pos.y + frame_geom.size.h as i32 / 2,
+                );
+                let within = placement::clamp_to(self.usable_area_at(center), frame_geom.size, frame_geom.pos);
+                let shift = Point::new(within.x - frame_geom.pos.x, within.y - frame_geom.pos.y);
+                if shift != Point::new(0, 0) {
+                    frame_geom.pos = within;
+                    if let Some(client) = self.clients.get_mut(id) {
+                        client.geometry.pos = Point::new(content.pos.x + shift.x, content.pos.y + shift.y);
+                    }
+                    tracing::debug!(?window, ?shift, "moved a window so the frame it just gained is on screen");
+                }
                 self.backend.set_frame_geometry(frame, frame_geom);
                 let buffer = self.theme.render(&request, &layout);
                 self.backend.paint_decoration(frame, &buffer);
@@ -3644,6 +3667,38 @@ mod tests {
         // The frame must be reachable by id again, or every later click
         // on this window's chrome resolves to no client.
         assert_eq!(wm.client_for_frame(frame), Some(id));
+    }
+
+    #[test]
+    fn a_bare_window_in_the_corner_is_nudged_so_the_frame_it_gains_is_on_screen() {
+        // The one case where the content does move. Omarchy's floating
+        // terminal maps bare at the output's origin; when a config
+        // reload gives it this desktop's chrome, a frame built around
+        // content at (0,0) has its titlebar above the top edge of the
+        // display — chrome the user can see none of and grab none of.
+        let mut backend = FakeBackend::new();
+        let window = backend.create_window();
+        backend.set_geometry(window, Rect { pos: Point::new(0, 0), size: Size::new(800, 600) });
+        backend.set_client_draws_own_chrome(window, true);
+        let mut wm = wm(backend);
+        wm.dispatch(BackendEvent::MapRequest(window));
+        let id = wm.client_for_window(window).unwrap();
+        assert_eq!(wm.client(id).unwrap().geometry.pos, Point::new(0, 0), "bare, it sits where it asked to");
+
+        wm.backend_mut().set_client_draws_own_chrome(window, false);
+        wm.dispatch(BackendEvent::ChromeChanged(window));
+
+        let client = wm.client(id).unwrap();
+        assert!(client.frame.is_some(), "it is framed now");
+        let offset = client.layout.client_offset;
+        assert!(offset.y > 0, "the fake theme's chrome has a titlebar to put somewhere");
+        assert_eq!(client.geometry.pos, offset, "the content moved down and right by exactly the chrome's offset");
+        assert_eq!(client.geometry.size, Size::new(800, 600), "and kept its size");
+        assert_eq!(
+            frame_rect(&wm, window).pos,
+            Point::new(0, 0),
+            "so the frame — titlebar first — begins at the corner the window was in"
+        );
     }
 
     // ---- transient (dialog) stacking ---------------------------------

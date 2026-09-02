@@ -341,13 +341,19 @@
 #[decorations]
 # Draw this desktop's chrome whatever the client asks for. The rescue
 # direction, and the reason it exists: Omarchy ships alacritty
-# configured `decorations = "None"`, which is right under a tiling
-# compositor that draws no titlebars. Under this desktop that client
-# asks for client-side decorations and then draws none, leaving a bare
-# rectangle. One line here gives it a real titlebar back. (Until you
-# write that line it is still movable and resizable -- see
+# configured `decorations = "None"` and kitty `hide_window_decorations
+# yes`, which is right under a tiling compositor that draws no
+# titlebars. Under this desktop those clients ask for client-side
+# decorations and then draw none, leaving a bare rectangle. So the
+# default list below names exactly them, under every class Omarchy
+# launches them as -- "org.omarchy.terminal" is the floating terminal
+# behind omarchy-update and the installers. Matching is a
+# case-insensitive prefix on the application id. Setting the key
+# replaces the default rather than adding to it; `server_side = []`
+# clears it, for a bare terminal you actually want. (A window with no
+# chrome from either side is still movable and resizable -- see
 # drag_modifier above -- just bare.)
-#server_side = ["alacritty", "kitty"]
+#server_side = ["alacritty", "kitty", "org.omarchy.terminal"]
 #
 # Never draw chrome for these; the client's own is the only one. For an
 # application that insists on drawing a titlebar without asking for the

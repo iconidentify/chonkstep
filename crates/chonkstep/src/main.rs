@@ -541,6 +541,10 @@ mod tests {
         assert!(example.theme.is_none(), "example must leave theme unset (commented out)");
         assert!(!example.restore_session, "example must leave restore_session at its default (commented out)");
         assert!(example.lock_command.is_none(), "example must leave lock_command unset (commented out)");
+        assert_eq!(
+            example.decorations, defaults.decorations,
+            "example must leave [decorations] at its default (commented out) — and the commented line must restate it"
+        );
 
         let as_set = |config: &wm_config::Config| {
             let mut bindings: Vec<(KeyCombo, Action)> = config.keybindings.clone();

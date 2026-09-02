@@ -263,6 +263,17 @@ refitted, and everything returns to the corner the moment the bar
 exits. Omarchy's shell needs to know nothing about any of this; it
 draws its bar the way it draws it on Hyprland.
 
+Omarchy's terminals get titlebars, though they never ask for them.
+Omarchy configures alacritty and kitty to draw no decorations - right
+under Hyprland, which has none - and under a desktop that does, each
+one negotiates client-side chrome and then draws nothing. chonkstep
+believes every other client about its own chrome, but ships those two
+(under every class Omarchy launches them as, including the
+`org.omarchy.terminal` behind `omarchy-update`) in `[decorations]
+server_side`, so the update window, the installers and a plain terminal
+all wear this desktop's frame; `server_side = []` in the config takes it
+back off.
+
 On a HiDPI display, set `scale = 2.0` in
 `~/.config/chonkstep/config.toml` - it scales chrome, dock, cursors,
 and the terminal font as one system.

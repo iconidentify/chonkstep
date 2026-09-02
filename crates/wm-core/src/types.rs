@@ -349,7 +349,10 @@ pub enum BackendEvent<Win, Frame> {
 /// (see `wm-wayland`'s `DecorationEvidence`). They exist for the
 /// clients that answer it *wrongly* — a terminal configured
 /// `decorations = "None"` for a tiling desktop asks for client-side
-/// and then draws nothing, which `server_side` fixes in one line.
+/// and then draws nothing, which `server_side` fixes in one line. The
+/// config crate ships that line for the terminals Omarchy configures
+/// that way (`wm_config::DEFAULT_SERVER_SIDE`); this type itself
+/// defaults to empty.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct DecorationRules {
     /// Draw this desktop's chrome whatever the client asks for. The
