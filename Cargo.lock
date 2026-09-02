@@ -2830,6 +2830,7 @@ dependencies = [
  "smithay",
  "tiny-skia",
  "tracing",
+ "wayland-scanner",
  "wm-config",
  "wm-core",
  "wm-theme",

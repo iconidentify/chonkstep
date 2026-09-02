@@ -9,7 +9,13 @@ members = ["crates/*", "examples/*"]
 # A dockapp does not have to be Rust — the socket protocol is
 # language-agnostic — and `chonk-switch` is Python. Excluded so the
 # `examples/*` member glob above doesn't demand a Cargo.toml of it.
-exclude = ["examples/chonk-switch"]
+# `layer-role-repro` is a Wayland *client*, and the only one in the
+# tree: it exists to prove a compositor bug from the outside, so it
+# links `wayland-client` — a dependency nothing else here wants, and
+# one the workspace should not acquire for a single diagnostic.
+# Excluded for that reason rather than for `chonk-switch`'s; see its
+# own README for what it reproduces and how to run it.
+exclude = ["examples/chonk-switch", "examples/layer-role-repro"]
 
 [workspace.package]
 version = "0.2.0"

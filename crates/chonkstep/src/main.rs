@@ -33,6 +33,13 @@ fn main() {
     // see `chonk_shell::spawn::declare_display_stack`.
     chonk_shell::spawn::declare_display_stack(chonk_shell::spawn::DisplayStack::X11);
 
+    // Take the hot-restart marker out of the environment before it can
+    // be inherited by anything this session launches — see the function
+    // for what a leaked marker does to a nested session. Here, beside
+    // the stack declaration, because both are one-shot process facts
+    // that must be settled while this process is still single-threaded.
+    chonk_shell::startup::consume_session_continuation();
+
     // User configuration is loaded before anything scale- or theme-
     // dependent is built. `wm_config::load()` never fails by contract:
     // no file yields the defaults, and a broken file logs what is wrong

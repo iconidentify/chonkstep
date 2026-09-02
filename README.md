@@ -321,7 +321,11 @@ What the session backend does not do yet, stated plainly:
   path), idle-notify with idle-inhibit, wlr-screencopy (`grim` and
   friends - the site's screenshots are captured through it),
   wlr-foreign-toplevel-management, wlr-output-management (`wlr-randr`,
-  `kanshi`), fractional-scale-v1 with viewporter, and explicit GPU
+  `kanshi`), data-control on both its interfaces - the wlr one and the
+  standardised `ext-data-control-v1` - so clipboard managers work
+  (`wl-paste --watch`, `cliphist`, `clipman`, `wl-clip-persist`), on
+  the middle-click selection as well as the ordinary clipboard,
+  fractional-scale-v1 with viewporter, and explicit GPU
   sync (`wp_linux_drm_syncobj_v1`) on DRM sessions whose device
   supports it. Screen sharing works through the standard portal chain
   (xdg-desktop-portal-wlr over screencopy into PipeWire), verified end

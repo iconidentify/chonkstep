@@ -164,6 +164,50 @@
 # the log says so. This never runs on a normal login or logout.
 #lock_command = "swaylock"
 
+# The terminal emulator "spawn-terminal" launches, and the one
+# Terminal=true desktop entries run inside. Unset means the built-in
+# terminal (foot), which is the only one this desktop can theme
+# end-to-end: the palette, font size and geometry are passed on foot's
+# command line. Name something else and it is launched exactly as
+# written -- it keeps its own colors and its own idea of how big it
+# should be, and a light/dark switch leaves it alone. That is the
+# trade, and it is worth it if you already have a terminal configured
+# the way you like it.
+#
+# A string is split on whitespace; an array is taken verbatim, which is
+# how you pass an argument that itself contains a space.
+#terminal = "alacritty"
+#terminal = ["ghostty", "--title", "my terminal"]
+
+# Commands to run once when the session starts, in the order written.
+# Nothing runs on a reload, and nothing runs on a hot restart -- these
+# start a session, they do not re-start one.
+#
+# This is how another desktop's shell comes up beside this one. Omarchy
+# 4, for instance, runs its whole desktop -- bar, menu, notifications,
+# system panels -- as a single Quickshell process, and this desktop
+# already serves every Wayland protocol it needs:
+#autostart = [
+#  "quickshell -n -p /usr/share/omarchy/shell",
+#]
+
+# Named commands a keybinding can run, by name.
+#
+# Bindings name a command; they never contain one. That keeps the
+# binding vocabulary closed and checkable -- a name that is not
+# declared here is reported at startup, with the key and the name, and
+# the binding is dropped rather than left to fail silently when pressed.
+# It also gives each command one place to be spelled correctly.
+#
+# Same two spellings as `terminal` above: a string is split on
+# whitespace, an array is taken verbatim.
+#[commands]
+#omarchy-menu = "omarchy-shell shell toggle omarchy.menu"
+#volume-up    = "omarchy-audio-output-volume up"
+#volume-down  = "omarchy-audio-output-volume down"
+#lock         = "omarchy-system-lock"
+#notify       = ["notify-send", "hello world"]
+
 # Keybindings. Entries here merge OVER the defaults: listing a combo
 # overrides only that combo, and every unlisted default stays bound.
 # The special value "none" unbinds a combo outright.
@@ -174,12 +218,23 @@
 #   Keys: single letters and digits (a-z, 0-9), return (or enter), tab,
 #         space, escape, left, right, up, down, home, end, pageup,
 #         pagedown, minus, equal, comma, period, f1 through f12
+#   Media keys (the ones with pictures on them rather than letters):
+#         volumeup, volumedown, volumemute (or mute), micmute,
+#         playpause (or audioplay), audiopause, audiostop, audionext,
+#         audioprev, brightnessup, brightnessdown, kbdbrightnessup,
+#         kbdbrightnessdown, poweroff, search
+#         These take modifiers like any other key, and are usually
+#         bound bare: "volumeup" = "run volume-up"
 #
 # Actions (kebab-case, a closed set):
 #   spawn-terminal, close, toggle-maximize, toggle-shade, miniaturize,
 #   toggle-fullscreen, workspace-next, workspace-prev,
 #   workspace-carry-next, workspace-carry-prev, overview, window-menu,
 #   reload, restart, none
+#
+# ...plus "run <name>", the one action that takes an argument: the name
+# of an entry in [commands] above. The argument is a name, never a
+# command line -- see [commands] for why.
 #
 # "reload" re-reads this file and applies it in place; "restart"
 # re-execs the on-disk binary to pick up a new build. See the note at

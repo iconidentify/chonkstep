@@ -229,6 +229,23 @@ impl Session {
             // dev-nested script exports it); it would silently beat
             // the config file this harness just wrote.
             .env_remove("CHONKSTEP_SCALE")
+            // Same hazard, worse symptom. A session that has ever been
+            // hot-restarted leaves CHONKSTEP_SESSION_CONTINUES in the
+            // environment of every process it launches, terminals
+            // included — so a developer running this suite from a
+            // restarted desktop hands each posed session a marker
+            // saying "you are a continuation". The shell believes it
+            // and skips exactly the two things a fresh session does:
+            // the layout restore `session_restore.rs` exists to test,
+            // and autostart. The suite would then pass or fail
+            // depending on whether the developer had pressed the
+            // restart key that day, which is the worst kind of flake.
+            //
+            // The compositor now consumes the marker at startup
+            // (`chonk_shell::startup::consume_session_continuation`) so
+            // it stops propagating, but a harness must not depend on
+            // the thing it is testing having already fixed itself.
+            .env_remove("CHONKSTEP_SESSION_CONTINUES")
             .stdout(Stdio::from(log))
             .stderr(Stdio::from(log_err))
             .spawn()

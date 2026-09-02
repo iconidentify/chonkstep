@@ -363,6 +363,15 @@ impl CompositorHandler for Compositor {
         // not hypothetical — it is the Edge-on-NVIDIA flicker report;
         // see `dmabuf::install_readiness_hook` for the mechanism.
         crate::dmabuf::install_readiness_hook(surface);
+        // And the guard against smithay's layer-shell pre-commit hook
+        // outliving the role that installed it — a Qt shell that
+        // destroys a layer surface and commits the same `wl_surface`
+        // again is otherwise killed for a protocol error it did not
+        // commit. It has to go on every surface, before the role
+        // exists, because that is the only point early enough to be
+        // ahead of smithay's hook in the surface's hook list; see
+        // `layers::install_orphaned_role_guard` for the whole story.
+        crate::layers::install_orphaned_role_guard(surface);
     }
 
     fn commit(&mut self, surface: &WlSurface) {

@@ -58,6 +58,7 @@
 //! instead of being defaulted: the caller must be able to tell "user
 //! said nothing" apart from "user chose the default value".
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 pub use wm_core::FocusPolicy;
@@ -114,6 +115,27 @@ pub enum Action {
     /// applies a changed *build*, and only the second one has to cost
     /// the user anything.
     Restart,
+    /// Run the argv named by this string in the `[commands]` table.
+    ///
+    /// The verb set above is closed because the WM owns its own
+    /// semantics, and that rule still holds: this variant carries a
+    /// *name*, never a command line. Bindings stay a closed vocabulary
+    /// the parser can validate; the argv lives in one table where it is
+    /// declared once, checked once, and can be reported on by name when
+    /// something is wrong with it.
+    ///
+    /// The distinction is not pedantry. It is what lets an unknown
+    /// command in a binding be diagnosed as "no such command" at parse
+    /// time — before any key is ever pressed — instead of failing
+    /// silently at spawn time with no line number to blame. A binding
+    /// naming a command that does not exist is dropped by [`parse`],
+    /// exactly as an unparsable key spec is.
+    ///
+    /// It exists because a desktop that cannot launch anything the user
+    /// names cannot host another desktop's tooling. Omarchy publishes
+    /// 382 commands through one router; without this verb not one of
+    /// them can reach a key.
+    Run(String),
 }
 
 /// Maps a kebab-case action name from a config file to its [`Action`].
@@ -137,7 +159,24 @@ fn action_from_name(name: &str) -> Option<Action> {
         "window-menu" => Some(Action::WindowMenu),
         "reload" => Some(Action::Reload),
         "restart" => Some(Action::Restart),
-        _ => None,
+        // `run <name>` is the one action name that carries an argument,
+        // and the argument is a key into `[commands]` — not a command
+        // line. Everything after the verb is taken whole, including
+        // inner whitespace, so a command may be named "lock screen" if
+        // its author prefers that to "lock-screen"; only the ends are
+        // trimmed. An empty name is rejected here rather than becoming
+        // a lookup for "" that could never match anything.
+        //
+        // The name arrives already lowercased by the caller, and
+        // `[commands]` lowercases its keys for the same reason, so
+        // `run Lock` and a `Lock = ...` entry find each other. Command
+        // names are case-insensitive like every other name in this
+        // file; nothing is gained by making capitalization a silent
+        // way to lose a binding.
+        rest => {
+            let name = rest.strip_prefix("run ")?.trim();
+            (!name.is_empty()).then(|| Action::Run(name.to_string()))
+        }
     }
 }
 
@@ -214,6 +253,34 @@ pub struct Config {
     /// locker configured means the recovered session comes back
     /// unlocked, and the compositor says so in the log.
     pub lock_command: Option<String>,
+    /// Named argv lists a binding can reach through [`Action::Run`],
+    /// keyed by lowercased name. Empty by default: the desktop's own
+    /// verbs need no entry here, and this table exists for the things
+    /// only the user knows the name of.
+    ///
+    /// A `BTreeMap` rather than a `Vec` of pairs because the only
+    /// operation is lookup by name, and because a stable order makes
+    /// the "no such command" diagnostic list candidates the same way
+    /// twice.
+    pub commands: BTreeMap<String, Vec<String>>,
+    /// The terminal emulator `spawn-terminal` launches, as argv.
+    ///
+    /// `None` means the built-in default, which is the only terminal
+    /// this desktop can theme end-to-end — the palette is passed on its
+    /// command line, so a replacement gets the desktop's colors only if
+    /// it happens to read them from somewhere else. That tradeoff is
+    /// the user's to make: a session hosting another desktop's tooling
+    /// has to be able to use that desktop's terminal.
+    pub terminal: Option<Vec<String>>,
+    /// Commands to run once, in order, when the session comes up.
+    ///
+    /// Named argv like [`Self::commands`] but a list rather than a map:
+    /// these are not addressed by name, they are simply run, and the
+    /// order they appear in the file is the order they start in. Empty
+    /// by default — a desktop that launches processes the user did not
+    /// ask for is the thing `restore_session` is deliberately opt-in to
+    /// avoid, and this is the same rule.
+    pub autostart: Vec<Vec<String>>,
     pub keybindings: Vec<(KeyCombo, Action)>,
 }
 
@@ -271,6 +338,9 @@ impl Config {
             drag_modifier: Some(DEFAULT_DRAG_MODIFIER),
             restore_session: false,
             lock_command: None,
+            commands: BTreeMap::new(),
+            terminal: None,
+            autostart: Vec::new(),
             keybindings: vec![
                 bind("alt+shift+return", Action::SpawnTerminal),
                 bind("alt+shift+q", Action::Close),
@@ -350,6 +420,33 @@ fn keysym_for(token: &str) -> Option<u32> {
         "f10" => 0xffc7,
         "f11" => 0xffc8,
         "f12" => 0xffc9,
+        // The XF86 block: the keys with pictures on them rather than
+        // letters. Spelled here in the same run-together style as
+        // "pageup" rather than as their X11 names, because
+        // `XF86AudioRaiseVolume` in a config file is shouting a
+        // vendor prefix at someone who just wants the volume key.
+        //
+        // These exist because a desktop cannot host another desktop's
+        // tooling without them. Every volume, brightness and media
+        // binding any Linux desktop ships lands on one of these
+        // keysyms, and until now this parser had no name for a single
+        // one of them — a laptop's volume keys were not merely
+        // unbound, they were unbindable.
+        "volumeup" => 0x1008ff13,
+        "volumedown" => 0x1008ff11,
+        "volumemute" | "mute" => 0x1008ff12,
+        "micmute" => 0x1008ffb2,
+        "playpause" | "audioplay" => 0x1008ff14,
+        "audiopause" => 0x1008ff31,
+        "audiostop" => 0x1008ff15,
+        "audionext" => 0x1008ff17,
+        "audioprev" => 0x1008ff16,
+        "brightnessup" => 0x1008ff02,
+        "brightnessdown" => 0x1008ff03,
+        "kbdbrightnessup" => 0x1008ff05,
+        "kbdbrightnessdown" => 0x1008ff06,
+        "poweroff" => 0x1008ff2a,
+        "search" => 0x1008ff1b,
         _ => return None,
     };
     Some(keysym)
@@ -640,6 +737,57 @@ pub fn parse(text: &str) -> Result<Config, String> {
                     "config: [decorations] must be a table, ignoring it"
                 ),
             },
+            "commands" => match value {
+                toml::Value::Table(entries) => {
+                    for (name, value) in entries {
+                        let name = name.trim().to_ascii_lowercase();
+                        if name.is_empty() {
+                            tracing::warn!("config: [commands] entry with an empty name, skipping it");
+                            continue;
+                        }
+                        match argv_from_value(value, "commands") {
+                            Some(argv) => {
+                                config.commands.insert(name, argv);
+                            }
+                            None => tracing::warn!(
+                                name = %name,
+                                "config: [commands] entry must be a command-line string or an array of arguments, skipping it"
+                            ),
+                        }
+                    }
+                }
+                other => tracing::warn!(
+                    value = ?other,
+                    "config: [commands] must be a table, ignoring it"
+                ),
+            },
+            "terminal" => match argv_from_value(value, "terminal") {
+                Some(argv) => config.terminal = Some(argv),
+                None => tracing::warn!(
+                    value = ?value,
+                    "config: terminal must be a command-line string or an array of arguments, keeping the built-in terminal"
+                ),
+            },
+            // A list of command lines rather than a table: these are
+            // run, not named, and their file order is their start
+            // order — which a table could not promise.
+            "autostart" => match value {
+                toml::Value::Array(items) => {
+                    for item in items {
+                        match argv_from_value(item, "autostart") {
+                            Some(argv) => config.autostart.push(argv),
+                            None => tracing::warn!(
+                                value = ?item,
+                                "config: autostart entries must be command-line strings or arrays of arguments, skipping one"
+                            ),
+                        }
+                    }
+                }
+                other => tracing::warn!(
+                    value = ?other,
+                    "config: autostart must be an array of command lines, ignoring it"
+                ),
+            },
             "keybindings" => match value {
                 toml::Value::Table(entries) => apply_keybindings(&mut config.keybindings, entries),
                 other => tracing::warn!(
@@ -653,7 +801,70 @@ pub fn parse(text: &str) -> Result<Config, String> {
             ),
         }
     }
+    // `run <name>` is checked here, after the whole file has been read,
+    // rather than inside `apply_keybindings`. TOML tables reach us in
+    // an order we do not control, so a binding may well be parsed
+    // before the `[commands]` table it refers to; validating during the
+    // walk would reject perfectly good configs based on where the user
+    // happened to put a section.
+    //
+    // A binding naming a command that does not exist is dropped, not
+    // kept and failed at spawn time. The whole point of routing argv
+    // through a named table is that a typo becomes one warning at
+    // startup naming both the key and the command, instead of a key
+    // that silently does nothing whenever it is pressed.
+    config.keybindings.retain(|(combo, action)| {
+        let Action::Run(name) = action else { return true };
+        if config.commands.contains_key(name) {
+            return true;
+        }
+        tracing::warn!(
+            command = %name,
+            key = ?combo,
+            known = ?config.commands.keys().collect::<Vec<_>>(),
+            "config: binding runs a command that is not in [commands], dropping the binding"
+        );
+        false
+    });
     Ok(config)
+}
+
+/// A command line from the file, as argv.
+///
+/// Two spellings, because they answer different needs and neither one
+/// alone is enough. A bare string is what a user reaches for and is
+/// split on whitespace, exactly as `lock_command` is. An array is the
+/// escape hatch for the case that split cannot express — an argument
+/// with a space in it — and is taken verbatim, so
+/// `["notify-send", "hello world"]` sends one argument, not two.
+///
+/// `None` means "not a command line at all". An empty result is also
+/// `None`: a string of only spaces and an empty array both describe no
+/// program to run, and every caller would otherwise have to guard
+/// against spawning "".
+fn argv_from_value(value: &toml::Value, what: &str) -> Option<Vec<String>> {
+    let argv: Vec<String> = match value {
+        toml::Value::String(line) => line.split_whitespace().map(str::to_string).collect(),
+        toml::Value::Array(items) => {
+            let mut argv = Vec::with_capacity(items.len());
+            for item in items {
+                match item {
+                    toml::Value::String(arg) => argv.push(arg.clone()),
+                    other => {
+                        tracing::warn!(
+                            value = ?other,
+                            key = %what,
+                            "config: command arguments must be strings, rejecting this command"
+                        );
+                        return None;
+                    }
+                }
+            }
+            argv
+        }
+        _ => return None,
+    };
+    (!argv.is_empty()).then_some(argv)
 }
 
 /// A TOML array of strings, trimmed and lowercased for the
@@ -1456,5 +1667,210 @@ mod tests {
             None => std::env::remove_var("HOME"),
         }
         let _ = std::fs::remove_dir_all(&scratch);
+    }
+}
+
+#[cfg(test)]
+mod command_tests {
+    use super::*;
+
+    fn action_for(config: &Config, spec: &str) -> Option<Action> {
+        let combo = parse_key(spec).expect("test spec must parse");
+        config
+            .keybindings
+            .iter()
+            .find(|(existing, _)| *existing == combo)
+            .map(|(_, action)| action.clone())
+    }
+
+    /// The whole point of the seam: a key reaches a named command, and
+    /// the name — not the command line — is what the binding carries.
+    #[test]
+    fn a_binding_runs_a_named_command() {
+        let config = parse(
+            r#"
+            [commands]
+            omarchy-menu = "omarchy-shell shell toggle omarchy.menu"
+
+            [keybindings]
+            "super+space" = "run omarchy-menu"
+            "#,
+        )
+        .expect("valid config");
+        assert_eq!(
+            action_for(&config, "super+space"),
+            Some(Action::Run("omarchy-menu".into()))
+        );
+        assert_eq!(
+            config.commands.get("omarchy-menu").map(Vec::as_slice),
+            Some(["omarchy-shell", "shell", "toggle", "omarchy.menu"].map(String::from).as_slice())
+        );
+    }
+
+    /// Declaring the table *after* the binding that uses it must work.
+    /// TOML hands us keys in an order the user does not control, so
+    /// validating during the walk would make a correct config fail on
+    /// section order alone. This is the regression test for that.
+    #[test]
+    fn command_table_may_come_after_the_binding_that_names_it() {
+        let config = parse(
+            r#"
+            [keybindings]
+            "super+space" = "run menu"
+
+            [commands]
+            menu = "omarchy-menu"
+            "#,
+        )
+        .expect("valid config");
+        assert_eq!(action_for(&config, "super+space"), Some(Action::Run("menu".into())));
+    }
+
+    /// A binding naming a command nobody declared is dropped at parse
+    /// time rather than kept and failed at press time.
+    #[test]
+    fn a_binding_naming_an_unknown_command_is_dropped() {
+        let config = parse(
+            r#"
+            [commands]
+            menu = "omarchy-menu"
+
+            [keybindings]
+            "super+space" = "run typo"
+            "#,
+        )
+        .expect("valid config");
+        assert_eq!(action_for(&config, "super+space"), None);
+    }
+
+    /// An unknown `run` must not take the *default* binding for that
+    /// combo down with it — the same contract every other unparsable
+    /// entry honors.
+    #[test]
+    fn a_dropped_run_binding_leaves_other_bindings_alone() {
+        let config = parse(
+            r#"
+            [keybindings]
+            "super+space" = "run nope"
+            "#,
+        )
+        .expect("valid config");
+        let defaults = Config::default_config();
+        assert_eq!(config.keybindings.len(), defaults.keybindings.len());
+        assert_eq!(action_for(&config, "alt+shift+return"), Some(Action::SpawnTerminal));
+    }
+
+    /// Command names fold case on both sides, so capitalization can
+    /// never be the silent reason a key does nothing.
+    #[test]
+    fn command_names_are_case_insensitive_on_both_sides() {
+        let config = parse(
+            r#"
+            [commands]
+            Lock = "omarchy-system-lock"
+
+            [keybindings]
+            "super+l" = "run LOCK"
+            "#,
+        )
+        .expect("valid config");
+        assert_eq!(action_for(&config, "super+l"), Some(Action::Run("lock".into())));
+        assert!(config.commands.contains_key("lock"));
+    }
+
+    /// An array is the escape hatch a whitespace split cannot express:
+    /// one argument that contains a space stays one argument.
+    #[test]
+    fn an_array_command_keeps_arguments_with_spaces_whole() {
+        let config = parse(
+            r#"
+            [commands]
+            greet = ["notify-send", "hello world"]
+            "#,
+        )
+        .expect("valid config");
+        assert_eq!(
+            config.commands.get("greet").map(Vec::as_slice),
+            Some(["notify-send", "hello world"].map(String::from).as_slice())
+        );
+    }
+
+    /// Empty command lines describe no program to run, in either
+    /// spelling, and must never reach a caller that would spawn "".
+    #[test]
+    fn empty_command_lines_are_rejected_in_both_spellings() {
+        let config = parse(
+            r#"
+            [commands]
+            blank = "   "
+            nothing = []
+            "#,
+        )
+        .expect("valid config");
+        assert!(config.commands.is_empty());
+    }
+
+    /// `run` with no name is not an action. It must not become a
+    /// lookup for the empty string.
+    #[test]
+    fn run_without_a_name_is_not_an_action() {
+        assert_eq!(action_from_name("run"), None);
+        assert_eq!(action_from_name("run   "), None);
+    }
+
+    /// Autostart is a list because its order is meaningful, and the
+    /// file's order is the one that survives.
+    #[test]
+    fn autostart_keeps_file_order() {
+        let config = parse(
+            r#"
+            autostart = ["first --a", ["second", "--b"]]
+            "#,
+        )
+        .expect("valid config");
+        assert_eq!(
+            config.autostart,
+            vec![
+                vec!["first".to_string(), "--a".to_string()],
+                vec!["second".to_string(), "--b".to_string()],
+            ]
+        );
+    }
+
+    /// The media keys exist now. Before this they were not merely
+    /// unbound — there was no name for them, so a laptop's volume keys
+    /// could not be bound at all.
+    #[test]
+    fn media_keys_parse() {
+        for (spec, keysym) in [
+            ("volumeup", 0x1008ff13),
+            ("volumedown", 0x1008ff11),
+            ("mute", 0x1008ff12),
+            ("brightnessup", 0x1008ff02),
+            ("playpause", 0x1008ff14),
+        ] {
+            let combo = parse_key(spec).unwrap_or_else(|| panic!("{spec} must parse"));
+            assert_eq!(combo.keysym, keysym, "{spec}");
+        }
+    }
+
+    /// A configured terminal is argv, in both spellings.
+    #[test]
+    fn terminal_accepts_a_string_or_an_array() {
+        let from_string = parse(r#"terminal = "alacritty --class term""#).expect("valid");
+        assert_eq!(
+            from_string.terminal.as_deref(),
+            Some(["alacritty", "--class", "term"].map(String::from).as_slice())
+        );
+        let from_array = parse(r#"terminal = ["ghostty"]"#).expect("valid");
+        assert_eq!(from_array.terminal.as_deref(), Some(["ghostty".to_string()].as_slice()));
+    }
+
+    /// Nothing configured means the built-in terminal, and that has to
+    /// stay distinguishable from "the user chose something".
+    #[test]
+    fn no_terminal_key_leaves_the_builtin_selected() {
+        assert!(parse("").expect("valid").terminal.is_none());
+        assert!(Config::default_config().terminal.is_none());
     }
 }

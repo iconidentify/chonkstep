@@ -176,22 +176,59 @@ pub(crate) struct EwmhLedger {
 }
 
 impl EwmhLedger {
+    // Every `note_*` below sets its dirty flag only when the value it
+    // is handed actually differs from the one already pending. "Dirty"
+    // has to mean *changed*, not *mentioned*, because several of these
+    // are re-asserted unconditionally on every pass of the event loop
+    // by callers whose job is to keep a derived value current rather
+    // than to notice when it moves.
+    //
+    // `_NET_WORKAREA` is the one that made this a bug rather than a
+    // tidiness point. `layers::refresh` runs `apply_workareas` every
+    // pass, which calls `WindowManager::set_workareas`, which publishes
+    // unconditionally — correct on its own terms, since it cannot know
+    // whether the insets it just composed are new. With no layer
+    // surface reserving space that path stays quiet, so an ordinary
+    // session never showed it. Give the session a bar with an
+    // exclusive zone — Omarchy's, for one — and it fires forever:
+    // measured at ~14,000 `PropertyNotify` events per second and 18%
+    // of a CPU, burned rewriting four unchanged integers onto the
+    // XWayland root, on a desktop with nothing happening.
+    //
+    // The comparison belongs here rather than in `set_workareas`
+    // because this ledger is the only thing that knows what has already
+    // been published; a caller re-asserting a derived value is being
+    // correct, and asking every one of them to remember its own last
+    // write is how the check gets forgotten by the next one.
+
     pub(crate) fn note_client_list(&mut self, clients: &[WlWindowId]) {
+        if self.client_list == clients {
+            return;
+        }
         self.client_list = clients.to_vec();
         self.client_list_dirty = true;
     }
 
     pub(crate) fn note_active_window(&mut self, window: Option<WlWindowId>) {
+        if self.active == window {
+            return;
+        }
         self.active = window;
         self.active_dirty = true;
     }
 
     pub(crate) fn note_workspaces(&mut self, count: usize, current: usize) {
+        if self.workspaces == (count, current) {
+            return;
+        }
         self.workspaces = (count, current);
         self.workspaces_dirty = true;
     }
 
     pub(crate) fn note_workarea(&mut self, area: Rect, workspace_count: usize) {
+        if self.workarea == Some((area, workspace_count)) {
+            return;
+        }
         self.workarea = Some((area, workspace_count));
         self.workarea_dirty = true;
     }
@@ -574,6 +611,88 @@ fn drain_inbound(comp: &mut Compositor) {
 mod tests {
     use super::*;
     use wm_theme_api::{Point, Size};
+
+    fn rect(x: i32, y: i32, w: u32, h: u32) -> Rect {
+        Rect::new(Point { x, y }, Size { w, h })
+    }
+
+    /// Re-asserting the same workarea must not queue another write.
+    ///
+    /// This is the regression that mattered: `layers::refresh` runs
+    /// `apply_workareas` on every pass of the event loop, and that
+    /// publishes unconditionally. With no layer surface reserving
+    /// space the path is quiet, so an ordinary session never showed
+    /// it; a bar with an exclusive zone turned it into ~14,000
+    /// `PropertyNotify` events per second and 18% of a CPU spent
+    /// rewriting four integers that had not changed.
+    #[test]
+    fn re_noting_an_unchanged_workarea_queues_nothing() {
+        let mut ledger = EwmhLedger::default();
+        ledger.note_workarea(rect(0, 26, 2504, 1574), 1);
+        assert!(ledger.workarea_dirty, "the first value is genuinely new");
+        ledger.workarea_dirty = false;
+
+        for _ in 0..100 {
+            ledger.note_workarea(rect(0, 26, 2504, 1574), 1);
+        }
+        assert!(!ledger.workarea_dirty, "an unchanged workarea must not queue a write");
+    }
+
+    /// ...and a workarea that really moves still does.
+    #[test]
+    fn a_changed_workarea_still_queues_a_write() {
+        let mut ledger = EwmhLedger::default();
+        ledger.note_workarea(rect(0, 26, 2504, 1574), 1);
+        ledger.workarea_dirty = false;
+
+        ledger.note_workarea(rect(0, 52, 2504, 1548), 1);
+        assert!(ledger.workarea_dirty, "a bar that changed height must reach the root window");
+
+        ledger.workarea_dirty = false;
+        // The workspace count is half the value; changing only that
+        // still counts as a change.
+        ledger.note_workarea(rect(0, 52, 2504, 1548), 2);
+        assert!(ledger.workarea_dirty, "the workspace count is part of the published value");
+    }
+
+    /// The same rule for the other three, which are re-asserted by
+    /// their own always-current callers.
+    #[test]
+    fn unchanged_values_queue_nothing_for_any_of_the_root_properties() {
+        let mut ledger = EwmhLedger::default();
+        ledger.note_active_window(None);
+        ledger.note_workspaces(1, 0);
+        ledger.note_client_list(&[]);
+        ledger.active_dirty = false;
+        ledger.workspaces_dirty = false;
+        ledger.client_list_dirty = false;
+
+        ledger.note_active_window(None);
+        ledger.note_workspaces(1, 0);
+        ledger.note_client_list(&[]);
+        assert!(!ledger.active_dirty, "the active window did not move");
+        assert!(!ledger.workspaces_dirty, "the workspace row did not change");
+        assert!(!ledger.client_list_dirty, "the client list did not change");
+    }
+
+    /// `mark_client_list_dirty` must still force a rewrite of content
+    /// that has not changed — that is its entire job. Smithay's XWM
+    /// appends a freshly mapped window to `_NET_CLIENT_LIST` after this
+    /// module's REPLACE, so the list has to be written again with the
+    /// identical contents to dedup it. The comparison added to
+    /// `note_client_list` must not defeat that.
+    #[test]
+    fn the_dedup_override_still_forces_an_unchanged_client_list_out() {
+        let mut ledger = EwmhLedger::default();
+        ledger.note_client_list(&[]);
+        ledger.client_list_dirty = false;
+
+        ledger.mark_client_list_dirty();
+        assert!(
+            ledger.client_list_dirty,
+            "the smithay-append dedup depends on being able to re-publish identical contents"
+        );
+    }
 
     #[test]
     fn the_supported_list_matches_what_this_stack_actually_does() {

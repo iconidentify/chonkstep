@@ -67,10 +67,10 @@ use smithay::output::Output;
 use smithay::reexports::wayland_server::protocol::wl_output::WlOutput;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::utils::SERIAL_COUNTER;
-use smithay::wayland::compositor::with_states;
+use smithay::wayland::compositor::{add_pre_commit_hook, with_states};
 use smithay::wayland::shell::wlr_layer::{
     Anchor, ExclusiveZone, KeyboardInteractivity, Layer, LayerSurface, LayerSurfaceCachedState,
-    Margins, WlrLayerShellHandler, WlrLayerShellState,
+    Margins, WlrLayerShellHandler, WlrLayerShellState, LAYER_SURFACE_ROLE,
 };
 use smithay::wayland::shell::xdg::PopupSurface;
 
@@ -557,12 +557,40 @@ fn sync_keyboard(comp: &mut Compositor) {
     }
     let target = match want {
         Some((_, surface)) => Some(surface),
-        None => focused_window_surface(comp),
+        // Nobody claims exclusivity any more, so the keyboard leaves —
+        // but not necessarily to a window. A focus grab
+        // (`focus_grab.rs`) sits one rung below exclusive
+        // interactivity and one above window focus, so if one is
+        // holding, the seat lands on its whitelist instead. Without
+        // this arm an Omarchy popout that is *also* a grab would lose
+        // the keyboard the moment any unrelated launcher closed,
+        // because this pass runs before `focus_grab::refresh` and that
+        // pass only re-asserts focus on the passes something changed.
+        None => focus_grab_target(comp).or_else(|| focused_window_surface(comp)),
     };
     let Some(keyboard) = comp.seat.get_keyboard() else {
         return;
     };
     keyboard.set_focus(comp, target, SERIAL_COUNTER.next_serial());
+}
+
+/// The surface an active focus grab holds the keyboard on, if one
+/// does — consulted by [`sync_keyboard`] before it falls back to
+/// window focus. `None` in every session where no client has started a
+/// grab, which is every session not running a shell that speaks
+/// `hyprland-focus-grab-v1`.
+fn focus_grab_target(comp: &Compositor) -> Option<WlSurface> {
+    if !comp.focus_grab.is_active() {
+        return None;
+    }
+    // Ask through the same predicate the input path uses, so there is
+    // one definition of "on the whitelist" in the crate: the currently
+    // focused surface keeps the keyboard if it is already inside.
+    let focused = comp.seat.get_keyboard().and_then(|keyboard| keyboard.current_focus());
+    match focused {
+        Some(surface) if !comp.focus_grab.escapes(Some(&surface), None) => Some(surface),
+        _ => comp.focus_grab.keyboard_surface(),
+    }
 }
 
 /// The surface of the window `wm-core` currently calls focused — where
@@ -653,6 +681,144 @@ pub(crate) fn accepts_focus_on_click(backend: &crate::state::WaylandBackend, id:
         .iter()
         .find(|record| record.id == id)
         .is_some_and(|record| record.interactivity != KeyboardInteractivity::None)
+}
+
+// ---------------------------------------------------------------------
+// Workaround: smithay's layer-shell pre-commit hook outlives its role.
+// ---------------------------------------------------------------------
+
+/// The exact condition smithay's layer-shell pre-commit hook treats as
+/// a fatal client mistake: a zero width without both horizontal
+/// anchors, or a zero height without both vertical ones. Restated here
+/// because [`install_orphaned_role_guard`] has to answer "would
+/// upstream kill this client?" *before* upstream is asked, and the
+/// only honest way to answer it is to ask the same question in the
+/// same words. Upstream's copy is the hook installed around line 125
+/// of `smithay-0.7.0/src/wayland/shell/wlr_layer/handlers.rs`.
+fn upstream_rejects(pending: &LayerSurfaceCachedState) -> bool {
+    (pending.size.w == 0 && !pending.anchor.anchored_horizontally())
+        || (pending.size.h == 0 && !pending.anchor.anchored_vertically())
+}
+
+/// Rewrites the pending state of a surface whose layer role is gone
+/// into a shape [`upstream_rejects`] accepts at any size: all four
+/// anchors, the one anchor value that satisfies both halves of that
+/// check unconditionally.
+///
+/// Only `anchor` is touched, and the rewrite stays invisible even in
+/// the one case where the state can be read again. A client may
+/// `get_layer_surface` the same `wl_surface` a second time — smithay's
+/// `set_role` accepts a role it has already given — and smithay does
+/// not clear the cached state when it does, so whatever is left here
+/// is what that surface starts from. It makes no difference:
+/// everywhere this module reads an anchor, all four edges and none
+/// mean the same thing. [`axis_place`] centers on `(true, true)`
+/// exactly as it centers on `(false, false)`; [`axis_size`] ignores
+/// anchors entirely once the client has asked for a real size;
+/// [`exclusive_edge`] calls both combinations neutral. The one branch
+/// where all-four would differ is [`axis_size`]'s stretch, and it is
+/// out of reach: a client that commits without asking for a size is
+/// committing a zero, which is legal only when it anchored that axis
+/// itself.
+fn neutralize_orphan(pending: &mut LayerSurfaceCachedState) {
+    pending.anchor = Anchor::all();
+}
+
+/// Installs the per-surface guard that stops a *destroyed* layer
+/// surface from killing its client on the next commit. Called once per
+/// surface from `CompositorHandler::new_surface`, beside the dmabuf
+/// readiness hook; silent on every surface that never takes the layer
+/// role.
+///
+/// # The upstream bug
+///
+/// `smithay-0.7.0/src/wayland/shell/wlr_layer/handlers.rs` adds a
+/// pre-commit hook to the `wl_surface` when a layer surface is created
+/// (around line 125) and never removes it — there is no
+/// `remove_pre_commit_hook` call anywhere in that file, and the
+/// `HookId` that would allow one is dropped on the floor. The hook
+/// belongs to the `wl_surface`, so it outlives the role. Meanwhile
+/// `destroyed` (around line 352 of the same file) resets the cached
+/// state to `Default::default()` — size 0×0, no anchors — which is
+/// precisely the shape the surviving hook calls a protocol error.
+///
+/// So a client that destroys its `zwlr_layer_surface_v1` and then
+/// commits the same `wl_surface` again is killed by a hook belonging
+/// to an object it already destroyed, over state it never wrote.
+///
+/// That sequence is neither hypothetical nor rare — it is how Qt
+/// unmaps a layer surface: `zwlr_layer_surface_v1.destroy()`, then
+/// `wl_surface.attach(nil)` and `commit()`, keeping the surface for
+/// the next show. Quickshell is built that way, and Quickshell is the
+/// whole of Omarchy's desktop shell, so without this guard the bar,
+/// the menus and the notification surfaces die together the first time
+/// the user closes a menu: one `zwlr_layer_surface_v1` error, code 1,
+/// "width 0 requested without setting left and right anchors", and the
+/// shell's connection is gone.
+///
+/// # Why a hook of our own, and why it runs first
+///
+/// smithay keeps pre-commit hooks in a `Vec` and invokes them in
+/// registration order — `wayland/compositor/tree.rs`:
+/// `add_pre_commit_hook` pushes, `invoke_pre_commit_hooks` iterates
+/// the clone front to back. This guard is registered from
+/// `new_surface`, which runs when the `wl_surface` is created;
+/// smithay's is registered from `get_layer_surface`, which cannot
+/// happen before the surface it is given exists. Ours is therefore
+/// always earlier in that vector and always runs first, and the
+/// pending state it leaves behind is what smithay's hook then reads.
+///
+/// # What this must not do
+///
+/// Silence upstream's error for a layer surface that is still alive. A
+/// living client that commits a zero width without anchoring both
+/// sides really has broken the protocol, and the compositor has no
+/// size to give it; that error is correct and still goes out. The
+/// guard therefore fires on exactly one condition — state upstream
+/// will reject, on a surface smithay no longer lists as a layer
+/// surface.
+///
+/// # Removing this
+///
+/// When smithay calls `remove_pre_commit_hook` in the layer surface's
+/// `destroyed`, delete this function, [`upstream_rejects`],
+/// [`neutralize_orphan`], the call in `xdg.rs`'s `new_surface`, and
+/// the tests that name them. Nothing else refers to any of it.
+pub(crate) fn install_orphaned_role_guard(surface: &WlSurface) {
+    add_pre_commit_hook::<Compositor, _>(surface, |comp, _dh, surface| {
+        // One cheap read first: this runs on the commit path of every
+        // surface in the session, and for all but a handful the answer
+        // is "never had the layer role".
+        let pending = with_states(surface, |states| {
+            if states.role != Some(LAYER_SURFACE_ROLE) {
+                return None;
+            }
+            let mut cached = states.cached_state.get::<LayerSurfaceCachedState>();
+            Some(*cached.pending())
+        });
+        let Some(pending) = pending else {
+            return;
+        };
+        if !upstream_rejects(&pending) {
+            return;
+        }
+        // State upstream will object to. Whether the objection is
+        // right turns on one thing: whether the role is still there to
+        // object on behalf of. smithay drops the surface from
+        // `known_layers` in the same `destroyed` that resets the
+        // state, so that list is the authority — and it is the very
+        // list whose mutation opens this hole.
+        if comp.layer_shell.state.layer_surfaces().any(|layer| layer.wl_surface() == surface) {
+            return;
+        }
+        with_states(surface, |states| {
+            let mut cached = states.cached_state.get::<LayerSurfaceCachedState>();
+            neutralize_orphan(cached.pending());
+        });
+        tracing::debug!(
+            "neutralized a commit on a destroyed layer surface — smithay's stale pre-commit hook"
+        );
+    });
 }
 
 // ---------------------------------------------------------------------
@@ -831,5 +997,91 @@ mod tests {
         // sixty times a second.
         assert!(EdgeInsets::default().is_zero());
         assert!(!EdgeInsets { top: 1, ..Default::default() }.is_zero());
+    }
+
+    // The orphaned-role guard. The hook itself needs a client on a
+    // socket to run, so what is pinned here is the pair of judgements
+    // it makes — which pending states upstream kills for, and what
+    // this compositor writes over them — plus the claim the rewrite
+    // rests on: that all four anchors and none are the same anchor to
+    // every reader in this module.
+
+    fn sized(w: i32, h: i32, anchor: Anchor) -> LayerSurfaceCachedState {
+        LayerSurfaceCachedState { size: (w, h).into(), anchor, ..Default::default() }
+    }
+
+    #[test]
+    fn the_state_smithay_leaves_behind_is_the_state_it_kills_for() {
+        // This is the whole bug in one assertion. `destroyed` in
+        // smithay's wlr_layer/handlers.rs writes exactly this value
+        // into the pending state, and the pre-commit hook it forgot to
+        // remove reads exactly this value on the client's next commit.
+        assert!(upstream_rejects(&LayerSurfaceCachedState::default()));
+    }
+
+    #[test]
+    fn the_guard_leaves_a_state_upstream_accepts() {
+        for mut pending in [
+            LayerSurfaceCachedState::default(),
+            sized(0, 0, Anchor::TOP),
+            sized(0, 40, Anchor::empty()),
+            sized(300, 0, Anchor::LEFT | Anchor::RIGHT),
+        ] {
+            assert!(upstream_rejects(&pending), "the fixture should be one upstream objects to");
+            neutralize_orphan(&mut pending);
+            assert!(!upstream_rejects(&pending));
+        }
+    }
+
+    #[test]
+    fn a_healthy_layer_surface_never_reaches_the_guard() {
+        // Both shapes real clients commit, and the reason the guard
+        // costs a live bar nothing: it returns before it ever consults
+        // the shell's surface list.
+        assert!(!upstream_rejects(&sized(0, 40, Anchor::TOP | Anchor::LEFT | Anchor::RIGHT)));
+        assert!(!upstream_rejects(&sized(600, 400, Anchor::empty())));
+    }
+
+    #[test]
+    fn the_guards_trigger_still_recognizes_a_real_protocol_violation() {
+        // Half of "the guard is not a blanket amnesty": these are the
+        // shapes a client has genuinely no right to commit, and
+        // [`upstream_rejects`] must keep saying so.
+        assert!(upstream_rejects(&sized(0, 40, Anchor::TOP)));
+        assert!(upstream_rejects(&sized(600, 0, Anchor::LEFT)));
+    }
+
+    // The other half — that a *live* layer surface committing those
+    // shapes still gets killed, because the guard returns early when
+    // `layer_surfaces()` still lists the surface — has no unit test,
+    // and the honest reason is that it needs a real `Compositor` with a
+    // populated `WlrLayerShellState`, which is not constructible here.
+    //
+    // It is not untested, though; it is tested from outside. Against a
+    // nested session, a client committing `set_size(0, 100)` with only
+    // `Anchor::Top` while its layer surface is alive is killed with
+    // `zwlr_layer_surface_v1` code 1, while the same client destroying
+    // its role first survives. That pair is the property this module
+    // actually promises, and it was checked that way on 2026-09-01
+    // before the guard shipped. If this file grows a way to build a
+    // `Compositor` in a test, this is the first thing to bring inside.
+
+    #[test]
+    fn all_four_anchors_read_exactly_as_none_do() {
+        // What lets [`neutralize_orphan`] write into state a
+        // re-created layer surface might inherit: every reader of an
+        // anchor in this module treats the two the same, so the
+        // residue cannot move, resize or re-reserve anything.
+        let size = Size::new(600, 400);
+        assert_eq!(
+            anchored_rect(output(), size, Anchor::all(), EdgeInsets::default()),
+            anchored_rect(output(), size, Anchor::empty(), EdgeInsets::default()),
+        );
+        let margins = EdgeInsets { left: 10, right: 30, top: 4, bottom: 12 };
+        assert_eq!(
+            anchored_rect(output(), size, Anchor::all(), margins),
+            anchored_rect(output(), size, Anchor::empty(), margins),
+        );
+        assert_eq!(exclusive_edge(Anchor::all()), exclusive_edge(Anchor::empty()));
     }
 }

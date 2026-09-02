@@ -1,0 +1,13 @@
+[package]
+name = "layer-repro"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+wayland-client = "0.31"
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }
+rustix = { version = "1", features = ["event", "fs"] }
+
+[[bin]]
+name = "layer-repro"
+path = "src/main.rs"

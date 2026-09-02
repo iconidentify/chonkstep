@@ -100,7 +100,46 @@ exactly one key: letters, digits, `return`/`enter`, `tab`, `space`,
 `escape`, `left`, `right`, `up`, `down`, `home`, `end`, `pageup`,
 `pagedown`, `minus`, `equal`, `comma`, `period`, `f1`–`f12`.
 
+The keys with pictures on them rather than letters have names too, and
+are usually bound bare: `volumeup`, `volumedown`, `volumemute` (or
+`mute`), `micmute`, `playpause` (or `audioplay`), `audiopause`,
+`audiostop`, `audionext`, `audioprev`, `brightnessup`,
+`brightnessdown`, `kbdbrightnessup`, `kbdbrightnessdown`, `poweroff`,
+`search`.
+
 A typo'd combo or unknown action is warned about and skipped; every
-other line still applies. Apply edits to the running session with
+other line still applies.
+
+## Running your own commands
+
+Actions are a closed set — the window manager owns what "maximize"
+means, so the list above is not extensible. Arbitrary commands go
+through one indirection instead: name it in `[commands]`, then bind
+`run <name>`.
+
+```toml
+[commands]
+omarchy-menu = "omarchy-shell shell toggle omarchy.menu"
+volume-up    = "omarchy-audio-output-volume up"
+notify       = ["notify-send", "hello world"]   # array keeps spaces whole
+
+[keybindings]
+"super+space" = "run omarchy-menu"
+"volumeup"    = "run volume-up"
+```
+
+The binding carries the *name*, never the command line. That is what
+lets a mistake be caught: a binding naming a command you never declared
+is reported at startup — naming both the key and the command — and
+dropped, rather than becoming a key that silently does nothing when you
+press it.
+
+A string is split on whitespace; an array is taken verbatim, which is
+how you pass an argument that contains a space. Commands are launched
+detached: the desktop starts them and does not supervise them.
+
+To start something with the session rather than on a key, use
+`autostart` — a list, run in order, once, on a genuinely new session
+(not on a reload, and not on a hot restart). Apply edits to the running session with
 `scripts/reload.sh` (package installs: `/usr/lib/chonkstep/reload.sh`),
 or the bound `reload` key.

@@ -19,6 +19,7 @@
 //! stays unit-testable without `set_var`, which tests running in
 //! parallel threads of one process cannot use safely.
 
+use std::collections::BTreeMap;
 use wm_config::{Action, Config};
 use wm_core::{DecorationRules, FocusPolicy, KeyCombo, Modifiers, PlacementPolicy};
 use wm_theme::{Appearance, Theme};
@@ -79,6 +80,22 @@ pub struct SessionState {
     /// The modifier for the move/resize drag gesture. `None` disables
     /// it.
     pub drag_modifier: Option<Modifiers>,
+    /// Named argv the `run` bindings resolve against, straight off the
+    /// config. Carried here rather than looked up from a reloaded
+    /// config at press time so a binding and the command it names can
+    /// never disagree: they arrive together, through this one path, or
+    /// not at all.
+    pub commands: BTreeMap<String, Vec<String>>,
+    /// The terminal `spawn-terminal` launches, or `None` for the
+    /// built-in one.
+    pub terminal: Option<Vec<String>>,
+    /// Commands to run once at session start. Startup-only in effect,
+    /// like [`Self::restore_session`], and carried here for the same
+    /// reason: one resolution path, so a reload cannot silently apply a
+    /// different rule than the startup it replaces. A reload does not
+    /// re-run these — "run once at session start" would otherwise mean
+    /// "run again every time the user edits their config".
+    pub autostart: Vec<Vec<String>>,
     pub keybindings: Vec<(KeyCombo, Action)>,
 }
 
@@ -108,6 +125,9 @@ impl SessionState {
             restore_session: config.restore_session,
             decorations: config.decorations.clone(),
             drag_modifier: config.drag_modifier,
+            commands: config.commands.clone(),
+            terminal: config.terminal.clone(),
+            autostart: config.autostart.clone(),
             keybindings: config.keybindings.clone(),
         }
     }
@@ -304,7 +324,47 @@ pub fn session_layout_path() -> std::path::PathBuf {
 /// supervisor starts a fresh process with a fresh environment — which
 /// is exactly the case restore exists for.
 pub fn session_continues() -> bool {
-    std::env::var_os("CHONKSTEP_SESSION_CONTINUES").is_some()
+    *SESSION_CONTINUES.get_or_init(|| std::env::var_os(SESSION_CONTINUES_VAR).is_some())
+}
+
+/// The environment variable [`session_continues`] answers from. Set by
+/// both binaries' `restart_in_place` on the process they exec into.
+const SESSION_CONTINUES_VAR: &str = "CHONKSTEP_SESSION_CONTINUES";
+
+/// Answered once, so the value survives [`consume_session_continuation`]
+/// taking the variable back out of the environment.
+static SESSION_CONTINUES: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+
+/// Reads the continuation marker and removes it from the environment.
+///
+/// Call once, first thing in `main`, before any thread exists — the
+/// same placement and the same reason as
+/// [`crate::spawn::declare_display_stack`]. `remove_var` is only sound
+/// while this process is single-threaded.
+///
+/// It has to be *consumed* rather than merely read, because a marker
+/// left in the environment is inherited by every process the desktop
+/// launches, and it means the wrong thing to all of them. It says "you
+/// are a continuation of a session that is already running". A terminal,
+/// a browser, a dockapp — none of them care. But a nested chonkstep
+/// session started from a terminal inside a restarted one reads it,
+/// concludes it is a hot restart, and silently skips both session
+/// restore and autostart. That is a genuinely confusing failure: the
+/// same binary and the same config behave differently depending on
+/// whether the session that launched the terminal had ever been
+/// restarted.
+///
+/// Found exactly that way — an autostart entry that worked from a fresh
+/// login did nothing when launched from a terminal, because the
+/// terminal's parent session had been hot-restarted hours earlier.
+pub fn consume_session_continuation() {
+    let present = std::env::var_os(SESSION_CONTINUES_VAR).is_some();
+    // Set before removing, so a `session_continues()` racing in from
+    // anywhere still resolves to the value the variable actually had.
+    let _ = SESSION_CONTINUES.set(present);
+    if present {
+        std::env::remove_var(SESSION_CONTINUES_VAR);
+    }
 }
 
 /// Whether `XCURSOR_SIZE` was the user's own when this session started,
@@ -464,6 +524,9 @@ mod tests {
             edge_resistance: 10,
             terminal_font_px: 20.0,
             restore_session: false,
+            commands: BTreeMap::new(),
+            terminal: None,
+            autostart: Vec::new(),
             decorations: DecorationRules::default(),
             drag_modifier: Some(wm_core::DEFAULT_DRAG_MODIFIER),
             keybindings: Vec::new(),
@@ -563,5 +626,31 @@ mod tests {
     #[test]
     fn absent_config_theme_is_not_an_error() {
         assert!(config_theme_fallback(None).is_none());
+    }
+}
+
+#[cfg(test)]
+mod continuation_tests {
+    /// The marker must not survive into the environment children
+    /// inherit. A leaked one makes a nested session skip its own
+    /// autostart and layout restore, which is how it was found.
+    ///
+    /// Single test on purpose: `consume_session_continuation` writes
+    /// process-global state exactly once (a `OnceLock` plus a
+    /// `remove_var`), so splitting this across tests would have them
+    /// race for the one initialization that is allowed to happen.
+    #[test]
+    fn consuming_the_marker_takes_it_out_of_the_environment() {
+        std::env::set_var(super::SESSION_CONTINUES_VAR, "1");
+        super::consume_session_continuation();
+        assert!(super::session_continues(), "the marker was set, so this process is a continuation");
+        assert!(
+            std::env::var_os(super::SESSION_CONTINUES_VAR).is_none(),
+            "the marker must be gone from the environment so children do not inherit it"
+        );
+        // A second consume must not flip the answer: the value is
+        // settled once, and the variable is already gone by now.
+        super::consume_session_continuation();
+        assert!(super::session_continues(), "the answer is settled once and stays settled");
     }
 }

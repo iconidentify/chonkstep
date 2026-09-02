@@ -34,6 +34,21 @@ tracing = "0.1"
 # Screenshot encoding (see `capture.rs`) - the same rasterizer the
 # theme engine draws with, so no second image stack enters the graph.
 tiny-skia = "0.11"
+# Protocol code generation for the one interface no published crate
+# carries: `hyprland-focus-grab-v1` (see `focus_grab.rs` and the XML
+# vendored beside it in `protocols/`). Omarchy's Quickshell desktop
+# uses it for click-outside-to-dismiss on every popup it opens, and a
+# compositor without it makes that shell's bar popouts, notification
+# cards and menus impossible to close by clicking away.
+#
+# This costs no new crate in the dependency graph: `wayland-scanner` is
+# already compiled here as the code generator behind
+# `wayland-protocols`, `wayland-protocols-wlr` and `wayland-server`
+# itself, and it is a proc-macro crate — `generate_server_code!` runs at
+# expansion time, so there is no `build.rs` and no generated file to
+# check in and let drift. Pinned to the same "0.31" requirement those
+# crates use so the workspace resolves one copy.
+wayland-scanner = "0.31"
 
 # Smithay 0.7 is the pinned compositor framework. Features are opted
 # into explicitly (default-features = false); both backends — the

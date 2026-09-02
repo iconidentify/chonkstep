@@ -114,6 +114,15 @@ struct InputState {
     /// between routes to the press's target rather than whatever is
     /// under the pointer now.
     implicit_grab: Option<ImplicitGrab>,
+    /// Raw button codes whose press dismissed a focus grab
+    /// (`focus_grab.rs`) instead of being routed anywhere. Their
+    /// releases are swallowed too, so nothing downstream sees half of a
+    /// click it never got the other half of — the same contract
+    /// `suppressed_keys` below keeps for the keyboard. Raw codes rather
+    /// than [`MouseButton`]s because the dismissing press can be a
+    /// button `wm_button` does not map at all, and that one still has
+    /// to be matched on the way up.
+    grab_dismissals: Vec<u32>,
     /// Keycodes whose press was intercepted (a grabbed combo, or any
     /// press during the modal keyboard grab) — their releases are
     /// swallowed too, so a client never sees a release for a press it
@@ -276,7 +285,14 @@ struct Route {
 /// now, so this session would wait forever for an event that is not
 /// coming and keep routing every click to the grab's stale target.
 pub(crate) fn clear_implicit_grab(seat: &Seat<Compositor>) {
-    with_input(seat, |input| input.implicit_grab = None);
+    with_input(seat, |input| {
+        input.implicit_grab = None;
+        // The swallow list goes with it, and for the same reason: a
+        // button held down through a VT switch releases into whoever
+        // owns the seat now, so an entry left here would silently eat
+        // the next release of that button in this session.
+        input.grab_dismissals.clear();
+    });
 }
 
 /// Runs `f` against the seat's [`InputState`], creating it on first
@@ -441,6 +457,13 @@ pub(crate) fn process_input_event<I: InputBackend>(state: &mut Compositor, event
 ///   `keyboard_grabbed`, every release ADDITIONALLY queues
 ///   `BackendEvent::KeyRelease` — the Alt release is what commits an
 ///   Alt-Tab cycle (see `wm-x11`'s KeyRelease comment; same contract).
+///
+/// Going through `KeyboardHandle::input` rather than writing
+/// `wl_keyboard.key` directly is also what puts the session's real
+/// keymap back after a virtual keyboard has swapped its own in — see
+/// `crate::virtual_keyboard`. Route physical keys around this function
+/// and the symptom is the user's own keyboard typing nonsense in the
+/// window `wtype` last touched.
 fn on_keyboard_key<I: InputBackend>(state: &mut Compositor, event: I::KeyboardKeyEvent) {
     let keycode = event.key_code();
     let key_state = event.state();
@@ -698,6 +721,26 @@ fn pointer_moved(state: &mut Compositor, position: LogicalPoint<f64, Logical>, t
     reclaim_leaked_grab(state, &seat);
     let hit = hit_at(state.wm.backend(), at, position);
     let route = resolve_route(state.wm.backend_mut(), &seat, &hit);
+    // A focus grab holds the pointer to its whitelist: motion outside
+    // it moves the cursor and nothing else. No crossing, so
+    // focus-follows-mouse cannot pull the keyboard off the popout; no
+    // shell or `wm-core` queues, so the dock does not light up under a
+    // pointer that is only passing over it; and `None` seat focus, so
+    // the client the pointer left gets the `wl_pointer.leave` it needs
+    // to drop a hover highlight. It deliberately does NOT clear the
+    // grab — see `focus_grab.rs` on why a menu that closed when the
+    // pointer left it would be unusable.
+    //
+    // Gated on nothing holding the pointer already (`route.target`):
+    // a press that landed inside the popout and dragged out of it — a
+    // slider, a scrollbar — is that client's own gesture and keeps
+    // being delivered.
+    if route.target.is_none() && grab_excludes(state, &hit) {
+        state.wm.backend_mut().mark_damaged();
+        pointer.motion(state, None, &MotionEvent { location: position, serial, time });
+        pointer.frame(state);
+        return;
+    }
 
     // Enter/crossing detection, only while nothing holds the pointer —
     // X11 suppressed crossing events for the duration of a grab too
@@ -870,6 +913,35 @@ fn on_pointer_button<I: InputBackend>(state: &mut Compositor, event: I::PointerB
     reclaim_leaked_grab(state, &seat);
     let hit = hit_at(state.wm.backend(), at, position);
     let route = resolve_route(state.wm.backend_mut(), &seat, &hit);
+    // Click-outside-to-dismiss, the whole point of
+    // `hyprland-focus-grab-v1`: a press that lands outside every
+    // whitelisted surface ends the grab and goes nowhere else. Swallowed
+    // rather than delivered because that is what a menu click means
+    // everywhere — X11's override-redirect menus, GTK, Qt, and Hyprland,
+    // which is the implementation Quickshell was written against: the
+    // click that closes the popout must not also press the button it
+    // happened to land on.
+    //
+    // Gated on `route.target` for the same reason the motion path is —
+    // a gesture already in flight is not a dismissal — and the release
+    // is remembered so it can be swallowed too, since returning here
+    // means no implicit grab was recorded to route it by.
+    if pressed && route.target.is_none() && grab_excludes(state, &hit) {
+        crate::focus_grab::dismiss(state);
+        with_input(&seat, |input| input.grab_dismissals.push(event.button_code()));
+        return;
+    }
+    if !pressed {
+        let swallowed = with_input(&seat, |input| {
+            let code = event.button_code();
+            let found = input.grab_dismissals.contains(&code);
+            input.grab_dismissals.retain(|held| *held != code);
+            found
+        });
+        if swallowed {
+            return;
+        }
+    }
     // The implicit-grab bookkeeping runs whether or not a drag holds
     // the pointer: it is what tracks which buttons are down, and a
     // drag's own lifetime is measured in exactly those (see
@@ -1049,7 +1121,14 @@ fn on_pointer_button<I: InputBackend>(state: &mut Compositor, event: I::PointerB
     // because clicking the window that is *already* focused re-queues
     // nothing — `wm-core`'s early return — and the keyboard would stay
     // on the bar forever.
-    if pressed && !route.dragging {
+    //
+    // Both halves are suppressed while a focus grab holds the keyboard:
+    // this press is, by the check at the top of this function, inside
+    // the whitelist, and either half would move the seat off it — the
+    // claim to a layer surface the grab may not have whitelisted, the
+    // release to whatever window `wm-core` calls focused. The grab's
+    // own pass owns the keyboard until it ends (`focus_grab.rs`).
+    if pressed && !route.dragging && !state.focus_grab.is_active() {
         match target {
             PressTarget::Layer(layer) => claim_on_demand_focus(state, layer, serial),
             _ => release_on_demand_focus(state, serial),
@@ -1108,6 +1187,61 @@ fn release_on_demand_focus(state: &mut Compositor, serial: smithay::utils::Seria
     if let Some(keyboard) = state.seat.get_keyboard() {
         keyboard.set_focus(state, target, serial);
     }
+}
+
+/// Whether this hit falls outside an active focus grab's whitelist —
+/// the one question `focus_grab.rs` asks of the hit-test, asked here
+/// because [`Hit`] is this module's type.
+///
+/// Two surfaces are offered to the whitelist because a client may have
+/// named either: the exact `wl_surface` the walk landed on (a
+/// subsurface, or a popup of the popup) and the layer surface or
+/// toplevel that owns it. Quickshell whitelists the layer surface it
+/// opened; a client that whitelists only its popup is served by the
+/// same call.
+///
+/// The two hits with no `wl_surface` behind them at all — this
+/// desktop's own shell surfaces (dock, menus) and the background —
+/// are outside every whitelist by construction, which is right: they
+/// are exactly where a user clicks to dismiss a popup.
+fn grab_excludes(state: &Compositor, hit: &Hit) -> bool {
+    if !state.focus_grab.is_active() {
+        return false;
+    }
+    let backend = state.wm.backend();
+    let (surface, root) = match hit {
+        Hit::Layer { layer, surface, .. } => {
+            let root = backend
+                .layers
+                .iter()
+                .find(|record| record.id == *layer)
+                .filter(|record| record.surface.alive())
+                .map(|record| record.surface.wl_surface().clone());
+            (Some(surface.clone()), root)
+        }
+        Hit::Content { window, surface, .. } => {
+            let root = backend
+                .windows
+                .get(window)
+                .filter(|record| record.surface.alive())
+                .and_then(|record| record.surface.wl_surface());
+            (surface.clone(), root)
+        }
+        // Our own chrome around a client's window. The client owns no
+        // pixel of it, so only the whole window being whitelisted keeps
+        // a titlebar click from dismissing.
+        Hit::FrameChrome { frame, .. } => {
+            let root = backend
+                .frames
+                .get(frame)
+                .and_then(|record| backend.windows.get(&record.window))
+                .filter(|record| record.surface.alive())
+                .and_then(|record| record.surface.wl_surface());
+            (None, root)
+        }
+        Hit::Shell { .. } | Hit::Root => (None, None),
+    };
+    state.focus_grab.escapes(surface.as_ref(), root.as_ref())
 }
 
 fn wm_button(button: InputMouseButton) -> Option<MouseButton> {

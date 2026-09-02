@@ -25,8 +25,13 @@
 
 mod backend_impl;
 mod capture;
+mod data_control;
 mod decoration;
 mod dmabuf;
+// hyprland-focus-grab-v1: click-outside-to-dismiss for shells that ask
+// for it (Omarchy's Quickshell asks on every popup). The one module
+// here that generates its own protocol bindings — see its module docs.
+mod focus_grab;
 mod idle;
 mod input;
 mod layers;
@@ -39,6 +44,8 @@ mod state;
 // End-to-end test injection door — inert unless CHONKSTEP_TEST_SOCKET
 // is set; see its module docs for the three regressions it exists for.
 mod test_door;
+// virtual-keyboard-v1: `wtype` and everything Omarchy builds on it.
+mod virtual_keyboard;
 mod xdg;
 mod xewmh;
 mod xwayland;

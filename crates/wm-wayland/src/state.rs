@@ -838,7 +838,38 @@ pub struct ClientState {
 
 impl ClientData for ClientState {
     fn initialized(&self, _client_id: ClientId) {}
-    fn disconnected(&self, _client_id: ClientId, _reason: DisconnectReason) {}
+
+    /// Says why a client went away.
+    ///
+    /// This was an empty stub, and the silence cost real debugging
+    /// time: a client that vanishes mid-session is indistinguishable
+    /// from one that exited on purpose, so "the shell disappeared when
+    /// I closed a menu" had no first clue to follow at all — not even
+    /// whether the compositor had hung up or the client had walked
+    /// away. A protocol error carries the offending object and the
+    /// interface's own message, which is the difference between a
+    /// bisect and a read.
+    ///
+    /// Levels are chosen so a normal session stays quiet: a client
+    /// closing its own connection is the ordinary way programs exit
+    /// and is logged at debug, while a protocol error means *this
+    /// compositor* rejected something and killed the client for it,
+    /// which is a bug here until proven otherwise.
+    fn disconnected(&self, client_id: ClientId, reason: DisconnectReason) {
+        match reason {
+            DisconnectReason::ConnectionClosed => {
+                tracing::debug!(?client_id, "client closed its connection");
+            }
+            DisconnectReason::ProtocolError(error) => tracing::warn!(
+                ?client_id,
+                object = %error.object_interface,
+                object_id = error.object_id,
+                code = error.code,
+                message = %error.message,
+                "client killed for a protocol error"
+            ),
+        }
+    }
 }
 
 /// How often the dispatch loop wakes with zero protocol activity, to
@@ -1124,6 +1155,12 @@ pub struct Compositor {
     /// middle-clicking into a Wayland editor has nothing to travel
     /// through.
     pub primary_selection_state: PrimarySelectionState,
+    /// The clipboard-manager protocols, wlr and ext alike: the only way
+    /// a client that does not have keyboard focus can read or write the
+    /// two selections above. Without them `wl-paste --watch` refuses to
+    /// run and nothing keeps a clipboard history — see
+    /// `crate::data_control`.
+    pub(crate) data_control: crate::data_control::DataControl,
     pub xwayland_shell_state: XWaylandShellState,
     /// fractional-scale-v1: the channel that can say "1.5" to a client,
     /// where `wl_output.scale` can only say its ceiling. Serving it is
@@ -1211,9 +1248,23 @@ pub struct Compositor {
     /// ext-session-lock: the lock lifecycle machine and the
     /// confirmation owed to a locking client — see `lock.rs`.
     pub(crate) session_lock: crate::lock::SessionLock,
+    /// hyprland-focus-grab-v1: the surface whitelists a shell asks the
+    /// compositor to enforce so a click away dismisses its popups.
+    /// Omarchy's Quickshell uses one per popout; without the global it
+    /// disables the feature and the popouts never close. See
+    /// `focus_grab.rs`.
+    pub(crate) focus_grab: crate::focus_grab::FocusGrab,
     /// ext-idle-notify + idle-inhibit: the timers `swayidle` runs on,
     /// reset from the input path — see `idle.rs`.
     pub(crate) idle: crate::idle::Idle,
+    /// virtual-keyboard-v1: the global `wtype` looks for, and with it
+    /// paste-as-keystrokes, emoji insertion and voice dictation. Held
+    /// so the global's id outlives `run`, never read again — a virtual
+    /// keyboard's whole state lives on its own protocol object, so
+    /// there is nothing here to reconcile per pass. Same shape as
+    /// `Idle::_inhibit`. See `virtual_keyboard.rs`.
+    pub(crate) _virtual_keyboard:
+        smithay::wayland::virtual_keyboard::VirtualKeyboardManagerState,
 
     /// Latest pointer position in compositor space, maintained by
     /// `input.rs` — the renderer draws the cursor here, and hit-tests
@@ -1394,6 +1445,15 @@ impl Compositor {
         // workareas has already run, so the layer-composed rects land
         // last (see `layers::apply_workareas`).
         crate::layers::refresh(self);
+        // Focus grabs settle after the layer pass and before the lock
+        // one, which is the ordering their own module documents read as
+        // a sequence: the layer surfaces a grab whitelists have just
+        // been arranged and had their exclusive-focus claim resolved,
+        // so the keyboard decision here sees the settled answer; and
+        // `lock::refresh` runs immediately after, so a lock that
+        // engages on this very pass still lands on top of a grab this
+        // one just ended.
+        crate::focus_grab::refresh(self);
         // Lock upkeep (re-configures on resize, keyboard onto a late
         // lock surface); a no-op the instant the test above it — the
         // ledger's `locked` flag — is clear.
@@ -1946,6 +2006,22 @@ impl Compositor {
         if self.layer_shell.exclusive_focus.is_some() {
             return;
         }
+        // A focus grab (`focus_grab.rs`) pins the keyboard to its
+        // whitelist for as long as it holds, so window focus stops here
+        // too — one rung below exclusive interactivity in that module's
+        // ordering table. The activated flags above still applied, for
+        // the same reason they do under an exclusive layer surface:
+        // `wm-core`'s idea of the focused window stays current, and the
+        // seat returns to it when the grab ends — re-derived from
+        // `wm-core` at that moment rather than replayed, which is why
+        // this intent is dropped here and not parked the way the lock
+        // branch above parks it. Without this line the
+        // click-to-focus a dismissing press queues would drag the
+        // keyboard off an Omarchy menu the instant it opened over a
+        // window.
+        if self.focus_grab.is_active() {
+            return;
+        }
         // A `Nothing` intent falls through here with no surface, which
         // is the point: the seat drops the hidden window, so the keys
         // typed while it is miniaturized stop landing on it, and the
@@ -2005,6 +2081,12 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
     let output_manager_state = OutputManagerState::new_with_xdg_output::<Compositor>(&display_handle);
     let data_device_state = DataDeviceState::new::<Compositor>(&display_handle);
     let primary_selection_state = PrimarySelectionState::new::<Compositor>(&display_handle);
+    // Data control rides on both selections above, so it is built from
+    // the primary state rather than beside it — passing that state is
+    // what makes middle-click selections visible to a clipboard
+    // manager (see `data_control`'s module docs for the silent
+    // half-working session the alternative produces).
+    let data_control = crate::data_control::init(&display_handle, &primary_selection_state);
     let xwayland_shell_state = XWaylandShellState::new::<Compositor>(&display_handle);
     // The fractional-scale pair. Both are plain globals with no failure
     // mode; registered here so they exist before any client can bind —
@@ -2164,6 +2246,11 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
     // Same timing rule as dmabuf: bound before any client can connect.
     let protocols = crate::protocols::init(&display_handle);
     let output_mgmt = crate::output_mgmt::init(&display_handle);
+    // And again for the one protocol with no crate behind it: this is
+    // the global Omarchy's Quickshell looks for the moment it connects,
+    // and finding it absent is what makes every popout in that shell
+    // impossible to dismiss by clicking away. See `focus_grab.rs`.
+    let focus_grab = crate::focus_grab::init(&display_handle);
     // The ecosystem protocols, under the same timing rule. Layer-shell
     // is what fuzzel/mako/waybar look for the moment they connect;
     // session-lock is unfiltered (any client may lock — swaylock is
@@ -2187,6 +2274,12 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
         smithay::wayland::idle_inhibit::IdleInhibitManagerState::new::<Compositor>(&display_handle),
     );
     tracing::info!("layer-shell, session-lock and idle-notify advertised");
+    // Same timing rule again, plus one of its own: the seat this is
+    // handed must already carry a keyboard, because smithay's handler
+    // unwraps it on the first synthetic key. `add_keyboard` above is
+    // what guarantees that, and `virtual_keyboard::init` says so out
+    // loud if it ever stops being true.
+    let virtual_keyboard = crate::virtual_keyboard::init(&display_handle, &seat);
 
     // The listening socket clients connect to, plus the display's own
     // fd so wayland-server processes client requests — both plain
@@ -2225,6 +2318,14 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
     // rebuilt under it, and silently launched every browser on
     // XWayland at double scale when it did.
     chonk_shell::spawn::declare_display_stack(chonk_shell::spawn::DisplayStack::Wayland);
+
+    // Take the hot-restart marker out of the environment beside the
+    // stack declaration, for the same two reasons: both are one-shot
+    // facts about this process, and both have to be settled before any
+    // thread exists — this one because `remove_var` is only sound while
+    // single-threaded, and because everything this session spawns
+    // inherits whatever is left behind here.
+    chonk_shell::startup::consume_session_continuation();
     // Children the shell spawns find the session through the
     // environment, so it must be set before `Shell::new` (which may
     // autostart things) and before XWayland comes up. `DISPLAY`
@@ -2417,6 +2518,7 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
         output_manager_state,
         data_device_state,
         primary_selection_state,
+        data_control,
         xwayland_shell_state,
         fractional_scale_state,
         viewporter_state,
@@ -2436,7 +2538,9 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
         output_mgmt,
         layer_shell,
         session_lock,
+        focus_grab,
         idle,
+        _virtual_keyboard: virtual_keyboard,
         pointer_location: (0.0, 0.0).into(),
         cursor_status: CursorImageStatus::default_named(),
         cursors: CursorSet::build(scale),

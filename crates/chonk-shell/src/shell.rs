@@ -243,9 +243,60 @@ fn terminal_window_size(theme: &Theme, screen: Size) -> (u32, u32) {
 /// The returned handle is how a live appearance switch reaches this
 /// terminal later (`Shell::retint_terminals` signals it); a caller
 /// that drops it launches a terminal that simply keeps its palette.
+///
+/// `configured` is the user's `terminal` setting. When it is set the
+/// desktop steps out of the way entirely: that argv is launched as
+/// written, with no geometry, font or palette arguments bolted on. It
+/// has to be that way — those arguments are foot's command-line
+/// spelling of the theme, and there is no portable spelling to
+/// translate them into. So a configured terminal keeps its own colors
+/// and its own idea of how big it should be, and an appearance switch
+/// leaves it alone.
+///
+/// That is a real loss of integration, and it is the right trade: a
+/// session that can only ever run one terminal cannot host a desktop
+/// that ships four of them and picks between them with
+/// `xdg-terminal-exec`.
 #[must_use]
-fn spawn_terminal(theme: &Theme, font_px: f32, screen: Size) -> Option<spawn::SpawnedChild> {
-    spawn_foot(terminal_args(theme, font_px, screen, terminal_client_scale(theme)), theme.titlebar.font.size / 12.0)
+fn spawn_terminal(
+    configured: Option<&[String]>,
+    theme: &Theme,
+    font_px: f32,
+    screen: Size,
+) -> Option<spawn::SpawnedChild> {
+    let scale = theme.titlebar.font.size / 12.0;
+    if let Some(argv) = configured {
+        return spawn_configured_terminal(argv, &[], scale);
+    }
+    spawn_foot(terminal_args(theme, font_px, screen, terminal_client_scale(theme)), scale)
+}
+
+/// Launches a user-configured terminal, optionally running `command`
+/// inside it.
+///
+/// The separator is `-e`, which is the one terminal-launching
+/// convention old enough to be everywhere: xterm, alacritty, ghostty,
+/// kitty, foot and wezterm all accept it. It is a guess, but it is the
+/// guess with the best odds, and a terminal that wants a different flag
+/// can be named with the flag already in its argv.
+#[must_use]
+fn spawn_configured_terminal(
+    argv: &[String],
+    command: &[String],
+    scale: f32,
+) -> Option<spawn::SpawnedChild> {
+    let Some((program, args)) = argv.split_first() else {
+        tracing::warn!("configured terminal has an empty argument list; not launching");
+        return None;
+    };
+    let mut owned: Vec<String> = args.to_vec();
+    if !command.is_empty() {
+        owned.push("-e".to_string());
+        owned.extend(command.iter().cloned());
+    }
+    let arg_refs: Vec<&str> = owned.iter().map(String::as_str).collect();
+    let env: Vec<(String, String)> = crate::startup::xcursor_size_env(scale).into_iter().collect();
+    spawn::spawn_supervised(program, &arg_refs, &env, &[])
 }
 
 /// The factor the terminal will scale itself by, which is what
@@ -290,6 +341,36 @@ fn spawn_foot(args: Vec<String>, scale: f32) -> Option<spawn::SpawnedChild> {
     spawn::spawn_supervised("foot", &arg_refs, &env, &[])
 }
 
+/// Runs one entry from `[commands]`, detached.
+///
+/// Detached rather than supervised, and that is the whole design of
+/// this verb. A supervised child is one the desktop intends to keep
+/// talking to — the terminals it retints by signal, the dockapps it
+/// restarts. A command the user named is none of those: it is a thing
+/// they asked to happen, which then belongs to them. Supervising it
+/// would mean holding a reaper thread per press for a process the
+/// desktop has no opinion about, and would make a long-lived one
+/// (`omarchy-launch-shell`, say) look like a leak.
+///
+/// The scale goes in for the same reason it does everywhere else here:
+/// a launched program that guesses its own cursor size guesses wrong on
+/// a fractional display.
+fn run_named_command(name: &str, argv: &[String], scale: f32) {
+    let Some((program, args)) = argv.split_first() else {
+        // `argv_from_value` rejects empty command lines, so reaching
+        // here means the invariant broke upstream rather than that the
+        // user typed something odd. Say so and carry on.
+        tracing::warn!(command = %name, "command has an empty argument list; not running it");
+        return;
+    };
+    let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
+    let env: Vec<(String, String)> = crate::startup::xcursor_size_env(scale).into_iter().collect();
+    match spawn::spawn_detached_with_env(program, &arg_refs, &env, &[]) {
+        Some(pid) => tracing::info!(command = %name, program = %program, pid, "ran command"),
+        None => tracing::warn!(command = %name, program = %program, "command failed to start"),
+    }
+}
+
 /// Launches one `.desktop` entry — the shared dispatch behind both the
 /// root menu's Applications submenu and the launcher dock's tiles, so
 /// the two gestures can never disagree on how an entry runs.
@@ -304,7 +385,13 @@ fn spawn_foot(args: Vec<String>, scale: f32) -> Option<spawn::SpawnedChild> {
 /// Returns a supervised handle when the launch went through the themed
 /// terminal (`Terminal=true`), so appearance switches can retint it —
 /// `None` for GUI launches and failures.
-fn launch_app(entry: &AppEntry, theme: &Theme, font_px: f32, screen: Size) -> Option<spawn::SpawnedChild> {
+fn launch_app(
+    configured_terminal: Option<&[String]>,
+    entry: &AppEntry,
+    theme: &Theme,
+    font_px: f32,
+    screen: Size,
+) -> Option<spawn::SpawnedChild> {
     // Scale recovered from the already-scaled theme (titlebar font is
     // 12px at 1x) — the same trick `terminal_args` uses, so launch
     // fixups need no separate scale plumbing.
@@ -314,6 +401,12 @@ fn launch_app(entry: &AppEntry, theme: &Theme, font_px: f32, screen: Size) -> Op
         return None;
     };
     if entry.terminal {
+        // A `Terminal=true` entry has to run in whichever terminal the
+        // session actually uses, or the desktop would be launching TUI
+        // apps into a terminal the user replaced.
+        if let Some(argv) = configured_terminal {
+            return spawn_configured_terminal(argv, &entry.exec, scale);
+        }
         let mut argv = terminal_args(theme, font_px, screen, terminal_client_scale(theme));
         argv.push("-e".to_string());
         argv.extend(entry.exec.iter().cloned());
@@ -730,10 +823,28 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         let mut terminals = Vec::new();
         for plan in relaunch {
             let terminal = match plan {
-                RelaunchPlan::Terminal => spawn_terminal(&theme, state.terminal_font_px, primary.size),
-                RelaunchPlan::App(entry) => launch_app(&entry, &theme, state.terminal_font_px, primary.size),
+                RelaunchPlan::Terminal => spawn_terminal(state.terminal.as_deref(), &theme, state.terminal_font_px, primary.size),
+                RelaunchPlan::App(entry) => launch_app(state.terminal.as_deref(), &entry, &theme, state.terminal_font_px, primary.size),
             };
             terminals.extend(terminal);
+        }
+
+        // Autostart, gated on the same "is this genuinely a new
+        // session" question the layout restore above asks, and for the
+        // same reason: an X11 hot restart keeps every client alive
+        // through the SaveSet, so re-running the list there would leave
+        // the user with two of everything they asked to start once.
+        //
+        // Ordered and detached. The order is the file's, because a list
+        // that starts a shell and then a thing that talks to that shell
+        // has an order that matters; detached because these are the
+        // user's processes to own, exactly as `[commands]` entries are.
+        // Nothing waits and nothing is retried: an autostart entry that
+        // fails costs the user that entry, never the session.
+        if !crate::startup::session_continues() {
+            for argv in &state.autostart {
+                run_named_command("autostart", argv, state.scale);
+            }
         }
 
         // Publish the resolved appearance so the contract's reader half
@@ -1040,7 +1151,7 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
     pub fn run_action(&mut self, wm: &mut WindowManager<B>, action: &Action) -> ShellOutcome {
         match action {
             Action::SpawnTerminal => {
-                let terminal = spawn_terminal(&self.theme, self.state.terminal_font_px, terminal_screen(self));
+                let terminal = spawn_terminal(self.state.terminal.as_deref(), &self.theme, self.state.terminal_font_px, terminal_screen(self));
                 self.terminals.extend(terminal);
             }
             Action::Close => {
@@ -1139,6 +1250,20 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
             // how a session picks up a *new build* of itself, which is
             // the one thing it cannot do without exec.
             Action::Restart => return ShellOutcome::Restart,
+            // Named argv from `[commands]`. The lookup cannot normally
+            // miss — `wm_config::parse` drops any binding naming a
+            // command it did not find — but the keymap and the command
+            // table are two pieces of state that a reload replaces, and
+            // a miss here is a warning rather than an assumption. The
+            // desktop stays up either way; that is the whole contract
+            // this crate's config layer is written to.
+            Action::Run(name) => match self.state.commands.get(name) {
+                Some(argv) => run_named_command(name, argv, self.state.scale),
+                None => tracing::warn!(
+                    command = %name,
+                    "no such command in [commands]; nothing to run"
+                ),
+            },
         }
         ShellOutcome::Continue
     }
@@ -1411,7 +1536,7 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
             if let Some(action) = self.launchdock.handle_click(wm.backend_mut(), &self.theme, local, pressed, &running) {
                 match action {
                     LaunchDockAction::Launch(entry) => {
-                        let terminal = launch_app(&entry, &self.theme, self.state.terminal_font_px, terminal_screen(self));
+                        let terminal = launch_app(self.state.terminal.as_deref(), &entry, &self.theme, self.state.terminal_font_px, terminal_screen(self));
                         self.terminals.extend(terminal);
                     }
                     // The same activate path a pager's
@@ -1635,7 +1760,7 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
     fn run_root_menu_action(&mut self, wm: &mut WindowManager<B>, action: RootMenuAction) {
         match action {
             RootMenuAction::LaunchTerminal => {
-                let terminal = spawn_terminal(&self.theme, self.state.terminal_font_px, terminal_screen(self));
+                let terminal = spawn_terminal(self.state.terminal.as_deref(), &self.theme, self.state.terminal_font_px, terminal_screen(self));
                 self.terminals.extend(terminal);
             }
             RootMenuAction::LaunchAbout => {
@@ -1679,7 +1804,7 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
             // doesn't get to panic.
             RootMenuAction::LaunchApp(i) => {
                 if let Some(entry) = self.apps.get(i) {
-                    let terminal = launch_app(entry, &self.theme, self.state.terminal_font_px, terminal_screen(self));
+                    let terminal = launch_app(self.state.terminal.as_deref(), entry, &self.theme, self.state.terminal_font_px, terminal_screen(self));
                     self.terminals.extend(terminal);
                 } else {
                     tracing::warn!(index = i, count = self.apps.len(), "menu fired an out-of-range application index");

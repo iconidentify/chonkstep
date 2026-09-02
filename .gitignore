@@ -5,3 +5,6 @@
 /.claude/worktrees/
 __pycache__/
 *.pyc
+
+# The out-of-workspace reproducer builds into its own target directory.
+/examples/layer-role-repro/target/
