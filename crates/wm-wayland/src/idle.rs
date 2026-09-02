@@ -106,6 +106,6 @@ fn surface_visible(backend: &WaylandBackend, surface: &WlSurface) -> bool {
     let layer_mapped = backend
         .layers
         .iter()
-        .any(|record| record.mapped && *record.surface.wl_surface() == root);
+        .any(|record| record.presented() && *record.surface.wl_surface() == root);
     window_mapped || layer_mapped
 }

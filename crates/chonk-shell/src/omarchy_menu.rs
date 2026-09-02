@@ -137,10 +137,7 @@ impl MenuPaths {
     /// file rather than the developer's.
     pub fn from_env(omarchy_path: Option<OsString>, xdg_config_home: Option<OsString>, home: Option<OsString>) -> Self {
         let home = home.map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
-        let omarchy = omarchy_path
-            .filter(|value| !value.is_empty())
-            .map(PathBuf::from)
-            .unwrap_or_else(|| home.join(".local/share/omarchy"));
+        let omarchy = omarchy_root(omarchy_path, &home);
         let config = xdg_config_home
             .filter(|value| !value.is_empty())
             .map(PathBuf::from)
@@ -150,6 +147,19 @@ impl MenuPaths {
             user: config.join("omarchy/extensions/omarchy-menu.jsonc"),
         }
     }
+}
+
+/// Where Omarchy is installed: `$OMARCHY_PATH` when set and non-empty
+/// — the variable Omarchy's own shell and every one of its scripts
+/// read, `/usr/share/omarchy` on an Omarchy 4 machine — else the
+/// pre-package location under `$HOME`. Shared with
+/// [`crate::omarchy_shell`], so the menu and the shell can never be
+/// found in two different Omarchys.
+pub fn omarchy_root(omarchy_path: Option<OsString>, home: &Path) -> PathBuf {
+    omarchy_path
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.join(".local/share/omarchy"))
 }
 
 // ----------------------------------------------------------------- JSONC

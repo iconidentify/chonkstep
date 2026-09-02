@@ -527,6 +527,27 @@ fn run_omarchy_command(command: &str, theme: &Theme) {
     spawn::spawn_detached_with_env(program, &args, &launch_env(scale), &[]);
 }
 
+/// Starts Omarchy's shell if this session is one that should host it
+/// (`crate::omarchy_shell` owns the rule), through the exact launch
+/// path an Omarchy menu action takes: `bash -lc omarchy-launch-shell`,
+/// detached, with the desktop's launch environment. Every outcome is
+/// logged once, so the session log answers "why is there no bar".
+fn host_omarchy_shell(state: &SessionState) {
+    use crate::omarchy_shell::{self, Verdict};
+    match omarchy_shell::decide(state.omarchy_shell) {
+        Verdict::Launch => {
+            let (program, args) = crate::omarchy_menu::action_argv(omarchy_shell::LAUNCHER);
+            match spawn::spawn_detached_with_env(program, &args, &launch_env(state.scale), &[]) {
+                Some(pid) => tracing::info!(pid, "hosting Omarchy's shell"),
+                None => tracing::warn!("Omarchy's shell launcher failed to start"),
+            }
+        }
+        Verdict::Disabled => tracing::info!("not hosting Omarchy's shell: omarchy_shell = false"),
+        Verdict::NotWayland => tracing::debug!("not hosting Omarchy's shell: not a Wayland session"),
+        Verdict::NotInstalled => tracing::info!("no Omarchy shell installed; nothing to host"),
+    }
+}
+
 /// Path to the `chonk-about` demo binary — resolved relative to the
 /// shell binary's own running image (`chonk-about` always builds into
 /// the same output directory, debug or release), not the process's
@@ -900,6 +921,12 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
                 run_named_command("autostart", argv, state.scale);
             }
         }
+
+        // Omarchy's shell, where Hyprland's `autostart.lua` would start
+        // it. Not behind the gate above: a Wayland re-exec kills the
+        // shell with the display it was drawing on, so a continuation
+        // has none until it starts one — see `crate::omarchy_shell`.
+        host_omarchy_shell(state);
 
         // Publish the resolved appearance so the contract's reader half
         // (`$XDG_STATE_HOME/chonkstep/appearance`) is present from the

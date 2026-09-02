@@ -125,9 +125,47 @@ pub(crate) struct LayerRecord {
     pub geometry: Rect,
     pub mapped: bool,
     /// The namespace the client declared ("launcher", "notifications").
-    /// Kept for logs — it is the only human-readable identity a layer
-    /// surface has.
+    /// The only human-readable identity a layer surface has: kept for
+    /// logs, and read by [`declined`], the one policy that keys on it.
     pub namespace: String,
+}
+
+impl LayerRecord {
+    /// Whether the surface is one the user can see and click right now:
+    /// mapped, still alive, and not [`declined`]. The renderer and the
+    /// hit walk both ask this and nothing else, so a surface can never
+    /// be drawn where it cannot be clicked or the reverse. Frame
+    /// callbacks deliberately do *not* ask it — a declined surface's
+    /// client still gets its frames, or it would stall waiting for one.
+    pub fn presented(&self) -> bool {
+        self.mapped && self.surface.alive() && !declined(self.layer, &self.namespace)
+    }
+}
+
+/// The namespace Omarchy's shell gives its Background plugin's surface
+/// (`shell/plugins/background/Background.qml`).
+pub(crate) const OMARCHY_BACKGROUND_NAMESPACE: &str = "omarchy-background";
+
+/// Whether a layer surface is one this desktop hosts but does not show.
+///
+/// Exactly one: Omarchy's Background plugin. Chonkstep hosts Omarchy's
+/// shell for its bar, panels, notifications and pickers
+/// (`chonk_shell::omarchy_shell`), and that shell also ships a
+/// full-screen `background`-layer surface that paints Omarchy's
+/// wallpaper and takes every button on the desk — double-click opens
+/// its pickers. Under this desktop the desk is already spoken for: the
+/// root wallpaper (which wears Omarchy's own background when the theme
+/// follows Omarchy) and the root menu on right-click. So the surface is
+/// configured, committed and answered like any other, and neither
+/// drawn nor hit-tested. The client sees a healthy surface; the user
+/// sees chonkstep's desk.
+///
+/// Keyed on both the layer and the namespace: a wallpaper daemon of
+/// the user's own choosing (`swaybg`, namespace `wallpaper`) is not
+/// Omarchy's plugin, and a surface Omarchy moved off the background
+/// layer with `set_layer` is no longer painting a wallpaper.
+pub(crate) fn declined(layer: Layer, namespace: &str) -> bool {
+    layer == Layer::Background && namespace == OMARCHY_BACKGROUND_NAMESPACE
 }
 
 /// Compositor-side state this module keeps between passes.
@@ -882,6 +920,9 @@ impl WlrLayerShellHandler for Compositor {
         let backend = self.wm.backend_mut();
         let id = LayerId(backend.alloc_id());
         tracing::info!(id = id.0, ?layer, %namespace, output, "new layer surface");
+        if declined(layer, &namespace) {
+            tracing::info!(id = id.0, "declining Omarchy's background surface: the desk stays chonkstep's");
+        }
         backend.layers.push(LayerRecord {
             id,
             surface,
@@ -1036,6 +1077,26 @@ mod tests {
         // No bars at all is the reservation the Dock started with, so
         // the pass after the last bar leaves puts it back exactly.
         assert_eq!(dock_reservation(EdgeInsets::default()), EdgeReservation::default());
+    }
+
+    #[test]
+    fn only_omarchys_background_surface_is_declined() {
+        assert!(declined(Layer::Background, OMARCHY_BACKGROUND_NAMESPACE));
+        // Another wallpaper daemon on the same layer is the user's
+        // choice, and stays.
+        assert!(!declined(Layer::Background, "wallpaper"));
+        // Omarchy's other surfaces — its bar, its panels, its OSD —
+        // are the whole point of hosting the shell.
+        for namespace in ["omarchy-bar", "omarchy-panel", "omarchy-osd", "omarchy-notifications"] {
+            for layer in [Layer::Background, Layer::Bottom, Layer::Top, Layer::Overlay] {
+                assert!(!declined(layer, namespace), "{namespace:?} on {layer:?}");
+            }
+        }
+        // And the plugin's own surface, moved off the background layer,
+        // is no longer painting a wallpaper over the desk.
+        for layer in [Layer::Bottom, Layer::Top, Layer::Overlay] {
+            assert!(!declined(layer, OMARCHY_BACKGROUND_NAMESPACE), "{layer:?}");
+        }
     }
 
     #[test]

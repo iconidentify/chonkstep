@@ -15,6 +15,14 @@
 //!
 //! Usage: `chonk-fake-bar <height> [right]` — `right` anchors the bar
 //! as a right-edge panel `height` pixels wide instead.
+//!
+//! `chonk-fake-bar background <namespace>` is the other shape a layer
+//! client takes: a surface on the `background` layer anchored to all
+//! four edges with no exclusive zone, the way a wallpaper daemon — or
+//! Omarchy's Background plugin, namespace `omarchy-background` — covers
+//! the desk. The compositor declines exactly that namespace on that
+//! layer, and the test that pins it needs both a surface it must show
+//! and one it must not, differing only in the name.
 
 use std::io::Write;
 use std::os::fd::AsFd;
@@ -119,13 +127,30 @@ fn frame_file(width: u32, height: u32) -> std::fs::File {
     file
 }
 
-fn main() {
+/// The three shapes the client takes, from its arguments.
+enum Shape {
+    /// A top bar `thickness` tall, or a right panel `thickness` wide.
+    Edge { thickness: u32, right_panel: bool },
+    /// A wallpaper: the whole output, on the background layer, under
+    /// the given namespace.
+    Background { namespace: String },
+}
+
+fn parse_args() -> Shape {
     let mut args = std::env::args().skip(1);
-    let thickness: u32 = args
-        .next()
-        .and_then(|arg| arg.parse().ok())
-        .unwrap_or_else(|| fatal("usage: chonk-fake-bar <height> [right]"));
-    let right_panel = args.next().as_deref() == Some("right");
+    let usage = "usage: chonk-fake-bar <height> [right] | chonk-fake-bar background <namespace>";
+    match args.next().as_deref() {
+        Some("background") => Shape::Background { namespace: args.next().unwrap_or_else(|| fatal(usage)) },
+        Some(thickness) => Shape::Edge {
+            thickness: thickness.parse().unwrap_or_else(|_| fatal(usage)),
+            right_panel: args.next().as_deref() == Some("right"),
+        },
+        None => fatal(usage),
+    }
+}
+
+fn main() {
+    let shape = parse_args();
 
     let conn = Connection::connect_to_env().unwrap_or_else(|e| fatal(&format!("no compositor: {e}")));
     let mut queue = conn.new_event_queue();
@@ -139,15 +164,31 @@ fn main() {
     let (compositor, shm, layer_shell) = (compositor.clone(), shm.clone(), layer_shell.clone());
 
     let surface = compositor.create_surface(&qh, ());
-    let layer = layer_shell.get_layer_surface(&surface, None, zwlr_layer_shell_v1::Layer::Top, "chonk-fake-bar".into(), &qh, ());
-    if right_panel {
-        layer.set_anchor(Anchor::Right | Anchor::Top | Anchor::Bottom);
-        layer.set_size(thickness, 0);
-    } else {
-        layer.set_anchor(Anchor::Top | Anchor::Left | Anchor::Right);
-        layer.set_size(0, thickness);
+    let (layer_kind, namespace) = match &shape {
+        Shape::Edge { .. } => (zwlr_layer_shell_v1::Layer::Top, "chonk-fake-bar".to_string()),
+        Shape::Background { namespace } => (zwlr_layer_shell_v1::Layer::Background, namespace.clone()),
+    };
+    let layer = layer_shell.get_layer_surface(&surface, None, layer_kind, namespace, &qh, ());
+    match shape {
+        Shape::Edge { thickness, right_panel: true } => {
+            layer.set_anchor(Anchor::Right | Anchor::Top | Anchor::Bottom);
+            layer.set_size(thickness, 0);
+            layer.set_exclusive_zone(thickness as i32);
+        }
+        Shape::Edge { thickness, right_panel: false } => {
+            layer.set_anchor(Anchor::Top | Anchor::Left | Anchor::Right);
+            layer.set_size(0, thickness);
+            layer.set_exclusive_zone(thickness as i32);
+        }
+        Shape::Background { .. } => {
+            // Every edge, no size of its own, and -1: "do not move me
+            // for anyone's exclusive zone" — Quickshell's
+            // `exclusionMode: Ignore`, which is what Omarchy's plugin sets.
+            layer.set_anchor(Anchor::Top | Anchor::Bottom | Anchor::Left | Anchor::Right);
+            layer.set_size(0, 0);
+            layer.set_exclusive_zone(-1);
+        }
     }
-    layer.set_exclusive_zone(thickness as i32);
     surface.commit();
 
     // The first configure carries the stretched dimension; the client

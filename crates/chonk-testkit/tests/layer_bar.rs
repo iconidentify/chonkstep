@@ -132,3 +132,85 @@ fn the_dock_steps_under_a_bar_and_windows_maximize_between_them() {
     let back = wait_for_dock_at(&mut session, 0, 0);
     assert_eq!(back.x, home.x);
 }
+
+/// The fake bar's fill, as a screenshot reads it: `BAR_ORANGE` is
+/// little-endian ARGB, so the bytes come back reversed.
+const ORANGE: [u8; 3] = [0xE0, 0x70, 0x10];
+
+/// The colour of the desk around the output's centre — a spot no
+/// shell chrome covers on an empty desktop.
+fn desk_colour(shot: &chonk_testkit::Screenshot) -> [f64; 3] {
+    shot.mean_rgb(shot.width / 2 - 20, shot.height / 2 - 20, 40, 40)
+}
+
+fn near(actual: [f64; 3], expected: [f64; 3]) -> bool {
+    actual.iter().zip(expected).all(|(a, e)| (a - e).abs() < 12.0)
+}
+
+/// Waits for the fake bar to report itself mapped — the line it prints
+/// after the roundtrip that follows its first buffer, by which time the
+/// compositor has run the commit. The log is `client-0-…`: the harness
+/// numbers logs by the clients it is *currently* tracking, and
+/// `kill_client` drops the previous bar, so each bar in turn is the
+/// only one — `launch` truncates the file before this is called.
+fn wait_for_client_mapped(session: &Session) {
+    let log = session.dir.join("client-0-chonk-fake-bar.log");
+    poll_until(Duration::from_secs(10), "the layer client to report itself mapped", || {
+        std::fs::read_to_string(&log).ok().filter(|text| text.contains("mapped ")).map(|_| ())
+    })
+    .expect("the background surface should map like any other layer surface");
+}
+
+#[test]
+#[ignore = "needs a live Wayland session to nest in: scripts/e2e.sh, or cargo test -p chonk-testkit -- --ignored --test-threads=1"]
+fn omarchys_background_surface_is_hosted_but_the_desk_stays_chonksteps() {
+    let mut session = Session::boot("layer-background", SessionOptions { scale: Some(1.0), ..Default::default() }).unwrap();
+    let desk = desk_colour(&session.screenshot("desk").unwrap());
+    assert!(!near(desk, ORANGE.map(f64::from)), "the fixture colour must not be the wallpaper's own");
+
+    // -- the control: a wallpaper daemon on the background layer shows --
+    raise_bar(&mut session, &["background", "wallpaper"]);
+    wait_for_client_mapped(&session);
+    poll_until(Duration::from_secs(10), "the background-layer surface to paint the desk", || {
+        let shot = session.screenshot("wallpaper-daemon").ok()?;
+        near(desk_colour(&shot), ORANGE.map(f64::from)).then_some(())
+    })
+    .expect("a background-layer surface under any other namespace is drawn over the wallpaper");
+    session.kill_client("chonk-fake-bar");
+    poll_until(Duration::from_secs(10), "the desk to come back once the daemon exits", || {
+        let shot = session.screenshot("daemon-gone").ok()?;
+        near(desk_colour(&shot), desk).then_some(())
+    })
+    .expect("the wallpaper returns when the surface goes");
+
+    // -- Omarchy's plugin: same surface, its namespace, not shown ------
+    raise_bar(&mut session, &["background", "omarchy-background"]);
+    wait_for_client_mapped(&session);
+    assert!(
+        session.log().contains("declining Omarchy's background surface"),
+        "the compositor names the surface it is declining"
+    );
+    // The client is healthy — configured, committed, mapped — yet the
+    // desk is still chonkstep's wallpaper, and stays so.
+    let shot = session.screenshot("omarchy-background").unwrap();
+    assert!(near(desk_colour(&shot), desk), "Omarchy's background surface must not paint over the desk: {:?}", desk_colour(&shot));
+
+    // -- and a right-click on the desk is still the root menu ----------
+    let world = session.world().unwrap();
+    let (x, y) = (world.output_w as f64 / 2.0, world.output_h as f64 / 2.0);
+    let door = session.door();
+    door.motion(x, y).unwrap();
+    door.barrier().unwrap();
+    door.button("right", true).unwrap();
+    door.barrier().unwrap();
+    door.button("right", false).unwrap();
+    door.barrier().unwrap();
+    poll_until(Duration::from_secs(10), "the root menu to open over the declined surface", || {
+        let world = door.windows().ok()?;
+        // A menu: mapped, raised, and not flush against the right edge
+        // where the dock column and launcher strip live.
+        world.shells.iter().find(|s| s.mapped && s.above && s.x + (s.w as i32) < world.output_w as i32).cloned()
+    })
+    .expect("a right-click on the desk must reach the root menu, not Omarchy's background surface");
+    session.kill_client("chonk-fake-bar");
+}

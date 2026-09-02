@@ -39,6 +39,7 @@
 //! restore_session = true             # optional; relaunch last session's windows
 //! lock_command = "swaylock"          # optional; locker for post-crash recovery
 //! omarchy_menu = true                # optional; Omarchy's menu under right-click
+//! omarchy_shell = true               # optional; host Omarchy's shell (bar, panels, OSD)
 //!
 //! [decorations]                      # optional; per-application overrides
 //! server_side = ["bare.kde.app"]     # frame a client whose own chrome never shows up
@@ -291,6 +292,15 @@ pub struct Config {
     /// integration *off* on a machine that has Omarchy but wants a
     /// plain chonkstep root menu.
     pub omarchy_menu: bool,
+    /// Whether a Wayland session starts Omarchy's shell — the Quickshell
+    /// process behind its bar, menus, panels, notifications, OSD and
+    /// lock screen — the way Omarchy's own Hyprland configuration does
+    /// (see `chonk_shell::omarchy_shell`). On by default, and inert on
+    /// a machine without Omarchy's shell or on the X11 stack, where
+    /// Quickshell cannot run. Most rows of the Omarchy menu are only
+    /// half a feature without it: a speed test, a theme picker or a
+    /// volume key each ends in a panel that shell draws.
+    pub omarchy_shell: bool,
     pub keybindings: Vec<(KeyCombo, Action)>,
 }
 
@@ -356,6 +366,7 @@ impl Config {
             terminal: None,
             autostart: Vec::new(),
             omarchy_menu: true,
+            omarchy_shell: true,
             keybindings: vec![
                 bind("alt+shift+return", Action::SpawnTerminal),
                 bind("alt+shift+q", Action::Close),
@@ -692,6 +703,13 @@ pub fn parse(text: &str) -> Result<Config, String> {
                 other => tracing::warn!(
                     value = ?other,
                     "config: omarchy_menu must be a boolean, keeping default"
+                ),
+            },
+            "omarchy_shell" => match value {
+                toml::Value::Boolean(b) => config.omarchy_shell = *b,
+                other => tracing::warn!(
+                    value = ?other,
+                    "config: omarchy_shell must be a boolean, keeping default"
                 ),
             },
             "lock_command" => match value {
@@ -1633,6 +1651,27 @@ mod tests {
     fn wrongly_typed_omarchy_menu_keeps_the_default() {
         for text in ["omarchy_menu = \"off\"", "omarchy_menu = 0"] {
             assert!(parse(text).unwrap().omarchy_menu, "text {text:?}");
+        }
+    }
+
+    #[test]
+    fn omarchy_shell_defaults_on_and_parses_as_a_boolean() {
+        // On by default for the same reason the menu is: without
+        // Omarchy's shell installed there is nothing to launch, so the
+        // default costs a machine without Omarchy nothing.
+        assert!(Config::default_config().omarchy_shell);
+        assert!(!parse("omarchy_shell = false").unwrap().omarchy_shell);
+        assert!(parse("omarchy_shell = true").unwrap().omarchy_shell);
+        // The two keys are independent: a desktop can carry the menu
+        // and leave the shell to something else, or the reverse.
+        let config = parse("omarchy_menu = false\nomarchy_shell = true").unwrap();
+        assert!(!config.omarchy_menu && config.omarchy_shell);
+    }
+
+    #[test]
+    fn wrongly_typed_omarchy_shell_keeps_the_default() {
+        for text in ["omarchy_shell = \"off\"", "omarchy_shell = 1"] {
+            assert!(parse(text).unwrap().omarchy_shell, "text {text:?}");
         }
     }
 

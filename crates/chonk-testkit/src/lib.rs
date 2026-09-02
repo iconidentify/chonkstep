@@ -139,6 +139,12 @@ pub fn poll_until<T>(
 #[derive(Default)]
 pub struct SessionOptions {
     pub scale: Option<f32>,
+    /// Whether the session hosts Omarchy's shell (`omarchy_shell`).
+    /// Off by default, unlike the compositor's own default: on a
+    /// machine with Omarchy installed, every nested compositor these
+    /// tests boot would otherwise start a real Quickshell against
+    /// itself.
+    pub omarchy_shell: bool,
     /// Extra lines appended verbatim to the isolated config file —
     /// how a test opts into keys the harness has no dedicated field
     /// for (`restore_session = true`, `lock_command = ...`).
@@ -212,7 +218,9 @@ impl Session {
         std::fs::create_dir_all(config_home.join("chonkstep")).map_err(|e| e.to_string())?;
         std::fs::create_dir_all(state_home.join("chonkstep")).map_err(|e| e.to_string())?;
 
-        let mut config = String::new();
+        // TOML forbids a repeated key, so the harness writes this one
+        // itself rather than leaving it to `config_extra`.
+        let mut config = format!("omarchy_shell = {}\n", options.omarchy_shell);
         if let Some(scale) = options.scale {
             config.push_str(&format!("scale = {scale}\n"));
         }

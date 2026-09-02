@@ -241,6 +241,19 @@ eight built-in themes as Omarchy themes into `~/.config/omarchy/themes/`
 so `omarchy-theme-set amber-phosphor` dresses the rest of the machine
 to match. Details in [docs/appearance.md](docs/appearance.md).
 
+Most of that menu ends in Omarchy's *shell* - the Quickshell process
+behind Omarchy's bar, panels, pickers, notifications, on-screen display
+and lock screen - and a Wayland session starts it the way Omarchy's
+Hyprland configuration does, through `omarchy-launch-shell`, as it
+comes up. So "Network Speed Test" summons Omarchy's gauges, "Style >
+Theme" opens Omarchy's own theme picker, and a volume key shows its OSD,
+on this desk exactly as on Hyprland. The one part of the shell chonkstep
+declines is its Background plugin, a full-screen surface that would
+paint over chonkstep's wallpaper and take the right-click the root menu
+lives on; the compositor keeps that surface healthy and simply never
+shows it, so the desk stays chonkstep's. `omarchy_shell = false` in the
+config leaves the shell to you.
+
 Omarchy's bar, and anything else that wants to draw the desktop's
 state, talks to the shell over a small socket at
 `$XDG_RUNTIME_DIR/chonkstep/control-<display>.sock` - newline-framed

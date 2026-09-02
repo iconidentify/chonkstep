@@ -24,6 +24,7 @@ pub mod launchdock;
 pub mod omarchy_export;
 pub mod omarchy_follow;
 pub mod omarchy_menu;
+pub mod omarchy_shell;
 pub mod overview;
 pub mod session_layout;
 pub mod shell;

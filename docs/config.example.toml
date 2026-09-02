@@ -170,6 +170,21 @@
 # to chonkstep's own rows.
 #omarchy_menu = true
 
+# Whether a Wayland session starts Omarchy's shell -- the Quickshell
+# process behind Omarchy's bar, panels, notifications, on-screen
+# display, pickers and lock screen -- exactly as Omarchy's own Hyprland
+# configuration starts it (`omarchy-launch-shell`). Most of the Omarchy
+# menu is only half a feature without it: "Network speed test", "Style
+# > Theme", the volume keys, all end in a panel that shell draws.
+#
+# On by default, and inert without Omarchy's shell installed or on the
+# X11 stack, where Quickshell cannot run. Its Background plugin is the
+# one part chonkstep declines: the desktop keeps its own wallpaper and
+# root menu, so a right-click on the desk is still chonkstep's. Set it
+# to false to run a plain chonkstep desk on an Omarchy machine, or to
+# start the shell yourself from `autostart`.
+#omarchy_shell = true
+
 # The modifier for the move/resize drag gesture: hold it and drag with
 # the LEFT button anywhere on a window to move it, or with the RIGHT
 # button to resize it from whichever third of the window you grabbed

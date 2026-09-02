@@ -83,6 +83,12 @@ pub struct SessionState {
     /// every reload, which is how a fresh `omarchy update` reaches the
     /// menu without a restart.
     pub omarchy_menu: bool,
+    /// Whether a Wayland session hosts Omarchy's shell
+    /// (`crate::omarchy_shell`). Boot-time only, like `autostart`: a
+    /// reload cannot start or stop a process the user may since have
+    /// taken over — Omarchy's own "Restart shell" row does that — but
+    /// it is carried here so it resolves through the one path.
+    pub omarchy_shell: bool,
     /// Per-application decoration overrides, handed to the backend.
     ///
     /// Carried here rather than read straight off the config by each
@@ -141,6 +147,7 @@ impl SessionState {
             terminal_font_px: config.terminal_font_px,
             restore_session: config.restore_session,
             omarchy_menu: config.omarchy_menu,
+            omarchy_shell: config.omarchy_shell,
             decorations: config.decorations.clone(),
             drag_modifier: config.drag_modifier,
             commands: config.commands.clone(),
@@ -577,6 +584,7 @@ mod tests {
             terminal: None,
             autostart: Vec::new(),
             omarchy_menu: true,
+            omarchy_shell: true,
             decorations: DecorationRules::default(),
             drag_modifier: Some(wm_core::DEFAULT_DRAG_MODIFIER),
             keybindings: Vec::new(),

@@ -602,7 +602,7 @@ fn push_layer_band(
     viewport: Point,
 ) {
     for record in backend.layers.iter().rev() {
-        if record.layer != band || !record.mapped || !record.surface.alive() {
+        if record.layer != band || !record.presented() {
             continue;
         }
         let surface = record.surface.wl_surface();
