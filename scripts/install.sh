@@ -96,10 +96,18 @@ echo "Installing dependencies (sudo)..."
 # portal-gtk the fallback for everything else (file chooser and
 # friends), and pipewire carries the frames from backend to browser.
 # See docs/screen-sharing.md.
+# JetBrains Mono Nerd comes in two conflicting packages and stock
+# Omarchy ships the -basic variant; demanding the full one makes
+# pacman refuse the whole transaction on exactly the machines this
+# installer targets. Either variant carries the family the terminal
+# theme names, so ask for the full package only when neither is
+# already installed.
+jb_font="ttf-jetbrains-mono-nerd"
+pacman -Qq | grep -qx 'ttf-jetbrains-mono-nerd\(-basic\)\?' && jb_font=""
 sudo pacman -S --needed --noconfirm \
     xorg-server xorg-xinit xorg-xauth \
     foot picom wireplumber \
-    ttf-dejavu gsfonts ttf-jetbrains-mono-nerd noto-fonts \
+    ttf-dejavu gsfonts $jb_font noto-fonts \
     libxkbcommon libglvnd mesa xorg-xwayland \
     libdrm libinput systemd-libs seatd \
     pipewire xdg-desktop-portal xdg-desktop-portal-wlr xdg-desktop-portal-gtk
