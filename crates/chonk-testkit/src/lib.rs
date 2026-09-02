@@ -34,6 +34,18 @@
 //! locally with `scripts/e2e.sh` or
 //! `cargo test -p chonk-testkit -- --ignored --test-threads=1`.
 //!
+//! # What every posed session has in common
+//!
+//! Each session runs from a fresh scratch directory ([`session_dir`])
+//! with a config file the harness writes itself. That file always
+//! begins `omarchy_shell = false` unless [`SessionOptions::omarchy_shell`]
+//! is set: the compositor's own default is to host Omarchy's shell
+//! when it finds one, and on a machine with Omarchy installed every
+//! nested compositor this suite boots would otherwise start a real
+//! Quickshell against itself — a bar, notifications and an OSD
+//! fighting the test for the desk. The one test that wants the shell
+//! hosted asks for it and supplies its own stand-in launcher.
+//!
 //! # House rules this crate enforces on itself
 //!
 //! - **Every wait is a bounded poll on an observable condition** — a
@@ -130,6 +142,41 @@ pub fn poll_until<T>(
     }
 }
 
+/// evdev keycodes (`KEY_*` from input-event-codes.h), which is what
+/// [`Door::key`] speaks — the door applies the xkb +8 offset itself.
+/// One list, so no test restates a number it could get wrong.
+pub mod keys {
+    pub const ESC: u32 = 1;
+    pub const ENTER: u32 = 28;
+    pub const LEFTSHIFT: u32 = 42;
+    pub const X: u32 = 45;
+    pub const LEFTALT: u32 = 56;
+    pub const SPACE: u32 = 57;
+    pub const UP: u32 = 103;
+    pub const LEFT: u32 = 105;
+    pub const RIGHT: u32 = 106;
+    /// The bare volume-up key — one of the media keys the config
+    /// parser had no name for until the `[commands]` seam landed.
+    pub const VOLUMEUP: u32 = 115;
+    pub const LEFTMETA: u32 = 125;
+}
+
+/// The solid colour `chonk-fake-bar` (this crate's layer-shell
+/// client) fills its surface with, as a screenshot reads it back:
+/// RGB, a strong orange nothing in the shell's palettes comes near.
+/// The bar derives its premultiplied little-endian ARGB pixel from
+/// this, so the fixture and the assertions on it cannot drift apart.
+pub const FAKE_BAR_RGB: [u8; 3] = [0xE0, 0x70, 0x10];
+
+/// Where the session called `name` keeps its scratch — config, state,
+/// logs, screenshots, the door socket. Public so a test can name a
+/// path inside the directory (a marker file for a command to write)
+/// before the session that will use it exists; [`Session::boot`]
+/// clears and recreates exactly this directory.
+pub fn session_dir(name: &str) -> PathBuf {
+    std::env::temp_dir().join("chonk-testkit").join(name)
+}
+
 // -- the session ---------------------------------------------------------
 
 /// Options for [`Session::boot`]. `scale` lands in the isolated
@@ -208,7 +255,7 @@ impl Session {
     /// waits — bounded — until both the wayland socket and the door
     /// are demonstrably up.
     pub fn boot(name: &str, options: SessionOptions) -> Result<Session, String> {
-        let dir = std::env::temp_dir().join("chonk-testkit").join(name);
+        let dir = session_dir(name);
         // A fresh directory per boot: leftovers from the previous run
         // (an old door socket, an old config) must not leak into this
         // one. Failure to remove is fine the first time around.
@@ -217,6 +264,14 @@ impl Session {
         let state_home = dir.join("state");
         std::fs::create_dir_all(config_home.join("chonkstep")).map_err(|e| e.to_string())?;
         std::fs::create_dir_all(state_home.join("chonkstep")).map_err(|e| e.to_string())?;
+        // Always present, even empty: the compositor reads Omarchy's
+        // current theme from `$XDG_STATE_HOME/omarchy/current` only
+        // when `$XDG_STATE_HOME/omarchy` already exists as a directory,
+        // and otherwise from `$HOME/.local/state/omarchy/current` —
+        // Omarchy's own hard-coded path. Without this directory a test
+        // that plants no palette on purpose would be dressed in the
+        // developer's real Omarchy theme, and pass or fail with it.
+        std::fs::create_dir_all(state_home.join("omarchy")).map_err(|e| e.to_string())?;
 
         // TOML forbids a repeated key, so the harness writes this one
         // itself rather than leaving it to `config_extra`.
@@ -467,9 +522,50 @@ impl Session {
         matches!(self.compositor.try_wait(), Ok(None))
     }
 
-    /// The compositor's captured log so far.
+    /// The compositor's captured log so far, with the colour escapes
+    /// `tracing` writes already stripped ([`strip_ansi`]). Stripping
+    /// here rather than at each matcher is what stops one test from
+    /// forgetting: a `key=value` pair in the raw file has escapes
+    /// between the key and the value, so a substring match against
+    /// the raw bytes fails against a healthy compositor.
     pub fn log(&self) -> String {
-        std::fs::read_to_string(&self.log_path).unwrap_or_default()
+        strip_ansi(&std::fs::read_to_string(&self.log_path).unwrap_or_default())
+    }
+
+    /// Polls the ledger until the Dock column sits with its right edge
+    /// `right_inset` pixels in from the output's and its top at `top`
+    /// — where a layer-shell reservation puts it. A poll and not a
+    /// barrier because the shell moves the Dock in the dispatch pass
+    /// after another client's surface maps, and the door's barrier
+    /// orders nothing against a separate client.
+    pub fn wait_for_dock_at(&mut self, right_inset: u32, top: i32) -> Result<ShellInfo, String> {
+        let door = &mut self.door;
+        poll_until(DEFAULT_TIMEOUT, &format!("the dock to hang {right_inset} in from the right at y={top}"), || {
+            let world = door.windows().ok()?;
+            world.dock_inset(right_inset).filter(|dock| dock.y == top).cloned()
+        })
+    }
+
+    /// Right-clicks bare desk and returns the root menu once a menu
+    /// surface with exactly `rows` rows has mapped — the row count is
+    /// the check that the menu that opened is the one expected, since
+    /// the ledger does not carry labels.
+    ///
+    /// The click lands 30% across and halfway down the output: inside
+    /// the desk, clear of the Dock column and the launcher strip on
+    /// the right edge, and far enough left that two cascades can open
+    /// to the right of the menu without either being pushed flush
+    /// against the edge, where [`World::menus`] would stop seeing it.
+    pub fn open_root_menu(&mut self, metrics: &MenuMetrics, rows: usize) -> Result<ShellInfo, String> {
+        let world = self.door.windows()?;
+        let (x, y) = (world.output_w as f64 * 0.3, world.output_h as f64 / 2.0);
+        self.door.right_click(x, y)?;
+        let wanted = metrics.height_for(rows);
+        let door = &mut self.door;
+        poll_until(DEFAULT_TIMEOUT, &format!("the root menu ({rows} rows, {wanted}px tall) to map"), || {
+            let world = door.windows().ok()?;
+            world.menus().into_iter().find(|m| m.h == wanted)
+        })
     }
 
     /// A file in the isolated state directory — where the compositor's
@@ -669,9 +765,123 @@ impl World {
     /// than wide) flush against the output's right edge — the shape
     /// the shell gives it at every scale.
     pub fn dock(&self) -> Option<&ShellInfo> {
+        self.dock_inset(0)
+    }
+
+    /// The dock found by shape alone, with its right edge
+    /// `right_inset` pixels in from the output's: zero for the
+    /// unobstructed corner, a right-edge panel's width once one has
+    /// reserved the edge and the column has stepped left.
+    pub fn dock_inset(&self, right_inset: u32) -> Option<&ShellInfo> {
         self.shells.iter().find(|s| {
-            s.mapped && s.h > s.w && s.x + s.w as i32 == self.output_w as i32
+            s.mapped && s.h > s.w && s.x + s.w as i32 == (self.output_w - right_inset) as i32
         })
+    }
+
+    /// Mapped menu surfaces: every mapped, raised shell that does not
+    /// sit flush against the output's right edge. The Dock column and
+    /// the launcher strip under it do, and they are the only other
+    /// shells the desktop keeps raised; a menu opened on bare desk
+    /// never does.
+    pub fn menus(&self) -> Vec<ShellInfo> {
+        self.shells
+            .iter()
+            .filter(|s| s.mapped && s.above && s.x + (s.w as i32) < self.output_w as i32)
+            .cloned()
+            .collect()
+    }
+}
+
+// -- menus ---------------------------------------------------------------
+
+/// Every row the root menu can carry, in the order
+/// `chonk_shell::desktop::root_menu_items` builds them. Two are
+/// conditional: "Omarchy Bar" is present only while the session hosts
+/// Omarchy's shell, and "Omarchy" only when an Omarchy menu definition
+/// is installed and `omarchy_menu` is on. [`RootMenu`] says which of
+/// the two a given session has, so a test clicks a row by its label
+/// and never by a hand-counted index.
+pub const ROOT_MENU_ROWS: &[&str] = &["Terminal", "Applications", "Theme", "Wallpaper", "Omarchy Bar", "Omarchy", "Exit"];
+
+/// Which of the root menu's optional rows a session carries. The
+/// default — neither — is the menu the harness's own default session
+/// shows on a machine with no Omarchy menu definition.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RootMenu {
+    /// The session hosts Omarchy's shell, so the bar toggle is listed.
+    pub omarchy_bar: bool,
+    /// An Omarchy menu definition was found, so its submenu is listed.
+    pub omarchy: bool,
+}
+
+impl RootMenu {
+    /// The rows this menu shows, in order.
+    pub fn rows(self) -> Vec<&'static str> {
+        ROOT_MENU_ROWS
+            .iter()
+            .copied()
+            .filter(|row| match *row {
+                "Omarchy Bar" => self.omarchy_bar,
+                "Omarchy" => self.omarchy,
+                _ => true,
+            })
+            .collect()
+    }
+
+    /// How many rows this menu shows — what [`Session::open_root_menu`]
+    /// is asked to wait for.
+    pub fn row_count(self) -> usize {
+        self.rows().len()
+    }
+
+    /// The index of the row labelled `label`, if this menu carries it.
+    pub fn row_of(self, label: &str) -> Option<usize> {
+        self.rows().iter().position(|row| *row == label)
+    }
+}
+
+/// The menu's row geometry restated from `wm_theme::menu::render_menu`
+/// at scale 1: the title strip is the titlebar's height (never shorter
+/// than a row), rows are `menu.item_height` tall, and a `border.width`
+/// outline wraps everything. Aiming with the same numbers the shell
+/// hit-tests through is what keeps a test from encoding a magic
+/// coordinate that breaks the day a pad changes.
+pub struct MenuMetrics {
+    pub border: u32,
+    pub title_h: u32,
+    pub item_h: u32,
+}
+
+impl MenuMetrics {
+    /// The geometry of the theme the compositor wears by default, at
+    /// scale 1 — the only scale the menu tests boot at.
+    pub fn at_scale_1() -> Self {
+        let theme = wm_theme::default_theme::nextstep_classic();
+        let item_h = (theme.menu.item_height as u32).max(4);
+        Self {
+            border: (theme.border.width as u32).max(1),
+            title_h: (theme.titlebar.height as u32).max(item_h),
+            item_h,
+        }
+    }
+
+    /// The expected surface height of a menu with `rows` rows.
+    pub fn height_for(&self, rows: usize) -> u32 {
+        self.title_h + self.item_h * rows as u32 + self.border * 2
+    }
+
+    /// How many rows a menu surface of height `h` carries, or `None`
+    /// for a height no whole number of rows explains.
+    pub fn rows_in(&self, h: u32) -> Option<usize> {
+        let body = h.checked_sub(self.title_h + self.border * 2)?;
+        (body % self.item_h == 0).then_some((body / self.item_h) as usize)
+    }
+
+    /// The centre of row `row` of the menu surface `menu`, in the
+    /// output coordinates the door's pointer speaks.
+    pub fn row_center(&self, menu: &ShellInfo, row: usize) -> (f64, f64) {
+        let y = menu.y as u32 + self.border + self.title_h + self.item_h * row as u32 + self.item_h / 2;
+        (menu.x as f64 + menu.w as f64 / 2.0, y as f64)
     }
 }
 
@@ -782,6 +992,19 @@ impl Door {
         self.button("left", true)?;
         self.barrier()?;
         self.button("left", false)?;
+        self.barrier()
+    }
+
+    /// The right-button click that opens the root menu on bare desk,
+    /// settled at every edge like [`Door::click`]: the motion gets its
+    /// own barrier because the shell decides what was clicked from
+    /// where the pointer already is when the press arrives.
+    pub fn right_click(&mut self, x: f64, y: f64) -> Result<(), String> {
+        self.motion(x, y)?;
+        self.barrier()?;
+        self.button("right", true)?;
+        self.barrier()?;
+        self.button("right", false)?;
         self.barrier()
     }
 
@@ -933,7 +1156,9 @@ impl Screenshot {
         let rgba = match info.color_type {
             png::ColorType::Rgba => buffer,
             png::ColorType::Rgb => buffer
-                .chunks_exact(3)
+                .as_chunks::<3>()
+                .0
+                .iter()
                 .flat_map(|px| [px[0], px[1], px[2], 255])
                 .collect(),
             other => return Err(format!("unsupported screenshot color type {other:?}")),
@@ -982,6 +1207,14 @@ impl Screenshot {
         [sum[0] / count, sum[1] / count, sum[2] / count]
     }
 
+    /// The colour of the desk at the output's centre, as a 40x40
+    /// mean: on an empty desktop no chrome and no window covers that
+    /// spot, so it reads the wallpaper — or whatever a layer surface
+    /// has painted over it.
+    pub fn centre_rgb(&self) -> [f64; 3] {
+        self.mean_rgb(self.width / 2 - 20, self.height / 2 - 20, 40, 40)
+    }
+
     /// Fraction of pixels (0.0–1.0) whose max per-channel difference
     /// from `other` exceeds `threshold`. The "did anything move"
     /// primitive: a window that followed a post-release drag shows up
@@ -994,7 +1227,7 @@ impl Screenshot {
         );
         let mut differing = 0usize;
         let total = (self.width * self.height) as usize;
-        for (a, b) in self.rgba.chunks_exact(4).zip(other.rgba.chunks_exact(4)) {
+        for (a, b) in self.rgba.as_chunks::<4>().0.iter().zip(other.rgba.as_chunks::<4>().0) {
             let delta = a
                 .iter()
                 .zip(b.iter())
@@ -1015,6 +1248,14 @@ impl Screenshot {
 /// regression's symptom was exactly corners at (0, 0, 0).
 pub fn is_dark(mean: [f64; 3]) -> bool {
     mean.iter().sum::<f64>() / 3.0 < 12.0
+}
+
+/// Whether a sampled mean colour is the one expected, within the
+/// slack a mean over real renderer output needs: every channel inside
+/// 12 of the target. Tight enough to tell any two fixture colours
+/// apart, loose enough for the rounding a scaled blit introduces.
+pub fn near(actual: [f64; 3], expected: [u8; 3]) -> bool {
+    actual.iter().zip(expected).all(|(a, e)| (a - f64::from(e)).abs() < 12.0)
 }
 
 #[cfg(test)]
@@ -1041,6 +1282,24 @@ mod tests {
         let frame = parse_frame_line(line).unwrap();
         assert_eq!(frame.window, 3);
         assert!(!frame.mapped);
+    }
+
+    /// The optional rows drop out without disturbing the order of the
+    /// rest, and a label is found at its index in the menu that has
+    /// it and nowhere in one that does not.
+    #[test]
+    fn root_menu_rows_keep_their_order_with_and_without_the_optional_ones() {
+        let plain = RootMenu::default();
+        assert_eq!(plain.rows(), ["Terminal", "Applications", "Theme", "Wallpaper", "Exit"]);
+        assert_eq!(plain.row_of("Exit"), Some(4));
+        assert_eq!(plain.row_of("Omarchy Bar"), None);
+        let hosted = RootMenu { omarchy_bar: true, omarchy: false };
+        assert_eq!(hosted.row_count(), 6);
+        assert_eq!(hosted.row_of("Omarchy Bar"), Some(4));
+        let full = RootMenu { omarchy_bar: true, omarchy: true };
+        assert_eq!(full.rows(), ROOT_MENU_ROWS);
+        assert_eq!(full.row_of("Omarchy"), Some(5));
+        assert_eq!(full.row_of("Exit"), Some(6));
     }
 
     #[test]

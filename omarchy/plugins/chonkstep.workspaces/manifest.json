@@ -18,9 +18,6 @@
     "category": "Compositor",
     "allowMultiple": false,
     "defaultSection": "left",
-    "defaults": {
-      "hideEmpty": false
-    },
     "schema": [
       {
         "key": "hideEmpty",

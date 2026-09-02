@@ -318,6 +318,31 @@ pub(crate) fn state_dir() -> std::path::PathBuf {
     home.join(".local/state/chonkstep")
 }
 
+/// One of this session's small state files by name — `theme`,
+/// `wallpaper`, `dock`, `dock-items`, `omarchy-bar` — under
+/// [`state_dir`]. `None` only when neither `XDG_STATE_HOME` nor `HOME`
+/// is set, which is a session with nowhere to remember anything: every
+/// caller treats that as "do not persist", never as an error.
+pub(crate) fn state_file(name: &str) -> Option<std::path::PathBuf> {
+    if std::env::var_os("XDG_STATE_HOME").is_none() && std::env::var_os("HOME").is_none() {
+        return None;
+    }
+    Some(state_dir().join(name))
+}
+
+/// Whether a fresh `Shell` runs the config's `autostart` list.
+///
+/// Not on an X11 hot restart: there every client survives the re-exec
+/// through the SaveSet, and running the list again would leave the
+/// user with two of everything they asked to start once. A Wayland
+/// re-exec is the opposite case — the display closes and every client
+/// dies with it — so a continuation there has nothing running and the
+/// list runs again, exactly as it does on a fresh start. Pure, so the
+/// rule is pinned by a test rather than by a restart.
+pub(crate) fn autostart_runs(session_continues: bool, stack: crate::spawn::DisplayStack) -> bool {
+    !(session_continues && stack == crate::spawn::DisplayStack::X11)
+}
+
 /// Whether something has asked this session to re-exec its on-disk
 /// binary since the last call (`scripts/restart.sh` writes the marker).
 ///
@@ -700,6 +725,18 @@ mod continuation_tests {
     /// process-global state exactly once (a `OnceLock` plus a
     /// `remove_var`), so splitting this across tests would have them
     /// race for the one initialization that is allowed to happen.
+    #[test]
+    fn autostart_is_skipped_only_on_an_x11_continuation() {
+        use crate::spawn::DisplayStack;
+        // A fresh session runs the list on either stack.
+        assert!(super::autostart_runs(false, DisplayStack::X11));
+        assert!(super::autostart_runs(false, DisplayStack::Wayland));
+        // A hot restart keeps X11 clients alive, so the list must not
+        // run twice there — but kills every Wayland client, so it must.
+        assert!(!super::autostart_runs(true, DisplayStack::X11));
+        assert!(super::autostart_runs(true, DisplayStack::Wayland));
+    }
+
     #[test]
     fn consuming_the_marker_takes_it_out_of_the_environment() {
         std::env::set_var(super::SESSION_CONTINUES_VAR, "1");

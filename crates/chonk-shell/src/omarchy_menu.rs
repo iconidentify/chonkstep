@@ -240,8 +240,13 @@ fn strip_trailing_commas(text: &str) -> String {
         let c = bytes[i];
         if in_string {
             if c == b'\\' && i + 1 < bytes.len() {
-                out.push_str(&text[i..i + 2]);
-                i += 2;
+                // The escaped character is copied whole, however many
+                // bytes it is: JSON only escapes ASCII, but a user's
+                // file may well say `"\é"` by mistake, and slicing two
+                // bytes there would split the code point and panic.
+                let escaped = text[i + 1..].chars().next().map_or(1, char::len_utf8);
+                out.push_str(&text[i..i + 1 + escaped]);
+                i += 1 + escaped;
                 continue;
             }
             if c == b'"' {
@@ -361,13 +366,20 @@ impl<'de> Deserialize<'de> for OrderedEntries {
                 f.write_str("an object of menu entries keyed by id")
             }
             fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
-                let mut entries = Vec::new();
+                let mut entries: Vec<(String, RawEntry)> = Vec::new();
                 while let Some((id, value)) = map.next_entry::<String, serde_json::Value>()? {
                     if !value.is_object() {
                         continue;
                     }
                     match serde_json::from_value::<RawEntry>(value) {
-                        Ok(entry) => entries.push((id, entry)),
+                        // A key repeated within one file: the later
+                        // value wins, as it does for Omarchy's
+                        // `JSON.parse`, in the earlier position, so
+                        // the tree still has exactly one node per id.
+                        Ok(entry) => match entries.iter_mut().find(|(seen, _)| *seen == id) {
+                            Some(slot) => slot.1 = entry,
+                            None => entries.push((id, entry)),
+                        },
                         Err(error) => tracing::warn!(id, %error, "omarchy menu entry could not be read; skipping it"),
                     }
                 }
@@ -716,12 +728,10 @@ impl Conditions {
         self.results.get(&(id.to_string(), tag)).copied()
     }
 
-    pub fn len(&self) -> usize {
+    /// How many guard lines answered — a log figure, and the test's
+    /// check that every line answered exactly once.
+    pub(crate) fn len(&self) -> usize {
         self.results.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.results.is_empty()
     }
 }
 
@@ -1423,6 +1433,27 @@ mod tests {
     }
 
     #[test]
+    fn a_multibyte_character_after_a_backslash_does_not_split_the_string() {
+        // `"\é"` is not a JSON escape, but a user's file may say it,
+        // and the comma stripper walks bytes: it must step over the
+        // whole code point rather than slice through it.
+        let text = "{\"a\": {\"label\": \"\\é\",}, }";
+        let stripped = strip_trailing_commas(text);
+        assert_eq!(stripped, "{\"a\": {\"label\": \"\\é\"} }");
+    }
+
+    #[test]
+    fn a_repeated_key_keeps_its_first_position_and_its_last_value() {
+        let entries = parse_entries(
+            r#"{ "a": {"label": "First"}, "b": {"label": "B"}, "a": {"label": "Second"} }"#,
+        );
+        assert_eq!(entries.len(), 2, "one node per id");
+        assert_eq!(entries[0].0, "a");
+        assert_eq!(entries[0].1.label.as_deref(), Some("Second"), "the later value wins, as JSON.parse's does");
+        assert_eq!(entries[1].0, "b");
+    }
+
+    #[test]
     fn the_exec_form_is_omarchys_login_shell_dash_c() {
         assert_eq!(action_argv("omarchy-theme-set tokyo-night"), ("bash", ["-lc", "omarchy-theme-set tokyo-night"]));
     }
@@ -1507,6 +1538,7 @@ mod tests {
     /// test reads it rather than trusting the fixture alone. Skips
     /// cleanly elsewhere.
     #[test]
+    #[ignore = "reads the Omarchy installed on this machine; run by hand or from scripts/e2e.sh"]
     fn the_installed_omarchy_menu_parses_into_a_full_tree() {
         let Some(paths) = MenuPaths::discover() else {
             eprintln!("no Omarchy menu installed here; skipping");
@@ -1532,7 +1564,7 @@ mod tests {
     /// depend on the machine — run it by hand when the prelude or a
     /// guard line changes.
     #[test]
-    #[ignore]
+    #[ignore = "forks the installed Omarchy's guard scripts; run by hand"]
     fn the_installed_menus_conditions_evaluate_within_the_timeout() {
         let Some(paths) = MenuPaths::discover() else { return };
         let model = MenuModel::build(parse_entries(&std::fs::read_to_string(&paths.default).unwrap()));

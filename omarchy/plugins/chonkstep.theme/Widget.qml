@@ -9,7 +9,7 @@ BarWidget {
   id: root
   moduleName: "chonkstep.theme"
 
-  readonly property bool showAppearance: setting("showAppearance", true) !== false
+  readonly property bool showAppearance: setting("showAppearance", true) === true
   readonly property var theme: link.connected ? link.theme : null
   readonly property string text: {
     if (!theme || !theme.name) return ""

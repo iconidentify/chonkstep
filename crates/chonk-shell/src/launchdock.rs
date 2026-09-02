@@ -519,12 +519,7 @@ fn ghost_slot(pixels: &mut [u8], tile: u32, slot: usize) {
 /// — the same resolution as `theme_select.rs`'s and `wallpaper.rs`'s
 /// state files, which live right next to this one.
 fn state_path() -> Option<PathBuf> {
-    if let Some(root) = std::env::var_os("XDG_STATE_HOME") {
-        return Some(PathBuf::from(root).join("chonkstep/dock"));
-    }
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .map(|home| home.join(".local/state/chonkstep/dock"))
+    crate::startup::state_file("dock")
 }
 
 /// Reads the pin file and resolves each id against `apps`. Stale ids

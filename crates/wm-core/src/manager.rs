@@ -4297,10 +4297,10 @@ mod tests {
         let id = wm.client_for_window(window).unwrap();
         assert_eq!(wm.client(id).unwrap().title, "", "no WM_NAME was set yet at map time");
 
-        wm.backend_mut().set_title(window, "chrisk@imac:~/chonkstep");
+        wm.backend_mut().set_title(window, "user@host:~/chonkstep");
         wm.dispatch(BackendEvent::TitleChanged(window));
 
-        assert_eq!(wm.client(id).unwrap().title, "chrisk@imac:~/chonkstep");
+        assert_eq!(wm.client(id).unwrap().title, "user@host:~/chonkstep");
         let frame = wm.client(id).unwrap().frame.unwrap();
         assert!(wm.backend().painted_frames.contains(&frame));
     }
@@ -5174,7 +5174,7 @@ mod tests {
 
         // Any later repaint (focus change, title update) must hold the
         // shade too — same trap, different trigger.
-        wm.backend_mut().set_title(window, "chrisk@imac:~/chonkstep");
+        wm.backend_mut().set_title(window, "user@host:~/chonkstep");
         wm.dispatch(BackendEvent::TitleChanged(window));
         let painted = *wm.backend().last_paint_size.get(&frame).unwrap();
         assert_eq!(painted.h, shaded_height, "a title-change repaint must not re-inflate a shaded frame");

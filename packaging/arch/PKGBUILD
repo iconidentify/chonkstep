@@ -51,6 +51,8 @@ optdepends=(
   'pipewire: carries screen-share frames from portal backend to application'
   'git: chonk-get install from a git URL'
   'python: dockapps written against the Python binding'
+  'omarchy: host Omarchy'\''s shell and menu'
+  'socat: watch the control socket'
 )
 makedepends=('rust')
 # Pin the real checksum when tagging a release: makepkg -g in this
@@ -88,6 +90,10 @@ package() {
   install -Dm755 target/release/chonkstep "$pkgdir/usr/bin/chonkstep"
   install -Dm755 target/release/chonkstep-wayland "$pkgdir/usr/bin/chonkstep-wayland"
   install -Dm755 scripts/chonk-get "$pkgdir/usr/bin/chonk-get"
+  # The Omarchy bridge: writes chonkstep's built-in themes out as
+  # Omarchy themes, so `omarchy-theme-set` can dress the rest of the
+  # machine to match (see README, "Installing on Omarchy").
+  install -Dm755 target/release/omarchy-export-themes "$pkgdir/usr/bin/omarchy-export-themes"
 
   # Session launcher scripts. These resolve the binary themselves:
   # from /usr/lib/chonkstep they find no sibling checkout and fall
@@ -132,5 +138,16 @@ DESKTOP
   install -Dm644 docs/dockapp-protocol.md -t "$pkgdir/usr/share/doc/$pkgname"
   install -Dm644 docs/xwayland-compatibility.md -t "$pkgdir/usr/share/doc/$pkgname"
   install -Dm644 docs/screen-sharing.md -t "$pkgdir/usr/share/doc/$pkgname"
+  install -Dm644 docs/appearance.md -t "$pkgdir/usr/share/doc/$pkgname"
+  install -Dm644 docs/control-socket.md -t "$pkgdir/usr/share/doc/$pkgname"
   install -Dm644 README.md CHANGELOG.md -t "$pkgdir/usr/share/doc/$pkgname"
+
+  # The Omarchy bar widgets that read the control socket, and the guide
+  # to installing them. Omarchy loads plugins from the user's own
+  # ~/.config/omarchy/plugins/<id>/, so these are shipped for the user
+  # to link from there rather than installed into Omarchy's tree.
+  for plugin in omarchy/plugins/*/; do
+    install -Dm644 "$plugin"* -t "$pkgdir/usr/share/chonkstep/omarchy/plugins/$(basename "$plugin")"
+  done
+  install -Dm644 omarchy/README.md "$pkgdir/usr/share/doc/$pkgname/omarchy-plugins.md"
 }

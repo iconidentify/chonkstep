@@ -16,23 +16,14 @@
 //! No `foot` or other client is needed — the commands under test write
 //! files, which keeps what is being proved narrow.
 
-use std::path::PathBuf;
+use std::path::Path;
 use std::time::Duration;
 
-use chonk_testkit::{poll_until, Session, SessionOptions};
+use chonk_testkit::{keys, poll_until, session_dir, Session, SessionOptions};
 
 /// Long enough for a spawn, an exec and a small write to land, without
 /// making a failing test wait on the full default.
 const SPAWNED: Duration = Duration::from_secs(8);
-
-/// evdev keycodes, which is what the test door speaks (`test_door.rs`
-/// applies the xkb +8 itself).
-const KEY_LEFTMETA: u32 = 125;
-const KEY_SPACE: u32 = 57;
-/// The bare volume-up key — one of the media keys the config parser
-/// had no name for until the `[commands]` seam landed, which is
-/// exactly why it is worth pinning here.
-const KEY_VOLUMEUP: u32 = 115;
 
 /// A command line that writes `marker` into the session's own scratch
 /// directory, as a TOML array so the path survives whitespace.
@@ -40,20 +31,14 @@ const KEY_VOLUMEUP: u32 = 115;
 /// Arrays rather than a bare string on purpose: this is also the
 /// documented escape hatch for arguments that contain spaces, and a
 /// temp path is exactly where an unexpected space would show up.
-fn writes(dir: &PathBuf, marker: &str) -> String {
+fn writes(dir: &Path, marker: &str) -> String {
     let path = dir.join(marker);
     format!(r#"["sh", "-c", "echo ran > {}"]"#, path.display())
 }
 
-/// Where a booted session's scratch directory lives, so a config can
-/// name a path inside it before the session exists.
-fn session_dir(name: &str) -> PathBuf {
-    std::env::temp_dir().join("chonk-testkit").join(name)
-}
-
 /// The marker file a command was asked to write, once it exists.
 /// Shaped as `Option` because that is what `poll_until` polls on.
-fn marker(dir: &PathBuf, name: &str) -> Option<()> {
+fn marker(dir: &Path, name: &str) -> Option<()> {
     dir.join(name).exists().then_some(())
 }
 
@@ -76,7 +61,7 @@ fn a_bound_key_runs_the_command_it_names() {
     )
     .expect("session boots");
 
-    session.door().chord(KEY_LEFTMETA, KEY_SPACE).expect("chord injects");
+    session.door().chord(keys::LEFTMETA, keys::SPACE).expect("chord injects");
     poll_until(SPAWNED, "the marker written by the command `mark`", || marker(&dir, "pressed"))
         .expect("super+space should have run the command named `mark`");
 }
@@ -101,7 +86,7 @@ fn a_bare_media_key_runs_a_command() {
     )
     .expect("session boots");
 
-    session.door().tap_key(KEY_VOLUMEUP).expect("key injects");
+    session.door().tap_key(keys::VOLUMEUP).expect("key injects");
     poll_until(SPAWNED, "the marker written by the command `louder`", || marker(&dir, "louder"))
         .expect("a bare volumeup press should have run the command named `louder`");
 }
@@ -160,10 +145,10 @@ fn a_binding_naming_a_missing_command_does_not_cost_the_session() {
     .expect("a config with a bad binding must still boot a session");
 
     // The bad binding is gone rather than bound to a failing spawn.
-    session.door().chord(KEY_LEFTMETA, KEY_SPACE).expect("chord injects");
+    session.door().chord(keys::LEFTMETA, keys::SPACE).expect("chord injects");
     // The good one in the same file still works, which is the half
     // that proves one bad entry cost exactly one entry.
-    session.door().tap_key(KEY_VOLUMEUP).expect("key injects");
+    session.door().tap_key(keys::VOLUMEUP).expect("key injects");
     poll_until(SPAWNED, "the marker written by the surviving command `real`", || marker(&dir, "real"))
         .expect("the valid binding beside the broken one must still run");
 
@@ -198,7 +183,7 @@ fn a_spawned_command_does_not_inherit_the_continuation_marker() {
     )
     .expect("session boots");
 
-    session.door().chord(KEY_LEFTMETA, KEY_SPACE).expect("chord injects");
+    session.door().chord(keys::LEFTMETA, keys::SPACE).expect("chord injects");
     poll_until(SPAWNED, "the spawned command's environment dump", || dump.exists().then_some(()))
         .expect("the env dump should have been written");
 

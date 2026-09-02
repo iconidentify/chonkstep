@@ -88,9 +88,9 @@ pub fn declare_control_socket(path: std::path::PathBuf) {
 ///
 /// `unset` names variables to *remove* from the child's environment.
 /// It exists for dockapps, which must be launched with
-/// [`DISPLAY_SERVER_ENV`] cleared — see that constant for why that is a
-/// requirement of the design rather than a precaution. Pass `&[]` when
-/// there is nothing to remove.
+/// [`DOCKAPP_WITHHELD_ENV`] cleared — see [`DISPLAY_SERVER_ENV`] for
+/// why that is a requirement of the design rather than a precaution.
+/// Pass `&[]` when there is nothing to remove.
 pub fn spawn_detached_with_env(
     program: &str,
     args: &[&str],

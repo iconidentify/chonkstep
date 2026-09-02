@@ -280,6 +280,14 @@ fn spawn_terminal(
 /// kitty, foot and wezterm all accept it. It is a guess, but it is the
 /// guess with the best odds, and a terminal that wants a different flag
 /// can be named with the flag already in its argv.
+///
+/// Detached, never supervised, and so never in `Shell::terminals`:
+/// that list exists to be signalled SIGUSR1/SIGUSR2 on an appearance
+/// switch, which is foot's colour-theme swap and, for a terminal that
+/// does not handle those signals (alacritty does not), the default
+/// action — termination. A configured terminal keeps its own colours,
+/// as the doc above says, and an appearance switch must leave it alone
+/// in the most literal sense. Always `None` for that reason.
 #[must_use]
 fn spawn_configured_terminal(
     argv: &[String],
@@ -297,7 +305,10 @@ fn spawn_configured_terminal(
     }
     let arg_refs: Vec<&str> = owned.iter().map(String::as_str).collect();
     let env: Vec<(String, String)> = crate::startup::xcursor_size_env(scale).into_iter().collect();
-    spawn::spawn_supervised(program, &arg_refs, &env, &[])
+    if spawn::spawn_detached_with_env(program, &arg_refs, &env, &[]).is_none() {
+        tracing::warn!(program = %program, "configured terminal failed to start");
+    }
+    None
 }
 
 /// The factor the terminal will scale itself by, which is what
@@ -529,9 +540,10 @@ fn run_omarchy_command(command: &str, theme: &Theme) {
 
 /// Starts Omarchy's shell if this session is one that should host it
 /// (`crate::omarchy_shell` owns the rule), through the exact launch
-/// path an Omarchy menu action takes: `bash -lc omarchy-launch-shell`,
-/// detached, with the desktop's launch environment. Every outcome is
-/// logged once, so the session log answers "why is there no bar".
+/// path an Omarchy menu action takes — `bash -lc`, detached, with the
+/// desktop's launch environment — running the launcher by the path the
+/// verdict resolved. Every outcome is logged once, so the session log
+/// answers "why is there no bar".
 fn host_omarchy_shell(verdict: &crate::omarchy_shell::Verdict, scale: f32) {
     use crate::omarchy_shell::{self, Verdict};
     match verdict {
@@ -868,9 +880,11 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         let mut desktop = Desktop::new(backend, screen, primary, scale, &theme, state.appearance, apps.clone(), fonts.clone());
         desktop.set_omarchy_menu(omarchy_menu_for(state));
         // The control socket, bound here — after the dock socket it
-        // sits beside, and before the first process this session
-        // launches (the layout relaunch and autostart below), so
-        // `CHONKSTEP_CONTROL_SOCKET` is in every child's environment.
+        // sits beside, and before the first process meant to see it
+        // (the layout relaunch and autostart below; dockapp tiles,
+        // already spawned by `Desktop::new`, are deliberately kept from
+        // it — see `spawn::DOCKAPP_WITHHELD_ENV`), so
+        // `CHONKSTEP_CONTROL_SOCKET` is in every such child's environment.
         // Binding declares the path to `spawn`, which is what puts it
         // there; a failed bind declares nothing and the session simply
         // has no control socket.
@@ -906,11 +920,12 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
             terminals.extend(terminal);
         }
 
-        // Autostart, gated on the same "is this genuinely a new
-        // session" question the layout restore above asks, and for the
-        // same reason: an X11 hot restart keeps every client alive
-        // through the SaveSet, so re-running the list there would leave
-        // the user with two of everything they asked to start once.
+        // Autostart, skipped only on an X11 hot restart — the one case
+        // where the previous session's clients are still alive (through
+        // the SaveSet) and re-running the list would leave the user
+        // with two of everything they asked to start once. A Wayland
+        // re-exec kills every client, so there the list runs again;
+        // `startup::autostart_runs` owns the rule.
         //
         // Ordered and detached. The order is the file's, because a list
         // that starts a shell and then a thing that talks to that shell
@@ -918,16 +933,17 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         // user's processes to own, exactly as `[commands]` entries are.
         // Nothing waits and nothing is retried: an autostart entry that
         // fails costs the user that entry, never the session.
-        if !crate::startup::session_continues() {
+        if crate::startup::autostart_runs(crate::startup::session_continues(), spawn::current_display_stack()) {
             for argv in &state.autostart {
                 run_named_command("autostart", argv, state.scale);
             }
         }
 
         // Omarchy's shell, where Hyprland's `autostart.lua` would start
-        // it. Not behind the gate above: a Wayland re-exec kills the
-        // shell with the display it was drawing on, so a continuation
-        // has none until it starts one — see `crate::omarchy_shell`.
+        // it. Wayland-only, so the gate above is moot for it: a Wayland
+        // re-exec kills the shell with the display it was drawing on,
+        // and a continuation has none until it starts one — see
+        // `crate::omarchy_shell`.
         // The bar's visibility is settled *before* the launch, so the
         // compositor already knows to keep the bar off the screen when
         // its surface arrives a few hundred milliseconds later.

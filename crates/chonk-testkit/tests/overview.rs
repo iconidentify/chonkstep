@@ -11,16 +11,8 @@
 //! in, so `#[ignore]`d; run with `scripts/e2e.sh` or
 //! `cargo test -p chonk-testkit -- --ignored --test-threads=1`.
 
-use chonk_testkit::{poll_until, Screenshot, Session, SessionOptions, ShellInfo, World};
+use chonk_testkit::{keys, poll_until, Screenshot, Session, SessionOptions, ShellInfo, World};
 use std::time::Duration;
-
-// evdev keycodes (input-event-codes.h), what the door's `key` speaks.
-const KEY_ESC: u32 = 1;
-const KEY_ENTER: u32 = 28;
-const KEY_UP: u32 = 103;
-const KEY_LEFT: u32 = 105;
-const KEY_RIGHT: u32 = 106;
-const KEY_LEFTMETA: u32 = 125;
 
 /// The dock/Clip tile edge at scale 2 — `chonk_shell::desktop::tile_px`
 /// restated (56 at 1x, scaled), the number the Overview's strip and
@@ -90,7 +82,7 @@ fn launch_terminal(session: &mut Session, title: &str) {
 }
 
 fn open_overview(session: &mut Session) {
-    session.door().chord(KEY_LEFTMETA, KEY_UP).unwrap();
+    session.door().chord(keys::LEFTMETA, keys::UP).unwrap();
     let door = session.door();
     poll_until(Duration::from_secs(10), "the overview panel to appear in the ledger", || {
         let world = door.windows().ok()?;
@@ -132,17 +124,17 @@ fn overview_opens_navigates_and_commits() {
     // launch order (A, B), so stepping toward the *other* card is Left
     // when B is focused, Right when A is. The commit must then move
     // focus — observable as the dark titlebar changing windows.
-    let step = if before == "OverviewB" { KEY_LEFT } else { KEY_RIGHT };
+    let step = if before == "OverviewB" { keys::LEFT } else { keys::RIGHT };
     session.door().tap_key(step).unwrap();
     session.screenshot("overview-selection-moved").unwrap();
-    session.door().tap_key(KEY_ENTER).unwrap();
+    session.door().tap_key(keys::ENTER).unwrap();
     assert_overview_closed(&mut session, "Return committed the selection");
     let after = focused_of_two(&mut session, "OverviewA", "OverviewB");
     assert_ne!(after, before, "committing the other card should move focus (dark titlebar)");
 
     // -- Escape dismisses without committing ----------------------------
     open_overview(&mut session);
-    session.door().tap_key(KEY_ESC).unwrap();
+    session.door().tap_key(keys::ESC).unwrap();
     assert_overview_closed(&mut session, "Escape");
     let unchanged = focused_of_two(&mut session, "OverviewA", "OverviewB");
     assert_eq!(unchanged, after, "Escape must not move focus");
@@ -186,7 +178,7 @@ fn overview_on_an_empty_desk_is_quiet_not_a_crash() {
     session.door().barrier().unwrap();
     session.screenshot("overview-empty").unwrap();
     assert!(session.compositor_alive(), "an empty overview must not take the compositor down");
-    session.door().tap_key(KEY_ESC).unwrap();
+    session.door().tap_key(keys::ESC).unwrap();
     assert_overview_closed(&mut session, "Escape on an empty desk");
     assert!(session.compositor_alive());
 }

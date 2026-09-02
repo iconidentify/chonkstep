@@ -106,10 +106,7 @@ pub(crate) mod dock_order {
     /// and two files a user may edit by hand should not be one
     /// character apart in meaning.
     pub(crate) fn state_path() -> Option<PathBuf> {
-        if let Some(root) = std::env::var_os("XDG_STATE_HOME") {
-            return Some(PathBuf::from(root).join("chonkstep/dock-items"));
-        }
-        std::env::var_os("HOME").map(PathBuf::from).map(|home| home.join(".local/state/chonkstep/dock-items"))
+        crate::startup::state_file("dock-items")
     }
 
     /// The remembered order, or an empty list if there is no file yet
@@ -2523,15 +2520,15 @@ impl<B: Backend> Desktop<B> {
 
     /// Tells the desktop whether this session hosts Omarchy's shell
     /// (`Some`, with the user's remembered choice about its bar) or not
-    /// (`None`: no `Omarchy Bar` row). The choice reaches the compositor
-    /// at once, before the bar's surface can arrive, and the row reads
-    /// it back. Called once at startup — the hosting decision is
-    /// boot-time — but harmless to call again.
+    /// (`None`: no `Omarchy Bar` row, and nothing hidden — a bar the
+    /// user starts by other means is shown). The choice reaches the
+    /// compositor at once, before the bar's surface can arrive, and the
+    /// row reads it back. Called once at startup, since the hosting
+    /// decision is boot-time.
     pub fn set_omarchy_bar(&mut self, backend: &mut B, bar: Option<BarVisibility>) {
         self.omarchy_bar = bar;
-        if let Some(bar) = bar {
-            backend.set_layer_surface_hidden(crate::omarchy_shell::BAR_NAMESPACE, bar.is_hidden());
-        }
+        let hidden = bar.is_some_and(BarVisibility::is_hidden);
+        backend.set_layer_surface_hidden(crate::omarchy_shell::BAR_NAMESPACE, hidden);
     }
 
     /// The `Omarchy Bar` row fired: flip the choice, remember it, and
@@ -3480,6 +3477,34 @@ mod tests {
         assert_eq!(hidden.last().unwrap(), "Exit");
         assert!(labels(Some(BarVisibility::Shown)).contains(&"\u{2022} Omarchy Bar".to_string()), "marked when shown");
         assert!(matches!(resolve_action(ACTION_OMARCHY_BAR, RootMenuBounds::default()), Some(RootMenuAction::ToggleOmarchyBar)));
+    }
+
+    /// The choice reaches the compositor as the bar's namespace, hidden
+    /// or not — and a desk that stops hosting a shell un-hides it, so a
+    /// bar the user starts by other means is never silently invisible.
+    #[test]
+    fn the_omarchy_bar_choice_is_applied_to_the_compositor_and_cleared_with_the_shell() {
+        use wm_core::fake_backend::FakeBackend;
+        let primary = Rect { pos: Point::new(0, 0), size: TEST_SCREEN };
+        let mut backend = FakeBackend::new();
+        let mut desktop: Desktop<FakeBackend> =
+            Desktop::new(&mut backend, TEST_SCREEN, primary, 1.0, &test_theme(), wm_theme::Appearance::Dark, Vec::new(), wm_theme::FontState::new());
+        backend.layer_visibility_calls.clear();
+
+        desktop.set_omarchy_bar(&mut backend, Some(BarVisibility::Hidden));
+        desktop.toggle_omarchy_bar(&mut backend);
+        desktop.set_omarchy_bar(&mut backend, None);
+        let bar = crate::omarchy_shell::BAR_NAMESPACE.to_string();
+        assert_eq!(
+            backend.layer_visibility_calls,
+            vec![(bar.clone(), true), (bar.clone(), false), (bar, false)],
+            "hidden by default, shown by the toggle, and cleared when no shell is hosted"
+        );
+        // With no shell hosted the toggle is inert: a stale menu id must
+        // not hide anything.
+        backend.layer_visibility_calls.clear();
+        desktop.toggle_omarchy_bar(&mut backend);
+        assert!(backend.layer_visibility_calls.is_empty());
     }
 
     #[test]

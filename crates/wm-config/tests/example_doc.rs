@@ -16,11 +16,12 @@ fn the_documented_examples_parse_and_mean_what_they_say() {
         terminal = ["ghostty", "--title", "my terminal"]
 
         autostart = [
-          "quickshell -n -p /usr/share/omarchy/shell",
+          "wl-paste --watch cliphist store",
+          "udiskie --automount --no-notify --no-tray",
         ]
 
         [commands]
-        omarchy-menu = "omarchy-shell shell toggle omarchy.menu"
+        omarchy-menu = "omarchy-menu toggle"
         volume-up    = "omarchy-audio-output-volume up"
         volume-down  = "omarchy-audio-output-volume down"
         lock         = "omarchy-system-lock"
@@ -41,7 +42,7 @@ fn the_documented_examples_parse_and_mean_what_they_say() {
         config.terminal.as_deref(),
         Some(["ghostty", "--title", "my terminal"].map(String::from).as_slice())
     );
-    assert_eq!(config.autostart.len(), 1);
+    assert_eq!(config.autostart.len(), 2);
     assert_eq!(config.commands.len(), 5);
     assert_eq!(
         config.commands.get("notify").map(Vec::as_slice),

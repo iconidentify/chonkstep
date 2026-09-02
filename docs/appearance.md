@@ -41,19 +41,26 @@ one exception, below.
 
 ## Following Omarchy
 
-`theme = "omarchy"` (or the `Omarchy (...)` row in the Themes
+`theme = "omarchy"` (or the `Omarchy (...)` row in the Theme
 submenu) is not a ninth theme but an instruction: wear whatever
 [Omarchy](https://omarchy.org) is wearing. The desktop reads the palette
 `omarchy-theme-set` leaves at
 `~/.local/state/omarchy/current/theme/colors.toml` (`$XDG_STATE_HOME`
-honoured), maps its named colours onto chonkstep's chrome -- the
-focused titlebar in the palette's darkest ground with the foreground
-as ink, the unfocused bar in its `muted`, menus on
-`lighter_background`, the highlight in its `accent` with black or
-white text by contrast, the terminal palette slot for slot as
-Omarchy's own alacritty template lays it out -- and keeps chonkstep's
-geometry: the 23 px titlebar, the bevels, the dock tile, the fonts.
-The theme is named after Omarchy's: `Omarchy (Tokyo Night)`.
+honoured), maps its named colours onto chonkstep's chrome, and keeps
+chonkstep's geometry: the 23 px titlebar, the bevels, the dock tile,
+the fonts. For a dark palette the focused titlebar is its
+`darker_background` with `bright_foreground` as ink, the unfocused bar
+its `muted`, menus on `lighter_background`, the highlight in its
+`accent`. A light palette swaps roles the way the built-in light theme
+does, so focus stays legible on a pale desk: the focused titlebar
+becomes the palette's `foreground` (ink) with `background` as its
+text, the unfocused bar its `selection`, and the borders `foreground`.
+In both moods every ink is chosen from two palette candidates by
+contrast against the fill it lands on, the highlight text included,
+and the terminal palette is laid out slot for slot as Omarchy's own
+alacritty template lays it (`crates/wm-theme/src/omarchy.rs` carries
+the full table). The theme is named after Omarchy's:
+`Omarchy (Tokyo Night)`.
 
 The session then watches that file about once a second and re-dresses
 when it changes, so `omarchy-theme-set catppuccin-latte` -- or a pick
@@ -71,13 +78,13 @@ applications follow a light Omarchy theme as a light desk. While
 following, `appearance = ...` in the config and any
 `appearance-request` are consumed and declined, with a line in the
 session log saying why -- the way to change mood is to change the
-Omarchy theme. Picking a built-in from the Themes submenu ends the
+Omarchy theme. Picking a built-in from the Theme submenu ends the
 follow and hands the axis back.
 
 With Omarchy not installed, or its palette missing or unparsable, the
 flagship stands in and the log says so once; the choice to follow
 stands, and the watch picks the palette up the moment one appears.
-The Themes submenu only offers the Omarchy row when there is a
+The Theme submenu only offers the Omarchy row when there is a
 palette to follow.
 
 **The wallpaper is Omarchy's own.** An Omarchy theme is a palette and a
@@ -90,16 +97,29 @@ bmp), and the same one-hertz watch that notices a palette swap notices
 the link moving, so cycling backgrounds in Omarchy cycles them here. A
 follow with no background set wears Graphite Fold, the neutral artwork.
 The row also stands on its own: the Wallpaper submenu offers `Omarchy's
-Background` wherever Omarchy is installed, so a built-in theme can wear
-Omarchy's picture too.
+Background` whenever Omarchy has a current theme to read (a readable
+`current/theme/colors.toml` -- the same test that admits the Omarchy
+row to the Theme submenu), so a built-in theme can wear Omarchy's
+picture too.
 
-The bridge runs the other way too: `omarchy-export-themes` (built with
-the shell, `cargo build -p chonk-shell`) writes each built-in theme as
-an Omarchy theme -- `colors.toml` derived from the theme itself plus
-its wallpaper under `backgrounds/` -- into `~/.config/omarchy/themes/`
-(or a directory you name), after which `omarchy-theme-set
-amber-phosphor` dresses the rest of the machine to match. The export
-is generated, never hand-edited: change the built-in and run it again.
+The bridge runs the other way too: `omarchy-export-themes` writes each
+built-in theme as an Omarchy theme -- `colors.toml` derived from the
+theme itself plus its wallpaper under `backgrounds/` -- into
+`~/.config/omarchy/themes/` (or a directory you name), after which
+`omarchy-theme-set amber-phosphor` dresses the rest of the machine to
+match. It is built with the shell (`cargo build -p chonk-shell`) and
+lives at `target/release/omarchy-export-themes` in a checkout, at
+`~/.local/bin/omarchy-export-themes` after `scripts/install.sh`, and at
+`/usr/bin/omarchy-export-themes` from the Arch package; the whole
+invocation is
+
+```sh
+omarchy-export-themes                 # into ~/.config/omarchy/themes/
+omarchy-export-themes /some/dir       # or wherever you say
+```
+
+The export is generated, never hand-edited: change the built-in and
+run it again.
 
 ## The file contract (public -- dockapps build on this)
 

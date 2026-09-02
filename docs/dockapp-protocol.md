@@ -85,6 +85,7 @@ this environment added:
 | `CHONKSTEP_DOCK_TOKEN` | the slot's 128-bit token as 32 lowercase hex digits |
 | `CHONKSTEP_SCALE` | the session scale, formatted with four decimals (e.g. `2.0000`) |
 | `CHONKSTEP_THEME` | the active theme id (e.g. `nextstep-classic`) |
+| `CHONKSTEP_APPEARANCE` | the session's current mood, `light` or `dark`, read from the published appearance file (see `appearance.md`); omitted only if that file is missing, which is never a session's normal state |
 
 and this environment **removed**: `WAYLAND_DISPLAY`, `DISPLAY`.
 
@@ -94,10 +95,11 @@ slot (the 0600 socket in the 0700 directory is the outer lock, and the
 shell also checks `SO_PEERCRED` uid — none of the three is load-bearing
 alone). Parse the hex into 16 raw bytes for the `Hello` message.
 
-`CHONKSTEP_SCALE` and `CHONKSTEP_THEME` are a convenience so the first
-frame can be styled before the handshake completes; the authoritative
-values arrive in `Welcome` and can change at any time via
-`ThemeChanged`.
+`CHONKSTEP_SCALE`, `CHONKSTEP_THEME` and `CHONKSTEP_APPEARANCE` are a
+convenience so the first frame can be styled before the handshake
+completes; the authoritative values arrive in `Welcome` and can change
+at any time via `ThemeChanged`, whose `theme_toml` carries the
+appearance tag.
 
 If `CHONKSTEP_DOCK_SOCKET` is absent, the binary was almost certainly
 run from a terminal instead of being launched by the dock; say so and

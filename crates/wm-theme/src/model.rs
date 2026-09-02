@@ -78,7 +78,10 @@ impl Color {
     /// user-authored palettes want to warn and derive, not guess.
     pub fn from_hex(text: &str) -> Option<Self> {
         let hex = text.trim().strip_prefix('#')?;
-        if hex.len() != 6 && hex.len() != 8 {
+        // Byte-indexed below, so the text has to be ASCII first: six
+        // *bytes* of `#éé` would otherwise be sliced mid code point,
+        // and this parses palettes people type.
+        if !hex.is_ascii() || (hex.len() != 6 && hex.len() != 8) {
             return None;
         }
         let byte = |i: usize| u8::from_str_radix(&hex[i..i + 2], 16).ok();
@@ -386,7 +389,31 @@ impl Theme {
 
 #[cfg(test)]
 mod tests {
+    use super::Color;
     use crate::default_theme::nextstep_classic;
+
+    #[test]
+    fn hex_colours_parse_in_every_spelling_people_use_and_refuse_the_rest() {
+        assert_eq!(Color::from_hex("#1a2B3c"), Some(Color::rgb(0x1a, 0x2b, 0x3c)));
+        assert_eq!(Color::from_hex("  #1a2b3cff "), Some(Color::rgb(0x1a, 0x2b, 0x3c)), "alpha is accepted and dropped");
+        for bad in ["1a2b3c", "#1a2b3", "#1a2b3c7", "#gg0000", "", "#", "#éé", "#1a2b3cé"] {
+            assert_eq!(Color::from_hex(bad), None, "{bad:?}");
+        }
+        assert_eq!(Color::from_hex(&Color::rgb(7, 8, 9).hex()), Some(Color::rgb(7, 8, 9)), "hex() is the inverse");
+    }
+
+    #[test]
+    fn contrast_and_mixing_follow_the_wcag_arithmetic() {
+        let black = Color::rgb(0, 0, 0);
+        let white = Color::rgb(255, 255, 255);
+        assert!((white.contrast_ratio(black) - 21.0).abs() < 0.01, "black on white is the 21:1 maximum");
+        assert!((black.contrast_ratio(white) - 21.0).abs() < 0.01, "and the ratio is symmetric");
+        assert!((white.contrast_ratio(white) - 1.0).abs() < 0.01);
+        assert_eq!(black.mix(white, 0.0), black);
+        assert_eq!(black.mix(white, 1.0), white);
+        assert_eq!(black.mix(white, 0.5), Color::rgb(128, 128, 128), "half-up rounding per channel");
+        assert_eq!(black.mix(white, 2.0), white, "the amount is clamped");
+    }
 
     #[test]
     fn scaled_doubles_pixel_dimensions_but_not_colors() {

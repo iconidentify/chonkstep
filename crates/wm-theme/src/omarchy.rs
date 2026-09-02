@@ -596,17 +596,30 @@ pub fn palette_from_theme(theme: &Theme) -> OmarchyPalette {
 
 // ---- Omarchy's current theme on this machine ------------------------------
 
-/// `$XDG_STATE_HOME/omarchy/current` (else
-/// `~/.local/state/omarchy/current`): where `omarchy-theme-set` keeps
-/// the *current* theme — `theme/` (a copy of the theme directory,
-/// swapped atomically) and `theme.name` (the directory name it came
-/// from). State, not config: this is Omarchy's own contract, read
-/// here and written by nobody but Omarchy.
+/// Where `omarchy-theme-set` keeps the *current* theme — `theme/` (a
+/// copy of the theme directory, swapped atomically), `theme.name` (the
+/// directory name it came from) and the `background` link. State, not
+/// config: this is Omarchy's own contract, read here and written by
+/// nobody but Omarchy.
+///
+/// Omarchy spells the path `$HOME/.local/state/omarchy/current` and
+/// never consults `XDG_STATE_HOME`, so that is the answer here too —
+/// with one exception, for the same reason `omarchy_menu` honours
+/// `XDG_CONFIG_HOME`: when `$XDG_STATE_HOME/omarchy` already exists,
+/// it is preferred, which is how an isolated test session points the
+/// desk at a palette of its own rather than the developer's. A user
+/// who merely *sets* `XDG_STATE_HOME` has no such directory, and
+/// follows the theme Omarchy actually writes.
 pub fn current_dir() -> Option<PathBuf> {
-    if let Some(root) = std::env::var_os("XDG_STATE_HOME") {
-        return Some(PathBuf::from(root).join("omarchy/current"));
+    current_dir_in(std::env::var_os("XDG_STATE_HOME").map(PathBuf::from), std::env::var_os("HOME").map(PathBuf::from))
+}
+
+/// The pure half of [`current_dir`].
+fn current_dir_in(xdg_state_home: Option<PathBuf>, home: Option<PathBuf>) -> Option<PathBuf> {
+    if let Some(isolated) = xdg_state_home.map(|root| root.join("omarchy")).filter(|dir| dir.is_dir()) {
+        return Some(isolated.join("current"));
     }
-    std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/state/omarchy/current"))
+    home.map(|home| home.join(".local/state/omarchy/current"))
 }
 
 /// The current theme's `colors.toml`, whether or not it exists yet.
@@ -1027,6 +1040,7 @@ color15 = "#efefef"
     /// skipped, loudly, where Omarchy is not installed. The embedded
     /// fixtures above cover the shapes; this covers the population.
     #[test]
+    #[ignore = "reads the Omarchy themes installed on this machine; run by hand or from scripts/e2e.sh"]
     fn every_installed_omarchy_theme_parses_and_dresses() {
         let root = std::env::var_os("OMARCHY_PATH")
             .map(PathBuf::from)
@@ -1052,6 +1066,26 @@ color15 = "#efefef"
         }
         assert!(seen > 0, "an Omarchy install with no themes?");
         eprintln!("{seen} installed Omarchy themes parsed and dressed");
+    }
+
+    #[test]
+    fn the_current_dir_is_omarchys_own_unless_an_isolated_state_tree_exists() {
+        let home = PathBuf::from("/home/u");
+        let scratch = std::env::temp_dir().join(format!("chonk-omarchy-state-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&scratch);
+        // XDG_STATE_HOME set but holding no omarchy tree: Omarchy's own
+        // path, because that is where omarchy-theme-set writes.
+        std::fs::create_dir_all(&scratch).unwrap();
+        assert_eq!(
+            current_dir_in(Some(scratch.clone()), Some(home.clone())),
+            Some(PathBuf::from("/home/u/.local/state/omarchy/current"))
+        );
+        assert_eq!(current_dir_in(None, Some(home.clone())), Some(PathBuf::from("/home/u/.local/state/omarchy/current")));
+        assert_eq!(current_dir_in(None, None), None);
+        // With one, it is the isolated tree.
+        std::fs::create_dir_all(scratch.join("omarchy")).unwrap();
+        assert_eq!(current_dir_in(Some(scratch.clone()), Some(home)), Some(scratch.join("omarchy/current")));
+        let _ = std::fs::remove_dir_all(&scratch);
     }
 
     #[test]

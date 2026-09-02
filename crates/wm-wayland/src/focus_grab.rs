@@ -16,9 +16,8 @@
 //! bug this module exists to close, and it is why the protocol is
 //! implemented here rather than waited on: it is a published protocol
 //! with a public XML definition (`protocols/hyprland-focus-grab-v1.xml`,
-//! vendored verbatim from `hyprwm/hyprland-protocols`), which sway and
-//! labwc adopt the same way, and it is the only Hyprland-specific
-//! interface this compositor speaks.
+//! vendored verbatim from `hyprwm/hyprland-protocols`), and it is the
+//! only Hyprland-specific interface this compositor speaks.
 //!
 //! # Where the bindings come from
 //!

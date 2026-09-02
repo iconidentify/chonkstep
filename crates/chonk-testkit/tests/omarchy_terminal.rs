@@ -65,10 +65,15 @@ fn listing_it_under_client_side_lets_omarchy_terminal_stay_bare() {
     let mut session = Session::boot("omarchy-terminal-bare", options).unwrap();
     let window = launch_omarchy_terminal(&mut session);
 
-    // Give the shell a moment it would have used to frame the window,
-    // then assert it did not: the client asked for client-side chrome,
-    // the user's opt-out says to grant it, and the desktop steps back.
-    std::thread::sleep(Duration::from_millis(500));
+    // Asserting an *absence* needs a settled signal, not a timer: a
+    // sleep only ever proves "no frame within N ms on this machine",
+    // which on a slow one is no proof at all. The ledger already lists
+    // the window as mapped (`wait_for_window`), and the shell decides
+    // on a frame in the dispatch pass that maps it; two barrier
+    // round-trips after that have certainly run that pass and rendered
+    // its outcome, so "no frame in the ledger now" means "no frame".
+    session.door().barrier().unwrap();
+    session.door().barrier().unwrap();
     let world = session.world().unwrap();
     assert!(world.window_matching(APP_ID).is_some_and(|w| w.mapped), "the terminal is up");
     assert!(world.frame_of(window.id).is_none(), "listed under client_side, a client that asked to decorate itself is left alone");

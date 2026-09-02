@@ -16,59 +16,15 @@
 //! in, so `#[ignore]`d; run with `scripts/e2e.sh` or
 //! `cargo test -p chonk-testkit --test omarchy_menu -- --ignored`.
 
-use chonk_testkit::{poll_until, Session, SessionOptions, ShellInfo, World};
+use chonk_testkit::{poll_until, session_dir, MenuMetrics, RootMenu, Session, SessionOptions, ShellInfo};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-/// Where the root menu is opened: well inside the desktop, clear of
-/// the dock column on the right edge and the launcher strip under the
-/// Clip.
-const CLICK_AT: (f64, f64) = (400.0, 400.0);
-
-/// The root menu's rows, in `root_menu_items` order, when the Omarchy
-/// submenu is present.
-const ROOT_ROWS_WITH_OMARCHY: &[&str] = &["Terminal", "Applications", "Theme", "Wallpaper", "Omarchy", "Exit"];
-
-/// The menu's row geometry restated from `wm_theme::menu::render_menu`
-/// at scale 1: the title strip is the titlebar's height (never shorter
-/// than a row), rows are `menu.item_height` tall, and a `border.width`
-/// outline wraps everything. Aiming with the same numbers the shell
-/// hit-tests through is what keeps this test from encoding a magic
-/// coordinate that breaks the day a pad changes.
-struct MenuMetrics {
-    border: u32,
-    title_h: u32,
-    item_h: u32,
-}
-
-impl MenuMetrics {
-    fn at_scale_1() -> Self {
-        let theme = wm_theme::default_theme::nextstep_classic();
-        let item_h = (theme.menu.item_height as u32).max(4);
-        Self {
-            border: (theme.border.width as u32).max(1),
-            title_h: (theme.titlebar.height as u32).max(item_h),
-            item_h,
-        }
-    }
-
-    /// The expected surface height of a menu with `rows` rows.
-    fn height_for(&self, rows: usize) -> u32 {
-        self.title_h + self.item_h * rows as u32 + self.border * 2
-    }
-
-    /// How many rows a menu surface of height `h` carries.
-    fn rows_in(&self, h: u32) -> Option<usize> {
-        let body = h.checked_sub(self.title_h + self.border * 2)?;
-        (body % self.item_h == 0).then_some((body / self.item_h) as usize)
-    }
-
-    /// The centre of row `row` of the menu surface `menu`.
-    fn row_center(&self, menu: &ShellInfo, row: usize) -> (f64, f64) {
-        let y = menu.y as u32 + self.border + self.title_h + self.item_h * row as u32 + self.item_h / 2;
-        (menu.x as f64 + menu.w as f64 / 2.0, y as f64)
-    }
-}
+/// The root menu these sessions show: a menu definition is installed
+/// (the scratch tree) and the shell is not hosted (the harness
+/// default), so the Omarchy submenu is listed and the bar toggle is
+/// not.
+const WITH_OMARCHY: RootMenu = RootMenu { omarchy_bar: false, omarchy: true };
 
 /// Writes a scratch `OMARCHY_PATH` tree whose menu has three rows under
 /// one `Omarchy` submenu — `Plain`, `Guarded` (shown, because the flag
@@ -99,13 +55,12 @@ fn write_omarchy_tree(session_dir: &Path) -> PathBuf {
 }
 
 fn boot(name: &str, config_extra: &str) -> (Session, PathBuf) {
-    // The tree is written where the session will be, before the
-    // session is booted; `Session::boot` clears its directory first,
-    // so the tree lives beside it rather than inside it.
-    let session_dir = std::env::temp_dir().join("chonk-testkit").join(format!("{name}-omarchy"));
-    let _ = std::fs::remove_dir_all(&session_dir);
-    std::fs::create_dir_all(&session_dir).unwrap();
-    let omarchy = write_omarchy_tree(&session_dir);
+    // The tree is written in a directory *beside* the session's, not
+    // inside it: `Session::boot` clears its own directory first.
+    let beside = session_dir(&format!("{name}-omarchy"));
+    let _ = std::fs::remove_dir_all(&beside);
+    std::fs::create_dir_all(&beside).unwrap();
+    let omarchy = write_omarchy_tree(&beside);
     let session = Session::boot(
         name,
         SessionOptions {
@@ -115,49 +70,19 @@ fn boot(name: &str, config_extra: &str) -> (Session, PathBuf) {
         },
     )
     .unwrap();
-    (session, session_dir.join("markers"))
-}
-
-/// Mapped menu surfaces: every mapped, raised shell that does not sit
-/// flush against the right edge of the output — the dock column and
-/// the launcher strip under it do, and they are the only other shells
-/// the desktop keeps raised. A menu opened at `CLICK_AT` never does.
-fn menus(world: &World) -> Vec<ShellInfo> {
-    world
-        .shells
-        .iter()
-        .filter(|s| s.mapped && s.above && s.x + (s.w as i32) < world.output_w as i32)
-        .cloned()
-        .collect()
-}
-
-/// Right-clicks the desktop and waits for the root menu to map.
-fn open_root_menu(session: &mut Session, metrics: &MenuMetrics, expected_rows: usize) -> ShellInfo {
-    let door = session.door();
-    door.motion(CLICK_AT.0, CLICK_AT.1).unwrap();
-    door.barrier().unwrap();
-    door.button("right", true).unwrap();
-    door.barrier().unwrap();
-    door.button("right", false).unwrap();
-    door.barrier().unwrap();
-    let wanted = metrics.height_for(expected_rows);
-    poll_until(Duration::from_secs(10), &format!("the root menu ({expected_rows} rows, {wanted}px tall) to map"), || {
-        let world = door.windows().ok()?;
-        menus(&world).into_iter().find(|m| m.h == wanted)
-    })
-    .expect("a right-click on the desktop should open the root menu")
+    (session, beside.join("markers"))
 }
 
 /// Clicks row `row` of `menu` and waits for a menu surface that was not
 /// there before — the cascade it opened.
 fn cascade_from(session: &mut Session, metrics: &MenuMetrics, menu: &ShellInfo, row: usize) -> ShellInfo {
-    let known: Vec<u64> = menus(&session.world().unwrap()).iter().map(|m| m.id).collect();
+    let known: Vec<u64> = session.world().unwrap().menus().iter().map(|m| m.id).collect();
     let (x, y) = metrics.row_center(menu, row);
     let door = session.door();
     door.click(x, y).unwrap();
     poll_until(Duration::from_secs(10), &format!("the cascade from row {row} to map"), || {
         let world = door.windows().ok()?;
-        menus(&world).into_iter().find(|m| !known.contains(&m.id))
+        world.menus().into_iter().find(|m| !known.contains(&m.id))
     })
     .expect("clicking a submenu row should open its cascade")
 }
@@ -187,14 +112,15 @@ fn omarchy_submenu_lists_the_conditioned_rows_and_runs_a_picked_action() {
     wait_for_conditions(&mut session);
 
     // -- root menu carries the Omarchy row --------------------------------
-    let root = open_root_menu(&mut session, &metrics, ROOT_ROWS_WITH_OMARCHY.len());
+    let root = session
+        .open_root_menu(&metrics, WITH_OMARCHY.row_count())
+        .expect("a right-click on the desktop should open the root menu with an Omarchy row");
     session.screenshot("root-menu").unwrap();
 
     // -- Omarchy cascades to the scratch definition's top level ----------
     // Two top-level rows: the `Test` submenu and the `Marked` action.
     // `Test`'s three children are one level further in.
-    let omarchy_row = ROOT_ROWS_WITH_OMARCHY.iter().position(|r| *r == "Omarchy").unwrap();
-    let omarchy = cascade_from(&mut session, &metrics, &root, omarchy_row);
+    let omarchy = cascade_from(&mut session, &metrics, &root, WITH_OMARCHY.row_of("Omarchy").unwrap());
     assert_eq!(metrics.rows_in(omarchy.h), Some(2), "Omarchy submenu should list Test and Marked (surface {omarchy:?})");
     session.screenshot("omarchy-submenu").unwrap();
 
@@ -220,7 +146,7 @@ fn omarchy_submenu_lists_the_conditioned_rows_and_runs_a_picked_action() {
     let mut last = Vec::new();
     poll_until(Duration::from_secs(10), "every menu surface to unmap after the pick", || {
         let world = door.windows().ok()?;
-        last = menus(&world);
+        last = world.menus();
         last.is_empty().then_some(())
     })
     .unwrap_or_else(|e| panic!("an action pick closes the whole cascade: {e}; still mapped: {last:?}"));
@@ -234,9 +160,17 @@ fn omarchy_menu_false_leaves_the_root_menu_without_the_submenu() {
     let (mut session, _markers) = boot("omarchy-menu-off", "omarchy_menu = false\n");
     let metrics = MenuMetrics::at_scale_1();
     // Nothing to wait for on the Omarchy side — the whole point — so
-    // the boot's own readiness is the only gate.
-    let root = open_root_menu(&mut session, &metrics, ROOT_ROWS_WITH_OMARCHY.len() - 1);
-    assert_eq!(metrics.rows_in(root.h), Some(5));
+    // the boot's own readiness is the only gate. The row count is the
+    // assertion: the menu that maps is the one without the submenu.
+    session
+        .open_root_menu(&metrics, RootMenu::default().row_count())
+        .expect("a right-click on the desktop should open the root menu without an Omarchy row");
+    // Only a negative on the log: with the key off, the shell's
+    // `omarchy_menu_for` returns before it would look for — or say
+    // anything about — a definition ("no Omarchy menu definition
+    // installed" is logged only when the key is *on* and discovery
+    // finds nothing), so there is no positive line to pin. Should the
+    // shell grow one, assert it here instead.
     assert!(!session.log().contains("omarchy menu loaded"), "the key off means the definition is never read");
     session.screenshot("root-menu-without-omarchy").unwrap();
 }

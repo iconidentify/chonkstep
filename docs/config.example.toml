@@ -60,9 +60,9 @@
 # watching that file, so `omarchy-theme-set catppuccin-latte` re-dresses
 # this desk within a second, light or dark as the palette says. With
 # Omarchy absent or its palette unreadable, the flagship stands in
-# (warned once) until one appears. The same entry appears in the Themes
+# (warned once) until one appears. The same entry appears in the Theme
 # submenu as "Omarchy (<theme>)" whenever there is a palette to follow.
-# A theme picked from the root menu's Themes submenu is persisted and
+# A theme picked from the root menu's Theme submenu is persisted and
 # wins over this value on every later startup -- the menu is the more
 # recent gesture; this line is only the starting point. An unknown id
 # is warned about and ignored. Picking one from the menu applies it
@@ -233,14 +233,17 @@
 
 # Commands to run once when the session starts, in the order written.
 # Nothing runs on a reload, and nothing runs on a hot restart -- these
-# start a session, they do not re-start one.
+# start a session, they do not re-start one. Each entry is a command
+# line in the same two spellings as `terminal` above.
 #
-# This is how another desktop's shell comes up beside this one. Omarchy
-# 4, for instance, runs its whole desktop -- bar, menu, notifications,
-# system panels -- as a single Quickshell process, and this desktop
-# already serves every Wayland protocol it needs:
+# The usual residents are the small daemons a desktop wants around it:
+# a clipboard manager, an automounter, a notification bridge. Omarchy's
+# shell is NOT one of them -- `omarchy_shell = true` above already
+# starts it through Omarchy's own launcher, and listing it here too
+# would start it twice.
 #autostart = [
-#  "quickshell -n -p /usr/share/omarchy/shell",
+#  "wl-paste --watch cliphist store",
+#  "udiskie --automount --no-notify --no-tray",
 #]
 
 # Named commands a keybinding can run, by name.
@@ -254,7 +257,7 @@
 # Same two spellings as `terminal` above: a string is split on
 # whitespace, an array is taken verbatim.
 #[commands]
-#omarchy-menu = "omarchy-shell shell toggle omarchy.menu"
+#omarchy-menu = "omarchy-menu toggle"
 #volume-up    = "omarchy-audio-output-volume up"
 #volume-down  = "omarchy-audio-output-volume down"
 #lock         = "omarchy-system-lock"
@@ -335,47 +338,42 @@
 
 # Per-application decoration overrides. You should not need these.
 #
-# Who draws a window's titlebar is a question the client already
-# answers, on one of two protocols: the standard xdg-decoration, and
-# KDE's older org_kde_kwin_server_decoration, which is the only one GTK
-# speaks. This desktop advertises both and believes what it is told, so
-# a browser whose frame is part of its tab strip keeps its own chrome,
-# a web app that asks for a titlebar gets a chiseled one, and
-# LibreOffice -- which asks for a titlebar on the KDE protocol -- wears
-# exactly one.
+# Who draws a window's titlebar is settled on one of two protocols, and
+# the two mean different things by "client-side". The standard
+# xdg-decoration is a NEGOTIATION the compositor concludes, and this
+# desktop concludes every one of them the same way: server-side, its
+# own chrome, exactly as Hyprland does for every client. A client that
+# asked for client-side hears "server-side" back and, by the protocol
+# it chose, draws no titlebar of its own. That is what puts a frame on
+# Omarchy's terminals -- alacritty `decorations = "None"`, kitty
+# `hide_window_decorations yes`, every `org.omarchy.*` class Omarchy
+# invents -- which ask for chrome they would never draw. KDE's older
+# org_kde_kwin_server_decoration, the only decoration protocol GTK
+# speaks, is a DECLARATION: a client saying client-side there has
+# already laid itself out around its own headerbar, and is believed.
+# So is an X11 or XWayland client declaring the same through
+# _MOTIF_WM_HINTS. A client that speaks neither protocol is framed.
 #
-# These lists exist for the clients that answer wrongly, and each is a
-# case-insensitive PREFIX of the application's app_id (Wayland) or its
-# WM_CLASS (X11 and XWayland), so one entry covers a family. Whichever
-# session you log into, the same entry means the same thing.
-#
-# The name to write is in the session log, on the line that reports how
-# the window was mapped:
-#
-#     mapped window undecorated -- its client says it draws its own
-#     chrome app=Alacritty
+# These lists correct the two ways that can still come out wrong, and
+# each entry is a case-insensitive PREFIX of the application's app_id
+# (Wayland) or its WM_CLASS (X11 and XWayland), so one entry covers a
+# family. Whichever session you log into, the same entry means the same
+# thing. The name to write is in the session log, on the line that
+# reports how the window was mapped -- "mapped and decorated window" or
+# "mapped window undecorated", each followed by `app=<the name>`.
 #
 #[decorations]
-# Nothing here is needed for Omarchy's terminals. Omarchy ships
-# alacritty `decorations = "None"` and kitty `hide_window_decorations
-# yes`, right under a tiling compositor with no titlebars; under this
-# desktop each asks for client-side decorations it will never draw, and
-# the compositor simply answers "server-side" -- the xdg-decoration
-# protocol gives it the last word, and Hyprland answers the same way.
-# So every window Omarchy opens, under every `org.omarchy.*` class it
-# invents, wears this desktop's frame with no list at all.
-#
-# Draw this desktop's chrome whatever the client says. The rescue
-# direction, for the protocols where the client's word is final: a
-# KDE-decoration or X11 client that declares its own chrome and then
-# draws none is a bare rectangle, and one line here frames it. (A
-# window with no chrome from either side is still movable and
-# resizable -- see drag_modifier above -- just bare.) Matching is a
-# case-insensitive prefix on the application id.
-#server_side = ["bare.kde.app"]
-#
 # Never draw chrome for these; the client's own is the only one. The
 # opt-out from the rule above, for an xdg client whose bare surface is
-# the point -- a borderless game, a kiosk -- and for an application that
-# insists on drawing a titlebar without asking for the right to.
+# the point -- a borderless game, a kiosk -- and for a client that
+# speaks neither protocol and really does draw its own titlebar.
 #client_side = ["borderless-game"]
+#
+# Draw this desktop's chrome whatever the client says. Only matters for
+# the protocols where the client's word is otherwise final: a KDE-
+# protocol or X11 client that declares its own chrome and then draws
+# none is a bare rectangle, and one line here frames it. (A window with
+# no chrome from either side is still movable and resizable -- see
+# drag_modifier above -- just bare.) An xdg client never needs this;
+# it is framed already.
+#server_side = ["bare.kde.app"]

@@ -1164,10 +1164,10 @@ mod tests {
     // nested session, a client committing `set_size(0, 100)` with only
     // `Anchor::Top` while its layer surface is alive is killed with
     // `zwlr_layer_surface_v1` code 1, while the same client destroying
-    // its role first survives. That pair is the property this module
-    // actually promises, and it was checked that way on 2026-09-01
-    // before the guard shipped. If this file grows a way to build a
-    // `Compositor` in a test, this is the first thing to bring inside.
+    // its role first survives (`examples/layer-role-repro` is that
+    // client). That pair is the property this module actually promises.
+    // If this file grows a way to build a `Compositor` in a test, this
+    // is the first thing to bring inside.
 
     #[test]
     fn all_four_anchors_read_exactly_as_none_do() {

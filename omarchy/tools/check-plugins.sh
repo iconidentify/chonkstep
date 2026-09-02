@@ -5,7 +5,8 @@
 #      is installed on its own, so the file is duplicated, not shared).
 #   2. Every manifest passes Omarchy's own validator when it is installed
 #      (`omarchy plugin validate`), or a stdlib re-check of the same rules
-#      when it is not.
+#      when it is not; the directory name, the manifest id and the widget's
+#      `moduleName` all agree.
 #   3. qmllint over every .qml file with the Omarchy shell tree providing
 #      the qs.Ui / qs.Commons modules, so `import qs.Ui` resolves for real.
 #
@@ -14,26 +15,35 @@
 # warning (unqualified access inside inline components), and Omarchy does
 # not use `pragma ComponentBehavior: Bound` to silence them.
 set -u
+shopt -s nullglob
 
 here=$(cd "$(dirname "$0")" && pwd)
-plugins="$here/../plugins"
-shell_root=${OMARCHY_SHELL_ROOT:-$HOME/.local/share/omarchy/shell}
+plugins=$(cd "$here/../plugins" && pwd) || exit 1
+# Omarchy's own scripts find the shell at $OMARCHY_PATH/shell; the pre-package
+# location is the fallback the shell itself uses when OMARCHY_PATH is unset.
+shell_root=${OMARCHY_SHELL_ROOT:-${OMARCHY_PATH:-$HOME/.local/share/omarchy}/shell}
 status=0
 
 fail() { echo "check-plugins: $*" >&2; status=1; }
 
 # 1. duplicated ControlSocket.qml
 copies=("$plugins"/*/ControlSocket.qml)
-for copy in "${copies[@]:1}"; do
-  if ! cmp -s "${copies[0]}" "$copy"; then
-    fail "ControlSocket.qml differs: ${copies[0]} vs $copy"
-  fi
-done
-echo "ControlSocket.qml: ${#copies[@]} copies, identical"
+if (( ${#copies[@]} == 0 )); then
+  fail "no ControlSocket.qml found under $plugins"
+else
+  for copy in "${copies[@]:1}"; do
+    if ! cmp -s "${copies[0]}" "$copy"; then
+      fail "ControlSocket.qml differs: ${copies[0]} vs $copy"
+    fi
+  done
+  echo "ControlSocket.qml: ${#copies[@]} copies, identical"
+fi
 
 # 2. manifests
 validate=$(command -v omarchy-plugin-validate || true)
-for dir in "$plugins"/*/; do
+dirs=("$plugins"/*/)
+(( ${#dirs[@]} > 0 )) || fail "no plugin directories under $plugins"
+for dir in "${dirs[@]}"; do
   dir=${dir%/}
   id=$(basename "$dir")
   if [[ -n $validate ]]; then
@@ -65,24 +75,45 @@ PY
   # to the id here means a symlinked checkout behaves like an installed one.
   mid=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["id"])' "$dir/manifest.json")
   [[ $mid == "$id" ]] || fail "directory $id but manifest id $mid"
+  # The bar addresses a widget (settings, IPC, layout) by its moduleName,
+  # which must be the id the registry knows it by.
+  widget=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("entryPoints", {}).get("barWidget", ""))' "$dir/manifest.json")
+  if [[ -n $widget && -f $dir/$widget ]]; then
+    module=$(sed -nE 's/^[[:space:]]*moduleName:[[:space:]]*"([^"]*)".*/\1/p' "$dir/$widget" | head -n1)
+    [[ $module == "$mid" ]] || fail "$id/$widget has moduleName \"$module\" but the manifest id is $mid"
+  fi
   echo "manifest ok: $id"
 done
 
 # 3. qmllint
-qmllint=$(command -v qmllint || command -v /usr/lib/qt6/bin/qmllint || true)
+# Qt's own idea of where its qml and tools live; the /usr/lib/qt6 layout is
+# Arch's, and Debian/Fedora put them elsewhere.
+qt_query() {
+  if command -v qtpaths6 >/dev/null; then
+    qtpaths6 --query "$1"
+  elif command -v qmake6 >/dev/null; then
+    qmake6 -query "$1"
+  fi
+}
+qt_qml=$(qt_query QT_INSTALL_QML)
+qt_bins=$(qt_query QT_INSTALL_BINS)
+qmllint=$(command -v qmllint || { [[ -n $qt_bins && -x $qt_bins/qmllint ]] && echo "$qt_bins/qmllint"; } || true)
 if [[ -z $qmllint ]]; then
   echo "qmllint not found; skipping lint" >&2
 elif [[ ! -d $shell_root/Ui ]]; then
-  echo "Omarchy shell not found at $shell_root (set OMARCHY_SHELL_ROOT); skipping lint" >&2
+  echo "Omarchy shell not found at $shell_root (set OMARCHY_SHELL_ROOT or OMARCHY_PATH); skipping lint" >&2
 else
   # Quickshell exposes the config root as the `qs` module prefix; a scratch
   # directory whose `qs` entry points at the shell tree gives qmllint the
   # same view.
   lintroot=$(mktemp -d)
+  trap 'rm -rf "$lintroot"' EXIT
   ln -s "$shell_root" "$lintroot/qs"
+  import_args=(-I "$lintroot")
+  [[ -n $qt_qml ]] && import_args+=(-I "$qt_qml")
   for qml in "$plugins"/*/*.qml; do
     echo "qmllint $qml"
-    out=$("$qmllint" -I "$lintroot" -I /usr/lib/qt6/qml "$qml" 2>&1)
+    out=$("$qmllint" "${import_args[@]}" "$qml" 2>&1)
     if [[ ${VERBOSE:-0} == 1 ]]; then
       [[ -n $out ]] && echo "$out"
     else
@@ -90,7 +121,6 @@ else
     fi
     grep -q '^Error' <<<"$out" && fail "qmllint error in $qml"
   done
-  rm -rf "$lintroot"
 fi
 
 exit $status

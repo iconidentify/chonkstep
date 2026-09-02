@@ -11,11 +11,8 @@
 //! in, so `#[ignore]`d; run with `scripts/e2e.sh` or
 //! `cargo test -p chonk-testkit -- --ignored --test-threads=1`.
 
-use chonk_testkit::{poll_until, profile_binary, Screenshot, Session, SessionOptions, ShellInfo, World};
+use chonk_testkit::{keys, poll_until, profile_binary, Screenshot, Session, SessionOptions, ShellInfo, World};
 use std::time::Duration;
-
-// evdev keycode (input-event-codes.h), what the door's `key` speaks.
-const KEY_ESC: u32 = 1;
 
 /// The probe's request; the workarea on the nested output is larger,
 /// so the grant comes back verbatim.
@@ -126,7 +123,7 @@ fn a_dockapp_panel_opens_streams_receives_input_and_dismisses() {
     .expect("a click inside the panel should reach the probe and come back as a red repaint");
 
     // -- Escape dismisses -------------------------------------------------
-    session.door().tap_key(KEY_ESC).unwrap();
+    session.door().tap_key(keys::ESC).unwrap();
     {
         let door = session.door();
         poll_until(Duration::from_secs(10), "the panel to leave the ledger after Escape", || {

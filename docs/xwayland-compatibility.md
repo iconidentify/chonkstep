@@ -99,7 +99,7 @@ and re-decide rather than reading once at map time.
 |---|---|---|---|
 | Honours `_MOTIF_WM_HINTS` | **Asserted in CI** | **From the code, verified live once** (`backend_impl.rs` asks smithay's `X11Surface::is_decorated`, which parses the same five words - note its name reads "wants decorations" but it answers "is client-side decorated"; the sign was once inverted here, found and fixed when Spotify arrived frameless with `MWM_DECOR_ALL` set) | n/a |
 | Publishes `_NET_FRAME_EXTENTS` | **Asserted in CI** — real geometry when framed, four zeros when not | **From the code, verified live once** — published via `xewmh.rs`, `xprop` shows real chrome values | n/a |
-| xdg-decoration | n/a | n/a | Server-side forced on every toplevel |
+| xdg-decoration | n/a | n/a | Every negotiation concluded server-side (Hyprland's rule); KDE's `org_kde_kwin_server_decoration` also advertised, and a client-side *declaration* there is believed — see below |
 
 The CI assertion lives in the `test` job of `.github/workflows/ci.yml`: it
 boots the release binary as the window manager of an Xvfb display, launches an
@@ -118,15 +118,26 @@ property routing are not exercised, and cannot be, because a headless CI
 runner cannot boot a compositor at all (the nested backend needs a host
 display and the session backend needs a DRM device and a seat).
 
-**Known wrong, native Wayland only:** a toolkit that draws its own titlebar
-and never binds `zxdg_decoration_manager_v1` — GTK4/libadwaita above all —
-gets framed anyway and wears two titlebars. This is a deliberate trade rather
-than an oversight, and the long argument is at `client_draws_own_chrome` in
-`crates/wm-wayland/src/backend_impl.rs`: treating a client's *silence* as
-"I decorate myself" would also un-frame every SDL2 or GLFW window built
-without libdecor, leaving a rectangle that cannot be moved, resized or closed
-with the pointer. Applications that route through XWayland are unaffected,
-since they answer in Motif hints instead of by staying quiet.
+**Native Wayland clients, the current rule** (`crates/wm-wayland/src/decoration.rs`,
+whose module comment carries the measured per-client evidence). The
+decision is made from what the client says on one of two protocols. Over
+`zxdg_decoration_manager_v1` every negotiation is concluded server-side,
+as Hyprland concludes it: a client that asked for client-side hears
+`server_side` back and, by the protocol it chose, draws no titlebar of its
+own — which is what frames Omarchy's `decorations = "None"` terminals.
+Over KDE's `org_kde_kwin_server_decoration` — the only decoration
+protocol GTK3 and GTK4 speak — a client-side declaration is believed,
+which is what keeps a libadwaita headerbar from wearing a second titlebar;
+a GTK4 client that binds the manager and creates nothing for a toplevel is
+read the same way, because GTK4 only creates the object when it wants
+*our* chrome. A client that binds neither protocol (SDL2, GLFW without
+libdecor) is framed, deliberately against the xdg preamble's default,
+because those clients are silent for the opposite reason to GTK's.
+`[decorations] client_side` and `server_side` in the config correct either
+direction. Earlier revisions of this section listed GTK4 double titlebars
+as **Known wrong**; that history is under "GTK double titlebars" below.
+Applications that route through XWayland are unaffected by any of it,
+since they answer in Motif hints.
 
 ## UI scale and HiDPI
 
@@ -145,14 +156,18 @@ its 1x size next to pixel-identical chrome. A live scale change
 (config reload) re-advertises the outputs and re-sends the per-surface
 preference, and an already-mapped GTK dialog follows it both ways.
 
-**The environment variables never could have fixed this.** The launcher
-puts `GDK_SCALE` and `QT_SCALE_FACTOR` in every child's environment, and
-for a Wayland client they do nothing: verified under `WAYLAND_DEBUG`, a
-GTK client launched with `GDK_SCALE=2` against an output advertising
-scale 1 makes **no `wl_surface.set_buffer_scale` call at all**. On
-Wayland, GTK takes its scale from the protocol. The variables remain
-load-bearing for X11 and XWayland clients, which have no output scale
-to read.
+**The environment variables never could have fixed this, and the
+launcher no longer sets them under the compositor.** For a Wayland
+client they do nothing: verified under `WAYLAND_DEBUG`, a GTK client
+launched with `GDK_SCALE=2` against an output advertising scale 1 makes
+**no `wl_surface.set_buffer_scale` call at all**. On Wayland, GTK takes
+its scale from the protocol. Worse, now that the outputs advertise the
+scale, `QT_SCALE_FACTOR=2` would *multiply onto* the platform scale a Qt
+client already read and draw it twice as large again — so on the Wayland
+stack the launcher withholds every toolkit scale variable
+(`crates/chonk-shell/src/shell.rs`, `launch_app`). The variables remain
+load-bearing on the X11 session, where there is no output scale to
+read.
 
 Advertising the scale was tried once before and broke the desktop badly
 — the dock vanished off the right edge, the wallpaper was clipped to a
@@ -190,10 +205,14 @@ The shipped design splits exactly along that line
   mode by the advertised scale there is how the first working build
   handed `grim` a quarter-size capture.
 
-A fractional session scale (1.5) advertises the nearest whole step (2):
-clients render crisp and somewhat larger than the chrome, and the
-ledger reflows their frames around what they actually commit. The exact
-fraction has no channel short of implementing `fractional-scale-v1`.
+A fractional session scale (1.5) reaches clients two ways. `wl_output.scale`
+can only carry an integer, so it advertises the ceiling (2) — rounded
+*up* on purpose, because a client on that fallback path then renders more
+pixels than the output needs and is downscaled crisp, where the floor
+would have it upscaled blurry (`state.rs`, `advertised_output_scale`). A
+client that binds `wp_fractional_scale_v1` — implemented, along with
+`wp_viewporter` (`state.rs`, `xdg.rs`) — is told the exact fraction
+through `preferred_scale` and the ceiling never applies to it.
 
 ### XSETTINGS
 
@@ -229,12 +248,19 @@ the tree, and XSETTINGS is the mechanism toolkits prefer anyway.
 
 Applications the desktop launches itself are additionally told the scale
 through environment variables, set on each child as the launcher spawns it
-(`crates/chonk-shell/src/shell.rs`, `launch_app`).
-`GDK_SCALE` and `GDK_DPI_SCALE` carry the integer and fractional halves for
-GTK, `QT_SCALE_FACTOR` plus `QT_AUTO_SCREEN_SCALE_FACTOR=0` for Qt,
-`XCURSOR_SIZE` (24 × scale) for pointers, and Chromium-family binaries
-additionally get `--force-device-scale-factor`, which is the switch Chromium
-actually honours.
+(`crates/chonk-shell/src/shell.rs`, `launch_app` and `launch_env`) — on the
+X11 session only, for the reason given under "Native Wayland clients scale
+from the outputs". `QT_SCALE_FACTOR` plus `QT_AUTO_SCREEN_SCALE_FACTOR=0`
+for Qt, and Chromium-family binaries additionally get
+`--force-device-scale-factor`, which is the switch Chromium actually
+honours. Nothing sets `GDK_SCALE` or `GDK_DPI_SCALE` any more: GTK's scale
+comes from XSETTINGS, and setting the variable as well would fix the window
+scale and disable the `Gdk/UnscaledDPI` override, double-scaling the client
+(`spawn.rs`, `gtk_qt_scale_env` and its test). `XCURSOR_SIZE` rides both
+stacks, with a per-stack value: pre-multiplied by the scale for an X11
+client, which has nothing to multiply by itself, and the unscaled base for
+a Wayland client, which treats it as a logical size
+(`startup.rs`, `xcursor_size_env`).
 
 One limit follows from the environment-variable half, and one from the
 toolkits themselves. Both are real, and both are narrower than they were
@@ -258,10 +284,13 @@ browser therefore picks the scale up when it starts and not afterwards. The
 same applies to anything else that consults neither XSETTINGS nor the
 environment.
 
-Under the Wayland session the compositor advertises its outputs at scale 1
-and implements neither `wp_fractional_scale_v1` nor `wp_viewporter`, so no
-client's buffers are scaled by the compositor. Every scaling decision is the
-application's, made from the variables above.
+Under the Wayland session the compositor advertises the session scale on
+its outputs and implements `wp_fractional_scale_v1` and `wp_viewporter`
+(see "Native Wayland clients scale from the outputs"), so a native client
+is scaled by the protocol and not by the variables above — which is why
+the launcher withholds them there. Only the XWayland clients in that
+session take the X11 path: XSETTINGS for the toolkits that read it, and
+the environment for the rest.
 
 ## Clipboard
 
@@ -323,12 +352,12 @@ the X11 session everything is an X11 client.
 
 | Application | Transport | Decorations | Scale | Notes |
 |---|---|---|---|---|
-| LibreOffice | XWayland or native GTK, its choice | Single titlebar — it sets the Motif hint | `GDK_SCALE`/`GDK_DPI_SCALE` at launch | From the code |
+| LibreOffice | XWayland or native GTK, its choice | Single titlebar — the Motif hint on XWayland, a KDE-protocol `Server` request natively | XSETTINGS (X11); the output scale (Wayland) | From the code; one titlebar verified live on Wayland |
 | Microsoft Edge, Chrome, Chromium, Brave | **Native Wayland** under the compositor; X11 under the X11 session | Single titlebar | `--force-device-scale-factor` | The launcher pins the ozone platform; a browser started outside the launcher may pick the wrong one |
-| Electron apps (Slack, VS Code, Discord) | Usually XWayland | Single titlebar if the app sets the Motif hint, which most Chromium-derived apps do | **Likely 1×** | The launcher's Chromium fixups match on the binary name (`chrom*`, `microsoft-edge`, `brave*`), so an Electron app gets neither the ozone pin nor the scale flag, and Chromium does not read `GDK_SCALE` reliably |
+| Electron apps (Slack, VS Code, Discord) | Usually XWayland | Single titlebar if the app sets the Motif hint, which most Chromium-derived apps do | **Likely 1×** | The launcher's Chromium fixups match on the binary name (`chrom*`, `microsoft-edge`, `brave*`), so an Electron app gets neither the ozone pin nor the scale flag, and Chromium does not read XSETTINGS for scale |
 | JetBrains IDEs (IntelliJ, CLion) | XWayland | Framed by chonkstep — JBR does not set the Motif hint | **Likely 1×** | Java's HiDPI detection wants `Xft.dpi` in `RESOURCE_MANAGER`, which nothing here writes. Expect to set `-Dsun.java2d.uiScale` yourself. Unverified |
-| GIMP | XWayland or native GTK | Framed; GIMP asks for server-side chrome | `GDK_SCALE` at launch | Multi-window mode leans on `_NET_WM_WINDOW_TYPE_UTILITY` and `_DIALOG`, both handled |
-| Qt applications (VLC, Krita, qBittorrent) | Native Wayland or XWayland | Framed, single titlebar either way | `QT_SCALE_FACTOR` at launch | Qt defers to server-side decorations when offered, and the compositor always offers |
+| GIMP | XWayland or native GTK | Framed; GIMP asks for server-side chrome | XSETTINGS (X11); the output scale (Wayland) | Multi-window mode leans on `_NET_WM_WINDOW_TYPE_UTILITY` and `_DIALOG`, both handled |
+| Qt applications (VLC, Krita, qBittorrent) | Native Wayland or XWayland | Framed, single titlebar either way | `QT_SCALE_FACTOR` at launch (X11); the output scale (Wayland) | Qt defers to server-side decorations when offered, and the compositor always offers |
 | Steam | XWayland | Mixed — Steam's own windows ask for various chrome | 1× unless Steam is told otherwise | Its Chromium-embedded UI, overlay and Big Picture mode are all unverified here |
 | Wine / Proton applications | XWayland | Depends on winecfg's "allow the window manager to decorate the windows"; Wine sets the Motif hint when it decorates itself | Wine's own DPI setting | Fullscreen games depend on `_NET_WM_STATE_FULLSCREEN`, which works in the X11 session; see the state caveat below for the Wayland one |
 
@@ -339,8 +368,13 @@ Every row is **From the code** or weaker. None has been run.
 **Drag-and-drop across the X11/Wayland boundary.** Not implemented, deferred
 deliberately. See above.
 
-**Live UI scale changes.** Applications read the scale once, at launch. Not
-implemented, deferred deliberately.
+**Live UI scale changes.** Fixed in stages, and kept here because earlier
+revisions listed it as not implemented. A config reload's new scale reaches
+native Wayland clients through the re-advertised outputs and per-surface
+preferences, and X11/XWayland GTK and Qt clients through XSETTINGS (both
+above). What still does not follow is anything read once at launch: a
+client's own pointer size (`XCURSOR_SIZE`), Chromium's
+`--force-device-scale-factor` on the X11 session, and Java.
 
 **EWMH control messages inside the Wayland session.** Fixed: a
 pager's `_NET_CURRENT_DESKTOP` or `_NET_ACTIVE_WINDOW` client message
@@ -372,7 +406,8 @@ into the same interactive move the window manager runs for its own titlebar
 drags, edge snapping included.
 
 **GTK double titlebars.** Fixed, and not the way this document
-previously said. The claim here used to be that a toplevel which never
+previously said; this entry is history, kept so the reasoning is not
+re-derived. The claim here used to be that a toplevel which never
 negotiates xdg-decoration is client-decorated by the protocol's default
 rule and so goes unframed — which is what the specification says, and
 which is the wrong reading for GTK, because GTK never binds

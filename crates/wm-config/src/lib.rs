@@ -40,6 +40,11 @@
 //! lock_command = "swaylock"          # optional; locker for post-crash recovery
 //! omarchy_menu = true                # optional; Omarchy's menu under right-click
 //! omarchy_shell = true               # optional; host Omarchy's shell (bar, panels, OSD)
+//! terminal = "alacritty"             # optional; the terminal the shell spawns (string or argv)
+//! autostart = [["udiskie", "--automount"]]  # optional; run once, in order, on a fresh session
+//!
+//! [commands]                         # optional; named argv lists for `run <name>`
+//! menu = "omarchy-menu toggle"       # a string is split on whitespace; an array is literal
 //!
 //! [decorations]                      # optional; per-application overrides
 //! server_side = ["bare.kde.app"]     # frame a client whose own chrome never shows up
@@ -48,6 +53,7 @@
 //! [keybindings]
 //! "alt+shift+return" = "spawn-terminal"
 //! "super+t" = "spawn-terminal"       # extra binding for the same action
+//! "super+space" = "run menu"         # a `[commands]` entry, by name
 //! "alt+ctrl+right" = "none"          # unbind a default
 //! ```
 //!

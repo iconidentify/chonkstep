@@ -17,7 +17,7 @@
 
 use std::time::Duration;
 
-use chonk_testkit::{poll_until, Session, SessionOptions};
+use chonk_testkit::{near, poll_until, Session, SessionOptions};
 
 /// Tokyo Night, as Omarchy ships it.
 const TOKYO_NIGHT: &str = r##"mode = "dark"
@@ -122,23 +122,13 @@ fn omarchy_sets_background(session: &Session, image: &str) {
     std::os::unix::fs::symlink(current.join("theme/backgrounds").join(image), link).unwrap();
 }
 
-/// The colour of bare desk at the centre of the screen — under no
-/// chrome, no window — as a 40×40 mean.
-fn desk_colour(shot: &chonk_testkit::Screenshot) -> [f64; 3] {
-    shot.mean_rgb(shot.width / 2 - 20, shot.height / 2 - 20, 40, 40)
-}
-
-fn near(actual: [f64; 3], expected: [u8; 3]) -> bool {
-    actual.iter().zip(expected).all(|(a, e)| (a - e as f64).abs() < 12.0)
-}
-
 fn mean_brightness(shot: &chonk_testkit::Screenshot) -> f64 {
     let m = shot.mean_rgb(0, 0, shot.width, shot.height);
     (m[0] + m[1] + m[2]) / 3.0
 }
 
 #[test]
-#[ignore]
+#[ignore = "needs a live Wayland session to nest in: scripts/e2e.sh, or cargo test -p chonk-testkit -- --ignored --test-threads=1"]
 fn a_session_told_to_follow_omarchy_wears_its_palette_and_re_dresses_when_it_changes() {
     let mut session = Session::boot("omarchy-follow", following_options()).unwrap();
     session.door().barrier().unwrap();
@@ -185,7 +175,7 @@ fn a_session_told_to_follow_omarchy_wears_its_palette_and_re_dresses_when_it_cha
 }
 
 #[test]
-#[ignore]
+#[ignore = "needs a live Wayland session to nest in: scripts/e2e.sh, or cargo test -p chonk-testkit -- --ignored --test-threads=1"]
 fn an_appearance_request_is_declined_while_following_omarchy() {
     let mut session = Session::boot("omarchy-appearance", following_options()).unwrap();
     session.door().barrier().unwrap();
@@ -207,7 +197,7 @@ fn an_appearance_request_is_declined_while_following_omarchy() {
 }
 
 #[test]
-#[ignore]
+#[ignore = "needs a live Wayland session to nest in: scripts/e2e.sh, or cargo test -p chonk-testkit -- --ignored --test-threads=1"]
 fn following_with_no_omarchy_palette_wears_the_default_until_one_appears() {
     let mut session = Session::boot(
         "omarchy-absent",
@@ -239,7 +229,7 @@ fn following_with_no_omarchy_palette_wears_the_default_until_one_appears() {
 /// within the watch's second; and a theme change that lands with the
 /// palette repaints palette and picture together.
 #[test]
-#[ignore]
+#[ignore = "needs a live Wayland session to nest in: scripts/e2e.sh, or cargo test -p chonk-testkit -- --ignored --test-threads=1"]
 fn a_follow_desk_wears_omarchys_background_and_repaints_when_it_is_cycled() {
     const GREEN: [u8; 3] = [0x20, 0xA0, 0x40];
     const PURPLE: [u8; 3] = [0x80, 0x20, 0xA0];
@@ -253,19 +243,18 @@ fn a_follow_desk_wears_omarchys_background_and_repaints_when_it_is_cycled() {
     // Boot: nothing persisted about the wallpaper, so the theme's own
     // — Omarchy's picture — is what the desk shows.
     let green = session.screenshot("green").unwrap();
-    assert!(near(desk_colour(&green), GREEN), "the desk should wear Omarchy's background at boot: {:?} ({})", desk_colour(&green), green.path.display());
+    assert!(near(green.centre_rgb(), GREEN), "the desk should wear Omarchy's background at boot: {:?} ({})", green.centre_rgb(), green.path.display());
 
     // `omarchy-theme-bg-next`: the link moves; the theme does not.
     omarchy_sets_background(&session, "2-purple.png");
-    let purple = poll_until(Duration::from_secs(30), "the desk to repaint in the next background", || {
+    poll_until(Duration::from_secs(30), "the desk to repaint in the next background", || {
         let shot = session.screenshot("purple").ok()?;
-        near(desk_colour(&shot), PURPLE).then_some(shot)
+        near(shot.centre_rgb(), PURPLE).then_some(())
     })
     .expect("cycling Omarchy's background was never picked up");
     let world = session.door().windows().unwrap();
     assert_eq!(world.theme.name, "Omarchy (Tokyo Night)", "a background swap alone leaves the theme as it was");
     assert!(session.compositor_alive(), "repainting killed the compositor: {}", session.log());
-    drop(purple);
 
     // A new theme arrives with its own picture — as `omarchy-theme-set`
     // does it, the background link last of all.
@@ -275,7 +264,7 @@ fn a_follow_desk_wears_omarchys_background_and_repaints_when_it_is_cycled() {
         let world = session.door().windows().ok()?;
         (world.theme.name == "Omarchy (Catppuccin Latte)").then_some(())?;
         let shot = session.screenshot("latte-green").ok()?;
-        near(desk_colour(&shot), GREEN).then_some(shot)
+        near(shot.centre_rgb(), GREEN).then_some(shot)
     })
     .expect("the theme change did not carry its background with it");
 }

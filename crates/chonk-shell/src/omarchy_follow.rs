@@ -98,7 +98,8 @@ impl Watch {
 
     /// Whether Omarchy's current theme or background has changed since
     /// the last time this returned `true` — or since the watch was
-    /// created, for its first look. Rate-limited to [`CADENCE`]: calls inside the window
+    /// created, for its first look. Rate-limited to [`CADENCE`]: calls
+    /// inside the window
     /// return `false` without touching the disk.
     ///
     /// The first call after construction baselines and returns `false`:

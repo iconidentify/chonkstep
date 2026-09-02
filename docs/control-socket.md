@@ -209,7 +209,7 @@ socket is not blind, and so it can correlate focus with a workspace.
 The verb set is deliberately closed and tiny: it covers what a bar
 needs and nothing else. Anything a client would otherwise want — launch
 a terminal, change the theme, restart — already has a route (a
-`[commands]` entry, the Themes submenu, the `restart` marker) and is
+`[commands]` entry, the Theme submenu, the `restart` marker) and is
 not duplicated here.
 
 ### 4.1 `snapshot`

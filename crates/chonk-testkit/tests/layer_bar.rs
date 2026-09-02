@@ -19,39 +19,14 @@
 //! in, so `#[ignore]`d; run with `scripts/e2e.sh` or
 //! `cargo test -p chonk-testkit -- --ignored --test-threads=1`.
 
-use chonk_testkit::{poll_until, profile_binary, Session, SessionOptions, ShellInfo, World};
+use chonk_testkit::{
+    keys, near, poll_until, profile_binary, session_dir, MenuMetrics, RootMenu, Session, SessionOptions, FAKE_BAR_RGB,
+};
 use std::time::Duration;
-
-// evdev keycodes (input-event-codes.h), what the door's `key` speaks.
-const KEY_LEFTSHIFT: u32 = 42;
-const KEY_X: u32 = 45;
-const KEY_LEFTALT: u32 = 56;
 
 /// The bar's thickness in the nested output's physical pixels. Scale
 /// 1, so buffer pixels, layer-shell pixels and ledger pixels agree.
 const BAR: u32 = 48;
-
-/// The Dock, found by shape alone: the mapped column (taller than
-/// wide) whose right edge sits `right_inset` pixels in from the
-/// output's right edge — zero for the unobstructed corner, the panel's
-/// width once one is up. `World::dock` only knows the zero case.
-fn dock_column(world: &World, right_inset: u32) -> Option<&ShellInfo> {
-    world
-        .shells
-        .iter()
-        .find(|s| s.mapped && s.h > s.w && s.x + s.w as i32 == (world.output_w - right_inset) as i32)
-}
-
-/// Polls the ledger until the Dock column sits at `(right_inset, top)`
-/// — the shell moves it in the dispatch pass after the bar maps, which
-/// the door's barrier alone does not order against a separate client.
-fn wait_for_dock_at(session: &mut Session, right_inset: u32, top: i32) -> ShellInfo {
-    poll_until(Duration::from_secs(10), &format!("the dock to hang {right_inset} in from the right at y={top}"), || {
-        let world = session.world().ok()?;
-        dock_column(&world, right_inset).filter(|dock| dock.y == top).cloned()
-    })
-    .expect("the dock should step out of the bar's reservation")
-}
 
 /// Runs the fake bar and waits until it reports itself mapped.
 fn raise_bar(session: &mut Session, args: &[&str]) {
@@ -64,12 +39,12 @@ fn raise_bar(session: &mut Session, args: &[&str]) {
 /// Two modifiers, so the door's single-modifier `chord` does not fit.
 fn toggle_maximize(session: &mut Session) {
     let door = session.door();
-    door.key(KEY_LEFTALT, true).unwrap();
-    door.key(KEY_LEFTSHIFT, true).unwrap();
+    door.key(keys::LEFTALT, true).unwrap();
+    door.key(keys::LEFTSHIFT, true).unwrap();
     door.barrier().unwrap();
-    door.tap_key(KEY_X).unwrap();
-    door.key(KEY_LEFTSHIFT, false).unwrap();
-    door.key(KEY_LEFTALT, false).unwrap();
+    door.tap_key(keys::X).unwrap();
+    door.key(keys::LEFTSHIFT, false).unwrap();
+    door.key(keys::LEFTALT, false).unwrap();
     door.barrier().unwrap();
 }
 
@@ -80,13 +55,12 @@ fn the_dock_steps_under_a_bar_and_windows_maximize_between_them() {
 
     // -- the corner, unobstructed ----------------------------------------
     let world = session.world().unwrap();
-    let home = dock_column(&world, 0).expect("the dock is in its corner on an empty desktop").clone();
+    let home = world.dock().expect("the dock is in its corner on an empty desktop").clone();
     assert_eq!(home.y, 0, "with no bar the dock starts at the very top");
-    let output_w = world.output_w as i32;
 
     // -- a top bar maps: the dock hangs itself under it -------------------
     raise_bar(&mut session, &[&BAR.to_string()]);
-    let under = wait_for_dock_at(&mut session, 0, BAR as i32);
+    let under = session.wait_for_dock_at(0, BAR as i32).expect("the dock should step out of the bar's reservation");
     assert_eq!((under.x, under.w), (home.x, home.w), "a top bar moves the column down, not sideways");
     assert_eq!(under.h, home.h, "a stack that fits below the bar keeps its height");
 
@@ -105,7 +79,7 @@ fn the_dock_steps_under_a_bar_and_windows_maximize_between_them() {
 
     // -- the bar exits: the corner comes back, and so does the workarea ---
     session.kill_client("chonk-fake-bar");
-    let back = wait_for_dock_at(&mut session, 0, 0);
+    let back = session.wait_for_dock_at(0, 0).expect("the dock should return to its corner once the bar exits");
     assert_eq!((back.x, back.w, back.h), (home.x, home.w, home.h), "the column is exactly where it started");
     poll_until(Duration::from_secs(10), "the maximized frame to grow back to the top edge", || {
         let world = session.world().ok()?;
@@ -118,33 +92,18 @@ fn the_dock_steps_under_a_bar_and_windows_maximize_between_them() {
     // window is still maximized, so its frame tracks the workarea live.
     let panel = 64u32;
     raise_bar(&mut session, &[&panel.to_string(), "right"]);
-    let beside = wait_for_dock_at(&mut session, panel, 0);
+    let beside = session.wait_for_dock_at(panel, 0).expect("the dock should step left out of the panel's reservation");
     assert_eq!(beside.x, home.x - panel as i32, "the column steps left by exactly the panel's width");
-    let frame = poll_until(Duration::from_secs(10), "the frame to stop short of the displaced dock", || {
+    poll_until(Duration::from_secs(10), "the frame to stop short of the displaced dock", || {
         let world = session.world().ok()?;
         world.frame_of(window.id).filter(|f| f.x + f.w as i32 == beside.x).cloned()
     })
     .expect("a maximized window must end where the displaced column begins, not under it");
-    assert!(frame.x + (frame.w as i32) <= output_w - panel as i32 - home.w as i32);
 
     // -- and back once more ------------------------------------------------
     session.kill_client("chonk-fake-bar");
-    let back = wait_for_dock_at(&mut session, 0, 0);
+    let back = session.wait_for_dock_at(0, 0).expect("the dock should return to its corner once the panel exits");
     assert_eq!(back.x, home.x);
-}
-
-/// The fake bar's fill, as a screenshot reads it: `BAR_ORANGE` is
-/// little-endian ARGB, so the bytes come back reversed.
-const ORANGE: [u8; 3] = [0xE0, 0x70, 0x10];
-
-/// The colour of the desk around the output's centre — a spot no
-/// shell chrome covers on an empty desktop.
-fn desk_colour(shot: &chonk_testkit::Screenshot) -> [f64; 3] {
-    shot.mean_rgb(shot.width / 2 - 20, shot.height / 2 - 20, 40, 40)
-}
-
-fn near(actual: [f64; 3], expected: [f64; 3]) -> bool {
-    actual.iter().zip(expected).all(|(a, e)| (a - e).abs() < 12.0)
 }
 
 /// Waits for the fake bar to report itself mapped — the line it prints
@@ -164,22 +123,36 @@ fn wait_for_client_mapped(session: &Session) {
 #[test]
 #[ignore = "needs a live Wayland session to nest in: scripts/e2e.sh, or cargo test -p chonk-testkit -- --ignored --test-threads=1"]
 fn omarchys_background_surface_is_hosted_but_the_desk_stays_chonksteps() {
-    let mut session = Session::boot("layer-background", SessionOptions { scale: Some(1.0), ..Default::default() }).unwrap();
-    let desk = desk_colour(&session.screenshot("desk").unwrap());
-    assert!(!near(desk, ORANGE.map(f64::from)), "the fixture colour must not be the wallpaper's own");
+    // An empty Omarchy root, so the root menu's shape at the end is
+    // exact: no menu definition means no Omarchy submenu, whatever
+    // this machine has installed under /usr/share/omarchy.
+    let no_omarchy = session_dir("layer-background-omarchy");
+    let _ = std::fs::remove_dir_all(&no_omarchy);
+    std::fs::create_dir_all(&no_omarchy).unwrap();
+    let mut session = Session::boot(
+        "layer-background",
+        SessionOptions {
+            scale: Some(1.0),
+            env: vec![("OMARCHY_PATH".to_string(), no_omarchy.to_string_lossy().into_owned())],
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let desk = session.screenshot("desk").unwrap().centre_rgb();
+    assert!(!near(desk, FAKE_BAR_RGB), "the fixture colour must not be the wallpaper's own");
 
     // -- the control: a wallpaper daemon on the background layer shows --
     raise_bar(&mut session, &["background", "wallpaper"]);
     wait_for_client_mapped(&session);
     poll_until(Duration::from_secs(10), "the background-layer surface to paint the desk", || {
         let shot = session.screenshot("wallpaper-daemon").ok()?;
-        near(desk_colour(&shot), ORANGE.map(f64::from)).then_some(())
+        near(shot.centre_rgb(), FAKE_BAR_RGB).then_some(())
     })
     .expect("a background-layer surface under any other namespace is drawn over the wallpaper");
     session.kill_client("chonk-fake-bar");
     poll_until(Duration::from_secs(10), "the desk to come back once the daemon exits", || {
         let shot = session.screenshot("daemon-gone").ok()?;
-        near(desk_colour(&shot), desk).then_some(())
+        near(shot.centre_rgb(), desk.map(|c| c.round() as u8)).then_some(())
     })
     .expect("the wallpaper returns when the surface goes");
 
@@ -193,24 +166,29 @@ fn omarchys_background_surface_is_hosted_but_the_desk_stays_chonksteps() {
     // The client is healthy — configured, committed, mapped — yet the
     // desk is still chonkstep's wallpaper, and stays so.
     let shot = session.screenshot("omarchy-background").unwrap();
-    assert!(near(desk_colour(&shot), desk), "Omarchy's background surface must not paint over the desk: {:?}", desk_colour(&shot));
+    assert!(
+        near(shot.centre_rgb(), desk.map(|c| c.round() as u8)),
+        "Omarchy's background surface must not paint over the desk: {:?}",
+        shot.centre_rgb()
+    );
+
+    // -- the harness default, `omarchy_shell = false`, is what booted --
+    // The verdict is logged once at startup by
+    // `chonk_shell::shell::host_omarchy_shell`; polled rather than read
+    // outright only so the assertion never races the first tick.
+    poll_until(Duration::from_secs(10), "the shell to say it is not hosting Omarchy's shell", || {
+        session.log().contains("not hosting Omarchy's shell").then_some(())
+    })
+    .expect("a session the harness boots by default declines to host Omarchy's shell, and says so");
 
     // -- and a right-click on the desk is still the root menu ----------
-    let world = session.world().unwrap();
-    let (x, y) = (world.output_w as f64 / 2.0, world.output_h as f64 / 2.0);
-    let door = session.door();
-    door.motion(x, y).unwrap();
-    door.barrier().unwrap();
-    door.button("right", true).unwrap();
-    door.barrier().unwrap();
-    door.button("right", false).unwrap();
-    door.barrier().unwrap();
-    poll_until(Duration::from_secs(10), "the root menu to open over the declined surface", || {
-        let world = door.windows().ok()?;
-        // A menu: mapped, raised, and not flush against the right edge
-        // where the dock column and launcher strip live.
-        world.shells.iter().find(|s| s.mapped && s.above && s.x + (s.w as i32) < world.output_w as i32).cloned()
-    })
-    .expect("a right-click on the desk must reach the root menu, not Omarchy's background surface");
+    // The row count is exact: no hosted shell means no `Omarchy Bar`
+    // row, and the empty `OMARCHY_PATH` means no `Omarchy` submenu.
+    let metrics = MenuMetrics::at_scale_1();
+    let unhosted = RootMenu::default();
+    assert_eq!(unhosted.row_of("Omarchy Bar"), None, "the bar toggle belongs only to a session hosting the shell");
+    session
+        .open_root_menu(&metrics, unhosted.row_count())
+        .expect("a right-click on the desk must reach the root menu, not Omarchy's background surface");
     session.kill_client("chonk-fake-bar");
 }

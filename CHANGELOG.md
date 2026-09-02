@@ -5,6 +5,107 @@ crate and both session binaries carry the same number.
 
 ## [Unreleased]
 
+### A desktop that hosts Omarchy
+
+chonkstep now stands where Hyprland stands on an Omarchy 4 machine:
+it runs Omarchy's own shell, mirrors Omarchy's own menu, wears
+Omarchy's own theme and background, and feeds Omarchy's bar - all
+through Omarchy's public extension points (its JSONC menu, its
+`current/theme` state, its Quickshell plugin system), never by
+emulating Hyprland.
+
+- **Omarchy's shell, hosted.** A Wayland session starts `omarchy-shell`
+  (the Quickshell process behind Omarchy's bar, panels, pickers,
+  notifications, OSD and lock screen) through Omarchy's own
+  `omarchy-launch-shell`, exactly as Omarchy's Hyprland autostart does.
+  Every Omarchy menu row that ends in a panel - the speed tests, Style
+  > Theme, the volume keys - now works here. `omarchy_shell = false`
+  opts out; the key is inert without Omarchy or on X11. The shell's
+  Background plugin is the one surface the compositor declines (it
+  would paint over the desk and take the root menu's right-click); the
+  surface stays a healthy client and is simply never shown.
+- **Omarchy Bar, on request.** The shell's bar starts hidden - the Dock
+  and the Clip already hold the corners - and the root menu's new
+  `Omarchy Bar` row switches it on and off, remembering the choice in
+  chonkstep's own state (never Omarchy's, so it does not follow you
+  into a Hyprland session). Hidden means not drawn, not clickable, no
+  reserved edge; the bar keeps running and is whole the instant it is
+  shown. Underneath: a `Backend::set_layer_surface_hidden` verb and
+  one `layer_presented` predicate every layer-shell consumer asks.
+- **Omarchy's menu, in the root menu.** Right-click the desk and the
+  `Omarchy` submenu *is* Omarchy's menu: read from
+  `omarchy-menu.jsonc` (and your extension file) on every reload, kind
+  inferred as Omarchy's `MenuModel.js` infers it, every `when` /
+  `checked` / `disabled` condition evaluated the way Omarchy evaluates
+  it (batched, in the background, never on the desktop's thread), and
+  every action run exactly as Omarchy runs it (`bash -lc <action>`,
+  detached). Only the rows that would command Hyprland are left out.
+  `omarchy_menu = false` turns the submenu off.
+- **Omarchy's theme, followed.** `theme = "omarchy"` (or the `Omarchy
+  (...)` row in the Theme submenu) reads the palette
+  `omarchy-theme-set` leaves under `~/.local/state/omarchy/current/
+  theme/` and dresses chrome, dock, menus and terminals in it - light
+  or dark as the palette says - on chonkstep's own geometry, and keeps
+  watching, so an Omarchy theme switch restyles this desk within a
+  second. The desk wears Omarchy's *current background* as its
+  wallpaper too (whatever format Omarchy ships it in), repainting when
+  `omarchy-theme-bg-next` cycles it, and the Wallpaper submenu offers
+  `Omarchy's Background` so any built-in theme can wear it. The other
+  direction: `omarchy-export-themes` writes the eight built-in themes
+  as Omarchy themes into `~/.config/omarchy/themes/`, so
+  `omarchy-theme-set amber-phosphor` dresses the rest of the machine
+  to match.
+- **A socket for the bar.** Always-on, newline-framed JSON at
+  `$XDG_RUNTIME_DIR/chonkstep/control-<display>.sock` (also in
+  `CHONKSTEP_CONTROL_SOCKET`): workspaces, outputs, the focused window,
+  the theme, each re-sent when it changes, and two verbs (`snapshot`,
+  `focus-workspace`). `docs/control-socket.md` is the contract;
+  its first clients are two Omarchy bar widgets under `omarchy/plugins/`
+  - `chonkstep.workspaces` (the strip Omarchy's own widget cannot draw
+  here, because it asks Hyprland) and `chonkstep.theme`.
+- **Making room.** The Dock steps out from under a layer-shell bar's
+  exclusive zone (top and right edges) and back the moment the bar
+  goes; maximized windows refit to the workarea live. Those are the
+  only two edges the Dock yields to: a left or bottom bar still pushes
+  the workarea but overlaps the Clip and the icon row today. Omarchy's
+  terminals (`org.omarchy.terminal`, alacritty, kitty), which Omarchy
+  configures to draw no chrome of their own, get this desktop's frame:
+  the compositor now answers every xdg-decoration negotiation
+  server-side, as Hyprland does, and `[decorations] client_side` is
+  the opt-out for a client that really should stay bare.
+- **Plumbing the integration needed.** `[commands]` (named shell
+  commands a `run <name>` keybinding refers to - the action vocabulary
+  stays closed, the names may now stand for `omarchy-menu`), `terminal`
+  and `autostart` in the config, and the XF86 media keysyms. Three
+  protocols Omarchy's shell and tools speak: `ext-data-control-v1` and
+  `wlr-data-control` (clipboard managers), `virtual-keyboard-v1`
+  (`wtype`), and `hyprland-focus-grab-v1` (the shell's popups dismiss
+  on a click elsewhere). And three bugs living under the shell exposed:
+  a hot-restart marker every child process inherited, a
+  `_NET_WORKAREA` PropertyNotify storm (14,000 events a second with a
+  bar reserving an edge), and a Smithay layer-shell pre-commit hook
+  that disconnected any client destroying a layer surface the way Qt
+  and GTK do (Smithay #1979, guarded in-tree).
+
+### Chrome, decided by what the client says
+
+- The per-name allowlist (`self_decorating_apps`) is gone, replaced by
+  reading what each client actually says on the two decoration
+  protocols: xdg-decoration negotiations are concluded server-side,
+  KDE's `org_kde_kwin_server_decoration` - the only one GTK speaks - is
+  now advertised and its client-side declarations believed, and
+  `_MOTIF_WM_HINTS` is read by one parser on every leg. `[decorations]`
+  in the config corrects both directions (`client_side` to keep an xdg
+  client bare, `server_side` to frame a KDE or X11 client that declares
+  chrome and draws none), reaches XWayland windows too, and a reload
+  re-decides the chrome of every window already open. The old key
+  still parses, as `decorations.client_side`. And the floor under it:
+  `drag_modifier` (Alt by default) moves a window with a left drag and
+  resizes it with a right drag from anywhere on its content, and the
+  new `window-menu` action (`control+escape`) opens the window commands
+  menu, so a window with no titlebar from either side is still yours to
+  move, resize and close.
+
 ### Light and dark, everywhere
 
 - Every theme now has two deliberate renditions of itself - a light

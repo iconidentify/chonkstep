@@ -31,14 +31,17 @@ chonk-dock-proto = { path = "../chonk-dock-proto" }
 # client half adds no new code to vet — only the `client` feature.
 wayland-client = "0.31"
 wayland-protocols-wlr = { version = "0.3", features = ["client"] }
+# The menu e2e tests aim their clicks with the same pure layout math
+# the shell renders and hit-tests through — asserting against the real
+# geometry instead of hand-tuned magic coordinates that break the day
+# a pad changes. `MenuMetrics` lives in the library so every test
+# shares one copy of that arithmetic, which is why the theme crate is
+# a dependency of the harness itself and not only of its tests.
+wm-theme = { path = "../wm-theme" }
 
 [dev-dependencies]
-# The Overview e2e test aims its clicks with the same pure layout
-# math the shell renders and hit-tests through — asserting against the
-# real geometry instead of hand-tuned magic coordinates that break the
-# day a pad changes. Dev-only: the harness library itself stays free
-# of desktop code.
-wm-theme = { path = "../wm-theme" }
+# The Overview e2e test lays out its expected tiles through the theme
+# API's geometry types.
 wm-theme-api = { path = "../wm-theme-api" }
 # The EWMH e2e test plays the part of an X11 pager against the nested
 # session's XWayland: it sends the control ClientMessages and reads the

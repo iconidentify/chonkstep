@@ -3,14 +3,16 @@
 Omarchy's bar ships a workspace strip that talks to Hyprland. Under chonkstep
 that widget has nothing to talk to, so this directory carries replacements
 that read chonkstep's own control socket instead (`docs/control-socket.md`
-at the repository root is the protocol; the plugins are clients of it and
-change nothing about it).
+in `docs/` at the repository root is the protocol; the plugins are clients of
+it and change nothing about it).
 
 ```
 omarchy/
   plugins/
     chonkstep.workspaces/   bar widget: one button per workspace, click to switch
     chonkstep.theme/        bar widget: the active theme's name ("NeXTSTEP Classic · dark")
+                            (each carries its own README, LICENSE and ControlSocket.qml,
+                            so it can be split out and published on its own)
   tools/
     fake-control-socket.py  a stand-in server for developing without a compositor
     check-plugins.sh        manifest validation, qmllint, and a diff of the shared file
@@ -45,6 +47,16 @@ plugin cannot import files outside it, so there is nowhere for a shared copy
 to live. The copies must stay byte-identical; `tools/check-plugins.sh`
 enforces that.
 
+## Showing the bar
+
+A chonkstep session that finds Omarchy installed hosts the Omarchy shell
+itself, but keeps its bar **hidden** to start with: the desk already has a
+Dock and a Clip in the corners the bar would want. The root menu's
+`Omarchy Bar` row shows it (and hides it again); the choice is remembered in
+chonkstep's own state, not Omarchy's, so it does not follow you into a
+Hyprland session. Until the bar is shown, an enabled widget is running but
+has nowhere to be seen.
+
 ## Installing for development
 
 Omarchy loads third-party plugins from `~/.config/omarchy/plugins/<id>/`,
@@ -54,8 +66,9 @@ where `<id>` is the manifest's `id`. A symlink to this checkout is enough:
 ln -s "$PWD/omarchy/plugins/chonkstep.workspaces" ~/.config/omarchy/plugins/chonkstep.workspaces
 ln -s "$PWD/omarchy/plugins/chonkstep.theme"      ~/.config/omarchy/plugins/chonkstep.theme
 
-# The shell watches that directory, but the watcher does not always see a
-# new symlink; a rescan is cheap and idempotent.
+# The shell watches that directory and sees the new symlink appear. What
+# it never sees is an edit made through the symlink, so a rescan is the
+# habit to form; it is cheap and idempotent.
 omarchy-shell shell rescanPlugins
 omarchy plugin list | grep chonkstep
 
@@ -73,9 +86,12 @@ Two things to know about the symlink route:
 - `omarchy plugin validate` refuses a symlinked folder ("symlinks are not
   allowed inside a plugin folder"). Validate the checkout path instead:
   `omarchy plugin validate omarchy/plugins/chonkstep.workspaces`.
-- Edits to the QML are picked up on the next shell restart
-  (`omarchy-restart-shell`, or `omarchy plugin disable` + `enable` to
-  recreate just the widget).
+- Edits to the QML are not noticed through the symlink (the shell watches
+  the plugins directory, not the files behind a link). Pick them up with
+  `omarchy-shell shell rescanPlugins`, which unloads the plugin widgets,
+  clears Quickshell's component cache and rescans, so the edited file is
+  compiled afresh; `omarchy plugin disable` + `enable` only re-creates the
+  widget from the cached component and shows the old code.
 
 ### Editing shell.json by hand
 
@@ -93,11 +109,22 @@ The layout entry is the widget id plus any settings; this replaces
 }
 ```
 
-Settings can also be flipped live:
-`omarchy-shell shell setBarWidget chonkstep.workspaces hideEmpty true '{}'`.
-The manifests declare the settings under `barWidget.schema`; Omarchy 4.0.1
-registers that field but has no UI that renders it yet, so the CLI and the
-file are the two ways to change a setting today.
+Settings can also be set live from the CLI:
+
+```sh
+omarchy bar set chonkstep.workspaces hideEmpty true --json
+omarchy bar set chonkstep.theme showAppearance false --json
+```
+
+`--json` matters for a boolean: without it the value is stored as the string
+`"true"`, and the widgets read a setting as on only when it is the JSON
+`true` (the same `=== true` test Omarchy's own widgets use), so a stringly
+`"true"` is off. The manifests declare the settings under `barWidget.schema`;
+Omarchy 4.0.x registers that field but has no UI that renders it yet, so the
+CLI and the file are the two ways to change a setting today. The QML
+fallbacks (`setting("hideEmpty", false)`) are the effective defaults — the
+shell reads a manifest's `schema` as metadata and never merges declared
+defaults into a widget's settings.
 
 ## Installing from git
 
@@ -118,6 +145,9 @@ after which users install with
 omarchy plugin add https://github.com/<org>/chonkstep.workspaces --enable
 ```
 
+Each plugin directory carries its own `README.md` and `LICENSE` so the split
+repository is complete on its own.
+
 The repository name does not matter to Omarchy: the install directory, the
 `omarchy plugin` commands, and the `shell.json` entries all use the manifest
 `id` (`chonkstep.workspaces`), and `omarchy plugin update` pulls whatever
@@ -130,19 +160,28 @@ reserved.
 `tools/fake-control-socket.py` speaks protocol 1 from the Python standard
 library alone. On connect it sends `hello` and the full snapshot; it answers
 `snapshot` and `focus-workspace` (with an `error` for anything out of range
-or unknown), enforces the line limits the real shell does, and logs every
-request it receives to stderr.
+or unknown, and — as the spec requires — an acknowledgement to the asker
+alone when the named workspace is already active), enforces the line limits
+the real shell does, and logs every request it receives to stderr.
+
+It listens on `$XDG_RUNTIME_DIR/chonkstep/control-fake.sock` by default,
+next to the session's `control-<display>.sock` and never on it: your own
+desktop is a chonkstep session, and `CHONKSTEP_CONTROL_SOCKET` in your
+terminal names its live socket, so the fake deliberately ignores that
+variable. A `--socket` path that answers a connect is refused rather than
+replaced; only a stale socket file is cleaned up, and on exit the fake
+removes only the file it bound.
 
 ```sh
 # Static state: three workspaces, windows 3/0/1, the first focused.
-omarchy/tools/fake-control-socket.py --socket /tmp/ctl-fake.sock --windows 3,0,1 --active 0
+omarchy/tools/fake-control-socket.py --windows 3,0,1 --active 0
 
 # Cycle through a scripted timeline (focus changes, a fourth workspace
 # appearing and disappearing, a theme change) every two seconds.
-omarchy/tools/fake-control-socket.py --socket /tmp/ctl-fake.sock --script --interval 2
+omarchy/tools/fake-control-socket.py --script --interval 2
 
 # Or feed state changes by hand; each line is one nudge.
-omarchy/tools/fake-control-socket.py --socket /tmp/ctl-fake.sock
+omarchy/tools/fake-control-socket.py
 {"active": 2}
 {"windows": [1, 1, 0, 4]}
 {"theme": {"name": "Ristretto", "appearance": "dark"}}
@@ -152,21 +191,35 @@ omarchy/tools/fake-control-socket.py --socket /tmp/ctl-fake.sock
 timeline; `--protocol 2` announces a version the plugins do not speak, for
 checking that they hang up rather than guess. `--help` lists the rest.
 
-Point the plugins at it by exporting `CHONKSTEP_CONTROL_SOCKET=/tmp/ctl-fake.sock`
-in the environment the shell starts from. Without that variable the plugins
+Point the plugins at it by exporting
+`CHONKSTEP_CONTROL_SOCKET=$XDG_RUNTIME_DIR/chonkstep/control-fake.sock` in
+the environment the shell starts from. Without that variable the plugins
 derive the session socket path from `XDG_RUNTIME_DIR` and `WAYLAND_DISPLAY`
 exactly as the spec describes.
 
 To try the widgets without disturbing a running desktop, start a nested
 chonkstep (`CHONKSTEP_BACKEND=winit` with scratch `XDG_CONFIG_HOME` and
-`XDG_STATE_HOME`), then inside it run the Omarchy shell with a scratch `HOME`
-holding only a symlink to `~/.local/share/omarchy`, a copy of
-`~/.local/state/omarchy/current`, a `shell.json`, and the plugin symlinks:
+`XDG_STATE_HOME`). Two things about the scratch environment:
+
+- A chonkstep that finds Omarchy installed launches `omarchy-launch-shell`
+  itself (`omarchy_shell = true` is the default). A nested session whose
+  shell you mean to start by hand must decline that, or you get two: put
+  `omarchy_shell = false` in the scratch `$XDG_CONFIG_HOME/chonkstep/config.toml`
+  before starting it.
+- The environment must carry `OMARCHY_PATH` (the login shell normally sets
+  it; `/usr/share/omarchy` for the package): the shell and every
+  `omarchy-*` script find the tree through it.
+
+Then inside the nested session run the Omarchy shell with a scratch `HOME`
+holding only a symlink to `~/.local/share/omarchy` (the pre-package fallback
+location, so that resolves too), a copy of `~/.local/state/omarchy/current`,
+a `shell.json`, and the plugin symlinks:
 
 ```sh
-HOME=/path/to/scratch-home WAYLAND_DISPLAY=wayland-N \
-CHONKSTEP_CONTROL_SOCKET=/tmp/ctl-fake.sock QS_DISABLE_FILE_WATCHER=1 QS_NO_RELOAD_POPUP=1 \
-  dbus-run-session -- quickshell -p ~/.local/share/omarchy/shell
+HOME=/path/to/scratch-home WAYLAND_DISPLAY=wayland-N OMARCHY_PATH="$OMARCHY_PATH" \
+CHONKSTEP_CONTROL_SOCKET=$XDG_RUNTIME_DIR/chonkstep/control-fake.sock \
+QS_DISABLE_FILE_WATCHER=1 QS_NO_RELOAD_POPUP=1 \
+  dbus-run-session -- quickshell -p "$OMARCHY_PATH/shell"
 ```
 
 `dbus-run-session` keeps the second shell's notification and polkit
@@ -181,7 +234,12 @@ omarchy/tools/check-plugins.sh            # manifests, qmllint, identical Contro
 VERBOSE=1 omarchy/tools/check-plugins.sh  # full qmllint output
 ```
 
-qmllint reports `[unqualified]` warnings for `root.*` references inside the
-Repeater's delegate and the Loader's `Socket`; Omarchy's own widgets produce
-the same class of warning (the shell does not use
-`pragma ComponentBehavior: Bound`), and the script fails only on errors.
+qmllint reports warnings of three kinds, none of them ours to fix:
+`[unqualified]` for `root.*` references inside the Repeater's delegate and
+the Loader's `Socket` (Omarchy's own widgets produce the same, since the
+shell does not use `pragma ComponentBehavior: Bound`); `[missing-property]`
+for `link.item.connected` and friends, because a Loader's `item` is typed
+as a bare `QObject` and the linter cannot see the `Socket` behind it; and
+`[signal-handler-parameters]` on `onError`, whose `QLocalSocket::LocalSocketError`
+parameter type is not exposed to QML. The script counts warnings and fails
+only on errors.

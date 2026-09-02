@@ -525,15 +525,14 @@ fn an_x11_pager_can_switch_the_workspace() {
     let session = Session::boot("ewmh-inbound-desktop", SessionOptions::default()).unwrap();
 
     // XWayland starts with the session; its display number is
-    // announced in the log once the server is ready. tracing writes
-    // ANSI color escapes between the key and the value (the same trap
-    // `Session::boot` documents for the socket line), so the escapes
-    // are stripped before parsing.
+    // announced in the log once the server is ready. `Session::log`
+    // has already stripped the ANSI color escapes tracing writes
+    // between the key and the value (the same trap `Session::boot`
+    // documents for the socket line), so the field parses as written.
     let display = poll_until(Duration::from_secs(30), "XWayland to announce its display", || {
         let log = session.log();
         let line = log.lines().find(|line| line.contains("XWayland ready"))?;
-        let plain = chonk_testkit::strip_ansi(line);
-        plain.split("display=").nth(1)?.trim().parse::<u32>().ok()
+        line.split("display=").nth(1)?.trim().parse::<u32>().ok()
     })
     .expect("the nested session never brought XWayland up");
 
@@ -670,9 +669,20 @@ fn chromium_resize_at_scale_2_keeps_its_scale() {
         eprintln!("chromium not installed; skipping");
         return;
     }
+    // Frameless on purpose, like the zenity tests: the desktop now
+    // answers Chromium's xdg-decoration negotiation server-side and
+    // frames the browser window, and the grip below is the CSD shadow
+    // margin — a framed window would put a resize bar there instead
+    // and turn this into a test of the frame. The bug lived in how a
+    // client's own resize commits are measured, which the frame does
+    // not change, so the frameless shape is kept.
     let mut session = Session::boot(
         "chromium-resize-scale2",
-        SessionOptions { scale: Some(2.0), ..SessionOptions::default() },
+        SessionOptions {
+            scale: Some(2.0),
+            config_extra: "[decorations]\nclient_side = [\"chromium\"]\n".to_string(),
+            ..SessionOptions::default()
+        },
     )
     .unwrap();
     let data_dir = session.dir.join("chromium-data");

@@ -28,10 +28,13 @@ scripts/install.sh
 ```
 
 Either way you get two real login sessions — `chonkstep` (X11) and
-`chonkstep (Wayland)` — plus the `chonk-get` dockapp installer. The
-package puts binaries in `/usr/bin` and session scripts in
-`/usr/lib/chonkstep/`; the checkout installer points the session
-entries back into the repo.
+`chonkstep (Wayland)` — plus the `chonk-get` dockapp installer and
+`omarchy-export-themes`. The package puts binaries in `/usr/bin` and
+session scripts in `/usr/lib/chonkstep/`; the checkout installer points
+the session entries back into the repo and links the two tools into
+`~/.local/bin` (it tells you if that is not on your `PATH`; from a
+checkout they are also always `scripts/chonk-get` and
+`target/release/omarchy-export-themes`).
 
 ## 2. Log in
 
@@ -107,7 +110,7 @@ chrome, dock, cursors and terminal font as one system — also live.
 
 ## 5. Theming
 
-Right-click the desktop → **Themes**, and pick one of the eight:
+Right-click the desktop → **Theme**, and pick one of the eight:
 NeXTSTEP Classic, Amber Phosphor, Teal Blueprint, Graphite, NeXT
 Lavender, Jade Lacquer, Ivory Halftone (the light one), Indigo
 Filament. It applies on the spot — chrome, menus, wallpaper, dock,
@@ -148,7 +151,9 @@ You can write one in any language that can open a Unix socket —
 [instrument-platform.md](instrument-platform.md) has a complete
 Python one in ten lines.
 
-Try the shipped ones (paths are relative to a checkout):
+Try the shipped ones (paths are relative to a checkout; `chonk-get` is
+`~/.local/bin/chonk-get` after `scripts/install.sh`, `/usr/bin/chonk-get`
+from the package, or simply `scripts/chonk-get` in the checkout):
 
 ```sh
 chonk-get install bindings/python        # a Python clock tile
@@ -163,6 +168,48 @@ Cargo or make), and registers. The tile appears at the next shell
 restart. Dockapps are ordinary processes running as you — not
 sandboxed — so install one with the same care as any other program.
 
+## 7. On Omarchy
+
+On an Omarchy 4 machine the Wayland session stands where Hyprland
+stood, and nothing below needs configuring — it is all on by default
+and inert anywhere Omarchy is absent. The README's
+[Installing on Omarchy](../README.md#installing-on-omarchy-or-any-arch)
+section is the long form.
+
+- **The `Omarchy` submenu.** Right-click the desktop: the `Omarchy`
+  row *is* Omarchy's menu (Learn, Trigger, Style, Setup, Install,
+  Remove, Update, About, System), read from Omarchy's own definition
+  and run the way Omarchy runs it, through `bash -lc`, so your login
+  shell's `OMARCHY_PATH` is what makes it work. Only the rows that
+  would command Hyprland are left out. `omarchy_menu = false` hides
+  it.
+- **Omarchy's theme and background.** `theme = "omarchy"`, or the
+  `Omarchy (...)` row in the Theme submenu, dresses the desk in the
+  palette Omarchy is currently wearing and follows `omarchy-theme-set`
+  live, with Omarchy's current background as the wallpaper; the
+  Wallpaper submenu offers `Omarchy's Background` on its own too. The
+  other way round, `omarchy-export-themes` writes the eight built-ins
+  as Omarchy themes. Details in [appearance.md](appearance.md).
+- **Omarchy's shell, hosted.** The session starts Omarchy's Quickshell
+  shell as Hyprland would, so the panels, pickers, OSD, notifications
+  and lock screen the menu ends in are all here. `omarchy_shell =
+  false` leaves it to you; a shell that dies is not relaunched under
+  chonkstep (`omarchy-restart-shell` brings it back).
+- **The bar, on request.** The shell's bar starts hidden — the Dock
+  holds that corner — and the root menu's `Omarchy Bar` row switches
+  it on, remembered in chonkstep's own state. When it is on, the Dock
+  hangs under it.
+- **Two widgets for that bar.** `chonkstep.workspaces` and
+  `chonkstep.theme` under `omarchy/plugins/` replace the workspace
+  strip and name the theme, reading chonkstep's control socket instead
+  of Hyprland; [omarchy/README.md](../omarchy/README.md) has the
+  symlink-and-enable steps.
+- **The control socket.** Anything can watch the desktop's state —
+  workspaces, outputs, the focused window, the theme — as one JSON line
+  per fact at `$XDG_RUNTIME_DIR/chonkstep/control-<display>.sock`;
+  `socat - UNIX-CONNECT:$CHONKSTEP_CONTROL_SOCKET` shows it, and
+  [control-socket.md](control-socket.md) is the contract.
+
 ## Where things live
 
 | Thing                  | Path                                             |
@@ -170,5 +217,7 @@ sandboxed — so install one with the same care as any other program.
 | Config                 | `~/.config/chonkstep/config.toml`                |
 | Config template        | `/usr/share/doc/chonkstep/config.example.toml` (package) or `docs/config.example.toml` |
 | Session logs           | `~/.local/state/chonkstep/*.log`                 |
+| Persisted choices      | `$XDG_STATE_HOME/chonkstep/{theme,wallpaper,omarchy-bar,appearance}` (`~/.local/state/chonkstep/` when unset) — the theme and wallpaper picked from the menu, whether Omarchy's bar is shown, the light/dark mode |
+| Control socket         | `$XDG_RUNTIME_DIR/chonkstep/control-<display>.sock` (also in `CHONKSTEP_CONTROL_SOCKET` for everything the shell launches) |
 | Dockapp registrations  | `~/.config/chonkstep/dockapps/*.dockapp`         |
 | Dockapp sources        | `~/.local/share/chonkstep/dockapps/`             |

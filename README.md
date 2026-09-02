@@ -180,16 +180,18 @@ cd chonkstep
 scripts/install.sh
 ```
 
-The installer pulls the runtime dependencies with pacman (Xorg,
-rxvt-unicode, picom, wireplumber for the sound instrument, the theme
-fonts, the stack the Wayland compositor builds and runs against -
-libxkbcommon, EGL/mesa, Xwayland, and libdrm/libinput/libudev/libseat
-for the hardware session - and a Rust toolchain if needed), builds both
+The installer pulls the runtime dependencies with pacman (Xorg, foot -
+the terminal the desktop spawns - picom, wireplumber for the sound
+instrument, the theme fonts, the stack the Wayland compositor builds
+and runs against - libxkbcommon, EGL/mesa, Xwayland, and
+libdrm/libinput/libudev/libseat for the hardware session - the portal
+stack for screen sharing, and a Rust toolchain if needed), builds the
 release binaries, installs **two** session entries that point back into
 the checkout - `/usr/share/xsessions/chonkstep.desktop` and
-`/usr/share/wayland-sessions/chonkstep.desktop` - and seeds
-`~/.config/chonkstep/config.toml` from the fully-commented example if
-you don't have one.
+`/usr/share/wayland-sessions/chonkstep.desktop` - plus the portal
+backend map, links `chonk-get` and `omarchy-export-themes` into
+`~/.local/bin`, and seeds `~/.config/chonkstep/config.toml` from the
+fully-commented example if you don't have one.
 
 Both halves are real login sessions. How you start one depends on the
 machine, and on which you want:
@@ -215,17 +217,20 @@ prints this only when it finds logind missing.
 
 Once you are in, right-click the desktop: the `Omarchy` submenu of the
 root menu *is* Omarchy's own menu - the same Learn / Trigger / Style /
-Setup / Install / Remove / Update / System tree Omarchy's shell offers,
+Setup / Install / Remove / Update / About / System tree Omarchy's shell offers,
 read from Omarchy's own `omarchy-menu.jsonc` (and your extension file)
 every time either changes, with every entry running exactly as Omarchy
 runs it and every `when`/`checked`/`disabled` condition answered the way
 Omarchy answers it. chonkstep keeps no list of its own, so an Omarchy
 upgrade shows up in the menu on its own; the only entries left out are
 the ones that would command Hyprland. `omarchy_menu = false` in the
-config turns the submenu off.
+config turns the submenu off. Every row runs the way Omarchy runs it,
+through `bash -lc`, so `OMARCHY_PATH` and Omarchy's `bin` on `PATH`
+come from your login shell - Omarchy's stock `.bashrc` exports both,
+and a shell that does not leaves the rows with nothing to run.
 
 chonkstep can also dress in Omarchy's theme. `theme = "omarchy"` in
-the config (or the `Omarchy (...)` row in the root menu's Themes
+the config (or the `Omarchy (...)` row in the root menu's Theme
 submenu) makes the desktop read the palette `omarchy-theme-set` leaves
 under `~/.local/state/omarchy/current/theme/` and wear it - chrome,
 dock, menus, terminals, light or dark as the palette says - on
@@ -234,12 +239,17 @@ wallpaper (the picture `current/background` points at, in whatever
 format Omarchy ships it), and keep watching both, so switching themes
 or cycling backgrounds in Omarchy restyles this desk within a second.
 The Wallpaper submenu offers `Omarchy's Background` as a row of its
-own wherever Omarchy is installed, so any theme can wear it. The other
-direction is
-`omarchy-export-themes`, built alongside the shell, which writes the
-eight built-in themes as Omarchy themes into `~/.config/omarchy/themes/`
-so `omarchy-theme-set amber-phosphor` dresses the rest of the machine
-to match. Details in [docs/appearance.md](docs/appearance.md).
+own whenever Omarchy has a current theme to read (that is, a readable
+`current/theme/colors.toml`), so any theme can wear it. The other
+direction is `omarchy-export-themes`, which writes the eight built-in
+themes as Omarchy themes into `~/.config/omarchy/themes/` so
+`omarchy-theme-set amber-phosphor` dresses the rest of the machine to
+match. It is built alongside the shell: `target/release/omarchy-export-themes`
+in a checkout, `~/.local/bin/omarchy-export-themes` after
+`scripts/install.sh`, `/usr/bin/omarchy-export-themes` from the
+package; run it once with no arguments (or with a directory to write
+somewhere else) and again after a rebuild. Details in
+[docs/appearance.md](docs/appearance.md).
 
 Most of that menu ends in Omarchy's *shell* - the Quickshell process
 behind Omarchy's bar, panels, pickers, notifications, on-screen display
@@ -256,9 +266,16 @@ surface this desk decides about: it starts *hidden* - the Dock and the
 Clip already hold the corners - and the root menu's `Omarchy Bar` row
 switches it on (and off again), remembering the choice in chonkstep's
 own state rather than Omarchy's, so it never follows you into a
-Hyprland session. While hidden the bar keeps running and simply takes
-no space, no clicks and no pixels. `omarchy_shell = false` in the
-config leaves the shell to you.
+Hyprland session. Hiding is the compositor's doing, not the shell's:
+while hidden the bar keeps running and simply takes no space, no
+clicks and no pixels, and the edge it had reserved is released - the
+Dock and maximized windows move back into it. One thing Omarchy's
+launcher does on Hyprland it cannot do here: its supervisor asks
+`hyprctl` whether the compositor is still alive before relaunching a
+shell that died abnormally, an answer chonkstep never gives, so a
+crashed shell is not brought back on its own - `omarchy-restart-shell`
+or a new login does. `omarchy_shell = false` in the config leaves the
+shell to you.
 
 Omarchy's bar, and anything else that wants to draw the desktop's
 state, talks to the shell over a small socket at
@@ -273,7 +290,13 @@ Its first clients are two Omarchy bar widgets under
 [`omarchy/plugins/`](omarchy/README.md) - `chonkstep.workspaces`, the
 workspace strip Omarchy's own widget cannot draw here because it asks
 Hyprland, and `chonkstep.theme`, the active theme's name - which
-install like any other Omarchy plugin and import nothing from Hyprland.
+import nothing from Hyprland. They are ordinary Omarchy plugins, but
+`omarchy plugin add` wants one plugin per repository root and these two
+live in a subdirectory of this one, so today they are installed by
+symlinking each into `~/.config/omarchy/plugins/` and enabling it with
+`omarchy plugin enable`; [omarchy/README.md](omarchy/README.md) has
+the exact commands, and what publishing them as their own repositories
+would take.
 
 The bar and the Dock share a corner, and the Dock gives way. Omarchy's
 bar is a layer-shell surface that reserves the top strip of the
@@ -285,7 +308,10 @@ itself under (or beside) it, and maximized windows fill what is left
 between the two - windows already maximized when the bar arrives are
 refitted, and everything returns to the corner the moment the bar
 exits. Omarchy's shell needs to know nothing about any of this; it
-draws its bar the way it draws it on Hyprland.
+draws its bar the way it draws it on Hyprland. Those two edges are the
+only ones the Dock yields to: a bar anchored to the left or the bottom
+still pushes the workarea, but it shares no edge with the Dock's
+column and so overlaps the Clip and the icon row today.
 
 Omarchy's terminals get titlebars, though they never ask for them.
 Omarchy configures alacritty and kitty to draw no decorations - right
@@ -411,9 +437,12 @@ What the session backend does not do yet, stated plainly:
   standardised `ext-data-control-v1` - so clipboard managers work
   (`wl-paste --watch`, `cliphist`, `clipman`, `wl-clip-persist`), on
   the middle-click selection as well as the ordinary clipboard,
-  fractional-scale-v1 with viewporter, and explicit GPU
-  sync (`wp_linux_drm_syncobj_v1`) on DRM sessions whose device
-  supports it. Screen sharing works through the standard portal chain
+  fractional-scale-v1 with viewporter, `zwp_virtual_keyboard_manager_v1`
+  (`wtype`, which Omarchy's emoji and clipboard pasting type with),
+  `hyprland_focus_grab_v1`
+  (the protocol Omarchy's shell uses to dismiss a popup on a click
+  elsewhere), and explicit GPU sync (`wp_linux_drm_syncobj_v1`) on DRM
+  sessions whose device supports it. Screen sharing works through the standard portal chain
   (xdg-desktop-portal-wlr over screencopy into PipeWire), verified end
   to end - [docs/screen-sharing.md](docs/screen-sharing.md) is the
   map, including the one upstream limitation: the wlr portal backend
@@ -474,22 +503,29 @@ about and skipped, and a completely unreadable file just means the
 defaults. See [docs/config.example.toml](docs/config.example.toml) for
 a fully commented example of every option.
 
-Nine settings and a keybinding table are available:
-`focus_follows_mouse` (click-to-focus by default), `scale` (HiDPI UI
-scaling; the `CHONKSTEP_SCALE` environment variable overrides it),
-`theme` (a theme picked live from the root menu is persisted and wins
-over it), `appearance` (`"light"` or `"dark"` - the axis every theme
-has two renditions along; the running session's own persisted mode
-wins after the first start, and the live way to switch is the request
-file in [docs/appearance.md](docs/appearance.md)), `placement` (where
-new windows land: `smart` by default, or `cascade` / `center`),
+The settings, each documented in full in that file: `focus_follows_mouse`
+(click-to-focus by default), `scale` (HiDPI UI scaling; the
+`CHONKSTEP_SCALE` environment variable overrides it), `theme` (a theme
+picked live from the root menu is persisted and wins over it),
+`appearance` (`"light"` or `"dark"` - the axis every theme has two
+renditions along; the running session's own persisted mode wins after
+the first start, and the live way to switch is the request file in
+[docs/appearance.md](docs/appearance.md)), `placement` (where new
+windows land: `smart` by default, or `cascade` / `center`),
 `edge_resistance` (how close, in pixels, a dragged window gets to a
 screen or window edge before snapping flush; `0` disables snapping),
 `terminal_font_px` (the terminal's type size at 1x scale, with the
-launch geometry derived from the monitor), `restore_session` and
-`lock_command` (the Living Desktop pair above). Keybindings merge
-over the defaults - list a combo to change it, set it to `"none"` to
-unbind it, and every unlisted default stays.
+launch geometry derived from the monitor), `terminal` (another
+terminal in place of the built-in foot), `drag_modifier` (the key held
+to move or resize any window from its content: `alt` by default),
+`restore_session` and `lock_command` (the Living Desktop pair above),
+`omarchy_menu` and `omarchy_shell` (the two halves of hosting Omarchy,
+both on by default and inert without it), and `autostart` (commands
+run once as a session starts). Then three tables: `[keybindings]`,
+`[commands]` (named command lines a `run <name>` binding refers to),
+and `[decorations]` (per-application chrome overrides, rarely needed).
+Keybindings merge over the defaults - list a combo to change it, set it
+to `"none"` to unbind it, and every unlisted default stays.
 
 Edits apply to the running session: `scripts/reload.sh` re-reads this
 file and applies all of it in place - nothing closed, no window lost -
@@ -512,6 +548,7 @@ The default bindings:
 | alt+shift+right  | Carry the focused window to the next         |
 | alt+shift+left   | Carry the focused window to the previous     |
 | super+up         | The modal Overview                           |
+| control+escape   | The window commands menu, no titlebar needed |
 
 Alt+Tab window cycling is part of the modal switcher machinery and is
 always available; it is not rebindable from the config file.

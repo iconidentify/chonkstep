@@ -40,19 +40,24 @@ window and do nothing when no window is focused.
 | `alt` + drag, right      | Resize the window, from anywhere on it              |
 
 The last two are the ones that matter for a window with no titlebar.
-A client is allowed to draw its own chrome — a browser whose frame is
-part of its tab strip does, and this desktop believes it — and some
-clients ask for that right and then draw nothing at all. Those windows
-have no titlebar to drag and no resize bar to pull, so the gesture is
-grabbed on the window's own content and works on every window, framed
-or not; `control+escape` reaches its commands menu for the same reason.
-Window Maker binds both the same way, and for the same case.
+Every xdg-decoration negotiation on this desktop ends server-side, as
+it does on Hyprland, so a Wayland client that merely *asked* to draw
+its own chrome gets a frame anyway. But a client that *declares* its
+own chrome — over KDE's server-decoration protocol, which is the one
+GTK speaks, or through `_MOTIF_WM_HINTS` on X11 — is believed, and a
+few of those declare a titlebar and then draw nothing at all. Those
+windows have no titlebar to drag and no resize bar to pull, so the
+gesture is grabbed on the window's own content and works on every
+window, framed or not; `control+escape` reaches its commands menu for
+the same reason. Window Maker binds both the same way, and for the
+same case.
 
 The modifier is `drag_modifier` in the config: `"alt"` by default,
 `"super"` if an application (CAD, GIMP, Blender) wants Alt+drag for
-itself, `"none"` to turn the gesture off. To give a bare window its
-titlebar back permanently instead, name it in `[decorations]
-server_side` — see `docs/config.example.toml`.
+itself, `"none"` to turn the gesture off. To give such a bare window
+its titlebar back permanently instead, name it in `[decorations]
+server_side`; to keep an xdg client bare on purpose, name it in
+`client_side` — see `docs/config.example.toml`.
 
 Two more actions exist and are deliberately unbound by default —
 give them keys in your config:
@@ -77,7 +82,10 @@ give them keys in your config:
 
 ## Mouse, for completeness
 
-- Right-click the desktop: the root menu (applications, themes, exit).
+- Right-click the desktop: the root menu — `Terminal`, `Applications`,
+  `Theme`, `Wallpaper`, then `Omarchy Bar` (when the session hosts
+  Omarchy's shell) and the `Omarchy` submenu (when Omarchy is
+  installed), and `Exit`.
 - Right-click any titlebar: the window commands menu.
 - Drag a miniaturized window's icon tile onto the launcher strip to
   pin its application; click a pin to launch or focus; drag off to
@@ -119,7 +127,7 @@ through one indirection instead: name it in `[commands]`, then bind
 
 ```toml
 [commands]
-omarchy-menu = "omarchy-shell shell toggle omarchy.menu"
+omarchy-menu = "omarchy-menu toggle"    # what Omarchy's own Super+Space runs
 volume-up    = "omarchy-audio-output-volume up"
 notify       = ["notify-send", "hello world"]   # array keeps spaces whole
 

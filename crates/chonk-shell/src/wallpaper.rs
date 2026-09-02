@@ -233,13 +233,9 @@ fn cover(source: &Pixmap, screen: Size) -> DecorationBuffer {
     DecorationBuffer { width: dest.width(), height: dest.height(), pixels: dest.take() }
 }
 
+/// `$XDG_STATE_HOME/chonkstep/wallpaper` (see `startup::state_file`).
 fn state_path() -> Option<PathBuf> {
-    if let Some(root) = std::env::var_os("XDG_STATE_HOME") {
-        return Some(PathBuf::from(root).join("chonkstep/wallpaper"));
-    }
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .map(|home| home.join(".local/state/chonkstep/wallpaper"))
+    crate::startup::state_file("wallpaper")
 }
 
 #[cfg(test)]
@@ -269,7 +265,7 @@ mod tests {
     #[test]
     fn light_renditions_are_actually_lighter_than_dark_ones() {
         let mean = |buffer: &wm_theme_api::DecorationBuffer| {
-            let sum: u64 = buffer.pixels.chunks_exact(4).map(|px| (px[0] as u64 + px[1] as u64 + px[2] as u64) / 3).sum();
+            let sum: u64 = buffer.pixels.as_chunks::<4>().0.iter().map(|px| (px[0] as u64 + px[1] as u64 + px[2] as u64) / 3).sum();
             (sum / (u64::from(buffer.width) * u64::from(buffer.height))) as i64
         };
         for wallpaper in Wallpaper::ALL.into_iter().filter(|w| *w != Wallpaper::ClassicLavender) {

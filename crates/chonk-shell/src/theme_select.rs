@@ -39,12 +39,7 @@ pub fn persist(id: &str) -> std::io::Result<()> {
 }
 
 fn state_path() -> Option<PathBuf> {
-    if let Some(root) = std::env::var_os("XDG_STATE_HOME") {
-        return Some(PathBuf::from(root).join("chonkstep/theme"));
-    }
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .map(|home| home.join(".local/state/chonkstep/theme"))
+    crate::startup::state_file("theme")
 }
 
 #[cfg(test)]

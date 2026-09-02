@@ -58,6 +58,11 @@ pub struct FakeBackend {
     /// "was it raised when it was clicked", and only the second one is
     /// the bug.
     pub raised_frameless: Vec<FakeWindowId>,
+    /// Every `set_layer_surface_hidden` call, in order, as `(namespace,
+    /// hidden)`. Recorded rather than reduced to a set because the
+    /// shell promises to *clear* a namespace it no longer has a reason
+    /// to hide, and only the sequence shows that.
+    pub layer_visibility_calls: Vec<(String, bool)>,
     /// How many pointer grabs are currently outstanding: incremented by
     /// `grab_pointer_for_drag`, decremented by `ungrab_pointer`.
     ///
@@ -287,6 +292,9 @@ impl Backend for FakeBackend {
     }
     fn paint_root_color(&mut self, _rgb: (u8, u8, u8)) {}
     fn paint_root_image(&mut self, _buffer: &DecorationBuffer) {}
+    fn set_layer_surface_hidden(&mut self, namespace: &str, hidden: bool) {
+        self.layer_visibility_calls.push((namespace.to_string(), hidden));
+    }
     fn screen_size(&self) -> Size {
         FAKE_SCREEN.size
     }

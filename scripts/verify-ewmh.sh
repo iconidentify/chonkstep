@@ -74,24 +74,32 @@ for prop in _NET_CLIENT_LIST _NET_NUMBER_OF_DESKTOPS _NET_CURRENT_DESKTOP _NET_W
 done
 
 # --- activation round-trip: does a _NET_ACTIVE_WINDOW ClientMessage
-# actually move focus and get republished? Needs a window to activate;
-# the terminal chonkstep ships is urxvt, so look for one and skip (not
+# actually move focus and get republished? Needs a window to activate.
+# The terminal the desktop spawns is foot, a Wayland client that never
+# appears on an X11 session, so there is no shipped window to count
+# on: look for any common X11 terminal (open one first) and skip (not
 # fail) when none is running — the property checks above still stand.
 active_id() { root_prop _NET_ACTIVE_WINDOW | grep -oE '0x[0-9a-fA-F]+' | head -n 1; }
+terminal_windows() {
+    local class
+    for class in XTerm URxvt Alacritty kitty; do
+        xdotool search --class "$class" 2>/dev/null
+    done
+}
 
 if ! command -v xdotool >/dev/null 2>&1; then
     skip "_NET_ACTIVE_WINDOW activation check (xdotool not installed)"
 else
     before=$(active_id)
     target=""
-    for w in $(xdotool search --class URxvt 2>/dev/null); do
+    for w in $(terminal_windows); do
         target="$w"
         # Prefer a window that isn't already active, so the property
         # has to visibly change rather than merely stay put.
         [ "$(printf '0x%x' "$w")" != "${before:-}" ] && break
     done
     if [ -z "$target" ]; then
-        skip "_NET_ACTIVE_WINDOW activation check (no URxvt window running)"
+        skip "_NET_ACTIVE_WINDOW activation check (no terminal window running)"
     else
         target_hex=$(printf '0x%x' "$target")
         xdotool windowactivate "$target" 2>/dev/null || true
@@ -101,7 +109,7 @@ else
         after=$(active_id)
         if [ "${after:-}" = "$target_hex" ]; then
             if [ "$target_hex" = "${before:-}" ]; then
-                ok "_NET_ACTIVE_WINDOW tracks windowactivate ($after — only URxvt was already active)"
+                ok "_NET_ACTIVE_WINDOW tracks windowactivate ($after — the only terminal was already active)"
             else
                 ok "_NET_ACTIVE_WINDOW changed after windowactivate (${before:-none} -> $after)"
             fi
@@ -141,16 +149,16 @@ else
 
     # Per-window desktop assignment: every managed client should carry
     # _NET_WM_DESKTOP (pagers use it to place windows on the right
-    # miniature). Same URxvt-or-skip convention as the activation check.
-    client=$(xdotool search --class URxvt 2>/dev/null | head -n 1)
+    # miniature). Same terminal-or-skip convention as the activation check.
+    client=$(terminal_windows | head -n 1)
     if [ -z "${client:-}" ]; then
-        skip "_NET_WM_DESKTOP check (no URxvt window running)"
+        skip "_NET_WM_DESKTOP check (no terminal window running)"
     else
         client_hex=$(printf '0x%x' "$client")
         if xprop -id "$client" _NET_WM_DESKTOP 2>/dev/null | grep -qE '= *[0-9]+'; then
-            ok "_NET_WM_DESKTOP present on URxvt window $client_hex"
+            ok "_NET_WM_DESKTOP present on terminal window $client_hex"
         else
-            fail "_NET_WM_DESKTOP missing from URxvt window $client_hex"
+            fail "_NET_WM_DESKTOP missing from terminal window $client_hex"
         fi
     fi
 fi

@@ -4,11 +4,18 @@
 # closed. chonkstep polls for this marker file once per event-loop tick
 # and applies the config the instant it sees it.
 #
-# What this applies: the theme, the UI scale, focus policy, window
-# placement, edge resistance, the terminal font size, the keybindings
-# themselves, the move/resize drag modifier, and the [decorations]
-# overrides — which re-decide the chrome of every window already open,
-# not just the next one to map.
+# What this applies: the theme, the appearance, the UI scale, focus
+# policy, window placement, edge resistance, the terminal font size
+# and the `terminal` command for the next terminal spawned, the
+# keybindings themselves and the [commands] they name, the move/resize
+# drag modifier, the [decorations] overrides — which re-decide the
+# chrome of every window already open, not just the next one to map —
+# and `omarchy_menu`, which also re-reads Omarchy's menu definition
+# files, so a reload is how you say "look again" after editing an
+# extension. Two keys are read at session start only and a reload
+# leaves them alone: `omarchy_shell` (the shell is started once, as
+# the session comes up) and `autostart` (those commands start a
+# session, they do not re-start one).
 #
 # That list is the same one the bound `reload` action applies, and it
 # has to stay that way: everything here travels through one path

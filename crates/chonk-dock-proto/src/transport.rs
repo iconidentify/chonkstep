@@ -1226,8 +1226,14 @@ mod tests {
         assert!(sanitize_display(&"a".repeat(1000)).len() <= 32, "a display name cannot blow the 108-byte sun_path");
     }
 
+    /// The two tests below read `XDG_RUNTIME_DIR`, and one of them sets
+    /// it; the lock keeps them from interleaving under the parallel
+    /// test runner.
+    static RUNTIME_DIR_ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn the_control_socket_lives_beside_the_dock_socket_under_the_same_display_key() {
+        let _env = RUNTIME_DIR_ENV.lock().unwrap();
         // The spec (`docs/control-socket.md` §1) promises the control
         // socket is sanitised exactly as the dock socket is, so a bar
         // author can derive one path from the other; pin the two to
@@ -1253,10 +1259,10 @@ mod tests {
         // Restart survival depends on the name not carrying a pid or a
         // start time; if it did, a reconnecting dockapp could never
         // find the new shell.
+        let _env = RUNTIME_DIR_ENV.lock().unwrap();
         let dir = std::env::temp_dir().join("chonk-dock-path-test");
-        // SAFETY-ish: this test reads the variable it just set in the
-        // same thread and does not race the others, which never touch
-        // XDG_RUNTIME_DIR.
+        // The variable is process-global; the lock above is what keeps
+        // the other reader of it from racing this write.
         std::env::set_var("XDG_RUNTIME_DIR", &dir);
         let first = socket_path(":1").unwrap();
         let second = socket_path(":1").unwrap();

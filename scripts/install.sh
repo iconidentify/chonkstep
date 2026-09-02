@@ -7,11 +7,12 @@
 # upgrade story.
 #
 # What this does:
-#   1. Installs runtime dependencies with pacman (Xorg, the terminal,
-#      picom, the theme fonts, and the graphics, input, and seat
-#      libraries the Wayland compositor builds and runs against) and a
-#      Rust toolchain if the system has none.
-#   2. Builds the release binaries - chonkstep and chonkstep-wayland.
+#   1. Installs runtime dependencies with pacman (Xorg, foot, picom,
+#      the theme fonts, the graphics, input, and seat libraries the
+#      Wayland compositor builds and runs against, and the portal stack
+#      for screen sharing) and a Rust toolchain if the system has none.
+#   2. Builds the release binaries - chonkstep, chonkstep-wayland and
+#      omarchy-export-themes.
 #   3. Installs both session entries pointing at this checkout's
 #      launcher scripts - /usr/share/xsessions/chonkstep.desktop
 #      (scripts/xsession.sh) and
@@ -19,6 +20,20 @@
 #      (scripts/wayland-session.sh) - so a login manager offers
 #      chonkstep in either flavour, and a machine with no login manager
 #      can start either one from a TTY.
+#   4. Installs the portal backend map,
+#      /usr/share/xdg-desktop-portal/chonkstep-portals.conf, which
+#      routes screen sharing to xdg-desktop-portal-wlr.
+#   5. Seeds ~/.config/chonkstep/config.toml from the fully commented
+#      example, only if there is none.
+#   6. Links the two user-facing tools into ~/.local/bin: chonk-get (the
+#      dockapp installer) and omarchy-export-themes (chonkstep's themes
+#      as Omarchy themes). Nothing under ~/.config/omarchy is touched;
+#      the Omarchy bar widgets under omarchy/plugins/ are yours to link
+#      or not (omarchy/README.md).
+#
+# Every step is safe to repeat: pacman is asked with --needed, the
+# entries and links are rewritten in place, and an existing config is
+# never overwritten.
 #
 # Usage: scripts/install.sh
 set -euo pipefail
@@ -33,11 +48,13 @@ fi
 
 echo "Installing dependencies (sudo)..."
 # xorg-server/xinit/xauth: the X session itself (xauth is what startx
-# needs on a machine with no display manager - stock Omarchy). rxvt-
-# unicode: the terminal the root menu launches. picom: the X11
-# compositing manager behind the themes' translucent terminals - the
-# Wayland session needs no equivalent, because a compositor composites
-# itself. wireplumber:
+# needs on a machine with no display manager - stock Omarchy). foot:
+# the terminal the root menu and alt+shift+return launch, the one the
+# desktop themes end to end; it is a Wayland client, so on the X11
+# session name your own with `terminal =` in the config. picom: the
+# X11 compositing manager behind the themes' translucent terminals -
+# the Wayland session needs no equivalent, because a compositor
+# composites itself. wireplumber:
 # wpctl, which the dock's sound instrument reads and controls (already
 # present on any PipeWire desktop; harmless elsewhere - without a sink
 # the instrument shows its dead-screen face). Fonts: DejaVu (the
@@ -81,7 +98,7 @@ echo "Installing dependencies (sudo)..."
 # See docs/screen-sharing.md.
 sudo pacman -S --needed --noconfirm \
     xorg-server xorg-xinit xorg-xauth \
-    rxvt-unicode foot picom wireplumber \
+    foot picom wireplumber \
     ttf-dejavu gsfonts ttf-jetbrains-mono-nerd noto-fonts \
     libxkbcommon libglvnd mesa xorg-xwayland \
     libdrm libinput systemd-libs seatd \
@@ -145,6 +162,24 @@ if [ ! -e "$config" ]; then
     install -Dm644 docs/config.example.toml "$config"
     echo "Seeded ${config} (all defaults, fully commented)."
 fi
+
+# The two tools a user reaches for by name, put on PATH the same way
+# the session entries were: as links back into this checkout, so
+# scripts/update.sh keeps them current with nothing else to do.
+# chonk-get is a script and lives in scripts/; omarchy-export-themes is
+# a release binary beside the session ones. ln -sfn makes a rerun (or
+# a moved checkout, after re-running this script) rewrite the links
+# rather than fail on them. ~/.local/bin is the XDG-blessed spot and
+# is on PATH on stock Omarchy; the note below covers a shell where it
+# is not, since a link nobody can reach is worse than none.
+bin="$HOME/.local/bin"
+install -d "$bin"
+ln -sfn "${repo}/scripts/chonk-get" "$bin/chonk-get"
+ln -sfn "${repo}/target/release/omarchy-export-themes" "$bin/omarchy-export-themes"
+bin_on_path=""
+case ":${PATH}:" in
+    *":${bin}:"*) bin_on_path="yes" ;;
+esac
 
 # Stock Omarchy boots straight into Hyprland via autologin - there is
 # no login-manager session picker for either session entry to appear
@@ -226,8 +261,19 @@ cat <<DONE
   - HiDPI: set "scale = 2.0" in ${config}
     (the whole file is optional and every line is documented; both
     backends read it).
+  - On PATH, as links into this checkout: chonk-get (install a dockapp:
+    chonk-get install examples/chonk-shelf) and omarchy-export-themes
+    (write chonkstep's themes where omarchy-theme-set can find them).
+DONE
+if [ -z "$bin_on_path" ]; then
+    cat <<DONE
+    Note: ${bin} is not on this shell's PATH, so reach them by that
+    path or add it (Omarchy's stock bashrc already does).
+DONE
+fi
+cat <<DONE
   - Update later with: scripts/update.sh
-  - Both session entries point at this checkout (${repo});
-    moving the checkout means re-running scripts/install.sh.
+  - Both session entries and both links point at this checkout
+    (${repo}); moving the checkout means re-running scripts/install.sh.
 
 DONE

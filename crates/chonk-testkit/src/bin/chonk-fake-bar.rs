@@ -30,6 +30,7 @@
 use std::io::Write;
 use std::os::fd::AsFd;
 
+use chonk_testkit::FAKE_BAR_RGB;
 use wayland_client::protocol::{
     wl_buffer::WlBuffer, wl_compositor::WlCompositor, wl_registry, wl_shm, wl_shm_pool, wl_surface::WlSurface,
 };
@@ -39,9 +40,11 @@ use wayland_protocols_wlr::layer_shell::v1::client::{
     zwlr_layer_surface_v1::{self, Anchor, ZwlrLayerSurfaceV1},
 };
 
-/// Premultiplied opaque ARGB, little-endian per pixel: a strong
-/// orange nothing in the shell's palettes comes near.
-const BAR_ORANGE: [u8; 4] = [0x10, 0x70, 0xE0, 0xFF];
+/// The fill, as `wl_shm` `Argb8888` wants it: premultiplied opaque
+/// ARGB, little-endian per pixel, so the bytes run B, G, R, A. Derived
+/// from the RGB the tests assert on rather than restated, so the two
+/// cannot disagree about which orange this is.
+const BAR_ORANGE: [u8; 4] = [FAKE_BAR_RGB[2], FAKE_BAR_RGB[1], FAKE_BAR_RGB[0], 0xFF];
 
 fn fatal(message: &str) -> ! {
     eprintln!("chonk-fake-bar: {message}");

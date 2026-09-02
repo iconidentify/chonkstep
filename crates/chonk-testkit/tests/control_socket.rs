@@ -20,14 +20,10 @@
 
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use chonk_testkit::{poll_until, Session, SessionOptions};
-
-const KEY_LEFTMETA: u32 = 125;
-const KEY_SPACE: u32 = 57;
-const KEY_VOLUMEUP: u32 = 115;
+use chonk_testkit::{keys, poll_until, session_dir, Session, SessionOptions};
 
 /// Long enough for a window to map and the shell's next tick to notice.
 const EVENT: Duration = Duration::from_secs(10);
@@ -41,7 +37,7 @@ struct Bar {
 }
 
 impl Bar {
-    fn connect(path: &PathBuf) -> Bar {
+    fn connect(path: &Path) -> Bar {
         let stream = poll_until(EVENT, &format!("the control socket at {}", path.display()), || UnixStream::connect(path).ok())
             .expect("the shell binds the control socket during startup");
         stream.set_read_timeout(Some(EVENT)).expect("read timeout");
@@ -86,10 +82,6 @@ fn control_socket_path(session: &Session) -> PathBuf {
     // clean, so the derivation a client does is a plain join.
     let runtime = std::env::var("XDG_RUNTIME_DIR").expect("XDG_RUNTIME_DIR is set in any session this can run in");
     PathBuf::from(runtime).join("chonkstep").join(format!("control-{}.sock", session.wayland_display))
-}
-
-fn session_dir(name: &str) -> PathBuf {
-    std::env::temp_dir().join("chonk-testkit").join(name)
 }
 
 /// The whole document, walked once in the order a bar would walk it.
@@ -158,7 +150,7 @@ fn a_bar_sees_the_snapshot_the_windows_and_its_own_switches() {
 
     // The keyboard grows a second workspace by carrying the window
     // there; the socket narrates it.
-    session.door().chord(KEY_LEFTMETA, KEY_SPACE).expect("chord injects");
+    session.door().chord(keys::LEFTMETA, keys::SPACE).expect("chord injects");
     let carried = bar.wait_for("a workspaces event with two workspaces and the second active", |e| {
         e["event"] == "workspaces" && e["workspaces"].as_array().map(Vec::len) == Some(2) && e["active"] == 1
     });
@@ -191,7 +183,7 @@ fn a_bar_sees_the_snapshot_the_windows_and_its_own_switches() {
     // §1.1: a process the shell launches finds the socket in its
     // environment, under the name the document gives, at the path the
     // bar itself connected to.
-    session.door().tap_key(KEY_VOLUMEUP).expect("key injects");
+    session.door().tap_key(keys::VOLUMEUP).expect("key injects");
     poll_until(SPAWNED, "the environment dump", || dump.exists().then_some(())).expect("the dump command should have run");
     let env = std::fs::read_to_string(&dump).expect("dump readable");
     let exported = env.lines().find_map(|l| l.strip_prefix("CHONKSTEP_CONTROL_SOCKET="));
@@ -200,12 +192,13 @@ fn a_bar_sees_the_snapshot_the_windows_and_its_own_switches() {
     assert!(session.compositor_alive(), "nothing above may have cost the session");
 }
 
-/// A stopped shell is EOF, and the next shell on the same display is
-/// reachable at the same path — the reconnect story §1.2 tells a client
-/// to rely on.
+/// A stopped shell is EOF on the client's side — the first half of the
+/// reconnect story §1.2 tells a client to rely on. (The second half,
+/// that the next shell on the same display binds the same path, is
+/// not exercised here: nothing boots a successor.)
 #[test]
 #[ignore = "needs a live Wayland session to nest inside"]
-fn the_socket_dies_with_the_session_and_the_path_is_reusable() {
+fn a_stopped_shell_reaches_its_client_as_eof() {
     let mut session = Session::boot("control-socket-exit", SessionOptions::default()).expect("session boots");
     let path = control_socket_path(&session);
     let mut bar = Bar::connect(&path);

@@ -9,9 +9,10 @@
 //! workspace". That is the entire protocol, and `docs/control-socket.md`
 //! is its normative text: the wire format lives there, not here, and a
 //! disagreement between this file and that document is a bug in this
-//! file. A bar author should read the document and never need this
-//! module; it is written so the examples in the document are exactly
-//! what a client sees.
+//! file (the document's own preamble points back here for the
+//! implementation, not for the contract). A bar author should read the
+//! document and never need this module; it is written so the examples
+//! in the document are exactly what a client sees.
 //!
 //! # Two invariants
 //!
@@ -58,9 +59,11 @@
 //! # Where it sits in the shell
 //!
 //! Bound once in `Shell::new`, right after the dockapp host and before
-//! the first process the session launches, so `CHONKSTEP_CONTROL_SOCKET`
-//! is in the environment of every autostart entry, `[commands]` launch
-//! and menu launch (see `spawn::declare_control_socket` for the route).
+//! the first process meant to see it, so `CHONKSTEP_CONTROL_SOCKET` is
+//! in the environment of every autostart entry, `[commands]` launch and
+//! menu launch (see `spawn::declare_control_socket` for the route;
+//! dockapp tiles are spawned earlier and kept from it on purpose,
+//! `spawn::DOCKAPP_WITHHELD_ENV`).
 //! Serviced once per `Shell::tick`: accept, read, answer, publish. A
 //! bind failure is a warning and a session without a control socket,
 //! never a session that failed to start.
@@ -470,12 +473,16 @@ impl ControlClient {
     /// A zero-length read is the peer's writing side going away, which
     /// is not by itself a reason: it may still be reading. The reason
     /// arrives when [`peer_gone`](Self::peer_gone) says both sides are.
+    ///
+    /// The queue is drained *before* that verdict: a client that writes
+    /// a request and closes at once (`printf ... | nc -U -q0`, a Python
+    /// `send(); close()`) shows `POLLHUP` with its bytes still waiting
+    /// in the kernel, and those bytes are the whole reason it
+    /// connected. Only a peer already known to have finished writing is
+    /// judged without a read.
     fn read(&mut self, now: &Snapshot, commands: &mut Vec<Command>) -> Option<Farewell> {
-        if self.peer_gone() {
-            return Some(Farewell::ClosedByPeer);
-        }
         if self.peer_finished {
-            return None;
+            return self.peer_gone().then_some(Farewell::ClosedByPeer);
         }
         let mut budget = READ_BUDGET;
         let mut buffer = [0u8; 4096];
@@ -988,10 +995,20 @@ mod tests {
     }
 
     /// Services until the shell has read `bar`'s request: a request
-    /// sent a moment ago may not be in the kernel buffer yet.
+    /// sent a moment ago may not be in the kernel buffer yet, so this
+    /// polls for the first pass that yields a command (or an error
+    /// event to the bar, which `service` answers without a command —
+    /// callers expecting one of those poll `bar.lines` themselves).
+    /// Bounded so a regression fails rather than hangs.
     fn service_after_request(socket: &mut ControlSocket, snapshot: &Snapshot) -> Vec<Command> {
-        std::thread::sleep(Duration::from_millis(5));
-        socket.service(snapshot)
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let commands = socket.service(snapshot);
+            if !commands.is_empty() || Instant::now() >= deadline {
+                return commands;
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
     }
 
     // -----------------------------------------------------------------
@@ -1169,6 +1186,42 @@ mod tests {
         let lines = bar.lines(1);
         assert_eq!(lines[0]["event"], "workspaces");
         assert_eq!(lines[0]["active"], 2);
+    }
+
+    /// The fire-and-forget shape the document's own `printf | socat`
+    /// example has: the request and the close arrive in the same
+    /// instant, and the request must still be served.
+    #[test]
+    fn a_request_written_and_closed_at_once_is_still_served() {
+        let snapshot = sample_snapshot();
+        let (_scratch, mut socket, mut bar) = connected(&snapshot);
+        bar.lines(5);
+        bar.send("{\"request\":\"focus-workspace\",\"index\":2}\n");
+        drop(bar);
+        assert_eq!(service_after_request(&mut socket, &snapshot), vec![Command::FocusWorkspace(2)]);
+        // And the departed client is then let go of, not kept.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while socket.client_count() > 0 {
+            assert!(Instant::now() < deadline, "the closed client should be dropped");
+            socket.service(&snapshot);
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    /// A request split across two writes — the framing is the newline,
+    /// not the write — is assembled across service passes.
+    #[test]
+    fn a_request_split_across_two_writes_is_assembled() {
+        let snapshot = sample_snapshot();
+        let (_scratch, mut socket, mut bar) = connected(&snapshot);
+        bar.lines(5);
+        bar.send("{\"request\":\"focus-wor");
+        // Give the first half every chance to arrive alone: it must
+        // yield nothing, and nothing must be discarded.
+        std::thread::sleep(Duration::from_millis(5));
+        assert!(socket.service(&snapshot).is_empty(), "half a line is not a request");
+        bar.send("kspace\",\"index\":1}\n");
+        assert_eq!(service_after_request(&mut socket, &snapshot), vec![Command::FocusWorkspace(1)]);
     }
 
     #[test]

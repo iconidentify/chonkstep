@@ -27,9 +27,11 @@
 //!
 //! # What is different from Hyprland
 //!
-//! The launcher is run as `bash -lc omarchy-launch-shell`, exactly the
-//! form every Omarchy menu action takes ([`crate::omarchy_menu::action_argv`]),
-//! because the login shell is what puts `$OMARCHY_PATH/bin` on `PATH`.
+//! The launcher is run as `bash -lc '<path to omarchy-launch-shell>'`,
+//! the form every Omarchy menu action takes
+//! ([`crate::omarchy_menu::action_argv`]) because the login shell is
+//! what exports `OMARCHY_PATH` and puts `$OMARCHY_PATH/bin` on `PATH` —
+//! the launcher itself and everything it starts need both.
 //!
 //! It is *not* gated on [`crate::startup::session_continues`], unlike
 //! `autostart`. That gate exists because an X11 hot restart keeps every
@@ -41,9 +43,11 @@
 //! no shell unless it starts one. There is no X11 case to double.
 //!
 //! The launcher is named by its resolved path under the Omarchy root
-//! rather than by bare name, because the desk has just checked that
-//! very file exists — and because a test can then stand up an Omarchy
-//! root of its own, whose launcher is whatever the test needs.
+//! rather than by bare name (Hyprland's autostart says
+//! `omarchy-launch-shell` and lets `PATH` find it), because the desk
+//! has just checked that very file exists — and because a test can then
+//! stand up an Omarchy root of its own, whose launcher is whatever the
+//! test needs.
 //!
 //! # The bar is the user's to show
 //!
@@ -82,8 +86,8 @@ use std::path::{Path, PathBuf};
 
 use crate::spawn::DisplayStack;
 
-/// The script Omarchy's own `autostart.lua` runs: `omarchy-launch-shell`,
-/// found on the login shell's `PATH` like every other Omarchy action.
+/// The file name of the script Omarchy's own `autostart.lua` runs,
+/// resolved here under the Omarchy root's `bin/` ([`ShellPaths`]).
 pub const LAUNCHER: &str = "omarchy-launch-shell";
 
 /// The two files under the Omarchy root the launcher needs, whose
@@ -193,7 +197,12 @@ impl BarVisibility {
     /// The persisted choice, or the default when there is none or it
     /// is unreadable.
     pub fn load() -> Self {
-        Self::from_state(bar_state_path().and_then(|path| std::fs::read_to_string(path).ok()).as_deref())
+        bar_state_path().map_or(Self::DEFAULT, |path| Self::load_from(&path))
+    }
+
+    /// [`Self::load`] against an explicit file.
+    pub fn load_from(path: &Path) -> Self {
+        Self::from_state(std::fs::read_to_string(path).ok().as_deref())
     }
 
     /// The pure half of [`Self::load`]: the state file's text.
@@ -224,10 +233,18 @@ impl BarVisibility {
         self == Self::Hidden
     }
 
+    /// Remembers the choice; a session with nowhere to remember it
+    /// (no state directory) succeeds silently, like every other state
+    /// file here.
     pub fn persist(self) -> std::io::Result<()> {
-        let Some(path) = bar_state_path() else {
-            return Ok(());
-        };
+        match bar_state_path() {
+            Some(path) => self.persist_to(&path),
+            None => Ok(()),
+        }
+    }
+
+    /// [`Self::persist`] to an explicit file, creating its directory.
+    pub fn persist_to(self, path: &Path) -> std::io::Result<()> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -238,10 +255,7 @@ impl BarVisibility {
 /// `$XDG_STATE_HOME/chonkstep/omarchy-bar`, beside `wallpaper` and
 /// `theme`.
 fn bar_state_path() -> Option<PathBuf> {
-    if let Some(root) = std::env::var_os("XDG_STATE_HOME") {
-        return Some(PathBuf::from(root).join("chonkstep/omarchy-bar"));
-    }
-    std::env::var_os("HOME").map(PathBuf::from).map(|home| home.join(".local/state/chonkstep/omarchy-bar"))
+    crate::startup::state_file("omarchy-bar")
 }
 
 #[cfg(test)]
@@ -299,6 +313,22 @@ mod tests {
             let paths = ShellPaths::from_env(unset, Some("/home/u".into()));
             assert_eq!(paths.shell_qml, PathBuf::from("/home/u/.local/share/omarchy/shell/shell.qml"));
         }
+    }
+
+    #[test]
+    fn the_bar_choice_round_trips_through_its_state_file() {
+        let dir = std::env::temp_dir().join(format!("chonk-omarchy-bar-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        // Two directories deep and absent: persisting creates the path.
+        let path = dir.join("chonkstep/omarchy-bar");
+        assert_eq!(BarVisibility::load_from(&path), BarVisibility::DEFAULT, "no file, the default");
+        BarVisibility::Shown.persist_to(&path).unwrap();
+        assert_eq!(BarVisibility::load_from(&path), BarVisibility::Shown);
+        BarVisibility::Hidden.persist_to(&path).unwrap();
+        assert_eq!(BarVisibility::load_from(&path), BarVisibility::Hidden);
+        std::fs::write(&path, "nonsense").unwrap();
+        assert_eq!(BarVisibility::load_from(&path), BarVisibility::DEFAULT, "a corrupt file is no choice");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

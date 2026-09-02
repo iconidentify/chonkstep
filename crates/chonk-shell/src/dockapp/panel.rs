@@ -304,7 +304,7 @@ mod tests {
         let theme = theme();
         let buffer = render(&theme, (64, 48), None).unwrap();
         assert_eq!(buffer.pixels.len(), (buffer.width * buffer.height * 4) as usize);
-        assert!(buffer.pixels.chunks_exact(4).all(|px| px[3] == 255), "fully painted, fully opaque");
+        assert!(buffer.pixels.as_chunks::<4>().0.iter().all(|px| px[3] == 255), "fully painted, fully opaque");
     }
 
     #[test]

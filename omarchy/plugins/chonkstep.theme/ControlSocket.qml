@@ -52,7 +52,10 @@ QtObject {
     var runtimeDir = Quickshell.env("XDG_RUNTIME_DIR")
     if (!runtimeDir) return ""
     var display = Quickshell.env("WAYLAND_DISPLAY") || Quickshell.env("DISPLAY") || "default"
-    display = String(display).replace(/^:/, "").replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 32)
+    display = String(display).replace(/^:+/, "").replace(/[^A-Za-z0-9_-]/g, "_").slice(0, 32)
+    // A display that sanitises to nothing (":" alone) is "default", as in
+    // chonk-dock-proto's sanitize_display; the shell listens there too.
+    if (display === "") display = "default"
     return String(runtimeDir) + "/chonkstep/control-" + display + ".sock"
   }
 
@@ -117,6 +120,15 @@ QtObject {
   property bool giveUp: false
   property int retryDelay: 250
 
+  // Whether this path has ever answered. A socket that was there and went
+  // away is a chonkstep restarting, worth polling briskly for; one that
+  // has never existed is a bar running under some other compositor, and
+  // Quickshell warns on every failed connect, so after enough misses the
+  // retry ceiling widens from five seconds to a minute.
+  property bool seen: false
+  property int misses: 0
+  readonly property int patientAfter: 8
+
   // The Socket lives behind a Loader so a reconnect is a fresh object. A
   // Quickshell Socket whose connect attempt failed (no such file — the
   // compositor is mid-restart) keeps its dead QLocalSocket around, and
@@ -139,6 +151,8 @@ QtObject {
       onConnectionStateChanged: {
         if (connected) {
           root.retryDelay = 250
+          root.seen = true
+          root.misses = 0
         } else {
           root.clear()
           retry.restart()
@@ -164,19 +178,27 @@ QtObject {
   onResolvedPathChanged: {
     root.giveUp = false
     root.retryDelay = 250
+    root.seen = false
+    root.misses = 0
     if (root.ready) reconnect()
   }
 
   // Exponential backoff from a quarter second to five: a hot restart of
   // the compositor is back within a second or two and the strip should
-  // reappear promptly, while a session without chonkstep at all should
-  // not keep the bar busy polling for a socket that will never exist.
+  // reappear promptly. A socket never seen at all is a different case —
+  // a session without chonkstep — and after `patientAfter` misses the
+  // ceiling becomes a minute, so the bar is not warning every five
+  // seconds for a socket that will never exist. The timer fires once per
+  // failed attempt (it is restarted on every disconnect), so counting
+  // here counts attempts, not the two signals one failure can raise.
   property Timer retry: Timer {
     id: retry
     interval: root.retryDelay
     repeat: false
     onTriggered: {
-      root.retryDelay = Math.min(root.retryDelay * 2, 5000)
+      root.misses += 1
+      var ceiling = root.seen || root.misses < root.patientAfter ? 5000 : 60000
+      root.retryDelay = Math.min(root.retryDelay * 2, ceiling)
       root.reconnect()
     }
   }

@@ -18,9 +18,6 @@
     "category": "Compositor",
     "allowMultiple": false,
     "defaultSection": "right",
-    "defaults": {
-      "showAppearance": true
-    },
     "schema": [
       {
         "key": "showAppearance",
