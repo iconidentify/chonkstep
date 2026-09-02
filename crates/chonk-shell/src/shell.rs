@@ -842,7 +842,7 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         // the one `FontSystem` this session ever builds. They used to
         // construct their own, which cost two more full font scans at
         // boot for databases identical to the one already in hand.
-        let mut desktop = Desktop::new(backend, screen, primary, scale, theme.id.clone(), state.appearance, apps.clone(), fonts.clone());
+        let mut desktop = Desktop::new(backend, screen, primary, scale, &theme, state.appearance, apps.clone(), fonts.clone());
         desktop.set_omarchy_menu(omarchy_menu_for(state));
         // The control socket, bound here — after the dock socket it
         // sits beside, and before the first process this session
@@ -2179,8 +2179,15 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         // itself to a look per second and is not consulted at all while
         // the session wears a built-in.
         if self.state.following.is_some() && self.omarchy.changed(std::time::Instant::now()) {
-            tracing::info!("Omarchy's current theme changed; re-dressing");
+            tracing::info!("Omarchy's current theme or background changed; re-dressing");
             self.reresolve(wm);
+            // The background is part of the look and the watch fires
+            // for it too, but a background swap leaves the palette —
+            // and so the resolved theme — exactly as it was, and
+            // `apply_session_state` rightly repaints nothing for an
+            // unchanged theme. The picture is repainted here instead,
+            // and only if the desk is showing Omarchy's.
+            self.desktop.refresh_wallpaper(wm.backend_mut());
         }
         if let Some(target) = self.desktop.take_workspace_request() {
             wm.switch_workspace(target);

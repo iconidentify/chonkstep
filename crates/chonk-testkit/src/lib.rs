@@ -166,8 +166,14 @@ pub struct SessionOptions {
     /// contents)` — for state that belongs to *another* program the
     /// session reads: the Omarchy e2e plants
     /// `omarchy/current/theme/colors.toml` and `omarchy/current/theme.name`
-    /// here, exactly where `omarchy-theme-set` would put them.
-    pub state_root_files: Vec<(String, String)>,
+    /// here, exactly where `omarchy-theme-set` would put them. Bytes,
+    /// not text, because a planted Omarchy background is a picture.
+    pub state_root_files: Vec<(String, Vec<u8>)>,
+    /// Symlinks made in the isolated `XDG_STATE_HOME` root before
+    /// boot, as `(relative link path, relative target path)` — the
+    /// target resolved against the root to an absolute path, as
+    /// `ln -nsf` in `omarchy-theme-set` leaves `current/background`.
+    pub state_root_links: Vec<(String, String)>,
 }
 
 /// One booted nested compositor plus everything needed to drive and
@@ -230,6 +236,13 @@ impl Session {
                 std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
             }
             std::fs::write(path, contents).map_err(|e| e.to_string())?;
+        }
+        for (link, target) in &options.state_root_links {
+            let path = state_home.join(link);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+            }
+            std::os::unix::fs::symlink(state_home.join(target), path).map_err(|e| e.to_string())?;
         }
 
         let door_path = dir.join("door.sock");

@@ -6,8 +6,10 @@
 //! Omarchy is *simulated*: the harness plants
 //! `$XDG_STATE_HOME/omarchy/current/theme/colors.toml` and
 //! `current/theme.name` exactly where `omarchy-theme-set` writes them,
-//! and swaps them the way it does (palette first, name last). The
-//! real Omarchy is never touched — this runs against the isolated
+//! and swaps them the way it does (palette first, name last); the
+//! background is a `current/background` link into the theme's
+//! `backgrounds/`, repointed the way `omarchy-theme-bg-next` does it.
+//! The real Omarchy is never touched — this runs against the isolated
 //! state root every testkit session gets.
 //!
 //! `#[ignore]`d like the rest of the suite (needs a Wayland session
@@ -81,8 +83,8 @@ fn following_options() -> SessionOptions {
         scale: Some(1.0),
         config_extra: "theme = \"omarchy\"\n".to_string(),
         state_root_files: vec![
-            ("omarchy/current/theme/colors.toml".to_string(), TOKYO_NIGHT.to_string()),
-            ("omarchy/current/theme.name".to_string(), "tokyo-night\n".to_string()),
+            ("omarchy/current/theme/colors.toml".to_string(), TOKYO_NIGHT.into()),
+            ("omarchy/current/theme.name".to_string(), "tokyo-night\n".into()),
         ],
         ..SessionOptions::default()
     }
@@ -94,6 +96,40 @@ fn omarchy_sets_theme(session: &Session, dir_name: &str, colors: &str) {
     let current = session.dir.join("state/omarchy/current");
     std::fs::write(current.join("theme/colors.toml"), colors).unwrap();
     std::fs::write(current.join("theme.name"), format!("{dir_name}\n")).unwrap();
+}
+
+/// A solid-colour PNG, the smallest picture that can stand in for one
+/// of Omarchy's backgrounds: cover-scaled to the screen it is the same
+/// colour everywhere, so one sample anywhere on bare desk reads it.
+fn solid_png(rgb: [u8; 3]) -> Vec<u8> {
+    let (w, h) = (64u32, 64u32);
+    let mut bytes = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut bytes, w, h);
+        encoder.set_color(png::ColorType::Rgb);
+        encoder.set_depth(png::BitDepth::Eight);
+        let mut writer = encoder.write_header().unwrap();
+        writer.write_image_data(&rgb.repeat((w * h) as usize)).unwrap();
+    }
+    bytes
+}
+
+/// What `omarchy-theme-bg-set` does: `ln -nsf <image> current/background`.
+fn omarchy_sets_background(session: &Session, image: &str) {
+    let current = session.dir.join("state/omarchy/current");
+    let link = current.join("background");
+    let _ = std::fs::remove_file(&link);
+    std::os::unix::fs::symlink(current.join("theme/backgrounds").join(image), link).unwrap();
+}
+
+/// The colour of bare desk at the centre of the screen — under no
+/// chrome, no window — as a 40×40 mean.
+fn desk_colour(shot: &chonk_testkit::Screenshot) -> [f64; 3] {
+    shot.mean_rgb(shot.width / 2 - 20, shot.height / 2 - 20, 40, 40)
+}
+
+fn near(actual: [f64; 3], expected: [u8; 3]) -> bool {
+    actual.iter().zip(expected).all(|(a, e)| (a - e as f64).abs() < 12.0)
 }
 
 fn mean_brightness(shot: &chonk_testkit::Screenshot) -> f64 {
@@ -193,4 +229,53 @@ fn following_with_no_omarchy_palette_wears_the_default_until_one_appears() {
     })
     .map(|world| assert_eq!(world.theme.name, "Omarchy (Tokyo Night)"))
     .expect("a palette appearing after boot was never picked up");
+}
+
+/// A follow desk wears Omarchy's own background: the picture behind
+/// `current/background` is the wallpaper from the first frame, with
+/// the Wallpaper menu never touched; a cycle to the next picture —
+/// which moves the link and nothing under `theme/`, so the palette
+/// and the resolved theme are exactly as they were — repaints it
+/// within the watch's second; and a theme change that lands with the
+/// palette repaints palette and picture together.
+#[test]
+#[ignore]
+fn a_follow_desk_wears_omarchys_background_and_repaints_when_it_is_cycled() {
+    const GREEN: [u8; 3] = [0x20, 0xA0, 0x40];
+    const PURPLE: [u8; 3] = [0x80, 0x20, 0xA0];
+    let mut options = following_options();
+    options.state_root_files.push(("omarchy/current/theme/backgrounds/1-green.png".to_string(), solid_png(GREEN)));
+    options.state_root_files.push(("omarchy/current/theme/backgrounds/2-purple.png".to_string(), solid_png(PURPLE)));
+    options.state_root_links.push(("omarchy/current/background".to_string(), "omarchy/current/theme/backgrounds/1-green.png".to_string()));
+    let mut session = Session::boot("omarchy-background", options).unwrap();
+    session.door().barrier().unwrap();
+
+    // Boot: nothing persisted about the wallpaper, so the theme's own
+    // — Omarchy's picture — is what the desk shows.
+    let green = session.screenshot("green").unwrap();
+    assert!(near(desk_colour(&green), GREEN), "the desk should wear Omarchy's background at boot: {:?} ({})", desk_colour(&green), green.path.display());
+
+    // `omarchy-theme-bg-next`: the link moves; the theme does not.
+    omarchy_sets_background(&session, "2-purple.png");
+    let purple = poll_until(Duration::from_secs(30), "the desk to repaint in the next background", || {
+        let shot = session.screenshot("purple").ok()?;
+        near(desk_colour(&shot), PURPLE).then_some(shot)
+    })
+    .expect("cycling Omarchy's background was never picked up");
+    let world = session.door().windows().unwrap();
+    assert_eq!(world.theme.name, "Omarchy (Tokyo Night)", "a background swap alone leaves the theme as it was");
+    assert!(session.compositor_alive(), "repainting killed the compositor: {}", session.log());
+    drop(purple);
+
+    // A new theme arrives with its own picture — as `omarchy-theme-set`
+    // does it, the background link last of all.
+    omarchy_sets_theme(&session, "catppuccin-latte", CATPPUCCIN_LATTE);
+    omarchy_sets_background(&session, "1-green.png");
+    poll_until(Duration::from_secs(30), "palette and picture to change together", || {
+        let world = session.door().windows().ok()?;
+        (world.theme.name == "Omarchy (Catppuccin Latte)").then_some(())?;
+        let shot = session.screenshot("latte-green").ok()?;
+        near(desk_colour(&shot), GREEN).then_some(shot)
+    })
+    .expect("the theme change did not carry its background with it");
 }

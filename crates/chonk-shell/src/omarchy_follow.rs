@@ -1,5 +1,6 @@
-//! Noticing that Omarchy changed its theme, so a session that follows
-//! it changes too — with no hook installed on Omarchy's side.
+//! Noticing that Omarchy changed its theme — or its background — so a
+//! session that follows it changes too, with no hook installed on
+//! Omarchy's side.
 //!
 //! `omarchy-theme-set` swaps `current/theme` atomically (`rm -rf` the
 //! old copy, `mv` the staged new one into place) and *then* writes
@@ -12,6 +13,15 @@
 //! started following an empty state directory, or Omarchy being
 //! uninstalled under a running desk.
 //!
+//! The background is the third ingredient. `omarchy-theme-set` and
+//! `omarchy-theme-bg-set` both end with `ln -nsf <image>
+//! current/background`, so the link's *target* is the background's
+//! identity, and it is read (not followed) into the signature: a
+//! cycle to the next picture changes the target and nothing else. The
+//! target file's own mtime and size ride along for a picture edited
+//! in place under the same name. Omarchy's own shell polls this very
+//! link for the same reason.
+//!
 //! Polled at one hertz from `Shell::tick`, not watched with inotify:
 //! the same argument the reload marker and the dockapp theme
 //! broadcast make (`startup::reload_requested`), plus a specific one —
@@ -22,7 +32,7 @@
 //! change landing within a second of the user pressing the key is
 //! indistinguishable from instant beside Omarchy's own reload fan-out.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime};
 
 /// How often `Shell::tick` looks. A second is the cadence the brief
@@ -31,22 +41,37 @@ use std::time::{Duration, Instant, SystemTime};
 /// out to every application.
 const CADENCE: Duration = Duration::from_secs(1);
 
-/// The identity of Omarchy's current theme on disk, cheap to take and
-/// compared by equality: `theme.name`'s mtime and `colors.toml`'s
-/// (mtime, size), each `None` when the file is not there.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// The identity of Omarchy's current look on disk, cheap to take and
+/// compared by equality: `theme.name`'s mtime, `colors.toml`'s
+/// (mtime, size), and the `background` link's target with the target's
+/// (mtime, size) — each `None` when the file is not there.
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct Signature {
     name: Option<SystemTime>,
     colors: Option<(SystemTime, u64)>,
+    background: Option<(PathBuf, Option<(SystemTime, u64)>)>,
 }
 
 impl Signature {
     fn of(current: &Path) -> Self {
         let name = std::fs::metadata(current.join("theme.name")).and_then(|m| m.modified()).ok();
-        let colors = std::fs::metadata(current.join("theme/colors.toml"))
-            .ok()
-            .and_then(|m| Some((m.modified().ok()?, m.len())));
-        Self { name, colors }
+        let colors = Self::identity(&current.join("theme/colors.toml"));
+        let link = current.join("background");
+        // `read_link`, not `metadata`: the link is what Omarchy moves.
+        // A background that is a plain file rather than a link (a
+        // hand-made state directory) is identified by its own path, so
+        // its contents' identity below is still what changes.
+        let background = std::fs::symlink_metadata(&link).ok().map(|meta| {
+            let target = if meta.file_type().is_symlink() { std::fs::read_link(&link).unwrap_or(link.clone()) } else { link.clone() };
+            let identity = Self::identity(&link);
+            (target, identity)
+        });
+        Self { name, colors, background }
+    }
+
+    /// (mtime, size) of the file at `path`, through any link.
+    fn identity(path: &Path) -> Option<(SystemTime, u64)> {
+        std::fs::metadata(path).ok().and_then(|m| Some((m.modified().ok()?, m.len())))
     }
 }
 
@@ -71,9 +96,9 @@ impl Watch {
         Self { last_checked: None, seen: None }
     }
 
-    /// Whether Omarchy's current theme has changed since the last time
-    /// this returned `true` — or since the watch was created, for its
-    /// first look. Rate-limited to [`CADENCE`]: calls inside the window
+    /// Whether Omarchy's current theme or background has changed since
+    /// the last time this returned `true` — or since the watch was
+    /// created, for its first look. Rate-limited to [`CADENCE`]: calls inside the window
     /// return `false` without touching the disk.
     ///
     /// The first call after construction baselines and returns `false`:
@@ -99,7 +124,7 @@ impl Watch {
         }
         self.last_checked = Some(now);
         let signature = Signature::of(current);
-        let changed = self.seen.is_some_and(|seen| seen != signature);
+        let changed = self.seen.as_ref().is_some_and(|seen| *seen != signature);
         self.seen = Some(signature);
         changed
     }
@@ -155,6 +180,43 @@ mod tests {
         touch(&dir.join("theme.name"), 10);
         assert!(!watch.changed_in(&dir, t0 + Duration::from_millis(500)), "too soon to look");
         assert!(watch.changed_in(&dir, t0 + Duration::from_millis(1000)), "the second look sees it");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// `omarchy-theme-bg-next`: the link is repointed at another file
+    /// and nothing under `theme/` moves. That alone must count — and
+    /// so must the picture behind an unmoved link being rewritten.
+    #[test]
+    fn repointing_the_background_link_is_a_change() {
+        let dir = scratch("background");
+        std::fs::create_dir_all(dir.join("theme/backgrounds")).unwrap();
+        let first = dir.join("theme/backgrounds/1-first.webp");
+        let second = dir.join("theme/backgrounds/2-second.webp");
+        std::fs::write(&first, "one").unwrap();
+        std::fs::write(&second, "two").unwrap();
+        let link = dir.join("background");
+        std::os::unix::fs::symlink(&first, &link).unwrap();
+
+        let mut watch = Watch::new();
+        let t0 = Instant::now();
+        assert!(!watch.changed_in(&dir, t0), "baseline");
+        assert!(!watch.changed_in(&dir, t0 + Duration::from_secs(2)), "nothing moved");
+
+        // `ln -nsf second background`: the link's target moves, and
+        // its own mtime is not consulted, so replacing it in place is
+        // seen for the target and not the timestamp.
+        std::fs::remove_file(&link).unwrap();
+        std::os::unix::fs::symlink(&second, &link).unwrap();
+        assert!(watch.changed_in(&dir, t0 + Duration::from_secs(4)), "the link points somewhere else");
+        assert!(!watch.changed_in(&dir, t0 + Duration::from_secs(6)), "reported once");
+
+        // The same target, rewritten: a picture edited under its name.
+        std::fs::write(&second, "two, retouched").unwrap();
+        assert!(watch.changed_in(&dir, t0 + Duration::from_secs(8)), "the file behind the link changed");
+
+        // The link removed altogether — no background — is a change too.
+        std::fs::remove_file(&link).unwrap();
+        assert!(watch.changed_in(&dir, t0 + Duration::from_secs(10)), "vanished");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

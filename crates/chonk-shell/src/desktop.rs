@@ -354,6 +354,12 @@ const ACTION_LAUNCH_TERMINAL: u32 = 1;
 const ACTION_LAUNCH_ABOUT: u32 = 2;
 const ACTION_EXIT: u32 = 3;
 const ACTION_WALLPAPER_BASE: u32 = 100;
+/// The Wallpaper submenu's Omarchy row — `Wallpaper::Omarchy`, which
+/// is not in `Wallpaper::ALL` — in the slot right after the built-ins,
+/// the same arrangement as the Theme submenu's follow row below.
+/// Offered on the same condition as that row (Omarchy has a palette on
+/// this machine), and like it always resolvable.
+const ACTION_WALLPAPER_OMARCHY: u32 = ACTION_WALLPAPER_BASE + Wallpaper::ALL.len() as u32;
 const ACTION_THEME_BASE: u32 = 200;
 /// The Theme submenu's follow-Omarchy row: the slot right after the
 /// built-ins, so it lives in the Theme range without displacing the
@@ -453,7 +459,9 @@ pub struct RootMenuBounds {
 /// `follow_omarchy` is the follow-Omarchy theme row's label when Omarchy
 /// has a current palette on this machine (`Omarchy (Tokyo Night)`, or
 /// plain `Omarchy` before any theme is set), `None` to leave the row out
-/// — a desk without Omarchy should not offer to follow it. `omarchy` is
+/// — a desk without Omarchy should not offer to follow it. The
+/// Wallpaper submenu's "Omarchy's Background" row comes and goes with
+/// it: the picture is Omarchy's too. `omarchy` is
 /// the Omarchy submenu's rows, already rendered against the current
 /// condition snapshot; empty means no submenu (Omarchy not installed,
 /// the key turned off, or nothing visible yet). The two are independent:
@@ -466,6 +474,10 @@ fn root_menu_items(selected_wallpaper: Wallpaper, selected_theme_id: &str, apps:
             label: bullet_label(wallpaper == selected_wallpaper, wallpaper.label()),
             action: ACTION_WALLPAPER_BASE + index as u32,
         })
+        .chain(follow_omarchy.map(|_| MenuItem::Action {
+            label: bullet_label(selected_wallpaper == Wallpaper::Omarchy, Wallpaper::Omarchy.label()),
+            action: ACTION_WALLPAPER_OMARCHY,
+        }))
         .collect();
     let theme_items = wm_theme::default_theme::CHOICES
         .iter()
@@ -520,10 +532,10 @@ fn resolve_action(action: u32, bounds: RootMenuBounds) -> Option<RootMenuAction>
         action if (ACTION_APP_BASE..ACTION_OMARCHY_BASE).contains(&action)
             && ((action - ACTION_APP_BASE) as usize) < bounds.app_count =>
             Some(RootMenuAction::LaunchApp((action - ACTION_APP_BASE) as usize)),
-        action if (ACTION_WALLPAPER_BASE..ACTION_WALLPAPER_BASE + Wallpaper::ALL.len() as u32)
-            .contains(&action) => Some(RootMenuAction::SetWallpaper(
+        action if (ACTION_WALLPAPER_BASE..ACTION_WALLPAPER_OMARCHY).contains(&action) => Some(RootMenuAction::SetWallpaper(
             Wallpaper::ALL[(action - ACTION_WALLPAPER_BASE) as usize],
         )),
+        ACTION_WALLPAPER_OMARCHY => Some(RootMenuAction::SetWallpaper(Wallpaper::Omarchy)),
         action if (ACTION_THEME_BASE..ACTION_THEME_OMARCHY).contains(&action) => Some(RootMenuAction::SetTheme(
             wm_theme::default_theme::CHOICES[(action - ACTION_THEME_BASE) as usize].0,
         )),
@@ -1296,7 +1308,7 @@ impl<B: Backend> Desktop<B> {
     /// caller must still pass both — the shell cannot recover the
     /// primary's origin from a size.
     #[allow(clippy::too_many_arguments)]
-    pub fn new(backend: &mut B, screen: Size, primary: Rect, scale: f32, theme_id: String, appearance: wm_theme::Appearance, apps: Vec<crate::apps::AppEntry>, fonts: wm_theme::FontState) -> Self {
+    pub fn new(backend: &mut B, screen: Size, primary: Rect, scale: f32, theme: &wm_theme::Theme, appearance: wm_theme::Appearance, apps: Vec<crate::apps::AppEntry>, fonts: wm_theme::FontState) -> Self {
         let tile = tile_px(scale);
         let pad = icon_pad_px(scale);
         // The dock is exactly one tile wide, tiles touch directly with
@@ -1308,7 +1320,8 @@ impl<B: Backend> Desktop<B> {
         // of chrome.
         let dock_width = tile;
 
-        let wallpaper = Wallpaper::load();
+        let theme_id = theme.id.clone();
+        let wallpaper = Wallpaper::load_or(&theme.wallpaper);
         // The WM reports the real workspace state after startup; until
         // then "first of one" is what a fresh session actually has.
         let workspace = Rc::new(RefCell::new(WorkspaceShared { current: 0, count: 1, requested: None }));
@@ -2532,6 +2545,18 @@ impl<B: Backend> Desktop<B> {
         self.redraw_dock(backend, theme);
     }
 
+    /// Repaints the root if the wallpaper is one whose pixels live
+    /// outside this process — Omarchy's background, re-read from its
+    /// link on every render — so a change on disk reaches the screen.
+    /// A no-op for the embedded artworks, whose pixels cannot have
+    /// moved; called from the shell's Omarchy watch, which fires for a
+    /// background swap exactly as for a palette swap.
+    pub fn refresh_wallpaper(&self, backend: &mut B) {
+        if self.wallpaper == Wallpaper::Omarchy {
+            self.repaint_wallpaper(backend);
+        }
+    }
+
     fn repaint_wallpaper(&self, backend: &mut B) {
         match self.wallpaper.render(self.screen_size(), self.appearance) {
             Some(buffer) => backend.paint_root_image(&buffer),
@@ -2951,6 +2976,11 @@ mod tests {
     /// these the slowest tests in the crate.
     const TEST_SCREEN: Size = Size { w: 640, h: 480 };
 
+    /// The flagship, as every desk under test wears it.
+    fn test_theme() -> wm_theme::Theme {
+        wm_theme::default_theme::theme_variant("nextstep-classic", wm_theme::Appearance::Dark).expect("the flagship theme exists")
+    }
+
     /// The invariant the whole live-scale path rests on: a session that
     /// was rescaled is indistinguishable from one that started at that
     /// scale.
@@ -2973,7 +3003,7 @@ mod tests {
         let primary = Rect { pos: Point::new(0, 0), size: TEST_SCREEN };
         let mut backend = FakeBackend::new();
         let mut desktop: Desktop<FakeBackend> =
-            Desktop::new(&mut backend, TEST_SCREEN, primary, 1.0, "nextstep-classic".to_string(), wm_theme::Appearance::Dark, Vec::new(), wm_theme::FontState::new());
+            Desktop::new(&mut backend, TEST_SCREEN, primary, 1.0, &test_theme(), wm_theme::Appearance::Dark, Vec::new(), wm_theme::FontState::new());
 
         let area = desktop.primary_workarea();
         assert_eq!(area.size.w, TEST_SCREEN.w - tile_px(1.0), "one dock column reserved on the right");
@@ -2990,7 +3020,7 @@ mod tests {
 
         let primary = Rect { pos: Point::new(0, 0), size: TEST_SCREEN };
         let build = |backend: &mut FakeBackend, scale: f32| -> Desktop<FakeBackend> {
-            Desktop::new(backend, TEST_SCREEN, primary, scale, "nextstep-classic".to_string(), wm_theme::Appearance::Dark, Vec::new(), wm_theme::FontState::new())
+            Desktop::new(backend, TEST_SCREEN, primary, scale, &test_theme(), wm_theme::Appearance::Dark, Vec::new(), wm_theme::FontState::new())
         };
 
         let mut backend = FakeBackend::new();
@@ -3026,7 +3056,7 @@ mod tests {
         let primary = Rect { pos: Point::new(0, 0), size: TEST_SCREEN };
         let mut backend = FakeBackend::new();
         let mut desktop: Desktop<FakeBackend> =
-            Desktop::new(&mut backend, TEST_SCREEN, primary, 1.0, "nextstep-classic".to_string(), wm_theme::Appearance::Dark, Vec::new(), wm_theme::FontState::new());
+            Desktop::new(&mut backend, TEST_SCREEN, primary, 1.0, &test_theme(), wm_theme::Appearance::Dark, Vec::new(), wm_theme::FontState::new());
 
         let dock = desktop.dock_window();
         let clip = desktop.clip_window();
@@ -3180,7 +3210,7 @@ mod tests {
         let primary = Rect { pos: Point::new(0, 0), size: TEST_SCREEN };
         let mut backend = FakeBackend::new();
         let mut desktop: Desktop<FakeBackend> =
-            Desktop::new(&mut backend, TEST_SCREEN, primary, 1.0, "nextstep-classic".to_string(), wm_theme::Appearance::Dark, Vec::new(), wm_theme::FontState::new());
+            Desktop::new(&mut backend, TEST_SCREEN, primary, 1.0, &test_theme(), wm_theme::Appearance::Dark, Vec::new(), wm_theme::FontState::new());
         let theme = wm_theme::default_theme::theme_by_id("nextstep-classic").unwrap();
         let tile = tile_px(1.0);
         let before = backend.shell_geometries[&desktop.dock_window()];
@@ -3221,7 +3251,7 @@ mod tests {
         let primary = Rect { pos: Point::new(0, 0), size: TEST_SCREEN };
         let mut backend = FakeBackend::new();
         let mut desktop: Desktop<FakeBackend> =
-            Desktop::new(&mut backend, TEST_SCREEN, primary, 1.0, "nextstep-classic".to_string(), wm_theme::Appearance::Dark, Vec::new(), wm_theme::FontState::new());
+            Desktop::new(&mut backend, TEST_SCREEN, primary, 1.0, &test_theme(), wm_theme::Appearance::Dark, Vec::new(), wm_theme::FontState::new());
         let theme = wm_theme::default_theme::theme_by_id("nextstep-classic").unwrap();
         let room = tile_px(1.0) / 2;
 
@@ -3361,13 +3391,38 @@ mod tests {
         }
     }
 
-    #[test]
-    fn wallpaper_submenu_marks_the_current_selection() {
-        let items = root_menu_items(Wallpaper::TealBlueprint, "nextstep-classic", &[], None, Vec::new());
+    fn wallpaper_submenu(selected: Wallpaper, omarchy: Option<&str>) -> Vec<MenuItem> {
+        let items = root_menu_items(selected, "nextstep-classic", &[], omarchy, Vec::new());
         let submenu = items.iter().find(|item| item.label() == "Wallpaper").expect("wallpaper submenu");
         let MenuItem::Submenu { items, .. } = submenu else { panic!("expected submenu") };
+        items.clone()
+    }
+
+    #[test]
+    fn wallpaper_submenu_marks_the_current_selection() {
+        let items = wallpaper_submenu(Wallpaper::TealBlueprint, None);
         assert_eq!(items.len(), Wallpaper::ALL.len());
         assert!(items.iter().any(|item| item.label() == "\u{2022} Teal Blueprint"));
+    }
+
+    /// Omarchy's background is offered exactly when Omarchy is here to
+    /// have one, after the built-ins, and its row resolves to the
+    /// variant that reads Omarchy's link.
+    #[test]
+    fn omarchys_background_is_a_wallpaper_row_only_on_a_desk_with_omarchy() {
+        let without = wallpaper_submenu(Wallpaper::Omarchy, None);
+        assert_eq!(without.len(), Wallpaper::ALL.len(), "no Omarchy, no row");
+        assert!(without.iter().all(|item| !item.label().contains("Omarchy")));
+
+        let with = wallpaper_submenu(Wallpaper::Omarchy, Some("Omarchy (Tokyo Night)"));
+        assert_eq!(with.len(), Wallpaper::ALL.len() + 1);
+        assert_eq!(with.last().unwrap().label(), "\u{2022} Omarchy's Background", "offered last, and marked when current");
+        let MenuItem::Action { action, .. } = with.last().unwrap() else { panic!("expected an action row") };
+        assert!(matches!(resolve_action(*action, RootMenuBounds::default()), Some(RootMenuAction::SetWallpaper(Wallpaper::Omarchy))));
+
+        let unmarked = wallpaper_submenu(Wallpaper::TealBlueprint, Some("Omarchy"));
+        assert_eq!(unmarked.last().unwrap().label(), "  Omarchy's Background");
+        assert_eq!(unmarked.iter().filter(|item| item.label().starts_with('\u{2022}')).count(), 1, "one bullet in the submenu");
     }
 
     fn theme_submenu(selected: &str, omarchy: Option<&str>) -> Vec<MenuItem> {

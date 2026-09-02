@@ -80,6 +80,19 @@ stands, and the watch picks the palette up the moment one appears.
 The Themes submenu only offers the Omarchy row when there is a
 palette to follow.
 
+**The wallpaper is Omarchy's own.** An Omarchy theme is a palette and a
+set of backgrounds, and `omarchy-theme-set` -- and `omarchy-theme-bg-next`,
+the background-cycling key -- leave `current/background` pointing at the
+one in use. The follow theme names that link as its wallpaper: picked
+(or booted into with nothing else persisted) the desk shows the picture
+behind it, in whatever format Omarchy ships it (webp, jpg, png, gif,
+bmp), and the same one-hertz watch that notices a palette swap notices
+the link moving, so cycling backgrounds in Omarchy cycles them here. A
+follow with no background set wears Graphite Fold, the neutral artwork.
+The row also stands on its own: the Wallpaper submenu offers `Omarchy's
+Background` wherever Omarchy is installed, so a built-in theme can wear
+Omarchy's picture too.
+
 The bridge runs the other way too: `omarchy-export-themes` (built with
 the shell, `cargo build -p chonk-shell`) writes each built-in theme as
 an Omarchy theme -- `colors.toml` derived from the theme itself plus

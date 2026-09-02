@@ -77,7 +77,7 @@
 //! | bevel light / dark        | `dark_foreground` / `darker_background` | `background` / `dark_foreground` |
 //! | dock tile gradient        | `lighter_background` → `darker_background` | `dark_background` → `muted`  |
 //! | terminal                  | the 16 ANSI slots, see below        | same                                |
-//! | wallpaper                 | `graphite-fold`                     | `graphite-fold` (light rendition)   |
+//! | wallpaper                 | Omarchy's `current/background`      | same                                |
 //!
 //! Why `muted` for the unfocused bar in the dark mood and `selection`
 //! in the light one: in a dark palette `selection` is a text-selection
@@ -97,13 +97,18 @@
 //! light one) keeps the relief in the palette's key rather than in a
 //! computed grey the author never chose.
 //!
-//! The wallpaper is a built-in artwork because the shell only composes
-//! its embedded set, and it is the neutral one on purpose: Graphite
-//! Fold has no hue to argue with whichever accent the palette brings,
-//! and it has a rendition for each mood. In practice it is rarely
-//! seen — `omarchy-shell` draws Omarchy's own background over ours
-//! while it runs — so it is the floor for a session with Omarchy's
-//! shell off, not a composition.
+//! The wallpaper is Omarchy's own. An Omarchy theme is a palette *and*
+//! a set of backgrounds, and `omarchy-theme-set` (and
+//! `omarchy-theme-bg-next`) point `current/background` at the one in
+//! use; a follower that took the palette and left the picture behind
+//! would not look like Omarchy to anyone who has seen it. The theme
+//! carries the id [`WALLPAPER`], and the shell resolves it to the
+//! image that link names when it paints ([`current_background_path`]),
+//! re-reading it whenever the link moves — so Omarchy's background
+//! keys cycle this desk's wallpaper too, with no hook on Omarchy's
+//! side. When the link is missing (Omarchy installed, no background
+//! set) the shell falls back to Graphite Fold, the neutral artwork
+//! with no hue to argue with whichever accent the palette brings.
 //!
 //! # The terminal
 //!
@@ -145,9 +150,11 @@ use crate::model::{Appearance, Bevel, BevelStyle, Color, Fill, TerminalPalette, 
 /// which theme that is right now.
 pub const ID: &str = "omarchy";
 
-/// The wallpaper every Omarchy-derived theme composes with — see the
-/// module docs for why it is the neutral one.
-const WALLPAPER: &str = "graphite-fold";
+/// The wallpaper id every Omarchy-derived theme carries: not one of
+/// the shell's embedded artworks but a pointer at Omarchy's own
+/// current background, which the shell resolves through
+/// [`current_background_path`] when it paints. See the module docs.
+pub const WALLPAPER: &str = "omarchy";
 
 /// The percentage the terminal is painted at, matching Omarchy's own
 /// `0.985` active-window opacity rule.
@@ -605,6 +612,16 @@ pub fn current_dir() -> Option<PathBuf> {
 /// The current theme's `colors.toml`, whether or not it exists yet.
 pub fn current_colors_path() -> Option<PathBuf> {
     current_dir().map(|dir| dir.join("theme/colors.toml"))
+}
+
+/// `current/background`: the symlink `omarchy-theme-set` and
+/// `omarchy-theme-bg-set` point at the background image in use (a
+/// `.webp`, `.jpg` or `.png` under the theme's `backgrounds/`, or
+/// anything the user handed `omarchy theme bg set`). Whether or not it
+/// exists yet — the shell reads through it and falls back when it
+/// cannot.
+pub fn current_background_path() -> Option<PathBuf> {
+    current_dir().map(|dir| dir.join("background"))
 }
 
 /// The current Omarchy theme's directory name (`tokyo-night`), when

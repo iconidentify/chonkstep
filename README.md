@@ -229,8 +229,13 @@ the config (or the `Omarchy (...)` row in the root menu's Themes
 submenu) makes the desktop read the palette `omarchy-theme-set` leaves
 under `~/.local/state/omarchy/current/theme/` and wear it - chrome,
 dock, menus, terminals, light or dark as the palette says - on
-chonkstep's own geometry, and keep watching it, so switching themes in
-Omarchy restyles this desk within a second. The other direction is
+chonkstep's own geometry, with Omarchy's own current background as the
+wallpaper (the picture `current/background` points at, in whatever
+format Omarchy ships it), and keep watching both, so switching themes
+or cycling backgrounds in Omarchy restyles this desk within a second.
+The Wallpaper submenu offers `Omarchy's Background` as a row of its
+own wherever Omarchy is installed, so any theme can wear it. The other
+direction is
 `omarchy-export-themes`, built alongside the shell, which writes the
 eight built-in themes as Omarchy themes into `~/.config/omarchy/themes/`
 so `omarchy-theme-set amber-phosphor` dresses the rest of the machine
