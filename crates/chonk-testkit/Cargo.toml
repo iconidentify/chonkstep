@@ -23,6 +23,14 @@ png = "0.17"
 # through an SDK — the probe is scripted test apparatus, and the fewer
 # layers between the test and the bytes, the more the test says.
 chonk-dock-proto = { path = "../chonk-dock-proto" }
+# The layer-shell e2e drives a real bar against the nested shell the
+# same way: `src/bin/chonk-fake-bar.rs` is a wlr-layer-shell client
+# that claims an edge and holds it. Both crates are already in the
+# graph on the server side (smithay's winit backend speaks
+# `wayland-client`; `wm-wayland` implements the wlr protocols), so the
+# client half adds no new code to vet — only the `client` feature.
+wayland-client = "0.31"
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }
 
 [dev-dependencies]
 # The Overview e2e test aims its clicks with the same pure layout

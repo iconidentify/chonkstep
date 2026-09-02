@@ -251,6 +251,18 @@ workspace strip Omarchy's own widget cannot draw here because it asks
 Hyprland, and `chonkstep.theme`, the active theme's name - which
 install like any other Omarchy plugin and import nothing from Hyprland.
 
+The bar and the Dock share a corner, and the Dock gives way. Omarchy's
+bar is a layer-shell surface that reserves the top strip of the
+screen, and its power button lives at the far right of that strip -
+exactly where the Dock's identity tile hangs. Layer-shell gives a bar
+no way to ask a compositor's own chrome to move, so the compositor
+moves it: while a bar holds the top (or right) edge, the Dock hangs
+itself under (or beside) it, and maximized windows fill what is left
+between the two - windows already maximized when the bar arrives are
+refitted, and everything returns to the corner the moment the bar
+exits. Omarchy's shell needs to know nothing about any of this; it
+draws its bar the way it draws it on Hyprland.
+
 On a HiDPI display, set `scale = 2.0` in
 `~/.config/chonkstep/config.toml` - it scales chrome, dock, cursors,
 and the terminal font as one system.

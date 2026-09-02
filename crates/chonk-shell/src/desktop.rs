@@ -974,15 +974,41 @@ fn stacked_dock_height(tile: u32, screen_height: u32, items: &[SupervisedWidget]
         .min(screen_height.max(1))
 }
 
+/// The strips another shell has reserved off the primary monitor's
+/// top and right edges — a layer-shell bar's exclusive zone, on the
+/// Wayland session — that the Dock steps out of. In device pixels,
+/// like every other dock dimension.
+///
+/// Only the two edges the Dock's own corner touches: a bottom bar has
+/// nothing to say to a top-anchored column, and a left bar even less.
+/// The Clip and the icon row along the bottom edge are left where they
+/// are for now; a bottom bar under them is the same problem in the
+/// other corner, and this is where to extend when it bites.
+///
+/// The dock yields, not the bar, because the bar cannot: layer-shell
+/// gives a client an edge and a zone, with no vocabulary for "the
+/// compositor's own chrome is in your corner". The host makes room for
+/// its guest.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct EdgeReservation {
+    pub top: u32,
+    pub right: u32,
+}
+
 /// Root geometry of the Dock: a one-tile-wide column hugging the top-
-/// right corner of the monitor it belongs to. Anchored to `primary`'s
-/// own corner rather than to the screen's, because on a multi-head
-/// desktop the screen's top-right corner belongs to whichever output
-/// happens to sit furthest right — and the screen's origin can be
-/// negative outright, for a second head placed left of the primary.
-fn dock_geometry(primary: Rect, dock_width: u32, dock_height: u32) -> Rect {
+/// right corner of the monitor it belongs to — or, under a bar that has
+/// reserved the top or right edge, the top-right corner of what the
+/// bar left. Anchored to `primary`'s own corner rather than to the
+/// screen's, because on a multi-head desktop the screen's top-right
+/// corner belongs to whichever output happens to sit furthest right —
+/// and the screen's origin can be negative outright, for a second head
+/// placed left of the primary.
+fn dock_geometry(primary: Rect, reserved: EdgeReservation, dock_width: u32, dock_height: u32) -> Rect {
     Rect {
-        pos: Point::new(primary.pos.x + primary.size.w.saturating_sub(dock_width) as i32, primary.pos.y),
+        pos: Point::new(
+            primary.pos.x + primary.size.w.saturating_sub(dock_width + reserved.right) as i32,
+            primary.pos.y + reserved.top.min(primary.size.h) as i32,
+        ),
         size: Size::new(dock_width, dock_height),
     }
 }
@@ -1126,6 +1152,10 @@ pub struct Desktop<B: Backend> {
     /// piece of the shell's own chrome hangs. Deliberately not derived
     /// from `screen` — see `dock_geometry`.
     primary: Rect,
+    /// What a bar has claimed off the primary's top and right edges,
+    /// and so where the Dock's column actually starts. Zero until the
+    /// binary reports a reservation; see [`Desktop::set_reservation`].
+    reserved: EdgeReservation,
     dock_width: u32,
     tile: u32,
     pad: u32,
@@ -1334,8 +1364,11 @@ impl<B: Backend> Desktop<B> {
         // order above exactly as written.
         let remembered_order = dock_order::state_path().map(|path| dock_order::load(&path)).unwrap_or_default();
         let items = dock_order::arrange(items, &remembered_order, |item| item.id().to_string());
+        // No bar has spoken yet, so the column starts at the corner;
+        // `set_reservation` re-hangs it the moment one does.
+        let reserved = EdgeReservation::default();
         let dock_height = stacked_dock_height(tile, primary.size.h, &items);
-        let dock_geom = dock_geometry(primary, dock_width, dock_height);
+        let dock_geom = dock_geometry(primary, reserved, dock_width, dock_height);
         let dock_window = backend
             .create_shell_surface(dock_geom, wallpaper.dock_color(appearance), true)
             .expect("failed to create dock window");
@@ -1355,6 +1388,7 @@ impl<B: Backend> Desktop<B> {
             dock_window,
             screen,
             primary,
+            reserved,
             dock_width,
             tile,
             pad,
@@ -1420,11 +1454,51 @@ impl<B: Backend> Desktop<B> {
     /// The Clip and the launcher strip on the left deliberately reserve
     /// nothing: they are corner furniture in the classic desktop, and
     /// windows sliding under the Clip is how the original behaved too.
+    ///
+    /// A bar that reserved the right edge pushes the column left by its
+    /// width, so the reservation here is the column *plus* that strip:
+    /// the WM composes this with the bar's own carve-out by
+    /// intersection, and an intersection of two right-edge reservations
+    /// is only the wider one — it would leave the displaced dock over
+    /// the windows unless the shell's claim already accounts for both.
     pub fn primary_workarea(&self) -> Rect {
+        let reserved_right = self.dock_width.saturating_add(self.reserved.right);
         Rect {
             pos: self.primary.pos,
-            size: Size::new(self.primary.size.w.saturating_sub(self.dock_width).max(1), self.primary.size.h),
+            size: Size::new(self.primary.size.w.saturating_sub(reserved_right).max(1), self.primary.size.h),
         }
+    }
+
+    /// The Dock's current root geometry: the column at the top-right of
+    /// whatever a bar has left of the primary, content-sized to the
+    /// tile stack and never taller than the space below the bar. The
+    /// one derivation every consumer — the painter, the hover test, the
+    /// instrument panel's placement — reads, so they cannot disagree
+    /// about where the dock is.
+    fn dock_geom(&self) -> Rect {
+        let below_bar = self.primary.size.h.saturating_sub(self.reserved.top);
+        let dock_height = stacked_dock_height(self.tile, below_bar, &self.items);
+        dock_geometry(self.primary, self.reserved, self.dock_width, dock_height)
+    }
+
+    /// A bar's exclusive zones on the primary changed (or a bar came or
+    /// went): re-hangs the Dock in the corner the bar leaves free and
+    /// reports whether anything moved, so the caller knows to push new
+    /// workareas. Called once per compositor dispatch pass while any
+    /// reservation exists, so an unchanged reservation must — and does
+    /// — cost a comparison and nothing else.
+    ///
+    /// The instrument panel is not discarded: its next servicing pass
+    /// compares the placement it would make against the one it has and
+    /// restages only on a difference, which is exactly the check a
+    /// moved dock needs.
+    pub fn set_reservation(&mut self, backend: &mut B, theme: &Theme, reserved: EdgeReservation) -> bool {
+        if reserved == self.reserved {
+            return false;
+        }
+        self.reserved = reserved;
+        self.redraw_dock(backend, theme);
+        true
     }
 
     /// The whole desktop's extent — the union of every monitor, which
@@ -2037,8 +2111,7 @@ impl<B: Backend> Desktop<B> {
         let Some(granted) = tile.panel_granted() else { return };
         let ready = tile.take_panel_ready(now);
 
-        let dock_height = stacked_dock_height(self.tile, self.primary.size.h, &self.items);
-        let dock_geom = dock_geometry(self.primary, self.dock_width, dock_height);
+        let dock_geom = self.dock_geom();
         let inset = instrument::chrome_inset(theme);
         let geometry = instrument::place(granted, inset, dock_geom, slot_top, self.primary_workarea());
 
@@ -2228,8 +2301,7 @@ impl<B: Backend> Desktop<B> {
     /// one always wants the other"). Root motion arrives for every
     /// pointer move on the desktop, so the leaving edge is always seen.
     pub fn update_dock_hover(&mut self, backend: &mut B, theme: &Theme, root: Point) {
-        let dock_height = stacked_dock_height(self.tile, self.primary.size.h, &self.items);
-        let dock = dock_geometry(self.primary, self.dock_width, dock_height);
+        let dock = self.dock_geom();
         let inside = dock.contains(root).then(|| Point::new(root.x - dock.pos.x, root.y - dock.pos.y));
         let target = inside.and_then(|local| self.item_index_at(local)).map(|index| self.items[index].id().to_string());
         if target == self.hovered_item {
@@ -2298,8 +2370,8 @@ impl<B: Backend> Desktop<B> {
     }
 
     fn redraw_dock(&mut self, backend: &mut B, theme: &Theme) {
-        let dock_height = stacked_dock_height(self.tile, self.primary.size.h, &self.items);
-        let dock_geom = dock_geometry(self.primary, self.dock_width, dock_height);
+        let dock_geom = self.dock_geom();
+        let dock_height = dock_geom.size.h;
         backend.configure_shell_surface(self.dock_window, dock_geom);
 
         let Some(mut pixmap) = Pixmap::new(self.dock_width, dock_height.max(1)) else {
@@ -3073,7 +3145,7 @@ mod tests {
 
     #[test]
     fn the_dock_hugs_the_primary_monitors_top_right_corner() {
-        let dock = dock_geometry(PRIMARY, 56, 400);
+        let dock = dock_geometry(PRIMARY, EdgeReservation::default(), 56, 400);
         assert_eq!(dock, Rect { pos: Point::new(1544, 0), size: Size::new(56, 400) });
 
         // Moving the primary itself carries the dock with it — the
@@ -3081,8 +3153,83 @@ mod tests {
         // own top-right corner belongs to whichever head sits furthest
         // right.
         let offset_primary = Rect { pos: Point::new(1920, 200), size: Size::new(1600, 1200) };
-        let dock = dock_geometry(offset_primary, 56, 400);
+        let dock = dock_geometry(offset_primary, EdgeReservation::default(), 56, 400);
         assert_eq!(dock, Rect { pos: Point::new(3464, 200), size: Size::new(56, 400) });
+    }
+
+    #[test]
+    fn a_bar_reserving_the_top_or_right_edge_moves_the_dock_into_the_corner_it_leaves() {
+        // A top bar 40px tall: the column starts under it, same x.
+        let under_bar = dock_geometry(PRIMARY, EdgeReservation { top: 40, right: 0 }, 56, 400);
+        assert_eq!(under_bar, Rect { pos: Point::new(1544, 40), size: Size::new(56, 400) });
+
+        // A right-edge panel 30px wide: the column steps left of it.
+        let beside_panel = dock_geometry(PRIMARY, EdgeReservation { top: 0, right: 30 }, 56, 400);
+        assert_eq!(beside_panel, Rect { pos: Point::new(1514, 0), size: Size::new(56, 400) });
+
+        // A reservation taller than the monitor cannot push the dock off
+        // it: the y is pinned to the bottom edge, not wrapped past it.
+        let absurd = dock_geometry(PRIMARY, EdgeReservation { top: 5_000, right: 0 }, 56, 400);
+        assert_eq!(absurd.pos.y, 1200);
+    }
+
+    #[test]
+    fn a_reservation_rehangs_the_dock_and_widens_the_workarea_and_an_unchanged_one_is_free() {
+        use wm_core::fake_backend::FakeBackend;
+
+        let primary = Rect { pos: Point::new(0, 0), size: TEST_SCREEN };
+        let mut backend = FakeBackend::new();
+        let mut desktop: Desktop<FakeBackend> =
+            Desktop::new(&mut backend, TEST_SCREEN, primary, 1.0, "nextstep-classic".to_string(), wm_theme::Appearance::Dark, Vec::new(), wm_theme::FontState::new());
+        let theme = wm_theme::default_theme::theme_by_id("nextstep-classic").unwrap();
+        let tile = tile_px(1.0);
+        let before = backend.shell_geometries[&desktop.dock_window()];
+        assert_eq!(before.pos, Point::new((TEST_SCREEN.w - tile) as i32, 0));
+
+        let bar = EdgeReservation { top: 32, right: 0 };
+        assert!(desktop.set_reservation(&mut backend, &theme, bar), "a new reservation is a change");
+        let after = backend.shell_geometries[&desktop.dock_window()];
+        assert_eq!(after.pos, Point::new(before.pos.x, 32), "the column starts under the bar");
+        assert_eq!(after.size.h, before.size.h, "a stack that fits below the bar keeps its content height");
+        assert_eq!(desktop.primary_workarea().size.w, TEST_SCREEN.w - tile, "a top bar changes nothing about the column's own reservation");
+
+        assert!(!desktop.set_reservation(&mut backend, &theme, bar), "the same reservation again is not a change");
+
+        // A right-edge reservation displaces the column, and the
+        // shell's workarea claim must grow by the same amount — the WM
+        // intersects this rect with the bar's own carve-out, and the
+        // intersection of two right-edge strips is only the wider one.
+        let panel = EdgeReservation { top: 0, right: 24 };
+        assert!(desktop.set_reservation(&mut backend, &theme, panel));
+        let beside = backend.shell_geometries[&desktop.dock_window()];
+        assert_eq!(beside.pos, Point::new((TEST_SCREEN.w - tile - 24) as i32, 0));
+        assert_eq!(desktop.primary_workarea().size.w, TEST_SCREEN.w - tile - 24);
+
+        // The bar leaving restores the corner exactly.
+        assert!(desktop.set_reservation(&mut backend, &theme, EdgeReservation::default()));
+        assert_eq!(backend.shell_geometries[&desktop.dock_window()], before);
+        assert_eq!(desktop.primary_workarea().size.w, TEST_SCREEN.w - tile);
+    }
+
+    #[test]
+    fn a_dock_under_a_bar_is_capped_to_the_space_below_it() {
+        use wm_core::fake_backend::FakeBackend;
+
+        // The stack clamp measures the room *under* the bar, not the
+        // monitor: a column that would otherwise reach the bottom edge
+        // must not be configured to hang past it.
+        let primary = Rect { pos: Point::new(0, 0), size: TEST_SCREEN };
+        let mut backend = FakeBackend::new();
+        let mut desktop: Desktop<FakeBackend> =
+            Desktop::new(&mut backend, TEST_SCREEN, primary, 1.0, "nextstep-classic".to_string(), wm_theme::Appearance::Dark, Vec::new(), wm_theme::FontState::new());
+        let theme = wm_theme::default_theme::theme_by_id("nextstep-classic").unwrap();
+        let room = tile_px(1.0) / 2;
+
+        desktop.set_reservation(&mut backend, &theme, EdgeReservation { top: TEST_SCREEN.h - room, right: 0 });
+        let dock = backend.shell_geometries[&desktop.dock_window()];
+        assert_eq!(dock.pos.y, (TEST_SCREEN.h - room) as i32);
+        assert_eq!(dock.size.h, room, "half a tile of room leaves half a tile of dock");
+        assert_eq!(dock.pos.y + dock.size.h as i32, TEST_SCREEN.h as i32, "and never a pixel past the bottom edge");
     }
 
     #[test]
@@ -3091,7 +3238,7 @@ mod tests {
         // an absurd dock width must still leave the surface on the
         // monitor it belongs to.
         let narrow = Rect { pos: Point::new(-1920, 0), size: Size::new(40, 1080) };
-        assert_eq!(dock_geometry(narrow, 56, 100).pos, Point::new(-1920, 0));
+        assert_eq!(dock_geometry(narrow, EdgeReservation::default(), 56, 100).pos, Point::new(-1920, 0));
     }
 
     #[test]

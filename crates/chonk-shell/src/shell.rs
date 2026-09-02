@@ -18,7 +18,7 @@ use wm_theme::{FontState, RasterThemeEngine, Theme};
 use wm_theme_api::{DecorationBuffer, Point, PopupHost, Rect, Size};
 
 use crate::apps::{self, AppEntry};
-use crate::desktop::{Desktop, IconDragResult, MenuAction, RootMenuAction, WindowMenuAction, WindowMenuContext};
+use crate::desktop::{Desktop, EdgeReservation, IconDragResult, MenuAction, RootMenuAction, WindowMenuAction, WindowMenuContext};
 use crate::control::{self, ControlSocket};
 use crate::dockapp::Farewell;
 use chonk_dock_proto::wire::PanelCloseReason;
@@ -1191,6 +1191,17 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
             self.desktop.workareas(&monitors)
         };
         wm.set_workareas(areas);
+    }
+
+    /// Tells the Dock what another shell has claimed off the primary's
+    /// top and right edges, so it can step out of the way — the Wayland
+    /// binary calls this with the layer-shell exclusive zones before it
+    /// composes the workareas, because the answer changes what
+    /// [`Shell::workarea`] says. Returns whether anything moved; a
+    /// caller that re-pushes the same zones every dispatch pass pays
+    /// for nothing.
+    pub fn set_edge_reservation(&mut self, wm: &mut WindowManager<B>, reserved: EdgeReservation) -> bool {
+        self.desktop.set_reservation(wm.backend_mut(), &self.theme, reserved)
     }
 
     /// Resolves a configured key combo to its action, for the binary's

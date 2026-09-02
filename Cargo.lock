@@ -329,6 +329,8 @@ dependencies = [
  "chonk-dock-proto",
  "png",
  "serde_json",
+ "wayland-client",
+ "wayland-protocols-wlr",
  "wm-theme",
  "wm-theme-api",
  "x11rb",

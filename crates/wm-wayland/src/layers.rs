@@ -60,6 +60,19 @@
 //! pass runs after everything that could have reset the areas, so the
 //! composed rects always land last; when no reservation exists the
 //! module goes silent and the shell's own areas stand untouched.
+//!
+//! The Dock is the one piece of the shell's baseline that *reacts* to
+//! a reservation rather than merely being intersected with it. Its
+//! column hugs the primary's top-right corner, which is exactly where
+//! a top bar puts its most important controls, and layer-shell has no
+//! way for the bar to ask the compositor's chrome to move — so the
+//! same pass hands the primary's top and right insets to the shell
+//! (`Shell::set_edge_reservation`) before reading its baseline, and
+//! the Dock hangs itself under the bar. The shell's workarea widens by
+//! any right-edge inset for the same reason: the composition below is
+//! an intersection, and the intersection of the Dock's displaced
+//! column with the bar's own strip would otherwise leave the column
+//! standing over windows.
 
 use smithay::delegate_layer_shell;
 use smithay::backend::renderer::utils::with_renderer_surface_state;
@@ -74,6 +87,7 @@ use smithay::wayland::shell::wlr_layer::{
 };
 use smithay::wayland::shell::xdg::PopupSurface;
 
+use chonk_shell::desktop::EdgeReservation;
 use wm_theme_api::{Point, Rect, Size};
 
 use crate::state::Compositor;
@@ -613,8 +627,19 @@ fn apply_workareas(comp: &mut Compositor) {
         return;
     }
     comp.layer_shell.reserved_last_pass = any;
-    let output_size = comp.wm.backend().output_size;
     let monitors = comp.wm.monitors();
+    // The Dock steps out of the strips a bar reserves on the primary's
+    // top and right edges — before the baseline is read below, since
+    // a displaced column changes what the shell's own workarea says.
+    // The pass that follows the last bar leaving pushes zero insets
+    // here, which is what hangs the Dock back in its corner.
+    let primary_insets = monitors
+        .iter()
+        .position(|monitor| monitor.primary)
+        .and_then(|index| comp.layer_shell.reserved.get(index).copied())
+        .unwrap_or_default();
+    comp.shell.set_edge_reservation(&mut comp.wm, dock_reservation(primary_insets));
+    let output_size = comp.wm.backend().output_size;
     let areas: Vec<Rect> = monitors
         .iter()
         .enumerate()
@@ -637,6 +662,15 @@ fn apply_workareas(comp: &mut Compositor) {
         })
         .collect();
     comp.wm.set_workareas(areas);
+}
+
+/// The part of a monitor's layer reservation the Dock can yield to:
+/// the top and right strips, the two edges its corner touches. A
+/// bottom or left bar shares no edge with a top-right column, so it
+/// says nothing to it. Insets are non-negative by construction
+/// (`reserve` only ever adds), so the clamp is belt and braces.
+fn dock_reservation(insets: EdgeInsets) -> EdgeReservation {
+    EdgeReservation { top: insets.top.max(0) as u32, right: insets.right.max(0) as u32 }
 }
 
 /// The commit-time half of the lifecycle, called from
@@ -988,6 +1022,20 @@ mod tests {
         let usable = shrink(output(), insets);
         assert_eq!(usable.size.h, 0);
         assert!(usable.size.w == 2560);
+    }
+
+    #[test]
+    fn only_the_top_and_right_insets_reach_the_dock() {
+        // A top bar with a left dock-style panel (waybar + nwg-dock):
+        // the Dock steps under the bar and ignores the panel entirely.
+        let insets = EdgeInsets { top: 40, left: 64, right: 0, bottom: 0 };
+        assert_eq!(dock_reservation(insets), EdgeReservation { top: 40, right: 0 });
+        // A right-edge panel and a bottom bar: only the panel counts.
+        let insets = EdgeInsets { top: 0, left: 0, right: 48, bottom: 32 };
+        assert_eq!(dock_reservation(insets), EdgeReservation { top: 0, right: 48 });
+        // No bars at all is the reservation the Dock started with, so
+        // the pass after the last bar leaves puts it back exactly.
+        assert_eq!(dock_reservation(EdgeInsets::default()), EdgeReservation::default());
     }
 
     #[test]

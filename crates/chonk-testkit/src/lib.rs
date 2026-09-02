@@ -178,7 +178,9 @@ pub struct Session {
     /// investigated from the artifacts.
     pub dir: PathBuf,
     compositor: Child,
-    clients: Vec<Child>,
+    /// Launched clients with the program name each was started as,
+    /// so a test can single one out to kill (`kill_client`).
+    clients: Vec<(String, Child)>,
     door: Door,
     /// The nested compositor's own wayland socket name (e.g.
     /// "wayland-2"), parsed from its log — what clients and grim get
@@ -340,7 +342,11 @@ impl Session {
     pub fn launch(&mut self, program: &str, args: &[&str]) -> Result<(), String> {
         // Client output is kept per launch: "the client never mapped"
         // is undiagnosable from a /dev/null.
-        let log_path = self.dir.join(format!("client-{}-{program}.log", self.clients.len()));
+        // A program given by path (this crate's own probe binaries)
+        // logs under its file name: the path's slashes are not a
+        // directory tree the log should be filed into.
+        let short = Path::new(program).file_name().and_then(|name| name.to_str()).unwrap_or(program);
+        let log_path = self.dir.join(format!("client-{}-{short}.log", self.clients.len()));
         let log = std::fs::File::create(&log_path).map_err(|e| e.to_string())?;
         let log_err = log.try_clone().map_err(|e| e.to_string())?;
         let child = Command::new(program)
@@ -361,7 +367,7 @@ impl Session {
             .stderr(Stdio::from(log_err))
             .spawn()
             .map_err(|e| format!("could not launch {program}: {e}"))?;
-        self.clients.push(child);
+        self.clients.push((short.to_string(), child));
         Ok(())
     }
 
@@ -457,15 +463,35 @@ impl Session {
     /// for the user closing their windows. Reaped with the same bounded
     /// polls everything else uses.
     pub fn kill_clients(&mut self) {
-        for client in &mut self.clients {
+        for (_, client) in &mut self.clients {
             let _ = client.kill();
         }
-        for client in &mut self.clients {
+        for (_, client) in &mut self.clients {
             let _ = poll_until(Duration::from_secs(2), "a killed client to be reaped", || {
                 client.try_wait().ok().flatten()
             });
         }
         self.clients.clear();
+    }
+
+    /// Kills every launched client started as `program` (its file
+    /// name, as `launch` was given it) and reaps them — the test-side
+    /// stand-in for one program exiting while the rest of the desktop
+    /// carries on, for asserting what the compositor gives back when
+    /// it does (a bar's exclusive zone, say). A no-op for a name never
+    /// launched.
+    pub fn kill_client(&mut self, program: &str) {
+        let short = Path::new(program).file_name().and_then(|name| name.to_str()).unwrap_or(program);
+        let (mut doomed, kept): (Vec<_>, Vec<_>) = self.clients.drain(..).partition(|(name, _)| name == short);
+        self.clients = kept;
+        for (_, client) in &mut doomed {
+            let _ = client.kill();
+        }
+        for (_, client) in &mut doomed {
+            let _ = poll_until(Duration::from_secs(2), "the killed client to be reaped", || {
+                client.try_wait().ok().flatten()
+            });
+        }
     }
 
     /// Kills the compositor with SIGKILL — the harshest crash there is
@@ -486,11 +512,11 @@ impl Drop for Session {
         // goes, but killing them explicitly reaps them), compositor
         // last. Reaping is a bounded try_wait poll, never a blocking
         // wait — see the module docs.
-        for client in &mut self.clients {
+        for (_, client) in &mut self.clients {
             let _ = client.kill();
         }
         let _ = self.compositor.kill();
-        for client in &mut self.clients {
+        for (_, client) in &mut self.clients {
             let _ = poll_until(Duration::from_secs(2), "a client to be reaped", || {
                 client.try_wait().ok().flatten()
             });

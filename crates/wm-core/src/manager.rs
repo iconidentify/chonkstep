@@ -396,9 +396,47 @@ impl<B: Backend> WindowManager<B> {
     /// monitor past its end at that monitor's full geometry, so a shell
     /// that only reserves space on one output needs to say nothing
     /// about the rest.
+    ///
+    /// A maximized window is a promise to fill the usable area, and the
+    /// usable area just changed: every window maximized along either
+    /// axis is refitted to the new one, so a bar that comes up after
+    /// the windows did pushes them out of its strip, and a bar that
+    /// exits hands the strip back. Fullscreen windows never followed
+    /// the workarea and are left alone; a shaded one keeps its rolled-
+    /// up geometry and catches up when it is unshaded.
     pub fn set_workareas(&mut self, areas: Vec<Rect>) {
+        let before = self.effective_workareas();
         self.workareas = areas;
         self.publish_workarea_union();
+        if self.effective_workareas() != before {
+            self.refit_maximized();
+        }
+    }
+
+    /// Re-maximizes every window that is maximized along some axis
+    /// into the current usable area of its own monitor. The fit keeps
+    /// an already-saved restore geometry, so unmaximizing later
+    /// still lands where the user left the window before any of this.
+    fn refit_maximized(&mut self) {
+        let maximized: Vec<(ClientId, MaximizeDirections)> = self
+            .clients
+            .iter()
+            .filter(|(_, client)| !client.flags.intersects(ClientFlags::FULLSCREEN | ClientFlags::SHADED))
+            .filter_map(|(id, client)| {
+                let mut directions = MaximizeDirections::empty();
+                if client.flags.contains(ClientFlags::MAXIMIZED_H) {
+                    directions |= MaximizeDirections::HORIZONTAL;
+                }
+                if client.flags.contains(ClientFlags::MAXIMIZED_V) {
+                    directions |= MaximizeDirections::VERTICAL;
+                }
+                (!directions.is_empty()).then_some((id, directions))
+            })
+            .collect();
+        for (id, directions) in maximized {
+            self.fit_maximized(id, directions);
+            tracing::debug!(?id, ?directions, "refitted a maximized window to the new workarea");
+        }
     }
 
     /// The *primary* monitor's workarea — the single-rect form, and
@@ -1607,6 +1645,14 @@ impl<B: Backend> WindowManager<B> {
     /// in either axis) so `unmaximize` can restore it. No titlebar button
     /// triggers this — see `MaximizeDirections`'s doc comment.
     pub fn maximize(&mut self, id: ClientId, directions: MaximizeDirections) {
+        self.fit_maximized(id, directions);
+        tracing::info!(?id, ?directions, "maximized");
+    }
+
+    /// `maximize` without the announcement — shared with the workarea
+    /// refit, where one bar coming up would otherwise log a maximize
+    /// per window as if the user had asked for each.
+    fn fit_maximized(&mut self, id: ClientId, directions: MaximizeDirections) {
         // The window's *own* monitor, not the primary: a window dragged
         // onto the second head must maximize there. Same frame-center
         // rule fullscreen picks its monitor by (`client_frame_center`),
@@ -1645,7 +1691,6 @@ impl<B: Backend> WindowManager<B> {
 
         self.reflow_frame(id);
         self.publish_client_net_state(id);
-        tracing::info!(?id, ?directions, "maximized");
     }
 
     /// Restores the geometry saved by the most recent `maximize` call, if
@@ -4743,6 +4788,76 @@ mod tests {
         assert_eq!(client.restore_geometry, Some(original_geometry));
         let frame_geom = *wm.backend().last_frame_geometry.get(&frame).unwrap();
         assert_eq!(frame_geom, Rect { pos: Point::new(0, 0), size: Size::new(800, 600) }, "frame should fill the monitor edge-to-edge");
+    }
+
+    #[test]
+    fn a_workarea_change_refits_maximized_windows_and_keeps_their_restore_geometry() {
+        let mut backend = FakeBackend::new();
+        let window = backend.create_window();
+        backend.set_geometry(window, Rect { pos: Point::new(50, 50), size: Size::new(100, 100) });
+        backend.set_monitor(Rect { pos: Point::new(0, 0), size: Size::new(800, 600) });
+        let mut wm = wm(backend);
+        wm.dispatch(BackendEvent::MapRequest(window));
+        let id = wm.client_for_window(window).unwrap();
+        let frame = wm.client(id).unwrap().frame.unwrap();
+        let original_geometry = wm.client(id).unwrap().geometry;
+        wm.maximize(id, MaximizeDirections::FULL);
+
+        // A bar comes up after the window did and claims 40px of the
+        // top: the maximized window moves out of its strip.
+        let under_bar = Rect { pos: Point::new(0, 40), size: Size::new(800, 560) };
+        wm.set_workarea(under_bar);
+        assert_eq!(wm.backend().last_frame_geometry.get(&frame), Some(&under_bar), "a maximized window follows the workarea");
+        let client = wm.client(id).unwrap();
+        assert!(client.flags.contains(ClientFlags::MAXIMIZED_H | ClientFlags::MAXIMIZED_V), "and is still maximized");
+        assert_eq!(client.restore_geometry, Some(original_geometry), "the refit does not overwrite where the user left it");
+
+        // The bar exits: the strip comes back, and so does the window.
+        let whole = Rect { pos: Point::new(0, 0), size: Size::new(800, 600) };
+        wm.set_workarea(whole);
+        assert_eq!(wm.backend().last_frame_geometry.get(&frame), Some(&whole));
+
+        // Unmaximizing after all that lands where the user had it.
+        wm.unmaximize(id);
+        assert_eq!(wm.client(id).unwrap().geometry, original_geometry);
+    }
+
+    #[test]
+    fn a_vertically_maximized_window_refits_along_its_axis_only() {
+        let mut backend = FakeBackend::new();
+        let window = backend.create_window();
+        backend.set_geometry(window, Rect { pos: Point::new(50, 50), size: Size::new(100, 100) });
+        backend.set_monitor(Rect { pos: Point::new(0, 0), size: Size::new(800, 600) });
+        let mut wm = wm(backend);
+        wm.dispatch(BackendEvent::MapRequest(window));
+        let id = wm.client_for_window(window).unwrap();
+        let frame = wm.client(id).unwrap().frame.unwrap();
+        wm.maximize(id, MaximizeDirections::VERTICAL);
+        let before = *wm.backend().last_frame_geometry.get(&frame).unwrap();
+
+        wm.set_workarea(Rect { pos: Point::new(0, 40), size: Size::new(800, 560) });
+
+        let after = *wm.backend().last_frame_geometry.get(&frame).unwrap();
+        assert_eq!((after.pos.y, after.size.h), (40, 560), "the maximized axis follows the workarea");
+        assert_eq!((after.pos.x, after.size.w), (before.pos.x, before.size.w), "the free axis is untouched");
+    }
+
+    #[test]
+    fn a_fullscreen_window_ignores_workarea_changes() {
+        let mut backend = FakeBackend::new();
+        let window = backend.create_window();
+        backend.set_geometry(window, Rect { pos: Point::new(50, 50), size: Size::new(100, 100) });
+        backend.set_monitor(Rect { pos: Point::new(0, 0), size: Size::new(800, 600) });
+        let mut wm = wm(backend);
+        wm.dispatch(BackendEvent::MapRequest(window));
+        let id = wm.client_for_window(window).unwrap();
+        wm.maximize(id, MaximizeDirections::FULL);
+        wm.fullscreen(id);
+        let fullscreen = wm.client(id).unwrap().geometry;
+
+        wm.set_workarea(Rect { pos: Point::new(0, 40), size: Size::new(800, 560) });
+
+        assert_eq!(wm.client(id).unwrap().geometry, fullscreen, "fullscreen never followed the workarea and must not start now");
     }
 
     #[test]
