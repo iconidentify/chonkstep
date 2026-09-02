@@ -41,8 +41,8 @@
 //! omarchy_menu = true                # optional; Omarchy's menu under right-click
 //!
 //! [decorations]                      # optional; per-application overrides
-//! server_side = ["alacritty"]        # force this desktop's chrome (default: Omarchy's terminals)
-//! client_side = ["some.app"]         # never frame it
+//! server_side = ["bare.kde.app"]     # frame a client whose own chrome never shows up
+//! client_side = ["borderless-game"]  # let an xdg client stay bare
 //!
 //! [keybindings]
 //! "alt+shift+return" = "spawn-terminal"
@@ -220,11 +220,11 @@ pub struct Config {
     /// of the display it lands on. Not per-theme on purpose: a theme
     /// restyles the terminal's colors, never its metrics.
     pub terminal_font_px: f32,
-    /// Per-application decoration overrides, in both directions. The
-    /// decoration protocols answer this question correctly for every
-    /// client observed, and a list is the exception, not the mechanism;
-    /// the shipped exceptions are [`DEFAULT_SERVER_SIDE`], the terminals
-    /// Omarchy configures to answer it wrongly.
+    /// Per-application decoration overrides, in both directions. Empty
+    /// by default: the compositor concludes every xdg-decoration
+    /// negotiation with its own chrome and believes the KDE protocol's
+    /// declarations, which is right for every client observed, and a
+    /// list is the exception, not the mechanism.
     pub decorations: DecorationRules,
     /// The modifier that turns a drag anywhere on a window into a move
     /// (left button) or a resize (right button), the way every stacking
@@ -301,22 +301,6 @@ pub const DEFAULT_TERMINAL_FONT_PX: f32 = 20.0;
 /// says nothing: Alt, as Window Maker has always bound it.
 pub const DEFAULT_DRAG_MODIFIER: Modifiers = Modifiers::ALT;
 
-/// The applications whose chrome this desktop draws whatever they ask
-/// for, when the config says nothing: the terminals Omarchy ships
-/// configured to draw no decorations — alacritty's `decorations =
-/// "None"`, kitty's `hide_window_decorations yes` — under any class
-/// they are launched as, including the `org.omarchy.terminal` that
-/// Omarchy's own floating terminals (`omarchy-update`, the
-/// installers) wear. Right under Hyprland, which draws no titlebars;
-/// here each one asks for client-side chrome and then draws none,
-/// and the first thing a new user sees of Omarchy on this desktop is
-/// a bare rectangle they cannot drag. A default that names the two
-/// known liars is a smaller claim than it looks: a terminal with
-/// decorations turned *on* asks for server-side chrome anyway, so for
-/// everyone not running Omarchy's config these entries decide
-/// nothing. `server_side = []` in the config clears them.
-pub const DEFAULT_SERVER_SIDE: [&str; 3] = ["alacritty", "kitty", "org.omarchy.terminal"];
-
 /// The range a `terminal_font_px` value has to land in. Below the floor
 /// the terminal is unreadable; above the ceiling a default-sized window
 /// has room for almost no columns. Both ends are rejected loudly rather
@@ -352,21 +336,19 @@ impl Config {
             placement: PlacementPolicy::Smart,
             edge_resistance: 10,
             terminal_font_px: DEFAULT_TERMINAL_FONT_PX,
-            // Only the rescue direction ships a list, and a short one.
-            // The `client_side` list this desktop once decided *from*
-            // held the Chromium family, and it was wrong in both
-            // directions within a day: it matched
-            // `chrome-<host>-<profile>` (a `--app` window, which asks
-            // for *server*-side decorations and draws none) while
-            // missing `google-chrome` (the browser window, which asks
-            // for client-side and draws its own). Reading the
-            // negotiation gets both right with no list at all — so
-            // that one stays empty, and `server_side` names only the
-            // clients known to negotiate one thing and draw another.
-            decorations: DecorationRules {
-                server_side: DEFAULT_SERVER_SIDE.iter().map(|s| s.to_string()).collect(),
-                client_side: Vec::new(),
-            },
+            // Deliberately empty, in both directions. The `client_side`
+            // list this desktop once decided *from* held the Chromium
+            // family, and it was wrong in both directions within a day:
+            // it matched `chrome-<host>-<profile>` (a `--app` window,
+            // which asks for *server*-side decorations and draws none)
+            // while missing `google-chrome` (the browser window, which
+            // asks for client-side and draws its own). A `server_side`
+            // list naming Omarchy's terminals lasted about as long: the
+            // `org.omarchy.*` classes are an open set, one per script.
+            // The compositor answering every xdg negotiation with its
+            // own chrome gets all of them right with no list at all
+            // (see `wm-wayland`'s `decoration` module).
+            decorations: DecorationRules::default(),
             drag_modifier: Some(DEFAULT_DRAG_MODIFIER),
             restore_session: false,
             lock_command: None,
@@ -1184,15 +1166,12 @@ mod tests {
         assert_eq!(config.theme, None);
         assert_eq!(config.placement, PlacementPolicy::Smart);
         assert_eq!(config.edge_resistance, 10);
-        // The decoration policy's only shipped list is the rescue one,
-        // naming the terminals Omarchy configures to lie: the protocols
-        // answer for every other client observed, and an entry here is
-        // a correction, not the mechanism.
-        assert_eq!(config.decorations.server_side, ["alacritty", "kitty", "org.omarchy.terminal"].map(String::from));
-        assert!(config.decorations.client_side.is_empty());
-        assert_eq!(config.decorations.decision_for(Some("org.omarchy.terminal")), Some(true));
-        assert_eq!(config.decorations.decision_for(Some("Alacritty")), Some(true));
-        assert_eq!(config.decorations.decision_for(Some("foot")), None);
+        // The decoration policy ships no per-application list at all:
+        // the compositor concludes the negotiation for every client
+        // observed, and an entry here is a correction, not the
+        // mechanism.
+        assert_eq!(config.decorations, DecorationRules::default());
+        assert_eq!(config.decorations.decision_for(Some("org.omarchy.terminal")), None);
         assert_eq!(config.drag_modifier, Some(DEFAULT_DRAG_MODIFIER));
     }
 
@@ -1241,26 +1220,7 @@ mod tests {
     fn the_old_one_directional_key_still_reads_as_client_side() {
         let config = parse("self_decorating_apps = [\"zenity\"]\n").unwrap();
         assert_eq!(config.decorations.client_side, vec!["zenity".to_string()]);
-        assert_eq!(config.decorations.server_side, Config::default_config().decorations.server_side);
-    }
-
-    /// The shipped `server_side` list is a default, not a floor: a
-    /// config that says `server_side = []` has asked for a bare
-    /// alacritty on purpose and gets one, and a config that lists
-    /// something else replaces the default rather than adding to it.
-    #[test]
-    fn an_explicit_server_side_list_replaces_the_shipped_one_and_an_empty_one_clears_it() {
-        let cleared = parse("[decorations]\nserver_side = []\n").unwrap();
-        assert!(cleared.decorations.server_side.is_empty());
-        assert_eq!(cleared.decorations.decision_for(Some("alacritty")), None);
-
-        let replaced = parse("[decorations]\nserver_side = [\"foot\"]\n").unwrap();
-        assert_eq!(replaced.decorations.server_side, vec!["foot".to_string()]);
-        assert_eq!(replaced.decorations.decision_for(Some("alacritty")), None);
-
-        // And a config that never mentions the table keeps the default.
-        let silent = parse("").unwrap();
-        assert_eq!(silent.decorations.decision_for(Some("org.omarchy.terminal")), Some(true));
+        assert!(config.decorations.server_side.is_empty());
     }
 
     /// An empty entry must never become a prefix that matches every

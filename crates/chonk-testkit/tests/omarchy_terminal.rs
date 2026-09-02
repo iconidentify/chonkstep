@@ -3,13 +3,14 @@
 //! Omarchy configures alacritty `decorations = "None"` — the right
 //! setting under Hyprland, which draws no titlebars — and launches it
 //! as `org.omarchy.terminal` for `omarchy-update` and the installers.
-//! Under this desktop that terminal negotiates client-side chrome and
-//! draws none, which is why `[decorations] server_side` ships with it
-//! named (`wm_config::DEFAULT_SERVER_SIDE`). The unit tests pin the
-//! rule; this pins that the rule reaches a real alacritty on a real
-//! socket, as a frame around it — and that `server_side = []` really
-//! does take the frame back off, so the default is a default and not
-//! a hard-coded exception.
+//! Under this desktop that terminal asks for client-side chrome it
+//! will never draw, and the compositor answers "server-side" — the
+//! xdg-decoration protocol gives it the last word (see `wm-wayland`'s
+//! `decoration` module), so no list has to name the class. The unit
+//! tests pin the policy; this pins that the answer reaches a real
+//! alacritty on a real socket, as a frame around it — and that
+//! `[decorations] client_side` really does take the frame back off,
+//! so a bare window is still a thing a user can ask for.
 //!
 //! The real alacritty is the client here (Omarchy's terminal *is*
 //! alacritty), told on its command line to draw no decorations so the
@@ -55,10 +56,10 @@ fn omarchy_terminal_gets_this_desktops_frame_by_default() {
 
 #[test]
 #[ignore = "needs a live Wayland session to nest in: scripts/e2e.sh, or cargo test -p chonk-testkit -- --ignored --test-threads=1"]
-fn clearing_server_side_lets_omarchy_terminal_stay_bare() {
+fn listing_it_under_client_side_lets_omarchy_terminal_stay_bare() {
     let options = SessionOptions {
         scale: Some(1.0),
-        config_extra: "[decorations]\nserver_side = []\n".into(),
+        config_extra: format!("[decorations]\nclient_side = [\"{APP_ID}\"]\n"),
         ..Default::default()
     };
     let mut session = Session::boot("omarchy-terminal-bare", options).unwrap();
@@ -66,10 +67,9 @@ fn clearing_server_side_lets_omarchy_terminal_stay_bare() {
 
     // Give the shell a moment it would have used to frame the window,
     // then assert it did not: the client asked for client-side chrome,
-    // the user cleared the rescue list, and the desktop believes the
-    // client again.
+    // the user's opt-out says to grant it, and the desktop steps back.
     std::thread::sleep(Duration::from_millis(500));
     let world = session.world().unwrap();
     assert!(world.window_matching(APP_ID).is_some_and(|w| w.mapped), "the terminal is up");
-    assert!(world.frame_of(window.id).is_none(), "with server_side = [] a client that asked to decorate itself is left alone");
+    assert!(world.frame_of(window.id).is_none(), "listed under client_side, a client that asked to decorate itself is left alone");
 }

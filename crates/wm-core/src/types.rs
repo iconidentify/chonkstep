@@ -344,15 +344,14 @@ pub enum BackendEvent<Win, Frame> {
 /// failure that actually strands a user is a window with chrome from
 /// neither side, and that is the one an off-only list cannot rescue.
 ///
-/// Neither list needs an entry for correctness: the decoration
-/// protocols answer the question for every client observed here
-/// (see `wm-wayland`'s `DecorationEvidence`). They exist for the
-/// clients that answer it *wrongly* — a terminal configured
-/// `decorations = "None"` for a tiling desktop asks for client-side
-/// and then draws nothing, which `server_side` fixes in one line. The
-/// config crate ships that line for the terminals Omarchy configures
-/// that way (`wm_config::DEFAULT_SERVER_SIDE`); this type itself
-/// defaults to empty.
+/// Neither list needs an entry for correctness: under xdg-decoration
+/// the compositor has the last word and takes it, and under the KDE
+/// protocol a client's declaration is believed (see `wm-wayland`'s
+/// `decoration` module). They exist for the two ways that can still
+/// go wrong — a KDE or X11 client that declares its own chrome and
+/// draws none, which `server_side` fixes in one line, and an xdg
+/// client whose bare surface is the point (a borderless game, a
+/// kiosk), which `client_side` lets stay bare. Both empty by default.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct DecorationRules {
     /// Draw this desktop's chrome whatever the client asks for. The

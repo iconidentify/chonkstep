@@ -266,13 +266,14 @@ draws its bar the way it draws it on Hyprland.
 Omarchy's terminals get titlebars, though they never ask for them.
 Omarchy configures alacritty and kitty to draw no decorations - right
 under Hyprland, which has none - and under a desktop that does, each
-one negotiates client-side chrome and then draws nothing. chonkstep
-believes every other client about its own chrome, but ships those two
-(under every class Omarchy launches them as, including the
-`org.omarchy.terminal` behind `omarchy-update`) in `[decorations]
-server_side`, so the update window, the installers and a plain terminal
-all wear this desktop's frame; `server_side = []` in the config takes it
-back off.
+one would negotiate client-side chrome and then draw nothing. The
+xdg-decoration protocol makes that a request, not a decision: the
+compositor answers, and chonkstep answers "server-side" to every
+client that asks, exactly as Hyprland does. So the update window, the
+installers, `omarchy-about` and a plain terminal all wear this
+desktop's frame - every `org.omarchy.*` class Omarchy invents,
+without a list naming any of them. `[decorations] client_side` in the
+config is the opt-out for a window whose bare surface is the point.
 
 On a HiDPI display, set `scale = 2.0` in
 `~/.config/chonkstep/config.toml` - it scales chrome, dock, cursors,

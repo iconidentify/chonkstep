@@ -47,6 +47,41 @@
 //! missing `google-chrome` (the browser window, which asks for
 //! client-side and draws its own). Both bugs, in one list, in a day.
 //!
+//! # Who gets the last word
+//!
+//! "Mostly" believing, because the two protocols mean different things
+//! by a client-side request, and only one of them is a request.
+//!
+//! xdg-decoration is a *negotiation*, and the specification gives the
+//! compositor the final say: `set_mode` states a preference, the
+//! `configure` event states the decision, and a client "must obey the
+//! mode" it is configured with. This desktop's decision is its own
+//! chrome. A client that asked for client-side hears `server_side`
+//! back and, by the protocol it chose to speak, draws no titlebar of
+//! its own; we draw ours. That is what Hyprland does for every
+//! xdg-decoration client without exception — which matters here
+//! because it means every application Omarchy ships has already been
+//! living under a compositor that answers this way. The case that
+//! made this the policy rather than an option: Omarchy launches each
+//! of its TUIs (`omarchy-update`, About, btop, whatever a user adds)
+//! as the same alacritty under a different `org.omarchy.<name>`
+//! class, with `decorations = "None"` because Hyprland has no
+//! titlebars to want. Each one asks for client-side and draws
+//! nothing. Believing the ask leaves an open-ended family of bare
+//! rectangles that only a per-name list could rescue, one name at a
+//! time; concluding the negotiation frames all of them, and any the
+//! user installs tomorrow, with no list at all.
+//!
+//! The KDE protocol's client-side is a *declaration*. GTK3 asks for
+//! `Client` after it has already decided to draw a headerbar, and lays
+//! the window out from that decision, not from our answer; GTK4 never
+//! asks at all (the asymmetry below). Imposing a frame on either gives
+//! two titlebars with no way back, so those are believed as stated.
+//! `[decorations] client_side` is the door for an xdg client that has
+//! a real reason to stay bare — a borderless game, a kiosk — and
+//! `server_side` the one for a KDE-protocol or X11 client that says
+//! client-side and then draws nothing.
+//!
 //! # The GTK4 asymmetry
 //!
 //! GTK4's `gdk_wayland_toplevel_set_decorated` early-returns when the
@@ -94,8 +129,15 @@ use crate::state::{ClientState, Compositor};
 pub(crate) enum DecorationEvidence {
     /// The client asked for, or accepted, this desktop's chrome.
     WantsServerSide,
-    /// The client said it draws its own.
-    WantsClientSide,
+    /// The client asked, over xdg-decoration, to draw its own — a
+    /// preference in a negotiation this compositor concludes the other
+    /// way, and which the client is bound by its protocol to accept.
+    /// Framed; see "Who gets the last word" in the module docs.
+    PrefersClientSide,
+    /// The client has said, over the KDE protocol or by GTK4's silence
+    /// on it, that it draws its own chrome and will whatever we answer.
+    /// Left bare, or it wears two titlebars.
+    DrawsClientSide,
     /// The client bound no decoration protocol at all and has told us
     /// nothing. Framed — see the module docs.
     Silent,
@@ -159,13 +201,13 @@ impl DecorationNegotiation {
             // way; only smithay's own default goes the other direction,
             // silently, inside `send_configure`.
             return match self.xdg_client_side {
-                Some(true) => DecorationEvidence::WantsClientSide,
+                Some(true) => DecorationEvidence::PrefersClientSide,
                 Some(false) | None => DecorationEvidence::WantsServerSide,
             };
         }
         if self.kde_object {
             return match self.kde_client_side {
-                Some(true) => DecorationEvidence::WantsClientSide,
+                Some(true) => DecorationEvidence::DrawsClientSide,
                 Some(false) | None => DecorationEvidence::WantsServerSide,
             };
         }
@@ -182,7 +224,7 @@ impl DecorationNegotiation {
             // and creates nothing for a toplevel is declining our
             // chrome for it. A GTK4 window that wanted ours would have
             // created the object and asked.
-            return DecorationEvidence::WantsClientSide;
+            return DecorationEvidence::DrawsClientSide;
         }
         DecorationEvidence::Silent
     }
@@ -208,10 +250,13 @@ pub(crate) fn client_draws_own_chrome(
         return !force_server_side;
     }
     match evidence {
-        DecorationEvidence::WantsClientSide => true,
-        // Silence is framed — the one guess in this module, argued in
-        // the module docs.
-        DecorationEvidence::WantsServerSide | DecorationEvidence::Silent => false,
+        DecorationEvidence::DrawsClientSide => true,
+        // An xdg preference for client-side is overruled, not
+        // believed: the negotiation ends with our configure, and the
+        // client draws nothing once it hears `server_side`. Silence is
+        // framed too — the one guess in this module, argued in the
+        // module docs.
+        DecorationEvidence::PrefersClientSide | DecorationEvidence::WantsServerSide | DecorationEvidence::Silent => false,
     }
 }
 
@@ -366,10 +411,21 @@ mod tests {
         let chrome_app = DecorationNegotiation { xdg_object: true, xdg_client_side: Some(false), ..Default::default() };
         assert!(!client_draws_own_chrome(&no_rules(), Some("chrome-discord.com__channels_@me-Default"), chrome_app.evidence()));
 
-        // Chrome's ordinary browser window: asks for client-side and
-        // means it — its frame is fused with the tab strip.
+        // Chrome's ordinary browser window asks for client-side; the
+        // negotiation ends with our `server_side`, which Chrome obeys
+        // by folding its own frame away (as it does under Hyprland),
+        // so it is framed and wears one titlebar, ours.
         let chrome_browser = DecorationNegotiation { xdg_object: true, xdg_client_side: Some(true), ..Default::default() };
-        assert!(client_draws_own_chrome(&no_rules(), Some("google-chrome"), chrome_browser.evidence()));
+        assert_eq!(chrome_browser.evidence(), DecorationEvidence::PrefersClientSide);
+        assert!(!client_draws_own_chrome(&no_rules(), Some("google-chrome"), chrome_browser.evidence()));
+
+        // alacritty with Omarchy's `decorations = "None"`, under any of
+        // the classes Omarchy launches it as: the same ask, the same
+        // answer, and a frame with no rule naming it.
+        let alacritty = DecorationNegotiation { xdg_object: true, xdg_client_side: Some(true), ..Default::default() };
+        for class in ["Alacritty", "org.omarchy.terminal", "org.omarchy.about", "org.omarchy.btop"] {
+            assert!(!client_draws_own_chrome(&no_rules(), Some(class), alacritty.evidence()), "{class} is framed");
+        }
 
         // foot asks for server-side outright.
         let foot = DecorationNegotiation { xdg_object: true, xdg_client_side: Some(false), ..Default::default() };
@@ -382,7 +438,14 @@ mod tests {
 
         // A GTK4 headerbar app: bound the manager, created nothing.
         let nautilus = DecorationNegotiation { kde_manager_bound: true, ..Default::default() };
+        assert_eq!(nautilus.evidence(), DecorationEvidence::DrawsClientSide);
         assert!(client_draws_own_chrome(&no_rules(), Some("org.gnome.Nautilus"), nautilus.evidence()));
+
+        // A GTK3 app that asked for `Client` over the KDE protocol has
+        // already laid out its headerbar: a declaration, believed.
+        let gtk3_csd = DecorationNegotiation { kde_object: true, kde_object_seen: true, kde_client_side: Some(true), kde_manager_bound: true, ..Default::default() };
+        assert_eq!(gtk3_csd.evidence(), DecorationEvidence::DrawsClientSide);
+        assert!(client_draws_own_chrome(&no_rules(), Some("gnome-calculator"), gtk3_csd.evidence()));
     }
 
     /// Bound the interface and expressed no preference: ours.
@@ -404,14 +467,24 @@ mod tests {
         assert!(!client_draws_own_chrome(&no_rules(), Some("sdl2-game"), silent.evidence()));
     }
 
-    /// Both override directions, and the one that rescues a window.
+    /// Both override directions: the one that rescues a window whose
+    /// client-side is a declaration we cannot overrule on the wire, and
+    /// the one that lets an xdg client have the bare window it asked
+    /// for after all.
     #[test]
     fn a_rule_overrules_the_protocol_in_both_directions() {
-        let asks_client_side = DecorationNegotiation { xdg_object: true, xdg_client_side: Some(true), ..Default::default() };
-        let rules = DecorationRules { server_side: vec!["alacritty".into()], client_side: Vec::new() };
+        let declares_client_side = DecorationNegotiation { kde_object: true, kde_object_seen: true, kde_client_side: Some(true), kde_manager_bound: true, ..Default::default() };
+        let rules = DecorationRules { server_side: vec!["bare-thing".into()], client_side: Vec::new() };
         assert!(
-            !client_draws_own_chrome(&rules, Some("Alacritty"), asks_client_side.evidence()),
-            "a terminal that asks for client-side and draws nothing can be forced back into a frame"
+            !client_draws_own_chrome(&rules, Some("bare-thing"), declares_client_side.evidence()),
+            "a client that declares client-side and draws nothing can be forced back into a frame"
+        );
+
+        let prefers_client_side = DecorationNegotiation { xdg_object: true, xdg_client_side: Some(true), ..Default::default() };
+        let rules = DecorationRules { server_side: Vec::new(), client_side: vec!["borderless-game".into()] };
+        assert!(
+            client_draws_own_chrome(&rules, Some("borderless-game"), prefers_client_side.evidence()),
+            "the user can let an xdg client's preference stand"
         );
 
         let asks_server_side = DecorationNegotiation { xdg_object: true, xdg_client_side: Some(false), ..Default::default() };
@@ -446,7 +519,7 @@ mod tests {
             kde_client_side: Some(false),
             kde_manager_bound: true,
         };
-        assert_eq!(both.evidence(), DecorationEvidence::WantsClientSide);
+        assert_eq!(both.evidence(), DecorationEvidence::PrefersClientSide);
     }
 
 }

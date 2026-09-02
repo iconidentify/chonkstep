@@ -339,23 +339,26 @@
 #     chrome app=Alacritty
 #
 #[decorations]
-# Draw this desktop's chrome whatever the client asks for. The rescue
-# direction, and the reason it exists: Omarchy ships alacritty
-# configured `decorations = "None"` and kitty `hide_window_decorations
-# yes`, which is right under a tiling compositor that draws no
-# titlebars. Under this desktop those clients ask for client-side
-# decorations and then draw none, leaving a bare rectangle. So the
-# default list below names exactly them, under every class Omarchy
-# launches them as -- "org.omarchy.terminal" is the floating terminal
-# behind omarchy-update and the installers. Matching is a
-# case-insensitive prefix on the application id. Setting the key
-# replaces the default rather than adding to it; `server_side = []`
-# clears it, for a bare terminal you actually want. (A window with no
-# chrome from either side is still movable and resizable -- see
-# drag_modifier above -- just bare.)
-#server_side = ["alacritty", "kitty", "org.omarchy.terminal"]
+# Nothing here is needed for Omarchy's terminals. Omarchy ships
+# alacritty `decorations = "None"` and kitty `hide_window_decorations
+# yes`, right under a tiling compositor with no titlebars; under this
+# desktop each asks for client-side decorations it will never draw, and
+# the compositor simply answers "server-side" -- the xdg-decoration
+# protocol gives it the last word, and Hyprland answers the same way.
+# So every window Omarchy opens, under every `org.omarchy.*` class it
+# invents, wears this desktop's frame with no list at all.
 #
-# Never draw chrome for these; the client's own is the only one. For an
-# application that insists on drawing a titlebar without asking for the
-# right to.
-#client_side = ["some.stubborn.app"]
+# Draw this desktop's chrome whatever the client says. The rescue
+# direction, for the protocols where the client's word is final: a
+# KDE-decoration or X11 client that declares its own chrome and then
+# draws none is a bare rectangle, and one line here frames it. (A
+# window with no chrome from either side is still movable and
+# resizable -- see drag_modifier above -- just bare.) Matching is a
+# case-insensitive prefix on the application id.
+#server_side = ["bare.kde.app"]
+#
+# Never draw chrome for these; the client's own is the only one. The
+# opt-out from the rule above, for an xdg client whose bare surface is
+# the point -- a borderless game, a kiosk -- and for an application that
+# insists on drawing a titlebar without asking for the right to.
+#client_side = ["borderless-game"]

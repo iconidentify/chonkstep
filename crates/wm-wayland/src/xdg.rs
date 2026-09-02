@@ -1132,16 +1132,14 @@ impl XdgDecorationHandler for Compositor {
     fn request_mode(&mut self, toplevel: ToplevelSurface, mode: DecorationMode) {
         // The ask is recorded, then read back through the one policy
         // every other decoration path goes through. A ClientSide ask is
-        // honored — which is what KWin, labwc and cosmic-comp do, and
-        // what the protocol is shaped for — because the clients that
-        // ask for it and mean it (a browser whose frame is fused with
-        // its tab strip, a libadwaita headerbar) cannot drop their
-        // chrome on request, so imposing ours gives two titlebars with
-        // no way back. The client that asks and then draws nothing is
-        // real too (a terminal configured `decorations = "None"` for a
-        // tiling desktop), and it is answered by the modifier-drag that
-        // moves and resizes any window, and by one line of
-        // `[decorations] server_side` if the user wants its frame back.
+        // answered ServerSide: the protocol makes this configure the
+        // decision and binds the client to it, and this desktop's
+        // decision is its own chrome — the same answer Hyprland gives
+        // every xdg-decoration client, so every application Omarchy
+        // ships already knows how to hear it. See "Who gets the last
+        // word" in `crate::decoration` for why this is the policy and
+        // not a per-application list, and `[decorations] client_side`
+        // for the client with a real reason to stay bare.
         let backend = self.wm.backend_mut();
         let asked_client_side = mode == DecorationMode::ClientSide;
         let mut client_side = asked_client_side;
@@ -1154,7 +1152,7 @@ impl XdgDecorationHandler for Compositor {
                 client_side = backend.xdg_client_draws_own_chrome(record);
             }
             if client_side != asked_client_side {
-                tracing::debug!(?id, asked_client_side, "a [decorations] rule overrides this client's decoration request");
+                tracing::debug!(?id, asked_client_side, "answering the other way: this desktop's chrome is the product");
             }
             backend.queue(WmEvent::ChromeChanged(id));
         }
