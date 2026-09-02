@@ -136,7 +136,7 @@
 #
 # Must be a number between 6 and 96 -- outside that it is warned about
 # and the default of 20 is kept.
-#terminal_font_px = 20
+#terminal_font_px = 18
 
 # Session restore: when true, the desktop records every window's
 # application, geometry, workspace and shape (maximized / shaded /

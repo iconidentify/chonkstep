@@ -34,7 +34,7 @@
 //! appearance = "dark"                # optional; "light" | "dark"
 //! placement = "smart"                # optional; "smart" | "cascade" | "center"
 //! edge_resistance = 10               # optional; px, 0 disables edge snapping
-//! terminal_font_px = 20              # optional; terminal font size at 1x
+//! terminal_font_px = 18              # optional; terminal font size at 1x
 //! drag_modifier = "alt"              # optional; move/resize drag modifier, or "none"
 //! restore_session = true             # optional; relaunch last session's windows
 //! lock_command = "swaylock"          # optional; locker for post-crash recovery
@@ -311,7 +311,7 @@ pub struct Config {
 }
 
 /// Terminal font size when the config says nothing, in 1x pixels.
-pub const DEFAULT_TERMINAL_FONT_PX: f32 = 20.0;
+pub const DEFAULT_TERMINAL_FONT_PX: f32 = 18.0;
 
 /// The modifier the move/resize drag gesture rides on when the config
 /// says nothing: Alt, as Window Maker has always bound it.

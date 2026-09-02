@@ -97,16 +97,23 @@ pub enum ShellOutcome {
 // the config's `terminal_font_px` (1x pixels) and tracks CHONKSTEP_SCALE
 // the same way the WM's own chrome does.
 //
-// The window is sized in *pixels*, not in cells. It used to be a
-// hand-tuned "92x26" pinned to whatever fitted a 1920-wide display at
-// scale 2 — but a cell count is only safe while the font size is a
-// constant, and the moment the font became a user setting that geometry
-// would march off the edge of the screen the first time anyone raised
-// it. A fraction of the actual head fits by construction at any font
-// size, on any display, and lets the column count be what falls out.
-// Wider than tall by less than it looks: the height fraction is the
-// larger of the two because the chrome comes off the height and a
-// terminal is judged on rows.
+// The window opens at the terminal world's one universal default —
+// 80 columns by 24 rows, the shape every terminal since the VT100
+// agrees on — asked for in cells (`--window-size-chars`), so foot's
+// own font metrics make it exact. Cells are only safe while they fit:
+// the font size is a user setting with a ceiling of 96px, at which 80
+// columns is wider than any screen, and this file once carried a
+// hand-tuned "92x26" that marched off the edge for exactly that
+// reason. So the standard shape is requested when a conservative
+// estimate says it fits the workarea, and everything below is the
+// fallback for the pathological font/screen pairing: a fraction of
+// the actual head, which fits by construction.
+const TERMINAL_STANDARD_CELLS: (u32, u32) = (80, 24);
+// Cell-size estimate per font pixel for the fits-check, deliberately
+// generous (JetBrains Mono's advance is 0.6em, line height ~1.25):
+// overestimating the footprint only makes the fallback a little
+// eager, while underestimating would overhang the screen.
+const TERMINAL_CELL_ESTIMATE: (f32, f32) = (0.65, 1.4);
 const TERMINAL_SCREEN_FRACTION: (f32, f32) = (0.70, 0.78);
 // Floor for that fraction, so a small or oddly-shaped head still gets a
 // usable terminal rather than a proportionally tiny one.
@@ -132,12 +139,18 @@ fn terminal_args(theme: &Theme, font_px: f32, screen: Size, client_scale: f32) -
         ((screen.w as f32 / divisor) as u32).max(1),
         ((screen.h as f32 / divisor) as u32).max(1),
     );
-    let (window_w, window_h) = terminal_window_size(theme, logical_screen);
+    let size_args = if standard_cells_fit(px as f32 / client_scale.max(0.01), theme, logical_screen) {
+        let (cols, rows) = TERMINAL_STANDARD_CELLS;
+        ("--window-size-chars".to_string(), format!("{cols}x{rows}"))
+    } else {
+        let (window_w, window_h) = terminal_window_size(theme, logical_screen);
+        ("--window-size-pixels".to_string(), format!("{window_w}x{window_h}"))
+    };
     let mut args = vec![
         "--font".to_string(),
         format!("JetBrainsMono Nerd Font:pixelsize={px},Noto Sans Symbols 2:pixelsize={px}"),
-        "--window-size-pixels".to_string(),
-        format!("{window_w}x{window_h}"),
+        size_args.0,
+        size_args.1,
         // Which of the two populated sections the terminal starts in —
         // the appearance the resolved theme is wearing right now.
         "--override".to_string(),
@@ -216,7 +229,23 @@ fn terminal_screen<B: Backend + PopupHost<PopupId = B::ShellId>>(shell: &Shell<B
     shell.desktop.primary_workarea().size
 }
 
-/// The terminal's launch size, in pixels, for a given head.
+/// Whether the standard 80x24 opens comfortably on this head: the
+/// estimated cell footprint plus the frame's chrome inside the
+/// (logical) workarea. `font_px` is the font size in the same logical
+/// units as `screen`.
+fn standard_cells_fit(font_px: f32, theme: &Theme, screen: Size) -> bool {
+    let (cols, rows) = TERMINAL_STANDARD_CELLS;
+    let (cw, ch) = TERMINAL_CELL_ESTIMATE;
+    let chrome_h = f32::from(theme.titlebar.height)
+        + f32::from(theme.resize_bar.height)
+        + 2.0 * f32::from(theme.border.width);
+    let need_w = cols as f32 * font_px * cw;
+    let need_h = rows as f32 * font_px * ch + chrome_h;
+    need_w <= screen.w as f32 && need_h <= screen.h as f32
+}
+
+/// The fallback launch size, in pixels, for a head the standard cell
+/// shape cannot fit.
 ///
 /// foot's `--window-size-pixels` sizes the terminal's *own* surface,
 /// but what has to fit the screen is the decorated frame — so the
@@ -2461,6 +2490,26 @@ mod tests {
     #[test]
     fn exit_maps_to_the_exit_outcome() {
         assert_eq!(root_action_outcome(&RootMenuAction::Exit), ShellOutcome::Exit);
+    }
+
+    #[test]
+    fn the_standard_terminal_shape_fits_any_ordinary_desk() {
+        // 18px on a 1920x1080 logical head: 80x24 must open as cells.
+        let theme = wm_theme::default_theme::nextstep_classic();
+        assert!(standard_cells_fit(18.0, &theme, Size::new(1920, 1080)));
+        // A modest laptop at a modest font still takes the standard.
+        assert!(standard_cells_fit(16.0, &theme, Size::new(1280, 800)));
+    }
+
+    #[test]
+    fn a_pathological_font_falls_back_to_the_fitted_pixel_size() {
+        // The config ceiling: 96px makes 80 columns wider than any
+        // screen this side of a video wall — the fallback must engage
+        // rather than let the frame march off the edge.
+        let theme = wm_theme::default_theme::nextstep_classic();
+        assert!(!standard_cells_fit(96.0, &theme, Size::new(1920, 1080)));
+        let (w, h) = terminal_window_size(&theme, Size::new(1920, 1080));
+        assert!(w <= 1920 && h <= 1080);
     }
 
     #[test]
