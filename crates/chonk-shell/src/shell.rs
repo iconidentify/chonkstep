@@ -531,6 +531,11 @@ fn launch_env(scale: f32) -> Vec<(String, String)> {
 /// launch environment every other GUI the shell starts gets, since
 /// most Omarchy actions end in a window (a webapp, a floating
 /// terminal, a picker).
+/// How long a menu-launched Omarchy theme pick stays armed for
+/// adoption. Long enough to browse the picker at leisure; short enough
+/// that an abandoned pick cannot re-dress the desk much later.
+const ADOPTION_ARM_WINDOW: std::time::Duration = std::time::Duration::from_secs(180);
+
 fn run_omarchy_command(command: &str, theme: &Theme) {
     let scale = theme.titlebar.font.size / 12.0;
     let (program, args) = crate::omarchy_menu::action_argv(command);
@@ -846,8 +851,17 @@ pub struct Shell<B: Backend + PopupHost<PopupId = B::ShellId>> {
     panel_escape: bool,
     /// Notices Omarchy switching its theme underneath a session that
     /// follows it (`SessionState::following`); asked once a second from
-    /// [`Shell::tick`], and only while following.
+    /// [`Shell::tick`] while following — and while an adoption is
+    /// armed (below), so a pick can be noticed before following began.
     omarchy: crate::omarchy_follow::Watch,
+    /// Set when the user launches Omarchy's own theme flow from this
+    /// desktop's menu while wearing a built-in theme. Their intent —
+    /// "give me that theme" — is expressed at launch, but honored only
+    /// when Omarchy's current theme actually changes on disk: the
+    /// picker cancelled is a desk unchanged. Expires rather than
+    /// lingering, so a pick abandoned this morning cannot re-dress the
+    /// desk this afternoon.
+    omarchy_adoption_armed: Option<std::time::Instant>,
 }
 
 impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
@@ -985,6 +999,7 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
             control,
             panel_escape: false,
             omarchy: crate::omarchy_follow::Watch::new(),
+            omarchy_adoption_armed: None,
         }
     }
 
@@ -1971,6 +1986,16 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
             RootMenuAction::OmarchyCommand { index, generation } => {
                 match self.desktop.omarchy_command(index, generation) {
                     Some(command) => {
+                        // A theme flow launched from this desktop's own
+                        // menu carries an expectation the follow gate
+                        // would otherwise swallow: the user asked for
+                        // that theme, so when the pick lands (and only
+                        // then — see the armed field), the desk adopts
+                        // Omarchy's theme instead of silently keeping
+                        // its own while Omarchy changes underneath.
+                        if command.contains("omarchy-theme-set") && self.state.following.is_none() {
+                            self.omarchy_adoption_armed = Some(std::time::Instant::now());
+                        }
                         run_omarchy_command(&command, &self.theme);
                         self.desktop.note_omarchy_action_fired();
                     }
@@ -2230,18 +2255,36 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         }
         // Following Omarchy: when its current theme changes on disk,
         // re-resolve exactly as a reload would. The watch rate-limits
-        // itself to a look per second and is not consulted at all while
-        // the session wears a built-in.
-        if self.state.following.is_some() && self.omarchy.changed(std::time::Instant::now()) {
-            tracing::info!("Omarchy's current theme or background changed; re-dressing");
-            self.reresolve(wm);
-            // The background is part of the look and the watch fires
-            // for it too, but a background swap leaves the palette —
-            // and so the resolved theme — exactly as it was, and
-            // `apply_session_state` rightly repaints nothing for an
-            // unchanged theme. The picture is repainted here instead,
-            // and only if the desk is showing Omarchy's.
-            self.desktop.refresh_wallpaper(wm.backend_mut());
+        // itself to a look per second and is consulted while following
+        // — or while an adoption is armed, which is how a theme picked
+        // through this desktop's menu can be noticed *before* the desk
+        // follows. A session wearing a built-in with nothing armed
+        // never polls.
+        let armed = self
+            .omarchy_adoption_armed
+            .is_some_and(|since| since.elapsed() < ADOPTION_ARM_WINDOW);
+        if self.state.following.is_none() && !armed {
+            self.omarchy_adoption_armed = None;
+        } else if self.omarchy.changed(std::time::Instant::now()) {
+            if self.state.following.is_some() {
+                tracing::info!("Omarchy's current theme or background changed; re-dressing");
+                self.reresolve(wm);
+                // The background is part of the look and the watch fires
+                // for it too, but a background swap leaves the palette —
+                // and so the resolved theme — exactly as it was, and
+                // `apply_session_state` rightly repaints nothing for an
+                // unchanged theme. The picture is repainted here instead,
+                // and only if the desk is showing Omarchy's.
+                self.desktop.refresh_wallpaper(wm.backend_mut());
+            } else {
+                // The armed pick landed: Omarchy's theme really changed,
+                // so honor the intent expressed at the menu and follow —
+                // through the same persisted path the menu's own
+                // "Omarchy" entry takes, so the choice survives restart.
+                tracing::info!("adopting Omarchy's theme: it changed after a pick from this desktop's menu");
+                self.omarchy_adoption_armed = None;
+                self.run_root_menu_action(wm, RootMenuAction::SetTheme(wm_theme::omarchy::ID));
+            }
         }
         if let Some(target) = self.desktop.take_workspace_request() {
             wm.switch_workspace(target);
