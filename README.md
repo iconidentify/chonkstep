@@ -167,8 +167,8 @@ Two routes. As a package (binaries to `/usr/bin`, session scripts to
 ```sh
 git clone https://github.com/iconidentify/chonkstep.git
 cd chonkstep/packaging/arch
-makepkg -si -p PKGBUILD-git   # the branch head; plain PKGBUILD pins the
-                              # v0.2.0 release tag once it is published
+makepkg -si                   # the branch head; PKGBUILD-release pins
+                              # the v0.2.0 release tag once it is published
 ```
 
 Or straight from the checkout, which is what `scripts/update.sh`

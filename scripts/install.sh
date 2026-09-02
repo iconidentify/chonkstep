@@ -46,6 +46,27 @@ if ! command -v pacman >/dev/null 2>&1; then
     exit 1
 fi
 
+# A documented refusal, not a limitation to paper over: the session
+# entries below carry this checkout's absolute path in Exec=, and SDDM
+# hands that value to its stock session wrappers
+# (/usr/share/sddm/scripts/{Xsession,wayland-session}), both of which
+# end in an unquoted `exec $@`. A path containing whitespace
+# word-splits there and the session dies before it starts - no
+# .desktop-file quoting survives that wrapper, so no escaping here can
+# fix it. Quotes and backslashes are refused for the same reason plus
+# the .desktop value unescaping (\\s becomes a space) that would mangle
+# them first. Clone to a plain path (e.g. ~/src/chonkstep) instead.
+case "$repo" in
+    *[[:space:]\"\\]*)
+        echo "This checkout lives at '${repo}', and that path contains" >&2
+        echo "whitespace, a quote, or a backslash. SDDM's session wrapper" >&2
+        echo "word-splits the Exec path ('exec \$@'), so a session entry" >&2
+        echo "pointing here can never start. Move or re-clone the checkout" >&2
+        echo "to a path without those characters and re-run scripts/install.sh." >&2
+        exit 1
+        ;;
+esac
+
 echo "Installing dependencies (sudo)..."
 # xorg-server/xinit/xauth: the X session itself (xauth is what startx
 # needs on a machine with no display manager - stock Omarchy). foot:
@@ -124,14 +145,30 @@ echo "Building chonkstep (release)..."
 cargo build --release --workspace
 
 echo "Installing session entries (sudo)..."
-sudo install -d /usr/share/xsessions
-sudo tee /usr/share/xsessions/chonkstep.desktop >/dev/null <<DESKTOP
+# Written to a scratch file first and placed with `install -m644`, not
+# piped through `sudo tee`: tee creates the file with this shell's
+# umask, and a hardened umask (077) would leave the entry 0600 root -
+# unreadable by the sddm greeter user, whose session list then shows a
+# blank row or nothing at all. install's explicit mode is immune.
+#
+# Deliberately NO TryExec in either entry, and this is load-bearing:
+# SDDM's greeter runs as the sddm user and stats an absolute TryExec,
+# hiding the session when the stat fails - and a default 0700 home
+# (login.defs HOME_MODE on Arch) fails exactly that stat for a script
+# under ~. Exec is never checked at listing time, and at launch the
+# session runs as the logging-in user, who can of course read their
+# own home. The Arch package's entries DO carry TryExec, because
+# /usr/lib/chonkstep is world-traversable by construction.
+entry_tmp="$(mktemp)"
+trap 'rm -f "$entry_tmp"' EXIT
+cat > "$entry_tmp" <<DESKTOP
 [Desktop Entry]
 Name=chonkstep
 Comment=A NeXTSTEP-style window manager with chiseled chrome
 Exec=${repo}/scripts/xsession.sh
 Type=Application
 DESKTOP
+sudo install -Dm644 "$entry_tmp" /usr/share/xsessions/chonkstep.desktop
 
 # The Wayland twin. Display managers read this directory for sessions
 # they must start on a bare VT (no Xorg first), which is exactly what
@@ -144,8 +181,7 @@ DESKTOP
 # chonkstep-portals.conf (installed below) to pick the ScreenCast
 # backend. The session script also exports it, for TTY logins that
 # never see this file; both spell it the same.
-sudo install -d /usr/share/wayland-sessions
-sudo tee /usr/share/wayland-sessions/chonkstep.desktop >/dev/null <<DESKTOP
+cat > "$entry_tmp" <<DESKTOP
 [Desktop Entry]
 Name=chonkstep (Wayland)
 Comment=The chonkstep desktop as a native Wayland compositor
@@ -153,6 +189,7 @@ Exec=${repo}/scripts/wayland-session.sh
 DesktopNames=chonkstep
 Type=Application
 DESKTOP
+sudo install -Dm644 "$entry_tmp" /usr/share/wayland-sessions/chonkstep.desktop
 
 # The portal backend map: ScreenCast/Screenshot to the wlr backend
 # (screen sharing — see docs/screen-sharing.md), the rest to GTK. The
@@ -189,11 +226,17 @@ case ":${PATH}:" in
     *":${bin}:"*) bin_on_path="yes" ;;
 esac
 
-# Stock Omarchy boots straight into Hyprland via autologin - there is
-# no login-manager session picker for either session entry to appear
-# in, so point those users at the TTY routes; on a machine that does
-# run a display manager, the session-list path is the smoother one for
-# both.
+# How this machine logs in decides which instructions are honest.
+# Three shapes in the wild:
+#   - a display manager with a session picker: log out, pick chonkstep;
+#   - Omarchy 4: SDDM is enabled, but its stock greeter theme
+#     (Theme Current=omarchy) draws NO session picker - it takes a
+#     password and hardwires the login to the Hyprland (uwsm) session
+#     (see its Main.qml: sessionIndex searches the list for "uwsm").
+#     chonkstep can be perfectly registered and never appear; those
+#     users need the autologin route or a theme with a picker;
+#   - no display manager at all (Omarchy <= 3 and minimal Arch): the
+#     TTY routes.
 has_dm=""
 for dm in sddm gdm lightdm greetd lemurs ly; do
     if systemctl is-enabled "$dm" >/dev/null 2>&1; then
@@ -201,6 +244,12 @@ for dm in sddm gdm lightdm greetd lemurs ly; do
         break
     fi
 done
+# SDDM's config: conf.d sorted then sddm.conf, last assignment wins -
+# close enough for a diagnostic.
+sddm_theme=""
+if [ "$has_dm" = "sddm" ]; then
+    sddm_theme="$(cat /etc/sddm.conf.d/*.conf /etc/sddm.conf 2>/dev/null | sed -n 's/^Current=//p' | tail -n 1)"
+fi
 
 # Whether this machine has logind, which decides whether the Wayland
 # session needs any seat setup at all. libseat prefers logind and falls
@@ -224,7 +273,24 @@ chonkstep-wayland (the Smithay compositor) - and both are real login
 sessions, running the same desktop.
 
 DONE
-if [ -n "$has_dm" ]; then
+if [ "$sddm_theme" = "omarchy" ]; then
+    cat <<DONE
+  - This is Omarchy: SDDM is the login manager, but its stock greeter
+    theme has no session picker - it logs every interactive login into
+    Hyprland, so chonkstep will NOT appear at the login screen even
+    though both entries are installed. Two ways in:
+      1. Make chonkstep the boot session (autologin):
+           printf '[Autologin]\nUser=$USER\nSession=chonkstep.desktop\n' |
+             sudo tee /etc/sddm.conf.d/20-chonkstep-session.conf
+         Session=chonkstep.desktop resolves to the Wayland session
+         (SDDM searches wayland-sessions first). Remove the file to go
+         back to Hyprland.
+      2. Switch the greeter to a theme with a session menu (SDDM ships
+         elarun, maldives, maya): edit /etc/sddm.conf.d/10-theme.conf
+         and set Current= to one of them, then pick "chonkstep
+         (Wayland)" from its session menu at login.
+DONE
+elif [ -n "$has_dm" ]; then
     cat <<DONE
   - X11 session: log out and pick "chonkstep" in ${has_dm}'s session list.
   - Wayland session: log out and pick "chonkstep (Wayland)" in the same
@@ -233,9 +299,9 @@ if [ -n "$has_dm" ]; then
 DONE
 else
     cat <<DONE
-  - X11 session: no display manager is enabled (stock Omarchy boots
-    straight into Hyprland), so switch to a TTY (Ctrl+Alt+F3), log in,
-    and run:
+  - X11 session: no display manager is enabled (Omarchy 3 and earlier
+    boot straight into Hyprland), so switch to a TTY (Ctrl+Alt+F3),
+    log in, and run:
       startx ${repo}/scripts/xsession.sh
   - Wayland session: from that same TTY, instead run:
       exec ${repo}/scripts/wayland-session.sh
@@ -283,5 +349,9 @@ cat <<DONE
   - Update later with: scripts/update.sh
   - Both session entries and both links point at this checkout
     (${repo}); moving the checkout means re-running scripts/install.sh.
+  - Not showing up at the login screen? scripts/verify-install.sh
+    checks everything mechanical (entries, permissions, Exec targets)
+    and diagnoses the environment; the "Log in" section of
+    docs/quickstart.md covers the rest.
 
 DONE

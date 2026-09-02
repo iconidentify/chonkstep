@@ -23,7 +23,11 @@ BIN="$(cd "$(dirname "$0")/.." && pwd)/target/release/chonkstep"
 if [ ! -x "$BIN" ]; then
     BIN="$(command -v chonkstep || echo "$BIN")"
 fi
-LOG_DIR="$HOME/.local/state/chonkstep"
+# The same XDG_STATE_HOME-first resolution as the Wayland twin and the
+# binaries themselves (chonk_shell::startup::state_dir), so the logs
+# land in the directory the docs point at even when the variable is
+# set.
+LOG_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/chonkstep"
 mkdir -p "$LOG_DIR"
 
 # A session/message D-Bus bus isn't optional plumbing for most modern

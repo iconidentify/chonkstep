@@ -13,9 +13,18 @@ the path from "installed" to "mine".
 ```sh
 git clone https://github.com/iconidentify/chonkstep.git
 cd chonkstep/packaging/arch
-makepkg -si -p PKGBUILD-git   # the branch head
-# the plain PKGBUILD is the release shape: it pins the v0.2.0 tag
-# once that is published
+makepkg -si   # builds the branch head (pkgname chonkstep-git)
+# PKGBUILD-release next to it is the pinned-tag shape; it becomes
+# buildable once the v0.2.0 release tag is published
+```
+
+If you installed the checkout route first (below), remove its two
+session entries before installing the package, or pacman will refuse
+with "exists in filesystem":
+
+```sh
+sudo rm /usr/share/xsessions/chonkstep.desktop \
+        /usr/share/wayland-sessions/chonkstep.desktop
 ```
 
 **From a checkout** (Omarchy or any Arch; nothing is copied out of the
@@ -38,14 +47,47 @@ checkout they are also always `scripts/chonk-get` and
 
 ## 2. Log in
 
-- **With a display manager** (sddm, gdm, lightdm, ...): log out and
-  pick `chonkstep` or `chonkstep (Wayland)` from the session list.
-- **Without one** (stock Omarchy boots straight into Hyprland): switch
-  to a TTY (Ctrl+Alt+F3), log in, and run
+Both installs register two real login sessions:
+`/usr/share/xsessions/chonkstep.desktop` and
+`/usr/share/wayland-sessions/chonkstep.desktop`. How you reach them
+depends on how your machine logs in.
+
+- **A display manager with a session picker** (sddm with a stock
+  theme, gdm, lightdm, ...): log out and pick `chonkstep` or
+  `chonkstep (Wayland)` from the session menu.
+- **Omarchy 4** ships SDDM enabled, but its greeter theme has **no
+  session picker**: it takes a password and logs every interactive
+  login straight into Hyprland (its `Main.qml` hardwires the
+  `Hyprland (uwsm)` session). chonkstep can be perfectly installed
+  and still never appear at the login screen — that is the theme, not
+  a broken install. Two ways in:
+
+  1. **Make chonkstep the boot session** (autologin):
+
+     ```sh
+     printf '[Autologin]\nUser=%s\nSession=chonkstep.desktop\n' "$USER" |
+       sudo tee /etc/sddm.conf.d/20-chonkstep-session.conf
+     ```
+
+     `Session=chonkstep.desktop` resolves to the Wayland session —
+     SDDM searches `wayland-sessions` before `xsessions` for the
+     name. Delete the file to hand the boot back to Hyprland.
+  2. **Switch the greeter theme** to one with a session menu (SDDM
+     ships `elarun`, `maldives`, `maya`): set `Current=` in
+     `/etc/sddm.conf.d/10-theme.conf`, then pick chonkstep from the
+     menu at login. `omarchy-refresh-sddm` restores Omarchy's theme
+     later.
+- **No display manager at all** (Omarchy 3 and earlier, minimal
+  Arch): switch to a TTY (Ctrl+Alt+F3), log in, and run
   `exec /usr/lib/chonkstep/wayland-session.sh` (package) or
   `exec scripts/wayland-session.sh` (checkout). No `startx` for the
   Wayland one — the compositor *is* the display server. The X11
-  session is `startx /usr/lib/chonkstep/xsession.sh`.
+  session is `startx /usr/lib/chonkstep/xsession.sh` (or
+  `scripts/start-session.sh` in a checkout, which wraps exactly
+  that). To get a graphical picker instead, install one and enable
+  it: `sudo pacman -S sddm && sudo systemctl enable sddm.service`
+  (disable any other display manager first — only one can own the
+  boot).
 - **Just looking?** Run `chonkstep-wayland` from a terminal inside
   your current desktop: it notices there is already a desktop here and
   opens a window that is its screen — same chrome, dock, menus,
@@ -54,6 +96,46 @@ checkout they are also always `scripts/chonk-get` and
 Seat access needs no setup on any systemd machine — logind hands the
 session its devices. Without logind, enable `seatd` and join the
 `seat` group.
+
+### chonkstep is not in the session list
+
+Run the verifier first — it mechanically checks everything below and
+diagnoses the machine:
+
+```sh
+scripts/verify-install.sh              # checkout
+/usr/lib/chonkstep/verify-install.sh   # package
+```
+
+What it checks, and the fixes, in the order they bite:
+
+- **Are the entries actually there?** `ls
+  /usr/share/xsessions/chonkstep.desktop
+  /usr/share/wayland-sessions/chonkstep.desktop`. Missing means the
+  install never ran to completion — re-run it.
+- **Is the greeter allowed to read them?** The greeter runs as its own
+  user (`sddm`), so the entries must be world-readable (`0644`). An
+  install piped through `tee` under a hardened `umask` used to leave
+  them `0600`; `sudo chmod 644` both files. (Current `install.sh`
+  writes them with an explicit mode.)
+- **Do the Exec targets exist and execute?** A moved or deleted
+  checkout leaves entries pointing at nothing: SDDM still lists them
+  (it does not check `Exec` before launch), the session dies
+  instantly, and you bounce back to the greeter. Re-run
+  `scripts/install.sh` from the checkout's new home.
+- **Is the Wayland list hidden entirely?** SDDM only lists
+  `wayland-sessions` when `/dev/dri` exists. A VM without a virtual
+  GPU has no `/dev/dri` — the X11 session still shows.
+- **Is SDDM even looking in the right place?** `SessionDir=` in
+  `/etc/sddm.conf` or `/etc/sddm.conf.d/` overrides the default
+  `/usr/share/xsessions` + `/usr/share/wayland-sessions` search path.
+- **Is another display manager winning the boot?** `systemctl status
+  display-manager` names the one systemd actually starts.
+- **Is the greeter a theme with no session menu?** Omarchy's is — see
+  above. A `desktop-file-validate` complaint about `DesktopNames` is
+  *not* your problem: that key is a session-file convention the
+  validator doesn't know, and Hyprland's own entry fails the same
+  way.
 
 ## 3. The keybinding card
 

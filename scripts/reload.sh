@@ -34,8 +34,12 @@
 #
 # Usage: edit the config, then run this. (Or bind the `reload` action to
 # a key and never leave the keyboard — see docs/config.example.toml.)
+#
+# XDG_STATE_HOME first, because that is where the running session
+# looks: chonk_shell::startup::state_dir honors it before falling back
+# to ~/.local/state, and a marker dropped anywhere else is never seen.
 set -eu
-STATE_DIR="$HOME/.local/state/chonkstep"
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/chonkstep"
 mkdir -p "$STATE_DIR"
 touch "$STATE_DIR/reload"
 echo "reload requested — chonkstep should apply the config within ~100ms"

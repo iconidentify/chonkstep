@@ -7,8 +7,12 @@
 # automatically by the fresh instance.
 #
 # Usage: rebuild first (`cargo build --release`), then run this.
+#
+# XDG_STATE_HOME first, because that is where the running session
+# looks: chonk_shell::startup::state_dir honors it before falling back
+# to ~/.local/state, and a marker dropped anywhere else is never seen.
 set -eu
-STATE_DIR="$HOME/.local/state/chonkstep"
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/chonkstep"
 mkdir -p "$STATE_DIR"
 touch "$STATE_DIR/restart"
 echo "restart requested — chonkstep should re-exec within ~100ms"

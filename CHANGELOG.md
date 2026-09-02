@@ -238,6 +238,61 @@ emulating Hyprland.
   rendered at 4x on a scale-2 session while both were in play. Qt has
   no XSETTINGS client, so `QT_SCALE_FACTOR` stays.
 
+### Showing up at the login screen
+
+An audit of "chonkstep is not showing up in SDDM" from both install
+routes, against what SDDM 0.21 actually does (its greeter lists a
+session only after opening the entry as the `sddm` user, stats an
+absolute `TryExec` when one is present, and hides the whole Wayland
+list without `/dev/dri`; its stock session wrappers launch `Exec`
+through an unquoted `exec $@`).
+
+- `scripts/verify-install.sh` (also installed to
+  `/usr/lib/chonkstep/`): proves an install is one a login manager
+  will offer - entries present, world-readable, parseable, `Exec` /
+  `TryExec` targets executable, `desktop-file-validate` clean - and
+  diagnoses the machine: pickerless greeter themes, missing
+  `/dev/dri`, `SessionDir=` overrides, which route owns the entries.
+  `--root` points it at a staged tree, e.g. a makepkg `$pkgdir`.
+- The Arch packaging's default recipe now builds: plain `makepkg -si`
+  in `packaging/arch/` used to pick the release PKGBUILD, whose
+  source is the `v0.2.0` tag archive - and upstream has no tags yet,
+  so the download 404ed before anything was built. The branch-head
+  recipe is now the default `PKGBUILD`; the pinned-tag twin waits as
+  `PKGBUILD-release`.
+- The `-git` package ships the portal backend map: `package()` had
+  dropped `chonkstep-portals.conf`, so a `-git` install exported
+  `XDG_CURRENT_DESKTOP=chonkstep` with no portal config behind it and
+  screen sharing silently failed. Both recipes also gained `bash` in
+  `depends` and `TryExec=` in their session entries - safe for a
+  package (pacman guarantees the target under `/usr`), and left out
+  of the checkout installer's entries on purpose: the greeter's
+  `TryExec` stat runs as the `sddm` user, and a default 0700 home
+  (login.defs `HOME_MODE`) would fail it and hide the session.
+- `scripts/install.sh` writes the session entries with an explicit
+  mode instead of piping through `sudo tee`: tee honors the caller's
+  umask, and a hardened umask (077) left entries 0600 - unreadable by
+  the greeter user, which renders as a blank row or no row at all.
+  It also refuses a checkout path containing whitespace, quotes or
+  backslashes, with the reason spelled out (no `.desktop` escaping
+  survives SDDM's `exec $@` wrapper), and its closing instructions
+  now tell the truth on Omarchy 4: SDDM is enabled there, but the
+  stock greeter theme draws no session picker and hardwires
+  interactive logins to Hyprland (uwsm), so the honest routes -
+  `[Autologin] Session=chonkstep.desktop`, or a theme with a session
+  menu - are printed instead of "pick chonkstep in the session list".
+- The marker scripts reach the session they signal:
+  `scripts/restart.sh` and `scripts/reload.sh` hardcoded
+  `~/.local/state`, while the binaries resolve `XDG_STATE_HOME`
+  first - with that variable set, a restart or reload request was
+  dropped in a directory the running session never polls. Both now
+  resolve the same way the binaries do, as do the log paths in
+  `scripts/xsession.sh` and `scripts/start-session.sh`.
+- `docs/quickstart.md`'s login section walks the three machines a
+  user actually has (a DM with a picker, Omarchy 4's pickerless SDDM,
+  no DM at all) and ends in a troubleshooting list ordered by how the
+  failures bite, with the verifier as its first line.
+
 ## [0.2.0] - 2026-08-30
 
 The release where the desktop stopped asking you to restart it, and

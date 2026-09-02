@@ -8,7 +8,7 @@
 # client once the server is ready.
 set -u
 
-LOG_DIR="$HOME/.local/state/chonkstep"
+LOG_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/chonkstep"
 mkdir -p "$LOG_DIR"
 
 exec startx "$(cd "$(dirname "$0")" && pwd)/xsession.sh" -- vt1 >> "$LOG_DIR/startx.log" 2>&1
