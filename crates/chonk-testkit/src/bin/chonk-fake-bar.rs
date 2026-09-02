@@ -13,8 +13,11 @@
 //! the bar exits. Omarchy's real bar is a Quickshell process a test
 //! cannot reasonably boot; this one speaks the same four requests.
 //!
-//! Usage: `chonk-fake-bar <height> [right]` — `right` anchors the bar
-//! as a right-edge panel `height` pixels wide instead.
+//! Usage: `chonk-fake-bar <height> [top|right] [namespace]` — `right`
+//! anchors the bar as a right-edge panel `height` pixels wide instead;
+//! the namespace defaults to `chonk-fake-bar`, and is how a test stands
+//! in for Omarchy's bar (`omarchy-bar`), whose visibility the desk
+//! decides by that name.
 //!
 //! `chonk-fake-bar background <namespace>` is the other shape a layer
 //! client takes: a surface on the `background` layer anchored to all
@@ -129,8 +132,9 @@ fn frame_file(width: u32, height: u32) -> std::fs::File {
 
 /// The three shapes the client takes, from its arguments.
 enum Shape {
-    /// A top bar `thickness` tall, or a right panel `thickness` wide.
-    Edge { thickness: u32, right_panel: bool },
+    /// A top bar `thickness` tall, or a right panel `thickness` wide,
+    /// under the given namespace.
+    Edge { thickness: u32, right_panel: bool, namespace: String },
     /// A wallpaper: the whole output, on the background layer, under
     /// the given namespace.
     Background { namespace: String },
@@ -138,13 +142,19 @@ enum Shape {
 
 fn parse_args() -> Shape {
     let mut args = std::env::args().skip(1);
-    let usage = "usage: chonk-fake-bar <height> [right] | chonk-fake-bar background <namespace>";
+    let usage = "usage: chonk-fake-bar <height> [top|right] [namespace] | chonk-fake-bar background <namespace>";
     match args.next().as_deref() {
         Some("background") => Shape::Background { namespace: args.next().unwrap_or_else(|| fatal(usage)) },
-        Some(thickness) => Shape::Edge {
-            thickness: thickness.parse().unwrap_or_else(|_| fatal(usage)),
-            right_panel: args.next().as_deref() == Some("right"),
-        },
+        Some(thickness) => {
+            let thickness = thickness.parse().unwrap_or_else(|_| fatal(usage));
+            let right_panel = match args.next().as_deref() {
+                None | Some("top") => false,
+                Some("right") => true,
+                Some(_) => fatal(usage),
+            };
+            let namespace = args.next().unwrap_or_else(|| "chonk-fake-bar".to_string());
+            Shape::Edge { thickness, right_panel, namespace }
+        }
         None => fatal(usage),
     }
 }
@@ -165,17 +175,17 @@ fn main() {
 
     let surface = compositor.create_surface(&qh, ());
     let (layer_kind, namespace) = match &shape {
-        Shape::Edge { .. } => (zwlr_layer_shell_v1::Layer::Top, "chonk-fake-bar".to_string()),
+        Shape::Edge { namespace, .. } => (zwlr_layer_shell_v1::Layer::Top, namespace.clone()),
         Shape::Background { namespace } => (zwlr_layer_shell_v1::Layer::Background, namespace.clone()),
     };
     let layer = layer_shell.get_layer_surface(&surface, None, layer_kind, namespace, &qh, ());
     match shape {
-        Shape::Edge { thickness, right_panel: true } => {
+        Shape::Edge { thickness, right_panel: true, .. } => {
             layer.set_anchor(Anchor::Right | Anchor::Top | Anchor::Bottom);
             layer.set_size(thickness, 0);
             layer.set_exclusive_zone(thickness as i32);
         }
-        Shape::Edge { thickness, right_panel: false } => {
+        Shape::Edge { thickness, right_panel: false, .. } => {
             layer.set_anchor(Anchor::Top | Anchor::Left | Anchor::Right);
             layer.set_size(0, thickness);
             layer.set_exclusive_zone(thickness as i32);

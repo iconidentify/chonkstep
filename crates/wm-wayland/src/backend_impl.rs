@@ -258,6 +258,21 @@ impl Backend for WaylandBackend {
         self.damage = true;
     }
 
+    fn set_layer_surface_hidden(&mut self, namespace: &str, hidden: bool) {
+        let changed = if hidden {
+            self.hidden_layer_namespaces.insert(namespace.to_string())
+        } else {
+            self.hidden_layer_namespaces.remove(namespace)
+        };
+        if changed {
+            // The next dispatch pass re-arranges the layers (so a bar's
+            // strip is reserved or released) and renders; nothing else
+            // to poke.
+            self.damage = true;
+            tracing::info!(namespace, hidden, "layer surface visibility changed");
+        }
+    }
+
     fn paint_root_image(&mut self, buffer: &DecorationBuffer) {
         // An empty buffer keeps the previous background rather than
         // installing a zero-sized image nothing can render.

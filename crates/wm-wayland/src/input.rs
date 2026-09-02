@@ -1667,7 +1667,7 @@ fn layer_band_hit(
     position: LogicalPoint<f64, Logical>,
 ) -> Option<Hit> {
     for record in backend.layers.iter().rev() {
-        if record.layer != band || !record.presented() {
+        if record.layer != band || !backend.layer_presented(record) {
             continue;
         }
         let root = record.surface.wl_surface();

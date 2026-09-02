@@ -603,6 +603,14 @@ pub struct WaylandBackend {
     /// either of them cannot see would be drawn but unclickable or the
     /// reverse. See `layers.rs`.
     pub(crate) layers: Vec<crate::layers::LayerRecord>,
+    /// Layer-surface namespaces the shell has asked to keep off the
+    /// screen (`Backend::set_layer_surface_hidden`) — Omarchy's bar
+    /// while the user has it switched off in the root menu. A hidden
+    /// surface is treated exactly as `layers::declined` treats
+    /// Omarchy's background: configured, committed, answered, and
+    /// neither drawn, hit-tested, nor allowed to reserve an edge. See
+    /// [`WaylandBackend::layer_presented`].
+    pub(crate) hidden_layer_namespaces: std::collections::BTreeSet<String>,
     /// Whether an ext-session-lock holds the session. THE flag the
     /// renderer and the input path branch on: while set, only
     /// [`WaylandBackend::lock_surfaces`] render and receive input —
@@ -700,6 +708,7 @@ impl WaylandBackend {
             pointer: None,
             frame_cursors: HashMap::new(),
             layers: Vec::new(),
+            hidden_layer_namespaces: std::collections::BTreeSet::new(),
             locked: false,
             lock_surfaces: Vec::new(),
             ewmh: crate::xewmh::EwmhLedger::default(),
@@ -723,6 +732,22 @@ impl WaylandBackend {
     /// Marks the scene dirty. Every mutating verb and every handler
     /// that changes anything visible must call this (or set the field)
     /// or its change waits for the next unrelated damage to appear.
+    /// Whether a layer surface is one the user can see and click right
+    /// now: mapped, still alive, and neither declined by policy
+    /// ([`crate::layers::declined`]) nor hidden by the shell
+    /// ([`Self::hidden_layer_namespaces`]). The renderer, the hit walk,
+    /// the exclusive-zone pass and the keyboard-focus pass all ask this
+    /// and nothing else, so a surface can never be drawn where it cannot
+    /// be clicked, or reserve a strip it does not occupy. Frame
+    /// callbacks deliberately do *not* ask it — a hidden surface's
+    /// client still gets its frames, or it would stall waiting for one.
+    pub(crate) fn layer_presented(&self, record: &crate::layers::LayerRecord) -> bool {
+        record.mapped
+            && record.surface.alive()
+            && !crate::layers::declined(record.layer, &record.namespace)
+            && !self.hidden_layer_namespaces.contains(&record.namespace)
+    }
+
     pub(crate) fn mark_damaged(&mut self) {
         self.damage = true;
     }

@@ -71,6 +71,17 @@ pub trait Backend {
     fn paint_root_color(&mut self, rgb: (u8, u8, u8));
     fn paint_root_image(&mut self, buffer: &DecorationBuffer);
 
+    /// Keeps every layer-shell surface declaring `namespace` off the
+    /// screen (`hidden`), or lets it back on. A hidden surface stays a
+    /// healthy client — configured, committed, given its frames — and
+    /// is simply not drawn, not hit-tested, and not allowed to reserve
+    /// an edge, so the space it claimed goes back to the windows and
+    /// the Dock. The shell uses it for Omarchy's bar, which the user
+    /// switches on and off from the root menu. Layer surfaces are a
+    /// Wayland notion, so the default does nothing; X11 has no such
+    /// surface to hide.
+    fn set_layer_surface_hidden(&mut self, _namespace: &str, _hidden: bool) {}
+
     /// Drains one queued click on a shell surface: `(surface, surface-
     /// local position, button, pressed)`. Backends queue these from
     /// their input machinery; the binary's event loop drains and feeds

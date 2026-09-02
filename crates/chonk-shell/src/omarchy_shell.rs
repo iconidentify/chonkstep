@@ -40,6 +40,24 @@
 //! gives — exits rather than relaunching. The new process therefore has
 //! no shell unless it starts one. There is no X11 case to double.
 //!
+//! The launcher is named by its resolved path under the Omarchy root
+//! rather than by bare name, because the desk has just checked that
+//! very file exists — and because a test can then stand up an Omarchy
+//! root of its own, whose launcher is whatever the test needs.
+//!
+//! # The bar is the user's to show
+//!
+//! Omarchy's bar is the shell's most visible surface, and this desk
+//! already has a Dock and a Clip in the corners it wants. So the bar is
+//! *off by default* and switched on from the root menu's `Omarchy Bar`
+//! row; the choice is remembered across sessions in chonkstep's own
+//! state ([`BarVisibility`]), never in Omarchy's — `omarchy-toggle-bar`
+//! writes a flag Omarchy's Hyprland session reads too, and a preference
+//! about this desk should not follow the user into that one. Hiding is
+//! the compositor's doing (`Backend::set_layer_surface_hidden` on the
+//! bar's namespace): the bar keeps running, keeps its clock, and takes
+//! no space, no clicks and no pixels until it is asked for.
+//!
 //! The one part of the shell this desktop declines is its Background
 //! plugin: a full-screen surface on the layer-shell `background` layer
 //! that would paint Omarchy's wallpaper over chonkstep's own and take
@@ -111,10 +129,10 @@ impl ShellPaths {
 /// but [`Verdict::Launch`] is a reason not to, in the order the reasons
 /// are checked; the shell logs the reason once at boot so a user asking
 /// "why is there no bar" finds the answer in the session log.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Verdict {
-    /// Run the launcher.
-    Launch,
+    /// Run the launcher found at these paths.
+    Launch(ShellPaths),
     /// `omarchy_shell = false`: the user turned it off.
     Disabled,
     /// Not a Wayland session. Quickshell is a Wayland client, and the
@@ -128,42 +146,147 @@ pub enum Verdict {
 /// The rule, pure so the tests can reach every branch: the shell is
 /// launched when the key is on, the stack is Wayland, and the files are
 /// there — in that order, so the log names the *first* reason.
-pub fn verdict(enabled: bool, stack: DisplayStack, installed: bool) -> Verdict {
+pub fn verdict(enabled: bool, stack: DisplayStack, installed: Option<ShellPaths>) -> Verdict {
     if !enabled {
         Verdict::Disabled
     } else if stack != DisplayStack::Wayland {
         Verdict::NotWayland
-    } else if !installed {
-        Verdict::NotInstalled
     } else {
-        Verdict::Launch
+        match installed {
+            Some(paths) => Verdict::Launch(paths),
+            None => Verdict::NotInstalled,
+        }
     }
 }
 
 /// [`verdict`] for this process: the config key against the running
 /// stack and the installed files.
 pub fn decide(enabled: bool) -> Verdict {
-    verdict(enabled, crate::spawn::current_display_stack(), ShellPaths::discover().is_some())
+    verdict(enabled, crate::spawn::current_display_stack(), ShellPaths::discover())
+}
+
+/// The command line the shell hands `bash -lc`: the launcher by its
+/// resolved path, single-quoted so a path with a space or a `$` in it
+/// survives the shell (a quote inside the path — legal, if unlikely —
+/// is spelled the one way POSIX allows, `'\''`).
+pub fn launch_command(paths: &ShellPaths) -> String {
+    let path = paths.launcher.to_string_lossy();
+    format!("'{}'", path.replace('\'', "'\\''"))
+}
+
+/// The namespace Omarchy's shell gives its bar (`plugins/bar/Bar.qml`).
+pub const BAR_NAMESPACE: &str = "omarchy-bar";
+
+/// Whether this desk shows Omarchy's bar. The user's choice, made in
+/// the root menu and remembered in chonkstep's own state file; hidden
+/// until they make one — see the module docs for why the default and
+/// the storage are both this desk's rather than Omarchy's.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BarVisibility {
+    Hidden,
+    Shown,
+}
+
+impl BarVisibility {
+    pub const DEFAULT: Self = Self::Hidden;
+
+    /// The persisted choice, or the default when there is none or it
+    /// is unreadable.
+    pub fn load() -> Self {
+        Self::from_state(bar_state_path().and_then(|path| std::fs::read_to_string(path).ok()).as_deref())
+    }
+
+    /// The pure half of [`Self::load`]: the state file's text.
+    pub fn from_state(text: Option<&str>) -> Self {
+        match text.map(str::trim) {
+            Some("shown") => Self::Shown,
+            Some("hidden") => Self::Hidden,
+            _ => Self::DEFAULT,
+        }
+    }
+
+    /// The word the state file holds for this choice.
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::Hidden => "hidden",
+            Self::Shown => "shown",
+        }
+    }
+
+    pub fn toggled(self) -> Self {
+        match self {
+            Self::Hidden => Self::Shown,
+            Self::Shown => Self::Hidden,
+        }
+    }
+
+    pub fn is_hidden(self) -> bool {
+        self == Self::Hidden
+    }
+
+    pub fn persist(self) -> std::io::Result<()> {
+        let Some(path) = bar_state_path() else {
+            return Ok(());
+        };
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(path, self.id())
+    }
+}
+
+/// `$XDG_STATE_HOME/chonkstep/omarchy-bar`, beside `wallpaper` and
+/// `theme`.
+fn bar_state_path() -> Option<PathBuf> {
+    if let Some(root) = std::env::var_os("XDG_STATE_HOME") {
+        return Some(PathBuf::from(root).join("chonkstep/omarchy-bar"));
+    }
+    std::env::var_os("HOME").map(PathBuf::from).map(|home| home.join(".local/state/chonkstep/omarchy-bar"))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    fn installed() -> Option<ShellPaths> {
+        Some(ShellPaths::under(Path::new("/usr/share/omarchy")))
+    }
+
     #[test]
     fn the_shell_launches_only_when_every_condition_holds() {
-        assert_eq!(verdict(true, DisplayStack::Wayland, true), Verdict::Launch);
-        assert_eq!(verdict(false, DisplayStack::Wayland, true), Verdict::Disabled);
-        assert_eq!(verdict(true, DisplayStack::X11, true), Verdict::NotWayland);
-        assert_eq!(verdict(true, DisplayStack::Wayland, false), Verdict::NotInstalled);
+        assert_eq!(verdict(true, DisplayStack::Wayland, installed()), Verdict::Launch(installed().unwrap()));
+        assert_eq!(verdict(false, DisplayStack::Wayland, installed()), Verdict::Disabled);
+        assert_eq!(verdict(true, DisplayStack::X11, installed()), Verdict::NotWayland);
+        assert_eq!(verdict(true, DisplayStack::Wayland, None), Verdict::NotInstalled);
     }
 
     #[test]
     fn the_first_reason_is_the_one_reported() {
         // Off *and* on X11 *and* not installed: the user's own choice
         // is the reason worth logging, not the machine's limitations.
-        assert_eq!(verdict(false, DisplayStack::X11, false), Verdict::Disabled);
-        assert_eq!(verdict(true, DisplayStack::X11, false), Verdict::NotWayland);
+        assert_eq!(verdict(false, DisplayStack::X11, None), Verdict::Disabled);
+        assert_eq!(verdict(true, DisplayStack::X11, None), Verdict::NotWayland);
+    }
+
+    #[test]
+    fn the_launch_command_is_the_launchers_path_quoted_for_bash() {
+        assert_eq!(launch_command(&installed().unwrap()), "'/usr/share/omarchy/bin/omarchy-launch-shell'");
+        let odd = ShellPaths::under(Path::new("/tmp/it's here/omarchy"));
+        assert_eq!(launch_command(&odd), "'/tmp/it'\\''s here/omarchy/bin/omarchy-launch-shell'");
+    }
+
+    #[test]
+    fn the_bar_is_hidden_until_the_user_says_otherwise() {
+        assert_eq!(BarVisibility::from_state(None), BarVisibility::Hidden);
+        assert_eq!(BarVisibility::from_state(Some("shown\n")), BarVisibility::Shown);
+        assert_eq!(BarVisibility::from_state(Some("hidden")), BarVisibility::Hidden);
+        // Garbage in the file is no choice at all.
+        assert_eq!(BarVisibility::from_state(Some("maybe")), BarVisibility::DEFAULT);
+        for choice in [BarVisibility::Hidden, BarVisibility::Shown] {
+            assert_eq!(BarVisibility::from_state(Some(choice.id())), choice, "round-trips");
+            assert_eq!(choice.toggled().toggled(), choice);
+            assert_ne!(choice.toggled(), choice);
+        }
     }
 
     #[test]

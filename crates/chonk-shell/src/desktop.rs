@@ -37,6 +37,7 @@ use crate::dockapp::panel::{self as instrument, InstrumentPanel};
 use crate::dockapp::tile::{reserved_filter, RemoteTile, ServiceContext, StopReason, TileState};
 use crate::dockapp::{self, DockHost, Farewell};
 use crate::overview::{OverviewHit, OverviewItem, OverviewPanel};
+use crate::omarchy_shell::BarVisibility;
 use crate::wallpaper::Wallpaper;
 use crate::widgets::{
     run_detached, ClockWidget, DockInput, DockItem, DockWidget, Effect, NetTrafficWidget, PowerWidget, SamplerRegistry, SoundWidget, SupervisedWidget,
@@ -222,6 +223,9 @@ pub enum RootMenuAction {
     /// flat index is the identity both sides agree on.
     LaunchApp(usize),
     SetWallpaper(Wallpaper),
+    /// The `Omarchy Bar` row: show the hosted shell's bar if it is
+    /// hidden, hide it if it is shown (`Desktop::toggle_omarchy_bar`).
+    ToggleOmarchyBar,
     /// The stable id of a built-in theme (`wm_theme::default_theme::
     /// CHOICES`) — handled by the shell orchestration (`crate::shell`),
     /// which persists it and reports `ShellOutcome::Restart` so the
@@ -353,6 +357,10 @@ pub enum DockItemMenuAction {
 const ACTION_LAUNCH_TERMINAL: u32 = 1;
 const ACTION_LAUNCH_ABOUT: u32 = 2;
 const ACTION_EXIT: u32 = 3;
+/// The `Omarchy Bar` toggle — present only while this session hosts
+/// Omarchy's shell (`Desktop::set_omarchy_bar`), marked when the bar
+/// is shown.
+const ACTION_OMARCHY_BAR: u32 = 4;
 const ACTION_WALLPAPER_BASE: u32 = 100;
 /// The Wallpaper submenu's Omarchy row — `Wallpaper::Omarchy`, which
 /// is not in `Wallpaper::ALL` — in the slot right after the built-ins,
@@ -466,7 +474,17 @@ pub struct RootMenuBounds {
 /// condition snapshot; empty means no submenu (Omarchy not installed,
 /// the key turned off, or nothing visible yet). The two are independent:
 /// the palette lives in Omarchy's state, the menu in its share dir.
-fn root_menu_items(selected_wallpaper: Wallpaper, selected_theme_id: &str, apps: &[crate::apps::AppEntry], follow_omarchy: Option<&str>, omarchy: Vec<MenuItem>) -> Vec<MenuItem> {
+///
+/// `omarchy_bar` is the hosted shell's bar visibility, `None` when this
+/// session hosts no shell and so has no bar to offer.
+fn root_menu_items(
+    selected_wallpaper: Wallpaper,
+    selected_theme_id: &str,
+    apps: &[crate::apps::AppEntry],
+    follow_omarchy: Option<&str>,
+    omarchy: Vec<MenuItem>,
+    omarchy_bar: Option<BarVisibility>,
+) -> Vec<MenuItem> {
     let wallpaper_items = Wallpaper::ALL
         .into_iter()
         .enumerate()
@@ -498,6 +516,14 @@ fn root_menu_items(selected_wallpaper: Wallpaper, selected_theme_id: &str, apps:
         MenuItem::Submenu { label: "Theme".to_string(), items: theme_items },
         MenuItem::Submenu { label: "Wallpaper".to_string(), items: wallpaper_items },
     ];
+    // The bar toggle sits with chonkstep's own look-and-feel rows —
+    // it is a choice about *this* desk's furniture, like the wallpaper
+    // — and is marked the way the Theme and Wallpaper rows mark the
+    // current choice, so a glance at the menu says whether the bar is
+    // on.
+    if let Some(bar) = omarchy_bar {
+        items.push(MenuItem::Action { label: bullet_label(!bar.is_hidden(), "Omarchy Bar"), action: ACTION_OMARCHY_BAR });
+    }
     // After chonkstep's own choices and before Exit: it is a guest's
     // menu inside the host's, so it sits below the host's rows and
     // above the one row that ends the session.
@@ -518,6 +544,7 @@ fn resolve_action(action: u32, bounds: RootMenuBounds) -> Option<RootMenuAction>
         ACTION_LAUNCH_TERMINAL => Some(RootMenuAction::LaunchTerminal),
         ACTION_LAUNCH_ABOUT => Some(RootMenuAction::LaunchAbout),
         ACTION_EXIT => Some(RootMenuAction::Exit),
+        ACTION_OMARCHY_BAR => Some(RootMenuAction::ToggleOmarchyBar),
         // Subtraction-then-compare rather than a `Range::contains`:
         // `ACTION_OMARCHY_BASE + omarchy_count as u32` could in
         // principle overflow u32, and the subtraction form has no such
@@ -1295,6 +1322,11 @@ pub struct Desktop<B: Backend> {
     /// because it is a menu-building input like `apps`, and the tick
     /// that keeps its conditions fresh runs beside `tick_menu`.
     omarchy: Option<crate::omarchy_menu::OmarchyMenu>,
+    /// Whether the hosted Omarchy shell's bar is shown — `None` when
+    /// this session hosts no shell, and so offers no `Omarchy Bar` row.
+    /// Applied to the backend as a hidden layer namespace
+    /// (`Backend::set_layer_surface_hidden`) whenever it is set.
+    omarchy_bar: Option<BarVisibility>,
     logo: Pixmap,
 }
 
@@ -1430,6 +1462,7 @@ impl<B: Backend> Desktop<B> {
             theme_id,
             apps,
             omarchy: None,
+            omarchy_bar: None,
             logo,
         };
         desktop.repaint_wallpaper(backend);
@@ -2484,8 +2517,37 @@ impl<B: Backend> Desktop<B> {
         // gesture that can afford two file reads.
         let follow_omarchy = wm_theme::omarchy::is_available()
             .then(|| wm_theme::omarchy::display_name(&wm_theme::omarchy::current_theme_name().map(|n| wm_theme::omarchy::title_case(&n)).unwrap_or_default()));
-        let items = root_menu_items(self.wallpaper, &self.theme_id, &self.apps, follow_omarchy.as_deref(), omarchy_items);
+        let items = root_menu_items(self.wallpaper, &self.theme_id, &self.apps, follow_omarchy.as_deref(), omarchy_items, self.omarchy_bar);
         self.menu.open_root(backend, theme, &mut self.fonts.system(), items, root_bounds, at, bounds);
+    }
+
+    /// Tells the desktop whether this session hosts Omarchy's shell
+    /// (`Some`, with the user's remembered choice about its bar) or not
+    /// (`None`: no `Omarchy Bar` row). The choice reaches the compositor
+    /// at once, before the bar's surface can arrive, and the row reads
+    /// it back. Called once at startup — the hosting decision is
+    /// boot-time — but harmless to call again.
+    pub fn set_omarchy_bar(&mut self, backend: &mut B, bar: Option<BarVisibility>) {
+        self.omarchy_bar = bar;
+        if let Some(bar) = bar {
+            backend.set_layer_surface_hidden(crate::omarchy_shell::BAR_NAMESPACE, bar.is_hidden());
+        }
+    }
+
+    /// The `Omarchy Bar` row fired: flip the choice, remember it, and
+    /// show or hide the bar's surface. A no-op when no shell is hosted
+    /// (the row cannot have been there; a stale id resolves to this and
+    /// must do nothing).
+    pub fn toggle_omarchy_bar(&mut self, backend: &mut B) {
+        let Some(bar) = self.omarchy_bar else {
+            return;
+        };
+        let next = bar.toggled();
+        if let Err(e) = next.persist() {
+            tracing::warn!(?e, "failed to persist the Omarchy bar choice");
+        }
+        tracing::info!(bar = next.id(), "Omarchy bar toggled");
+        self.set_omarchy_bar(backend, Some(next));
     }
 
     /// The stored application index `RootMenuAction::LaunchApp`'s
@@ -3392,10 +3454,32 @@ mod tests {
     }
 
     fn wallpaper_submenu(selected: Wallpaper, omarchy: Option<&str>) -> Vec<MenuItem> {
-        let items = root_menu_items(selected, "nextstep-classic", &[], omarchy, Vec::new());
+        let items = root_menu_items(selected, "nextstep-classic", &[], omarchy, Vec::new(), None);
         let submenu = items.iter().find(|item| item.label() == "Wallpaper").expect("wallpaper submenu");
         let MenuItem::Submenu { items, .. } = submenu else { panic!("expected submenu") };
         items.clone()
+    }
+
+    /// The bar row is offered exactly when a shell is hosted, sits
+    /// among chonkstep's own rows (before the Omarchy submenu and
+    /// Exit), is marked when the bar is shown, and resolves to the
+    /// toggle.
+    #[test]
+    fn the_omarchy_bar_row_comes_with_a_hosted_shell_and_marks_a_shown_bar() {
+        let omarchy = vec![MenuItem::Action { label: "Row".to_string(), action: ACTION_OMARCHY_BASE }];
+        let labels = |bar: Option<BarVisibility>| -> Vec<String> {
+            root_menu_items(Wallpaper::DEFAULT, "nextstep-classic", &[], None, omarchy.clone(), bar)
+                .iter()
+                .map(|item| item.label().to_string())
+                .collect()
+        };
+        assert!(labels(None).iter().all(|label| !label.contains("Omarchy Bar")), "no shell, no row");
+        let hidden = labels(Some(BarVisibility::Hidden));
+        let row = hidden.iter().position(|label| label == "  Omarchy Bar").expect("an unmarked row for a hidden bar");
+        assert_eq!(hidden[row + 1], "Omarchy", "chonkstep's row, then the guest's submenu");
+        assert_eq!(hidden.last().unwrap(), "Exit");
+        assert!(labels(Some(BarVisibility::Shown)).contains(&"\u{2022} Omarchy Bar".to_string()), "marked when shown");
+        assert!(matches!(resolve_action(ACTION_OMARCHY_BAR, RootMenuBounds::default()), Some(RootMenuAction::ToggleOmarchyBar)));
     }
 
     #[test]
@@ -3426,7 +3510,7 @@ mod tests {
     }
 
     fn theme_submenu(selected: &str, omarchy: Option<&str>) -> Vec<MenuItem> {
-        let items = root_menu_items(Wallpaper::TealBlueprint, selected, &[], omarchy, Vec::new());
+        let items = root_menu_items(Wallpaper::TealBlueprint, selected, &[], omarchy, Vec::new(), None);
         let submenu = items.iter().find(|item| item.label() == "Theme").expect("theme submenu");
         let MenuItem::Submenu { items, .. } = submenu else { panic!("expected submenu") };
         items.clone()
@@ -3492,7 +3576,7 @@ mod tests {
     /// menu build so these tests exercise the real assembly path, not
     /// `applications_items` in isolation.
     fn applications_submenu(apps: &[AppEntry]) -> Vec<MenuItem> {
-        let items = root_menu_items(Wallpaper::TealBlueprint, "nextstep-classic", apps, None, Vec::new());
+        let items = root_menu_items(Wallpaper::TealBlueprint, "nextstep-classic", apps, None, Vec::new(), None);
         let submenu = items.iter().find(|item| item.label() == "Applications").expect("Applications submenu");
         let MenuItem::Submenu { items, .. } = submenu else { panic!("expected a submenu") };
         items.clone()
@@ -3596,12 +3680,12 @@ mod tests {
 
     #[test]
     fn the_omarchy_submenu_sits_between_wallpaper_and_exit_only_when_it_has_rows() {
-        let without = root_menu_items(Wallpaper::TealBlueprint, "nextstep-classic", &[], None, Vec::new());
+        let without = root_menu_items(Wallpaper::TealBlueprint, "nextstep-classic", &[], None, Vec::new(), None);
         let labels: Vec<&str> = without.iter().map(MenuItem::label).collect();
         assert_eq!(labels, ["Terminal", "Applications", "Theme", "Wallpaper", "Exit"]);
 
         let rows = vec![MenuItem::Action { label: "About".to_string(), action: ACTION_OMARCHY_BASE }];
-        let with = root_menu_items(Wallpaper::TealBlueprint, "nextstep-classic", &[], None, rows);
+        let with = root_menu_items(Wallpaper::TealBlueprint, "nextstep-classic", &[], None, rows, None);
         let labels: Vec<&str> = with.iter().map(MenuItem::label).collect();
         assert_eq!(labels, ["Terminal", "Applications", "Theme", "Wallpaper", "Omarchy", "Exit"]);
     }
@@ -3786,7 +3870,7 @@ mod tests {
         }
 
         fn open_root(&mut self) {
-            let items = root_menu_items(Wallpaper::TealBlueprint, "nextstep-classic", &[], None, Vec::new());
+            let items = root_menu_items(Wallpaper::TealBlueprint, "nextstep-classic", &[], None, Vec::new(), None);
             self.menu.open_root(&mut self.host, &self.theme, &mut self.font_system, items, RootMenuBounds::default(), Point::new(0, 0), Size::new(1600, 1000));
         }
 
@@ -3848,7 +3932,7 @@ mod tests {
         assert_eq!(f.host.open.len(), 1);
 
         let window = f.only_open_window();
-        let items = root_menu_items(Wallpaper::TealBlueprint, "nextstep-classic", &[], None, Vec::new());
+        let items = root_menu_items(Wallpaper::TealBlueprint, "nextstep-classic", &[], None, Vec::new(), None);
         let row = f.row_point(ROOT_MENU_TITLE, &items, 0);
         assert!(matches!(
             f.click(window, row),

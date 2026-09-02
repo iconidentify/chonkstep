@@ -130,23 +130,14 @@ pub(crate) struct LayerRecord {
     pub namespace: String,
 }
 
-impl LayerRecord {
-    /// Whether the surface is one the user can see and click right now:
-    /// mapped, still alive, and not [`declined`]. The renderer and the
-    /// hit walk both ask this and nothing else, so a surface can never
-    /// be drawn where it cannot be clicked or the reverse. Frame
-    /// callbacks deliberately do *not* ask it — a declined surface's
-    /// client still gets its frames, or it would stall waiting for one.
-    pub fn presented(&self) -> bool {
-        self.mapped && self.surface.alive() && !declined(self.layer, &self.namespace)
-    }
-}
-
 /// The namespace Omarchy's shell gives its Background plugin's surface
 /// (`shell/plugins/background/Background.qml`).
 pub(crate) const OMARCHY_BACKGROUND_NAMESPACE: &str = "omarchy-background";
 
-/// Whether a layer surface is one this desktop hosts but does not show.
+/// Whether a layer surface is one this desktop hosts but never shows,
+/// as a matter of policy rather than of the user's choosing (the
+/// user's choices live in `WaylandBackend::hidden_layer_namespaces`,
+/// and `WaylandBackend::layer_presented` combines the two).
 ///
 /// Exactly one: Omarchy's Background plugin. Chonkstep hosts Omarchy's
 /// shell for its bar, panels, notifications and pickers
@@ -467,7 +458,10 @@ fn arrange(comp: &mut Compositor) {
                 let margins = physical_margins(cached.margin, factor);
                 let usable = shrink(full, insets);
                 plan_surface(backend, index, cached, usable, factor);
-                if backend.layers[index].mapped {
+                // A hidden or declined surface occupies no strip: the
+                // Dock and the windows take the space back the moment
+                // the user switches Omarchy's bar off.
+                if backend.layer_presented(&backend.layers[index]) {
                     reserve(
                         &mut insets,
                         edge,
@@ -588,10 +582,9 @@ fn sync_keyboard(comp: &mut Compositor) {
                 .iter()
                 .rev()
                 .find(|record| {
-                    record.mapped
+                    backend.layer_presented(record)
                         && record.layer == band
                         && record.interactivity == KeyboardInteractivity::Exclusive
-                        && record.surface.alive()
                 })
                 .map(|record| (record.id, record.surface.wl_surface().clone()))
         };
@@ -734,6 +727,7 @@ pub(crate) fn handle_commit(comp: &mut Compositor, root: &WlSurface) -> bool {
     let record = &mut backend.layers[index];
     if record.mapped != has_buffer {
         record.mapped = has_buffer;
+        tracing::info!(id = record.id.0, namespace = %record.namespace, mapped = has_buffer, "layer surface map state changed");
         backend.mark_damaged();
     }
     // Whether this was the blocked initial commit or a later one, the

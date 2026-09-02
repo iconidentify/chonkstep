@@ -180,9 +180,11 @@
 # On by default, and inert without Omarchy's shell installed or on the
 # X11 stack, where Quickshell cannot run. Its Background plugin is the
 # one part chonkstep declines: the desktop keeps its own wallpaper and
-# root menu, so a right-click on the desk is still chonkstep's. Set it
-# to false to run a plain chonkstep desk on an Omarchy machine, or to
-# start the shell yourself from `autostart`.
+# root menu, so a right-click on the desk is still chonkstep's. Its bar
+# starts hidden and is switched on from the root menu's "Omarchy Bar"
+# row (the choice is remembered, in chonkstep's state, not Omarchy's).
+# Set this to false to run a plain chonkstep desk on an Omarchy
+# machine, or to start the shell yourself from `autostart`.
 #omarchy_shell = true
 
 # The modifier for the move/resize drag gesture: hold it and drag with

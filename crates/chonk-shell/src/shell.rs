@@ -532,14 +532,15 @@ fn run_omarchy_command(command: &str, theme: &Theme) {
 /// path an Omarchy menu action takes: `bash -lc omarchy-launch-shell`,
 /// detached, with the desktop's launch environment. Every outcome is
 /// logged once, so the session log answers "why is there no bar".
-fn host_omarchy_shell(state: &SessionState) {
+fn host_omarchy_shell(verdict: &crate::omarchy_shell::Verdict, scale: f32) {
     use crate::omarchy_shell::{self, Verdict};
-    match omarchy_shell::decide(state.omarchy_shell) {
-        Verdict::Launch => {
-            let (program, args) = crate::omarchy_menu::action_argv(omarchy_shell::LAUNCHER);
-            match spawn::spawn_detached_with_env(program, &args, &launch_env(state.scale), &[]) {
-                Some(pid) => tracing::info!(pid, "hosting Omarchy's shell"),
-                None => tracing::warn!("Omarchy's shell launcher failed to start"),
+    match verdict {
+        Verdict::Launch(paths) => {
+            let command = omarchy_shell::launch_command(paths);
+            let (program, args) = crate::omarchy_menu::action_argv(&command);
+            match spawn::spawn_detached_with_env(program, &args, &launch_env(scale), &[]) {
+                Some(pid) => tracing::info!(pid, launcher = %paths.launcher.display(), "hosting Omarchy's shell"),
+                None => tracing::warn!(launcher = %paths.launcher.display(), "Omarchy's shell launcher failed to start"),
             }
         }
         Verdict::Disabled => tracing::info!("not hosting Omarchy's shell: omarchy_shell = false"),
@@ -662,6 +663,7 @@ fn root_action_outcome(action: &RootMenuAction) -> ShellOutcome {
         | RootMenuAction::LaunchAbout
         | RootMenuAction::LaunchApp(_)
         | RootMenuAction::OmarchyCommand { .. }
+        | RootMenuAction::ToggleOmarchyBar
         | RootMenuAction::SetWallpaper(_) => ShellOutcome::Continue,
     }
 }
@@ -926,7 +928,13 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         // it. Not behind the gate above: a Wayland re-exec kills the
         // shell with the display it was drawing on, so a continuation
         // has none until it starts one — see `crate::omarchy_shell`.
-        host_omarchy_shell(state);
+        // The bar's visibility is settled *before* the launch, so the
+        // compositor already knows to keep the bar off the screen when
+        // its surface arrives a few hundred milliseconds later.
+        let verdict = crate::omarchy_shell::decide(state.omarchy_shell);
+        let hosted = matches!(verdict, crate::omarchy_shell::Verdict::Launch(_));
+        desktop.set_omarchy_bar(backend, hosted.then(crate::omarchy_shell::BarVisibility::load));
+        host_omarchy_shell(&verdict, state.scale);
 
         // Publish the resolved appearance so the contract's reader half
         // (`$XDG_STATE_HOME/chonkstep/appearance`) is present from the
@@ -1958,6 +1966,9 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
             }
             RootMenuAction::SetWallpaper(wallpaper) => {
                 self.desktop.set_wallpaper(wm.backend_mut(), &self.theme, wallpaper);
+            }
+            RootMenuAction::ToggleOmarchyBar => {
+                self.desktop.toggle_omarchy_bar(wm.backend_mut());
             }
             RootMenuAction::SetTheme(id) if id == wm_theme::omarchy::ID => {
                 // Following is a choice, not a theme: persist the choice

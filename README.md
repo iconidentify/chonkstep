@@ -251,7 +251,13 @@ on this desk exactly as on Hyprland. The one part of the shell chonkstep
 declines is its Background plugin, a full-screen surface that would
 paint over chonkstep's wallpaper and take the right-click the root menu
 lives on; the compositor keeps that surface healthy and simply never
-shows it, so the desk stays chonkstep's. `omarchy_shell = false` in the
+shows it, so the desk stays chonkstep's. The shell's bar is the other
+surface this desk decides about: it starts *hidden* - the Dock and the
+Clip already hold the corners - and the root menu's `Omarchy Bar` row
+switches it on (and off again), remembering the choice in chonkstep's
+own state rather than Omarchy's, so it never follows you into a
+Hyprland session. While hidden the bar keeps running and simply takes
+no space, no clicks and no pixels. `omarchy_shell = false` in the
 config leaves the shell to you.
 
 Omarchy's bar, and anything else that wants to draw the desktop's
