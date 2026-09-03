@@ -12,33 +12,31 @@
 #     omarchy-osd -i logout -m "Logging out" -d 5000
 #     omarchy-hyprland-window-close-all      # hyprctl clients + dispatch close
 #
-# Both ends of it are Hyprland-shaped, and the failure is quiet rather
-# than loud, which is worse:
+# Only the first of those is a problem here, and it is not a compositor
+# problem at all. `uwsm stop` looks for an active `wayland-wm@*.service`
+# on the session bus. chonkstep is started by the display manager (or
+# from a TTY) through its own session script, not by uwsm, so there is
+# no such unit: uwsm prints "Compositor is not running." and **exits
+# 0**. Verified on this machine with `uwsm stop -n`. The Logout row
+# therefore shows an OSD reading "Logging out" for five seconds and
+# leaves you logged in.
 #
-#   - `uwsm stop` looks for an active `wayland-wm@*.service` on the
-#     session bus. chonkstep is started by the display manager (or from
-#     a TTY) through its own session script, not by uwsm, so there is no
-#     such unit: uwsm prints "Compositor is not running." and **exits
-#     0**. Verified on this machine with `uwsm stop -n`.
-#   - `omarchy-hyprland-window-close-all` pipes `hyprctl clients -j`
-#     into `hyprctl dispatch`, so it closes nothing.
+# The window-closing statement needs no help. `omarchy-hyprland-window-
+# close-all` is `hyprctl clients -j` piped into `hyprctl dispatch`, and
+# chonkstep answers Hyprland's IPC (docs/hyprland-ipc.md), so it closes
+# the windows here exactly as it does on Hyprland. An earlier version
+# of this shim closed them over wlr-foreign-toplevel with
+# `chonk-toplevel`; that is no longer needed and has been removed, so
+# this file now has no chonkstep-specific dependency of any kind.
 #
-# The net effect on chonkstep is that the Logout row shows an OSD
-# reading "Logging out" for five seconds and then does nothing at all:
-# no windows closed, no session ended.
-#
-# This shim keeps the shape and replaces both ends:
-#
-#   - Windows close over `wlr-foreign-toplevel-management`, through
-#     `chonk-toplevel close-all` (crates/chonk-toplevel). That is a
-#     polite close — the same request a taskbar's close button sends —
-#     so an application with unsaved work still gets to ask.
-#   - The session ends through logind: `loginctl terminate-session`.
-#     That is the portable "log this session out" primitive, it is what
-#     ends a session started by any display manager or from a TTY, and
-#     it needs nothing from the compositor. `uwsm stop` is kept as a
-#     fast path for a session that really is uwsm-managed, so this file
-#     is also correct on Hyprland.
+# What replaces `uwsm stop` is logind: `loginctl terminate-session`.
+# That is the portable "log this session out" primitive, it is what
+# ends a session started by any display manager or from a TTY, and it
+# needs nothing from the compositor. `uwsm stop` is kept as a fast path
+# for a session that really is uwsm-managed, so this file is also
+# correct on Hyprland. It is byte-for-byte the same logic as the
+# upstream patch in ../upstream/ — the only reason it exists separately
+# is that /usr/bin/omarchy-system-logout is not ours to edit.
 #
 # One honest wart, stated here rather than papered over, because it is
 # visible the *next* time you log in: chonkstep's session script
@@ -61,72 +59,50 @@
 #
 # Activation and uninstall: docs/omarchy-integration.md.
 
-set -u
-
-# The client that can close windows without hyprctl, resolved the same
-# way the launch-or-focus shim resolves it.
-find_client() {
-  local candidate here
-  if [[ -n ${CHONK_TOPLEVEL:-} ]]; then
-    printf '%s\n' "$CHONK_TOPLEVEL"
-    return 0
-  fi
-  if candidate=$(command -v chonk-toplevel 2>/dev/null); then
-    printf '%s\n' "$candidate"
-    return 0
-  fi
-  here=$(cd -- "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")/../../.." && pwd) || return 1
-  for candidate in "$here/target/release/chonk-toplevel" "$here/target/debug/chonk-toplevel"; do
-    [[ -x $candidate ]] && printf '%s\n' "$candidate" && return 0
-  done
-  return 1
-}
-
-# Ending the session, in the order of least to most brutal. Each tier
-# is tried only when the one before it does not apply.
+# Ending the session, least to most brutal. Each tier is tried only
+# when the one before it does not apply.
 end_session() {
   # A genuinely uwsm-managed session: its own stop is the graceful one,
-  # and it is what Omarchy means. Asked with `-n` (dry run) first so
-  # this branch is taken only when there is really a unit to stop.
+  # and it is what Omarchy means. Asked with `-n` (uwsm's dry run)
+  # first, so this branch is taken only when there is really a unit to
+  # stop — `Will stop compositor <unit>.` when there is, `Compositor is
+  # not running.` when there is not.
   if command -v uwsm >/dev/null 2>&1 &&
     uwsm stop -n 2>&1 | grep -qE "Will stop compositor|Found running compositor"; then
     uwsm stop
-    return 0
+    return
   fi
 
   # The portable route. logind terminates every process in the
   # session's scope, which is precisely "log out" for a session started
   # by a display manager or from a TTY.
   if command -v loginctl >/dev/null 2>&1; then
-    local session=${XDG_SESSION_ID:-}
-    if [[ -z $session ]]; then
-      session=$(loginctl show-user "$UID" --property=Display --value 2>/dev/null)
+    if [[ -n ${XDG_SESSION_ID:-} ]]; then
+      loginctl terminate-session "$XDG_SESSION_ID"
+    else
+      loginctl terminate-user "$UID"
     fi
-    if [[ -n $session ]]; then
-      loginctl terminate-session "$session"
-      return 0
-    fi
-    # No session id to name: terminate whatever this user has.
-    loginctl terminate-user "$UID"
-    return 0
+    return
   fi
 
-  echo "omarchy-system-logout: no uwsm session and no loginctl; cannot end the session" >&2
-  return 1
+  logger -t omarchy-system-logout "No uwsm session and no loginctl: cannot end the session."
 }
 
-# Omarchy's own ordering: announce, then close, then go. The OSD is the
-# shell's, and works here unchanged.
-omarchy-osd -i logout -m "Logging out" -d 5000 2>/dev/null || true
+# The two-second delay is Omarchy's: the OSD and the window closes below
+# need to happen before the session goes. A backgrounded function rather
+# than the original `nohup bash -c "sleep 2 && uwsm stop"`, so the
+# fallback chain above lives in one place instead of being re-quoted
+# into a string. `trap '' HUP` and the redirection are what nohup did.
+end_session_later() {
+  trap '' HUP
+  sleep 2
+  end_session
+}
+end_session_later >/dev/null 2>&1 &
+disown 2>/dev/null || true
 
-if CLIENT=$(find_client); then
-  closed=$("$CLIENT" close-all 2>/dev/null) || closed=""
-  [[ -n $closed ]] && echo "omarchy-system-logout: asked $closed window(s) to close"
-else
-  echo "omarchy-system-logout: chonk-toplevel not found; logging out without closing windows first" >&2
-fi
+omarchy-osd -i logout -m "Logging out" -d 5000
 
-# Allow apps like Chrome to shut down correctly.
-sleep 1
-
-end_session
+# Now close all windows
+omarchy-hyprland-window-close-all
+sleep 1 # Allow apps like Chrome to shutdown correctly

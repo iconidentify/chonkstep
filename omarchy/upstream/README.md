@@ -1,126 +1,105 @@
 # Keep these working on Hyprland, and make them work elsewhere too
 
-Five of Omarchy's scripts ask Hyprland a question and treat "no answer"
-as an answer. On Hyprland they are correct and nothing here changes
-what they do. On any other Wayland compositor the question comes back
-empty and the script takes a wrong branch — quietly, in four of the
-five cases, which is what makes them worth a patch rather than a
-README note.
+Two of Omarchy's scripts ask a question and treat "no answer" as an
+answer. On Hyprland they are correct and nothing here changes what
+they do. Off Hyprland — or, for the first of the two, in *any* session
+uwsm did not start, Hyprland included — the question comes back empty
+and the script takes a wrong branch, silently.
 
-Each change is the same shape: **Hyprland's existing path stays first,
+Each change is the same shape: **Omarchy's existing path stays first,
 unchanged, and a fallback is added behind it.** A Hyprland session
-never reaches the new code. Nothing is removed, no dependency is added
-that Omarchy does not already have (`socat` and `jq` are both already
-required by scripts in `bin/`), and each patch is self-contained.
+under uwsm never reaches the new code. Nothing is removed, no
+dependency is added that Omarchy does not already have, and each patch
+is self-contained.
 
 The patches are in `patches/`, numbered; `bin/` holds the same scripts
 whole, if reading them that way is easier. They apply with `-p1` from
-the repository root and each one reproduces the file in `bin/` exactly.
+the repository root and each one reproduces the file in `bin/`
+exactly.
+
+## This was five patches, and most of it was our bug
+
+An earlier draft of this set had five patches in it. Three of them —
+for `omarchy-launch-shell`, `omarchy-launch-or-focus` and
+`omarchy-restart-shell` — argued that those scripts break wherever
+`hyprctl` is not answering, and offered fallbacks that do not need it.
+
+They are gone, because that diagnosis was ours to fix and we fixed it.
+We maintain a Wayland compositor that hosts Omarchy's shell and
+tooling, and the reason `hyprctl` was not answering was that we were
+not answering it. We now serve Hyprland's IPC — the same socket, the
+same wire format, the same JSON — so the real `hyprctl` binary works
+against our session and **all three of those scripts are correct
+unmodified**. Asking you to carry a fallback for a question we had
+simply declined to answer was the wrong request.
+
+What is left is the part that is not about the compositor at all, and
+the part that no compositor IPC can reach.
 
 ## What each one fixes
 
-### 0001 — `omarchy-launch-shell`: liveness by socket, not by hyprctl
+### 0001 — `omarchy-system-logout`: log out of a session uwsm did not start
 
-The supervisor's job is to relaunch Quickshell after a death Qt turned
-into a bare `_exit()`. Before relaunching it checks whether the
-compositor is still there, so a session that is tearing down does not
-burn the attempt budget:
-
-```sh
-compositor_alive() { for attempt in 1 2 3; do hyprctl -j monitors >/dev/null 2>&1 && return 0; ...; done; return 1; }
-```
-
-Off Hyprland `hyprctl` exits 1 on every attempt, so `compositor_alive`
-reports the session as going and the supervisor exits 0 instead of
-relaunching. A Quickshell that dies stays dead, and with it the bar,
-the OSD, the notification daemon and the lock screen, until the next
-login.
-
-The patch adds a second tier inside the same retry loop: a Wayland
-compositor is alive exactly when its socket is present and accepts a
-connection. That is true on Hyprland too — this is arguably the more
-honest test of the two, since it asks about the display server the
-shell is actually connected to rather than about a side channel — but
-it is placed second so Hyprland's behaviour is bit-for-bit unchanged.
-
-`socat` does the connect; without it the file test alone still stands,
-which is strictly better than asking a compositor that is not running.
-
-### 0002 — `omarchy-launch-or-focus`: a portable window activator
-
-This is the script behind every "open it, or raise it if it is already
-open" keybinding, and everything routed through
-`omarchy-launch-or-focus-tui` and `-webapp`. It finds the window with
-`hyprctl clients -j | jq … | head -n1`. Off Hyprland the address is
-always empty, so it always takes the launch branch: every such
-keybinding opens a second copy of an app that is already on screen.
-
-The portable mechanism is `zwlr_foreign_toplevel_management_v1` — the
-protocol that exists so an outside process can enumerate windows and
-activate one, implemented by every wlroots-descended compositor and by
-Hyprland. What varies is the *client*: there is no single CLI for it
-that ships everywhere. So the patch takes one as configuration rather
-than hardcoding a package:
-
-```sh
-"$OMARCHY_TOPLEVEL_HELPER" activate <window-pattern>
-# exit 0 activated · 1 nothing matched · anything else: could not look
-```
-
-and falls back to `wlrctl` when no helper is configured, since that is
-the most widely packaged implementation. A session with neither behaves
-exactly as it does today.
-
-Two notes for review:
-
-- The `hyprctl` branch is now gated on `HYPRLAND_INSTANCE_SIGNATURE`
-  and moved into a function, which also means the pipeline is not run
-  at all where it cannot work. The jq expression is unchanged.
-- **We have exercised the helper tier and not the `wlrctl` tier.** Our
-  helper is a small `wlr-foreign-toplevel` client whose pattern
-  matching is a deliberate reimplementation of this script's
-  `test("\bPATTERN\b"; "i")` over app id and title, so it selects the
-  same window; it is in the chonkstep repository as
-  `crates/chonk-toplevel` if it is useful as a reference. The `wlrctl`
-  invocations are written from its documented interface and should be
-  checked by someone who has it installed, or dropped in favour of the
-  helper hook alone.
-
-### 0003 — `omarchy-system-logout`: log out of any session
+This one is not a Hyprland issue; it is a uwsm issue, and it applies to
+a Hyprland session too.
 
 `uwsm stop` looks for an active `wayland-wm@*.service` on the session
-bus. A session that uwsm did not start has none, and uwsm's answer is
-not an error — it prints "Compositor is not running." and **exits 0**.
-Combined with `omarchy-hyprland-window-close-all` closing nothing, the
-Logout row shows its OSD for five seconds and then does nothing at all.
+bus. A session uwsm did not start has none — a display manager that
+`Exec`s a session script, or a bare `exec` from a TTY — and uwsm's
+answer is not an error. From `uwsm/main.py`, `stop_wm()`:
+
+```python
+if not units:
+    print_ok("Compositor is not running.")
+    return False
+```
+
+`print_ok`, and the process exits 0. So the Logout row shows its OSD
+for five seconds, closes the windows, and then leaves the user logged
+in.
 
 The patch keeps `uwsm stop` as the first tier, now asked with `-n`
-first so it is used only when there is really a unit to stop, and falls
-back to `loginctl terminate-session "$XDG_SESSION_ID"` — the portable
-"log this session out", and what ends a session started by a display
-manager or from a TTY. Window closing gains the same
-`OMARCHY_TOPLEVEL_HELPER` seam 0002 introduces (`close-all`), which is
-the protocol's polite close, not a kill.
+first — uwsm's own dry run, which reports `Will stop compositor
+<unit>.` when there is a unit and `Compositor is not running.` when
+there is not, so it answers exactly this question without ending
+anything. When there is no unit it falls back to
+`loginctl terminate-session "$XDG_SESSION_ID"`, which is the portable
+"log this session out" and what ends a session started by a display
+manager or from a TTY.
 
-The `nohup bash -c "sleep 2 && uwsm stop"` line becomes a
-backgrounded function, so the fallback chain lives in one place instead
-of being re-quoted into a string.
+The `nohup bash -c "sleep 2 && uwsm stop"` line becomes a backgrounded
+function, so the fallback chain lives in one place instead of being
+re-quoted into a string. `trap '' HUP` and the redirection are what
+`nohup` was doing.
 
-### 0004 — `omarchy-toggle-nightlight`: a fallback chain
+Window closing is **not** touched: `omarchy-hyprland-window-close-all`
+stays exactly as it is. An earlier draft added a fallback for it; it
+turned out not to be needed, because that script is `hyprctl clients`
+piped into `hyprctl dispatch` and any compositor answering Hyprland's
+IPC answers it.
 
-`hyprsunset` is unreachable off Hyprland twice over: it is driven
-through Hyprland's IPC socket, *and* it tints through
-`hyprland-ctm-control-v1`. It says so itself:
+### 0002 — `omarchy-toggle-nightlight`: a fallback chain
+
+`hyprsunset` is unreachable off Hyprland twice over, and the second
+reason is the one that matters: it is driven through Hyprland's IPC
+socket, *and* it tints through `hyprland-ctm-control-v1`. Serving
+Hyprland's IPC does not help here at all — `hyprctl hyprsunset ...`
+never touches that socket, it is routed to hyprsunset's own — and the
+protocol is a separate thing again. Run on a compositor that does not
+implement it, hyprsunset says so itself:
 
 ```
+┣ Setting the temperature to 4000K
+┣ Found new output with ID 16, binding
 ✖ Compositor doesn't support hyprland-ctm-control-v1, are you running on Hyprland?
 ```
 
-Today the row spends two seconds in ten retries and then asks the shell
-to refresh an indicator that never changed.
+Today the row spends two seconds in ten retries and then asks the
+shell to refresh an indicator that never changed.
 
 The patch adds `wlsunset` and `gammastep`, which do the same job over
-`wlr-gamma-control-unstable-v1`. Two details a reviewer should look at:
+`wlr-gamma-control-unstable-v1`. Two details a reviewer should look
+at:
 
 - Neither has a query interface, so the chosen temperature is recorded
   in `$XDG_RUNTIME_DIR/omarchy-nightlight-temperature` and that file is
@@ -130,76 +109,87 @@ The patch adds `wlsunset` and `gammastep`, which do the same job over
   and turning nightlight *off* stops it rather than running a daemon
   that does nothing.
 
-We cannot test this one: the compositor we work on implements neither
-gamma protocol, so `wlsunset` has nothing to bind either. The patch is
-offered because it is the right shape and because it makes the row
-correct on sway, river, Wayfire and labwc — please treat the
-wlsunset/gammastep arguments as needing a second pair of eyes.
-
-### 0005 — `omarchy-restart-shell`: respawn without dispatch
-
-The companion to 0001, and the more urgent of the two, because it is
-destructive rather than merely inert. The script kills Quickshell with
-`quickshell kill` (portable, works), then respawns it with
-
-```sh
-hyprctl dispatch 'hl.dsp.exec_cmd("omarchy-launch-shell")'
-```
-
-Off Hyprland that fails, nothing is spawned, the readiness loop times
-out, and the script reports "Omarchy shell did not become ready after
-restart" and exits 1 — having already killed the shell. The one manual
-recovery for a dead shell is also what leaves you without one.
-
-The patch keeps the dispatch first and falls back to `setsid` from an
-environment reconstructed out of the systemd user manager. That is the
-portable stand-in for the comment's own reasoning ("spawn from Hyprland
-so the shell inherits the canonical session environment"): a Wayland
-session publishes `WAYLAND_DISPLAY` and `XDG_CURRENT_DESKTOP` there so
-that D-Bus-activated services — the desktop portals in particular — can
-find the display, which makes it the one place outside the compositor
-that knows the canonical values.
-
-It also gives the lock check a fallback. `omarchy-hyprland-session-locked`
-exits 2 ("undetermined") where there is no `hyprctl`; on that answer the
-patch asks the lock service itself (`omarchy-shell lock status`), which
-is the question actually being asked. What that cannot see is the
-recovery case your own comment describes — a session still held by the
-compositor's failsafe behind a locker that has already died — because
-that state is only visible in `solitaryBlockedBy`. Rather than guess,
-the patch exposes it as `--relock`, and leaves the Hyprland path
-detecting it automatically exactly as it does now.
+The one line the patch changes for a reason unrelated to any of this
+is quoting `$OFF_TEMP` on the right-hand side of a `[[ … == … ]]`,
+which shellcheck flags today (SC2053) and which is inside a hunk the
+patch already touches. Say the word and it comes back out.
 
 ## Testing
 
-On the compositor we work on, and with the caveats named per patch:
+We could not test this patch when it was first written: our compositor
+could not tint a screen by any means, so `wlsunset` had nothing to bind
+either and the patch was offered on shape alone. It now implements
+`wlr-gamma-control-unstable-v1`, so this is tested rather than
+reasoned about.
 
-- **0001** — verified A/B against a scratch `$OMARCHY_PATH` (a copy of
-  `shell/`, so `quickshell -n` does not collide with the live
-  instance), each supervisor under `dbus-run-session`, killing the
-  Quickshell it started by recorded PID. Unpatched: the supervisor
-  exits. Patched: `Omarchy shell exited with status 137; relaunching.`
-  in the journal under the `omarchy-shell` tag, and a new Quickshell
-  PID.
-- **0002** — verified with a helper: Omarchy's script run twice leaves
-  two windows; the patched logic run twice leaves one, activated.
-- **0003** — the `uwsm stop` no-op is verified (`uwsm stop -n` reports
-  "Compositor is not running." and exits 0). The `loginctl` tier is
-  reasoned about, not tested; we did not want to end the session we
-  were working in.
-- **0004** — not tested; see above.
-- **0005** — the failure is verified by reading the script and by
-  confirming `hyprctl dispatch` fails here. The respawn is the same
-  `setsid` mechanism 0001's supervisor is launched by in the A/B above.
+**0002 — `omarchy-toggle-nightlight`**, on a live session on real
+hardware:
 
-`shellcheck` is clean on all five.
+```
+$ omarchy-toggle-nightlight --status            # unpatched
+{"enabled":false,"temperature":null}
+$ time omarchy-toggle-nightlight                # unpatched
+┏ hyprsunset v0.4.0 ━━╸
+┣ Loaded 1 profiles
+real    0m2.133s
+$ omarchy-toggle-nightlight --status            # unpatched, after
+{"enabled":false,"temperature":null}
+$ pgrep -a hyprsunset
+                                                # nothing; it exited
+```
+
+Two seconds, no tint, status unchanged — and running `hyprsunset`
+directly gives the `hyprland-ctm-control-v1` error quoted above.
+
+```
+$ bin/omarchy-toggle-nightlight                 # patched
+$ pgrep -a wlsunset
+1609230 wlsunset -T 4001 -t 4000
+$ bin/omarchy-toggle-nightlight --status
+{"enabled":true,"temperature":4000}
+```
+
+and the compositor's own log confirms the ramp reached the hardware,
+and that toggling off put it back:
+
+```
+gamma ramp programmed  size=256 white_r=65535 white_g=53969 white_b=39177
+gamma control released; restoring the original ramp
+gamma ramp programmed  size=256 white_r=65535 white_g=65535 white_b=65535
+```
+
+`gammastep` is not installed here, so the `gammastep` arm is written
+from its documented interface and has not been run — a second pair of
+eyes on `-O` would be welcome. The `wlsunset` arm is the one above.
+
+**0001 — `omarchy-system-logout`.** The no-op is verified directly:
+
+```
+$ uwsm stop -n
+Stopping compositor...
+Compositor is not running.
+$ echo $?
+0
+```
+
+on a live graphical session that logind knows about
+(`loginctl list-sessions` → session `1`, `seat0`, `tty1`). The
+`loginctl` tier is verified as far as branch selection — `end_session`
+lifted verbatim with the two session-ending calls replaced by an echo
+picks `loginctl terminate-session 1`, the right session — but the call
+itself is reasoned about, not run: we did not want to end the session
+we were working in.
+
+`shellcheck` is clean on both patched scripts, and both apply cleanly
+to `quattro` at `f99d33a` and reproduce `bin/` byte for byte.
 
 ## Where these came from
 
 We maintain a non-tiling Wayland compositor that hosts Omarchy's shell
-and tooling, so these are the seams we hit. They are equally seams for
-sway, river, Wayfire, labwc and anyone running Omarchy's tooling
-outside its own session — which is why they are offered here as
-compositor-agnostic patches rather than as anything about our own
-project. Each keeps Hyprland's path first because that is the path
-almost every Omarchy user is on.
+and tooling, so these are the seams we hit. The logout one is a seam
+for anybody running Omarchy outside a uwsm-started session, Hyprland
+included; the nightlight one is a seam for sway, river, Wayfire and
+labwc. Neither is offered as anything about our own project — the
+three patches that *were* about our project have been withdrawn, which
+is the honest half of this set's history and the reason it is now two
+patches instead of five.

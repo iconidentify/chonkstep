@@ -7,12 +7,18 @@
 # Ending the session.
 #
 # `uwsm stop` stops an active `wayland-wm@*.service`, which is how a uwsm-
-# started session ends and stays first here. A session started some other way
-# -- a display manager that Execs a session script, or a bare `exec` from a
-# TTY -- has no such unit: uwsm reports "Compositor is not running." and exits
-# 0, so the old unconditional call left the Logout row showing its OSD and
-# doing nothing at all. logind's `terminate-session` is the portable
+# started session ends and is why it stays first here. A session started some
+# other way -- a display manager that Execs a session script, or a bare `exec`
+# from a TTY -- has no such unit, and uwsm's answer is not an error: it prints
+# "Compositor is not running." and exits 0 (uwsm/main.py, stop_wm). So the old
+# unconditional call left the Logout row showing its OSD, closing the windows,
+# and never ending the session. logind's `terminate-session` is the portable
 # equivalent and needs nothing from the compositor.
+#
+# `uwsm stop -n` is uwsm's own dry run: it reports "Will stop compositor
+# <unit>." when there is a unit to stop and "Compositor is not running."
+# when there is not, so it answers exactly the question this branch asks
+# without ending anything.
 end_session() {
   if command -v uwsm >/dev/null 2>&1 &&
     uwsm stop -n 2>&1 | grep -qE "Will stop compositor|Found running compositor"; then
@@ -32,39 +38,13 @@ end_session() {
   logger -t omarchy-system-logout "No uwsm session and no loginctl: cannot end the session."
 }
 
-# Closing the windows first, so applications get their chance to ask about
-# unsaved work.
-#
-# `omarchy-hyprland-window-close-all` is Hyprland IPC and closes nothing
-# elsewhere. OMARCHY_TOPLEVEL_HELPER -- the same seam
-# omarchy-launch-or-focus uses -- is a program that speaks
-# `zwlr_foreign_toplevel_management_v1`, called here as
-#
-#     "$OMARCHY_TOPLEVEL_HELPER" close-all
-#
-# `close` in that protocol is the polite close, the same request a taskbar's
-# close button sends, so this is not a kill.
-close_all_windows() {
-  if [[ -n ${HYPRLAND_INSTANCE_SIGNATURE:-} ]]; then
-    omarchy-hyprland-window-close-all
-    return
-  fi
-
-  if [[ -n ${OMARCHY_TOPLEVEL_HELPER:-} ]]; then
-    "$OMARCHY_TOPLEVEL_HELPER" close-all >/dev/null 2>&1 || true
-    return
-  fi
-
-  if command -v wlrctl >/dev/null 2>&1; then
-    wlrctl toplevel close >/dev/null 2>&1 || true
-  fi
-}
-
-# The two-second delay is Omarchy's: the OSD and the window closes below
-# need to happen before the session goes. A backgrounded function rather
-# than the original `nohup bash -c "sleep 2 && uwsm stop"`, so the fallback
-# chain above stays in one place instead of being re-quoted into a string.
+# The two-second delay is Omarchy's: the OSD and the window closes below need
+# to happen before the session goes. A backgrounded function rather than the
+# original `nohup bash -c "sleep 2 && uwsm stop"`, so the fallback chain above
+# lives in one place instead of being re-quoted into a string. `trap '' HUP`
+# and the redirection are what nohup was doing.
 end_session_later() {
+  trap '' HUP
   sleep 2
   end_session
 }
@@ -73,5 +53,6 @@ disown 2>/dev/null || true
 
 omarchy-osd -i logout -m "Logging out" -d 5000
 
-close_all_windows
+# Now close all windows
+omarchy-hyprland-window-close-all
 sleep 1 # Allow apps like Chrome to shutdown correctly

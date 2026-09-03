@@ -62,7 +62,7 @@ status_json() {
   local temp enabled
 
   temp=$(current_temp)
-  if [[ -n $temp ]] && ((temp < IDENTITY_TEMP)); then
+  if [[ -n $temp ]] && (( temp < IDENTITY_TEMP )); then
     enabled=true
   else
     enabled=false

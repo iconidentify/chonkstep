@@ -1,6 +1,6 @@
 --- a/bin/omarchy-toggle-nightlight
 +++ b/bin/omarchy-toggle-nightlight
-@@ -8,18 +8,61 @@
+@@ -8,11 +8,54 @@ ON_TEMP=4000
  OFF_TEMP=6500
  IDENTITY_TEMP=6000
  
@@ -57,15 +57,7 @@
  }
  
  status_json() {
-   local temp enabled
- 
-   temp=$(current_temp)
--  if [[ -n $temp ]] && (( temp < IDENTITY_TEMP )); then
-+  if [[ -n $temp ]] && ((temp < IDENTITY_TEMP)); then
-     enabled=true
-   else
-     enabled=false
-@@ -34,26 +77,58 @@
+@@ -34,26 +77,58 @@ if [[ ${1:-} == "--status" ]]; then
    exit 0
  fi
  

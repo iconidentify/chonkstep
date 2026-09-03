@@ -308,13 +308,13 @@ own state rather than Omarchy's, so it never follows you into a
 Hyprland session. Hiding is the compositor's doing, not the shell's:
 while hidden the bar keeps running and simply takes no space, no
 clicks and no pixels, and the edge it had reserved is released - the
-Dock and maximized windows move back into it. One thing Omarchy's
-launcher does on Hyprland it cannot do here: its supervisor asks
-`hyprctl` whether the compositor is still alive before relaunching a
-shell that died abnormally, an answer chonkstep never gives, so a
-crashed shell is not brought back on its own - `omarchy-restart-shell`
-or a new login does. `omarchy_shell = false` in the config leaves the
-shell to you.
+Dock and maximized windows move back into it. Omarchy's launcher
+supervises the shell here as it does on Hyprland: it asks `hyprctl`
+whether the compositor is still alive before relaunching one that died
+abnormally, and chonkstep answers (see
+[docs/hyprland-ipc.md](docs/hyprland-ipc.md)), so a crashed shell comes
+back on its own. `omarchy_shell = false` in the config leaves the shell
+to you.
 
 Omarchy's bar, and anything else that wants to draw the desktop's
 state, talks to the shell over a small socket at

@@ -8,14 +8,11 @@ chonkstep session replaces the first and hosts the second: it starts
 follows, and mirrors Omarchy's menu into its own root menu (see
 `docs/appearance.md` and the README's Omarchy section).
 
-Most of that tooling is compositor-agnostic and simply works. A
-handful of scripts ask Hyprland a question, and off Hyprland those
-answers do not come. This page is the honest inventory: what works out
-of the box, what a shim in `omarchy/shims/` fixes, and what stays
-Hyprland-only. Every row was checked by reading the script on a live
-Arch install of Omarchy 4.0.x; rows that could be exercised without
-ending the session were also run, and where a claim is reasoning rather
-than observation this page says so.
+Most of that tooling is compositor-agnostic and simply works. The rest
+asks Hyprland a question — and chonkstep now answers, in Hyprland's own
+IPC (`docs/hyprland-ipc.md`, on by default). This page is the honest
+inventory: what works out of the box, what a shim in `omarchy/shims/`
+fixes, and what stays Hyprland-only.
 
 Nothing here modifies Omarchy. `/usr/share/omarchy` and `/usr/bin/omarchy-*`
 are read and never written; a shim wins by being earlier on `PATH`, and
@@ -30,84 +27,124 @@ desktop over to Omarchy's shell.
 
 | Omarchy command | Under chonkstep, unshimmed | Fixed by | Notes |
 |---|---|---|---|
-| the shell itself (`omarchy-launch-shell` at login) | **works** — the shell starts and runs | — | chonkstep launches it the way Omarchy's `autostart.lua` does |
-| its **supervision** (relaunch after a crash) | **broken, silently** — a dead Quickshell never comes back | `omarchy/shims/bin/omarchy-launch-shell` | liveness by Wayland socket instead of `hyprctl -j monitors` |
-| `omarchy-restart-shell` | **broken, destructively** — kills the shell, cannot respawn it, exits 1 | `omarchy/shims/bin/omarchy-restart-shell` | respawn by `setsid` instead of `hyprctl dispatch` |
-| `omarchy-launch-or-focus` (and `-tui`, `-webapp`) | **broken, silently** — always opens a second copy | `omarchy/shims/bin/omarchy-launch-or-focus` | window list and activation over `wlr-foreign-toplevel` |
-| `omarchy-system-logout` | **broken, silently** — shows the OSD, logs nobody out | `omarchy/shims/bin/omarchy-system-logout` | ends the session through logind; see the wart below |
-| `omarchy-toggle-nightlight` | **broken** — two seconds of retries, no tint | *nothing yet* | needs a gamma protocol chonkstep does not implement |
-| `omarchy-launch-screensaver` | **broken** — errors on stderr, launches nothing, exits 1 | *nothing* | not worth a shim; see below |
-| `omarchy-hyprland-*` (24 scripts) | **inert by design** | — | excluded from the mirrored menu |
-| `omarchy-capture-screenshot` / `-region` / `-screenrecording` | **work** | — | `grim`/`slurp`/`gpu-screen-recorder` over `wlr-screencopy`; two caveats below |
+| the shell itself (`omarchy-launch-shell` at login) | **works** | — | chonkstep launches it the way Omarchy's `autostart.lua` does |
+| its **supervision** (relaunch after a crash) | **works** | — | `compositor_alive`'s `hyprctl -j monitors` is answered; see below |
+| `omarchy-restart-shell` | **works** | — | kill, `hyprctl dispatch exec_cmd`, ping — all answered; one caveat below |
+| `omarchy-launch-or-focus` (and `-tui`, `-webapp`) | **works** | — | `hyprctl clients -j` finds the window, `dispatch` focuses it |
+| `omarchy-hyprland-window-close-all` | **works** | — | `hyprctl clients` piped into `hyprctl dispatch` |
+| `omarchy-system-logout` | **broken, silently** — shows the OSD, closes the windows, logs nobody out | `omarchy/shims/bin/omarchy-system-logout` | `uwsm stop` is a no-op here; see the wart below |
+| `omarchy-toggle-nightlight` | **broken** — two seconds of retries, no tint | *nothing yet* | `hyprsunset` needs `hyprland-ctm-control-v1`; use `wlsunset` |
+| `omarchy-launch-screensaver` | **broken** — launches nothing, exits 1 | *nothing* | not worth a shim; see below |
+| `omarchy-hyprland-*` (24 scripts) | mostly answered now | — | still excluded from the mirrored menu |
+| `omarchy-capture-screenshot` / `-region` / `-screenrecording` | **work** | — | `grim`/`slurp`/`gpu-screen-recorder` over `wlr-screencopy` |
 | `omarchy-theme-set`, the pickers, the OSD, notifications, `omarchy-menu` | **work** | — | all of it is shell IPC, no compositor involved |
 | `omarchy-launch-webapp`, `-tui`, `-terminal`, `uwsm-app` launches | **work** | — | `uwsm-app` falls back to a plain exec outside a uwsm session |
 | `omarchy-system-lock` | **works** | — | `ext-session-lock-v1`; chonkstep implements it |
 
-### What "broken, silently" means, and why it is the interesting column
+### What changed, and how it was checked
 
-Every one of the four shimmed commands fails by *doing nothing* rather
-than by reporting an error. `hyprctl` exits 1 with
-`HYPRLAND_INSTANCE_SIGNATURE not set! (is hyprland running?)`, and each
-of these scripts reads that as an answer:
+Three rows in that table used to read "broken, silently" and had a shim
+against their name. They are fixed by `crates/chonk-hyprland-ipc`
+rather than by a shim, and they were re-checked against **Omarchy's
+unmodified scripts** in a nested chonkstep on a private `Xvfb`, with a
+scratch `$OMARCHY_PATH` so `quickshell -n` could not collide with the
+live instance. Each was run twice: once with the IPC on (the default)
+and once with `CHONKSTEP_HYPRLAND_IPC=0`, so the difference is
+attributable rather than assumed.
 
-- an empty window list means "no window is open", so launch one;
-- a failed liveness probe means "the session is going", so stop
-  supervising;
-- `uwsm stop` finds no `wayland-wm@*.service`, prints "Compositor is
-  not running." and **exits 0**.
-
-None of that produces a visible failure. That is what makes these worth
-shimming rather than documenting as limitations.
-
-## The shims
-
-Four scripts in `omarchy/shims/bin/`, each a copy of Omarchy's own with
-the Hyprland-specific part replaced and every comment kept. Each file's
-header states the original mechanism, the failure, and the
-substitution, so a rebase onto a newer Omarchy is a diff rather than an
-archaeology exercise.
-
-The engineering is in one of them. `omarchy-launch-or-focus` needs to
-enumerate windows and activate one, and the compositor-agnostic way to
-do that is `zwlr_foreign_toplevel_management_v1` — the protocol that
-exists for taskbars, which chonkstep advertises at version 3 (see
-`crates/wm-wayland/src/protocols.rs`). The client is
-**`chonk-toplevel`** (`crates/chonk-toplevel`), a ~500-line Wayland
-client with four verbs:
+**Supervision** (`omarchy-launch-shell`). Its `compositor_alive()` is
+three attempts at `hyprctl -j monitors`; off Hyprland every attempt
+failed, the supervisor read that as "the session is tearing down" and
+exited 0, so a Quickshell that died stayed dead — and with it the bar,
+the OSD, the notification daemon and the lock screen. Start the
+unmodified supervisor, `kill -9` the Quickshell it started by recorded
+PID:
 
 ```
-chonk-toplevel list                # id, app id, title, states — tab separated
-chonk-toplevel activate <pattern>  # raise and focus the first match
-chonk-toplevel close <pattern>     # politely close the first match
-chonk-toplevel close-all           # politely close every window
+IPC on   RESULT: RELAUNCHED — quickshell #2 pid=1549985 ; supervisor still alive
+IPC off  RESULT: NOT relaunched ; supervisor exited
 ```
 
-Its exit codes are the interface: `0` did it, `1` nothing matched, `2`
-could not look, `3` usage. `1` versus `2` is the distinction the
-`hyprctl | jq` pipeline loses, and the reason the shim can tell "no
-such window, so launch" apart from "the focus half of this command is
-off".
+**`omarchy-launch-or-focus`.** It finds the window with `hyprctl
+clients -j | jq … | head -n1`; an empty address means "nothing is
+open", so every launch-or-focus keybinding opened a second copy. Run
+the unmodified script twice for the same app:
 
-The pattern rule is a literal reimplementation of Omarchy's
-`test("\bPATTERN\b"; "i")` against app id and title, so the shim picks
-the same window Omarchy's script would have picked on Hyprland. The one
-deliberate difference is documented in `matches_pattern`: the pattern
-is matched **literally**, not as a regex, because every pattern Omarchy
-passes is a literal and the dots in `org.omarchy.btop` should not match
-any character.
+```
+IPC on   clients after run 1: 1 ; clients after run 2: 1   (and it is the active window)
+IPC off  jq: parse error: Invalid numeric literal ... (twice) ; a second copy each time
+```
 
-### Installing them
+and it activates the right one rather than merely finding it — with
+Alacritty focused, `omarchy-launch-or-focus foot "foot"` leaves `foot`
+active and the client count unchanged at 2.
+
+**`omarchy-restart-shell`**, the destructive one: it kills Quickshell
+and respawns it with `hyprctl dispatch 'hl.dsp.exec_cmd("omarchy-launch-shell")'`,
+so off Hyprland the one manual recovery for a dead shell was also what
+left you without one. Traced through the unmodified script:
+
+```
+IPC on   + timeout 5 quickshell kill -p /tmp/ck-om/shell --any-display
+         + hyprctl dispatch 'hl.dsp.exec_cmd("omarchy-launch-shell")'
+         + omarchy-shell shell ping        → answers on the 2nd attempt
+         + exit 0                          → a new quickshell pid
+IPC off  Omarchy shell did not become ready after restart.   exit 1, no shell
+```
+
+### One caveat on `omarchy-restart-shell`: its lock guard is blind here
+
+The script refuses to restart while the session is locked, because
+restarting the locker would strand the session behind the compositor's
+failsafe. It asks `omarchy-hyprland-session-locked`, which reads the
+lock out of the `solitaryBlockedBy` field of `hyprctl -j monitors`.
+
+chonkstep reports `solitaryBlockedBy: null` unconditionally
+(`chonk-hyprland-ipc/src/state.rs`) — nothing here blocks a solitary
+client from direct scanout for a reason it could name — so that helper
+always answers **unlocked** (exit 1, verified), and the guard never
+fires. Restarting the shell while the screen is locked would therefore
+kill the locker without re-locking afterwards.
+
+This is a chonkstep gap, not an Omarchy one, and the fix is one field:
+report `["LOCK"]` there while an `ext-session-lock` is held. Until it
+lands, do not run `omarchy-restart-shell` from a locked session; ask
+`omarchy-shell lock status` first if in doubt.
+
+## The one remaining shim
+
+`omarchy/shims/bin/omarchy-system-logout`, and its problem is not a
+compositor problem. `uwsm stop` looks for an active
+`wayland-wm@*.service` on the session bus; chonkstep is started by the
+display manager (or from a TTY) through its own session script, not by
+uwsm, so there is no such unit. uwsm's answer is not an error:
+
+```
+$ uwsm stop -n
+Stopping compositor...
+Compositor is not running.
+$ echo $?
+0
+```
+
+So the Logout row shows its OSD, closes the windows — that part works
+now, `omarchy-hyprland-window-close-all` is `hyprctl clients` piped
+into `hyprctl dispatch` — and leaves you logged in. The shim keeps
+`uwsm stop` as a fast path (asked with `-n` first, so it is used only
+when there is really a unit) and falls back to logind's
+`loginctl terminate-session`.
+
+The shim needs nothing from this repository: no `chonk-toplevel`, no
+control socket, no build. It is Omarchy's script with one statement
+replaced.
+
+### Installing it
 
 ```sh
 omarchy/shims/install.sh              # symlinks into ~/.local/bin
 omarchy/shims/install.sh --list       # what is linked, and what PATH resolves today
 omarchy/shims/install.sh --uninstall  # removes only links into this checkout
 ```
-
-`chonk-toplevel` has to exist. From a checkout that is
-`cargo build --release -p chonk-toplevel`; the shims find it on `PATH`,
-or under `target/release`, or under `target/debug`, or wherever
-`$CHONK_TOPLEVEL` points.
 
 ### Which directory, and the part that is genuinely awkward
 
@@ -127,8 +164,7 @@ session has two different PATHs**:
   are argv lists, not shell lines, so a bare name there resolves
   against that PATH and finds Omarchy's copy.
 
-Two consequences, both worth knowing before you decide the shims are
-not working:
+Two consequences:
 
 1. **For a chonkstep keybinding, name the shim by absolute path** in
    `[commands]`, or install into `/usr/local/bin`, which is ahead of
@@ -139,23 +175,10 @@ not working:
    runs `/usr/bin/omarchy-system-logout` whatever PATH says. Call the
    command by name — `omarchy-system-logout` — or use the menu row.
 
-### The supervisor is a special case
-
-chonkstep starts the shell by the **resolved path**
-`$OMARCHY_PATH/bin/omarchy-launch-shell`, deliberately (it has just
-checked that file exists). PATH cannot intercept the supervisor that
-runs at login. To use the shim's supervisor for the whole session,
-decline chonkstep's own launch and start the shim from `autostart`:
-
-```toml
-# ~/.config/chonkstep/config.toml
-omarchy_shell = false
-autostart = ["/path/to/chonkstep/omarchy/shims/bin/omarchy-launch-shell"]
-```
-
-The shim on `PATH` is still worth having: `omarchy-restart-shell`
-(shimmed or not) respawns through `omarchy-launch-shell` by name, so a
-manual restart picks up the portable supervisor either way.
+Note that the supervisor no longer needs any of this. chonkstep starts
+the shell by the resolved path `$OMARCHY_PATH/bin/omarchy-launch-shell`,
+which PATH cannot intercept — and that is now fine, because Omarchy's
+own launcher supervises correctly here.
 
 ### The logout wart, said plainly
 
@@ -178,19 +201,23 @@ does nothing at all.
 
 ## What stays Hyprland-only
 
-### Nightlight — and why no shim ships
+### Nightlight — the one thing the IPC cannot reach
 
 `omarchy-toggle-nightlight` drives `hyprsunset` through
-`hyprctl hyprsunset temperature`. Two separate things are missing here,
-and the second is the one that matters:
+`hyprctl hyprsunset temperature`, and neither half of that is served
+here:
 
-1. The **control channel** is Hyprland's IPC socket, so the set and the
-   read-back both fail. On its own this would be shimmable.
-2. `hyprsunset` tints the screen through
-   **`hyprland-ctm-control-v1`**, and the portable alternatives
-   (`wlsunset`, `gammastep`) use
-   **`wlr-gamma-control-unstable-v1`**. chonkstep implements *neither*.
-   Run on this session, hyprsunset says so itself:
+1. `hyprctl hyprsunset …` writes **nothing** to the compositor socket —
+   it is routed to hyprsunset's own `.hyprsunset.sock`. Answering
+   Hyprland's IPC does not help at all:
+
+   ```
+   $ hyprctl hyprsunset temperature
+   Couldn't connect to …/hypr/<signature>/.hyprsunset.sock. (3)
+   ```
+
+2. `hyprsunset` tints through **`hyprland-ctm-control-v1`**, which
+   chonkstep does not implement. Run on this session it says so:
 
    ```
    ┣ Setting the temperature to 4000K
@@ -198,40 +225,46 @@ and the second is the one that matters:
    ✖ Compositor doesn't support hyprland-ctm-control-v1, are you running on Hyprland?
    ```
 
-So there is no program on this session that can tint the screen, and a
-shim would be a shim over nothing. Nightlight becomes available the day
-chonkstep implements `wlr-gamma-control-unstable-v1` — at which point
-`wlsunset` works and the upstream patch in `omarchy/upstream/` (which
-adds exactly that fallback chain) makes Omarchy's own row work here
-unchanged. Until then the honest answer is "not supported", and the
-menu row wastes two seconds in ten retries before telling the shell to
-refresh an indicator that never changed.
+So the unmodified row spends about two seconds in ten retries and
+changes nothing — measured on the live session, `--status` reading
+`{"enabled":false,"temperature":null}` before and after.
+
+**The screen itself is tintable.** chonkstep implements
+`wlr-gamma-control-unstable-v1` (`docs/night-light.md`), so `wlsunset`,
+`gammastep` and `redshift` all work on the DRM backend. Until Omarchy's
+row learns about them, warm the screen directly:
+
+```sh
+wlsunset -T 6500 -t 3000 -S 07:00 -s 20:00
+```
+
+The patch in `omarchy/upstream/` adds exactly that fallback chain to
+Omarchy's own row, and it is now **tested** rather than hoped for: the
+patched script starts `wlsunset -T 4001 -t 4000`, reports
+`{"enabled":true,"temperature":4000}`, and the compositor logs the ramp
+reaching the hardware and being restored on the way back off. No shim
+ships for it, because the fix belongs upstream and the workaround is
+one command.
+
+Note that the gamma control is a **DRM-backend** feature: a nested
+chonkstep on someone else's desktop advertises no gamma global at all
+(deliberately — see `docs/night-light.md`), so nightlight cannot be
+tested in a nested session.
 
 ### Screensaver
 
-`omarchy-launch-screensaver` needs three Hyprland things — `hyprctl
-monitors` for the monitor list, `hyprctl dispatch` to place a terminal
-*onto a named monitor*, and Hyprland's `.socket2.sock` event stream to
-wait for each window to map. Run here it prints
-
-```
-jq: parse error: Invalid numeric literal at line 1, column 28
-socat[…] E connect(, AF=1 "/run/user/1000/hypr//.socket2.sock", 36): No such file or directory
-```
-
-launches nothing, and exits 1. The first two have portable equivalents
-in principle (`wl_output` for the list, foreign-toplevel for the wait);
-the middle one does not — "spawn this command and have its window land
-on that monitor" has no compositor-agnostic form, and rewriting the
+`omarchy-launch-screensaver` needs Hyprland's `.socket2.sock` event
+stream to wait for each window to map, and `hyprctl dispatch` to place
+a terminal *onto a named monitor*. chonkstep serves the event socket,
+but "spawn this command and have its window land on that monitor" has
+no compositor-agnostic form and no chonkstep equivalent — rewriting the
 script around per-monitor placement is a redesign, not a shim.
 
-Note that this row is **not** filtered out of the mirrored menu:
+This row is **not** filtered out of the mirrored menu:
 `chonk_shell::omarchy_menu::is_hyprland_only` matches a word that is
 exactly `hyprctl` or begins with `omarchy-hyprland-`, and
 `omarchy-launch-screensaver force` is neither. Widening that rule to
-name individual scripts would be a list to keep in sync with Omarchy;
-the row is left where it is, doing nothing, which is what it did before
-this page existed.
+name individual scripts would be a list to keep in sync with Omarchy.
 
 ### Two capture caveats
 
@@ -242,55 +275,56 @@ trimmings rather than the capture:
 
 - `omarchy-capture-screenshot` reads and restores
   `cursor:no_hardware_cursors` through `hyprctl getoption`/`keyword`.
-  Both calls are `&>/dev/null`-guarded and their failure is harmless
-  here (chonkstep composites its own cursor and does not bake it into
-  a screencopy frame), so the screenshot is correct — the setting was
-  never chonkstep's to change.
+  chonkstep declines both deliberately (`docs/hyprland-ipc.md` §3), and
+  both calls are `&>/dev/null`-guarded, so the screenshot is correct —
+  the setting was never chonkstep's to change.
 - `omarchy-capture-screenrecording --fullscreen` asks
   `omarchy-hyprland-monitor-focused` for a monitor name and
-  `hyprctl monitors -j` for its resolution. Both come back empty, so
-  gpu-screen-recorder is handed `-w ""`. **Fullscreen recording does
-  not work** — read-verified from the script and from `hyprctl monitors
-  -j` returning nothing here, not run. The default region flow (slurp)
-  does work, because slurp is a layer-shell client and needs nothing
-  from Hyprland.
+  `hyprctl monitors -j` for its resolution. Both are answered now, so
+  this is expected to work; it has not been re-run since the IPC
+  landed, and this line says so rather than claiming it.
 
 ## Preparing the same fixes for upstream
 
-`omarchy/upstream/` holds the compositor-agnostic version of each of
-these scripts, as complete replacements (`bin/`) and as unified diffs
-against Omarchy 4.0.x (`patches/`). Every patch keeps Hyprland's
-existing path first and adds a fallback, so nothing changes for a
-Hyprland user. `omarchy/upstream/README.md` is written as the pull
-request description would be.
+`omarchy/upstream/` holds the compositor-agnostic version of the two
+scripts that still need one, as complete replacements (`bin/`) and as
+unified diffs against Omarchy's `quattro` branch (`patches/`). Both
+keep Omarchy's existing path first and add a fallback, so nothing
+changes for a Hyprland user on uwsm.
+
+It used to hold five. Three were withdrawn when the IPC layer made the
+unmodified scripts correct — the honest outcome, and a better one than
+a patch. `omarchy/upstream/README.md` is written as the pull request
+description would be, and says so.
 
 Nothing in that directory has been sent anywhere. It is a prepared set.
 
 ## Checking it yourself
 
-The two failures that are worth reproducing, because both are silent:
-
 ```sh
-# 1. launch-or-focus opens a second copy. Run Omarchy's own script twice:
+# Is the IPC actually answering? The compositor logs the signature it
+# bound, and both sockets live under it.
+grep 'hyprland ipc listening' ~/.local/state/chonkstep/wayland-session.log
+hyprctl monitors -j | jq -c '.[]|{name,focused}'
+
+# launch-or-focus no longer opens a second copy. Omarchy's own script,
+# twice:
 omarchy-launch-or-focus probe "foot --app-id=probe -- sleep 900"
 sleep 3
 omarchy-launch-or-focus probe "foot --app-id=probe -- sleep 900"
-chonk-toplevel list | grep probe        # two windows
+hyprctl clients -j | jq '[.[]|select(.class=="probe")]|length'   # 1
 
-# Now the shim, twice, from a clean start:
-chonk-toplevel close probe; chonk-toplevel close probe
-omarchy/shims/bin/omarchy-launch-or-focus probe "foot --app-id=probe -- sleep 900"
-sleep 3
-omarchy/shims/bin/omarchy-launch-or-focus probe "foot --app-id=probe -- sleep 900"
-chonk-toplevel list | grep probe        # one window, activated
+# The supervisor. Do this against a scratch OMARCHY_PATH (a copy of
+# $OMARCHY_PATH/shell, so quickshell's -n does not collide with your
+# live instance), under dbus-run-session, and kill the Quickshell it
+# started *by recorded PID*. A bare `pkill quickshell` or
+# `pgrep -f omarchy-launch-shell` will find your live session's shell
+# and take your desktop down with it.
 
-# 2. The supervisor. `pkill -9 quickshell` on your live session and
-#    watch nothing come back; `omarchy-restart-shell` will not fix it
-#    either. To test it without losing your own shell, point a scratch
-#    OMARCHY_PATH at a copy of $OMARCHY_PATH/shell (so quickshell's
-#    -n does not collide with the live instance), run each supervisor
-#    under `dbus-run-session`, kill the Quickshell it started by PID,
-#    and watch for a new one. Omarchy's launcher exits; the shim logs
-#    "Omarchy shell exited with status 137; relaunching." to the
-#    journal under the omarchy-shell tag and brings it back.
+# The logout no-op, safely:
+uwsm stop -n; echo "exit=$?"     # "Compositor is not running.", exit 0
+
+# Nightlight, safely (Ctrl-C to restore; the compositor puts the ramp
+# back when the client goes away):
+wlsunset -T 4001 -t 4000
 ```

@@ -9,7 +9,9 @@ tool gets told when the answer is no.
 Until this landed, chonkstep could not tint or dim the display *at
 all*, by any program. The gap surfaced from the outside: an upstream
 patch to Omarchy's nightlight script could not be tested here, because
-nothing on this session could change a screen's colour.
+nothing on this session could change a screen's colour. That patch is
+now tested against this implementation — `omarchy/upstream/` carries
+the run — which is the point of the exercise.
 
 ## What carries it
 

@@ -113,12 +113,8 @@ done
 
 cat <<EOF
 
-Two shims are not reached by PATH alone; see docs/omarchy-integration.md:
+One route PATH cannot cover; see docs/omarchy-integration.md:
 
-  * omarchy-launch-shell — chonkstep starts Omarchy's supervisor by its
-    absolute path under \$OMARCHY_PATH, so PATH cannot intercept the one
-    that runs at login. Set \`omarchy_shell = false\` in
-    ~/.config/chonkstep/config.toml and add this shim to \`autostart\`.
   * anything invoked as \`omarchy <subcommand>\` — the omarchy CLI execs
     its scripts by absolute path out of its own directory. Call the
     shimmed command by name (\`omarchy-system-logout\`) rather than
