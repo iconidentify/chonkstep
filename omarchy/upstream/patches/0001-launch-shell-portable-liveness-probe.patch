@@ -1,0 +1,50 @@
+--- a/bin/omarchy-launch-shell
++++ b/bin/omarchy-launch-shell
+@@ -34,11 +34,47 @@
+ 
+ # A compositor busy reconfiguring outputs can miss a query without being gone,
+ # and that is when the shell dies.
++#
++# Two ways of asking, tried in that order per attempt. Hyprland's IPC is the
++# precise one and stays first: it is free, it is already here, and it answers
++# for the compositor this shell usually runs under. The fallback asks the
++# session instead of asking Hyprland -- a Wayland compositor is alive exactly
++# when its socket is present and accepts a connection -- so the supervisor
++# keeps supervising under a compositor that has no hyprctl. Without it,
++# `hyprctl -j monitors` fails on every attempt, `compositor_alive` reports the
++# session as tearing down, and a Quickshell that died is never relaunched:
++# no bar, no OSD, no notifications and no lock screen until the next login.
++wayland_socket() {
++  local name=${WAYLAND_DISPLAY:-}
++  [[ -n $name ]] || return 1
++  # An absolute WAYLAND_DISPLAY is a path; anything else is relative to
++  # XDG_RUNTIME_DIR. Both forms are in the spec.
++  if [[ $name == /* ]]; then
++    printf '%s\n' "$name"
++  else
++    printf '%s/%s\n' "${XDG_RUNTIME_DIR:-/run/user/$UID}" "$name"
++  fi
++}
++
++# A socket file that has gone means the compositor exited and cleaned up; a
++# socket file that will not accept a connection means it died without
++# cleaning up. socat is already an Omarchy dependency (omarchy-launch-
++# screensaver uses it); where it is missing the file test alone is still
++# strictly better than asking a compositor that is not running.
++wayland_socket_alive() {
++  local socket
++  socket=$(wayland_socket) || return 1
++  [[ -S $socket ]] || return 1
++  command -v socat >/dev/null 2>&1 || return 0
++  socat -u /dev/null "UNIX-CONNECT:$socket" >/dev/null 2>&1
++}
++
+ compositor_alive() {
+   local attempt
+ 
+   for attempt in 1 2 3; do
+     hyprctl -j monitors >/dev/null 2>&1 && return 0
++    wayland_socket_alive && return 0
+     (( attempt < 3 )) && sleep 0.5
+   done
+ 

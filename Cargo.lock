@@ -369,6 +369,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "chonk-toplevel"
+version = "0.2.0"
+dependencies = [
+ "wayland-client",
+ "wayland-protocols-wlr",
+]
+
+[[package]]
 name = "chonk-ui"
 version = "0.2.0"
 dependencies = [

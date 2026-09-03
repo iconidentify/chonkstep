@@ -112,6 +112,19 @@ pub struct FakeBackend {
     /// has moved the clickable rect out from under an unchanged
     /// picture"), read from the other end.
     pub shell_geometries: HashMap<u32, Rect>,
+    /// Which shell surfaces are currently mapped — `true` after
+    /// `map_shell_surface`, `false` after `unmap_shell_surface`, absent
+    /// until one or the other is called (`create_shell_surface` maps
+    /// nothing, exactly like the real backends).
+    ///
+    /// The state this double used to throw away, and the half of
+    /// "hidden" a geometry cannot show: the Dock is hidden by unmapping
+    /// its surface *and* releasing the strip it reserved, and a test
+    /// that could only see the second one would pass for a Dock still
+    /// sitting visibly in the corner over its own giveaway. A map
+    /// (rather than a set of the mapped) so an unmap is distinguishable
+    /// from a surface nobody has mapped yet.
+    pub shell_mapped: HashMap<u32, bool>,
     /// Scroll events waiting for `Backend::take_shell_scroll`, oldest
     /// first. The fake has no input hardware, so tests stage them with
     /// `queue_shell_scroll` — the same shape a real backend's input
@@ -258,6 +271,13 @@ impl FakeBackend {
     pub fn queue_shell_scroll(&mut self, shell: u32, local: Point, delta: ScrollDelta) {
         self.queued_shell_scrolls.push_back((shell, local, delta));
     }
+
+    /// Whether `shell` is mapped right now. A surface nobody has ever
+    /// mapped reads as unmapped, which is what a real backend shows: a
+    /// created surface is not visible until it is mapped.
+    pub fn shell_is_mapped(&self, shell: u32) -> bool {
+        self.shell_mapped.get(&shell).copied().unwrap_or(false)
+    }
 }
 
 const DEFAULT_GEOMETRY: Rect = Rect { pos: Point { x: 0, y: 0 }, size: Size { w: 200, h: 150 } };
@@ -277,10 +297,15 @@ impl Backend for FakeBackend {
         self.shell_geometries.insert(self.next_shell_id, geometry);
         Some(self.next_shell_id)
     }
-    fn map_shell_surface(&mut self, _id: Self::ShellId) {}
-    fn unmap_shell_surface(&mut self, _id: Self::ShellId) {}
+    fn map_shell_surface(&mut self, id: Self::ShellId) {
+        self.shell_mapped.insert(id, true);
+    }
+    fn unmap_shell_surface(&mut self, id: Self::ShellId) {
+        self.shell_mapped.insert(id, false);
+    }
     fn destroy_shell_surface(&mut self, id: Self::ShellId) {
         self.shell_geometries.remove(&id);
+        self.shell_mapped.remove(&id);
     }
     fn raise_shell_surface(&mut self, _id: Self::ShellId) {}
     fn configure_shell_surface(&mut self, id: Self::ShellId, geometry: wm_theme_api::Rect) {

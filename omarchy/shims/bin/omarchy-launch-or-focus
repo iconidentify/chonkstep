@@ -1,0 +1,157 @@
+#!/bin/bash
+
+# omarchy:summary=Launch an app or focus an existing window matching a pattern
+# omarchy:args=<window-pattern> <launch-command>
+#
+# chonkstep shim for Omarchy 4.0.x's omarchy-launch-or-focus.
+#
+# Omarchy's version finds the window with Hyprland's IPC:
+#
+#     WINDOW_ADDRESS=$(hyprctl clients -j | jq -r --arg p "$1" \
+#       '.[]|select((.class|test("\\b"+$p+"\\b";"i")) or (.title|test(...)))|.address' | head -n1)
+#     if [[ -n $WINDOW_ADDRESS ]]; then hyprctl dispatch ... else eval exec setsid $LAUNCH_COMMAND; fi
+#
+# Under anything but Hyprland `hyprctl clients -j` prints nothing and
+# exits 1, so WINDOW_ADDRESS is always empty and the script always
+# takes the launch branch. The user-visible symptom is that every
+# "open it, or raise it if it is already open" keybinding — the
+# browser, the terminal, 1Password, Signal, and everything routed
+# through omarchy-launch-or-focus-tui and -webapp, which both exec this
+# script by name — opens a second copy of the app instead of raising
+# the one already on screen.
+#
+# The portable answer is `zwlr_foreign_toplevel_management_v1`: the
+# protocol that exists so that an outside process can enumerate a
+# compositor's windows and ask for one to be activated. chonkstep
+# advertises it at version 3; so do sway, river, Wayfire, Hyprland and
+# most of the wlroots-descended world. `chonk-toplevel` (this
+# repository, crates/chonk-toplevel) is the client, and it reproduces
+# Omarchy's pattern rule exactly — case-insensitive, word-bounded,
+# against app id and title — so this picks the same window Omarchy's
+# script would have picked.
+#
+# Hyprland keeps its fast path: with HYPRLAND_INSTANCE_SIGNATURE set
+# this hands straight over to Omarchy's own script, so a machine that
+# boots both sessions needs no second configuration.
+#
+# Activation and uninstall: docs/omarchy-integration.md.
+
+set -u
+
+if (($# == 0)); then
+  echo "Usage: omarchy-launch-or-focus [window-pattern] [launch-command]"
+  exit 1
+fi
+
+WINDOW_PATTERN="$1"
+LAUNCH_COMMAND="${2:-"uwsm-app -- $WINDOW_PATTERN"}"
+
+launch() {
+  # Omarchy's own launch branch, verbatim, word-splitting and all: the
+  # command arrives as one string that the caller expects a shell to
+  # split (omarchy-launch-or-focus-tui builds "omarchy-launch-tui $@").
+  # shellcheck disable=SC2086 # deliberate: $LAUNCH_COMMAND is a command line
+  eval exec setsid $LAUNCH_COMMAND
+}
+
+# On Hyprland, be Omarchy's script. Nothing here improves on hyprctl
+# when hyprctl is answering, and a shim that changed behaviour under
+# the compositor it was not written for would be a bug of its own.
+if [[ -n ${HYPRLAND_INSTANCE_SIGNATURE:-} ]]; then
+  real="${OMARCHY_PATH:-/usr/share/omarchy}/bin/omarchy-launch-or-focus"
+  [[ -x $real ]] && exec "$real" "$@"
+fi
+
+# The client. Preferred in this order: an explicit override, the
+# packaged binary on PATH, then a development checkout's build
+# products. Release before debug, because a checkout that has both is
+# running the release one.
+find_client() {
+  local candidate here
+  if [[ -n ${CHONK_TOPLEVEL:-} ]]; then
+    printf '%s\n' "$CHONK_TOPLEVEL"
+    return 0
+  fi
+  if candidate=$(command -v chonk-toplevel 2>/dev/null); then
+    printf '%s\n' "$candidate"
+    return 0
+  fi
+  # …/omarchy/shims/bin/this -> the repository root is three up.
+  # readlink -f first: the documented install is a *symlink* into a
+  # directory on PATH, and dirname of the symlink is that directory.
+  here=$(cd -- "$(dirname -- "$(readlink -f -- "${BASH_SOURCE[0]}")")/../../.." && pwd) || return 1
+  for candidate in "$here/target/release/chonk-toplevel" "$here/target/debug/chonk-toplevel"; do
+    [[ -x $candidate ]] && printf '%s\n' "$candidate" && return 0
+  done
+  return 1
+}
+
+if ! CLIENT=$(find_client); then
+  # No client, no window list — but the app the user asked for should
+  # still open. Degrading to "always launch" is exactly Omarchy's
+  # behaviour on this compositor today, so a missing client costs
+  # nothing that was working.
+  echo "omarchy-launch-or-focus: chonk-toplevel not found; launching without checking for an existing window" >&2
+  launch
+fi
+
+# chonk-toplevel's exit codes carry the distinction the hyprctl
+# pipeline loses: 0 activated, 1 no window matched, 2 could not look
+# (no display, or a compositor with no foreign-toplevel global).
+# "Could not look" must launch — the same fallback as no match — but it
+# is worth a word in the log, because it means the focus half of this
+# command is silently off.
+"$CLIENT" activate "$WINDOW_PATTERN"
+status=$?
+
+case $status in
+0) ;;
+1) launch ;;
+*)
+  echo "omarchy-launch-or-focus: could not enumerate windows (chonk-toplevel exit $status); launching" >&2
+  launch
+  ;;
+esac
+
+# Activated. One more step chonkstep needs and Hyprland does not:
+# activating a toplevel focuses it, but focus does not drag the
+# workspace along, so a window on another workspace would be focused
+# and still off-screen. The control socket (docs/control-socket.md)
+# reports the focused window's workspace and which workspace is
+# active; when they disagree, ask for the switch. Best-effort by
+# design — no socket, no socat, no jq, or a compositor that is not
+# chonkstep all leave the window focused, which is what was asked for.
+follow_focus_to_its_workspace() {
+  local socket snapshot active where
+  socket=${CHONKSTEP_CONTROL_SOCKET:-}
+  if [[ -z $socket ]]; then
+    [[ -n ${WAYLAND_DISPLAY:-} ]] || return 0
+    socket="${XDG_RUNTIME_DIR:-/run/user/$UID}/chonkstep/control-${WAYLAND_DISPLAY}.sock"
+  fi
+  [[ -S $socket ]] || return 0
+  command -v socat >/dev/null 2>&1 || return 0
+  command -v jq >/dev/null 2>&1 || return 0
+
+  # The shell sends `hello` and the full snapshot on connect and then
+  # keeps streaming, so read for a moment and hang up.
+  # `timeout` reports 124 when it does the timing out, which is the
+  # normal case here: the stream never ends on its own.
+  snapshot=$(timeout 1 socat -u "UNIX-CONNECT:$socket" - 2>/dev/null || true)
+  [[ -n $snapshot ]] || return 0
+
+  # -R + fromjson? reads the stream a line at a time and ignores any
+  # line that is not JSON, so an event this shim does not know about —
+  # or a truncated last line from the hang-up — cannot make jq fail.
+  # `tail -n1`: the newest value of each facet wins.
+  active=$(printf '%s\n' "$snapshot" |
+    jq -rR 'fromjson? | select(.event == "workspaces") | .active' 2>/dev/null | tail -n 1)
+  where=$(printf '%s\n' "$snapshot" |
+    jq -rR 'fromjson? | select(.event == "focus") | .window.workspace // empty' 2>/dev/null | tail -n 1)
+
+  [[ -n $active && -n $where && $active != "$where" ]] || return 0
+  printf '{"request":"focus-workspace","index":%s}\n' "$where" |
+    timeout 1 socat - "UNIX-CONNECT:$socket" >/dev/null 2>&1 || true
+}
+
+follow_focus_to_its_workspace
+exit 0

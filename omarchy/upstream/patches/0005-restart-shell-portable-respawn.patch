@@ -1,0 +1,79 @@
+--- a/bin/omarchy-restart-shell
++++ b/bin/omarchy-restart-shell
+@@ -25,16 +25,38 @@
+ # and a restart plus re-lock is the only way back in without a reboot. So
+ # ask the lock service rather than merely pinging the shell: only a locker
+ # that reports the lock secure or in progress is worth preserving.
++# omarchy-hyprland-session-locked reads the lock out of Hyprland's
++# solitaryBlockedBy monitor field and exits 2 ("undetermined") where there is
++# no hyprctl to ask. On that answer, fall back to asking the lock service
++# itself: a locker that reports secure or in-progress must not be restarted,
++# which is the case worth catching even without the compositor's help. What
++# the fallback cannot see is the recovery case -- a session still held by the
++# compositor's failsafe behind a locker that has already died -- so `--relock`
++# is offered for it rather than guessed at.
++lock_service_state() {
++  OMARCHY_PATH="$session_omarchy_path" OMARCHY_SHELL_IPC_TIMEOUT=0.5s omarchy-shell lock status 2>/dev/null |
++    jq -r '.secure or .requested' 2>/dev/null
++}
++
+ relock=0
+-if omarchy-hyprland-session-locked; then
+-  locking=$(OMARCHY_PATH="$session_omarchy_path" OMARCHY_SHELL_IPC_TIMEOUT=0.5s omarchy-shell lock status 2>/dev/null |
+-    jq -r '.secure or .requested' 2>/dev/null)
+-  if [[ $locking == "true" ]]; then
++[[ ${1:-} == --relock ]] && relock=1
++
++omarchy-hyprland-session-locked
++case $? in
++0)
++  if [[ $(lock_service_state) == "true" ]]; then
+     echo "Refusing to restart Omarchy shell while the session is locked." >&2
+     exit 1
+   fi
+   relock=1
+-fi
++  ;;
++2)
++  if [[ $(lock_service_state) == "true" ]]; then
++    echo "Refusing to restart Omarchy shell while the session is locked." >&2
++    exit 1
++  fi
++  ;;
++esac
+ 
+ # The lock plugin loads asynchronously, so a fresh shell answers ping before
+ # it can lock, and may even refuse early lock requests while its plugins or
+@@ -67,7 +89,31 @@
+ 
+ # Spawn from Hyprland so the shell inherits the canonical session environment,
+ # not transient variables from a terminal, SSH connection, or development tool.
+-hyprctl dispatch 'hl.dsp.exec_cmd("omarchy-launch-shell")' >/dev/null
++#
++# Where there is no Hyprland to dispatch through, the portable stand-in for
++# "the canonical session environment" is the systemd user manager's: a Wayland
++# session publishes WAYLAND_DISPLAY and XDG_CURRENT_DESKTOP there so that
++# D-Bus-activated services (the desktop portals, notably) can find the
++# display. Reconstruct from that and spawn detached.
++#
++# Without this, the dispatch fails, nothing is spawned, the readiness loop
++# below times out, and the script reports failure having already killed the
++# shell in the loop above -- so the one manual recovery for a dead shell is
++# also what leaves you without one.
++respawn_shell() {
++  hyprctl dispatch 'hl.dsp.exec_cmd("omarchy-launch-shell")' >/dev/null 2>&1 && return 0
++
++  local key value
++  for key in WAYLAND_DISPLAY XDG_CURRENT_DESKTOP XDG_SESSION_TYPE; do
++    value=$(systemctl --user show-environment 2>/dev/null | sed -n "s/^$key=//p" | tail -n 1)
++    [[ -n $value ]] && export "$key=$value"
++  done
++  export OMARCHY_PATH="$session_omarchy_path"
++
++  setsid omarchy-launch-shell </dev/null >/dev/null 2>&1 &
++}
++
++respawn_shell
+ 
+ for (( attempt = 0; attempt < 20; attempt++ )); do
+   if OMARCHY_PATH="$session_omarchy_path" OMARCHY_SHELL_IPC_TIMEOUT=0.5s omarchy-shell shell ping >/dev/null 2>&1; then

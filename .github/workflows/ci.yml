@@ -423,6 +423,11 @@ jobs:
       # `-D warnings` and under `#![deny(missing_docs)]`, and a crate
       # that publishes a binary wire format to every X client on the
       # session is not one to let drift.
+      #
+      # `chonk-toplevel` was added the day it was written for the same
+      # reason: it is a ~500-line Wayland client with no dependency on
+      # anything else here, it arrived clean, and it is what
+      # `omarchy/shims/` puts on a user's keybindings.
       - name: Deny clippy warnings on the crates that are clean
         run: |
           cargo clippy --all-targets --no-deps \
@@ -431,6 +436,7 @@ jobs:
             -p chonk-dock-widget \
             -p chonk-netjoin \
             -p chonk-testkit \
+            -p chonk-toplevel \
             -p chonk-xsettings \
             -p chonk-instruments \
             -p chonk-shell \

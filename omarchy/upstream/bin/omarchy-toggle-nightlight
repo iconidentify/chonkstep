@@ -1,0 +1,134 @@
+#!/bin/bash
+
+# omarchy:summary=Toggle nightlight screen temperature
+# omarchy:args=[--status]
+# omarchy:examples=omarchy toggle nightlight
+
+ON_TEMP=4000
+OFF_TEMP=6500
+IDENTITY_TEMP=6000
+
+# Which program can actually tint this session's screen.
+#
+# hyprsunset stays first and is unchanged: it is precise, it is already
+# installed, and `hyprctl hyprsunset` can *read back* the temperature, which
+# is what makes the status query and the resend loop below work. What it
+# cannot do is run anywhere else -- it needs `hyprland-ctm-control-v1`, and it
+# is driven through Hyprland's IPC socket, so on another compositor both the
+# set and the read fail and the menu row silently does nothing for two
+# seconds (ten resend attempts at 0.2s) before telling the shell to refresh an
+# indicator that never changed.
+#
+# wlsunset and gammastep are the portable equivalents, over
+# `wlr-gamma-control-unstable-v1`. Neither has a query interface, so the
+# chosen temperature is recorded in a state file and that file is what
+# --status reports. Both take the temperature on the command line only, so a
+# change means restarting the daemon; that is why `apply_portable` kills
+# before it starts.
+backend() {
+  if [[ -n ${HYPRLAND_INSTANCE_SIGNATURE:-} ]] && command -v hyprsunset >/dev/null 2>&1; then
+    echo hyprsunset
+  elif command -v wlsunset >/dev/null 2>&1; then
+    echo wlsunset
+  elif command -v gammastep >/dev/null 2>&1; then
+    echo gammastep
+  else
+    echo none
+  fi
+}
+
+STATE_FILE="${XDG_RUNTIME_DIR:-/tmp}/omarchy-nightlight-temperature"
+
+current_temp() {
+  local output
+
+  case $(backend) in
+  hyprsunset)
+    output=$(hyprctl hyprsunset temperature 2>/dev/null) || return
+    grep -oE '[0-9]+' <<<"$output" | head -n1
+    ;;
+  wlsunset)
+    pgrep -x wlsunset >/dev/null || return
+    cat "$STATE_FILE" 2>/dev/null
+    ;;
+  gammastep)
+    pgrep -x gammastep >/dev/null || return
+    cat "$STATE_FILE" 2>/dev/null
+    ;;
+  esac
+}
+
+status_json() {
+  local temp enabled
+
+  temp=$(current_temp)
+  if [[ -n $temp ]] && ((temp < IDENTITY_TEMP)); then
+    enabled=true
+  else
+    enabled=false
+  fi
+
+  jq -cn --argjson enabled "$enabled" --arg temp "$temp" \
+    '{enabled:$enabled, temperature:(($temp | tonumber?) // null)}'
+}
+
+if [[ ${1:-} == "--status" ]]; then
+  status_json
+  exit 0
+fi
+
+apply_hyprsunset() {
+  local target=$1
+
+  if ! pgrep -x hyprsunset >/dev/null; then
+    setsid uwsm-app -- hyprsunset &
+  fi
+
+  # A freshly-started hyprsunset applies its default temperature at the end of
+  # its boot, overriding anything set before then — so resend until it sticks
+  for _ in {1..10}; do
+    hyprctl hyprsunset temperature "$target" >/dev/null 2>&1
+    sleep 0.2
+    [[ $(current_temp) == "$target" ]] && break
+  done
+}
+
+# wlsunset and gammastep take the temperature at startup and have no way to be
+# retuned, so a change is a restart. `-T`/`-t` with equal day and night values
+# pins one temperature around the clock, which is what a manual toggle means.
+apply_portable() {
+  local program=$1 target=$2
+
+  pkill -x "$program" >/dev/null 2>&1
+  printf '%s\n' "$target" >"$STATE_FILE"
+
+  # The OFF temperature is neutral daylight: rather than run a daemon that
+  # does nothing, stop and let the compositor's ramps go back to normal.
+  if ((target >= IDENTITY_TEMP)); then
+    return
+  fi
+
+  case $program in
+  wlsunset) setsid "$program" -T $((target + 1)) -t "$target" >/dev/null 2>&1 & ;;
+  gammastep) setsid "$program" -O "$target" >/dev/null 2>&1 & ;;
+  esac
+}
+
+CURRENT_TEMP=$(current_temp)
+
+if [[ -z $CURRENT_TEMP || $CURRENT_TEMP == "$OFF_TEMP" ]]; then
+  TARGET_TEMP=$ON_TEMP
+else
+  TARGET_TEMP=$OFF_TEMP
+fi
+
+case $(backend) in
+hyprsunset) apply_hyprsunset "$TARGET_TEMP" ;;
+wlsunset | gammastep) apply_portable "$(backend)" "$TARGET_TEMP" ;;
+none)
+  omarchy-notification-send -g ✋ "No nightlight backend installed (hyprsunset, wlsunset or gammastep)"
+  exit 1
+  ;;
+esac
+
+omarchy-shell -q nightlight refresh

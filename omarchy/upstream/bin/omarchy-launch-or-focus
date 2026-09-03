@@ -1,0 +1,84 @@
+#!/bin/bash
+
+# omarchy:summary=Launch an app or focus an existing window matching a pattern
+# omarchy:args=<window-pattern> <launch-command>
+
+if (($# == 0)); then
+  echo "Usage: omarchy-launch-or-focus [window-pattern] [launch-command]"
+  exit 1
+fi
+
+WINDOW_PATTERN="$1"
+LAUNCH_COMMAND="${2:-"uwsm-app -- $WINDOW_PATTERN"}"
+
+launch() {
+  # Omarchy's launch branch, unchanged: the command arrives as one string
+  # the caller expects a shell to split (omarchy-launch-or-focus-tui builds
+  # "omarchy-launch-tui $@").
+  # shellcheck disable=SC2086 # deliberate: $LAUNCH_COMMAND is a command line
+  eval exec setsid $LAUNCH_COMMAND
+}
+
+# Hyprland's IPC, unchanged and still first: it is exact, it needs nothing
+# installed, and it is what this runs under by default.
+hypr_focus() {
+  local address
+  address=$(hyprctl clients -j 2>/dev/null |
+    jq -r --arg p "$WINDOW_PATTERN" '.[]|select((.class|test("\\b" + $p + "\\b";"i")) or (.title|test("\\b" + $p + "\\b";"i")))|.address' 2>/dev/null |
+    head -n1)
+  [[ -n $address ]] || return 1
+  hyprctl dispatch "hl.dsp.focus({ window = \"address:$address\" })" >/dev/null 2>&1 ||
+    hyprctl dispatch focuswindow "address:$address"
+}
+
+# The portable route, for a session that is not Hyprland.
+#
+# Every wlroots-descended compositor -- and Hyprland itself -- advertises
+# `zwlr_foreign_toplevel_management_v1`, whose entire purpose is letting an
+# outside process enumerate windows and ask for one to be activated. What
+# varies is the *client*: there is no single CLI for it that ships everywhere,
+# so this takes one as configuration rather than hardcoding a package.
+#
+# OMARCHY_TOPLEVEL_HELPER names a program called as
+#
+#     "$OMARCHY_TOPLEVEL_HELPER" activate <window-pattern>
+#
+# and expected to exit 0 when it activated a window, 1 when nothing matched,
+# and anything else when it could not look. `wlrctl` is tried when no helper
+# is configured, since it is the most widely packaged implementation.
+#
+# Without this branch, `hyprctl clients -j` fails off Hyprland, the address is
+# always empty, and every launch-or-focus keybinding -- the browser, the
+# terminal, 1Password, Signal, and everything routed through
+# omarchy-launch-or-focus-tui and -webapp -- opens a second copy of an app
+# that is already on screen.
+portable_focus() {
+  local helper=${OMARCHY_TOPLEVEL_HELPER:-}
+
+  if [[ -n $helper ]]; then
+    "$helper" activate "$WINDOW_PATTERN"
+    case $? in
+    0) return 0 ;;
+    1) return 1 ;;
+    *) return 2 ;;
+    esac
+  fi
+
+  if command -v wlrctl >/dev/null 2>&1; then
+    wlrctl toplevel focus "app_id:$WINDOW_PATTERN" >/dev/null 2>&1 && return 0
+    wlrctl toplevel focus "title:$WINDOW_PATTERN" >/dev/null 2>&1 && return 0
+    return 1
+  fi
+
+  return 2
+}
+
+if [[ -n ${HYPRLAND_INSTANCE_SIGNATURE:-} ]] && hypr_focus; then
+  exit 0
+fi
+
+portable_focus
+case $? in
+0) exit 0 ;;
+*) launch ;;
+esac

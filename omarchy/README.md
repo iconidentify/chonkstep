@@ -6,6 +6,13 @@ that read chonkstep's own control socket instead (`docs/control-socket.md`
 in `docs/` at the repository root is the protocol; the plugins are clients of
 it and change nothing about it).
 
+This directory also carries the other half of the same relationship:
+where Omarchy's own *scripts* ask Hyprland a question chonkstep cannot
+answer, `shims/` holds a drop-in that answers it portably, and
+`upstream/` holds the same fix prepared as a patch to Omarchy itself.
+The rule is the same throughout — nothing under `/usr/share/omarchy` or
+`/usr/bin` is ever written, and every piece here is opt-in.
+
 ```
 omarchy/
   plugins/
@@ -13,6 +20,12 @@ omarchy/
     chonkstep.theme/        bar widget: the active theme's name ("NeXTSTEP Classic · dark")
                             (each carries its own README, LICENSE and ControlSocket.qml,
                             so it can be split out and published on its own)
+  shims/                    Omarchy's Hyprland-bound scripts, with the Hyprland part
+                            replaced: the shell supervisor, its restart, launch-or-focus
+                            and logout. Symlinked onto PATH by shims/install.sh; see
+                            docs/omarchy-integration.md for what each one fixes.
+  upstream/                 the same five fixes as a reviewable patch set for Omarchy,
+                            Hyprland's path kept first in every one. Prepared, not sent.
   tools/
     fake-control-socket.py  a stand-in server for developing without a compositor
     check-plugins.sh        manifest validation, qmllint, and a diff of the shared file

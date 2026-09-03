@@ -1,0 +1,16 @@
+[package]
+name = "chonk-toplevel"
+description = "A wlr-foreign-toplevel client: list, activate and close windows from a shell script. The compositor-agnostic half of Omarchy's launch-or-focus, which asks hyprctl."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+# The Wayland client half. Both crates are already in the workspace
+# graph — `wm-wayland` implements these protocols on the *server* side
+# through smithay's re-exports, and `chonk-testkit` already declares
+# the client halves for its layer-shell and session-lock probes — so
+# this adds a feature, not a dependency tree. Versions match
+# chonk-testkit's exactly, so cargo unifies them into one crate.
+wayland-client = "0.31"
+wayland-protocols-wlr = { version = "0.3", features = ["client"] }
