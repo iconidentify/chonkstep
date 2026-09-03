@@ -109,6 +109,17 @@ unset DISPLAY WAYLAND_DISPLAY
 # XWayland and the toolkits read these variables too, and handing them
 # an empty string where the user simply has no preference is a worse-
 # formed environment than an absent variable.
+# Answer Hyprland's IPC, so Omarchy's tooling works here. Off in the
+# compositor by default on purpose -- docs/hyprland-ipc.md argues that
+# impersonating another compositor changes how unrelated software on the
+# machine behaves, and is a claim a user should make deliberately rather
+# than inherit. This session makes it, because being a drop-in for
+# Hyprland under Omarchy is what this session is for: with it on, the
+# 53 Omarchy scripts that shell out to hyprctl and the Quickshell bar
+# that talks the sockets directly both work. Comment this line out to
+# decline it; nothing else changes.
+export CHONKSTEP_HYPRLAND_IPC=1
+
 for _xkb in XKB_DEFAULT_RULES XKB_DEFAULT_MODEL XKB_DEFAULT_LAYOUT \
             XKB_DEFAULT_VARIANT XKB_DEFAULT_OPTIONS; do
     if [ -n "${!_xkb:-}" ]; then
