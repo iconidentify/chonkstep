@@ -335,8 +335,9 @@ pub const OMARCHY_BINDINGS: &[(&str, &str)] = &[
     ("super+shift+n", "run omarchy-editor"),
     // -- tiling.lua: the window and workspace verbs -------------------
     //
-    // Six of forty. The rest of that file is the tiling vocabulary
-    // itself, and `OMARCHY_UNBOUND` says so one chord at a time.
+    // Twenty-six of forty. The rest of that file is the tiling
+    // vocabulary itself, and `OMARCHY_UNBOUND` says so one chord at a
+    // time.
     ("super+w", "close"),
     ("super+f", "toggle-fullscreen"),
     // Omarchy's "Full width" is Hyprland's `maximized` mode, which
@@ -348,6 +349,37 @@ pub const OMARCHY_BINDINGS: &[(&str, &str)] = &[
     ("super+alt+f", "toggle-maximize"),
     ("super+tab", "workspace-next"),
     ("super+shift+tab", "workspace-prev"),
+    // The twenty chords an Omarchy user has in their fingers before
+    // they have a mouse in their hand: the workspace row by number,
+    // and the same row with the window in tow. `SUPER + 0` is
+    // workspace 10, which is where Omarchy puts it and why these verbs
+    // take a number rather than being spelled out nine times.
+    //
+    // Chonkstep's workspaces grow on demand and are never destroyed,
+    // so `SUPER + 7` on a desk with three workspaces creates the four
+    // in between rather than refusing — the same thing `super+tab`
+    // does one workspace at a time, and the same thing Hyprland does.
+    // The bar draws whatever the row grew to.
+    ("super+1", "workspace 1"),
+    ("super+2", "workspace 2"),
+    ("super+3", "workspace 3"),
+    ("super+4", "workspace 4"),
+    ("super+5", "workspace 5"),
+    ("super+6", "workspace 6"),
+    ("super+7", "workspace 7"),
+    ("super+8", "workspace 8"),
+    ("super+9", "workspace 9"),
+    ("super+0", "workspace 10"),
+    ("super+shift+1", "workspace-carry 1"),
+    ("super+shift+2", "workspace-carry 2"),
+    ("super+shift+3", "workspace-carry 3"),
+    ("super+shift+4", "workspace-carry 4"),
+    ("super+shift+5", "workspace-carry 5"),
+    ("super+shift+6", "workspace-carry 6"),
+    ("super+shift+7", "workspace-carry 7"),
+    ("super+shift+8", "workspace-carry 8"),
+    ("super+shift+9", "workspace-carry 9"),
+    ("super+shift+0", "workspace-carry 10"),
     // "Move window to scratchpad": send this window out of the way and
     // leave it recoverable. Chonkstep's nearest true verb is
     // `miniaturize` — the window collapses to an icon tile on the desk
@@ -543,8 +575,6 @@ pub const OMARCHY_UNBOUND: &[(&str, &str, Unbound)] = &[
     ("super+left/right/up/down", "focus the window in that direction", Unbound::NoVerb),
     ("super+shift+left/right/up/down", "swap the window with its neighbour", Unbound::TilingOnly),
     ("super+minus / super+equal, +shift/alt/ctrl variants", "grow and shrink the window by 25 / 100 / 300 px", Unbound::TilingOnly),
-    ("super+1..0", "switch to workspace n", Unbound::NoVerb),
-    ("super+shift+1..0", "move the window to workspace n", Unbound::NoVerb),
     ("super+shift+alt+1..0", "move the window to workspace n without following", Unbound::NoVerb),
     ("super+s", "toggle the scratchpad workspace", Unbound::NoVerb),
     ("super+ctrl+tab", "the workspace before this one", Unbound::NoVerb),
@@ -757,15 +787,27 @@ mod tests {
             let combo = parse_key(spec).unwrap_or_else(|| panic!("{spec} should parse"));
             assert!(!bound.contains(&combo), "{spec} is documented unbound but the preset binds it");
         }
-        // The workspace-by-index families, every member.
+        // The digit families that stay dead, every member: moving a
+        // window without following it, and the group-focus chords.
         for digit in '1'..='9' {
-            for prefix in ["super", "super+shift", "super+shift+alt", "super+alt"] {
+            for prefix in ["super+shift+alt", "super+alt"] {
                 let spec = format!("{prefix}+{digit}");
-                // ...except the bar-panel chords, which ARE bound and
-                // are a different family (`super+ctrl+n`).
                 let combo = parse_key(&spec).unwrap();
                 assert!(!bound.contains(&combo), "{spec} is documented unbound but the preset binds it");
             }
+        }
+        // ...and the two that are alive, asserted rather than left to
+        // the gap between the lists: `super+n` is workspace n and
+        // `super+shift+n` carries the window there, counting from one
+        // with `super+0` as the tenth, which is where Omarchy puts it.
+        let by_number = |spec: &str| {
+            let combo = parse_key(spec).unwrap();
+            omarchy_keybindings().into_iter().find(|(c, _)| *c == combo).map(|(_, a)| a)
+        };
+        for digit in 1..=10 {
+            let key = if digit == 10 { "0".to_string() } else { digit.to_string() };
+            assert_eq!(by_number(&format!("super+{key}")), Some(Action::Workspace(digit - 1)));
+            assert_eq!(by_number(&format!("super+shift+{key}")), Some(Action::WorkspaceCarry(digit - 1)));
         }
         // `super+up` is the one arrow the preset does claim, for the
         // Overview, and the docs say so: assert it rather than let it

@@ -70,9 +70,11 @@
 #               close, super+space for Omarchy's menu, super+tab
 #               between workspaces, and the media, capture,
 #               notification and panel chords running Omarchy's own
-#               commands. 93 bindings; it also declares the 77
+#               commands. 113 bindings; it also declares the 77
 #               [commands] entries they name, so you need none of your
-#               own for them.
+#               own for them. On a machine that HAS Omarchy on it this
+#               table is only the fallback -- your live ~/.config/hypr/
+#               is read instead; see `hyprland_config` below.
 #
 # A keymap REPLACES the other; the two are never merged. A desk
 # answering to both would close a window on alt+shift+q AND on
@@ -92,6 +94,39 @@
 # here wins either way, so `keymap = "chonkstep"` keeps the posture
 # and the NeXTSTEP chords together.
 #keymap = "omarchy"
+
+# ============================================================
+
+# Read the machine's LIVE Hyprland configuration - ~/.config/hypr/ and
+# Omarchy's shipped defaults - for keybindings, window rules,
+# `exec-once` autostart and `env` session environment. Both syntaxes
+# are read: Lua (Omarchy 4) and the classic `hyprland.conf`.
+#
+# This is what makes the swap invisible. Omarchy's own menu WRITES
+# those files: change a keybinding through their UI and it edits
+# Hyprland config. Without this, that menu would silently stop working
+# the day you switched window managers.
+#
+# It also replaces the keymap above with the live original rather than
+# the hand-transcribed copy of it, so an Omarchy release that moves a
+# chord moves yours too.
+#
+# Left unset, the POSTURE decides: on under `desktop = "omarchy"` or
+# `keymap = "omarchy"` (you have already asked for these bindings), off
+# otherwise (a plain chonkstep desk reads nobody else's files - a
+# stale ~/.config/hypr from an afternoon spent trying Hyprland must
+# never silently replace your keymap).
+#
+# Set it explicitly to override that either way. `false` is the escape
+# hatch; `true` turns it on for a chonkstep desk that wants it anyway.
+#
+# Your own settings in THIS file always win: a [keybindings] entry
+# beats any chord read from there, "none" still unbinds one, and a
+# [commands] entry of the same name replaces the one the read
+# declared. An edit to your Hyprland config takes effect within a
+# second, with no restart. See docs/hyprland-config.md for what is
+# read, what is ignored and why, and the precedence in full.
+#hyprland_config = false
 
 # ============================================================
 
@@ -414,9 +449,29 @@
 #   workspace-carry-next, workspace-carry-prev, overview, window-menu,
 #   toggle-dock, reload, restart, none
 #
-# ...plus "run <name>", the one action that takes an argument: the name
-# of an entry in [commands] above. The argument is a name, never a
-# command line -- see [commands] for why.
+# ...plus three actions that take an argument:
+#
+#   "workspace <n>"        go to workspace n
+#   "workspace-carry <n>"  take the focused window to workspace n, and
+#                          follow it there
+#   "run <name>"           run the [commands] entry called <name>. The
+#                          argument is a name, never a command line --
+#                          see [commands] above for why.
+#
+# Workspaces are numbered from 1 here -- the way the window menu's
+# "Move To" submenu numbers them, and the way Hyprland, GNOME and every
+# bar that draws a workspace strip number them. 1 through 99 are
+# accepted; "workspace 0" is not an action and is skipped with a
+# warning, because a file that counts from zero is off by one on every
+# other line too.
+#
+# Naming a workspace that does not exist yet CREATES it, and any gap
+# before it: on a desk with three workspaces, "workspace 7" leaves you
+# on the seventh of seven. That is not a special case for this verb --
+# chonkstep's workspaces have always grown on demand and are never
+# destroyed, which is exactly what "workspace-next" does off the end of
+# the row. The Clip, the pager and any bar draw whatever the row grew
+# to.
 #
 # "reload" re-reads this file and applies it in place; "restart"
 # re-execs the on-disk binary to pick up a new build. See the note at
@@ -454,6 +509,13 @@
 "alt+shift+right" = "workspace-carry-next"  # carry the focused window along
 "alt+shift+left" = "workspace-carry-prev"   # carry the focused window back
 "super+up" = "overview"                     # the modal Overview (see below)
+
+# Workspaces by number are unbound in this keymap -- the defaults above
+# reach them by stepping -- but the verbs are there for the taking, and
+# `keymap = "omarchy"` binds all twenty of them on super+1..0 and
+# super+shift+1..0 for a user who arrives with that muscle memory:
+#"alt+ctrl+1" = "workspace 1"                # go to the first workspace
+#"alt+shift+1" = "workspace-carry 1"         # ...and take this window along
 
 # "overview" opens a modal view of every window on the current desk as
 # a grid of live thumbnails, with a workspace strip along the bottom.

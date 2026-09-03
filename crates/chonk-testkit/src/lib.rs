@@ -147,6 +147,12 @@ pub fn poll_until<T>(
 /// One list, so no test restates a number it could get wrong.
 pub mod keys {
     pub const ESC: u32 = 1;
+    /// The number row, as evdev counts it: `KEY_1` is 2, so the digit
+    /// `n` is `n + 1` and `KEY_0` is 11 at the far end. The workspace
+    /// chords are the reason these are here.
+    pub const ONE: u32 = 2;
+    pub const TWO: u32 = 3;
+    pub const THREE: u32 = 4;
     pub const ENTER: u32 = 28;
     pub const LEFTSHIFT: u32 = 42;
     pub const X: u32 = 45;
@@ -214,6 +220,15 @@ pub struct SessionOptions {
     /// making. Applied after the harness's own variables, so a test
     /// can also deliberately override one of those.
     pub env: Vec<(String, String)>,
+    /// Files seeded into the isolated `XDG_CONFIG_HOME` root itself
+    /// (not under `chonkstep/`) before boot, as `(relative path,
+    /// contents)` — the config-side twin of [`Self::state_root_files`],
+    /// for configuration belonging to *another* program this session
+    /// reads. The Hyprland-config e2e plants a whole `hypr/` tree here,
+    /// exactly where an Omarchy user's own files live, so the session
+    /// reads somebody else's configuration from the place it really
+    /// comes from rather than from a path invented for the test.
+    pub config_root_files: Vec<(String, String)>,
     /// Files seeded into the isolated `XDG_STATE_HOME` root itself
     /// (not under `chonkstep/`) before boot, as `(relative path,
     /// contents)` — for state that belongs to *another* program the
@@ -288,6 +303,13 @@ impl Session {
         }
         for (name, contents) in &options.config_files {
             let path = config_home.join("chonkstep").join(name);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+            }
+            std::fs::write(path, contents).map_err(|e| e.to_string())?;
+        }
+        for (name, contents) in &options.config_root_files {
+            let path = config_home.join(name);
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
             }
@@ -530,6 +552,41 @@ impl Session {
     /// the raw bytes fails against a healthy compositor.
     pub fn log(&self) -> String {
         strip_ansi(&std::fs::read_to_string(&self.log_path).unwrap_or_default())
+    }
+
+    /// What a launched client has written to stdout/stderr so far,
+    /// with colour escapes stripped for the same reason [`log`] strips
+    /// them.
+    ///
+    /// The probes in `src/bin/` are scripted clients that *report* —
+    /// `chonk-gamma-probe` prints the gamma size it was told and
+    /// whether its second claim was refused — so for those the client's
+    /// own log is the observation, not merely the diagnosis of a
+    /// failure. `program` is the name it was launched under (a path's
+    /// file name), and clients are matched newest first, so relaunching
+    /// the same probe reads the run that just happened.
+    ///
+    /// [`log`]: Session::log
+    pub fn client_log(&self, program: &str) -> String {
+        let short = Path::new(program).file_name().and_then(|name| name.to_str()).unwrap_or(program);
+        let suffix = format!("-{short}.log");
+        // Found on disk by name rather than by this client's position
+        // in `clients`: `kill_client` removes entries, so a position
+        // there stops matching the `client-N-` the file was named with
+        // the moment a test kills anything.
+        let mut newest: Option<(usize, PathBuf)> = None;
+        for entry in std::fs::read_dir(&self.dir).into_iter().flatten().flatten() {
+            let path = entry.path();
+            let Some(name) = path.file_name().and_then(|name| name.to_str()) else { continue };
+            let Some(rest) = name.strip_prefix("client-") else { continue };
+            let Some(number) = rest.strip_suffix(&suffix) else { continue };
+            let Ok(number) = number.parse::<usize>() else { continue };
+            if newest.as_ref().is_none_or(|(seen, _)| number >= *seen) {
+                newest = Some((number, path));
+            }
+        }
+        let Some((_, path)) = newest else { return String::new() };
+        strip_ansi(&std::fs::read_to_string(path).unwrap_or_default())
     }
 
     /// Polls the ledger until the Dock column sits with its right edge

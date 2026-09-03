@@ -278,6 +278,83 @@ pub fn float_override(identity: &str, workarea: Rect, chrome: Size, scale: f32) 
     ))
 }
 
+/// What a window-identity rule says about a window that is mapping.
+///
+/// The size is *logical* pixels, like [`OMARCHY_FLOAT_SIZE`] beside it
+/// and for the same reason: a rule read out of a config file was
+/// written against a 1x desk, and scaling it is this crate's job.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FloatDecision {
+    /// The size to map at, or `None` to leave the client's own alone.
+    pub size: Option<Size>,
+    /// Whether to center it rather than honour the position it asked
+    /// for.
+    pub center: bool,
+}
+
+/// A source of per-window float rules, supplied by the shell.
+///
+/// A trait rather than a data type because the rules this desktop
+/// actually wants to honour are the *user's* — read live out of their
+/// Hyprland configuration by `wm_config::hyprland` — and matching them
+/// needs a regular-expression engine that this crate has no other use
+/// for. The same seam `set_theme_engine` already uses: the core owns
+/// the question and the moment it is asked, and somebody else owns the
+/// answer.
+///
+/// `class` and `title` are the window's identity at map time, both
+/// possibly empty. An implementation must be total and cheap: it is
+/// called once per mapped window, on the compositor's own thread.
+pub trait FloatPolicy: std::fmt::Debug + Send + Sync {
+    fn decision_for(&self, class: &str, title: &str) -> Option<FloatDecision>;
+}
+
+/// The content size to map a window at, consulting `policy` first and
+/// falling back to the built-in [`float_override`].
+///
+/// The fallback is what keeps a machine with no configuration to read
+/// behaving exactly as it did: [`float_override`]'s `org.omarchy.`
+/// rule is a transcription of one line of Omarchy's own config, and it
+/// stays the answer for a session that could not read the real thing.
+/// A policy that answers is the real thing, and wins.
+///
+/// `own` is the size the client asked for, returned unchanged when a
+/// rule says "center this" without saying how big — the caller treats
+/// any `Some` as "this window is placed by rule, not by the client",
+/// so returning its own size is how "move it, do not resize it" is
+/// said in this signature.
+pub fn float_override_for(
+    policy: Option<&dyn FloatPolicy>,
+    class: &str,
+    title: &str,
+    workarea: Rect,
+    chrome: Size,
+    own: Size,
+    scale: f32,
+) -> Option<Size> {
+    let Some(decision) = policy.and_then(|policy| policy.decision_for(class, title)) else {
+        return float_override(class, workarea, chrome, scale);
+    };
+    match decision.size {
+        Some(size) => Some(fit_in(size, workarea, chrome, scale)),
+        // A rule that floats and centers without a size: keep the
+        // client's own, clamped to the workarea so the frame still
+        // fits.
+        None if decision.center => Some(fit_in(own, workarea, chrome, 1.0)),
+        None => None,
+    }
+}
+
+/// A logical size scaled and clamped to fit inside `workarea` once
+/// `chrome` has taken its share — the arithmetic [`float_override`]
+/// does, factored out so both callers do it identically.
+fn fit_in(size: Size, workarea: Rect, chrome: Size, scale: f32) -> Size {
+    let scale = if scale.is_finite() && scale > 0.0 { scale } else { 1.0 };
+    let scaled = |edge: u32| (edge as f32 * scale).round().max(1.0) as u32;
+    let fits = |want: u32, area: u32, chrome: u32| want.min(area.saturating_sub(chrome)).max(1);
+    Size::new(fits(scaled(size.w), workarea.size.w, chrome.w), fits(scaled(size.h), workarea.size.h, chrome.h))
+}
+
 fn center_of(workarea: Rect, frame: Size) -> Point {
     Point::new(
         workarea.pos.x + (workarea.size.w.saturating_sub(frame.w) / 2) as i32,

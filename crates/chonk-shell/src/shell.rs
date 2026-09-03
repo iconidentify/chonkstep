@@ -809,18 +809,6 @@ fn primary_rect(monitors: &[MonitorInfo], screen: Size) -> Rect {
         .unwrap_or(Rect { pos: Point::new(0, 0), size: screen })
 }
 
-fn carry_focused_to_workspace<B: Backend>(wm: &mut WindowManager<B>, workspace: usize) {
-    let Some(id) = wm.focused_client() else {
-        return;
-    };
-    let Some(window) = wm.client(id).map(|client| client.window) else {
-        return;
-    };
-    wm.move_client_to_workspace(id, workspace);
-    wm.switch_workspace(workspace);
-    wm.dispatch(BackendEvent::ActivateRequested(window));
-}
-
 /// The one desktop shell, orchestrated: the Desktop (dock, Clip, root
 /// and window menus, icon tiles, wallpaper), the launcher strip, the
 /// scanned `.desktop` index, the active theme, and the configured
@@ -920,6 +908,43 @@ pub struct Shell<B: Backend + PopupHost<PopupId = B::ShellId>> {
     /// lingering, so a pick abandoned this morning cannot re-dress the
     /// desk this afternoon.
     omarchy_adoption_armed: Option<std::time::Instant>,
+    /// Watches the user's *own* Hyprland configuration — their
+    /// bindings, window rules and autostart — so an edit made through
+    /// Omarchy's menu takes effect without a restart.
+    ///
+    /// The sibling of [`Self::omarchy`] beside it, at the same one-hertz
+    /// cadence and for a stronger version of the same reason: those
+    /// files are written by `rename`-over rather than in place, which
+    /// an inotify watch has to re-arm for and a signature comparison
+    /// simply sees. `None` on a session that does not read anybody
+    /// else's configuration, which is most of them — see
+    /// `wm_config::hyprland::wanted`.
+    hyprland_config: Option<(wm_config::hyprland::Roots, wm_config::hyprland::Watch)>,
+}
+
+/// The watch over the user's own Hyprland configuration, for a session
+/// that reads one.
+///
+/// Returns `None` — and so costs a session that reads nobody else's
+/// files exactly one `Option` check per frame and no disk access at
+/// all — when the posture does not call for it, or when there is no
+/// `$HOME` to find a configuration under.
+///
+/// The initial read here is a second read of files `wm_config::parse`
+/// has already been through, and that is deliberate: it is what the
+/// watch's baseline is taken over, so the *set of files* being watched
+/// is the set that was actually opened rather than a guess at which
+/// ones a configuration might use. It happens once, at startup,
+/// against about forty small files.
+fn hyprland_watch(state: &SessionState) -> Option<(wm_config::hyprland::Roots, wm_config::hyprland::Watch)> {
+    if !state.reads_hyprland_config {
+        return None;
+    }
+    let roots = wm_config::hyprland::Roots::of_this_machine()?;
+    let reading = wm_config::hyprland::read(&roots);
+    let watch = wm_config::hyprland::Watch::new(&roots, &reading);
+    tracing::info!(files = reading.files.len(), "watching the desktop's Hyprland configuration for changes");
+    Some((roots, watch))
 }
 
 impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
@@ -1066,6 +1091,10 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
             panel_escape: false,
             omarchy: crate::omarchy_follow::Watch::new(),
             omarchy_adoption_armed: None,
+            // Armed only for a session that actually reads somebody
+            // else's configuration; on every other session this is
+            // `None` and the poll in `tick` never touches the disk.
+            hyprland_config: hyprland_watch(state),
         }
     }
 
@@ -1110,6 +1139,12 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         // Straight through to the backend, which is what answers the
         // decoration protocols and decides who gets a frame...
         wm.backend_mut().set_decoration_rules(next.decorations.clone());
+        // The user's own window rules, read live out of their Hyprland
+        // configuration. Pushed through the same pass as the
+        // decoration rules beside it, so a `windowrule` edited through
+        // Omarchy's menu reaches the next window that maps without a
+        // restart — see `wm_config::hyprland`.
+        wm.set_float_policy(next.float_policy.clone());
         // ...and then re-ask for every window already on the desk. A
         // rule that only reached windows opened after it was written
         // would mean closing and reopening the very window whose chrome
@@ -1470,6 +1505,15 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
                     wm.switch_workspace(wm.current_workspace() - 1);
                 }
             }
+            // The same two verbs by number. No left-edge guard and no
+            // right-edge guard: the index arrived from the parser
+            // already range-checked and already converted out of the
+            // config file's 1-based counting, so what reaches here is
+            // an index `switch_workspace` can always honour — growing
+            // the row on demand exactly as `workspace-next` does one
+            // step at a time.
+            Action::Workspace(index) => wm.switch_workspace(*index),
+            Action::WorkspaceCarry(index) => wm.carry_focused_to_workspace(*index),
             // The modal Overview. Closed: open it (declined during a
             // live Alt+Tab session — two modal keyboard owners cannot
             // share one grab). Open: route the parked key press. The
@@ -1502,10 +1546,10 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
                     }
                 }
             }
-            Action::WorkspaceCarryNext => carry_focused_to_workspace(wm, wm.current_workspace() + 1),
+            Action::WorkspaceCarryNext => wm.carry_focused_to_workspace(wm.current_workspace() + 1),
             Action::WorkspaceCarryPrev => {
                 if wm.current_workspace() > 0 {
-                    carry_focused_to_workspace(wm, wm.current_workspace() - 1);
+                    wm.carry_focused_to_workspace(wm.current_workspace() - 1);
                 }
             }
             // Re-read the config file and apply it here and now:
@@ -2403,6 +2447,27 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
                 self.run_root_menu_action(wm, RootMenuAction::SetTheme(wm_theme::omarchy::ID));
             }
         }
+        // Following the user's own Hyprland configuration. Omarchy's
+        // menu writes those files, so a rebind made through their UI
+        // has to reach a running session — otherwise "your menu still
+        // configures your machine" is a half-truth. Re-resolved through
+        // `reresolve`, which is the same one path a reload and a theme
+        // change take, so the read cannot resolve by different rules
+        // than the startup it replaces.
+        if let Some((roots, watch)) = &mut self.hyprland_config {
+            if watch.changed(std::time::Instant::now()) {
+                tracing::info!("the desktop's Hyprland configuration changed; re-reading it");
+                // Re-point the watch before re-resolving: the file set
+                // is itself part of what an edit can change (a fresh
+                // `source =` line brings in a file that was never
+                // watched), and taking the new set from the read that
+                // is about to be applied keeps the two in step.
+                let reading = wm_config::hyprland::read(roots);
+                reading.report();
+                watch.follow(&reading);
+                self.reresolve(wm);
+            }
+        }
         if let Some(target) = self.desktop.take_workspace_request() {
             wm.switch_workspace(target);
         }
@@ -2497,7 +2562,24 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         }
         for command in commands {
             match command {
-                control::Command::FocusWorkspace(index) => wm.switch_workspace(index),
+                // A switch, never a create — `docs/control-socket.md`
+                // §4 promises exactly this, and the promise is worth
+                // keeping because this protocol publishes the real
+                // workspace count, so a bar built on it draws only
+                // the workspaces that exist and never needs to
+                // conjure one. (The Hyprland compatibility socket
+                // deliberately answers the other way: Hyprland grows
+                // on demand and its clients — Omarchy's bar draws
+                // buttons one through five unconditionally — depend
+                // on that. Two protocols, two audiences, each honest
+                // to its own contract.)
+                control::Command::FocusWorkspace(index) => {
+                    if index < wm.workspace_count() {
+                        wm.switch_workspace(index);
+                    } else {
+                        tracing::debug!(index, "control client asked for a workspace that does not exist; ignoring");
+                    }
+                }
             }
         }
         self.control.publish(&self.control_snapshot(wm));

@@ -78,9 +78,14 @@ the menu is not undone the next time you log in.
   command line — and with `theme = "omarchy"` that palette *is*
   Omarchy's. If you would rather have the terminal Omarchy configured,
   that is one line: `terminal = "omarchy-launch-terminal"`.
-- **`autostart`.** Empty, in both postures. Omarchy's shell is started
-  through Omarchy's own launcher by `omarchy_shell`, not from this list;
-  putting it here too would start it twice.
+- **`autostart`.** The *preset* sets it in neither posture. On a
+  machine with an Omarchy configuration to read, the live read fills it
+  from their `exec-once` lines — see
+  [hyprland-config.md](hyprland-config.md) — and your own `autostart`
+  in `config.toml` still replaces that, like every other key. Omarchy's
+  shell is never in it either way: it is started through Omarchy's own
+  launcher by `omarchy_shell`, and taking it from the list too would
+  start it twice.
 - **Placement, focus policy, edge resistance, scale, decorations, the
   drag modifier.** These are how chonkstep manages windows, which is
   the half of the desktop the mode is *keeping*. An Omarchy user
@@ -175,11 +180,41 @@ commands are on its broken list; they stay bound, because they are
 Omarchy's own commands on Omarchy's own chords and the binding is
 already right for the day the gap closes.
 
+### On a real Omarchy machine, the table is read live
+
+Everything below describes the **baked** keymap: Omarchy's bindings
+transcribed by hand into `preset.rs`. On a machine that actually has
+Omarchy on it, that table is the *fallback*, not what you get.
+
+`desktop = "omarchy"` also reads your **live** `~/.config/hypr/**` —
+Lua on Omarchy 4, classic `hyprland.conf` on 3 — and the bindings it
+finds there replace the baked table outright. That is the difference
+between "chonkstep knows what Omarchy's chords were in August" and
+"Omarchy's menu still configures your machine": rebind a key through
+their UI and the running session follows it within a second.
+
+On the machine this was developed on the live read produced **135
+bindings over 101 commands**, against the baked table's 113 over 77 —
+the extra ones are mostly the preinstalled webapp and TUI chords, which
+a table of constants had to write off because Omarchy gates them on a
+file test that only a live read can make.
+
+It also generalises the one hardcoded window rule: `org.omarchy.*` at
+875x600 becomes Omarchy's real 38 float rules, so Steam gets 1100x700
+and picture-in-picture 600x338 instead of the size Omarchy's terminals
+want.
+
+**[hyprland-config.md](hyprland-config.md)** is the whole story: what is
+read, what is deliberately ignored and why, the precedence, and
+`hyprland_config = false` to turn it off. The tables below stay
+accurate for a machine with no Omarchy configuration to read, and are
+what the live read falls back to.
+
 ### The full map, and what is unbound
 
 Both tables live in the keybinding card, beside chonkstep's own:
 **[keybindings.md](keybindings.md), under "The Omarchy keymap"**
-— 93 bindings over 77 declared commands, then the 37 groups of Omarchy
+— 113 bindings over 77 declared commands, then the 35 groups of Omarchy
 chords that are deliberately dead here and why. Both are transcribed
 from `crates/wm-config/src/preset.rs`, which is the authoritative list;
 `crates/wm-config/tests/preset_doc.rs` fails if the card and the table
@@ -197,17 +232,14 @@ The two `declined on purpose` rows:
 
 ### The gaps worth knowing about
 
-Four things an Omarchy user will reach for and not find, with the
-workaround for each:
+Two things an Omarchy user will reach for and not find, with the
+workaround for each. Workspaces by number used to be the first entry on
+this list; `super+1..9` and `super+0`, and `super+shift+1..9` and
+`super+shift+0` to take the window along, are bound now and go exactly
+where an Omarchy user expects. Chonkstep counts workspaces from one in
+the config file, as Omarchy does, and grows the row on demand — press
+`super+7` on a desk with three workspaces and you have seven.
 
-- **Workspaces by number.** `super+1..9` is unbound and
-  `super+shift+1..9` with it: chonkstep's workspaces are reached
-  relatively (`workspace-next` / `workspace-prev`, on `super+tab` and
-  `super+shift+tab` here) and there is no verb for "go to workspace 4".
-- **Carrying a window between workspaces** has no Omarchy chord to map
-  onto — theirs is `super+shift+1..9`, by index. The verbs exist; bind
-  them: `"super+shift+right" = "workspace-carry-next"`. The window
-  menu's `Move To` submenu also does it with the mouse.
 - **Directional focus** (`super+left/right/up/down`) does not exist on a
   stacking desk. Alt+Tab does, and it is fixed modal machinery here —
   hold Alt, Tab through live thumbnails — exactly as Omarchy binds it.

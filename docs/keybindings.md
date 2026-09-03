@@ -39,13 +39,30 @@ Window-targeted actions (`close`, `toggle-maximize`, `toggle-shade`,
 `miniaturize`, `toggle-fullscreen`, `window-menu`) act on the focused
 window and do nothing when no window is focused.
 
+Two more verbs exist and are unbound in this keymap, because the
+NeXTSTEP vocabulary reaches workspaces by stepping through them rather
+than by number: `workspace <n>` goes to workspace *n*, and
+`workspace-carry <n>` takes the focused window there and follows it.
+**Workspaces are numbered from 1** in this file, the way the window
+menu's `Move To` submenu numbers them and the way every other desktop
+does; 1 through 99 are accepted. Naming a workspace that does not exist
+yet creates it, along with any gap before it — the row grows on demand
+and is never destroyed, exactly as `workspace-next` grows it a step at a
+time. Bind them like anything else:
+
+```toml
+[keybindings]
+"alt+ctrl+1" = "workspace 1"
+"alt+shift+1" = "workspace-carry 1"
+```
+
 ## The Omarchy keymap (`keymap = "omarchy"`)
 
 ```toml
 keymap = "omarchy"        # ...or desktop = "omarchy", which defaults it
 ```
 
-93 bindings, derived from Omarchy's own configuration on the machine —
+113 bindings, derived from Omarchy's own configuration on the machine —
 `$OMARCHY_PATH/default/hypr/bindings/*.lua` — rather than from memory of
 Hyprland, with the `o.bind` helpers expanded the way `helpers.lua`
 expands them. A `run <name>` action names an entry the preset declares
@@ -86,6 +103,26 @@ day the gap closes, the binding is already right.
 | `super+alt+f`            | `toggle-maximize`                      | --                                                                                                                  |
 | `super+tab`              | `workspace-next`                       | --                                                                                                                  |
 | `super+shift+tab`        | `workspace-prev`                       | --                                                                                                                  |
+| `super+1`                | `workspace 1`                          | --                                                                                                                  |
+| `super+2`                | `workspace 2`                          | --                                                                                                                  |
+| `super+3`                | `workspace 3`                          | --                                                                                                                  |
+| `super+4`                | `workspace 4`                          | --                                                                                                                  |
+| `super+5`                | `workspace 5`                          | --                                                                                                                  |
+| `super+6`                | `workspace 6`                          | --                                                                                                                  |
+| `super+7`                | `workspace 7`                          | --                                                                                                                  |
+| `super+8`                | `workspace 8`                          | --                                                                                                                  |
+| `super+9`                | `workspace 9`                          | --                                                                                                                  |
+| `super+0`                | `workspace 10`                         | --                                                                                                                  |
+| `super+shift+1`          | `workspace-carry 1`                    | --                                                                                                                  |
+| `super+shift+2`          | `workspace-carry 2`                    | --                                                                                                                  |
+| `super+shift+3`          | `workspace-carry 3`                    | --                                                                                                                  |
+| `super+shift+4`          | `workspace-carry 4`                    | --                                                                                                                  |
+| `super+shift+5`          | `workspace-carry 5`                    | --                                                                                                                  |
+| `super+shift+6`          | `workspace-carry 6`                    | --                                                                                                                  |
+| `super+shift+7`          | `workspace-carry 7`                    | --                                                                                                                  |
+| `super+shift+8`          | `workspace-carry 8`                    | --                                                                                                                  |
+| `super+shift+9`          | `workspace-carry 9`                    | --                                                                                                                  |
+| `super+shift+0`          | `workspace-carry 10`                   | --                                                                                                                  |
 | `super+alt+s`            | `miniaturize`                          | --                                                                                                                  |
 | `super+ctrl+v`           | `run omarchy-clipboard`                | `omarchy-shell shell toggle omarchy.clipboard`                                                                      |
 | `super+space`            | `run omarchy-menu`                     | `omarchy-menu toggle`                                                                                               |
@@ -170,7 +207,7 @@ day the gap closes, the binding is already right.
 
 ### Deliberately unbound
 
-37 groups of Omarchy chord this keymap leaves dead, and why. Left dead
+35 groups of Omarchy chord this keymap leaves dead, and why. Left dead
 rather than approximated: a dead key is looked up in five seconds,
 while a `super+j` that does something *else* is a bug report.
 
@@ -193,8 +230,6 @@ while a `super+j` that does something *else* is a bug report.
 | `super+left/right/up/down`                                                                         | focus the window in that direction                                   | chonkstep has no verb for it, and no command can stand in   |
 | `super+shift+left/right/up/down`                                                                   | swap the window with its neighbour                                   | tiling-only: no meaning on a stacking desk                  |
 | `super+minus / super+equal, +shift/alt/ctrl variants`                                              | grow and shrink the window by 25 / 100 / 300 px                      | tiling-only: no meaning on a stacking desk                  |
-| `super+1..0`                                                                                       | switch to workspace n                                                | chonkstep has no verb for it, and no command can stand in   |
-| `super+shift+1..0`                                                                                 | move the window to workspace n                                       | chonkstep has no verb for it, and no command can stand in   |
 | `super+shift+alt+1..0`                                                                             | move the window to workspace n without following                     | chonkstep has no verb for it, and no command can stand in   |
 | `super+s`                                                                                          | toggle the scratchpad workspace                                      | chonkstep has no verb for it, and no command can stand in   |
 | `super+ctrl+tab`                                                                                   | the workspace before this one                                        | chonkstep has no verb for it, and no command can stand in   |
@@ -214,9 +249,8 @@ while a `super+j` that does something *else* is a bug report.
 | `touchpad toggle / on / off`                                                                       | enable and disable the touchpad                                      | commands Hyprland, which is not running                     |
 | `super+ctrl+x, f9`                                                                                 | voxtype dictation: toggle, and push-to-talk                          | Omarchy binds it conditionally; a table of constants cannot |
 
-The four gaps most worth knowing about — workspaces by number, carrying
-a window between workspaces, directional focus, and toggling Omarchy's
-bar — have workarounds listed in
+The two gaps most worth knowing about — directional focus and toggling
+Omarchy's bar — have workarounds listed in
 [omarchy-mode.md](omarchy-mode.md#the-gaps-worth-knowing-about).
 
 ## The mouse gestures

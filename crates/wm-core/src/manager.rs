@@ -7,7 +7,7 @@ use crate::backend::Backend;
 use crate::client::{Client, ClientFlags, ClientId, Lifecycle, MaximizeDirections, MonitorInfo};
 use crate::focus::FocusPolicy;
 use crate::hittest::{hit_test, HitTarget};
-use crate::placement::{self, PlacementPolicy};
+use crate::placement::{self, FloatPolicy, PlacementPolicy};
 use crate::resize;
 use crate::snap;
 use crate::types::{BackendEvent, ClientChrome, DragHandle, KeyCombo, MouseButton, Modifiers, NetState, NetStateAction, SurfaceRef, WindowType};
@@ -214,6 +214,18 @@ pub struct WindowManager<B: Backend> {
     /// cooperating. Window Maker has bound it to Alt since 1997 and
     /// grabs it on the client window for precisely this case.
     drag_modifier: Option<Modifiers>,
+    /// Per-window float rules read out of the user's *own* desktop
+    /// configuration, or `None` when there are none to read.
+    ///
+    /// `None` is not "float nothing": it is "fall back to the one
+    /// built-in rule", which is `placement::float_override`'s
+    /// `org.omarchy.` prefix. So a machine with no configuration to
+    /// read behaves exactly as it did before this field existed, and a
+    /// machine with one gets its own fifteen rules instead of a
+    /// transcription of one of them. Installed by the shell through
+    /// [`Self::set_float_policy`], the same way every other config
+    /// value reaches this type.
+    float_policy: Option<std::sync::Arc<dyn FloatPolicy>>,
     notifications: VecDeque<Notification>,
     focus_policy: FocusPolicy,
     /// 0-based, matching `Client::workspace`. Grows on demand the first
@@ -271,6 +283,7 @@ impl<B: Backend> WindowManager<B> {
             ui_scale: 1.0,
             snap_threshold: SNAP_THRESHOLD_PX,
             drag_modifier: Some(DEFAULT_DRAG_MODIFIER),
+            float_policy: None,
             notifications: VecDeque::new(),
             focus_policy: FocusPolicy::default(),
             current_workspace: 0,
@@ -294,6 +307,17 @@ impl<B: Backend> WindowManager<B> {
     /// position of their own — the config file's `placement` entry.
     pub fn set_placement_policy(&mut self, policy: PlacementPolicy) {
         self.placement_policy = policy;
+    }
+
+    /// Installs the per-window float rules — the ones read live out of
+    /// the user's own desktop configuration (`wm_config::hyprland`).
+    ///
+    /// Applies to windows mapped from here on, not retroactively: a
+    /// rule is a statement about how a window *arrives*, and re-placing
+    /// windows the user has since moved would be a config reload
+    /// rearranging their desk. `None` restores the built-in fallback.
+    pub fn set_float_policy(&mut self, policy: Option<std::sync::Arc<dyn FloatPolicy>>) {
+        self.float_policy = policy;
     }
 
     /// Tells the window manager what the desktop's UI scale is — the
@@ -699,6 +723,40 @@ impl<B: Backend> WindowManager<B> {
         }
     }
 
+    /// Carries the focused window to `workspace` and follows it there:
+    /// move, switch, activate, in that order. The "take this window
+    /// with me" gesture, as one verb — the sequence the keyboard's
+    /// carry bindings and any external controller both need, kept here
+    /// so there is exactly one of it.
+    ///
+    /// The order is not incidental. `move_client_to_workspace`
+    /// deliberately drops focus when the client leaves the active
+    /// workspace, so the activate at the end is what makes a *repeated*
+    /// carry keep carrying the same window instead of stranding it one
+    /// workspace along. Routed through the same activate path a pager's
+    /// `_NET_ACTIVE_WINDOW` message takes, so a carried window that was
+    /// shaded or miniaturized arrives usable rather than arriving as a
+    /// title bar.
+    ///
+    /// Growth is inherited, not decided here: both steps grow the
+    /// workspace row on demand, so carrying to workspace 7 from a desk
+    /// with three creates the four that were missing exactly as
+    /// `switch_workspace` alone would. A no-op if nothing is focused,
+    /// and harmless if `workspace` is the one the window is already on
+    /// — the move and the switch both no-op, and the window is simply
+    /// re-activated.
+    pub fn carry_focused_to_workspace(&mut self, workspace: usize) {
+        let Some(id) = self.focused else {
+            return;
+        };
+        let Some(window) = self.clients.get(id).map(|client| client.window) else {
+            return;
+        };
+        self.move_client_to_workspace(id, workspace);
+        self.switch_workspace(workspace);
+        self.handle_activate_request(window);
+    }
+
     /// Drains one pending desktop-shell notification (icon-tile
     /// lifecycle for miniaturized windows) — call this in a loop each
     /// time around the event loop, same as `Backend::poll_event`.
@@ -876,17 +934,20 @@ impl<B: Backend> WindowManager<B> {
         // this first layout already added around the client's own
         // content; a titlebar's height does not depend on how wide the
         // window under it is.
-        let floated = placement::float_override(
+        let floated = placement::float_override_for(
+            self.float_policy.as_deref(),
             &client.class,
+            &client.title,
             self.placement_area(),
             Size::new(
                 layout.frame_size.w.saturating_sub(content.size.w),
                 layout.frame_size.h.saturating_sub(content.size.h),
             ),
+            content.size,
             self.ui_scale,
         );
         if let Some(size) = floated {
-            tracing::info!(?window, app = %client.class, ?size, "floating an Omarchy window at its own fixed size");
+            tracing::info!(?window, app = %client.class, title = %client.title, ?size, "a window rule places this window at a fixed size");
             client.geometry.size = size;
             // The request goes with it: it is what the titlebar is
             // painted from a few lines down, and a frame drawn from the
@@ -3516,6 +3577,186 @@ mod tests {
         assert!(wm.backend().mapped_frames.contains(&frame), "the carried client must be visible on arrival");
         assert!(wm.client(id).unwrap().flags.contains(ClientFlags::FOCUSED), "the carried client must end up focused, so a repeated carry keeps carrying it");
         assert_eq!(wm.backend().published_window_desktops.last(), Some(&(window, 1)), "the move must re-publish _NET_WM_DESKTOP");
+    }
+
+    /// The same sequence as one verb — what the `workspace-carry <n>`
+    /// binding runs, and what an external controller asking for
+    /// "move this window to workspace 4 and take me with it" gets.
+    /// Asserted against exactly the outcomes the hand-rolled sequence
+    /// above asserts, so the verb cannot quietly drift from the
+    /// gesture it replaced.
+    #[test]
+    fn the_carry_verb_moves_switches_and_refocuses_in_one_call() {
+        let mut backend = FakeBackend::new();
+        let window = backend.create_window();
+        let mut wm = wm(backend);
+        wm.dispatch(BackendEvent::MapRequest(window));
+        let id = wm.client_for_window(window).unwrap();
+        let frame = wm.client(id).unwrap().frame.unwrap();
+
+        wm.carry_focused_to_workspace(1);
+
+        assert_eq!(wm.current_workspace(), 1, "the desk must follow the window it carried");
+        assert_eq!(wm.client(id).unwrap().workspace, 1);
+        assert!(wm.backend().mapped_frames.contains(&frame), "the carried client must be visible on arrival");
+        assert!(
+            wm.client(id).unwrap().flags.contains(ClientFlags::FOCUSED),
+            "the carried client must end up focused, so a repeated carry keeps carrying it"
+        );
+        assert_eq!(wm.backend().published_window_desktops.last(), Some(&(window, 1)));
+
+        // The point of ending focused: press it again and the same
+        // window keeps going, rather than being stranded one along.
+        wm.carry_focused_to_workspace(2);
+        assert_eq!((wm.current_workspace(), wm.client(id).unwrap().workspace), (2, 2));
+    }
+
+    /// Carrying past the end of the row grows it, exactly as
+    /// `switch_workspace` and `move_client_to_workspace` each do
+    /// alone — `super+shift+7` on a desk with one workspace is a
+    /// request for seven, not an error.
+    #[test]
+    fn carrying_past_the_end_of_the_row_grows_it() {
+        let mut backend = FakeBackend::new();
+        let window = backend.create_window();
+        let mut wm = wm(backend);
+        wm.dispatch(BackendEvent::MapRequest(window));
+        let id = wm.client_for_window(window).unwrap();
+        assert_eq!(wm.workspace_count(), 1);
+
+        wm.carry_focused_to_workspace(6);
+
+        assert_eq!(wm.workspace_count(), 7, "carrying to index 6 means 7 workspaces (0..=6) now exist");
+        assert_eq!(wm.current_workspace(), 6);
+        assert_eq!(wm.client(id).unwrap().workspace, 6);
+        assert_eq!(wm.backend().published_workspaces.last(), Some(&(7, 6)), "a pager must hear the grown row");
+    }
+
+    /// Carrying a window to the workspace it is already on is the
+    /// keypress a user makes by habit — `super+shift+1` while already
+    /// on the first workspace. It must cost nothing visible: no
+    /// unmap-remap flicker, no `_NET_WM_DESKTOP` churn, no workspace
+    /// re-publish, and the window still focused afterwards.
+    #[test]
+    fn carrying_to_the_workspace_it_is_already_on_changes_nothing() {
+        let mut backend = FakeBackend::new();
+        let window = backend.create_window();
+        let mut wm = wm(backend);
+        wm.dispatch(BackendEvent::MapRequest(window));
+        let id = wm.client_for_window(window).unwrap();
+        let frame = wm.client(id).unwrap().frame.unwrap();
+        let desktops_before = wm.backend().published_window_desktops.len();
+        let workspaces_before = wm.backend().published_workspaces.len();
+
+        wm.carry_focused_to_workspace(0);
+
+        assert_eq!(wm.current_workspace(), 0);
+        assert_eq!(wm.client(id).unwrap().workspace, 0);
+        assert!(!wm.backend().unmapped_frames.contains(&frame), "a carry that changes nothing must not hide the frame");
+        assert!(wm.client(id).unwrap().flags.contains(ClientFlags::FOCUSED));
+        assert_eq!(wm.backend().published_window_desktops.len(), desktops_before, "no _NET_WM_DESKTOP re-publish");
+        assert_eq!(wm.backend().published_workspaces.len(), workspaces_before, "no workspace re-publish");
+    }
+
+    /// Carry is a *window* verb, so with no window focused it does
+    /// nothing at all — and "nothing" includes not switching the
+    /// workspace. Switching anyway would make the carry chords into a
+    /// second, silently different set of switch chords whenever the
+    /// desk happened to be empty.
+    #[test]
+    fn carrying_with_nothing_focused_leaves_the_workspace_alone() {
+        let backend = FakeBackend::new();
+        let mut wm = wm(backend);
+        let workspaces_before = wm.backend().published_workspaces.len();
+
+        wm.carry_focused_to_workspace(3);
+
+        assert_eq!(wm.current_workspace(), 0, "an empty desk must not travel");
+        assert_eq!(wm.workspace_count(), 1, "...nor grow the row on a verb that did nothing");
+        assert_eq!(wm.backend().published_workspaces.len(), workspaces_before);
+    }
+
+    /// A shaded window carried to another workspace arrives usable
+    /// rather than arriving as a title bar. The carry routes through
+    /// the same activate path a pager's `_NET_ACTIVE_WINDOW` takes,
+    /// which is where unshading lives; this pins that it keeps doing
+    /// so, since the alternative (move + switch + `focus_client`)
+    /// looks identical until the window you carried is rolled up.
+    #[test]
+    fn a_shaded_window_arrives_unshaded_from_a_carry() {
+        let mut backend = FakeBackend::new();
+        let window = backend.create_window();
+        let mut wm = wm(backend);
+        wm.dispatch(BackendEvent::MapRequest(window));
+        let id = wm.client_for_window(window).unwrap();
+        wm.toggle_shade(id);
+        assert!(wm.client(id).unwrap().flags.contains(ClientFlags::SHADED));
+
+        wm.carry_focused_to_workspace(1);
+
+        assert!(!wm.client(id).unwrap().flags.contains(ClientFlags::SHADED), "a carried window must arrive usable");
+        assert!(wm.client(id).unwrap().flags.contains(ClientFlags::FOCUSED));
+    }
+
+    /// Carrying onto a workspace that already has windows: the
+    /// resident stays where it is and stays visible, and the arrival
+    /// takes the focus. Workspace-scoped focus is the thing at risk
+    /// here — the switch half of the carry drops focus when the
+    /// focused client is not on the target, and the activate half has
+    /// to put it back on the *carried* window rather than leaving the
+    /// resident to inherit it.
+    #[test]
+    fn a_carried_window_takes_focus_from_the_workspace_it_arrives_on() {
+        let mut backend = FakeBackend::new();
+        let traveller = backend.create_window();
+        let resident = backend.create_window();
+        let mut wm = wm(backend);
+        wm.dispatch(BackendEvent::MapRequest(traveller));
+        let travelling = wm.client_for_window(traveller).unwrap();
+        wm.switch_workspace(1);
+        wm.dispatch(BackendEvent::MapRequest(resident)); // lands on workspace 1
+        let staying = wm.client_for_window(resident).unwrap();
+        let resident_frame = wm.client(staying).unwrap().frame.unwrap();
+        wm.switch_workspace(0);
+        // A bare workspace switch deliberately leaves nothing focused
+        // when the window that had focus stayed behind, so the
+        // traveller is picked up the way a click or a pager would pick
+        // it up. A carry with nothing in hand is the separate case
+        // above.
+        wm.dispatch(BackendEvent::ActivateRequested(traveller));
+
+        wm.carry_focused_to_workspace(1);
+
+        assert_eq!(wm.focused_client(), Some(travelling), "the window that just arrived is the one in hand");
+        assert!(!wm.client(staying).unwrap().flags.contains(ClientFlags::FOCUSED));
+        assert_eq!(wm.client(staying).unwrap().workspace, 1, "the resident must not be moved by someone else's carry");
+        assert!(wm.backend().mapped_frames.contains(&resident_frame), "...nor hidden by it");
+    }
+
+    /// A window miniaturized on this workspace is not something a
+    /// carry can pick up — it is not focused, it lives on the desk as
+    /// an icon tile, and `switch_workspace` deliberately leaves
+    /// miniaturized clients alone. Carrying the *other* window must
+    /// therefore leave it exactly as it was: still miniaturized, still
+    /// on its own workspace, and still not focused.
+    #[test]
+    fn a_carry_leaves_miniaturized_windows_where_they_are() {
+        let mut backend = FakeBackend::new();
+        let sleeping = backend.create_window();
+        let carried = backend.create_window();
+        let mut wm = wm(backend);
+        wm.dispatch(BackendEvent::MapRequest(sleeping));
+        let asleep = wm.client_for_window(sleeping).unwrap();
+        wm.miniaturize(asleep);
+        wm.dispatch(BackendEvent::MapRequest(carried));
+        let travelling = wm.client_for_window(carried).unwrap();
+
+        wm.carry_focused_to_workspace(2);
+
+        assert_eq!(wm.focused_client(), Some(travelling));
+        assert_eq!(wm.client(travelling).unwrap().workspace, 2);
+        assert_eq!(wm.client(asleep).unwrap().lifecycle, Lifecycle::Miniaturized, "a carry must not wake a sleeping window");
+        assert_eq!(wm.client(asleep).unwrap().workspace, 0, "...nor take it along");
     }
 
     #[test]

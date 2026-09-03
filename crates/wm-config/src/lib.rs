@@ -70,6 +70,7 @@
 //! instead of being defaulted: the caller must be able to tell "user
 //! said nothing" apart from "user chose the default value".
 
+pub mod hyprland;
 pub mod preset;
 
 use std::collections::BTreeMap;
@@ -102,6 +103,35 @@ pub enum Action {
     WorkspacePrev,
     WorkspaceCarryNext,
     WorkspaceCarryPrev,
+    /// Switch to a workspace by number — `"workspace 4"`.
+    ///
+    /// The payload is the **0-based** index `wm_core` speaks, already
+    /// converted from the 1-based number the config file spells. The
+    /// two vocabularies are deliberately different and the conversion
+    /// happens exactly once, here at the parser, for the same reason
+    /// the window menu's `Move To` submenu labels index 0 "Workspace
+    /// 1": a person counts workspaces from one, and every desktop this
+    /// one has to feel like — Omarchy's and Hyprland's included —
+    /// counts them from one too, while `Client::workspace` has been
+    /// 0-based since the first commit. Making the file 0-based to
+    /// match the internals would mean `SUPER + 1` going to the second
+    /// workspace on an Omarchy user's muscle memory; making the
+    /// internals 1-based would touch every workspace call site in the
+    /// window manager. Converting at the door costs one subtraction.
+    ///
+    /// Growing is the semantics, not an error: naming workspace 7 on a
+    /// desk with three creates the four in between, exactly as
+    /// [`Self::WorkspaceNext`] grows the row one at a time and as
+    /// Hyprland does. Chonkstep's workspaces have always grown on
+    /// demand and cannot be destroyed, so there is no state in which
+    /// this verb could sensibly refuse.
+    Workspace(usize),
+    /// Carry the focused window to a workspace by number and follow it
+    /// there — `"workspace-carry 4"`, the by-number
+    /// [`Self::WorkspaceCarryNext`]. 0-based payload and grow-on-demand
+    /// semantics exactly as [`Self::Workspace`]; a silent no-op when
+    /// nothing is focused, like every other window-targeted verb.
+    WorkspaceCarry(usize),
     /// Toggle the modal Overview: every window on the current
     /// workspace as a grid of live thumbnails plus a workspace strip,
     /// drawn and driven by the desktop shell. One verb on purpose —
@@ -184,12 +214,25 @@ fn action_from_name(name: &str) -> Option<Action> {
         "toggle-dock" => Some(Action::ToggleDock),
         "reload" => Some(Action::Reload),
         "restart" => Some(Action::Restart),
-        // `run <name>` is the one action name that carries an argument,
-        // and the argument is a key into `[commands]` — not a command
-        // line. Everything after the verb is taken whole, including
-        // inner whitespace, so a command may be named "lock screen" if
-        // its author prefers that to "lock-screen"; only the ends are
-        // trimmed. An empty name is rejected here rather than becoming
+        // The two verbs that carry a workspace *number* rather than a
+        // name. Parameterised rather than eighteen literal spellings
+        // (`workspace-1`, `workspace-2`, ...) because the parser can
+        // carry the number cleanly and a table of nine strings would
+        // have to grow a tenth the first time somebody wanted ten
+        // workspaces — which is exactly what Omarchy's `SUPER + 0`
+        // wants. `run <name>` already established the shape: verb,
+        // space, argument.
+        rest if rest.starts_with("workspace ") || rest.starts_with("workspace-carry ") => {
+            let (verb, number) = rest.split_once(' ')?;
+            let index = workspace_index(number)?;
+            Some(if verb == "workspace" { Action::Workspace(index) } else { Action::WorkspaceCarry(index) })
+        }
+        // `run <name>` carries an argument like the two workspace
+        // verbs above, but its argument is a key into `[commands]` —
+        // not a command line. Everything after the verb is taken
+        // whole, including inner whitespace, so a command may be named
+        // "lock screen" if its author prefers that to "lock-screen";
+        // only the ends are trimmed. An empty name is rejected here rather than becoming
         // a lookup for "" that could never match anything.
         //
         // The name arrives already lowercased by the caller, and
@@ -203,6 +246,35 @@ fn action_from_name(name: &str) -> Option<Action> {
             (!name.is_empty()).then(|| Action::Run(name.to_string()))
         }
     }
+}
+
+/// The largest workspace number a binding may name.
+///
+/// A ceiling exists because the workspace row grows to whatever it is
+/// told and never shrinks: `"workspace 90000000"` — a typo, not a
+/// wish — would leave the window menu's `Move To` submenu ninety
+/// million rows long, the control socket's `workspaces` event ninety
+/// million entries wide, and `_NET_NUMBER_OF_DESKTOPS` a number no
+/// pager can draw. Two digits is more workspaces than any keyboard can
+/// reach and far more than anyone has ever wanted; a number past it is
+/// a mistake, and a mistake is better refused at parse time with a
+/// warning naming the line than honoured at the first keypress.
+pub const MAX_WORKSPACE: usize = 99;
+
+/// Reads the workspace number a `workspace` / `workspace-carry`
+/// binding names, as the 0-based index `wm_core` speaks.
+///
+/// The file counts from 1 and the window manager counts from 0, and
+/// this function is the only place the two ever meet — see
+/// [`Action::Workspace`]. `0` is rejected rather than quietly read as
+/// the first workspace: a user who writes it is either counting from
+/// zero (and would be off by one on every other number too) or has a
+/// generated file with an off-by-one in it, and both are worth a
+/// warning. So is a number past [`MAX_WORKSPACE`], and so is anything
+/// that is not a number at all.
+fn workspace_index(number: &str) -> Option<usize> {
+    let number: usize = number.trim().parse().ok()?;
+    (1..=MAX_WORKSPACE).contains(&number).then(|| number - 1)
 }
 
 /// The resolved configuration the binary runs with.
@@ -361,7 +433,44 @@ pub struct Config {
     /// Which binding vocabulary [`Self::keybindings`] started from
     /// ([`preset::Keymap`]), carried for the same reason.
     pub keymap: preset::Keymap,
+    /// Whether to read the machine's live Hyprland configuration —
+    /// `~/.config/hypr/**` and Omarchy's shipped defaults — for
+    /// bindings, window rules, autostart and session environment (see
+    /// [`hyprland`]).
+    ///
+    /// `None` means "decide from the posture", which is the shipped
+    /// behaviour and is spelled out in [`hyprland::wanted`]: a session
+    /// that has already asked for Omarchy's keymap gets the live
+    /// version of it rather than the transcription, and a plain
+    /// chonkstep desk reads nobody else's files. `Some(false)` turns
+    /// it off outright — the escape hatch — and `Some(true)` turns it
+    /// on for a chonkstep desk that wants it anyway.
+    pub hyprland_config: Option<bool>,
+    /// Per-window float rules from that read, or `None` for the
+    /// built-in behaviour. Carried as the trait object
+    /// `wm_core::WindowManager` consults, for the reason
+    /// `wm_core::FloatPolicy`'s own docs give: matching them needs a
+    /// regular-expression engine `wm-core` has no other use for.
+    pub float_policy: Option<std::sync::Arc<dyn wm_core::FloatPolicy>>,
+    /// `env` lines from that read: the environment the guest desktop's
+    /// own tooling expects to find, applied to the session before
+    /// anything is started under it.
+    pub session_env: Vec<(String, String)>,
     pub keybindings: Vec<(KeyCombo, Action)>,
+}
+
+/// The `hyprland_config` key, read out of the raw table before the
+/// walk because the read it gates has to happen there — the same
+/// chicken-and-egg `preset::base` solves for `desktop` and `keymap`,
+/// solved the same way.
+fn hyprland_switch(table: &toml::Table) -> Option<bool> {
+    match table.get("hyprland_config")? {
+        toml::Value::Boolean(b) => Some(*b),
+        other => {
+            tracing::warn!(value = ?other, "config: hyprland_config must be a boolean, deciding from the posture instead");
+            None
+        }
+    }
 }
 
 /// Terminal font size when the config says nothing, in 1x pixels.
@@ -431,6 +540,11 @@ impl Config {
             omarchy_bar: None,
             desktop: preset::Desktop::Chonkstep,
             keymap: preset::Keymap::Chonkstep,
+            // The read is decided by the posture, not by this value:
+            // see `Config::hyprland_config`.
+            hyprland_config: None,
+            float_policy: None,
+            session_env: Vec::new(),
             keybindings: vec![
                 bind("alt+shift+return", Action::SpawnTerminal),
                 bind("alt+shift+q", Action::Close),
@@ -498,6 +612,23 @@ fn keysym_for(token: &str) -> Option<u32> {
         "period" => 0x2e,
         "bracketleft" => 0x5b,
         "bracketright" => 0x5d,
+        // The rest of the printable punctuation on a standard board,
+        // and the three editing keys. Added when this parser grew a
+        // reader for the user's *own* Hyprland configuration: Omarchy
+        // binds `SUPER + SHIFT + SLASH` to the password manager and
+        // `SUPER + BACKSPACE`, `SUPER + CTRL + Delete` and
+        // `code:118` to three more, and a key this format has no name
+        // for is not merely unbound — it is unbindable, so a user
+        // could not have taken it back with a `[keybindings]` line
+        // either.
+        "slash" => 0x2f,
+        "semicolon" => 0x3b,
+        "apostrophe" => 0x27,
+        "grave" => 0x60,
+        "backslash" => 0x5c,
+        "backspace" => 0xff08,
+        "delete" => 0xffff,
+        "insert" => 0xff63,
         // The key with a picture of a screen on it. It has no `XF86`
         // prefix and predates that block by decades, but it is here for
         // the same reason the block below is: every desktop's screenshot
@@ -706,6 +837,33 @@ fn edge_resistance_from_value(value: &toml::Value) -> Option<u32> {
 /// return value so the function stays trivially callable from tests
 /// and from `load` alike; without a subscriber they cost nothing.
 pub fn parse(text: &str) -> Result<Config, String> {
+    parse_with(text, &|| None)
+}
+
+/// [`parse`], with a source for the machine's live Hyprland
+/// configuration.
+///
+/// # Why the live read is a parameter and not a call
+///
+/// [`parse`] is a *pure function of its text*, and it has to stay one.
+/// Every test in this crate, every doc example, and the example-config
+/// checker all call it; if it read `~/.config/hypr` on its own, the
+/// same config file would parse differently on two machines and the
+/// preset tests would assert whatever Omarchy happened to be installed
+/// on the machine running them. That is not a testing inconvenience,
+/// it is a correctness property: "what does this file mean" must not
+/// depend on files it does not mention.
+///
+/// So the read is supplied. [`load`] — which is already the I/O half,
+/// and already the only caller that has a machine to read — passes the
+/// real one; everything else passes nothing and gets the baked preset,
+/// which is exactly what a hermetic parse of `desktop = "omarchy"`
+/// means.
+///
+/// The closure is lazy on purpose: it is called only when
+/// [`hyprland::wanted`] says this config asked for a live read, so a
+/// plain chonkstep session does no I/O at all.
+pub fn parse_with(text: &str, live: &dyn Fn() -> Option<hyprland::Reading>) -> Result<Config, String> {
     let table: toml::Table = text
         .parse()
         .map_err(|err: toml::de::Error| format!("invalid TOML: {err}"))?;
@@ -714,6 +872,21 @@ pub fn parse(text: &str) -> Result<Config, String> {
     // a preset default" (see `preset::base`, which also explains why
     // this cannot happen inside the walk below).
     let mut config = preset::base(&table);
+    // The user's live Hyprland configuration, read over the preset and
+    // under the file's own keys — the exact position the presets
+    // themselves occupy, and for the same reason: by the time any key
+    // below is read, this is just the starting value that key
+    // overwrites. So `[keybindings]` in this file still has the last
+    // word on any chord, `"none"` still unbinds one, and a `[commands]`
+    // entry still replaces one the read declared.
+    //
+    // Applied here rather than inside `preset::base` because it is not
+    // a preset: a preset is a constant, and this reads the disk. Its
+    // *place* in the order is the preset's, which is what matters.
+    config.hyprland_config = hyprland_switch(&table);
+    if hyprland::wanted(&config) {
+        hyprland::apply(&mut config, live().as_ref());
+    }
     for (key, value) in &table {
         match key.as_str() {
             "focus_follows_mouse" => match value {
@@ -929,6 +1102,9 @@ pub fn parse(text: &str) -> Result<Config, String> {
                     "config: autostart must be an array of command lines, ignoring it"
                 ),
             },
+            // Read in `preset::base`'s company, before the walk (see
+            // below); accepted here so it is not reported as unknown.
+            "hyprland_config" => {}
             "keybindings" => match value {
                 toml::Value::Table(entries) => apply_keybindings(&mut config.keybindings, entries),
                 other => tracing::warn!(
@@ -1081,7 +1257,11 @@ pub fn load() -> Config {
             return Config::default_config();
         }
     };
-    match parse(&text) {
+    // The one call site with a machine in front of it, and so the one
+    // that reads the user's live Hyprland configuration — see
+    // `parse_with` for why that is a parameter rather than something
+    // `parse` does for itself.
+    match parse_with(&text, &hyprland::load) {
         Ok(config) => config,
         Err(err) => {
             tracing::warn!(path = %path.display(), %err, "config: using defaults");
@@ -1406,6 +1586,92 @@ mod tests {
         assert_eq!(config.keybindings.len(), 13);
     }
 
+    /// The one conversion between the two workspace vocabularies, in
+    /// both directions and at both ends of the range. The file counts
+    /// from 1 (as Omarchy, Hyprland and the window menu's `Move To`
+    /// submenu do) and the window manager counts from 0, and if these
+    /// ever meet anywhere but here the desk goes to the wrong
+    /// workspace on every press.
+    #[test]
+    fn a_workspace_binding_counts_from_one_and_arrives_counting_from_zero() {
+        let config = parse(
+            r#"
+            [keybindings]
+            "super+1" = "workspace 1"
+            "super+9" = "workspace 9"
+            "super+0" = "workspace 10"
+            "super+shift+1" = "workspace-carry 1"
+            "super+shift+9" = "workspace-carry 9"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(action_for(&config, "super+1"), Some(Action::Workspace(0)), "the first workspace is index 0");
+        assert_eq!(action_for(&config, "super+9"), Some(Action::Workspace(8)));
+        assert_eq!(action_for(&config, "super+0"), Some(Action::Workspace(9)), "Omarchy's tenth, on the zero key");
+        assert_eq!(action_for(&config, "super+shift+1"), Some(Action::WorkspaceCarry(0)));
+        assert_eq!(action_for(&config, "super+shift+9"), Some(Action::WorkspaceCarry(8)));
+    }
+
+    /// The argument is read the way every other name in this file is:
+    /// case-insensitively, with the ends trimmed. `workspace-next` and
+    /// `workspace-carry-next` are still their own literal names and
+    /// must not be swallowed by the parameterised arm.
+    #[test]
+    fn a_workspace_number_is_read_like_every_other_name_in_the_file() {
+        let config = parse(
+            r#"
+            [keybindings]
+            "super+a" = "WORKSPACE 3"
+            "super+b" = "  workspace   3  "
+            "super+c" = "Workspace-Carry 3"
+            "super+d" = "workspace-next"
+            "super+e" = "workspace-carry-next"
+            "#,
+        )
+        .unwrap();
+        assert_eq!(action_for(&config, "super+a"), Some(Action::Workspace(2)));
+        assert_eq!(action_for(&config, "super+b"), Some(Action::Workspace(2)));
+        assert_eq!(action_for(&config, "super+c"), Some(Action::WorkspaceCarry(2)));
+        assert_eq!(action_for(&config, "super+d"), Some(Action::WorkspaceNext), "the relative verbs keep their names");
+        assert_eq!(action_for(&config, "super+e"), Some(Action::WorkspaceCarryNext));
+    }
+
+    /// A number this file cannot honour is dropped with the same
+    /// warning any unknown action gets — never clamped, and never
+    /// quietly read as workspace 1. Clamping `workspace 0` to the
+    /// first workspace would hide an off-by-one in a generated file
+    /// for as long as the file existed.
+    #[test]
+    fn a_workspace_number_that_is_not_one_is_skipped_rather_than_clamped() {
+        for bad in ["workspace 0", "workspace -1", "workspace 100", "workspace", "workspace x", "workspace 3 4", "workspace-carry 0", "workspace-carry 100"] {
+            let text = format!("[keybindings]\n\"super+a\" = \"{bad}\"\n");
+            let config = parse(&text).unwrap();
+            assert_eq!(action_for(&config, "super+a"), None, "{bad:?} must not bind");
+        }
+        // ...and, exactly like an unknown action name, a bad number
+        // leaves any existing binding for that combo alone rather than
+        // unbinding it. `"none"` is the way to unbind, and only that.
+        let config = parse("[keybindings]\n\"alt+ctrl+right\" = \"workspace 0\"").unwrap();
+        assert_eq!(
+            action_for(&config, "alt+ctrl+right"),
+            Some(Action::WorkspaceNext),
+            "a rejected entry must not cost the user the default binding for that combo"
+        );
+    }
+
+    /// The ceiling is a real ceiling and the number just under it is
+    /// really accepted — an off-by-one here is a binding that works
+    /// everywhere except the last workspace.
+    #[test]
+    fn the_workspace_ceiling_is_inclusive() {
+        let text = format!("[keybindings]\n\"super+a\" = \"workspace {MAX_WORKSPACE}\"\n");
+        let config = parse(&text).unwrap();
+        assert_eq!(action_for(&config, "super+a"), Some(Action::Workspace(MAX_WORKSPACE - 1)));
+        assert_eq!(workspace_index("1"), Some(0));
+        assert_eq!(workspace_index(&MAX_WORKSPACE.to_string()), Some(MAX_WORKSPACE - 1));
+        assert_eq!(workspace_index(&(MAX_WORKSPACE + 1).to_string()), None);
+    }
+
     #[test]
     fn every_action_name_maps_to_its_variant() {
         let names: &[(&str, Action)] = &[
@@ -1419,6 +1685,10 @@ mod tests {
             ("workspace-prev", Action::WorkspacePrev),
             ("workspace-carry-next", Action::WorkspaceCarryNext),
             ("workspace-carry-prev", Action::WorkspaceCarryPrev),
+            // The parameterised pair, one number each: the argument is
+            // covered exhaustively below, this pins the names.
+            ("workspace 4", Action::Workspace(3)),
+            ("workspace-carry 4", Action::WorkspaceCarry(3)),
             ("overview", Action::Overview),
             ("window-menu", Action::WindowMenu),
             ("toggle-dock", Action::ToggleDock),
