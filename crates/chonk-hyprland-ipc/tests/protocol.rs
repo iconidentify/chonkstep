@@ -66,7 +66,13 @@ fn desktop() -> Snapshot {
         workspaces: vec![workspace(0, 1), workspace(1, 0), workspace(2, 0)],
         windows: vec![window(4_294_967_297, "~ — foot", "foot", 0)],
         focused: Some(4_294_967_297),
+        locked: false,
     }
+}
+
+/// The same desk with a session lock in force.
+fn locked_desktop() -> Snapshot {
+    Snapshot { locked: true, ..desktop() }
 }
 
 fn ask(wire: &str, snapshot: &Snapshot) -> String {
@@ -696,4 +702,29 @@ fn a_workspace_past_the_end_is_refused_not_clamped() {
     let (response, actions) = answer_payload(b"/dispatch workspace 500", &desktop());
     assert!(actions.is_empty());
     assert!(response.starts_with("Invalid dispatcher"), "got {response:?}");
+}
+
+/// Hyprland exposes no lock state of its own, so anything asking
+/// whether an Omarchy machine is locked reads `solitaryBlockedBy` and
+/// looks for `LOCK` — `omarchy-hyprland-session-locked` does exactly
+/// that, and `omarchy-restart-shell` branches on its answer before
+/// killing the shell. Reporting null while locked told that script the
+/// desk was open, so it would have killed the locker and not put it
+/// back.
+#[test]
+fn a_locked_session_says_so_where_the_only_caller_looks() {
+    let json = ask("j/monitors", &locked_desktop());
+    let parsed: serde_json::Value = serde_json::from_str(&json).expect("monitors is json");
+    let blocked = &parsed[0]["solitaryBlockedBy"];
+    assert_eq!(blocked, "LOCK", "a locked session must name the lock: {json}");
+}
+
+#[test]
+fn an_unlocked_session_blocks_nothing_which_is_what_hyprland_reports() {
+    let json = ask("j/monitors", &desktop());
+    let parsed: serde_json::Value = serde_json::from_str(&json).expect("monitors is json");
+    assert!(
+        parsed[0]["solitaryBlockedBy"].is_null(),
+        "nothing is blocking a solitary client on an unlocked desk: {json}"
+    );
 }

@@ -161,6 +161,11 @@ pub struct Snapshot {
     pub windows: Vec<Window>,
     /// `ClientId::as_u64()` of the focused window, if any.
     pub focused: Option<u64>,
+    /// Whether a session lock is in force. Reported to clients as
+    /// `LOCK` in every monitor's `solitaryBlockedBy`, which is the only
+    /// place Hyprland's IPC exposes lock state and therefore the only
+    /// place anything on an Omarchy machine looks for it.
+    pub locked: bool,
 }
 
 impl Snapshot {
@@ -244,9 +249,20 @@ pub struct MonitorJson {
     #[serde(rename = "dpmsStatus")]
     pub dpms_status: bool,
     pub vrr: bool,
-    /// chonkstep never blocks a solitary client from direct scanout for
-    /// a reason it could name, so this is always null — which is also
-    /// what Hyprland reports when nothing is blocking.
+    /// Why a monitor cannot hand a single client the scanout plane —
+    /// and, incidentally, the only place Hyprland's IPC exposes lock
+    /// state at all. `omarchy-hyprland-session-locked` reads exactly
+    /// this field, looking for `LOCK`, because Hyprland reports no lock
+    /// any other way; anything that asks "is the screen locked" on an
+    /// Omarchy machine is asking this string.
+    ///
+    /// chonkstep blocks solitary scanout for no reason it could name,
+    /// so the only value it ever reports is the lock — `LOCK` while a
+    /// session lock is in force, null otherwise, which is also what
+    /// Hyprland reports when nothing is blocking. Reporting null
+    /// unconditionally, as this did at first, told every caller the
+    /// session was unlocked: `omarchy-restart-shell` would then kill
+    /// the locker it was supposed to protect and leave the desk open.
     #[serde(rename = "solitaryBlockedBy")]
     pub solitary_blocked_by: Option<String>,
     #[serde(rename = "activelyTearing")]
@@ -360,7 +376,7 @@ impl Snapshot {
                     focused: monitor.focused,
                     dpms_status: true,
                     vrr: false,
-                    solitary_blocked_by: None,
+                    solitary_blocked_by: self.locked.then(|| "LOCK".to_string()),
                     actively_tearing: false,
                     direct_scanout_to: None,
                     disabled: false,

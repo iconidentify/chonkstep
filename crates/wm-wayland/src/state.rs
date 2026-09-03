@@ -1872,13 +1872,13 @@ impl Compositor {
             return;
         }
 
-        let before = crate::hyprland_ipc::snapshot(&self.wm);
+        let before = crate::hyprland_ipc::snapshot(&self.wm, self.session_lock.machine.locked());
         let actions = server.service(&before);
         for action in actions {
             crate::hyprland_ipc::apply(&mut self.wm, action);
         }
 
-        let after = crate::hyprland_ipc::snapshot(&self.wm);
+        let after = crate::hyprland_ipc::snapshot(&self.wm, self.session_lock.machine.locked());
         // Borrow again: `apply` needed `&mut self.wm` above.
         if let Some(server) = &mut self.hyprland_ipc {
             server.publish(&after);

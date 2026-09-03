@@ -92,7 +92,12 @@ pub(crate) fn init() -> Option<Server> {
 }
 
 /// Read the live window manager into the protocol's vocabulary.
-pub(crate) fn snapshot(wm: &WindowManager<WaylandBackend>) -> Snapshot {
+/// `locked` is the compositor's session-lock state, which the window
+/// manager does not carry — it lives on the `Compositor` — so it is
+/// passed in. It reaches clients as `LOCK` in every monitor's
+/// `solitaryBlockedBy`, the one field Hyprland's IPC exposes lock
+/// state through and the one Omarchy's tooling reads.
+pub(crate) fn snapshot(wm: &WindowManager<WaylandBackend>, locked: bool) -> Snapshot {
     let monitors_info = wm.monitors();
     let current = wm.current_workspace();
 
@@ -187,7 +192,7 @@ pub(crate) fn snapshot(wm: &WindowManager<WaylandBackend>) -> Snapshot {
         })
         .collect();
 
-    Snapshot { monitors, workspaces, windows, focused: focused.map(wm_core::ClientId::as_u64) }
+    Snapshot { monitors, workspaces, windows, focused: focused.map(wm_core::ClientId::as_u64), locked }
 }
 
 fn focused_monitor_index(
