@@ -1497,9 +1497,15 @@ pub struct Desktop<B: Backend> {
     /// crosses the `Box<dyn DockWidget>` boundary as a shared cell
     /// rather than through the trait.
     workspace: Rc<RefCell<WorkspaceShared>>,
-    /// The Clip: the workspace tile, pinned at the screen's top-left
-    /// corner (its stock position) — corner arrows switch workspaces,
-    /// the face shows the current one.
+    /// The Clip: the workspace tile, pinned in the primary monitor's
+    /// bottom-right corner — corner arrows switch workspaces, the face
+    /// shows the current one. Mapped and unmapped with the Dock, which
+    /// is the one visibility choice both surfaces answer to.
+    ///
+    /// (This said "top-left corner (its stock position)" while
+    /// `clip_geometry` had always measured from the bottom-right, and
+    /// that function's own comment explains the choice: the top-left is
+    /// the corner every maximized window wants. The code was right.)
     clip_window: B::ShellId,
     /// What the Clip last rendered, so workspace churn repaints it
     /// exactly once per actual change.
@@ -1816,6 +1822,16 @@ impl<B: Backend> Desktop<B> {
     ///   paying.)
     /// * The **reservation** goes with it — see `primary_workarea`.
     ///
+    /// The **Clip** travels with it. It is a separate surface in a
+    /// different corner, and it stayed behind when the Dock left —
+    /// which read, correctly, as chrome that had been forgotten rather
+    /// than kept: the desk it belongs to is gone, its workspace face
+    /// duplicates whatever bar took the Dock's place, and it is the
+    /// only chonkstep furniture left on an otherwise borrowed screen.
+    /// Hiding the Dock is now the whole desk stepping back, which is
+    /// what `desktop = "omarchy"` asks for and what someone reaching
+    /// for the `Dock` row on a hosted bar means by it.
+    ///
     /// An open instrument panel is dismissed on the way down. The panel
     /// is staged beside the Dock's column and its only opener is a
     /// click on a tile, so a panel left standing over a hidden Dock
@@ -1835,6 +1851,7 @@ impl<B: Backend> Desktop<B> {
             // would keep whatever hover state it drew.
             self.clear_dock_hover(backend, theme);
             backend.unmap_shell_surface(self.dock_window);
+            backend.unmap_shell_surface(self.clip_window);
         } else {
             // Configured and painted before it is mapped, so the column
             // never appears for a frame at the geometry or the palette
@@ -1843,6 +1860,15 @@ impl<B: Backend> Desktop<B> {
             self.redraw_dock(backend, theme);
             backend.map_shell_surface(self.dock_window);
             backend.raise_shell_surface(self.dock_window);
+            // The Clip on the same terms, and in the same order: its
+            // corner is re-derived and repainted before it is mapped,
+            // so a workspace switched while it was hidden shows the
+            // number it holds now rather than the one it went away
+            // with. `reposition_clip` reads `self.dock`, which is why
+            // this follows the assignment above rather than leading it.
+            self.reposition_clip(backend, theme);
+            backend.map_shell_surface(self.clip_window);
+            backend.raise_shell_surface(self.clip_window);
         }
         true
     }
@@ -2147,6 +2173,16 @@ impl<B: Backend> Desktop<B> {
     }
 
     fn repaint_clip(&mut self, backend: &mut B, theme: &Theme) {
+        // A hidden Clip is not drawn, for `redraw_dock`'s reason and
+        // with its guarantee: `clip_drawn` is still updated by
+        // `set_workspace_display` while the tile is away, so the switch
+        // that happened out of sight is already recorded, and
+        // `set_dock_visibility` repaints on the way up before mapping.
+        // Skipping only the composite is what keeps a hidden Clip from
+        // rendering a tile per workspace change that nobody can see.
+        if self.dock.is_hidden() {
+            return;
+        }
         let (current, count) = self.clip_drawn;
         let current = if current == usize::MAX { 0 } else { current };
         let buffer = workspace::render_clip_tile(theme, &mut self.fonts.system(), &mut self.fonts.swash(), self.tile, current, count.max(1));
@@ -4161,15 +4197,21 @@ mod tests {
         let theme = wm_theme::default_theme::theme_by_id("nextstep-classic").unwrap();
         let tile = tile_px(1.0);
         let dock = desktop.dock_window();
+        let clip = desktop.clip_window();
 
         // Shown, as built: mapped, and one column off the workarea.
         assert!(backend.shell_is_mapped(dock));
+        assert!(backend.shell_is_mapped(clip));
         assert_eq!(desktop.primary_workarea().size.w, TEST_SCREEN.w - tile);
         assert_eq!(desktop.dock_visibility(), DockVisibility::Shown);
 
         // Hidden: gone from the screen, and the whole width is windows'.
         assert!(desktop.set_dock_visibility(&mut backend, &theme, DockVisibility::Hidden), "a new choice is a change");
         assert!(!backend.shell_is_mapped(dock), "the surface must be unmapped, not merely painted over");
+        // The Clip goes with it. It reserves nothing, so this is the
+        // assertion that would still pass if it were left behind —
+        // every arithmetic check below is blind to it.
+        assert!(!backend.shell_is_mapped(clip), "the Clip is the desk's furniture too, and leaves with the desk");
         let free = desktop.primary_workarea();
         assert_eq!(free, primary, "a hidden dock reserves nothing at all");
         // Every other head keeps its own rect, and the primary's entry
@@ -4185,9 +4227,19 @@ mod tests {
         // wherever it was when it went away.
         assert!(desktop.set_dock_visibility(&mut backend, &theme, DockVisibility::Shown));
         assert!(backend.shell_is_mapped(dock));
+        assert!(backend.shell_is_mapped(clip), "and the Clip comes back with it");
         assert_eq!(desktop.primary_workarea().size.w, TEST_SCREEN.w - tile);
         let geom = backend.shell_geometries[&dock];
         assert_eq!(geom.pos.x + geom.size.w as i32, TEST_SCREEN.w as i32, "back in the corner");
+        // Re-derived on the way up rather than left where it was: the
+        // Clip's corner is the primary's bottom-right, which is what
+        // `reposition_clip` is doing inside the show branch.
+        let clip_geom = backend.shell_geometries[&clip];
+        assert_eq!(
+            (clip_geom.pos.x + clip_geom.size.w as i32, clip_geom.pos.y + clip_geom.size.h as i32),
+            (TEST_SCREEN.w as i32, TEST_SCREEN.h as i32),
+            "the Clip back in its own corner"
+        );
     }
 
     /// The two toggles compose: all four combinations are sane, and a
