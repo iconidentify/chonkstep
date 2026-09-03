@@ -31,3 +31,14 @@ tiny-skia = "0.11"
 # this window is not `chonk_ui::App`". Same version `chonk-ui` pins so
 # there is one `x11rb` in the tree.
 x11rb = "0.13"
+
+# The preview example and the render tests only — never the shipping
+# binary's look. `chonk-ui` re-exports exactly one theme (the
+# flagship), which is all an app needs at runtime because the desk
+# tells it which theme to wear through the environment. Proving this
+# dialog is legible in *all* of them, in both appearances — and that it
+# still matches its sibling `chonk-netjoin` in each — needs the whole
+# set, and that lives in `wm-theme`. The same split, for the same
+# reason, that `chonk-netjoin`'s manifest makes.
+[dev-dependencies]
+wm-theme = { path = "../wm-theme" }

@@ -24,6 +24,11 @@
 //! - [`netload::render_netload_tile`] is a close port of the classic
 //!   network-load dockapp: a monochrome LCD panel with a seven-segment
 //!   throughput readout and a mirrored dot-matrix graph.
+//! - [`instrument_panel`] is the panel design system: the vocabulary
+//!   ([`panel`]'s LED screen at reading scale — glass ground, type
+//!   ramp, engraved rules, meters, lamps, row states) every fold-out
+//!   panel behind a dock tile is drawn with, so a panel reads as the
+//!   instrument opened up rather than as a dialog beside it.
 //! - [`tile`] is the common tile platform (face, relief, ink, sunken
 //!   wells) every dock item and icon builds on - the core of the UI kit.
 //! - [`workspace::render_clip_tile`] renders the top-left Clip tile
@@ -51,6 +56,7 @@ pub mod clock;
 pub mod default_theme;
 pub mod digitalclock;
 pub mod icon;
+pub mod instrument_panel;
 pub mod launcher;
 pub mod menu;
 pub mod model;

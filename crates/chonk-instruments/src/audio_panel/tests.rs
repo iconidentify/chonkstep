@@ -243,74 +243,90 @@ use wm_theme_api::Point;
 
 #[test]
 fn the_request_scales_with_the_tile() {
-    assert_eq!(PanelMetrics::request(56, 3), (336, 4 * 2 + 3 * 32 + 2 * 2));
+    // 392 wide (seven tiles — wide enough that a PulseAudio
+    // description reaches its distinguishing tail), and tall enough for
+    // the glass inset, the OUTPUTS band, three 32px rows and the
+    // grooves between them.
+    let m = m56();
+    assert_eq!(PanelMetrics::request(56, 3), (392, 3 + 4 + m.header_h + 2 + 3 * 32 + 2 * 2 + 4 + 3));
     assert_eq!(PanelMetrics::request(56, 0), PanelMetrics::request(56, 1), "the empty panel keeps one row of face");
 
     let (hidpi_w, hidpi_h) = PanelMetrics::request(112, 3);
-    assert_eq!(hidpi_w, 672, "the panel doubles with the tile");
+    assert_eq!(hidpi_w, 784, "the panel doubles with the tile");
     assert!(hidpi_h > PanelMetrics::request(56, 3).1);
 }
 
 #[test]
 fn a_granted_panel_hit_tests_where_it_draws() {
     let m = m56();
-    assert_eq!((m.width, m.height, m.row_h, m.pad, m.gap), (336, 108, 32, 4, 2));
+    assert_eq!((m.width, m.row_h, m.pad, m.gap), (392, 32, 4, 2));
+    assert_eq!(m.height, PanelMetrics::request(56, 3).1);
 
-    assert_eq!(m.row_top(0), 4);
-    assert_eq!(m.row_top(1), 38);
-    assert_eq!(m.row_at(Point::new(10, 4), 3), Some(0));
-    assert_eq!(m.row_at(Point::new(10, 35), 3), Some(0));
-    assert_eq!(m.row_at(Point::new(10, 36), 3), None, "the gap belongs to nobody");
-    assert_eq!(m.row_at(Point::new(10, 38), 3), Some(1));
-    assert_eq!(m.row_at(Point::new(10, 3), 3), None, "the top padding is not a row");
-    assert_eq!(m.row_at(Point::new(10, 107), 3), None, "past the last row is nothing");
-    assert_eq!(m.row_at(Point::new(-1, 10), 3), None);
-    assert_eq!(m.row_at(Point::new(336, 10), 3), None);
-    assert_eq!(m.mute_zone_left(), 336 - (4 + 32));
+    // The row stack starts under the OUTPUTS band, and every row is
+    // one row-height of glass with a groove-wide gap after it.
+    let top = m.rows_top();
+    assert_eq!(m.row_top(0), top);
+    assert_eq!(m.row_top(1), top + 34);
+    assert_eq!(m.row_at(Point::new(10, top), 3), Some(0));
+    assert_eq!(m.row_at(Point::new(10, top + 31), 3), Some(0));
+    assert_eq!(m.row_at(Point::new(10, top + 32), 3), None, "the groove belongs to nobody");
+    assert_eq!(m.row_at(Point::new(10, top + 34), 3), Some(1));
+    assert_eq!(m.row_at(Point::new(10, top - 1), 3), None, "the header is not a row");
+    assert_eq!(m.row_at(Point::new(10, m.height as i32 - 1), 3), None, "past the last row is nothing");
+    assert_eq!(m.row_at(Point::new(0, top + 10), 3), None, "the gasket is not the panel");
+    assert_eq!(m.row_at(Point::new(392, top + 10), 3), None);
+    assert_eq!(m.mute_zone_left(), 392 - 3 - 4 - 32, "the mute key sits a pad in from the glass edge");
 }
 
 /// The grant, not the request, is the geometry: a narrower panel moves
-/// the mute square in, a shorter one compresses the rows to keep every
+/// the mute key in, a shorter one compresses the rows to keep every
 /// device on the face, and a grant too short even for that hides the
 /// tail from the hit-test as well as from the paint.
 #[test]
 fn a_clamped_grant_is_obeyed_rather_than_overdrawn() {
     let (natural_w, natural_h) = PanelMetrics::request(56, 3);
+    let top = m56().rows_top();
 
     let narrow = PanelMetrics::granted(56, 240, natural_h, 3);
     assert_eq!(narrow.width, 240, "the granted width is the width");
-    assert_eq!(narrow.mute_zone_left(), 240 - (4 + 32), "the mute square follows the right edge in");
-    assert_eq!(narrow.row_at(Point::new(239, 10), 3), Some(0));
-    assert_eq!(narrow.row_at(Point::new(240, 10), 3), None, "past the grant is not the panel");
+    assert_eq!(narrow.mute_zone_left(), 240 - 3 - 4 - 32, "the mute key follows the right edge in");
+    assert_eq!(narrow.row_at(Point::new(236, top + 10), 3), Some(0));
+    assert_eq!(narrow.row_at(Point::new(240, top + 10), 3), None, "past the grant is not the panel");
 
     // Two thirds of the height still shows all three devices, at a
     // compressed row height.
-    let short = PanelMetrics::granted(56, natural_w, 72, 3);
+    let short = PanelMetrics::granted(56, natural_w, natural_h * 2 / 3, 3);
     assert!(short.row_h < 32, "rows compress to fit a clamped grant");
     assert_eq!(short.visible_rows(3), 3, "and every device survives the clamp");
-    assert!(short.row_top(2) + short.row_h as i32 <= 72, "the last row must land inside the grant");
+    assert!(
+        short.row_top(2) + short.row_h as i32 <= (natural_h * 2 / 3) as i32,
+        "the last row must land inside the grant"
+    );
 
     // Below the legibility floor the tail is dropped instead — and a
     // dropped row is not clickable.
-    let tiny = PanelMetrics::granted(56, natural_w, 40, 3);
+    let tiny = PanelMetrics::granted(56, natural_w, 72, 3);
     assert_eq!(tiny.row_h, MIN_ROW_H, "compression stops at the legibility floor");
     assert_eq!(tiny.visible_rows(3), 2);
-    assert_eq!(tiny.row_at(Point::new(10, 4), 3), Some(0));
-    assert_eq!(tiny.row_at(Point::new(10, 66), 3), None, "a row that is not drawn is not a target");
+    assert_eq!(tiny.row_at(Point::new(10, tiny.row_top(0) + 2), 3), Some(0));
+    assert_eq!(tiny.row_at(Point::new(10, tiny.row_top(2) + 2), 3), None, "a row that is not drawn is not a target");
 
-    // A grant taller than the request is floor, not stretch.
+    // A grant taller than the request is glass, not stretch.
     let tall = PanelMetrics::granted(56, natural_w, natural_h * 3, 3);
-    assert_eq!(tall.row_h, 32, "extra height is well floor, not fatter rows");
+    assert_eq!(tall.row_h, 32, "extra height is glass, not fatter rows");
     assert_eq!(tall.height, natural_h * 3);
 
-    // Absurdly narrow: the mute square leaves rather than swallowing
-    // the row, so a press still means "make this the default".
+    // Absurdly narrow: the mute key leaves rather than swallowing the
+    // row, so a press still means "make this the default".
     let sliver = PanelMetrics::granted(56, 80, natural_h, 3);
-    assert_eq!(sliver.mute_zone_left(), 4 + 32 * 2, "the seam stops two row-heights in rather than eating the row");
-    assert_eq!(sliver.row_at(Point::new(40, 10), 3), Some(0), "and the body is still the switch target");
+    assert!(
+        sliver.mute_zone_left() >= sliver.width as i32,
+        "the key leaves the panel rather than eating the row"
+    );
+    assert_eq!(sliver.row_at(Point::new(40, top + 10), 3), Some(0), "and the body is still the switch target");
 
     let hairline = PanelMetrics::granted(56, 60, natural_h, 3);
-    assert!(hairline.mute_zone_left() >= hairline.width as i32, "narrower still, the mute square leaves the panel");
+    assert!(hairline.mute_zone_left() >= hairline.width as i32, "narrower still, the mute key is gone too");
 }
 
 // -----------------------------------------------------------------
@@ -327,19 +343,23 @@ fn fixture_panel() -> AudioPanel {
 }
 
 /// The three-device panel granted exactly what it asked for at a 56px
-/// tile: 336x108, 32px rows, 4px pad, 2px gap.
+/// tile: 336 wide, 32px rows, 4px pad, 2px gap, under an OUTPUTS band.
 fn m56() -> PanelMetrics {
     let (w, h) = PanelMetrics::request(56, 3);
     PanelMetrics::granted(56, w, h, 3)
 }
 
-/// A point on row `i`'s body / mute square at the 56px metrics.
+/// A point on row `i`'s body / mute key at the 56px metrics, read off
+/// the metrics themselves so a change to the panel's furniture moves
+/// the probes with the rows instead of leaving them on the header.
 fn on_row(i: i32) -> Point {
-    Point::new(40, 4 + i * 34 + 10)
+    let m = m56();
+    Point::new(m.glass_x() + m.row_h as i32, m.row_top(i as usize) + m.row_h as i32 / 2)
 }
 
 fn on_mute(i: i32) -> Point {
-    Point::new(310, 4 + i * 34 + 10)
+    let m = m56();
+    Point::new(m.mute_zone_left() + m.pad as i32, m.row_top(i as usize) + m.row_h as i32 / 2)
 }
 
 #[test]

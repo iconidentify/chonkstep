@@ -1,20 +1,38 @@
-//! The BT tile's fold-out: adapter power, the devices this machine
-//! knows, and the door to the pairing dialog.
+//! The BT tile's fold-out: what Bluetooth this machine has, the
+//! devices it knows, and the door to the pairing dialog.
 //!
 //! Same discipline as every instrument in this crate. The panel is a
 //! pure fold: it is fed already-sampled state by [`crate::BluetoothWidget`],
-//! turns it into rows, and answers input with a [`PanelReaction`]
-//! instead of performing anything. No entry point here can reach a
-//! syscall — the crate's `clippy.toml` makes that a build error and its
-//! dependency list makes it moot.
+//! turns it into a [`BtView`] the renderer draws, and answers input
+//! with a [`PanelReaction`] instead of performing anything. No entry
+//! point here can reach a syscall — the crate's `clippy.toml` makes
+//! that a build error and its dependency list makes it moot.
 //!
 //! The host is [`crate::BluetoothWidget`], through the panel half of
 //! the `DockWidget` trait (`panel_spec` / `render_panel` /
 //! `panel_input` / `panel_tick`); this type is the brain those four
-//! methods delegate to. Drawing is [`wm_theme::bluetooth`]'s
-//! `render_bt_panel`, which also owns the row geometry
-//! ([`panel_row_height`], [`forget_cell_width`]) so the hit-test below
-//! and the pixels cannot disagree about where a cell is.
+//! methods delegate to. Drawing is [`render`], which also owns the
+//! band geometry ([`render::bt_layout`]) that the hit test below asks,
+//! so the pixels and the pointer cannot disagree about where a cell is.
+//!
+//! # The three absences
+//!
+//! Most desks running this instrument have no Bluetooth at all, and
+//! there are three different ways for that to be true. They used to
+//! render alike — one row saying `NO ADAPTER`, in a panel 50 pixels
+//! tall — and the whole point of [`BtStatus`] having three absent
+//! variants is that they are three different truths with three
+//! different remedies:
+//!
+//! | Reading | Status | What the panel offers |
+//! |---|---|---|
+//! | `/sys/class/bluetooth` empty | [`BtStatus::NoRadio`] | nothing: there is no radio to act on, so there is no control to draw |
+//! | a controller in sysfs, no adapter in BlueZ's reply | [`BtStatus::NoDaemon`] | the command that starts the service — plus an unblock, but only if rfkill is what is standing in the way |
+//! | BlueZ answering, no adapter powered | [`BtStatus::Off`] | the power row, and the known devices in the disabled treatment |
+//!
+//! The sysfs walk and the BlueZ call are deliberately different
+//! questions — see [`bluez`]'s module doc — and this is where the
+//! difference is finally *shown* rather than only measured.
 //!
 //! # The action table
 //!
@@ -78,19 +96,22 @@
 //! ([`PanelEvent`]) has no long-press — it is press, release, scroll,
 //! motion and crossings, and a panel takes no keyboard *ever*, by
 //! design — so the confirm is two clicks on the same `[x]` within
-//! [`FORGET_GRACE`]. The first arms it, which inverts the cell to full
-//! ink so the pending question is visible on the face rather than
-//! remembered; the second commits; anything else disarms it.
+//! [`FORGET_GRACE`]. The first arms it, and the *row* becomes the
+//! question — `FORGET?` in lit ink where the battery reading was, the
+//! cell inverted beside it — so the pending question is on the face
+//! rather than in someone's memory; the second commits; anything else
+//! disarms it.
 
 pub mod bluez;
 pub mod json;
+pub mod render;
 
 use std::time::{Duration, Instant};
 
 use chonk_dock_widget::{Effect, PanelEvent, PanelReaction, PanelSpec, SourceId};
-use wm_theme::bluetooth::{forget_cell_width, panel_content_height, panel_content_width, panel_row_height, BtPanelRow};
 
-use bluez::{BluezState, Device, RfkillState};
+use bluez::{BluezState, RfkillState};
+use render::{Block, BtLayout, BtRowKey, BtStatus, BtView, DeviceRow};
 
 /// How many fresh BlueZ samples a pending connect or disconnect may
 /// outlive before the row goes back to showing reality.
@@ -113,17 +134,6 @@ pub const FORGET_GRACE: Duration = Duration::from_secs(3);
 /// elsewhere dismisses. See the `chonk-btpair` crate.
 pub const PAIR_DIALOG: &str = "chonk-btpair";
 
-/// One row's semantics: what it is, and therefore what a click on it
-/// means. The rendering twin is [`BtPanelRow`], which is only what a
-/// row *looks like*; this is the half that knows which device is which.
-#[derive(Clone, Debug, PartialEq, Eq)]
-enum Row {
-    Power,
-    Device { path: String, name: String, connected: bool, battery: Option<u8> },
-    PairNew,
-    NoAdapter,
-}
-
 /// A connect or disconnect that has been asked for and not yet
 /// confirmed by a reading.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -137,19 +147,25 @@ struct Pending {
 }
 
 pub struct BtPanel {
-    /// Whether any adapter exists at all — the sysfs answer, which is
-    /// deliberately not the same question as whether BlueZ is
-    /// answering. See [`bluez`]'s module doc.
-    present: bool,
+    /// The controller sysfs named (`hci0`), if any. Deliberately not
+    /// the same question as whether BlueZ is answering — see
+    /// [`bluez`]'s module doc — and the plate for a silent daemon
+    /// names it, because "the hardware is real, the software is not
+    /// running" is the whole of that state.
+    controller: Option<String>,
     powered: bool,
+    /// Whether BlueZ answered at all this pass. An adapter list that
+    /// is empty while sysfs has a controller *is* the silent daemon.
+    daemon: bool,
     /// The adapter every adapter-scoped action addresses.
     adapter: Option<String>,
     rfkill: RfkillState,
-    devices: Vec<Device>,
-    rows: Vec<Row>,
+    devices: Vec<bluez::Device>,
     pending: Vec<Pending>,
     /// The `[x]` waiting for its second click, and when it was armed.
     armed: Option<(String, Instant)>,
+    hover: Option<BtRowKey>,
+    pressed: Option<BtRowKey>,
     /// The most recent `panel_tick` time. `panel_input` carries no
     /// clock of its own — [`PanelEvent`] is a pointer vocabulary, not a
     /// timed one — and `panel_tick` is polled every pass while the
@@ -162,22 +178,28 @@ pub struct BtPanel {
     /// freshness spends a pending's budget.
     bluez_src: SourceId,
     dirty: bool,
+    /// The last view rendered, kept only to notice that the next one
+    /// differs — the panel repaints on change, never on a timer.
+    last_view: Option<BtView>,
 }
 
 impl BtPanel {
     pub fn new() -> Self {
         Self {
-            present: false,
+            controller: None,
             powered: false,
+            daemon: false,
             adapter: None,
             rfkill: RfkillState::default(),
             devices: Vec::new(),
-            rows: Vec::new(),
             pending: Vec::new(),
             armed: None,
+            hover: None,
+            pressed: None,
             last_tick: None,
             bluez_src: SourceId::UNBOUND,
             dirty: true,
+            last_view: None,
         }
     }
 
@@ -186,19 +208,22 @@ impl BtPanel {
     }
 
     /// Feeds the panel what the widget already sampled, so the panel
-    /// never re-reads what the tile has folded. `fresh` is whether this
-    /// pass carried a new BlueZ reading — the thing a pending's
-    /// deadline is measured in.
-    pub fn set_state(&mut self, present: bool, state: &BluezState, rfkill: RfkillState, fresh: bool) {
-        self.present = present;
+    /// never re-reads what the tile has folded. `controller` is the
+    /// sysfs name of the first controller (`None` when there is no
+    /// Bluetooth hardware at all) and `fresh` is whether this pass
+    /// carried a new BlueZ reading — the thing a pending's deadline is
+    /// measured in.
+    pub fn set_state(&mut self, controller: Option<&str>, state: &BluezState, rfkill: RfkillState, fresh: bool) {
+        self.controller = controller.map(str::to_string);
         self.powered = state.any_powered();
+        self.daemon = !state.adapters.is_empty();
         self.adapter = state.primary().map(|adapter| adapter.path.clone());
         self.rfkill = rfkill;
         self.devices = state.devices.clone();
         if fresh {
             self.reconcile();
         }
-        self.rebuild();
+        self.note_change();
     }
 
     /// Drops pendings the reading now agrees with, and spends the
@@ -226,22 +251,38 @@ impl BtPanel {
         self.pending.iter().any(|pending| pending.path == path)
     }
 
-    /// Rebuilds the row list from the current state. The order is the
-    /// panel's grammar: power first, then what is connected, then what
-    /// is merely known, then the way to add something new.
-    fn rebuild(&mut self) {
-        let before = std::mem::take(&mut self.rows);
-        if !self.present {
-            self.rows.push(Row::NoAdapter);
-        } else {
-            self.rows.push(Row::Power);
-            let mut push = |device: &Device| {
-                self.rows.push(Row::Device {
-                    path: device.path.clone(),
-                    name: device.name.clone(),
-                    connected: device.connected,
-                    battery: device.battery,
-                });
+    /// The reading, as one of the four truths. The order is the order
+    /// the questions were asked in: hardware, then daemon, then power.
+    fn status(&self) -> BtStatus {
+        if self.controller.is_none() {
+            return BtStatus::NoRadio;
+        }
+        if !self.daemon {
+            return BtStatus::NoDaemon;
+        }
+        if !self.powered {
+            let block = if self.rfkill.hard {
+                Block::Hard
+            } else if self.rfkill.soft_blocked() {
+                Block::Soft
+            } else {
+                Block::None
+            };
+            return BtStatus::Off { block };
+        }
+        let connected = self.devices.iter().filter(|device| device.connected).count();
+        BtStatus::On { connected: connected.min(u8::MAX as usize) as u8 }
+    }
+
+    /// Everything the renderer draws. The row order is the panel's
+    /// grammar: what is connected, then what is merely known.
+    pub fn view(&self) -> BtView {
+        let status = self.status();
+        let mut devices = Vec::new();
+        if !matches!(status, BtStatus::NoRadio | BtStatus::NoDaemon) {
+            let mut push = |device: &bluez::Device| {
+                let armed = self.armed.as_ref().is_some_and(|(path, _)| path == &device.path);
+                devices.push(DeviceRow::from_device(device, self.is_pending(&device.path), armed));
             };
             for device in self.devices.iter().filter(|device| device.connected) {
                 push(device);
@@ -249,37 +290,36 @@ impl BtPanel {
             for device in self.devices.iter().filter(|device| device.paired && !device.connected) {
                 push(device);
             }
-            self.rows.push(Row::PairNew);
         }
-        if self.rows != before {
+        BtView {
+            status,
+            controller: self.controller.clone(),
+            devices,
+            hover: self.hover.clone(),
+            pressed: self.pressed.clone(),
+        }
+    }
+
+    /// Marks the panel dirty when the face it would draw has actually
+    /// changed. Everything the renderer reads lives in [`BtView`], so
+    /// comparing views is exactly comparing pixels — and an open panel
+    /// that repainted on every sample would cost a frame a second for
+    /// a screen that did not move.
+    fn note_change(&mut self) {
+        let view = self.view();
+        if self.last_view.as_ref() != Some(&view) {
+            self.last_view = Some(view);
             self.dirty = true;
         }
     }
 
-    /// The rows as the renderer takes them — the lookup that turns
-    /// semantics into appearance, including the two pieces of state the
-    /// renderer shows but the row itself does not carry: whether an
-    /// action is in flight, and whether this row's `[x]` is armed.
-    fn render_rows(&self) -> Vec<BtPanelRow<'_>> {
-        self.rows
-            .iter()
-            .map(|row| match row {
-                Row::Power => BtPanelRow::Power { on: self.powered },
-                Row::Device { path, name, connected, .. } => BtPanelRow::Device {
-                    name,
-                    connected: *connected,
-                    pending: self.is_pending(path),
-                    armed: self.armed.as_ref().is_some_and(|(armed, _)| armed == path),
-                },
-                Row::PairNew => BtPanelRow::PairNew,
-                Row::NoAdapter => BtPanelRow::NoAdapter,
-            })
-            .collect()
+    fn layout(&self, tile: u32) -> BtLayout {
+        render::bt_layout(&self.view(), tile)
     }
 
     pub fn spec(&self, tile: u32) -> PanelSpec {
-        let row_h = panel_row_height(tile);
-        PanelSpec::new(panel_content_width(tile), panel_content_height(row_h, self.rows.len()))
+        let layout = self.layout(tile);
+        PanelSpec::new(layout.width, layout.height)
     }
 
     pub fn render(
@@ -292,15 +332,17 @@ impl BtPanel {
         swash: &mut cosmic_text::SwashCache,
     ) -> wm_theme_api::DecorationBuffer {
         self.dirty = false;
-        let rows = self.render_rows();
-        wm_theme::bluetooth::render_bt_panel(theme, fonts, swash, width, height, panel_row_height(tile), &rows)
+        let view = self.view();
+        let buffer = render::render_bt_panel_into(theme, fonts, swash, tile, &view, width, height);
+        self.last_view = Some(view);
+        buffer
     }
 
     /// Whether the panel's pixels changed since the last render.
     pub fn tick(&mut self, now: Instant) -> bool {
         self.last_tick = Some(now);
         // An arming that ran out of grace disarms itself, which is a
-        // visible change: the inverted cell goes back to a whisper.
+        // visible change: the row stops asking its question.
         if let Some((_, armed_at)) = self.armed {
             if now.duration_since(armed_at) >= FORGET_GRACE {
                 self.armed = None;
@@ -310,73 +352,104 @@ impl BtPanel {
         std::mem::take(&mut self.dirty)
     }
 
-    /// The row a point lands on, and whether it landed on that row's
-    /// forget cell. Geometry comes from `wm-theme`'s two helpers, which
-    /// are the same ones the renderer draws with.
-    fn hit(&self, local: wm_theme_api::Point, tile: u32, width: u32) -> Option<(usize, bool)> {
-        let row_h = panel_row_height(tile);
-        if local.x < 0 || local.y < 0 || local.x >= width as i32 {
-            return None;
+    /// One panel event. Press highlights, release fires — the idiom
+    /// the LNK and SND panels already keep, so a pointer means the
+    /// same thing in all three fold-outs. It also makes the forget
+    /// confirm honest: a press that slides off its cell before the
+    /// release neither arms nor commits anything.
+    pub fn on_event(&mut self, event: PanelEvent, tile: u32) -> PanelReaction {
+        let layout = self.layout(tile);
+        match event {
+            PanelEvent::Enter => PanelReaction::None,
+            PanelEvent::Scroll { .. } => PanelReaction::None,
+            PanelEvent::Motion { local } => {
+                let over = layout.row_at(local.x, local.y);
+                if over == self.hover {
+                    return PanelReaction::None;
+                }
+                self.hover = over;
+                PanelReaction::Repaint
+            }
+            PanelEvent::Leave => {
+                if self.hover.is_none() && self.pressed.is_none() {
+                    return PanelReaction::None;
+                }
+                self.hover = None;
+                self.pressed = None;
+                PanelReaction::Repaint
+            }
+            PanelEvent::LeftPress { local } => {
+                self.pressed = layout.row_at(local.x, local.y);
+                // A press on the frame's furniture is still a click
+                // "somewhere else", and somewhere else disarms a
+                // pending confirm.
+                if self.pressed.is_none() {
+                    return self.disarm();
+                }
+                PanelReaction::Repaint
+            }
+            PanelEvent::LeftRelease { local } => {
+                let target = layout.row_at(local.x, local.y);
+                let had_highlight = self.pressed.is_some();
+                let fired = self.pressed.take().filter(|key| Some(key) == target.as_ref());
+                let Some(key) = fired else {
+                    // A press that changed its mind before the release
+                    // performs nothing — and, like any other click that
+                    // is not the armed cell's second, disarms.
+                    let disarmed = self.armed.take().is_some();
+                    return if had_highlight || disarmed { PanelReaction::Repaint } else { PanelReaction::None };
+                };
+                self.activate(&key)
+            }
         }
-        let index = (local.y as u32 / row_h) as usize;
-        if index >= self.rows.len() {
-            return None;
-        }
-        let cell = forget_cell_width(row_h);
-        Some((index, local.x >= width.saturating_sub(cell) as i32))
     }
 
-    /// A click, already resolved to a row. `tile` and `width` are the
-    /// live geometry — the granted width, not the requested one, so the
-    /// forget cell is hit-tested where it was actually drawn.
-    pub fn input(&mut self, event: PanelEvent, tile: u32, width: u32) -> PanelReaction {
-        let PanelEvent::LeftPress { local } = event else { return PanelReaction::None };
-        let Some((index, on_forget)) = self.hit(local, tile, width) else {
-            return self.disarm();
-        };
+    /// The action table, applied to one released row.
+    fn activate(&mut self, key: &BtRowKey) -> PanelReaction {
         // Any click that is not the armed cell's second click cancels
         // the arming — including a click on a *different* row's `[x]`,
         // which then arms that one instead.
         let armed = self.armed.take();
-        let row = self.rows[index].clone();
-
-        match row {
-            Row::Power => {
-                self.dirty |= armed.is_some();
-                self.power_action()
+        let reaction = match key {
+            BtRowKey::Power => self.power_action(),
+            BtRowKey::PairNew => {
+                // No `then:`. The dialog is a window someone is about
+                // to spend a minute in; the sample that matters lands
+                // long after it exits, on the panel's own cadence.
+                PanelReaction::Run(Effect::Run { program: PAIR_DIALOG, args: Vec::new(), then: None })
             }
-            Row::Device { path, connected, .. } if on_forget => {
+            BtRowKey::Device(path) => {
+                let connected = self.devices.iter().find(|device| &device.path == path).map(|device| device.connected);
+                match connected {
+                    Some(connected) => self.toggle_device(path, connected),
+                    None => PanelReaction::None,
+                }
+            }
+            BtRowKey::Forget(path) => {
                 let now = self.last_tick;
-                let confirmed = armed
-                    .as_ref()
-                    .is_some_and(|(armed_path, at)| *armed_path == path && now.is_none_or(|now| now.duration_since(*at) < FORGET_GRACE));
+                let confirmed = armed.as_ref().is_some_and(|(armed_path, at)| {
+                    armed_path == path && now.is_none_or(|now| now.duration_since(*at) < FORGET_GRACE)
+                });
                 if confirmed {
                     self.dirty = true;
-                    return self.forget(&path);
+                    return self.forget(path);
                 }
                 // Arm it. Without a tick to date the arming from, arm
                 // anyway and let the next tick date it — the panel is
                 // ticked every pass while open, so this is the first
                 // click of a freshly-opened panel at worst.
-                self.armed = now.map(|now| (path, now));
+                self.armed = now.map(|now| (path.clone(), now));
                 self.dirty = true;
                 PanelReaction::Repaint
             }
-            Row::Device { path, connected, .. } => {
-                self.dirty |= armed.is_some();
-                self.toggle_device(&path, connected)
-            }
-            Row::PairNew => {
-                self.dirty |= armed.is_some();
-                // No `then:`. The dialog is a window someone is about to
-                // spend a minute in; the sample that matters lands long
-                // after it exits, on the panel's own cadence.
-                PanelReaction::Run(Effect::Run { program: PAIR_DIALOG, args: Vec::new(), then: None })
-            }
-            Row::NoAdapter => {
-                self.dirty |= armed.is_some();
-                PanelReaction::None
-            }
+        };
+        // A row that declined to fire (a hard block, a device already
+        // mid-negotiation) still had a press highlight, and a stale
+        // arming this click cancelled is a visible change too — so the
+        // release is never free of a repaint once it had a target.
+        match reaction {
+            PanelReaction::None => PanelReaction::Repaint,
+            other => other,
         }
     }
 

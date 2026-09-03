@@ -68,6 +68,7 @@ pub mod render;
 
 use chonk_dock_widget::{Effect, SourceId};
 use json::Json;
+use wm_theme::instrument_panel;
 use wm_theme_api::Point;
 
 /// One sink, as the panel models it. `PartialEq`/`Eq` so a fold can
@@ -267,11 +268,25 @@ pub fn action_effects(action: &PanelAction, inputs: &[SinkInput], confirm: Optio
 // Panel geometry
 // ---------------------------------------------------------------------
 
-/// The floor a compressed row will not go below. Under about this many
-/// device pixels the lamp, the description and the speaker stop being
-/// separable marks and the row is a smear, so a grant too short for
-/// every device at this height loses the tail rather than the legibility.
-pub const MIN_ROW_H: u32 = 14;
+/// The floor a compressed row will not go below — the panel
+/// vocabulary's own hit-target floor, because a row *is* a control.
+/// Under this many device pixels the lamp, the description, the meter
+/// and the mute key stop being separable marks and the row is a smear,
+/// so a grant too short for every device at this height loses the tail
+/// rather than the legibility.
+pub const MIN_ROW_H: u32 = instrument_panel::MIN_HIT;
+
+/// The built-in themes' tile bevel. Hit tests get no theme (the
+/// soundctl zone-map precedent), and every built-in theme's tile bevel
+/// is one device pixel; a theme with a wider one shifts the drawn
+/// bands by a pixel or two, well inside a click target's slack.
+const BEVEL: u32 = 1;
+
+/// How far the glass sits inside the granted content rect: the gasket
+/// course plus the well's lip, as [`instrument_panel::draw_panel_ground`]
+/// lays it. Everything the panel draws and everything it hit-tests
+/// lives inside this.
+const INSET: i32 = (BEVEL * 2 + 1) as i32;
 
 /// The panel's layout numbers, derived from the dock's tile edge so the
 /// panel scales with the dock it unfolds from (56px tiles ask for a
@@ -294,10 +309,15 @@ pub struct PanelMetrics {
     /// still a whole panel, never a buffer with a hole under it.
     pub height: u32,
     pub row_h: u32,
-    /// Outer padding around the row stack.
+    /// Padding between the glass edge and what is on it.
     pub pad: u32,
-    /// Vertical gap between rows.
+    /// Vertical gap between rows — one engraved groove wide, since
+    /// that is exactly what sits in it.
     pub gap: u32,
+    /// The OUTPUTS band at the top of the glass. Constant for a tile
+    /// size: a header names the rows, so it must not shrink with them
+    /// when a clamped grant compresses the stack.
+    pub header_h: u32,
 }
 
 impl PanelMetrics {
@@ -307,22 +327,31 @@ impl PanelMetrics {
     /// size that was never granted.
     fn natural(tile: u32) -> PanelMetrics {
         let tile = tile.max(8);
+        let row_h = (tile * 4 / 7).max(18);
         PanelMetrics {
-            width: tile * 6,
+            width: tile * 7,
             height: 0,
-            row_h: (tile * 4 / 7).max(18),
+            row_h,
             pad: (tile / 14).max(3),
             gap: (tile / 28).max(2),
+            header_h: instrument_panel::section_h(row_h),
         }
     }
 
-    /// The content size to ask the shell for: every device at the
-    /// natural row height. The empty panel still asks for one row's
-    /// worth of face, for its "no devices" reading.
+    /// The fixed furniture above the first row: the glass inset, the
+    /// glass's own top padding, the OUTPUTS band, and the groove-wide
+    /// gap under it.
+    fn chrome_h(&self) -> u32 {
+        INSET as u32 + self.pad + self.header_h + self.gap
+    }
+
+    /// The content size to ask the shell for: the header plus every
+    /// device at the natural row height. The empty panel still asks for
+    /// one row's worth of face, for its "no devices" reading.
     pub fn request(tile: u32, rows: usize) -> (u32, u32) {
         let m = PanelMetrics::natural(tile);
         let rows = rows.max(1) as u32;
-        (m.width, m.pad * 2 + rows * m.row_h + (rows - 1) * m.gap)
+        (m.width, m.chrome_h() + rows * m.row_h + (rows - 1) * m.gap + m.pad + INSET as u32)
     }
 
     /// The metrics for a grant. The width is the granted width
@@ -331,14 +360,30 @@ impl PanelMetrics {
     /// grant the shell clamped, down to [`MIN_ROW_H`].
     ///
     /// A grant *taller* than the request is not stretched: rows keep
-    /// their natural height and the extra is well floor, because a
+    /// their natural height and the extra is glass, because a
     /// three-device panel with 60px rows would read as a menu, not as
     /// an instrument.
     pub fn granted(tile: u32, width: u32, height: u32, rows: usize) -> PanelMetrics {
         let base = PanelMetrics::natural(tile);
         let n = rows.max(1) as u32;
-        let for_rows = height.saturating_sub(base.pad * 2 + (n - 1) * base.gap) / n;
-        PanelMetrics { width, height, row_h: base.row_h.min(for_rows).max(MIN_ROW_H), ..base }
+        let stack = height.saturating_sub(base.chrome_h() + base.pad + INSET as u32 + (n - 1) * base.gap);
+        PanelMetrics { width, height, row_h: base.row_h.min(stack / n).max(MIN_ROW_H), ..base }
+    }
+
+    /// The top edge of the row stack, content-local — under the
+    /// OUTPUTS band.
+    pub fn rows_top(&self) -> i32 {
+        self.chrome_h() as i32
+    }
+
+    /// The glass's left edge and width — the band the header and the
+    /// rows are laid across.
+    pub fn glass_x(&self) -> i32 {
+        INSET
+    }
+
+    pub fn glass_w(&self) -> u32 {
+        (self.width as i32 - INSET * 2).max(0) as u32
     }
 
     /// How many of `rows` devices fit whole in the granted height. A
@@ -346,43 +391,57 @@ impl PanelMetrics {
     /// fit and hides the rest — and hides them from the hit-test too,
     /// so nothing invisible is ever clickable.
     pub fn visible_rows(&self, rows: usize) -> usize {
-        if self.height < self.pad + self.row_h {
+        let room = self.height as i32 - INSET - self.rows_top();
+        if room < self.row_h as i32 {
             return 0;
         }
-        let pitch = (self.row_h + self.gap).max(1);
-        rows.min(1 + ((self.height - self.pad - self.row_h) / pitch) as usize)
+        let pitch = (self.row_h + self.gap).max(1) as i32;
+        rows.min(1 + ((room - self.row_h as i32) / pitch) as usize)
     }
 
     /// The top edge of row `i`, content-local.
     pub fn row_top(&self, i: usize) -> i32 {
-        self.pad as i32 + i as i32 * (self.row_h + self.gap) as i32
+        self.rows_top() + i as i32 * (self.row_h + self.gap) as i32
     }
 
     /// The row index at a content-local point, if it is on a *visible*
-    /// row rather than in a gap, the padding, or past the grant.
+    /// row rather than in a groove, the header, the gasket, or past the
+    /// grant.
     pub fn row_at(&self, point: Point, rows: usize) -> Option<usize> {
-        if point.x < 0 || point.x >= self.width as i32 || point.y < self.pad as i32 {
+        if point.x < INSET || point.x >= self.width as i32 - INSET || point.y < self.rows_top() {
             return None;
         }
         let pitch = (self.row_h + self.gap) as i32;
-        let offset = point.y - self.pad as i32;
+        let offset = point.y - self.rows_top();
         let row = offset / pitch;
         let within = offset % pitch;
         (within < self.row_h as i32 && (row as usize) < self.visible_rows(rows)).then_some(row as usize)
     }
 
-    /// The mute control's band: a square at the row's right edge. The
-    /// rest of the row is the switch-default target.
+    /// The mute key's edge: a square control, one row tall, at the
+    /// row's right end. The rest of the row is the switch-default
+    /// target.
+    pub fn mute_key_w(&self) -> u32 {
+        instrument_panel::hit_size(self.row_h)
+    }
+
+    /// The engraved seam a row's meaning changes at: left of it the row
+    /// is "make this the default", right of it is the mute key.
     ///
-    /// On a grant too narrow to hold both, the mute square is the one
-    /// that goes — pushed off the right edge, where it is neither drawn
-    /// nor clickable — rather than eating the row and turning every
-    /// press on a device into a mute. Both the renderer and the
-    /// hit-test read this one function, so they cannot disagree about
-    /// where the seam went.
+    /// On a grant too narrow to hold both, the key is the one that goes
+    /// — this answers past the panel's right edge, where the zone is
+    /// neither drawn nor clickable — rather than eating the row and
+    /// turning every press on a device into a mute. Both the renderer
+    /// and the hit-test read this one function, so they cannot disagree
+    /// about where the seam went.
     pub fn mute_zone_left(&self) -> i32 {
-        let seam = self.width as i32 - (self.pad + self.row_h) as i32;
-        seam.max(self.pad as i32 + self.row_h as i32 * 2)
+        let seam = self.width as i32 - INSET - self.pad as i32 - self.mute_key_w() as i32;
+        // Never closer in than two row-heights: past that the key would
+        // be eating the device row rather than sitting beside it.
+        if seam < INSET + self.row_h as i32 * 2 {
+            return self.width as i32;
+        }
+        seam
     }
 }
 

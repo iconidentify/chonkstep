@@ -1,6 +1,39 @@
-//! The link panel's Tailscale data layer: `tailscale status --json`
-//! reduced to the few facts the TAILSCALE row draws, plus the honest
-//! classification of a denied toggle.
+//! The link panel's Tailscale data layer: `tailscale status --json
+//! --peers=false` reduced to the few facts the TAILSCALE row draws,
+//! plus the honest classification of a denied toggle.
+//!
+//! # Why `--peers=false`, which is not a detail
+//!
+//! A sampler command's output has to fit a pipe buffer. The dock's
+//! command sampler reads a child's stdout *after* the child exits
+//! (see `wait_with_deadline`), so a command that writes more than
+//! 64KB without exiting blocks on the pipe forever and is SIGKILLed
+//! when the 8s sample deadline expires — every single cycle, burning
+//! a worker thread each time and never once producing a reading.
+//!
+//! Plain `tailscale status --json` walks straight into that. Its
+//! payload is dominated by the `Peer` map, at roughly 1KB per peer:
+//! on the machine this was found on, 56 peers made a 78KB document,
+//! and the panel's tailnet row had never once shown a real reading —
+//! it had only ever shown `SENSING`, while `killing a command that
+//! never exited program="tailscale"` scrolled past every 13 seconds
+//! (a 5s interval plus an 8s deadline). Run by hand the same command
+//! returns in 8ms, which is exactly why this hid: nothing is slow.
+//! The document is simply bigger than the transport.
+//!
+//! `--peers=false` drops the map and leaves a ~2.4KB document whose
+//! size does not depend on how large the tailnet is — the fix is a
+//! bound, not a bigger number. Everything this module reads survives
+//! it: `BackendState`, `Self.Online`, `Health` and the top-level
+//! `ExitNodeStatus` are all outside the peer map.
+//!
+//! What did not survive is the count of peers *offering* themselves
+//! as exit nodes, which the first cut drew as `NONE · 3 OFFERED`.
+//! That is no loss. A panel with no way to open a picker that says
+//! three are on offer is teasing a menu it does not have — the same
+//! sin as the bare `…` this panel just removed. What replaced it is
+//! a fact: which exit node traffic is leaving through, and whether
+//! that node is up.
 //!
 //! Reads are unprivileged — any user can run `tailscale status` — so
 //! the row's *facts* never need a grant. Mutation (`tailscale up`,
@@ -80,13 +113,6 @@ impl Json {
             _ => None,
         }
     }
-
-    pub(crate) fn as_obj(&self) -> Option<&[(String, Json)]> {
-        match self {
-            Json::Obj(entries) => Some(entries),
-            _ => None,
-        }
-    }
 }
 
 /// Nesting deeper than this fails the parse rather than the stack.
@@ -103,6 +129,7 @@ impl Parser {
     fn peek(&self) -> Option<char> {
         self.chars.get(self.pos).copied()
     }
+
 
     fn bump(&mut self) -> Option<char> {
         let c = self.peek()?;
@@ -292,7 +319,7 @@ impl BackendState {
 }
 
 /// Everything the TAILSCALE row draws, reduced from one
-/// `tailscale status --json` sample.
+/// `tailscale status --json --peers=false` sample.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TailscaleStatus {
     pub backend: BackendState,
@@ -300,18 +327,27 @@ pub struct TailscaleStatus {
     /// coordination infrastructure. Distinct from `Running`: a
     /// running backend on a dead uplink is offline.
     pub self_online: bool,
-    /// The hostname of the peer currently used as an exit node, if
-    /// any (the peer whose `ExitNode` is true).
+    /// The exit node traffic is currently leaving through, as the
+    /// top-level `ExitNodeStatus` reports it: its tailnet address if
+    /// it published one, else its stable node ID. `None` when this
+    /// node is not using an exit node at all.
+    ///
+    /// Read from `ExitNodeStatus` rather than by scanning the peer
+    /// map, because the peer map is why this sampler used to hang —
+    /// see the module doc's note on `--peers=false`.
     pub exit_node: Option<String>,
-    /// How many peers offer themselves as exit nodes
-    /// (`ExitNodeOption`) — drawn as availability, not a menu, in
-    /// this iteration.
-    pub exit_node_choices: u32,
+    /// Whether that exit node is reachable. An exit node that has
+    /// gone offline is the failure the reader actually needs to see:
+    /// their traffic is leaving through a machine that is not there.
+    /// Meaningless (and `false`) when [`exit_node`] is `None`.
+    ///
+    /// [`exit_node`]: TailscaleStatus::exit_node
+    pub exit_node_online: bool,
     /// Current health warnings, verbatim from the `Health` array.
     pub health: Vec<String>,
 }
 
-/// Reduces a `tailscale status --json` document. `None` when the text
+/// Reduces a `tailscale status --json --peers=false` document. `None` when the text
 /// is not the JSON this asks for — a crashed CLI's error text, a
 /// truncated read — which the panel folds as "no reading yet", keeping
 /// the previous one.
@@ -319,24 +355,29 @@ pub fn parse_status(text: &str) -> Option<TailscaleStatus> {
     let doc = Json::parse(text)?;
     let backend = BackendState::from_name(doc.get("BackendState")?.as_str()?);
     let self_online = doc.get("Self").and_then(|s| s.get("Online")).and_then(Json::as_bool).unwrap_or(false);
-    let mut exit_node = None;
-    let mut exit_node_choices = 0u32;
-    if let Some(peers) = doc.get("Peer").and_then(Json::as_obj) {
-        for (_, peer) in peers {
-            if peer.get("ExitNodeOption").and_then(Json::as_bool).unwrap_or(false) {
-                exit_node_choices += 1;
-            }
-            if peer.get("ExitNode").and_then(Json::as_bool).unwrap_or(false) && exit_node.is_none() {
-                exit_node = peer.get("HostName").and_then(Json::as_str).map(str::to_string);
-            }
-        }
-    }
+    // The exit node, from the top-level `ExitNodeStatus` object the
+    // CLI fills from prefs — present regardless of `--peers`, and
+    // absent entirely (`omitempty`) when no exit node is in use.
+    // Its address is the reading a person can act on; the stable
+    // node ID is the fallback for a node that published no address,
+    // which is a poor label but a true one.
+    let exit = doc.get("ExitNodeStatus");
+    let exit_node = exit.and_then(|e| {
+        let addr = e
+            .get("TailscaleIPs")
+            .and_then(Json::as_arr)
+            .and_then(|ips| ips.first())
+            .and_then(Json::as_str)
+            .map(|ip| ip.split('/').next().unwrap_or(ip).to_string());
+        addr.or_else(|| e.get("ID").and_then(Json::as_str).map(str::to_string)).filter(|s| !s.is_empty())
+    });
+    let exit_node_online = exit_node.is_some() && exit.and_then(|e| e.get("Online")).and_then(Json::as_bool).unwrap_or(false);
     let health = doc
         .get("Health")
         .and_then(Json::as_arr)
         .map(|items| items.iter().filter_map(|i| i.as_str().map(str::to_string)).collect())
         .unwrap_or_default();
-    Some(TailscaleStatus { backend, self_online, exit_node, exit_node_choices, health })
+    Some(TailscaleStatus { backend, self_online, exit_node, exit_node_online, health })
 }
 
 /// Whether this session may move Tailscale at all. `Unknown` until a
@@ -434,9 +475,13 @@ mod tests {
         assert!(Json::parse(&ok).is_some());
     }
 
-    /// The shape a real 1.102 `tailscale status --json` has, cut down
-    /// to the fields this module reads (captured live on 2026-09-02).
-    fn status_doc(backend: &str, online: bool, exit_node: bool) -> String {
+    /// The shape a real 1.102 `tailscale status --json --peers=false`
+    /// has, cut down to the fields this module reads (captured live
+    /// on 2026-09-03). Note `"Peer": null` — that is what the flag
+    /// this sampler passes actually produces, and pinning it here is
+    /// what keeps a future edit from quietly going back to scanning a
+    /// map that is no longer sent.
+    fn status_doc(backend: &str, online: bool, exit: &str) -> String {
         format!(
             r#"{{
   "Version": "1.102.3",
@@ -450,51 +495,81 @@ mod tests {
     "ExitNodeOption": false
   }},
   "Health": [],
-  "Peer": {{
-    "nodekey:aaaa": {{
-      "HostName": "gateway",
-      "Online": true,
-      "ExitNode": {exit_node},
-      "ExitNodeOption": true
-    }},
-    "nodekey:bbbb": {{
-      "HostName": "laptop",
-      "Online": false,
-      "ExitNode": false,
-      "ExitNodeOption": false
-    }}
-  }},
+  "Peer": null,{exit}
   "User": {{"7571899064330385": {{"DisplayName": "chris"}}}}
 }}"#
         )
     }
 
+    /// The `ExitNodeStatus` object the CLI emits while an exit node is
+    /// in use. Omitted entirely when there is none, which is the
+    /// `""` every other test passes.
+    fn exit_status(online: bool) -> String {
+        format!(
+            r#"
+  "ExitNodeStatus": {{
+    "ID": "nSTABLE1CNTRL",
+    "Online": {online},
+    "TailscaleIPs": ["100.64.0.5/32"]
+  }},"#
+        )
+    }
+
     #[test]
     fn status_reduces_the_running_document() {
-        let status = parse_status(&status_doc("Running", true, false)).unwrap();
+        let status = parse_status(&status_doc("Running", true, "")).unwrap();
         assert_eq!(
             status,
             TailscaleStatus {
                 backend: BackendState::Running,
                 self_online: true,
                 exit_node: None,
-                exit_node_choices: 1,
+                exit_node_online: false,
                 health: vec![]
             }
         );
     }
 
     #[test]
-    fn status_names_the_active_exit_node() {
-        let status = parse_status(&status_doc("Running", true, true)).unwrap();
-        assert_eq!(status.exit_node.as_deref(), Some("gateway"));
+    fn status_names_the_active_exit_node_by_address() {
+        let status = parse_status(&status_doc("Running", true, &exit_status(true))).unwrap();
+        // The address without its prefix length: `100.64.0.5/32` is a
+        // route, and the row is naming a machine.
+        assert_eq!(status.exit_node.as_deref(), Some("100.64.0.5"));
+        assert!(status.exit_node_online);
+    }
+
+    #[test]
+    fn an_exit_node_that_went_offline_still_names_itself() {
+        // The whole point of carrying `Online`: traffic is leaving
+        // through a machine that is not answering, and a row that
+        // only said "100.64.0.5" would look healthy.
+        let status = parse_status(&status_doc("Running", true, &exit_status(false))).unwrap();
+        assert_eq!(status.exit_node.as_deref(), Some("100.64.0.5"));
+        assert!(!status.exit_node_online);
+    }
+
+    #[test]
+    fn an_exit_node_without_an_address_falls_back_to_its_id() {
+        let text = r#"{"BackendState":"Running","ExitNodeStatus":{"ID":"nSTABLE1CNTRL","Online":true}}"#;
+        assert_eq!(parse_status(text).unwrap().exit_node.as_deref(), Some("nSTABLE1CNTRL"));
+    }
+
+    #[test]
+    fn a_peerless_document_reports_no_exit_node_rather_than_guessing() {
+        // `--peers=false` sends `"Peer": null`. The old parser read
+        // the exit node out of that map; if anything ever reaches for
+        // it again this is the test that fails.
+        let status = parse_status(&status_doc("Running", true, "")).unwrap();
+        assert_eq!(status.exit_node, None);
+        assert!(!status.exit_node_online);
     }
 
     #[test]
     fn status_reads_the_stopped_and_needs_login_states() {
-        assert_eq!(parse_status(&status_doc("Stopped", false, false)).unwrap().backend, BackendState::Stopped);
-        assert_eq!(parse_status(&status_doc("NeedsLogin", false, false)).unwrap().backend, BackendState::NeedsLogin);
-        assert_eq!(parse_status(&status_doc("SomethingNew", false, false)).unwrap().backend, BackendState::Other);
+        assert_eq!(parse_status(&status_doc("Stopped", false, "")).unwrap().backend, BackendState::Stopped);
+        assert_eq!(parse_status(&status_doc("NeedsLogin", false, "")).unwrap().backend, BackendState::NeedsLogin);
+        assert_eq!(parse_status(&status_doc("SomethingNew", false, "")).unwrap().backend, BackendState::Other);
     }
 
     #[test]
@@ -510,7 +585,7 @@ mod tests {
         assert_eq!(status.backend, BackendState::Stopped);
         assert!(!status.self_online);
         assert_eq!(status.exit_node, None);
-        assert_eq!(status.exit_node_choices, 0);
+        assert!(!status.exit_node_online);
         assert!(status.health.is_empty());
     }
 

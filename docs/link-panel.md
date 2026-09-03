@@ -17,32 +17,61 @@ click away, or press Escape.
 ## What it shows
 
 ```
-  HOMEBASE                    ▁▃▅▇      <- the current link, from the
-  WIFI · 87%                                tile's own reading
+  HOMEBASE                  ▓▓▓▓▓▓░░    <- the current link, from the
+  W I F I  ·  8 7 %                         tile's own reading
+  ────────────────────────────────────
 
-  CONNECTIONS ─────────────────────
-  ■ E   WIRED CONNECTION 1              <- lit lamp = active
-  ■ W   HOMEBASE
-  □ WG  WG-HOME                         <- a WireGuard tunnel
-  ▪ VPN OFFICE-VPN               BUSY   <- dim lamp = in flight
+  C O N N E C T I O N S ──────────────
+  ■  E   WIRED CONNECTION 1             <- lit lamp = active
+  ■  W   HOMEBASE
+  □  WG  WG-HOME                        <- a WireGuard tunnel
+  ▪  VPN OFFICE-VPN              BUSY   <- dim lamp = in flight
 
-  WI-FI NETWORKS ──────────────────
-  ▁▃▅▇ 🔒 HOMEBASE             LINKED
-  ▁▃▅  🔒 NEIGHBOUR 5G          JOIN…   <- secured, no saved profile
-  ▁▃   CAFE WIFI                 OPEN
-  ▁▃   🔒 LAB:5G                SAVED   <- one click connects
+  W I - F I  N E T W O R K S ─────────
+  ▓▓▓▓▓▓░░  HOMEBASE        🔒 LINKED
+  ▓▓▓▓░░░░  NEIGHBOUR 5G     🔒 JOIN…   <- secured, no saved profile
+  ▓▓▓░░░░░  CAFE WIFI            OPEN
+  ▓▓░░░░░░  LAB:5G          🔒  SAVED   <- one click connects
 
-  TAILSCALE ───────────────────────
-  ■ TAILNET                        UP
+  T A I L S C A L E ──────────────────
+  ■  TAILNET                       UP
+     E X I T  N O D E   GATEWAY         <- where your traffic leaves
 
+  ────────────────────────────────────
            ┌──────────┐
            │  RESCAN  │
            └──────────┘
 ```
 
-Every row that can be clicked highlights under the pointer and sinks
-when pressed. A press on one row released on another fires nothing —
-that is a change of mind, not a command.
+Every row that can be clicked lifts under the pointer and sinks when
+pressed. A press on one row released on another fires nothing — that
+is a change of mind, not a command. A row that *cannot* act — a
+network you are already on, a toggle already in flight, a locked
+tailnet, a rescan still cooling — stays flat under the pointer, because
+a lift is a promise.
+
+### How it is drawn
+
+Everything on the glass comes out of `wm_theme::instrument_panel`, the
+design system the fold-out panels share with each other and with the
+tiles behind them, so the panel reads as the LNK tile unfolded rather
+than as a dialog that appeared beside it:
+
+- **Three type steps, and only three.** Band labels are small, widely
+  letter-spaced and dim; row names are the body; the verdict a row is
+  *for* (`LINKED`, `UP`, `BUSY`) is the largest and hottest thing in
+  the row. The header's link name sits a step above all of it.
+- **Engraved dividers.** Every rule is a groove — a dark line with a
+  lit one under it — not a hairline, which is what makes the panel look
+  milled rather than drawn.
+- **Levels are meters.** Signal strength is the same segmented LED
+  meter the VOL tile's bars are made of, at the same currents: the
+  network you are on burns at full, the alternatives are readable but
+  idle. A percentage may sit *beside* a meter; it never replaces one.
+- **Empty is designed.** A machine with no radio, or a scan that heard
+  nothing, gets a socket milled into the glass with a dead meter in it
+  and a legend beside it — the section says so rather than vanishing or
+  dropping a sentence of prose where a row belongs.
 
 ### The rows
 
@@ -55,6 +84,7 @@ that is a change of mind, not a command.
 | WI-FI | a secured network with no profile (`JOIN…`) | opens the join dialog |
 | WI-FI | the network you are on (`LINKED`) | nothing — it is a fact, not a switch |
 | TAILSCALE | the tailnet row | `tailscale up` / `down` |
+| TAILSCALE | the `EXIT NODE` line | nothing — a reading, not a control |
 | — | RESCAN | one explicit scan, then a cooldown |
 
 `EXT` beside a connection means NetworkManager did not bring it up
@@ -162,7 +192,56 @@ can then change the machine's VPN state with no further
 authentication), so it is asked, never assumed.
 
 If the `tailscale` binary is not installed at all, the section simply
-does not appear.
+does not appear. Until the first status sample lands the row reads
+`SENSING`, and every other state it can be in says a word too — `UP`,
+`DOWN`, `BUSY`, `LOGIN`, `AUTH`, `LOCKED`, `UNKNOWN`. It never says
+`…`: an ellipsis is a promise of a menu, and this row has none to open.
+
+### The exit node
+
+When the tailnet is up **and traffic is actually leaving through an
+exit node**, the row carries a labelled reading under it — `EXIT NODE
+GATEWAY`, or `EXIT NODE  GATEWAY · OFFLINE` when the node your traffic
+is routed through has stopped answering, which is the state that
+silently breaks browsing and so is the one worth spelling out.
+
+It is a fact, not a control: choosing an exit node is `tailscale set
+--exit-node=…`, which is not in this panel's action table, and a row
+that looked pressable but was not would be worse than a row that reads
+honestly. When no exit node is in use the line is simply absent.
+
+An earlier cut also counted the peers *offering* themselves as exit
+nodes and drew `EXIT NODE  NONE · 3 OFFERED`. That is gone twice over.
+It gestured at a picker this panel cannot open — the same sin as the
+bare `…` it was brought in to replace — and it cost the sampler its
+bound; see below.
+
+### Why the status sample passes `--peers=false`
+
+The panel samples `tailscale status --json --peers=false`, and the flag
+is load-bearing rather than tidy.
+
+The dock's command sampler reads a child's stdout *after* the child
+exits. A command that writes more than a pipe buffer (64KB) without
+exiting therefore blocks on the pipe forever and is killed when the 8s
+sample deadline expires. Plain `tailscale status --json` is dominated
+by its peer map at roughly 1KB per peer, so on a tailnet of any size it
+walks straight into that: on the machine where this was found, 56 peers
+made a 78KB document, the sampler was SIGKILLed on every single cycle
+(`killing a command that never exited program="tailscale"`, every ~13
+seconds — a 5s interval plus an 8s deadline), a worker thread was tied
+up for eight of every thirteen seconds, and the TAILNET row had never
+once shown a real reading. It only ever said `SENSING`.
+
+What made it hide is that nothing is slow: run by hand the same command
+answers in 8ms. The document was simply bigger than the transport.
+
+`--peers=false` leaves a ~2.4KB document whose size does not depend on
+how big anyone's tailnet is. That is the point — the fix is a bound,
+not a bigger number. Everything the row draws survives it, because
+`BackendState`, `Self.Online`, `Health` and the top-level
+`ExitNodeStatus` all sit outside the peer map. The peer count of exit
+nodes on offer did not survive, and is no loss for the reason above.
 
 ### How the panel decides it is locked
 
@@ -193,12 +272,19 @@ The panel's four queries are all reads, and all cache reads:
 | `nmcli -t -f DEVICE,TYPE,STATE,CONNECTION device status` | 3s |
 | `nmcli -t -f NAME,TYPE,ACTIVE,UUID connection show` | 3s |
 | `nmcli -t -f IN-USE,SSID,SIGNAL,SECURITY dev wifi list --rescan no` | 3s |
-| `tailscale status --json` | 5s |
+| `tailscale status --json --peers=false` | 5s |
 
 `--rescan no` is load-bearing. nmcli's default `--rescan auto` triggers
 a real hardware scan and blocks for seconds; that is the bug that
 froze the desktop for ~3.6s every ~34s in August 2026 and got the
 instruments moved into a crate whose lints make I/O a compile error.
+
+`--peers=false` is load-bearing for a different reason — output size
+rather than latency; see "Why the status sample passes `--peers=false`"
+above. Two of the four flags on this table are there to stop a *read*
+from wedging the desktop, which is the shape of bug this instrument
+keeps finding: nothing here is slow, and both bugs still stalled a
+worker for seconds at a time.
 The only scan this panel ever asks for is the explicit RESCAN row, and
 that row disarms itself for about fifteen seconds afterwards.
 

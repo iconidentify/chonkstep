@@ -705,14 +705,23 @@ mod tests {
         }
     }
 
-    /// A point on row `i`'s body / mute square, for a panel granted its
-    /// request at a 56px tile.
+    /// A point on row `i`'s body / mute key, for a panel granted its
+    /// request at a 56px tile. Derived from the metrics rather than
+    /// written out, so a change to the panel's furniture moves these
+    /// probes with it instead of quietly aiming them at the header.
+    fn panel_metrics() -> PanelMetrics {
+        let (w, h) = PanelMetrics::request(56, 3);
+        PanelMetrics::granted(56, w, h, 3)
+    }
+
     fn row(i: i32) -> Point {
-        Point::new(40, 4 + i * 34 + 10)
+        let m = panel_metrics();
+        Point::new(m.glass_x() + m.row_h as i32, m.row_top(i as usize) + m.row_h as i32 / 2)
     }
 
     fn mute(i: i32) -> Point {
-        Point::new(310, 4 + i * 34 + 10)
+        let m = panel_metrics();
+        Point::new(m.mute_zone_left() + m.pad as i32, m.row_top(i as usize) + m.row_h as i32 / 2)
     }
 
     /// The open gesture does nothing until `pactl` has answered once —

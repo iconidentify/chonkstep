@@ -113,8 +113,8 @@ use tailscale::{classify_toggle_output, parse_status, BackendState, OperatorStat
 pub const PANEL_INTERVAL: Duration = Duration::from_secs(3);
 
 /// Tailscale's status cadence: slower still, because the tailnet
-/// changes on human time and `tailscale status --json` is the most
-/// expensive of the four spawns.
+/// changes on human time and `tailscale status` is the most expensive
+/// of the four spawns.
 pub const TAILSCALE_INTERVAL: Duration = Duration::from_secs(5);
 
 /// How many fresh wifi-list samples the rescan row stays disarmed
@@ -229,7 +229,20 @@ impl LinkPanel {
                 args: to_args(&["-t", "-f", "IN-USE,SSID,SIGNAL,SECURITY", "dev", "wifi", "list", "--rescan", "no"]),
                 interval: PANEL_INTERVAL,
             },
-            Source::Command { program: "tailscale", args: to_args(&["status", "--json"]), interval: TAILSCALE_INTERVAL },
+            // `--peers=false` is load-bearing, not tidiness. The peer
+            // map is ~1KB per peer, and the dock's command sampler
+            // reads stdout only after the child exits, so a tailnet
+            // past ~60 peers wrote more than a pipe buffer, blocked
+            // forever, and was SIGKILLed at the 8s deadline on every
+            // cycle — a worker thread burned every 13 seconds for a
+            // row that never once got a reading. Without the flag the
+            // document is unbounded in the size of someone's tailnet;
+            // with it, ~2.4KB flat. See `tailscale`'s module doc.
+            Source::Command {
+                program: "tailscale",
+                args: to_args(&["status", "--json", "--peers=false"]),
+                interval: TAILSCALE_INTERVAL,
+            },
         ]
     }
 

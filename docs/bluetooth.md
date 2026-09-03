@@ -7,9 +7,18 @@ Three crates carry it:
 
 | Piece | Where |
 |---|---|
-| Tile and panel faces (pure renderers) | `crates/wm-theme/src/bluetooth.rs` |
+| The tile face, and the rune both faces wear | `crates/wm-theme/src/bluetooth.rs` |
+| The panel face (layout + drawing) | `crates/chonk-instruments/src/bt_panel/render.rs` |
 | The widget, the BlueZ reading, the panel brain | `crates/chonk-instruments/src/bluetooth.rs`, `src/bt_panel.rs`, `src/bt_panel/{bluez,json}.rs` |
 | The pairing dialog | `crates/chonk-btpair/` |
+
+The panel renderer moved out of `wm-theme` and into the instrument
+crate, where its two sibling fold-outs (`link_panel::render`,
+`audio_panel::render`) already live: its input is this crate's own panel
+state, and `wm-theme` keeps what is genuinely shared — the tile face,
+the glass, the LED palette, the meters, the lamps and the rune, now
+gathered as the `wm_theme::instrument_panel` design system every panel
+draws with.
 
 ---
 
@@ -197,8 +206,58 @@ cargo run -p wm-theme --example preview_bluetooth -- /tmp/bt
 
 ## The panel
 
+A tile-face frame around one glass well, four tiles wide — the LNK
+panel's shape at the LNK panel's width, because the two radios' fold-
+outs should read as the same object seen twice. Drawn entirely in
+`wm_theme::instrument_panel`'s vocabulary: the panel ground, the
+three-step type ramp (`Section` / `Row` / `Readout`), engraved rules
+and seams, `draw_lamp`, `draw_meter`, `draw_row_ground`,
+`draw_key_cell`, and the `MIN_HIT` floor under every control.
+
+### Three absences, three faces
+
+Most desks running this instrument have no Bluetooth, and there are
+three different ways for that to be true. They used to render alike —
+one row saying `NO ADAPTER`, in a panel about 50 pixels tall, which
+read as a stub or a rendering bug rather than as a state. They are
+three different truths with three different remedies, and they now look
+it:
+
+| Reading | Status | Face |
+|---|---|---|
+| `/sys/class/bluetooth` empty | `NoRadio` | the rune at plate size, ghosted and struck through, `NO BLUETOOTH RADIO`, and **no control anywhere on the panel** — nothing here is actionable, so nothing looks it |
+| a controller in sysfs, no adapter in BlueZ's reply | `NoDaemon` | the rune ghosted but *not* struck (the hardware is real), `BLUETOOTH SERVICE DOWN`, the controller named, and `systemctl start bluetooth` in a recessed field under a `REMEDY` rule |
+| BlueZ answering, no adapter powered | `Off` | the full instrument: an `ADAPTER` section whose power row carries a milled `TURN ON` key, the rfkill block explained when there is one, and the known devices below it in the disabled treatment with no pair row (pairing needs a radio) |
+
+The header is constant furniture in all four states — rune, name,
+status line — and carries the connected-count LED digits only when
+there is an instrument to take a reading: `On` lights them, `Off` shows
+the bare ghost pattern, and the two absent states get no readout at
+all, because a ghosted pair of digits beside `NO CONTROLLER` is
+furniture pretending to be an instrument.
+
+### The populated states
+
 Rows, in the order that is the panel's grammar: power, then what is
 connected, then what is merely known, then the way to add something new.
+
+A device row is a class glyph (BlueZ's `Icon`, folded to the nine
+marks a 7x7 LED grid can say something with — an unrecognized icon gets
+a question mark rather than a plausible guess), a connection lamp
+(`LampState::On` / `Pending` / `Off`), the name, and — where BlueZ
+publishes `org.bluez.Battery1` — a meter with the percentage beside it
+as a readout. The meter burns at full current only for a device that is
+actually connected; a paired-and-idle headset's last known charge is a
+reading the panel is remembering, not one it is taking. Under a fifth
+the number keeps the hot readout ink, which is the whole alarm a
+single-hue LED palette has.
+
+**Nobody here has seen these on hardware.** They are rasterized from
+canned readings and reviewed by looking:
+
+```sh
+cargo test -p chonk-instruments bt_panel   # the states, as assertions
+```
 
 **Optimism with a deadline.** A Bluetooth connect takes seconds — a
 headset has to be woken, negotiated with, and its profiles brought up. A
@@ -214,10 +273,22 @@ The budget counts *readings*, not repaints — the dock ticks a panel at
 from the panel: the pairing keys go with it. `PanelEvent` has no
 long-press — it is press, release, scroll, motion and crossings, and a
 panel takes no keyboard *ever*, by design — so the confirm is two clicks
-on the same `[x]` within `FORGET_GRACE` (3s). The first arms it, which
-inverts the cell to full ink so the pending question is on the face
-rather than in someone's memory; the second commits; anything else
-disarms it.
+on the same key within `FORGET_GRACE` (3s). Idle, the forget key is a
+receded X with no relief at all: eight milled keys marching down the
+right edge is more chrome than a list of headphones needs, and a control
+that looks pressable on every row invites the accident the confirm
+exists to catch. Pointing at it raises the key under it and takes the
+mark to full ink — the one control on the row that lights all the way,
+because it is the one that destroys something. The first click arms it,
+and then the **row** becomes the question: it lifts off the glass,
+`FORGET?` stands in the readout step where the battery reading was, and
+the key inverts to a solid block of ink with the X knocked out of it in
+glass. The second click commits; anything else disarms it.
+
+**Press highlights, release fires** — the same idiom the LNK and SND
+panels keep, so a pointer means the same thing in all three fold-outs.
+It is also what makes the confirm honest: a press that slides off its
+key before the release neither arms nor commits anything.
 
 ---
 
@@ -261,6 +332,38 @@ one. When a legacy device demands exactly that, the dialog reaches
 `Phase::NeedsKeyboard`, says so, and names the tool that can do it,
 rather than hanging on a prompt it cannot answer.
 
+### Chrome, not glass
+
+The dialog used to be drawn on the instruments' LED glass, because it
+is spawned by a Bluetooth panel and wears the Bluetooth rune. That was
+the wrong family. `chonk-netjoin` is the other dialog a dock panel
+spawns for a job a panel may not do itself, and its module doc puts it
+plainly: *the panel next door draws on an LED screen because it is an
+instrument; this is a window, decorated by the same window manager that
+decorates a terminal, so it wears the app vocabulary instead.* Two
+dialogs from one desktop that did not agree about that read as two
+desktops.
+
+So this window now speaks the join dialog's vocabulary element for
+element — the menu surface's fill and bevel, a sunken well over the
+same `field_tone` recipe, the menu's own highlight bar under a hovered
+list row, `paint::draw_button` for the footer, and the highlight bar
+behind a failure — on the join dialog's own logical grid (`MARGIN 12`,
+`TITLE_H 20`, `BUTTON_W 88`, `BUTTON_H 26`, `BUTTON_GAP 8`), with the
+action button in the slot `JOIN` occupies and the way out where
+`CANCEL` is. The one deliberate difference is the mark: the join
+dialog's subject is a network name, which is its title, while this
+dialog's subject is Bluetooth itself, so the instrument's rune sits
+beside the title.
+
+The crate is now a library plus a thin binary, exactly as
+`chonk-netjoin` is, so every phase can be rasterized with no X server,
+no BlueZ and no radio:
+
+```sh
+cargo run -p chonk-btpair --example preview -- /tmp/btpair
+```
+
 ### The command stream
 
 ```text
@@ -290,8 +393,9 @@ So, plainly:
   from canned `busctl` replies, the row grammar, the hit-tests, the
   pending/deadline machine, the two-click confirm, the exact argv of
   every action, the pairing state machine against canned transcripts,
-  and every face rendered at every size and theme. 84 tests
-  (56 in `chonk-instruments`, 28 in `chonk-btpair`), plus the
+  and every face rendered at every size, in every built-in theme and
+  both appearances — the panel's and the dialog's alike. 270 tests
+  (239 in `chonk-instruments`, 31 in `chonk-btpair`), plus the
   `wm-theme` renderer's own.
 - **Not tested, and not testable here.** Any of it against a real
   radio. No pairing has ever been performed. The `busctl` reply shapes

@@ -42,8 +42,11 @@
 //! friction in `docs/bluetooth.md` rather than left for the next reader
 //! to rediscover.
 
-mod pair;
-mod render;
+// The pure halves live in the library beside this file
+// (`lib.rs`), so every phase of this dialog can be rasterized and
+// tested with no X server and no radio — the same split
+// `chonk-netjoin` uses.
+use chonk_btpair::{pair, render};
 
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};

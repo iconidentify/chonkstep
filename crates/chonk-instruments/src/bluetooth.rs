@@ -144,6 +144,12 @@ pub struct BluetoothWidget {
     rfkill_src: SourceId,
     state: BtState,
     present: bool,
+    /// The first controller sysfs named (`hci0`). The panel's
+    /// silent-daemon plate names it, because "the hardware is real,
+    /// the daemon is not running" is the whole of that state and a
+    /// plate that could not say *which* controller would be making a
+    /// claim it had not checked.
+    controller: Option<String>,
     bluez: BluezState,
     rfkill: RfkillState,
     panel: BtPanel,
@@ -157,6 +163,7 @@ impl BluetoothWidget {
             rfkill_src: SourceId::UNBOUND,
             state: BtState::Absent,
             present: false,
+            controller: None,
             bluez: BluezState::default(),
             rfkill: RfkillState::default(),
             panel: BtPanel::new(),
@@ -254,7 +261,9 @@ impl DockWidget for BluetoothWidget {
         // Every `hci*` directory is a controller. The entry names are
         // the entire reading — no files were requested, because
         // "does this exist" is the question.
-        self.present = samples.tree(self.controllers).iter().any(|entry| entry.name.starts_with("hci"));
+        self.controller =
+            samples.tree(self.controllers).iter().find(|entry| entry.name.starts_with("hci")).map(|entry| entry.name.clone());
+        self.present = self.controller.is_some();
         self.rfkill = rfkill_from(samples.tree(self.rfkill_src));
         // A BlueZ reading that did not parse leaves the last good one
         // rather than blanking the panel mid-interaction; a *cleared*
@@ -268,7 +277,7 @@ impl DockWidget for BluetoothWidget {
         };
 
         self.state = Self::derive(self.present, &self.bluez);
-        self.panel.set_state(self.present, &self.bluez, self.rfkill, bluez_fresh);
+        self.panel.set_state(self.controller.as_deref(), &self.bluez, self.rfkill, bluez_fresh);
         self.state != before
     }
 
@@ -298,10 +307,12 @@ impl DockWidget for BluetoothWidget {
     }
 
     fn panel_spec(&self, tile: u32) -> Option<PanelSpec> {
-        // The panel is offered even with no adapter: its `NO ADAPTER`
-        // row is a real answer to "what Bluetooth does this machine
-        // have", and a tile that simply ignored the gesture would leave
-        // someone clicking at it wondering whether the dock was wedged.
+        // The panel is offered even with no adapter. "This machine has
+        // no Bluetooth radio" is a real answer to "what Bluetooth does
+        // this machine have" and it gets a designed face
+        // (`BtStatus::NoRadio`), not a stub; a tile that simply ignored
+        // the gesture would leave someone clicking at it wondering
+        // whether the dock was wedged.
         Some(self.panel.spec(tile))
     }
 
@@ -312,7 +323,7 @@ impl DockWidget for BluetoothWidget {
     }
 
     fn panel_input(&mut self, event: PanelEvent, tile: u32) -> PanelReaction {
-        self.panel.input(event, tile, wm_theme::bluetooth::panel_content_width(tile))
+        self.panel.on_event(event, tile)
     }
 
     fn panel_tick(&mut self, now: std::time::Instant) -> bool {
