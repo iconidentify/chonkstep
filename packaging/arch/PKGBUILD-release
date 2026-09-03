@@ -97,6 +97,11 @@ package() {
   install -Dm755 target/release/chonkstep "$pkgdir/usr/bin/chonkstep"
   install -Dm755 target/release/chonkstep-wayland "$pkgdir/usr/bin/chonkstep-wayland"
   install -Dm755 scripts/chonk-get "$pkgdir/usr/bin/chonk-get"
+  # The wifi passphrase dialog. Nobody runs it by hand: the dock's LNK
+  # panel spawns it by bare name when someone clicks a secured network
+  # with no saved profile, so it has to be on PATH or that row silently
+  # does nothing. See docs/link-panel.md.
+  install -Dm755 target/release/chonk-netjoin "$pkgdir/usr/bin/chonk-netjoin"
   # The Omarchy bridge: writes chonkstep's built-in themes out as
   # Omarchy themes, so `omarchy-theme-set` can dress the rest of the
   # machine to match (see README, "Installing on Omarchy").

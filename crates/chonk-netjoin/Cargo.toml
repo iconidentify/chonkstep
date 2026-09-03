@@ -1,0 +1,40 @@
+[package]
+name = "chonk-netjoin"
+description = "The wifi join dialog: the keyboard the LNK panel is not allowed to have. Takes an SSID, asks for a passphrase, hands it to nmcli over a pipe."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+# The look-and-feel SDK: the theme model, the paint primitives, and the
+# `CHONKSTEP_THEME`/`CHONKSTEP_SCALE` reading that makes this dialog
+# wear the same clothes as the desk that launched it.
+chonk-ui = { path = "../chonk-ui" }
+# For `paint::draw_text`'s FontSystem/SwashCache parameters. The same
+# version `wm-theme` pins, so cargo unifies them into one crate and the
+# types line up.
+cosmic-text = "0.12"
+tiny-skia = "0.11"
+# The window itself.
+#
+# `chonk_ui::App` is the SDK's window type and this crate would rather
+# have used it, but `App` masks no keyboard: it sets neither
+# `EventMask::KEY_PRESS` nor a key callback, and a passphrase field is
+# nothing but keyboard. Rather than grow the SDK's public API from
+# inside a dialog, the window lives here (`window.rs`) and everything
+# *visible* still comes from `chonk-ui` — so the two agree on the look
+# without this crate waiting on the SDK. Folding it back into
+# `chonk_ui::App` once that grows a key callback is a deletion here,
+# not a rewrite.
+x11rb = "0.13"
+
+# Tests and the preview example only — never the shipping binary.
+# `chonk-ui` re-exports exactly one theme (the flagship), which is all
+# an app needs at runtime because the desk tells it which theme to wear
+# through the environment. Proving the dialog is legible in *all* of
+# them, in both appearances, needs the whole set, and that lives in
+# `wm-theme`. Keeping it here rather than in `[dependencies]` is the
+# difference between "the design pass can see every theme" and "this
+# app reached around its own SDK".
+[dev-dependencies]
+wm-theme = { path = "../wm-theme" }

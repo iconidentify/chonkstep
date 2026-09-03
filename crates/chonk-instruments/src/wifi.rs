@@ -42,6 +42,7 @@
 //! it. Without that, clicking cycles which interface the tile watches,
 //! pinning the choice so the auto-pick stops overriding it.
 
+use std::cell::Cell;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -49,7 +50,14 @@ use wm_theme::wifi::{render_wifi_tile, LinkReading};
 use wm_theme::{panel, Theme};
 use wm_theme_api::DecorationBuffer;
 
-use chonk_dock_widget::{DockInput, DockWidget, Effect, Samples, Source, SourceId, TreeEntry, SAMPLE_INTERVAL};
+use chonk_dock_widget::{
+    DockInput, DockWidget, Effect, PanelCtx, PanelEvent, PanelFrame, PanelReaction, PanelSpec, Samples, Source, SourceId, TreeEntry,
+    SAMPLE_INTERVAL,
+};
+
+use crate::link_panel::data::split_terse;
+use crate::link_panel::render::LinkHeader;
+use crate::link_panel::LinkPanel;
 
 /// Where the interfaces live, and which of each interface's files the
 /// tile reads. Positional, like every [`Source::Tree`]: the arrays and
@@ -133,27 +141,6 @@ struct IfaceProbe {
     carrier: bool,
     speed_mbps: Option<u32>,
     wireless: bool,
-}
-
-/// Splits one nmcli terse-mode line on unescaped `:`. Terse mode
-/// backslash-escapes both `:` and `\` inside values (an SSID may
-/// legally contain either), so a naive `split(':')` would shear such
-/// an SSID apart and misread its tail as the signal.
-fn split_terse(line: &str) -> Vec<String> {
-    let mut fields = vec![String::new()];
-    let mut chars = line.chars();
-    while let Some(c) = chars.next() {
-        match c {
-            '\\' => {
-                if let Some(escaped) = chars.next() {
-                    fields.last_mut().expect("fields never empty").push(escaped);
-                }
-            }
-            ':' => fields.push(String::new()),
-            _ => fields.last_mut().expect("fields never empty").push(c),
-        }
-    }
-    fields
 }
 
 /// The active line of `nmcli -t -f ACTIVE,SSID,SIGNAL dev wifi`:
@@ -246,7 +233,34 @@ pub struct WifiWidget {
     /// has answered with a word this code recognizes.
     radio_enabled: Option<bool>,
     wifi_hw: bool,
+    /// The fold-out behind this tile. Always present and always
+    /// sampling — its sources are declared once for the session, like
+    /// every widget's (see [`LinkPanel`]'s "Sampling cadence") — but
+    /// only rendered and clicked while the shell has it open.
+    panel: LinkPanel,
+    /// The dock's tile edge as of the last render, the yardstick every
+    /// panel metric is derived from.
+    ///
+    /// A [`Cell`] because the scale arrives through `render`, which
+    /// takes `&self` — while `panel_spec`, which needs it, is
+    /// consulted at the open gesture with no scale of its own. The
+    /// tile has always been rendered by then, so the remembered value
+    /// is the live one; [`STOCK_TILE`] only covers the impossible case
+    /// of a panel opened on a tile that never drew.
+    tile: Cell<u32>,
 }
+
+/// The dock's stock tile edge at scale 1.0 — the fallback scale for a
+/// panel spec asked for before the tile has ever rendered. It is a
+/// wrong answer to a question that cannot be asked, kept honest-sized
+/// so that if it ever *is*, the result is a normal panel rather than a
+/// sliver.
+const STOCK_TILE: u32 = 56;
+
+/// How many of this widget's declared [`Source`]s belong to the tile.
+/// The panel's own follow, so `bind` splits the id slice here — the
+/// one place the two halves' source lists meet.
+const TILE_SOURCES: usize = 3;
 
 impl WifiWidget {
     pub fn new() -> Self {
@@ -261,6 +275,8 @@ impl WifiWidget {
             nmcli: None,
             radio_enabled: None,
             wifi_hw: false,
+            panel: LinkPanel::new(),
+            tile: Cell::new(STOCK_TILE),
         }
     }
 
@@ -269,6 +285,18 @@ impl WifiWidget {
     /// [`WifiWidget::nmcli`], since a sample that landed at all is the
     /// proof that nmcli runs here — which is what gates the
     /// click-to-toggle behavior.
+    /// The tile's current link, in the shape the link panel's header
+    /// draws — so the panel never re-samples what this widget already
+    /// folded. See `LinkPanel::set_link_header`.
+    pub fn link_header(&self) -> LinkHeader {
+        match &self.state {
+            LinkState::Absent => LinkHeader::Unknown,
+            LinkState::Down { interface } => LinkHeader::Down { interface: interface.clone() },
+            LinkState::Wifi { ssid, signal } => LinkHeader::Wifi { ssid: ssid.clone(), signal: *signal },
+            LinkState::Wired { interface, speed_mbps } => LinkHeader::Wired { interface: interface.clone(), speed_mbps: *speed_mbps },
+        }
+    }
+
     fn fold_nmcli(&mut self, samples: &Samples) -> Option<(String, u8)> {
         if samples.unusable(self.wifi_list) {
             self.nmcli = Some(false);
@@ -291,18 +319,25 @@ impl DockWidget for WifiWidget {
         "LNK"
     }
 
+    /// The tile's three, then the panel's four, appended in that order
+    /// — so [`bind`](DockWidget::bind) can hand the tail straight to
+    /// [`LinkPanel::bind`] and neither half has to know the other's
+    /// count.
     fn sources(&self) -> Vec<Source> {
-        vec![
+        let mut sources = vec![
             Source::Tree { root: PathBuf::from(NET_ROOT), files: NET_FIELDS, dirs: NET_DIRS, interval: SAMPLE_INTERVAL },
             Source::Command { program: "nmcli", args: nmcli_args(), interval: SAMPLE_INTERVAL },
             Source::Command { program: "nmcli", args: radio_args(), interval: RADIO_INTERVAL },
-        ]
+        ];
+        sources.extend(self.panel.sources());
+        sources
     }
 
     fn bind(&mut self, ids: &[SourceId]) {
         self.interfaces = ids.first().copied().unwrap_or(SourceId::UNBOUND);
         self.wifi_list = ids.get(1).copied().unwrap_or(SourceId::UNBOUND);
         self.radio = ids.get(2).copied().unwrap_or(SourceId::UNBOUND);
+        self.panel.bind(ids.get(TILE_SOURCES..).unwrap_or(&[]));
     }
 
     fn update(&mut self, samples: &Samples) -> bool {
@@ -336,10 +371,19 @@ impl DockWidget for WifiWidget {
             Some((ssid, signal)) => LinkState::Wifi { ssid, signal },
             None => pick_link(&self.probes, self.selected),
         };
+        // The panel folds its own four sources every pass and marks
+        // itself dirty; `panel_tick` is what turns that into a
+        // repaint, and only while the panel is open. The tile's answer
+        // is about the *tile*, so a panel-only change must not claim
+        // it — but the header the panel draws is the tile's state, so
+        // it is pushed across here, where that state has just settled.
+        self.panel.update(samples);
+        self.panel.set_link_header(self.link_header());
         self.state != before
     }
 
     fn render(&self, theme: &Theme, tile: u32, fonts: &mut cosmic_text::FontSystem, swash: &mut cosmic_text::SwashCache) -> DecorationBuffer {
+        self.tile.set(tile);
         let reading = match &self.state {
             LinkState::Absent => return panel::render_dead_tile(theme, fonts, swash, tile, "LNK"),
             LinkState::Wifi { ssid, signal } => LinkReading::Wifi { ssid, signal_pct: *signal },
@@ -385,6 +429,38 @@ impl DockWidget for WifiWidget {
         } else {
             Vec::new()
         }
+    }
+
+    // ---------------------------------------------------------------
+    // The link panel. Four one-liners onto `LinkPanel`, which is where
+    // the whole fold-out lives; this impl's only job is the scale the
+    // trait does not carry into every method.
+    // ---------------------------------------------------------------
+
+    /// Always `Some`: even a machine with no radio and no tailnet has
+    /// connection profiles worth toggling, and one with none of those
+    /// gets a panel that says so — which is a better answer to a
+    /// right-click than nothing happening.
+    fn panel_spec(&self, tile: u32) -> Option<PanelSpec> {
+        Some(self.panel.spec(tile))
+    }
+
+    fn render_panel(&mut self, frame: &mut PanelFrame, ctx: &mut PanelCtx<'_>) {
+        self.tile.set(ctx.tile);
+        let buffer = self.panel.render(ctx.theme, ctx.tile, ctx.fonts, ctx.swash, frame.width(), frame.height());
+        // Sized from the frame we were handed, so this cannot refuse —
+        // but `adopt` is the contract, and asserting the contract in
+        // the one place it is met is how it stays met.
+        debug_assert!(buffer.width == frame.width() && buffer.height == frame.height());
+        frame.adopt(buffer);
+    }
+
+    fn panel_input(&mut self, event: PanelEvent, tile: u32) -> PanelReaction {
+        self.panel.on_event(event, tile)
+    }
+
+    fn panel_tick(&mut self, _now: std::time::Instant) -> bool {
+        self.panel.take_dirty()
     }
 }
 

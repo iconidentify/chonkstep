@@ -233,6 +233,16 @@ You can write one in any language that can open a Unix socket —
 [instrument-platform.md](instrument-platform.md) has a complete
 Python one in ten lines.
 
+The tiles that ship with the desktop have panels too. Right-click
+**LNK** for the link panel: wifi networks in range, your saved
+connection profiles and WireGuard tunnels, and the Tailscale row, each
+a switch you can throw from the dock. Joining a new secured network
+opens a small passphrase dialog, because a panel takes no keyboard by
+design. [link-panel.md](link-panel.md) is the whole story — including
+the one-time `sudo tailscale set --operator=$USER` grant that
+`scripts/install.sh` offers you, without which Tailscale can be shown
+but not toggled.
+
 Try the shipped ones (paths are relative to a checkout; `chonk-get` is
 `~/.local/bin/chonk-get` after `scripts/install.sh`, `/usr/bin/chonk-get`
 from the package, or simply `scripts/chonk-get` in the checkout):
