@@ -1,7 +1,9 @@
 //! End-to-end coverage for the `Dock` row: hiding the Dock takes the
 //! column off the screen *and* gives back the strip of desk it was
 //! reserving, so a maximized window covers ground it could not reach a
-//! moment earlier — and showing it again takes both back.
+//! moment earlier — and showing it again takes both back. The Clip, the
+//! workspace tile in the opposite corner, leaves and returns with it:
+//! one visibility choice, every piece of desk furniture it owns.
 //!
 //! # Why this test and not a unit test
 //!
@@ -118,16 +120,24 @@ fn hiding_the_dock_from_the_root_menu_gives_a_maximized_window_its_strip() {
     assert_eq!((full.x, full.y, full.h), (short.x, short.y, short.h), "and nothing else moved");
     assert_eq!(std::fs::read_to_string(session.state_file("dock-visibility")).unwrap().trim(), "hidden");
 
-    // The Clip is corner furniture of its own and stays: a square tile
-    // in the bottom-right, which is why `World::dock`'s taller-than-wide
-    // shape test does not see it. It must still be there — hiding the
-    // Dock is not "hide everything in the corner".
-    let world = session.world().unwrap();
-    assert!(
-        world.shells.iter().any(|s| s.mapped && s.w == s.h && s.x + s.w as i32 == output_w as i32
-            && s.y + s.h as i32 == output_h as i32),
-        "the Clip keeps its own corner"
-    );
+    // The Clip goes with it. This assertion used to read the other
+    // way — "the Clip keeps its own corner", on the argument that it is
+    // corner furniture of its own and hiding the Dock is not "hide
+    // everything in the corner". That argument does not survive the
+    // session this feature exists for: under a hosted Omarchy bar the
+    // Clip is the last chonkstep object on a borrowed screen, showing a
+    // workspace number the bar is already showing. `World::dock`'s
+    // taller-than-wide shape test cannot see a square tile, so the
+    // check is written out by hand here.
+    poll_until(Duration::from_secs(10), "the Clip to leave with the Dock", || {
+        let world = session.world().ok()?;
+        world
+            .shells
+            .iter()
+            .all(|s| !(s.mapped && s.w == s.h && s.x + s.w as i32 == output_w as i32 && s.y + s.h as i32 == output_h as i32))
+            .then_some(())
+    })
+    .expect("hiding the Dock takes the Clip with it");
 
     // -- and shows it again: both halves come back --------------------
     toggle_dock_from_menu(&mut session, &metrics);
@@ -138,6 +148,15 @@ fn hiding_the_dock_from_the_root_menu_gives_a_maximized_window_its_strip() {
         world.frame_of(window.id).filter(|f| f.x + f.w as i32 == home.x).cloned()
     })
     .expect("the window yields the strip the moment the dock reserves it again");
+    poll_until(Duration::from_secs(10), "the Clip to come back to its corner", || {
+        let world = session.world().ok()?;
+        world
+            .shells
+            .iter()
+            .any(|s| s.mapped && s.w == s.h && s.x + s.w as i32 == output_w as i32 && s.y + s.h as i32 == output_h as i32)
+            .then_some(())
+    })
+    .expect("showing the Dock brings the Clip back");
     assert_eq!(std::fs::read_to_string(session.state_file("dock-visibility")).unwrap().trim(), "shown");
 }
 
@@ -160,7 +179,18 @@ fn a_session_configured_dockless_never_shows_the_dock_and_a_binding_brings_it_ba
 
     let world = session.world().unwrap();
     let output_w = world.output_w;
+    let output_h = world.output_h;
     assert!(world.dock().is_none(), "a session configured dockless has no dock on screen");
+    // Nor a Clip. This is the boot path rather than the toggle, and it
+    // is the one that could differ: `Desktop::new` maps both surfaces
+    // unconditionally and the shell hides them a moment later through
+    // the resolved choice. A startup that reached the Dock by some
+    // other route would leave the Clip lit on a dockless desk.
+    assert!(
+        !world.shells.iter().any(|s| s.mapped && s.w == s.h && s.x + s.w as i32 == output_w as i32
+            && s.y + s.h as i32 == output_h as i32),
+        "nor a Clip: one choice hides every piece of desk furniture"
+    );
 
     // A window maximizes across the whole width from the start — the
     // startup path composed the workareas from a Dock that was already
