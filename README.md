@@ -239,10 +239,20 @@ first try instead of running into NeXTSTEP `alt+shift` chords.
 It is a set of defaults, never a lock: every value it sets is
 overridden by writing that key out (`show_dock = true` gets the Dock
 back, `keymap = "chonkstep"` keeps the NeXTSTEP chords). What it
-changes, what it deliberately leaves alone, all 93 bindings and the 37
+changes, what it deliberately leaves alone, all 113 bindings and the 35
 groups of Omarchy chord it leaves *unbound* rather than approximate,
 are in [docs/omarchy-mode.md](docs/omarchy-mode.md) and
 [docs/keybindings.md](docs/keybindings.md).
+
+On a machine that actually has Omarchy on it, that table is only the
+fallback: the same line reads your **live** `~/.config/hypr/` — Lua on
+Omarchy 4, classic `hyprland.conf` on 3 — for keybindings, window
+rules, startup apps and session environment, and follows an edit within
+a second without a restart. That is what keeps Omarchy's own menu
+working as the way you configure your machine, since changing a
+keybinding through their UI *is* an edit to those files.
+[docs/hyprland-config.md](docs/hyprland-config.md) has what is read,
+what is deliberately ignored and why, and how to turn it off.
 
 Once you are in, right-click the desktop: the `Omarchy` submenu of the
 root menu *is* Omarchy's own menu - the same Learn / Trigger / Style /

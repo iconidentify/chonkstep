@@ -7,6 +7,16 @@ description = "User configuration: config.toml loading, keybinding parsing, and 
 
 [dependencies]
 wm-core = { path = "../wm-core" }
+# Window rules in somebody else's config file are regular expressions —
+# `^(zoom|vlc|mpv|org.kde.kdenlive)$`, `.*[Rr]esolve.*` — and they
+# arrive from a file this crate does not own. `regex` is the right
+# engine for exactly that: it has no backtracking, so matching is
+# linear in the input no matter what pattern a file asks for, and it
+# refuses to compile a pattern whose program would exceed the size
+# limit `hyprland::rules` sets. A hand-rolled matcher would have had to
+# earn both of those properties, in a crate that runs on the
+# compositor's own thread.
+regex = "1"
 serde = { version = "1", features = ["derive"] }
 # preserve_order matters: [keybindings] entries can name the same combo
 # through different spellings ("alt+ctrl+right" vs "alt+control+right"),

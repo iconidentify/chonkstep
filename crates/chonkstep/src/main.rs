@@ -56,6 +56,13 @@ fn main() {
     let state = SessionState::resolve(&config);
     tracing::info!(scale = state.scale, "UI scale (config `scale`; CHONKSTEP_SCALE overrides)");
     ensure_xcursor_size(state.scale);
+    // The `env` lines from the desktop's own Hyprland configuration,
+    // applied here for the same reason and in the same window as the
+    // cursor size above: they exist to be *inherited*, so they have to
+    // be in place before this process starts anything, and this is
+    // still the single-threaded part of startup where setting them is
+    // sound. Empty on a session that reads no such configuration.
+    chonk_shell::startup::apply_session_env(&state.session_env);
 
     let mut backend = match X11Backend::connect_and_become_wm(None, state.scale) {
         Ok(b) => b,

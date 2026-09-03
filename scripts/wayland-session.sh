@@ -216,14 +216,25 @@ publish_portal_env() {
         # tracing colors the key with ANSI escapes even into a file.
         sock=$(sed -n '/wayland socket listening/s/.*"\(wayland-[^"]*\)".*/\1/p' \
             "$LOG" 2>/dev/null | tail -n 1)
-        if [ -n "$sock" ] && [ "$sock" != "$published" ] \
+        # The Hyprland instance signature, when the session serves
+        # Hyprland's IPC. Same reasoning as WAYLAND_DISPLAY exactly: the
+        # compositor chooses it, a D-Bus-activated shell inherits
+        # nothing from here, and `hyprctl` and Quickshell's IPC client
+        # both find the sockets through this variable and nothing else.
+        # Republished on the same change-detection as the socket, so a
+        # crash recovery — which re-execs the compositor and mints a new
+        # signature — repoints instead of leaving a dead one.
+        sig=$(sed -n '/hyprland ipc listening/s/.*signature="\([^"]*\)".*/\1/p' \
+            "$LOG" 2>/dev/null | tail -n 1)
+        if [ -n "$sock" ] && [ "$sock$sig" != "$published" ] \
                 && [ -S "$XDG_RUNTIME_DIR/$sock" ]; then
             dbus-update-activation-environment --systemd \
                 "WAYLAND_DISPLAY=$sock" \
                 "XDG_CURRENT_DESKTOP=$XDG_CURRENT_DESKTOP" \
                 "XDG_SESSION_TYPE=$XDG_SESSION_TYPE" \
+                ${sig:+"HYPRLAND_INSTANCE_SIGNATURE=$sig"} \
                 >>"$LOG" 2>&1 || true
-            published="$sock"
+            published="$sock$sig"
         fi
         sleep 1
     done

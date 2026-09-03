@@ -126,6 +126,39 @@ pub struct SessionState {
     /// The modifier for the move/resize drag gesture. `None` disables
     /// it.
     pub drag_modifier: Option<Modifiers>,
+    /// Per-window float rules read out of the user's own Hyprland
+    /// configuration (`wm_config::hyprland`), or `None` for the
+    /// built-in behaviour.
+    ///
+    /// Carried here rather than read straight off the config at map
+    /// time for the reason this module's docs give about every other
+    /// setting: this is the one path config takes into a running
+    /// session, and a setting that travels beside the rest cannot be
+    /// the one a reload forgets. It is also what makes a live edit to
+    /// somebody's `windowrule` line take effect without a restart —
+    /// `apply_session_state` pushes it down like any other policy.
+    pub float_policy: Option<std::sync::Arc<dyn wm_core::FloatPolicy>>,
+    /// Whether this session reads the user's own Hyprland
+    /// configuration at all (`wm_config::hyprland::wanted`).
+    ///
+    /// Carried as the resolved *decision* rather than re-derived from
+    /// the config wherever it is needed, so the session's watch and
+    /// the session's bindings can never disagree about whether
+    /// somebody else's files are in play. It is also the only honest
+    /// signal for that: a session that reads a configuration
+    /// containing no window rules has no float policy, which would
+    /// otherwise be indistinguishable from not reading one at all.
+    pub reads_hyprland_config: bool,
+    /// Environment variables from that same read: the guest desktop's
+    /// own `env` lines, which its tooling expects to find.
+    ///
+    /// Startup-only in effect, like [`Self::autostart`] — the process
+    /// environment is inherited at spawn, so changing it later reaches
+    /// nothing already running — but carried here so it resolves
+    /// through the one path with everything else. Applied by
+    /// [`apply_session_env`], which explains why it can only be done
+    /// once, early.
+    pub session_env: Vec<(String, String)>,
     /// Named argv the `run` bindings resolve against, straight off the
     /// config. Carried here rather than looked up from a reloaded
     /// config at press time so a binding and the command it names can
@@ -176,6 +209,9 @@ impl SessionState {
             dock: crate::desktop::DockVisibility::resolve(config.show_dock),
             decorations: config.decorations.clone(),
             drag_modifier: config.drag_modifier,
+            float_policy: config.float_policy.clone(),
+            reads_hyprland_config: wm_config::hyprland::wanted(config),
+            session_env: config.session_env.clone(),
             commands: config.commands.clone(),
             terminal: config.terminal.clone(),
             autostart: config.autostart.clone(),
@@ -604,6 +640,71 @@ pub fn ensure_xcursor_size(scale: f32) {
     }
 }
 
+/// Applies the `env` lines read out of the user's own Hyprland
+/// configuration ([`SessionState::session_env`]) to this process, so
+/// every child the session goes on to start inherits them.
+///
+/// # Why the process environment, and why exactly here
+///
+/// These variables exist to be inherited. `GDK_BACKEND=wayland,x11,*`,
+/// `MOZ_ENABLE_WAYLAND=1`, `ELECTRON_OZONE_PLATFORM_HINT=wayland` and
+/// `QT_QPA_PLATFORM=wayland;xcb` are how an Omarchy machine gets its
+/// toolkits onto Wayland at all, and they only do anything for a
+/// process that is *started with them already set*. Hyprland sets them
+/// on itself for the same reason. So the one honest place to apply
+/// them is this process, before it starts anything — which is also the
+/// only place `set_var` is sound, and the same window
+/// [`ensure_xcursor_size`] above uses and documents.
+///
+/// That constraint is the reason this is startup-only and a reload
+/// does not re-apply it: a variable changed after the session has
+/// started reaches nothing already running, and setting it from a
+/// thread that is no longer alone is undefined behaviour rather than a
+/// no-op. A user who edits their `env` lines gets them at the next
+/// login, and the log line below says so.
+///
+/// # What it will not overwrite
+///
+/// Anything already in the environment. A variable the session
+/// launcher, the user's shell profile or systemd put there is more
+/// specific than a line in a config file this desktop is reading on
+/// somebody else's behalf, and silently replacing it is exactly the
+/// failure `ensure_xcursor_size` above spent two days on. The refusals
+/// are logged, so a variable that did not take effect says why.
+///
+/// The list itself has already been filtered by
+/// `wm_config::hyprland::filter_env`, which drops the two variables
+/// that would be outright false here (`XDG_CURRENT_DESKTOP=Hyprland`
+/// and its sibling) and the ones naming this very session.
+///
+/// # Safety
+///
+/// Must be called from `main` before any other thread exists — the
+/// same contract, and the same window, as [`ensure_xcursor_size`].
+pub fn apply_session_env(env: &[(String, String)]) {
+    for (name, value) in env {
+        // A name with a `=` or a NUL in it would panic `set_var`. It
+        // can only come from a malformed config, and this whole path
+        // exists to survive those.
+        if name.is_empty() || name.contains('=') || name.contains('\0') || value.contains('\0') {
+            tracing::warn!(name = %name, "session env: not a usable variable name, skipping it");
+            continue;
+        }
+        if std::env::var_os(name).is_some() {
+            tracing::debug!(name = %name, "session env: already set in this session's environment, leaving it alone");
+            continue;
+        }
+        tracing::debug!(name = %name, value = %value, "session env: from the desktop's own Hyprland configuration");
+        // SAFETY: called once at the very start of a session's
+        // startup, before any other thread exists, so no concurrent
+        // env access is possible.
+        unsafe { std::env::set_var(name, value) };
+    }
+    if !env.is_empty() {
+        tracing::info!(count = env.len(), "session env applied; a later edit to these lines takes effect at the next login");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -640,6 +741,9 @@ mod tests {
             dock: crate::desktop::DockVisibility::Shown,
             decorations: DecorationRules::default(),
             drag_modifier: Some(wm_core::DEFAULT_DRAG_MODIFIER),
+            float_policy: None,
+            reads_hyprland_config: false,
+            session_env: Vec::new(),
             keybindings: Vec::new(),
         };
         assert_eq!(state.theme(), base.scaled(2.0));
