@@ -571,25 +571,7 @@ fn plan_surface(
 /// deliberately: focus *policy* stays in the policy brain, and this is
 /// a seat-level override with a seat-level end.
 fn sync_keyboard(comp: &mut Compositor) {
-    let want = {
-        let backend = comp.wm.backend();
-        // Overlay outranks Top; within a band the newest mapped
-        // claimant wins, which is the "most recently opened wins"
-        // behavior every wlr compositor exhibits.
-        let claimant = |band: Layer| {
-            backend
-                .layers
-                .iter()
-                .rev()
-                .find(|record| {
-                    backend.layer_presented(record)
-                        && record.layer == band
-                        && record.interactivity == KeyboardInteractivity::Exclusive
-                })
-                .map(|record| (record.id, record.surface.wl_surface().clone()))
-        };
-        claimant(Layer::Overlay).or_else(|| claimant(Layer::Top))
-    };
+    let want = exclusive_claimant(comp.wm.backend());
     let want_id = want.as_ref().map(|(id, _)| *id);
     if want_id == comp.layer_shell.exclusive_focus {
         return;
@@ -600,30 +582,74 @@ fn sync_keyboard(comp: &mut Compositor) {
         // still records who would hold it, for the unlock to restore.
         return;
     }
-    let target = match want {
-        Some((_, surface)) => Some(surface),
-        // Nobody claims exclusivity any more, so the keyboard leaves —
-        // but not necessarily to a window. A focus grab
-        // (`focus_grab.rs`) sits one rung below exclusive
-        // interactivity and one above window focus, so if one is
-        // holding, the seat lands on its whitelist instead. Without
-        // this arm an Omarchy popout that is *also* a grab would lose
-        // the keyboard the moment any unrelated launcher closed,
-        // because this pass runs before `focus_grab::refresh` and that
-        // pass only re-asserts focus on the passes something changed.
-        None => focus_grab_target(comp).or_else(|| focused_window_surface(comp)),
-    };
+    let target = keyboard_target_given(comp, want);
     let Some(keyboard) = comp.seat.get_keyboard() else {
         return;
     };
     keyboard.set_focus(comp, target, SERIAL_COUNTER.next_serial());
 }
 
+/// The top-most mapped, presented `Top`/`Overlay` layer surface asking
+/// for exclusive keyboard interactivity, with its id — [`LayerShell`]'s
+/// `exclusive_focus` bookkeeping is this answer, remembered.
+///
+/// Overlay outranks Top; within a band the newest mapped claimant wins,
+/// which is the "most recently opened wins" behavior every wlr
+/// compositor exhibits.
+fn exclusive_claimant(backend: &crate::state::WaylandBackend) -> Option<(LayerId, WlSurface)> {
+    let claimant = |band: Layer| {
+        backend
+            .layers
+            .iter()
+            .rev()
+            .find(|record| {
+                backend.layer_presented(record)
+                    && record.layer == band
+                    && record.interactivity == KeyboardInteractivity::Exclusive
+            })
+            .map(|record| (record.id, record.surface.wl_surface().clone()))
+    };
+    claimant(Layer::Overlay).or_else(|| claimant(Layer::Top))
+}
+
+/// Where the keyboard belongs when no lock is holding it: THE one
+/// answer, so that everything which has to put the seat back
+/// ([`sync_keyboard`] when a claimant goes away, `lock::unlock` when
+/// the screen unlocks) puts it in the same place.
+///
+/// Three rungs, highest first — an exclusive layer surface, then an
+/// active focus grab's whitelist, then the window `wm-core` calls
+/// focused. `wm-core` is never told about the top two: focus *policy*
+/// stays in the policy brain, and both are seat-level overrides with
+/// seat-level ends.
+pub(crate) fn keyboard_target(comp: &Compositor) -> Option<WlSurface> {
+    keyboard_target_given(comp, exclusive_claimant(comp.wm.backend()))
+}
+
+/// [`keyboard_target`] for a caller that has already asked
+/// [`exclusive_claimant`] and needs the id half of the answer for its
+/// own bookkeeping.
+fn keyboard_target_given(comp: &Compositor, want: Option<(LayerId, WlSurface)>) -> Option<WlSurface> {
+    match want {
+        Some((_, surface)) => Some(surface),
+        // Nobody claims exclusivity, so the keyboard goes to a window —
+        // but not necessarily straight there. A focus grab
+        // (`focus_grab.rs`) sits one rung below exclusive interactivity
+        // and one above window focus, so if one is holding, the seat
+        // lands on its whitelist instead. Without this arm an Omarchy
+        // popout that is *also* a grab would lose the keyboard the
+        // moment any unrelated launcher closed, because `sync_keyboard`
+        // runs before `focus_grab::refresh` and that pass only
+        // re-asserts focus on the passes something changed.
+        None => focus_grab_target(comp).or_else(|| focused_window_surface(comp)),
+    }
+}
+
 /// The surface an active focus grab holds the keyboard on, if one
-/// does — consulted by [`sync_keyboard`] before it falls back to
-/// window focus. `None` in every session where no client has started a
-/// grab, which is every session not running a shell that speaks
-/// `hyprland-focus-grab-v1`.
+/// does — [`keyboard_target_given`]'s middle rung, asked before it
+/// falls back to window focus. `None` in every session where no client
+/// has started a grab, which is every session not running a shell that
+/// speaks `hyprland-focus-grab-v1`.
 fn focus_grab_target(comp: &Compositor) -> Option<WlSurface> {
     if !comp.focus_grab.is_active() {
         return None;

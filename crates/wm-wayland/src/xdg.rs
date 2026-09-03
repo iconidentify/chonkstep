@@ -372,6 +372,12 @@ impl CompositorHandler for Compositor {
         // ahead of smithay's hook in the surface's hook list; see
         // `layers::install_orphaned_role_guard` for the whole story.
         crate::layers::install_orphaned_role_guard(surface);
+        // And the same guard for smithay's session-lock hook, which
+        // outlives its role exactly as the layer-shell one does and
+        // kills the locker's whole connection on the unlock teardown —
+        // for Omarchy's Quickshell that connection is also the bar and
+        // the OSDs. See `lock::install_defunct_lock_role_guard`.
+        crate::lock::install_defunct_lock_role_guard(surface);
     }
 
     fn commit(&mut self, surface: &WlSurface) {
