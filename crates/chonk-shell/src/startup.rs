@@ -89,6 +89,30 @@ pub struct SessionState {
     /// taken over — Omarchy's own "Restart shell" row does that — but
     /// it is carried here so it resolves through the one path.
     pub omarchy_shell: bool,
+    /// The config file's opinion about Omarchy's hosted bar
+    /// (`omarchy_bar`), unresolved: `None` when the file said nothing,
+    /// so `BarVisibility::resolve` can still tell that apart from an
+    /// explicit `false`.
+    ///
+    /// Unresolved here, unlike [`Self::dock`] beside it, because the
+    /// bar is the *guest's* surface and the shell settles its
+    /// visibility at the one moment it decides whether to host the
+    /// shell at all — there is nothing to resolve on a session that is
+    /// not hosting one (`crate::shell::Shell::new`).
+    pub omarchy_bar: Option<bool>,
+    /// Whether this desk wears its Dock — the resolved answer, not the
+    /// raw `show_dock` key: the persisted choice the root menu's `Dock`
+    /// row and the `toggle-dock` binding write wins over the config
+    /// file, exactly as the persisted theme choice wins over `theme`
+    /// (see [`crate::desktop::DockVisibility::resolve`]).
+    ///
+    /// Carried here, and applied on every reload rather than only at
+    /// boot, because both halves of hiding the Dock — the surface and
+    /// the strip of workarea it reserves — are things a live session
+    /// can change in place. The decoration rules are the cautionary
+    /// tale in the comment below: a setting that only some of the ways
+    /// of asking for a reload actually applied.
+    pub dock: crate::desktop::DockVisibility,
     /// Per-application decoration overrides, handed to the backend.
     ///
     /// Carried here rather than read straight off the config by each
@@ -148,6 +172,8 @@ impl SessionState {
             restore_session: config.restore_session,
             omarchy_menu: config.omarchy_menu,
             omarchy_shell: config.omarchy_shell,
+            omarchy_bar: config.omarchy_bar,
+            dock: crate::desktop::DockVisibility::resolve(config.show_dock),
             decorations: config.decorations.clone(),
             drag_modifier: config.drag_modifier,
             commands: config.commands.clone(),
@@ -610,6 +636,8 @@ mod tests {
             autostart: Vec::new(),
             omarchy_menu: true,
             omarchy_shell: true,
+            omarchy_bar: None,
+            dock: crate::desktop::DockVisibility::Shown,
             decorations: DecorationRules::default(),
             drag_modifier: Some(wm_core::DEFAULT_DRAG_MODIFIER),
             keybindings: Vec::new(),

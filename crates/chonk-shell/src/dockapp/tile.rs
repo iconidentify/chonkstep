@@ -305,6 +305,17 @@ struct Connection {
     /// ([`ThemeState::for_client`]), so the comparison never sees two
     /// differently-masked copies of the same fact.
     told: ThemeState,
+    /// The last `Visibility` this connection was told, so
+    /// [`RemoteTile::push_visibility`] pushes on a change and never on
+    /// a pass. `true` at adoption because `adopt` queues
+    /// `Visibility { visible: true }` behind the `Welcome`; a tile
+    /// adopted onto a hidden Dock is corrected by the very servicing
+    /// pass that admitted it, so the two messages leave in order and
+    /// the dockapp's first act is to stop drawing.
+    ///
+    /// Per connection for the same reason `told` is: a dockapp that
+    /// reconnects has been told nothing yet.
+    told_visible: bool,
     /// The protocol version this connection's `Hello` announced.
     ///
     /// Two decisions key on it, and both are the same incident wearing
@@ -416,6 +427,13 @@ pub(crate) struct ServiceContext<'a> {
     /// same reason `theme` is: a monitor change moves it, and a value
     /// recomputed per pass cannot be the one nobody updated.
     pub panel_bounds: (u32, u32),
+    /// Whether the Dock is on screen at all right now
+    /// (`Desktop::dock_visibility`). From the servicing context for
+    /// the same reason `theme` and `panel_bounds` are: the triggers are
+    /// diffuse — the root menu's `Dock` row, the `toggle-dock` binding,
+    /// a reload of `show_dock` — and a comparison against a value
+    /// recomputed every pass cannot be the one somebody forgot to send.
+    pub visible: bool,
 }
 
 /// One out-of-process dock tile.
@@ -650,6 +668,7 @@ impl RemoteTile {
             unanswered: 0,
             since: now,
             told: welcome.clone(),
+            told_visible: true,
             proto: client_proto,
         };
         // Queued, not sent inline, for exactly the reason every other
@@ -697,6 +716,7 @@ impl RemoteTile {
         self.set_tile_px(ctx.theme.tile_px);
         self.receive(ctx);
         self.push_theme(ctx);
+        self.push_visibility(ctx);
         self.check_liveness(ctx.now);
         // A frame parked by the rate limiter becomes visible on the
         // pass after its token refills. `next_ready_in` exists for a
@@ -1125,6 +1145,36 @@ impl RemoteTile {
     /// surviving, and [`SendQueue`] is bounded so "peer stopped
     /// reading" cannot become "compositor allocates until the OOM
     /// killer picks a winner".
+    /// Tells a connected dockapp whether its tile is on screen, when
+    /// the answer has changed since it was last told.
+    ///
+    /// The protocol already defines what `false` means, and it is
+    /// stronger than "nobody is looking": *"a dockapp should stop
+    /// sampling and stop drawing"*. A tile on a hidden Dock is a
+    /// process polling `/proc`, redrawing a pixmap and pushing frames
+    /// into a socket whose other end throws every one of them away —
+    /// which is precisely the state a built-in avoids by having its
+    /// `redraw_dock` skipped, and a dockapp cannot avoid unless it is
+    /// told. Polled, not notified, exactly like
+    /// [`push_theme`](Self::push_theme) — and pinned by the same kind
+    /// of test, that an unchanged answer sends nothing.
+    fn push_visibility(&mut self, ctx: &ServiceContext) {
+        let Some(connection) = self.connection.as_ref() else { return };
+        if connection.told_visible == ctx.visible {
+            return;
+        }
+        // Recorded before the enqueue and whatever it does with the
+        // message, for the reason `push_theme` spells out: the
+        // invariant is "we do not say it again until it changes
+        // again", so a dropped message costs the next change, never a
+        // retry storm of this one.
+        if let Some(connection) = self.connection.as_mut() {
+            connection.told_visible = ctx.visible;
+        }
+        tracing::debug!(id = %self.entry.id, visible = ctx.visible, "telling a dockapp whether its tile is on screen");
+        self.enqueue(ServerMessage::Visibility { visible: ctx.visible }, ctx.now);
+    }
+
     fn flush(&mut self, now: Instant) {
         let Some(connection) = self.connection.as_mut() else { return };
         let result = connection.send.flush(|message| connection.socket.send(message));
@@ -2085,7 +2135,7 @@ mod tests {
             // every one of these queues another message at a peer that
             // is not reading.
             let now = base + PING_INTERVAL * (step as u32 + 1);
-            let mut ctx = ServiceContext { now, theme: &welcome(), socket_path: &socket_path, scratch: &mut scratch, panel_bounds: (1024, 1024) };
+            let mut ctx = ServiceContext { now, theme: &welcome(), socket_path: &socket_path, scratch: &mut scratch, panel_bounds: (1024, 1024), visible: true };
             tile.service(&mut ctx);
         }
         let elapsed = start.elapsed();
@@ -2111,7 +2161,7 @@ mod tests {
 
         let socket_path = PathBuf::from("/test/dock.sock");
         let mut scratch = Vec::new();
-        let mut ctx = ServiceContext { now: base + PING_INTERVAL, theme: &welcome(), socket_path: &socket_path, scratch: &mut scratch, panel_bounds: (1024, 1024) };
+        let mut ctx = ServiceContext { now: base + PING_INTERVAL, theme: &welcome(), socket_path: &socket_path, scratch: &mut scratch, panel_bounds: (1024, 1024), visible: true };
         tile.service(&mut ctx);
 
         assert!(tile.poll_fd().is_none(), "the connection is gone");
@@ -2135,7 +2185,7 @@ mod tests {
         let mut scratch = Vec::new();
         let mut pass = |tile: &mut RemoteTile, step: u32| {
             let now = base + PING_INTERVAL * step;
-            let mut ctx = ServiceContext { now, theme: &welcome(), socket_path: &socket_path, scratch: &mut scratch, panel_bounds: (1024, 1024) };
+            let mut ctx = ServiceContext { now, theme: &welcome(), socket_path: &socket_path, scratch: &mut scratch, panel_bounds: (1024, 1024), visible: true };
             tile.service(&mut ctx);
         };
 
@@ -2187,6 +2237,105 @@ mod tests {
             .collect()
     }
 
+    /// The `Visibility` messages a dockapp would act on, in order.
+    fn visibility_pushed(datagrams: &[Vec<u8>]) -> Vec<bool> {
+        datagrams
+            .iter()
+            .filter_map(|bytes| match ServerMessage::decode(bytes) {
+                Ok(ServerMessage::Visibility { visible }) => Some(visible),
+                _ => None,
+            })
+            .collect()
+    }
+
+    // -----------------------------------------------------------------
+    // Visibility: a hidden Dock stops its dockapps
+    // -----------------------------------------------------------------
+
+    /// Hiding the Dock has to reach the dockapps, or a tile nobody can
+    /// see keeps polling and keeps drawing forever. The protocol's own
+    /// words for `false`: *"a dockapp should stop sampling and stop
+    /// drawing, not just stop being looked at"*.
+    ///
+    /// Asserted on the socket, like the theme push above: this is
+    /// exactly the datagram a real dockapp's `serve` loop decodes.
+    #[test]
+    fn hiding_the_dock_tells_a_dockapp_to_stop_and_showing_it_tells_it_to_start() {
+        let (ours, peer) = seqpacket_pair();
+        let base = Instant::now();
+        let mut tile = RemoteTile::new(entry(RestartPolicy::Always, 1), 56, base);
+        tile.adopt(ours, InputMask::all(), chonk_dock_proto::PROTOCOL_VERSION, welcome(), base);
+        tile.state = TileState::Live;
+        let socket_path = PathBuf::from("/test/dock.sock");
+        let mut scratch = Vec::new();
+        let steady = welcome();
+        let mut pass = |tile: &mut RemoteTile, at: u64, visible: bool| {
+            let mut ctx = ServiceContext {
+                now: base + Duration::from_millis(at),
+                theme: &steady,
+                socket_path: &socket_path,
+                scratch: &mut scratch,
+                panel_bounds: (1024, 1024),
+                visible,
+            };
+            tile.service(&mut ctx);
+        };
+
+        // Sixty passes on a shown Dock say one thing: the
+        // `Visibility { visible: true }` `adopt` queued behind the
+        // `Welcome`, flushed by the first of them. The push is a
+        // change, not a heartbeat, so the other fifty-nine are silent.
+        for step in 0..60 {
+            pass(&mut tile, 16 * step, true);
+        }
+        assert_eq!(visibility_pushed(&drain(&peer)), vec![true], "the handshake's, and no repeat of it");
+
+        // The Dock is hidden. Once, and then silence.
+        for step in 60..120 {
+            pass(&mut tile, 16 * step, false);
+        }
+        assert_eq!(visibility_pushed(&drain(&peer)), vec![false], "told once that it is off screen");
+        assert_eq!(tile.state, TileState::Live, "and not disturbed otherwise — a hidden tile is not a dead one");
+        assert!(tile.poll_fd().is_some(), "the same socket it had before");
+        assert!(tile.child.is_none(), "nothing was relaunched");
+
+        // And shown again.
+        for step in 120..180 {
+            pass(&mut tile, 16 * step, true);
+        }
+        assert_eq!(visibility_pushed(&drain(&peer)), vec![true]);
+    }
+
+    /// A dockapp that connects while the Dock is already hidden must be
+    /// told so by the very pass that admitted it — its first act should
+    /// be to stop drawing, not to draw a frame nobody will blit.
+    #[test]
+    fn a_dockapp_adopted_onto_a_hidden_dock_is_corrected_in_the_same_pass() {
+        let (ours, peer) = seqpacket_pair();
+        let base = Instant::now();
+        let mut tile = RemoteTile::new(entry(RestartPolicy::Always, 1), 56, base);
+        tile.adopt(ours, InputMask::all(), chonk_dock_proto::PROTOCOL_VERSION, welcome(), base);
+        tile.state = TileState::Live;
+        let socket_path = PathBuf::from("/test/dock.sock");
+        let mut scratch = Vec::new();
+        let steady = welcome();
+        let mut ctx = ServiceContext {
+            now: base,
+            theme: &steady,
+            socket_path: &socket_path,
+            scratch: &mut scratch,
+            panel_bounds: (1024, 1024),
+            visible: false,
+        };
+        tile.service(&mut ctx);
+
+        // Both messages, in order, on one socket: the handshake's
+        // optimistic `true` and this pass's correction. A v1 decoder
+        // reads them as written, so nothing about the handshake had to
+        // change to make this work.
+        assert_eq!(visibility_pushed(&drain(&peer)), vec![true, false], "the last word is the truth");
+    }
+
     // -----------------------------------------------------------------
     // Theming: a dockapp never restarts for a theme change
     // -----------------------------------------------------------------
@@ -2213,7 +2362,7 @@ mod tests {
         // A theme pick: new id, new palette, and — because the theme
         // menu is also how the scale is changed — a new tile edge.
         let next = ThemeState { tile_px: 112, scale: 2.0, proto: chonk_dock_proto::SHELL_PROTOCOL_VERSION, theme_id: "amber-phosphor".into(), theme_toml: "id = \"amber-phosphor\"".into() };
-        let mut ctx = ServiceContext { now: base, theme: &next, socket_path: &socket_path, scratch: &mut scratch, panel_bounds: (1024, 1024) };
+        let mut ctx = ServiceContext { now: base, theme: &next, socket_path: &socket_path, scratch: &mut scratch, panel_bounds: (1024, 1024), visible: true };
         tile.service(&mut ctx);
 
         assert_eq!(themes_pushed(&drain(&peer)), vec![next.clone()], "the dockapp is told, over its existing connection");
@@ -2240,14 +2389,14 @@ mod tests {
         let _ = drain(&peer);
 
         let at_56 = welcome();
-        let ctx = ServiceContext { now: base, theme: &at_56, socket_path: &socket_path, scratch: &mut scratch, panel_bounds: (1024, 1024) };
+        let ctx = ServiceContext { now: base, theme: &at_56, socket_path: &socket_path, scratch: &mut scratch, panel_bounds: (1024, 1024), visible: true };
         assert!(tile.on_frame(1, 56, 56, vec![9; 56 * 56 * 4], &ctx), "the dock is laid out at 56");
         assert!(tile.last_frame.is_some());
 
         // The relayout. The tile edge is now 112 and the frame the
         // dockapp is about to send was drawn for 56.
         let at_112 = ThemeState { tile_px: 112, scale: 2.0, ..welcome() };
-        let mut ctx = ServiceContext { now: base, theme: &at_112, socket_path: &socket_path, scratch: &mut scratch, panel_bounds: (1024, 1024) };
+        let mut ctx = ServiceContext { now: base, theme: &at_112, socket_path: &socket_path, scratch: &mut scratch, panel_bounds: (1024, 1024), visible: true };
         tile.service(&mut ctx);
 
         assert!(tile.last_frame.is_none(), "the stored 56px frame is dropped rather than drawn into a 112px slot");
@@ -2281,7 +2430,7 @@ mod tests {
         let steady = welcome();
         for step in 0..1_000u32 {
             let mut ctx =
-                ServiceContext { now: base + Duration::from_millis(16 * step as u64), theme: &steady, socket_path: &socket_path, scratch: &mut scratch, panel_bounds: (1024, 1024) };
+                ServiceContext { now: base + Duration::from_millis(16 * step as u64), theme: &steady, socket_path: &socket_path, scratch: &mut scratch, panel_bounds: (1024, 1024), visible: true };
             tile.service(&mut ctx);
         }
         assert!(themes_pushed(&drain(&peer)).is_empty(), "a dock that did not change told the dockapp nothing");
@@ -2319,7 +2468,7 @@ mod tests {
         assert_ne!(nan, nan, "the premise: derived equality is not reflexive here");
         for step in 0..1_000u32 {
             let mut ctx =
-                ServiceContext { now: base + Duration::from_millis(16 * step as u64), theme: &nan, socket_path: &socket_path, scratch: &mut scratch, panel_bounds: (1024, 1024) };
+                ServiceContext { now: base + Duration::from_millis(16 * step as u64), theme: &nan, socket_path: &socket_path, scratch: &mut scratch, panel_bounds: (1024, 1024), visible: true };
             tile.service(&mut ctx);
         }
         // Layered, and both layers are asserted. `same_as` stopped the
@@ -2350,7 +2499,7 @@ mod tests {
         tile.adopt(ours, InputMask::none(), chonk_dock_proto::PROTOCOL_VERSION, welcome(), base);
         let socket_path = PathBuf::from("/test/dock.sock");
         let mut scratch = Vec::new();
-        let ctx = ServiceContext { now: base, theme: &welcome(), socket_path: &socket_path, scratch: &mut scratch, panel_bounds: (1024, 1024) };
+        let ctx = ServiceContext { now: base, theme: &welcome(), socket_path: &socket_path, scratch: &mut scratch, panel_bounds: (1024, 1024), visible: true };
 
         assert!(tile.on_frame(1, 56, 112, vec![0; 56 * 112 * 4], &ctx), "two units of 56px is exactly this tile");
         assert!(tile.last_frame.is_some());
@@ -2384,7 +2533,7 @@ mod tests {
         let steady = welcome();
 
         // Still inside the window: held open, nothing launched.
-        let mut ctx = ServiceContext { now: base + REJOIN_WINDOW / 2, theme: &steady, socket_path: &socket_path, scratch: &mut scratch, panel_bounds: (1024, 1024) };
+        let mut ctx = ServiceContext { now: base + REJOIN_WINDOW / 2, theme: &steady, socket_path: &socket_path, scratch: &mut scratch, panel_bounds: (1024, 1024), visible: true };
         tile.service(&mut ctx);
         assert_eq!(tile.state, TileState::Rejoining { until: base + REJOIN_WINDOW });
         assert_eq!(tile.budget.recent_failures(), 0);
@@ -2393,7 +2542,7 @@ mod tests {
         // the launch itself fails and books exactly one failure — the
         // number to look at, because going through `disconnected` for the
         // expiry as well would have made it two.
-        let mut ctx = ServiceContext { now: base + REJOIN_WINDOW, theme: &steady, socket_path: &socket_path, scratch: &mut scratch, panel_bounds: (1024, 1024) };
+        let mut ctx = ServiceContext { now: base + REJOIN_WINDOW, theme: &steady, socket_path: &socket_path, scratch: &mut scratch, panel_bounds: (1024, 1024), visible: true };
         tile.service(&mut ctx);
         assert_eq!(tile.budget.recent_failures(), 1, "the failed launch, and only the failed launch");
         assert!(matches!(tile.state, TileState::Waiting { .. }), "backing off to try the program again");
@@ -2455,7 +2604,7 @@ mod tests {
         let socket_path = PathBuf::from("/test/dock.sock");
         let mut scratch = Vec::new();
         let mut ctx =
-            ServiceContext { now, theme: &welcome(), socket_path: &socket_path, scratch: &mut scratch, panel_bounds: bounds };
+            ServiceContext { now, theme: &welcome(), socket_path: &socket_path, scratch: &mut scratch, panel_bounds: bounds, visible: true };
         tile.service(&mut ctx);
     }
 

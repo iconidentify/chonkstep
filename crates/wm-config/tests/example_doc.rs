@@ -13,6 +13,7 @@ use wm_config::{parse, Action};
 fn the_documented_examples_parse_and_mean_what_they_say() {
     let config = parse(
         r#"
+        show_dock = false
         terminal = ["ghostty", "--title", "my terminal"]
 
         autostart = [
@@ -32,6 +33,7 @@ fn the_documented_examples_parse_and_mean_what_they_say() {
         "volumeup"    = "run volume-up"
         "volumedown"  = "run volume-down"
         "super+l"     = "run lock"
+        "super+d"     = "toggle-dock"
         "#,
     )
     .expect("the documented config must parse");
@@ -43,6 +45,14 @@ fn the_documented_examples_parse_and_mean_what_they_say() {
         Some(["ghostty", "--title", "my terminal"].map(String::from).as_slice())
     );
     assert_eq!(config.autostart.len(), 2);
+    // The dockless configuration the reference documents, and the
+    // binding it suggests beside it.
+    assert!(!config.show_dock, "the documented `show_dock = false` must actually turn the Dock off");
+    assert_eq!(
+        config.keybindings.iter().filter(|(_, a)| *a == Action::ToggleDock).count(),
+        1,
+        "the documented `super+d` = `toggle-dock` example must survive parsing"
+    );
     assert_eq!(config.commands.len(), 5);
     assert_eq!(
         config.commands.get("notify").map(Vec::as_slice),

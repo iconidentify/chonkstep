@@ -738,6 +738,7 @@ fn root_action_outcome(action: &RootMenuAction) -> ShellOutcome {
         | RootMenuAction::LaunchApp(_)
         | RootMenuAction::OmarchyCommand { .. }
         | RootMenuAction::ToggleOmarchyBar
+        | RootMenuAction::ToggleDock
         | RootMenuAction::SetWallpaper(_) => ShellOutcome::Continue,
     }
 }
@@ -1020,7 +1021,15 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         // its surface arrives a few hundred milliseconds later.
         let verdict = crate::omarchy_shell::decide(state.omarchy_shell);
         let hosted = matches!(verdict, crate::omarchy_shell::Verdict::Launch(_));
-        desktop.set_omarchy_bar(backend, hosted.then(crate::omarchy_shell::BarVisibility::load));
+        desktop.set_omarchy_bar(backend, hosted.then(|| crate::omarchy_shell::BarVisibility::resolve(state.omarchy_bar)));
+        // And this desk's own column, beside the guest's bar and for
+        // the same reason: settled before the first frame, so a session
+        // configured (or remembered) dockless never shows the Dock at
+        // all. `Desktop::new` created and mapped it a moment ago; this
+        // is where the resolved answer is applied, and the workareas
+        // the binary pushes after `Shell::new` returns are composed
+        // from `primary_workarea`, which by then already knows.
+        desktop.set_dock_visibility(backend, &theme, state.dock);
         host_omarchy_shell(&verdict, &theme.id, state.appearance, state.scale);
 
         // Publish the resolved appearance so the contract's reader half
@@ -1179,6 +1188,12 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         let tile = crate::desktop::tile_px(self.state.scale);
         self.desktop.relayout(wm.backend_mut(), &self.theme, &previews);
         self.launchdock.restyle(wm.backend_mut(), &self.theme, tile);
+        // Whether there is a Dock at all, re-resolved with everything
+        // else: a reload is how an edit to `show_dock` reaches a
+        // running session. Idempotent, so the theme picks that also
+        // come through here cost a comparison. Before the workareas
+        // below, because it is one of the two things that decide them.
+        self.desktop.set_dock_visibility(wm.backend_mut(), &self.theme, self.state.dock);
 
         // 5. Workareas, now that the dock has settled its height.
         self.apply_workareas(wm);
@@ -1334,6 +1349,30 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         self.desktop.set_reservation(wm.backend_mut(), &self.theme, reserved)
     }
 
+    /// Flips the Dock's visibility and pushes the workareas that
+    /// change with it.
+    ///
+    /// The second half is the whole point. Hiding the Dock gives its
+    /// column back to the primary monitor's workarea, and a workarea
+    /// nobody re-pushes is a strip of screen no maximized window will
+    /// ever use, with nothing drawn in it to explain why — the bug this
+    /// feature is one line away from at every call site, which is why
+    /// there is exactly one call site and both halves are inside it.
+    /// `wm.set_workareas` re-derives every maximized and fullscreen
+    /// window against the new rects, so the windows already on screen
+    /// grow into the strip (or out of it) without being touched.
+    fn toggle_dock(&mut self, wm: &mut WindowManager<B>) {
+        if self.desktop.toggle_dock(wm.backend_mut(), &self.theme) {
+            self.apply_workareas(wm);
+        }
+    }
+
+    /// Whether the Dock is on screen — what the `Dock` menu row
+    /// bullets, exposed for the binary's own reporting.
+    pub fn dock_visibility(&self) -> crate::desktop::DockVisibility {
+        self.desktop.dock_visibility()
+    }
+
     /// Resolves a configured key combo to its action, for the binary's
     /// key interception. A miss MUST leave the event flowing through to
     /// `wm-core` unchanged — during a modal Alt+Tab session the
@@ -1479,6 +1518,11 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
             // alone, it moves the session to the defaults. That is the
             // same thing a restart with a broken file has always done,
             // and the warning it logs is the same one.
+            // Show or hide the Dock from the keyboard — the same
+            // choice the root menu's `Dock` row makes, through the
+            // same one method, so the two cannot disagree about
+            // whether the workareas were re-pushed.
+            Action::ToggleDock => self.toggle_dock(wm),
             Action::Reload => self.reresolve(wm),
             // Re-exec the on-disk binary. Since `Action::Reload` exists
             // this is no longer the config hot-reload gesture; it is
@@ -2083,6 +2127,7 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
             RootMenuAction::ToggleOmarchyBar => {
                 self.desktop.toggle_omarchy_bar(wm.backend_mut());
             }
+            RootMenuAction::ToggleDock => self.toggle_dock(wm),
             RootMenuAction::SetTheme(id) if id == wm_theme::omarchy::ID => {
                 // Following is a choice, not a theme: persist the choice
                 // and re-resolve the session through the one path, which

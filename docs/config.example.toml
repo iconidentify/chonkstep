@@ -23,6 +23,78 @@
 # session it costs you every client, because Wayland clients die with
 # the socket they were connected to.
 
+# ============================================================
+# PRESETS -- one line for a whole posture
+# ============================================================
+#
+# Which desktop this session IS. Two names:
+#
+#   "chonkstep" (the default) a whole chonkstep desktop: the Dock of
+#               instruments in the corner, chonkstep's own themes, a
+#               hosted Omarchy bar kept off screen until asked for.
+#               This is what every config file without this key
+#               already means.
+#   "omarchy"   Omarchy's desktop, with chonkstep doing the window
+#               management. No Dock; Omarchy's bar shown; Omarchy's
+#               theme followed; Omarchy's menu, pickers, panels,
+#               notifications and lock screen; and Omarchy's own
+#               keybinding vocabulary (see `keymap` below).
+#
+# This is a set of DEFAULTS, never a lock. The posture is applied to
+# the built-in defaults BEFORE the rest of this file is read, so any
+# key it sets is overridden simply by writing that key out -- the
+# ordinary TOML rule, with no precedence order to learn. What it sets:
+#
+#   show_dock    = false          keymap        = "omarchy"
+#   omarchy_bar  = true           omarchy_menu  = true
+#   theme        = "omarchy"      omarchy_shell = true
+#
+# ...and nothing else. Notably it does NOT touch `terminal`,
+# `autostart`, `lock_command`, placement, focus policy, scale or the
+# decoration rules -- those are how chonkstep manages windows, which
+# is the half of the desktop the posture is keeping. See
+# docs/omarchy-mode.md for the whole story, including what to override
+# to get the Dock back and what the mode deliberately leaves alone.
+#
+# Case-insensitive. An unknown name is warned about and "chonkstep" is
+# kept.
+#desktop = "omarchy"
+
+# Which vocabulary of chords the session answers to. Two names:
+#
+#   "chonkstep" (the default) the NeXTSTEP-style alt+shift chords the
+#               rest of this desktop was designed around, listed in
+#               full under [keybindings] at the bottom of this file.
+#   "omarchy"   Omarchy's own bindings mapped onto chonkstep's
+#               actions: super+return for a terminal, super+w to
+#               close, super+space for Omarchy's menu, super+tab
+#               between workspaces, and the media, capture,
+#               notification and panel chords running Omarchy's own
+#               commands. 93 bindings; it also declares the 77
+#               [commands] entries they name, so you need none of your
+#               own for them.
+#
+# A keymap REPLACES the other; the two are never merged. A desk
+# answering to both would close a window on alt+shift+q AND on
+# super+w with neither being the documented answer, and would leave a
+# chord one keymap deliberately kills alive because the other bound
+# it. Your own [keybindings] entries still merge over whichever is
+# active, so bringing one binding back from the other vocabulary is
+# one line.
+#
+# Omarchy chords that name a TILING action (window gaps, split ratios,
+# layout cycling, "toggle floating" on a desk where everything already
+# floats) are deliberately left UNBOUND rather than approximated, as
+# are the ones that command Hyprland itself. docs/keybindings.md lists
+# every one of them and why.
+#
+# `desktop = "omarchy"` above defaults this to "omarchy"; setting it
+# here wins either way, so `keymap = "chonkstep"` keeps the posture
+# and the NeXTSTEP chords together.
+#keymap = "omarchy"
+
+# ============================================================
+
 # Focus policy: false (the default) is click-to-focus, true is
 # focus-follows-mouse. The CHONKSTEP_FOCUS_FOLLOWS_MOUSE environment
 # variable, when set, wins over this value in both directions ("1"
@@ -150,6 +222,36 @@
 # applications you did not just ask for is something to opt into.
 #restore_session = true
 
+# Whether this desk wears its Dock: the instrument column in the
+# top-right corner -- the identity tile, the six instruments and the
+# clock -- together with the one-tile strip of screen it reserves, so a
+# maximized window stops at its edge instead of sliding underneath.
+#
+# On by default: the Dock is what a chonkstep desk is. Set it to false
+# for the other configuration chonkstep is built for -- its window
+# management and its chrome under ANOTHER shell's bar and pickers,
+# Omarchy's especially, with no second piece of furniture in the
+# corner. Hidden means hidden AND out of the way: the column is
+# unmapped and its strip goes back to the workarea in the same breath,
+# so windows use the full width of the screen.
+#
+# Everything else stays where it is. The Clip in the bottom-right
+# corner and the launcher strip down the left edge are their own
+# surfaces in their own corners and reserve nothing, so they are
+# unaffected; a miniaturized window's icon tile sits on the desk along
+# the bottom edge, not in the Dock, so miniaturizing still works and
+# double-clicking a tile still restores. Instruments keep running while
+# hidden -- they simply are not drawn -- and a dockapp is told to stop
+# sampling and stop drawing until the column comes back.
+#
+# This is the starting point, not the last word: the root menu's "Dock"
+# row (right-click the desktop) and the "toggle-dock" action both
+# remember your choice in chonkstep's own state, and a remembered
+# choice wins over this key -- the same precedence the theme menu's
+# choice has over `theme` above. To go back to letting this key decide,
+# delete $XDG_STATE_HOME/chonkstep/dock-visibility.
+#show_dock = true
+
 # Omarchy's own command menu, hosted as the `Omarchy` submenu of the
 # root menu (right-click the desktop): Learn, Trigger, Style, Setup,
 # Install, Remove, Update, About, System -- every entry Omarchy's shell
@@ -186,6 +288,29 @@
 # Set this to false to run a plain chonkstep desk on an Omarchy
 # machine, or to start the shell yourself from `autostart`.
 #omarchy_shell = true
+
+# Whether that hosted bar starts ON SCREEN. Unset by default, which
+# means "hidden": a chonkstep desk already has its Dock in the corner
+# and does not want a second instrument strip unasked. Setting it true
+# is what `desktop = "omarchy"` does, because there the bar is the
+# desk's furniture rather than a guest's.
+#
+# Shown means shown AND accounted for: the bar reserves its strip at
+# the top and the Dock steps down below it. Hidden means the bar keeps
+# running -- keeps its clock, keeps its state -- and takes no space,
+# no clicks and no pixels.
+#
+# Like `show_dock`, this is the starting point and not the last word:
+# the root menu's "Omarchy Bar" row remembers your choice in
+# chonkstep's own state (never in Omarchy's -- a preference about this
+# desk should not follow you into a Hyprland session), and a
+# remembered choice wins over this key. To go back to letting this key
+# decide, delete $XDG_STATE_HOME/chonkstep/omarchy-bar.
+#
+# Inert unless the session is actually hosting Omarchy's shell: with
+# `omarchy_shell = false`, or on X11, there is no bar for this to be
+# about.
+#omarchy_bar = true
 
 # The modifier for the move/resize drag gesture: hold it and drag with
 # the LEFT button anywhere on a window to move it, or with the RIGHT
@@ -272,12 +397,14 @@
 #   Modifiers: alt, shift, ctrl (or control), super (or mod4, win)
 #   Keys: single letters and digits (a-z, 0-9), return (or enter), tab,
 #         space, escape, left, right, up, down, home, end, pageup,
-#         pagedown, minus, equal, comma, period, f1 through f12
+#         pagedown, minus, equal, comma, period, bracketleft,
+#         bracketright, print, f1 through f12
 #   Media keys (the ones with pictures on them rather than letters):
 #         volumeup, volumedown, volumemute (or mute), micmute,
 #         playpause (or audioplay), audiopause, audiostop, audionext,
 #         audioprev, brightnessup, brightnessdown, kbdbrightnessup,
-#         kbdbrightnessdown, poweroff, search
+#         kbdbrightnessdown, kbdlightonoff, poweroff, calculator,
+#         eject, search
 #         These take modifiers like any other key, and are usually
 #         bound bare: "volumeup" = "run volume-up"
 #
@@ -285,7 +412,7 @@
 #   spawn-terminal, close, toggle-maximize, toggle-shade, miniaturize,
 #   toggle-fullscreen, workspace-next, workspace-prev,
 #   workspace-carry-next, workspace-carry-prev, overview, window-menu,
-#   reload, restart, none
+#   toggle-dock, reload, restart, none
 #
 # ...plus "run <name>", the one action that takes an argument: the name
 # of an entry in [commands] above. The argument is a name, never a
@@ -295,15 +422,26 @@
 # re-execs the on-disk binary to pick up a new build. See the note at
 # the top of this file for which one you want.
 #
+# "toggle-dock" shows or hides the Dock, exactly as the root menu's
+# "Dock" row does -- the column and the strip of screen it reserves,
+# both together. Unbound by default; give it a key if you switch back
+# and forth. See `show_dock` above for what a hidden Dock leaves
+# behind, and where the choice is remembered.
+#
+#   "super+d" = "toggle-dock"        # for instance
+#
 # Window-targeted actions (close, toggle-maximize, toggle-shade,
 # miniaturize, toggle-fullscreen, window-menu) act on the focused window and do
 # nothing when no window is focused. The Alt+Tab window switcher is
 # part of the window manager's modal machinery and is not rebindable
 # here.
 [keybindings]
-# The full default set, spelled out. Since entries merge over the
-# defaults, restating them changes nothing -- edit or remove lines
-# freely; unlisted combos keep their default meaning.
+# The full default set, spelled out -- this is the "chonkstep" keymap.
+# Since entries merge over the defaults, restating them changes
+# nothing -- edit or remove lines freely; unlisted combos keep their
+# default meaning. With `keymap = "omarchy"` above, these entries
+# merge over Omarchy's table instead, and every line below that you
+# have not edited is simply an extra binding on top of it.
 "alt+shift+return" = "spawn-terminal"       # launch the themed terminal
 "alt+shift+q" = "close"                     # close the focused window
 "alt+shift+x" = "toggle-maximize"           # maximize / restore

@@ -217,6 +217,33 @@ logind already hands the active session its devices. On a machine
 without logind, enable `seatd` and join the `seat` group; the installer
 prints this only when it finds logind missing.
 
+### One line: chonkstep as Omarchy's window manager
+
+Everything in the rest of this section is a switch you can throw
+individually, and together they add up to one posture. That posture has
+a name:
+
+```toml
+# ~/.config/chonkstep/config.toml
+desktop = "omarchy"
+```
+
+That is the whole configuration. It flips chonkstep from "a whole
+desktop" to "the window manager for Omarchy's desktop": no chonkstep
+Dock, Omarchy's bar shown, Omarchy's theme followed, Omarchy's menu and
+pickers, and **Omarchy's own keybindings** — `super+return` for a
+terminal, `super+w` to close, `super+space` for the menu — mapped onto
+chonkstep's actions, so a Hyprland user's muscle memory works on the
+first try instead of running into NeXTSTEP `alt+shift` chords.
+
+It is a set of defaults, never a lock: every value it sets is
+overridden by writing that key out (`show_dock = true` gets the Dock
+back, `keymap = "chonkstep"` keeps the NeXTSTEP chords). What it
+changes, what it deliberately leaves alone, all 93 bindings and the 37
+groups of Omarchy chord it leaves *unbound* rather than approximate,
+are in [docs/omarchy-mode.md](docs/omarchy-mode.md) and
+[docs/keybindings.md](docs/keybindings.md).
+
 Once you are in, right-click the desktop: the `Omarchy` submenu of the
 root menu *is* Omarchy's own menu - the same Learn / Trigger / Style /
 Setup / Install / Remove / Update / About / System tree Omarchy's shell offers,

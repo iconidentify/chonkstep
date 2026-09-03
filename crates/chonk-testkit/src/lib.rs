@@ -801,7 +801,12 @@ impl World {
 /// is installed and `omarchy_menu` is on. [`RootMenu`] says which of
 /// the two a given session has, so a test clicks a row by its label
 /// and never by a hand-counted index.
-pub const ROOT_MENU_ROWS: &[&str] = &["Terminal", "Applications", "Theme", "Wallpaper", "Omarchy Bar", "Omarchy", "Exit"];
+///
+/// "Dock" is unconditional — the Dock is chonkstep's own furniture, so
+/// every session has one to show or hide — which is why it is not one
+/// of [`RootMenu`]'s fields.
+pub const ROOT_MENU_ROWS: &[&str] =
+    &["Terminal", "Applications", "Theme", "Wallpaper", "Dock", "Omarchy Bar", "Omarchy", "Exit"];
 
 /// Which of the root menu's optional rows a session carries. The
 /// default — neither — is the menu the harness's own default session
@@ -1286,20 +1291,24 @@ mod tests {
 
     /// The optional rows drop out without disturbing the order of the
     /// rest, and a label is found at its index in the menu that has
-    /// it and nowhere in one that does not.
+    /// it and nowhere in one that does not. `Dock` is in every one of
+    /// them: the Dock is chonkstep's own furniture, so there is no
+    /// session with no Dock to offer.
     #[test]
     fn root_menu_rows_keep_their_order_with_and_without_the_optional_ones() {
         let plain = RootMenu::default();
-        assert_eq!(plain.rows(), ["Terminal", "Applications", "Theme", "Wallpaper", "Exit"]);
-        assert_eq!(plain.row_of("Exit"), Some(4));
+        assert_eq!(plain.rows(), ["Terminal", "Applications", "Theme", "Wallpaper", "Dock", "Exit"]);
+        assert_eq!(plain.row_of("Dock"), Some(4));
+        assert_eq!(plain.row_of("Exit"), Some(5));
         assert_eq!(plain.row_of("Omarchy Bar"), None);
         let hosted = RootMenu { omarchy_bar: true, omarchy: false };
-        assert_eq!(hosted.row_count(), 6);
-        assert_eq!(hosted.row_of("Omarchy Bar"), Some(4));
+        assert_eq!(hosted.row_count(), 7);
+        assert_eq!(hosted.row_of("Dock"), Some(4), "this desk's own column, then the guest's bar");
+        assert_eq!(hosted.row_of("Omarchy Bar"), Some(5));
         let full = RootMenu { omarchy_bar: true, omarchy: true };
         assert_eq!(full.rows(), ROOT_MENU_ROWS);
-        assert_eq!(full.row_of("Omarchy"), Some(5));
-        assert_eq!(full.row_of("Exit"), Some(6));
+        assert_eq!(full.row_of("Omarchy"), Some(6));
+        assert_eq!(full.row_of("Exit"), Some(7));
     }
 
     #[test]

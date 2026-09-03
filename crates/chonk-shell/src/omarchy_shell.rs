@@ -197,20 +197,65 @@ impl BarVisibility {
     /// The persisted choice, or the default when there is none or it
     /// is unreadable.
     pub fn load() -> Self {
-        bar_state_path().map_or(Self::DEFAULT, |path| Self::load_from(&path))
+        Self::stored().unwrap_or(Self::DEFAULT)
+    }
+
+    /// The session's answer: the persisted choice if the user has ever
+    /// made one, else the config file's `omarchy_bar`, else the
+    /// default above.
+    ///
+    /// Persisted-over-configured, exactly as
+    /// [`crate::desktop::DockVisibility::resolve`] resolves the Dock
+    /// beside it and `startup::resolve_theme_id` resolves the theme:
+    /// the `Omarchy Bar` menu row is *this session's* control, and a
+    /// choice made with it has to outlive the session that made it, or
+    /// hiding the bar would silently undo itself at the next login.
+    ///
+    /// `None` for the configured value — rather than a `bool` with the
+    /// default folded in — because the three layers have to stay
+    /// distinguishable. `desktop = "omarchy"` sets this key to `true`
+    /// as a *preset default*, and a user who then hides the bar from
+    /// the menu must keep it hidden; that only works if "the file said
+    /// shown" is a different state from "nobody said anything".
+    pub fn resolve(configured: Option<bool>) -> Self {
+        Self::stored().or_else(|| configured.map(Self::from_config)).unwrap_or(Self::DEFAULT)
+    }
+
+    /// `omarchy_bar` as a visibility.
+    pub fn from_config(show: bool) -> Self {
+        if show {
+            Self::Shown
+        } else {
+            Self::Hidden
+        }
+    }
+
+    /// The choice in the state file, `None` when there is no readable
+    /// one — which is what lets [`Self::resolve`] tell "the user has
+    /// never said" apart from "the user said hidden".
+    fn stored() -> Option<Self> {
+        Self::stored_in(&bar_state_path()?)
+    }
+
+    /// [`Self::stored`] against an explicit file.
+    pub fn stored_in(path: &Path) -> Option<Self> {
+        Self::from_state(std::fs::read_to_string(path).ok().as_deref())
     }
 
     /// [`Self::load`] against an explicit file.
     pub fn load_from(path: &Path) -> Self {
-        Self::from_state(std::fs::read_to_string(path).ok().as_deref())
+        Self::stored_in(path).unwrap_or(Self::DEFAULT)
     }
 
-    /// The pure half of [`Self::load`]: the state file's text.
-    pub fn from_state(text: Option<&str>) -> Self {
+    /// The pure half of [`Self::stored`]: the state file's text.
+    /// `None` for anything that is not one of the two words, so a
+    /// truncated or hand-edited file falls through to the config key
+    /// rather than reading as a deliberate choice.
+    pub fn from_state(text: Option<&str>) -> Option<Self> {
         match text.map(str::trim) {
-            Some("shown") => Self::Shown,
-            Some("hidden") => Self::Hidden,
-            _ => Self::DEFAULT,
+            Some("shown") => Some(Self::Shown),
+            Some("hidden") => Some(Self::Hidden),
+            _ => None,
         }
     }
 
@@ -291,16 +336,48 @@ mod tests {
 
     #[test]
     fn the_bar_is_hidden_until_the_user_says_otherwise() {
-        assert_eq!(BarVisibility::from_state(None), BarVisibility::Hidden);
-        assert_eq!(BarVisibility::from_state(Some("shown\n")), BarVisibility::Shown);
-        assert_eq!(BarVisibility::from_state(Some("hidden")), BarVisibility::Hidden);
-        // Garbage in the file is no choice at all.
-        assert_eq!(BarVisibility::from_state(Some("maybe")), BarVisibility::DEFAULT);
+        assert_eq!(BarVisibility::from_state(None), None);
+        assert_eq!(BarVisibility::from_state(Some("shown\n")), Some(BarVisibility::Shown));
+        assert_eq!(BarVisibility::from_state(Some("hidden")), Some(BarVisibility::Hidden));
+        // Garbage in the file is no choice at all -- not the default,
+        // *no answer*, so `resolve` falls through to the config key.
+        assert_eq!(BarVisibility::from_state(Some("maybe")), None);
         for choice in [BarVisibility::Hidden, BarVisibility::Shown] {
-            assert_eq!(BarVisibility::from_state(Some(choice.id())), choice, "round-trips");
+            assert_eq!(BarVisibility::from_state(Some(choice.id())), Some(choice), "round-trips");
             assert_eq!(choice.toggled().toggled(), choice);
             assert_ne!(choice.toggled(), choice);
         }
+    }
+
+    /// The three layers, in order. Nothing stored is the case the
+    /// config key exists for; anything stored wins over it, which is
+    /// what stops `desktop = "omarchy"` from re-showing a bar the user
+    /// has hidden from the menu.
+    #[test]
+    fn a_configured_bar_is_the_default_and_a_stored_choice_beats_it() {
+        assert_eq!(BarVisibility::from_config(true), BarVisibility::Shown);
+        assert_eq!(BarVisibility::from_config(false), BarVisibility::Hidden);
+
+        let dir = std::env::temp_dir().join(format!("chonk-omarchy-bar-resolve-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("omarchy-bar");
+
+        // Nothing stored: the config key decides, and with no key
+        // either, the desk's own default.
+        let resolve = |configured: Option<bool>| {
+            BarVisibility::stored_in(&path).or_else(|| configured.map(BarVisibility::from_config)).unwrap_or(BarVisibility::DEFAULT)
+        };
+        assert_eq!(resolve(None), BarVisibility::Hidden, "no file, no key: this desk's own default");
+        assert_eq!(resolve(Some(true)), BarVisibility::Shown, "the posture asks for the bar");
+        assert_eq!(resolve(Some(false)), BarVisibility::Hidden);
+
+        // Stored beats configured, in both directions.
+        BarVisibility::Hidden.persist_to(&path).unwrap();
+        assert_eq!(resolve(Some(true)), BarVisibility::Hidden, "the user hid it; the preset must not undo that");
+        BarVisibility::Shown.persist_to(&path).unwrap();
+        assert_eq!(resolve(Some(false)), BarVisibility::Shown);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -327,7 +404,8 @@ mod tests {
         BarVisibility::Hidden.persist_to(&path).unwrap();
         assert_eq!(BarVisibility::load_from(&path), BarVisibility::Hidden);
         std::fs::write(&path, "nonsense").unwrap();
-        assert_eq!(BarVisibility::load_from(&path), BarVisibility::DEFAULT, "a corrupt file is no choice");
+        assert_eq!(BarVisibility::stored_in(&path), None, "a corrupt file is no choice at all");
+        assert_eq!(BarVisibility::load_from(&path), BarVisibility::DEFAULT, "so the default stands");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

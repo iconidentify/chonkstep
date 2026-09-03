@@ -743,6 +743,7 @@ mod panel_wire_tests {
                 socket_path: &socket_path,
                 scratch: &mut self.scratch,
                 panel_bounds: (800, 600),
+                visible: true,
             };
             self.tile.service(&mut ctx);
         }
@@ -1007,6 +1008,7 @@ mod v1_compat_wire_tests {
                 socket_path: &socket_path,
                 scratch: &mut self.scratch,
                 panel_bounds: (800, 600),
+                visible: true,
             };
             self.tile.service(&mut ctx);
         }
@@ -1268,7 +1270,7 @@ mod restart_tests {
                 admit(self.tiles.iter_mut(), admission, theme, now);
             }
             let socket_path = self.host.socket_path().clone();
-            let mut ctx = ServiceContext { now, theme, socket_path: &socket_path, scratch: &mut self.scratch, panel_bounds: (1024, 1024) };
+            let mut ctx = ServiceContext { now, theme, socket_path: &socket_path, scratch: &mut self.scratch, panel_bounds: (1024, 1024), visible: true };
             for tile in &mut self.tiles {
                 tile.service(&mut ctx);
             }

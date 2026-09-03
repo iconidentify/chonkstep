@@ -13,6 +13,7 @@
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use tiny_skia::{FilterQuality, Pixmap, PixmapPaint, Transform};
@@ -221,6 +222,11 @@ pub enum RootMenuAction {
     /// flat index is the identity both sides agree on.
     LaunchApp(usize),
     SetWallpaper(Wallpaper),
+    /// The `Dock` row: show this desk's own Dock if it is hidden, hide
+    /// it if it is shown (`Desktop::toggle_dock`). Unlike the row
+    /// beside it, this one is always there — the Dock is chonkstep's,
+    /// not a guest's, so there is no session without it to offer.
+    ToggleDock,
     /// The `Omarchy Bar` row: show the hosted shell's bar if it is
     /// hidden, hide it if it is shown (`Desktop::toggle_omarchy_bar`).
     ToggleOmarchyBar,
@@ -359,6 +365,10 @@ const ACTION_EXIT: u32 = 3;
 /// Omarchy's shell (`Desktop::set_omarchy_bar`), marked when the bar
 /// is shown.
 const ACTION_OMARCHY_BAR: u32 = 4;
+/// The `Dock` toggle — always present, since the Dock is this desk's
+/// own furniture rather than a hosted shell's, and marked when the
+/// Dock is shown.
+const ACTION_DOCK: u32 = 5;
 const ACTION_WALLPAPER_BASE: u32 = 100;
 /// The Wallpaper submenu's Omarchy row — `Wallpaper::Omarchy`, which
 /// is not in `Wallpaper::ALL` — in the slot right after the built-ins,
@@ -474,7 +484,9 @@ pub struct RootMenuBounds {
 /// the palette lives in Omarchy's state, the menu in its share dir.
 ///
 /// `omarchy_bar` is the hosted shell's bar visibility, `None` when this
-/// session hosts no shell and so has no bar to offer.
+/// session hosts no shell and so has no bar to offer. `dock` is this
+/// desk's own Dock, which is never `None`: every session has one to
+/// show or hide.
 fn root_menu_items(
     selected_wallpaper: Wallpaper,
     selected_theme_id: &str,
@@ -482,6 +494,7 @@ fn root_menu_items(
     follow_omarchy: Option<&str>,
     omarchy: Vec<MenuItem>,
     omarchy_bar: Option<BarVisibility>,
+    dock: DockVisibility,
 ) -> Vec<MenuItem> {
     let wallpaper_items = Wallpaper::ALL
         .into_iter()
@@ -514,6 +527,13 @@ fn root_menu_items(
         MenuItem::Submenu { label: "Theme".to_string(), items: theme_items },
         MenuItem::Submenu { label: "Wallpaper".to_string(), items: wallpaper_items },
     ];
+    // The Dock's own row, immediately above the bar's: two rows about
+    // which chrome this desk wears, in the section that already holds
+    // the wallpaper and the theme, bulleted the same way so a glance
+    // at the menu says which of the two columns are on. This desk's
+    // own furniture is listed first and the guest's second, the same
+    // order the Omarchy submenu takes below.
+    items.push(MenuItem::Action { label: bullet_label(!dock.is_hidden(), "Dock"), action: ACTION_DOCK });
     // The bar toggle sits with chonkstep's own look-and-feel rows —
     // it is a choice about *this* desk's furniture, like the wallpaper
     // — and is marked the way the Theme and Wallpaper rows mark the
@@ -543,6 +563,7 @@ fn resolve_action(action: u32, bounds: RootMenuBounds) -> Option<RootMenuAction>
         ACTION_LAUNCH_ABOUT => Some(RootMenuAction::LaunchAbout),
         ACTION_EXIT => Some(RootMenuAction::Exit),
         ACTION_OMARCHY_BAR => Some(RootMenuAction::ToggleOmarchyBar),
+        ACTION_DOCK => Some(RootMenuAction::ToggleDock),
         // Subtraction-then-compare rather than a `Range::contains`:
         // `ACTION_OMARCHY_BASE + omarchy_count as u32` could in
         // principle overflow u32, and the subtraction form has no such
@@ -1011,6 +1032,161 @@ fn stacked_dock_height(tile: u32, screen_height: u32, items: &[SupervisedWidget]
         .min(screen_height.max(1))
 }
 
+/// Whether this desk wears its Dock. The user's choice, made in the
+/// root menu's `Dock` row or on the `toggle-dock` binding and
+/// remembered in chonkstep's own state file; shown until they say
+/// otherwise.
+///
+/// # Why this exists at all
+///
+/// chonkstep is offered to Omarchy as *the non-tiling option* — its
+/// window management and its chrome, under Omarchy's own shell for the
+/// bar and the pickers. On that desk a second column of instruments in
+/// the corner is furniture the user did not ask for, so "chonkstep
+/// without its Dock" has to be a configuration rather than a patch:
+/// `show_dock = false` in the config file starts a session that way,
+/// and this type is what a session remembers about it afterwards.
+///
+/// # Hidden means the screen comes back
+///
+/// The Dock is the one piece of this desk's chrome that *reserves*
+/// screen: [`Desktop::primary_workarea`] carves its column off the
+/// primary monitor so a maximized window stops at its edge rather than
+/// sliding underneath. Hiding it therefore has two halves, and a
+/// half-done hide is invisible until someone maximizes a window and
+/// finds a strip of unusable desk down the right side. So
+/// [`Desktop::set_dock_visibility`] unmaps the surface *and*
+/// `primary_workarea` stops reserving, and the shell re-pushes the
+/// workareas on the way through — see [`crate::shell::Shell::
+/// apply_workareas`].
+///
+/// Deliberately the same shape and the same idiom as
+/// [`crate::omarchy_shell::BarVisibility`], down to the words in the
+/// state file, because the root menu offers the two rows side by side
+/// and they should read as one idea. The differences are the two that
+/// are real: the default is `Shown` (the Dock is this desk's own, the
+/// bar is a guest's), and a config key can move that default, since a
+/// dockless session is a *configuration* and not merely a preference.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DockVisibility {
+    Hidden,
+    Shown,
+}
+
+impl DockVisibility {
+    pub const DEFAULT: Self = Self::Shown;
+
+    /// The persisted choice, or the default when there is none or it
+    /// is unreadable — the config-free form, for a caller with no
+    /// `show_dock` in hand. [`Self::resolve`] is what the session
+    /// itself uses.
+    pub fn load() -> Self {
+        Self::stored().unwrap_or(Self::DEFAULT)
+    }
+
+    /// The session's answer: the persisted choice if the user has ever
+    /// made one, else the config file's `show_dock`.
+    ///
+    /// Persisted-over-configured is the precedence
+    /// [`crate::startup::resolve_theme_id`] already establishes for the
+    /// theme, and for the same reason: the menu row and the binding are
+    /// *this session's* controls, and a choice made with them has to
+    /// outlive the session that made it, or toggling the Dock off would
+    /// silently come back on at the next login. Editing `show_dock`
+    /// after that, like editing `theme` after a menu pick, is
+    /// overridden by the newer answer — and the file the user edits
+    /// documents that.
+    pub fn resolve(configured: bool) -> Self {
+        Self::stored().unwrap_or(Self::from_config(configured))
+    }
+
+    /// `show_dock` as a visibility.
+    pub fn from_config(show: bool) -> Self {
+        if show {
+            Self::Shown
+        } else {
+            Self::Hidden
+        }
+    }
+
+    /// The choice in the state file, `None` when there is no readable
+    /// one — which is what lets [`Self::resolve`] tell "the user has
+    /// never said" apart from "the user said shown".
+    fn stored() -> Option<Self> {
+        Self::stored_in(&dock_state_path()?)
+    }
+
+    /// [`Self::stored`] against an explicit file.
+    pub fn stored_in(path: &Path) -> Option<Self> {
+        Self::from_state(std::fs::read_to_string(path).ok().as_deref())
+    }
+
+    /// [`Self::load`] against an explicit file: the stored choice, or
+    /// the default when the file is absent or says nothing legible.
+    pub fn load_from(path: &Path) -> Self {
+        Self::stored_in(path).unwrap_or(Self::DEFAULT)
+    }
+
+    /// The pure half of [`Self::stored`]: the state file's text.
+    /// `None` for anything that is not one of the two words, so a
+    /// truncated or hand-edited file falls through to the config key
+    /// rather than resolving to a choice nobody made.
+    pub fn from_state(text: Option<&str>) -> Option<Self> {
+        match text.map(str::trim) {
+            Some("shown") => Some(Self::Shown),
+            Some("hidden") => Some(Self::Hidden),
+            _ => None,
+        }
+    }
+
+    /// The word the state file holds for this choice — the same two
+    /// words `omarchy-bar` holds, so the two files read alike.
+    pub fn id(self) -> &'static str {
+        match self {
+            Self::Hidden => "hidden",
+            Self::Shown => "shown",
+        }
+    }
+
+    pub fn toggled(self) -> Self {
+        match self {
+            Self::Hidden => Self::Shown,
+            Self::Shown => Self::Hidden,
+        }
+    }
+
+    pub fn is_hidden(self) -> bool {
+        self == Self::Hidden
+    }
+
+    /// Remembers the choice; a session with nowhere to remember it
+    /// (no state directory) succeeds silently, like every other state
+    /// file here.
+    pub fn persist(self) -> std::io::Result<()> {
+        match dock_state_path() {
+            Some(path) => self.persist_to(&path),
+            None => Ok(()),
+        }
+    }
+
+    /// [`Self::persist`] to an explicit file, creating its directory.
+    pub fn persist_to(self, path: &Path) -> std::io::Result<()> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(path, self.id())
+    }
+}
+
+/// `$XDG_STATE_HOME/chonkstep/dock-visibility`, beside `omarchy-bar`.
+///
+/// Not `dock`, which the launcher strip's pins have held since it
+/// existed, and not `dock-items`, which is the instrument order: three
+/// files about the dock, three names that say which part.
+fn dock_state_path() -> Option<PathBuf> {
+    crate::startup::state_file("dock-visibility")
+}
+
 /// The strips another shell has reserved off the primary monitor's
 /// top and right edges — a layer-shell bar's exclusive zone, on the
 /// Wayland session — that the Dock steps out of. In device pixels,
@@ -1399,6 +1575,12 @@ pub struct Desktop<B: Backend> {
     /// Applied to the backend as a hidden layer namespace
     /// (`Backend::set_layer_surface_hidden`) whenever it is set.
     omarchy_bar: Option<BarVisibility>,
+    /// Whether the Dock's surface is mapped and its column reserved
+    /// off the primary's workarea. `Shown` at construction, which is
+    /// what [`Desktop::new`] just built and mapped; the shell settles
+    /// the user's actual answer with
+    /// [`Desktop::set_dock_visibility`] before the first frame.
+    dock: DockVisibility,
     logo: Pixmap,
 }
 
@@ -1544,6 +1726,10 @@ impl<B: Backend> Desktop<B> {
             apps,
             omarchy: None,
             omarchy_bar: None,
+            // Created and mapped just above, so this is a statement of
+            // fact, not a default: the shell applies the resolved
+            // choice through `set_dock_visibility` a moment later.
+            dock: DockVisibility::Shown,
             logo,
         };
         desktop.repaint_wallpaper(backend);
@@ -1588,12 +1774,90 @@ impl<B: Backend> Desktop<B> {
     /// intersection, and an intersection of two right-edge reservations
     /// is only the wider one — it would leave the displaced dock over
     /// the windows unless the shell's claim already accounts for both.
+    /// A hidden Dock reserves nothing at all: the column is unmapped,
+    /// so the strip is empty desk and a maximized window must be
+    /// allowed to cover it. This is the half of hiding that is
+    /// invisible until someone maximizes a window — a hidden Dock that
+    /// kept its reservation would leave one tile of dead screen down
+    /// the right edge with nothing drawn in it and no way to find out
+    /// why. Any bar's own claim still applies, because the bar is still
+    /// there.
     pub fn primary_workarea(&self) -> Rect {
-        let reserved_right = self.dock_width.saturating_add(self.reserved.right);
+        let column = if self.dock.is_hidden() { 0 } else { self.dock_width };
+        let reserved_right = column.saturating_add(self.reserved.right);
         Rect {
             pos: self.primary.pos,
             size: Size::new(self.primary.size.w.saturating_sub(reserved_right).max(1), self.primary.size.h),
         }
+    }
+
+    /// Whether this desk currently wears its Dock — what the root
+    /// menu's `Dock` row bullets, and what a dockapp is told through
+    /// the protocol's `Visibility` message.
+    pub fn dock_visibility(&self) -> DockVisibility {
+        self.dock
+    }
+
+    /// Shows or hides the Dock, and reports whether anything changed —
+    /// which is the caller's cue to re-push the workareas, since the
+    /// answer [`Desktop::primary_workarea`] gives has just moved by a
+    /// whole tile.
+    ///
+    /// Both halves, always, because either one alone is a bug:
+    ///
+    /// * The **surface** is unmapped, so the column is neither drawn
+    ///   nor hit-tested and clicks in the corner reach whatever is
+    ///   actually there. The surface is kept, not destroyed — showing
+    ///   the Dock again is a map and a repaint, not a rebuild, and the
+    ///   instruments never stop running. (They keep sampling and keep
+    ///   their state while hidden, exactly as Omarchy's bar keeps its
+    ///   clock: `redraw_dock` skips the composite, so a hidden Dock
+    ///   costs the repaint thread nothing but the ticks it was already
+    ///   paying.)
+    /// * The **reservation** goes with it — see `primary_workarea`.
+    ///
+    /// An open instrument panel is dismissed on the way down. The panel
+    /// is staged beside the Dock's column and its only opener is a
+    /// click on a tile, so a panel left standing over a hidden Dock
+    /// would be a detail view of an instrument the user can no longer
+    /// see, anchored to a column that is not on screen — the
+    /// "unreachable but alive" shape this whole method exists to avoid.
+    pub fn set_dock_visibility(&mut self, backend: &mut B, theme: &Theme, dock: DockVisibility) -> bool {
+        if dock == self.dock {
+            return false;
+        }
+        self.dock = dock;
+        if dock.is_hidden() {
+            self.dismiss_instrument_panel(backend, PanelCloseReason::Dismissed);
+            // Whoever the pointer was over gets its `Leave` now rather
+            // than on some later motion event: the tile is going off
+            // screen, and a widget left believing the pointer is on it
+            // would keep whatever hover state it drew.
+            self.clear_dock_hover(backend, theme);
+            backend.unmap_shell_surface(self.dock_window);
+        } else {
+            // Configured and painted before it is mapped, so the column
+            // never appears for a frame at the geometry or the palette
+            // it had when it went away — a bar may have come or gone,
+            // or the tile stack changed height, while it was hidden.
+            self.redraw_dock(backend, theme);
+            backend.map_shell_surface(self.dock_window);
+            backend.raise_shell_surface(self.dock_window);
+        }
+        true
+    }
+
+    /// The `Dock` row fired, or the `toggle-dock` binding: flip the
+    /// choice, remember it, and apply it. Reports whether the caller
+    /// must re-push the workareas (always, here — the flip always
+    /// changes something).
+    pub fn toggle_dock(&mut self, backend: &mut B, theme: &Theme) -> bool {
+        let next = self.dock.toggled();
+        if let Err(e) = next.persist() {
+            tracing::warn!(?e, "failed to persist the Dock visibility choice");
+        }
+        tracing::info!(dock = next.id(), "Dock toggled");
+        self.set_dock_visibility(backend, theme, next)
     }
 
     /// The Dock's current root geometry: the column at the top-right of
@@ -2149,7 +2413,18 @@ impl<B: Backend> Desktop<B> {
         let workarea = self.primary_workarea();
         let chrome = instrument::chrome_inset(theme) * 2;
         let panel_bounds = (workarea.size.w.saturating_sub(chrome), workarea.size.h.saturating_sub(chrome));
-        let mut ctx = ServiceContext { now, theme: theme_state, socket_path: &socket_path, scratch: &mut scratch, panel_bounds };
+        let mut ctx = ServiceContext {
+            now,
+            theme: theme_state,
+            socket_path: &socket_path,
+            scratch: &mut scratch,
+            panel_bounds,
+            // A dockapp on a hidden Dock is drawing frames nothing will
+            // ever blit, and the protocol already has the word for it:
+            // `Visibility { visible: false }` means "stop sampling and
+            // stop drawing", not merely "nobody is looking".
+            visible: !self.dock.is_hidden(),
+        };
         for item in &mut self.items {
             // A tile the supervisor evicted is one the dock has
             // disowned, and continuing to run its process would leave a
@@ -2589,7 +2864,16 @@ impl<B: Backend> Desktop<B> {
     /// pointer move on the desktop, so the leaving edge is always seen.
     pub fn update_dock_hover(&mut self, backend: &mut B, theme: &Theme, root: Point) {
         let dock = self.dock_geom();
-        let inside = dock.contains(root).then(|| Point::new(root.x - dock.pos.x, root.y - dock.pos.y));
+        // A hidden Dock is never under the pointer, whatever the
+        // geometry still says. This crossing is driven from *root*
+        // motion rather than from the dock surface's own events (see
+        // the doc comment), so it is the one input path an unmapped
+        // surface does not close by itself: without this the corner
+        // would go on delivering `Enter`/`Leave` to instruments that
+        // are not on screen, and a tile that reacts to a hover would
+        // react to a pointer passing over a maximized window.
+        let inside = (!self.dock.is_hidden() && dock.contains(root))
+            .then(|| Point::new(root.x - dock.pos.x, root.y - dock.pos.y));
         let target = inside.and_then(|local| self.item_index_at(local)).map(|index| self.items[index].id().to_string());
         if target == self.hovered_item {
             return;
@@ -2604,6 +2888,14 @@ impl<B: Backend> Desktop<B> {
             self.apply_effects(backend, theme, effects);
             self.hovered_item = Some(id);
         }
+    }
+
+    /// Tells whichever tile the pointer was over that it has left, and
+    /// forgets it — the crossing half of taking the column off screen.
+    fn clear_dock_hover(&mut self, backend: &mut B, theme: &Theme) {
+        let Some(id) = self.hovered_item.take() else { return };
+        let effects = self.deliver_by_id(&id, DockInput::Leave);
+        self.apply_effects(backend, theme, effects);
     }
 
     /// Hands one input to the item with this id, if it is still in the
@@ -2698,6 +2990,18 @@ impl<B: Backend> Desktop<B> {
     }
 
     fn redraw_dock(&mut self, backend: &mut B, theme: &Theme) {
+        // A hidden Dock is not drawn. The instruments still tick — a
+        // sampler thread does not know about this, and a tile whose
+        // meter kept running is a tile that is *right* the moment the
+        // column comes back — but composing a column nobody can see,
+        // every time the clock's second hand moves, is work with no
+        // reader. `set_dock_visibility` calls straight back into here
+        // on the way up, so the first frame after a show is composed
+        // against the current geometry and palette rather than
+        // whatever the column held when it went away.
+        if self.dock.is_hidden() {
+            return;
+        }
         let dock_geom = self.dock_geom();
         let dock_height = dock_geom.size.h;
         backend.configure_shell_surface(self.dock_window, dock_geom);
@@ -2799,7 +3103,8 @@ impl<B: Backend> Desktop<B> {
         // gesture that can afford two file reads.
         let follow_omarchy = wm_theme::omarchy::is_available()
             .then(|| wm_theme::omarchy::display_name(&wm_theme::omarchy::current_theme_name().map(|n| wm_theme::omarchy::title_case(&n)).unwrap_or_default()));
-        let items = root_menu_items(self.wallpaper, &self.theme_id, &self.apps, follow_omarchy.as_deref(), omarchy_items, self.omarchy_bar);
+        let items =
+            root_menu_items(self.wallpaper, &self.theme_id, &self.apps, follow_omarchy.as_deref(), omarchy_items, self.omarchy_bar, self.dock);
         self.menu.open_root(backend, theme, &mut self.fonts.system(), items, root_bounds, at, bounds);
     }
 
@@ -3745,7 +4050,7 @@ mod tests {
     }
 
     fn wallpaper_submenu(selected: Wallpaper, omarchy: Option<&str>) -> Vec<MenuItem> {
-        let items = root_menu_items(selected, "nextstep-classic", &[], omarchy, Vec::new(), None);
+        let items = root_menu_items(selected, "nextstep-classic", &[], omarchy, Vec::new(), None, DockVisibility::Shown);
         let submenu = items.iter().find(|item| item.label() == "Wallpaper").expect("wallpaper submenu");
         let MenuItem::Submenu { items, .. } = submenu else { panic!("expected submenu") };
         items.clone()
@@ -3759,7 +4064,7 @@ mod tests {
     fn the_omarchy_bar_row_comes_with_a_hosted_shell_and_marks_a_shown_bar() {
         let omarchy = vec![MenuItem::Action { label: "Row".to_string(), action: ACTION_OMARCHY_BASE }];
         let labels = |bar: Option<BarVisibility>| -> Vec<String> {
-            root_menu_items(Wallpaper::DEFAULT, "nextstep-classic", &[], None, omarchy.clone(), bar)
+            root_menu_items(Wallpaper::DEFAULT, "nextstep-classic", &[], None, omarchy.clone(), bar, DockVisibility::Shown)
                 .iter()
                 .map(|item| item.label().to_string())
                 .collect()
@@ -3801,6 +4106,217 @@ mod tests {
         assert!(backend.layer_visibility_calls.is_empty());
     }
 
+    /// The Dock row is always there — the Dock is this desk's own, not
+    /// a hosted shell's — sits immediately above the bar's row when
+    /// there is one, is marked when the Dock is shown, and resolves to
+    /// the toggle.
+    #[test]
+    fn the_dock_row_is_always_offered_and_marks_a_shown_dock() {
+        let labels = |dock: DockVisibility, bar: Option<BarVisibility>| -> Vec<String> {
+            root_menu_items(Wallpaper::DEFAULT, "nextstep-classic", &[], None, Vec::new(), bar, dock)
+                .iter()
+                .map(|item| item.label().to_string())
+                .collect()
+        };
+
+        // Unhosted: no bar row, but a Dock row all the same.
+        let shown = labels(DockVisibility::Shown, None);
+        let row = shown.iter().position(|label| label == "\u{2022} Dock").expect("a marked row for a shown dock");
+        assert_eq!(shown[row - 1], "Wallpaper", "it joins the look-and-feel section");
+        assert_eq!(shown[row + 1], "Exit", "and nothing else is offered on an unhosted desk");
+
+        // Hidden: unmarked, exactly as the Theme and Wallpaper rows go
+        // unmarked for a choice that is not current.
+        let hidden = labels(DockVisibility::Hidden, None);
+        assert!(hidden.contains(&"  Dock".to_string()), "unmarked when hidden");
+
+        // Beside a hosted shell's bar: this desk's own furniture first.
+        let both = labels(DockVisibility::Shown, Some(BarVisibility::Hidden));
+        let dock = both.iter().position(|label| label == "\u{2022} Dock").unwrap();
+        assert_eq!(both[dock + 1], "  Omarchy Bar", "the Dock's row, then the bar's");
+
+        // The two toggles are independent ids and neither resolves to
+        // the other — the bug a shared id would produce is a menu that
+        // hides the wrong column.
+        assert!(matches!(resolve_action(ACTION_DOCK, RootMenuBounds::default()), Some(RootMenuAction::ToggleDock)));
+        assert!(matches!(
+            resolve_action(ACTION_OMARCHY_BAR, RootMenuBounds::default()),
+            Some(RootMenuAction::ToggleOmarchyBar)
+        ));
+        assert_ne!(ACTION_DOCK, ACTION_OMARCHY_BAR);
+    }
+
+    /// Hiding the Dock is two things at once, and the second is the one
+    /// nobody sees go wrong until they maximize a window: the surface
+    /// is unmapped *and* the column stops being reserved off the
+    /// primary's workarea.
+    #[test]
+    fn hiding_the_dock_unmaps_it_and_gives_its_column_back_to_the_workarea() {
+        use wm_core::fake_backend::FakeBackend;
+
+        let primary = Rect { pos: Point::new(0, 0), size: TEST_SCREEN };
+        let mut backend = FakeBackend::new();
+        let mut desktop: Desktop<FakeBackend> =
+            Desktop::new(&mut backend, TEST_SCREEN, primary, 1.0, &test_theme(), wm_theme::Appearance::Dark, Vec::new(), wm_theme::FontState::new());
+        let theme = wm_theme::default_theme::theme_by_id("nextstep-classic").unwrap();
+        let tile = tile_px(1.0);
+        let dock = desktop.dock_window();
+
+        // Shown, as built: mapped, and one column off the workarea.
+        assert!(backend.shell_is_mapped(dock));
+        assert_eq!(desktop.primary_workarea().size.w, TEST_SCREEN.w - tile);
+        assert_eq!(desktop.dock_visibility(), DockVisibility::Shown);
+
+        // Hidden: gone from the screen, and the whole width is windows'.
+        assert!(desktop.set_dock_visibility(&mut backend, &theme, DockVisibility::Hidden), "a new choice is a change");
+        assert!(!backend.shell_is_mapped(dock), "the surface must be unmapped, not merely painted over");
+        let free = desktop.primary_workarea();
+        assert_eq!(free, primary, "a hidden dock reserves nothing at all");
+        // Every other head keeps its own rect, and the primary's entry
+        // is the widened one — the shape `set_workareas` indexes.
+        assert_eq!(desktop.workareas(&[AUX_LEFT, primary]), vec![AUX_LEFT, primary]);
+
+        // Asking again is free, which is what lets the reload path call
+        // it on every theme pick.
+        assert!(!desktop.set_dock_visibility(&mut backend, &theme, DockVisibility::Hidden));
+
+        // Shown again: both halves come back, and the column is
+        // reconfigured to the corner it belongs in rather than left
+        // wherever it was when it went away.
+        assert!(desktop.set_dock_visibility(&mut backend, &theme, DockVisibility::Shown));
+        assert!(backend.shell_is_mapped(dock));
+        assert_eq!(desktop.primary_workarea().size.w, TEST_SCREEN.w - tile);
+        let geom = backend.shell_geometries[&dock];
+        assert_eq!(geom.pos.x + geom.size.w as i32, TEST_SCREEN.w as i32, "back in the corner");
+    }
+
+    /// The two toggles compose: all four combinations are sane, and a
+    /// Dock hidden under a shown bar still gives back only its own
+    /// column — the bar's strip is the bar's, and stays reserved.
+    #[test]
+    fn the_dock_and_a_bars_reservation_are_independent_in_all_four_combinations() {
+        use wm_core::fake_backend::FakeBackend;
+
+        let primary = Rect { pos: Point::new(0, 0), size: TEST_SCREEN };
+        let mut backend = FakeBackend::new();
+        let mut desktop: Desktop<FakeBackend> =
+            Desktop::new(&mut backend, TEST_SCREEN, primary, 1.0, &test_theme(), wm_theme::Appearance::Dark, Vec::new(), wm_theme::FontState::new());
+        let theme = wm_theme::default_theme::theme_by_id("nextstep-classic").unwrap();
+        let tile = tile_px(1.0);
+        let dock = desktop.dock_window();
+
+        // A right-edge panel and a top bar at once, the shape that
+        // moves the column in both axes.
+        let bar = EdgeReservation { top: 32, right: 24 };
+        assert!(desktop.set_reservation(&mut backend, &theme, bar));
+        let under = backend.shell_geometries[&dock];
+        assert_eq!(under.pos, Point::new((TEST_SCREEN.w - tile - 24) as i32, 32));
+        assert_eq!(desktop.primary_workarea().size.w, TEST_SCREEN.w - tile - 24, "the column plus the bar's strip");
+
+        // Dock hidden under the bar: only the column comes back. A
+        // workarea that also swallowed the bar's 24px would put
+        // maximized windows under a bar that is still on screen.
+        desktop.set_dock_visibility(&mut backend, &theme, DockVisibility::Hidden);
+        assert!(!backend.shell_is_mapped(dock));
+        assert_eq!(desktop.primary_workarea().size.w, TEST_SCREEN.w - 24, "the bar keeps its strip");
+
+        // The bar leaves while the Dock is hidden: nothing is reserved.
+        assert!(desktop.set_reservation(&mut backend, &theme, EdgeReservation::default()));
+        assert_eq!(desktop.primary_workarea(), primary);
+        assert!(!backend.shell_is_mapped(dock), "and a redraw for the bar must not resurrect the column");
+
+        // And the Dock comes back to the corner the bar left, not to
+        // the displaced position it was hidden at.
+        desktop.set_dock_visibility(&mut backend, &theme, DockVisibility::Shown);
+        let back = backend.shell_geometries[&dock];
+        assert_eq!(back.pos, Point::new((TEST_SCREEN.w - tile) as i32, 0), "shown into the corner as it is now, not as it was");
+        assert_eq!(desktop.primary_workarea().size.w, TEST_SCREEN.w - tile);
+    }
+
+    /// The one input path an unmapped surface does not close by itself:
+    /// the tile crossing is hit-tested from *root* motion, so it has to
+    /// know about the hide. Otherwise the pointer passing over the
+    /// (now maximized) window in that corner would keep telling
+    /// invisible instruments the pointer was on them.
+    #[test]
+    fn a_hidden_dock_takes_no_hover_and_the_tile_under_the_pointer_is_told_it_left() {
+        use wm_core::fake_backend::FakeBackend;
+
+        let primary = Rect { pos: Point::new(0, 0), size: TEST_SCREEN };
+        let mut backend = FakeBackend::new();
+        let mut desktop: Desktop<FakeBackend> =
+            Desktop::new(&mut backend, TEST_SCREEN, primary, 1.0, &test_theme(), wm_theme::Appearance::Dark, Vec::new(), wm_theme::FontState::new());
+        let theme = wm_theme::default_theme::theme_by_id("nextstep-classic").unwrap();
+        let tile = tile_px(1.0);
+
+        // The middle of the first widget slot, in root coordinates:
+        // one tile down from the identity tile at the column's top.
+        let over_a_tile = Point::new((TEST_SCREEN.w - tile / 2) as i32, (tile + tile / 2) as i32);
+        desktop.update_dock_hover(&mut backend, &theme, over_a_tile);
+        assert!(desktop.hovered_item.is_some(), "the pointer is over a tile of the shown column");
+
+        // Hiding takes the hover with it, on the spot rather than at
+        // the next motion event.
+        desktop.set_dock_visibility(&mut backend, &theme, DockVisibility::Hidden);
+        assert_eq!(desktop.hovered_item, None, "the tile is told it lost the pointer as the column goes");
+
+        // And no amount of motion through that corner finds a tile
+        // while the column is hidden.
+        desktop.update_dock_hover(&mut backend, &theme, over_a_tile);
+        assert_eq!(desktop.hovered_item, None, "a hidden column is never under the pointer");
+
+        // Shown again, the same point hovers again — nothing was
+        // permanently detached, only unmapped.
+        desktop.set_dock_visibility(&mut backend, &theme, DockVisibility::Shown);
+        desktop.update_dock_hover(&mut backend, &theme, over_a_tile);
+        assert!(desktop.hovered_item.is_some());
+    }
+
+    /// The Dock's choice is remembered the way the bar's is, plus the
+    /// one thing the bar has no need of: telling "the user never said"
+    /// apart from "the user said shown", so the config key can be the
+    /// default without overriding a real choice.
+    #[test]
+    fn the_dock_choice_round_trips_through_its_state_file_and_defers_to_the_config_key() {
+        let dir = std::env::temp_dir().join(format!("chonk-dock-visibility-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        // Two directories deep and absent: persisting creates the path.
+        let path = dir.join("chonkstep/dock-visibility");
+
+        assert_eq!(DockVisibility::stored_in(&path), None, "no file, no choice");
+        assert_eq!(DockVisibility::load_from(&path), DockVisibility::Shown, "and the default is a dock you can see");
+        assert_eq!(DockVisibility::DEFAULT, DockVisibility::Shown);
+
+        DockVisibility::Hidden.persist_to(&path).unwrap();
+        assert_eq!(DockVisibility::stored_in(&path), Some(DockVisibility::Hidden));
+        DockVisibility::Shown.persist_to(&path).unwrap();
+        assert_eq!(DockVisibility::stored_in(&path), Some(DockVisibility::Shown));
+        for choice in [DockVisibility::Hidden, DockVisibility::Shown] {
+            assert_eq!(DockVisibility::from_state(Some(choice.id())), Some(choice), "round-trips");
+            assert_eq!(choice.toggled().toggled(), choice);
+            assert_ne!(choice.toggled(), choice);
+        }
+
+        // A corrupt or truncated file is *no choice*, not a choice of
+        // the default: `resolve` must fall through to `show_dock`, or a
+        // half-written state file would silently override the config.
+        std::fs::write(&path, "nonsense").unwrap();
+        assert_eq!(DockVisibility::stored_in(&path), None);
+        assert_eq!(DockVisibility::load_from(&path), DockVisibility::DEFAULT, "a corrupt file is no choice");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // The precedence itself, pure: with nothing stored the config
+        // key decides, and with something stored it does not.
+        assert_eq!(DockVisibility::from_config(true), DockVisibility::Shown);
+        assert_eq!(DockVisibility::from_config(false), DockVisibility::Hidden);
+        assert_eq!(DockVisibility::from_state(None).unwrap_or(DockVisibility::from_config(false)), DockVisibility::Hidden);
+        assert_eq!(
+            DockVisibility::from_state(Some("shown")).unwrap_or(DockVisibility::from_config(false)),
+            DockVisibility::Shown,
+            "a stored choice wins over the config key, exactly as a stored theme does"
+        );
+    }
+
     #[test]
     fn wallpaper_submenu_marks_the_current_selection() {
         let items = wallpaper_submenu(Wallpaper::TealBlueprint, None);
@@ -3829,7 +4345,7 @@ mod tests {
     }
 
     fn theme_submenu(selected: &str, omarchy: Option<&str>) -> Vec<MenuItem> {
-        let items = root_menu_items(Wallpaper::TealBlueprint, selected, &[], omarchy, Vec::new(), None);
+        let items = root_menu_items(Wallpaper::TealBlueprint, selected, &[], omarchy, Vec::new(), None, DockVisibility::Shown);
         let submenu = items.iter().find(|item| item.label() == "Theme").expect("theme submenu");
         let MenuItem::Submenu { items, .. } = submenu else { panic!("expected submenu") };
         items.clone()
@@ -3895,7 +4411,7 @@ mod tests {
     /// menu build so these tests exercise the real assembly path, not
     /// `applications_items` in isolation.
     fn applications_submenu(apps: &[AppEntry]) -> Vec<MenuItem> {
-        let items = root_menu_items(Wallpaper::TealBlueprint, "nextstep-classic", apps, None, Vec::new(), None);
+        let items = root_menu_items(Wallpaper::TealBlueprint, "nextstep-classic", apps, None, Vec::new(), None, DockVisibility::Shown);
         let submenu = items.iter().find(|item| item.label() == "Applications").expect("Applications submenu");
         let MenuItem::Submenu { items, .. } = submenu else { panic!("expected a submenu") };
         items.clone()
@@ -3999,14 +4515,14 @@ mod tests {
 
     #[test]
     fn the_omarchy_submenu_sits_between_wallpaper_and_exit_only_when_it_has_rows() {
-        let without = root_menu_items(Wallpaper::TealBlueprint, "nextstep-classic", &[], None, Vec::new(), None);
+        let without = root_menu_items(Wallpaper::TealBlueprint, "nextstep-classic", &[], None, Vec::new(), None, DockVisibility::Shown);
         let labels: Vec<&str> = without.iter().map(MenuItem::label).collect();
-        assert_eq!(labels, ["Terminal", "Applications", "Theme", "Wallpaper", "Exit"]);
+        assert_eq!(labels, ["Terminal", "Applications", "Theme", "Wallpaper", "\u{2022} Dock", "Exit"]);
 
         let rows = vec![MenuItem::Action { label: "About".to_string(), action: ACTION_OMARCHY_BASE }];
-        let with = root_menu_items(Wallpaper::TealBlueprint, "nextstep-classic", &[], None, rows, None);
+        let with = root_menu_items(Wallpaper::TealBlueprint, "nextstep-classic", &[], None, rows, None, DockVisibility::Shown);
         let labels: Vec<&str> = with.iter().map(MenuItem::label).collect();
-        assert_eq!(labels, ["Terminal", "Applications", "Theme", "Wallpaper", "Omarchy", "Exit"]);
+        assert_eq!(labels, ["Terminal", "Applications", "Theme", "Wallpaper", "\u{2022} Dock", "Omarchy", "Exit"]);
     }
 
     #[test]
@@ -4189,7 +4705,7 @@ mod tests {
         }
 
         fn open_root(&mut self) {
-            let items = root_menu_items(Wallpaper::TealBlueprint, "nextstep-classic", &[], None, Vec::new(), None);
+            let items = root_menu_items(Wallpaper::TealBlueprint, "nextstep-classic", &[], None, Vec::new(), None, DockVisibility::Shown);
             self.menu.open_root(&mut self.host, &self.theme, &mut self.font_system, items, RootMenuBounds::default(), Point::new(0, 0), Size::new(1600, 1000));
         }
 
@@ -4251,7 +4767,7 @@ mod tests {
         assert_eq!(f.host.open.len(), 1);
 
         let window = f.only_open_window();
-        let items = root_menu_items(Wallpaper::TealBlueprint, "nextstep-classic", &[], None, Vec::new(), None);
+        let items = root_menu_items(Wallpaper::TealBlueprint, "nextstep-classic", &[], None, Vec::new(), None, DockVisibility::Shown);
         let row = f.row_point(ROOT_MENU_TITLE, &items, 0);
         assert!(matches!(
             f.click(window, row),

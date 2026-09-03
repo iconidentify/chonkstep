@@ -1,13 +1,24 @@
 # The keybinding card
 
-The defaults below are read out of [config.example.toml](config.example.toml),
-which is the authoritative, fully commented list — if this card and
-that file ever disagree, the file wins. Every binding here can be
-changed in `~/.config/chonkstep/config.toml`; entries merge over the
-defaults, so listing one combo changes only that combo, and setting a
-combo to `"none"` unbinds it.
+There are **two** keymaps. `keymap = "chonkstep"` is the default and is
+the NeXTSTEP-style `alt+shift` vocabulary the rest of this desktop was
+designed around; `keymap = "omarchy"` is Omarchy's own vocabulary
+mapped onto chonkstep's actions, for a user arriving with Hyprland
+muscle memory (and what `desktop = "omarchy"` selects — see
+[omarchy-mode.md](omarchy-mode.md)).
 
-## The defaults
+Choosing one **replaces** the other's table; the two are never merged.
+Whichever is active, entries in your `[keybindings]` merge over it, so
+listing one combo changes only that combo and setting a combo to
+`"none"` unbinds it.
+
+Each table below is transcribed from the source that defines it — the
+chonkstep defaults from [config.example.toml](config.example.toml), the
+Omarchy keymap from `crates/wm-config/src/preset.rs` — and a test fails
+if a table here and its source disagree. If this card and its source
+ever do disagree, the source wins.
+
+## The chonkstep defaults (`keymap = "chonkstep"`)
 
 | Binding            | Action                 | What it does                                  |
 |--------------------|------------------------|-----------------------------------------------|
@@ -27,6 +38,186 @@ combo to `"none"` unbinds it.
 Window-targeted actions (`close`, `toggle-maximize`, `toggle-shade`,
 `miniaturize`, `toggle-fullscreen`, `window-menu`) act on the focused
 window and do nothing when no window is focused.
+
+## The Omarchy keymap (`keymap = "omarchy"`)
+
+```toml
+keymap = "omarchy"        # ...or desktop = "omarchy", which defaults it
+```
+
+93 bindings, derived from Omarchy's own configuration on the machine —
+`$OMARCHY_PATH/default/hypr/bindings/*.lua` — rather than from memory of
+Hyprland, with the `o.bind` helpers expanded the way `helpers.lua`
+expands them. A `run <name>` action names an entry the preset declares
+in `[commands]`; the third column is the argv it runs, which is
+Omarchy's own command line. Selecting this keymap declares all 77 of
+those commands, so nothing here needs a `[commands]` table of your own.
+
+Three of these differ from what Omarchy does with the chord —
+`super+f`/`super+alt+f`, `super+alt+s`, and the two chonkstep verbs on
+`super+up` and `control+escape` — and
+[omarchy-mode.md](omarchy-mode.md#three-chords-we-do-differently) spells
+out how. Two more differ in *how* they fire: Omarchy marks its media and
+brightness keys "locked" (working over the lock screen) and its ramps
+"repeating" (firing while held), and chonkstep's bindings do neither.
+
+Whether a mapped chord *works* is two questions, and this table answers
+only the first. The chord reaching the command is what the keymap
+guarantees; whether that Omarchy command does anything under a
+compositor that is not Hyprland is
+[omarchy-integration.md](omarchy-integration.md)'s subject — it is the
+honest inventory, script by script, and a few of the commands below
+are on its broken list (`omarchy-toggle-nightlight` wants a gamma
+protocol chonkstep does not implement yet). They are bound anyway,
+because they are Omarchy's own commands on Omarchy's own chords: the
+day the gap closes, the binding is already right.
+
+| Binding                  | Action                                 | Omarchy's own command                                                                                               |
+|--------------------------|----------------------------------------|---------------------------------------------------------------------------------------------------------------------|
+| `super+return`           | `spawn-terminal`                       | --                                                                                                                  |
+| `super+shift+return`     | `run omarchy-browser`                  | `omarchy-launch-browser`                                                                                            |
+| `super+shift+b`          | `run omarchy-browser`                  | `omarchy-launch-browser`                                                                                            |
+| `super+shift+alt+b`      | `run omarchy-browser-private`          | `omarchy-launch-browser --private`                                                                                  |
+| `super+shift+f`          | `run omarchy-files`                    | `omarchy-launch-nautilus`                                                                                           |
+| `super+alt+shift+f`      | `run omarchy-files-here`               | `omarchy-launch-nautilus-cwd`                                                                                       |
+| `super+shift+n`          | `run omarchy-editor`                   | `omarchy-launch-editor`                                                                                             |
+| `super+w`                | `close`                                | --                                                                                                                  |
+| `super+f`                | `toggle-fullscreen`                    | --                                                                                                                  |
+| `super+alt+f`            | `toggle-maximize`                      | --                                                                                                                  |
+| `super+tab`              | `workspace-next`                       | --                                                                                                                  |
+| `super+shift+tab`        | `workspace-prev`                       | --                                                                                                                  |
+| `super+alt+s`            | `miniaturize`                          | --                                                                                                                  |
+| `super+ctrl+v`           | `run omarchy-clipboard`                | `omarchy-shell shell toggle omarchy.clipboard`                                                                      |
+| `super+space`            | `run omarchy-menu`                     | `omarchy-menu toggle`                                                                                               |
+| `super+alt+space`        | `run omarchy-menu-apps`                | `omarchy-menu toggle apps`                                                                                          |
+| `super+escape`           | `run omarchy-menu-system`              | `omarchy-menu toggle system`                                                                                        |
+| `poweroff`               | `run omarchy-menu-system`              | `omarchy-menu toggle system`                                                                                        |
+| `super+ctrl+c`           | `run omarchy-menu-capture`             | `omarchy-menu toggle capture`                                                                                       |
+| `super+ctrl+o`           | `run omarchy-menu-toggles`             | `omarchy-menu toggle toggle`                                                                                        |
+| `super+ctrl+h`           | `run omarchy-menu-hardware`            | `omarchy-menu toggle hardware`                                                                                      |
+| `super+ctrl+s`           | `run omarchy-menu-share`               | `omarchy-menu toggle share`                                                                                         |
+| `super+ctrl+space`       | `run omarchy-menu-background`          | `omarchy-menu toggle background`                                                                                    |
+| `super+shift+ctrl+space` | `run omarchy-menu-theme`               | `omarchy-menu toggle theme`                                                                                         |
+| `super+ctrl+e`           | `run omarchy-emojis`                   | `omarchy-shell shell toggle omarchy.emojis`                                                                         |
+| `super+alt+k`            | `run omarchy-keybindings-tmux`         | `omarchy-menu-tmux-keybindings`                                                                                     |
+| `super+ctrl+k`           | `run omarchy-keybindings-herdr`        | `omarchy-menu-herdr-keybindings`                                                                                    |
+| `super+ctrl+q`           | `run omarchy-calculator`               | `omacalc`                                                                                                           |
+| `calculator`             | `run omarchy-calculator`               | `omacalc`                                                                                                           |
+| `super+comma`            | `run omarchy-notification-dismiss`     | `omarchy-shell notifications dismissOne`                                                                            |
+| `super+shift+comma`      | `run omarchy-notification-dismiss-all` | `omarchy-shell notifications dismissAll`                                                                            |
+| `super+alt+comma`        | `run omarchy-notification-invoke`      | `omarchy-shell notifications invokeLast`                                                                            |
+| `super+shift+alt+comma`  | `run omarchy-notification-history`     | `omarchy-shell notifications showHistory`                                                                           |
+| `super+ctrl+comma`       | `run omarchy-notification-silence`     | `omarchy-toggle-notification-silencing`                                                                             |
+| `super+ctrl+i`           | `run omarchy-toggle-idle`              | `omarchy-toggle-idle`                                                                                               |
+| `super+ctrl+n`           | `run omarchy-toggle-nightlight`        | `omarchy-toggle-nightlight`                                                                                         |
+| `print`                  | `run omarchy-screenshot`               | `omarchy-capture-screenshot`                                                                                        |
+| `alt+print`              | `run omarchy-screenrecord`             | `bash -lc "omarchy-capture-screenrecording --stop-recording \|\| omarchy-menu toggle trigger.capture.screenrecord"` |
+| `super+print`            | `run omarchy-colorpicker`              | `bash -lc "pkill hyprpicker \|\| hyprpicker -a"`                                                                    |
+| `super+ctrl+print`       | `run omarchy-ocr`                      | `omarchy-capture-text`                                                                                              |
+| `super+alt+bracketleft`  | `run omarchy-webcam-smaller`           | `omarchy-capture-webcam-resize smaller`                                                                             |
+| `super+alt+bracketright` | `run omarchy-webcam-larger`            | `omarchy-capture-webcam-resize larger`                                                                              |
+| `super+ctrl+period`      | `run omarchy-transcode`                | `omarchy-transcode`                                                                                                 |
+| `super+ctrl+r`           | `run omarchy-reminder-set`             | `omarchy-menu toggle reminder-set`                                                                                  |
+| `super+ctrl+alt+r`       | `run omarchy-reminder-show`            | `omarchy-reminder show`                                                                                             |
+| `super+shift+ctrl+r`     | `run omarchy-reminder-clear`           | `omarchy-reminder clear`                                                                                            |
+| `super+ctrl+alt+t`       | `run omarchy-show-time`                | `omarchy-notification-time`                                                                                         |
+| `super+ctrl+alt+b`       | `run omarchy-show-battery`             | `omarchy-notification-battery`                                                                                      |
+| `super+ctrl+alt+w`       | `run omarchy-show-weather`             | `omarchy-notification-weather`                                                                                      |
+| `super+shift+ctrl+a`     | `run omarchy-agent`                    | `omarchy-agent --pick`                                                                                              |
+| `super+ctrl+a`           | `run omarchy-panel-audio`              | `omarchy-shell shell toggle omarchy.audio`                                                                          |
+| `super+ctrl+b`           | `run omarchy-panel-bluetooth`          | `omarchy-shell shell toggle omarchy.bluetooth`                                                                      |
+| `super+ctrl+w`           | `run omarchy-panel-network`            | `omarchy-shell shell toggle omarchy.network`                                                                        |
+| `super+ctrl+p`           | `run omarchy-panel-power`              | `omarchy-shell shell toggle omarchy.power`                                                                          |
+| `super+ctrl+alt+d`       | `run omarchy-panel-clock`              | `omarchy-shell shell toggle omarchy.clock`                                                                          |
+| `super+ctrl+t`           | `run omarchy-activity`                 | `omarchy-launch-tui btop`                                                                                           |
+| `super+ctrl+1`           | `run omarchy-panel-1`                  | `omarchy-shell -q shell togglePanelAt right 1`                                                                      |
+| `super+ctrl+2`           | `run omarchy-panel-2`                  | `omarchy-shell -q shell togglePanelAt right 2`                                                                      |
+| `super+ctrl+3`           | `run omarchy-panel-3`                  | `omarchy-shell -q shell togglePanelAt right 3`                                                                      |
+| `super+ctrl+4`           | `run omarchy-panel-4`                  | `omarchy-shell -q shell togglePanelAt right 4`                                                                      |
+| `super+ctrl+5`           | `run omarchy-panel-5`                  | `omarchy-shell -q shell togglePanelAt right 5`                                                                      |
+| `super+ctrl+6`           | `run omarchy-panel-6`                  | `omarchy-shell -q shell togglePanelAt right 6`                                                                      |
+| `super+ctrl+7`           | `run omarchy-panel-7`                  | `omarchy-shell -q shell togglePanelAt right 7`                                                                      |
+| `super+ctrl+8`           | `run omarchy-panel-8`                  | `omarchy-shell -q shell togglePanelAt right 8`                                                                      |
+| `super+ctrl+9`           | `run omarchy-panel-9`                  | `omarchy-shell -q shell togglePanelAt right 9`                                                                      |
+| `super+ctrl+l`           | `run omarchy-lock`                     | `omarchy-system-lock`                                                                                               |
+| `volumeup`               | `run omarchy-volume-up`                | `omarchy-audio-output-volume raise`                                                                                 |
+| `volumedown`             | `run omarchy-volume-down`              | `omarchy-audio-output-volume lower`                                                                                 |
+| `volumemute`             | `run omarchy-volume-mute`              | `omarchy-audio-output-volume mute-toggle`                                                                           |
+| `micmute`                | `run omarchy-mic-mute`                 | `omarchy-audio-input-mute`                                                                                          |
+| `alt+volumeup`           | `run omarchy-volume-up-fine`           | `omarchy-audio-output-volume +1`                                                                                    |
+| `alt+volumedown`         | `run omarchy-volume-down-fine`         | `omarchy-audio-output-volume -1`                                                                                    |
+| `shift+volumemute`       | `run omarchy-audio-output-switch`      | `omarchy-audio-output-switch`                                                                                       |
+| `brightnessup`           | `run omarchy-brightness-up`            | `omarchy-brightness-display +5%`                                                                                    |
+| `brightnessdown`         | `run omarchy-brightness-down`          | `omarchy-brightness-display 5%-`                                                                                    |
+| `shift+brightnessup`     | `run omarchy-brightness-max`           | `omarchy-brightness-display 100%`                                                                                   |
+| `shift+brightnessdown`   | `run omarchy-brightness-min`           | `omarchy-brightness-display 1%`                                                                                     |
+| `alt+brightnessup`       | `run omarchy-brightness-up-fine`       | `omarchy-brightness-display +1%`                                                                                    |
+| `alt+brightnessdown`     | `run omarchy-brightness-down-fine`     | `omarchy-brightness-display 1%-`                                                                                    |
+| `kbdbrightnessup`        | `run omarchy-kbd-brightness-up`        | `omarchy-brightness-keyboard up`                                                                                    |
+| `kbdbrightnessdown`      | `run omarchy-kbd-brightness-down`      | `omarchy-brightness-keyboard down`                                                                                  |
+| `kbdlightonoff`          | `run omarchy-kbd-brightness-cycle`     | `omarchy-brightness-keyboard cycle`                                                                                 |
+| `playpause`              | `run omarchy-media-play-pause`         | `omarchy-shell media playPause`                                                                                     |
+| `audiopause`             | `run omarchy-media-play-pause`         | `omarchy-shell media playPause`                                                                                     |
+| `audionext`              | `run omarchy-media-next`               | `omarchy-shell media next`                                                                                          |
+| `audioprev`              | `run omarchy-media-prev`               | `omarchy-shell media previous`                                                                                      |
+| `alt+playpause`          | `run omarchy-media-next`               | `omarchy-shell media next`                                                                                          |
+| `alt+shift+playpause`    | `run omarchy-media-prev`               | `omarchy-shell media previous`                                                                                      |
+| `shift+playpause`        | `run omarchy-audio-source-switch`      | `omarchy-audio-source-switch`                                                                                       |
+| `shift+audiopause`       | `run omarchy-audio-source-switch`      | `omarchy-audio-source-switch`                                                                                       |
+| `eject`                  | `run omarchy-eject`                    | `eject`                                                                                                             |
+| `super+up`               | `overview`                             | --                                                                                                                  |
+| `control+escape`         | `window-menu`                          | --                                                                                                                  |
+
+### Deliberately unbound
+
+37 groups of Omarchy chord this keymap leaves dead, and why. Left dead
+rather than approximated: a dead key is looked up in five seconds,
+while a `super+j` that does something *else* is a bug report.
+
+| Omarchy chord                                                                                      | What Omarchy does with it                                            | Why not here                                                |
+|----------------------------------------------------------------------------------------------------|----------------------------------------------------------------------|-------------------------------------------------------------|
+| `super+alt+return, super+ctrl+return, super+shift+{a,c,d,e,g,m,o,p,s,w,x,y,/}, +alt/ctrl variants` | Omarchy's preinstalled application, TUI and webapp chords            | Omarchy binds it conditionally; a table of constants cannot |
+| `super+c / super+v / super+x`                                                                      | universal copy / paste / cut, by synthesising Ctrl+C/V/X at the seat | chonkstep has no verb for it, and no command can stand in   |
+| `super+j`                                                                                          | toggle window split                                                  | tiling-only: no meaning on a stacking desk                  |
+| `super+p`                                                                                          | pseudo-tile the window                                               | tiling-only: no meaning on a stacking desk                  |
+| `super+t`                                                                                          | toggle floating / tiling                                             | tiling-only: no meaning on a stacking desk                  |
+| `super+ctrl+f`                                                                                     | tiled fullscreen                                                     | tiling-only: no meaning on a stacking desk                  |
+| `super+o`                                                                                          | pop the window out, floating and pinned                              | tiling-only: no meaning on a stacking desk                  |
+| `super+home / super+alt+home`                                                                      | restore / save window width                                          | commands Hyprland, which is not running                     |
+| `super+l`                                                                                          | cycle the workspace layout                                           | commands Hyprland, which is not running                     |
+| `super+g / super+alt+g`                                                                            | toggle grouping / move out of group                                  | tiling-only: no meaning on a stacking desk                  |
+| `super+alt+left/right/up/down`                                                                     | move the window into the group in that direction                     | tiling-only: no meaning on a stacking desk                  |
+| `super+alt+tab / super+alt+shift+tab`                                                              | next / previous window in the group                                  | tiling-only: no meaning on a stacking desk                  |
+| `super+ctrl+left / super+ctrl+right`                                                               | move the grouped-window focus                                        | tiling-only: no meaning on a stacking desk                  |
+| `super+alt+1..5`                                                                                   | focus the nth window of the group                                    | tiling-only: no meaning on a stacking desk                  |
+| `super+left/right/up/down`                                                                         | focus the window in that direction                                   | chonkstep has no verb for it, and no command can stand in   |
+| `super+shift+left/right/up/down`                                                                   | swap the window with its neighbour                                   | tiling-only: no meaning on a stacking desk                  |
+| `super+minus / super+equal, +shift/alt/ctrl variants`                                              | grow and shrink the window by 25 / 100 / 300 px                      | tiling-only: no meaning on a stacking desk                  |
+| `super+1..0`                                                                                       | switch to workspace n                                                | chonkstep has no verb for it, and no command can stand in   |
+| `super+shift+1..0`                                                                                 | move the window to workspace n                                       | chonkstep has no verb for it, and no command can stand in   |
+| `super+shift+alt+1..0`                                                                             | move the window to workspace n without following                     | chonkstep has no verb for it, and no command can stand in   |
+| `super+s`                                                                                          | toggle the scratchpad workspace                                      | chonkstep has no verb for it, and no command can stand in   |
+| `super+ctrl+tab`                                                                                   | the workspace before this one                                        | chonkstep has no verb for it, and no command can stand in   |
+| `super+shift+alt+left/right/up/down`                                                               | move the workspace to the monitor in that direction                  | chonkstep has no verb for it, and no command can stand in   |
+| `ctrl+alt+tab / ctrl+alt+shift+tab`                                                                | focus the next / previous monitor                                    | chonkstep has no verb for it, and no command can stand in   |
+| `ctrl+alt+delete`                                                                                  | close every window                                                   | commands Hyprland, which is not running                     |
+| `super+slash / super+alt+slash`                                                                    | monitor scaling up / down                                            | commands Hyprland, which is not running                     |
+| `super+mouse wheel, super+drag`                                                                    | scroll through workspaces; move and resize by mouse                  | not a key chord this config format can express              |
+| `super+k`                                                                                          | Omarchy's keybinding cheatsheet                                      | declined on purpose — see the note under the table          |
+| `super+shift+space`                                                                                | toggle Omarchy's top bar                                             | chonkstep has no verb for it, and no command can stand in   |
+| `super+ctrl+d`                                                                                     | Omarchy's display panel                                              | commands Hyprland, which is not running                     |
+| `super+backspace / super+shift+backspace / super+ctrl+backspace`                                   | window transparency; window gaps; single-window square aspect        | commands Hyprland, which is not running                     |
+| `super+ctrl+delete / super+ctrl+alt+delete`                                                        | toggle the laptop display; toggle mirroring                          | commands Hyprland, which is not running                     |
+| `super+ctrl+z / super+ctrl+alt+z`                                                                  | cursor zoom in / reset                                               | commands Hyprland, which is not running                     |
+| `super+shift+code:201`                                                                             | Omarchy's root menu, on a bare keycode                               | not a key chord this config format can express              |
+| `switch:on/off:Lid Switch`                                                                         | run the lid-close and clamshell handlers                             | not a key chord this config format can express              |
+| `touchpad toggle / on / off`                                                                       | enable and disable the touchpad                                      | commands Hyprland, which is not running                     |
+| `super+ctrl+x, f9`                                                                                 | voxtype dictation: toggle, and push-to-talk                          | Omarchy binds it conditionally; a table of constants cannot |
+
+The four gaps most worth knowing about — workspaces by number, carrying
+a window between workspaces, directional focus, and toggling Omarchy's
+bar — have workarounds listed in
+[omarchy-mode.md](omarchy-mode.md#the-gaps-worth-knowing-about).
 
 ## The mouse gestures
 
@@ -59,13 +250,24 @@ its titlebar back permanently instead, name it in `[decorations]
 server_side`; to keep an xdg client bare on purpose, name it in
 `client_side` — see `docs/config.example.toml`.
 
-Two more actions exist and are deliberately unbound by default —
+Three more actions exist and are deliberately unbound by default —
 give them keys in your config:
 
-| Action    | What it does                                                             |
-|-----------|--------------------------------------------------------------------------|
-| `reload`  | Re-read the config file and apply all of it, live — nothing closed       |
-| `restart` | Re-exec the on-disk binary, for picking up a new build                   |
+| Action        | What it does                                                         |
+|---------------|----------------------------------------------------------------------|
+| `toggle-dock` | Show / hide the Dock, column and reserved strip together             |
+| `reload`      | Re-read the config file and apply all of it, live — nothing closed   |
+| `restart`     | Re-exec the on-disk binary, for picking up a new build               |
+
+`toggle-dock` is the keyboard's way to the root menu's `Dock` row.
+Hidden means hidden *and* out of the way: the column is unmapped and
+the one-tile strip it reserves goes straight back to the workarea, so
+maximized windows use the full width of the screen. The Clip, the
+launcher strip and any miniaturized window's icon tile are their own
+surfaces elsewhere on the desk and stay put. The choice is remembered
+across sessions; `show_dock = false` in the config is where a session
+that never wants a Dock starts — see
+[config.example.toml](config.example.toml).
 
 ## Fixed modal machinery (not rebindable)
 
@@ -83,9 +285,11 @@ give them keys in your config:
 ## Mouse, for completeness
 
 - Right-click the desktop: the root menu — `Terminal`, `Applications`,
-  `Theme`, `Wallpaper`, then `Omarchy Bar` (when the session hosts
-  Omarchy's shell) and the `Omarchy` submenu (when Omarchy is
-  installed), and `Exit`.
+  `Theme`, `Wallpaper`, `Dock`, then `Omarchy Bar` (when the session
+  hosts Omarchy's shell) and the `Omarchy` submenu (when Omarchy is
+  installed), and `Exit`. `Dock` and `Omarchy Bar` are bulleted when
+  that column is on screen, the way the `Theme` and `Wallpaper` rows
+  mark the current choice.
 - Right-click any titlebar: the window commands menu.
 - Drag a miniaturized window's icon tile onto the launcher strip to
   pin its application; click a pin to launch or focus; drag off to

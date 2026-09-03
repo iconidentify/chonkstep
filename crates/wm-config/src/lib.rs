@@ -28,6 +28,8 @@
 //! The format, in full:
 //!
 //! ```toml
+//! desktop = "omarchy"                # optional; a whole posture's defaults (see `preset`)
+//! keymap = "omarchy"                 # optional; which binding vocabulary (see `preset`)
 //! focus_follows_mouse = false        # optional; default false
 //! scale = 2.0                        # optional; UI scale factor
 //! theme = "nextstep-classic"         # optional; theme name
@@ -38,8 +40,10 @@
 //! drag_modifier = "alt"              # optional; move/resize drag modifier, or "none"
 //! restore_session = true             # optional; relaunch last session's windows
 //! lock_command = "swaylock"          # optional; locker for post-crash recovery
+//! show_dock = true                  # optional; the Dock column and its screen strip
 //! omarchy_menu = true                # optional; Omarchy's menu under right-click
 //! omarchy_shell = true               # optional; host Omarchy's shell (bar, panels, OSD)
+//! omarchy_bar = true                 # optional; start with that bar shown
 //! terminal = "alacritty"             # optional; the terminal the shell spawns (string or argv)
 //! autostart = [["udiskie", "--automount"]]  # optional; run once, in order, on a fresh session
 //!
@@ -65,6 +69,8 @@
 //! crate's — which is why `scale` and `theme` stay `Option` here
 //! instead of being defaulted: the caller must be able to tell "user
 //! said nothing" apart from "user chose the default value".
+
+pub mod preset;
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -114,6 +120,16 @@ pub enum Action {
     /// says why it exists: "To access the window commands menu of a
     /// window without its titlebar, press Control+Esc."
     WindowMenu,
+    /// Show the Dock if it is hidden, hide it if it is shown — the
+    /// keyboard's way to the same choice the root menu's `Dock` row
+    /// makes, remembered across sessions in chonkstep's own state.
+    ///
+    /// A verb rather than a `[commands]` entry because hiding the Dock
+    /// is not a program to run: it unmaps a surface *and* gives the
+    /// strip it reserved back to the workarea, which is the window
+    /// manager's own semantics and nothing an external command could
+    /// reach.
+    ToggleDock,
     /// Re-read this file and apply it to the running session — theme,
     /// UI scale, focus policy, placement, edge resistance and these
     /// very bindings, with no restart and nothing closed.
@@ -165,6 +181,7 @@ fn action_from_name(name: &str) -> Option<Action> {
         "workspace-carry-prev" => Some(Action::WorkspaceCarryPrev),
         "overview" => Some(Action::Overview),
         "window-menu" => Some(Action::WindowMenu),
+        "toggle-dock" => Some(Action::ToggleDock),
         "reload" => Some(Action::Reload),
         "restart" => Some(Action::Restart),
         // `run <name>` is the one action name that carries an argument,
@@ -307,6 +324,43 @@ pub struct Config {
     /// half a feature without it: a speed test, a theme picker or a
     /// volume key each ends in a panel that shell draws.
     pub omarchy_shell: bool,
+    /// Whether the session comes up wearing its Dock — the instrument
+    /// column in the primary monitor's top-right corner, and the strip
+    /// of screen it reserves off the workarea.
+    ///
+    /// On by default: the Dock is what a chonkstep desk *is*. Set it
+    /// to false for the configuration chonkstep is offered to Omarchy
+    /// as — its window management and chrome under Omarchy's own bar
+    /// and pickers, with no second piece of furniture in the corner.
+    ///
+    /// This is the *starting point*, not the last word: the root
+    /// menu's `Dock` row and the `toggle-dock` binding both write the
+    /// user's choice to chonkstep's state, and a stored choice wins
+    /// over this key exactly as a stored theme choice wins over
+    /// `theme` (see `chonk_shell::desktop::DockVisibility::resolve`).
+    pub show_dock: bool,
+    /// Whether the session starts with Omarchy's hosted bar on screen.
+    ///
+    /// `Option` for the same reason `theme` is: the bar's visibility is
+    /// a *remembered* choice (the root menu's `Omarchy Bar` row writes
+    /// it to chonkstep's own state), so the resolver must be able to
+    /// tell "the file said nothing, use the remembered choice or the
+    /// desk's own default of hidden" apart from "the file said start it
+    /// shown" — see `chonk_shell::omarchy_shell::BarVisibility::resolve`.
+    ///
+    /// `None` by default, because a chonkstep desk that merely *hosts*
+    /// Omarchy's shell already has a Dock in the corner and does not
+    /// want a second instrument strip unasked. `desktop = "omarchy"`
+    /// is the posture that asks.
+    pub omarchy_bar: Option<bool>,
+    /// Which posture's defaults this file was read over
+    /// ([`preset::Desktop`]). Carried so a session can *report* what it
+    /// resolved as; nothing downstream branches on it, because a preset
+    /// is only ever the starting value of the keys it sets.
+    pub desktop: preset::Desktop,
+    /// Which binding vocabulary [`Self::keybindings`] started from
+    /// ([`preset::Keymap`]), carried for the same reason.
+    pub keymap: preset::Keymap,
     pub keybindings: Vec<(KeyCombo, Action)>,
 }
 
@@ -373,6 +427,10 @@ impl Config {
             autostart: Vec::new(),
             omarchy_menu: true,
             omarchy_shell: true,
+            show_dock: true,
+            omarchy_bar: None,
+            desktop: preset::Desktop::Chonkstep,
+            keymap: preset::Keymap::Chonkstep,
             keybindings: vec![
                 bind("alt+shift+return", Action::SpawnTerminal),
                 bind("alt+shift+q", Action::Close),
@@ -438,6 +496,15 @@ fn keysym_for(token: &str) -> Option<u32> {
         "equal" => 0x3d,
         "comma" => 0x2c,
         "period" => 0x2e,
+        "bracketleft" => 0x5b,
+        "bracketright" => 0x5d,
+        // The key with a picture of a screen on it. It has no `XF86`
+        // prefix and predates that block by decades, but it is here for
+        // the same reason the block below is: every desktop's screenshot
+        // binding lands on it, and a parser with no name for it cannot
+        // host another desktop's capture tooling. Omarchy binds four
+        // chords on this one key.
+        "print" => 0xff61,
         // Function keys spelled out rather than computed so exactly
         // f1..f12 exist — no accidental "f01"/"f13" acceptance.
         "f1" => 0xffbe,
@@ -479,6 +546,12 @@ fn keysym_for(token: &str) -> Option<u32> {
         "kbdbrightnessdown" => 0x1008ff06,
         "poweroff" => 0x1008ff2a,
         "search" => 0x1008ff1b,
+        // The rest of the laptop's picture keys Omarchy binds: the
+        // backlight's own on/off/cycle key beside the two ramps above
+        // it, the calculator, and the eject key.
+        "kbdlightonoff" => 0x1008ff04,
+        "calculator" => 0x1008ff1d,
+        "eject" => 0x1008ff2c,
         _ => return None,
     };
     Some(keysym)
@@ -636,7 +709,11 @@ pub fn parse(text: &str) -> Result<Config, String> {
     let table: toml::Table = text
         .parse()
         .map_err(|err: toml::de::Error| format!("invalid TOML: {err}"))?;
-    let mut config = Config::default_config();
+    // The presets, applied to the defaults *before* the file's own keys
+    // are read — which is the whole of "an explicit setting always beats
+    // a preset default" (see `preset::base`, which also explains why
+    // this cannot happen inside the walk below).
+    let mut config = preset::base(&table);
     for (key, value) in &table {
         match key.as_str() {
             "focus_follows_mouse" => match value {
@@ -716,6 +793,24 @@ pub fn parse(text: &str) -> Result<Config, String> {
                 other => tracing::warn!(
                     value = ?other,
                     "config: omarchy_shell must be a boolean, keeping default"
+                ),
+            },
+            // Both preset keys are resolved by `preset::base` above,
+            // which also warns about a bad value. Listed here only so
+            // they are not reported as unknown top-level keys.
+            "desktop" | "keymap" => {}
+            "omarchy_bar" => match value {
+                toml::Value::Boolean(b) => config.omarchy_bar = Some(*b),
+                other => tracing::warn!(
+                    value = ?other,
+                    "config: omarchy_bar must be a boolean, keeping default"
+                ),
+            },
+            "show_dock" => match value {
+                toml::Value::Boolean(b) => config.show_dock = *b,
+                other => tracing::warn!(
+                    value = ?other,
+                    "config: show_dock must be a boolean, keeping default"
                 ),
             },
             "lock_command" => match value {
@@ -1326,6 +1421,7 @@ mod tests {
             ("workspace-carry-prev", Action::WorkspaceCarryPrev),
             ("overview", Action::Overview),
             ("window-menu", Action::WindowMenu),
+            ("toggle-dock", Action::ToggleDock),
             ("restart", Action::Restart),
         ];
         // One letter per action rather than one function key: the list
@@ -1672,6 +1768,27 @@ mod tests {
         // and leave the shell to something else, or the reverse.
         let config = parse("omarchy_menu = false\nomarchy_shell = true").unwrap();
         assert!(!config.omarchy_menu && config.omarchy_shell);
+    }
+
+    #[test]
+    fn show_dock_defaults_on_and_parses_as_a_boolean() {
+        // The Dock is what a chonkstep desk is, so it is there unless
+        // the file says otherwise.
+        assert!(Config::default_config().show_dock);
+        assert!(!parse("show_dock = false").unwrap().show_dock);
+        assert!(parse("show_dock = true").unwrap().show_dock);
+        // And it is independent of the Omarchy keys beside it: the
+        // dockless configuration is exactly "chonkstep's windowing
+        // under Omarchy's shell", which needs both halves at once.
+        let config = parse("show_dock = false\nomarchy_shell = true").unwrap();
+        assert!(!config.show_dock && config.omarchy_shell);
+    }
+
+    #[test]
+    fn wrongly_typed_show_dock_keeps_the_default() {
+        for text in ["show_dock = \"off\"", "show_dock = 0"] {
+            assert!(parse(text).unwrap().show_dock, "text {text:?}");
+        }
     }
 
     #[test]
