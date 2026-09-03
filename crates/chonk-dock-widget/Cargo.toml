@@ -23,8 +23,15 @@ license.workspace = true
 #     through `render` — five instruments used to construct one each,
 #     which is five full fontconfig scans for the shaping caches of a
 #     handful of three-character labels.
+#   - `tracing` for the one line `Argv` writes when it refuses a runtime
+#     value: an action that silently does not happen is the worst
+#     possible way to enforce a rule. It grants nothing — it is a facade
+#     that compiles to a no-op without a subscriber, and `wm-core`
+#     already puts it in this crate's dependency closure — so the "no
+#     capability lives here" property is untouched.
 [dependencies]
 wm-core = { path = "../wm-core" }
+tracing = "0.1"
 wm-theme = { path = "../wm-theme" }
 wm-theme-api = { path = "../wm-theme-api" }
 cosmic-text = "0.12"

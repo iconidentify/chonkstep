@@ -236,19 +236,32 @@ impl BackgroundCommand {
             // The one place in this crate where blocking on a child
             // process is the *point*: this closure is the body of the
             // sampler thread `Worker::spawn` started, so the only thing
-            // `output()` can park here is this worker. That is exactly
+            // a wait can park here is this worker. That is exactly
             // the property `clippy.toml`'s ban on `Command::output`
             // exists to force someone to state out loud — see
             // `super::SupervisedWidget` for what happens to a widget
             // that gets it wrong and blocks the repaint thread instead.
+            //
+            // "Only this worker", though, used to mean *forever*: a
+            // bare `output()` on a program that hangs instead of
+            // exiting wedges this thread for the life of the session,
+            // and the source behind it then shows its last good reading
+            // as if it were current. `bluetoothctl` with no `org.bluez`
+            // on the bus does exactly that — blocks indefinitely,
+            // silently — which is why the deadline below is not a
+            // nicety. Stdout is piped so it can be collected after the
+            // wait; stderr goes where the shell's does, as it always
+            // has.
             #[allow(clippy::disallowed_methods)]
-            let result = Command::new(program).args(&args).output();
-            match result {
+            let spawned = Command::new(program).args(&args).stdout(std::process::Stdio::piped()).spawn();
+            match spawned {
                 // A failed run clears the reading rather than leaving
                 // the last good one on screen: a tile showing a network
                 // that went away is worse than a tile admitting it does
-                // not know.
-                Ok(output) => Outcome::Sampled(output.status.success().then(|| String::from_utf8_lossy(&output.stdout).into_owned())),
+                // not know. A run killed at the deadline is a failed
+                // run by that same rule — the widget draws its dead
+                // face rather than a stale number.
+                Ok(child) => Outcome::Sampled(wait_with_deadline(child, program, SAMPLE_DEADLINE)),
                 Err(error) => {
                     tracing::debug!(?error, program, "sampler command could not be spawned; giving up on it");
                     Outcome::Unusable
@@ -327,32 +340,179 @@ fn read_tree(root: &Path, files: &[&str], dirs: &[&str]) -> Vec<TreeEntry> {
     out
 }
 
-/// Runs one program on a thread of its own and optionally nudges a
-/// sampler when it exits — the executor half of [`Effect::Run`].
+/// Runs a widget's commands **in the order it listed them**, one after
+/// another, on a single thread of the dock's own — the executor half
+/// of [`Effect::Run`], one command or several
+/// (`PanelReaction::RunAll`).
 ///
 /// This is the click path's version of the whole argument: `wpctl
 /// set-volume` and `nmcli radio wifi off` arrive on the same repaint
-/// thread a sample would have, and are just as able to park it.
-pub(crate) fn run_detached(program: &'static str, args: Vec<String>, then: Option<Resampler>) {
+/// thread a sample would have, and are just as able to park it. The
+/// dock hands them here and returns.
+///
+/// Sequential rather than one thread per command, because the plural
+/// exists for actions whose parts are a sequence: switching the
+/// default audio sink is `pactl set-default-sink` and then one
+/// `pactl move-sink-input` per playing stream, and a widget that lists
+/// them in that order means them in that order. One thread also costs
+/// less than N and cannot interleave two commands against the same
+/// daemon.
+///
+/// Each command's `then` resample fires as soon as *that* command
+/// exits, not at the end of the run: a resample is "the reading you
+/// need is ready now", and holding the first one until the last
+/// migration finished would make the panel look slower than the
+/// system it is reporting on.
+///
+/// `env` is the desktop's launch environment (`shell::launch_env`),
+/// given to every command: an `Effect::Run` that opens a *window* —
+/// the wifi join dialog, the Bluetooth pairing dialog — must wear the
+/// theme, appearance and scale the desk is wearing, and it learns them
+/// the same way every other GUI the shell starts does. A command that
+/// draws nothing is unharmed by carrying them.
+///
+/// Every command runs under [`RUN_DEADLINE`]: a program that hangs
+/// instead of exiting is killed rather than pinning this thread (and
+/// its child) for the life of the session. `bluetoothctl` with no
+/// `org.bluez` on the bus is the case that made this non-hypothetical
+/// — it blocks forever, silently — and Omarchy's own scripts wrap
+/// every such call in `timeout 2s` for the same reason.
+pub(crate) fn run_detached(commands: Vec<(&'static str, Vec<String>, Option<Resampler>)>, env: Vec<(String, String)>) {
+    let Some((first, _, _)) = commands.first() else {
+        return;
+    };
+    let name = format!("chonkstep-run-{first}");
     std::thread::Builder::new()
-        .name(format!("chonkstep-run-{program}"))
+        .name(name)
         .spawn(move || {
-            // Audited exception to `clippy.toml`'s ban, and the one
-            // worth reading twice: `nmcli` reaches this line, and
-            // `nmcli` is the exact binary whose blocking call froze the
-            // desktop on 2026-08-29. It is safe here for one reason
-            // only — this closure is the body of this effect's own
-            // worker thread, never the compositor's repaint loop. The
-            // widget that asked for it returned an `Effect` and cannot
-            // have run anything itself.
-            #[allow(clippy::disallowed_methods)]
-            let _ = Command::new(program).args(&args).output();
-            if let Some(resampler) = then {
-                resampler.resample_soon();
+            for (program, args, then) in commands {
+                // Audited exception to `clippy.toml`'s ban, and the one
+                // worth reading twice: `nmcli` reaches this line, and
+                // `nmcli` is the exact binary whose blocking call froze
+                // the desktop on 2026-08-29. It is safe here for one
+                // reason only — this closure is the body of this
+                // effect's own worker thread, never the compositor's
+                // repaint loop. The widget that asked for it returned
+                // an `Effect` and cannot have run anything itself.
+                //
+                // Output goes nowhere, as it did when this was an
+                // `output()` that captured and dropped both streams: an
+                // effect's answer is the next *sample*, never its
+                // chatter. Discarding rather than piping also means
+                // there is no pipe to fill, so a noisy command cannot
+                // wedge on a full buffer while this thread waits.
+                #[allow(clippy::disallowed_methods)]
+                let child = Command::new(program)
+                    .args(&args)
+                    .envs(env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .spawn();
+                match child {
+                    Ok(child) => {
+                        if wait_with_deadline(child, program, RUN_DEADLINE).is_none() {
+                            tracing::warn!(program, "effect command exceeded its deadline and was killed");
+                        }
+                    }
+                    Err(error) => tracing::warn!(?error, program, "effect command could not be started"),
+                }
+                if let Some(resampler) = then {
+                    resampler.resample_soon();
+                }
             }
         })
-        .map_err(|error| tracing::warn!(?error, program, "could not start the effect thread; the command will not run"))
+        .map_err(|error| tracing::warn!(?error, "could not start the effect thread; the commands will not run"))
         .ok();
+}
+
+/// How long any one command a widget asks for may take before the dock
+/// kills it.
+///
+/// Generous enough for the slow-but-honest ones this desktop actually
+/// runs — `nmcli dev wifi connect` negotiates with an access point,
+/// and the wifi join dialog is a *window* the user types a passphrase
+/// into — and finite, which is the whole point: the failure being
+/// prevented is a worker parked forever, not a worker parked a while.
+const RUN_DEADLINE: Duration = Duration::from_secs(120);
+
+/// How long a *sampler's* command may take before it is killed and the
+/// reading reported as absent.
+///
+/// Much tighter than [`RUN_DEADLINE`], because a sample is a poll on a
+/// timer: anything that has not answered in this long has already
+/// missed its interval, and the widget is better told "no reading"
+/// (which it draws as a dead face) than left showing a number from
+/// before the tool wedged.
+const SAMPLE_DEADLINE: Duration = Duration::from_secs(8);
+
+/// Waits for `child` up to `deadline`, killing it if it overruns.
+/// `Some(stdout)` for a command that exited successfully within the
+/// deadline; `None` for every other outcome — non-zero exit, unreadable
+/// output, or the deadline.
+///
+/// Polling rather than a `wait_timeout` from a crate: this is a worker
+/// thread with nothing else to do, the poll is a `waitpid(WNOHANG)`,
+/// and 20ms of latency on a command that takes hundreds of
+/// milliseconds is invisible. The alternative — a dependency whose job
+/// is one loop — is not worth it here.
+///
+/// One caveat the callers are built around: stdout is read *after* the
+/// child exits, so a command that writes more than a pipe buffer's
+/// worth (64KB) without exiting would block on the pipe and be killed
+/// at the deadline. Every sampler command here is a line-oriented
+/// status query measured in kilobytes; a source that needs to stream
+/// wants a different mechanism, not a bigger buffer.
+fn wait_with_deadline(mut child: std::process::Child, program: &str, deadline: Duration) -> Option<String> {
+    let start = std::time::Instant::now();
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                if !status.success() {
+                    return None;
+                }
+                // The child's stdout is a pipe only when the caller
+                // asked for one; a `spawn`ed command with inherited
+                // stdio has nothing to read and answers with an empty
+                // string, which its caller ignores.
+                let mut out = String::new();
+                if let Some(mut pipe) = child.stdout.take() {
+                    use std::io::Read;
+                    if pipe.read_to_string(&mut out).is_err() {
+                        return None;
+                    }
+                }
+                return Some(out);
+            }
+            Ok(None) => {
+                if start.elapsed() >= deadline {
+                    // Kill, then reap: a killed child left unwaited is
+                    // a zombie, and this desktop runs for weeks.
+                    //
+                    // Audited exception to `clippy.toml`'s ban on
+                    // `Child::wait`, on both counts the ban names. The
+                    // thread: this function only ever runs on a dock
+                    // worker (a sampler's, or an effect's), never the
+                    // repaint thread — the whole point of the deadline
+                    // above is that this worker gets *unstuck*, so
+                    // trading the wait for a leaked zombie would be
+                    // undoing the fix. The duration: the child has just
+                    // been sent SIGKILL, which is not catchable, so
+                    // this is a reap of a process already on its way
+                    // out rather than a wait on one still working.
+                    let _ = child.kill();
+                    #[allow(clippy::disallowed_methods)]
+                    let _ = child.wait();
+                    tracing::warn!(program, ?deadline, "killing a command that never exited");
+                    return None;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Err(error) => {
+                tracing::warn!(?error, program, "could not wait on a command; giving up on it");
+                return None;
+            }
+        }
+    }
 }
 
 /// The sampler thread and the mailbox it drops results into, shared by
@@ -722,12 +882,52 @@ mod tests {
     /// The same claim for the click path: `Effect::Run` hands the
     /// command to a thread and returns, so a `wpctl` or `nmcli` that
     /// hangs costs a tile that does not catch up rather than a desktop
-    /// that stops drawing.
+    /// that stops drawing. And the same for the plural — a
+    /// multi-command action (a sink switch plus its stream migrations)
+    /// is one handoff and one thread: the commands wait for each other,
+    /// the desktop waits for none of them.
     #[test]
-    fn running_an_effect_returns_before_the_command_does() {
+    fn running_effects_returns_before_the_commands_do() {
         let start = std::time::Instant::now();
-        run_detached("sleep", vec!["2".to_string()], None);
+        run_detached(vec![("sleep", vec!["2".to_string()], None)], Vec::new());
         assert!(start.elapsed() < Duration::from_millis(50), "run_detached must not wait on the child");
+
+        let start = std::time::Instant::now();
+        run_detached(vec![("sleep", vec!["2".to_string()], None), ("sleep", vec!["2".to_string()], None)], Vec::new());
+        assert!(start.elapsed() < Duration::from_millis(50), "a sequence must not wait on its children either");
+
+        run_detached(Vec::new(), Vec::new());
+    }
+
+    /// The deadline, on the shape that made it necessary: a program
+    /// that never exits (`bluetoothctl` with no `org.bluez` on the bus,
+    /// and `sleep` here standing in for it) is killed and reported as
+    /// *no reading*, so its widget draws a dead face rather than a
+    /// number from before the tool wedged. Without this the worker
+    /// thread — and the child — would be parked for the life of the
+    /// session.
+    #[test]
+    fn a_command_that_never_exits_is_killed_and_reads_as_nothing() {
+        #[allow(clippy::disallowed_methods)]
+        let child = Command::new("sleep").arg("30").stdout(std::process::Stdio::piped()).spawn().expect("sleep exists");
+        let start = std::time::Instant::now();
+        let reading = wait_with_deadline(child, "sleep", Duration::from_millis(150));
+        assert!(reading.is_none(), "a killed command has no reading, exactly as a failed one has none");
+        assert!(start.elapsed() < Duration::from_secs(5), "and the wait ended at the deadline, not at the child's own pace");
+    }
+
+    /// The ordinary path is untouched by the deadline machinery: a
+    /// command that exits in time still hands back its stdout, which is
+    /// the whole product of a `Source::Command`.
+    #[test]
+    fn a_command_that_exits_in_time_still_yields_its_output() {
+        #[allow(clippy::disallowed_methods)]
+        let child = Command::new("echo").arg("hello").stdout(std::process::Stdio::piped()).spawn().expect("echo exists");
+        assert_eq!(wait_with_deadline(child, "echo", Duration::from_secs(5)).as_deref(), Some("hello\n"));
+
+        #[allow(clippy::disallowed_methods)]
+        let child = Command::new("false").stdout(std::process::Stdio::piped()).spawn().expect("false exists");
+        assert_eq!(wait_with_deadline(child, "false", Duration::from_secs(5)), None, "a non-zero exit is still no reading");
     }
 }
 

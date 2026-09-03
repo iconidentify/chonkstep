@@ -77,13 +77,13 @@ fn a_dockapp_panel_opens_streams_receives_input_and_dismisses() {
     }
     session.door().barrier().unwrap();
 
-    // The probe's tile: the identity tile plus the six built-in
-    // instruments sit above it, so it is the seventh slot down the
+    // The probe's tile: the identity tile plus the seven built-in
+    // instruments sit above it, so it is the eighth slot down the
     // column (default order; this session has no remembered one).
     let world = session.world().unwrap();
     let dock = world.dock().expect("the dock is in the ledger").clone();
     let tile = (56.0 * world.scale).round() as i32;
-    let (tile_x, tile_y) = (dock.x as f64 + tile as f64 / 2.0, (tile * 7) as f64 + tile as f64 / 2.0);
+    let (tile_x, tile_y) = (dock.x as f64 + tile as f64 / 2.0, (tile * 8) as f64 + tile as f64 / 2.0);
 
     // -- click the tile: the panel unfolds beside the dock ---------------
     session.door().click(tile_x, tile_y).unwrap();

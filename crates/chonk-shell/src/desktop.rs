@@ -34,14 +34,15 @@ use wm_theme_api::{DecorationBuffer, Point, Rect, Size};
 use chonk_dock_proto::wire::{InputEvent, InputKind, PanelCloseReason};
 
 use crate::dockapp::panel::{self as instrument, InstrumentPanel};
-use crate::dockapp::tile::{reserved_filter, RemoteTile, ServiceContext, StopReason, TileState};
+use crate::dockapp::tile::{clamp_panel_grant, reserved_filter, RemoteTile, ServiceContext, StopReason, TileState};
 use crate::dockapp::{self, DockHost, Farewell};
 use crate::overview::{OverviewHit, OverviewItem, OverviewPanel};
 use crate::omarchy_shell::BarVisibility;
 use crate::wallpaper::Wallpaper;
 use crate::widgets::{
-    run_detached, ClockWidget, DockInput, DockItem, DockWidget, Effect, NetTrafficWidget, PowerWidget, SamplerRegistry, SoundWidget, SupervisedWidget,
-    SysLoadWidget, WifiWidget, WorkspaceShared,
+    run_detached, BluetoothWidget, ClockWidget, DockInput, DockItem, DockWidget, Effect, NetTrafficWidget, PanelCtx, PanelEvent,
+    PanelFrame, PanelReaction, PowerWidget, SamplerRegistry, SoundWidget, SupervisedWidget, SysLoadWidget, WifiWidget,
+    WorkspaceShared,
 };
 
 /// The keysym the open instrument panel grabs for its dismissal —
@@ -1144,11 +1145,38 @@ fn centered_on(primary: Rect, size: Size) -> Point {
     )
 }
 
+/// Translates the panel-input wire shape the desktop's routing already
+/// speaks (`InputEvent`, shared with remote panels) into the SDK
+/// vocabulary a built-in widget matches on. Total, because everything
+/// the routing can deliver has a built-in meaning: presses were
+/// already narrowed to left by [`reserved_filter`], and `Motion` is
+/// panel-only in both worlds.
+fn builtin_panel_event(event: &InputEvent) -> PanelEvent {
+    let local = Point::new(event.x, event.y);
+    match event.kind {
+        InputKind::Press => PanelEvent::LeftPress { local },
+        InputKind::Release => PanelEvent::LeftRelease { local },
+        InputKind::Scroll => PanelEvent::Scroll { local, delta: event.delta },
+        InputKind::Motion => PanelEvent::Motion { local },
+        InputKind::Enter => PanelEvent::Enter,
+        InputKind::Leave => PanelEvent::Leave,
+    }
+}
+
 /// The dock's default instrument stack, top to bottom, under the
-/// identity tile: the five instruments — network traffic, system load,
-/// sound, link, power — with the analog clock as the bookend at the
-/// bottom, closing the rack the way the identity tile opens it (the two
-/// non-instrument faces frame the glass screens between them).
+/// identity tile: the six instruments — network traffic, system load,
+/// sound, link, Bluetooth, power — with the analog clock as the bookend
+/// at the bottom, closing the rack the way the identity tile opens it
+/// (the two non-instrument faces frame the glass screens between them).
+///
+/// Bluetooth sits directly under link on purpose: they are the two
+/// radios, they read as one family on the dock, and their panels are
+/// the same shape. On a machine with no adapter the tile shows the
+/// SDK's dead screen — the same answer the power tile gives a desktop
+/// with no battery — rather than vanishing, because a tile that
+/// disappears when its hardware is absent makes the column's geometry
+/// depend on the machine and leaves nothing to click when the dongle
+/// is plugged in.
 /// Middle-click drag reorders live and `dock_order` remembers it; this
 /// is only what a session with no remembered order starts from.
 ///
@@ -1173,9 +1201,46 @@ fn builtin_items() -> Vec<DockItem> {
         DockItem::builtin("builtin:sysload", Box::new(SysLoadWidget::new())),
         DockItem::builtin("builtin:sound", Box::new(SoundWidget::new())),
         DockItem::builtin("builtin:wifi", Box::new(WifiWidget::new())),
+        DockItem::builtin("builtin:bluetooth", Box::new(BluetoothWidget::new())),
         DockItem::builtin("builtin:power", Box::new(PowerWidget::new())),
         DockItem::builtin("builtin:clock", Box::new(ClockWidget::new())),
     ]
+}
+
+/// The state of one open *built-in* instrument panel — the in-process
+/// half of what [`RemoteTile`]'s `PanelState` holds for a dockapp,
+/// minus everything the socket made necessary. No generations (a
+/// direct render cannot arrive out of order), no bands (the widget
+/// draws the whole frame), no liveness pings (a built-in that stalls
+/// is caught by [`SupervisedWidget`]'s budget, and eviction tears its
+/// panel down). What remains is exactly the negotiation the desktop
+/// arbitrates on: who owns the screen, at what granted size, with
+/// which pixels.
+struct BuiltinPanel {
+    /// The owning item's persistence id (`builtin:*`) — the same key
+    /// the surface's owner field carries, so click-away, toggle and
+    /// teardown resolve through one comparison whatever kind of tile
+    /// owns the panel.
+    id: String,
+    /// The granted content size: the widget's [`PanelSpec`] clamped by
+    /// [`crate::dockapp::tile::clamp_panel_grant`], through the same
+    /// arithmetic a remote `OpenPanel` is granted by, so a built-in
+    /// cannot be granted a panel a dockapp would have been refused.
+    ///
+    /// [`PanelSpec`]: chonk_dock_widget::PanelSpec
+    granted: (u32, u32),
+    /// The persistent granted-size frame the widget renders into —
+    /// kept across repaints so a widget may redraw only what changed.
+    frame: PanelFrame,
+    /// This panel was opened (or re-opened) since the last
+    /// reconciliation pass — the arbitration token
+    /// [`Desktop::sync_instrument_panel`] consumes to decide the
+    /// desktop-wide winner. The twin of `PanelState::just_opened`.
+    just_opened: bool,
+    /// The frame is stale: the widget asked for a repaint
+    /// ([`PanelReaction::Repaint`]) or has never rendered. Cleared by
+    /// the reconciliation pass that re-renders and presents.
+    dirty: bool,
 }
 
 pub struct Desktop<B: Backend> {
@@ -1290,9 +1355,19 @@ pub struct Desktop<B: Backend> {
     overview: OverviewPanel<B>,
     /// The one open instrument panel's surface and identity —
     /// desktop-wide singleton by construction. The panel's *pixels*
-    /// live with the owning [`RemoteTile`]; see
+    /// live with the owning [`RemoteTile`] — or, for a built-in
+    /// widget's panel, with [`Desktop::builtin_panel`]; see
     /// [`crate::dockapp::panel`] for the split.
     instrument_panel: InstrumentPanel<B>,
+    /// The open *built-in* panel, if any: the in-process counterpart
+    /// of a [`RemoteTile`]'s panel state, holding what the socket
+    /// would have held — the granted size and the newest frame — for
+    /// a widget that draws directly instead of streaming. At most one,
+    /// and at most one panel desktop-wide across both kinds: the
+    /// arbitration in [`Desktop::sync_instrument_panel`] closes
+    /// whichever kind lost. The surface, chrome and placement are the
+    /// same [`InstrumentPanel`] whoever the owner is.
+    builtin_panel: Option<BuiltinPanel>,
     /// Whether the shell holds the bare-Escape key grab that makes
     /// panel dismissal work while the panel is up. Tracked so the grab
     /// and its release are exactly paired whatever order the teardown
@@ -1376,7 +1451,15 @@ impl<B: Backend> Desktop<B> {
         let mut inherited = dockapps.handoff_path().map(|path| dockapp::handoff::take(&path)).unwrap_or_default();
 
         let mut samplers = SamplerRegistry::new();
-        let items: Vec<SupervisedWidget> = builtin_items()
+        let mut builtins = builtin_items();
+        // The built-in panel conformance probe, constructed only when
+        // the e2e suite asks for it by environment — the same gate the
+        // injection door uses (`CHONKSTEP_TEST_SOCKET`), so a
+        // production dock never shows it. See `widgets::panel_probe`.
+        if std::env::var_os("CHONKSTEP_TEST_PANEL_TILE").is_some() {
+            builtins.push(DockItem::builtin("builtin:panel-probe", Box::new(crate::widgets::panel_probe::PanelProbeWidget::new())));
+        }
+        let items: Vec<SupervisedWidget> = builtins
             .into_iter()
             .chain(registered.into_iter().map(|entry| {
                 let mut remote = RemoteTile::new(entry, tile, now);
@@ -1454,6 +1537,7 @@ impl<B: Backend> Desktop<B> {
             switcher: None,
             overview: OverviewPanel::default(),
             instrument_panel: InstrumentPanel::default(),
+            builtin_panel: None,
             panel_key_grabbed: false,
             panel_swallow_release: None,
             theme_id,
@@ -2113,6 +2197,16 @@ impl<B: Backend> Desktop<B> {
                 }
             }
         }
+        // A built-in open that raced a remote one inside the same 16ms
+        // pass wins the tie: the right-click is the user's own hand on
+        // the tile this instant, where a remote open is a client
+        // reacting to an earlier click. Either way the loser is closed
+        // below — opening one kind of panel closes the other.
+        if let Some(panel) = &mut self.builtin_panel {
+            if std::mem::take(&mut panel.just_opened) {
+                winner = Some(panel.id.clone());
+            }
+        }
         if let Some(winner) = &winner {
             for item in &mut self.items {
                 if let Some(tile) = item.remote_mut() {
@@ -2121,12 +2215,27 @@ impl<B: Backend> Desktop<B> {
                     }
                 }
             }
+            if self.builtin_panel.as_ref().is_some_and(|panel| panel.id != *winner) {
+                self.builtin_panel = None;
+            }
+        }
+        // A built-in owner the supervisor has since evicted (or that
+        // somehow left the column) takes its panel state with it — the
+        // no-owner arm below then hides the surface, exactly as a dead
+        // dockapp's teardown does for a remote panel.
+        if let Some(panel) = &self.builtin_panel {
+            let live = self.items.iter().any(|item| item.id() == panel.id && !item.evicted());
+            if !live {
+                self.builtin_panel = None;
+            }
         }
 
         // Whoever holds an open grant now owns the screen (at most one,
         // by the arbitration above).
-        let owner = self.items.iter().find_map(|item| {
-            item.remote().filter(|tile| tile.panel_open()).map(|tile| tile.id().to_string())
+        let owner = self.builtin_panel.as_ref().map(|panel| panel.id.clone()).or_else(|| {
+            self.items
+                .iter()
+                .find_map(|item| item.remote().filter(|tile| tile.panel_open()).map(|tile| tile.id().to_string()))
         });
         let Some(owner) = owner else {
             if self.instrument_panel.visible() {
@@ -2137,22 +2246,33 @@ impl<B: Backend> Desktop<B> {
         };
 
         // Geometry: beside the dock, level with the owning tile's slot.
-        let Some(slot_top) = self
+        let Some((index, slot_top)) = self
             .item_slots()
             .into_iter()
             .find(|(index, _)| self.items[*index].id() == owner)
-            .map(|(_, rect)| rect.pos.y)
+            .map(|(index, rect)| (index, rect.pos.y))
         else {
             // The tile left the column while holding a grant (removed
             // mid-pass); its shutdown path closes the panel, and the
             // next pass lands in the no-owner arm above.
             return;
         };
-        let Some(tile) = self.items.iter_mut().filter_map(|item| item.remote_mut()).find(|tile| tile.id() == owner) else {
-            return;
+
+        // What was granted and whether new pixels are due this pass —
+        // answered per kind, presented through the one surface below.
+        // A built-in is polled while its panel is open (the direct
+        // replacement for the frames a dockapp would push), so its
+        // panel data rides the same pass that folds its samples.
+        let (granted, ready) = if self.builtin_panel.is_some() {
+            let ticked = self.items[index].panel_tick(now);
+            let Some(panel) = self.builtin_panel.as_mut() else { return };
+            let ready = std::mem::take(&mut panel.dirty) || ticked;
+            (panel.granted, ready)
+        } else {
+            let Some(tile) = self.items[index].remote_mut() else { return };
+            let Some(granted) = tile.panel_granted() else { return };
+            (granted, tile.take_panel_ready(now))
         };
-        let Some(granted) = tile.panel_granted() else { return };
-        let ready = tile.take_panel_ready(now);
 
         let dock_geom = self.dock_geom();
         let inset = instrument::chrome_inset(theme);
@@ -2161,19 +2281,130 @@ impl<B: Backend> Desktop<B> {
         let restage = !self.instrument_panel.visible()
             || self.instrument_panel.owner() != Some(owner.as_str())
             || self.instrument_panel.geometry() != geometry;
-        // Split borrows: the frame lives in `items`, the surface in
-        // `instrument_panel` — disjoint fields of `self`.
-        let frame = self
-            .items
-            .iter()
-            .find_map(|item| item.remote().filter(|tile| tile.id() == owner))
-            .and_then(RemoteTile::panel_frame);
+        if !restage && !ready {
+            return;
+        }
+
+        // A built-in's frame is rendered here, on demand — the buffer
+        // handoff that stands where a remote panel's banded stream
+        // stood. Split borrows: the widget lives in `items`, its frame
+        // in `builtin_panel`, the text machinery in `fonts` — disjoint
+        // fields of `self`.
+        if let Some(panel) = self.builtin_panel.as_mut() {
+            let mut fonts = self.fonts.system();
+            let mut swash = self.fonts.swash();
+            let mut ctx = PanelCtx { theme, tile: self.tile, fonts: &mut fonts, swash: &mut swash };
+            self.items[index].render_panel(&mut panel.frame, &mut ctx);
+        }
+        // Split borrows again: the pixels live in `builtin_panel` or in
+        // `items` (remote), the surface in `instrument_panel`.
+        let frame = match self.builtin_panel.as_ref() {
+            Some(panel) => Some(panel.frame.buffer()),
+            None => self
+                .items
+                .iter()
+                .find_map(|item| item.remote().filter(|tile| tile.id() == owner))
+                .and_then(RemoteTile::panel_frame),
+        };
         if restage {
             self.instrument_panel.show(backend, theme, &owner, granted, geometry, frame);
             self.set_panel_key_grab(backend, true);
-        } else if ready {
+        } else {
             self.instrument_panel.repaint(backend, theme, frame);
         }
+    }
+
+    /// The dock's open gesture for a built-in panel: right-click on a
+    /// panel-capable tile ([`DockWidget::panel_spec`] non-`None`)
+    /// opens its panel, and the same click on the tile whose panel is
+    /// already open closes it. Returns whether the press was consumed
+    /// — `false` for a tile with no panel, so the caller's routing
+    /// falls through unchanged (a remote tile's right-click keeps
+    /// meaning its own menu, and its panel keeps opening from
+    /// whatever its client decided a click means).
+    ///
+    /// The press only *stages* the open. The surface appears on the
+    /// next reconciliation pass ([`Desktop::sync_instrument_panel`],
+    /// at most one housekeeping tick away), which is also where a
+    /// panel of the other kind gets closed — one arbitration path for
+    /// every opener, however it arrived.
+    pub fn toggle_builtin_panel(&mut self, backend: &mut B, theme: &Theme, local: Point) -> bool {
+        let Some(index) = self.item_index_at(local) else { return false };
+        let id = self.items[index].id().to_string();
+        if self.builtin_panel.as_ref().is_some_and(|panel| panel.id == id) {
+            // The re-click is the toggle, resolved through the same
+            // funnel every other dismissal gesture ends in.
+            self.dismiss_instrument_panel(backend, PanelCloseReason::Dismissed);
+            return true;
+        }
+        // The gesture is also a click-away: a right-click on any *other*
+        // tile takes the open built-in panel down, exactly as a left
+        // press on another tile does (`dock_input`). Done before the
+        // capability check, because a panel-less tile is a place to
+        // click away to just as much as a panel-capable one is —
+        // otherwise the panel would survive a click on the tile right
+        // next to it and look stuck.
+        if self.builtin_panel.is_some() {
+            self.dismiss_instrument_panel(backend, PanelCloseReason::Dismissed);
+        }
+        let Some(spec) = self.items[index].panel_spec(self.tile) else { return false };
+        // The same clamp a remote `OpenPanel` is granted through, so a
+        // built-in cannot hold a panel a dockapp would be refused; the
+        // same refusal for a degenerate spec or workarea.
+        let workarea = self.primary_workarea();
+        let chrome = instrument::chrome_inset(theme) * 2;
+        let bounds = (workarea.size.w.saturating_sub(chrome), workarea.size.h.saturating_sub(chrome));
+        let Some(granted) = clamp_panel_grant(spec.width, spec.height, bounds) else {
+            tracing::warn!(%id, asked = format!("{}x{}", spec.width, spec.height), "refusing a built-in instrument panel spec");
+            return false;
+        };
+        self.builtin_panel = Some(BuiltinPanel {
+            id,
+            granted,
+            frame: PanelFrame::new(granted.0, granted.1),
+            just_opened: true,
+            dirty: true,
+        });
+        true
+    }
+
+    /// Applies what a built-in widget said about a panel event. No
+    /// backend in the signature on purpose — the hover path that also
+    /// delivers panel events has none — so a `Close` drops the state
+    /// and lets the next reconciliation pass (at most one housekeeping
+    /// tick away) take the surface down: the same cadence a remote
+    /// `ClosePanel` request lands on.
+    fn apply_panel_reaction(&mut self, reaction: PanelReaction) {
+        match reaction {
+            PanelReaction::None => return,
+            PanelReaction::Repaint => {
+                if let Some(panel) = &mut self.builtin_panel {
+                    panel.dirty = true;
+                }
+                return;
+            }
+            PanelReaction::Close => {
+                self.builtin_panel = None;
+                return;
+            }
+            // Both Run arities flatten through `effects()`, so the
+            // single-command shorthand and the multi-command form
+            // cannot drift apart — see `PanelReaction`.
+            PanelReaction::Run(_) | PanelReaction::RunAll(_) => {}
+        }
+        // The identical executor a tile click's effects run on — see
+        // `apply_effects` — which is the panel's whole safety story:
+        // a panel action can only *be* one of these, and the dock, not
+        // the widget, is what runs it. The commands go out in the
+        // order the widget listed them, sequentially, on one thread.
+        let (commands, repaint) = self.take_commands(reaction.effects());
+        // A widget that answers a *panel* event with `Effect::Repaint`
+        // means the panel; the dock's tiles repaint from `update`,
+        // which sees whatever an action's resample brings back.
+        if let Some(panel) = &mut self.builtin_panel {
+            panel.dirty |= repaint;
+        }
+        run_detached(commands, self.launch_env());
     }
 
     /// Pairs the bare-Escape grab exactly with panel visibility. The
@@ -2216,6 +2447,9 @@ impl<B: Backend> Desktop<B> {
                 }
             }
         }
+        // A built-in owner has no one to notify: dropping the state is
+        // the whole close.
+        self.builtin_panel = None;
         if self.instrument_panel.visible() {
             self.instrument_panel.hide(backend);
         }
@@ -2274,6 +2508,16 @@ impl<B: Backend> Desktop<B> {
 
     fn deliver_panel_event(&mut self, event: InputEvent) {
         let Some(owner) = self.instrument_panel.owner().map(str::to_string) else { return };
+        // A built-in owner hears the SDK vocabulary and answers with a
+        // reaction, applied here; a remote one hears the wire shape
+        // unchanged. One routing above this line, so click, scroll and
+        // hover cannot treat the two kinds differently.
+        if self.builtin_panel.as_ref().is_some_and(|panel| panel.id == owner) {
+            let Some(index) = self.items.iter().position(|item| item.id() == owner) else { return };
+            let reaction = self.items[index].panel_input(builtin_panel_event(&event), self.tile);
+            self.apply_panel_reaction(reaction);
+            return;
+        }
         let now = std::time::Instant::now();
         if let Some(tile) = self.items.iter_mut().filter_map(|item| item.remote_mut()).find(|tile| tile.id() == owner) {
             tile.panel_input(event, now);
@@ -2393,6 +2637,49 @@ impl<B: Backend> Desktop<B> {
     /// Repaints are coalesced: a widget that emits several effects gets
     /// one redraw, not one per effect.
     fn apply_effects(&mut self, backend: &mut B, theme: &Theme, effects: Vec<Effect>) {
+        let (commands, repaint) = self.take_commands(effects);
+        run_detached(commands, self.launch_env());
+        if repaint {
+            self.redraw_dock(backend, theme);
+        }
+    }
+
+    /// The environment a command a widget asked for is run with — the
+    /// same one every GUI the shell launches gets
+    /// ([`crate::shell::launch_env`]).
+    ///
+    /// It matters because some of those commands *open a window*: the
+    /// link panel's join dialog and the Bluetooth panel's pairing
+    /// dialog are chonkstep apps, and a chonkstep app with no
+    /// `CHONKSTEP_THEME` in its environment falls back to NeXTSTEP
+    /// Classic — so the dialog the desk opened would arrive in
+    /// different clothes from the desk. The desktop is the one that
+    /// knows the live answer (it is wearing it), which is why this is
+    /// read from its own fields rather than from the published state
+    /// file a fresh dockapp reads.
+    fn launch_env(&self) -> Vec<(String, String)> {
+        crate::shell::launch_env(&self.theme_id, Some(self.appearance), self.scale)
+    }
+
+    /// Performs the effects the dock can perform here and now — a
+    /// resample is a condvar poke — and hands back the commands, in
+    /// the widget's own order, for
+    /// [`run_detached`](crate::widgets::run_detached)
+    /// to run one after another on one thread, plus whether a
+    /// `Repaint` was asked for.
+    ///
+    /// The repaint comes back as a flag rather than being done here
+    /// because it means different pixels on the two paths that share
+    /// this: the dock's tiles for a tile click, the open panel's
+    /// content for a panel action. Everything else about an effect
+    /// means exactly the same thing on both, which is why they share
+    /// this at all.
+    #[allow(clippy::type_complexity)]
+    fn take_commands(
+        &mut self,
+        effects: Vec<Effect>,
+    ) -> (Vec<(&'static str, Vec<String>, Option<crate::widgets::sampling::Resampler>)>, bool) {
+        let mut commands = Vec::new();
         let mut repaint = false;
         for effect in effects {
             match effect {
@@ -2403,13 +2690,11 @@ impl<B: Backend> Desktop<B> {
                     }
                 }
                 Effect::Run { program, args, then } => {
-                    run_detached(program, args, then.and_then(|id| self.samplers.resampler(id)));
+                    commands.push((program, args, then.and_then(|id| self.samplers.resampler(id))));
                 }
             }
         }
-        if repaint {
-            self.redraw_dock(backend, theme);
-        }
+        (commands, repaint)
     }
 
     fn redraw_dock(&mut self, backend: &mut B, theme: &Theme) {
@@ -3188,7 +3473,16 @@ mod tests {
     fn builtin_ids_are_the_ones_already_written_to_users_dock_item_files() {
         let items = builtin_items();
         let ids: Vec<&str> = items.iter().map(|item| item.id()).collect();
-        assert_eq!(ids, ["builtin:net", "builtin:sysload", "builtin:sound", "builtin:wifi", "builtin:power", "builtin:clock"]);
+        // `builtin:bluetooth` joined the stack; every id that was
+        // already published kept its spelling, which is the property
+        // this test exists for. A session with a remembered order that
+        // predates the new tile keeps its arrangement and gains the
+        // Bluetooth tile at the end — see `dock_order::merge`, whose
+        // doc names exactly this case.
+        assert_eq!(
+            ids,
+            ["builtin:net", "builtin:sysload", "builtin:sound", "builtin:wifi", "builtin:bluetooth", "builtin:power", "builtin:clock"]
+        );
     }
 
     struct FixedHeightWidget(u32);
@@ -3963,6 +4257,236 @@ mod tests {
             f.click(window, row),
             Some(MenuAction::Root(RootMenuAction::LaunchTerminal))
         ));
+    }
+
+    // ------------------------------------------------------------------
+    // The built-in instrument panel.
+
+    /// Opaque premultiplied pure green/red — the panel probe's two
+    /// states, restated here so this test notices if the probe's
+    /// contract drifts away from what the e2e asserts on screen.
+    const PROBE_GREEN: [u8; 4] = [0x00, 0xFF, 0x00, 0xFF];
+    const PROBE_RED: [u8; 4] = [0xFF, 0x00, 0x00, 0xFF];
+
+    /// A desk with the panel probe appended to the stock column, plus
+    /// the probe's slot center in dock-local coordinates.
+    fn desk_with_probe(backend: &mut wm_core::fake_backend::FakeBackend) -> (Desktop<wm_core::fake_backend::FakeBackend>, Point) {
+        let primary = Rect { pos: Point::new(0, 0), size: TEST_SCREEN };
+        let mut desktop: Desktop<wm_core::fake_backend::FakeBackend> =
+            Desktop::new(backend, TEST_SCREEN, primary, 1.0, &test_theme(), wm_theme::Appearance::Dark, Vec::new(), wm_theme::FontState::new());
+        desktop.items.push(SupervisedWidget::new(DockItem::builtin(
+            "builtin:panel-probe",
+            Box::new(crate::widgets::panel_probe::PanelProbeWidget::new()),
+        )));
+        let (_, rect) = desktop
+            .item_slots()
+            .into_iter()
+            .find(|(index, _)| desktop.items[*index].id() == "builtin:panel-probe")
+            .expect("the probe is in the column");
+        let center = Point::new(rect.pos.x + rect.size.w as i32 / 2, rect.pos.y + rect.size.h as i32 / 2);
+        (desktop, center)
+    }
+
+    /// The open gesture end to end against the fake backend: the
+    /// right-click toggle stages the panel, the reconciliation pass
+    /// stages the surface beside the dock with the probe's pixels in
+    /// the frame and the Escape grab held, and the re-click (or any
+    /// dismissal) takes all of it down again.
+    #[test]
+    fn a_right_click_opens_a_builtin_panel_and_the_toggle_closes_it() {
+        let theme = test_theme();
+        let mut backend = wm_core::fake_backend::FakeBackend::new();
+        let (mut desktop, probe_center) = desk_with_probe(&mut backend);
+
+        // A tile with no panel ignores the gesture entirely: the clock
+        // sits at the bottom of the stock column above the probe.
+        let (_, clock_rect) = desktop
+            .item_slots()
+            .into_iter()
+            .find(|(index, _)| desktop.items[*index].id() == "builtin:clock")
+            .expect("the clock is in the column");
+        assert!(
+            !desktop.toggle_builtin_panel(&mut backend, &theme, clock_rect.pos),
+            "a panel-less tile must let the press fall through"
+        );
+        assert!(desktop.builtin_panel.is_none());
+
+        assert!(desktop.toggle_builtin_panel(&mut backend, &theme, probe_center), "the probe's tile consumes the press");
+        assert!(!desktop.instrument_panel.visible(), "the press only stages; the surface appears on the next pass");
+        desktop.sync_instrument_panel(&mut backend, &theme);
+
+        assert!(desktop.instrument_panel.visible());
+        assert_eq!(desktop.instrument_panel.owner(), Some("builtin:panel-probe"));
+        assert!(desktop.panel_key_grabbed, "Escape is grabbed exactly while a panel is up");
+        // Flush against the dock strip, like every instrument panel.
+        let geometry = desktop.instrument_panel.geometry();
+        let dock = desktop.dock_geom();
+        assert_eq!(geometry.pos.x + geometry.size.w as i32, dock.pos.x);
+        // The probe asked for 300x200; the nested workarea grants it
+        // verbatim, and the frame was rendered green on open.
+        let panel = desktop.builtin_panel.as_ref().expect("the built-in grant is held");
+        assert_eq!(panel.granted, (300, 200));
+        assert_eq!(&panel.frame.buffer().pixels[0..4], &PROBE_GREEN);
+
+        assert!(desktop.toggle_builtin_panel(&mut backend, &theme, probe_center), "the re-click is the toggle");
+        assert!(desktop.builtin_panel.is_none());
+        assert!(!desktop.instrument_panel.visible());
+        assert!(!desktop.panel_key_grabbed, "the grab is released with the panel");
+    }
+
+    /// The open gesture is a click-away too: a right-click on a tile
+    /// that is not the panel's owner takes the panel down, whether or
+    /// not that tile has a panel of its own. A panel that survived a
+    /// click on the tile next to it would read as stuck.
+    #[test]
+    fn a_right_click_on_another_tile_dismisses_the_open_builtin_panel() {
+        let theme = test_theme();
+        let mut backend = wm_core::fake_backend::FakeBackend::new();
+        let (mut desktop, probe_center) = desk_with_probe(&mut backend);
+        let (_, clock_rect) = desktop
+            .item_slots()
+            .into_iter()
+            .find(|(index, _)| desktop.items[*index].id() == "builtin:clock")
+            .expect("the clock is in the column");
+
+        assert!(desktop.toggle_builtin_panel(&mut backend, &theme, probe_center));
+        desktop.sync_instrument_panel(&mut backend, &theme);
+        assert!(desktop.instrument_panel.visible());
+
+        assert!(
+            !desktop.toggle_builtin_panel(&mut backend, &theme, clock_rect.pos),
+            "the clock still has no panel of its own, so the press is not consumed"
+        );
+        assert!(desktop.builtin_panel.is_none(), "but the open panel is dismissed by the click-away");
+        assert!(!desktop.instrument_panel.visible());
+        assert!(!desktop.panel_key_grabbed);
+    }
+
+    /// The input round trip, and the reactions that come back: a click
+    /// inside the content reaches the widget as a `LeftPress`, its
+    /// `Repaint` reaction re-renders the frame on the next pass, and a
+    /// left press on the owning tile is the same click-away toggle a
+    /// remote panel gets (press consumed, release swallowed).
+    #[test]
+    fn builtin_panel_input_repaints_and_the_tile_click_dismisses() {
+        let theme = test_theme();
+        let mut backend = wm_core::fake_backend::FakeBackend::new();
+        let (mut desktop, probe_center) = desk_with_probe(&mut backend);
+        assert!(desktop.toggle_builtin_panel(&mut backend, &theme, probe_center));
+        desktop.sync_instrument_panel(&mut backend, &theme);
+
+        // A click inside the content area (surface-local includes the
+        // chrome border the shell draws around it).
+        let inset = instrument::chrome_inset(&theme) as i32;
+        desktop.instrument_panel_click(&theme, Point::new(inset + 10, inset + 10), wm_core::MouseButton::Left, true);
+        let panel = desktop.builtin_panel.as_ref().unwrap();
+        assert!(panel.dirty, "the probe's Repaint reaction marks the frame stale");
+        assert_eq!(&panel.frame.buffer().pixels[0..4], &PROBE_GREEN, "but pixels change only on the pass");
+        desktop.sync_instrument_panel(&mut backend, &theme);
+        let panel = desktop.builtin_panel.as_ref().unwrap();
+        assert!(!panel.dirty);
+        assert_eq!(&panel.frame.buffer().pixels[0..4], &PROBE_RED, "the click came back as a repaint");
+
+        // A click on the chrome is inert — the border is the shell's.
+        desktop.instrument_panel_click(&theme, Point::new(0, 0), wm_core::MouseButton::Left, true);
+        assert!(!desktop.builtin_panel.as_ref().unwrap().dirty, "chrome clicks never reach the widget");
+
+        // Left press on the owning tile: the toggle, press consumed,
+        // release swallowed — the exact contract remote panels have.
+        assert!(desktop.dock_input(&mut backend, &theme, DockInput::Press { local: probe_center, button: wm_core::MouseButton::Left }));
+        assert!(desktop.builtin_panel.is_none(), "the tile press dismissed the panel");
+        assert!(!desktop.instrument_panel.visible());
+        assert!(
+            desktop.dock_input(&mut backend, &theme, DockInput::Release { local: probe_center, button: wm_core::MouseButton::Left }),
+            "the orphan release is swallowed, not delivered"
+        );
+    }
+
+    /// The desktop-wide singleton across the two kinds of opener, on
+    /// the built-in side: a second built-in opening steals the screen
+    /// from the first, and an owner the supervisor evicts loses its
+    /// panel on the next pass rather than leaving a stale surface up.
+    #[test]
+    fn a_newer_builtin_panel_wins_and_an_evicted_owner_loses_its_panel() {
+        let theme = test_theme();
+        let mut backend = wm_core::fake_backend::FakeBackend::new();
+        let (mut desktop, first_center) = desk_with_probe(&mut backend);
+        desktop.items.push(SupervisedWidget::new(DockItem::builtin(
+            "builtin:panel-probe-b",
+            Box::new(crate::widgets::panel_probe::PanelProbeWidget::new()),
+        )));
+        // The column just grew: find both slots afresh.
+        let (_, rect_b) = desktop
+            .item_slots()
+            .into_iter()
+            .find(|(index, _)| desktop.items[*index].id() == "builtin:panel-probe-b")
+            .unwrap();
+
+        assert!(desktop.toggle_builtin_panel(&mut backend, &theme, first_center));
+        desktop.sync_instrument_panel(&mut backend, &theme);
+        assert_eq!(desktop.instrument_panel.owner(), Some("builtin:panel-probe"));
+
+        assert!(desktop.toggle_builtin_panel(&mut backend, &theme, rect_b.pos), "a right-click elsewhere opens, not toggles");
+        desktop.sync_instrument_panel(&mut backend, &theme);
+        assert_eq!(desktop.instrument_panel.owner(), Some("builtin:panel-probe-b"), "the newest opener wins the screen");
+        assert_eq!(desktop.builtin_panel.as_ref().map(|p| p.id.as_str()), Some("builtin:panel-probe-b"));
+
+        // The owner is evicted mid-session: the next pass tears the
+        // panel down with the tile.
+        let index = desktop.items.iter().position(|item| item.id() == "builtin:panel-probe-b").unwrap();
+        desktop.items[index].force_evict();
+        desktop.sync_instrument_panel(&mut backend, &theme);
+        assert!(desktop.builtin_panel.is_none(), "an evicted owner's grant is gone");
+        assert!(!desktop.instrument_panel.visible(), "and its surface with it");
+        assert!(!desktop.panel_key_grabbed);
+    }
+
+    /// A panel action that is several commands: both `Run` arities go
+    /// through one dispatch, so a widget that returns the plural gets
+    /// the same treatment as one that returns the singular — the
+    /// non-command effects in the list applied here, the commands
+    /// handed to the detached executor in the widget's own order.
+    ///
+    /// The commands themselves are not run here (that is
+    /// `run_detached`'s job and its own test); what this pins
+    /// is that the plural reaches the same place the singular does and
+    /// that a `Repaint` inside either means the *panel*'s pixels.
+    #[test]
+    fn a_multi_command_panel_action_dispatches_like_a_single_one() {
+        let theme = test_theme();
+        let mut backend = wm_core::fake_backend::FakeBackend::new();
+        let (mut desktop, probe_center) = desk_with_probe(&mut backend);
+        assert!(desktop.toggle_builtin_panel(&mut backend, &theme, probe_center));
+        desktop.sync_instrument_panel(&mut backend, &theme);
+        assert!(!desktop.builtin_panel.as_ref().unwrap().dirty, "the open pass rendered what was staged");
+
+        // The singular and the plural of the same thing.
+        desktop.apply_panel_reaction(PanelReaction::Run(Effect::Repaint));
+        assert!(desktop.builtin_panel.as_ref().unwrap().dirty, "a Repaint effect means the panel's own pixels");
+        desktop.sync_instrument_panel(&mut backend, &theme);
+
+        desktop.apply_panel_reaction(PanelReaction::RunAll(vec![Effect::Repaint]));
+        assert!(desktop.builtin_panel.as_ref().unwrap().dirty, "and it means the same inside the plural");
+        desktop.sync_instrument_panel(&mut backend, &theme);
+
+        // An action that resolved to no commands changes nothing, and
+        // the panel is still up: "nothing to run" is not "close me".
+        desktop.apply_panel_reaction(PanelReaction::run_all(Vec::new()));
+        assert!(!desktop.builtin_panel.as_ref().unwrap().dirty);
+        assert!(desktop.instrument_panel.visible());
+    }
+
+    /// The wire-to-SDK translation the built-in input path rides.
+    #[test]
+    fn builtin_panel_events_translate_the_wire_vocabulary_faithfully() {
+        let event = |kind, delta| InputEvent { kind, button: None, x: 3, y: 4, delta };
+        let at = Point::new(3, 4);
+        assert_eq!(builtin_panel_event(&event(InputKind::Press, 0)), PanelEvent::LeftPress { local: at });
+        assert_eq!(builtin_panel_event(&event(InputKind::Release, 0)), PanelEvent::LeftRelease { local: at });
+        assert_eq!(builtin_panel_event(&event(InputKind::Scroll, -2)), PanelEvent::Scroll { local: at, delta: -2 });
+        assert_eq!(builtin_panel_event(&event(InputKind::Motion, 0)), PanelEvent::Motion { local: at });
+        assert_eq!(builtin_panel_event(&event(InputKind::Enter, 0)), PanelEvent::Enter);
+        assert_eq!(builtin_panel_event(&event(InputKind::Leave, 0)), PanelEvent::Leave);
     }
 }
 

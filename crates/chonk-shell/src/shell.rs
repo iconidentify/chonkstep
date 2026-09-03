@@ -516,7 +516,7 @@ fn launch_app(
         argv.extend(spawn::chromium_platform_args(stack));
     }
     let arg_refs: Vec<&str> = argv.iter().map(String::as_str).collect();
-    spawn::spawn_detached_with_env(program, &arg_refs, &launch_env(scale), &[]);
+    spawn::spawn_detached_with_env(program, &arg_refs, &launch_env(&theme.id, crate::appearance::load_published(), scale), &[]);
     None
 }
 
@@ -536,10 +536,21 @@ fn omarchy_menu_for(state: &SessionState) -> Option<crate::omarchy_menu::Omarchy
 }
 
 /// The environment every detached GUI launch from the shell carries:
-/// toolkit scaling *and* the pointer size, both in the child's own
-/// environment rather than the session's, because the scale can change
-/// while the session runs and the process environment cannot safely be
-/// rewritten once threads exist. See `startup::xcursor_size_env`.
+/// the look this desktop is wearing, toolkit scaling, and the pointer
+/// size — all in the child's own environment rather than the
+/// session's, because any of them can change while the session runs
+/// and the process environment cannot safely be rewritten once threads
+/// exist. See `startup::xcursor_size_env`.
+///
+/// **The look first, because it is the part a chonkstep app reads.**
+/// `CHONKSTEP_THEME` / `CHONKSTEP_APPEARANCE` / `CHONKSTEP_SCALE` are
+/// the published channel by which an SDK app (`chonk_ui::active_theme`,
+/// `chonk_ui::scale`) learns what the desk looks like; with them absent
+/// it falls back to NeXTSTEP Classic at 1x, which is how a first-party
+/// dialog ends up in different clothes from the desktop that opened
+/// it. Every GUI the shell starts — the About box, an Omarchy menu
+/// action, and a window a dock instrument's panel opens — goes through
+/// here so that cannot happen in one place and not another.
 ///
 /// The toolkit scale variables ride the X11 stack only — the reasoning
 /// is spelled out at length in `launch_app`, whose fixups these are.
@@ -548,9 +559,26 @@ fn omarchy_menu_for(state: &SessionState) -> Option<crate::omarchy_menu::Omarchy
 /// multiplies the output scale in itself, so it gets the unscaled
 /// base, while an X11 client has nothing to multiply by and gets the
 /// pre-multiplied size. `xcursor_size_env` owns that rule.
-fn launch_env(scale: f32) -> Vec<(String, String)> {
+/// `appearance` is an `Option` for the same reason the dockapp launch
+/// reads it from the published state file and omits it when absent:
+/// saying nothing is better than guessing a mood, and the callers that
+/// have the live value (the desktop, which is wearing it) pass `Some`
+/// while the ones that would have to go and look pass whatever the
+/// published file says.
+pub(crate) fn launch_env(theme_id: &str, appearance: Option<wm_theme::Appearance>, scale: f32) -> Vec<(String, String)> {
+    let mut env = vec![
+        ("CHONKSTEP_THEME".to_string(), theme_id.to_string()),
+        // Four decimals, exactly as the dockapp launch writes it — one
+        // format for one number, so a child cannot parse two.
+        ("CHONKSTEP_SCALE".to_string(), format!("{scale:.4}")),
+    ];
+    if let Some(appearance) = appearance {
+        env.push(("CHONKSTEP_APPEARANCE".to_string(), appearance.name().to_string()));
+    }
     let scale_fixups = matches!(spawn::current_display_stack(), spawn::DisplayStack::X11);
-    let mut env = if scale_fixups { spawn::gtk_qt_scale_env(scale) } else { Vec::new() };
+    if scale_fixups {
+        env.extend(spawn::gtk_qt_scale_env(scale));
+    }
     env.extend(crate::startup::xcursor_size_env(scale));
     env
 }
@@ -569,7 +597,7 @@ fn run_omarchy_command(command: &str, theme: &Theme) {
     let scale = theme.titlebar.font.size / 12.0;
     let (program, args) = crate::omarchy_menu::action_argv(command);
     tracing::info!(command, "running omarchy menu command");
-    spawn::spawn_detached_with_env(program, &args, &launch_env(scale), &[]);
+    spawn::spawn_detached_with_env(program, &args, &launch_env(&theme.id, crate::appearance::load_published(), scale), &[]);
 }
 
 /// Starts Omarchy's shell if this session is one that should host it
@@ -578,13 +606,13 @@ fn run_omarchy_command(command: &str, theme: &Theme) {
 /// desktop's launch environment — running the launcher by the path the
 /// verdict resolved. Every outcome is logged once, so the session log
 /// answers "why is there no bar".
-fn host_omarchy_shell(verdict: &crate::omarchy_shell::Verdict, scale: f32) {
+fn host_omarchy_shell(verdict: &crate::omarchy_shell::Verdict, theme_id: &str, appearance: wm_theme::Appearance, scale: f32) {
     use crate::omarchy_shell::{self, Verdict};
     match verdict {
         Verdict::Launch(paths) => {
             let command = omarchy_shell::launch_command(paths);
             let (program, args) = crate::omarchy_menu::action_argv(&command);
-            match spawn::spawn_detached_with_env(program, &args, &launch_env(scale), &[]) {
+            match spawn::spawn_detached_with_env(program, &args, &launch_env(theme_id, Some(appearance), scale), &[]) {
                 Some(pid) => tracing::info!(pid, launcher = %paths.launcher.display(), "hosting Omarchy's shell"),
                 None => tracing::warn!(launcher = %paths.launcher.display(), "Omarchy's shell launcher failed to start"),
             }
@@ -993,7 +1021,7 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         let verdict = crate::omarchy_shell::decide(state.omarchy_shell);
         let hosted = matches!(verdict, crate::omarchy_shell::Verdict::Launch(_));
         desktop.set_omarchy_bar(backend, hosted.then(crate::omarchy_shell::BarVisibility::load));
-        host_omarchy_shell(&verdict, state.scale);
+        host_omarchy_shell(&verdict, &theme.id, state.appearance, state.scale);
 
         // Publish the resolved appearance so the contract's reader half
         // (`$XDG_STATE_HOME/chonkstep/appearance`) is present from the
@@ -1063,6 +1091,13 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         wm.set_placement_policy(next.placement);
         wm.set_snap_threshold(next.edge_resistance);
         wm.set_drag_modifier(next.drag_modifier);
+        // The scale belongs in this list rather than in the metrics
+        // step below: `wm-core` re-lays-out nothing on it — every pixel
+        // it draws comes pre-scaled from the theme engine step 3 swaps
+        // in — and wants it only to size the handful of measurements
+        // written into that crate as *logical* numbers (today, the
+        // fixed size Omarchy's own windows float at).
+        wm.set_ui_scale(next.scale);
         // Straight through to the backend, which is what answers the
         // decoration protocols and decides who gets a frame...
         wm.backend_mut().set_decoration_rules(next.decorations.clone());
@@ -1802,7 +1837,18 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
                         // of the compositor, where "Remove" would mean
                         // editing the default column and "Restart"
                         // would mean restarting the shell.
-                        self.desktop.open_dock_item_menu(wm.backend_mut(), &self.theme, local, self.pointer_root);
+                        //
+                        // A built-in that offers a panel takes the
+                        // button instead: right-click opens (and
+                        // re-click toggles) its detail panel — the
+                        // built-in counterpart of the panel a remote
+                        // tile opens for itself after a click. The
+                        // fall-through order costs nothing: a tile is
+                        // remote (menu) or built-in (panel or
+                        // nothing), never both.
+                        if !self.desktop.open_dock_item_menu(wm.backend_mut(), &self.theme, local, self.pointer_root) {
+                            self.desktop.toggle_builtin_panel(wm.backend_mut(), &self.theme, local);
+                        }
                     }
                 }
             }
@@ -1985,18 +2031,15 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
                 // a running dockapp additionally gets `ThemeChanged`
                 // pushed down its socket — this env var is only how a
                 // freshly-spawned one learns the theme it starts in.
-                let mut env = vec![
-                    ("CHONKSTEP_THEME".to_string(), self.theme.id.clone()),
-                    // The appearance rides beside the theme id for the
-                    // same reason and through the same kind of channel:
-                    // `chonk_ui::active_theme` resolves the pair to the
-                    // exact rendition this desktop is wearing.
-                    ("CHONKSTEP_APPEARANCE".to_string(), self.state.appearance.name().to_string()),
-                ];
-                // Same per-stack cursor-size rule as every other
-                // launch — chonk-about is a native client and must not
-                // inherit the pre-multiplied process value.
-                env.extend(crate::startup::xcursor_size_env(self.state.scale));
+                //
+                // One env for every GUI the shell starts: `launch_env`
+                // carries the theme id, the appearance beside it (the
+                // pair `chonk_ui::active_theme` resolves to the exact
+                // rendition this desktop is wearing), the scale, and
+                // the same per-stack cursor-size rule every other
+                // launch gets — chonk-about is a native client and must
+                // not inherit the pre-multiplied process value.
+                let env = launch_env(&self.theme.id, Some(self.state.appearance), self.state.scale);
                 spawn::spawn_detached_with_env(&about_binary_path(), &[], &env, &[]);
             }
             // Indexes the same apps vec the desktop's menu was built

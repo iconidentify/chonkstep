@@ -217,6 +217,67 @@ fn cascade_origin(workarea: Rect, frame: Size, cascade_index: usize, cascade_ste
     )
 }
 
+/// The `app_id` prefix Omarchy stamps on every window it opens for
+/// itself: `org.omarchy.terminal`, `org.omarchy.about`,
+/// `org.omarchy.btop`, one per script it ships and an open set by
+/// design (`wm-config` already treats it as one for decorations).
+///
+/// Matched case-insensitively, exactly as the decoration rules match
+/// their prefixes — the same identity string, arriving through the
+/// same [`Backend::window_class`], deserves the same comparison.
+///
+/// [`Backend::window_class`]: crate::Backend::window_class
+pub const OMARCHY_APP_ID_PREFIX: &str = "org.omarchy.";
+
+/// The size Omarchy's own windows map at, in *logical* pixels — the
+/// `size 875 600` its Hyprland rules give every `org.omarchy.*` class,
+/// restated here because the windows are written to that shape: a
+/// TUI in a terminal with a fixed column count, a menu, an about box.
+/// Left to place themselves they arrive at whatever the terminal
+/// emulator's default happens to be, which on a HiDPI desk is a
+/// postage stamp and on a 4K one is half the screen.
+pub const OMARCHY_FLOAT_SIZE: Size = Size::new(875, 600);
+
+/// The *content* size the desktop maps `identity` at whatever the
+/// client itself asked for, or `None` to leave the client's own size
+/// alone — the size half of the one placement rule that keys on who
+/// the window is rather than on where the others are.
+///
+/// Exactly one rule today: a window whose identity starts with
+/// [`OMARCHY_APP_ID_PREFIX`] maps at [`OMARCHY_FLOAT_SIZE`] scaled by
+/// `scale` and centered (the position half is the caller's, which
+/// simply runs [`PlacementPolicy::Center`] for anything this answers
+/// `Some` to). `chrome` is what this desktop's frame adds around the
+/// content — the frame size minus the content size — so the clamp
+/// keeps the *whole frame*, titlebar included, inside `workarea`
+/// rather than the content alone.
+///
+/// Scaled, not literal, because 875×600 is a logical measurement and
+/// everything else in this crate is device pixels: on a scale-2 desk
+/// the same window has to be 1750×1200 to be the same window.
+///
+/// Pure, so the rule is a unit test rather than something you have to
+/// open Omarchy to see.
+pub fn float_override(identity: &str, workarea: Rect, chrome: Size, scale: f32) -> Option<Size> {
+    if !identity.to_ascii_lowercase().starts_with(OMARCHY_APP_ID_PREFIX) {
+        return None;
+    }
+    // A nonsense scale (zero, negative, NaN from a bad config) means
+    // "no scaling" rather than a zero-sized window: the rule exists to
+    // make these windows usable, and must not be the thing that makes
+    // one unusable.
+    let scale = if scale.is_finite() && scale > 0.0 { scale } else { 1.0 };
+    let scaled = |edge: u32| (edge as f32 * scale).round().max(1.0) as u32;
+    // The frame has to fit; the content is what is left of the
+    // workarea after the chrome takes its share. `max(1)` because a
+    // zero-edged window is not a smaller window, it is an absent one.
+    let fits = |want: u32, area: u32, chrome: u32| want.min(area.saturating_sub(chrome)).max(1);
+    Some(Size::new(
+        fits(scaled(OMARCHY_FLOAT_SIZE.w), workarea.size.w, chrome.w),
+        fits(scaled(OMARCHY_FLOAT_SIZE.h), workarea.size.h, chrome.h),
+    ))
+}
+
 fn center_of(workarea: Rect, frame: Size) -> Point {
     Point::new(
         workarea.pos.x + (workarea.size.w.saturating_sub(frame.w) / 2) as i32,
@@ -555,5 +616,47 @@ mod tests {
         assert_eq!(overlap_area(a, rect(-25, -25, 50, 50)), 25 * 25, "negative origins");
         assert_eq!(overlap_area(a, rect(10, 10, 0, 50)), 0, "zero width is zero area");
         assert_eq!(overlap_area(a, a), 100 * 100, "identity");
+    }
+
+    // ------------------------------------------------------------------
+    // The identity rule: Omarchy's own windows.
+
+    const NO_CHROME: Size = Size::new(0, 0);
+
+    #[test]
+    fn omarchy_windows_float_at_the_fixed_size_and_nothing_else_does() {
+        let area = rect(0, 56, 1600, 1000);
+        assert_eq!(float_override("org.omarchy.terminal", area, NO_CHROME, 1.0), Some(Size::new(875, 600)));
+        assert_eq!(float_override("org.omarchy.about", area, NO_CHROME, 1.0), Some(Size::new(875, 600)));
+        // An open set: the rule is the prefix, not a list of scripts.
+        assert_eq!(float_override("org.omarchy.something-invented-tomorrow", area, NO_CHROME, 1.0), Some(Size::new(875, 600)));
+        // Matched the way every other identity rule here is matched.
+        assert_eq!(float_override("ORG.Omarchy.Terminal", area, NO_CHROME, 1.0), Some(Size::new(875, 600)));
+
+        for other in ["Alacritty", "org.gnome.Nautilus", "omarchy", "org.omarchyx", "", "not.org.omarchy.terminal"] {
+            assert_eq!(float_override(other, area, NO_CHROME, 1.0), None, "{other} is not Omarchy's own window");
+        }
+    }
+
+    #[test]
+    fn the_float_size_is_logical_and_the_frame_is_what_must_fit() {
+        // A scale-2 desk is a big desk: the workarea is device pixels
+        // too, so the clamp is not what is being measured here.
+        let area = rect(0, 112, 3200, 2000);
+        // Logical: the same window is twice the pixels on a scale-2 desk.
+        assert_eq!(float_override("org.omarchy.btop", area, NO_CHROME, 2.0), Some(Size::new(1750, 1200)));
+        // …but never bigger than the workarea has room for, chrome
+        // included — the titlebar has to stay on screen.
+        let chrome = Size::new(4, 30);
+        let small = rect(0, 0, 800, 500);
+        assert_eq!(float_override("org.omarchy.btop", small, chrome, 1.0), Some(Size::new(796, 470)));
+        let placed = place_frame(PlacementPolicy::Center, small, Size::new(796 + 4, 470 + 30), &[], 0, 23);
+        assert_eq!(placed, small.pos, "the clamped frame fills the workarea exactly");
+
+        // Degenerate inputs give a small window, never a zero-sized or
+        // panicking one.
+        assert_eq!(float_override("org.omarchy.about", rect(0, 0, 10, 10), Size::new(40, 40), 1.0), Some(Size::new(1, 1)));
+        assert_eq!(float_override("org.omarchy.about", area, NO_CHROME, 0.0), Some(Size::new(875, 600)), "a nonsense scale is no scale");
+        assert_eq!(float_override("org.omarchy.about", area, NO_CHROME, f32::NAN), Some(Size::new(875, 600)));
     }
 }

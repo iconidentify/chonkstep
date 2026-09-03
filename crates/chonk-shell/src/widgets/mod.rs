@@ -7,7 +7,7 @@
 //! * `chonk-dock-widget` is the vocabulary — the [`DockWidget`] trait,
 //!   [`Source`], [`Samples`], [`Effect`], [`DockInput`]. Nothing in it
 //!   can perform I/O.
-//! * `chonk-instruments` is the six built-in tiles, written against
+//! * `chonk-instruments` is the built-in tiles, written against
 //!   that vocabulary and against `wm-theme`, and *nothing else*. Its
 //!   own `clippy.toml` makes `std::fs::File`, `std::process::Command`,
 //!   `std::fs::{read, read_to_string, read_dir}`, `std::thread::spawn`
@@ -34,10 +34,14 @@ use wm_theme_api::DecorationBuffer;
 
 use crate::dockapp::tile::RemoteTile;
 
+pub(crate) mod panel_probe;
 pub mod sampling;
 
-pub use chonk_dock_widget::{DockInput, DockWidget, Effect, Samples, Source, SourceId, TreeEntry, SAMPLE_INTERVAL};
-pub use chonk_instruments::{ClockWidget, NetTrafficWidget, PowerWidget, SoundWidget, SysLoadWidget, WifiWidget};
+pub use chonk_dock_widget::{
+    DockInput, DockWidget, Effect, PanelCtx, PanelEvent, PanelFrame, PanelReaction, PanelSpec, Samples, Source,
+    SourceId, TreeEntry, SAMPLE_INTERVAL,
+};
+pub use chonk_instruments::{BluetoothWidget, ClockWidget, NetTrafficWidget, PowerWidget, SoundWidget, SysLoadWidget, WifiWidget};
 
 pub(crate) use sampling::{run_detached, SamplerRegistry};
 
@@ -58,7 +62,7 @@ pub(crate) const BUILTIN_PREFIX: &str = "builtin:";
 ///
 /// # Why this exists at all
 ///
-/// The dock is about to hold two very different kinds of tile: the six
+/// The dock is about to hold two very different kinds of tile: the
 /// instruments that ship with the compositor, and out-of-process
 /// dockapps that push pixels down a socket
 /// (`chonk-dock-proto`). Almost nothing in the dock cares which is
@@ -153,7 +157,7 @@ impl DockItem {
     /// does on its behalf — reading its socket, pinging it, relaunching
     /// it. Deliberately not part of [`DockWidget`]: none of that is
     /// something a *widget* does, and putting it on the trait would put
-    /// a socket pump in the vocabulary the six built-in instruments are
+    /// a socket pump in the vocabulary the built-in instruments are
     /// written against.
     pub(crate) fn remote_mut(&mut self) -> Option<&mut RemoteTile> {
         match self {
@@ -220,6 +224,41 @@ impl DockWidget for DockItem {
         match self {
             DockItem::Builtin { widget, .. } => widget.on_input(input, tile),
             DockItem::Remote(remote) => remote.on_input(input, tile),
+        }
+    }
+
+    // The built-in panel family forwards only for the built-in arm. A
+    // remote tile's panel is a different machine entirely — grants and
+    // frames negotiated over its socket, presented by the same
+    // `Desktop::sync_instrument_panel` — and its `DockWidget` face
+    // keeps the trait defaults (`panel_spec` = `None`), so the dock's
+    // right-click gesture never fires for it and the two panel paths
+    // cannot claim the same tile.
+
+    fn panel_spec(&self, tile: u32) -> Option<PanelSpec> {
+        match self {
+            DockItem::Builtin { widget, .. } => widget.panel_spec(tile),
+            DockItem::Remote(_) => None,
+        }
+    }
+
+    fn render_panel(&mut self, frame: &mut PanelFrame, ctx: &mut PanelCtx<'_>) {
+        if let DockItem::Builtin { widget, .. } = self {
+            widget.render_panel(frame, ctx);
+        }
+    }
+
+    fn panel_input(&mut self, event: PanelEvent, tile: u32) -> PanelReaction {
+        match self {
+            DockItem::Builtin { widget, .. } => widget.panel_input(event, tile),
+            DockItem::Remote(_) => PanelReaction::None,
+        }
+    }
+
+    fn panel_tick(&mut self, now: std::time::Instant) -> bool {
+        match self {
+            DockItem::Builtin { widget, .. } => widget.panel_tick(now),
+            DockItem::Remote(_) => false,
         }
     }
 }
@@ -689,6 +728,73 @@ impl SupervisedWidget {
         effects
     }
 
+    /// Whether — and at what size — this item wants a panel behind its
+    /// tile. `None` for an evicted item unconditionally: a tombstone
+    /// has no detail view, for the same reason it has no controls.
+    ///
+    /// Not timed: it is a field read on every implementor, and the
+    /// budget machinery's meaning is "you did work on the repaint
+    /// thread", which answering a `const`-shaped question is not.
+    pub(crate) fn panel_spec(&self, tile: u32) -> Option<chonk_dock_widget::PanelSpec> {
+        if self.evicted {
+            return None;
+        }
+        self.item.panel_spec(tile)
+    }
+
+    /// Polls the widget's open panel for liveness — see
+    /// [`DockWidget::panel_tick`]. Timed and charged as `update`, which
+    /// is the class of work it is: a boolean fold on the repaint
+    /// thread.
+    pub(crate) fn panel_tick(&mut self, now: Instant) -> bool {
+        if self.evicted {
+            return false;
+        }
+        let start = Instant::now();
+        let changed = self.item.panel_tick(now);
+        self.charge(CallKind::Update, start.elapsed());
+        changed && !self.evicted
+    }
+
+    /// Draws the widget's panel into `frame` — see
+    /// [`DockWidget::render_panel`]. Timed and charged as `render`;
+    /// a panel render that keeps stopping the desktop costs the widget
+    /// its slot exactly as a tile render would, and the panel goes
+    /// with it (the dock tears down an evicted owner's panel).
+    pub(crate) fn render_panel(
+        &mut self,
+        frame: &mut chonk_dock_widget::PanelFrame,
+        ctx: &mut chonk_dock_widget::PanelCtx<'_>,
+    ) {
+        if self.evicted {
+            return;
+        }
+        let start = Instant::now();
+        self.item.render_panel(frame, ctx);
+        self.charge(CallKind::Render, start.elapsed());
+    }
+
+    /// Delivers one panel pointer event — see
+    /// [`DockWidget::panel_input`]. Timed and charged as `on_input`.
+    /// An evicted widget's panel is already gone, but the call is
+    /// guarded anyway: `PanelReaction::None` is the answer a dead
+    /// screen gives to everything.
+    pub(crate) fn panel_input(&mut self, event: chonk_dock_widget::PanelEvent, tile: u32) -> chonk_dock_widget::PanelReaction {
+        if self.evicted {
+            return chonk_dock_widget::PanelReaction::None;
+        }
+        let start = Instant::now();
+        let reaction = self.item.panel_input(event, tile);
+        self.charge(CallKind::Input, start.elapsed());
+        if self.evicted {
+            // The call that evicts is answered with a close rather
+            // than whatever the widget said: its panel must not
+            // outlive its tile.
+            return chonk_dock_widget::PanelReaction::Close;
+        }
+        reaction
+    }
+
     /// Books one timed call against the budget and acts on the verdict.
     fn charge(&mut self, kind: CallKind, elapsed: Duration) {
         let entry = &mut self.entry[kind.index()];
@@ -762,6 +868,15 @@ impl SupervisedWidget {
     fn with_limits(item: DockItem, limits: Limits) -> Self {
         Self { limits, ..Self::new(item) }
     }
+
+    /// Test-only: puts the widget in the evicted state directly, so
+    /// tests of what the dock does *about* an eviction (tear down its
+    /// panel, draw its tombstone) need not manufacture a real stall.
+    #[cfg(test)]
+    pub(crate) fn force_evict(&mut self) {
+        self.evicted = true;
+        self.relayout = true;
+    }
 }
 
 /// The workspace state the Clip tile and the `Desktop` share
@@ -834,12 +949,25 @@ mod tests {
         fn tile_height(&self) -> u32 {
             3
         }
+
+        fn panel_spec(&self, _tile: u32) -> Option<chonk_dock_widget::PanelSpec> {
+            Some(chonk_dock_widget::PanelSpec::new(30, 20))
+        }
+
+        fn panel_input(&mut self, _event: PanelEvent, _tile: u32) -> PanelReaction {
+            std::thread::sleep(self.cost);
+            PanelReaction::Repaint
+        }
     }
 
     /// Budgets small enough that a test can overrun them on purpose in
     /// well under a millisecond, in the same proportions as the stock
     /// ones (severe is an order of magnitude over budget; hard is an
     /// order of magnitude over that).
+    /// The stock tile edge, which is what these tests measure against —
+    /// the panel methods take it the way `render` and `on_input` do.
+    const TEST_TILE: u32 = 56;
+
     const TEST_LIMITS: Limits = Limits {
         budget: Duration::from_micros(100),
         severe: Duration::from_micros(500),
@@ -995,6 +1123,32 @@ mod tests {
         }
         assert!(!supervised.evicted);
         assert_eq!(supervised.offences, 0);
+    }
+
+    /// The panel entry points ride the same budget as the tile's: a
+    /// widget whose panel keeps stalling the repaint thread loses its
+    /// slot exactly as one whose tile does, and once it is gone its
+    /// panel capability goes with the rest of it — no spec, no input,
+    /// no ticks. The call that *becomes* the eviction is answered with
+    /// `Close`, because the panel must not outlive the tile.
+    #[test]
+    fn panel_calls_are_budgeted_and_an_evicted_widget_has_no_panel() {
+        let mut supervised =
+            SupervisedWidget::with_limits(DockItem::builtin("builtin:test", Box::new(SlowWidget::new(TEST_LIMITS.severe * 2))), TEST_LIMITS);
+        assert!(supervised.panel_spec(TEST_TILE).is_some(), "a healthy panel-capable widget advertises its panel");
+
+        let press = || PanelEvent::LeftPress { local: Point::new(1, 1) };
+        assert!(matches!(supervised.panel_input(press(), TEST_TILE), PanelReaction::Repaint));
+        assert!(matches!(supervised.panel_input(press(), TEST_TILE), PanelReaction::Repaint));
+        assert!(
+            matches!(supervised.panel_input(press(), TEST_TILE), PanelReaction::Close),
+            "the third severe stall evicts, and the evicting call answers Close so the panel comes down with the tile"
+        );
+        assert!(supervised.evicted());
+
+        assert!(supervised.panel_spec(TEST_TILE).is_none(), "a tombstone has no detail view");
+        assert!(matches!(supervised.panel_input(press(), TEST_TILE), PanelReaction::None), "and no panel controls");
+        assert!(!supervised.panel_tick(Instant::now()), "and nothing to keep live");
     }
 
     /// The tombstone path end to end, for the labels that would

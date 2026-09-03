@@ -115,6 +115,33 @@ message as a protocol error and take your tile down with it. The tile
 keeps working either way; feature-gate your panel affordance on
 `ctx.shell_proto >= 2` if you want to hide it entirely.
 
+## Actions: a table you can review
+
+A panel row that *does* something has to run a command, and a dockapp
+runs as you — the dock is not a sandbox and cannot be. `chonkdock.actions`
+is the convention that makes what your instrument executes *reviewable*
+instead: a frozen table of argv tuples with validated runtime slots, one
+call site, and a test harness that asserts the property.
+
+```python
+from chonkdock.actions import ActionTable, Slot
+
+ACTIONS = ActionTable({
+    "switch_sink": ("pactl", "set-default-sink", Slot("sink")),
+    "toggle_mute": ("pactl", "set-sink-mute", Slot("sink"), "toggle"),
+}, programs=("pactl",))
+
+ACTIONS.run("switch_sink", sink=row.name)
+```
+
+A `Slot` value is validated the way the compositor's own built-in
+widgets validate theirs (non-empty, no leading `-` so an operand cannot
+become an option, no control characters, length-capped), and a refused
+value means the command does not run at all rather than running short.
+Subclass `ActionTableGuarantee` in `tests/test_actions.py` with your own
+table to inherit the structural assertions. The argument in full,
+including what this is *not*, is `docs/instrument-actions.md`.
+
 A working example lives in `chonkdock/examples/clock.py`, registered
 by `py-dockclock.dockapp`. Install this directory into a running
 desktop with:

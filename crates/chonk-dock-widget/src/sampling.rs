@@ -20,7 +20,7 @@
 //! `widgets::sampling`, on the dock's side of the boundary.
 //!
 //! That split is the whole point of this crate existing at all.
-//! `chonk-instruments` — the six built-in tiles — depends on this crate
+//! `chonk-instruments` — the built-in tiles — depends on this crate
 //! and on nothing that can perform I/O, and carries a `clippy.toml`
 //! that makes `std::fs::File`, `std::process::Command`,
 //! `std::fs::read_to_string`, `std::fs::read`, `std::fs::read_dir` and
@@ -280,10 +280,186 @@ pub enum Effect {
     /// trusting the command's exit status: the authority on what a
     /// click did is the next sample, and this just asks for that sample
     /// as soon as the command lands rather than up to an interval later.
+    ///
+    /// Read the two fields as the sentence they are: **the program is
+    /// compile-time (`&'static str`) and the arguments are runtime
+    /// (`Vec<String>`)**. The program is the whitelist — the set of
+    /// binaries a built-in widget can run is the set of literals in
+    /// this repository, and nothing at runtime can add to it. The
+    /// arguments are *allowed* to carry runtime values, because a
+    /// control that could not name a sink, a UUID or an SSID would be
+    /// useless.
+    ///
+    /// **Build this with [`Argv`] whenever any word of it comes from
+    /// the running system** — a sink name, a connection UUID, an SSID,
+    /// a MAC. The literal form is for an argv that is entirely written
+    /// out in the source; [`Argv`] is what admits a runtime value, and
+    /// what refuses the ones that would turn an operand into an option.
+    /// See [`Argv`] for the whole rule.
     Run { program: &'static str, args: Vec<String>, then: Option<SourceId> },
     /// Ask a sampler to sample now. For the case with no command in
     /// front of it.
     Resample(SourceId),
+}
+
+/// An argv built shape-first: a compile-time program, compile-time
+/// words, and runtime values only through a validated slot.
+///
+/// # The rule
+///
+/// **The program and the argv's *shape* are compile-time; a runtime
+/// value may only ever be one whole operand, and only through
+/// [`value`](Argv::value) or [`number`](Argv::number), which validate
+/// it. A value that fails validation does not produce a clipped
+/// command — it produces no command at all.**
+///
+/// # Why there is a rule at all
+///
+/// [`Effect::Run`]'s safety story has always been "the compiler is the
+/// whitelist": the program name is a `&'static str`, so the set of
+/// binaries this desktop's own widgets can run is the set written in
+/// its source, reviewable by reading it. Panels are what put pressure
+/// on that. `wpctl set-volume` needs no arguments a human did not
+/// type, but "switch to *this* sink", "bring *this* connection up",
+/// "join *this* network" all need a word that came from the system a
+/// moment ago — a `pactl` sink name, an `nmcli` UUID, an SSID
+/// broadcast by whatever access point is in range.
+///
+/// Those words are not attacker-chosen in any deep sense, but the last
+/// one is broadcast by a stranger, and none of them are *reviewable*:
+/// no amount of reading the source tells you what will be in them. So
+/// the vocabulary keeps everything else fixed and admits them one
+/// operand at a time.
+///
+/// What the validation refuses, and why it is exactly this list:
+///
+/// * **A leading `-`.** This is the one that matters. Nothing here
+///   goes through a shell — [`Effect::Run`] is `Command::new(program)`
+///   with an argv vector, so there is no quoting, no globbing and no
+///   metacharacter to escape — but every one of these programs parses
+///   its own options, and an SSID named `--terminate` handed to
+///   `nmcli` as an operand is not an operand any more. A runtime word
+///   is an *operand*, and an operand that looks like an option is
+///   refused rather than smuggled.
+/// * **Control characters** (including NUL and newline). A NUL cannot
+///   survive the trip to `execve` anyway; a newline cannot appear in
+///   anything this is for, and can appear in a log line, a `.desktop`
+///   file, or another program's parser.
+/// * **Empty**, and **anything longer than [`Argv::MAX_VALUE`]**. An
+///   SSID is at most 32 bytes and a UUID 36; a kilobyte of "sink name"
+///   is a bug upstream, and passing it on turns that bug into this
+///   desktop's.
+///
+/// Spaces, `%`, quotes and UTF-8 are all *fine* and deliberately
+/// allowed: `pactl` sink names and SSIDs contain them routinely, and
+/// with no shell in the path they are ordinary bytes.
+///
+/// # Using it
+///
+/// ```
+/// # use chonk_dock_widget::sampling::{Argv, Effect, SourceId};
+/// # fn example(uuid: String, confirm: SourceId) -> Option<Effect> {
+/// Argv::new("nmcli").word("connection").word("up").value(&uuid).effect(Some(confirm))
+/// # }
+/// ```
+///
+/// [`effect`](Argv::effect) answers `None` when any value was refused,
+/// so a rejected action is simply an action that did not happen — the
+/// panel repaints, the sampler reports what is actually true, and
+/// nothing half-formed reaches a process. Widgets in this SDK have no
+/// way to report an error to the user and should not grow one for
+/// this: the honest feedback is the next reading.
+pub struct Argv {
+    program: &'static str,
+    args: Vec<String>,
+    /// Why this argv is dead, if it is — kept rather than returned
+    /// per-call so a builder chain stays a chain, and so the reason can
+    /// be logged (or asserted on in a test) at the end of it.
+    rejected: Option<&'static str>,
+}
+
+impl Argv {
+    /// The longest a runtime value may be, in bytes. Comfortably above
+    /// every identifier these commands actually take (SSID 32, UUID
+    /// 36, PipeWire node names well under 100) and far below anything
+    /// that could be an accident worth passing on.
+    pub const MAX_VALUE: usize = 256;
+
+    /// Starts an argv for `program` — the same compile-time program
+    /// name [`Effect::Run`] has always taken, and the reason the set of
+    /// binaries a built-in widget can run is readable from the source.
+    pub fn new(program: &'static str) -> Argv {
+        Argv { program, args: Vec::new(), rejected: None }
+    }
+
+    /// One compile-time word: a subcommand (`connection`), a flag
+    /// (`--rescan`), a fixed operand (`@DEFAULT_AUDIO_SINK@`, `5%+`).
+    /// Never validated, because it is in the source, where a reviewer
+    /// can see it — that is the whole distinction this type draws.
+    #[must_use]
+    pub fn word(mut self, word: &'static str) -> Argv {
+        self.args.push(word.to_string());
+        self
+    }
+
+    /// One runtime operand — the sink name, the UUID, the SSID.
+    /// Validated against the rule in the type's docs; a value that
+    /// fails kills the whole argv rather than the one word, because a
+    /// command missing an operand is a command with a different
+    /// meaning (`nmcli connection up` with no UUID is not a smaller
+    /// version of the request, it is a usage error at best).
+    #[must_use]
+    pub fn value(mut self, value: impl AsRef<str>) -> Argv {
+        let value = value.as_ref();
+        let refusal = if value.is_empty() {
+            Some("an empty runtime value")
+        } else if value.len() > Self::MAX_VALUE {
+            Some("a runtime value longer than Argv::MAX_VALUE")
+        } else if value.starts_with('-') {
+            Some("a runtime value that starts with '-', which the program would read as an option")
+        } else if value.chars().any(|c| c.is_control()) {
+            Some("a runtime value containing a control character")
+        } else {
+            None
+        };
+        match refusal {
+            Some(reason) => self.rejected = self.rejected.or(Some(reason)),
+            None => self.args.push(value.to_string()),
+        }
+        self
+    }
+
+    /// One runtime number — a PulseAudio stream index, a percentage.
+    /// Always valid, and unsigned on purpose: a negative number
+    /// renders with the leading `-` that [`value`](Argv::value) exists
+    /// to refuse. A word that genuinely starts with a dash is a flag,
+    /// and a flag is compile-time — [`word`](Argv::word).
+    #[must_use]
+    pub fn number(mut self, value: u64) -> Argv {
+        self.args.push(value.to_string());
+        self
+    }
+
+    /// Why this argv was refused, if it was — for a test that wants to
+    /// assert the rule rather than merely observe a `None`.
+    pub fn rejected(&self) -> Option<&'static str> {
+        self.rejected
+    }
+
+    /// The effect to return from
+    /// [`on_input`](crate::DockWidget::on_input) or
+    /// [`panel_input`](crate::DockWidget::panel_input), or `None` if
+    /// any runtime value was refused.
+    ///
+    /// `then` is [`Effect::Run`]'s resample: the sampler whose next
+    /// reading is the authority on what the command did.
+    pub fn effect(self, then: Option<SourceId>) -> Option<Effect> {
+        if let Some(reason) = self.rejected {
+            tracing::warn!(program = self.program, reason, "refusing a widget argv");
+            return None;
+        }
+        Some(Effect::Run { program: self.program, args: self.args, then })
+    }
 }
 
 /// A pointer event, in the coordinates of the tile it landed on.
@@ -503,6 +679,60 @@ mod tests {
         assert!(samples.tree(tree)[0].dir(0));
         assert!(!samples.tree(tree)[0].dir(9));
         assert_eq!(samples.hms(clock), (13, 30, 5));
+    }
+
+    /// What an `Argv` is *for*: the shape stays in the source and the
+    /// runtime word rides in one slot, whole.
+    #[test]
+    fn an_argv_keeps_its_shape_and_carries_runtime_operands_whole() {
+        let mut bench = SampleBench::new();
+        let confirm = bench.text("");
+        // A name with a space and a `%` in it — both perfectly ordinary
+        // in PipeWire node names, and both harmless with no shell in
+        // the path.
+        let effect = Argv::new("pactl")
+            .word("move-sink-input")
+            .number(42)
+            .value("alsa_output.pci-0000_00_1f.3 [100%]")
+            .effect(Some(confirm))
+            .expect("nothing here is refusable");
+        match effect {
+            Effect::Run { program, args, then } => {
+                assert_eq!(program, "pactl");
+                assert_eq!(args, ["move-sink-input", "42", "alsa_output.pci-0000_00_1f.3 [100%]"]);
+                assert_eq!(then, Some(confirm));
+            }
+            _ => panic!("an argv builds a Run and nothing else"),
+        }
+    }
+
+    /// The rule, asserted one refusal at a time. Every one of these
+    /// kills the *whole* command: a widget action either happens as
+    /// written or does not happen, never partially.
+    #[test]
+    fn a_refused_runtime_value_produces_no_command_at_all() {
+        let ssid_shaped_like_an_option = Argv::new("nmcli").word("dev").word("wifi").word("connect").value("--terminate");
+        assert_eq!(
+            ssid_shaped_like_an_option.rejected(),
+            Some("a runtime value that starts with '-', which the program would read as an option")
+        );
+        assert!(ssid_shaped_like_an_option.effect(None).is_none(), "and it does not run as a shorter command");
+
+        assert!(Argv::new("nmcli").word("connection").word("up").value("").effect(None).is_none());
+        assert!(Argv::new("pactl").word("set-default-sink").value("sink\nname").effect(None).is_none());
+        assert!(Argv::new("pactl").word("set-default-sink").value("sink\0name").effect(None).is_none());
+        assert!(Argv::new("pactl").word("set-default-sink").value("x".repeat(Argv::MAX_VALUE + 1)).effect(None).is_none());
+        assert!(Argv::new("pactl").word("set-default-sink").value("x".repeat(Argv::MAX_VALUE)).effect(None).is_some(), "the cap is inclusive");
+
+        // A *compile-time* word is never validated — that is the whole
+        // distinction. A flag is a flag because it is in the source.
+        assert!(Argv::new("nmcli").word("dev").word("wifi").word("--rescan").word("yes").effect(None).is_some());
+
+        // The first refusal is the reported one, and later good values
+        // do not resurrect the argv.
+        let dead = Argv::new("nmcli").value("-x").value("fine");
+        assert!(dead.rejected().is_some());
+        assert!(dead.effect(None).is_none());
     }
 
     #[test]

@@ -257,6 +257,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "chonk-btpair"
+version = "0.2.0"
+dependencies = [
+ "chonk-ui",
+ "cosmic-text",
+ "tiny-skia",
+ "wm-theme",
+ "x11rb",
+]
+
+[[package]]
 name = "chonk-dock-proto"
 version = "0.2.0"
 dependencies = [
@@ -268,6 +279,7 @@ name = "chonk-dock-widget"
 version = "0.2.0"
 dependencies = [
  "cosmic-text",
+ "tracing",
  "wm-core",
  "wm-theme",
  "wm-theme-api",
@@ -294,8 +306,20 @@ version = "0.2.0"
 dependencies = [
  "chonk-dock-widget",
  "cosmic-text",
+ "tiny-skia",
  "wm-theme",
  "wm-theme-api",
+]
+
+[[package]]
+name = "chonk-netjoin"
+version = "0.2.0"
+dependencies = [
+ "chonk-ui",
+ "cosmic-text",
+ "tiny-skia",
+ "wm-theme",
+ "x11rb",
 ]
 
 [[package]]
@@ -337,6 +361,7 @@ dependencies = [
  "png 0.17.16",
  "serde_json",
  "wayland-client",
+ "wayland-protocols",
  "wayland-protocols-wlr",
  "wm-theme",
  "wm-theme-api",

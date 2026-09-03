@@ -189,6 +189,15 @@ pub struct WindowManager<B: Backend> {
     /// Monotonic count of placements performed, feeding the cascade
     /// staircase (`placement::place_frame`'s `cascade_index`).
     placements: usize,
+    /// The desktop's UI scale, as the shell resolved it — the factor
+    /// every *logical* measurement in this crate is device pixels
+    /// times. Exactly one thing needs it today
+    /// (`placement::float_override`, whose 875×600 is a logical size),
+    /// and everything else here is already device pixels because the
+    /// theme engine hands out pre-scaled layouts. `1.0` until the
+    /// shell says otherwise (`set_ui_scale`), which is also the right
+    /// answer for a session that never mentions scale at all.
+    ui_scale: f32,
     /// Edge-attraction distance for move drags — see `crate::snap`.
     /// Configurable (`set_snap_threshold`); `0` disables snapping.
     snap_threshold: i32,
@@ -259,6 +268,7 @@ impl<B: Backend> WindowManager<B> {
             last_pointer: None,
             placement_policy: PlacementPolicy::Smart,
             placements: 0,
+            ui_scale: 1.0,
             snap_threshold: SNAP_THRESHOLD_PX,
             drag_modifier: Some(DEFAULT_DRAG_MODIFIER),
             notifications: VecDeque::new(),
@@ -284,6 +294,21 @@ impl<B: Backend> WindowManager<B> {
     /// position of their own — the config file's `placement` entry.
     pub fn set_placement_policy(&mut self, policy: PlacementPolicy) {
         self.placement_policy = policy;
+    }
+
+    /// Tells the window manager what the desktop's UI scale is — the
+    /// config file's `scale`, resolved by the shell.
+    ///
+    /// A plain setter, deliberately: nothing already on screen is
+    /// re-laid-out by it, because everything that *draws* is scaled by
+    /// the theme engine the shell swaps in on the same pass. This is
+    /// only the factor for the logical measurements written into this
+    /// crate itself — see [`placement::float_override`] — so a window
+    /// that maps after the change gets the new scale and one already
+    /// mapped keeps the size it has, which is the same deal every
+    /// other window on the desk gets.
+    pub fn set_ui_scale(&mut self, scale: f32) {
+        self.ui_scale = scale;
     }
 
     /// Sets the move-drag edge-attraction distance in pixels — the
@@ -833,14 +858,46 @@ impl<B: Backend> WindowManager<B> {
         client.geometry = content;
         client.workspace = self.current_workspace;
 
-        let request = Self::decoration_request(&client, None);
+        let mut request = Self::decoration_request(&client, None);
         // A client-decorated window is laid out as though the frame were
         // exactly its content, so every placement and geometry
         // calculation below reads the same for both kinds.
-        let layout = match chrome {
+        let mut layout = match chrome {
             ClientChrome::ServerDrawn => self.theme.layout(&request),
             ClientChrome::ClientDrawn => frameless_layout(content.size),
         };
+        // The one rule that keys on *who* the window is: Omarchy's own
+        // windows (`org.omarchy.*`) map at one fixed size, centered,
+        // the way Omarchy's own Hyprland rules float them — see
+        // `placement::float_override`. The size is settled before the
+        // layout that everything below is computed from, so the window
+        // never flashes at the size its terminal emulator would
+        // otherwise have picked. The chrome the clamp needs is what
+        // this first layout already added around the client's own
+        // content; a titlebar's height does not depend on how wide the
+        // window under it is.
+        let floated = placement::float_override(
+            &client.class,
+            self.placement_area(),
+            Size::new(
+                layout.frame_size.w.saturating_sub(content.size.w),
+                layout.frame_size.h.saturating_sub(content.size.h),
+            ),
+            self.ui_scale,
+        );
+        if let Some(size) = floated {
+            tracing::info!(?window, app = %client.class, ?size, "floating an Omarchy window at its own fixed size");
+            client.geometry.size = size;
+            // The request goes with it: it is what the titlebar is
+            // painted from a few lines down, and a frame drawn from the
+            // size the client asked for inside a layout sized to the
+            // one it got is a frame with a seam in it.
+            request = Self::decoration_request(&client, None);
+            layout = match chrome {
+                ClientChrome::ServerDrawn => self.theme.layout(&request),
+                ClientChrome::ClientDrawn => frameless_layout(size),
+            };
+        }
         // Place the FRAME at the client's own requested position rather
         // than deriving it by subtracting the chrome offset from it.
         // Most apps request (0, 0) as a "don't care, WM decides"
@@ -853,8 +910,12 @@ impl<B: Backend> WindowManager<B> {
         // but the overwhelmingly common (0, 0) means "don't care, WM
         // decides" (see the comment below), and that is exactly what
         // the placement policy exists for. Dialogs center regardless of
-        // policy — they are conversations, not workspace furniture.
-        let frame_pos = if content.pos != Point::new(0, 0) {
+        // policy — they are conversations, not workspace furniture, and
+        // so is an Omarchy window, which additionally ignores a
+        // position the client asked for: the whole rule is "this window
+        // appears in the middle at this size", and honoring a
+        // placeholder origin would put half of it under the dock.
+        let frame_pos = if floated.is_none() && content.pos != Point::new(0, 0) {
             content.pos
         } else {
             let workarea = self.placement_area();
@@ -867,7 +928,7 @@ impl<B: Backend> WindowManager<B> {
                     size: c.layout.frame_size,
                 })
                 .collect();
-            let policy = if window_type == WindowType::Dialog {
+            let policy = if window_type == WindowType::Dialog || floated.is_some() {
                 PlacementPolicy::Center
             } else {
                 self.placement_policy
@@ -887,6 +948,17 @@ impl<B: Backend> WindowManager<B> {
             ClientChrome::ServerDrawn => {
                 let frame = self.backend.create_decoration(window, &layout);
                 self.backend.set_frame_geometry(frame, frame_geom);
+                if floated.is_some() {
+                    // The only map path that overrides the client's own
+                    // size, and so the only one that has to tell it:
+                    // framing a window neither resizes it nor implies a
+                    // configure (`set_frame_geometry` moves the content
+                    // rect and deliberately leaves its size alone —
+                    // "resizes leave the content alone until the
+                    // separate `resize_client` call that always
+                    // accompanies them").
+                    self.backend.resize_client(window, client.geometry.size);
+                }
                 let buffer = self.theme.render(&request, &layout);
                 self.backend.paint_decoration(frame, &buffer);
                 self.backend.map_frame(frame);
@@ -5747,6 +5819,60 @@ mod tests {
             LEFT_HEAD.contains(second_frame.pos),
             "the pointer moving back to the primary must move where new windows open, got {second_frame:?}"
         );
+    }
+
+    /// Omarchy's own windows are the one case where the desktop
+    /// overrides both halves of what a client asked for. The size is
+    /// logical, so it follows the desk's scale; the position is the
+    /// middle of the workarea whatever the client requested, because
+    /// the whole rule is "this window appears in the middle at this
+    /// size" (`placement::float_override`).
+    #[test]
+    fn an_omarchy_window_maps_centered_at_its_own_fixed_size() {
+        let mut backend = FakeBackend::new();
+        let window = backend.create_window();
+        // A terminal's own idea of its size, and a real (non-placeholder)
+        // position the rule must override rather than honor.
+        backend.set_geometry(window, Rect { pos: Point::new(40, 30), size: Size::new(720, 405) });
+        backend.window_classes.insert(window, "org.omarchy.terminal".to_string());
+        let mut wm = wm(backend);
+        wm.dispatch(BackendEvent::MapRequest(window));
+
+        let id = wm.client_for_window(window).unwrap();
+        assert_eq!(wm.client(id).unwrap().geometry.size, Size::new(875, 600), "the fixed logical size, at scale 1");
+        let frame = frame_rect(&wm, window);
+        let titlebar = wm.client(id).unwrap().layout.titlebar_height;
+        assert_eq!(frame.size, Size::new(875, 600 + titlebar), "chrome around the granted content");
+        // Centered in the 1600x1200 fake screen, frame and all.
+        assert_eq!(frame.pos, Point::new((1600 - 875) / 2, (1200 - (600 + titlebar as i32)) / 2));
+
+        // The frame extents a client reasons from describe the window it
+        // actually got, not the one it asked for.
+        assert_eq!(wm.client(id).unwrap().layout.frame_size, frame.size);
+    }
+
+    /// The same window on a scale-2 desk is the same *window*: twice the
+    /// pixels, still centered. And an ordinary application is untouched
+    /// by any of it — the rule keys on the identity, nothing else.
+    #[test]
+    fn the_omarchy_float_follows_the_ui_scale_and_leaves_other_apps_alone() {
+        let mut backend = FakeBackend::new();
+        let omarchy = backend.create_window();
+        let other = backend.create_window();
+        backend.set_geometry(omarchy, Rect { pos: Point::new(0, 0), size: Size::new(400, 300) });
+        backend.set_geometry(other, Rect { pos: Point::new(0, 0), size: Size::new(400, 300) });
+        backend.window_classes.insert(omarchy, "org.omarchy.about".to_string());
+        backend.window_classes.insert(other, "Alacritty".to_string());
+        let mut wm = wm(backend);
+        wm.set_ui_scale(1.5);
+
+        wm.dispatch(BackendEvent::MapRequest(omarchy));
+        let id = wm.client_for_window(omarchy).unwrap();
+        assert_eq!(wm.client(id).unwrap().geometry.size, Size::new(1313, 900), "875x600 logical at scale 1.5");
+
+        wm.dispatch(BackendEvent::MapRequest(other));
+        let id = wm.client_for_window(other).unwrap();
+        assert_eq!(wm.client(id).unwrap().geometry.size, Size::new(400, 300), "everything else keeps the size it asked for");
     }
 
     #[test]

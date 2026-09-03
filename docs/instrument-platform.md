@@ -165,6 +165,56 @@ caps and the workarea — the shell grants a size, and the instrument
 draws exactly that. The conformance probe in `chonk-testkit`
 (`chonk-panel-probe`) exercises the whole conversation end to end.
 
+### Built-in instruments have panels too
+
+The built-in instruments are not dockapps — they run in the
+compositor's own process, against the `DockWidget` SDK
+(`chonk-dock-widget`) rather than the socket — and they have the same
+panel, on the same surface, with the same chrome, placement,
+one-per-desktop rule and dismissal gestures. What differs is only what
+the socket was there for:
+
+| | remote dockapp | built-in widget |
+| --- | --- | --- |
+| opened by | the *client*, on whatever it decides a click means (`OpenPanel`) | **right-click on the tile** (button 3), which also toggles it closed |
+| pixels arrive as | a banded `PanelFrame` stream with generations and flow control | a direct render into a shell-owned buffer of the granted size (`render_panel`) |
+| liveness | ping/pong; three unanswered and the panel comes down | the widget budget every `DockWidget` call is already timed against; an evicted widget's panel is torn down with its tile |
+| input | `PanelInput` on the wire | the same events as `PanelEvent`, in content-local pixels |
+
+The gesture split is worth stating plainly, because it is the one thing
+a user has to learn: **left-click keeps meaning whatever the tile
+already meant** (the sound tile's volume zones, a dockapp's own click),
+and **right-click opens the panel** of a built-in tile that has one. A
+built-in tile with no panel ignores the right-click entirely, and a
+remote tile's right-click still opens its dock menu — a tile is one
+kind or the other, never both.
+
+Everything else is deliberately identical, including the parts that
+are restrictions. There is **no keyboard, ever**: a panel is a popover,
+takes no focus, and the only key involved is the Escape the *shell*
+grabs to dismiss it — which the widget is never told about, because
+dismissal is the desktop's gesture, not the panel's. A panel that needs
+a secret needs a window (the link panel hands a secured SSID to a real
+join dialog rather than growing a passphrase field). The spec a widget
+returns is a *request*: the shell clamps it through the same arithmetic
+that grants a remote `OpenPanel`, and the frame arrives at the granted
+size, so a widget renders against the frame it was handed and is
+correct on every monitor.
+
+And a panel adds surface, not capability. A widget still cannot touch
+the system: panel actions come back as the same `Effect`s a tile click
+returns, run by the same detached executor, confirmed by the same
+next-sample rule — with runtime words (a sink name, a UUID, an SSID)
+admitted only through the validated `Argv` slots described in
+`docs/instrument-actions.md`. An action that is genuinely several
+commands (`pactl` takes one per invocation, so switching the default
+sink is a set plus one move per playing stream) returns them all in
+one reaction and they run in that order, on one thread, each
+confirming with its own resample as it lands. The e2e is
+`chonk-testkit/tests/builtin_panel.rs`, which boots a real nested
+session, right-clicks a probe tile, and asserts the panel's pixels on
+screen.
+
 ## Writing one
 
 1. Read `docs/dockapp-protocol.md`, or skip it and use a binding:
