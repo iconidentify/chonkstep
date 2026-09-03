@@ -141,9 +141,11 @@ a walkthrough from install to first hour in
   persist across sessions.
 - **A NeXTSTEP-style desktop shell.** Right-click root menu with
   cascading submenus, a dock of instrument apps - an analog clock plus
-  five LED instruments on theme-reactive glass (network traffic with a
+  six LED instruments on theme-reactive glass (network traffic with a
   mirrored up/down history matrix, CPU and memory load, sound volume
-  with click-zone control, wifi/ethernet link state, battery/power) -
+  with click-zone control, wifi/ethernet link state, Bluetooth radio
+  and connected devices, battery/power), most of them with a
+  right-click detail panel behind the tile -
   miniaturized-window icon tiles with drag-to-place, and
   eight built-in wallpaper artworks, each with a rendition per
   appearance mood. Real workspaces, too: a dock
