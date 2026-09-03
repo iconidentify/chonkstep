@@ -743,6 +743,7 @@ impl Backend for WaylandBackend {
             return;
         };
         record.content.size = size;
+        let mut configure_owed = false;
         match &record.surface {
             ManagedSurface::Xdg(toplevel) => {
                 if toplevel.alive() {
@@ -780,7 +781,13 @@ impl Backend for WaylandBackend {
                     toplevel.with_pending_state(|state| {
                         state.size = Some(logical.into());
                     });
-                    let _ = toplevel.send_pending_configure();
+                    // Staged, not sent: the configure goes out at the
+                    // end of the pass carrying every change this one
+                    // made, so a resize that accompanies a state change
+                    // can never reach the client ahead of the state (a
+                    // fullscreen-sized window still labelled windowed is
+                    // what taught us — see `xdg::flush_configures`).
+                    configure_owed = true;
                     // What the client will commit if it obeys: the
                     // logical ask times its own factor — NOT `size`,
                     // which the round trip through logical units may
@@ -804,6 +811,9 @@ impl Backend for WaylandBackend {
                 }
             }
         }
+        if configure_owed {
+            self.note_configure(window);
+        }
         self.damage = true;
     }
 
@@ -812,6 +822,7 @@ impl Backend for WaylandBackend {
             return;
         };
         record.content = geometry;
+        let mut configure_owed = false;
         match &record.surface {
             ManagedSurface::X11(surface) => {
                 // The ICCCM case this verb exists for: an X11 client
@@ -842,11 +853,15 @@ impl Backend for WaylandBackend {
                                 .into(),
                         );
                     });
-                    let _ = toplevel.send_pending_configure();
+                    configure_owed = true;
                 }
             }
         }
-        if record.mapped {
+        let mapped = record.mapped;
+        if configure_owed {
+            self.note_configure(window);
+        }
+        if mapped {
             self.damage = true;
         }
     }
@@ -1222,6 +1237,7 @@ impl Backend for WaylandBackend {
             return;
         };
         let maximized = both_axes_maximized(max_h, max_v);
+        let mut configure_owed = false;
         match &record.surface {
             ManagedSurface::Xdg(toplevel) => {
                 if toplevel.alive() {
@@ -1242,11 +1258,14 @@ impl Backend for WaylandBackend {
                             state.states.unset(XdgToplevelState::Suspended);
                         }
                     });
-                    // Dedup-send: unchanged states produce no configure,
-                    // so `wm-core` republishing on every transition (it
-                    // does, from six call sites) costs nothing on the
-                    // wire.
-                    let _ = toplevel.send_pending_configure();
+                    // Staged, not sent. The dedup that used to make
+                    // this line cheap still applies — it now happens in
+                    // `xdg::flush_configures`, which sends one configure
+                    // per toplevel per pass — and deferring is what
+                    // makes the state and the geometry `wm-core` set on
+                    // either side of this call reach the client as one
+                    // settled answer instead of two contradictory ones.
+                    configure_owed = true;
                 }
             }
             ManagedSurface::X11(surface) => {
@@ -1268,6 +1287,9 @@ impl Backend for WaylandBackend {
                     }
                 }
             }
+        }
+        if configure_owed {
+            self.note_configure(window);
         }
     }
 

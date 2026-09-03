@@ -441,6 +441,17 @@ pub struct WaylandBackend {
     /// Events queued by protocol handlers and backend verbs, drained
     /// by `Backend::poll_event` exactly as the X11 backend's socket is.
     pub(crate) pending: VecDeque<BackendEvent<WlWindowId, WlFrameId>>,
+    /// Toplevels whose configuration this pass has changed, and whether
+    /// one of them is *owed* a configure even if nothing changed — the
+    /// answer a client's own request has to get, refusal included.
+    ///
+    /// The same record-now/act-later shape as [`Self::pending`] beside
+    /// it, and for a sharper reason: a configure states what the window
+    /// *is*, so one sent from inside a request handler states what it
+    /// was before `wm-core` ever saw the request. See
+    /// `crate::xdg::flush_configures` for the invariant and the bug
+    /// that made it one.
+    pub(crate) configure_debt: HashMap<WlWindowId, crate::xdg::ConfigureDebt>,
     /// Clicks on shell surfaces (surface, surface-local position,
     /// button, pressed) — plus background presses under [`ROOT_SHELL`].
     /// Drained by `Backend::take_shell_click` for the loop's shell
@@ -682,6 +693,7 @@ impl WaylandBackend {
         Self {
             next_id: 1,
             windows: HashMap::new(),
+            configure_debt: HashMap::new(),
             decoration_rules: wm_config::DecorationRules::default(),
             frames: HashMap::new(),
             shells: HashMap::new(),
@@ -1566,6 +1578,17 @@ impl Compositor {
             }
         }
 
+        // Everything above that changed a toplevel's size or state
+        // staged it and booked a configure; this is where those go out,
+        // one per toplevel, carrying the settled answer. It has to be
+        // the last thing before the frame: every pass above it — the
+        // event drain, the shell tick, the layer and lock passes, the
+        // scale drain — can still move a window, and a configure sent
+        // before the last of them would state a configuration this pass
+        // was about to change. See `xdg::flush_configures` for the
+        // invariant, and the stuck-fullscreen desktop that made it one.
+        self.wm.backend_mut().flush_configures();
+
         // Damage means the scene changed; `redraw_pending` means a
         // change already accounted for has not reached every screen yet
         // (a page flip was still in flight on one of them last pass).
@@ -1997,12 +2020,14 @@ impl Compositor {
         // this that wakes a self-minimized Chromium on restore: the
         // unset here is a real state change, so the restore's re-set
         // produces a real configure instead of a dedup.
+        let mut restaged: Vec<WlWindowId> = Vec::new();
         for (window_id, record) in self.wm.backend().windows.iter() {
             let active = Some(*window_id) == target;
             match &record.surface {
                 // xdg-shell carries it as a toplevel state on the next
-                // configure; `send_pending_configure` dedups, so an
-                // unchanged flag costs nothing.
+                // configure, which goes out with everything else this
+                // pass staged (`xdg::flush_configures`); the dedup there
+                // means an unchanged flag still costs nothing.
                 ManagedSurface::Xdg(toplevel) => {
                     if toplevel.alive() {
                         toplevel.with_pending_state(|state| {
@@ -2012,7 +2037,7 @@ impl Compositor {
                                 state.states.unset(XdgToplevelState::Activated);
                             }
                         });
-                        let _ = toplevel.send_pending_configure();
+                        restaged.push(*window_id);
                     }
                 }
                 ManagedSurface::X11(surface) => {
@@ -2021,6 +2046,9 @@ impl Compositor {
                     }
                 }
             }
+        }
+        for window in restaged {
+            self.wm.backend_mut().note_configure(window);
         }
         // A layer surface holding *exclusive* keyboard interactivity
         // outranks window focus on the seat (the protocol's demand —

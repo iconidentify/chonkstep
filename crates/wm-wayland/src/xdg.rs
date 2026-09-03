@@ -14,6 +14,16 @@
 //! null-buffer commit is the protocol's unmap, translated to
 //! `BackendEvent::Unmapped` the same way `wm-x11` translates
 //! UnmapNotify. `wm-core` cannot tell the difference, by construction.
+//!
+//! The return leg has a discipline of its own, because a configure is
+//! not a notification but a *statement of what the window is*. Nothing
+//! in this crate sends a toplevel configure inline any more: changes
+//! are staged on the toplevel and booked, and one configure per
+//! toplevel goes out at the end of the pass, after `wm-core` has
+//! decided everything the pass delivered. See
+//! [`WaylandBackend::flush_configures`] for the invariant, and for the
+//! stuck-fullscreen desktop that a request answered from *before* the
+//! request left behind.
 
 use std::os::fd::OwnedFd;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -59,7 +69,9 @@ use smithay::{
 use wm_core::{BackendEvent, NetState, NetStateAction};
 use wm_theme_api::{Point, Rect, ResizeEdge, Size};
 
-use crate::state::{ClientState, Compositor, ManagedSurface, WindowRecord, WlFrameId, WlWindowId};
+use crate::state::{
+    ClientState, Compositor, ManagedSurface, WaylandBackend, WindowRecord, WlFrameId, WlWindowId,
+};
 
 type WmEvent = BackendEvent<WlWindowId, WlFrameId>;
 
@@ -651,7 +663,13 @@ impl Compositor {
 
     /// Queues a `_NET_WM_STATE`-shaped request — the translation
     /// `wm-x11` does for EWMH client messages, reused for the xdg
-    /// requests that mean exactly the same thing.
+    /// requests that mean exactly the same thing — and books the
+    /// configure the protocol owes the client in reply.
+    ///
+    /// Both halves belong here together: the request and its answer are
+    /// one exchange, and the answer may not be written until the queued
+    /// event above has been through `wm-core`. See
+    /// [`WaylandBackend::flush_configures`].
     fn queue_net_state(
         &mut self,
         surface: &WlSurface,
@@ -662,6 +680,178 @@ impl Compositor {
         let backend = self.wm.backend_mut();
         if let Some(window) = backend.window_for_surface(surface) {
             backend.queue(WmEvent::NetStateRequested { window, action, first, second });
+            backend.owe_configure(window);
+        }
+    }
+}
+
+// -- the configure discipline --------------------------------------------
+
+/// What one toplevel has been booked for during this pass.
+///
+/// Kept as a type rather than a bare `bool` so the two rules that
+/// decide what actually goes on the wire — how bookings combine, and
+/// when a configure is forced — are written once, named, and testable
+/// without a compositor to hang them off.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct ConfigureDebt {
+    /// The client asked for a state and is owed an answer *even if the
+    /// compositor changed nothing* — a refusal is still an answer.
+    answer_owed: bool,
+}
+
+impl ConfigureDebt {
+    /// Something staged a change; no client is waiting on a reply.
+    const STAGED: Self = Self { answer_owed: false };
+    /// A client asked, and the protocol owes it a configure.
+    const OWED: Self = Self { answer_owed: true };
+
+    /// Two bookings for the same toplevel, combined. An owed answer
+    /// survives any number of plain changes booked around it, in either
+    /// order: a request that arrives before a reflow, or after one, is
+    /// answered either way.
+    fn merge(self, other: Self) -> Self {
+        Self { answer_owed: self.answer_owed || other.answer_owed }
+    }
+
+    /// Whether this booking still needs a configure *forced* once the
+    /// staged changes have been sent — the whole storm-safety argument,
+    /// in four rows:
+    ///
+    /// | staged changes sent | answer owed | force one? | why |
+    /// |---|---|---|---|
+    /// | yes | yes | no  | the client's answer already went out, carrying the decision |
+    /// | yes | no  | no  | a change was published; nobody is waiting on a reply |
+    /// | no  | yes | **yes** | the request changed nothing, and silence is not an answer |
+    /// | no  | no  | no  | nothing happened; say nothing |
+    ///
+    /// The only row that puts a configure on the wire for an unchanged
+    /// toplevel is the one a client's own request reached, which bounds
+    /// the traffic at one configure per request and leaves an idle
+    /// desktop silent.
+    fn forces_configure(self, staged_configure_sent: bool) -> bool {
+        self.answer_owed && !staged_configure_sent
+    }
+}
+
+impl WaylandBackend {
+    /// Books a configure for `window` at the end of this pass, because
+    /// something staged a change to its pending state.
+    ///
+    /// The state itself is written straight onto the toplevel (smithay
+    /// accumulates it in `server_pending`); this only records *that*
+    /// somebody must tell the client, so that the telling happens once,
+    /// at the one point in the pass where the answer is settled.
+    pub(crate) fn note_configure(&mut self, window: WlWindowId) {
+        self.book_configure(window, ConfigureDebt::STAGED);
+    }
+
+    fn book_configure(&mut self, window: WlWindowId, debt: ConfigureDebt) {
+        let entry = self.configure_debt.entry(window).or_default();
+        *entry = entry.merge(debt);
+    }
+
+    /// Books a configure that must go out **even if nothing changed** —
+    /// the reply the protocol owes a client that asked for a state, and
+    /// owes it just as much when the compositor declines.
+    ///
+    /// A no-op state request (fullscreen on an already-fullscreen
+    /// window) reaches `wm-core`, changes nothing, and therefore stages
+    /// nothing; without this the client would be answered with silence
+    /// and wait forever for a state it will never be told about.
+    ///
+    /// Nothing is owed before the handshake's opening move, though: a
+    /// request that arrives ahead of the initial configure is answered
+    /// *by* that configure, which carries whatever is staged when it
+    /// goes out (`toplevel_committed`). Forcing a second one there
+    /// would put an empty configure on the wire at every window's map.
+    pub(crate) fn owe_configure(&mut self, window: WlWindowId) {
+        let initial_sent = self.windows.get(&window).is_some_and(|record| match &record.surface {
+            ManagedSurface::Xdg(toplevel) => toplevel.is_initial_configure_sent(),
+            ManagedSurface::X11(_) => false,
+        });
+        if !initial_sent {
+            return;
+        }
+        self.book_configure(window, ConfigureDebt::OWED);
+    }
+
+    /// Sends every configure this pass booked, once per toplevel.
+    ///
+    /// # The invariant
+    ///
+    /// **A managed xdg toplevel is only ever told a settled
+    /// configuration: the one configure it receives per pass carries
+    /// the decision `wm-core` reached during that pass, never the state
+    /// that preceded it.** Nothing outside this function sends a
+    /// toplevel configure — the initial one in `toplevel_committed` is
+    /// the single exception, because it is the protocol's opening move
+    /// and there is no state yet to be wrong about.
+    ///
+    /// # The bug this exists for
+    ///
+    /// `fullscreen_request` used to queue the request for `wm-core` and
+    /// then, in the same breath, `send_configure()`. That configure was
+    /// built from the toplevel's state *at that instant* — before
+    /// `wm-core` had seen the queued event — so a client asking to
+    /// become fullscreen was told, synchronously, that it was not. A
+    /// real `WAYLAND_DEBUG` capture of Chromium (2026-09-03, one
+    /// `set_fullscreen`, three configures):
+    ///
+    /// ```text
+    ///  -> xdg_toplevel#32.set_fullscreen(nil)
+    ///     xdg_toplevel#32.configure(0, 0, array[4])        <- the request handler: states unchanged
+    ///     xdg_toplevel#32.configure(1280, 800, array[4])   <- reflow: fullscreen SIZE, windowed STATE
+    ///     xdg_toplevel#32.configure(1280, 800, array[8])   <- publish_net_state: fullscreen, at last
+    /// ```
+    ///
+    /// Chromium reads the first as a refusal and drops the fullscreen
+    /// session it had just opened, then honors the third — so the
+    /// window goes fullscreen while the page believes it is windowed.
+    /// The user's "fullscreening a video needs two clicks" is that
+    /// disagreement; the endgame is worse. With the page windowed and
+    /// the compositor fullscreen, the page's exit control sends no
+    /// `unset_fullscreen` at all, and the desktop is left with an
+    /// invisible sheet over the whole screen swallowing every click —
+    /// `entered fullscreen` in the log with no `left fullscreen` after
+    /// it, which is exactly how it was reported.
+    ///
+    /// # Why it is safe against a configure storm
+    ///
+    /// Each pass sends at most one configure per toplevel, and only for
+    /// toplevels something touched. `send_pending_configure` still
+    /// dedups, so an unchanged toplevel produces nothing; the forced
+    /// send is reached only by a client's own request, which bounds it
+    /// at one configure per request. Nothing here reacts to an ack (the
+    /// compositor has no `ack_configure` handler at all), so there is no
+    /// edge a client could ping-pong on — the ledger is quiet at rest.
+    pub(crate) fn flush_configures(&mut self) {
+        if self.configure_debt.is_empty() {
+            return;
+        }
+        for (window, debt) in std::mem::take(&mut self.configure_debt) {
+            let Some(record) = self.windows.get(&window) else {
+                // Destroyed between the booking and here; its client is
+                // owed nothing any more.
+                continue;
+            };
+            let ManagedSurface::Xdg(toplevel) = &record.surface else {
+                continue;
+            };
+            if !toplevel.alive() || !toplevel.is_initial_configure_sent() {
+                // Before the handshake's opening move there is nothing
+                // to answer with: the initial configure sent from
+                // `toplevel_committed` carries whatever is staged here.
+                continue;
+            }
+            let staged_configure_sent = toplevel.send_pending_configure().is_some();
+            if debt.forces_configure(staged_configure_sent) {
+                // Nothing changed, so `wm-core` declined the request (or
+                // the window was already in the asked-for state). The
+                // client still has to hear an answer, and the answer is
+                // the state it already has.
+                let _ = toplevel.send_configure();
+            }
         }
     }
 }
@@ -947,12 +1137,11 @@ impl XdgShellHandler for Compositor {
             NetState::MaximizedHorz,
             Some(NetState::MaximizedVert),
         );
-        // The protocol demands a configure in reply whether or not the
-        // request is honored; `wm-core`'s own reconfigure follows once
-        // it acts on the queued event.
-        if surface.is_initial_configure_sent() {
-            surface.send_configure();
-        }
+        // The configure the protocol demands in reply — honored or
+        // declined — is booked by `queue_net_state` and written at the
+        // end of the pass, once `wm-core` has decided. Writing it here
+        // would answer with the state the window had *before* it asked;
+        // see `WaylandBackend::flush_configures`.
     }
 
     fn unmaximize_request(&mut self, surface: ToplevelSurface) {
@@ -962,9 +1151,6 @@ impl XdgShellHandler for Compositor {
             NetState::MaximizedHorz,
             Some(NetState::MaximizedVert),
         );
-        if surface.is_initial_configure_sent() {
-            surface.send_configure();
-        }
     }
 
     fn fullscreen_request(
@@ -973,10 +1159,8 @@ impl XdgShellHandler for Compositor {
         _output: Option<wl_output::WlOutput>,
     ) {
         // Single output today — the output hint has nothing to select.
+        // The reply is booked, not written: see `maximize_request`.
         self.queue_net_state(surface.wl_surface(), NetStateAction::Add, NetState::Fullscreen, None);
-        if surface.is_initial_configure_sent() {
-            surface.send_configure();
-        }
     }
 
     fn unfullscreen_request(&mut self, surface: ToplevelSurface) {
@@ -986,9 +1170,6 @@ impl XdgShellHandler for Compositor {
             NetState::Fullscreen,
             None,
         );
-        if surface.is_initial_configure_sent() {
-            surface.send_configure();
-        }
     }
 
     fn minimize_request(&mut self, surface: ToplevelSurface) {
@@ -1165,7 +1346,7 @@ impl XdgDecorationHandler for Compositor {
         toplevel.with_pending_state(|state| {
             state.decoration_mode = Some(if client_side { DecorationMode::ClientSide } else { DecorationMode::ServerSide });
         });
-        send_decoration_configure(&toplevel);
+        book_decoration_configure(self, &toplevel);
     }
 
     fn unset_mode(&mut self, toplevel: ToplevelSurface) {
@@ -1186,12 +1367,12 @@ impl XdgDecorationHandler for Compositor {
         toplevel.with_pending_state(|state| {
             state.decoration_mode = Some(if client_side { DecorationMode::ClientSide } else { DecorationMode::ServerSide });
         });
-        send_decoration_configure(&toplevel);
+        book_decoration_configure(self, &toplevel);
     }
 }
 
-/// Sends the configure a decoration request has to be answered with,
-/// and does so even when nothing else about the surface changed.
+/// Books the configure a decoration request has to be answered with,
+/// owed even when nothing else about the surface changed.
 ///
 /// The subtlety that made this a function rather than a line: smithay's
 /// `send_pending_configure` sends nothing when `has_pending_changes()`
@@ -1203,16 +1384,20 @@ impl XdgDecorationHandler for Compositor {
 /// decoration object after its first (buffer-less) commit could ask,
 /// be answered with silence, and — forbidden by the protocol from
 /// attaching a buffer before its first decoration configure — never map
-/// at all.
-fn send_decoration_configure(toplevel: &ToplevelSurface) {
-    if !toplevel.is_initial_configure_sent() {
-        // The initial configure will carry the mode when it goes.
-        return;
-    }
-    if toplevel.send_pending_configure().is_none() {
-        // Nothing else changed, so force one: the client is waiting on
-        // the decoration configure specifically.
-        toplevel.send_configure();
+/// at all. (`flush_configures` keeps both halves: it forces a configure
+/// when nothing changed, and it stays silent before the initial
+/// configure, which carries the mode itself.)
+fn book_decoration_configure(compositor: &mut Compositor, toplevel: &ToplevelSurface) {
+    let backend = compositor.wm.backend_mut();
+    if let Some(window) = backend.window_for_surface(toplevel.wl_surface()) {
+        // Booked rather than written, like every other configure a
+        // client request earns: `owe_configure` is exactly the
+        // force-one-anyway behavior described above, and routing it
+        // through the same flush keeps the rule that a toplevel hears
+        // one settled configure per pass — a decoration reply written
+        // inline could otherwise carry a state request from the same
+        // batch that `wm-core` has not decided yet.
+        backend.owe_configure(window);
     }
 }
 
@@ -1251,6 +1436,37 @@ delegate_xdg_decoration!(Compositor);
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The rule that decides whether an unchanged toplevel hears
+    /// anything, spelled row by row. The third row is the fix — a
+    /// request the compositor declined is still owed an answer — and
+    /// the first is what keeps the fix from doubling every configure:
+    /// once the answer has gone out with the staged changes, nothing
+    /// more is owed.
+    #[test]
+    fn only_an_unanswered_request_forces_a_configure() {
+        assert!(!ConfigureDebt::OWED.forces_configure(true), "the answer already went out");
+        assert!(!ConfigureDebt::STAGED.forces_configure(true), "a change, with nobody waiting on a reply");
+        assert!(ConfigureDebt::OWED.forces_configure(false), "silence is not an answer to a request");
+        assert!(!ConfigureDebt::STAGED.forces_configure(false), "nothing happened; say nothing");
+    }
+
+    /// A pass books a toplevel from several directions — a reflow, a
+    /// state publish, the client's own request — and the answer the
+    /// client is owed must survive all of them, whichever order they
+    /// arrive in. Getting this backwards is a client left waiting on a
+    /// configure that a later, unrelated booking quietly downgraded.
+    #[test]
+    fn an_owed_answer_survives_any_other_booking() {
+        assert_eq!(ConfigureDebt::OWED.merge(ConfigureDebt::STAGED), ConfigureDebt::OWED);
+        assert_eq!(ConfigureDebt::STAGED.merge(ConfigureDebt::OWED), ConfigureDebt::OWED);
+        assert_eq!(ConfigureDebt::OWED.merge(ConfigureDebt::OWED), ConfigureDebt::OWED);
+        assert_eq!(ConfigureDebt::STAGED.merge(ConfigureDebt::STAGED), ConfigureDebt::STAGED);
+        // A booking's default is the plain one: `HashMap::entry(..).
+        // or_default()` must not invent an owed answer for a toplevel
+        // nothing asked about.
+        assert_eq!(ConfigureDebt::default(), ConfigureDebt::STAGED);
+    }
 
     /// The invariant that keeps every existing client exactly where it
     /// was: a surface that draws one pixel per pixel is measured

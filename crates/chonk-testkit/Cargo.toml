@@ -31,6 +31,12 @@ chonk-dock-proto = { path = "../chonk-dock-proto" }
 # client half adds no new code to vet — only the `client` feature.
 wayland-client = "0.31"
 wayland-protocols-wlr = { version = "0.3", features = ["client"] }
+# The fullscreen e2e drives a client that asks for states and reports
+# what it was told back: `src/bin/chonk-fullscreen-probe.rs` is an
+# xdg-shell toplevel with a browser's memory of its own requests, and
+# xdg-shell's client half lives in this same crate (the `client`
+# feature below, already taken for the locker).
+#
 # The session-lock e2e drives a locker that is ALSO a layer client —
 # the shape Quickshell takes under Omarchy, and the shape that found
 # the unlock-teardown kill: `src/bin/chonk-lock-probe.rs` holds a bar

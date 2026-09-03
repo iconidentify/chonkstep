@@ -250,10 +250,24 @@ impl BackgroundCommand {
             // on the bus does exactly that — blocks indefinitely,
             // silently — which is why the deadline below is not a
             // nicety. Stdout is piped so it can be collected after the
-            // wait; stderr goes where the shell's does, as it always
-            // has.
+            // wait. Stderr is discarded, and that is a deliberate
+            // change from "wherever the shell's goes": a sampler runs
+            // on a timer forever, so a command that complains on every
+            // run does not report a problem — it floods the session
+            // log until real errors are unfindable in it. The
+            // bluetooth instrument's `busctl` on a machine with no
+            // bluetooth daemon wrote "Could not activate remote peer
+            // 'org.bluez'" every few seconds and buried a live
+            // fullscreen investigation. A sampler's signal is its exit
+            // status and its stdout; both are read, and a failed run
+            // already clears the tile to its dead face, which is the
+            // honest report.
             #[allow(clippy::disallowed_methods)]
-            let spawned = Command::new(program).args(&args).stdout(std::process::Stdio::piped()).spawn();
+            let spawned = Command::new(program)
+                .args(&args)
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::null())
+                .spawn();
             match spawned {
                 // A failed run clears the reading rather than leaving
                 // the last good one on screen: a tile showing a network
