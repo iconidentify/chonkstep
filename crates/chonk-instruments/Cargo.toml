@@ -26,3 +26,12 @@ chonk-dock-widget = { path = "../chonk-dock-widget" }
 wm-theme = { path = "../wm-theme" }
 wm-theme-api = { path = "../wm-theme-api" }
 cosmic-text = "0.12"
+# The pixmap the theme kit's pure drawing functions paint into. The
+# audio panel's renderer lives in this crate (`audio_panel::render`)
+# rather than `wm-theme` because its input is this crate's own panel
+# state, and `wm_theme::paint`/`panel`/`tile` all draw on a
+# `tiny_skia::Pixmap` — the same version `wm-theme` itself uses.
+# `default-features = false` on purpose: the default `png-format`
+# feature adds `Pixmap::save_png`, a file writer, and this crate's
+# whole argument is that there is nothing here that can touch a file.
+tiny-skia = { version = "0.11", default-features = false, features = ["std", "simd"] }

@@ -45,6 +45,7 @@
 //! the hardcoded flagship theme in `default_theme`) and import of the
 //! legacy `.style`/`.themed` theme formats (deferred past milestone 1).
 
+pub mod bluetooth;
 pub mod cascade;
 pub mod clock;
 pub mod default_theme;

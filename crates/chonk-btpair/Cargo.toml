@@ -1,0 +1,33 @@
+[package]
+name = "chonk-btpair"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The Bluetooth pairing dialog: discovery and passkey confirmation, in a chiseled window the dock's BT panel spawns."
+
+[dependencies]
+chonk-ui = { path = "../chonk-ui" }
+# For `bluetooth::draw_bt_rune`, whose own doc says it is "public so the
+# pairing dialog can wear the same mark" — this is that dialog, and the
+# mark on this window is the one on the tile, from the same source.
+#
+# `chonk-ui` re-exports `paint`/`panel`/`tile`/`model` but not
+# `bluetooth`, and its SDK doc is explicit that the re-export list is
+# the compatibility contract and the rest of `wm-theme` is not. A
+# *third-party* app is meant to build against `chonk-ui` alone; this is
+# a first-party dialog shipped in the same tree as the renderer it
+# draws, so naming `wm-theme` directly is honest about the coupling
+# rather than widening the SDK's promise for one caller. Same version
+# resolution as everything else in the workspace, so the `Pixmap` and
+# `Theme` types are the same ones `chonk-ui` hands back.
+wm-theme = { path = "../wm-theme" }
+# For `paint::draw_text`'s FontSystem/SwashCache parameters. The same
+# version `wm-theme` pins, so cargo unifies them into one crate and the
+# types line up; this is a public crates.io dependency, not an internal API.
+cosmic-text = "0.12"
+tiny-skia = "0.11"
+# The window and its event loop. `chonk_ui::App` is the house window,
+# and this crate deliberately does not use it — see `main.rs`'s "Why
+# this window is not `chonk_ui::App`". Same version `chonk-ui` pins so
+# there is one `x11rb` in the tree.
+x11rb = "0.13"
