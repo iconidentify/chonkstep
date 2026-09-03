@@ -43,13 +43,35 @@
 //!   `sysload`, `nettraffic`, `wifi`), which is what lets them be
 //!   tested pixel-for-pixel with no live system behind them.
 
+/// The SND tile's panel: every PipeWire sink with its level, mute and
+/// port availability, the click that makes one the desktop's default
+/// (and carries the playing streams over with it), and a per-device
+/// mute and wheel. Public as a module because it carries this crate's
+/// `pactl` reading — the parse surface, the `pactl`-versus-`wpctl`
+/// namespace trap, and the switch recipe are all in its module doc.
+pub mod audio_panel;
+mod bluetooth;
+/// The BT tile's panel: adapter power, known devices, connect and
+/// disconnect, forget, and the door to the pairing dialog. Public as a
+/// module because it also carries this crate's BlueZ reading
+/// (`bt_panel::bluez`) — the parse surface the tile and the panel
+/// share, and the module doc that records why it is `busctl` and never
+/// `bluetoothctl`.
+pub mod bt_panel;
 mod clock;
+/// The LNK tile's panel: wifi networks (including join), connection
+/// and WireGuard toggles, Tailscale. Public as a module because the
+/// dock-side panel host wires to its types (`PanelInput`,
+/// `PanelAction`), not just a constructor — see its module doc's
+/// "Wiring status".
+pub mod link_panel;
 mod net;
 mod power;
 mod sound;
 mod sysload;
 mod wifi;
 
+pub use bluetooth::BluetoothWidget;
 pub use clock::ClockWidget;
 pub use net::NetTrafficWidget;
 pub use power::PowerWidget;
