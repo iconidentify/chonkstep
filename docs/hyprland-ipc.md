@@ -437,15 +437,29 @@ the failure being reported as a display-driver stall.
 
 ## 5. Turning it off
 
-**It is off by default.** Set `CHONKSTEP_HYPRLAND_IPC=1` in the session
-to turn it on; unset it to turn it off.
+**It is on by default.** Set `CHONKSTEP_HYPRLAND_IPC=0` (or `false`,
+`no`, or empty) in the session to decline it; anything else, including
+an unset variable, answers.
 
-This differs from chonkstep's own control socket, which is always on
-because a bar that must be told the socket exists cannot tell the user
-how to enable it. Impersonating another compositor is a larger claim: it
-changes how unrelated software on the machine behaves, and a user is
-entitled to decline it. A bind failure is a warning and an inert server,
-never a failed login.
+It began the other way, opted into, on the argument that impersonating
+another compositor is a larger claim than chonkstep's own control socket
+makes — it changes how unrelated software on the machine behaves, and a
+user is entitled to decline it. That argument was right about the claim
+and wrong about who makes it. Answering this IPC is not a side feature
+of this desktop; it is most of what makes it usable as a drop-in under
+Omarchy, where fifty-three scripts and the bar itself depend on it. A
+default that has to be discovered in a document is a default that is
+wrong on every machine nobody read the document on.
+
+So the claim is still declinable, and the reasons to decline it are
+still these: it changes how unrelated software behaves, and a machine
+running both chonkstep and Hyprland at different times may prefer that
+only one of them ever answers. One variable does it.
+
+A value nobody anticipated means yes, deliberately: the failure mode of
+a typo should be the feature working, not a silently inert server whose
+absence looks like a bug in Omarchy's tooling. A bind failure is a
+warning and an inert server, never a failed login.
 
 When on, the compositor exports `HYPRLAND_INSTANCE_SIGNATURE` into its
 own children before `Shell::new` autostarts anything, and

@@ -378,17 +378,29 @@ pub struct Server {
 }
 
 impl Server {
-    /// Whether the session asked for this server.
+    /// Whether this session should answer as Hyprland.
     ///
-    /// Off unless `CHONKSTEP_HYPRLAND_IPC=1`. Pretending to be another
-    /// compositor is a larger claim than chonkstep's own control socket
-    /// makes, and it changes how unrelated software behaves — so unlike
-    /// the control socket, which is always on because a bar that must
-    /// be told it exists is useless, this one is opted into.
+    /// **On unless `CHONKSTEP_HYPRLAND_IPC` explicitly says otherwise**
+    /// (`0`, `false`, `no`, or the empty string). This began as an
+    /// opt-in, on the argument that impersonating another compositor is
+    /// a larger claim than chonkstep's own control socket makes and
+    /// should be made deliberately. The argument was right about the
+    /// claim and wrong about who makes it: answering Hyprland's IPC is
+    /// not a side feature of this desktop, it is most of what makes it
+    /// usable as a drop-in under Omarchy, and a default that has to be
+    /// discovered in a document is a default that is wrong on every
+    /// machine nobody read it on. A user who wants the desktop without
+    /// the impersonation still has one variable, and the reasons to
+    /// want that are still in `docs/hyprland-ipc.md`.
+    ///
+    /// An unset variable is the common case and means yes. A value
+    /// nobody anticipated (`maybe`) also means yes: the failure mode of
+    /// a typo should be the feature working, not a silently inert
+    /// server whose absence looks like a bug in Omarchy's tooling.
     pub fn enabled() -> bool {
-        matches!(
+        !matches!(
             std::env::var(ENABLE_ENV).as_deref(),
-            Ok("1") | Ok("true") | Ok("yes")
+            Ok("0") | Ok("false") | Ok("no") | Ok("")
         )
     }
 
@@ -721,5 +733,55 @@ fn flush(stream: &Stream, outbound: &mut Vec<u8>, doomed: &mut bool) {
     }
     if outbound.len() > OUTBOUND_CAP {
         *doomed = true;
+    }
+}
+
+#[cfg(test)]
+mod enabled_tests {
+    use super::*;
+
+    /// The switch is read from the process environment, so these run
+    /// under one lock rather than in parallel: `set_var`/`remove_var`
+    /// are process-wide and two tests racing would flap.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn with_value(value: Option<&str>, check: impl FnOnce()) {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let previous = std::env::var(ENABLE_ENV).ok();
+        match value {
+            Some(v) => std::env::set_var(ENABLE_ENV, v),
+            None => std::env::remove_var(ENABLE_ENV),
+        }
+        check();
+        match previous {
+            Some(v) => std::env::set_var(ENABLE_ENV, v),
+            None => std::env::remove_var(ENABLE_ENV),
+        }
+    }
+
+    #[test]
+    fn the_common_case_is_an_unset_variable_and_it_means_yes() {
+        with_value(None, || assert!(Server::enabled()));
+    }
+
+    #[test]
+    fn only_a_deliberate_refusal_turns_it_off() {
+        for refusal in ["0", "false", "no", ""] {
+            with_value(Some(refusal), || {
+                assert!(!Server::enabled(), "{refusal:?} should decline the server");
+            });
+        }
+    }
+
+    #[test]
+    fn a_typo_leaves_the_feature_working_rather_than_silently_inert() {
+        // The failure mode of a misspelling must be the desktop working,
+        // not tooling that mysteriously falls back to its
+        // no-compositor branch.
+        for odd in ["maybe", "1", "true", "yes", "off "] {
+            with_value(Some(odd), || {
+                assert!(Server::enabled(), "{odd:?} should still answer");
+            });
+        }
     }
 }
