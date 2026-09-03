@@ -14,6 +14,14 @@ wm-theme = { path = "../wm-theme" }
 wm-theme-api = { path = "../wm-theme-api" }
 wm-config = { path = "../wm-config" }
 chonk-shell = { path = "../chonk-shell" }
+# The Hyprland IPC protocol, so Omarchy's unmodified shell and the real
+# `hyprctl` binary work against chonkstep. Deliberately a separate crate
+# with no dependency on `wm-core`: every JSON shape and parser in it is
+# a promise made to somebody else's binary, and keeping it free of the
+# window manager is what lets those promises be tested without booting
+# one. This crate supplies the other half — the live state to serve and
+# the place in the event loop. See `crates/wm-wayland/src/hyprland_ipc.rs`.
+chonk-hyprland-ipc = { path = "../chonk-hyprland-ipc" }
 # XSETTINGS publishing for XWayland clients. The compositor opens a
 # second, ordinary X11 connection to Xwayland for this — see
 # `Compositor::xsettings` — because that is the only channel a toolkit

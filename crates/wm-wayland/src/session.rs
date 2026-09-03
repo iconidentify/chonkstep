@@ -781,7 +781,7 @@ pub(crate) fn init(
     // revokes it, then rebuild our idea of the crtc when it comes back.
     loop_handle
         .insert_source(notifier, |event, &mut (), comp: &mut Compositor| {
-            let Compositor { graphics, wm, seat, .. } = comp;
+            let Compositor { graphics, wm, seat, gamma, .. } = comp;
             let Graphics::Session(session) = graphics else {
                 return;
             };
@@ -845,6 +845,16 @@ pub(crate) fn init(
                     // repaints the screens the other session scribbled
                     // on.
                     wm.backend_mut().mark_damaged();
+                    // The other session's `activate(true)` reset every
+                    // crtc, and a crtc reset comes back with a linear
+                    // LUT — so a night-light daemon's warm screen would
+                    // silently go blue-white on the way back from a VT
+                    // switch, and stay that way until the daemon next
+                    // felt like re-sending. The flag makes
+                    // `gamma::refresh` program the ramp that is still
+                    // logically in force; the ioctl waits for the pass,
+                    // not for this callback.
+                    crate::gamma::note_session_resumed(gamma);
                 }
             }
         })
@@ -1268,6 +1278,114 @@ pub(crate) fn apply_mode(
             Ok(())
         }
     }
+}
+
+/// The gamma ramp length each output's hardware wants, index-aligned
+/// with `Compositor::outputs` — the number `zwlr_gamma_control_v1`
+/// advertises as `gamma_size`, and the number of entries a client's
+/// table must contain per channel.
+///
+/// Zero means "this output cannot have its gamma set", and that answer
+/// is given twice over: the nested backend has no crtc to program at
+/// all, and a real crtc whose `gamma_length` the kernel reports as zero
+/// is hardware with no LUT. `gamma.rs` turns a zero into the protocol's
+/// `failed` rather than into a claim it cannot honor — and an all-zero
+/// list into no global at all.
+pub(crate) fn gamma_ramp_sizes(graphics: &Graphics) -> Vec<u32> {
+    let Graphics::Session(session) = graphics else {
+        // The nested output is a window on somebody else's desktop.
+        // There is no scanout engine behind it and no LUT to program;
+        // see `gamma.rs` for why that is answered with an absent global
+        // rather than a silent no-op.
+        return vec![0];
+    };
+    session
+        .outputs
+        .iter()
+        .map(|output| match session.drm.device_fd().get_crtc(output.crtc) {
+            Ok(info) => {
+                if info.gamma_length() == 0 {
+                    tracing::info!(
+                        output = %output.name,
+                        "this crtc reports no gamma ramp; night-light tools will be told so"
+                    );
+                }
+                info.gamma_length()
+            }
+            Err(error) => {
+                tracing::warn!(
+                    output = %output.name,
+                    ?error,
+                    "could not read this crtc's gamma length; treating the output as uncontrollable"
+                );
+                0
+            }
+        })
+        .collect()
+}
+
+/// Reads back the ramp currently programmed on one output's crtc, so
+/// `gamma.rs` has something exact to restore a crashed night-light
+/// daemon's screen to.
+///
+/// `None` when the driver will not answer — some do not implement
+/// `GETGAMMA` even when they accept `SETGAMMA` — and the caller falls
+/// back to a linear ramp, which is what an untouched LUT holds.
+pub(crate) fn read_gamma(
+    graphics: &Graphics,
+    index: usize,
+    size: usize,
+) -> Option<(Vec<u16>, Vec<u16>, Vec<u16>)> {
+    let Graphics::Session(session) = graphics else {
+        return None;
+    };
+    let output = session.outputs.get(index)?;
+    let mut red = vec![0u16; size];
+    let mut green = vec![0u16; size];
+    let mut blue = vec![0u16; size];
+    match session.drm.device_fd().get_gamma(output.crtc, &mut red, &mut green, &mut blue) {
+        Ok(()) => Some((red, green, blue)),
+        Err(error) => {
+            tracing::info!(output = %output.name, ?error, "could not read the crtc's gamma ramp back");
+            None
+        }
+    }
+}
+
+/// Programs one output's crtc gamma LUT — the real half of every
+/// `set_gamma` and every restore.
+///
+/// The legacy `DRM_IOCTL_MODE_SETGAMMA` ioctl, for the reasons
+/// `gamma.rs`'s header sets out at length: the `drm` crate exposes it
+/// as one call on the control device, whereas the atomic `GAMMA_LUT`
+/// property would mean committing behind the `DrmCompositor` that owns
+/// every other atomic commit on this crtc. On an atomic driver the
+/// kernel routes this ioctl into the same atomic state the property
+/// would have set, and smithay's own commits never mention `GAMMA_LUT`,
+/// so the value survives every frame queued afterwards.
+///
+/// Called only from `gamma::refresh`, once per dispatch pass, because
+/// the kernel's legacy-gamma helper performs a *blocking* commit and
+/// can wait about a vblank for a page flip already in flight here.
+pub(crate) fn write_gamma(
+    graphics: &Graphics,
+    index: usize,
+    red: &[u16],
+    green: &[u16],
+    blue: &[u16],
+) -> Result<(), String> {
+    let Graphics::Session(session) = graphics else {
+        return Err("the nested backend has no crtc to program a gamma ramp on".into());
+    };
+    let output = session
+        .outputs
+        .get(index)
+        .ok_or_else(|| format!("no session output at index {index}"))?;
+    session
+        .drm
+        .device_fd()
+        .set_gamma(output.crtc, red, green, blue)
+        .map_err(|error| format!("the crtc refused the gamma ramp: {error}"))
 }
 
 /// Mirrors the (position, size) layout wlr-output-management just

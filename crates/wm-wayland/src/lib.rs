@@ -32,6 +32,12 @@ mod dmabuf;
 // for it (Omarchy's Quickshell asks on every popup). The one module
 // here that generates its own protocol bindings — see its module docs.
 mod focus_grab;
+mod hyprland_ipc;
+// wlr-gamma-control-v1: the protocol wlsunset/gammastep/redshift warm
+// the screen through — the only way this desktop can be tinted at all.
+// Session backend only; see its module docs for the DRM mechanism and
+// the honest nested answer.
+mod gamma;
 mod idle;
 mod input;
 mod layers;

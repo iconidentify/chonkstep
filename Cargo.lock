@@ -301,6 +301,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "chonk-hyprland-ipc"
+version = "0.2.0"
+dependencies = [
+ "chonk-dock-proto",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "chonk-instruments"
 version = "0.2.0"
 dependencies = [
@@ -1743,6 +1752,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "regex"
+version = "1.13.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f020237b6c8eed93db2e2cb53c00c60a8e1bc73da7d073199a1180401450218d"
+dependencies = [
+ "aho-corasick",
+ "memchr",
+ "regex-automata",
+ "regex-syntax",
+]
+
+[[package]]
 name = "regex-automata"
 version = "0.4.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2934,6 +2955,7 @@ checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
 name = "wm-config"
 version = "0.2.0"
 dependencies = [
+ "regex",
  "serde",
  "toml",
  "tracing",
@@ -2973,6 +2995,7 @@ dependencies = [
 name = "wm-wayland"
 version = "0.2.0"
 dependencies = [
+ "chonk-hyprland-ipc",
  "chonk-shell",
  "chonk-xsettings",
  "smithay",

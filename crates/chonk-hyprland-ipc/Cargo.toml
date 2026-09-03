@@ -1,0 +1,37 @@
+[package]
+name = "chonk-hyprland-ipc"
+description = "Hyprland's IPC protocol, served from chonkstep's own state: the request/response socket, the socket2 event stream, and the honest-failure dispatch table that lets Omarchy's unmodified shell and hyprctl drive chonkstep."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# This crate is a *translation layer*, and it is deliberately kept clear
+# of chonkstep's own types. It defines its own `Snapshot` describing the
+# desktop and lets the caller fill it in (`chonk-shell` does, from
+# `wm-core`), for two reasons.
+#
+# The first is testability. Every JSON shape and every parser in here is
+# a promise made to somebody else's binary — Quickshell's IPC client and
+# the real `hyprctl` — and the only way to test a promise like that is
+# to construct the state by hand, including states the compositor cannot
+# currently produce but Hyprland can. A crate that depended on `wm-core`
+# would have to boot a window manager to check a field name.
+#
+# The second is that the dependency would point the wrong way. `wm-core`
+# is what chonkstep *is*; this crate is a costume it wears for one
+# desktop's tooling. Nothing in the window manager should have to know
+# the costume exists, and today nothing does.
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# The socket primitives, reused rather than rewritten. `transport`
+# already carries this workspace's hard-won answers to the questions a
+# second Unix-socket server would otherwise have to answer again: create
+# the parent directory 0700 or verify it is, `chmod` the socket 0600
+# because `bind` applied the umask, probe a socket that already exists
+# rather than stealing its name, and hand back fds that are
+# `SOCK_NONBLOCK` from `socket(2)` and `accept4(2)` rather than from a
+# later `fcntl`. Writing a second copy of that would mean maintaining a
+# second copy of its bugs.
+chonk-dock-proto = { path = "../chonk-dock-proto" }

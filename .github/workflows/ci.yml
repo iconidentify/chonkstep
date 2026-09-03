@@ -428,9 +428,22 @@ jobs:
       # reason: it is a ~500-line Wayland client with no dependency on
       # anything else here, it arrived clean, and it is what
       # `omarchy/shims/` puts on a user's keybindings.
+      #
+      # `chonk-hyprland-ipc` was added the day it was written, and it is
+      # the strongest case on this list. Every JSON field name, every
+      # event payload and every parser in it is a promise made to
+      # somebody else's binary — the real `hyprctl` and Quickshell's IPC
+      # client — which means a regression there does not look like a
+      # regression here: it looks like Omarchy's bar going quietly
+      # blank, or a script taking a branch its author never tested. It
+      # arrived clean, it depends only on `serde` and
+      # `chonk-dock-proto`, and it carries the conformance tests that
+      # pin those promises down. A crate whose whole job is to be
+      # trusted by software we do not control is not one to let drift.
       - name: Deny clippy warnings on the crates that are clean
         run: |
           cargo clippy --all-targets --no-deps \
+            -p chonk-hyprland-ipc \
             -p chonk-about \
             -p chonk-btpair \
             -p chonk-dock-widget \

@@ -1164,6 +1164,12 @@ pub struct Compositor {
     /// tile. Reconciled against `Shell::extra_poll_fds` at the end of
     /// every dispatch pass — see [`Compositor::sync_dock_sources`].
     dock_sources: Vec<(RawFd, RegistrationToken)>,
+    /// The Hyprland IPC server, when the session asked for one
+    /// (`CHONKSTEP_HYPRLAND_IPC=1`). `None` in an ordinary session,
+    /// which then pays one env lookup at startup and nothing else.
+    /// Its file descriptors are reconciled by the same pass that
+    /// handles the dockapp ones — see [`Compositor::sync_dock_sources`].
+    hyprland_ipc: Option<chonk_hyprland_ipc::Server>,
 
     // Per-protocol smithay state. Constructed once in `run`; the
     // handler impls in `xdg.rs`/`input.rs`/`xwayland.rs` return these
@@ -1278,6 +1284,12 @@ pub struct Compositor {
     /// wlr-output-management: what `wlr-randr` and `kanshi` list and
     /// configure outputs through — see `output_mgmt.rs`.
     pub(crate) output_mgmt: crate::output_mgmt::OutputManagement,
+    /// wlr-gamma-control: the per-output gamma ramps `wlsunset`,
+    /// `gammastep` and `redshift` warm the screen through, with the
+    /// exclusivity that stops two of them fighting and the captured
+    /// originals a crashed one is undone from. Advertised only where
+    /// there is a crtc to program — see `gamma.rs`.
+    pub(crate) gamma: crate::gamma::GammaControl,
     /// wlr-layer-shell: launchers, bars, notification daemons, OSDs —
     /// protocol state plus the focus/reservation bookkeeping in
     /// `layers.rs` (the surface records themselves live on the ledger).
@@ -1468,6 +1480,12 @@ impl Compositor {
         // reconciliations and before the damage test, so an applied
         // configuration's re-layout renders on this very pass.
         crate::output_mgmt::refresh(self);
+        // Gamma ramps settle beside the other protocol reconciliations
+        // and for a reason of their own: this is the only place the
+        // blocking legacy-gamma ioctl is called from, so a client
+        // hammering `set_gamma` costs one wait per pass rather than one
+        // per request (see `gamma.rs`).
+        crate::gamma::refresh(self);
         // The X11 tools' equivalent of the wlr window list above rides
         // the same timing: flush the buffered EWMH publishes to the
         // XWayland root after the drains, so `xprop`/`wmctrl` read the
@@ -1615,6 +1633,11 @@ impl Compositor {
         // frame callbacks, focus enter/leave) only reach clients on a
         // flush.
         let _ = self.display_handle.flush_clients();
+
+        // Hyprland IPC, before the source reconciliation below so that
+        // a connection accepted or dropped in this pass is registered
+        // or unregistered in the same one.
+        self.service_hyprland_ipc();
 
         // Last, after every socket this pass was going to close has
         // been closed. See `sync_dock_sources` for why that ordering is
@@ -1832,8 +1855,48 @@ impl Compositor {
     /// the only place calloop touches a registered descriptor. There is
     /// no point at which a source names a closed fd and something polls
     /// it.
+    /// Accept, answer and stream on the Hyprland IPC sockets.
+    ///
+    /// The two-snapshot discipline here is the same one
+    /// `Shell::service_control` uses and is load-bearing: requests are
+    /// answered against the state as it was, the actions they asked for
+    /// are applied, and the events are then derived from the state
+    /// those actions produced. A single snapshot would either answer
+    /// from the future or announce the past.
+    fn service_hyprland_ipc(&mut self) {
+        let Some(server) = &mut self.hyprland_ipc else {
+            return;
+        };
+        server.accept();
+        if !server.has_clients() {
+            return;
+        }
+
+        let before = crate::hyprland_ipc::snapshot(&self.wm);
+        let actions = server.service(&before);
+        for action in actions {
+            crate::hyprland_ipc::apply(&mut self.wm, action);
+        }
+
+        let after = crate::hyprland_ipc::snapshot(&self.wm);
+        // Borrow again: `apply` needed `&mut self.wm` above.
+        if let Some(server) = &mut self.hyprland_ipc {
+            server.publish(&after);
+        }
+    }
+
     fn sync_dock_sources(&mut self) {
-        let wanted = self.shell.extra_poll_fds();
+        let mut wanted = self.shell.extra_poll_fds();
+        // The Hyprland IPC sockets ride the same reconciliation rather
+        // than owning calloop sources of their own, because they have
+        // exactly the property this pass was built for: descriptors
+        // that come and go as clients connect, owned by something other
+        // than the event loop. The safety argument below covers them
+        // unchanged — the source is removed on the same pass that drops
+        // the owner, and before calloop next polls.
+        if let Some(server) = &self.hyprland_ipc {
+            wanted.extend(server.poll_fds());
+        }
         // Removals first, so a descriptor that was closed this pass is
         // unregistered before anything else can be inserted at the same
         // number.
@@ -2299,6 +2362,12 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
     // Same timing rule as dmabuf: bound before any client can connect.
     let protocols = crate::protocols::init(&display_handle);
     let output_mgmt = crate::output_mgmt::init(&display_handle);
+    // Gamma control rides the same timing rule and additionally asks
+    // the graphics stack what its hardware can do: an output with no
+    // gamma LUT — every nested one, and some real crtcs — is refused
+    // honestly, and a session where no output can be tinted advertises
+    // no global at all rather than one that lies.
+    let gamma = crate::gamma::init(&display_handle, &graphics);
     // And again for the one protocol with no crate behind it: this is
     // the global Omarchy's Quickshell looks for the moment it connects,
     // and finding it absent is what makes every popout in that shell
@@ -2386,6 +2455,16 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
     std::env::set_var("WAYLAND_DISPLAY", &socket_name);
     tracing::info!(socket = ?socket_name, "wayland socket listening");
 
+    // Hyprland IPC, for Omarchy's unmodified shell and the real
+    // `hyprctl`. Bound here, beside `WAYLAND_DISPLAY`, for the same two
+    // reasons that variable is set here: it exports
+    // `HYPRLAND_INSTANCE_SIGNATURE`, which must be in the environment
+    // before `Shell::new` autostarts anything that would look for it,
+    // and setting an environment variable is only sound while this
+    // process is still single-threaded. Off unless the session asked
+    // for it; see `hyprland_ipc::init`.
+    let hyprland_ipc = crate::hyprland_ipc::init();
+
     // Session policy comes from `chonk_shell::startup`, shared with the
     // X11 binary: same env-over-config precedence, same theme
     // resolution, same cursor sizing. A compositor that resolved these
@@ -2405,6 +2484,16 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
     // XWayland clients draw their own Xcursor pointers and have no way
     // to learn this session's scale otherwise.
     ensure_xcursor_size(scale);
+    // The `env` lines from the desktop's own Hyprland configuration
+    // (`wm_config::hyprland`), for the same reason and in the same
+    // window as the cursor size above: they exist to be *inherited* —
+    // `GDK_BACKEND`, `MOZ_ENABLE_WAYLAND` and the rest are how an
+    // Omarchy machine's toolkits get onto Wayland at all — so they have
+    // to be set before this process starts anything, and this is still
+    // the single-threaded part of startup where setting them is sound.
+    // Empty on a session that reads no such configuration, which is
+    // most of them.
+    chonk_shell::startup::apply_session_env(&state.session_env);
     let theme = state.theme();
     tracing::info!(theme = %theme.id, "theme loaded");
     // The font database is built out here rather than inside the engine
@@ -2558,6 +2647,7 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
     }
 
     let mut comp = Compositor {
+        hyprland_ipc,
         wm,
         shell,
         display_handle,
@@ -2589,6 +2679,7 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
         syncobj,
         protocols,
         output_mgmt,
+        gamma,
         layer_shell,
         session_lock,
         focus_grab,
@@ -2691,6 +2782,21 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
     // (README, "Restart costs you your clients"). A dockapp is not a
     // Wayland client, so it survives the restart that kills every window
     // on the screen — strictly more than any ordinary client here gets.
+    // Before anything else about the teardown: put every screen's
+    // colour back. A compositor that exits — or hot-restarts — while a
+    // night-light daemon holds a warm ramp would otherwise hand the
+    // greeter, or its own replacement, an orange display with nothing
+    // left running that knows why. See `gamma.rs`.
+    crate::gamma::restore_all(&mut comp);
+
+    // The Hyprland sockets go before the shell's, and explicitly,
+    // because a hot restart re-execs this process and `exec` runs no
+    // destructors: the incoming process would then find a live-looking
+    // socket at the path it wants and refuse to bind. Unlinking here is
+    // the same discipline `ControlSocket::shut_down` follows.
+    if let Some(server) = &mut comp.hyprland_ipc {
+        server.shut_down();
+    }
     comp.shell.shut_down(if comp.restart { Farewell::Restarting } else { Farewell::SessionOver });
 
     if comp.restart {
