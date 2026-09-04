@@ -38,7 +38,7 @@ use std::os::fd::OwnedFd;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use smithay::backend::renderer::utils::{on_commit_buffer_handler, with_renderer_surface_state};
-use smithay::desktop::PopupKind;
+use smithay::desktop::{find_popup_root_surface, PopupKind};
 use smithay::input::pointer::CursorImageStatus;
 use smithay::input::{Seat, SeatHandler, SeatState};
 use smithay::output::Output;
@@ -886,6 +886,9 @@ impl Compositor {
                     .map(|data| !data.lock().unwrap().pending_configures().is_empty())
             })
             .unwrap_or(false);
+            if !client_behind {
+                backend.popup_parent_committed(&root);
+            }
             // A commit whose size matches anything we recently asked
             // for is the client obeying us — possibly obeying an ask
             // from two configures ago, because acks are immediate while
@@ -1384,7 +1387,14 @@ impl XdgShellHandler for Compositor {
         // parent's content rect via `PopupManager`. No unconstraining
         // pass yet: NeXTSTEP-style menus hug their parent, and a
         // popup off the output edge is the client's own placement to
-        // fix. (Initial configure happens at first commit.)
+        // fix. (Initial configure happens at first commit.) If the
+        // parent later changes size, an application that cares about
+        // an internal widget's new location must send `reposition` (or
+        // create a reactive positioner); the protocol does not expose
+        // enough information for us to invent that anchor. The resize
+        // drain in `Compositor::dismiss_popups_after_parent_resize`
+        // dismisses a tree that did neither instead of leaving a stale,
+        // detached menu on screen.
         surface.with_pending_state(|state| {
             state.geometry = positioner.get_geometry();
         });
@@ -1403,6 +1413,9 @@ impl XdgShellHandler for Compositor {
             state.geometry = positioner.get_geometry();
             state.positioner = positioner;
         });
+        if let Ok(root) = find_popup_root_surface(&PopupKind::Xdg(surface.clone())) {
+            self.wm.backend_mut().popup_repositioned(&root);
+        }
         surface.send_repositioned(token);
     }
 

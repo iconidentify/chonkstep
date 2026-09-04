@@ -738,11 +738,16 @@ impl Backend for WaylandBackend {
         let Some(record) = self.windows.get_mut(&window) else {
             return;
         };
+        let resized = record.content.size != size;
         record.content.size = size;
         let mut configure_owed = false;
+        let mut popup_root = None;
         match &record.surface {
             ManagedSurface::Xdg(toplevel) => {
                 if toplevel.alive() {
+                    if resized {
+                        popup_root = Some(toplevel.wl_surface().clone());
+                    }
                     // The configure/ack/commit dance is how a Wayland
                     // client learns its size — there is no server-side
                     // resize to perform. `send_pending_configure`
@@ -809,6 +814,13 @@ impl Backend for WaylandBackend {
         }
         if configure_owed {
             self.note_configure(window);
+        }
+        if let Some(root) = popup_root {
+            // Interactive resize may call this once per pointer motion.
+            // One root entry is enough to dismiss its whole popup tree,
+            // and retaining the Vec's allocation keeps this edge free of
+            // allocator churn after the first resize.
+            self.note_popup_parent_resize(root);
         }
         self.damage = true;
     }

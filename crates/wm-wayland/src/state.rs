@@ -43,7 +43,7 @@ use smithay::backend::renderer::damage::OutputDamageTracker;
 use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
 use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::backend::winit::{self, WinitEvent, WinitGraphicsBackend};
-use smithay::desktop::PopupManager;
+use smithay::desktop::{PopupKind, PopupManager};
 use smithay::input::keyboard::XkbConfig;
 use smithay::input::pointer::CursorImageStatus;
 use smithay::input::{Seat, SeatState};
@@ -459,6 +459,15 @@ pub(crate) enum FocusIntent {
     Nothing,
 }
 
+/// An xdg toplevel resize that may invalidate popup anchors rooted in
+/// that surface. `ready` becomes true only after the client has acked
+/// our resize configure and committed its new toplevel buffer, giving
+/// it a full protocol round trip in which to send `xdg_popup.reposition`.
+pub(crate) struct PopupParentResize {
+    root: WlSurface,
+    ready: bool,
+}
+
 /// The `Backend` the `WindowManager` owns: pure bookkeeping the
 /// protocol handlers write into and the renderer reads out of. See the
 /// module docs for why no display connection lives here.
@@ -505,6 +514,14 @@ pub struct WaylandBackend {
     /// `crate::xdg::flush_configures` for the invariant and the bug
     /// that made it one.
     pub(crate) configure_debt: HashMap<WlWindowId, crate::xdg::ConfigureDebt>,
+    /// Native toplevel roots whose size changed this pass. Any xdg
+    /// popup tree rooted there is dismissed after the client accepts
+    /// the resize unless it supplies a fresh anchor: a non-reactive
+    /// popup cannot legally be reconfigured, and a client that sends
+    /// no `xdg_popup.reposition` has given us no updated anchor to
+    /// place it from. See
+    /// [`Compositor::dismiss_popups_after_parent_resize`].
+    popup_parent_resizes: Vec<PopupParentResize>,
     /// Clicks on shell surfaces (surface, surface-local position,
     /// button, pressed) — plus background presses under [`ROOT_SHELL`].
     /// Drained by `Backend::take_shell_click` for the loop's shell
@@ -773,6 +790,7 @@ impl WaylandBackend {
             windows: HashMap::new(),
             surface_windows: HashMap::new(),
             configure_debt: HashMap::new(),
+            popup_parent_resizes: Vec::new(),
             decoration_rules: wm_config::DecorationRules::default(),
             frames: HashMap::new(),
             shells: HashMap::new(),
@@ -827,6 +845,38 @@ impl WaylandBackend {
     /// Queues an event for the next `poll_event` drain.
     pub(crate) fn queue(&mut self, event: BackendEvent<WlWindowId, WlFrameId>) {
         self.pending.push_back(event);
+    }
+
+    /// Begin (or refresh) the popup-anchor grace period for a parent
+    /// resize. Repeated interactive-resize motions coalesce by root.
+    pub(crate) fn note_popup_parent_resize(&mut self, root: WlSurface) {
+        if let Some(resize) = self.popup_parent_resizes.iter_mut().find(|resize| resize.root == root) {
+            resize.ready = false;
+        } else {
+            self.popup_parent_resizes.push(PopupParentResize { root, ready: false });
+        }
+    }
+
+    /// The resized parent has committed after accepting every pending
+    /// configure. Its client has now had the opportunity to reposition
+    /// its popups, so an unchanged non-reactive anchor may be retired.
+    pub(crate) fn popup_parent_committed(&mut self, root: &WlSurface) {
+        if let Some(resize) = self.popup_parent_resizes.iter_mut().find(|resize| &resize.root == root) {
+            resize.ready = true;
+        }
+    }
+
+    /// An explicit reposition is the fresh anchor this grace period was
+    /// waiting for. The popup remains mapped at the client's new place.
+    pub(crate) fn popup_repositioned(&mut self, root: &WlSurface) {
+        self.popup_parent_resizes.retain(|resize| &resize.root != root);
+    }
+
+    /// Removes one resize whose client round trip has completed while
+    /// retaining the Vec allocation for future interactive resizes.
+    fn take_ready_popup_parent_resize(&mut self) -> Option<WlSurface> {
+        let index = self.popup_parent_resizes.iter().position(|resize| resize.ready)?;
+        Some(self.popup_parent_resizes.swap_remove(index).root)
     }
 
     /// Whether a layer surface is one the user can see and click right
@@ -990,7 +1040,14 @@ impl WaylandBackend {
     /// growing the stack by one dead slot per client-decorated window
     /// the session ever opened.
     pub(crate) fn forget_window(&mut self, window: WlWindowId) {
-        if self.windows.remove(&window).is_some() {
+        if let Some(record) = self.windows.remove(&window) {
+            if let Some(root) = record.surface.wl_surface() {
+                // A client is allowed to disappear while a resize
+                // configure is in flight. Such a root will never
+                // commit and become ready, so retire its grace record
+                // at the same lifecycle edge as its window.
+                self.popup_parent_resizes.retain(|resize| resize.root != root);
+            }
             self.mark_idle_policy_dirty();
         }
         self.surface_windows.retain(|_, indexed| *indexed != window);
@@ -1803,10 +1860,13 @@ impl Compositor {
         // window leaves the revision still and pays no snapshot allocation.
         self.notice_wm_protocol_changes();
 
-        // Wayland-side housekeeping with no X11 counterpart: dead xdg
-        // popups age out, and the focus intent a backend verb recorded
-        // lands on the seat (see `WaylandBackend::pending_focus` for
-        // why it cannot land inline).
+        // Wayland-side housekeeping with no X11 counterpart: a popup
+        // whose parent was resized is retired before its old anchor can
+        // be presented, dead xdg popups age out, and the focus intent a
+        // backend verb recorded lands on the seat (see
+        // `WaylandBackend::pending_focus` for why it cannot land
+        // inline).
+        self.dismiss_popups_after_parent_resize();
         self.popups.cleanup();
         self.core_protocols.sweep_activation_tokens(Instant::now());
         self.apply_pending_focus();
@@ -1991,6 +2051,61 @@ impl Compositor {
         // and the flush has gone out — a no-op in a user session (the
         // door never opens without CHONKSTEP_TEST_SOCKET).
         crate::test_door::after_frame(self);
+    }
+
+    /// Dismiss popup trees whose native parent changed size.
+    ///
+    /// `xdg_positioner` coordinates describe an anchor inside the
+    /// parent's surface. They do not describe how that anchor moves
+    /// when the application's own layout changes. A reactive
+    /// positioner lets the compositor send a fresh configure and an
+    /// explicit `xdg_popup.reposition` gives it a replacement anchor;
+    /// absent either, the protocol deliberately provides no way to
+    /// infer the new location. Chromium 140's application menu is one
+    /// such non-reactive client: after a parent configure it redraws
+    /// the toplevel but sends neither `set_reactive` nor `reposition`.
+    /// Leaving that surface mapped produces a visibly detached popup
+    /// whose hit region is just as stale.
+    ///
+    /// A compositor may dismiss a popup whenever it is no longer
+    /// suitable. After waiting through the parent's configure/commit
+    /// round trip, sending `popup_done` is therefore the only
+    /// protocol-correct fallback: the client can recreate it from its
+    /// now-current layout. Reactive popups and popups that explicitly
+    /// repositioned survive. Pure parent moves never enter this queue;
+    /// popup coordinates are parent-relative and remain correct across
+    /// them.
+    fn dismiss_popups_after_parent_resize(&mut self) {
+        while let Some(root) = self.wm.backend_mut().take_ready_popup_parent_resize() {
+            // One root can technically own multiple sibling popup
+            // trees. Dismissing a root popup recursively dismisses its
+            // descendants and mutates the tree, so re-query after each
+            // one rather than retaining stale handles.
+            loop {
+                let popup = PopupManager::popups_for_surface(&root).find_map(|(popup, _)| {
+                    let PopupKind::Xdg(xdg) = &popup else {
+                        return None;
+                    };
+                    if xdg.get_parent_surface().as_ref() != Some(&root) {
+                        return None;
+                    }
+                    // A reactive positioner explicitly asks the
+                    // compositor to keep this popup live as its parent
+                    // changes. Reading through the pending-state API is
+                    // the only public smithay accessor; an unchanged
+                    // read does not produce a configure debt.
+                    let reactive = xdg.with_pending_state(|state| state.positioner.reactive);
+                    (!reactive).then_some(popup)
+                });
+                let Some(popup) = popup else {
+                    break;
+                };
+                if let Err(error) = PopupManager::dismiss_popup(&root, &popup) {
+                    tracing::debug!(?error, "popup parent disappeared while dismissing its stale popup tree");
+                    break;
+                }
+            }
+        }
     }
 
     /// What this session tells X clients about its own appearance.
