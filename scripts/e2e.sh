@@ -161,27 +161,43 @@ else
     cargo test -p chonk-testkit --tests -- --ignored --test-threads=1 "$@"
 fi
 
-# The unit tests that read the Omarchy installed on this machine
-# (`#[ignore]`d for the same no-such-thing-in-CI reason; they skip
-# themselves when Omarchy is absent). No "$@": that filter is the
-# harness's.
-#
-# These report `N passed` in 0.00s whether they read a real Omarchy or
-# returned immediately, which looks identical to a real pass. Saying
-# up front whether there is an Omarchy to read is the difference.
+# The unit tests that read the Omarchy installed on this machine are
+# `#[ignore]`d for the same no-such-thing-in-CI reason. No "$@": that
+# filter is the harness's. Each suite has its own prerequisite, so
+# report them separately: a partial/custom install may contain either
+# the menu or the themes without the other.
 echo "Running the unit tests that read the installed Omarchy..."
-# The same root `chonk_shell::omarchy_menu::omarchy_root` resolves —
-# $OMARCHY_PATH when set (what Omarchy's own scripts read, and
-# /usr/share/omarchy on an Omarchy 4 machine), else the pre-package
-# location under $HOME — and the same file `MenuPaths::discover` tests
-# for, so this line cannot say "reading" about a tree those tests would
-# walk away from.
-omarchy_root="${OMARCHY_PATH:-$HOME/.local/share/omarchy}"
-omarchy_menu="$omarchy_root/default/omarchy/omarchy-menu.jsonc"
-if [ -f "$omarchy_menu" ]; then
-    echo "  (reading $omarchy_root)"
+# Match `chonk_shell::omarchy_menu::omarchy_root`: an empty
+# $OMARCHY_PATH falls back to $HOME, and a missing $HOME falls back to
+# the current directory.
+if [ -n "${OMARCHY_PATH:-}" ]; then
+    omarchy_menu_root="$OMARCHY_PATH"
 else
-    echo "  (no Omarchy menu at $omarchy_menu — these tests return early, so their 'passed' counts mean nothing here)"
+    omarchy_menu_root="${HOME:-.}/.local/share/omarchy"
+fi
+omarchy_menu="$omarchy_menu_root/default/omarchy/omarchy-menu.jsonc"
+if [ -f "$omarchy_menu" ]; then
+    echo "  chonk-shell menu fixture: reading $omarchy_menu"
+else
+    echo "  chonk-shell menu fixture: absent at $omarchy_menu — its installed tests return early"
+fi
+
+# Match `wm_theme::omarchy`'s installed-theme test exactly: unlike the
+# menu helper it treats a set-but-empty $OMARCHY_PATH as the current
+# directory, and it has no path at all when both environment variables
+# are unset.
+omarchy_themes=""
+if [ "${OMARCHY_PATH+x}" = x ]; then
+    omarchy_themes="${OMARCHY_PATH:+$OMARCHY_PATH/}themes"
+elif [ "${HOME+x}" = x ]; then
+    omarchy_themes="${HOME:+$HOME/}.local/share/omarchy/themes"
+fi
+if [ -n "$omarchy_themes" ] && [ -d "$omarchy_themes" ] && [ -r "$omarchy_themes" ]; then
+    echo "  wm-theme theme fixture: reading $omarchy_themes"
+elif [ -n "$omarchy_themes" ]; then
+    echo "  wm-theme theme fixture: absent or unreadable at $omarchy_themes — its installed test returns early"
+else
+    echo "  wm-theme theme fixture: unresolved because OMARCHY_PATH and HOME are unset — its installed test returns early"
 fi
 cargo test -p chonk-shell -p wm-theme --lib -- --ignored installed
 
