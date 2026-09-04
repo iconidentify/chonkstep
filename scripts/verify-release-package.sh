@@ -120,10 +120,10 @@ for binary in chonkstep chonkstep-wayland; do
     }
     reported_build_id="$(printf '%s\n' "$long_version" | sed -n 's/^build id: //p')"
     elf_build_id="$(readelf -n "$path" | sed -n 's/.*Build ID: //p' | head -n 1)"
-    [ -n "$elf_build_id" ] && [ "$reported_build_id" = "$elf_build_id" ] || {
+    if [ -z "$elf_build_id" ] || [ "$reported_build_id" != "$elf_build_id" ]; then
         echo "$binary reports build ID $reported_build_id, readelf reports $elf_build_id" >&2
         exit 1
-    }
+    fi
 done
 
 # And the split has to have actually happened: `options=(strip debug)`
