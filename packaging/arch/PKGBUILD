@@ -11,6 +11,28 @@
 # identical to PKGBUILD-release - see its comments for how the
 # dependency list was derived.
 
+# Ship the debug information rather than discarding it.
+#
+# `makepkg`'s stock `OPTIONS` include `strip` and `!debug`, and
+# `STRIP_BINARIES="--strip-all"`, so the default behaviour is to throw
+# away everything the release profile now emits — leaving a package
+# whose crashes symbolise as `??` for everyone, including the
+# maintainer on any machine but the build host. Arch's debuginfod
+# carries only official packages, so it cannot fill that gap for a
+# package installed from a GitHub release or the AUR.
+#
+# `!strip` keeps `makepkg` from stripping blindly; `debug` makes it do
+# the split properly instead — `objcopy --only-keep-debug` into a
+# separate `%s-debug` package, then strip the shipped binary. Measured
+# on aarch64: the shipped executable comes out at ~33 MB, SMALLER than
+# the ~44 MB it was before the release profile existed, because a full
+# strip also drops the `.symtab` the old build kept. The debug package
+# carries the ~101 MB nobody downloads unless they are reading a core.
+#
+# `.eh_frame` survives the strip, so stack unwinding from a coredump
+# works off the shipped binary alone; the debug package is what turns
+# those frames into `file:line`.
+options=(!strip debug)
 pkgname=chonkstep-git
 pkgver=0.2.0.r76.ge1b4e54
 pkgrel=1

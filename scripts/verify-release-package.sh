@@ -24,7 +24,7 @@ case "$expected_arch" in
     *) echo "unsupported expected architecture: $expected_arch" >&2; exit 2 ;;
 esac
 
-for command in bsdtar desktop-file-validate file ldd qmllint; do
+for command in bsdtar desktop-file-validate file ldd qmllint readelf; do
     command -v "$command" >/dev/null 2>&1 || {
         echo "release verifier needs $command" >&2
         exit 2
@@ -83,6 +83,51 @@ do
         ldd "$path" >&2
         exit 1
     fi
+    # A shipped binary must still be unwindable from a coredump. The
+    # panic hook turns every panic into a SIGABRT so the session
+    # supervisor can recover, which makes the core the one durable
+    # artifact a lost session leaves — and a core is only a stack if
+    # `.eh_frame` survived the packaging strip. It does survive
+    # `--strip-all`; what would remove it is someone "fixing" the
+    # release profile or the PKGBUILD's `options=(!strip debug)` back
+    # to discarding debug information, which is the state this check
+    # exists to stop returning to.
+    if ! readelf -S "$path" | grep -q '\.eh_frame'; then
+        echo "$binary has no .eh_frame: a coredump from it cannot be unwound" >&2
+        exit 1
+    fi
 done
+
+# And the split has to have actually happened: `options=(!strip debug)`
+# is what puts the symbols in a -debug package instead of the bin, and
+# a packaging change that dropped it would leave crashes unreadable
+# again with nothing failing to say so.
+# `makepkg` names it "$pkgname-debug-$pkgver-$pkgrel-$arch.pkg.tar*"
+# and writes it beside the main package. `$expected_version` is
+# already "version-pkgrel" (see the usage line), so the only unknown
+# left is the compression suffix. An explicit `if` rather than
+# `[ -f ] && ...`: this script runs under `set -e`, where a failing
+# test as the last statement of a loop body would end the run instead
+# of trying the next candidate.
+debug_package=""
+for candidate in "$(dirname "$package")"/chonkstep-debug-"$expected_version"-"$expected_arch".pkg.tar*; do
+    if [ -f "$candidate" ]; then
+        debug_package="$candidate"
+        break
+    fi
+done
+if [ -z "$debug_package" ]; then
+    echo "no debug package beside $(basename "$package"): the symbols were not split out" >&2
+    echo "  expected chonkstep-debug-$expected_version-$expected_arch.pkg.tar*" >&2
+    echo "  check that the PKGBUILD still sets options=(!strip debug)" >&2
+    exit 1
+fi
+for binary in chonkstep chonkstep-wayland; do
+    bsdtar -tf "$debug_package" | grep -q "usr/lib/debug/usr/bin/$binary" || {
+        echo "the debug package carries no symbols for $binary" >&2
+        exit 1
+    }
+done
+echo "verify-release-package: debug symbols present in $(basename "$debug_package")"
 
 echo "verify-release-package: $expected_arch $expected_version passed"

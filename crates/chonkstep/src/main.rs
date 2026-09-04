@@ -21,7 +21,36 @@ use chonk_shell::spawn;
 use chonk_shell::startup::{ensure_xcursor_size, SessionRequestPoller, SessionState};
 use chonk_xsettings::{DesktopAppearance, XSettingsManager};
 
+/// Answers `--version` and `-V` before anything else starts, and
+/// nothing else — these binaries take no other arguments.
+///
+/// It exists so a bug report can name its build. The version was
+/// previously reachable only through `pacman -Qi`, which is one more
+/// thing a user has to know to produce a report the crash itself
+/// cannot produce for them.
+///
+/// The ELF build id, which is what actually matches a coredump to a
+/// symbol package, is deliberately NOT embedded here: `coredumpctl
+/// info` already prints it for the core, and `readelf -n` prints it
+/// for the binary, so embedding a copy would add a build script and a
+/// note parser to restate something both ends already know. The line
+/// below says where to get it instead.
+fn print_version_and_exit_if_asked() {
+    let asked = std::env::args().skip(1).any(|arg| arg == "--version" || arg == "-V");
+    if !asked {
+        return;
+    }
+    println!("{} {}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
+    println!("build id: run `readelf -n \"$(command -v {})\"` (coredumpctl prints the core's own)", env!("CARGO_PKG_NAME"));
+    std::process::exit(0);
+}
+
 fn main() {
+    // Before the subscriber, so `--version` prints one clean line
+    // rather than a line preceded by whatever RUST_LOG asked for.
+    // Also before `restart_in_place`'s re-exec can ever matter: that
+    // path passes no arguments, so a restarted session never sees one.
+    print_version_and_exit_if_asked();
     tracing_subscriber::fmt().with_env_filter(tracing_subscriber::EnvFilter::from_default_env()).init();
     tracing::info!(
         version = env!("CARGO_PKG_VERSION"),
