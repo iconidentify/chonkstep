@@ -7,6 +7,19 @@ crate and both session binaries carry the same number.
 
 ### Performance
 
+- **Window previews follow actual surface damage instead of a wall clock.**
+  Every toplevel and subsurface commit marks only its owning preview stale;
+  static windows are captured once and then stay out of the synchronous GLES
+  readback path while another client animates. Failed imports remain throttled,
+  Overview's immediate card-resolution upgrade is unchanged, and boosted
+  buffers are still reduced to the normal 256px cap after Overview closes.
+  Capture timing now lives with each window record, removing the per-frame
+  thread-local hash-map borrow and dead-window pruning pass. Across three
+  alternating release-build trials with eight static clients and one animated
+  client, preview readbacks fell from 9.00/s to 1.00/s (88.9%), compositor CPU
+  from 47.915% to 26.462% of one core (44.8%), and context switches from
+  220.1/s to 180.7/s (17.9%). Real nested sessions cover miniaturize/restore
+  and Overview navigation in addition to the scheduling unit tests.
 - **Hyprland event snapshots are demand-driven; client aggregation is
   linear-time.** A connected
   Omarchy/Quickshell event socket no longer makes every buffer commit or

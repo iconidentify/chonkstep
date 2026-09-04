@@ -284,6 +284,17 @@ pub(crate) struct WindowRecord {
     /// snapshot (or forever, for a window that never maps), which the
     /// shell's icon and switcher renderers already handle.
     pub snapshot: Option<DecorationBuffer>,
+    /// Whether the managed surface tree has committed since
+    /// [`snapshot`](Self::snapshot) was last refreshed. Preview
+    /// readback is a synchronous GPU operation; remembering real pixel
+    /// changes prevents an unrelated animated window from forcing
+    /// static windows through that stall once per second forever.
+    pub snapshot_dirty: bool,
+    /// When the compositor most recently tried to refresh
+    /// [`snapshot`](Self::snapshot). Attempts, rather than only
+    /// successful captures, are recorded so an unimportable or dying
+    /// client cannot retry a synchronous GPU readback every frame.
+    pub snapshot_attempted_at: Option<Instant>,
     /// Everything the two decoration protocols have said about this
     /// toplevel — see [`crate::decoration`], which also holds the
     /// policy that reads it.
@@ -350,6 +361,8 @@ impl WindowRecord {
             app_id: None,
             window_type: WindowType::Normal,
             snapshot: None,
+            snapshot_dirty: true,
+            snapshot_attempted_at: None,
             decoration: crate::decoration::DecorationNegotiation::default(),
             content_offset: Point::new(0, 0),
             recent_asks: std::collections::VecDeque::new(),

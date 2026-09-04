@@ -417,6 +417,12 @@ impl CompositorHandler for Compositor {
         while let Some(parent) = get_parent(&root) {
             root = parent;
         }
+        let backend = self.wm.backend_mut();
+        if let Some(window) = backend.window_for_surface(&root) {
+            if let Some(record) = backend.windows.get_mut(&window) {
+                record.snapshot_dirty = true;
+            }
+        }
         let xwayland = surface.client().is_some_and(|client| client.get_data::<XWaylandClientData>().is_some());
         if !xwayland {
             // Which output's scale this surface should draw for. The

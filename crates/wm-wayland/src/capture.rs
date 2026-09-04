@@ -58,8 +58,6 @@
 //! session is actually showing, with no X server and no Wayland client
 //! in the picture.
 
-use std::cell::RefCell;
-use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -96,10 +94,11 @@ use crate::state::{Compositor, Graphics, WlWindowId};
 /// how the hint changes the schedule.
 const MAX_SNAPSHOT_EDGE: u32 = 256;
 
-/// Minimum age of a snapshot before it is taken again. A preview is
-/// consumed at miniaturize time and in the switcher, neither of which
-/// needs live video; one second keeps a thumbnail plausibly current
-/// while costing one small offscreen render per window per second.
+/// Minimum age of a snapshot before changed pixels are taken again. A
+/// preview is consumed at miniaturize time and in the switcher,
+/// neither of which needs live video; one second keeps an animating
+/// thumbnail plausibly current while static windows pay no recurring
+/// readback cost.
 const SNAPSHOT_INTERVAL: Duration = Duration::from_secs(1);
 
 /// How many windows may be captured in one frame. Reading pixels back
@@ -110,18 +109,6 @@ const SNAPSHOT_INTERVAL: Duration = Duration::from_secs(1);
 /// captured, so windows that started in lockstep drift into separate
 /// frames and stay there.
 const MAX_SNAPSHOTS_PER_FRAME: usize = 2;
-
-thread_local! {
-    /// When each window was last snapshotted. This is throttle policy,
-    /// not ledger state - `wm-core` and the shell have no business
-    /// knowing the capture cadence, and `WindowRecord` should not grow
-    /// a field that only this module reads - so it lives here, keyed
-    /// by the same id the ledger uses, and is pruned against the
-    /// ledger on every pass so dead windows cannot accumulate.
-    /// Thread-local rather than a field because the compositor is
-    /// single-threaded by construction (one calloop, one data type).
-    static LAST_SNAPSHOT: RefCell<HashMap<WlWindowId, Instant>> = RefCell::new(HashMap::new());
-}
 
 /// Refreshes the per-window snapshots used for previews. Called once
 /// per rendered frame; the implementation throttles its own work, so
@@ -149,12 +136,15 @@ pub(crate) fn refresh_snapshots(comp: &mut Compositor) {
         // fails (a client that just died, an unimportable buffer) must
         // wait out the interval like any other, or it retries at frame
         // rate forever.
-        LAST_SNAPSHOT.with(|last| last.borrow_mut().insert(window, now));
+        if let Some(record) = wm.backend_mut().windows.get_mut(&window) {
+            record.snapshot_attempted_at = Some(now);
+        }
         let Some(buffer) = snapshot_window(renderer, &surface, size, factor, edge) else {
             continue;
         };
         if let Some(record) = wm.backend_mut().windows.get_mut(&window) {
             record.snapshot = Some(buffer);
+            record.snapshot_dirty = false;
             boosted_landed = boost.is_some();
         }
     }
@@ -260,32 +250,14 @@ fn due_windows(
     boost: Option<u32>,
 ) -> Vec<(WlWindowId, WlSurface, Size, f64)> {
     let backend = comp.wm.backend();
-    LAST_SNAPSHOT.with(|last| {
-        let mut last = last.borrow_mut();
-        last.retain(|window, _| backend.windows.contains_key(window));
-        let eligible = backend.windows.iter().filter(|(_, record)| {
-            record.mapped && record.window_type != WindowType::Unmanaged && record.surface.alive()
-        });
-        if let Some(edge) = boost {
-            return eligible
-                .filter(|(_, record)| {
-                    let stored = record.snapshot.as_ref().map(|s| Size::new(s.width, s.height));
-                    needs_upgrade(stored, record.content.size, edge)
-                })
-                .filter_map(|(window, record)| {
-                    Some((
-                        *window,
-                        record.surface.wl_surface()?,
-                        record.content.size,
-                        backend.window_surface_scale(record),
-                    ))
-                })
-                .collect();
-        }
-        eligible
-            .filter(|(window, _)| {
-                last.get(window)
-                    .is_none_or(|taken| now.duration_since(*taken) >= SNAPSHOT_INTERVAL)
+    let eligible = backend.windows.iter().filter(|(_, record)| {
+        record.mapped && record.window_type != WindowType::Unmanaged && record.surface.alive()
+    });
+    if let Some(edge) = boost {
+        return eligible
+            .filter(|(_, record)| {
+                let stored = record.snapshot.as_ref().map(|s| Size::new(s.width, s.height));
+                needs_upgrade(stored, record.content.size, edge)
             })
             .filter_map(|(window, record)| {
                 Some((
@@ -295,9 +267,34 @@ fn due_windows(
                     backend.window_surface_scale(record),
                 ))
             })
-            .take(MAX_SNAPSHOTS_PER_FRAME)
-            .collect()
-    })
+            .collect();
+    }
+    eligible
+        .filter(|(_, record)| {
+            let stored = record.snapshot.as_ref().map(|s| Size::new(s.width, s.height));
+            let stale = record.snapshot_dirty
+                || needs_downgrade(stored, record.content.size, MAX_SNAPSHOT_EDGE);
+            snapshot_refresh_due(stale, record.snapshot_attempted_at, now)
+        })
+        .filter_map(|(window, record)| {
+            Some((
+                *window,
+                record.surface.wl_surface()?,
+                record.content.size,
+                backend.window_surface_scale(record),
+            ))
+        })
+        .take(MAX_SNAPSHOTS_PER_FRAME)
+        .collect()
+}
+
+/// Whether stale preview pixels may be refreshed without violating
+/// the readback throttle. Kept pure so dirty-state and retry timing
+/// can be tested without constructing a Wayland compositor.
+fn snapshot_refresh_due(stale: bool, attempted_at: Option<Instant>, now: Instant) -> bool {
+    stale
+        && attempted_at
+            .is_none_or(|attempted| now.saturating_duration_since(attempted) >= SNAPSHOT_INTERVAL)
 }
 
 /// Whether a stored snapshot is worth retaking at `edge`: it is when
@@ -311,6 +308,17 @@ fn needs_upgrade(stored: Option<Size>, source: Size, edge: u32) -> bool {
         return false;
     };
     stored.is_none_or(|held| held.w.max(held.h) < target.w.max(target.h))
+}
+
+/// Whether a snapshot retained from an Overview boost is larger than
+/// the normal preview target and should be replaced once the boost
+/// ends. This preserves the bounded-memory policy without waking
+/// clean, already-default-sized windows.
+fn needs_downgrade(stored: Option<Size>, source: Size, edge: u32) -> bool {
+    let (Some(held), Some((target, _))) = (stored, snapshot_target(source, edge)) else {
+        return false;
+    };
+    held.w.max(held.h) > target.w.max(target.h)
 }
 
 /// Renders one window's client content into a downscaled RGBA buffer.
@@ -335,6 +343,7 @@ fn snapshot_window(
     max_edge: u32,
 ) -> Option<DecorationBuffer> {
     let (size, scale) = snapshot_target(source, max_edge)?;
+    tracing::trace!(width = size.w, height = size.h, "capturing window preview");
     // The scene's own constructor, at capture scale: the GPU does the
     // downscale as part of drawing, so there is exactly one code path
     // that turns a wayland surface into pixels — including the
@@ -679,6 +688,30 @@ mod tests {
         assert!(needs_upgrade(None, Size::new(640, 400), 1200));
         // And a degenerate window is never due.
         assert!(!needs_upgrade(None, Size::new(0, 400), 1200));
+    }
+
+    #[test]
+    fn only_stale_snapshots_past_the_throttle_are_refreshed() {
+        let now = Instant::now();
+        assert!(snapshot_refresh_due(true, None, now));
+        assert!(snapshot_refresh_due(true, Some(now - SNAPSHOT_INTERVAL), now));
+        assert!(!snapshot_refresh_due(true, Some(now - SNAPSHOT_INTERVAL / 2), now));
+        assert!(!snapshot_refresh_due(false, None, now));
+        assert!(!snapshot_refresh_due(false, Some(now - SNAPSHOT_INTERVAL * 2), now));
+        // A clock sample earlier than the recorded attempt is safely
+        // treated as too recent rather than panicking.
+        assert!(!snapshot_refresh_due(true, Some(now + SNAPSHOT_INTERVAL), now));
+    }
+
+    #[test]
+    fn boosted_snapshots_are_downgraded_but_default_ones_are_not() {
+        let source = Size::new(2560, 1440);
+        assert!(needs_downgrade(Some(Size::new(1200, 675)), source, MAX_SNAPSHOT_EDGE));
+        assert!(!needs_downgrade(Some(Size::new(256, 144)), source, MAX_SNAPSHOT_EDGE));
+        assert!(!needs_downgrade(None, source, MAX_SNAPSHOT_EDGE));
+        // Captures never upscale, so the window's full-size snapshot
+        // is already the normal target even below the global cap.
+        assert!(!needs_downgrade(Some(Size::new(160, 90)), Size::new(160, 90), MAX_SNAPSHOT_EDGE));
     }
 
     #[test]

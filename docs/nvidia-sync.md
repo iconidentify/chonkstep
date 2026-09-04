@@ -138,19 +138,22 @@ remedies are client-side:
   paper over; the deadline blocker at least guarantees it never *hangs*
   such a client.
 
-## The input stalls (audit findings, no code changed)
+## The input stalls (audit findings and mitigation)
 
 The 250–300ms libinput "event processing lagging" bursts were audited
 against the render loop. Candidates, in order of plausibility:
 
 1. **Synchronous GPU readbacks in the frame path** (`capture.rs`): window
-   snapshots run once per rendered frame, capped at two windows per second
-   normally, and do `copy_framebuffer` + `map_texture` — a glReadPixels
-   that waits for *all* prior GL work in the compositor's context. The
-   readback itself is ≤256px, but the wait inherits whatever depth the GPU
-   queue has, and a browser repainting under hover is precisely when that
-   queue is deep. The Overview boost path is worse: entry captures every
-   mapped window at card resolution in a single frame, uncapped by design.
+   snapshots do `copy_framebuffer` + `map_texture` — a glReadPixels that waits
+   for *all* prior GL work in the compositor's context. The readback itself is
+   ≤256px, but the wait inherits whatever depth the GPU queue has, and a
+   browser repainting under hover is precisely when that queue is deep. The
+   compositor now marks a preview dirty from its toplevel or subsurface commit
+   and recaptures only dirty windows, at most once per second. In a release A/B
+   with one animated and eight static clients this cut readbacks from 9/s to
+   1/s and compositor CPU by 44.8%. Overview entry still captures every mapped
+   window at card resolution in a single frame, uncapped by design; that is a
+   deliberate quality/latency tradeoff and the remaining readback hotspot.
 2. **Shell widget samplers** that shell out synchronously — the documented
    2026-08-29 incident (`LOOP_BLOCK_GRACE`, `session.rs`) blocked the loop
    3.6s on `nmcli`. Same signature, out of this module's scope; check the
@@ -164,7 +167,7 @@ against the render loop. Candidates, in order of plausibility:
    `EGL_ANDROID_native_fence_sync` present it should not fire on this
    driver. If it did, it would block for the frame's full GPU time.
 
-Nothing was changed for the stalls; (1) is the actionable lead if they
-persist once the release race is closed, and it should be measured (a
-timestamp around `refresh_snapshots` under `CHONKSTEP_DAMAGE_LOG`-style
-gating) rather than guessed at.
+The recurring part of (1) is now removed. If stalls persist, Overview entry
+and the synchronous portions of (2) remain the first places to instrument;
+the capture path exposes trace-level per-readback telemetry (including target
+dimensions) so this can be measured rather than guessed at.
