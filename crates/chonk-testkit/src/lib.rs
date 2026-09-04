@@ -1135,6 +1135,17 @@ impl Door {
         Ok(Some((emitted, Duration::from_micros(interval_us))))
     }
 
+    /// Number of unconsumed xdg-activation tokens the compositor is
+    /// retaining. Exposed only by the opt-in test door so the wire-level
+    /// abuse test can measure the server's state directly.
+    pub fn activation_tokens(&mut self) -> Result<usize, String> {
+        self.send("activation-tokens")?;
+        let line = self.read_line()?;
+        line.strip_prefix("activation-tokens ")
+            .and_then(|value| value.parse().ok())
+            .ok_or_else(|| format!("unexpected activation-token reply: {line}"))
+    }
+
     /// The production scene hit-test's coarse target class at one
     /// output-global point (`root`, `shell`, `frame`, `content`,
     /// `layer`, or `ime`). This observes input policy directly instead

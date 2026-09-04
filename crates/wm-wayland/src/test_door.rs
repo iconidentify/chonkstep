@@ -63,6 +63,7 @@
 //! | `button left\|middle\|right press\|release` | pointer button by name |
 //! | `key CODE press\|release` | keyboard key by *evdev* keycode (`KEY_*` from input-event-codes.h; the xkb +8 offset is applied here) |
 //! | `repeat` | replies with the held compositor-binding repeat count and interval, or `repeat none` |
+//! | `activation-tokens` | replies with the number of retained xdg-activation tokens |
 //! | `hit X Y` | replies with `hit root\|shell\|frame\|content\|layer\|ime` from the production scene hit-test |
 //! | `barrier` | replies `ok` once every command before it has been dispatched **and** a frame has been rendered with no damage left over |
 //! | `windows` | replies one line per ledger entry (see below), then `done` |
@@ -483,6 +484,10 @@ fn handle_command(line: &str, stream: &mut UnixStream, comp: &mut Compositor) {
                 None => "repeat none\n".to_string(),
             };
             let _ = stream.write_all(reply.as_bytes());
+        }
+        Some("activation-tokens") => {
+            let count = comp.core_protocols.activation.tokens().count();
+            let _ = stream.write_all(format!("activation-tokens {count}\n").as_bytes());
         }
         Some("hit") => {
             let (Some(Ok(x)), Some(Ok(y))) =

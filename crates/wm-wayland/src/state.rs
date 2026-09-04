@@ -1795,6 +1795,7 @@ impl Compositor {
         // lands on the seat (see `WaylandBackend::pending_focus` for
         // why it cannot land inline).
         self.popups.cleanup();
+        self.core_protocols.sweep_activation_tokens(Instant::now());
         self.apply_pending_focus();
         // Beside the focus intent and for the same reason: a drag that
         // began or ended anywhere above has to reach the seat, and only

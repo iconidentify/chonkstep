@@ -4,6 +4,8 @@
 //! lifecycle and the handful of compositor policy callbacks together,
 //! rather than scattering one-field protocol states through `state.rs`.
 
+use std::time::{Duration, Instant};
+
 use smithay::input::pointer::PointerHandle;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::reexports::wayland_server::DisplayHandle;
@@ -30,12 +32,24 @@ use wm_core::BackendEvent;
 
 use crate::state::Compositor;
 
+/// Activation tokens are launch hand-offs, not session-long capabilities.
+/// Five minutes leaves ample room for a cold application start without
+/// retaining a client that requested tokens and then disappeared forever.
+const ACTIVATION_TOKEN_TTL: Duration = Duration::from_secs(5 * 60);
+const ACTIVATION_TOKEN_SWEEP_INTERVAL: Duration = Duration::from_secs(30);
+const MAX_ACTIVATION_TOKENS_PER_CLIENT: usize = 256;
+/// The per-client ceiling prevents one connection from growing the pool;
+/// this second ceiling also covers an attacker cycling connections.
+const MAX_ACTIVATION_TOKENS_GLOBAL: usize = 4_096;
+
 impl smithay::wayland::tablet_manager::TabletSeatHandler for Compositor {}
 
 /// State retained for the globals whose helpers need a getter or whose
 /// `GlobalId` lifetime is tied to the state value.
 pub(crate) struct CoreProtocols {
     pub activation: XdgActivationState,
+    next_activation_token_sweep: Instant,
+    rejected_activation_tokens: u64,
     pub xdg_foreign: XdgForeignState,
     pub shortcuts: KeyboardShortcutsInhibitState,
     pub active_shortcut_inhibitor: Option<KeyboardShortcutsInhibitor>,
@@ -56,6 +70,8 @@ pub(crate) struct CoreProtocols {
 pub(crate) fn init(display: &DisplayHandle) -> CoreProtocols {
     CoreProtocols {
         activation: XdgActivationState::new::<Compositor>(display),
+        next_activation_token_sweep: Instant::now() + ACTIVATION_TOKEN_SWEEP_INTERVAL,
+        rejected_activation_tokens: 0,
         xdg_foreign: XdgForeignState::new::<Compositor>(display),
         shortcuts: KeyboardShortcutsInhibitState::new::<Compositor>(display),
         active_shortcut_inhibitor: None,
@@ -76,9 +92,65 @@ pub(crate) fn init(display: &DisplayHandle) -> CoreProtocols {
     }
 }
 
+impl CoreProtocols {
+    /// Discards abandoned activation tokens on a bounded housekeeping
+    /// cadence. This is called every compositor dispatch pass, but the
+    /// deadline keeps the ordinary no-op path to one timestamp comparison.
+    pub(crate) fn sweep_activation_tokens(&mut self, now: Instant) {
+        if now < self.next_activation_token_sweep {
+            return;
+        }
+        self.next_activation_token_sweep = now + ACTIVATION_TOKEN_SWEEP_INTERVAL;
+        let before = self.activation.tokens().count();
+        self.activation
+            .retain_tokens(|_, data| activation_token_is_fresh(now, data.timestamp));
+        let removed = before - self.activation.tokens().count();
+        if removed > 0 {
+            tracing::debug!(removed, "expired abandoned xdg-activation tokens");
+        }
+    }
+}
+
+fn activation_token_is_fresh(now: Instant, created: Instant) -> bool {
+    now.checked_duration_since(created)
+        .is_none_or(|age| age < ACTIVATION_TOKEN_TTL)
+}
+
 impl XdgActivationHandler for Compositor {
     fn activation_state(&mut self) -> &mut XdgActivationState {
         &mut self.core_protocols.activation
+    }
+
+    fn token_created(&mut self, _token: XdgActivationToken, data: XdgActivationTokenData) -> bool {
+        let mut total = 0;
+        let mut for_client = 0;
+        for (_, known) in self.core_protocols.activation.tokens() {
+            total += 1;
+            if known.client_id == data.client_id {
+                for_client += 1;
+            }
+        }
+        if total < MAX_ACTIVATION_TOKENS_GLOBAL && for_client < MAX_ACTIVATION_TOKENS_PER_CLIENT {
+            return true;
+        }
+
+        // A hostile client may keep asking after it hits the ceiling.
+        // Powers-of-two logging keeps that visible without turning the
+        // defense itself into an unbounded logging attack.
+        self.core_protocols.rejected_activation_tokens =
+            self.core_protocols.rejected_activation_tokens.saturating_add(1);
+        let rejected = self.core_protocols.rejected_activation_tokens;
+        if rejected.is_power_of_two() {
+            tracing::warn!(
+                rejected,
+                total,
+                for_client,
+                per_client_limit = MAX_ACTIVATION_TOKENS_PER_CLIENT,
+                global_limit = MAX_ACTIVATION_TOKENS_GLOBAL,
+                "refusing excess xdg-activation token"
+            );
+        }
+        false
     }
 
     fn request_activation(
@@ -211,3 +283,16 @@ delegate_input_method_manager!(Compositor);
 delegate_xdg_dialog!(Compositor);
 delegate_xdg_system_bell!(Compositor);
 delegate_xdg_toplevel_tag!(Compositor);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn activation_tokens_expire_at_the_ttl_and_future_timestamps_are_safe() {
+        let now = Instant::now();
+        assert!(activation_token_is_fresh(now, now - ACTIVATION_TOKEN_TTL + Duration::from_nanos(1)));
+        assert!(!activation_token_is_fresh(now, now - ACTIVATION_TOKEN_TTL));
+        assert!(activation_token_is_fresh(now, now + Duration::from_secs(1)));
+    }
+}
