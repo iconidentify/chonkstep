@@ -78,7 +78,8 @@ RUN set -eux; \
     printf 'builder ALL=(ALL) NOPASSWD: ALL\n' > /etc/sudoers.d/builder; \
     chmod 440 /etc/sudoers.d/builder; \
     sed -i 's/^#MAKEFLAGS=.*/MAKEFLAGS="-j$(nproc)"/' /etc/makepkg.conf; \
-    sed -i 's/^COMPRESSZST=.*/COMPRESSZST=(zstd -c -z -q --threads=0 -)/' /etc/makepkg.conf
+    printf "\nPKGEXT='.pkg.tar.zst'\nCOMPRESSZST=(zstd -c -z -q --threads=0 -)\n" \
+      >> /etc/makepkg.conf
 
 USER builder
 WORKDIR /build
