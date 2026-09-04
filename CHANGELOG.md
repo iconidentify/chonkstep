@@ -7,6 +7,21 @@ crate and both session binaries carry the same number.
 
 ### Performance
 
+- **Invisible Wayland commits no longer schedule compositor frames.**
+  Surface commits now enter the damage pipeline only when their toplevel,
+  popup, layer, lock, cursor, or input-method surface is present in the scene
+  being displayed. Self-timed clients remain mapped and responsive on parked
+  workspaces, but can no longer spend scene-build, damage-pass, or page-flip
+  work on pixels nobody can see; ordinary applications are likewise suppressed
+  behind the lock screen, and disabled Omarchy layers stay out of the render
+  loop. A real 60 Hz Wayland probe supplies its own clock and reports progress
+  independently of compositor callbacks: one 60-commit visible interval
+  produced 62 render submissions (the commits plus two test barriers), while
+  the equivalent interval after Omarchy's silent workspace send produced zero.
+  Before this change the commit handler set global damage unconditionally, so
+  all 60 hidden commits scheduled frames. Unit tests pin framed, client-drawn,
+  unmanaged, and parked stacking policy; the live test crosses the real
+  protocol, Omarchy binding, workspace manager, renderer, and telemetry path.
 - **Eligible fullscreen clients can bypass composition on real hardware.**
   The DRM session now offers Smithay's conservative primary-plane direct
   scanout path: same GPU, exact swapchain format/modifier, fullscreen opaque

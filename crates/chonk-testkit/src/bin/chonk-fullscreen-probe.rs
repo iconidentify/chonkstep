@@ -35,8 +35,9 @@
 //!
 //! # Usage
 //!
-//! `chonk-fullscreen-probe [title] [app-id]` — then drive it with injected keys
-//! through the test door, on the window once it has keyboard focus:
+//! `chonk-fullscreen-probe [title] [app-id] [animate]` — then drive it with
+//! injected keys through the test door, on the window once it has keyboard
+//! focus:
 //!
 //! | key | evdev | meaning |
 //! |---|---|---|
@@ -51,9 +52,17 @@
 //! configure 1280x800 states=[fullscreen, activated]
 //! answer granted: asked fullscreen=true, told fullscreen=true
 //! ```
+//!
+//! The optional `animate` mode independently damages and commits at about
+//! 60 Hz, without requesting a frame callback. It exists to test the other
+//! half of compositor pacing: a client on a parked workspace may continue on
+//! its own timer, but its invisible commits must not make the compositor draw.
+//! Every thirtieth commit is reported as `animation frame=N`, giving the
+//! harness an observable clock that does not depend on compositor telemetry.
 
 use std::io::Write;
 use std::os::fd::AsFd;
+use std::time::Duration;
 
 use wayland_client::protocol::{
     wl_buffer::WlBuffer, wl_compositor::WlCompositor, wl_keyboard, wl_registry, wl_seat, wl_shm,
@@ -377,8 +386,10 @@ fn frame_file(width: i32, height: i32) -> std::fs::File {
 }
 
 fn main() {
-    let title = std::env::args().nth(1).unwrap_or_else(|| "chonk-fullscreen-probe".to_string());
-    let app_id = std::env::args().nth(2).unwrap_or_else(|| "chonk-fullscreen-probe".to_string());
+    let mut args = std::env::args().skip(1);
+    let title = args.next().unwrap_or_else(|| "chonk-fullscreen-probe".to_string());
+    let app_id = args.next().unwrap_or_else(|| "chonk-fullscreen-probe".to_string());
+    let animate = args.next().as_deref() == Some("animate");
 
     let connection = Connection::connect_to_env()
         .unwrap_or_else(|error| fatal(&format!("no wayland display: {error}")));
@@ -416,6 +427,7 @@ fn main() {
         .unwrap_or_else(|error| fatal(&format!("initial configure: {error}")));
 
     let mut attached = (0, 0);
+    let mut animation_frame = 0_u64;
     say(&format!("mapped title={title:?}"));
     while !probe.closed {
         if probe.dirty || attached != probe.size {
@@ -439,7 +451,25 @@ fn main() {
             attached = probe.size;
             probe.dirty = false;
         }
-        if queue.blocking_dispatch(&mut probe).is_err() {
+
+        if animate {
+            // A deliberately self-timed client: damage existing
+            // content and commit without a frame callback. A
+            // roundtrip makes each commit's server-side delivery
+            // observable before the next one, while the sleep is the
+            // producer's cadence (not a test wait).
+            let (width, height) = probe.size;
+            surface.damage(0, 0, width.max(1), height.max(1));
+            surface.commit();
+            animation_frame += 1;
+            if animation_frame.is_multiple_of(30) {
+                say(&format!("animation frame={animation_frame}"));
+            }
+            if queue.roundtrip(&mut probe).is_err() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(16));
+        } else if queue.blocking_dispatch(&mut probe).is_err() {
             break;
         }
     }

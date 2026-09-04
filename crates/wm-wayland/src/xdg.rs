@@ -24,7 +24,16 @@
 //! [`WaylandBackend::flush_configures`] for the invariant, and for the
 //! stuck-fullscreen desktop that a request answered from *before* the
 //! request left behind.
+//!
+//! A commit is also the principal source of compositor damage, but it
+//! is not automatically *visible* damage. [`Compositor::surface_affects_scene`]
+//! mirrors the renderer's scene admission: a self-timed client parked on
+//! another workspace, an ordinary window behind the lock screen, or a hidden
+//! Omarchy layer keeps speaking Wayland without scheduling frames whose output
+//! cannot change. Map, unmap, and layout edges damage through their own ledger
+//! verbs, so the gate applies only to steady-state pixel commits.
 
+use std::collections::HashMap;
 use std::os::fd::OwnedFd;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -69,7 +78,10 @@ use smithay::{
 use wm_core::{BackendEvent, NetState, NetStateAction};
 use wm_theme_api::{Point, Rect, ResizeEdge, Size};
 
-use crate::state::{ClientState, Compositor, ManagedSurface, WaylandBackend, WindowRecord, WlFrameId, WlWindowId};
+use crate::state::{
+    ClientState, Compositor, FrameRecord, ManagedSurface, StackEntry, WaylandBackend, WindowRecord, WlFrameId,
+    WlWindowId,
+};
 
 type WmEvent = BackendEvent<WlWindowId, WlFrameId>;
 
@@ -455,7 +467,14 @@ impl CompositorHandler for Compositor {
         // hooks police their commits, and the damage mark below is all
         // the compositor-side reaction a lock commit requires.
         if crate::layers::handle_commit(self, &root) {
-            self.wm.backend_mut().mark_damaged();
+            // Hidden Omarchy layers remain healthy clients and may
+            // continue committing, but their pixels are not in this
+            // compositor's scene. The layer lifecycle itself damages
+            // map/layout transitions; steady hidden commits need no
+            // otherwise-empty frame.
+            if self.surface_affects_scene(&root) {
+                self.wm.backend_mut().mark_damaged();
+            }
             return;
         }
 
@@ -473,15 +492,73 @@ impl CompositorHandler for Compositor {
             }
         }
 
-        // Every commit can carry fresh pixels (client repaints are the
-        // one damage source no backend verb sees), so the scene
-        // redraws. Full-frame, same correctness-first call as the X11
-        // side made with picom's --no-use-damage.
-        self.wm.backend_mut().mark_damaged();
+        // A commit can carry fresh pixels, but only a surface present
+        // in the current scene can change the output. This distinction
+        // matters for self-timed clients on another workspace and for
+        // applications behind the lock screen: neither receives frame
+        // callbacks, yet either may keep committing on its own clock.
+        // Rendering those commits produces the exact same output while
+        // consuming a scene build, damage pass and page flip each time.
+        // Map/unmap/layout transitions damage through their own backend
+        // verbs, so rejecting a hidden steady-state commit cannot leave
+        // stale pixels behind.
+        if self.surface_affects_scene(&root) {
+            self.wm.backend_mut().mark_damaged();
+        }
     }
 }
 
 impl Compositor {
+    /// Whether a commit to `root` can change the scene being rendered
+    /// right now.
+    ///
+    /// This mirrors `renderer::build_scene`, including its less-obvious
+    /// cases: a framed window is visible only when its *frame* is in the
+    /// current workspace, a client-decorated one owns a direct stacking
+    /// slot, popups inherit their toplevel's visibility, hidden/declined
+    /// layer surfaces do not paint, and a locked session contains only
+    /// lock, cursor, and input-method surfaces. Keeping the predicate
+    /// beside the commit handler makes it the admission gate for the
+    /// hottest damage source without teaching the renderer about
+    /// protocol callbacks.
+    fn surface_affects_scene(&self, root: &WlSurface) -> bool {
+        let backend = self.wm.backend();
+
+        // Cursor and input-method surfaces are assembled before the
+        // lock-screen branch, so they remain scene elements on either
+        // side of it.
+        if matches!(&self.cursor_status, CursorImageStatus::Surface(surface) if surface == root)
+            || backend.ime_popups.iter().any(|popup| popup.wl_surface() == root)
+        {
+            return true;
+        }
+
+        // An xdg popup is rendered as part of its toplevel/layer root,
+        // not as an independent ledger record. Resolve the chain once
+        // so a popup on a parked workspace is rejected with its owner.
+        let scene_root = self
+            .popups
+            .find_popup(root)
+            .and_then(|popup| smithay::desktop::find_popup_root_surface(&popup).ok())
+            .unwrap_or_else(|| root.clone());
+
+        if backend.locked {
+            return backend
+                .lock_surfaces
+                .iter()
+                .any(|entry| entry.surface.alive() && entry.surface.wl_surface() == &scene_root);
+        }
+
+        if let Some(window) = backend.window_for_surface(&scene_root) {
+            return window_is_in_scene(backend, window);
+        }
+        backend
+            .layers
+            .iter()
+            .find(|record| record.surface.wl_surface() == &scene_root)
+            .is_some_and(|record| backend.layer_presented(record))
+    }
+
     /// The fractional scale a surface should render for: the scale of
     /// the output its window (or layer surface, or lock surface) lives
     /// on, falling back to the primary output's for a surface not yet
@@ -654,6 +731,38 @@ impl Compositor {
             backend.owe_configure(window);
         }
     }
+}
+
+/// The window half of [`Compositor::surface_affects_scene`], factored
+/// so the exact renderer stacking rules are visible in one short walk.
+fn window_is_in_scene(backend: &WaylandBackend, window: WlWindowId) -> bool {
+    let Some(record) = backend.windows.get(&window) else {
+        return false;
+    };
+    if !record.mapped || !record.surface.alive() {
+        return false;
+    }
+    stack_exposes_window(record.window_type, window, &backend.stacking, &backend.frames)
+}
+
+/// Whether the renderer's current stacking slice exposes `window`.
+/// Unmanaged surfaces live in the renderer's separate topmost pass;
+/// every managed surface must own either a direct slot or a mapped
+/// decoration frame in this workspace.
+fn stack_exposes_window(
+    window_type: wm_core::WindowType,
+    window: WlWindowId,
+    stacking: &[StackEntry],
+    frames: &HashMap<WlFrameId, FrameRecord>,
+) -> bool {
+    if window_type == wm_core::WindowType::Unmanaged {
+        return true;
+    }
+    stacking.iter().any(|entry| match entry {
+        StackEntry::Window(candidate) => *candidate == window,
+        StackEntry::Frame(frame) => frames.get(frame).is_some_and(|record| record.window == window && record.mapped),
+        StackEntry::Shell(_) => false,
+    })
 }
 
 // -- the configure discipline --------------------------------------------
@@ -1404,6 +1513,67 @@ delegate_xdg_decoration!(Compositor);
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Workspace visibility belongs to the renderer's stacking
+    /// ledger, not merely to the client's mapped bit. A decorated
+    /// window stays protocol-mapped while parked, but its frame leaves
+    /// the active stack; a client-decorated window instead owns a
+    /// direct stack slot. This is the distinction the commit-damage
+    /// gate must preserve.
+    #[test]
+    fn managed_window_visibility_follows_its_exact_stack_ownership() {
+        let window = WlWindowId(10);
+        let other = WlWindowId(20);
+        let frame = WlFrameId(11);
+        let other_frame = WlFrameId(21);
+        let frames = HashMap::from([
+            (frame, FrameRecord { window, geometry: Rect::default(), buffer: None, mapped: true }),
+            (
+                other_frame,
+                FrameRecord { window: other, geometry: Rect::default(), buffer: None, mapped: true },
+            ),
+        ]);
+
+        assert!(stack_exposes_window(
+            wm_core::WindowType::Normal,
+            window,
+            &[StackEntry::Frame(frame)],
+            &frames
+        ));
+        assert!(stack_exposes_window(
+            wm_core::WindowType::Normal,
+            window,
+            &[StackEntry::Window(window)],
+            &frames
+        ));
+        assert!(!stack_exposes_window(
+            wm_core::WindowType::Normal,
+            window,
+            &[StackEntry::Frame(other_frame), StackEntry::Window(other)],
+            &frames
+        ));
+    }
+
+    /// An unmapped frame is retained as workspace state but paints
+    /// nothing. Unmanaged surfaces take the renderer's independent
+    /// overlay pass and therefore need no stacking entry at all.
+    #[test]
+    fn hidden_frames_and_unmanaged_surfaces_follow_renderer_policy() {
+        let window = WlWindowId(10);
+        let frame = WlFrameId(11);
+        let frames = HashMap::from([(
+            frame,
+            FrameRecord { window, geometry: Rect::default(), buffer: None, mapped: false },
+        )]);
+
+        assert!(!stack_exposes_window(
+            wm_core::WindowType::Dialog,
+            window,
+            &[StackEntry::Frame(frame)],
+            &frames
+        ));
+        assert!(stack_exposes_window(wm_core::WindowType::Unmanaged, window, &[], &frames));
+    }
 
     /// The rule that decides whether an unchanged toplevel hears
     /// anything, spelled row by row. The third row is the fix — a
