@@ -406,7 +406,7 @@ impl CompositorHandler for Compositor {
         crate::lock::install_defunct_lock_role_guard(surface);
     }
 
-    fn destroyed(&mut self, _surface: &WlSurface) {
+    fn destroyed(&mut self, surface: &WlSurface) {
         // `Output` retains weak surface handles so it can replay
         // `enter` to wl_output objects a client binds later. The
         // destruction callback is the exact moment one can turn dead;
@@ -416,6 +416,7 @@ impl CompositorHandler for Compositor {
         for entry in &self.outputs {
             entry.output.cleanup();
         }
+        self.wm.backend_mut().forget_surface(surface);
     }
 
     fn commit(&mut self, surface: &WlSurface) {
@@ -432,6 +433,11 @@ impl CompositorHandler for Compositor {
         }
         let backend = self.wm.backend_mut();
         if let Some(window) = backend.window_for_surface(&root) {
+            // Native roots were indexed at toplevel creation. An
+            // XWayland record predates its wl_surface association, so
+            // its first commit discovers the edge by fallback scan
+            // and makes every later lookup constant-time here.
+            backend.index_window_surface(&root, window);
             if let Some(record) = backend.windows.get_mut(&window) {
                 record.snapshot_dirty = true;
             }
@@ -1114,7 +1120,7 @@ impl XdgShellHandler for Compositor {
         // `toplevel_committed`.
         let backend = self.wm.backend_mut();
         let id = WlWindowId(backend.alloc_id());
-        backend.windows.insert(id, WindowRecord::new(ManagedSurface::Xdg(surface), Rect::default()));
+        backend.remember_window(id, WindowRecord::new(ManagedSurface::Xdg(surface), Rect::default()));
     }
 
     fn new_popup(&mut self, surface: PopupSurface, positioner: PositionerState) {

@@ -84,7 +84,7 @@ fn ensure_x11_record(backend: &mut WaylandBackend, window: &X11Surface) -> WlWin
     // tracked their pre-map configures); starting the record from that
     // truth is what makes `Backend::window_geometry` answer correctly
     // at map time.
-    backend.windows.insert(
+    backend.remember_window(
         id,
         WindowRecord::new(ManagedSurface::X11(window.clone()), wm_rect(window.geometry())),
     );
@@ -548,4 +548,3 @@ mod tests {
         assert_eq!(wm_resize_edge(X11ResizeEdge::BottomRight), ResizeEdge::SouthEast);
     }
 }
-

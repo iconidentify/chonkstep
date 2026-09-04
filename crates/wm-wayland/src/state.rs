@@ -53,7 +53,9 @@ use smithay::reexports::calloop::{
     EventLoop, Interest, LoopHandle, Mode as TriggerMode, PostAction, RegistrationToken,
 };
 use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::State as XdgToplevelState;
-use smithay::reexports::wayland_server::backend::{ClientData, ClientId, DisconnectReason, GlobalId};
+use smithay::reexports::wayland_server::backend::{
+    ClientData, ClientId, DisconnectReason, GlobalId, ObjectId,
+};
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::reexports::wayland_server::{Display, DisplayHandle, Resource};
 use smithay::utils::{Logical, Physical, Transform, SERIAL_COUNTER};
@@ -449,6 +451,13 @@ pub struct WaylandBackend {
     /// (id 0) stays forever unallocated.
     next_id: u64,
     pub(crate) windows: HashMap<WlWindowId, WindowRecord>,
+    /// Constant-time reverse lookup for native Wayland roots and for
+    /// XWayland roots after their first associated commit. The object
+    /// id includes its client/generation identity, so protocol id reuse
+    /// cannot alias a dead surface. Kept in lockstep by
+    /// [`Self::remember_window`], [`Self::index_window_surface`],
+    /// [`Self::forget_surface`], and [`Self::forget_window`].
+    surface_windows: HashMap<ObjectId, WlWindowId>,
     /// Per-application decoration overrides — see
     /// `wm_config::DecorationRules`. Held on the backend because both
     /// the decoration decision (`client_draws_own_chrome`) and the
@@ -730,6 +739,7 @@ impl WaylandBackend {
         Self {
             next_id: 1,
             windows: HashMap::new(),
+            surface_windows: HashMap::new(),
             configure_debt: HashMap::new(),
             decoration_rules: wm_config::DecorationRules::default(),
             frames: HashMap::new(),
@@ -859,11 +869,45 @@ impl WaylandBackend {
         )
     }
 
+    /// Inserts the authoritative window record and, when its root is
+    /// already known, its reverse surface index as one operation.
+    pub(crate) fn remember_window(&mut self, window: WlWindowId, record: WindowRecord) {
+        let surface = record.surface.wl_surface();
+        if self.windows.insert(window, record).is_some() {
+            // Ids are never reused in a session, but keep the index
+            // correct even if that allocator invariant is changed.
+            self.surface_windows.retain(|_, indexed| *indexed != window);
+        }
+        if let Some(surface) = surface {
+            self.surface_windows.insert(surface.id(), window);
+        }
+    }
+
+    /// Indexes a root learned after record creation. That is the X11
+    /// lifecycle: the X window exists before XWayland associates its
+    /// `wl_surface`; the first surface commit pays one fallback scan
+    /// and every lookup after it is constant-time.
+    pub(crate) fn index_window_surface(&mut self, surface: &WlSurface, window: WlWindowId) {
+        debug_assert!(self.windows.contains_key(&window));
+        self.surface_windows.insert(surface.id(), window);
+    }
+
+    /// Drops the index edge at the protocol object's exact lifetime
+    /// boundary. An X11 record can outlive this surface and acquire a
+    /// different association when it remaps.
+    pub(crate) fn forget_surface(&mut self, surface: &WlSurface) {
+        self.surface_windows.remove(&surface.id());
+    }
+
     /// Resolves a `wl_surface` back to the managed window it belongs
-    /// to, comparing against each record's root surface. Linear over
-    /// the window count — fine at WM scale, and it avoids a second
-    /// index that could drift from the authoritative `windows` map.
+    /// to. Native roots are indexed at toplevel creation. The linear
+    /// fallback is solely for an X11 record whose `wl_surface`
+    /// association appeared after that record; its first commit adds
+    /// the missing edge through [`Self::index_window_surface`].
     pub(crate) fn window_for_surface(&self, surface: &WlSurface) -> Option<WlWindowId> {
+        if let Some(window) = self.surface_windows.get(&surface.id()) {
+            return Some(*window);
+        }
         self.windows.iter().find(|(_, record)| record.surface.wl_surface().as_ref() == Some(surface)).map(|(id, _)| *id)
     }
 
@@ -881,6 +925,7 @@ impl WaylandBackend {
     /// the session ever opened.
     pub(crate) fn forget_window(&mut self, window: WlWindowId) {
         self.windows.remove(&window);
+        self.surface_windows.retain(|_, indexed| *indexed != window);
         self.stacking.retain(|entry| !matches!(entry, StackEntry::Window(w) if *w == window));
         // Same collection duty for the pending EWMH properties: keyed
         // by window id, and nothing downstream would ever drain an

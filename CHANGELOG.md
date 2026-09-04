@@ -7,6 +7,15 @@ crate and both session binaries carry the same number.
 
 ### Performance
 
+- **Surface ownership lookup is constant-time.** Native Wayland toplevels are
+  indexed when their role is created; XWayland surfaces add the same edge on
+  their first associated commit, and both destruction paths remove it at the
+  exact lifetime boundary. A normal toplevel commit asks for its owner up to
+  four times, so the 1,800-commit/201-window profiling scene drops from roughly
+  1.45 million record comparisons to 7,200 hash probes. Five alternating
+  release-build samples reduced median compositor CPU from 103 to 99 Linux
+  process ticks (3.9%) while retaining the hidden-scene assertion; one low
+  scheduler outlier was excluded by reporting the median rather than the mean.
 - **Output membership follows surface lifetime instead of commit rate.**
   Each Wayland surface now enters the session's outputs once when it is
   created, and dead weak handles are pruned from Smithay's output sets at the
