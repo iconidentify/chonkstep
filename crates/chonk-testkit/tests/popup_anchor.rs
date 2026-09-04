@@ -89,10 +89,7 @@ fn popup_configure(log: &str, popup_id: &str) -> Option<(i32, i32, u32, u32)> {
 #[test]
 #[ignore = "needs a Wayland session and Chromium"]
 fn chromium_popup_without_a_new_anchor_is_dismissed_on_parent_resize() {
-    let chromium_on_path = std::env::var_os("PATH")
-        .is_some_and(|path| std::env::split_paths(&path).any(|dir| dir.join("chromium").is_file()));
-    if !chromium_on_path {
-        eprintln!("chromium not installed; skipping");
+    if !chonk_testkit::require_client("chromium") {
         return;
     }
     let mut session = Session::boot(

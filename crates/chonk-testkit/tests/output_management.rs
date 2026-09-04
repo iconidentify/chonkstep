@@ -7,7 +7,6 @@
 //! costing the desktop. Those are the three distinct server paths:
 //! announce, apply/update, and fail.
 
-use std::process::Command;
 use std::time::Duration;
 
 use chonk_testkit::{poll_until, Session, SessionOptions};
@@ -30,13 +29,8 @@ fn run(session: &mut Session, args: &[&str]) -> Result<String, String> {
 
 #[test]
 #[ignore = "needs a live Wayland session and wlr-randr"]
-// This ignored integration test runs on Cargo's test thread, never the
-// compositor repaint thread. The synchronous probe is only an
-// availability check before the real client is supervised by Session.
-#[allow(clippy::disallowed_methods)]
 fn wlr_randr_lists_applies_and_observes_output_state() {
-    if Command::new(CLIENT).arg("--help").output().is_err() {
-        eprintln!("SKIP: wlr-randr is not installed");
+    if !chonk_testkit::require_client(CLIENT) {
         return;
     }
 

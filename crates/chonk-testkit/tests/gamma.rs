@@ -308,15 +308,11 @@ fn a_non_diagonal_ctm_is_a_named_protocol_error_not_an_approximation() {
 #[ignore = "needs a live Wayland session and the packaged hyprsunset client"]
 // This is an ignored integration test running on Cargo's test thread,
 // never the compositor repaint thread. It must synchronously inspect
-// the two real command-line clients' exit status and output.
+// `hyprctl`'s exit status and output. (The availability check that
+// used to need this too is now `require_client`, a PATH scan.)
 #[allow(clippy::disallowed_methods)]
 fn real_hyprsunset_stays_running_serves_its_ipc_and_restores_on_exit() {
-    if Command::new("hyprsunset")
-        .arg("--version")
-        .output()
-        .is_err()
-    {
-        eprintln!("SKIP: hyprsunset is not installed");
+    if !chonk_testkit::require_client("hyprsunset") {
         return;
     }
     let mut session = Session::boot("hyprsunset-real", with_gamma()).unwrap();

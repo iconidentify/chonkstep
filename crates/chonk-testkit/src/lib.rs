@@ -181,6 +181,110 @@ pub mod keys {
 /// this, so the fixture and the assertions on it cannot drift apart.
 pub const FAKE_BAR_RGB: [u8; 3] = [0xE0, 0x70, 0x10];
 
+/// Clients this suite needs that CI genuinely cannot install, with the
+/// reason — the allow-list [`require_client`] consults before turning a
+/// missing client into a red build.
+///
+/// Being on this list is not permission to skip quietly. A skip is
+/// still recorded and still printed by `scripts/e2e.sh`; the list only
+/// says "we already know, and it is not a regression". Deleting an
+/// entry the day the client becomes installable is the point: the
+/// build goes red until someone adds it to the workflow.
+const CI_CANNOT_INSTALL: &[(&str, &str)] = &[
+    // Hyprland's night-light daemon. Not packaged for Ubuntu, and
+    // building it on a runner would pull the whole Hyprland toolchain
+    // for one gamma assertion. `gamma.rs`'s other tests drive the
+    // protocol directly and do run.
+    ("hyprsunset", "not packaged for Ubuntu; the rest of gamma.rs drives the protocol directly"),
+];
+
+/// Where [`require_client`] records a client it did not find, so a run
+/// can say plainly which tests did not run. `scripts/e2e.sh` prints
+/// this file next to its closing line.
+pub fn skip_log_path() -> PathBuf {
+    std::env::temp_dir().join("chonk-testkit").join("skipped.log")
+}
+
+/// Whether `program` is on `PATH`, and the only sanctioned way for a
+/// test to decide it cannot run.
+///
+/// # Why this is not an `eprintln!` and a `return`
+///
+/// That was the idiom, in three tests, and it is invisible: `cargo
+/// test` captures a *passing* test's output, so the skip line is never
+/// printed and the test reports `ok`. On CI the
+/// `wlr-output-management` conformance test was in that state
+/// permanently — the only test in the tree that exercises that
+/// protocol against a real client, reporting `1 passed` in 0.00s while
+/// never booting a compositor. A skip that is indistinguishable from a
+/// pass is the same silent-failure class this project labels
+/// everywhere else, turned on its own suite.
+///
+/// So: under `CI`, a missing client is a **panic** naming it, unless it
+/// is in [`CI_CANNOT_INSTALL`]. Off CI it returns `false` — a developer
+/// without every client should still be able to run most of the suite —
+/// but the skip is recorded to [`skip_log_path`] either way, and
+/// `scripts/e2e.sh` prints the file, so a local run says which tests did
+/// not run rather than implying they all did.
+///
+/// A `PATH` scan rather than running the program: the workspace bans
+/// the blocking wait (`clippy::disallowed_methods`), and existence is
+/// all that is being asked.
+pub fn require_client(program: &str) -> bool {
+    let found = std::env::var_os("PATH").is_some_and(|path| {
+        std::env::split_paths(&path).any(|dir| dir.join(program).is_file())
+    });
+    if found {
+        return true;
+    }
+    let known = CI_CANNOT_INSTALL.iter().find(|(name, _)| *name == program);
+    let note = match known {
+        Some((_, reason)) => format!("{program} is not installed ({reason})"),
+        None => format!("{program} is not installed"),
+    };
+    let verdict = client_verdict(std::env::var_os("CI").is_some(), known.is_some());
+    // Recorded before the panic, so even the red build leaves the same
+    // artifact a green one would.
+    let path = skip_log_path();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        use std::io::Write as _;
+        let _ = writeln!(file, "{note}");
+    }
+    if verdict == MissingClient::Fatal {
+        panic!(
+            "{note}. On CI a missing client is a failure, not a skip: install it in \
+             .github/workflows/ci.yml's wayland job, or add it to \
+             chonk_testkit::CI_CANNOT_INSTALL with the reason it cannot be installed."
+        );
+    }
+    false
+}
+
+/// What a missing client costs, kept pure so the rule is testable
+/// without mutating the process environment — `CI` is global, and a
+/// test that set it would race every other test in the binary.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum MissingClient {
+    /// Off CI, or a client CI cannot install: the test returns early
+    /// and the skip is recorded and printed.
+    Skip,
+    /// On CI, and a client CI could have installed: a red build.
+    Fatal,
+}
+
+/// The rule: a missing client is fatal on CI unless it is one CI
+/// genuinely cannot install. Everything else is a recorded skip.
+pub fn client_verdict(on_ci: bool, ci_cannot_install: bool) -> MissingClient {
+    if on_ci && !ci_cannot_install {
+        MissingClient::Fatal
+    } else {
+        MissingClient::Skip
+    }
+}
+
 /// Where the session called `name` keeps its scratch — config, state,
 /// logs, screenshots, the door socket. Public so a test can name a
 /// path inside the directory (a marker file for a command to write)
@@ -1568,6 +1672,37 @@ mod tests {
     #[test]
     fn a_mangled_line_is_rejected_not_misparsed() {
         assert!(parse_window_line("window id=oops x=1 y=1 w=1 h=1 mapped=true").is_none());
+    }
+
+    #[test]
+    fn a_missing_client_is_fatal_on_ci_and_a_skip_off_it() {
+        // The whole point of the helper. Off CI a developer without
+        // every client still gets most of the suite; on CI a missing
+        // client is a red build, because a skip there is
+        // indistinguishable from a pass and that is how the only
+        // wlr-output-management test spent its life reporting `ok` in
+        // 0.00s without booting anything.
+        assert_eq!(client_verdict(true, false), MissingClient::Fatal, "CI, installable");
+        assert_eq!(client_verdict(false, false), MissingClient::Skip, "developer machine");
+        // The escape hatch, and it only opens on CI's side of the
+        // decision: a client CI genuinely cannot install is still a
+        // recorded, printed skip rather than a failure.
+        assert_eq!(client_verdict(true, true), MissingClient::Skip, "CI, not installable");
+        assert_eq!(client_verdict(false, true), MissingClient::Skip, "developer machine, not installable");
+    }
+
+    #[test]
+    fn every_declared_unavailable_client_carries_a_reason() {
+        // `CI_CANNOT_INSTALL` is an escape hatch, and an escape hatch
+        // with no argument written next to it is how a temporary
+        // exemption becomes permanent. An entry must say why.
+        for (client, reason) in CI_CANNOT_INSTALL {
+            assert!(!client.is_empty(), "a nameless entry");
+            assert!(
+                reason.len() > 20,
+                "{client} is exempted from the CI check with no real reason given: {reason:?}"
+            );
+        }
     }
 
     /// The exact bytes libwayland 1.26 writes under `FORCE_COLOR`,
