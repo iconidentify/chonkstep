@@ -177,11 +177,21 @@ fn xwayland_geometry_and_clicks_match_at_scale_two_from_first_map() {
     conn.map_window(xid).unwrap();
     conn.flush().unwrap();
 
-    let mapped = poll_until(
-        EVENT,
-        "the X11 window to enter the compositor ledger",
-        || session.world().ok()?.windows.into_iter().next(),
-    )
+    // `map_window_request` creates the backend record before wm-core
+    // has placed and decorated it. Waiting for any ledger entry can
+    // therefore capture the pre-manage `(0, 0)` geometry and compare
+    // XWayland against a stale snapshot after the real configure lands.
+    // This isolated session has one application window. Its cached
+    // X11 identity is not part of the test-door record, so the useful
+    // observable is the record's mapped bit rather than a title match.
+    let mapped = poll_until(EVENT, "the X11 window to finish mapping", || {
+        session
+            .world()
+            .ok()?
+            .windows
+            .into_iter()
+            .find(|window| window.mapped)
+    })
     .expect("the X11 window maps");
     session.door().barrier().expect("initial configure settles");
     assert_x11_rect(&conn, root, xid, &mapped);
