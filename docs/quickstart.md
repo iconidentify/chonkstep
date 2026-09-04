@@ -226,9 +226,12 @@ Then turn on the two settings that make sessions durable:
 restore_session = true
 
 # Wayland session only: when the compositor crashes, the session
-# script restarts it -- and with this set (any ext-session-lock
-# locker), the recovered session comes back LOCKED instead of exposing
-# your desktop to whoever walks past. Never runs on a normal login.
+# script restarts it inside a blank, input-isolated lock domain, then
+# launches this ext-session-lock client. `desktop = "omarchy"` already
+# supplies `omarchy-system-lock` and waits for its relaunched shell to
+# become ready; an explicit value like this wins.
+# With neither one, recovery fails closed and returns to the login
+# boundary rather than exposing your desktop. Never runs normally.
 lock_command = "swaylock"
 ```
 

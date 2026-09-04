@@ -40,6 +40,7 @@
 //! drag_modifier = "alt"              # optional; move/resize drag modifier, or "none"
 //! restore_session = true             # optional; relaunch last session's windows
 //! lock_command = "swaylock"          # optional; locker for post-crash recovery
+//!                                      # (`desktop = "omarchy"` supplies Omarchy's entry point)
 //! show_dock = true                  # optional; the Dock column and its screen strip
 //! omarchy_menu = true                # optional; Omarchy's menu under right-click
 //! omarchy_shell = true               # optional; host Omarchy's shell (bar, panels, OSD)
@@ -397,8 +398,11 @@ pub struct Config {
     /// when the compositor comes back up after a crash: the watchdog
     /// re-execs a crashed compositor, and a desktop that reappears
     /// with the user away from the keyboard must reappear locked. No
-    /// locker configured means the recovered session comes back
-    /// unlocked, and the compositor says so in the log.
+    /// Omarchy's desktop preset supplies its normal lock entry point;
+    /// an explicit value overrides that default. If recovery has no
+    /// resolved command, the compositor refuses to expose an unlocked
+    /// desktop and exits so the supervisor can return to the login
+    /// boundary instead.
     pub lock_command: Option<String>,
     /// Named argv lists a binding can reach through [`Action::Run`],
     /// keyed by lowercased name. Empty by default: the desktop's own

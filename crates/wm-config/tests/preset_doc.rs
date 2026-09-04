@@ -173,6 +173,10 @@ fn the_reference_summarises_the_posture_correctly() {
         ("show_dock    = false", !config.show_dock),
         ("omarchy_bar  = true", config.omarchy_bar == Some(true)),
         ("theme        = \"omarchy\"", config.theme.as_deref() == Some("omarchy")),
+        (
+            "lock_command = \"omarchy-system-lock\"",
+            config.lock_command.as_deref() == Some("omarchy-system-lock"),
+        ),
         ("keymap        = \"omarchy\"", config.keymap == wm_config::preset::Keymap::Omarchy),
         ("omarchy_menu  = true", config.omarchy_menu),
         ("omarchy_shell = true", config.omarchy_shell),
@@ -186,7 +190,6 @@ fn the_reference_summarises_the_posture_correctly() {
     let default = wm_config::Config::default_config();
     assert_eq!(config.terminal, default.terminal, "the posture must not set `terminal`");
     assert_eq!(config.autostart, default.autostart, "...nor `autostart`");
-    assert_eq!(config.lock_command, default.lock_command, "...nor `lock_command`");
     assert_eq!(config.placement, default.placement, "...nor `placement`");
     assert_eq!(config.focus_follows_mouse, default.focus_follows_mouse, "...nor the focus policy");
     assert_eq!(config.scale, default.scale, "...nor `scale`");

@@ -258,6 +258,13 @@ pub fn apply_desktop(config: &mut Config, desktop: Desktop) {
             // `startup::resolve_look` are the other two places it is
             // spelled, and a test in `wm-theme` pins them together.
             config.theme = Some("omarchy".to_string());
+            // Crash recovery happens before the relaunched shell can
+            // lock anything itself.  This is Omarchy's stable session
+            // entry point (and the same command its shipped hypridle
+            // configuration calls), so it preserves whichever locker
+            // the installed shell owns rather than guessing a client
+            // such as hyprlock or swaylock here.
+            config.lock_command = Some("omarchy-system-lock".to_string());
             // Both of these are already on by default and are restated
             // here on purpose: the posture is a *statement* of what the
             // session is, and a default that quietly flips the other way
@@ -937,6 +944,11 @@ mod tests {
             Some("omarchy"),
             "the desk follows Omarchy's theme"
         );
+        assert_eq!(
+            config.lock_command.as_deref(),
+            Some("omarchy-system-lock"),
+            "crash recovery uses Omarchy's own lock entry point"
+        );
         assert!(
             config.omarchy_menu && config.omarchy_shell,
             "the menu and the shell are hosted"
@@ -974,6 +986,10 @@ mod tests {
 
         let config = parse("desktop = \"omarchy\"\ntheme = \"amber-phosphor\"").unwrap();
         assert_eq!(config.theme.as_deref(), Some("amber-phosphor"));
+
+        let config =
+            parse("desktop = \"omarchy\"\nlock_command = \"swaylock --daemonize\"").unwrap();
+        assert_eq!(config.lock_command.as_deref(), Some("swaylock --daemonize"));
 
         let config = parse("desktop = \"omarchy\"\nomarchy_shell = false").unwrap();
         assert!(!config.omarchy_shell);

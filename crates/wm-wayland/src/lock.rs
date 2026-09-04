@@ -271,6 +271,56 @@ impl UnlockRequest {
     }
 }
 
+/// Cross the compositor-wide security boundary shared by an ordinary
+/// ext-session-lock request and crash recovery.  The lifecycle caller
+/// records the protocol holder (if there is one); this function owns
+/// everything that makes the old desktop stop rendering or receiving
+/// input immediately.
+fn enter_lock_domain(comp: &mut Compositor) {
+    comp.mark_hyprland_state_dirty();
+    comp.session_lock.mark_dirty();
+    let backend = comp.wm.backend_mut();
+    backend.locked = true;
+    backend.mark_idle_policy_dirty();
+    // A recovering locker inherits no surfaces from the dead one.
+    backend.lock_surfaces.clear();
+    // A drag in flight belongs to a desktop that just stopped
+    // existing for input purposes: end it, tell `wm-core` (its
+    // handler is idempotent), and drop the implicit grab so a button
+    // held across the lock cannot route the first post-unlock events
+    // to a pre-lock target.
+    backend.end_pointer_grab();
+    backend.queue(BackendEvent::DragEnded);
+    backend.mark_damaged();
+    let seat = comp.seat.clone();
+    crate::input::clear_implicit_grab(&seat);
+    // Smithay also owns a client click grab and each tablet tool owns
+    // an independent proximity focus. End both and make the pointer
+    // leave the pre-lock desktop now. There is no lock surface yet,
+    // so this first sync deliberately focuses nothing; new_surface
+    // below moves it onto the correct lock surface.
+    crate::input::reset_client_input_focus(comp);
+    // Focus leaves whatever window held it now: the very next key
+    // must not reach a client behind the lock.
+    if let Some(keyboard) = comp.seat.get_keyboard() {
+        keyboard.set_focus(comp, None, SERIAL_COUNTER.next_serial());
+    }
+}
+
+/// Blank and isolate a recovered session before its replacement locker
+/// is launched. There is deliberately no protocol holder or pending
+/// confirmation yet: [`confirm_after_frame`] therefore leaves the
+/// machine in `Locking`, and the first real locker is admitted through
+/// [`LockMachine::request_lock`]'s dead/absent-holder takeover path.
+pub(crate) fn begin_crash_recovery_lock(comp: &mut Compositor) {
+    let verdict = comp.session_lock.machine.request_lock(false);
+    debug_assert_eq!(verdict, LockRequest::Accept);
+    tracing::error!(
+        "crash recovery starts in the locked security domain; awaiting the replacement locker"
+    );
+    enter_lock_domain(comp);
+}
+
 impl SessionLockHandler for Compositor {
     fn lock_state(&mut self) -> &mut SessionLockManagerState {
         &mut self.session_lock.state
@@ -291,42 +341,9 @@ impl SessionLockHandler for Compositor {
             }
             LockRequest::Accept => {
                 tracing::info!("session locking; blanking outputs until the locker draws");
-                self.mark_hyprland_state_dirty();
                 self.session_lock.holder = Some(confirmation.ext_session_lock().clone());
                 self.session_lock.pending_ack = Some(confirmation);
-                self.session_lock.mark_dirty();
-                let backend = self.wm.backend_mut();
-                backend.locked = true;
-                backend.mark_idle_policy_dirty();
-                // A recovering locker inherits no surfaces from the
-                // dead one.
-                backend.lock_surfaces.clear();
-                // A drag in flight belongs to a desktop that just
-                // stopped existing for input purposes: end it, tell
-                // `wm-core` (its handler is idempotent), and drop the
-                // implicit grab so a button held across the lock
-                // cannot route the first post-unlock events to a
-                // pre-lock target.
-                backend.end_pointer_grab();
-                backend.queue(BackendEvent::DragEnded);
-                backend.mark_damaged();
-                let seat = self.seat.clone();
-                crate::input::clear_implicit_grab(&seat);
-                // Smithay also owns a client click grab and each
-                // tablet tool owns an independent proximity focus.
-                // End both and make the pointer leave the pre-lock
-                // desktop now, before a physical event can reuse
-                // either focus. There is no lock surface yet, so this
-                // first sync deliberately focuses nothing; new_surface
-                // below moves it onto the correct lock surface.
-                crate::input::reset_client_input_focus(self);
-                // Focus leaves whatever window held it *now*: the very
-                // next key must not reach a client behind the lock,
-                // and the lock surface (which does not exist yet)
-                // claims focus in `new_surface`.
-                if let Some(keyboard) = self.seat.get_keyboard() {
-                    keyboard.set_focus(self, None, SERIAL_COUNTER.next_serial());
-                }
+                enter_lock_domain(self);
             }
         }
     }

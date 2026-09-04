@@ -2897,7 +2897,53 @@ fn nesting_desktop_present() -> bool {
     std::env::var_os("WAYLAND_DISPLAY").is_some() || std::env::var_os("DISPLAY").is_some()
 }
 
+/// Omarchy's entry point talks to the Quickshell process the session
+/// has just relaunched. Run that one fallback through a login shell —
+/// the same environment contract as `host_omarchy_shell` — and wait
+/// asynchronously for its IPC target to become ready. The compositor
+/// is already blank and input-isolated while this child retries, so no
+/// sleep or process wait ever lands on the event thread and no desktop
+/// frame can leak through the startup race.
+const OMARCHY_LOCK_COMMAND: &str = "omarchy-system-lock";
+const OMARCHY_RECOVERY_LOCK_SCRIPT: &str = r#"
+for attempt in {1..100}; do
+    if omarchy-shell lock lock >/dev/null 2>&1; then
+        exec omarchy-system-lock
+    fi
+    sleep 0.1
+done
+exit 1
+"#;
+
+fn recovery_locker_argv<'a>(
+    command: &'a str,
+    omarchy_shell: &'a str,
+) -> Option<(&'a str, Vec<&'a str>)> {
+    if command == OMARCHY_LOCK_COMMAND {
+        return Some((omarchy_shell, vec!["-lc", OMARCHY_RECOVERY_LOCK_SCRIPT]));
+    }
+    let mut parts = command.split_whitespace();
+    let program = parts.next()?;
+    Some((program, parts.collect()))
+}
+
 pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> {
+    // Consume the supervisor's one-shot marker before bringing up any
+    // display machinery. A recovery with no resolved locker must fail
+    // at the login boundary, not finish booting an unlocked desktop.
+    let recovery_locker = if recovering_from_crash() {
+        tracing::error!(
+            "RECOVERED FROM A CRASH: the previous compositor process exited abnormally and the session supervisor restarted it"
+        );
+        Some(config.lock_command.clone().ok_or_else(|| {
+            std::io::Error::other(
+                "crash recovery has no lock command; refusing to expose an unlocked desktop (set lock_command or desktop = \"omarchy\")",
+            )
+        })?)
+    } else {
+        None
+    };
+
     let mut event_loop: EventLoop<Compositor> = EventLoop::try_new()?;
     let loop_handle = event_loop.handle();
 
@@ -3469,46 +3515,47 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
         restart: false,
     };
 
+    // Cross into the lock domain before the first dispatch. Clients
+    // may already have been spawned during shell construction, but no
+    // Wayland request can be serviced and no frame can be rendered
+    // until the loop below; from here onward both paths see `locked`.
+    // Starting blank ourselves also closes the launcher-failure race:
+    // if it exits before acquiring ext-session-lock, the desktop stays
+    // black and input-isolated rather than falling open.
+    if let Some(command) = recovery_locker.as_deref() {
+        crate::lock::begin_crash_recovery_lock(&mut comp);
+        // The override is an E2E seam, accepted only in the same
+        // process that has enabled the private test door. It is also
+        // scrubbed from the child environment in `chonk-shell::spawn`.
+        let omarchy_shell = if std::env::var_os("CHONKSTEP_TEST_SOCKET").is_some() {
+            std::env::var("CHONKSTEP_TEST_RECOVERY_SHELL")
+                .ok()
+                .filter(|program| !program.trim().is_empty())
+                .unwrap_or_else(|| "bash".to_string())
+        } else {
+            "bash".to_string()
+        };
+        let (program, args) = recovery_locker_argv(command, &omarchy_shell).ok_or_else(|| {
+            std::io::Error::other(
+                "crash recovery resolved an empty lock command; refusing to expose an unlocked desktop",
+            )
+        })?;
+        tracing::warn!(
+            locker = command,
+            "launching the replacement locker from an already-locked session"
+        );
+        if chonk_shell::spawn::spawn_detached(program, &args).is_none() {
+            return Err(std::io::Error::other(format!(
+                "failed to launch recovery lock command {command:?}; refusing to expose an unlocked desktop"
+            ))
+            .into());
+        }
+    }
+
     // The end-to-end test door: a control socket for injected input,
     // opened only when CHONKSTEP_TEST_SOCKET is set (a user session
     // pays one env lookup here and nothing else). See `test_door.rs`.
     crate::test_door::init(&comp.loop_handle);
-
-    // Crash recovery, the moment the session is otherwise up: the
-    // supervisor in `scripts/wayland-session.sh` drops the `recovery`
-    // marker only when it re-execs us after an *abnormal* exit, and
-    // consuming it here (a destructive read, beside the restart/reload
-    // markers the loop below polls) is how this process learns it is a
-    // resurrection. A crashed desktop comes back with the user quite
-    // possibly away from the keyboard, so if a locker is configured it
-    // is spawned right now — it connects to the socket exported above
-    // and locks through the ext-session-lock implementation in
-    // `lock.rs` like any other locker would. Spawned before the first
-    // dispatch on purpose: the lock lands before any client the
-    // restored session relaunches can draw a frame of the user's work.
-    if recovering_from_crash() {
-        tracing::error!(
-            "RECOVERED FROM A CRASH: the previous compositor process exited abnormally and the session supervisor restarted it"
-        );
-        match config.lock_command.as_deref() {
-            Some(command) => {
-                let mut parts = command.split_whitespace();
-                // The config layer already rejects empty strings, so
-                // `parts` always yields a program here — but a config
-                // key is user input, and "impossible" input does not
-                // get to panic the recovered session it exists to
-                // protect.
-                if let Some(program) = parts.next() {
-                    let args: Vec<&str> = parts.collect();
-                    tracing::warn!(locker = command, "locking the recovered session");
-                    chonk_shell::spawn::spawn_detached(program, &args);
-                }
-            }
-            None => tracing::warn!(
-                "no lock_command configured — the recovered session is coming back UNLOCKED; set lock_command in config.toml to lock after a crash"
-            ),
-        }
-    }
 
     tracing::info!("entering compositor loop");
     let mut request_poller = SessionRequestPoller::new(Instant::now());
@@ -3950,6 +3997,20 @@ fn resize_cursor_pixels(scale: f32, angle_rad: f32) -> (Vec<u8>, i32, i32, (i32,
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn omarchys_recovery_locker_waits_for_its_relaunched_shell() {
+        let (program, args) = recovery_locker_argv(OMARCHY_LOCK_COMMAND, "bash").unwrap();
+        assert_eq!(program, "bash", "Omarchy needs its login-shell environment");
+        assert_eq!(args, ["-lc", OMARCHY_RECOVERY_LOCK_SCRIPT]);
+        assert!(args[1].contains("omarchy-shell lock lock"));
+        assert!(args[1].contains("exec omarchy-system-lock"));
+
+        let (program, args) = recovery_locker_argv("swaylock --daemonize", "bash").unwrap();
+        assert_eq!(program, "swaylock", "an explicit ordinary locker stays direct");
+        assert_eq!(args, ["--daemonize"]);
+        assert!(recovery_locker_argv("   ", "bash").is_none());
+    }
 
     // The rest of this module needs a wayland display, a GPU or a host
     // window; the layout arithmetic needs none of them, and it is the

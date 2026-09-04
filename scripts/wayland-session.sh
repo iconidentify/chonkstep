@@ -452,8 +452,9 @@ trap stop_session TERM HUP INT
 # a lost session; now an *abnormal* exit (nonzero status, or a signal —
 # the panic hook in chonkstep-wayland's main aborts, so every panic is
 # one) drops a recovery marker and re-execs the compositor, which sees
-# the marker, restores the recorded session layout, and — when
-# lock_command is configured — comes back locked. A clean exit (the
+# the marker, restores the recorded session layout, and comes back in
+# a fail-closed lock domain; without a resolved lock command it exits
+# rather than expose the desktop. A clean exit (the
 # root menu's Exit, i.e. the user logging out) ends the loop and the
 # session. Note the compositor's own hot-restart (scripts/restart.sh,
 # the `restart` keybinding) never surfaces here at all: that is an

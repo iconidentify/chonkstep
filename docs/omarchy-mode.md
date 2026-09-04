@@ -30,11 +30,12 @@ precedence table to learn. `desktop = "omarchy"` followed by
 | `show_dock` | `true` | **`false`** | Omarchy's bar already carries the clock, volume, network, Bluetooth and power readouts the Dock's instruments carry. Two strips of furniture on one screen is the thing this mode exists to stop. |
 | `omarchy_bar` | *(unset — the bar is hosted but hidden)* | **`true`** | With the Dock gone, the bar is the desk's furniture rather than a guest's, so it starts on screen instead of waiting to be asked for. |
 | `theme` | *(unset — the flagship)* | **`"omarchy"`** | Follow Omarchy's palette: chrome, menus, wallpaper and terminal colours re-dress within a second of `omarchy-theme-set`. |
+| `lock_command` | *(unset)* | **`"omarchy-system-lock"`** | Recovery enters a blank, input-isolated lock domain before launching Omarchy's own lock entry point; hosting a newly restarted shell does not lock it by itself. |
 | `keymap` | `"chonkstep"` | **`"omarchy"`** | The adoption cliff, and the reason this is one line and not two. See [the keymap](#the-keymap) below. |
 | `omarchy_menu` | `true` | `true` | Already on; restated by the posture so a change of default cannot silently take the posture with it. |
 | `omarchy_shell` | `true` | `true` | Same. |
 
-Nothing else. The mode sets six values and no more; there is no hidden
+Nothing else. The mode sets seven values and no more; there is no hidden
 behaviour keyed off the posture anywhere in the codebase, which is why
 `desktop` is carried on the resolved config only so a session can
 *report* what it read.
@@ -47,6 +48,7 @@ desktop = "omarchy"     # the whole posture...
 show_dock = true        # ...but keep the Dock
 omarchy_bar = false     # ...or start with the bar hidden
 theme = "amber-phosphor"# ...or wear a chonkstep theme anyway
+lock_command = "swaylock"# ...or use a different recovery locker
 keymap = "chonkstep"    # ...or keep the NeXTSTEP chords
 omarchy_shell = false   # ...or do not host Omarchy's shell at all
 ```
@@ -67,11 +69,15 @@ the menu is not undone the next time you log in.
 
 ## What the mode deliberately leaves alone
 
-- **Notifications, the lock screen, idle and the OSD.** Omarchy's shell
-  draws all four, and hosting it (`omarchy_shell = true`, already the
-  default) is all they need. Chonkstep's own `lock_command` stays a
-  crash-recovery fallback for a Wayland session that comes back up
-  without a shell; the mode does not set it.
+- **Notifications, the steady-state lock screen, idle and the OSD.**
+  Omarchy's shell draws all four, and hosting it (`omarchy_shell = true`,
+  already the default) is all they need while the session is healthy.
+  Crash recovery is different: relaunching the shell does not lock the
+  resurrected session. The preset therefore sets `lock_command` to
+  Omarchy's own `omarchy-system-lock` entry point. Recovery first blanks
+  the compositor and blocks ordinary input, then waits off the event
+  thread for the freshly relaunched shell's lock IPC before invoking that
+  command; an explicit `lock_command` still wins.
 - **The terminal.** `spawn-terminal` still launches chonkstep's built-in
   terminal, because it is the only one the desktop can theme end to
   end — the palette, the font size and the launch geometry go on its

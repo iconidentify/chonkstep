@@ -7,6 +7,14 @@ crate and both session binaries carry the same number.
 
 ### Fixed
 
+- **Crash recovery can no longer resurrect an unlocked desktop.** The
+  Omarchy posture now resolves its shipped `omarchy-system-lock` entry
+  point while an explicit `lock_command` remains authoritative. A
+  recovered Wayland compositor enters a blank, input-isolated lock
+  domain before launching that command and waits asynchronously for a
+  relaunched Omarchy shell's IPC; a missing or unlaunchable command
+  fails closed instead of exposing the session
+  ([#53](https://github.com/iconidentify/chonkstep/issues/53)).
 - **Fullscreen applications now own their output's desktop plane.** A
   focused fullscreen window occludes the Omarchy `Top` bar and chonkstep's
   above-shell dock/menu on only the output it occupies, while protocol

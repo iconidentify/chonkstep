@@ -70,6 +70,9 @@
 //! (**`holding the lock`**) instead of ever unlocking: that is the
 //! standing lock `chonk-lock-thief` is pointed at, and a bypass can
 //! only be attempted against a lock that is actually in force.
+//! `--recovery-hold` skips the pre-lock layer-surface exercise and
+//! requests the lock immediately, as a locker launched into the
+//! compositor's already-blank crash-recovery domain must.
 //!
 //! Then it sits in its dispatch loop like any shell process would. A
 //! broken connection at any step prints `connection broke: ...` (with
@@ -472,6 +475,7 @@ fn main() {
     // below runs. `Session::launch` passes argv but not environment, so
     // the switch is a flag.
     let hold = std::env::args().any(|arg| arg == "--hold");
+    let recovery_hold = std::env::args().any(|arg| arg == "--recovery-hold");
     let conn = Connection::connect_to_env().unwrap_or_else(|e| fatal(&format!("no compositor: {e}")));
     let mut queue = conn.new_event_queue();
     let qh = queue.handle();
@@ -490,6 +494,24 @@ fn main() {
     let compositor = probe.compositor.clone().unwrap();
     let shm = probe.shm.clone().unwrap();
     let layer_shell = probe.layer_shell.clone().unwrap();
+
+    // A crash-recovery locker starts behind an already-enforced lock
+    // boundary, so it cannot first map an ordinary layer surface and
+    // wait for keyboard focus as the lifecycle probe below does. Take
+    // over the holderless lock directly, draw, and remain its holder.
+    if recovery_hold {
+        let surface = compositor.create_surface(&qh, ());
+        let (_held, (w, h)) =
+            lock_and_draw(&conn, &mut queue, &mut probe, &qh, &surface);
+        println!("locked {w}x{h}");
+        println!("holding the recovery lock");
+        let _ = std::io::stdout().flush();
+        loop {
+            if let Err(error) = queue.blocking_dispatch(&mut probe) {
+                broken(&conn, "the recovery hold loop", &error);
+            }
+        }
+    }
 
     // -- 1: the bar — the surface that must outlive the lock ------------
     let bar_surface = compositor.create_surface(&qh, ());

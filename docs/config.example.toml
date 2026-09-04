@@ -48,9 +48,10 @@
 #   show_dock    = false          keymap        = "omarchy"
 #   omarchy_bar  = true           omarchy_menu  = true
 #   theme        = "omarchy"      omarchy_shell = true
+#   lock_command = "omarchy-system-lock"
 #
 # ...and nothing else. Notably it does NOT touch `terminal`,
-# `autostart`, `lock_command`, placement, focus policy, scale or the
+# `autostart`, placement, focus policy, scale or the
 # decoration rules -- those are how chonkstep manages windows, which
 # is the half of the desktop the posture is keeping. See
 # docs/omarchy-mode.md for the whole story, including what to override
@@ -372,8 +373,11 @@
 # names a locker (any ext-session-lock client, e.g. "swaylock", split
 # on whitespace for arguments), the recovered session comes back
 # LOCKED instead of exposing your desktop to whoever walks past while
-# you are away. Unset, the recovered session comes back unlocked and
-# the log says so. This never runs on a normal login or logout.
+# you are away. `desktop = "omarchy"` supplies Omarchy's own
+# `omarchy-system-lock` entry point unless you override it, waiting for
+# the freshly relaunched shell's lock IPC to become ready. If no command
+# resolves, recovery fails closed and returns to the login boundary
+# rather than exposing the desktop. This never runs normally.
 #lock_command = "swaylock"
 
 # The terminal emulator "spawn-terminal" launches, and the one

@@ -6,9 +6,11 @@
 //! `foot` must be installed: it is the terminal the desktop itself
 //! spawns, and the client these tests record and restore.
 
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::time::Duration;
 
-use chonk_testkit::{poll_until, profile_binary, Session, SessionOptions};
+use chonk_testkit::{poll_until, profile_binary, session_dir, Session, SessionOptions};
 
 /// Layout writes are debounced (2s of stillness — see
 /// `chonk_shell::session_layout::DEBOUNCE`), so waits that span one
@@ -146,16 +148,50 @@ fn a_closed_window_is_forgotten_by_the_layout() {
 
 /// Pillar 2's compositor half, isolated from the supervisor (which has
 /// its own non-ignored script tests in `supervisor.rs`): a session
-/// that boots with the supervisor's recovery marker present announces
-/// the recovery, consumes the marker, and — with no locker configured
-/// — says out loud that it is coming back unlocked.
+/// that boots with the supervisor's recovery marker starts inside the
+/// lock domain, launches the configured locker, and lets that client
+/// take over before any ordinary scene can receive input.
+#[cfg(unix)]
 #[test]
 #[ignore = "needs a live Wayland session to nest in: scripts/e2e.sh, or cargo test -p chonk-testkit -- --ignored --test-threads=1"]
-fn a_recovery_marker_is_announced_and_consumed_at_boot() {
-    let session = Session::boot(
+fn a_recovery_marker_locks_before_the_first_ordinary_frame() {
+    let probe = profile_binary("chonk-lock-probe").expect("the recovery lock probe is built");
+    // Stand in for the login shell rather than starting the developer's
+    // real Omarchy UI. The production branch still hands this process
+    // the exact retry script, while the stand-in records that argv and
+    // turns the successful retry into a deterministic ext-session-lock
+    // client on the nested compositor.
+    let launcher_dir = std::env::temp_dir().join(format!(
+        "chonk-testkit-recovery-launcher-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&launcher_dir);
+    std::fs::create_dir_all(&launcher_dir).unwrap();
+    let bash = launcher_dir.join("bash");
+    let args_file = launcher_dir.join("args");
+    std::fs::write(
+        &bash,
+        "#!/bin/sh\nprintf '%s\\n' \"$*\" > \"$RECOVERY_LAUNCH_ARGS\"\nexec \"$RECOVERY_LOCKER\" --recovery-hold\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&bash, std::fs::Permissions::from_mode(0o755))
+        .unwrap();
+    let mut session = Session::boot(
         "recovery-marker",
         SessionOptions {
+            config_extra: "desktop = \"omarchy\"\n".to_string(),
             state_files: vec![("recovery".to_string(), String::new())],
+            env: vec![
+                (
+                    "CHONKSTEP_TEST_RECOVERY_SHELL".to_string(),
+                    bash.display().to_string(),
+                ),
+                (
+                    "RECOVERY_LAUNCH_ARGS".to_string(),
+                    args_file.display().to_string(),
+                ),
+                ("RECOVERY_LOCKER".to_string(), probe.display().to_string()),
+            ],
             ..SessionOptions::default()
         },
     )
@@ -163,11 +199,65 @@ fn a_recovery_marker_is_announced_and_consumed_at_boot() {
 
     poll_until(Duration::from_secs(5), "the recovery to be logged", || {
         let log = session.log();
-        (log.contains("RECOVERED FROM A CRASH") && log.contains("UNLOCKED")).then_some(())
+        (log.contains("RECOVERED FROM A CRASH") && log.contains("locked frame presented"))
+            .then_some(())
     })
     .unwrap();
+    assert_eq!(
+        session
+            .door()
+            .hit(640, 400)
+            .expect("the recovery hit-test answers"),
+        "lock",
+        "input must resolve inside the lock domain before any ordinary scene"
+    );
     assert!(
         !session.state_file("recovery").exists(),
         "the marker must be consumed — recovery is acknowledged exactly once"
+    );
+    let launch_args = std::fs::read_to_string(&args_file)
+        .expect("the login-shell stand-in recorded its argv");
+    assert!(
+        launch_args.starts_with("-lc "),
+        "the Omarchy fallback must use a login shell: {launch_args:?}"
+    );
+    assert!(
+        launch_args.contains("omarchy-shell lock lock")
+            && launch_args.contains("exec omarchy-system-lock"),
+        "the asynchronous launcher must wait on Omarchy's lock IPC, then run its system entry point: {launch_args:?}"
+    );
+    drop(session);
+    let _ = std::fs::remove_dir_all(launcher_dir);
+}
+
+/// No locker is a startup failure, not permission to resurrect the
+/// desktop unlocked. The real supervisor observes this nonzero exit,
+/// exhausts its bounded retry policy, and returns control to the login
+/// boundary where the failure is visible and the user's session is not.
+#[test]
+#[ignore = "needs a live Wayland session to nest in: scripts/e2e.sh, or cargo test -p chonk-testkit -- --ignored --test-threads=1"]
+fn recovery_without_a_locker_refuses_to_expose_the_desktop() {
+    let name = "recovery-without-locker";
+    let error = match Session::boot(
+        name,
+        SessionOptions {
+            state_files: vec![("recovery".to_string(), String::new())],
+            ..SessionOptions::default()
+        },
+    ) {
+        Ok(_) => panic!("a recovered session without a locker must not boot"),
+        Err(error) => error,
+    };
+    assert!(
+        error.contains("compositor exited during boot"),
+        "failure was not a nonzero compositor exit:\n{error}"
+    );
+    assert!(
+        error.contains("refusing to expose an unlocked desktop"),
+        "the visible startup failure must name its security reason:\n{error}"
+    );
+    assert!(
+        !session_dir(name).join("state/chonkstep/recovery").exists(),
+        "the marker must be consumed even when fail-closed recovery cannot continue"
     );
 }
