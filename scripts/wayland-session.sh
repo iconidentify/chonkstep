@@ -290,14 +290,15 @@ scrub_stale_activation_env
 # which name it allocated (it exports WAYLAND_DISPLAY to its own
 # children, not to us: $BIN runs in the foreground below).
 #
-# So: a background watcher tails the compositor's own startup line —
-# state.rs logs `wayland socket listening socket="wayland-N"` — and
-# publishes the name whenever it changes. "Whenever", not "once",
+# So: a background watcher tails the compositor's own startup lines —
+# state.rs logs `wayland socket listening socket="wayland-N"` and, once
+# the X server is accepting connections, `XWayland ready display=N` —
+# and publishes the names whenever they change. "Whenever", not "once",
 # because a crash recovery re-execs the compositor, which may allocate
-# a different socket; the portals must be repointed or they hold a dead
-# one. Silently a no-op when the tooling is absent (non-systemd, or the
-# supervisor test's scratch environment, where the stub compositor
-# never logs a socket line).
+# a different socket or X display; activated services must be repointed
+# or they hold a dead one. Silently a no-op when the tooling is absent
+# (non-systemd, or the supervisor test's scratch environment, where the
+# stub compositor never logs a socket line).
 publish_portal_env() {
     # The integration harness launches the compositor binary directly
     # inside a scratch runtime and never enters this login-session
@@ -305,42 +306,86 @@ publish_portal_env() {
     # contamination, not a reason to leave the real session's portal
     # environment unpublished; it was scrubbed above.
     command -v dbus-update-activation-environment >/dev/null 2>&1 || return 0
-    local published="" sock
+    local log_start="$1" published="" sock sig display state_key
+    local -a portal_state activation_env
     while :; do
-        # The value is the line's one quoted string; matched by its
-        # "wayland-" shape rather than by the `socket=` key, because
-        # tracing colors the key with ANSI escapes even into a file.
-        sock=$(sed -n '/wayland socket listening/s/.*"\(wayland-[^"]*\)".*/\1/p' \
-            "$LOG" 2>/dev/null | tail -n 1)
-        # The Hyprland instance signature, when the session serves
-        # Hyprland's IPC. Same reasoning as WAYLAND_DISPLAY exactly: the
-        # compositor chooses it, a D-Bus-activated shell inherits
-        # nothing from here, and `hyprctl` and Quickshell's IPC client
-        # both find the sockets through this variable and nothing else.
-        # Republished on the same change-detection as the socket, so a
-        # crash recovery — which re-execs the compositor and mints a new
-        # signature — repoints instead of leaving a dead one.
-        # Tracing decorates the field name and `=` with ANSI sequences,
-        # even in the redirected log. Match from the plain `signature`
-        # word to its next quoted value instead of requiring a literal
-        # `signature="` adjacency.
-        sig=$(sed -n '/hyprland ipc listening/s/.*signature[^"]*"\([^"]*\)".*/\1/p' \
-            "$LOG" 2>/dev/null | tail -n 1)
-        if [ -n "$sock" ] && [ "$sock$sig" != "$published" ] \
+        # Read only lines written by this supervisor invocation. The log
+        # is append-only across logins; consuming an older XWayland-ready
+        # line could otherwise publish a dead DISPLAY during the next
+        # login's startup window.
+        #
+        # Reset the optional fields at every Wayland socket line. That
+        # makes the latest socket a generation boundary: while a crashed
+        # compositor's replacement is still starting, its fresh socket
+        # can never be paired with its predecessor's signature or X
+        # display. Strip tracing's ANSI decoration before parsing because
+        # unlike the quoted socket fields the numeric display has no
+        # delimiter that naturally skips the colour sequences.
+        mapfile -t portal_state < <(
+            tail -c "+$((log_start + 1))" "$LOG" 2>/dev/null | awk '
+                BEGIN { esc = sprintf("%c", 27) }
+                {
+                    line = $0
+                    gsub(esc "\\[[0-9;]*m", "", line)
+                }
+                line ~ /wayland socket listening/ {
+                    sock = line
+                    sub(/^.*wayland socket listening[^"]*"/, "", sock)
+                    sub(/".*$/, "", sock)
+                    sig = ""
+                    display = ""
+                    next
+                }
+                sock != "" && line ~ /hyprland ipc listening/ {
+                    sig = line
+                    sub(/^.*hyprland ipc listening[^"]*"/, "", sig)
+                    sub(/".*$/, "", sig)
+                    next
+                }
+                sock != "" && line ~ /XWayland ready/ {
+                    display = line
+                    sub(/^.*XWayland ready[^0-9]*/, "", display)
+                    sub(/[^0-9].*$/, "", display)
+                }
+                END {
+                    print sock
+                    print sig
+                    print display
+                }
+            '
+        )
+        sock=${portal_state[0]:-}
+        sig=${portal_state[1]:-}
+        display=${portal_state[2]:-}
+        state_key="$sock|$sig|$display"
+        if [ -n "$sock" ] && [ "$state_key" != "$published" ] \
                 && [ -S "$XDG_RUNTIME_DIR/$sock" ]; then
-            dbus-update-activation-environment --systemd \
+            activation_env=(
                 "WAYLAND_DISPLAY=$sock" \
                 "XDG_CURRENT_DESKTOP=$XDG_CURRENT_DESKTOP" \
                 "XDG_SESSION_DESKTOP=$XDG_SESSION_DESKTOP" \
                 "XDG_SESSION_TYPE=$XDG_SESSION_TYPE" \
                 "XDG_MENU_PREFIX=$XDG_MENU_PREFIX" \
-                "XDG_BACKEND=$XDG_BACKEND" \
-                ${sig:+"HYPRLAND_INSTANCE_SIGNATURE=$sig"} \
+                "XDG_BACKEND=$XDG_BACKEND"
+            )
+            if [ -n "$display" ]; then
+                activation_env+=("DISPLAY=:$display")
+            fi
+            if [ -n "$sig" ]; then
+                activation_env+=("HYPRLAND_INSTANCE_SIGNATURE=$sig")
+            fi
+            dbus-update-activation-environment --systemd "${activation_env[@]}" \
                 >>"$LOG" 2>&1 || true
             if [ "$_CHONKSTEP_UWSM" -eq 1 ] && command -v uwsm >/dev/null 2>&1; then
-                WAYLAND_DISPLAY="$sock" \
-                    HYPRLAND_INSTANCE_SIGNATURE="$sig" \
-                    uwsm finalize HYPRLAND_INSTANCE_SIGNATURE >>"$LOG" 2>&1 || true
+                if [ -n "$display" ]; then
+                    WAYLAND_DISPLAY="$sock" DISPLAY=":$display" \
+                        HYPRLAND_INSTANCE_SIGNATURE="$sig" \
+                        uwsm finalize HYPRLAND_INSTANCE_SIGNATURE >>"$LOG" 2>&1 || true
+                else
+                    WAYLAND_DISPLAY="$sock" \
+                        HYPRLAND_INSTANCE_SIGNATURE="$sig" \
+                        uwsm finalize HYPRLAND_INSTANCE_SIGNATURE >>"$LOG" 2>&1 || true
+                fi
             elif command -v systemctl >/dev/null 2>&1; then
                 # The direct session owns these targets and therefore
                 # owns stopping them at logout too. This brings the
@@ -349,13 +394,22 @@ publish_portal_env() {
                 systemctl --user start graphical-session.target xdg-desktop-autostart.target \
                     >>"$LOG" 2>&1 || true
             fi
-            published="$sock$sig"
+            published="$state_key"
         fi
         sleep 1
     done
 }
-publish_portal_env &
+# Capture the append boundary before the watcher is forked and before
+# the compositor can write its first line. Doing this inside the
+# background function would leave a scheduling race with the launch
+# below.
+_env_log_start=0
+if [ -f "$LOG" ]; then
+    _env_log_start=$(wc -c < "$LOG")
+fi
+publish_portal_env "$_env_log_start" &
 _env_watcher=$!
+unset _env_log_start
 # The watcher must not outlive the session: it holds the log open and
 # would republish a stale socket into the next login's environment.
 _session_stopping=0
@@ -376,7 +430,7 @@ cleanup_session() {
     if command -v systemctl >/dev/null 2>&1; then
         systemctl --user stop xdg-desktop-autostart.target graphical-session.target \
             >>"$LOG" 2>&1 || true
-        systemctl --user unset-environment WAYLAND_DISPLAY HYPRLAND_INSTANCE_SIGNATURE \
+        systemctl --user unset-environment DISPLAY WAYLAND_DISPLAY HYPRLAND_INSTANCE_SIGNATURE \
             XDG_CURRENT_DESKTOP XDG_SESSION_DESKTOP XDG_SESSION_TYPE XDG_MENU_PREFIX XDG_BACKEND \
             >>"$LOG" 2>&1 || true
     fi

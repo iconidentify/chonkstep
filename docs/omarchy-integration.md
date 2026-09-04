@@ -78,17 +78,18 @@ the extension command owned by the chonkstep package itself.
 
 ## Session lifecycle
 
-Under uwsm, chonkstep publishes `WAYLAND_DISPLAY` and
-`HYPRLAND_INSTANCE_SIGNATURE` with `uwsm finalize`, participates in
-`graphical-session.target`, and lets uwsm clean the activation environment
-at logout. Omarchy's lock-before-suspend, fcitx5, Bluetooth agent, and XDG
-autostart services therefore share the compositor's lifetime.
+Under uwsm, chonkstep publishes `WAYLAND_DISPLAY`, the ready XWayland
+`DISPLAY`, and `HYPRLAND_INSTANCE_SIGNATURE` with `uwsm finalize`,
+participates in `graphical-session.target`, and lets uwsm clean the activation
+environment at logout. Omarchy's lock-before-suspend, fcitx5, Bluetooth agent,
+and XDG autostart services therefore share the compositor's lifetime.
 
 The direct session is a recovery/non-systemd path, not the supported Omarchy
-lifecycle. It publishes only the curated display/desktop variables and never
-imports the entire process environment. Test sessions are explicitly
-prevented from updating the user's live activation environment. Use the uwsm
-entry for `graphical-session.target`, XDG autostart, and Omarchy logout.
+lifecycle. It publishes only the curated display/desktop variables (including
+`DISPLAY` after XWayland reports ready) and never imports the entire process
+environment. Test sessions are explicitly prevented from updating the user's
+live activation environment. Use the uwsm entry for
+`graphical-session.target`, XDG autostart, and Omarchy logout.
 
 `TERM`, `HUP`, and `INT` are clean logouts. The compositor closes clients in
 order and exits zero; the supervisor forwards the signal, exits zero, and

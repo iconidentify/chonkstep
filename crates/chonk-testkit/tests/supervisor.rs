@@ -17,6 +17,7 @@ use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
+use std::{fs::OpenOptions, io::Write};
 
 use chonk_testkit::{poll_until, Session, SessionOptions};
 
@@ -289,14 +290,32 @@ fn direct_session_owns_graphical_targets_and_publishes_only_curated_environment(
         .spawn()
         .unwrap();
 
-    let started = poll_until(Duration::from_secs(10), "the direct session to start its user targets", || {
-        let text = std::fs::read_to_string(&calls).ok()?;
-        text.contains("--user start graphical-session.target xdg-desktop-autostart.target").then_some(text)
+    let log_path = dir.join("state/chonkstep/wayland-session.log");
+    poll_until(Duration::from_secs(5), "the compositor stub to announce its socket", || {
+        std::fs::read_to_string(&log_path)
+            .ok()?
+            .contains("wayland socket listening")
+            .then_some(())
     })
-    .expect("the non-uwsm session owns graphical-session.target");
+    .expect("the compositor stub must reach its startup lines");
+    writeln!(
+        OpenOptions::new().append(true).open(&log_path).unwrap(),
+        "\u{1b}[2m2026-09-04T00:00:00Z\u{1b}[0m XWayland ready \u{1b}[3mdisplay\u{1b}[0m\u{1b}[2m=\u{1b}[0m7"
+    )
+    .unwrap();
+
+    let started = poll_until(Duration::from_secs(10), "the direct session to publish its X display", || {
+        let text = std::fs::read_to_string(&calls).ok()?;
+        text.lines()
+            .any(|line| line.starts_with("dbus ") && line.contains("DISPLAY=:7"))
+            .then_some(text)
+    })
+    .expect("the activation environment must gain DISPLAY once XWayland is ready");
     assert!(started.contains("WAYLAND_DISPLAY=wayland-session-test"));
+    assert!(started.contains("DISPLAY=:7"));
     assert!(started.contains("XDG_MENU_PREFIX=chonkstep-"));
     assert!(started.contains("XDG_BACKEND=wayland"));
+    assert!(started.contains("--user start graphical-session.target xdg-desktop-autostart.target"));
     assert!(
         started.contains("private=unset|unset|unset|unset|unset|unset|unset|unset|unset"),
         "a login session must discard every stale private/test control before launching the compositor; calls were:\n{started}"
@@ -314,11 +333,172 @@ fn direct_session_owns_graphical_targets_and_publishes_only_curated_environment(
     assert!(wait_exit(&mut child).success());
     let stopped = std::fs::read_to_string(&calls).unwrap();
     assert!(stopped.contains("--user stop xdg-desktop-autostart.target graphical-session.target"));
-    assert!(stopped.contains("--user unset-environment WAYLAND_DISPLAY HYPRLAND_INSTANCE_SIGNATURE"));
+    assert!(stopped.lines().any(|line| {
+        line == "systemctl --user unset-environment DISPLAY WAYLAND_DISPLAY HYPRLAND_INSTANCE_SIGNATURE XDG_CURRENT_DESKTOP XDG_SESSION_DESKTOP XDG_SESSION_TYPE XDG_MENU_PREFIX XDG_BACKEND"
+    }));
     assert!(
         !stopped.contains("dbus --systemd --unset"),
         "dbus-update-activation-environment has no --unset operation; systemd owns deletion on Omarchy"
     );
+}
+
+#[test]
+fn a_new_session_never_reuses_an_old_xwayland_display() {
+    let dir = std::env::temp_dir().join("chonk-testkit-supervisor").join("stale-x-display");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("run")).unwrap();
+    std::fs::create_dir_all(dir.join("state/chonkstep")).unwrap();
+    std::fs::create_dir_all(dir.join("bin")).unwrap();
+    let calls = dir.join("calls");
+
+    let command = |name: &str, body: &str| {
+        let path = dir.join("bin").join(name);
+        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    };
+    command("systemctl", &format!("printf 'systemctl %s\\n' \"$*\" >> '{}'", calls.display()));
+    command(
+        "dbus-update-activation-environment",
+        &format!("printf 'dbus %s\\n' \"$*\" >> '{}'", calls.display()),
+    );
+
+    // The session log is append-only. The previous login had XWayland,
+    // but this compositor deliberately never reports it ready.
+    std::fs::write(
+        dir.join("state/chonkstep/wayland-session.log"),
+        "wayland socket listening socket=\"wayland-old\"\nXWayland ready display=99\n",
+    )
+    .unwrap();
+    let socket_name = "wayland-without-x";
+    let _socket = UnixListener::bind(dir.join("run").join(socket_name)).unwrap();
+    let stub = dir.join("stub-compositor.sh");
+    std::fs::write(
+        &stub,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' 'wayland socket listening socket=\"{socket_name}\"'\ntrap 'exit 0' TERM HUP INT\nwhile :; do sleep 1; done\n"
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let path = format!("{}:{}", dir.join("bin").display(), std::env::var("PATH").unwrap_or_default());
+    let mut child = Command::new("bash")
+        .arg(script_path())
+        .env_clear()
+        .env("HOME", &dir)
+        .env("PATH", path)
+        .env("XDG_STATE_HOME", dir.join("state"))
+        .env("XDG_RUNTIME_DIR", dir.join("run"))
+        .env("CHONKSTEP_SESSION_BIN", &stub)
+        .env("CHONKSTEP_SESSION_TESTING", "1")
+        .env("DBUS_SESSION_BUS_ADDRESS", "unix:path=/isolated")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+
+    let publication = poll_until(Duration::from_secs(10), "the Wayland-only environment publication", || {
+        let text = std::fs::read_to_string(&calls).ok()?;
+        text.lines()
+            .find(|line| line.starts_with("dbus ") && line.contains("WAYLAND_DISPLAY=wayland-without-x"))
+            .map(str::to_owned)
+    })
+    .expect("a missing XWayland must not block the Wayland session publication");
+    assert!(
+        !publication.split_whitespace().any(|word| word.starts_with("DISPLAY=")),
+        "an old log generation must not supply this session's X display: {publication}"
+    );
+
+    // SAFETY: the child was spawned by this test and remains live.
+    unsafe { libc::kill(child.id() as i32, libc::SIGTERM) };
+    assert!(wait_exit(&mut child).success());
+}
+
+#[test]
+fn xwayland_display_changes_are_republished_through_uwsm() {
+    let dir = std::env::temp_dir().join("chonk-testkit-supervisor").join("x-display-change");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("run")).unwrap();
+    std::fs::create_dir_all(dir.join("state")).unwrap();
+    std::fs::create_dir_all(dir.join("bin")).unwrap();
+    let calls_path = dir.join("calls");
+    let first_published = dir.join("first-published");
+
+    let command = |name: &str, body: &str| {
+        let path = dir.join("bin").join(name);
+        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    };
+    command(
+        "systemctl",
+        &format!("printf 'systemctl %s\\n' \"$*\" >> '{}'", calls_path.display()),
+    );
+    command(
+        "dbus-update-activation-environment",
+        &format!(
+            "printf 'dbus %s\\n' \"$*\" >> '{}'\ncase \"$*\" in *DISPLAY=:3*) touch '{}' ;; esac",
+            calls_path.display(),
+            first_published.display()
+        ),
+    );
+    command(
+        "uwsm",
+        &format!(
+            "printf 'uwsm %s WAYLAND_DISPLAY=%s DISPLAY=%s\\n' \"$*\" \"$WAYLAND_DISPLAY\" \"$DISPLAY\" >> '{}'",
+            calls_path.display()
+        ),
+    );
+
+    let socket_name = "wayland-changing-x";
+    let _socket = UnixListener::bind(dir.join("run").join(socket_name)).unwrap();
+    let stub = dir.join("stub-compositor.sh");
+    std::fs::write(
+        &stub,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' 'wayland socket listening socket=\"{socket_name}\"'\nprintf '%s\\n' 'XWayland ready display=3'\nwhile [ ! -f '{}' ]; do sleep 0.05; done\nprintf '%s\\n' 'XWayland ready display=4'\ntrap 'exit 0' TERM HUP INT\nwhile :; do sleep 1; done\n",
+            first_published.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let path = format!("{}:{}", dir.join("bin").display(), std::env::var("PATH").unwrap_or_default());
+    let mut child = Command::new("bash")
+        .arg(script_path())
+        .env_clear()
+        .env("HOME", &dir)
+        .env("PATH", path)
+        .env("XDG_STATE_HOME", dir.join("state"))
+        .env("XDG_RUNTIME_DIR", dir.join("run"))
+        .env("CHONKSTEP_SESSION_BIN", &stub)
+        .env("CHONKSTEP_SESSION_TESTING", "1")
+        .env("DBUS_SESSION_BUS_ADDRESS", "unix:path=/isolated")
+        .env("UWSM_ID", "chonkstep.desktop")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+
+    let calls = poll_until(Duration::from_secs(10), "the replacement X display publication", || {
+        let text = std::fs::read_to_string(&calls_path).ok()?;
+        (text.lines().any(|line| line.starts_with("dbus ") && line.contains("DISPLAY=:4"))
+            && text.lines().any(|line| line.starts_with("uwsm ") && line.contains("DISPLAY=:4")))
+        .then_some(text)
+    })
+    .expect("both activation paths must follow a changed XWayland display");
+    let display_three = calls.find("DISPLAY=:3").unwrap();
+    let display_four = calls.find("DISPLAY=:4").unwrap();
+    assert!(display_three < display_four, "the replacement must be published after the original:\n{calls}");
+    assert!(calls.contains(
+        "uwsm finalize HYPRLAND_INSTANCE_SIGNATURE WAYLAND_DISPLAY=wayland-changing-x DISPLAY=:3"
+    ));
+    assert!(calls.contains(
+        "uwsm finalize HYPRLAND_INSTANCE_SIGNATURE WAYLAND_DISPLAY=wayland-changing-x DISPLAY=:4"
+    ));
+
+    // SAFETY: the child was spawned by this test and remains live.
+    unsafe { libc::kill(child.id() as i32, libc::SIGTERM) };
+    assert!(wait_exit(&mut child).success());
 }
 
 #[test]
