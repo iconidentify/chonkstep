@@ -11,7 +11,8 @@ crate and both session binaries carry the same number.
   package attestation, artifact assembly, and the future AUR publisher pin
   every third-party GitHub Action to a full commit instead of a mutable tag.
   CI also runs RustSec's dependency audit so a newly disclosed vulnerability
-  cannot pass silently.
+  cannot pass silently, and every unsafe block must state the invariant that
+  makes its libc, EGL, or raw-descriptor operation sound.
 - **The text stack no longer depends on unmaintained `rustybuzz`.** All
   consumers now use `cosmic-text` 0.19 and its `harfrust` shaper. This also
   replaces two obsolete `ttf-parser` releases with one current dependency;

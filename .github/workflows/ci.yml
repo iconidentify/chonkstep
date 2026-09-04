@@ -440,8 +440,9 @@ jobs:
             libxkbcommon-dev libegl-dev libgles-dev libwayland-dev \
             libdrm-dev libgbm-dev libinput-dev libudev-dev libseat-dev
 
-      # Gate one: the incident's own lint, denied across every crate in
-      # the workspace with no exemptions and no ratchet. `--no-deps`
+      # Gate one: the incident's own lint plus documented safety contracts,
+      # denied across every crate in the workspace with no exemptions and no
+      # ratchet. `--no-deps`
       # keeps clippy off crates.io dependencies, whose source nobody
       # here can fix; `--workspace` makes every member a primary package
       # so all of them are still linted.
@@ -464,7 +465,7 @@ jobs:
       # three bans verbatim; if you add a ban to the root file, add it
       # there too or that crate quietly loses it.
       - name: Ban blocking child-process calls workspace-wide
-        run: cargo clippy --workspace --all-targets --no-deps -- -D clippy::disallowed_methods -D clippy::disallowed_types
+        run: cargo clippy --workspace --all-targets --no-deps -- -D clippy::disallowed_methods -D clippy::disallowed_types -D clippy::undocumented_unsafe_blocks
 
       # Gate two: everything else clippy has to say, denied — but only
       # on the nine crates that are clean today. This is a ratchet, not

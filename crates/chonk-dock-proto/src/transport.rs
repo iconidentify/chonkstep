@@ -71,6 +71,8 @@ fn cvt_size(ret: libc::ssize_t) -> io::Result<usize> {
 /// *different* socket than the caller asked for.
 fn sockaddr_un(path: &Path) -> io::Result<(libc::sockaddr_un, libc::socklen_t)> {
     let bytes = path.as_os_str().as_bytes();
+    // SAFETY: this C socket-address structure contains only integer and
+    // byte-array fields, for which all-zero is a valid initial value.
     let mut addr: libc::sockaddr_un = unsafe { std::mem::zeroed() };
     if bytes.len() >= addr.sun_path.len() {
         return Err(io::Error::new(
@@ -101,6 +103,8 @@ fn sockaddr_un(path: &Path) -> io::Result<(libc::sockaddr_un, libc::socklen_t)> 
 fn widen_socket_buffers(fd: RawFd) {
     let want = (2 * MAX_MESSAGE_BYTES) as libc::c_int;
     for option in [libc::SO_SNDBUF, libc::SO_RCVBUF] {
+        // SAFETY: `want` remains a live, correctly sized `c_int` for the
+        // duration of the call; `fd` is passed only as a kernel handle.
         unsafe {
             libc::setsockopt(
                 fd,
@@ -190,15 +194,21 @@ pub fn control_socket_path(display: &str) -> io::Result<PathBuf> {
 pub fn ensure_socket_dir(dir: &Path) -> io::Result<()> {
     let c_dir = std::ffi::CString::new(dir.as_os_str().as_bytes())
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "socket directory path contains a NUL byte"))?;
+    // SAFETY: `c_dir` is NUL-terminated and remains live for the call.
     let made = unsafe { libc::mkdir(c_dir.as_ptr(), 0o700) };
     if made < 0 {
         let err = io::Error::last_os_error();
         if err.kind() != io::ErrorKind::AlreadyExists {
             return Err(err);
         }
+        // SAFETY: all-zero is a valid initial representation for this C
+        // output structure; `lstat` fills it before any field is read.
         let mut stat: libc::stat = unsafe { std::mem::zeroed() };
+        // SAFETY: the path is a live NUL-terminated string and `stat` points
+        // to writable storage of the exact structure size.
         cvt(unsafe { libc::lstat(c_dir.as_ptr(), &mut stat) })?;
         let is_dir = stat.st_mode & libc::S_IFMT == libc::S_IFDIR;
+        // SAFETY: `geteuid` takes no arguments and has no memory preconditions.
         let is_ours = stat.st_uid == unsafe { libc::geteuid() };
         let is_private = stat.st_mode & 0o077 == 0;
         if !is_dir || !is_ours || !is_private {
@@ -228,6 +238,8 @@ pub fn ensure_socket_dir(dir: &Path) -> io::Result<()> {
 /// user that also know when the shell started".
 pub fn mint_token() -> io::Result<[u8; TOKEN_BYTES]> {
     let mut token = [0u8; TOKEN_BYTES];
+    // SAFETY: `token` is writable for exactly `token.len()` bytes and remains
+    // exclusively borrowed until the syscall returns.
     let filled = unsafe { libc::getrandom(token.as_mut_ptr().cast(), token.len(), 0) };
     if filled == token.len() as libc::ssize_t {
         return Ok(token);
@@ -368,8 +380,12 @@ impl Seqpacket {
     }
 
     pub fn set_nonblocking(&self, nonblocking: bool) -> io::Result<()> {
+        // SAFETY: this object owns a live descriptor; `F_GETFL` has no third
+        // argument and does not dereference userspace memory.
         let flags = cvt(unsafe { libc::fcntl(self.fd.as_raw_fd(), libc::F_GETFL) })?;
         let updated = if nonblocking { flags | libc::O_NONBLOCK } else { flags & !libc::O_NONBLOCK };
+        // SAFETY: this object owns the descriptor and `updated` is the integer
+        // flag word required by `F_SETFL`.
         cvt(unsafe { libc::fcntl(self.fd.as_raw_fd(), libc::F_SETFL, updated) })?;
         Ok(())
     }
@@ -382,6 +398,8 @@ impl Seqpacket {
     /// property is worth a public accessor precisely because losing it
     /// silently is the worst bug this codebase knows how to have.
     pub fn is_nonblocking(&self) -> io::Result<bool> {
+        // SAFETY: this object owns a live descriptor; `F_GETFL` has no third
+        // argument and does not dereference userspace memory.
         let flags = cvt(unsafe { libc::fcntl(self.fd.as_raw_fd(), libc::F_GETFL) })?;
         Ok(flags & libc::O_NONBLOCK != 0)
     }
@@ -434,6 +452,8 @@ impl Seqpacket {
     /// length checks. An over-large message is a protocol violation
     /// either way.
     pub fn recv(&self, buffer: &mut [u8]) -> io::Result<usize> {
+        // SAFETY: `buffer` is writable for the supplied length and remains
+        // exclusively borrowed; the object owns the live descriptor.
         cvt_size(unsafe {
             libc::recv(self.fd.as_raw_fd(), buffer.as_mut_ptr().cast(), buffer.len(), libc::MSG_DONTWAIT)
         })
@@ -591,8 +611,14 @@ impl Drop for SeqpacketListener {
 /// asynchronous, so the call either completes or reports `EAGAIN`.
 fn connect_nonblocking(path: &Path, kind: libc::c_int) -> io::Result<OwnedFd> {
     let (addr, len) = sockaddr_un(path)?;
+    // SAFETY: `socket` takes only integer arguments and returns a new raw fd,
+    // whose error sentinel is checked by `cvt`.
     let raw = cvt(unsafe { libc::socket(libc::AF_UNIX, kind | libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK, 0) })?;
+    // SAFETY: `raw` is newly created and nonnegative, with no other Rust
+    // owner; ownership transfers to this `OwnedFd` exactly once.
     let fd = unsafe { OwnedFd::from_raw_fd(raw) };
+    // SAFETY: `addr` remains live for the computed initialized length and the
+    // owned descriptor remains open for the duration of the syscall.
     cvt(unsafe { libc::connect(fd.as_raw_fd(), (&addr as *const libc::sockaddr_un).cast(), len) })?;
     Ok(fd)
 }
@@ -623,8 +649,14 @@ fn bind_listener(path: &Path, kind: libc::c_int) -> io::Result<OwnedFd> {
     // process's life where the listening fd could block an
     // `accept()` on an event-loop pass that turned out to have no
     // pending connection.
+    // SAFETY: `socket` takes only integer arguments and returns a new raw fd,
+    // whose error sentinel is checked by `cvt`.
     let raw = cvt(unsafe { libc::socket(libc::AF_UNIX, kind | libc::SOCK_CLOEXEC | libc::SOCK_NONBLOCK, 0) })?;
+    // SAFETY: `raw` is newly created and nonnegative, with no other Rust
+    // owner; ownership transfers to this `OwnedFd` exactly once.
     let fd = unsafe { OwnedFd::from_raw_fd(raw) };
+    // SAFETY: `addr` remains live for the computed initialized length and the
+    // owned descriptor remains open for the duration of the syscall.
     cvt(unsafe { libc::bind(fd.as_raw_fd(), (&addr as *const libc::sockaddr_un).cast(), len) })?;
 
     // `bind()` applied the process umask, so tighten explicitly.
@@ -633,8 +665,11 @@ fn bind_listener(path: &Path, kind: libc::c_int) -> io::Result<OwnedFd> {
     // the second lock.
     let c_path = std::ffi::CString::new(path.as_os_str().as_bytes())
         .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "socket path contains a NUL byte"))?;
+    // SAFETY: `c_path` is NUL-terminated and remains live for the call.
     cvt(unsafe { libc::chmod(c_path.as_ptr(), 0o600) })?;
 
+    // SAFETY: `fd` owns the live socket; `listen` has no userspace pointer
+    // arguments or additional memory-safety preconditions.
     cvt(unsafe { libc::listen(fd.as_raw_fd(), BACKLOG) })?;
     Ok(fd)
 }
@@ -699,6 +734,8 @@ fn clear_stale_socket(path: &Path, kind: libc::c_int) -> io::Result<()> {
 /// process launched between `accept` and a separate `fcntl` would
 /// inherit another peer's socket.
 fn accept_nonblocking(listener: RawFd) -> io::Result<Option<OwnedFd>> {
+    // SAFETY: `listener` is used only as a kernel handle; both optional
+    // address outputs are null, and `accept4` returns a new fd or -1.
     let raw = unsafe {
         libc::accept4(listener, std::ptr::null_mut(), std::ptr::null_mut(), libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC)
     };
@@ -709,20 +746,27 @@ fn accept_nonblocking(listener: RawFd) -> io::Result<Option<OwnedFd>> {
             _ => Err(err),
         };
     }
+    // SAFETY: successful `accept4` returned a new nonnegative descriptor with
+    // no other Rust owner; ownership transfers exactly once.
     Ok(Some(unsafe { OwnedFd::from_raw_fd(raw) }))
 }
 
 /// `SO_PEERCRED` on a borrowed descriptor — see
 /// [`Seqpacket::peer_credentials`].
 pub fn peer_credentials_of(fd: RawFd) -> io::Result<PeerCredentials> {
+    // SAFETY: all-zero is a valid initial representation for this C output
+    // structure, and the kernel fills it before fields are read.
     let mut cred: libc::ucred = unsafe { std::mem::zeroed() };
     let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+    // SAFETY: `cred` points to writable storage of `len` bytes and `len`
+    // itself is a live writable socklen; `fd` is only a kernel handle.
     cvt(unsafe { libc::getsockopt(fd, libc::SOL_SOCKET, libc::SO_PEERCRED, (&mut cred as *mut libc::ucred).cast(), &mut len) })?;
     Ok(PeerCredentials { pid: cred.pid, uid: cred.uid, gid: cred.gid })
 }
 
 /// [`Seqpacket::peer_is_this_user`] on a borrowed descriptor.
 pub fn peer_is_this_user_on(fd: RawFd) -> io::Result<bool> {
+    // SAFETY: `geteuid` takes no arguments and has no memory preconditions.
     Ok(peer_credentials_of(fd)?.uid == unsafe { libc::geteuid() })
 }
 
@@ -805,6 +849,8 @@ impl Stream {
     /// Whether `O_NONBLOCK` is actually set on this fd right now — the
     /// subject of an assertion, as for [`Seqpacket::is_nonblocking`].
     pub fn is_nonblocking(&self) -> io::Result<bool> {
+        // SAFETY: this object owns a live descriptor; `F_GETFL` has no third
+        // argument and does not dereference userspace memory.
         let flags = cvt(unsafe { libc::fcntl(self.fd.as_raw_fd(), libc::F_GETFL) })?;
         Ok(flags & libc::O_NONBLOCK != 0)
     }
@@ -823,6 +869,8 @@ impl Stream {
     /// `MSG_DONTWAIT`, so an idle socket answers `WouldBlock` rather
     /// than parking the caller.
     pub fn recv(&self, buffer: &mut [u8]) -> io::Result<usize> {
+        // SAFETY: `buffer` is writable for the supplied length and remains
+        // exclusively borrowed; the object owns the live descriptor.
         cvt_size(unsafe { libc::recv(self.fd.as_raw_fd(), buffer.as_mut_ptr().cast(), buffer.len(), libc::MSG_DONTWAIT) })
     }
 
@@ -841,6 +889,8 @@ impl Stream {
     /// ambiguous connection is safer than dropping a live one.
     pub fn peer_gone(&self) -> bool {
         let mut fd = libc::pollfd { fd: self.fd.as_raw_fd(), events: 0, revents: 0 };
+        // SAFETY: `fd` is one initialized `pollfd`, writable for the exact
+        // element count supplied, and remains live for this nonblocking call.
         let ready = unsafe { libc::poll(&mut fd, 1, 0) };
         ready > 0 && fd.revents & (libc::POLLHUP | libc::POLLERR) != 0
     }
@@ -890,6 +940,8 @@ impl AsRawFd for Stream {
 /// call, and losing either of them in either place is the same frozen
 /// desktop.
 pub fn send_on(fd: RawFd, message: &[u8]) -> io::Result<usize> {
+    // SAFETY: `message` is readable for the supplied length and remains live;
+    // the raw descriptor is passed only as a kernel handle.
     cvt_size(unsafe { libc::send(fd, message.as_ptr().cast(), message.len(), libc::MSG_DONTWAIT | libc::MSG_NOSIGNAL) })
 }
 
@@ -911,6 +963,8 @@ pub fn wait_readable(fd: RawFd, timeout: Option<Duration>) -> io::Result<bool> {
         Some(d) => d.as_millis().min(libc::c_int::MAX as u128) as libc::c_int,
         None => -1,
     };
+    // SAFETY: `pollfd` is one initialized value, writable for the exact
+    // element count supplied, and remains live until `poll` returns.
     let ready = unsafe { libc::poll(&mut pollfd, 1, timeout_ms) };
     if ready < 0 {
         let err = io::Error::last_os_error();

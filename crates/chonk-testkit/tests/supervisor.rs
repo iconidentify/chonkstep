@@ -160,6 +160,8 @@ fn terminating_the_supervisor_is_a_logout_not_a_recovery() {
     poll_until(Duration::from_secs(5), "stub compositor to start", || (run_count(&scratch) == 1).then_some(()))
         .expect("stub did not start");
 
+    // SAFETY: the child was spawned by this test, has not been reaped, and
+    // `kill` only passes its numeric pid and a valid signal to the kernel.
     unsafe { libc::kill(child.id() as i32, libc::SIGTERM) };
     let status = wait_exit(&mut child);
     assert!(status.success(), "session-manager TERM must be a clean logout: {status}");
@@ -244,6 +246,8 @@ fn direct_session_owns_graphical_targets_and_publishes_only_curated_environment(
     assert!(!started.contains("CARGO_POISON"));
     assert!(!started.contains("LD_LIBRARY_PATH"));
 
+    // SAFETY: the child was spawned by this test, has not been reaped, and
+    // `kill` only passes its numeric pid and a valid signal to the kernel.
     unsafe { libc::kill(child.id() as i32, libc::SIGTERM) };
     assert!(wait_exit(&mut child).success());
     let stopped = std::fs::read_to_string(&calls).unwrap();
@@ -259,6 +263,8 @@ fn direct_session_owns_graphical_targets_and_publishes_only_curated_environment(
 #[ignore = "needs a Wayland session to nest inside"]
 fn terminating_the_real_compositor_is_a_clean_logout() {
     let mut session = Session::boot("compositor-term", SessionOptions::default()).expect("nested compositor boots");
+    // SAFETY: the session owns this still-running compositor process, and
+    // `kill` only passes its numeric pid and a valid signal to the kernel.
     unsafe { libc::kill(session.compositor_pid() as i32, libc::SIGTERM) };
     let status = session
         .wait_for_compositor_exit(Duration::from_secs(10))

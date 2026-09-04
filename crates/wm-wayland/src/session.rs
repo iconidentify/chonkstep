@@ -628,6 +628,9 @@ pub(crate) fn init(
     //    on the DRM node directly: GBM is what turns "a scanout buffer"
     //    into "something EGL can render into", and the same device then
     //    backs the allocator that fills the swapchain.
+    // SAFETY: `gbm` owns a live GBM device for the selected DRM node and
+    // outlives the display; Smithay performs the EGL handle validation and
+    // returns an error if this platform cannot construct the display.
     let egl_display = unsafe { EGLDisplay::new(gbm.clone()) }
         .map_err(|error| format!("EGL display init failed on {}: {error}", device_path.display()))?;
     let egl_context = EGLContext::new(&egl_display)
