@@ -748,6 +748,70 @@ fn keysym_for(token: &str) -> Option<u32> {
         "kbdlightonoff" => 0x1008ff04,
         "calculator" => 0x1008ff1d,
         "eject" => 0x1008ff2c,
+        // The numeric keypad. Every name here is a name for a *key*,
+        // and the keysym each one resolves to is the one the
+        // compositor will actually be handed when that key is pressed
+        // — which for half the pad is NOT the keysym its X11 name
+        // suggests, so this block needs its reasoning stated.
+        //
+        // A binding is matched against the LEVEL-0 keysym of the
+        // keycode (`wm-wayland`'s `input.rs`: the unshifted sym, so
+        // that Alt+Shift+T matches T with SHIFT in the mask rather
+        // than the shifted sym). The keypad's digits do not live at
+        // level 0. On the stock US map every one of them is at level
+        // 2, behind NumLock — `xkbcli how-to-type --keysym KP_1` says
+        // `keycode 87, level 2, [ Mod2 NumLock ]`, while level 1 of
+        // that same keycode is `KP_End`. So `KP_1` (0xffb1) is a
+        // keysym this compositor can never see for a binding, and a
+        // table that mapped `kp1` to it would hand back a spec that
+        // parses, warns about nothing, and never fires — the exact
+        // silent failure this block exists to end.
+        //
+        // Each digit therefore names its key by the keysym that key
+        // actually delivers, which is the NumLock-off (cursor-mode)
+        // one. The upshot is the behaviour a user wants and would
+        // assume: `kp1` means the numpad's 1 key, and it fires
+        // whichever way NumLock happens to be set, because level-0
+        // lookup does not consult NumLock at all. Both spellings are
+        // accepted for the same key — the digit a user reads off the
+        // keycap, and the X11 cursor-mode name someone who knows the
+        // keysym table would reach for — in the same way "return" and
+        // "enter" are one key above.
+        "kp0" | "kpinsert" => 0xff9e,
+        "kp1" | "kpend" => 0xff9c,
+        "kp2" | "kpdown" => 0xff99,
+        "kp3" | "kpnext" | "kppagedown" => 0xff9b,
+        "kp4" | "kpleft" => 0xff96,
+        "kp5" | "kpbegin" => 0xff9d,
+        "kp6" | "kpright" => 0xff98,
+        "kp7" | "kphome" => 0xff95,
+        "kp8" | "kpup" => 0xff97,
+        "kp9" | "kpprior" | "kppageup" => 0xff9a,
+        "kpdecimal" | "kpdelete" => 0xff9f,
+        // The operators and Enter have no second level to hide behind:
+        // each is a single-level key whose own keysym is at level 0
+        // (`xkbcli` puts KP_Add, KP_Subtract, KP_Multiply, KP_Divide,
+        // KP_Enter and KP_Equal all at level 1, no modifiers), so
+        // these names mean exactly what they say.
+        //
+        // `kpenter` is the numpad's own Enter, and a different key
+        // from `return` — 0xff8d against 0xff0d. The Hyprland reader
+        // used to alias `kp_enter` to `return`, which would have made
+        // a numpad-Enter binding quietly replace the main Enter key's
+        // (see `hyprland::keys`'s alias table for why that never
+        // actually fired, and why it had to be fixed anyway).
+        "kpenter" => 0xff8d,
+        "kpadd" => 0xffab,
+        "kpsubtract" => 0xffad,
+        "kpmultiply" => 0xffaa,
+        "kpdivide" => 0xffaf,
+        "kpequal" => 0xffbd,
+        // Not on the US map at all, where <KPDL> is KP_Delete/
+        // KP_Decimal; layouts that use a comma as the decimal mark put
+        // it at level 0 of that key. Named for the same reason as the
+        // rest: a key this format cannot name is unbindable, and a
+        // user on such a layout cannot take it back by hand either.
+        "kpseparator" => 0xffac,
         _ => return None,
     };
     Some(keysym)
