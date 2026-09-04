@@ -29,9 +29,9 @@
 //!
 //! The tests in `tests/e2e.rs` are those regressions spelled as
 //! assertions, named after the behavior they pin. They need a live
-//! Wayland session to nest inside, which GitHub CI does not have (see
-//! ci.yml's wayland job comment), so they are `#[ignore]`d; run them
-//! locally with `scripts/e2e.sh` or
+//! Wayland session to nest inside, so they are `#[ignore]`d for an
+//! ordinary `cargo test`; CI creates an isolated headless Weston host.
+//! Run them locally with `scripts/e2e.sh` or
 //! `cargo test -p chonk-testkit -- --ignored --test-threads=1`.
 //!
 //! # What every posed session has in common

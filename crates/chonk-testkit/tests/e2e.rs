@@ -8,10 +8,9 @@
 //!
 //! # Running
 //!
-//! These need a live Wayland session to nest inside, which GitHub's
-//! headless runners do not have (ci.yml's wayland job documents why a
-//! compositor cannot boot there at all), so they are `#[ignore]`d.
-//! Locally, inside any Wayland session:
+//! These need a live Wayland session to nest inside, so they are
+//! `#[ignore]`d for an ordinary `cargo test`. CI supplies an isolated
+//! headless Weston host; locally they can run inside any Wayland session:
 //!
 //! ```text
 //! scripts/e2e.sh
@@ -466,15 +465,35 @@ fn live_reload_applies() {
 /// the client's environment, writing escapes *inside* these very
 /// tokens (`wl_keyboard\x1b[35m#15\x1b[36m.enter\x1b[0m(`), which
 /// made this counter report zero enters from a wire that plainly
-/// carried them — a red test against a healthy compositor, for as
-/// long as the diagnosis also grepped the raw bytes.
+/// carried them — a red test against a healthy compositor. Callers
+/// deliberately match only the interface name, not the object-id
+/// separator: current libwayland prints `wl_keyboard#15`, while older
+/// releases on supported CI distributions print `wl_keyboard@15`.
 fn wire_events(log: &std::path::Path, object: &str, event: &str) -> usize {
     std::fs::read_to_string(log)
         .unwrap_or_default()
         .lines()
-        .map(chonk_testkit::strip_ansi)
-        .filter(|line| line.contains(object) && line.contains(event))
+        .filter(|line| is_wire_event(line, object, event))
         .count()
+}
+
+fn is_wire_event(line: &str, object: &str, event: &str) -> bool {
+    let line = chonk_testkit::strip_ansi(line);
+    line.contains(object) && line.contains(event)
+}
+
+#[test]
+fn wayland_wire_events_accept_old_and_new_object_separators() {
+    assert!(is_wire_event(
+        "wl_keyboard@15.enter(4, wl_surface@8, array[0])",
+        "wl_keyboard",
+        ".enter("
+    ));
+    assert!(is_wire_event(
+        "wl_keyboard\x1b[35m#15\x1b[36m.leave\x1b[0m(5, wl_surface#8)",
+        "wl_keyboard",
+        ".leave("
+    ));
 }
 
 /// The regression: restoring a miniaturized client-decorated window
@@ -529,12 +548,12 @@ fn restore_after_miniaturize_is_a_real_focus_cycle() {
         )
         .unwrap();
     poll_until(ACT, "the client to see a wl_keyboard.enter", || {
-        (wire_events(&log, "wl_keyboard#", ".enter(") >= 1).then_some(())
+        (wire_events(&log, "wl_keyboard", ".enter(") >= 1).then_some(())
     })
     .expect("the focus click never reached the client's keyboard");
 
-    let enters_before = wire_events(&log, "wl_keyboard#", ".enter(");
-    let leaves_before = wire_events(&log, "wl_keyboard#", ".leave(");
+    let enters_before = wire_events(&log, "wl_keyboard", ".enter(");
+    let leaves_before = wire_events(&log, "wl_keyboard", ".leave(");
     let shells_before: Vec<u64> = session
         .door()
         .windows()
@@ -571,7 +590,7 @@ fn restore_after_miniaturize_is_a_real_focus_cycle() {
         .expect("the miniaturize chord never hid the window");
     }
     poll_until(ACT, "the client to see a wl_keyboard.leave", || {
-        (wire_events(&log, "wl_keyboard#", ".leave(") > leaves_before).then_some(())
+        (wire_events(&log, "wl_keyboard", ".leave(") > leaves_before).then_some(())
     })
     .expect(
         "the hidden window never got a wl_keyboard.leave — the seat is still parked on it, \
@@ -606,7 +625,7 @@ fn restore_after_miniaturize_is_a_real_focus_cycle() {
     }
     // And the client was told: a fresh enter, not a dedup.
     poll_until(ACT, "the client to see a fresh wl_keyboard.enter", || {
-        (wire_events(&log, "wl_keyboard#", ".enter(") > enters_before).then_some(())
+        (wire_events(&log, "wl_keyboard", ".enter(") > enters_before).then_some(())
     })
     .expect(
         "the restored window never got a fresh wl_keyboard.enter — restore was a dedup, \
@@ -840,7 +859,30 @@ fn chromium_resize_at_scale_2_keeps_its_scale() {
             ],
         )
         .unwrap();
-    session.wait_for_window("hromium").unwrap();
+    // A cold browser profile can spend more than the harness's usual
+    // ten-second client budget initializing SwiftShader on a hosted
+    // runner. The compositor interactions below retain the strict
+    // ten-second ACT deadline; only this heavyweight process startup
+    // gets the longer allowance.
+    let browser = {
+        let door = session.door();
+        poll_until(
+            Duration::from_secs(30),
+            "Chromium to map its first window",
+            || {
+                let world = door.windows().ok()?;
+                world.window_matching("hromium").cloned()
+            },
+        )
+    };
+    if let Err(error) = browser {
+        let client_log = std::fs::read_to_string(session.dir.join("client-0-chromium.log"))
+            .unwrap_or_else(|read_error| format!("<could not read Chromium log: {read_error}>"));
+        panic!(
+            "{error}\n--- Chromium log ---\n{client_log}\n--- compositor log ---\n{}",
+            session.log()
+        );
+    }
     session.door().barrier().unwrap();
     let window = session
         .world()
