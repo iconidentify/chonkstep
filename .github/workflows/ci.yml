@@ -1,15 +1,6 @@
-# Two gates on every change: the full workspace test suite (pure Rust,
-# no X server needed - the decoration renderer and wm-core's state
-# machine are tested against an in-memory fake backend), then a live
-# smoke test that boots the release binary as the window manager of a
-# headless Xvfb display and asserts, from the outside with xprop, that
-# it actually took over the display (EWMH's _NET_SUPPORTING_WM_CHECK
-# handshake), actually manages real clients (they appear in
-# _NET_CLIENT_LIST), and frames exactly the ones that asked to be
-# framed. The smoke test exists because everything the unit suite
-# cannot see - connection setup, substructure-redirect ownership,
-# reparenting, property publishing - is exactly what breaks against a
-# real X server.
+# Every change is checked for vulnerable dependencies, SDK regressions,
+# workspace-wide lint and documentation warnings, fresh Omarchy installation,
+# a live X11 smoke test, and a nested Wayland compositor end-to-end suite.
 name: ci
 
 on:
@@ -46,6 +37,8 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version-file: bindings/go/chonkdock/go.mod
+          # This module has no external dependencies and therefore no go.sum.
+          cache: false
 
       - name: Run the Go SDK tests
         working-directory: bindings/go/chonkdock
