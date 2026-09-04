@@ -1025,6 +1025,16 @@ pub struct Shell<B: Backend + PopupHost<PopupId = B::ShellId>> {
     /// (`docs/control-socket.md`). Serviced in [`Shell::tick`]; costs
     /// nothing while no bar is connected.
     control: ControlSocket,
+    /// Advances when the shell-owned style fields represented by a
+    /// control snapshot change. `WindowManager` owns the other semantic
+    /// revision; keeping the two separate makes a quiet tick a handful
+    /// of integer comparisons instead of a deep snapshot diff.
+    control_theme_revision: u64,
+    /// Monotonic diagnostic count of full control snapshots constructed.
+    /// Exposed through the opt-in Wayland test door so the E2E suite can
+    /// distinguish a cheap quiet pass from an allocated diff that emitted
+    /// nothing.
+    control_snapshot_builds: u64,
     /// Cached-path, cadence-bounded reader for the public
     /// `appearance-request` marker. Client traffic may wake the shell
     /// far faster than a human-visible control needs filesystem probes.
@@ -1250,6 +1260,8 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
             fonts,
             pointer_root: Point::new(0, 0),
             control,
+            control_theme_revision: 0,
+            control_snapshot_builds: 0,
             appearance_requests: crate::appearance::RequestPoller::new(now),
             transient_escape: false,
             config_reloaded: false,
@@ -1343,6 +1355,10 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         let scale_changed = self.desktop.set_scale(next.scale);
         let theme_changed = theme != self.theme;
         let appearance_changed = next.appearance != self.state.appearance;
+        let following_changed = next.following != self.state.following;
+        if scale_changed || theme_changed || appearance_changed || following_changed {
+            self.control_theme_revision = self.control_theme_revision.wrapping_add(1);
+        }
         self.state = next;
         if !scale_changed && !theme_changed {
             // Nothing that is drawn has moved. Repainting anyway would
@@ -1491,6 +1507,12 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
     /// binary still publishes itself (the X11 binary's XSETTINGS).
     pub fn session_state(&self) -> &SessionState {
         &self.state
+    }
+
+    /// Number of full native-control snapshots built in this session.
+    /// This is diagnostic only; protocol behavior never depends on it.
+    pub fn control_snapshot_builds(&self) -> u64 {
+        self.control_snapshot_builds
     }
 
     /// Signals every terminal this shell launched to swap to the color
@@ -2837,8 +2859,9 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
     /// One pass of the control socket (`crate::control`): admit new
     /// bars, answer requests, publish what changed.
     ///
-    /// The snapshot is taken only once someone is connected, so a
-    /// desktop without a bar pays one `accept` that returns nothing.
+    /// The snapshot is taken only once someone is connected and one of
+    /// its cheap semantic inputs changed (or the client has a request),
+    /// so a quiet bar pays no client/title/output allocation at all.
     /// A `focus-workspace` a client asked for is applied here and the
     /// result published in the same pass, so the client's answer is
     /// the `workspaces` event the switch produced, not one a tick late.
@@ -2847,10 +2870,17 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         if !self.control.has_clients() {
             return;
         }
-        let commands = self.control.service(&self.control_snapshot(wm));
-        if commands.is_empty() {
+        let stamp = self.control_snapshot_stamp(wm);
+        if !self.control.snapshot_needed(stamp) {
+            // A previous non-blocking write may still have bytes queued.
+            // Retrying it is socket maintenance, not a reason to rebuild
+            // the desktop view it already carries.
+            self.control.flush_pending();
             return;
         }
+        let snapshot = self.control_snapshot(wm);
+        let commands = self.control.service(&snapshot);
+        let publish_after_command = !commands.is_empty();
         for command in commands {
             match command {
                 // A switch, never a create — `docs/control-socket.md`
@@ -2873,10 +2903,44 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
                 }
             }
         }
-        self.control.publish(&self.control_snapshot(wm));
+        // A command is always a workspace request and is owed a
+        // post-command workspaces event even when it selected the already
+        // active workspace. `service` leaves that acknowledgement parked;
+        // a second snapshot is therefore needed exactly when a command was
+        // returned.
+        if self.control.has_clients() && publish_after_command {
+            let snapshot = self.control_snapshot(wm);
+            self.control.publish(&snapshot);
+        }
+        let stamp = self.control_snapshot_stamp(wm);
+        self.control.note_snapshot(stamp);
     }
 
-    fn control_snapshot(&self, wm: &WindowManager<B>) -> control::Snapshot {
+    fn control_snapshot_stamp(&self, wm: &WindowManager<B>) -> control::SnapshotStamp {
+        // On one output the answer is definitionally zero. Besides
+        // avoiding even the slice walk, this keeps X11's exact
+        // `query_pointer` round trip out of the quiet single-monitor
+        // path. Multiple outputs still need the exact server position:
+        // client-content motion does not necessarily reach the shell.
+        let focused_output = if wm.monitors_ref().len() <= 1 {
+            0
+        } else {
+            let pointer = wm.backend().pointer_position().unwrap_or(self.pointer_root);
+            wm.monitor_index_at(pointer)
+        };
+        control::SnapshotStamp {
+            wm: wm.protocol_state_revision(),
+            // Output resize/hotplug reaches `on_screen_resize`, whose
+            // `apply_workareas` advances this even when the WM's client
+            // state stayed unchanged.
+            workareas: wm.workarea_revision(),
+            focused_output,
+            theme: self.control_theme_revision,
+        }
+    }
+
+    fn control_snapshot(&mut self, wm: &WindowManager<B>) -> control::Snapshot {
+        self.control_snapshot_builds = self.control_snapshot_builds.wrapping_add(1);
         control::snapshot(
             wm,
             &control::Surroundings {

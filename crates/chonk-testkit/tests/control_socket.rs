@@ -98,7 +98,11 @@ fn a_bar_sees_the_snapshot_the_windows_and_its_own_switches() {
         "[commands]\ndump = [\"sh\", \"-c\", \"env > {}\"]\n\n[keybindings]\n\"super+space\" = \"workspace-carry-next\"\n\"volumeup\" = \"run dump\"\n",
         dump.display()
     );
-    let mut session = Session::boot("control-socket", SessionOptions { config_extra: config, ..Default::default() }).expect("session boots");
+    let mut session = Session::boot(
+        "control-socket",
+        SessionOptions { config_extra: config.clone(), ..Default::default() },
+    )
+    .expect("session boots");
 
     let path = control_socket_path(&session);
     let mut bar = Bar::connect(&path);
@@ -126,6 +130,38 @@ fn a_bar_sees_the_snapshot_the_windows_and_its_own_switches() {
     assert!(theme["id"].is_string() && theme["name"].is_string());
     assert!(matches!(theme["appearance"].as_str(), Some("dark" | "light")));
     assert!(theme.get("following").is_some(), "`following` is present even when null");
+
+    // A connected but quiet bar used to make every one of these
+    // compositor wakeups allocate and discard a complete snapshot. The
+    // counter observes construction rather than wire output, so equal
+    // snapshots cannot make this pass by deduplication alone.
+    let quiet_before = session.door().protocol_publishes().expect("read snapshot counters after accept");
+    assert!(quiet_before.control >= 1, "the accepted bar received a constructed snapshot");
+    for _ in 0..16 {
+        session.door().barrier().expect("quiet compositor pass completes");
+    }
+    let quiet_after = session.door().protocol_publishes().expect("read snapshot counters after quiet passes");
+    assert_eq!(quiet_after.control, quiet_before.control, "quiet dispatch passes built control snapshots");
+
+    // A restyle does not touch the window manager's protocol revision,
+    // so the shell-owned theme revision is a separate part of the cheap
+    // stamp. Drive the real config-reload funnel and count construction:
+    // exactly one current view, whose changed theme facet reaches the bar.
+    let theme_before = session.door().protocol_publishes().expect("read count before theme reload");
+    session
+        .rewrite_config(&format!("omarchy_shell = false\ntheme = \"graphite\"\n{config}"))
+        .expect("rewrite the session with another theme");
+    session.request_reload().expect("request the live theme reload");
+    let restyled = bar.wait_for("the graphite theme after a live reload", |e| {
+        e["event"] == "theme" && e["id"] == "graphite"
+    });
+    assert_eq!(restyled["name"], "Graphite");
+    let theme_after = session.door().protocol_publishes().expect("read count after theme reload");
+    assert_eq!(
+        theme_after.control,
+        theme_before.control + 1,
+        "one theme invalidation builds exactly one current view"
+    );
 
     // A window arrives: the workspace it landed on counts it, and focus
     // names it.
@@ -166,6 +202,7 @@ fn a_bar_sees_the_snapshot_the_windows_and_its_own_switches() {
     assert_eq!(switched["workspaces"].as_array().unwrap().len(), 2, "a switch never creates a workspace");
 
     // §4.1: the snapshot, on demand, in order.
+    let requested_before = session.door().protocol_publishes().expect("read count before snapshot request");
     bar.send(r#"{"request":"snapshot"}"#);
     let mut order = Vec::new();
     let first = bar.wait_for("the workspaces line that opens a snapshot", |e| e["event"] == "workspaces");
@@ -174,6 +211,12 @@ fn a_bar_sees_the_snapshot_the_windows_and_its_own_switches() {
         order.push(bar.next()["event"].as_str().unwrap().to_string());
     }
     assert_eq!(order, ["workspaces", "outputs", "focus", "theme"]);
+    let requested_after = session.door().protocol_publishes().expect("read count after snapshot request");
+    assert_eq!(
+        requested_after.control,
+        requested_before.control + 1,
+        "one readable snapshot request builds exactly one current view"
+    );
 
     // §2: an unknown verb is an error, not a disconnect.
     bar.send(r#"{"request":"make-coffee"}"#);

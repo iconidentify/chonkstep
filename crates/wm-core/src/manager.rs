@@ -623,6 +623,12 @@ impl<B: Backend> WindowManager<B> {
         self.backend.monitors()
     }
 
+    /// The backend's stable monitor ledger without cloning its names.
+    /// Hot read-only consumers should prefer this over [`Self::monitors`].
+    pub fn monitors_ref(&self) -> &[MonitorInfo] {
+        self.backend.monitors_ref()
+    }
+
     /// Index of the monitor the shell's chrome belongs on: the one the
     /// backend flagged `primary`, else the first (see
     /// `Backend::monitors`, which allows a platform to name none).
@@ -638,7 +644,7 @@ impl<B: Backend> WindowManager<B> {
     /// arrangement belongs to no output at all, and a frame dragged
     /// mostly off-screen still has to maximize somewhere.
     pub fn monitor_index_at(&self, point: Point) -> usize {
-        let monitors = self.backend.monitors();
+        let monitors = self.backend.monitors_ref();
         if let Some(index) = monitors.iter().position(|m| m.geometry.contains(point)) {
             return index;
         }
@@ -652,7 +658,11 @@ impl<B: Backend> WindowManager<B> {
 
     /// The full geometry of the monitor `point` falls on.
     pub fn monitor_rect_at(&self, point: Point) -> Rect {
-        self.backend.monitors().get(self.monitor_index_at(point)).map(|m| m.geometry).unwrap_or(NO_MONITOR_FALLBACK)
+        self.backend
+            .monitors_ref()
+            .get(self.monitor_index_at(point))
+            .map(|m| m.geometry)
+            .unwrap_or(NO_MONITOR_FALLBACK)
     }
 
     /// That monitor's workarea: the shell-reserved area if one was set

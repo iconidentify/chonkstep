@@ -341,6 +341,10 @@ impl Backend for FakeBackend {
         self.monitors.clone()
     }
 
+    fn monitors_ref(&self) -> &[MonitorInfo] {
+        &self.monitors
+    }
+
     fn poll_event(&mut self) -> Option<BackendEvent<Self::WindowId, Self::FrameId>> {
         self.queued_events.pop_front()
     }

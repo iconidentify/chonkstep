@@ -1034,6 +1034,7 @@ pub struct Door {
 /// Work performed by demand-driven desktop protocol publishers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ProtocolPublishes {
+    pub control: u64,
     pub hyprland: u64,
     pub foreign_full: u64,
     pub foreign_drag: u64,
@@ -1194,6 +1195,8 @@ impl Door {
             return Err(format!("unexpected protocol-publishes reply: {line}"));
         }
         Ok(ProtocolPublishes {
+            control: field(&line, "control=")
+                .ok_or_else(|| format!("protocol-publishes reply has no control count: {line}"))?,
             hyprland: field(&line, "hyprland=")
                 .ok_or_else(|| format!("protocol-publishes reply has no Hyprland count: {line}"))?,
             foreign_full: field(&line, "foreign_full=")

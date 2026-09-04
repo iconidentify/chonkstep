@@ -219,15 +219,32 @@ pub(crate) enum Request {
 }
 
 /// Everything the shell publishes, as the four facet events it is
-/// published as. Built fresh from the live `WindowManager` each tick
-/// there is a client to tell; compared facet-by-facet against the last
-/// one sent so a quiet desktop is a silent socket.
+/// published as. Built fresh from the live `WindowManager` when its
+/// cheap semantic stamp changes or a client has a request to answer;
+/// compared facet-by-facet against the last one sent so an irrelevant
+/// invalidation remains a silent socket.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Snapshot {
     pub workspaces: WorkspacesEvent,
     pub outputs: OutputsEvent,
     pub focus: FocusEvent,
     pub theme: ThemeEvent,
+}
+
+/// Cheap identity of every input that can change a control snapshot.
+///
+/// The full [`Snapshot`] is deliberately not used as its own dirty
+/// check: constructing it is the work this stamp exists to avoid.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct SnapshotStamp {
+    /// `WindowManager` client/focus/workspace semantic revision.
+    pub wm: u64,
+    /// Workarea publication revision, which also catches output changes.
+    pub workareas: u64,
+    /// Monitor currently under the pointer.
+    pub focused_output: usize,
+    /// Shell-owned theme, appearance, following, and scale revision.
+    pub theme: u64,
 }
 
 impl Snapshot {
@@ -290,7 +307,7 @@ pub(crate) fn snapshot<B: Backend>(wm: &WindowManager<B>, surroundings: &Surroun
         workspace: client.workspace,
     });
 
-    let monitors = wm.monitors();
+    let monitors = wm.monitors_ref();
     let outputs = if monitors.is_empty() {
         // A backend that names no outputs still has a screen; §3.3
         // says to describe it as one output called "screen".
@@ -527,6 +544,21 @@ impl ControlClient {
         ready > 0 && fds.revents & (libc::POLLHUP | libc::POLLERR) != 0
     }
 
+    /// Whether a non-blocking read can make progress or discover the
+    /// peer's departure. This is only a readiness query: the real read
+    /// remains in [`Self::read`], where framing and budgets are enforced.
+    fn input_pending(&self) -> bool {
+        if self.peer_finished {
+            return self.peer_gone();
+        }
+        let mut fd = libc::pollfd { fd: self.stream.as_raw_fd(), events: libc::POLLIN, revents: 0 };
+        // SAFETY: one live descriptor owned by this client, queried with
+        // a zero timeout. Failure means "not known ready" and is retried
+        // by the next bounded housekeeping pass.
+        let ready = unsafe { libc::poll(&mut fd, 1, 0) };
+        ready > 0 && fd.revents & (libc::POLLIN | libc::POLLHUP | libc::POLLERR | libc::POLLNVAL) != 0
+    }
+
     /// Consumes every complete line in `inbound`, then checks what is
     /// left against the cap: a partial line longer than any legal
     /// whole line is a client that has lost its framing.
@@ -626,6 +658,10 @@ pub(crate) struct ControlSocket {
     /// What every connected client has been told, facet by facet.
     /// `None` until the first publish.
     last: Option<Snapshot>,
+    /// Inputs consumed by the most recently constructed snapshot.
+    /// Kept separately from `last`: comparing `last` would first have
+    /// to construct the allocation-heavy value this gate avoids.
+    observed: Option<SnapshotStamp>,
 }
 
 impl ControlSocket {
@@ -656,7 +692,14 @@ impl ControlSocket {
         match StreamListener::bind(&socket_path) {
             Ok(listener) => {
                 tracing::info!(socket = %socket_path.display(), "control socket listening");
-                Self { listener: Some(listener), socket_path, clients: Vec::new(), hello: Self::hello(), last: None }
+                Self {
+                    listener: Some(listener),
+                    socket_path,
+                    clients: Vec::new(),
+                    hello: Self::hello(),
+                    last: None,
+                    observed: None,
+                }
             }
             Err(error) => {
                 tracing::warn!(?error, socket = %socket_path.display(), "could not bind the control socket; it is unavailable this session");
@@ -666,7 +709,14 @@ impl ControlSocket {
     }
 
     fn unbound(socket_path: PathBuf) -> Self {
-        Self { listener: None, socket_path, clients: Vec::new(), hello: Self::hello(), last: None }
+        Self {
+            listener: None,
+            socket_path,
+            clients: Vec::new(),
+            hello: Self::hello(),
+            last: None,
+            observed: None,
+        }
     }
 
     fn hello() -> Event {
@@ -687,6 +737,37 @@ impl ControlSocket {
 
     pub(crate) fn has_clients(&self) -> bool {
         !self.clients.is_empty()
+    }
+
+    /// Whether the shell must construct a snapshot this pass.
+    ///
+    /// A changed cheap stamp needs a diff. So does readable client data:
+    /// requests are interpreted against the current workspace count, and
+    /// a freshly accepted client's `wants_snapshot` is its same-tick
+    /// publication guarantee. Quiet clients with only buffered outbound
+    /// bytes return false; [`Self::flush_pending`] serves those without a
+    /// snapshot.
+    pub(crate) fn snapshot_needed(&self, stamp: SnapshotStamp) -> bool {
+        self.has_clients()
+            && (self.observed != Some(stamp)
+                || self.clients.iter().any(|client| client.wants_snapshot || client.input_pending()))
+    }
+
+    /// Records the cheap inputs represented by a snapshot that was just
+    /// constructed and serviced.
+    pub(crate) fn note_snapshot(&mut self, stamp: SnapshotStamp) {
+        self.observed = Some(stamp);
+    }
+
+    /// Retries queued non-blocking writes and forgets dead readers without
+    /// requiring a new desktop snapshot.
+    pub(crate) fn flush_pending(&mut self) {
+        for client in &mut self.clients {
+            if let Some(farewell) = client.flush() {
+                client.doom(farewell);
+            }
+        }
+        self.clients.retain(|client| !client.doomed);
     }
 
     /// Admits everything waiting on the listener. A new client owes
@@ -968,6 +1049,10 @@ mod tests {
         }
     }
 
+    fn sample_stamp() -> SnapshotStamp {
+        SnapshotStamp { wm: 7, workareas: 3, focused_output: 0, theme: 2 }
+    }
+
     fn text(event: &Event) -> String {
         String::from_utf8(line(event)).unwrap()
     }
@@ -1011,9 +1096,107 @@ mod tests {
         }
     }
 
+    fn wait_for_snapshot_need(socket: &ControlSocket, stamp: SnapshotStamp) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !socket.snapshot_needed(stamp) {
+            assert!(Instant::now() < deadline, "the client request never became readable");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
     // -----------------------------------------------------------------
     // The wire, checked against the document's own examples
     // -----------------------------------------------------------------
+
+    #[test]
+    fn a_quiet_connected_client_does_not_require_another_snapshot() {
+        let snapshot = sample_snapshot();
+        let (_scratch, mut socket, mut bar) = connected(&snapshot);
+        bar.lines(5);
+        let stamp = sample_stamp();
+        socket.note_snapshot(stamp);
+
+        assert!(!socket.snapshot_needed(stamp));
+        socket.flush_pending();
+        assert!(!socket.snapshot_needed(stamp), "socket maintenance is not a desktop invalidation");
+    }
+
+    #[test]
+    fn a_fresh_client_and_a_readable_snapshot_request_force_one_build() {
+        let scratch = Scratch::new();
+        let mut socket = ControlSocket::bind_at(scratch.socket());
+        let mut bar = Bar::connect(&socket);
+        wait_for_accept(&mut socket);
+        let stamp = sample_stamp();
+        assert!(socket.snapshot_needed(stamp), "accept owes the initial snapshot in this tick");
+        socket.service(&sample_snapshot());
+        socket.note_snapshot(stamp);
+        bar.lines(5);
+        assert!(!socket.snapshot_needed(stamp));
+
+        bar.send("{\"request\":\"snapshot\"}\n");
+        wait_for_snapshot_need(&socket, stamp);
+        socket.service(&sample_snapshot());
+        socket.note_snapshot(stamp);
+        assert_eq!(
+            bar.lines(4).iter().map(|event| event["event"].as_str().unwrap()).collect::<Vec<_>>(),
+            ["workspaces", "outputs", "focus", "theme"]
+        );
+        assert!(!socket.snapshot_needed(stamp));
+    }
+
+    #[test]
+    fn every_cheap_snapshot_input_invalidates_the_gate() {
+        let snapshot = sample_snapshot();
+        let (_scratch, mut socket, mut bar) = connected(&snapshot);
+        bar.lines(5);
+        let stamp = sample_stamp();
+        socket.note_snapshot(stamp);
+
+        assert!(socket.snapshot_needed(SnapshotStamp { wm: stamp.wm + 1, ..stamp }));
+        assert!(socket.snapshot_needed(SnapshotStamp { workareas: stamp.workareas + 1, ..stamp }));
+        assert!(socket.snapshot_needed(SnapshotStamp { focused_output: 1, ..stamp }));
+        assert!(socket.snapshot_needed(SnapshotStamp { theme: stamp.theme + 1, ..stamp }));
+    }
+
+    #[test]
+    fn pointer_and_theme_stamp_changes_publish_their_exact_facets() {
+        let snapshot = sample_snapshot();
+        let (_scratch, mut socket, mut bar) = connected(&snapshot);
+        bar.lines(5);
+        let mut stamp = sample_stamp();
+        socket.note_snapshot(stamp);
+
+        let mut moved = snapshot.clone();
+        moved.outputs.focused = Some(1);
+        moved.outputs.outputs.push(OutputEntry {
+            index: 1,
+            name: "DP-1".to_string(),
+            x: 2560,
+            y: 0,
+            width: 1920,
+            height: 1080,
+            scale: 1.0,
+        });
+        stamp.focused_output = 1;
+        assert!(socket.snapshot_needed(stamp));
+        socket.service(&moved);
+        socket.note_snapshot(stamp);
+        let output = bar.lines(1).pop().unwrap();
+        assert_eq!(output["event"], "outputs");
+        assert_eq!(output["focused"], 1);
+
+        let mut restyled = moved;
+        restyled.theme.id = "graphite".to_string();
+        restyled.theme.name = "Graphite".to_string();
+        stamp.theme += 1;
+        assert!(socket.snapshot_needed(stamp));
+        socket.service(&restyled);
+        socket.note_snapshot(stamp);
+        let theme = bar.lines(1).pop().unwrap();
+        assert_eq!(theme["event"], "theme");
+        assert_eq!(theme["id"], "graphite");
+    }
 
     #[test]
     fn every_facet_serialises_exactly_as_the_spec_example_reads() {

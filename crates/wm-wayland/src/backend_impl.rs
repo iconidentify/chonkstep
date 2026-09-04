@@ -187,6 +187,10 @@ impl Backend for WaylandBackend {
         self.monitors.clone()
     }
 
+    fn monitors_ref(&self) -> &[MonitorInfo] {
+        &self.monitors
+    }
+
     // -- shell surfaces ---------------------------------------------------
     // On X11 these were override-redirect windows; here they are pure
     // scene records the renderer draws directly — creation cannot fail,

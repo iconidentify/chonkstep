@@ -40,6 +40,10 @@ pub trait Backend {
     /// A backend without real multi-monitor support yet reports a
     /// single primary entry spanning the whole screen.
     fn monitors(&self) -> Vec<MonitorInfo>;
+    /// The same stable monitor ledger by reference, for hot read-only
+    /// paths that must not deep-copy every output name merely to inspect
+    /// an index or a rectangle.
+    fn monitors_ref(&self) -> &[MonitorInfo];
 
     /// The identity of a shell-owned surface — the dock, the Clip, the
     /// launcher strip, icon tiles, menu popups. The same id space

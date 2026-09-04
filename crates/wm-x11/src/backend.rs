@@ -2253,6 +2253,10 @@ impl Backend for X11Backend {
         self.monitors.clone()
     }
 
+    fn monitors_ref(&self) -> &[MonitorInfo] {
+        &self.monitors
+    }
+
     fn poll_event(&mut self) -> Option<BackendEvent<Self::WindowId, Self::FrameId>> {
         loop {
             let event = match self.conn.poll_for_event() {

@@ -61,6 +61,13 @@ crate and both session binaries carry the same number.
 
 ### Performance
 
+- **The native control socket now builds desktop snapshots only on a
+  semantic edge or readable request.** A cheap stamp covers window-manager
+  state, output/workarea changes, the monitor under the pointer, and shell
+  theme state; quiet clients still have buffered writes serviced without a
+  deep diff. Monitor inspection is borrowed, and a live bar test proves 16
+  unchanged compositor wakeups build zero snapshots while an explicit
+  request builds exactly one ([#94](https://github.com/iconidentify/chonkstep/issues/94)).
 - **Omarchy focus grabs no longer scale with every inert popup object.**
   The one active grab is now an indexed invariant, making the common
   input guard O(1) instead of searching all G grab objects. Surface
