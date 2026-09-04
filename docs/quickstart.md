@@ -13,11 +13,11 @@ the path from "installed" to "mine".
 ```sh
 chonkstep_dir="$(mktemp -d)"
 chonkstep_arch="$(uname -m)"
-chonkstep_pkg="chonkstep-0.2.0-2-$chonkstep_arch.pkg.tar.zst"
+chonkstep_pkg="chonkstep-0.2.0-3-$chonkstep_arch.pkg.tar.zst"
 curl -fL -o "$chonkstep_dir/$chonkstep_pkg" \
-  "https://github.com/iconidentify/chonkstep/releases/download/preview-v0.2.0-r2/$chonkstep_pkg"
+  "https://github.com/iconidentify/chonkstep/releases/download/preview-v0.2.0-r3/$chonkstep_pkg"
 curl -fL -o "$chonkstep_dir/SHA256SUMS" \
-  "https://github.com/iconidentify/chonkstep/releases/download/preview-v0.2.0-r2/SHA256SUMS"
+  "https://github.com/iconidentify/chonkstep/releases/download/preview-v0.2.0-r3/SHA256SUMS"
 (cd "$chonkstep_dir" && sha256sum --ignore-missing --check SHA256SUMS)
 sudo pacman -U "$chonkstep_dir/$chonkstep_pkg"
 omarchy install desktop-chonkstep
