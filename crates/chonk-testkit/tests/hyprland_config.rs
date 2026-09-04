@@ -529,7 +529,9 @@ fn a_broken_configuration_costs_the_user_the_configuration_and_nothing_else() {
     }
     session
         .wait_for_window_gone(PROBE)
-        .expect("the baked Omarchy keymap's super+w must still close a window when the live configuration is garbage");
+        .expect(
+            "the baked Omarchy keymap's super+w must close the client and retire its ledger record when the live configuration is garbage",
+        );
     assert!(session.compositor_alive(), "a broken configuration must never cost the user their session");
 }
 

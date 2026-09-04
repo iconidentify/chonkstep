@@ -770,8 +770,9 @@ impl Compositor {
     }
 }
 
-/// The window half of [`Compositor::surface_affects_scene`], factored
-/// so the exact renderer stacking rules are visible in one short walk.
+/// The window half of [`Compositor::resolved_surface_affects_scene`],
+/// factored so the exact renderer stacking rules are visible in one
+/// short walk.
 fn window_is_in_scene(backend: &WaylandBackend, window: WlWindowId) -> bool {
     let Some(record) = backend.windows.get(&window) else {
         return false;

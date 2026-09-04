@@ -907,11 +907,26 @@ impl WaylandBackend {
         Some(window)
     }
 
-    /// Drops the index edge at the protocol object's exact lifetime
-    /// boundary. An X11 record can outlive this surface and acquire a
-    /// different association when it remaps.
+    /// Drops an XWayland index edge at the protocol object's exact
+    /// lifetime boundary. An X11 record can outlive this surface and
+    /// acquire a different association when it remaps.
+    ///
+    /// An xdg window is the opposite: its role-destruction callback is
+    /// authoritative for retiring the whole record, and clients which
+    /// disappear by closing their connection can make Wayland dispatch
+    /// `wl_surface.destroyed` before `xdg_toplevel.destroyed`. Keep that
+    /// edge alive for the later callback or it cannot find and retire
+    /// the record, leaving a permanently mapped ghost in the ledger.
     pub(crate) fn forget_surface(&mut self, surface: &WlSurface) {
-        self.surface_windows.remove(&surface.id());
+        let id = surface.id();
+        let belongs_to_xdg = self
+            .surface_windows
+            .get(&id)
+            .and_then(|window| self.windows.get(window))
+            .is_some_and(|record| matches!(record.surface, ManagedSurface::Xdg(_)));
+        if !belongs_to_xdg {
+            self.surface_windows.remove(&id);
+        }
     }
 
     /// Resolves a `wl_surface` back to the managed window it belongs

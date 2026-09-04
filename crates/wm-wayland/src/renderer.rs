@@ -104,7 +104,7 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use wm_theme_api::{Point, Rect};
 
-use crate::state::{Compositor, Graphics, RootBackground, StackEntry, WaylandBackend};
+use crate::state::{Compositor, Graphics, RootBackground, StackEntry, WaylandBackend, WindowRecord};
 
 render_elements! {
     /// Everything one frame is composed of. The macro generates the
@@ -336,10 +336,10 @@ pub(crate) fn build_scene(
     (elements, clear_color)
 }
 
-/// Tells every mapped surface which frame it just appeared in —
-/// clients gate their next commit on these, so a session that never
-/// sends them freezes after one frame. Shared by both backends for
-/// exactly that reason.
+/// Tells every surface in the rendered scene which frame it just
+/// appeared in — clients gate their next commit on these, so a visible
+/// surface must hear them while a parked window or policy-hidden layer
+/// should sleep. Shared by both backends for exactly that reason.
 ///
 /// Called once per frame with a single `output`, even when several were
 /// drawn: a surface is told about the frame, and which output's clock
@@ -368,10 +368,12 @@ pub(crate) fn send_frame_callbacks(
         }
         return;
     }
-    // Layer surfaces animate too (a bar's clock, mako's timeout fade),
-    // popups included.
+    // Presented layer surfaces animate too (a bar's clock, mako's
+    // timeout fade), popups included. Omarchy layers disabled by the
+    // namespace policy stay mapped but are absent from the scene, so
+    // withholding callbacks is what makes them actually idle.
     for record in &backend.layers {
-        if !record.mapped || !record.surface.alive() {
+        if !backend.layer_presented(record) {
             continue;
         }
         let surface = record.surface.wl_surface();
@@ -382,14 +384,12 @@ pub(crate) fn send_frame_callbacks(
             });
         }
     }
-    // Frame callbacks: clients gate their next commit on these, so
-    // every mapped window (and its popups, and a client-provided
-    // cursor surface) hears about the frame it just appeared in. The
-    // throttle mirrors smithay's reference compositors.
-    for record in backend.windows.values() {
-        if !record.mapped || !record.surface.alive() {
-            continue;
-        }
+    // A window parked on another workspace is protocol-mapped but did
+    // not appear in this frame. Sending its callback would make it
+    // render another invisible buffer every time an unrelated visible
+    // client produced a frame. The workspace transition frame supplies
+    // the first callback when it becomes exposed again.
+    for_each_presented_window(backend, |record| {
         if let Some(surface) = record.surface.wl_surface() {
             send_frames_surface_tree(&surface, output, elapsed, Some(Duration::ZERO), |_, _| Some(output.clone()));
             for (popup, _) in PopupManager::popups_for_surface(&surface) {
@@ -398,7 +398,7 @@ pub(crate) fn send_frame_callbacks(
                 });
             }
         }
-    }
+    });
     if let CursorImageStatus::Surface(surface) = cursor_status {
         send_frames_surface_tree(surface, output, elapsed, Some(Duration::ZERO), |_, _| Some(output.clone()));
     }
@@ -441,17 +441,16 @@ pub(crate) fn take_presentation_feedback(
         return feedback;
     }
 
-    for record in backend.windows.values() {
-        if !record.mapped || !record.surface.alive() || !is_primary_rect(backend, record.content, output_rect) {
-            continue;
-        }
-        if let Some(surface) = record.surface.wl_surface() {
-            take_tree(&surface);
-            for (popup, _) in PopupManager::popups_for_surface(&surface) {
-                take_tree(popup.wl_surface());
+    for_each_presented_window(backend, |record| {
+        if is_primary_rect(backend, record.content, output_rect) {
+            if let Some(surface) = record.surface.wl_surface() {
+                take_tree(&surface);
+                for (popup, _) in PopupManager::popups_for_surface(&surface) {
+                    take_tree(popup.wl_surface());
+                }
             }
         }
-    }
+    });
     for record in &backend.layers {
         if !backend.layer_presented(record) || !is_primary_rect(backend, record.geometry, output_rect) {
             continue;
@@ -473,6 +472,37 @@ pub(crate) fn take_presentation_feedback(
         }
     }
     feedback
+}
+
+/// Visits each application surface tree represented by the current
+/// scene exactly once, in linear time. Override-redirect X11 surfaces
+/// occupy their renderer-owned top band; managed clients are resolved
+/// through their one direct-window or mapped-frame stacking slot.
+///
+/// This is deliberately a traversal rather than `windows.filter` plus
+/// [`crate::xdg::window_is_in_scene`]: that predicate is ideal for one
+/// commit's known owner but scans the stack, so applying it to every
+/// window would make per-frame protocol routing quadratic.
+fn for_each_presented_window(backend: &WaylandBackend, mut visit: impl FnMut(&WindowRecord)) {
+    for record in backend.windows.values() {
+        if record.window_type == wm_core::WindowType::Unmanaged && record.mapped && record.surface.alive() {
+            visit(record);
+        }
+    }
+    for entry in &backend.stacking {
+        let record = match entry {
+            StackEntry::Window(window) => backend.windows.get(window),
+            StackEntry::Frame(frame) => backend
+                .frames
+                .get(frame)
+                .filter(|record| record.mapped)
+                .and_then(|record| backend.windows.get(&record.window)),
+            StackEntry::Shell(_) => None,
+        };
+        if let Some(record) = record.filter(|record| record.mapped && record.surface.alive()) {
+            visit(record);
+        }
+    }
 }
 
 fn overlap_area(a: Rect, b: Rect) -> u64 {

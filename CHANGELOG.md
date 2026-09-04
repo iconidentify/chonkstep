@@ -7,6 +7,17 @@ crate and both session binaries carry the same number.
 
 ### Performance
 
+- **Parked applications receive no invisible animation budget.** Frame
+  callbacks and presentation feedback now follow the same stacking visibility
+  predicate as rendering: windows on another workspace, miniaturized windows,
+  and mapped-but-policy-hidden Omarchy layers sleep until a transition exposes
+  them. A live callback-driven client was parked while a self-timed neighbour
+  kept the active workspace rendering; the preserved before binary delivered
+  51 callbacks across 50 neighbour presentations, while the new path delivered
+  zero (100% of invisible callbacks removed) and resumed the target for another
+  30 frames immediately after its workspace was exposed. The saving scales
+  with every parked animation and avoids both client-side rendering and
+  compositor-side protocol-tree walks.
 - **Surface commits carry one resolved identity through their whole
   lifecycle.** A commit now performs one read-only owner-index probe and
   reuses the result for snapshot invalidation, scale selection, xdg lifecycle,
@@ -186,6 +197,16 @@ crate and both session binaries carry the same number.
 
 ### Release hardening
 
+- **Connection-close teardown cannot leave ghost Wayland windows.** Some
+  clients destroy their `wl_surface` explicitly; others exit and let the
+  server tear their object graph down. Smithay may report the generic surface
+  destruction before the xdg-toplevel destruction in the latter path. The
+  reverse ownership index now preserves native xdg edges until the role
+  callback retires the complete window record, while XWayland's detachable
+  associations still disappear at the surface boundary. A controlled live
+  regression first confirmed that the client received `xdg_toplevel.close`
+  but its mapped ledger record survived indefinitely; all three Omarchy
+  close/focus scenarios now observe both process closure and record removal.
 - **Nested restore and key-repeat coverage is deterministic across distros.**
   Session restore now relaunches an in-tree xdg client under the saved terminal
   identity, so the assertion measures Chonkstep's geometry pipeline rather than

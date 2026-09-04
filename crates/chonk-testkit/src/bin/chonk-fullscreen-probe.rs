@@ -35,9 +35,10 @@
 //!
 //! # Usage
 //!
-//! `chonk-fullscreen-probe [title] [app-id] [animate]` — then drive it with
-//! injected keys through the test door, on the window once it has keyboard
-//! focus:
+//! `chonk-fullscreen-probe [title] [app-id] [animation-mode]` — then drive it
+//! with injected keys through the test door, on the window once it has
+//! keyboard focus. `animation-mode` is `animate` for a self-timed producer or
+//! `animate-frame` for a conventional `wl_surface.frame`-paced one:
 //!
 //! | key | evdev | meaning |
 //! |---|---|---|
@@ -59,14 +60,17 @@
 //! its own timer, but its invisible commits must not make the compositor draw.
 //! Every thirtieth commit is reported as `animation frame=N`, giving the
 //! harness an observable clock that does not depend on compositor telemetry.
+//! The frame-driven mode reports every callback as `frame callback=N`, which
+//! lets the visibility test distinguish a parked client that truly sleeps from
+//! one that keeps drawing invisible buffers behind an active workspace.
 
 use std::io::Write;
 use std::os::fd::AsFd;
 use std::time::Duration;
 
 use wayland_client::protocol::{
-    wl_buffer::WlBuffer, wl_compositor::WlCompositor, wl_keyboard, wl_registry, wl_seat, wl_shm,
-    wl_shm_pool, wl_surface::WlSurface,
+    wl_buffer::WlBuffer, wl_callback, wl_compositor::WlCompositor, wl_keyboard, wl_registry,
+    wl_seat, wl_shm, wl_shm_pool, wl_surface::WlSurface,
 };
 use wayland_client::{Connection, Dispatch, QueueHandle, WEnum};
 use wayland_protocols::xdg::shell::client::{
@@ -140,6 +144,12 @@ struct Probe {
     refusals: u32,
     closed: bool,
     dirty: bool,
+    /// A requested `wl_surface.frame` has not answered yet.
+    frame_pending: bool,
+    /// The most recent frame callback permits one new animation frame.
+    frame_ready: bool,
+    /// Exact callback count, reported for pacing regressions.
+    frame_callbacks: u64,
 }
 
 impl Probe {
@@ -347,6 +357,24 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for Probe {
     }
 }
 
+impl Dispatch<wl_callback::WlCallback, ()> for Probe {
+    fn event(
+        probe: &mut Self,
+        _: &wl_callback::WlCallback,
+        event: wl_callback::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if matches!(event, wl_callback::Event::Done { .. }) {
+            probe.frame_pending = false;
+            probe.frame_ready = true;
+            probe.frame_callbacks += 1;
+            say(&format!("frame callback={}", probe.frame_callbacks));
+        }
+    }
+}
+
 macro_rules! ignore_events {
     ($($t:ty),*) => {$(
         impl Dispatch<$t, ()> for Probe {
@@ -389,7 +417,9 @@ fn main() {
     let mut args = std::env::args().skip(1);
     let title = args.next().unwrap_or_else(|| "chonk-fullscreen-probe".to_string());
     let app_id = args.next().unwrap_or_else(|| "chonk-fullscreen-probe".to_string());
-    let animate = args.next().as_deref() == Some("animate");
+    let animation = args.next();
+    let self_timed = animation.as_deref() == Some("animate");
+    let frame_driven = animation.as_deref() == Some("animate-frame");
 
     let connection = Connection::connect_to_env()
         .unwrap_or_else(|error| fatal(&format!("no wayland display: {error}")));
@@ -446,13 +476,17 @@ fn main() {
             );
             surface.attach(Some(&buffer), 0, 0);
             surface.damage(0, 0, width.max(1), height.max(1));
+            if frame_driven && !probe.frame_pending {
+                surface.frame(&qh, ());
+                probe.frame_pending = true;
+            }
             surface.commit();
             pool.destroy();
             attached = probe.size;
             probe.dirty = false;
         }
 
-        if animate {
+        if self_timed {
             // A deliberately self-timed client: damage existing
             // content and commit without a frame callback. A
             // roundtrip makes each commit's server-side delivery
@@ -469,6 +503,21 @@ fn main() {
                 break;
             }
             std::thread::sleep(Duration::from_millis(16));
+        } else if frame_driven && probe.frame_ready {
+            // A conventional animation loop: one new buffer only when
+            // the compositor says the previous frame was presented,
+            // and one callback booked atomically with that commit.
+            probe.frame_ready = false;
+            let (width, height) = probe.size;
+            surface.damage(0, 0, width.max(1), height.max(1));
+            surface.frame(&qh, ());
+            probe.frame_pending = true;
+            surface.commit();
+            animation_frame += 1;
+            if animation_frame.is_multiple_of(30) {
+                say(&format!("animation frame={animation_frame}"));
+            }
+            connection.flush().unwrap_or_else(|error| fatal(&format!("flushing animation frame: {error}")));
         } else if queue.blocking_dispatch(&mut probe).is_err() {
             break;
         }

@@ -1,12 +1,14 @@
-//! Invisible Wayland clients cannot schedule visible work.
+//! Invisible Wayland clients cannot schedule visible work and receive
+//! no animation budget from unrelated visible clients.
 //!
-//! A frame-callback-driven application naturally pauses when its
-//! workspace is parked, so it cannot expose an over-eager commit
-//! handler. This test uses the fullscreen probe's self-timed mode:
-//! the client keeps issuing real `wl_surface.commit` requests at about
-//! 60 Hz and reports its own progress. Damage telemetry then proves
-//! the same commits draw while visible and schedule zero frames after
-//! Omarchy's silent-send chord parks the window.
+//! The first test uses the fullscreen probe's self-timed mode: the
+//! client keeps issuing real `wl_surface.commit` requests at about
+//! 60 Hz and reports its own progress. Damage telemetry proves the
+//! same commits draw while visible and schedule zero frames after
+//! Omarchy's silent-send chord parks the window. The second supplies a
+//! continuously rendering visible neighbour and proves a conventional
+//! frame-callback-driven client sleeps while parked, then resumes as
+//! soon as its workspace is exposed again.
 //!
 //! For repeatable profiling, `CHONKSTEP_DAMAGE_SAMPLE_COMMITS` lengthens the
 //! hidden interval (in multiples of 30) and
@@ -26,6 +28,12 @@ const SETTLE: Duration = Duration::from_secs(10);
 fn animation_frame(log: &str) -> Option<u64> {
     log.lines()
         .filter_map(|line| line.strip_prefix("animation frame=")?.parse().ok())
+        .next_back()
+}
+
+fn frame_callback(log: &str) -> Option<u64> {
+    log.lines()
+        .filter_map(|line| line.strip_prefix("frame callback=")?.parse().ok())
         .next_back()
 }
 
@@ -98,6 +106,77 @@ fn send_to_workspace_two(session: &mut Session) {
     door.key(keys::LEFTSHIFT, false).unwrap();
     door.key(keys::LEFTMETA, false).unwrap();
     door.barrier().unwrap();
+}
+
+/// Omarchy's `super+2`: expose workspace two without carrying the
+/// currently focused window.
+fn switch_to_workspace_two(session: &mut Session) {
+    let door = session.door();
+    door.key(keys::LEFTMETA, true).unwrap();
+    door.tap_key(keys::TWO).unwrap();
+    door.key(keys::LEFTMETA, false).unwrap();
+    door.barrier().unwrap();
+}
+
+#[test]
+#[ignore = "needs a live Wayland session to nest in: scripts/e2e.sh, or cargo test -p chonk-testkit -- --ignored --test-threads=1"]
+fn a_parked_frame_driven_client_sleeps_and_resumes_when_exposed() {
+    let options = SessionOptions {
+        config_extra: "desktop = \"omarchy\"\nomarchy_bar = false\nshow_dock = false\n".into(),
+        env: vec![("CHONKSTEP_DAMAGE_LOG".into(), "1".into())],
+        ..Default::default()
+    };
+    let mut session = Session::boot("frame-callback-visibility", options).expect("session boots");
+    let probe = profile_binary("chonk-fullscreen-probe").expect("probe is built");
+    let program = probe.display().to_string();
+
+    // The self-timed window keeps the active workspace rendering after
+    // its frame-driven neighbour is parked. Observe the driver's map
+    // before launching the target: process launch order is not Wayland
+    // map order under load, and the newest mapped window owns focus.
+    session.launch(&program, &["VisibleDriver", "visible-driver", "animate"]).expect("driver launches");
+    session.wait_for_window("VisibleDriver").expect("driver maps before its target is launched");
+    session
+        .launch(&program, &["CallbackTarget", "callback-target", "animate-frame"])
+        .expect("frame-driven target launches");
+    session.wait_for_window("CallbackTarget").expect("target maps and focuses");
+    wait_for_animation(&session, &program, 30);
+
+    send_to_workspace_two(&mut session);
+    // Let five driver frames absorb any callback which had already
+    // crossed the wire before the workspace transition's barrier.
+    let settling_at = rendered_frames(&session);
+    poll_until(SETTLE, "the visible driver to settle the transition", || {
+        (rendered_frames(&session) >= settling_at + 5).then_some(())
+    })
+    .unwrap();
+    let parked_at = animation_frame(&session.client_log(&program)).expect("target reported animation progress");
+    let callbacks_at = frame_callback(&session.client_log(&program)).expect("target reported frame callbacks");
+    // Both clients share the same executable name and `client_log`
+    // selects the newest (the target). Observe the driver indirectly
+    // through compositor presentation telemetry: fifty new frames
+    // prove callbacks would have been available to a wrongly paced
+    // parked target.
+    let rendered_at = rendered_frames(&session);
+    poll_until(SETTLE, "the visible driver to present fifty more frames", || {
+        (rendered_frames(&session) >= rendered_at + 50).then_some(())
+    })
+    .unwrap();
+    let parked_after = animation_frame(&session.client_log(&program)).unwrap_or_default();
+    let callbacks_after = frame_callback(&session.client_log(&program)).unwrap_or_default();
+    assert_eq!(
+        callbacks_after, callbacks_at,
+        "fifty visible neighbour frames must deliver zero callbacks to a parked client"
+    );
+    assert_eq!(parked_after, parked_at, "a parked callback-driven client must receive no invisible frame budget");
+
+    switch_to_workspace_two(&mut session);
+    wait_for_animation(&session, &program, parked_at + 30);
+    eprintln!(
+        "frame callback visibility sample: parked target received {} callbacks across 50 visible-neighbour frames, then resumed",
+        callbacks_after - callbacks_at
+    );
+    assert!(session.compositor_alive(), "resuming the exposed client keeps the session alive");
 }
 
 #[test]
