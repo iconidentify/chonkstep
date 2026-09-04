@@ -61,6 +61,25 @@ fn property_values(
         .unwrap_or_default()
 }
 
+fn resource_manager(
+    conn: &x11rb::rust_connection::RustConnection,
+    root: u32,
+) -> Option<Vec<u8>> {
+    let reply = conn
+        .get_property(
+            false,
+            root,
+            AtomEnum::RESOURCE_MANAGER,
+            AtomEnum::STRING,
+            0,
+            u32::MAX,
+        )
+        .ok()?
+        .reply()
+        .ok()?;
+    (reply.type_ == u32::from(AtomEnum::STRING) && reply.format == 8).then_some(reply.value)
+}
+
 fn assert_x11_rect(
     conn: &x11rb::rust_connection::RustConnection,
     root: u32,
@@ -253,6 +272,68 @@ fn xwayland_geometry_and_clicks_match_at_scale_two_from_first_map() {
     assert_x11_rect(&conn, root, xid, &moved);
     while conn.poll_for_event().unwrap().is_some() {}
     assert_clicks_match(&mut session, &conn, &moved);
+}
+
+/// XSETTINGS does not reach Java, Electron's X11 backend or Xcursor.
+/// Those clients read the root resource database, so exercise the real
+/// XWayland property at startup and after a live scale change. Seed a
+/// user resource between the two to prove the compositor merges rather
+/// than replacing the shared database.
+#[test]
+#[ignore = "needs a Wayland session to nest inside"]
+fn xwayland_resource_manager_publishes_scale_and_preserves_user_resources() {
+    let session = Session::boot(
+        "xwayland-resource-manager",
+        SessionOptions { scale: Some(2.0), ..SessionOptions::default() },
+    )
+    .expect("nested compositor boots");
+    let display = xwayland_display(&session);
+    let (conn, screen_num) =
+        x11rb::rust_connection::RustConnection::connect(Some(&format!(":{display}")))
+            .expect("connect to nested XWayland");
+    let root = conn.setup().roots[screen_num].root;
+
+    let initial = poll_until(EVENT, "the scale-2 X resource database", || {
+        let bytes = resource_manager(&conn, root)?;
+        let text = String::from_utf8(bytes).ok()?;
+        (text.contains("Xft.dpi:\t192\n") && text.contains("Xcursor.size:\t48\n"))
+            .then_some(text)
+    })
+    .expect("XWayland clients receive scale resources at startup");
+    assert_eq!(initial.matches("Xft.dpi:").count(), 1);
+    assert_eq!(initial.matches("Xcursor.size:").count(), 1);
+
+    // Simulate `xrdb -merge`: preserve both the compositor's current
+    // declarations and a user's unrelated one. The next scale change
+    // must re-read this property, replace only its own keys and leave
+    // the addition byte-for-byte intact.
+    let mut seeded = initial.into_bytes();
+    seeded.extend_from_slice(b"ChonkstepTest.keep:\tuser-value\n");
+    conn.change_property8(
+        x11rb::protocol::xproto::PropMode::REPLACE,
+        root,
+        AtomEnum::RESOURCE_MANAGER,
+        AtomEnum::STRING,
+        &seeded,
+    )
+    .unwrap();
+    conn.flush().unwrap();
+
+    session.rewrite_config("scale = 1.5\n").unwrap();
+    session.request_reload().unwrap();
+    let reloaded = poll_until(EVENT, "the live scale change to reach X resources", || {
+        let bytes = resource_manager(&conn, root)?;
+        let text = String::from_utf8(bytes).ok()?;
+        (text.contains("Xft.dpi:\t144\n")
+            && text.contains("Xcursor.size:\t36\n")
+            && text.contains("ChonkstepTest.keep:\tuser-value\n"))
+        .then_some(text)
+    })
+    .expect("live scale changes merge into RESOURCE_MANAGER");
+    assert_eq!(reloaded.matches("Xft.dpi:").count(), 1);
+    assert_eq!(reloaded.matches("Xcursor.size:").count(), 1);
+    assert!(!reloaded.contains("Xft.dpi:\t192\n"));
+    assert!(!reloaded.contains("Xcursor.size:\t48\n"));
 }
 
 /// A toolkit's own minimize button calls XIconifyWindow, which sends

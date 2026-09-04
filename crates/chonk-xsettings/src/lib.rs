@@ -46,6 +46,10 @@
 //! - [`appearance`] is the typed layer in between: a caller says "the UI
 //!   scale is 2.0", not "`Xft/DPI` is 196608", and this module owns
 //!   every one of the unit conversions with its factor written down.
+//! - [`resources`] publishes the matching `Xft.dpi` and `Xcursor.size`
+//!   declarations in the root resource database for Java, Electron and
+//!   Xcursor consumers that do not implement XSETTINGS. It merges only
+//!   this desktop's keys, preserving a user's other X resources.
 //!
 //! # Using it
 //!
@@ -105,6 +109,7 @@
 pub mod appearance;
 pub mod format;
 pub mod manager;
+pub mod resources;
 
 pub use appearance::{
     BASE_CURSOR_SIZE_PX, BASE_DPI, DesktopAppearance, MAX_UI_SCALE, MIN_UI_SCALE,
@@ -116,3 +121,4 @@ pub use format::{
     serialize,
 };
 pub use manager::{AcquisitionPolicy, ManagerState, XSettingsError, XSettingsManager};
+pub use resources::merge_resource_manager;

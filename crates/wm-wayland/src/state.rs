@@ -2315,11 +2315,24 @@ impl Compositor {
             tracing::warn!(%error, "could not publish the initial XSETTINGS");
             return;
         }
+        match manager.publish_resource_manager(&appearance) {
+            Ok(true) => {}
+            Ok(false) => {
+                tracing::debug!("XWayland RESOURCE_MANAGER already carries the current scale");
+            }
+            Err(error) => {
+                // The XSETTINGS property is already useful and lives on
+                // this same connection, so a malformed shared root
+                // property must not discard it. A later real scale
+                // change retries the resource merge.
+                tracing::warn!(%error, "could not publish the initial XWayland resource database");
+            }
+        }
         tracing::info!(
             display = display_name,
             scale = appearance.ui_scale,
             cursor_px = appearance.effective_cursor_size(),
-            "publishing XSETTINGS to XWayland clients"
+            "publishing XSETTINGS and X resources to XWayland clients"
         );
         self.xsettings = Some(manager);
     }
@@ -2380,11 +2393,11 @@ impl Compositor {
         let Some(manager) = self.xsettings.as_mut() else {
             return;
         };
-        match manager.publish_appearance(&appearance) {
+        let xsettings_changed = match manager.publish_appearance(&appearance) {
             Ok(true) => {
-                tracing::info!(scale = appearance.ui_scale, "told X11 clients about the new UI scale through XSETTINGS")
+                true
             }
-            Ok(false) => {}
+            Ok(false) => false,
             Err(error) => {
                 // Losing the selection to another manager is one of the
                 // ways this fails, and the crate has already latched
@@ -2393,6 +2406,26 @@ impl Compositor {
                 // the rest of its life.
                 tracing::warn!(%error, "could not republish XSETTINGS; giving up on it for this session");
                 self.xsettings = None;
+                return;
+            }
+        };
+        match manager.publish_resource_manager(&appearance) {
+            Ok(resources_changed) if xsettings_changed || resources_changed => {
+                tracing::info!(
+                    scale = appearance.ui_scale,
+                    xsettings_changed,
+                    resources_changed,
+                    "told X11 clients about the new UI scale"
+                );
+            }
+            Ok(_) => {}
+            Err(error) => {
+                // Keep the XSETTINGS manager: an unexpected shared root
+                // property is not a reason to stop serving toolkits that
+                // use the selection we still own. Since the resource
+                // cache advances only after success, a later scale
+                // change will retry this merge.
+                tracing::warn!(%error, "could not republish the XWayland resource database");
             }
         }
     }

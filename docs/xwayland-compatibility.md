@@ -242,9 +242,15 @@ session log shows the selection acquired and scale 2.0 published.
 Where it does apply, it reaches clients this session did not launch — which
 the per-child environment variables below can never do — and it is
 republished when the UI scale changes, so a **running** GTK or Qt application
-follows a live rescale instead of waiting to be restarted. Nothing writes
-`Xft.dpi` into the X `RESOURCE_MANAGER`; there is no `xrdb` call anywhere in
-the tree, and XSETTINGS is the mechanism toolkits prefer anyway.
+follows a live rescale instead of waiting to be restarted.
+
+The compositor also merges `Xft.dpi` and `Xcursor.size` into the X root
+`RESOURCE_MANAGER` as soon as XWayland is ready, and republishes them after a
+live scale change. It replaces only those two resource names, preserving any
+unrelated values a user installed with `xrdb -merge`. This complements
+XSETTINGS for Java, Electron's X11 backend and direct Xcursor consumers; some
+of those clients latch resources when they open the display and therefore need
+to be restarted after a live scale change.
 
 Applications the desktop launches itself are additionally told the scale
 through environment variables, set on each child as the launcher spawns it
@@ -354,8 +360,8 @@ the X11 session everything is an X11 client.
 |---|---|---|---|---|
 | LibreOffice | XWayland or native GTK, its choice | Single titlebar — the Motif hint on XWayland, a KDE-protocol `Server` request natively | XSETTINGS (X11); the output scale (Wayland) | From the code; one titlebar verified live on Wayland |
 | Microsoft Edge, Chrome, Chromium, Brave | **Native Wayland** under the compositor; X11 under the X11 session | Single titlebar | `--force-device-scale-factor` | The launcher pins the ozone platform; a browser started outside the launcher may pick the wrong one |
-| Electron apps (Slack, VS Code, Discord) | Usually XWayland | Single titlebar if the app sets the Motif hint, which most Chromium-derived apps do | **Likely 1×** | The launcher's Chromium fixups match on the binary name (`chrom*`, `microsoft-edge`, `brave*`), so an Electron app gets neither the ozone pin nor the scale flag, and Chromium does not read XSETTINGS for scale |
-| JetBrains IDEs (IntelliJ, CLion) | XWayland | Framed by chonkstep — JBR does not set the Motif hint | **Likely 1×** | Java's HiDPI detection wants `Xft.dpi` in `RESOURCE_MANAGER`, which nothing here writes. Expect to set `-Dsun.java2d.uiScale` yourself. Unverified |
+| Electron apps (Slack, VS Code, Discord) | Usually XWayland | Single titlebar if the app sets the Motif hint, which most Chromium-derived apps do | `Xft.dpi` from `RESOURCE_MANAGER` | The launcher's Chromium fixups match only known browser names, so the display-global resource is the fallback for other Electron binaries |
+| JetBrains IDEs (IntelliJ, CLion) | XWayland | Framed by chonkstep — JBR does not set the Motif hint | `Xft.dpi` from `RESOURCE_MANAGER` | Java reads the resource when opening the display; restart after a live scale change. Unverified with a real IDE |
 | GIMP | XWayland or native GTK | Framed; GIMP asks for server-side chrome | XSETTINGS (X11); the output scale (Wayland) | Multi-window mode leans on `_NET_WM_WINDOW_TYPE_UTILITY` and `_DIALOG`, both handled |
 | Qt applications (VLC, Krita, qBittorrent) | Native Wayland or XWayland | Framed, single titlebar either way | `QT_SCALE_FACTOR` at launch (X11); the output scale (Wayland) | Qt defers to server-side decorations when offered, and the compositor always offers |
 | Steam | XWayland | Mixed — Steam's own windows ask for various chrome | 1× unless Steam is told otherwise | Its Chromium-embedded UI, overlay and Big Picture mode are all unverified here |

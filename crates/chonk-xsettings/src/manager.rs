@@ -145,6 +145,7 @@ use x11rb::{COPY_DEPTH_FROM_PARENT, COPY_FROM_PARENT, NONE};
 
 use crate::appearance::DesktopAppearance;
 use crate::format::Settings;
+use crate::resources::{ResourceValues, merge_transition};
 
 /// The `WM_NAME` put on the owner window.
 ///
@@ -218,6 +219,17 @@ pub enum XSettingsError {
     /// dying display is not this crate's bug to assert about.
     #[error("the X server produced no timestamp for the selection")]
     NoTimestamp,
+    /// The root resource database exists with a type or format this
+    /// manager cannot safely merge. It is left byte-for-byte untouched.
+    #[error(
+        "the X root RESOURCE_MANAGER has type {type_:#x} and format {format}; leaving it untouched"
+    )]
+    UnexpectedResourceManager {
+        /// The property's actual X atom type.
+        type_: Atom,
+        /// The property's actual element width.
+        format: u8,
+    },
 }
 
 /// Whether this manager still owns the selection.
@@ -325,6 +337,11 @@ pub struct XSettingsManager<C: Connection = RustConnection> {
     /// [`XSettingsManager::poll`].
     acquired_at: Timestamp,
     settings: Settings,
+    /// Values last merged into the root `RESOURCE_MANAGER`. Kept as
+    /// typed values so an unchanged config reload requires no X request;
+    /// a real change still re-reads the shared property and preserves
+    /// any user resources added since the previous publication.
+    resource_values: Option<ResourceValues>,
     state: ManagerState,
     /// Set by [`XSettingsManager::release`] so [`Drop`] does not repeat
     /// the teardown it already did (and already reported errors for).
@@ -483,6 +500,7 @@ impl<C: Connection> XSettingsManager<C> {
                     timestamp_atom,
                     acquired_at,
                     settings,
+                    resource_values: None,
                     state: ManagerState::Owner,
                     released: false,
                 })
@@ -745,6 +763,69 @@ impl<C: Connection> XSettingsManager<C> {
         self.update(|settings| {
             appearance.apply_to(settings);
         })
+    }
+
+    /// Merges this appearance's X resources into the root
+    /// `RESOURCE_MANAGER` property.
+    ///
+    /// This complements [`publish_appearance`](Self::publish_appearance)
+    /// for clients such as Java, Electron and Xcursor that read the X
+    /// resource database instead of XSETTINGS. Only this desktop's
+    /// `Xft.dpi`, `Xcursor.size`, and (when configured) `Xcursor.theme`
+    /// declarations are replaced; every unrelated byte is preserved.
+    ///
+    /// Re-applying identical values is a no-op without an X round trip.
+    /// When a value changes, the property is read again before merging,
+    /// so resources a user added with `xrdb -merge` remain intact.
+    pub fn publish_resource_manager(
+        &mut self,
+        appearance: &DesktopAppearance,
+    ) -> Result<bool, XSettingsError> {
+        if self.state == ManagerState::Superseded {
+            return Err(XSettingsError::SelectionLost(self.selection_name.clone()));
+        }
+        let current = ResourceValues::from_appearance(appearance);
+        if self.resource_values.as_ref() == Some(&current) {
+            return Ok(false);
+        }
+
+        let reply = self
+            .conn
+            .get_property(
+                false,
+                self.root,
+                AtomEnum::RESOURCE_MANAGER,
+                AtomEnum::ANY,
+                0,
+                u32::MAX / 4,
+            )?
+            .reply()?;
+        let existing = if reply.type_ == NONE {
+            &[][..]
+        } else if reply.type_ == u32::from(AtomEnum::STRING) && reply.format == 8 {
+            reply.value.as_slice()
+        } else {
+            return Err(XSettingsError::UnexpectedResourceManager {
+                type_: reply.type_,
+                format: reply.format,
+            });
+        };
+        let merged = merge_transition(existing, self.resource_values.as_ref(), &current);
+        let changed = merged != existing;
+        if changed {
+            self.conn
+                .change_property8(
+                    PropMode::REPLACE,
+                    self.root,
+                    AtomEnum::RESOURCE_MANAGER,
+                    AtomEnum::STRING,
+                    &merged,
+                )?
+                .check()?;
+            self.conn.flush()?;
+        }
+        self.resource_values = Some(current);
+        Ok(changed)
     }
 
     /// Handles the selection events the X server sends this manager, and
