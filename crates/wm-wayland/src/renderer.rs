@@ -2,9 +2,9 @@
 //! render elements and puts a frame on screen.
 //!
 //! The composition order is fixed, bottom to top: the root background
-//! (solid color or wallpaper image), then the ledger's `stacking`
-//! sequence partitioned so `above: false` shell surfaces come before
-//! all frames and `above: true` shells after them, each frame drawing
+//! (solid color or wallpaper image), then the ledger's two ordered
+//! sequences: `above: false` shell surfaces, the managed `stacking`,
+//! and `above: true` shells. Each frame draws
 //! its decoration buffer at its geometry with its client's surface
 //! tree (and that client's xdg popups) on top at the window's content
 //! rect, then XWayland override-redirect windows, then the pointer
@@ -94,7 +94,6 @@ use smithay::desktop::utils::{
     bbox_from_surface_tree, send_frames_surface_tree, take_presentation_feedback_surface_tree,
     OutputPresentationFeedback,
 };
-use smithay::desktop::PopupManager;
 use smithay::input::pointer::{CursorImageAttributes, CursorImageStatus};
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::render_elements;
@@ -240,14 +239,12 @@ pub(crate) fn build_scene_into(
     // predicate, so invisible furniture can never keep a click target.
     let desktop_bands_occluded = fullscreen_occludes_desktop_bands(backend, viewport);
     if !desktop_bands_occluded {
-        for entry in backend.stacking.iter().rev() {
-            if let StackEntry::Shell(id) = entry {
-                let Some(record) = backend.shells.get(id) else {
-                    continue;
-                };
-                if record.above && record.mapped {
-                    push_shell_elements(elements, renderer, record, viewport);
-                }
+        for id in backend.shell_stacking.iter().rev() {
+            let Some(record) = backend.shells.get(id) else {
+                continue;
+            };
+            if record.above && record.mapped {
+                push_shell_elements(elements, renderer, record, viewport);
             }
         }
 
@@ -265,8 +262,8 @@ pub(crate) fn build_scene_into(
     // stacking entry) draw above every managed frame, which is
     // where the X server would put a just-mapped override-redirect
     // window in practice.
-    for record in backend.windows.values() {
-        if record.window_type == wm_core::WindowType::Unmanaged && record.mapped {
+    for window in backend.scene_index.unmanaged() {
+        if let Some(record) = backend.windows.get(&window).filter(|record| record.mapped) {
             push_window_content(elements, renderer, backend, record.content, record, viewport);
         }
     }
@@ -284,7 +281,7 @@ pub(crate) fn build_scene_into(
             let Some(record) = backend.windows.get(id) else {
                 continue;
             };
-            if record.mapped {
+            if record.mapped && backend.scene_index.is_presented(*id) {
                 push_window_content(elements, renderer, backend, record.content, record, viewport);
             }
         }
@@ -336,14 +333,12 @@ pub(crate) fn build_scene_into(
     // wallpaper itself.
     push_layer_band(elements, renderer, backend, WlrLayer::Bottom, viewport);
 
-    for entry in backend.stacking.iter().rev() {
-        if let StackEntry::Shell(id) = entry {
-            let Some(record) = backend.shells.get(id) else {
-                continue;
-            };
-            if !record.above && record.mapped {
-                push_shell_elements(elements, renderer, record, viewport);
-            }
+    for id in backend.shell_stacking.iter().rev() {
+        let Some(record) = backend.shells.get(id) else {
+            continue;
+        };
+        if !record.above && record.mapped {
+            push_shell_elements(elements, renderer, record, viewport);
         }
     }
 
@@ -424,7 +419,7 @@ pub(crate) fn send_frame_callbacks(
         }
         let surface = record.surface.wl_surface();
         send_frames_surface_tree(surface, output, elapsed, Some(Duration::ZERO), |_, _| Some(output.clone()));
-        for (popup, _) in PopupManager::popups_for_surface(surface) {
+        for (popup, _) in backend.popups_for_surface(surface) {
             send_frames_surface_tree(popup.wl_surface(), output, elapsed, Some(Duration::ZERO), |_, _| {
                 Some(output.clone())
             });
@@ -438,7 +433,7 @@ pub(crate) fn send_frame_callbacks(
     for_each_presented_window(backend, |record| {
         if let Some(surface) = record.surface.wl_surface() {
             send_frames_surface_tree(&surface, output, elapsed, Some(Duration::ZERO), |_, _| Some(output.clone()));
-            for (popup, _) in PopupManager::popups_for_surface(&surface) {
+            for (popup, _) in backend.popups_for_surface(&surface) {
                 send_frames_surface_tree(popup.wl_surface(), output, elapsed, Some(Duration::ZERO), |_, _| {
                     Some(output.clone())
                 });
@@ -491,7 +486,7 @@ pub(crate) fn take_presentation_feedback(
         if is_primary_rect(backend, record.content, output_rect) {
             if let Some(surface) = record.surface.wl_surface() {
                 take_tree(&surface);
-                for (popup, _) in PopupManager::popups_for_surface(&surface) {
+                for (popup, _) in backend.popups_for_surface(&surface) {
                     take_tree(popup.wl_surface());
                 }
             }
@@ -503,7 +498,7 @@ pub(crate) fn take_presentation_feedback(
         }
         let surface = record.surface.wl_surface();
         take_tree(surface);
-        for (popup, _) in PopupManager::popups_for_surface(surface) {
+        for (popup, _) in backend.popups_for_surface(surface) {
             take_tree(popup.wl_surface());
         }
     }
@@ -521,31 +516,25 @@ pub(crate) fn take_presentation_feedback(
 }
 
 /// Visits each application surface tree represented by the current
-/// scene exactly once, in linear time. Override-redirect X11 surfaces
-/// occupy their renderer-owned top band; managed clients are resolved
-/// through their one direct-window or mapped-frame stacking slot.
-///
-/// This is deliberately a traversal rather than `windows.filter` plus
-/// `xdg::window_is_in_scene`: that predicate is ideal for one
-/// commit's known owner but scans the stack, so applying it to every
-/// window would make per-frame protocol routing quadratic.
+/// scene exactly once. Both bands come from the lifecycle index rather
+/// than rediscovering visibility from all windows and all stacking
+/// entries on every frame callback and presentation-feedback drain.
 fn for_each_presented_window(backend: &WaylandBackend, mut visit: impl FnMut(&WindowRecord)) {
-    for record in backend.windows.values() {
-        if record.window_type == wm_core::WindowType::Unmanaged && record.mapped && record.surface.alive() {
+    for window in backend.scene_index.unmanaged() {
+        if let Some(record) = backend
+            .windows
+            .get(&window)
+            .filter(|record| record.mapped && record.surface.alive())
+        {
             visit(record);
         }
     }
-    for entry in &backend.stacking {
-        let record = match entry {
-            StackEntry::Window(window) => backend.windows.get(window),
-            StackEntry::Frame(frame) => backend
-                .frames
-                .get(frame)
-                .filter(|record| record.mapped)
-                .and_then(|record| backend.windows.get(&record.window)),
-            StackEntry::Shell(_) => None,
-        };
-        if let Some(record) = record.filter(|record| record.mapped && record.surface.alive()) {
+    for window in backend.scene_index.presented() {
+        if let Some(record) = backend
+            .windows
+            .get(&window)
+            .filter(|record| record.mapped && record.surface.alive())
+        {
             visit(record);
         }
     }
@@ -861,7 +850,7 @@ fn push_layer_band(
             crate::xdg::committed_surface_scale(surface),
             backend.scale_at(record.geometry),
         );
-        for (popup, offset) in PopupManager::popups_for_surface(surface) {
+        for (popup, offset) in backend.popups_for_surface(surface) {
             let popup_surface = popup.wl_surface();
             let popup_factor = crate::xdg::effective_surface_scale(
                 crate::xdg::committed_surface_scale(popup_surface),
@@ -1009,7 +998,7 @@ fn push_window_content(
     // pushed at 1:1 elsewhere in this file — so the two do not have to
     // agree beyond meeting at the same rectangle.
     let factor = backend.window_surface_scale(record);
-    for (popup, offset) in PopupManager::popups_for_surface(&surface) {
+    for (popup, offset) in backend.popups_for_surface(&surface) {
         // The offset is surface-local to the parent, so it converts by
         // the parent's factor; the popup's tree then renders at the
         // popup's own, because a menu is a separate surface with its own

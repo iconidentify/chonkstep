@@ -75,6 +75,7 @@
 //! standing over windows.
 
 use smithay::backend::renderer::utils::with_renderer_surface_state;
+use smithay::desktop::{find_popup_root_surface, PopupKind};
 use smithay::delegate_layer_shell;
 use smithay::output::Output;
 use smithay::reexports::wayland_server::protocol::wl_output::WlOutput;
@@ -993,8 +994,12 @@ impl WlrLayerShellHandler for Compositor {
         // Tracked like any xdg popup; the renderer and the hit walk
         // find it through `PopupManager::popups_for_surface` on the
         // layer surface, exactly as they do for a toplevel's menus.
-        if let Err(error) = self.popups.track_popup(smithay::desktop::PopupKind::from(popup)) {
+        let popup = PopupKind::from(popup);
+        let root = find_popup_root_surface(&popup).ok();
+        if let Err(error) = self.popups.track_popup(popup) {
             tracing::warn!(?error, "failed to track a layer surface's popup");
+        } else if let Some(root) = root {
+            self.wm.backend_mut().remember_popup_root(root);
         }
     }
 

@@ -5,7 +5,7 @@
 //! Where `wm-x11` translates every verb into protocol requests against
 //! a server it doesn't control, this backend IS the server: every verb
 //! just mutates the records in [`WaylandBackend`] (`windows`, `frames`,
-//! `shells`, `stacking`) and sets the `damage` flag; the renderer walks
+//! `shells`, and their two stacking orders) and sets the `damage` flag; the renderer walks
 //! those records on the next redraw. The only calls that leave the
 //! process are the ones a client must hear about — xdg configures,
 //! close requests, and their XWayland equivalents.
@@ -22,16 +22,16 @@
 //! what lets the renderer and the pointer hit-test compare frame,
 //! content, and shell rects directly.
 //!
-//! Stacking: `stacking` holds frames, client-decorated windows, and
-//! shell surfaces bottom-to-top, but the effective z-order is
-//! partitioned — `above: false` shells (desktop furniture) render below
-//! every frame, `above: true` shells (dock, menus) above them — with
-//! `stacking`'s relative order applying within each band. A managed
+//! Stacking: `stacking` holds frames and client-decorated windows
+//! bottom-to-top; `shell_stacking` holds only shell surfaces. The shell
+//! order is partitioned — `above: false` desktop furniture renders below
+//! every frame, `above: true` docks and menus above them — with relative
+//! order applying within each band. A managed
 //! window whose client draws its own chrome has no frame to hold its
 //! place, so it holds one itself (`StackEntry::Window`) in the frame
 //! band: same band, same order, one fewer buffer to paint. The
-//! reordering verbs here (`raise`, `restack`, `raise_shell_surface`)
-//! therefore only need to get the relative order within a band right;
+//! reordering verbs here therefore only need to get the relative order
+//! within their own ledger right;
 //! hit-testing must walk the same three bands top-down to agree with
 //! what the renderer paints.
 
@@ -206,7 +206,7 @@ impl Backend for WaylandBackend {
                 fill_id: smithay::backend::renderer::element::Id::new(),
             },
         );
-        self.stacking.push(StackEntry::Shell(id));
+        self.shell_stacking.push(id);
         // Not visible until mapped — no damage yet.
         Some(id)
     }
@@ -227,15 +227,18 @@ impl Backend for WaylandBackend {
 
     fn destroy_shell_surface(&mut self, id: Self::ShellId) {
         if self.shells.remove(&id).is_some() {
-            self.stacking.retain(|entry| !matches!(entry, StackEntry::Shell(s) if *s == id));
+            self.shell_stacking.retain(|shell| *shell != id);
             self.damage = true;
         }
     }
 
     fn raise_shell_surface(&mut self, id: Self::ShellId) {
-        if raise_stack_entry(&mut self.stacking, StackEntry::Shell(id)) {
-            self.damage = true;
-        }
+        let Some(index) = self.shell_stacking.iter().position(|shell| *shell == id) else {
+            return;
+        };
+        let shell = self.shell_stacking.remove(index);
+        self.shell_stacking.push(shell);
+        self.damage = true;
     }
 
     fn configure_shell_surface(&mut self, id: Self::ShellId, geometry: Rect) {
@@ -602,6 +605,7 @@ impl Backend for WaylandBackend {
         // titlebar; leaving both would draw and hit-test the client
         // twice, at two different depths.
         replace_stack_entry(&mut self.stacking, StackEntry::Window(window), StackEntry::Frame(frame));
+        self.sync_managed_scene_index(window);
         frame
     }
 
@@ -611,8 +615,9 @@ impl Backend for WaylandBackend {
         // entry would re-apply a resize cursor to whatever frame the id
         // is ever reused for.
         self.frame_cursors.remove(&frame);
-        if self.frames.remove(&frame).is_some() {
+        if let Some(record) = self.frames.remove(&frame) {
             self.stacking.retain(|entry| !matches!(entry, StackEntry::Frame(f) if *f == frame));
+            self.sync_managed_scene_index(record.window);
             self.damage = true;
         }
     }
@@ -640,10 +645,18 @@ impl Backend for WaylandBackend {
     /// just interacting with it.
     fn release_decoration(&mut self, window: Self::WindowId, frame: Self::FrameId) {
         self.frame_cursors.remove(&frame);
-        if self.frames.remove(&frame).is_none() {
-            return;
-        }
+        let Some(record) = self.frames.remove(&frame) else { return };
         replace_stack_entry(&mut self.stacking, StackEntry::Frame(frame), StackEntry::Window(window));
+        if !record.mapped {
+            // A framed window is hidden by unmapping its frame while its
+            // client record stays mapped. Once the frame is gone the
+            // client slot owns visibility, so transfer that hidden state;
+            // a later workspace return can then enter `map_frameless`.
+            if let Some(window) = self.windows.get_mut(&window) {
+                window.mapped = false;
+            }
+        }
+        self.sync_managed_scene_index(window);
         self.damage = true;
     }
 
@@ -876,23 +889,31 @@ impl Backend for WaylandBackend {
 
     fn map_frame(&mut self, frame: Self::FrameId) {
         if let Some(record) = self.frames.get_mut(&frame) {
-            if record.mapped {
-                return;
+            let changed = !record.mapped;
+            if changed {
+                record.mapped = true;
             }
-            record.mapped = true;
-            self.idle_policy_dirty = true;
-            self.damage = true;
+            let window = record.window;
+            self.sync_managed_scene_index(window);
+            if changed {
+                self.idle_policy_dirty = true;
+                self.damage = true;
+            }
         }
     }
 
     fn unmap_frame(&mut self, frame: Self::FrameId) {
         if let Some(record) = self.frames.get_mut(&frame) {
-            if !record.mapped {
-                return;
+            let changed = record.mapped;
+            if changed {
+                record.mapped = false;
             }
-            record.mapped = false;
-            self.idle_policy_dirty = true;
-            self.damage = true;
+            let window = record.window;
+            self.sync_managed_scene_index(window);
+            if changed {
+                self.idle_policy_dirty = true;
+                self.damage = true;
+            }
         }
     }
 
@@ -918,13 +939,14 @@ impl Backend for WaylandBackend {
         let Some(record) = self.windows.get_mut(&window) else {
             return;
         };
-        if record.mapped {
-            return;
-        }
+        let changed = !record.mapped;
         record.mapped = true;
         ensure_stack_entry(&mut self.stacking, StackEntry::Window(window));
-        self.idle_policy_dirty = true;
-        self.damage = true;
+        self.sync_managed_scene_index(window);
+        if changed {
+            self.idle_policy_dirty = true;
+            self.damage = true;
+        }
     }
 
     /// Hides one again. The slot stays: `unmap_frame` leaves a hidden
@@ -933,12 +955,15 @@ impl Backend for WaylandBackend {
     /// it was left rather than flattened into map order.
     fn unmap_frameless(&mut self, window: Self::WindowId) {
         if let Some(record) = self.windows.get_mut(&window) {
-            if !record.mapped {
-                return;
+            let changed = record.mapped;
+            if changed {
+                record.mapped = false;
             }
-            record.mapped = false;
-            self.idle_policy_dirty = true;
-            self.damage = true;
+            self.sync_managed_scene_index(window);
+            if changed {
+                self.idle_policy_dirty = true;
+                self.damage = true;
+            }
         }
     }
 
@@ -949,11 +974,11 @@ impl Backend for WaylandBackend {
         // to swallow the UnmapNotify its own request generates), and
         // Wayland clients keep their buffers, so the unshade path needs
         // no repaint coaxing either.
-        if let Some(record) = self.windows.get_mut(&window) {
-            if record.mapped == mapped {
-                return;
-            }
-            record.mapped = mapped;
+        let Some(record) = self.windows.get_mut(&window) else { return };
+        let changed = record.mapped != mapped;
+        record.mapped = mapped;
+        self.sync_managed_scene_index(window);
+        if changed {
             self.idle_policy_dirty = true;
             self.damage = true;
         }
@@ -1476,21 +1501,25 @@ impl Backend for WaylandBackend {
         // which reads the same field. Every XWayland menu, dropdown and
         // tooltip lands here.
         let kind = self.window_type(window);
-        if let Some(record) = self.windows.get_mut(&window) {
-            record.window_type = kind;
-            record.mapped = true;
-            if let ManagedSurface::X11(surface) = &record.surface {
-                // A non-OR X11 window that asked to map still needs its
-                // MapRequest honored by the (X11) WM even when we
-                // decline to decorate it; OR windows mapped themselves
-                // already and set_mapped would rightly refuse them.
-                if surface.alive() && !surface.is_override_redirect() {
-                    if let Err(error) = surface.set_mapped(true) {
-                        tracing::warn!(?error, ?window, "X11 unmanaged map failed");
-                    }
+        let Some(record) = self.windows.get_mut(&window) else { return };
+        record.window_type = kind;
+        record.mapped = true;
+        if let ManagedSurface::X11(surface) = &record.surface {
+            // A non-OR X11 window that asked to map still needs its
+            // MapRequest honored by the (X11) WM even when we
+            // decline to decorate it; OR windows mapped themselves
+            // already and set_mapped would rightly refuse them.
+            if surface.alive() && !surface.is_override_redirect() {
+                if let Err(error) = surface.set_mapped(true) {
+                    tracing::warn!(?error, ?window, "X11 unmanaged map failed");
                 }
             }
-            self.damage = true;
+        }
+        self.damage = true;
+        if kind == WindowType::Unmanaged {
+            self.scene_index.mark_unmanaged(window);
+        } else {
+            self.sync_managed_scene_index(window);
         }
     }
 

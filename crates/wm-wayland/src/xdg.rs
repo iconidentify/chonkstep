@@ -33,6 +33,7 @@
 //! cannot change. Map, unmap, and layout edges damage through their own ledger
 //! verbs, so the gate applies only to steady-state pixel commits.
 
+#[cfg(test)]
 use std::collections::HashMap;
 use std::os::fd::OwnedFd;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -85,10 +86,9 @@ use smithay::{
 use wm_core::{BackendEvent, NetState, NetStateAction};
 use wm_theme_api::{clamp_client_size, client_size_limit, Point, Rect, ResizeEdge, Size};
 
-use crate::state::{
-    ClientState, Compositor, FrameRecord, ManagedSurface, StackEntry, WaylandBackend, WindowRecord,
-    WlFrameId, WlWindowId,
-};
+use crate::state::{ClientState, Compositor, ManagedSurface, WaylandBackend, WindowRecord, WlFrameId, WlWindowId};
+#[cfg(test)]
+use crate::state::{FrameRecord, StackEntry};
 
 type WmEvent = BackendEvent<WlWindowId, WlFrameId>;
 
@@ -840,6 +840,7 @@ impl Compositor {
             if let Some(record) = backend.windows.get_mut(&id) {
                 record.mapped = false;
             }
+            backend.scene_index.mark_hidden(id);
             backend.queue(WmEvent::Unmapped(id));
         } else if has_buffer {
             // The window-geometry offset is re-read on every commit,
@@ -945,9 +946,10 @@ impl Compositor {
     }
 }
 
-/// The window half of [`Compositor::resolved_surface_affects_scene`],
-/// factored so the exact renderer stacking rules are visible in one
-/// short walk.
+/// The window half of [`Compositor::resolved_surface_affects_scene`].
+/// Mapping transitions maintain the same admission the renderer uses,
+/// so a high-frequency client commit is one record lookup and one set
+/// lookup rather than a walk through every workspace's stack.
 pub(crate) fn window_is_in_scene(backend: &WaylandBackend, window: WlWindowId) -> bool {
     let Some(record) = backend.windows.get(&window) else {
         return false;
@@ -955,18 +957,16 @@ pub(crate) fn window_is_in_scene(backend: &WaylandBackend, window: WlWindowId) -
     if !record.mapped || !record.surface.alive() {
         return false;
     }
-    stack_exposes_window(
-        record.window_type,
-        window,
-        &backend.stacking,
-        &backend.frames,
-    )
+    record.window_type == wm_core::WindowType::Unmanaged
+        || backend.scene_index.is_presented(window)
 }
 
-/// Whether the renderer's current stacking slice exposes `window`.
+/// Test oracle for whether the renderer's current stacking slice
+/// exposes `window`.
 /// Unmanaged surfaces live in the renderer's separate topmost pass;
 /// every managed surface must own either a direct slot or a mapped
 /// decoration frame in this workspace.
+#[cfg(test)]
 fn stack_exposes_window(
     window_type: wm_core::WindowType,
     window: WlWindowId,
@@ -981,7 +981,6 @@ fn stack_exposes_window(
         StackEntry::Frame(frame) => frames
             .get(frame)
             .is_some_and(|record| record.window == window && record.mapped),
-        StackEntry::Shell(_) => false,
     })
 }
 
@@ -1398,8 +1397,12 @@ impl XdgShellHandler for Compositor {
         surface.with_pending_state(|state| {
             state.geometry = positioner.get_geometry();
         });
-        if let Err(error) = self.popups.track_popup(PopupKind::from(surface)) {
+        let popup = PopupKind::from(surface);
+        let root = find_popup_root_surface(&popup).ok();
+        if let Err(error) = self.popups.track_popup(popup) {
             tracing::warn!(?error, "failed to track xdg popup");
+        } else if let Some(root) = root {
+            self.wm.backend_mut().remember_popup_root(root);
         }
     }
 

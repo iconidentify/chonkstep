@@ -189,6 +189,7 @@ impl XwmHandler for Compositor {
             // windows, which have no frame lifecycle to hide them.
             record.mapped = false;
         }
+        backend.scene_index.mark_hidden(id);
         backend.mark_damaged();
         backend.queue(WmEvent::Unmapped(id));
         // Return the window to withdrawn so a future map restarts the

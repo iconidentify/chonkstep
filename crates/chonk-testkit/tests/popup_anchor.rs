@@ -72,6 +72,20 @@ fn newest_popup_id(log: &str) -> Option<&str> {
     request.split(".get_popup, (").nth(1)?.split(',').next()
 }
 
+fn popup_configure(log: &str, popup_id: &str) -> Option<(i32, i32, u32, u32)> {
+    let marker = format!("xdg_popup@{popup_id}.configure(");
+    let line = log.lines().rev().find(|line| line.contains(&marker))?;
+    let values = line
+        .split(&marker)
+        .nth(1)?
+        .strip_suffix(')')?
+        .split(',')
+        .map(|value| value.trim().parse::<i32>().ok())
+        .collect::<Option<Vec<_>>>()?;
+    let [x, y, w, h] = values.as_slice() else { return None };
+    Some((*x, *y, u32::try_from(*w).ok()?, u32::try_from(*h).ok()?))
+}
+
 #[test]
 #[ignore = "needs a Wayland session and Chromium"]
 fn chromium_popup_without_a_new_anchor_is_dismissed_on_parent_resize() {
@@ -141,6 +155,18 @@ fn chromium_popup_without_a_new_anchor_is_dismissed_on_parent_resize() {
         },
     )
     .unwrap();
+    let (popup_x, popup_y, popup_w, popup_h) = poll_until(
+        EVENT,
+        "Chromium's popup configure",
+        || popup_configure(&session.log(), &popup_id),
+    )
+    .unwrap();
+    let inside_x = window.x - window.offset_x + popup_x + i32::try_from(popup_w.min(20)).unwrap();
+    let inside_y = window.y - window.offset_y + popup_y + i32::try_from(popup_h.min(20)).unwrap();
+    poll_until(EVENT, "the mapped popup to join the compositor hit-test", || {
+        (session.door().hit(inside_x, inside_y).ok()?.as_str() == "popup").then_some(())
+    })
+    .expect("the popup was tracked by the client but never entered the rendered input scene");
 
     let before_resize = session.log();
     let popup_trace = before_resize
@@ -175,6 +201,10 @@ fn chromium_popup_without_a_new_anchor_is_dismissed_on_parent_resize() {
         },
     )
     .unwrap();
+    poll_until(EVENT, "the dismissed popup to leave the compositor hit-test", || {
+        (session.door().hit(inside_x, inside_y).ok()?.as_str() != "popup").then_some(())
+    })
+    .expect("the dismissed popup remained in the rendered input scene");
     let completed_trace = session
         .log()
         .lines()

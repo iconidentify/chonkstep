@@ -67,7 +67,7 @@ use smithay::backend::input::{
     TabletToolEvent, TabletToolProximityEvent, TabletToolTipEvent, TabletToolTipState,
 };
 use smithay::desktop::utils::under_from_surface_tree;
-use smithay::desktop::{PopupManager, WindowSurfaceType};
+use smithay::desktop::WindowSurfaceType;
 use smithay::input::keyboard::{keysyms, FilterResult, Keycode, Keysym, ModifiersState};
 use smithay::input::pointer::{
     AxisFrame, ButtonEvent, GestureHoldBeginEvent, GestureHoldEndEvent, GesturePinchBeginEvent, GesturePinchEndEvent,
@@ -82,9 +82,7 @@ use smithay::wayland::pointer_constraints::{with_pointer_constraint, PointerCons
 use smithay::wayland::shell::wlr_layer;
 use smithay::wayland::tablet_manager::{TabletDescriptor, TabletSeatTrait};
 
-use wm_core::{
-    BackendEvent, DragHandle, KeyCombo, Modifiers, MonitorInfo, MouseButton, ScrollDelta, SurfaceRef, WindowType,
-};
+use wm_core::{BackendEvent, DragHandle, KeyCombo, Modifiers, MonitorInfo, MouseButton, ScrollDelta, SurfaceRef};
 use wm_theme_api::{Point, Rect, ResizeEdge};
 
 use crate::state::{
@@ -1943,10 +1941,7 @@ fn hit_at(backend: &WaylandBackend, at: Point, position: LogicalPoint<f64, Logic
     if !desktop_bands_occluded {
         // `above` shell band (dock, shell menus), topmost stacking
         // entry first.
-        for entry in backend.stacking.iter().rev() {
-            let StackEntry::Shell(shell) = entry else {
-                continue;
-            };
+        for shell in backend.shell_stacking.iter().rev() {
             if let Some(record) = backend.shells.get(shell) {
                 if record.above && record.mapped && record.geometry.contains(at) {
                     return Hit::Shell {
@@ -1974,10 +1969,8 @@ fn hit_at(backend: &WaylandBackend, at: Point, position: LogicalPoint<f64, Logic
     // it the always-on-top treatment a menu gets. It is walked with the
     // frames below instead, where its stacking slot decides.
     // `renderer.rs`'s override-redirect pass reads this same field.
-    for (&window, record) in backend.windows.iter() {
-        if record.window_type != WindowType::Unmanaged {
-            continue;
-        }
+    for window in backend.scene_index.unmanaged() {
+        let Some(record) = backend.windows.get(&window) else { continue };
         if !record.mapped || !record.content.contains(at) {
             continue;
         }
@@ -2003,10 +1996,10 @@ fn hit_at(backend: &WaylandBackend, at: Point, position: LogicalPoint<f64, Logic
             let Some(record) = backend.windows.get(window) else {
                 continue;
             };
-            if !record.mapped {
+            if !record.mapped || !backend.scene_index.is_presented(*window) {
                 continue;
             }
-            if let Some(hit) = popup_hit(backend, None, *window, position) {
+            if let Some(hit) = popup_hit(backend, None, *window, record, position) {
                 return hit;
             }
             if frameless_claims(record.content, record.content_offset, at) {
@@ -2029,14 +2022,16 @@ fn hit_at(backend: &WaylandBackend, at: Point, position: LogicalPoint<f64, Logic
         // may extend beyond the frame rect entirely (a context menu
         // opened near an edge), so they are tested before — and
         // independent of — the frame's own geometry.
-        if let Some(hit) = popup_hit(backend, Some(*frame), record.window, position) {
+        let window = backend.windows.get(&record.window);
+        if let Some(hit) = window.and_then(|window| {
+            popup_hit(backend, Some(*frame), record.window, window, position)
+        }) {
             return hit;
         }
         if !record.geometry.contains(at) {
             continue;
         }
-        let over_content =
-            backend.windows.get(&record.window).is_some_and(|window| window.mapped && window.content.contains(at));
+        let over_content = window.is_some_and(|window| window.mapped && window.content.contains(at));
         if over_content {
             if let Some(hit) = content_hit(backend, Some(*frame), record.window, position) {
                 return hit;
@@ -2052,10 +2047,7 @@ fn hit_at(backend: &WaylandBackend, at: Point, position: LogicalPoint<f64, Logic
     }
 
     // `below` shell band (desktop-level furniture).
-    for entry in backend.stacking.iter().rev() {
-        let StackEntry::Shell(shell) = entry else {
-            continue;
-        };
+    for shell in backend.shell_stacking.iter().rev() {
         if let Some(record) = backend.shells.get(shell) {
             if !record.above && record.mapped && record.geometry.contains(at) {
                 return Hit::Shell { shell: *shell, local: local_to(at, record.geometry.pos) };
@@ -2079,6 +2071,7 @@ pub(crate) fn hit_kind_at(backend: &WaylandBackend, at: Point) -> &'static str {
     match hit_at(backend, at, position) {
         Hit::Shell { .. } => "shell",
         Hit::FrameChrome { .. } => "frame",
+        Hit::Content { popup: true, .. } => "popup",
         Hit::Content { .. } => "content",
         Hit::Layer { .. } => "layer",
         Hit::Ime { .. } => "ime",
@@ -2107,7 +2100,7 @@ fn layer_band_hit(
         let root = record.surface.wl_surface();
         let output_scale = backend.scale_at(record.geometry);
         let scale = crate::xdg::effective_surface_scale(crate::xdg::committed_surface_scale(root), output_scale);
-        for (popup, offset) in PopupManager::popups_for_surface(root) {
+        for (popup, offset) in backend.popups_for_surface(root) {
             let popup_surface = popup.wl_surface();
             let popup_origin: LogicalPoint<i32, Logical> = (
                 record.geometry.pos.x + crate::xdg::scale_length(offset.x, scale),
@@ -2118,7 +2111,10 @@ fn layer_band_hit(
             let probe = surface_probe(
                 anchor,
                 position,
-                crate::xdg::effective_surface_scale(crate::xdg::committed_surface_scale(popup_surface), output_scale),
+                crate::xdg::effective_surface_scale(
+                    crate::xdg::committed_surface_scale(popup_surface),
+                    output_scale,
+                ),
             );
             if let Some((surface, found)) =
                 under_from_surface_tree(popup_surface, probe, popup_origin, WindowSurfaceType::ALL)
@@ -2273,6 +2269,9 @@ enum Hit {
         window: WlWindowId,
         surface: Option<WlSurface>,
         origin: LogicalPoint<f64, Logical>,
+        /// Distinguishes an xdg popup from its parent's ordinary
+        /// surface tree for test-door diagnostics; routing is identical.
+        popup: bool,
     },
     /// A wlr-layer-shell surface (or one of its popups): client
     /// territory with no `wm-core` window behind it. Same seat
@@ -2353,7 +2352,13 @@ fn content_hit(
         // click-to-focus.
         None => (None, anchor),
     };
-    Some(Hit::Content { frame, window, surface, origin })
+    Some(Hit::Content {
+        frame,
+        window,
+        surface,
+        origin,
+        popup: false,
+    })
 }
 
 /// Moves a point into the space a client's surface tree is measured in.
@@ -2410,9 +2415,9 @@ fn popup_hit(
     backend: &WaylandBackend,
     frame: Option<WlFrameId>,
     window: WlWindowId,
+    record: &crate::state::WindowRecord,
     position: LogicalPoint<f64, Logical>,
 ) -> Option<Hit> {
-    let record = backend.windows.get(&window)?;
     if !record.mapped {
         return None;
     }
@@ -2421,6 +2426,9 @@ fn popup_hit(
         // top of `hit_at` — no xdg popups to test here.
         return None;
     };
+    if !backend.surface_has_popups(toplevel.wl_surface()) {
+        return None;
+    }
     // Popup offsets are measured from the parent surface's own origin,
     // which is the buffer's, so the same correction as `hit_at` applies.
     let content_origin =
@@ -2433,7 +2441,7 @@ fn popup_hit(
     // agreement this function's doc comment demands: draw and hit-test
     // have to describe one rectangle.
     let parent_scale = backend.window_surface_scale(record);
-    for (popup, offset) in PopupManager::popups_for_surface(toplevel.wl_surface()) {
+    for (popup, offset) in backend.popups_for_surface(toplevel.wl_surface()) {
         let popup_surface = popup.wl_surface();
         let popup_origin: LogicalPoint<i32, Logical> = (
             content_origin.x + crate::xdg::scale_length(offset.x, parent_scale),
@@ -2457,6 +2465,7 @@ fn popup_hit(
                 window,
                 surface: Some(surface),
                 origin: seat_origin(position, probe, found.to_f64()),
+                popup: true,
             });
         }
     }

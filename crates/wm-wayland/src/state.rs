@@ -31,7 +31,7 @@
 //! XWayland, `WindowManager` + `Shell` construction with the same
 //! theme/scale precedence as the X11 binary, and the dispatch loop.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::os::fd::{BorrowedFd, RawFd};
 use std::process::Stdio;
 use std::sync::Arc;
@@ -131,13 +131,11 @@ pub(crate) struct ProtocolPublishMetrics {
     pub foreign_toplevel_drag_syncs: u64,
 }
 
-/// One entry in the bottom-to-top stacking order. Frames and shell
-/// surfaces interleave in a single sequence because that is what the
-/// X11 server maintains for the X11 backend implicitly: the WM raises
-/// and restacks frames *among* the shell's override-redirect windows.
-/// The renderer partitions the walk (`above: false` shells, then
-/// frames, then `above: true` shells) so docks and menus stay over
-/// managed clients exactly as their X11 counterparts do.
+/// One entry in the bottom-to-top managed-window stacking order.
+/// Shell surfaces have their own [`WaylandBackend::shell_stacking`]
+/// because they are rendered in bands, never interleaved with managed
+/// windows. Keeping each order exactly where it has meaning avoids
+/// walking every application window merely to find the dock.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) enum StackEntry {
     Frame(WlFrameId),
@@ -152,7 +150,49 @@ pub(crate) enum StackEntry {
     /// `stacking` and always on top, and a browser treated the same way
     /// would sit over the dock forever.
     Window(WlWindowId),
-    Shell(WlShellId),
+}
+
+/// Constant-time admission for the two scene bands that otherwise
+/// require searching the complete window ledger or stacking order.
+/// Mutation stays private so lifecycle code cannot update one set and
+/// forget the other.
+#[derive(Default)]
+pub(crate) struct SceneIndex {
+    unmanaged: HashSet<WlWindowId>,
+    presented: HashSet<WlWindowId>,
+}
+
+impl SceneIndex {
+    pub(crate) fn mark_unmanaged(&mut self, window: WlWindowId) {
+        self.presented.remove(&window);
+        self.unmanaged.insert(window);
+    }
+
+    pub(crate) fn mark_presented(&mut self, window: WlWindowId) {
+        self.unmanaged.remove(&window);
+        self.presented.insert(window);
+    }
+
+    pub(crate) fn mark_hidden(&mut self, window: WlWindowId) {
+        self.presented.remove(&window);
+    }
+
+    pub(crate) fn forget(&mut self, window: WlWindowId) {
+        self.unmanaged.remove(&window);
+        self.presented.remove(&window);
+    }
+
+    pub(crate) fn unmanaged(&self) -> impl Iterator<Item = WlWindowId> + '_ {
+        self.unmanaged.iter().copied()
+    }
+
+    pub(crate) fn presented(&self) -> impl Iterator<Item = WlWindowId> + '_ {
+        self.presented.iter().copied()
+    }
+
+    pub(crate) fn is_presented(&self, window: WlWindowId) -> bool {
+        self.presented.contains(&window)
+    }
 }
 
 /// Re-spells one window's place in the frame band without moving it:
@@ -189,19 +229,13 @@ pub(crate) fn ensure_stack_entry(stacking: &mut Vec<StackEntry>, entry: StackEnt
 /// Moves `entry` to the top of `stacking`. Answers whether it was in
 /// there to move, which is every caller's damage test.
 ///
-/// Top of the *vector*, which is top of the entry's own band: whether
-/// that lands it over managed frames is decided at paint time from a
-/// shell's `above` flag (see the module doc on stacking bands), exactly
-/// as an override-redirect window's stacking versus reparented frames
-/// is decided on X11.
+/// Top of the vector is top of the managed-window band; unmanaged X11
+/// surfaces and shell furniture have separate renderer-owned bands.
 ///
-/// All three raise verbs — `raise` on a frame, `raise_frameless` on a
-/// window whose client drew its own chrome, `raise_shell_surface` on
-/// the dock — are this one function under different names. That is the
-/// point rather than tidiness: a framed and a client-decorated window
-/// must restack *identically*, and the bug that made `raise_frameless`
-/// necessary in the first place was two stacking paths that quietly
-/// disagreed, so this one leaves no room for a second pair to.
+/// Both application raise verbs — `raise` on a frame and
+/// `raise_frameless` on a window whose client drew its own chrome — are
+/// this one function under different names. A framed and a
+/// client-decorated window must restack identically.
 pub(crate) fn raise_stack_entry(stacking: &mut Vec<StackEntry>, entry: StackEntry) -> bool {
     let Some(index) = stacking.iter().position(|held| *held == entry) else {
         return false;
@@ -482,6 +516,11 @@ pub struct WaylandBackend {
     /// (id 0) stays forever unallocated.
     next_id: u64,
     pub(crate) windows: HashMap<WlWindowId, WindowRecord>,
+    /// Managed visibility and override-redirect membership, maintained
+    /// at lifecycle edges and read on the pointer/commit hot paths. A
+    /// pure Wayland session has no unmanaged members, so it never scans
+    /// every normal window merely to rediscover that fact.
+    pub(crate) scene_index: SceneIndex,
     /// Constant-time reverse lookup for native Wayland roots and for
     /// XWayland roots after their first associated commit. The object
     /// id includes its client/generation identity, so protocol id reuse
@@ -489,6 +528,12 @@ pub struct WaylandBackend {
     /// [`Self::remember_window`], [`Self::ensure_window_surface_index`],
     /// [`Self::forget_surface`], and [`Self::forget_window`].
     surface_windows: HashMap<ObjectId, WlWindowId>,
+    /// Root surfaces that currently own at least one tracked xdg popup.
+    /// `PopupManager::popups_for_surface` takes the surface-tree state
+    /// lock even on a miss, so rendering and pointer motion consult this
+    /// constant-time gate before probing the overwhelmingly common
+    /// popup-free root. Reconciled immediately after popup cleanup.
+    popup_roots: HashMap<ObjectId, WlSurface>,
     /// Per-application decoration overrides — see
     /// `wm_config::DecorationRules`. Held on the backend because both
     /// the decoration decision (`client_draws_own_chrome`) and the
@@ -497,9 +542,13 @@ pub struct WaylandBackend {
     pub(crate) decoration_rules: wm_config::DecorationRules,
     pub(crate) frames: HashMap<WlFrameId, FrameRecord>,
     pub(crate) shells: HashMap<WlShellId, ShellRecord>,
-    /// Bottom-to-top: frames and shell surfaces interleaved — see
-    /// [`StackEntry`].
+    /// Bottom-to-top managed application order — see [`StackEntry`].
     pub(crate) stacking: Vec<StackEntry>,
+    /// Bottom-to-top order within both shell bands. A shell's `above`
+    /// bit chooses its band; entries of the other band are skipped.
+    /// This is the single source of shell order for both rendering and
+    /// hit-testing, just as `stacking` is for managed applications.
+    pub(crate) shell_stacking: Vec<WlShellId>,
     /// Events queued by protocol handlers and backend verbs, drained
     /// by `Backend::poll_event` exactly as the X11 backend's socket is.
     pub(crate) pending: VecDeque<BackendEvent<WlWindowId, WlFrameId>>,
@@ -788,13 +837,16 @@ impl WaylandBackend {
         Self {
             next_id: 1,
             windows: HashMap::new(),
+            scene_index: SceneIndex::default(),
             surface_windows: HashMap::new(),
+            popup_roots: HashMap::new(),
             configure_debt: HashMap::new(),
             popup_parent_resizes: Vec::new(),
             decoration_rules: wm_config::DecorationRules::default(),
             frames: HashMap::new(),
             shells: HashMap::new(),
             stacking: Vec::new(),
+            shell_stacking: Vec::new(),
             pending: VecDeque::new(),
             shell_clicks: VecDeque::new(),
             shell_motions: VecDeque::new(),
@@ -972,6 +1024,7 @@ impl WaylandBackend {
             // Ids are never reused in a session, but keep the index
             // correct even if that allocator invariant is changed.
             self.surface_windows.retain(|_, indexed| *indexed != window);
+            self.scene_index.forget(window);
         }
         if let Some(surface) = surface {
             self.surface_windows.insert(surface.id(), window);
@@ -1027,6 +1080,70 @@ impl WaylandBackend {
         self.surface_windows.get(&surface.id()).copied()
     }
 
+    /// Indexes the ultimate toplevel/layer root of a newly tracked
+    /// popup. Nested menus therefore cost one root entry, not one entry
+    /// per submenu.
+    pub(crate) fn remember_popup_root(&mut self, root: WlSurface) {
+        self.popup_roots.insert(root.id(), root);
+    }
+
+    pub(crate) fn surface_has_popups(&self, root: &WlSurface) -> bool {
+        self.popup_roots.contains_key(&root.id())
+    }
+
+    /// Iterates a root's popups without touching Smithay's surface-tree
+    /// state on the ordinary no-popup path.
+    pub(crate) fn popups_for_surface<'a>(
+        &self,
+        root: &'a WlSurface,
+    ) -> impl Iterator<Item = (PopupKind, SPoint<i32, Logical>)> + 'a {
+        self.surface_has_popups(root)
+            .then(|| PopupManager::popups_for_surface(root))
+            .into_iter()
+            .flatten()
+    }
+
+    /// Drops roots whose last popup disappeared. Smithay owns popup
+    /// lifetime and exposes no destroy hook that says "this was the last
+    /// one", so reconciliation beside `PopupManager::cleanup` is the
+    /// authoritative collection edge.
+    pub(crate) fn reconcile_popup_roots(&mut self) {
+        self.popup_roots.retain(|_, root| {
+            root.is_alive() && PopupManager::popups_for_surface(root).next().is_some()
+        });
+    }
+
+    /// Slow truth used only when a rare mapping transition needs to
+    /// refresh [`Self::scene_index`] and by invariant tests. The
+    /// commit path must read the set instead of calling this: commits
+    /// are frequent; map, unmap and chrome changes are not.
+    pub(crate) fn managed_stack_exposes_window(&self, window: WlWindowId) -> bool {
+        self.stacking.iter().any(|entry| match entry {
+            StackEntry::Window(candidate) => *candidate == window,
+            StackEntry::Frame(frame) => self
+                .frames
+                .get(frame)
+                .is_some_and(|record| record.window == window && record.mapped),
+        })
+    }
+
+    /// Reconciles one managed window after a rare mapping or stack-kind
+    /// transition. Keeping the derived predicate here gives every
+    /// mutation site one operation to call and keeps the frequent read
+    /// path a single set lookup.
+    pub(crate) fn sync_managed_scene_index(&mut self, window: WlWindowId) {
+        let presented = self.windows.get(&window).is_some_and(|record| {
+            record.mapped
+                && record.window_type != WindowType::Unmanaged
+                && self.managed_stack_exposes_window(window)
+        });
+        if presented {
+            self.scene_index.mark_presented(window);
+        } else {
+            self.scene_index.mark_hidden(window);
+        }
+    }
+
     /// Drops a window's ledger entry *and* the stacking slot a
     /// frameless one holds.
     ///
@@ -1047,10 +1164,12 @@ impl WaylandBackend {
                 // commit and become ready, so retire its grace record
                 // at the same lifecycle edge as its window.
                 self.popup_parent_resizes.retain(|resize| resize.root != root);
+                self.popup_roots.remove(&root.id());
             }
             self.mark_idle_policy_dirty();
         }
         self.surface_windows.retain(|_, indexed| *indexed != window);
+        self.scene_index.forget(window);
         self.stacking.retain(|entry| !matches!(entry, StackEntry::Window(w) if *w == window));
         // Same collection duty for the pending EWMH properties: keyed
         // by window id, and nothing downstream would ever drain an
@@ -1868,6 +1987,7 @@ impl Compositor {
         // inline).
         self.dismiss_popups_after_parent_resize();
         self.popups.cleanup();
+        self.wm.backend_mut().reconcile_popup_roots();
         self.core_protocols.sweep_activation_tokens(Instant::now());
         self.apply_pending_focus();
         // Beside the focus intent and for the same reason: a drag that
@@ -4156,14 +4276,110 @@ mod tests {
     }
 
     #[test]
-    fn shell_slots_are_never_disturbed() {
-        // Shell surfaces share the one `stacking` vector with frames
-        // (see `StackEntry`), and the bands are decided at paint time
-        // from `above`, so a chrome change must leave their relative
-        // order alone rather than shuffling the dock.
-        let mut stacking = vec![StackEntry::Shell(WlShellId(9)), frame(2), StackEntry::Shell(WlShellId(8))];
+    fn managed_stack_changes_cannot_disturb_shell_order() {
+        // The two orders have different semantics and different hot
+        // paths. A chrome change rewrites only the managed order, while
+        // the renderer and input both read this one shell order.
+        let shell_stacking = vec![WlShellId(9), WlShellId(8)];
+        let mut stacking = vec![frame(2)];
         replace_stack_entry(&mut stacking, frame(2), window(20));
-        assert_eq!(stacking, vec![StackEntry::Shell(WlShellId(9)), window(20), StackEntry::Shell(WlShellId(8))]);
+        assert_eq!(stacking, vec![window(20)]);
+        assert_eq!(shell_stacking, vec![WlShellId(9), WlShellId(8)]);
+    }
+
+    #[test]
+    fn scene_index_transitions_are_exclusive_and_collect_every_edge() {
+        let window = WlWindowId(7);
+        let mut index = SceneIndex::default();
+
+        index.mark_presented(window);
+        assert!(index.is_presented(window));
+        assert_eq!(index.unmanaged().count(), 0);
+
+        index.mark_unmanaged(window);
+        assert!(!index.is_presented(window));
+        assert_eq!(index.unmanaged().collect::<Vec<_>>(), vec![window]);
+
+        index.mark_hidden(window);
+        assert_eq!(index.unmanaged().collect::<Vec<_>>(), vec![window]);
+        index.forget(window);
+        assert_eq!(index.unmanaged().count(), 0);
+        assert!(!index.is_presented(window));
+    }
+
+    /// Deterministic operation-count regression for the indexed part of
+    /// `hit_at`: adding ordinary managed windows must not add candidates
+    /// to either exceptional band. The necessary z-ordered frame walk is
+    /// intentionally outside this assertion.
+    #[test]
+    fn auxiliary_hit_candidates_are_flat_in_managed_window_count() {
+        let mut index = SceneIndex::default();
+        let shell_stacking = [WlShellId(1), WlShellId(2)];
+        let baseline = index.unmanaged().count() + shell_stacking.len();
+
+        for id in 1..=10_000 {
+            index.mark_presented(WlWindowId(id));
+        }
+
+        assert_eq!(index.unmanaged().count() + shell_stacking.len(), baseline);
+        assert!(index.is_presented(WlWindowId(10_000)));
+    }
+
+    /// Manual release-mode microbenchmark for issue #40. It compares
+    /// the former worst-case visibility scan (a hidden committing
+    /// window absent from a 201-frame stack) with the lifecycle index.
+    /// Kept ignored because timing is evidence, not a correctness gate;
+    /// `auxiliary_hit_candidates_are_flat_in_managed_window_count`
+    /// carries the deterministic complexity assertion above.
+    #[test]
+    #[ignore = "benchmark: cargo test -p wm-wayland --release benchmark_scene_membership_index -- --ignored --nocapture"]
+    fn benchmark_scene_membership_index() {
+        use std::hint::black_box;
+
+        const WINDOWS: u64 = 201;
+        const LOOKUPS: usize = 500_000;
+        let mut frames = HashMap::new();
+        let mut stacking = Vec::new();
+        let mut index = SceneIndex::default();
+        for id in 1..=WINDOWS {
+            let window = WlWindowId(id);
+            let frame_id = WlFrameId(id + WINDOWS);
+            frames.insert(
+                frame_id,
+                FrameRecord {
+                    window,
+                    geometry: Rect::default(),
+                    buffer: None,
+                    mapped: true,
+                },
+            );
+            stacking.push(StackEntry::Frame(frame_id));
+            index.mark_presented(window);
+        }
+        let hidden = WlWindowId(WINDOWS + 1);
+
+        let old_started = Instant::now();
+        for _ in 0..LOOKUPS {
+            let found = stacking.iter().any(|entry| match entry {
+                StackEntry::Window(candidate) => *candidate == hidden,
+                StackEntry::Frame(frame) => frames
+                    .get(frame)
+                    .is_some_and(|record| record.window == hidden && record.mapped),
+            });
+            black_box(found);
+        }
+        let old = old_started.elapsed();
+
+        let indexed_started = Instant::now();
+        for _ in 0..LOOKUPS {
+            black_box(index.is_presented(black_box(hidden)));
+        }
+        let indexed = indexed_started.elapsed();
+
+        eprintln!(
+            "{LOOKUPS} hidden-scene lookups across {WINDOWS} windows: scan={old:?}, index={indexed:?}, speedup={:.1}x",
+            old.as_secs_f64() / indexed.as_secs_f64()
+        );
     }
 
     #[test]
