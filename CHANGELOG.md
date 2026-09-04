@@ -7,6 +7,18 @@ crate and both session binaries carry the same number.
 
 ### Performance
 
+- **Idle inhibition follows the visible scene and reconciles only on its
+  edges.** A decorated toplevel stays protocol-mapped when its hidden frame is
+  parked, so checking only that mapped bit let an invisible video/player
+  suppress Omarchy's lock and suspend indefinitely. Idle policy now shares the
+  renderer's exact frame/direct-slot predicate, and protocol-inhibitor, window,
+  layer, destruction, and lock transitions invalidate one sparse pass while
+  pixel commits take a two-boolean fast path. A real self-timed client held an
+  inhibitor and a 250 ms idle notification through 30 commits, then moved via
+  Omarchy's silent-send binding: the instrumented run performed exactly three
+  reconciliations (startup, visible, parked), versus at least 32 under the
+  former once-per-dispatch path—a greater than 90% reduction—and observed the
+  idle event immediately after the window became invisible.
 - **On-screen scene assembly is allocation-stable after warm-up.** Each
   output now rebuilds its heterogeneous render-element list in retained
   storage instead of creating and dropping a fresh vector per frame. The DRM

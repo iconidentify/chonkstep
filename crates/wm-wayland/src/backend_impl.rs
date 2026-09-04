@@ -269,6 +269,7 @@ impl Backend for WaylandBackend {
             // strip is reserved or released) and renders; nothing else
             // to poke.
             self.layer_layout_dirty = true;
+            self.idle_policy_dirty = true;
             self.damage = true;
             tracing::info!(namespace, hidden, "layer surface visibility changed");
         }
@@ -852,14 +853,22 @@ impl Backend for WaylandBackend {
 
     fn map_frame(&mut self, frame: Self::FrameId) {
         if let Some(record) = self.frames.get_mut(&frame) {
+            if record.mapped {
+                return;
+            }
             record.mapped = true;
+            self.idle_policy_dirty = true;
             self.damage = true;
         }
     }
 
     fn unmap_frame(&mut self, frame: Self::FrameId) {
         if let Some(record) = self.frames.get_mut(&frame) {
+            if !record.mapped {
+                return;
+            }
             record.mapped = false;
+            self.idle_policy_dirty = true;
             self.damage = true;
         }
     }
@@ -886,8 +895,12 @@ impl Backend for WaylandBackend {
         let Some(record) = self.windows.get_mut(&window) else {
             return;
         };
+        if record.mapped {
+            return;
+        }
         record.mapped = true;
         ensure_stack_entry(&mut self.stacking, StackEntry::Window(window));
+        self.idle_policy_dirty = true;
         self.damage = true;
     }
 
@@ -897,7 +910,11 @@ impl Backend for WaylandBackend {
     /// it was left rather than flattened into map order.
     fn unmap_frameless(&mut self, window: Self::WindowId) {
         if let Some(record) = self.windows.get_mut(&window) {
+            if !record.mapped {
+                return;
+            }
             record.mapped = false;
+            self.idle_policy_dirty = true;
             self.damage = true;
         }
     }
@@ -910,7 +927,11 @@ impl Backend for WaylandBackend {
         // Wayland clients keep their buffers, so the unshade path needs
         // no repaint coaxing either.
         if let Some(record) = self.windows.get_mut(&window) {
+            if record.mapped == mapped {
+                return;
+            }
             record.mapped = mapped;
+            self.idle_policy_dirty = true;
             self.damage = true;
         }
     }

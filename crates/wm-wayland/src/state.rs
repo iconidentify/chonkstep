@@ -669,6 +669,11 @@ pub struct WaylandBackend {
     /// [`Backend`] verb; this edge carries that change to the protocol
     /// owner without making `wm-core` know about Wayland layer state.
     pub(crate) layer_layout_dirty: bool,
+    /// Whether idle inhibition must be recomputed after a scene-
+    /// visibility edge. Pixel-only commits deliberately leave this
+    /// clear; map, workspace, layer-policy, destruction, and lock
+    /// transitions set it. Consumed by `idle::refresh`.
+    pub(crate) idle_policy_dirty: bool,
     /// Whether an ext-session-lock holds the session. THE flag the
     /// renderer and the input path branch on: while set, only
     /// [`WaylandBackend::lock_surfaces`] render and receive input —
@@ -781,6 +786,7 @@ impl WaylandBackend {
             layers: Vec::new(),
             hidden_layer_namespaces: std::collections::BTreeSet::new(),
             layer_layout_dirty: true,
+            idle_policy_dirty: true,
             locked: false,
             lock_surfaces: Vec::new(),
             ewmh: crate::xewmh::EwmhLedger::default(),
@@ -801,18 +807,14 @@ impl WaylandBackend {
         self.pending.push_back(event);
     }
 
-    /// Marks the scene dirty. Every mutating verb and every handler
-    /// that changes anything visible must call this (or set the field)
-    /// or its change waits for the next unrelated damage to appear.
     /// Whether a layer surface is one the user can see and click right
     /// now: mapped, still alive, and neither declined by policy
     /// ([`crate::layers::declined`]) nor hidden by the shell
     /// ([`Self::hidden_layer_namespaces`]). The renderer, the hit walk,
     /// the exclusive-zone pass and the keyboard-focus pass all ask this
     /// and nothing else, so a surface can never be drawn where it cannot
-    /// be clicked, or reserve a strip it does not occupy. Frame
-    /// callbacks deliberately do *not* ask it — a hidden surface's
-    /// client still gets its frames, or it would stall waiting for one.
+    /// be clicked, reserve a strip it does not occupy, or receive an
+    /// animation callback for pixels that were not presented.
     pub(crate) fn layer_presented(&self, record: &crate::layers::LayerRecord) -> bool {
         record.mapped
             && record.surface.alive()
@@ -820,8 +822,23 @@ impl WaylandBackend {
             && !self.hidden_layer_namespaces.contains(&record.namespace)
     }
 
+    /// Marks the scene dirty. Every mutating verb and every handler
+    /// that changes anything visible must call this (or set the field)
+    /// or its change waits for the next unrelated damage to appear.
     pub(crate) fn mark_damaged(&mut self) {
         self.damage = true;
+    }
+
+    /// Records that the answer to "may the session idle?" can have
+    /// changed. Kept separate from pixel damage so an animated client
+    /// does not make the idle protocol rescan ownership at frame rate.
+    pub(crate) fn mark_idle_policy_dirty(&mut self) {
+        self.idle_policy_dirty = true;
+    }
+
+    /// Consumes one idle-policy invalidation edge.
+    pub(crate) fn take_idle_policy_dirty(&mut self) -> bool {
+        std::mem::take(&mut self.idle_policy_dirty)
     }
 
     /// Ends whatever drag grab is in flight and asks the seat to hand
@@ -951,7 +968,9 @@ impl WaylandBackend {
     /// growing the stack by one dead slot per client-decorated window
     /// the session ever opened.
     pub(crate) fn forget_window(&mut self, window: WlWindowId) {
-        self.windows.remove(&window);
+        if self.windows.remove(&window).is_some() {
+            self.mark_idle_policy_dirty();
+        }
         self.surface_windows.retain(|_, indexed| *indexed != window);
         self.stacking.retain(|entry| !matches!(entry, StackEntry::Window(w) if *w == window));
         // Same collection duty for the pending EWMH properties: keyed

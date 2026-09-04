@@ -212,6 +212,7 @@ impl SessionLockHandler for Compositor {
                 self.session_lock.pending_ack = Some(confirmation);
                 let backend = self.wm.backend_mut();
                 backend.locked = true;
+                backend.mark_idle_policy_dirty();
                 // A recovering locker inherits no surfaces from the
                 // dead one.
                 backend.lock_surfaces.clear();
@@ -245,6 +246,7 @@ impl SessionLockHandler for Compositor {
         self.session_lock.holder = None;
         let backend = self.wm.backend_mut();
         backend.locked = false;
+        backend.mark_idle_policy_dirty();
         // The ledger forgets the lock's surfaces and NOTHING else is
         // written to them: no configure, no unmap, no destroy. The
         // client owns their teardown and is already performing it (the

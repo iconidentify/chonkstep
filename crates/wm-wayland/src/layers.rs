@@ -569,11 +569,18 @@ fn plan_surface(
         },
     );
     let record = &mut backend.layers[index];
+    let layer_changed = record.layer != cached.layer;
     record.layer = cached.layer;
     record.interactivity = cached.keyboard_interactivity;
     if record.geometry != geometry {
         record.geometry = geometry;
         backend.damage = true;
+    }
+    if layer_changed {
+        // `declined` is a function of layer + namespace, so a client
+        // moving between bands can enter or leave the visible scene
+        // without changing its mapped bit.
+        backend.idle_policy_dirty = true;
     }
     let surface = backend.layers[index].surface.clone();
     surface.with_pending_state(|state| {
@@ -777,7 +784,9 @@ pub(crate) fn handle_commit(comp: &mut Compositor, root: &WlSurface) -> bool {
     };
     if let Some(namespace) = transition {
         comp.shell.set_layer_namespace_active(comp.wm.backend_mut(), &namespace, has_buffer);
-        comp.wm.backend_mut().mark_damaged();
+        let backend = comp.wm.backend_mut();
+        backend.mark_idle_policy_dirty();
+        backend.mark_damaged();
     }
     // Whether this was the blocked initial commit or a later one, the
     // full pass answers it: the initial configure goes out (the send

@@ -37,8 +37,10 @@
 //!
 //! `chonk-fullscreen-probe [title] [app-id] [animation-mode]` — then drive it
 //! with injected keys through the test door, on the window once it has
-//! keyboard focus. `animation-mode` is `animate` for a self-timed producer or
-//! `animate-frame` for a conventional `wl_surface.frame`-paced one:
+//! keyboard focus. `animation-mode` is `animate` for a self-timed producer,
+//! `animate-frame` for a conventional `wl_surface.frame`-paced one, or
+//! `animate-inhibit-idle` for a self-timed producer which also binds the idle
+//! inhibitor and notification protocols:
 //!
 //! | key | evdev | meaning |
 //! |---|---|---|
@@ -77,6 +79,16 @@ use wayland_protocols::xdg::shell::client::{
     xdg_surface::{self, XdgSurface},
     xdg_toplevel::{self, XdgToplevel},
     xdg_wm_base::{self, XdgWmBase},
+};
+use wayland_protocols::{
+    ext::idle_notify::v1::client::{
+        ext_idle_notification_v1::{self, ExtIdleNotificationV1},
+        ext_idle_notifier_v1::ExtIdleNotifierV1,
+    },
+    wp::idle_inhibit::zv1::client::{
+        zwp_idle_inhibit_manager_v1::ZwpIdleInhibitManagerV1,
+        zwp_idle_inhibitor_v1::ZwpIdleInhibitorV1,
+    },
 };
 
 /// evdev `KEY_F`: the page's fullscreen control.
@@ -126,6 +138,8 @@ struct Probe {
     shm: Option<wl_shm::WlShm>,
     wm_base: Option<XdgWmBase>,
     seat: Option<wl_seat::WlSeat>,
+    idle_notifier: Option<ExtIdleNotifierV1>,
+    idle_inhibit_manager: Option<ZwpIdleInhibitManagerV1>,
     surface: Option<WlSurface>,
     toplevel: Option<XdgToplevel>,
     /// The size the compositor's latest configure asked for, or
@@ -150,6 +164,10 @@ struct Probe {
     frame_ready: bool,
     /// Exact callback count, reported for pacing regressions.
     frame_callbacks: u64,
+    /// Held for the lifetime of `inhibit-idle` mode.
+    idle_inhibitor: Option<ZwpIdleInhibitorV1>,
+    /// Reports the compositor's real idle decision to the harness.
+    idle_notification: Option<ExtIdleNotificationV1>,
 }
 
 impl Probe {
@@ -223,6 +241,12 @@ impl Dispatch<wl_registry::WlRegistry, ()> for Probe {
                 "wl_shm" => probe.shm = Some(registry.bind(name, 1, qh, ())),
                 "xdg_wm_base" => probe.wm_base = Some(registry.bind(name, version.min(3), qh, ())),
                 "wl_seat" => probe.seat = Some(registry.bind(name, version.min(7), qh, ())),
+                "ext_idle_notifier_v1" => {
+                    probe.idle_notifier = Some(registry.bind(name, version.min(2), qh, ()))
+                }
+                "zwp_idle_inhibit_manager_v1" => {
+                    probe.idle_inhibit_manager = Some(registry.bind(name, 1, qh, ()))
+                }
                 _ => {}
             }
         }
@@ -375,6 +399,23 @@ impl Dispatch<wl_callback::WlCallback, ()> for Probe {
     }
 }
 
+impl Dispatch<ExtIdleNotificationV1, ()> for Probe {
+    fn event(
+        _: &mut Self,
+        _: &ExtIdleNotificationV1,
+        event: ext_idle_notification_v1::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        match event {
+            ext_idle_notification_v1::Event::Idled => say("idle state=idled"),
+            ext_idle_notification_v1::Event::Resumed => say("idle state=resumed"),
+            _ => {}
+        }
+    }
+}
+
 macro_rules! ignore_events {
     ($($t:ty),*) => {$(
         impl Dispatch<$t, ()> for Probe {
@@ -383,7 +424,16 @@ macro_rules! ignore_events {
         }
     )*};
 }
-ignore_events!(WlCompositor, wl_shm::WlShm, wl_shm_pool::WlShmPool, WlBuffer, WlSurface);
+ignore_events!(
+    WlCompositor,
+    wl_shm::WlShm,
+    wl_shm_pool::WlShmPool,
+    WlBuffer,
+    WlSurface,
+    ExtIdleNotifierV1,
+    ZwpIdleInhibitManagerV1,
+    ZwpIdleInhibitorV1
+);
 
 /// A sealed-off scratch file holding one solid frame for the `wl_shm`
 /// pool. Unlinked at once: the fd is the only handle.
@@ -418,8 +468,9 @@ fn main() {
     let title = args.next().unwrap_or_else(|| "chonk-fullscreen-probe".to_string());
     let app_id = args.next().unwrap_or_else(|| "chonk-fullscreen-probe".to_string());
     let animation = args.next();
-    let self_timed = animation.as_deref() == Some("animate");
+    let self_timed = matches!(animation.as_deref(), Some("animate" | "animate-inhibit-idle"));
     let frame_driven = animation.as_deref() == Some("animate-frame");
+    let inhibit_idle = matches!(animation.as_deref(), Some("inhibit-idle" | "animate-inhibit-idle"));
 
     let connection = Connection::connect_to_env()
         .unwrap_or_else(|error| fatal(&format!("no wayland display: {error}")));
@@ -481,6 +532,17 @@ fn main() {
                 probe.frame_pending = true;
             }
             surface.commit();
+            if inhibit_idle && probe.idle_inhibitor.is_none() {
+                let manager = probe
+                    .idle_inhibit_manager
+                    .as_ref()
+                    .unwrap_or_else(|| fatal("no zwp_idle_inhibit_manager_v1"));
+                let notifier = probe.idle_notifier.as_ref().unwrap_or_else(|| fatal("no ext_idle_notifier_v1"));
+                let seat = probe.seat.as_ref().unwrap_or_else(|| fatal("no wl_seat"));
+                probe.idle_inhibitor = Some(manager.create_inhibitor(&surface, &qh, ()));
+                probe.idle_notification = Some(notifier.get_idle_notification(250, seat, &qh, ()));
+                say("idle inhibition armed");
+            }
             pool.destroy();
             attached = probe.size;
             probe.dirty = false;

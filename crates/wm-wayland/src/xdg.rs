@@ -416,7 +416,12 @@ impl CompositorHandler for Compositor {
         for entry in &self.outputs {
             entry.output.cleanup();
         }
-        self.wm.backend_mut().forget_surface(surface);
+        let backend = self.wm.backend_mut();
+        backend.forget_surface(surface);
+        // The surface may own an idle inhibitor (including as a
+        // subsurface) or be a layer root. Re-evaluate once after the
+        // destruction instead of polling every live surface forever.
+        backend.mark_idle_policy_dirty();
     }
 
     fn commit(&mut self, surface: &WlSurface) {
@@ -551,8 +556,8 @@ impl Compositor {
     /// current workspace, a client-decorated one owns a direct stacking
     /// slot, popups inherit their toplevel's visibility, hidden/declined
     /// layer surfaces do not paint, and a locked session contains only
-    /// lock, cursor, and input-method surfaces. Keeping the predicate
-    /// The commit handler resolves both arguments once and reuses them
+    /// lock, cursor, and input-method surfaces. The commit handler
+    /// resolves both arguments once and reuses them
     /// for scale and role handling too; keeping the predicate beside it
     /// makes this the admission gate for the hottest damage source
     /// without teaching the renderer about protocol callbacks.
@@ -773,7 +778,7 @@ impl Compositor {
 /// The window half of [`Compositor::resolved_surface_affects_scene`],
 /// factored so the exact renderer stacking rules are visible in one
 /// short walk.
-fn window_is_in_scene(backend: &WaylandBackend, window: WlWindowId) -> bool {
+pub(crate) fn window_is_in_scene(backend: &WaylandBackend, window: WlWindowId) -> bool {
     let Some(record) = backend.windows.get(&window) else {
         return false;
     };

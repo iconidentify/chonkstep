@@ -14,13 +14,18 @@
 //! idle-inhibit rides along because smithay's delegate makes it two
 //! callbacks: a client showing a video creates an inhibitor on its
 //! surface, and while that surface is visible the idle timers pause.
-//! "Visible" is judged from indexed ownership each pass ([`refresh`]):
-//! the inhibiting surface's window (or layer surface) is mapped and the
-//! session is not locked — an inhibitor must not keep the screen awake
-//! from behind a lock screen, and a dead or unmapped surface's
-//! inhibition ends whether or not its client remembered to destroy the
-//! inhibitor (the spec explicitly leaves ignoring invisible inhibitors
-//! to the compositor).
+//! "Visible" is judged from indexed ownership after relevant scene
+//! edges ([`refresh`]): the inhibiting surface's window (or layer
+//! surface) must belong to the renderer's current stack, and the
+//! session must not be locked. An inhibitor therefore cannot keep the
+//! screen awake from behind a lock screen, and a dead or parked
+//! surface's inhibition ends whether or not its client remembered to
+//! destroy the inhibitor (the spec explicitly leaves ignoring
+//! invisible inhibitors to the compositor).
+//!
+//! `CHONKSTEP_IDLE_LOG=1` names each actual policy reconciliation. It
+//! is deliberately edge-oriented telemetry: a busy client that changes
+//! only pixels should produce no lines after the initial map.
 
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::utils::IsAlive;
@@ -38,13 +43,16 @@ pub(crate) struct Idle {
     /// never consulted again.
     pub _inhibit: IdleInhibitManagerState,
     /// Surfaces with a live `zwp_idle_inhibitor_v1`. Liveness and
-    /// visibility are judged per pass in [`refresh`], not here.
+    /// visibility are judged after invalidation in [`refresh`].
     pub inhibitors: Vec<WlSurface>,
+    /// A protocol inhibitor was added or removed. Window/layer/lock
+    /// visibility edges carry their own flag on `WaylandBackend`.
+    inhibitors_dirty: bool,
 }
 
 impl Idle {
     pub(crate) fn new(notifier: IdleNotifierState<Compositor>, inhibit: IdleInhibitManagerState) -> Self {
-        Self { notifier, _inhibit: inhibit, inhibitors: Vec::new() }
+        Self { notifier, _inhibit: inhibit, inhibitors: Vec::new(), inhibitors_dirty: true }
     }
 }
 
@@ -57,10 +65,13 @@ impl IdleNotifierHandler for Compositor {
 impl IdleInhibitHandler for Compositor {
     fn inhibit(&mut self, surface: WlSurface) {
         self.idle.inhibitors.push(surface);
+        self.idle.inhibitors_dirty = true;
     }
 
     fn uninhibit(&mut self, surface: WlSurface) {
+        let before = self.idle.inhibitors.len();
         self.idle.inhibitors.retain(|held| *held != surface);
+        self.idle.inhibitors_dirty |= self.idle.inhibitors.len() != before;
     }
 }
 
@@ -76,11 +87,17 @@ pub(crate) fn note_activity(comp: &mut Compositor) {
     comp.idle.notifier.notify_activity(&seat);
 }
 
-/// Recomputes whether idling is inhibited, once per dispatch pass.
-/// `set_is_inhibited` is a no-op on an unchanged answer. The steady
-/// state walks only two sparse sets: windows whose rules explicitly
-/// inhibit idle, and protocol inhibitor surfaces.
+/// Recomputes whether idling is inhibited after a protocol or scene-
+/// visibility edge. Pixel commits and unrelated dispatches take two
+/// booleans and return; an invalidated pass walks only two sparse sets:
+/// windows whose rules explicitly inhibit idle, and protocol inhibitor
+/// surfaces.
 pub(crate) fn refresh(comp: &mut Compositor) {
+    let inhibitors_changed = std::mem::take(&mut comp.idle.inhibitors_dirty);
+    let visibility_changed = comp.wm.backend_mut().take_idle_policy_dirty();
+    if !inhibitors_changed && !visibility_changed {
+        return;
+    }
     comp.idle.inhibitors.retain(IsAlive::alive);
     let inhibited = !comp.wm.backend().locked && {
         let rule_inhibited = comp.wm.rule_idle_inhibited();
@@ -88,6 +105,18 @@ pub(crate) fn refresh(comp: &mut Compositor) {
         rule_inhibited || comp.idle.inhibitors.iter().any(|surface| surface_visible(backend, surface))
     };
     comp.idle.notifier.set_is_inhibited(inhibited);
+    if idle_log_enabled() {
+        tracing::info!(
+            inhibited,
+            protocol_inhibitors = comp.idle.inhibitors.len(),
+            "idle policy reconciled"
+        );
+    }
+}
+
+fn idle_log_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("CHONKSTEP_IDLE_LOG").is_some_and(|value| value != "0"))
 }
 
 /// Whether the window or layer surface owning `surface` is mapped.
@@ -98,11 +127,10 @@ fn surface_visible(backend: &WaylandBackend, surface: &WlSurface) -> bool {
     while let Some(parent) = get_parent(&root) {
         root = parent;
     }
-    let window_mapped = backend
+    let window_presented = backend
         .window_for_surface(&root)
-        .and_then(|window| backend.windows.get(&window))
-        .is_some_and(|record| record.mapped);
+        .is_some_and(|window| crate::xdg::window_is_in_scene(backend, window));
     let layer_mapped =
         backend.layers.iter().any(|record| backend.layer_presented(record) && *record.surface.wl_surface() == root);
-    window_mapped || layer_mapped
+    window_presented || layer_mapped
 }
