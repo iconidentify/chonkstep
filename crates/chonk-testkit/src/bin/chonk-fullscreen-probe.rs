@@ -40,7 +40,9 @@
 //! keyboard focus. `animation-mode` is `animate` for a self-timed producer,
 //! `animate-frame` for a conventional `wl_surface.frame`-paced one, or
 //! `animate-inhibit-idle` for a self-timed producer which also binds the idle
-//! inhibitor and notification protocols. `absurd-geometry` instead declares
+//! inhibitor and notification protocols. `animate-duplicate-inhibit-idle`
+//! creates two inhibitors on that surface and destroys exactly one, exercising
+//! per-object removal. `absurd-geometry` instead declares
 //! a hostile 600-million-pixel-wide xdg window geometry while committing the
 //! ordinary 400x300 buffer; the compositor-survival E2E uses that mode:
 //!
@@ -91,6 +93,15 @@ use wayland_protocols::{
         zwp_idle_inhibit_manager_v1::ZwpIdleInhibitManagerV1,
         zwp_idle_inhibitor_v1::ZwpIdleInhibitorV1,
     },
+    wp::text_input::zv3::client::{
+        zwp_text_input_manager_v3::ZwpTextInputManagerV3,
+        zwp_text_input_v3::{self, ZwpTextInputV3},
+    },
+};
+use wayland_protocols_misc::zwp_input_method_v2::client::{
+    zwp_input_method_manager_v2::ZwpInputMethodManagerV2,
+    zwp_input_method_v2::{self, ZwpInputMethodV2},
+    zwp_input_popup_surface_v2::ZwpInputPopupSurfaceV2,
 };
 
 /// evdev `KEY_F`: the page's fullscreen control.
@@ -142,6 +153,8 @@ struct Probe {
     seat: Option<wl_seat::WlSeat>,
     idle_notifier: Option<ExtIdleNotifierV1>,
     idle_inhibit_manager: Option<ZwpIdleInhibitManagerV1>,
+    text_input_manager: Option<ZwpTextInputManagerV3>,
+    input_method_manager: Option<ZwpInputMethodManagerV2>,
     surface: Option<WlSurface>,
     toplevel: Option<XdgToplevel>,
     /// The size the compositor's latest configure asked for, or
@@ -170,6 +183,15 @@ struct Probe {
     idle_inhibitor: Option<ZwpIdleInhibitorV1>,
     /// Reports the compositor's real idle decision to the harness.
     idle_notification: Option<ExtIdleNotificationV1>,
+    text_input: Option<ZwpTextInputV3>,
+    input_method: Option<ZwpInputMethodV2>,
+    text_input_entered: bool,
+    text_input_enabled: bool,
+    input_method_active: bool,
+    ime_popups_requested: bool,
+    /// Keep both the surfaces and their role objects alive so only the
+    /// compositor's cap, not client-side destruction, bounds the test.
+    ime_popups: Vec<(WlSurface, ZwpInputPopupSurfaceV2)>,
 }
 
 impl Probe {
@@ -248,6 +270,12 @@ impl Dispatch<wl_registry::WlRegistry, ()> for Probe {
                 }
                 "zwp_idle_inhibit_manager_v1" => {
                     probe.idle_inhibit_manager = Some(registry.bind(name, 1, qh, ()))
+                }
+                "zwp_text_input_manager_v3" => {
+                    probe.text_input_manager = Some(registry.bind(name, 1, qh, ()))
+                }
+                "zwp_input_method_manager_v2" => {
+                    probe.input_method_manager = Some(registry.bind(name, 1, qh, ()))
                 }
                 _ => {}
             }
@@ -418,6 +446,40 @@ impl Dispatch<ExtIdleNotificationV1, ()> for Probe {
     }
 }
 
+impl Dispatch<ZwpTextInputV3, ()> for Probe {
+    fn event(
+        probe: &mut Self,
+        _: &ZwpTextInputV3,
+        event: zwp_text_input_v3::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        match event {
+            zwp_text_input_v3::Event::Enter { .. } => probe.text_input_entered = true,
+            zwp_text_input_v3::Event::Leave { .. } => probe.text_input_entered = false,
+            _ => {}
+        }
+    }
+}
+
+impl Dispatch<ZwpInputMethodV2, ()> for Probe {
+    fn event(
+        probe: &mut Self,
+        _: &ZwpInputMethodV2,
+        event: zwp_input_method_v2::Event,
+        _: &(),
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        match event {
+            zwp_input_method_v2::Event::Activate => probe.input_method_active = true,
+            zwp_input_method_v2::Event::Deactivate => probe.input_method_active = false,
+            _ => {}
+        }
+    }
+}
+
 macro_rules! ignore_events {
     ($($t:ty),*) => {$(
         impl Dispatch<$t, ()> for Probe {
@@ -434,7 +496,10 @@ ignore_events!(
     WlSurface,
     ExtIdleNotifierV1,
     ZwpIdleInhibitManagerV1,
-    ZwpIdleInhibitorV1
+    ZwpIdleInhibitorV1,
+    ZwpTextInputManagerV3,
+    ZwpInputMethodManagerV2,
+    ZwpInputPopupSurfaceV2
 );
 
 /// A sealed-off scratch file holding one solid frame for the `wl_shm`
@@ -470,9 +535,17 @@ fn main() {
     let title = args.next().unwrap_or_else(|| "chonk-fullscreen-probe".to_string());
     let app_id = args.next().unwrap_or_else(|| "chonk-fullscreen-probe".to_string());
     let animation = args.next();
-    let self_timed = matches!(animation.as_deref(), Some("animate" | "animate-inhibit-idle"));
+    let duplicate_inhibit = animation.as_deref() == Some("animate-duplicate-inhibit-idle");
+    let ime_popup_flood = animation.as_deref() == Some("ime-popup-flood");
+    let self_timed = matches!(
+        animation.as_deref(),
+        Some("animate" | "animate-inhibit-idle" | "animate-duplicate-inhibit-idle")
+    );
     let frame_driven = animation.as_deref() == Some("animate-frame");
-    let inhibit_idle = matches!(animation.as_deref(), Some("inhibit-idle" | "animate-inhibit-idle"));
+    let inhibit_idle = matches!(
+        animation.as_deref(),
+        Some("inhibit-idle" | "animate-inhibit-idle" | "animate-duplicate-inhibit-idle")
+    );
     let absurd_geometry = animation.as_deref() == Some("absurd-geometry");
 
     let connection = Connection::connect_to_env()
@@ -485,6 +558,22 @@ fn main() {
     queue
         .roundtrip(&mut probe)
         .unwrap_or_else(|error| fatal(&format!("registry roundtrip: {error}")));
+
+    if ime_popup_flood {
+        let seat = probe.seat.as_ref().unwrap_or_else(|| fatal("no wl_seat"));
+        let input_method_manager = probe
+            .input_method_manager
+            .as_ref()
+            .unwrap_or_else(|| fatal("no zwp_input_method_manager_v2"));
+        let text_input_manager = probe
+            .text_input_manager
+            .as_ref()
+            .unwrap_or_else(|| fatal("no zwp_text_input_manager_v3"));
+        // Create both before the window maps. Its ensuing keyboard-focus
+        // edge then gives text-input the parent surface every popup needs.
+        probe.input_method = Some(input_method_manager.get_input_method(seat, &qh, ()));
+        probe.text_input = Some(text_input_manager.get_text_input(seat, &qh, ()));
+    }
 
     let compositor = probe.compositor.clone().unwrap_or_else(|| fatal("no wl_compositor"));
     let wm_base = probe.wm_base.clone().unwrap_or_else(|| fatal("no xdg_wm_base"));
@@ -550,13 +639,41 @@ fn main() {
                     .unwrap_or_else(|| fatal("no zwp_idle_inhibit_manager_v1"));
                 let notifier = probe.idle_notifier.as_ref().unwrap_or_else(|| fatal("no ext_idle_notifier_v1"));
                 let seat = probe.seat.as_ref().unwrap_or_else(|| fatal("no wl_seat"));
-                probe.idle_inhibitor = Some(manager.create_inhibitor(&surface, &qh, ()));
+                let first = manager.create_inhibitor(&surface, &qh, ());
+                if duplicate_inhibit {
+                    probe.idle_inhibitor = Some(manager.create_inhibitor(&surface, &qh, ()));
+                    first.destroy();
+                    say("one duplicate idle inhibitor destroyed");
+                } else {
+                    probe.idle_inhibitor = Some(first);
+                }
                 probe.idle_notification = Some(notifier.get_idle_notification(250, seat, &qh, ()));
                 say("idle inhibition armed");
             }
             pool.destroy();
             attached = probe.size;
             probe.dirty = false;
+        }
+
+        if ime_popup_flood && probe.text_input_entered && !probe.text_input_enabled {
+            let text_input = probe.text_input.as_ref().unwrap();
+            text_input.enable();
+            text_input.commit();
+            probe.text_input_enabled = true;
+            connection.flush().unwrap_or_else(|error| fatal(&format!("enabling text input: {error}")));
+        }
+        if ime_popup_flood && probe.input_method_active && !probe.ime_popups_requested {
+            let input_method = probe.input_method.as_ref().unwrap();
+            for _ in 0..32 {
+                let popup_surface = compositor.create_surface(&qh, ());
+                let role = input_method.get_input_popup_surface(&popup_surface, &qh, ());
+                probe.ime_popups.push((popup_surface, role));
+            }
+            probe.ime_popups_requested = true;
+            queue
+                .roundtrip(&mut probe)
+                .unwrap_or_else(|error| fatal(&format!("creating IME popups: {error}")));
+            say("32 input-method popups requested");
         }
 
         if self_timed {

@@ -7,6 +7,13 @@ crate and both session binaries carry the same number.
 
 ### Fixed
 
+- **Protocol-object teardown now removes every hot-path ledger entry it
+  created.** Input-method popups and idle inhibitors are bounded and
+  pruned on object or client destruction, same-surface idle inhibitors
+  retain per-object reference counts, and session-lock surfaces are
+  removed with their `wl_surface`. A second lock surface for one physical
+  output is refused even when a distinct `wl_output` resource names it
+  ([#96](https://github.com/iconidentify/chonkstep/issues/96)).
 - **Crash recovery can no longer resurrect an unlocked desktop.** The
   Omarchy posture now resolves its shipped `omarchy-system-lock` entry
   point while an explicit `lock_command` remains authoritative. A

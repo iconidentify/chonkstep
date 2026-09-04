@@ -526,18 +526,29 @@ impl CompositorHandler for Compositor {
         for entry in &self.outputs {
             entry.output.cleanup();
         }
-        let was_lock_surface = self.wm.backend().locked
-            && self
-                .wm
-                .backend()
-                .lock_surfaces
-                .iter()
-                .any(|entry| entry.surface.wl_surface() == surface);
+        // idle-inhibit's smithay handler has no object-destroy callback;
+        // client disconnect reaches us through the inhibited wl_surface
+        // instead. Removing the whole refcount entry is correct because
+        // every inhibitor for this now-dead surface dies with it.
+        self.idle.surface_destroyed(surface);
+        let was_lock_surface = self
+            .wm
+            .backend()
+            .lock_surfaces
+            .iter()
+            .any(|entry| entry.surface.wl_surface() == surface);
         if was_lock_surface {
             self.session_lock.mark_dirty();
         }
         self.focus_grab.surface_destroyed(surface);
         let backend = self.wm.backend_mut();
+        let ime_before = backend.ime_popups.len();
+        backend.ime_popups.retain(|popup| popup.wl_surface() != surface);
+        let lock_before = backend.lock_surfaces.len();
+        backend.lock_surfaces.retain(|entry| entry.surface.wl_surface() != surface);
+        if backend.ime_popups.len() != ime_before || backend.lock_surfaces.len() != lock_before {
+            backend.mark_damaged();
+        }
         backend.forget_surface(surface);
         // The surface may own an idle inhibitor (including as a
         // subsurface) or be a layer root. Re-evaluate once after the

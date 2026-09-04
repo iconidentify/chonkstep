@@ -1039,6 +1039,15 @@ pub struct ProtocolPublishes {
     pub foreign_drag: u64,
 }
 
+/// Entries retained by compositor protocol ledgers that participate in
+/// rendering, hit-testing, or idle-policy walks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ProtocolLedgers {
+    pub ime: usize,
+    pub idle: usize,
+    pub lock: usize,
+}
+
 impl Door {
     fn unconnected() -> Door {
         Door { stream: None }
@@ -1155,6 +1164,24 @@ impl Door {
         line.strip_prefix("activation-tokens ")
             .and_then(|value| value.parse().ok())
             .ok_or_else(|| format!("unexpected activation-token reply: {line}"))
+    }
+
+    /// Live objects retained in the three bounded lifecycle ledgers.
+    /// Idle is an object count (not merely distinct surfaces), so a test
+    /// can observe that destroying one duplicate decremented exactly one.
+    pub fn protocol_ledgers(&mut self) -> Result<ProtocolLedgers, String> {
+        self.send("protocol-ledgers")?;
+        let line = self.read_line()?;
+        if !line.starts_with("protocol-ledgers ") {
+            return Err(format!("unexpected protocol-ledgers reply: {line}"));
+        }
+        Ok(ProtocolLedgers {
+            ime: field(&line, "ime=").ok_or_else(|| format!("protocol-ledgers reply has no IME count: {line}"))?,
+            idle: field(&line, "idle=")
+                .ok_or_else(|| format!("protocol-ledgers reply has no idle count: {line}"))?,
+            lock: field(&line, "lock=")
+                .ok_or_else(|| format!("protocol-ledgers reply has no lock count: {line}"))?,
+        })
     }
 
     /// Number of protocol snapshots/synchronizations attempted so far.

@@ -45,6 +45,9 @@ wayland-protocols-wlr = { version = "0.3", features = ["client"] }
 # server side (smithay) already pulls; only the `client`+`staging`
 # features are new.
 wayland-protocols = { version = "0.32", features = ["client", "staging", "unstable"] }
+# input-method-v2 is intentionally still a misc protocol. The popup
+# ledger abuse probe binds its generated client API directly.
+wayland-protocols-misc = { version = "0.3", features = ["client"] }
 # Client code for chonkstep's two vendored Hyprland protocols is
 # generated from the exact XML the compositor builds against. Keeping
 # the probe and server on one source makes a protocol drift a compile

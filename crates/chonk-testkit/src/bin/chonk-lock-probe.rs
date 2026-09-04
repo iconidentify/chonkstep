@@ -116,6 +116,9 @@ struct Probe {
     compositor: Option<WlCompositor>,
     shm: Option<wl_shm::WlShm>,
     output: Option<WlOutput>,
+    /// A second binding of the same global: a distinct protocol
+    /// resource that must still name the same physical output.
+    duplicate_output: Option<WlOutput>,
     seat: Option<WlSeat>,
     layer_shell: Option<ZwlrLayerShellV1>,
     lock_manager: Option<ExtSessionLockManagerV1>,
@@ -136,6 +139,9 @@ struct Probe {
     lock_finished: bool,
     /// A frame callback on the bar came back.
     frame_done: bool,
+    /// Any pressed key advances the duplicate-output test after the
+    /// harness has inspected the one-surface ledger.
+    duplicate_requested: bool,
 }
 
 impl Dispatch<wl_registry::WlRegistry, ()> for Probe {
@@ -153,7 +159,8 @@ impl Dispatch<wl_registry::WlRegistry, ()> for Probe {
                 "wl_shm" => probe.shm = Some(registry.bind(name, 1, qh, ())),
                 // The first output is the nested session's only one.
                 "wl_output" if probe.output.is_none() => {
-                    probe.output = Some(registry.bind(name, version.min(4), qh, ()))
+                    probe.output = Some(registry.bind(name, version.min(4), qh, ()));
+                    probe.duplicate_output = Some(registry.bind(name, version.min(4), qh, ()))
                 }
                 "wl_seat" if probe.seat.is_none() => {
                     probe.seat = Some(registry.bind(name, version.min(5), qh, ()))
@@ -261,6 +268,9 @@ impl Dispatch<WlKeyboard, ()> for Probe {
                 if probe.keyboard_on == Some(surface.id().protocol_id()) =>
             {
                 probe.keyboard_on = None;
+            }
+            wl_keyboard::Event::Key { state: wayland_client::WEnum::Value(wl_keyboard::KeyState::Pressed), .. } => {
+                probe.duplicate_requested = true;
             }
             // The keymap arrives as a file descriptor this probe has no
             // use for; letting it drop closes it.
@@ -476,6 +486,7 @@ fn main() {
     // the switch is a flag.
     let hold = std::env::args().any(|arg| arg == "--hold");
     let recovery_hold = std::env::args().any(|arg| arg == "--recovery-hold");
+    let duplicate_output_test = std::env::args().any(|arg| arg == "--duplicate-output");
     let conn = Connection::connect_to_env().unwrap_or_else(|e| fatal(&format!("no compositor: {e}")));
     let mut queue = conn.new_event_queue();
     let qh = queue.handle();
@@ -485,6 +496,7 @@ fn main() {
     if probe.compositor.is_none()
         || probe.shm.is_none()
         || probe.output.is_none()
+        || probe.duplicate_output.is_none()
         || probe.seat.is_none()
         || probe.layer_shell.is_none()
         || probe.lock_manager.is_none()
@@ -552,6 +564,30 @@ fn main() {
     let kept_wl_surface = compositor.create_surface(&qh, ());
     let (held, (w, h)) = lock_and_draw(&conn, &mut queue, &mut probe, &qh, &kept_wl_surface);
     println!("locked {w}x{h}");
+
+    // The protocol resource is not the output identity. Pause at one
+    // live surface so the harness can inspect the ledger, then request
+    // another through a second binding of the same wl_output global.
+    if duplicate_output_test {
+        println!("ready for duplicate output request");
+        let _ = std::io::stdout().flush();
+        dispatch_until(&conn, &mut queue, &mut probe, "the duplicate-output trigger key", |p| {
+            p.duplicate_requested
+        });
+        let duplicate_surface = compositor.create_surface(&qh, ());
+        let duplicate_output = probe.duplicate_output.clone().unwrap();
+        held.lock.get_lock_surface(&duplicate_surface, &duplicate_output, &qh, ());
+        println!("duplicate output request sent");
+        let _ = std::io::stdout().flush();
+        match queue.roundtrip(&mut probe) {
+            Err(error) => {
+                println!("duplicate output refused: {error}");
+                let _ = std::io::stdout().flush();
+                return;
+            }
+            Ok(_) => fatal("a second wl_output binding bypassed physical-output lock dedupe"),
+        }
+    }
 
     // -- `--hold`: stop here, still locked ------------------------------
     // The holder half of the bypass e2e. Everything below this point

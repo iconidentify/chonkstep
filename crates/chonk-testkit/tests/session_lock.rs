@@ -51,7 +51,7 @@
 //! in, so `#[ignore]`d; run with `scripts/e2e.sh` or
 //! `cargo test -p chonk-testkit -- --ignored --test-threads=1`.
 
-use chonk_testkit::{poll_until, profile_binary, Session, SessionOptions};
+use chonk_testkit::{keys, poll_until, profile_binary, Session, SessionOptions};
 use std::time::Duration;
 
 /// The probe's captured stdout/stderr — checkpoint lines, and on a
@@ -141,6 +141,38 @@ fn a_lockers_other_surfaces_survive_the_unlock_teardown() {
     assert!(!log.contains("connection broke"), "the probe reported a broken connection:\n{log}");
     assert!(session.compositor_alive(), "the compositor must outlive all three cycles");
     session.kill_client("chonk-lock-probe");
+}
+
+#[test]
+#[ignore = "needs a live Wayland session to nest in: scripts/e2e.sh, or cargo test -p chonk-testkit -- --ignored --test-threads=1"]
+fn a_second_output_resource_cannot_cover_one_physical_output_twice() {
+    let mut session = Session::boot(
+        "session-lock-duplicate-output",
+        SessionOptions { scale: Some(1.0), ..Default::default() },
+    )
+    .unwrap();
+    let probe = profile_binary("chonk-lock-probe").expect("cargo build -p chonk-testkit builds the probe");
+    session
+        .launch(probe.to_str().unwrap(), &["--duplicate-output"])
+        .expect("the duplicate-output locker launches");
+    checkpoint(&session, "ready for duplicate output request");
+    assert_eq!(
+        session.door().protocol_ledgers().unwrap().lock,
+        1,
+        "one accepted surface is the entire physical-output lock ledger"
+    );
+
+    session.door().tap_key(keys::SPACE).unwrap();
+    checkpoint(&session, "duplicate output refused");
+    poll_until(Duration::from_secs(5), "the refused client's lock ledger to be removed", || {
+        (session.door().protocol_ledgers().ok()?.lock == 0).then_some(())
+    })
+    .unwrap();
+    assert!(
+        !session.log().contains("session unlocked"),
+        "refusing the duplicate must leave the crashed-locker security domain locked"
+    );
+    assert!(session.compositor_alive(), "the compositor survives the refused duplicate");
 }
 
 /// The lock screen's fill, as `chonk-lock-probe` paints it —

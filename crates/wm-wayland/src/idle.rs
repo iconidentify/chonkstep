@@ -36,6 +36,78 @@ use smithay::{delegate_idle_inhibit, delegate_idle_notify};
 
 use crate::state::{Compositor, WaylandBackend};
 
+/// A protocol client gets constant-size bookkeeping for repeated
+/// inhibitors on one surface, while this ceiling also bounds the number
+/// of distinct surfaces a connection (or a churn of connections) can
+/// leave in the hot visibility walk.
+const MAX_IDLE_INHIBITOR_SURFACES: usize = 256;
+
+#[derive(Debug)]
+struct Counted<T> {
+    key: T,
+    count: usize,
+}
+
+/// A bounded set whose members have protocol-object reference counts.
+///
+/// idle-inhibit's handler reports only the inhibited `wl_surface`, not
+/// the inhibitor object. Consequently duplicate objects must be counted:
+/// destroying one of two inhibitors on a surface may not remove the
+/// other. The vector is intentionally bounded because it is walked on
+/// every idle-policy visibility reconciliation.
+#[derive(Debug)]
+struct BoundedRefCounts<T, const MAX: usize> {
+    entries: Vec<Counted<T>>,
+}
+
+impl<T: PartialEq, const MAX: usize> BoundedRefCounts<T, MAX> {
+    fn new() -> Self {
+        Self { entries: Vec::new() }
+    }
+
+    fn insert(&mut self, key: T) -> bool {
+        if let Some(entry) = self.entries.iter_mut().find(|entry| entry.key == key) {
+            entry.count = entry.count.saturating_add(1);
+            return true;
+        }
+        if self.entries.len() == MAX {
+            return false;
+        }
+        self.entries.push(Counted { key, count: 1 });
+        true
+    }
+
+    fn remove_one(&mut self, key: &T) -> bool {
+        let Some(index) = self.entries.iter().position(|entry| &entry.key == key) else {
+            return false;
+        };
+        if self.entries[index].count > 1 {
+            self.entries[index].count -= 1;
+        } else {
+            self.entries.swap_remove(index);
+        }
+        true
+    }
+
+    fn remove_all(&mut self, key: &T) -> bool {
+        let before = self.entries.len();
+        self.entries.retain(|entry| &entry.key != key);
+        self.entries.len() != before
+    }
+
+    fn retain(&mut self, mut keep: impl FnMut(&T) -> bool) {
+        self.entries.retain(|entry| keep(&entry.key));
+    }
+
+    fn iter(&self) -> impl Iterator<Item = &T> {
+        self.entries.iter().map(|entry| &entry.key)
+    }
+
+    fn object_count(&self) -> usize {
+        self.entries.iter().fold(0, |total, entry| total.saturating_add(entry.count))
+    }
+}
+
 /// Idle bookkeeping on [`Compositor`].
 pub(crate) struct Idle {
     pub notifier: IdleNotifierState<Compositor>,
@@ -44,15 +116,30 @@ pub(crate) struct Idle {
     pub _inhibit: IdleInhibitManagerState,
     /// Surfaces with a live `zwp_idle_inhibitor_v1`. Liveness and
     /// visibility are judged after invalidation in [`refresh`].
-    pub inhibitors: Vec<WlSurface>,
+    inhibitors: BoundedRefCounts<WlSurface, MAX_IDLE_INHIBITOR_SURFACES>,
     /// A protocol inhibitor was added or removed. Window/layer/lock
     /// visibility edges carry their own flag on `WaylandBackend`.
     inhibitors_dirty: bool,
+    rejected_inhibitor_surfaces: u64,
 }
 
 impl Idle {
     pub(crate) fn new(notifier: IdleNotifierState<Compositor>, inhibit: IdleInhibitManagerState) -> Self {
-        Self { notifier, _inhibit: inhibit, inhibitors: Vec::new(), inhibitors_dirty: true }
+        Self {
+            notifier,
+            _inhibit: inhibit,
+            inhibitors: BoundedRefCounts::new(),
+            inhibitors_dirty: true,
+            rejected_inhibitor_surfaces: 0,
+        }
+    }
+
+    pub(crate) fn surface_destroyed(&mut self, surface: &WlSurface) {
+        self.inhibitors_dirty |= self.inhibitors.remove_all(surface);
+    }
+
+    pub(crate) fn inhibitor_count(&self) -> usize {
+        self.inhibitors.object_count()
     }
 }
 
@@ -64,14 +151,23 @@ impl IdleNotifierHandler for Compositor {
 
 impl IdleInhibitHandler for Compositor {
     fn inhibit(&mut self, surface: WlSurface) {
-        self.idle.inhibitors.push(surface);
-        self.idle.inhibitors_dirty = true;
+        if self.idle.inhibitors.insert(surface) {
+            self.idle.inhibitors_dirty = true;
+            return;
+        }
+        self.idle.rejected_inhibitor_surfaces = self.idle.rejected_inhibitor_surfaces.saturating_add(1);
+        let rejected = self.idle.rejected_inhibitor_surfaces;
+        if rejected.is_power_of_two() {
+            tracing::warn!(
+                rejected,
+                limit = MAX_IDLE_INHIBITOR_SURFACES,
+                "refusing idle inhibitor on an excess distinct surface"
+            );
+        }
     }
 
     fn uninhibit(&mut self, surface: WlSurface) {
-        let before = self.idle.inhibitors.len();
-        self.idle.inhibitors.retain(|held| *held != surface);
-        self.idle.inhibitors_dirty |= self.idle.inhibitors.len() != before;
+        self.idle.inhibitors_dirty |= self.idle.inhibitors.remove_one(&surface);
     }
 }
 
@@ -108,7 +204,7 @@ pub(crate) fn refresh(comp: &mut Compositor) {
     if idle_log_enabled() {
         tracing::info!(
             inhibited,
-            protocol_inhibitors = comp.idle.inhibitors.len(),
+            protocol_inhibitors = comp.idle.inhibitors.object_count(),
             "idle policy reconciled"
         );
     }
@@ -133,4 +229,33 @@ fn surface_visible(backend: &WaylandBackend, surface: &WlSurface) -> bool {
     let layer_mapped =
         backend.layers.iter().any(|record| backend.layer_presented(record) && *record.surface.wl_surface() == root);
     window_presented || layer_mapped
+}
+
+#[cfg(test)]
+mod tests {
+    use super::BoundedRefCounts;
+
+    #[test]
+    fn duplicate_keys_are_reference_counted() {
+        let mut ledger = BoundedRefCounts::<u8, 4>::new();
+        assert!(ledger.insert(7));
+        assert!(ledger.insert(7));
+        assert_eq!(ledger.object_count(), 2);
+        assert!(ledger.remove_one(&7));
+        assert_eq!(ledger.iter().copied().collect::<Vec<_>>(), vec![7]);
+        assert_eq!(ledger.object_count(), 1);
+        assert!(ledger.remove_one(&7));
+        assert_eq!(ledger.object_count(), 0);
+    }
+
+    #[test]
+    fn distinct_keys_are_bounded_and_can_be_removed_as_a_group() {
+        let mut ledger = BoundedRefCounts::<u8, 2>::new();
+        assert!(ledger.insert(1));
+        assert!(ledger.insert(2));
+        assert!(!ledger.insert(3));
+        assert!(ledger.remove_all(&1));
+        assert!(ledger.insert(3));
+        assert_eq!(ledger.iter().copied().collect::<Vec<_>>(), vec![2, 3]);
+    }
 }

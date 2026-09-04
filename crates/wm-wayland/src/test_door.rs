@@ -64,6 +64,7 @@
 //! | `key CODE press\|release` | keyboard key by *evdev* keycode (`KEY_*` from input-event-codes.h; the xkb +8 offset is applied here) |
 //! | `repeat` | replies with the held compositor-binding repeat count and interval, or `repeat none` |
 //! | `activation-tokens` | replies with the number of retained xdg-activation tokens |
+//! | `protocol-ledgers` | replies with retained input-method popup, idle-inhibitor object, and lock-surface counts |
 //! | `protocol-publishes` | replies with Hyprland event-snapshot, foreign full-sync and foreign dragged-window-sync counters |
 //! | `hit X Y` | replies with `hit root\|shell\|frame\|content\|layer\|ime\|lock` from the production scene hit-test |
 //! | `barrier` | replies `ok` once every command before it has been dispatched **and** a frame has been rendered with no damage left over |
@@ -489,6 +490,12 @@ fn handle_command(line: &str, stream: &mut UnixStream, comp: &mut Compositor) {
         Some("activation-tokens") => {
             let count = comp.core_protocols.activation.tokens().count();
             let _ = stream.write_all(format!("activation-tokens {count}\n").as_bytes());
+        }
+        Some("protocol-ledgers") => {
+            let ime = comp.wm.backend().ime_popups.len();
+            let idle = comp.idle.inhibitor_count();
+            let lock = comp.wm.backend().lock_surfaces.len();
+            let _ = stream.write_all(format!("protocol-ledgers ime={ime} idle={idle} lock={lock}\n").as_bytes());
         }
         Some("protocol-publishes") => {
             let metrics = comp.protocol_publish_metrics;

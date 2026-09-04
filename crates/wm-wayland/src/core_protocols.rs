@@ -7,10 +7,19 @@
 use std::time::{Duration, Instant};
 
 use smithay::input::pointer::PointerHandle;
+use smithay::reexports::wayland_protocols_misc::zwp_input_method_v2::server::{
+    zwp_input_method_keyboard_grab_v2::ZwpInputMethodKeyboardGrabV2,
+    zwp_input_method_manager_v2::ZwpInputMethodManagerV2,
+    zwp_input_method_v2::ZwpInputMethodV2,
+    zwp_input_popup_surface_v2::ZwpInputPopupSurfaceV2,
+};
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
-use smithay::reexports::wayland_server::DisplayHandle;
+use smithay::reexports::wayland_server::{backend::ClientId, Client, DataInit, Dispatch, DisplayHandle, Resource};
 use smithay::utils::{Logical, Point as LogicalPoint, Rectangle};
-use smithay::wayland::input_method::{InputMethodHandler, InputMethodManagerState, PopupSurface};
+use smithay::wayland::input_method::{
+    InputMethodHandler, InputMethodKeyboardUserData, InputMethodManagerGlobalData, InputMethodManagerState,
+    InputMethodPopupSurfaceUserData, InputMethodUserData, PopupSurface,
+};
 use smithay::wayland::keyboard_shortcuts_inhibit::{
     KeyboardShortcutsInhibitHandler, KeyboardShortcutsInhibitState, KeyboardShortcutsInhibitor,
 };
@@ -22,7 +31,7 @@ use smithay::wayland::xdg_activation::{
 };
 use smithay::wayland::xdg_foreign::{XdgForeignHandler, XdgForeignState};
 use smithay::{
-    delegate_cursor_shape, delegate_input_method_manager, delegate_keyboard_shortcuts_inhibit,
+    delegate_cursor_shape, delegate_keyboard_shortcuts_inhibit,
     delegate_pointer_constraints, delegate_pointer_gestures, delegate_presentation, delegate_relative_pointer,
     delegate_single_pixel_buffer, delegate_text_input_manager, delegate_xdg_activation, delegate_xdg_dialog,
     delegate_tablet_manager, delegate_xdg_foreign, delegate_xdg_system_bell, delegate_xdg_toplevel_tag,
@@ -41,6 +50,11 @@ const MAX_ACTIVATION_TOKENS_PER_CLIENT: usize = 256;
 /// The per-client ceiling prevents one connection from growing the pool;
 /// this second ceiling also covers an attacker cycling connections.
 const MAX_ACTIVATION_TOKENS_GLOBAL: usize = 4_096;
+/// IME popup surfaces participate in every render and pointer hit-test.
+/// One input method normally owns one popup; these ceilings preserve
+/// headroom for hand-offs while bounding hostile protocol-object churn.
+const MAX_IME_POPUPS_PER_CLIENT: usize = 16;
+const MAX_IME_POPUPS_GLOBAL: usize = 256;
 
 impl smithay::wayland::tablet_manager::TabletSeatHandler for Compositor {}
 
@@ -50,6 +64,7 @@ pub(crate) struct CoreProtocols {
     pub activation: XdgActivationState,
     next_activation_token_sweep: Instant,
     rejected_activation_tokens: u64,
+    rejected_ime_popups: u64,
     pub xdg_foreign: XdgForeignState,
     pub shortcuts: KeyboardShortcutsInhibitState,
     pub active_shortcut_inhibitor: Option<KeyboardShortcutsInhibitor>,
@@ -72,6 +87,7 @@ pub(crate) fn init(display: &DisplayHandle) -> CoreProtocols {
         activation: XdgActivationState::new::<Compositor>(display),
         next_activation_token_sweep: Instant::now() + ACTIVATION_TOKEN_SWEEP_INTERVAL,
         rejected_activation_tokens: 0,
+        rejected_ime_popups: 0,
         xdg_foreign: XdgForeignState::new::<Compositor>(display),
         shortcuts: KeyboardShortcutsInhibitState::new::<Compositor>(display),
         active_shortcut_inhibitor: None,
@@ -223,8 +239,40 @@ impl PointerConstraintsHandler for Compositor {
 
 impl InputMethodHandler for Compositor {
     fn new_popup(&mut self, surface: PopupSurface) {
-        self.wm.backend_mut().ime_popups.push(surface);
-        self.wm.backend_mut().mark_damaged();
+        let new_id = surface.wl_surface().id();
+        let (total, for_client) = {
+            let backend = self.wm.backend_mut();
+            // The protocol role's exact destroy callback below is the
+            // primary removal path. This also discards an already-dead
+            // wl_surface before applying the admission limits.
+            backend.ime_popups.retain(PopupSurface::alive);
+            let total = backend.ime_popups.len();
+            let for_client = backend
+                .ime_popups
+                .iter()
+                .filter(|popup| popup.wl_surface().id().same_client_as(&new_id))
+                .count();
+            (total, for_client)
+        };
+        if total < MAX_IME_POPUPS_GLOBAL && for_client < MAX_IME_POPUPS_PER_CLIENT {
+            let backend = self.wm.backend_mut();
+            backend.ime_popups.push(surface);
+            backend.mark_damaged();
+            return;
+        }
+
+        self.core_protocols.rejected_ime_popups = self.core_protocols.rejected_ime_popups.saturating_add(1);
+        let rejected = self.core_protocols.rejected_ime_popups;
+        if rejected.is_power_of_two() {
+            tracing::warn!(
+                rejected,
+                total,
+                for_client,
+                per_client_limit = MAX_IME_POPUPS_PER_CLIENT,
+                global_limit = MAX_IME_POPUPS_GLOBAL,
+                "refusing excess input-method popup"
+            );
+        }
     }
 
     fn dismiss_popup(&mut self, surface: PopupSurface) {
@@ -279,10 +327,63 @@ delegate_tablet_manager!(Compositor);
 delegate_xdg_foreign!(Compositor);
 delegate_keyboard_shortcuts_inhibit!(Compositor);
 delegate_text_input_manager!(Compositor);
-delegate_input_method_manager!(Compositor);
 delegate_xdg_dialog!(Compositor);
 delegate_xdg_system_bell!(Compositor);
 delegate_xdg_toplevel_tag!(Compositor);
+
+// Smithay's input-method delegation forwards popup-role destruction only
+// to its own AliveTracker. Split the macro so the compositor can remove
+// the corresponding per-frame ledger entry at the exact object-lifetime
+// edge (including client disconnect), then forward to that tracker.
+smithay::reexports::wayland_server::delegate_global_dispatch!(Compositor: [
+    ZwpInputMethodManagerV2: InputMethodManagerGlobalData
+] => InputMethodManagerState);
+smithay::reexports::wayland_server::delegate_dispatch!(Compositor: [
+    ZwpInputMethodManagerV2: ()
+] => InputMethodManagerState);
+smithay::reexports::wayland_server::delegate_dispatch!(Compositor: [
+    ZwpInputMethodV2: InputMethodUserData<Compositor>
+] => InputMethodManagerState);
+smithay::reexports::wayland_server::delegate_dispatch!(Compositor: [
+    ZwpInputMethodKeyboardGrabV2: InputMethodKeyboardUserData<Compositor>
+] => InputMethodManagerState);
+
+impl Dispatch<ZwpInputPopupSurfaceV2, InputMethodPopupSurfaceUserData> for Compositor {
+    fn request(
+        state: &mut Self,
+        client: &Client,
+        object: &ZwpInputPopupSurfaceV2,
+        request: <ZwpInputPopupSurfaceV2 as Resource>::Request,
+        data: &InputMethodPopupSurfaceUserData,
+        dhandle: &DisplayHandle,
+        data_init: &mut DataInit<'_, Self>,
+    ) {
+        <InputMethodManagerState as Dispatch<
+            ZwpInputPopupSurfaceV2,
+            InputMethodPopupSurfaceUserData,
+            Compositor,
+        >>::request(state, client, object, request, data, dhandle, data_init);
+    }
+
+    fn destroyed(
+        state: &mut Self,
+        client: ClientId,
+        object: &ZwpInputPopupSurfaceV2,
+        data: &InputMethodPopupSurfaceUserData,
+    ) {
+        let backend = state.wm.backend_mut();
+        let before = backend.ime_popups.len();
+        backend.ime_popups.retain(|popup| popup.surface_role != *object);
+        if backend.ime_popups.len() != before {
+            backend.mark_damaged();
+        }
+        <InputMethodManagerState as Dispatch<
+            ZwpInputPopupSurfaceV2,
+            InputMethodPopupSurfaceUserData,
+            Compositor,
+        >>::destroyed(state, client, object, data);
+    }
+}
 
 #[cfg(test)]
 mod tests {

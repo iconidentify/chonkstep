@@ -81,3 +81,45 @@ fn a_parked_window_cannot_inhibit_omarchys_idle_policy() {
     );
     assert!(session.compositor_alive(), "releasing a parked inhibitor keeps the session alive");
 }
+
+#[test]
+#[ignore = "needs a live Wayland session to nest in: scripts/e2e.sh, or cargo test -p chonk-testkit -- --ignored --test-threads=1"]
+fn destroying_one_duplicate_inhibitor_keeps_the_other_until_disconnect() {
+    let mut session = Session::boot("duplicate-idle-inhibitor", SessionOptions::default()).expect("session boots");
+    assert_eq!(session.door().protocol_ledgers().unwrap().idle, 0);
+    let probe = profile_binary("chonk-fullscreen-probe").expect("probe is built");
+    let program = probe.display().to_string();
+    session
+        .launch(
+            &program,
+            &["DuplicateIdleHolder", "duplicate-idle-holder", "animate-duplicate-inhibit-idle"],
+        )
+        .expect("duplicate inhibitors launch");
+    session.wait_for_window("DuplicateIdleHolder").expect("inhibiting window maps");
+    poll_until(SETTLE, "one of two same-surface inhibitors to be destroyed", || {
+        session
+            .client_log(&program)
+            .contains("one duplicate idle inhibitor destroyed")
+            .then_some(())
+    })
+    .unwrap();
+    poll_until(SETTLE, "the compositor ledger to retain exactly one inhibitor", || {
+        (session.door().protocol_ledgers().ok()?.idle == 1).then_some(())
+    })
+    .unwrap();
+    poll_until(SETTLE, "the surviving inhibitor to hold for thirty animation frames", || {
+        animation_frame(&session.client_log(&program)).filter(|frame| *frame >= 30)
+    })
+    .unwrap();
+    assert!(
+        !session.client_log(&program).contains("idle state=idled"),
+        "destroying one of two inhibitor objects must not release the surviving one"
+    );
+
+    session.kill_client(&program);
+    poll_until(SETTLE, "client disconnect to clear its idle ledger entry", || {
+        (session.door().protocol_ledgers().ok()?.idle == 0).then_some(())
+    })
+    .unwrap();
+    assert!(session.compositor_alive(), "duplicate inhibitor teardown keeps the compositor alive");
+}

@@ -447,8 +447,8 @@ impl SessionLockHandler for Compositor {
 // `delegate_session_lock!(Compositor)` would emit all four of the
 // delegations below. Three of them are taken verbatim; the fourth —
 // `ext_session_lock_v1` itself — is written out by hand underneath so
-// that `unlock_and_destroy` can be authenticated before upstream sees
-// it. Keep this list in step with the macro
+// that `unlock_and_destroy` can be authenticated and duplicate physical
+// outputs can be rejected before upstream sees them. Keep this list in step with the macro
 // (`smithay-0.7.0/src/wayland/session_lock/mod.rs:227-244`) if smithay
 // ever adds an interface to it.
 smithay::reexports::wayland_server::delegate_global_dispatch!(Compositor: [
@@ -461,8 +461,9 @@ smithay::reexports::wayland_server::delegate_dispatch!(Compositor: [
     ExtSessionLockSurfaceV1: ExtLockSurfaceUserData
 ] => SessionLockManagerState);
 
-/// Authenticates `unlock_and_destroy` against the recorded holder, then
-/// hands every request on to smithay's implementation.
+/// Authenticates `unlock_and_destroy` against the recorded holder and
+/// rejects a second surface for one physical output, then hands every
+/// accepted request on to smithay's implementation.
 ///
 /// # The upstream bug
 ///
@@ -535,6 +536,31 @@ impl smithay::reexports::wayland_server::Dispatch<ExtSessionLockV1, SessionLockS
         dhandle: &DisplayHandle,
         data_init: &mut DataInit<'_, Self>,
     ) {
+        // Smithay records `WlOutput` resources here. A client can bind
+        // the same output global twice and thereby obtain two unequal
+        // resources for the same physical output, bypassing its dedupe.
+        // The compositor ledger uses physical output identity, so guard
+        // before upstream assigns the wl_surface role or grows its own
+        // `locked_outputs` vector.
+        if let ext_session_lock_v1::Request::GetLockSurface { output, .. } = &request {
+            let duplicate = Output::from_resource(output)
+                .and_then(|named| state.outputs.iter().position(|entry| entry.output == named))
+                .is_some_and(|index| {
+                    state
+                        .wm
+                        .backend()
+                        .lock_surfaces
+                        .iter()
+                        .any(|entry| entry.output == index)
+                });
+            if duplicate {
+                lock.post_error(
+                    ext_session_lock_v1::Error::DuplicateOutput,
+                    "physical output already has a lock surface",
+                );
+                return;
+            }
+        }
         // Matching binds nothing, so the request is not moved and is
         // still available to forward below.
         if matches!(request, ext_session_lock_v1::Request::UnlockAndDestroy) {
