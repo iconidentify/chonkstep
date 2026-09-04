@@ -557,11 +557,17 @@ impl Server {
     /// Every fd the event loop should wake on.
     pub fn poll_fds(&self) -> Vec<RawFd> {
         let mut fds = Vec::new();
+        self.extend_poll_fds(&mut fds);
+        fds
+    }
+
+    /// Appends every fd the event loop should wake on to reusable
+    /// caller-owned storage.
+    pub fn extend_poll_fds(&self, fds: &mut Vec<RawFd>) {
         fds.extend(self.requests.iter().map(AsRawFd::as_raw_fd));
         fds.extend(self.events.iter().map(AsRawFd::as_raw_fd));
         fds.extend(self.request_clients.iter().map(|c| c.stream.as_raw_fd()));
         fds.extend(self.event_clients.iter().map(|c| c.stream.as_raw_fd()));
-        fds
     }
 
     pub fn has_clients(&self) -> bool {
@@ -890,6 +896,24 @@ mod enabled_tests {
                 assert!(Server::enabled(), "{odd:?} should still answer");
             });
         }
+    }
+
+    #[test]
+    fn descriptor_collection_reuses_caller_owned_capacity() {
+        let server = Server {
+            directory: PathBuf::new(),
+            requests: None,
+            events: None,
+            request_clients: Vec::new(),
+            event_clients: Vec::new(),
+            differ: Differ::new(),
+            refusals: 0,
+        };
+        let mut fds = Vec::with_capacity(8);
+        let allocation = fds.as_ptr();
+        server.extend_poll_fds(&mut fds);
+        assert!(fds.is_empty());
+        assert_eq!(fds.as_ptr(), allocation, "an unchanged source set must not replace caller storage");
     }
 
     #[test]

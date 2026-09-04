@@ -2265,9 +2265,17 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
     /// maximum idle poll, so a missing fd costs a dockapp frame up to
     /// that bound and nothing else.
     pub fn extra_poll_fds(&self) -> Vec<std::os::fd::RawFd> {
-        let mut fds = self.desktop.extra_poll_fds();
-        fds.extend(self.control.poll_fds());
+        let mut fds = Vec::new();
+        self.extend_extra_poll_fds(&mut fds);
         fds
+    }
+
+    /// Appends current shell-owned descriptors without allocating when
+    /// the caller's buffer already has enough capacity. This is the
+    /// event-loop form of [`Self::extra_poll_fds`].
+    pub fn extend_extra_poll_fds(&self, fds: &mut Vec<std::os::fd::RawFd>) {
+        self.desktop.extend_extra_poll_fds(fds);
+        fds.extend(self.control.poll_fds());
     }
 
     /// A scroll over a shell surface, resolved to a dock tile the same

@@ -370,7 +370,7 @@ fn main() {
         // allocation on every wake.
         wait_fds.clear();
         wait_fds.push(wm.backend().connection_fd());
-        wait_fds.extend(shell.extra_poll_fds());
+        shell.extend_extra_poll_fds(&mut wait_fds);
         let now = Instant::now();
         let wait = shell
             .next_housekeeping_in(now)

@@ -7,6 +7,14 @@ crate and both session binaries carry the same number.
 
 ### Performance
 
+- **Dynamic event-source reconciliation is allocation-stable.** Both backends
+  append shell/IPC descriptors into caller-owned scratch storage, and Wayland
+  prunes calloop registrations in place. A normal IPC-enabled Wayland pass no
+  longer constructs at least three transient `Vec`s; capacity grows only when
+  the largest observed connection set grows. Across three alternating 12-second
+  release trials with a continuously animating Wayland client, compositor CPU
+  moved from 12.056% to 11.861% of one core (1.6% relative); wake counts stayed
+  level, as expected for an allocation-only change.
 - **Client traffic no longer amplifies filesystem marker polling.** Restart,
   reload, and appearance requests now own cached paths and a shared 100 ms
   deadline; display/input/IPC events remain immediate but cannot turn absent

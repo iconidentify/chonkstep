@@ -2449,9 +2449,18 @@ impl<B: Backend> Desktop<B> {
     /// optimisation with a correctness-shaped API, not a correctness
     /// requirement.
     pub fn extra_poll_fds(&self) -> Vec<std::os::fd::RawFd> {
-        let mut fds = self.dockapps.poll_fds();
-        fds.extend(self.items.iter().filter_map(|item| item.remote().and_then(RemoteTile::poll_fd)));
+        let mut fds = Vec::new();
+        self.extend_extra_poll_fds(&mut fds);
         fds
+    }
+
+    /// Appends the current dockapp descriptors to caller-owned storage.
+    /// Backend event loops use this form to reuse capacity across
+    /// dispatches; [`Self::extra_poll_fds`] remains the convenient
+    /// allocating snapshot API.
+    pub fn extend_extra_poll_fds(&self, fds: &mut Vec<std::os::fd::RawFd>) {
+        self.dockapps.extend_poll_fds(fds);
+        fds.extend(self.items.iter().filter_map(|item| item.remote().and_then(RemoteTile::poll_fd)));
     }
 
     /// Earliest deadline owned by transient menu or dockapp state.

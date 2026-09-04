@@ -319,13 +319,11 @@ impl DockHost {
     /// plus one per connection that has not identified itself yet.
     /// (Established connections are a tile's, not this type's — see
     /// `RemoteTile::poll_fd`.)
-    pub(crate) fn poll_fds(&self) -> Vec<RawFd> {
-        let mut fds = Vec::with_capacity(self.pending.len() + 1);
+    pub(crate) fn extend_poll_fds(&self, fds: &mut Vec<RawFd>) {
         if let Some(listener) = &self.listener {
             fds.push(listener.as_raw_fd());
         }
         fds.extend(self.pending.iter().map(|pending| pending.socket.as_raw_fd()));
-        fds
     }
 
     /// Accepts whatever is waiting and returns whoever has identified

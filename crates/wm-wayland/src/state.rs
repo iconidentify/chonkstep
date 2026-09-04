@@ -1311,6 +1311,10 @@ pub struct Compositor {
     /// tile. Reconciled against `Shell::extra_poll_fds` at the end of
     /// every dispatch pass — see [`Compositor::sync_dock_sources`].
     dock_sources: Vec<(RawFd, RegistrationToken)>,
+    /// Reused storage for the desired source set. Taking and returning
+    /// it in `sync_dock_sources` keeps the hot dispatch path allocation
+    /// free after the largest set seen so far establishes its capacity.
+    source_scratch: Vec<RawFd>,
     /// The Hyprland IPC server, when the session asked for one
     /// (`CHONKSTEP_HYPRLAND_IPC=1`). `None` in an ordinary session,
     /// which then pays one env lookup at startup and nothing else.
@@ -1497,6 +1501,22 @@ pub struct Compositor {
     /// clients. That matches what a compositor *can* do today; a
     /// future session handoff could improve it.
     pub restart: bool,
+}
+
+/// Removes registrations whose descriptor is no longer wanted without
+/// allocating a replacement vector. Source order has no meaning to
+/// calloop, so `swap_remove` is the constant-time erasure that keeps
+/// the capacity established by the largest connection set.
+fn retain_wanted_sources<T>(registered: &mut Vec<(RawFd, T)>, wanted: &[RawFd], mut remove: impl FnMut(T)) {
+    let mut index = 0;
+    while index < registered.len() {
+        if wanted.contains(&registered[index].0) {
+            index += 1;
+        } else {
+            let (_, token) = registered.swap_remove(index);
+            remove(token);
+        }
+    }
 }
 
 impl Compositor {
@@ -2051,7 +2071,9 @@ impl Compositor {
     }
 
     fn sync_dock_sources(&mut self) {
-        let mut wanted = self.shell.extra_poll_fds();
+        let mut wanted = std::mem::take(&mut self.source_scratch);
+        wanted.clear();
+        self.shell.extend_extra_poll_fds(&mut wanted);
         // The Hyprland IPC sockets ride the same reconciliation rather
         // than owning calloop sources of their own, because they have
         // exactly the property this pass was built for: descriptors
@@ -2060,22 +2082,15 @@ impl Compositor {
         // unchanged — the source is removed on the same pass that drops
         // the owner, and before calloop next polls.
         if let Some(server) = &self.hyprland_ipc {
-            wanted.extend(server.poll_fds());
+            server.extend_poll_fds(&mut wanted);
         }
         // Removals first, so a descriptor that was closed this pass is
         // unregistered before anything else can be inserted at the same
         // number.
-        let mut kept = Vec::with_capacity(wanted.len());
-        for (fd, token) in std::mem::take(&mut self.dock_sources) {
-            if wanted.contains(&fd) {
-                kept.push((fd, token));
-            } else {
-                self.loop_handle.remove(token);
-            }
-        }
-        self.dock_sources = kept;
+        let loop_handle = &self.loop_handle;
+        retain_wanted_sources(&mut self.dock_sources, &wanted, |token| loop_handle.remove(token));
 
-        for fd in wanted {
+        for &fd in &wanted {
             if self.dock_sources.iter().any(|(known, _)| *known == fd) {
                 continue;
             }
@@ -2103,6 +2118,7 @@ impl Compositor {
                 }
             }
         }
+        self.source_scratch = wanted;
     }
 
     /// Feeds one already-coalesced `PointerMotion` to the shell's drag
@@ -2893,6 +2909,7 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
         core_protocols,
         popups: PopupManager::default(),
         dock_sources: Vec::new(),
+        source_scratch: Vec::new(),
         seat,
         outputs,
         xwm: None,
@@ -3754,6 +3771,21 @@ mod tests {
         let mut stacking = vec![StackEntry::Shell(WlShellId(9)), frame(2), StackEntry::Shell(WlShellId(8))];
         replace_stack_entry(&mut stacking, frame(2), window(20));
         assert_eq!(stacking, vec![StackEntry::Shell(WlShellId(9)), window(20), StackEntry::Shell(WlShellId(8))]);
+    }
+
+    #[test]
+    fn source_reconciliation_removes_in_place_and_preserves_capacity() {
+        let mut registered = Vec::with_capacity(8);
+        registered.extend([(3, 'a'), (4, 'b'), (5, 'c')]);
+        let allocation = registered.as_ptr();
+        let mut removed = Vec::new();
+
+        retain_wanted_sources(&mut registered, &[5, 3, 7], |token| removed.push(token));
+
+        registered.sort_by_key(|(fd, _)| *fd);
+        assert_eq!(registered, [(3, 'a'), (5, 'c')]);
+        assert_eq!(removed, ['b']);
+        assert_eq!(registered.as_ptr(), allocation, "pruning must keep the established source allocation");
     }
 
     // Per-output scale resolution: the mixed-DPI question ("which
