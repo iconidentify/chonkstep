@@ -7,6 +7,17 @@ crate and both session binaries carry the same number.
 
 ### Performance
 
+- **Screenshot requests are deadline-driven and work on an idle desktop.**
+  The Wayland compositor resolves the marker path once, probes it at the same
+  bounded 100 ms cadence as restart/reload requests, and services it before
+  deciding whether scene damage warrants a frame. An animated client therefore
+  no longer turns an absent screenshot marker into one failed `openat` per
+  frame, while a desk with no client damage can now take a screenshot at all.
+  A compositor-only ten-second syscall trace under continuous animation fell
+  from 876 to 368 file operations (58.0%) and from 692 to 184 failed `openat`
+  calls (73.4%). Two reversed 30-second release pairs moved whole-process CPU
+  from 11.316% to 11.249% of one core (0.6%, effectively neutral); the syscall
+  count and new idle-session behavior are the claimed improvements.
 - **Window previews follow actual surface damage instead of a wall clock.**
   Every toplevel and subsurface commit marks only its owning preview stale;
   static windows are captured once and then stay out of the synchronous GLES

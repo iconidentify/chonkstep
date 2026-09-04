@@ -110,12 +110,62 @@ const SNAPSHOT_INTERVAL: Duration = Duration::from_secs(1);
 /// frames and stay there.
 const MAX_SNAPSHOTS_PER_FRAME: usize = 2;
 
+/// Deadline-aware reader for the screenshot request marker.
+///
+/// The path is resolved once at startup and absent files are probed at
+/// human-control cadence, not once per rendered frame. Keeping this on
+/// the compositor also lets an entirely idle session answer a request:
+/// [`crate::state::Compositor::dispatch_pending`] services it before
+/// deciding whether the scene itself needs another frame.
+pub(crate) struct ScreenshotRequestPoller {
+    state_dir: Option<PathBuf>,
+    marker: Option<PathBuf>,
+    home: Option<PathBuf>,
+    next_poll: Instant,
+}
+
+impl ScreenshotRequestPoller {
+    /// Creates a poller whose first pass is immediately due.
+    pub(crate) fn new(now: Instant) -> Self {
+        Self::with_environment(now, std::env::var_os("XDG_STATE_HOME"), std::env::var_os("HOME"))
+    }
+
+    fn with_environment(now: Instant, xdg_state_home: Option<OsString>, home: Option<OsString>) -> Self {
+        let state_dir = state_dir(xdg_state_home, home.clone());
+        let marker = state_dir.as_ref().map(|dir| dir.join("screenshot"));
+        let home = home.filter(|value| !value.is_empty()).map(PathBuf::from);
+        Self { state_dir, marker, home, next_poll: now }
+    }
+
+    /// Exact next point at which [`Self::poll`] can touch the marker.
+    pub(crate) fn next_deadline(&self) -> Instant {
+        self.next_poll
+    }
+
+    /// Consumes a screenshot request when the polling deadline is due.
+    /// A missing marker is the overwhelmingly common `None` path.
+    fn poll(&mut self, now: Instant) -> Option<Result<PathBuf, String>> {
+        if now < self.next_poll {
+            return None;
+        }
+        self.next_poll = now + chonk_shell::startup::SESSION_REQUEST_POLL_INTERVAL;
+        let (Some(state_dir), Some(marker)) = (&self.state_dir, &self.marker) else {
+            return None;
+        };
+        let Ok(request) = std::fs::read_to_string(marker) else {
+            return None;
+        };
+        if let Err(error) = std::fs::remove_file(marker) {
+            return Some(Err(format!("could not consume {}: {error}", marker.display())));
+        }
+        Some(Ok(screenshot_target(&request, state_dir, self.home.as_deref())))
+    }
+}
+
 /// Refreshes the per-window snapshots used for previews. Called once
 /// per rendered frame; the implementation throttles its own work, so
 /// this stays affordable at frame rate.
 pub(crate) fn refresh_snapshots(comp: &mut Compositor) {
-    poll_screenshot_marker(comp);
-
     let now = Instant::now();
     let boost = comp.wm.backend().preview_edge;
     let due = due_windows(comp, now, boost);
@@ -462,33 +512,22 @@ fn write_png(buffer: DecorationBuffer, path: &Path) -> Result<(), String> {
         .map_err(|error| format!("could not write {}: {error}", path.display()))
 }
 
-/// Checks the screenshot marker and services it. Polled once per
-/// rendered frame, which means a session drawing nothing at all also
-/// answers nothing - in practice the shell's clock keeps frames coming
-/// on an otherwise idle desktop, and any session worth screenshotting
-/// is one where something is happening.
+/// Checks the screenshot marker and services it. Called once per
+/// compositor dispatch; [`ScreenshotRequestPoller`] bounds filesystem
+/// work to ten probes per second regardless of client frame rate.
 ///
 /// The marker is consumed *before* the capture runs, exactly as
 /// `state.rs`'s restart marker is: a capture that fails (an
-/// unwritable path, a renderer hiccup) must not re-fire on every
-/// frame until someone notices.
-fn poll_screenshot_marker(comp: &mut Compositor) {
-    let Some(state_dir) = state_dir(std::env::var_os("XDG_STATE_HOME"), std::env::var_os("HOME"))
-    else {
-        return;
+/// unwritable path, a renderer hiccup) must not re-fire forever.
+pub(crate) fn poll_screenshot_marker(comp: &mut Compositor) {
+    let Some(request) = comp.screenshot_poller.poll(Instant::now()) else { return };
+    let target = match request {
+        Ok(target) => target,
+        Err(error) => {
+            tracing::warn!(%error, "screenshot request failed");
+            return;
+        }
     };
-    let marker = state_dir.join("screenshot");
-    let Ok(request) = std::fs::read_to_string(&marker) else {
-        return;
-    };
-    if let Err(error) = std::fs::remove_file(&marker) {
-        // Left in place, the marker would fire again next frame.
-        tracing::warn!(?error, path = %marker.display(), "could not consume the screenshot marker");
-        return;
-    }
-
-    let home = std::env::var_os("HOME").map(PathBuf::from);
-    let target = screenshot_target(&request, &state_dir, home.as_deref());
     match capture_output_png(comp, &target) {
         Ok(()) => tracing::info!(path = %target.display(), "screenshot written"),
         Err(error) => tracing::warn!(%error, path = %target.display(), "screenshot failed"),
@@ -613,6 +652,33 @@ mod tests {
             screenshot_target("shots/now.png", dir, None),
             PathBuf::from("/state/chonkstep/shots/now.png")
         );
+    }
+
+    #[test]
+    fn screenshot_markers_are_cached_throttled_and_consumed_once() {
+        let root = std::env::temp_dir().join(format!("chonk-screenshot-poller-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let dir = root.join("chonkstep");
+        std::fs::create_dir_all(&dir).unwrap();
+        let marker = dir.join("screenshot");
+        let start = Instant::now();
+        let mut poller = ScreenshotRequestPoller::with_environment(start, Some(root.clone().into_os_string()), None);
+
+        std::fs::write(&marker, []).unwrap();
+        assert_eq!(poller.poll(start).unwrap().unwrap(), dir.join("screenshot.png"));
+        assert!(!marker.exists(), "a delivered request is consumed exactly once");
+        assert_eq!(poller.next_deadline(), start + chonk_shell::startup::SESSION_REQUEST_POLL_INTERVAL);
+
+        std::fs::write(&marker, "custom.png\n").unwrap();
+        assert!(poller.poll(start + chonk_shell::startup::SESSION_REQUEST_POLL_INTERVAL / 2).is_none());
+        assert!(marker.exists(), "an early event leaves the marker waiting for its deadline");
+        assert_eq!(
+            poller.poll(start + chonk_shell::startup::SESSION_REQUEST_POLL_INTERVAL).unwrap().unwrap(),
+            dir.join("custom.png")
+        );
+        assert!(!marker.exists());
+
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

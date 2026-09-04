@@ -1440,6 +1440,10 @@ pub struct Compositor {
 
     /// The graphics stack: a host window, or the hardware itself.
     pub(crate) graphics: Graphics,
+    /// Cached marker path and deadline for compositor-native PNG
+    /// requests. Kept beside the renderer because servicing one needs
+    /// the live graphics context even when the scene is otherwise idle.
+    pub(crate) screenshot_poller: crate::capture::ScreenshotRequestPoller,
     /// linux-dmabuf: the format set we advertise and the protocol
     /// state behind it. Always present; "this renderer cannot do
     /// dmabuf" is represented inside, not by an `Option`, so protocol
@@ -1818,6 +1822,11 @@ impl Compositor {
         // was about to change. See `xdg::flush_configures` for the
         // invariant, and the stuck-fullscreen desktop that made it one.
         self.wm.backend_mut().flush_configures();
+
+        // Screenshot markers are a compositor service, not scene
+        // damage. Poll before the render decision so an idle desktop
+        // can answer one without waiting for unrelated client pixels.
+        crate::capture::poll_screenshot_marker(self);
 
         // Damage means the scene changed; `redraw_pending` means a
         // change already accounted for has not reached every screen yet
@@ -3016,6 +3025,7 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
         xewmh: None,
         ui_scale: scale,
         graphics,
+        screenshot_poller: crate::capture::ScreenshotRequestPoller::new(Instant::now()),
         dmabuf,
         syncobj,
         protocols,
@@ -3118,6 +3128,7 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
         let now = std::time::Instant::now();
         let mut wait = comp.shell.next_housekeeping_in(now);
         wait = wait.min(request_poller.next_deadline().saturating_duration_since(now));
+        wait = wait.min(comp.screenshot_poller.next_deadline().saturating_duration_since(now));
         if let Some(deadline) = crate::input::repeating_binding_deadline(&comp) {
             wait = wait.min(deadline.saturating_duration_since(now));
         }
