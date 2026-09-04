@@ -138,6 +138,11 @@ pub struct Client<B: Backend> {
     pub layout: DecorationLayout,
     pub lifecycle: Lifecycle,
     pub flags: ClientFlags,
+    /// Whether this client's first over-limit geometry has already
+    /// been logged. Client sizes cross several paths (initial map,
+    /// later ConfigureRequest, session restore); one bit keeps a buggy
+    /// client diagnosable without turning every commit into log spam.
+    pub(crate) geometry_clamp_logged: bool,
     /// The content geometry to restore on `unmaximize` — set the first
     /// time a client is maximized (in either axis) and cleared once it's
     /// fully unmaximized. `None` means "not currently maximized".
@@ -169,6 +174,7 @@ impl<B: Backend> Client<B> {
             layout: DecorationLayout::default(),
             lifecycle: Lifecycle::Normal,
             flags: ClientFlags::empty(),
+            geometry_clamp_logged: false,
             restore_geometry: None,
             // `WindowManager::handle_map_request` overwrites this with
             // the *current* workspace right after construction — this

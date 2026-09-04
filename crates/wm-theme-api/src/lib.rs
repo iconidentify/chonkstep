@@ -13,5 +13,8 @@ pub use decoration::{
     ButtonKind, ButtonRuntimeState, DecorationBuffer, DecorationLayout, DecorationRequest,
     ResizeEdge, ThemeEngine,
 };
-pub use geometry::{Point, Rect, Size};
+pub use geometry::{
+    clamp_client_size, client_size_limit, Point, Rect, Size,
+    MAX_CLIENT_WINDOW_DIMENSION,
+};
 pub use popup::{PopupGrab, PopupHost};

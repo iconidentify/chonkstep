@@ -22,6 +22,51 @@ impl Size {
     }
 }
 
+/// Absolute ceiling for one client window dimension in physical
+/// pixels. The effective limit is normally the desktop's own extent
+/// (see [`client_size_limit`]); this second guard keeps a malformed
+/// multi-output layout or an unattached protocol surface from turning
+/// a client-controlled size into a multi-gigabyte decoration buffer.
+pub const MAX_CLIENT_WINDOW_DIMENSION: u32 = 8192;
+
+/// Largest useful client size on this desktop.
+///
+/// A managed window cannot expose pixels beyond the union of the
+/// outputs, so accepting a larger content rectangle only increases
+/// allocations and protocol work. Each axis is independently bounded
+/// by the real desktop and by [`MAX_CLIENT_WINDOW_DIMENSION`]. A
+/// temporarily empty output layout still permits a 1x1 safe fallback.
+pub const fn client_size_limit(screen: Size) -> Size {
+    Size::new(
+        if screen.w == 0 {
+            1
+        } else if screen.w > MAX_CLIENT_WINDOW_DIMENSION {
+            MAX_CLIENT_WINDOW_DIMENSION
+        } else {
+            screen.w
+        },
+        if screen.h == 0 {
+            1
+        } else if screen.h > MAX_CLIENT_WINDOW_DIMENSION {
+            MAX_CLIENT_WINDOW_DIMENSION
+        } else {
+            screen.h
+        },
+    )
+}
+
+/// Bounds an untrusted client size before it can reach layout or
+/// raster allocation. Zero is preserved because protocol-specific
+/// callers use it to mean "unspecified"; positive dimensions are
+/// capped to the useful desktop limit.
+pub const fn clamp_client_size(size: Size, screen: Size) -> Size {
+    let limit = client_size_limit(screen);
+    Size::new(
+        if size.w > limit.w { limit.w } else { size.w },
+        if size.h > limit.h { limit.h } else { size.h },
+    )
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct Rect {
     pub pos: Point,
@@ -54,5 +99,21 @@ mod tests {
         assert!(r.contains(Point::new(14, 14)));
         assert!(!r.contains(Point::new(15, 15)));
         assert!(!r.contains(Point::new(9, 10)));
+    }
+
+    #[test]
+    fn client_size_is_bounded_by_the_desktop_and_absolute_ceiling() {
+        assert_eq!(
+            clamp_client_size(Size::new(u32::MAX, 100_000), Size::new(2560, 1600)),
+            Size::new(2560, 1600)
+        );
+        assert_eq!(
+            client_size_limit(Size::new(20_000, 10_000)),
+            Size::new(MAX_CLIENT_WINDOW_DIMENSION, MAX_CLIENT_WINDOW_DIMENSION)
+        );
+        assert_eq!(
+            clamp_client_size(Size::new(640, 480), Size::new(2560, 1600)),
+            Size::new(640, 480)
+        );
     }
 }

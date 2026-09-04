@@ -41,7 +41,7 @@ use smithay::xwayland::xwm::{
 use smithay::xwayland::{X11Surface, X11Wm, XwmHandler};
 
 use wm_core::{BackendEvent, NetState, NetStateAction};
-use wm_theme_api::{Point, Rect, ResizeEdge, Size};
+use wm_theme_api::{clamp_client_size, Point, Rect, ResizeEdge, Size};
 
 use crate::state::{
     Compositor, ManagedSurface, WaylandBackend, WindowRecord, WlFrameId, WlWindowId,
@@ -84,10 +84,8 @@ fn ensure_x11_record(backend: &mut WaylandBackend, window: &X11Surface) -> WlWin
     // tracked their pre-map configures); starting the record from that
     // truth is what makes `Backend::window_geometry` answer correctly
     // at map time.
-    backend.remember_window(
-        id,
-        WindowRecord::new(ManagedSurface::X11(window.clone()), wm_rect(window.geometry())),
-    );
+    let geometry = wm_rect(window.geometry(), backend.output_size);
+    backend.remember_window(id, WindowRecord::new(ManagedSurface::X11(window.clone()), geometry));
     id
 }
 
@@ -108,10 +106,11 @@ fn wm_resize_edge(edge: X11ResizeEdge) -> ResizeEdge {
     }
 }
 
-fn wm_rect(rect: Rectangle<i32, Logical>) -> Rect {
+fn wm_rect(rect: Rectangle<i32, Logical>, screen: Size) -> Rect {
+    let requested = Size::new(rect.size.w.max(0) as u32, rect.size.h.max(0) as u32);
     Rect {
         pos: Point::new(rect.loc.x, rect.loc.y),
-        size: Size::new(rect.size.w.max(0) as u32, rect.size.h.max(0) as u32),
+        size: clamp_client_size(requested, screen),
     }
 }
 
@@ -143,8 +142,9 @@ impl XwmHandler for Compositor {
         let id = ensure_x11_record(backend, &window);
         // Refresh the pre-map geometry — the client may have configured
         // itself since the record was first created.
+        let geometry = wm_rect(window.geometry(), backend.output_size);
         if let Some(record) = backend.windows.get_mut(&id) {
-            record.content = wm_rect(window.geometry());
+            record.content = geometry;
         }
         backend.queue(WmEvent::MapRequest(id));
     }
@@ -158,8 +158,9 @@ impl XwmHandler for Compositor {
         // these window types.
         let backend = self.wm.backend_mut();
         let id = ensure_x11_record(backend, &window);
+        let geometry = wm_rect(window.geometry(), backend.output_size);
         if let Some(record) = backend.windows.get_mut(&id) {
-            record.content = wm_rect(window.geometry());
+            record.content = geometry;
         }
         backend.queue(WmEvent::MapRequest(id));
     }
@@ -244,7 +245,8 @@ impl XwmHandler for Compositor {
             // the X11 backend's ConfigureRequest events (it honors
             // sizes, ignores positions on managed clients, and applies
             // everything verbatim pre-manage via `configure_unmanaged`).
-            backend.queue(WmEvent::ConfigureRequest { window: id, requested: wm_rect(requested) });
+            let requested = wm_rect(requested, backend.output_size);
+            backend.queue(WmEvent::ConfigureRequest { window: id, requested });
         } else {
             // Never mapped, no record yet: honor directly — ICCCM
             // requires acknowledging pre-map configures or clients
@@ -271,8 +273,9 @@ impl XwmHandler for Compositor {
         }
         let backend = self.wm.backend_mut();
         if let Some(id) = x11_window_id(backend, &window) {
+            let geometry = wm_rect(geometry, backend.output_size);
             if let Some(record) = backend.windows.get_mut(&id) {
-                record.content = wm_rect(geometry);
+                record.content = geometry;
             }
             backend.mark_damaged();
         }

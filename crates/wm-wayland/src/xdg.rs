@@ -76,7 +76,7 @@ use smithay::{
 };
 
 use wm_core::{BackendEvent, NetState, NetStateAction};
-use wm_theme_api::{Point, Rect, ResizeEdge, Size};
+use wm_theme_api::{clamp_client_size, client_size_limit, Point, Rect, ResizeEdge, Size};
 
 use crate::state::{
     ClientState, Compositor, FrameRecord, ManagedSurface, StackEntry, WaylandBackend, WindowRecord,
@@ -92,6 +92,48 @@ type WmEvent = BackendEvent<WlWindowId, WlFrameId>;
 /// here it is derived from buffer-presence transitions across commits.
 #[derive(Default)]
 struct MappedMarker(AtomicBool);
+
+/// One warning bit per xdg surface for rejected client geometry. It
+/// lives with the surface so an app that repeats the same malformed
+/// commit remains diagnosable without flooding the session log.
+#[derive(Default)]
+struct GeometryClampMarker(AtomicBool);
+
+fn first_geometry_warning(surface: &WlSurface) -> bool {
+    with_states(surface, |states| {
+        states
+            .data_map
+            .insert_if_missing_threadsafe(GeometryClampMarker::default);
+        !states
+            .data_map
+            .get::<GeometryClampMarker>()
+            .unwrap()
+            .0
+            .swap(true, Ordering::Relaxed)
+    })
+}
+
+fn warn_geometry_clamped(surface: &WlSurface, requested: Size, accepted: Size) {
+    if first_geometry_warning(surface) {
+        tracing::warn!(
+            surface = ?surface.id(),
+            ?requested,
+            ?accepted,
+            "client-declared xdg window geometry exceeded the desktop allocation limit; using bounded buffer geometry"
+        );
+    }
+}
+
+fn warn_geometry_offset_clamped(surface: &WlSurface, requested: Point, accepted: Point) {
+    if first_geometry_warning(surface) {
+        tracing::warn!(
+            surface = ?surface.id(),
+            ?requested,
+            ?accepted,
+            "client-declared xdg window-geometry origin exceeded the desktop coordinate limit; clamping"
+        );
+    }
+}
 
 fn mapped_marker(surface: &WlSurface) -> bool {
     with_states(surface, |states| {
@@ -327,19 +369,34 @@ pub(crate) fn effective_surface_scale(declared: f64, output_scale: f64) -> f64 {
 /// the renderer draws with: the offset positions a rectangle measured
 /// in physical pixels, and an inset scaled by anything else slides the
 /// window out from under its own frame by the difference.
-fn committed_content_offset(surface: &WlSurface, factor: f64) -> Point {
-    with_states(surface, |states| {
+fn committed_content_offset(surface: &WlSurface, factor: f64, screen: Size) -> Point {
+    let geometry = with_states(surface, |states| {
         let mut guard = states.cached_state.get::<SurfaceCachedState>();
         guard.current().geometry
-    })
-    .filter(|geometry| geometry.size.w > 0 && geometry.size.h > 0)
-    .map(|geometry| {
-        Point::new(
-            scale_length(geometry.loc.x, factor),
-            scale_length(geometry.loc.y, factor),
-        )
-    })
-    .unwrap_or(Point::new(0, 0))
+    });
+    let Some(geometry) = geometry.filter(|geometry| geometry.size.w > 0 && geometry.size.h > 0) else {
+        return Point::new(0, 0);
+    };
+    let declared = Size::new(
+        scale_length(geometry.size.w, factor) as u32,
+        scale_length(geometry.size.h, factor) as u32,
+    );
+    if clamp_client_size(declared, screen) != declared {
+        return Point::new(0, 0);
+    }
+    let limit = client_size_limit(screen);
+    let requested = Point::new(
+        scale_length(geometry.loc.x, factor),
+        scale_length(geometry.loc.y, factor),
+    );
+    let accepted = Point::new(
+        requested.x.clamp(-(limit.w as i32), limit.w as i32),
+        requested.y.clamp(-(limit.h as i32), limit.h as i32),
+    );
+    if accepted != requested {
+        warn_geometry_offset_clamped(surface, requested, accepted);
+    }
+    accepted
 }
 
 /// The size the client actually committed: its declared xdg window
@@ -357,20 +414,25 @@ fn committed_content_offset(surface: &WlSurface, factor: f64) -> Point {
 /// any other number and the three descriptions of one window stop
 /// agreeing: the frame is drawn to one rectangle, the pointer routed by
 /// a second, and the client's pixels land in a third.
-fn committed_content_size(surface: &WlSurface, factor: f64) -> Option<Size> {
+fn committed_content_size(surface: &WlSurface, factor: f64, screen: Size) -> Option<Size> {
     let geometry = with_states(surface, |states| {
         let mut guard = states.cached_state.get::<SurfaceCachedState>();
         guard.current().geometry
     });
+    let mut rejected = None;
     if let Some(geometry) = geometry {
         if geometry.size.w > 0 && geometry.size.h > 0 {
-            return Some(Size::new(
+            let requested = Size::new(
                 scale_length(geometry.size.w, factor) as u32,
                 scale_length(geometry.size.h, factor) as u32,
-            ));
+            );
+            if clamp_client_size(requested, screen) == requested {
+                return Some(requested);
+            }
+            rejected = Some(requested);
         }
     }
-    with_renderer_surface_state(surface, |state| state.surface_size())
+    let buffer_size = with_renderer_surface_state(surface, |state| state.surface_size())
         .flatten()
         .filter(|size| size.w > 0 && size.h > 0)
         .map(|size| {
@@ -378,7 +440,15 @@ fn committed_content_size(surface: &WlSurface, factor: f64) -> Option<Size> {
                 scale_length(size.w, factor) as u32,
                 scale_length(size.h, factor) as u32,
             )
-        })
+        });
+    let requested = buffer_size?;
+    let accepted = clamp_client_size(requested, screen);
+    if let Some(declared) = rejected {
+        warn_geometry_clamped(surface, declared, accepted);
+    } else if accepted != requested {
+        warn_geometry_clamped(surface, requested, accepted);
+    }
+    Some(accepted)
 }
 
 // -- wl_compositor -------------------------------------------------------
@@ -731,7 +801,8 @@ impl Compositor {
             .get(&id)
             .map(|record| backend.window_surface_scale(record))
             .unwrap_or(1.0);
-        let committed = committed_content_size(&root, surface_scale);
+        let screen = backend.output_size;
+        let committed = committed_content_size(&root, surface_scale, screen);
         if has_buffer && !was_mapped {
             set_mapped_marker(&root, true);
             // Seed the record with the client's own size so
@@ -742,7 +813,7 @@ impl Compositor {
                     record.content.size = size;
                 }
             }
-            let offset = committed_content_offset(&root, surface_scale);
+            let offset = committed_content_offset(&root, surface_scale, screen);
             if let Some(record) = backend.windows.get_mut(&id) {
                 record.content_offset = offset;
             }
@@ -773,7 +844,7 @@ impl Compositor {
             // its own hit rect by exactly the difference, most visibly
             // as a maximized window hanging off the top-left of the
             // screen by its former shadow.
-            let offset = committed_content_offset(&root, surface_scale);
+            let offset = committed_content_offset(&root, surface_scale, screen);
             if let Some(record) = backend.windows.get_mut(&id) {
                 record.content_offset = offset;
             }

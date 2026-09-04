@@ -2,8 +2,8 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use slotmap::SlotMap;
 use wm_theme_api::{
-    ButtonKind, ButtonRuntimeState, DecorationBuffer, DecorationLayout, DecorationRequest, Point, Rect, ResizeEdge,
-    Size, ThemeEngine,
+    clamp_client_size, ButtonKind, ButtonRuntimeState, DecorationBuffer, DecorationLayout,
+    DecorationRequest, Point, Rect, ResizeEdge, Size, ThemeEngine,
 };
 
 use crate::backend::Backend;
@@ -274,6 +274,30 @@ struct CycleSession {
 }
 
 impl<B: Backend> WindowManager<B> {
+    /// Bounds one client's size before any theme layout or raster
+    /// allocation can observe it. Protocol backends should reject bad
+    /// geometry at their own trust boundary too; this is the final,
+    /// backend-independent guard protecting every sibling path (X11
+    /// ConfigureRequest, session restore, shell-driven resize).
+    fn clamp_geometry(client: &mut Client<B>, screen: Size) {
+        let requested = client.geometry.size;
+        let accepted = clamp_client_size(requested, screen);
+        if requested == accepted {
+            return;
+        }
+        if !client.geometry_clamp_logged {
+            tracing::warn!(
+                window = ?client.window,
+                ?requested,
+                ?accepted,
+                ?screen,
+                "client window geometry exceeded the desktop allocation limit; clamping"
+            );
+            client.geometry_clamp_logged = true;
+        }
+        client.geometry.size = accepted;
+    }
+
     pub fn new(mut backend: B, theme: Box<dyn ThemeEngine>) -> Self {
         // Publish the initial workspace shape immediately: an EWMH pager
         // that starts alongside the WM reads `_NET_NUMBER_OF_DESKTOPS`/
@@ -1111,6 +1135,7 @@ impl<B: Backend> WindowManager<B> {
         client.chrome = chrome;
         client.class = self.backend.window_class(window).map(|c| c.class).unwrap_or_default();
         client.geometry = content;
+        Self::clamp_geometry(&mut client, self.backend.screen_size());
         client.workspace = self.current_workspace;
 
         let window_rule = self
@@ -1935,6 +1960,10 @@ impl<B: Backend> WindowManager<B> {
     /// backend. Shared tail of any operation that changes a client's
     /// content size in place (`ConfigureRequest`, maximize, unmaximize).
     fn reflow_frame(&mut self, id: ClientId) {
+        let screen = self.backend.screen_size();
+        if let Some(client) = self.clients.get_mut(id) {
+            Self::clamp_geometry(client, screen);
+        }
         let Some(client) = self.clients.get(id) else {
             return;
         };
@@ -5688,6 +5717,40 @@ mod tests {
         let client = wm.client(id).unwrap();
         assert_eq!(client.geometry.size.w, 321, "the free axis still honors the client");
         assert_eq!(client.geometry.size.h, maximized_h, "the maximized axis does not");
+    }
+
+    #[test]
+    fn client_geometry_is_bounded_on_initial_map_and_later_configure_requests() {
+        let mut backend = FakeBackend::new();
+        let first = backend.create_window();
+        backend.set_monitor(Rect { pos: Point::new(0, 0), size: Size::new(800, 600) });
+        backend.set_geometry(
+            first,
+            Rect { pos: Point::new(0, 0), size: Size::new(u32::MAX, u32::MAX) },
+        );
+        let mut wm = wm(backend);
+        wm.dispatch(BackendEvent::MapRequest(first));
+        let first_id = wm.client_for_window(first).unwrap();
+        let limit = wm_theme_api::client_size_limit(wm.backend().screen_size());
+        assert_eq!(wm.client(first_id).unwrap().geometry.size, limit);
+
+        let second = wm.backend_mut().create_window();
+        wm.backend_mut().set_geometry(
+            second,
+            Rect { pos: Point::new(20, 20), size: Size::new(320, 240) },
+        );
+        wm.dispatch(BackendEvent::MapRequest(second));
+        let second_id = wm.client_for_window(second).unwrap();
+        wm.dispatch(BackendEvent::ConfigureRequest {
+            window: second,
+            requested: Rect {
+                pos: Point::new(20, 20),
+                size: Size::new(u32::MAX, 100_000),
+            },
+        });
+        let client = wm.client(second_id).unwrap();
+        assert_eq!(client.geometry.size, limit);
+        assert!(client.geometry_clamp_logged);
     }
 
     /// The clamp must not grow into a general veto of client resizes.

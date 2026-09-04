@@ -99,6 +99,51 @@ fn fullscreen_transitions(session: &Session) -> (usize, usize) {
     )
 }
 
+/// A client-controlled `xdg_surface.set_window_geometry` used to flow
+/// straight into the full-frame decoration allocator. Widths above
+/// tiny-skia's row limit made `Pixmap::new` return `None` and the
+/// compositor's main thread `expect`ed, taking the whole login session
+/// down. This probe declares that exact hostile width over a normal
+/// 400x300 buffer; surviving, mapping from the buffer, and logging one
+/// bounded rejection are all part of the contract.
+#[test]
+#[ignore = "needs a live Wayland session to nest in: scripts/e2e.sh, or cargo test -p chonk-testkit -- --ignored --test-threads=1"]
+fn absurd_xdg_window_geometry_cannot_kill_or_bloat_the_session() {
+    let probe = profile_binary("chonk-fullscreen-probe")
+        .expect("cargo build -p chonk-testkit builds the probe");
+    let mut session = Session::boot(
+        "bounded-xdg-geometry",
+        SessionOptions { scale: Some(1.0), ..SessionOptions::default() },
+    )
+    .expect("the nested compositor boots");
+    session
+        .launch(
+            &probe.to_string_lossy(),
+            &["hostile-geometry", "hostile-geometry", "absurd-geometry"],
+        )
+        .expect("the hostile probe launches");
+
+    let window = session
+        .wait_for_window("hostile-geometry")
+        .expect("the session survives and maps the probe from its real buffer");
+    assert_eq!(
+        (window.w, window.h),
+        (400, 300),
+        "the rejected 600-million-pixel declaration must fall back to the committed buffer"
+    );
+    session
+        .door()
+        .barrier()
+        .expect("the compositor remains responsive after the hostile commit");
+    let log = session.log();
+    assert_eq!(
+        log.matches("client-declared xdg window geometry exceeded the desktop allocation limit")
+            .count(),
+        1,
+        "one surface gets one diagnostic, not one warning per later commit:\n{log}"
+    );
+}
+
 /// Waits for the real Top layer fixture to finish its first mapped
 /// commit. It is launched second in this module, after the probe.
 fn wait_for_bar(session: &Session) {

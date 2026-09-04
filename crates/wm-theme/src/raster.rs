@@ -293,7 +293,20 @@ fn render_decoration(
     layout: &DecorationLayout,
 ) -> DecorationBuffer {
     let (w, h) = (layout.frame_size.w.max(1), layout.frame_size.h.max(1));
-    let mut pixmap = Pixmap::new(w, h).expect("decoration size is nonzero");
+    let Some(mut pixmap) = Pixmap::new(w, h) else {
+        // Client geometry is bounded before reaching the theme, but
+        // ThemeEngine is a public contract and future callers must not
+        // be able to turn an allocation refusal into a compositor-main-
+        // thread panic. A defined opaque pixel keeps every backend's
+        // buffer import path total while the log preserves the bad
+        // dimensions for diagnosis.
+        tracing::error!(width = w, height = h, "could not allocate decoration raster; using a 1x1 fallback");
+        return DecorationBuffer {
+            width: 1,
+            height: 1,
+            pixels: vec![0, 0, 0, 0xff],
+        };
+    };
     // Defined, opaque pixels over the whole frame first — including the
     // client-area interior the client normally covers. Frames are
     // 32-bit ARGB (see wm-x11's `Argb`), and a fresh pixmap's

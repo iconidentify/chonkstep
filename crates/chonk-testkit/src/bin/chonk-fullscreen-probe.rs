@@ -40,7 +40,9 @@
 //! keyboard focus. `animation-mode` is `animate` for a self-timed producer,
 //! `animate-frame` for a conventional `wl_surface.frame`-paced one, or
 //! `animate-inhibit-idle` for a self-timed producer which also binds the idle
-//! inhibitor and notification protocols:
+//! inhibitor and notification protocols. `absurd-geometry` instead declares
+//! a hostile 600-million-pixel-wide xdg window geometry while committing the
+//! ordinary 400x300 buffer; the compositor-survival E2E uses that mode:
 //!
 //! | key | evdev | meaning |
 //! |---|---|---|
@@ -471,6 +473,7 @@ fn main() {
     let self_timed = matches!(animation.as_deref(), Some("animate" | "animate-inhibit-idle"));
     let frame_driven = animation.as_deref() == Some("animate-frame");
     let inhibit_idle = matches!(animation.as_deref(), Some("inhibit-idle" | "animate-inhibit-idle"));
+    let absurd_geometry = animation.as_deref() == Some("absurd-geometry");
 
     let connection = Connection::connect_to_env()
         .unwrap_or_else(|error| fatal(&format!("no wayland display: {error}")));
@@ -497,6 +500,14 @@ fn main() {
     let toplevel = xdg_surface.get_toplevel(&qh, ());
     toplevel.set_title(title.clone());
     toplevel.set_app_id(app_id);
+    if absurd_geometry {
+        // The buffer below remains WINDOWED. This declaration is the
+        // three-message session-kill shape from issue #36: older
+        // ChonkStep releases trusted it as a decoration width and
+        // panicked before this process could ever map.
+        xdg_surface.set_window_geometry(0, 0, 600_000_000, 10);
+        say("declared absurd window geometry 600000000x10");
+    }
     surface.commit();
     probe.surface = Some(surface.clone());
     probe.toplevel = Some(toplevel);
