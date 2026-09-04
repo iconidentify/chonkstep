@@ -58,6 +58,7 @@ fn ordinary_desktop_globals_bind_successfully() {
         "xdg_system_bell_v1",
         "xdg_toplevel_tag_manager_v1",
         "hyprland_toplevel_mapping_manager_v1",
+        "hyprland_focus_grab_manager_v1",
     ] {
         assert!(
             report.contains(&format!("interface: '{interface}'")),

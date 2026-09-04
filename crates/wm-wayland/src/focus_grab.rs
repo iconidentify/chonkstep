@@ -132,7 +132,7 @@
 //!
 //! # Integration contract
 //!
-//! One field, one init call, one call per dispatch pass, and four hooks
+//! One field, one init call, one call per dispatch pass, and five hooks
 //! — the same shape `protocols.rs` documents, all of it in `state.rs`
 //! except the hooks:
 //!
@@ -144,21 +144,20 @@
 //! 3. In `Compositor::dispatch_pending`, `crate::focus_grab::refresh(self);`
 //!    beside the other per-pass reconciliations.
 //! 4. The hooks: two in `input.rs` (motion and button), one in
-//!    `Compositor::apply_pending_focus`, one in `layers::sync_keyboard`.
-//!    Each is documented at its site.
+//!    `Compositor::apply_pending_focus`, one in `layers::sync_keyboard`,
+//!    and the `wl_surface` destruction callback in `xdg.rs`. Each is
+//!    documented at its site.
 //!
 //! # Why the work is deferred to `refresh`
 //!
-//! Dead-surface pruning and the keyboard move both happen once per
-//! dispatch pass rather than inside the request handlers, which is the
-//! same deferral `protocols.rs::apply_minimize_requests` and
-//! `WaylandBackend::pending_focus` document. Pruning by aliveness needs
-//! no destruction hook on `wl_surface` at all — a destroyed surface is
-//! simply not alive on the next pass — so the protocol's "destroying
-//! the surface is treated the same as an explicit call to
-//! `remove_surface`" clause cannot be forgotten by a future code path,
-//! and cannot leak an entry either. The cost is one dispatch pass of
-//! latency on a keyboard focus move nobody can perceive.
+//! The keyboard move happens once per dispatch pass rather than inside
+//! request handlers, which is the same deferral
+//! `protocols.rs::apply_minimize_requests` and
+//! `WaylandBackend::pending_focus` document. Surface removal itself is
+//! event-driven from `CompositorHandler::destroyed`: that is the one
+//! exhaustive callback for both explicit destruction and client death,
+//! and it implements the protocol's implicit `remove_surface` without
+//! scanning every live whitelist on unrelated frame commits.
 
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::reexports::wayland_server::{
@@ -260,7 +259,10 @@ impl<S: Clone + PartialEq> Whitelist<S> {
     /// An empty, inert whitelist — the state a freshly created
     /// `hyprland_focus_grab_v1` is in until its first `commit`.
     pub(crate) fn new() -> Self {
-        Whitelist { staged: Vec::new(), committed: Vec::new() }
+        Whitelist {
+            staged: Vec::new(),
+            committed: Vec::new(),
+        }
     }
 
     /// Whether this grab is being enforced.
@@ -320,10 +322,10 @@ impl<S: Clone + PartialEq> Whitelist<S> {
     /// client had removed and committed them itself.
     ///
     /// This is the protocol's "destroying the surface is treated the
-    /// same as an explicit call to `remove_surface`" clause, expressed
-    /// as a filter rather than a destruction callback so that a
-    /// surface which dies while nothing is looking still leaves the
-    /// whitelist on the next pass. See [`refresh`].
+    /// same as an explicit call to `remove_surface`" clause. The
+    /// compositor's exhaustive surface-destruction callback invokes
+    /// this filter once, so both staged and enforced copies change in
+    /// the same transition without steady-state polling.
     pub(crate) fn retain(&mut self, mut keep: impl FnMut(&S) -> bool) -> Commit {
         let was_active = self.is_active();
         let before = self.staged.len() + self.committed.len();
@@ -390,10 +392,12 @@ struct Grab {
 /// Everything this protocol keeps between dispatch passes.
 ///
 /// At most one grab in `grabs` is ever active — starting one ends any
-/// other — so "the active grab" is derived by searching rather than
-/// stored in a second field that could disagree with the first.
+/// other. Its index is cached so pointer routing is constant-time in
+/// the number of inert grab objects Quickshell created at startup;
+/// removing an object adjusts the index in the same operation.
 pub(crate) struct FocusGrab {
     grabs: Vec<Grab>,
+    active: Option<usize>,
     /// Set whenever something happened that the seat's keyboard focus
     /// might have to answer for: a grab started, changed, or ended.
     /// Consumed by [`refresh`].
@@ -412,11 +416,11 @@ pub(crate) struct FocusGrab {
 }
 
 impl FocusGrab {
-    /// Whether a grab is currently being enforced. Every hook outside
-    /// this module tests this first, so a session with no grabbing
-    /// client pays one `Vec::iter().any()` over an empty vector.
+    /// Whether a grab is currently being enforced. Every input hook
+    /// tests this first, so keep it one option read independent of how
+    /// many inert grab objects the shell owns.
     pub(crate) fn is_active(&self) -> bool {
-        self.grabs.iter().any(|grab| grab.list.is_active())
+        self.active.is_some()
     }
 
     /// Whether an input event landing on these surfaces falls *outside*
@@ -431,7 +435,7 @@ impl FocusGrab {
     /// whitelists the layer surface; a client that whitelisted only the
     /// popup it just opened is served by the same call.
     pub(crate) fn escapes(&self, surface: Option<&WlSurface>, root: Option<&WlSurface>) -> bool {
-        let Some(grab) = self.grabs.iter().find(|grab| grab.list.is_active()) else {
+        let Some(grab) = self.active.and_then(|index| self.grabs.get(index)) else {
             return false;
         };
         let inside = [surface, root]
@@ -450,8 +454,12 @@ impl FocusGrab {
     /// where a grab wants the keyboard at the moment an exclusive layer
     /// surface lets go of it.
     pub(crate) fn keyboard_surface(&self) -> Option<WlSurface> {
-        let grab = self.grabs.iter().find(|grab| grab.list.is_active())?;
-        grab.list.committed().iter().find(|surface| surface.is_alive()).cloned()
+        let grab = self.grabs.get(self.active?)?;
+        grab.list
+            .committed()
+            .iter()
+            .find(|surface| surface.is_alive())
+            .cloned()
     }
 
     /// Ends the active grab (if any) and sends its `cleared`. Answers
@@ -460,17 +468,49 @@ impl FocusGrab {
     /// This is the shared tail of every ending except the grab object
     /// being destroyed, which must not send on an object that is gone.
     fn clear_active(&mut self) -> bool {
-        let mut cleared = false;
-        for grab in self.grabs.iter_mut() {
-            if grab.list.finish() {
-                grab.resource.cleared();
-                cleared = true;
-            }
-        }
+        let Some(index) = self.active.take() else {
+            return false;
+        };
+        let Some(grab) = self.grabs.get_mut(index) else {
+            return false;
+        };
+        let cleared = grab.list.finish();
         if cleared {
+            grab.resource.cleared();
             self.refocus = true;
         }
         cleared
+    }
+
+    /// Applies the protocol's implicit `remove_surface` at the exact
+    /// destruction event. Called once from the compositor-wide surface
+    /// callback, which also runs for a disconnected client.
+    pub(crate) fn surface_destroyed(&mut self, surface: &WlSurface) {
+        for (index, grab) in self.grabs.iter_mut().enumerate() {
+            match grab.list.retain(|candidate| candidate != surface) {
+                Commit::Unchanged => {}
+                Commit::Cleared => {
+                    tracing::debug!(
+                        "focus grab cleared: its last whitelisted surface was destroyed"
+                    );
+                    grab.resource.cleared();
+                    if self.active == Some(index) {
+                        self.active = None;
+                    }
+                    self.refocus = true;
+                }
+                Commit::Started | Commit::Rewhitelisted => self.refocus = true,
+            }
+        }
+    }
+}
+
+/// Keeps the cached active index aligned after a `Vec::remove`.
+fn active_after_remove(active: Option<usize>, removed: usize) -> Option<usize> {
+    match active {
+        Some(index) if index == removed => None,
+        Some(index) if index > removed => Some(index - 1),
+        other => other,
     }
 }
 
@@ -503,18 +543,26 @@ pub(crate) fn init(display_handle: &DisplayHandle) -> FocusGrab {
     // nothing in a session's life withdraws this one.
     let _global = display_handle
         .create_global::<Compositor, HyprlandFocusGrabManagerV1, ()>(FOCUS_GRAB_VERSION, ());
-    tracing::info!(version = FOCUS_GRAB_VERSION, "hyprland-focus-grab advertised");
-    FocusGrab { grabs: Vec::new(), refocus: false, held_keyboard: false }
+    tracing::info!(
+        version = FOCUS_GRAB_VERSION,
+        "hyprland-focus-grab advertised"
+    );
+    FocusGrab {
+        grabs: Vec::new(),
+        active: None,
+        refocus: false,
+        held_keyboard: false,
+    }
 }
 
-/// Per-pass reconciliation: session lock, dead surfaces, keyboard.
+/// Per-pass reconciliation: session lock and keyboard.
 ///
 /// Ordered, and the order is the ordering table in the module docs read
 /// top down. Cheap to nothing when no client has ever bound the
 /// protocol, which is every session that is not running a shell that
 /// speaks it.
 pub(crate) fn refresh(comp: &mut Compositor) {
-    if comp.focus_grab.grabs.is_empty() && !comp.focus_grab.refocus {
+    if !comp.focus_grab.refocus && !(comp.wm.backend().locked && comp.focus_grab.active.is_some()) {
         return;
     }
     // A session lock outranks everything. The lock has already taken
@@ -525,27 +573,7 @@ pub(crate) fn refresh(comp: &mut Compositor) {
     if comp.wm.backend().locked && comp.focus_grab.clear_active() {
         tracing::debug!("focus grab cleared by the session lock");
     }
-    prune_dead_surfaces(comp);
     settle_keyboard(comp);
-}
-
-/// Applies the protocol's implicit `remove_surface` on destruction, by
-/// dropping whitelist entries whose surface is no longer alive.
-fn prune_dead_surfaces(comp: &mut Compositor) {
-    for index in 0..comp.focus_grab.grabs.len() {
-        let outcome = comp.focus_grab.grabs[index].list.retain(WlSurface::is_alive);
-        match outcome {
-            Commit::Unchanged => {}
-            Commit::Cleared => {
-                tracing::debug!("focus grab cleared: its last whitelisted surface was destroyed");
-                comp.focus_grab.grabs[index].resource.cleared();
-                comp.focus_grab.refocus = true;
-            }
-            // `Started` cannot come out of a filter, but treating it
-            // like any other change costs a bool and never lies.
-            Commit::Started | Commit::Rewhitelisted => comp.focus_grab.refocus = true,
-        }
-    }
 }
 
 /// Points the seat's keyboard at the grab while one holds it, and hands
@@ -618,7 +646,12 @@ fn settle_keyboard(comp: &mut Compositor) {
 /// released.
 fn keyboard_fallback(comp: &Compositor) -> Option<WlSurface> {
     if let Some(id) = comp.layer_shell.on_demand_focus {
-        let record = comp.wm.backend().layers.iter().find(|record| record.id == id);
+        let record = comp
+            .wm
+            .backend()
+            .layers
+            .iter()
+            .find(|record| record.id == id);
         if let Some(record) = record.filter(|record| record.surface.alive()) {
             return Some(record.surface.wl_surface().clone());
         }
@@ -673,7 +706,10 @@ impl Dispatch<HyprlandFocusGrabManagerV1, ()> for Compositor {
                 // why creating one costs nothing: Quickshell creates a
                 // grab per popup component at load and commits only the
                 // ones the user opens.
-                state.focus_grab.grabs.push(Grab { resource, list: Whitelist::new() });
+                state.focus_grab.grabs.push(Grab {
+                    resource,
+                    list: Whitelist::new(),
+                });
             }
             // Destructors need no body: `Dispatch::destroyed` runs
             // either way, and it is where the bookkeeping lives so that
@@ -694,7 +730,11 @@ impl Dispatch<HyprlandFocusGrabV1, ()> for Compositor {
         _display_handle: &DisplayHandle,
         _data_init: &mut DataInit<'_, Self>,
     ) {
-        let Some(index) = state.focus_grab.grabs.iter().position(|grab| &grab.resource == resource)
+        let Some(index) = state
+            .focus_grab
+            .grabs
+            .iter()
+            .position(|grab| &grab.resource == resource)
         else {
             // A request against a grab this compositor has already
             // forgotten. Not reachable through `destroyed`, which runs
@@ -725,11 +765,16 @@ impl Dispatch<HyprlandFocusGrabV1, ()> for Compositor {
         // send nothing, because `cleared` would have to travel on the
         // object that just went away. The keyboard still has to be
         // handed back, which is what the flag is for.
-        let Some(index) = state.focus_grab.grabs.iter().position(|grab| &grab.resource == resource)
+        let Some(index) = state
+            .focus_grab
+            .grabs
+            .iter()
+            .position(|grab| &grab.resource == resource)
         else {
             return;
         };
         let mut grab = state.focus_grab.grabs.remove(index);
+        state.focus_grab.active = active_after_remove(state.focus_grab.active, index);
         if grab.list.finish() {
             state.focus_grab.refocus = true;
         }
@@ -749,6 +794,9 @@ fn on_commit(comp: &mut Compositor, index: usize) {
             // both.
             tracing::debug!("focus grab cleared by its own client committing an empty whitelist");
             comp.focus_grab.grabs[index].resource.cleared();
+            if comp.focus_grab.active == Some(index) {
+                comp.focus_grab.active = None;
+            }
             comp.focus_grab.refocus = true;
         }
         Commit::Started => {
@@ -757,24 +805,32 @@ fn on_commit(comp: &mut Compositor, index: usize) {
             // one whitelist can be enforced at a time — two would mean
             // a click that is outside one and inside the other — so the
             // newcomer wins and the incumbent is told.
-            for other in 0..comp.focus_grab.grabs.len() {
-                if other == index {
-                    continue;
-                }
-                if comp.focus_grab.grabs[other].list.finish() {
+            if let Some(other) = comp.focus_grab.active.replace(index) {
+                if other != index && comp.focus_grab.grabs[other].list.finish() {
                     tracing::debug!("focus grab cleared: superseded by a newer grab");
                     comp.focus_grab.grabs[other].resource.cleared();
                 }
             }
             comp.focus_grab.refocus = true;
         }
-        Commit::Rewhitelisted => comp.focus_grab.refocus = true,
+        Commit::Rewhitelisted => {
+            comp.focus_grab.active = Some(index);
+            comp.focus_grab.refocus = true;
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Commit, Whitelist};
+    use super::{active_after_remove, Commit, Whitelist};
+
+    #[test]
+    fn removing_a_grab_keeps_the_active_index_aligned() {
+        assert_eq!(active_after_remove(None, 2), None);
+        assert_eq!(active_after_remove(Some(1), 2), Some(1));
+        assert_eq!(active_after_remove(Some(2), 2), None);
+        assert_eq!(active_after_remove(Some(4), 2), Some(3));
+    }
 
     /// The state machine under test, driven with plain integers for
     /// surfaces — see the module docs for why it is generic.
@@ -786,8 +842,14 @@ mod tests {
     fn adding_a_surface_does_not_start_the_grab() {
         let mut list = list();
         list.add(1);
-        assert!(!list.is_active(), "add_surface alone must not begin enforcing");
-        assert!(!list.contains(&1), "a staged surface is not on the enforced whitelist");
+        assert!(
+            !list.is_active(),
+            "add_surface alone must not begin enforcing"
+        );
+        assert!(
+            !list.contains(&1),
+            "a staged surface is not on the enforced whitelist"
+        );
     }
 
     #[test]
@@ -804,7 +866,11 @@ mod tests {
         let mut list = list();
         list.add(1);
         assert_eq!(list.commit(), Commit::Started);
-        assert_eq!(list.commit(), Commit::Unchanged, "a second commit must not re-start it");
+        assert_eq!(
+            list.commit(),
+            Commit::Unchanged,
+            "a second commit must not re-start it"
+        );
     }
 
     #[test]
@@ -820,7 +886,11 @@ mod tests {
         list.add(1);
         list.add(1);
         list.commit();
-        assert_eq!(list.committed(), &[1], "the protocol requires duplicates to collapse");
+        assert_eq!(
+            list.committed(),
+            &[1],
+            "the protocol requires duplicates to collapse"
+        );
     }
 
     #[test]
@@ -842,7 +912,11 @@ mod tests {
         assert_eq!(list.commit(), Commit::Cleared);
         assert!(!list.is_active());
         // The whole point: a second commit finds nothing to say.
-        assert_eq!(list.commit(), Commit::Unchanged, "cleared must fire exactly once");
+        assert_eq!(
+            list.commit(),
+            Commit::Unchanged,
+            "cleared must fire exactly once"
+        );
     }
 
     #[test]
@@ -881,7 +955,11 @@ mod tests {
         list.add(2);
         list.commit();
         assert_eq!(list.retain(|surface| *surface != 1), Commit::Rewhitelisted);
-        assert_eq!(list.committed(), &[2], "destruction is an implicit remove_surface");
+        assert_eq!(
+            list.committed(),
+            &[2],
+            "destruction is an implicit remove_surface"
+        );
     }
 
     #[test]
@@ -891,7 +969,11 @@ mod tests {
         list.commit();
         assert_eq!(list.retain(|_| false), Commit::Cleared);
         assert!(!list.is_active());
-        assert_eq!(list.retain(|_| false), Commit::Unchanged, "cleared must fire exactly once");
+        assert_eq!(
+            list.retain(|_| false),
+            Commit::Unchanged,
+            "cleared must fire exactly once"
+        );
     }
 
     #[test]

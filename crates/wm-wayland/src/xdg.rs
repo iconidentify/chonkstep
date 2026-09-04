@@ -79,8 +79,8 @@ use wm_core::{BackendEvent, NetState, NetStateAction};
 use wm_theme_api::{Point, Rect, ResizeEdge, Size};
 
 use crate::state::{
-    ClientState, Compositor, FrameRecord, ManagedSurface, StackEntry, WaylandBackend, WindowRecord, WlFrameId,
-    WlWindowId,
+    ClientState, Compositor, FrameRecord, ManagedSurface, StackEntry, WaylandBackend, WindowRecord,
+    WlFrameId, WlWindowId,
 };
 
 type WmEvent = BackendEvent<WlWindowId, WlFrameId>;
@@ -95,15 +95,29 @@ struct MappedMarker(AtomicBool);
 
 fn mapped_marker(surface: &WlSurface) -> bool {
     with_states(surface, |states| {
-        states.data_map.insert_if_missing_threadsafe(MappedMarker::default);
-        states.data_map.get::<MappedMarker>().unwrap().0.load(Ordering::Relaxed)
+        states
+            .data_map
+            .insert_if_missing_threadsafe(MappedMarker::default);
+        states
+            .data_map
+            .get::<MappedMarker>()
+            .unwrap()
+            .0
+            .load(Ordering::Relaxed)
     })
 }
 
 fn set_mapped_marker(surface: &WlSurface, value: bool) {
     with_states(surface, |states| {
-        states.data_map.insert_if_missing_threadsafe(MappedMarker::default);
-        states.data_map.get::<MappedMarker>().unwrap().0.store(value, Ordering::Relaxed);
+        states
+            .data_map
+            .insert_if_missing_threadsafe(MappedMarker::default);
+        states
+            .data_map
+            .get::<MappedMarker>()
+            .unwrap()
+            .0
+            .store(value, Ordering::Relaxed);
     });
 }
 
@@ -232,7 +246,10 @@ pub(crate) fn committed_surface_scale(surface: &WlSurface) -> f64 {
         let view = state.view()?;
         let dst = state.surface_size()?;
         let scale = state.buffer_scale() as f64;
-        Some(((view.src.size.w * scale, view.src.size.h * scale), (dst.w, dst.h)))
+        Some((
+            (view.src.size.w * scale, view.src.size.h * scale),
+            (dst.w, dst.h),
+        ))
     })
     .flatten();
     let Some((shown, dst)) = sizes else {
@@ -254,7 +271,13 @@ pub(crate) fn committed_surface_scale(surface: &WlSurface) -> f64 {
 /// fails silently, and it needs no live surface to pin down.
 fn ratio_scale(shown: (f64, f64), dst: (i32, i32)) -> Option<f64> {
     let ((shown_w, shown_h), (dst_w, dst_h)) = (shown, dst);
-    if dst_w <= 0 || dst_h <= 0 || !shown_w.is_finite() || !shown_h.is_finite() || shown_w <= 0.0 || shown_h <= 0.0 {
+    if dst_w <= 0
+        || dst_h <= 0
+        || !shown_w.is_finite()
+        || !shown_h.is_finite()
+        || shown_w <= 0.0
+        || shown_h <= 0.0
+    {
         return None;
     }
     let ratio_w = shown_w / dst_w as f64;
@@ -310,7 +333,12 @@ fn committed_content_offset(surface: &WlSurface, factor: f64) -> Point {
         guard.current().geometry
     })
     .filter(|geometry| geometry.size.w > 0 && geometry.size.h > 0)
-    .map(|geometry| Point::new(scale_length(geometry.loc.x, factor), scale_length(geometry.loc.y, factor)))
+    .map(|geometry| {
+        Point::new(
+            scale_length(geometry.loc.x, factor),
+            scale_length(geometry.loc.y, factor),
+        )
+    })
     .unwrap_or(Point::new(0, 0))
 }
 
@@ -345,7 +373,12 @@ fn committed_content_size(surface: &WlSurface, factor: f64) -> Option<Size> {
     with_renderer_surface_state(surface, |state| state.surface_size())
         .flatten()
         .filter(|size| size.w > 0 && size.h > 0)
-        .map(|size| Size::new(scale_length(size.w, factor) as u32, scale_length(size.h, factor) as u32))
+        .map(|size| {
+            Size::new(
+                scale_length(size.w, factor) as u32,
+                scale_length(size.h, factor) as u32,
+            )
+        })
 }
 
 // -- wl_compositor -------------------------------------------------------
@@ -426,6 +459,7 @@ impl CompositorHandler for Compositor {
         if was_lock_surface {
             self.session_lock.mark_dirty();
         }
+        self.focus_grab.surface_destroyed(surface);
         let backend = self.wm.backend_mut();
         backend.forget_surface(surface);
         // The surface may own an idle inhibitor (including as a
@@ -446,7 +480,9 @@ impl CompositorHandler for Compositor {
         while let Some(parent) = get_parent(&root) {
             root = parent;
         }
-        let xwayland = surface.client().is_some_and(|client| client.get_data::<XWaylandClientData>().is_some());
+        let xwayland = surface
+            .client()
+            .is_some_and(|client| client.get_data::<XWaylandClientData>().is_some());
         let owner = {
             let backend = self.wm.backend_mut();
             let owner = if xwayland {
@@ -491,7 +527,8 @@ impl CompositorHandler for Compositor {
             // so the hot path sends nothing after the first commit at
             // a given scale.
             let preferred = self.preferred_scale_for_resolved(&scene_root, scene_owner);
-            let advertised = crate::state::advertised_output_scale(preferred as f32).integer_scale();
+            let advertised =
+                crate::state::advertised_output_scale(preferred as f32).integer_scale();
             with_states(surface, |states| {
                 smithay::wayland::compositor::send_surface_state(
                     surface,
@@ -524,10 +561,14 @@ impl CompositorHandler for Compositor {
         }
 
         let toplevel = owner.and_then(|window| {
-            self.wm.backend().windows.get(&window).and_then(|record| match &record.surface {
-                ManagedSurface::Xdg(toplevel) => Some((window, toplevel.clone())),
-                ManagedSurface::X11(_) => None,
-            })
+            self.wm
+                .backend()
+                .windows
+                .get(&window)
+                .and_then(|record| match &record.surface {
+                    ManagedSurface::Xdg(toplevel) => Some((window, toplevel.clone())),
+                    ManagedSurface::X11(_) => None,
+                })
         });
         if let Some((window, toplevel)) = toplevel {
             self.toplevel_committed(window, &toplevel);
@@ -571,14 +612,21 @@ impl Compositor {
     /// for scale and role handling too; keeping the predicate beside it
     /// makes this the admission gate for the hottest damage source
     /// without teaching the renderer about protocol callbacks.
-    fn resolved_surface_affects_scene(&self, scene_root: &WlSurface, owner: Option<WlWindowId>) -> bool {
+    fn resolved_surface_affects_scene(
+        &self,
+        scene_root: &WlSurface,
+        owner: Option<WlWindowId>,
+    ) -> bool {
         let backend = self.wm.backend();
 
         // Cursor and input-method surfaces are assembled before the
         // lock-screen branch, so they remain scene elements on either
         // side of it.
         if matches!(&self.cursor_status, CursorImageStatus::Surface(surface) if surface == scene_root)
-            || backend.ime_popups.iter().any(|popup| popup.wl_surface() == scene_root)
+            || backend
+                .ime_popups
+                .iter()
+                .any(|popup| popup.wl_surface() == scene_root)
         {
             return true;
         }
@@ -619,14 +667,22 @@ impl Compositor {
 
     /// The scale lookup once popup ancestry and window ownership have
     /// already been resolved by the commit path.
-    fn preferred_scale_for_resolved(&self, scene_root: &WlSurface, owner: Option<WlWindowId>) -> f64 {
+    fn preferred_scale_for_resolved(
+        &self,
+        scene_root: &WlSurface,
+        owner: Option<WlWindowId>,
+    ) -> f64 {
         let backend = self.wm.backend();
         if let Some(id) = owner {
             if let Some(record) = backend.windows.get(&id) {
                 return backend.scale_at(record.content);
             }
         }
-        if let Some(record) = backend.layers.iter().find(|record| record.surface.wl_surface() == scene_root) {
+        if let Some(record) = backend
+            .layers
+            .iter()
+            .find(|record| record.surface.wl_surface() == scene_root)
+        {
             return backend.scale_at(record.geometry);
         }
         for entry in &backend.lock_surfaces {
@@ -646,7 +702,10 @@ impl Compositor {
     fn toplevel_committed(&mut self, id: WlWindowId, toplevel: &ToplevelSurface) {
         let root = toplevel.wl_surface().clone();
         let initial_configure_sent = with_states(&root, |states| {
-            states.data_map.get::<XdgToplevelSurfaceData>().map(|data| data.lock().unwrap().initial_configure_sent)
+            states
+                .data_map
+                .get::<XdgToplevelSurfaceData>()
+                .map(|data| data.lock().unwrap().initial_configure_sent)
         })
         .unwrap_or(true);
         if !initial_configure_sent {
@@ -658,7 +717,8 @@ impl Compositor {
             return;
         }
 
-        let has_buffer = with_renderer_surface_state(&root, |state| state.buffer().is_some()).unwrap_or(false);
+        let has_buffer =
+            with_renderer_surface_state(&root, |state| state.buffer().is_some()).unwrap_or(false);
         let was_mapped = mapped_marker(&root);
         let backend = self.wm.backend_mut();
         // The factor everything below measures by: the client's own
@@ -666,7 +726,11 @@ impl Compositor {
         // corrected for the integral-fallback case on this window's
         // output — one number, shared with the renderer and the
         // hit-test through `window_surface_scale`.
-        let surface_scale = backend.windows.get(&id).map(|record| backend.window_surface_scale(record)).unwrap_or(1.0);
+        let surface_scale = backend
+            .windows
+            .get(&id)
+            .map(|record| backend.window_surface_scale(record))
+            .unwrap_or(1.0);
         let committed = committed_content_size(&root, surface_scale);
         if has_buffer && !was_mapped {
             set_mapped_marker(&root, true);
@@ -750,12 +814,22 @@ impl Compositor {
             // commits trail rendering. Obedience, prompt or tardy, is
             // never a resize request. See `WindowRecord::recent_asks`
             // for the ping-pong this gate broke.
-            let echoes_ask = committed
-                .is_some_and(|size| backend.windows.get(&id).is_some_and(|record| record.recent_asks.contains(&size)));
+            let echoes_ask = committed.is_some_and(|size| {
+                backend
+                    .windows
+                    .get(&id)
+                    .is_some_and(|record| record.recent_asks.contains(&size))
+            });
             if let (Some(size), Some(record)) = (committed, backend.windows.get(&id)) {
                 if record.mapped && !client_behind && !echoes_ask && size != record.content.size {
-                    let requested = Rect { pos: record.content.pos, size };
-                    backend.queue(WmEvent::ConfigureRequest { window: id, requested });
+                    let requested = Rect {
+                        pos: record.content.pos,
+                        size,
+                    };
+                    backend.queue(WmEvent::ConfigureRequest {
+                        window: id,
+                        requested,
+                    });
                 }
             }
         }
@@ -779,7 +853,12 @@ impl Compositor {
     ) {
         let backend = self.wm.backend_mut();
         if let Some(window) = backend.window_for_surface(surface) {
-            backend.queue(WmEvent::NetStateRequested { window, action, first, second });
+            backend.queue(WmEvent::NetStateRequested {
+                window,
+                action,
+                first,
+                second,
+            });
             backend.owe_configure(window);
         }
     }
@@ -795,7 +874,12 @@ pub(crate) fn window_is_in_scene(backend: &WaylandBackend, window: WlWindowId) -
     if !record.mapped || !record.surface.alive() {
         return false;
     }
-    stack_exposes_window(record.window_type, window, &backend.stacking, &backend.frames)
+    stack_exposes_window(
+        record.window_type,
+        window,
+        &backend.stacking,
+        &backend.frames,
+    )
 }
 
 /// Whether the renderer's current stacking slice exposes `window`.
@@ -813,7 +897,9 @@ fn stack_exposes_window(
     }
     stacking.iter().any(|entry| match entry {
         StackEntry::Window(candidate) => *candidate == window,
-        StackEntry::Frame(frame) => frames.get(frame).is_some_and(|record| record.window == window && record.mapped),
+        StackEntry::Frame(frame) => frames
+            .get(frame)
+            .is_some_and(|record| record.window == window && record.mapped),
         StackEntry::Shell(_) => false,
     })
 }
@@ -844,7 +930,9 @@ impl ConfigureDebt {
     /// order: a request that arrives before a reflow, or after one, is
     /// answered either way.
     fn merge(self, other: Self) -> Self {
-        Self { answer_owed: self.answer_owed || other.answer_owed }
+        Self {
+            answer_owed: self.answer_owed || other.answer_owed,
+        }
     }
 
     /// Whether this booking still needs a configure *forced* once the
@@ -899,10 +987,13 @@ impl WaylandBackend {
     /// goes out (`toplevel_committed`). Forcing a second one there
     /// would put an empty configure on the wire at every window's map.
     pub(crate) fn owe_configure(&mut self, window: WlWindowId) {
-        let initial_sent = self.windows.get(&window).is_some_and(|record| match &record.surface {
-            ManagedSurface::Xdg(toplevel) => toplevel.is_initial_configure_sent(),
-            ManagedSurface::X11(_) => false,
-        });
+        let initial_sent = self
+            .windows
+            .get(&window)
+            .is_some_and(|record| match &record.surface {
+                ManagedSurface::Xdg(toplevel) => toplevel.is_initial_configure_sent(),
+                ManagedSurface::X11(_) => false,
+            });
         if !initial_sent {
             return;
         }
@@ -1077,7 +1168,12 @@ impl SeatHandler for Compositor {
 impl SelectionHandler for Compositor {
     type SelectionUserData = ();
 
-    fn new_selection(&mut self, ty: SelectionTarget, source: Option<SelectionSource>, _seat: Seat<Self>) {
+    fn new_selection(
+        &mut self,
+        ty: SelectionTarget,
+        source: Option<SelectionSource>,
+        _seat: Seat<Self>,
+    ) {
         // A Wayland client copied something. Xwayland owns the X-side
         // selection window, so it has to be told to claim CLIPBOARD (or
         // PRIMARY) on the X server and advertise these mime types;
@@ -1118,7 +1214,11 @@ impl SelectionHandler for Compositor {
             return;
         };
         if let Err(error) = xwm.send_selection(ty, mime_type, fd, loop_handle) {
-            tracing::warn!(?error, ?ty, "could not read the X11 selection for a Wayland client");
+            tracing::warn!(
+                ?error,
+                ?ty,
+                "could not read the X11 selection for a Wayland client"
+            );
         }
     }
 }
@@ -1163,7 +1263,10 @@ impl XdgShellHandler for Compositor {
         // `toplevel_committed`.
         let backend = self.wm.backend_mut();
         let id = WlWindowId(backend.alloc_id());
-        backend.remember_window(id, WindowRecord::new(ManagedSurface::Xdg(surface), Rect::default()));
+        backend.remember_window(
+            id,
+            WindowRecord::new(ManagedSurface::Xdg(surface), Rect::default()),
+        );
     }
 
     fn new_popup(&mut self, surface: PopupSurface, positioner: PositionerState) {
@@ -1181,7 +1284,12 @@ impl XdgShellHandler for Compositor {
         }
     }
 
-    fn reposition_request(&mut self, surface: PopupSurface, positioner: PositionerState, token: u32) {
+    fn reposition_request(
+        &mut self,
+        surface: PopupSurface,
+        positioner: PositionerState,
+        token: u32,
+    ) {
         surface.with_pending_state(|state| {
             state.geometry = positioner.get_geometry();
             state.positioner = positioner;
@@ -1291,14 +1399,28 @@ impl XdgShellHandler for Compositor {
         );
     }
 
-    fn fullscreen_request(&mut self, surface: ToplevelSurface, _output: Option<wl_output::WlOutput>) {
+    fn fullscreen_request(
+        &mut self,
+        surface: ToplevelSurface,
+        _output: Option<wl_output::WlOutput>,
+    ) {
         // Single output today — the output hint has nothing to select.
         // The reply is booked, not written: see `maximize_request`.
-        self.queue_net_state(surface.wl_surface(), NetStateAction::Add, NetState::Fullscreen, None);
+        self.queue_net_state(
+            surface.wl_surface(),
+            NetStateAction::Add,
+            NetState::Fullscreen,
+            None,
+        );
     }
 
     fn unfullscreen_request(&mut self, surface: ToplevelSurface) {
-        self.queue_net_state(surface.wl_surface(), NetStateAction::Remove, NetState::Fullscreen, None);
+        self.queue_net_state(
+            surface.wl_surface(),
+            NetStateAction::Remove,
+            NetState::Fullscreen,
+            None,
+        );
     }
 
     fn minimize_request(&mut self, surface: ToplevelSurface) {
@@ -1322,7 +1444,10 @@ impl XdgShellHandler for Compositor {
         // `BackendEvent::TitleChanged`'s doc), so the titlebar must
         // repaint on the property change, not the map.
         let title = with_states(surface.wl_surface(), |states| {
-            states.data_map.get::<XdgToplevelSurfaceData>().and_then(|data| data.lock().unwrap().title.clone())
+            states
+                .data_map
+                .get::<XdgToplevelSurfaceData>()
+                .and_then(|data| data.lock().unwrap().title.clone())
         });
         let backend = self.wm.backend_mut();
         if let Some(id) = backend.window_for_surface(surface.wl_surface()) {
@@ -1337,11 +1462,17 @@ impl XdgShellHandler for Compositor {
 
     fn app_id_changed(&mut self, surface: ToplevelSurface) {
         let app_id = with_states(surface.wl_surface(), |states| {
-            states.data_map.get::<XdgToplevelSurfaceData>().and_then(|data| data.lock().unwrap().app_id.clone())
+            states
+                .data_map
+                .get::<XdgToplevelSurfaceData>()
+                .and_then(|data| data.lock().unwrap().app_id.clone())
         });
         let backend = self.wm.backend_mut();
         if let Some(id) = backend.window_for_surface(surface.wl_surface()) {
-            let changed = backend.windows.get(&id).is_some_and(|record| record.app_id != app_id);
+            let changed = backend
+                .windows
+                .get(&id)
+                .is_some_and(|record| record.app_id != app_id);
             if let Some(record) = backend.windows.get_mut(&id) {
                 record.app_id = app_id;
             }
@@ -1432,8 +1563,11 @@ impl XdgDecorationHandler for Compositor {
             backend.queue(WmEvent::ChromeChanged(id));
         }
         toplevel.with_pending_state(|state| {
-            state.decoration_mode =
-                Some(if client_side { DecorationMode::ClientSide } else { DecorationMode::ServerSide });
+            state.decoration_mode = Some(if client_side {
+                DecorationMode::ClientSide
+            } else {
+                DecorationMode::ServerSide
+            });
         });
         // No configure here: if this races the initial commit, the
         // initial configure carries the mode; otherwise request_mode/
@@ -1472,8 +1606,11 @@ impl XdgDecorationHandler for Compositor {
             backend.queue(WmEvent::ChromeChanged(id));
         }
         toplevel.with_pending_state(|state| {
-            state.decoration_mode =
-                Some(if client_side { DecorationMode::ClientSide } else { DecorationMode::ServerSide });
+            state.decoration_mode = Some(if client_side {
+                DecorationMode::ClientSide
+            } else {
+                DecorationMode::ServerSide
+            });
         });
         book_decoration_configure(self, &toplevel);
     }
@@ -1494,8 +1631,11 @@ impl XdgDecorationHandler for Compositor {
             backend.queue(WmEvent::ChromeChanged(id));
         }
         toplevel.with_pending_state(|state| {
-            state.decoration_mode =
-                Some(if client_side { DecorationMode::ClientSide } else { DecorationMode::ServerSide });
+            state.decoration_mode = Some(if client_side {
+                DecorationMode::ClientSide
+            } else {
+                DecorationMode::ServerSide
+            });
         });
         book_decoration_configure(self, &toplevel);
     }
@@ -1580,10 +1720,23 @@ mod tests {
         let frame = WlFrameId(11);
         let other_frame = WlFrameId(21);
         let frames = HashMap::from([
-            (frame, FrameRecord { window, geometry: Rect::default(), buffer: None, mapped: true }),
+            (
+                frame,
+                FrameRecord {
+                    window,
+                    geometry: Rect::default(),
+                    buffer: None,
+                    mapped: true,
+                },
+            ),
             (
                 other_frame,
-                FrameRecord { window: other, geometry: Rect::default(), buffer: None, mapped: true },
+                FrameRecord {
+                    window: other,
+                    geometry: Rect::default(),
+                    buffer: None,
+                    mapped: true,
+                },
             ),
         ]);
 
@@ -1616,7 +1769,12 @@ mod tests {
         let frame = WlFrameId(11);
         let frames = HashMap::from([(
             frame,
-            FrameRecord { window, geometry: Rect::default(), buffer: None, mapped: false },
+            FrameRecord {
+                window,
+                geometry: Rect::default(),
+                buffer: None,
+                mapped: false,
+            },
         )]);
 
         assert!(!stack_exposes_window(
@@ -1625,7 +1783,12 @@ mod tests {
             &[StackEntry::Frame(frame)],
             &frames
         ));
-        assert!(stack_exposes_window(wm_core::WindowType::Unmanaged, window, &[], &frames));
+        assert!(stack_exposes_window(
+            wm_core::WindowType::Unmanaged,
+            window,
+            &[],
+            &frames
+        ));
     }
 
     /// The rule that decides whether an unchanged toplevel hears
@@ -1636,10 +1799,22 @@ mod tests {
     /// more is owed.
     #[test]
     fn only_an_unanswered_request_forces_a_configure() {
-        assert!(!ConfigureDebt::OWED.forces_configure(true), "the answer already went out");
-        assert!(!ConfigureDebt::STAGED.forces_configure(true), "a change, with nobody waiting on a reply");
-        assert!(ConfigureDebt::OWED.forces_configure(false), "silence is not an answer to a request");
-        assert!(!ConfigureDebt::STAGED.forces_configure(false), "nothing happened; say nothing");
+        assert!(
+            !ConfigureDebt::OWED.forces_configure(true),
+            "the answer already went out"
+        );
+        assert!(
+            !ConfigureDebt::STAGED.forces_configure(true),
+            "a change, with nobody waiting on a reply"
+        );
+        assert!(
+            ConfigureDebt::OWED.forces_configure(false),
+            "silence is not an answer to a request"
+        );
+        assert!(
+            !ConfigureDebt::STAGED.forces_configure(false),
+            "nothing happened; say nothing"
+        );
     }
 
     /// A pass books a toplevel from several directions — a reflow, a
@@ -1649,10 +1824,22 @@ mod tests {
     /// configure that a later, unrelated booking quietly downgraded.
     #[test]
     fn an_owed_answer_survives_any_other_booking() {
-        assert_eq!(ConfigureDebt::OWED.merge(ConfigureDebt::STAGED), ConfigureDebt::OWED);
-        assert_eq!(ConfigureDebt::STAGED.merge(ConfigureDebt::OWED), ConfigureDebt::OWED);
-        assert_eq!(ConfigureDebt::OWED.merge(ConfigureDebt::OWED), ConfigureDebt::OWED);
-        assert_eq!(ConfigureDebt::STAGED.merge(ConfigureDebt::STAGED), ConfigureDebt::STAGED);
+        assert_eq!(
+            ConfigureDebt::OWED.merge(ConfigureDebt::STAGED),
+            ConfigureDebt::OWED
+        );
+        assert_eq!(
+            ConfigureDebt::STAGED.merge(ConfigureDebt::OWED),
+            ConfigureDebt::OWED
+        );
+        assert_eq!(
+            ConfigureDebt::OWED.merge(ConfigureDebt::OWED),
+            ConfigureDebt::OWED
+        );
+        assert_eq!(
+            ConfigureDebt::STAGED.merge(ConfigureDebt::STAGED),
+            ConfigureDebt::STAGED
+        );
         // A booking's default is the plain one: `HashMap::entry(..).
         // or_default()` must not invent an owed answer for a toplevel
         // nothing asked about.
@@ -1720,7 +1907,11 @@ mod tests {
                 let logical = physical_to_logical(physical, factor);
                 let expected = scale_length(logical, factor);
                 // One more round trip lands exactly where the first did.
-                assert_eq!(physical_to_logical(expected, factor), logical, "{physical} @ {factor}");
+                assert_eq!(
+                    physical_to_logical(expected, factor),
+                    logical,
+                    "{physical} @ {factor}"
+                );
                 assert_eq!(scale_length(logical, factor), expected);
             }
         }
@@ -1764,9 +1955,11 @@ mod tests {
     fn a_cropped_over_allocated_buffer_still_states_its_scale() {
         // Captured commits: buffer 2560x2048 raw, src crop / dst pairs
         // from three consecutive drag motions.
-        for (src, dst) in
-            [((2108.0, 1568.0), (1054, 784)), ((2112.0, 1572.0), (1056, 786)), ((2128.0, 1588.0), (1064, 794))]
-        {
+        for (src, dst) in [
+            ((2108.0, 1568.0), (1054, 784)),
+            ((2112.0, 1572.0), (1056, 786)),
+            ((2128.0, 1588.0), (1064, 794)),
+        ] {
             assert_eq!(ratio_scale(src, dst), Some(2.0), "{src:?} over {dst:?}");
         }
         // The regression, pinned: the full buffer extent over the same
@@ -1818,7 +2011,10 @@ mod tests {
         assert_eq!(wm_resize_edge(Xdg::TopLeft), Some(ResizeEdge::NorthWest));
         assert_eq!(wm_resize_edge(Xdg::TopRight), Some(ResizeEdge::NorthEast));
         assert_eq!(wm_resize_edge(Xdg::BottomLeft), Some(ResizeEdge::SouthWest));
-        assert_eq!(wm_resize_edge(Xdg::BottomRight), Some(ResizeEdge::SouthEast));
+        assert_eq!(
+            wm_resize_edge(Xdg::BottomRight),
+            Some(ResizeEdge::SouthEast)
+        );
     }
 
     /// The protocol's `None` edge is refused, not guessed at: a resize

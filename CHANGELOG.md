@@ -7,6 +7,13 @@ crate and both session binaries carry the same number.
 
 ### Performance
 
+- **Omarchy focus grabs no longer scale with every inert popup object.**
+  The one active grab is now an indexed invariant, making the common
+  input guard O(1) instead of searching all G grab objects. Surface
+  destruction prunes whitelists from the exhaustive `wl_surface`
+  callback instead of every dispatch pass; at 60 wakes, the stable path
+  eliminates 120G staged/committed vector scans per second while keeping
+  the protocol's implicit-remove and keyboard handoff behavior exact.
 - **Lock-surface upkeep is now event-driven.** A new lock surface, its
   destruction, or an output size/scale change schedules one configure
   and focus reconciliation; an animated but otherwise stable lock screen
