@@ -34,6 +34,56 @@ license = "GPL-3.0-only"
 # making a debug session behave like a desktop instead of a
 # slideshow. Release builds are untouched — this section exists only
 # for the dev/test loop.
+# The release profile exists so a crash can be read. The compositor's
+# panic hook deliberately turns every panic into a `SIGABRT` so the
+# session supervisor can recover, which makes a coredump the one
+# durable artifact a lost session leaves behind — and with cargo's
+# default `debug = 0` that coredump carried no `.debug_*` at all, so
+# every chonkstep frame symbolised as `??`. Arch's debuginfod serves
+# only official packages, so it cannot fill the gap for anything
+# installed from this project's releases or the AUR recipe.
+#
+# Measured on this workspace (aarch64, `chonkstep-wayland`), because
+# the settings below are not free and the numbers are the argument:
+#
+#   profile                              build   unstripped   shipped   debug pkg
+#   ------------------------------------------------------------------------------
+#   cargo default (debug = 0)             113s      44.0 MB    44.0 MB      none
+#   debug = "line-tables-only"            106s     151.2 MB    34.9 MB   150.1 MB
+#   debug = 1                             112s     197.0 MB    34.8 MB   196.0 MB
+#   line-tables + cgu = 1 + thin LTO      134s     101.6 MB    33.5 MB   100.8 MB
+#
+# "shipped" is after the `objcopy --only-keep-debug` + `strip` that
+# `makepkg`'s own `debug` option performs, which is why the packaging
+# recipes now set `options=(strip debug)`: the split belongs to the
+# packager, and the shipped binary comes out SMALLER than it was
+# before this section existed (34 MB against 44 MB, because a full
+# strip also drops the `.symtab` the old build kept).
+#
+# `debug = "line-tables-only"` over `debug = 1`: both cost the same
+# build time and the same shipped bytes, and line tables are what turn
+# `??` into `file:line` for every frame. Full DWARF buys locals and
+# types for an interactive gdb session at +95 MB in the debug package,
+# which is not the case this profile is for. Revisit if someone is
+# routinely stepping through a release build.
+#
+# NOT `split-debuginfo = "packed"`. Measured: it *grew* the executable
+# to 96.7 MB while also emitting a 51.6 MB `.dwp`, and it takes the
+# debug information out of the object files that `makepkg`'s `debug`
+# option needs to extract — so it fights the packaging step rather
+# than helping it. Sidecar splitting here is the packager's job.
+#
+# `codegen-units = 1` and `lto = "thin"` make the shipped binary and
+# the debug package smaller than any other measured row above (33.5 MB
+# and 100.8 MB). They cost +21s (+19%) on a full release build. Neither
+# deterministic output nor a faster desktop is claimed: this profile
+# alone cannot guarantee reproducibility, and nothing in this tree
+# times a frame yet.
+[profile.release]
+debug = "line-tables-only"
+codegen-units = 1
+lto = "thin"
+
 [profile.dev.package.tiny-skia]
 opt-level = 3
 [profile.dev.package.tiny-skia-path]

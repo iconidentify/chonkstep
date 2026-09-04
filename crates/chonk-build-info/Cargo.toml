@@ -1,0 +1,9 @@
+[package]
+name = "chonk-build-info"
+description = "Build identity and ELF build-ID reporting for ChonkStep binaries"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+object = { version = "0.37.3", default-features = false, features = ["elf", "read_core", "std"] }

@@ -6,6 +6,7 @@ license.workspace = true
 description = "A modern NeXTSTEP-style window manager for X11."
 
 [dependencies]
+chonk-build-info = { path = "../chonk-build-info" }
 # The backend-generic desktop shell — everything the desktop *is*; this
 # binary only wires it to the X11 backend and drives the event loop.
 chonk-shell = { path = "../chonk-shell" }

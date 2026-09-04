@@ -41,6 +41,7 @@ jobs:
           set -euo pipefail
           version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n1)
           package_release=$(sed -n 's/^pkgrel=//p' packaging/arch/PKGBUILD-release | head -n1)
+          source_id=$(git describe --tags --always --dirty)
           if [[ $GITHUB_REF == refs/tags/preview-v* ]]; then
             tag_version=${GITHUB_REF_NAME#preview-v}
             if [[ $tag_version =~ ^(.+)-r([1-9][0-9]*)$ ]]; then
@@ -66,9 +67,17 @@ jobs:
           install -m644 packaging/arch/PKGBUILD-release "$build_dir/PKGBUILD"
 
           package_name="chonkstep-$version-$package_release-${{ matrix.arch }}.pkg.tar.zst"
+          # `options=(strip debug)` in the PKGBUILD makes makepkg emit
+          # this beside the main package: the symbols a coredump needs
+          # to be more than a list of addresses. Shipped as its own
+          # asset so the main package stays small and only someone
+          # reading a crash pays for it.
+          debug_package_name="chonkstep-debug-$version-$package_release-${{ matrix.arch }}.pkg.tar.zst"
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "package_release=$package_release" >> "$GITHUB_OUTPUT"
           echo "package_name=$package_name" >> "$GITHUB_OUTPUT"
+          echo "debug_package_name=$debug_package_name" >> "$GITHUB_OUTPUT"
+          echo "source_id=$source_id" >> "$GITHUB_OUTPUT"
 
       - name: Build the native Arch package environment
         run: |
@@ -86,6 +95,7 @@ jobs:
             --env CARGO_INCREMENTAL=0 \
             --env CARGO_PROFILE_DEV_DEBUG=0 \
             --env CARGO_PROFILE_TEST_DEBUG=0 \
+            --env "CHONKSTEP_GIT_DESCRIBE=${{ steps.metadata.outputs.source_id }}" \
             --volume "$RUNNER_TEMP/chonkstep-package:/build" \
             --volume "$GITHUB_WORKSPACE:/source:ro" \
             "chonkstep-arch-builder:${{ matrix.arch }}" \
@@ -96,24 +106,36 @@ jobs:
               /source/scripts/verify-release-package.sh \
                 "$package" \
                 "${{ matrix.arch }}" \
-                "${{ steps.metadata.outputs.version }}-${{ steps.metadata.outputs.package_release }}"
+                "${{ steps.metadata.outputs.version }}-${{ steps.metadata.outputs.package_release }}" \
+                "${{ steps.metadata.outputs.source_id }}"
               install -d /build/dist
               install -m644 "$package" /build/dist/
+              # The verifier above already failed the build if this was
+              # missing; installing it here is what gets it attested and
+              # published rather than discarded with the container.
+              install -m644 "/build/${{ steps.metadata.outputs.debug_package_name }}" /build/dist/
             '
 
-      - name: Record package digest
-        run: sha256sum "$RUNNER_TEMP/chonkstep-package/dist/${{ steps.metadata.outputs.package_name }}"
+      - name: Record package digests
+        run: |
+          cd "$RUNNER_TEMP/chonkstep-package/dist"
+          sha256sum "${{ steps.metadata.outputs.package_name }}" \
+                    "${{ steps.metadata.outputs.debug_package_name }}"
 
+      # Both subjects, so the symbols a user symbolises a crash with
+      # carry the same provenance guarantee as the binary that crashed.
       - name: Attest package provenance
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
         with:
-          subject-path: ${{ runner.temp }}/chonkstep-package/dist/${{ steps.metadata.outputs.package_name }}
+          subject-path: |
+            ${{ runner.temp }}/chonkstep-package/dist/${{ steps.metadata.outputs.package_name }}
+            ${{ runner.temp }}/chonkstep-package/dist/${{ steps.metadata.outputs.debug_package_name }}
 
-      - name: Upload package for release assembly
+      - name: Upload packages for release assembly
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: chonkstep-package-${{ matrix.arch }}
-          path: ${{ runner.temp }}/chonkstep-package/dist/${{ steps.metadata.outputs.package_name }}
+          path: ${{ runner.temp }}/chonkstep-package/dist/
           if-no-files-found: error
           retention-days: 14
 
@@ -143,6 +165,16 @@ jobs:
           cd dist
           test -f "chonkstep-$version-$package_release-x86_64.pkg.tar.zst"
           test -f "chonkstep-$version-$package_release-aarch64.pkg.tar.zst"
+          # The symbol packages are assets in their own right: without
+          # them a crash report from an installed package symbolises as
+          # `??`, and Arch's debuginfod serves only official packages.
+          # Asserted rather than globbed for, so losing one is a failed
+          # release rather than a quieter one.
+          test -f "chonkstep-debug-$version-$package_release-x86_64.pkg.tar.zst"
+          test -f "chonkstep-debug-$version-$package_release-aarch64.pkg.tar.zst"
+          # The glob takes all four; `chonkstep-debug-*` matches
+          # `chonkstep-*` too, so SHA256SUMS and the asset list below
+          # need no separate entry.
           LC_ALL=C sha256sum chonkstep-*.pkg.tar.zst | sort -k2 > SHA256SUMS
 
           cat > "$RUNNER_TEMP/release-notes.md" <<EOF
@@ -177,9 +209,25 @@ jobs:
           gh attestation verify "\$chonkstep_dir/\$chonkstep_pkg" --repo $GITHUB_REPOSITORY
           \`\`\`
 
-          \`SHA256SUMS\` covers both package files. This is a prerelease
-          distribution path; the eventual stable \`v$version\` tag will also
-          publish the source recipe to the AUR.
+          Each architecture also has a \`chonkstep-debug-\` package. It is not
+          needed to run the desktop, and installing it changes nothing about
+          how the desktop behaves. It carries the debug symbols, so install it
+          before reporting a crash — without it every ChonkStep frame in a
+          coredump reads as \`??\`, and Arch's debuginfod does not carry
+          symbols for packages installed this way:
+
+          \`\`\`sh
+          chonkstep_debug_pkg="chonkstep-debug-$version-$package_release-\$chonkstep_arch.pkg.tar.zst"
+          curl -fL -o "\$chonkstep_dir/\$chonkstep_debug_pkg" \
+            "https://github.com/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME/\$chonkstep_debug_pkg"
+          sudo pacman -U "\$chonkstep_dir/\$chonkstep_debug_pkg"
+          coredumpctl gdb chonkstep-wayland   # now shows file:line, not ??
+          \`\`\`
+
+          \`SHA256SUMS\` covers all four package files, and every one of them
+          carries GitHub build provenance. This is a prerelease distribution
+          path; the eventual stable \`v$version\` tag will also publish the
+          source recipe to the AUR.
           EOF
 
           assets=(chonkstep-*.pkg.tar.zst SHA256SUMS)

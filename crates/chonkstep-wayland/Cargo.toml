@@ -13,6 +13,7 @@ license.workspace = true
 # through `wm-wayland` rather than naming them itself; only the config
 # loader and the compositor crate appear here.
 [target.'cfg(target_os = "linux")'.dependencies]
+chonk-build-info = { path = "../chonk-build-info" }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 wm-config = { path = "../wm-config" }

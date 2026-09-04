@@ -21,7 +21,35 @@ use chonk_shell::spawn;
 use chonk_shell::startup::{ensure_xcursor_size, SessionRequestPoller, SessionState};
 use chonk_xsettings::{DesktopAppearance, XSettingsManager};
 
+/// Answers `--version` and `-V` before anything else starts.
+///
+/// It exists so a bug report can name its build. The version was
+/// previously reachable only through `pacman -Qi`, which is one more
+/// thing a user has to know to produce a report the crash itself
+/// cannot produce for them.
+///
+fn print_version_and_exit_if_asked() {
+    let asked = std::env::args()
+        .skip(1)
+        .any(|arg| arg == "--version" || arg == "-V");
+    if !asked {
+        return;
+    }
+    println!("{} {}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
+    println!("source: {}", chonk_build_info::SOURCE_ID);
+    match chonk_build_info::current_elf_build_id() {
+        Ok(build_id) => println!("build id: {build_id}"),
+        Err(error) => println!("build id: unavailable ({error})"),
+    }
+    std::process::exit(0);
+}
+
 fn main() {
+    // Before the subscriber, so `--version` prints one clean line
+    // rather than a line preceded by whatever RUST_LOG asked for.
+    // Also before `restart_in_place`'s re-exec can ever matter: that
+    // path passes no arguments, so a restarted session never sees one.
+    print_version_and_exit_if_asked();
     tracing_subscriber::fmt().with_env_filter(tracing_subscriber::EnvFilter::from_default_env()).init();
     tracing::info!(
         version = env!("CARGO_PKG_VERSION"),
