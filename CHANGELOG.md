@@ -7,6 +7,25 @@ crate and both session binaries carry the same number.
 
 ### Performance
 
+- **Hyprland event snapshots are demand-driven; client aggregation is
+  linear-time.** A connected
+  Omarchy/Quickshell event socket no longer makes every buffer commit or
+  housekeeping wake rebuild and clone the complete monitor, workspace,
+  window, binding, and device state. Socket readiness, compositor-state
+  invalidation, and output backpressure are tracked separately; query replies
+  remain fresh, successful mutations publish after they apply, and a new
+  subscriber is baselined before a simultaneous request so its first event
+  cannot be lost. Workspace aggregation and focus-history construction now
+  take one client pass instead of repeated and quadratic scans. With a
+  persistent subscriber and a continuously animating real Wayland client,
+  trace instrumentation measured 300 full snapshots in five seconds before
+  selective invalidation and zero after the initial state settled (100% of
+  steady-state snapshot construction removed). Whole-process CPU in that
+  render-dominated microbenchmark remained within run-to-run scheduler noise;
+  the allocation/work counter, not a noisy CPU percentage, is the claimed
+  result. Live tests cover Quickshell's queries, request/event ordering, real
+  windows, reload and exec effects, and mutations crossing from ChonkStep's
+  native control socket into the Hyprland event stream.
 - **Dynamic event-source reconciliation is allocation-stable.** Both backends
   append shell/IPC descriptors into caller-owned scratch storage, and Wayland
   prunes calloop registrations in place. A normal IPC-enabled Wayland pass no

@@ -1321,6 +1321,16 @@ pub struct Compositor {
     /// Its file descriptors are reconciled by the same pass that
     /// handles the dockapp ones — see [`Compositor::sync_dock_sources`].
     hyprland_ipc: Option<chonk_hyprland_ipc::Server>,
+    /// Set by the callback for one of the server's registered file
+    /// descriptors. A quiet subscriber is deliberately not serviced
+    /// on timer-only wakeups; there is no request to answer and no
+    /// socket maintenance to perform.
+    hyprland_ipc_ready: bool,
+    /// Whether work since the last publish may have changed anything
+    /// represented by the Hyprland event stream. Kept separate from
+    /// socket readiness: a desktop mutation must be published even
+    /// when the subscriber itself has said nothing.
+    hyprland_state_dirty: bool,
 
     // Per-protocol smithay state. Constructed once in `run`; the
     // handler impls in `xdg.rs`/`input.rs`/`xwayland.rs` return these
@@ -1539,6 +1549,14 @@ impl Compositor {
         // any later non-motion event in the same burst.
         let mut pending_motion = None;
         while let Some(event) = self.wm.backend_mut().poll_event() {
+            // Every externally visible window-manager transition
+            // reaches this queue. Remember that fact for the IPC
+            // publisher; pointer motion is the sole exception because
+            // the event protocol has no cursor-position event (a
+            // direct `cursorpos` query still reads it fresh).
+            if !matches!(event, BackendEvent::PointerMotion { .. }) {
+                self.hyprland_state_dirty = true;
+            }
             if matches!(event, BackendEvent::ShutdownRequested) {
                 // The display is going away for good; nothing below
                 // can succeed.
@@ -1591,6 +1609,7 @@ impl Compositor {
         }
 
         if let Some(new_size) = self.wm.backend_mut().take_screen_resize() {
+            self.hyprland_state_dirty = true;
             tracing::info!(width = new_size.w, height = new_size.h, "output resized");
             self.shell.on_screen_resize(&mut self.wm, new_size);
             self.wm.set_workarea(self.shell.workarea(new_size));
@@ -1638,7 +1657,9 @@ impl Compositor {
         // drains `take_shell_motion` itself inside `on_motion`, which
         // every coalesced `PointerMotion` above passes through.
 
-        self.shell.tick(&mut self.wm);
+        if self.shell.tick(&mut self.wm) {
+            self.hyprland_state_dirty = true;
+        }
 
         // Wayland-side housekeeping with no X11 counterpart: dead xdg
         // popups age out, and the focus intent a backend verb recorded
@@ -2034,40 +2055,94 @@ impl Compositor {
     /// it.
     /// Accept, answer and stream on the Hyprland IPC sockets.
     ///
-    /// The two-snapshot discipline here is the same one
-    /// `Shell::service_control` uses and is load-bearing: requests are
-    /// answered against the state as it was, the actions they asked for
-    /// are applied, and the events are then derived from the state
-    /// those actions produced. A single snapshot would either answer
-    /// from the future or announce the past.
+    /// When requests are actually present, the two-snapshot discipline
+    /// is the same one `Shell::service_control` uses and is
+    /// load-bearing: requests are answered against the state as it was,
+    /// their actions are applied, and events are derived from the state
+    /// those actions produced. A subscription-only pass needs only the
+    /// latter snapshot; manufacturing the unused "before" state on
+    /// every client frame was pure allocation and cloning.
     fn service_hyprland_ipc(&mut self) {
         let Some(mut server) = self.hyprland_ipc.take() else {
             return;
         };
-        server.accept();
+        let socket_ready = std::mem::take(&mut self.hyprland_ipc_ready);
+        let mut publish = self.hyprland_state_dirty;
+        let had_event_clients = server.has_event_clients();
+        if socket_ready {
+            server.accept();
+        }
+        let first_event_client = !had_event_clients && server.has_event_clients();
         if !server.has_clients() {
+            // There is no observer to retain history for. A later
+            // first subscriber establishes a fresh baseline below.
+            self.hyprland_state_dirty = false;
             self.hyprland_ipc = Some(server);
             return;
         }
 
-        let before = crate::hyprland_ipc::snapshot(
-            &self.wm,
-            self.session_lock.machine.locked(),
-            self.shell.session_state(),
-        );
-        server.service(&before, |action| crate::hyprland_ipc::apply(self, action));
-
-        let after = crate::hyprland_ipc::snapshot(
-            &self.wm,
-            self.session_lock.machine.locked(),
-            self.shell.session_state(),
-        );
-        if self.shell.take_config_reloaded() {
-            server.broadcast(&chonk_hyprland_ipc::event::config_reloaded());
-            server.reset_diff();
+        let mut first_event_baselined = false;
+        if socket_ready && server.has_request_clients() {
+            let before = crate::hyprland_ipc::snapshot(
+                &self.wm,
+                self.session_lock.machine.locked(),
+                self.shell.session_state(),
+            );
+            if first_event_client {
+                // The event and request listeners can become readable
+                // in one calloop dispatch. Establish the newcomer's
+                // baseline before applying that request, or the first
+                // owned publish below would establish it *after* the
+                // mutation and silently swallow the first event.
+                server.reset_diff();
+                server.publish(&before);
+                first_event_baselined = true;
+            }
+            publish |= server.service(&before, |action| crate::hyprland_ipc::apply(self, action));
+        } else if server.has_pending_output() {
+            // A response or event which met socket backpressure still
+            // gets a bounded retry on the housekeeping cadence, but a
+            // retry cannot alter desktop state and needs no snapshot.
+            server.maintain();
         }
-        server.publish(&after);
+
+        let config_reloaded = self.shell.take_config_reloaded();
+        publish |= config_reloaded || first_event_client;
+        if server.has_event_clients() {
+            if config_reloaded {
+                server.broadcast(&chonk_hyprland_ipc::event::config_reloaded());
+                server.reset_diff();
+            }
+            if first_event_client && !first_event_baselined {
+                // No subscriber was present while the desktop may
+                // have changed. The newcomer obtains current state
+                // from its queries; establish that same instant as the
+                // delta baseline instead of replaying old history.
+                server.reset_diff();
+            }
+            if publish {
+                let after = crate::hyprland_ipc::snapshot(
+                    &self.wm,
+                    self.session_lock.machine.locked(),
+                    self.shell.session_state(),
+                );
+                server.publish_owned(after);
+            } else if socket_ready {
+                // A readable event fd with no state delta is normally
+                // a hangup. Probe and prune it so calloop cannot spin
+                // forever on a dead subscriber.
+                server.maintain();
+            }
+        }
+        self.hyprland_state_dirty = false;
         self.hyprland_ipc = Some(server);
+    }
+
+    /// Invalidate the retained Hyprland event baseline after a state
+    /// transition which does not travel through wm-core's backend
+    /// event queue (currently input hotplug and unlock).
+    pub(crate) fn mark_hyprland_state_dirty(&mut self) {
+        self.hyprland_state_dirty = true;
     }
 
     fn sync_dock_sources(&mut self) {
@@ -2099,9 +2174,15 @@ impl Compositor {
             // removed above on the same pass that drops the owner and
             // before calloop next polls — see the ordering argument in
             // this method's docs.
+            let is_hyprland_ipc = self.hyprland_ipc.as_ref().is_some_and(|server| server.owns_poll_fd(fd));
             let borrowed = unsafe { BorrowedFd::borrow_raw(fd) };
             let source = Generic::new(borrowed, Interest::READ, TriggerMode::Level);
-            match self.loop_handle.insert_source(source, |_, _, _| Ok(PostAction::Continue)) {
+            match self.loop_handle.insert_source(source, move |_, _, comp| {
+                if is_hyprland_ipc {
+                    comp.hyprland_ipc_ready = true;
+                }
+                Ok(PostAction::Continue)
+            }) {
                 Ok(token) => self.dock_sources.push((fd, token)),
                 Err(error) => {
                     // Not fatal, and worth being precise about why: the
@@ -2889,6 +2970,10 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
 
     let mut comp = Compositor {
         hyprland_ipc,
+        hyprland_ipc_ready: false,
+        // A subscriber present on the first pass must receive a
+        // baseline even before the desktop produces its first event.
+        hyprland_state_dirty: true,
         wm,
         shell,
         display_handle,
@@ -3003,6 +3088,7 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
             // decoration policy was assigned here and nowhere else, so
             // the key silently skipped it.
             comp.shell.reload_config(&mut comp.wm);
+            comp.hyprland_state_dirty = true;
         }
         if requests.restart {
             tracing::info!("restart requested — re-executing in place");

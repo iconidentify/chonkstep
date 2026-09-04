@@ -102,6 +102,7 @@ pub(crate) fn snapshot(
     locked: bool,
     session: &chonk_shell::startup::SessionState,
 ) -> Snapshot {
+    tracing::trace!("constructing Hyprland IPC snapshot");
     let monitors_info = wm.monitors();
     let current = wm.current_workspace();
 
@@ -130,17 +131,27 @@ pub(crate) fn snapshot(
     // Count windows per workspace by the rule the control socket
     // already established: miniaturised windows count, withdrawn ones
     // do not, and dock and shell surfaces are not clients at all.
-    let mut counts: Vec<u32> = vec![0; wm.workspace_count().max(1)];
+    let workspace_count = wm.workspace_count().max(1);
+    let mut counts: Vec<u32> = vec![0; workspace_count];
+    let mut workspace_monitors: Vec<Option<i32>> = vec![None; workspace_count];
+    let mut workspace_fullscreen = vec![false; workspace_count];
     let mut windows = Vec::new();
     let focused = wm.focused_client();
-
-    let focus_order: Vec<u64> = focused
-        .into_iter()
-        .chain(wm.iter_clients().map(|(id, _)| id).filter(|id| Some(*id) != focused))
-        .map(wm_core::ClientId::as_u64)
-        .collect();
+    // This preserves the existing protocol order exactly: the focused
+    // client is zero and every other client follows in the window
+    // manager's stable iteration order. Computing each position while
+    // walking that order keeps snapshot construction linear; looking
+    // every id up in a separately allocated vector made it quadratic.
+    let mut next_unfocused_history_id = i32::from(focused.is_some());
     for (id, client) in wm.iter_clients() {
         let id: wm_core::ClientId = id;
+        let focus_history_id = if Some(id) == focused {
+            0
+        } else {
+            let current = next_unfocused_history_id;
+            next_unfocused_history_id = next_unfocused_history_id.saturating_add(1);
+            current
+        };
         if client.lifecycle == Lifecycle::Withdrawn {
             continue;
         }
@@ -149,6 +160,8 @@ pub(crate) fn snapshot(
         // snapshot taken then must not drop the window on the floor.
         while counts.len() <= client.workspace {
             counts.push(0);
+            workspace_monitors.push(None);
+            workspace_fullscreen.push(false);
         }
         counts[client.workspace] += 1;
 
@@ -157,7 +170,10 @@ pub(crate) fn snapshot(
             x: geometry.pos.x + i32::try_from(geometry.size.w / 2).unwrap_or(0),
             y: geometry.pos.y + i32::try_from(geometry.size.h / 2).unwrap_or(0),
         };
-
+        let monitor = i32::try_from(wm.monitor_index_at(centre)).unwrap_or(0);
+        workspace_monitors[client.workspace].get_or_insert(monitor);
+        workspace_fullscreen[client.workspace] |=
+            client.flags.contains(wm_core::ClientFlags::FULLSCREEN);
         windows.push(Window {
             id: id.as_u64(),
             title: client.title.clone(),
@@ -170,7 +186,7 @@ pub(crate) fn snapshot(
             // `Client::monitor` is an unset slotmap key: multi-monitor
             // policy resolves a window's output geometrically. Reading
             // the field would report every window on monitor zero.
-            monitor: i32::try_from(wm.monitor_index_at(centre)).unwrap_or(0),
+            monitor,
             // `omarchy-debug-idle` reads `.pid`, and Hyprland's own
             // `pid` is the client's. Not every client sets it, and 0 is
             // Hyprland's own "unknown" — a number invented to fill the
@@ -186,8 +202,7 @@ pub(crate) fn snapshot(
             tags: client.tags.clone(),
             xdg_tag: String::new(),
             xdg_description: String::new(),
-            focus_history_id: focus_order.iter().position(|candidate| *candidate == id.as_u64())
-                .and_then(|index| i32::try_from(index).ok()).unwrap_or(i32::MAX),
+            focus_history_id,
         });
     }
 
@@ -195,7 +210,7 @@ pub(crate) fn snapshot(
         .iter()
         .enumerate()
         .map(|(index, count)| {
-            let monitor_id = windows.iter().find(|window| window.workspace == index).map(|window| window.monitor)
+            let monitor_id = workspace_monitors[index]
                 .or_else(|| monitors.iter().find(|monitor| monitor.active_workspace == index).map(|monitor| monitor.id))
                 .unwrap_or(0);
             Workspace {
@@ -204,7 +219,7 @@ pub(crate) fn snapshot(
                     .map(|monitor| monitor.name.clone()).unwrap_or_default(),
                 monitor_id,
                 windows: *count,
-                has_fullscreen: windows.iter().any(|window| window.workspace == index && window.fullscreen),
+                has_fullscreen: workspace_fullscreen[index],
             }
         })
         .collect();

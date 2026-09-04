@@ -56,6 +56,11 @@ fn socket_dir(session: &Session) -> PathBuf {
     PathBuf::from(runtime).join("hypr").join(signature)
 }
 
+fn control_socket(session: &Session) -> PathBuf {
+    let runtime = std::env::var("XDG_RUNTIME_DIR").expect("XDG_RUNTIME_DIR");
+    PathBuf::from(runtime).join("chonkstep").join(format!("control-{}.sock", session.wayland_display))
+}
+
 /// One request: connect, write, read to EOF. Exactly `hyprctl`'s shape.
 fn request(dir: &Path, payload: &str) -> String {
     let mut stream = UnixStream::connect(dir.join(".socket.sock"))
@@ -439,6 +444,31 @@ fn switches_the_workspace_for_real() {
         (json(&dir, "j/activeworkspace")["id"] == serde_json::json!(1)).then_some(())
     })
     .expect("the Lua dispatch dialect must work too");
+}
+
+/// A mutation arriving through chonkstep's native bar protocol must
+/// invalidate the Hyprland event baseline too. Omarchy can have both
+/// clients connected at once; treating only Hyprland requests as dirty
+/// leaves its workspace indicator stale after the native bar switches.
+#[test]
+#[ignore = "needs a Wayland session to nest inside"]
+fn native_control_mutations_reach_the_hyprland_event_stream() {
+    let session = boot("hypr-ipc-native-control");
+    let dir = socket_dir(&session);
+    let mut events = Events::connect(&dir);
+
+    assert_eq!(request(&dir, "/dispatch workspace 2").trim(), "ok");
+    assert_eq!(events.wait_for("workspacev2"), "2,2");
+
+    let path = control_socket(&session);
+    let mut native = poll_until(EVENT, "the native control socket", || UnixStream::connect(&path).ok())
+        .expect("the native control socket accepts a bar");
+    native
+        .write_all(b"{\"request\":\"focus-workspace\",\"index\":0}\n")
+        .expect("send the native workspace switch");
+
+    assert_eq!(events.wait_for("workspacev2"), "1,1");
+    assert_eq!(json(&dir, "j/activeworkspace")["id"], serde_json::json!(1));
 }
 
 /// The load-bearing rule, live: a verb chonkstep cannot honour fails,

@@ -207,6 +207,7 @@ impl SessionLockHandler for Compositor {
             }
             LockRequest::Accept => {
                 tracing::info!("session locking; blanking outputs until the locker draws");
+                self.mark_hyprland_state_dirty();
                 self.session_lock.holder = Some(confirmation.ext_session_lock().clone());
                 self.session_lock.pending_ack = Some(confirmation);
                 let backend = self.wm.backend_mut();
@@ -238,6 +239,7 @@ impl SessionLockHandler for Compositor {
 
     fn unlock(&mut self) {
         tracing::info!("session unlocked");
+        self.mark_hyprland_state_dirty();
         self.session_lock.machine.unlocked();
         self.session_lock.pending_ack = None;
         self.session_lock.holder = None;

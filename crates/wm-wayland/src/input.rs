@@ -461,6 +461,7 @@ pub(crate) fn process_input_event<I: InputBackend>(state: &mut Compositor, event
     }
     match event {
         InputEvent::DeviceAdded { device } => {
+            state.mark_hyprland_state_dirty();
             let record = crate::state::InputDeviceRecord {
                 id: device.id(),
                 name: device.name(),
@@ -482,6 +483,7 @@ pub(crate) fn process_input_event<I: InputBackend>(state: &mut Compositor, event
             }
         }
         InputEvent::DeviceRemoved { device } => {
+            state.mark_hyprland_state_dirty();
             state.wm.backend_mut().input_devices.retain(|held| held.id != device.id());
             if device.has_capability(DeviceCapability::TabletTool) {
                 state.seat.tablet_seat().remove_tablet(&TabletDescriptor::from(&device));

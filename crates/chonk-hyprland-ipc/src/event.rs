@@ -123,9 +123,18 @@ impl Differ {
     /// connect, and replaying the whole desktop as a burst of
     /// `openwindow` events would tell it things it already knows.
     pub fn diff(&mut self, now: &Snapshot) -> Vec<Event> {
-        let Some(previous) = self.previous.replace(now.clone()) else {
+        self.diff_owned(now.clone())
+    }
+
+    /// Owned form of [`Self::diff`] for producers which just built the
+    /// snapshot. Moving it into the baseline avoids cloning every
+    /// monitor, workspace, window, binding and device merely so the
+    /// differ can remember the same value for its next comparison.
+    pub fn diff_owned(&mut self, now: Snapshot) -> Vec<Event> {
+        let Some(previous) = self.previous.replace(now) else {
             return Vec::new();
         };
+        let now = self.previous.as_ref().expect("the snapshot was installed above");
         let mut events = Vec::new();
 
         // --- 1. additions others will refer to -------------------------
@@ -303,4 +312,35 @@ fn workspace_name(snapshot: &Snapshot, index: usize) -> String {
 /// The `configreloaded` event, which asks every client to re-query.
 pub fn config_reloaded() -> Event {
     Event::new("configreloaded", "")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_owned_diff_keeps_the_producers_snapshot_allocation() {
+        let mut snapshot = Snapshot::default();
+        snapshot.workspaces.push(Workspace {
+            index: 0,
+            monitor: "eDP-1".into(),
+            monitor_id: 0,
+            windows: 0,
+            has_fullscreen: false,
+        });
+        let allocation = snapshot.workspaces.as_ptr();
+        let mut differ = Differ::new();
+
+        assert!(differ.diff_owned(snapshot).is_empty());
+        assert_eq!(
+            differ
+                .previous
+                .as_ref()
+                .expect("owned snapshot becomes the baseline")
+                .workspaces
+                .as_ptr(),
+            allocation,
+            "the event baseline must take ownership rather than clone the snapshot"
+        );
+    }
 }

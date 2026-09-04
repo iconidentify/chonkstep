@@ -570,8 +570,34 @@ impl Server {
         fds.extend(self.event_clients.iter().map(|c| c.stream.as_raw_fd()));
     }
 
+    /// Whether `fd` is one of this server's current listeners or
+    /// clients. Event loops which share one source registry with other
+    /// subsystems use this to attribute a wakeup without allocating a
+    /// second descriptor list.
+    #[must_use]
+    pub fn owns_poll_fd(&self, fd: RawFd) -> bool {
+        self.requests.as_ref().is_some_and(|listener| listener.as_raw_fd() == fd)
+            || self.events.as_ref().is_some_and(|listener| listener.as_raw_fd() == fd)
+            || self.request_clients.iter().any(|client| client.stream.as_raw_fd() == fd)
+            || self.event_clients.iter().any(|client| client.stream.as_raw_fd() == fd)
+    }
+
+    /// Whether at least one request or event client is connected.
+    #[must_use]
     pub fn has_clients(&self) -> bool {
         !self.request_clients.is_empty() || !self.event_clients.is_empty()
+    }
+
+    /// Whether at least one one-shot query client is connected.
+    #[must_use]
+    pub fn has_request_clients(&self) -> bool {
+        !self.request_clients.is_empty()
+    }
+
+    /// Whether at least one event-stream subscriber is connected.
+    #[must_use]
+    pub fn has_event_clients(&self) -> bool {
+        !self.event_clients.is_empty()
     }
 
     /// Accept everything pending on both listeners.
@@ -606,10 +632,14 @@ impl Server {
     /// with a *fresh* snapshot, so that the events a request causes
     /// describe the state it produced — the same two-snapshot discipline
     /// `Shell::service_control` uses.
-    pub fn service<F>(&mut self, snapshot: &Snapshot, mut apply: F)
+    ///
+    /// Returns whether at least one decoded action was applied.
+    #[must_use]
+    pub fn service<F>(&mut self, snapshot: &Snapshot, mut apply: F) -> bool
     where
         F: FnMut(Action) -> bool,
     {
+        let mut changed = false;
         for client in &mut self.request_clients {
             if client.answered {
                 client.flush();
@@ -671,7 +701,11 @@ impl Server {
                 continue;
             }
 
-            let response = answer_payload_applying(&client.inbound, snapshot, &mut apply);
+            let response = answer_payload_applying(&client.inbound, snapshot, |action| {
+                let applied = apply(action);
+                changed |= applied;
+                applied
+            });
             for line in response.lines().filter(|line| {
                 line.starts_with("Invalid dispatcher:") || line.starts_with("unknown request")
             }) {
@@ -686,6 +720,35 @@ impl Server {
         // whose answer has left is done with, and `hyprctl` reads to
         // EOF, so the close IS the framing.
         self.request_clients.retain(|client| !(client.doomed || client.answered && client.outbound.is_empty()));
+        changed
+    }
+
+    /// Flush already-produced output and prune disconnected peers
+    /// without constructing a desktop snapshot.
+    ///
+    /// This is the quiet-path counterpart to [`Self::service`] and
+    /// [`Self::publish_owned`]: writable backpressure and an event
+    /// subscriber's hangup still need maintenance, but neither can
+    /// change the answer to a query or produce a compositor event.
+    pub fn maintain(&mut self) {
+        for client in &mut self.request_clients {
+            if client.answered {
+                client.flush();
+            }
+        }
+        self.request_clients.retain(|client| !(client.doomed || client.answered && client.outbound.is_empty()));
+        for client in &mut self.event_clients {
+            client.flush();
+        }
+        self.event_clients.retain(|client| !client.doomed);
+    }
+
+    /// Whether output which hit socket backpressure still needs a
+    /// later flush pass.
+    #[must_use]
+    pub fn has_pending_output(&self) -> bool {
+        self.request_clients.iter().any(|client| !client.outbound.is_empty())
+            || self.event_clients.iter().any(|client| !client.outbound.is_empty())
     }
 
     /// Number of refused request segments since this server started.
@@ -695,7 +758,13 @@ impl Server {
 
     /// Derive events from the new state and stream them.
     pub fn publish(&mut self, snapshot: &Snapshot) {
-        let events = self.differ.diff(snapshot);
+        self.publish_owned(snapshot.clone());
+    }
+
+    /// Owned form of [`Self::publish`] for a compositor that created a
+    /// snapshot specifically for this event pass.
+    pub fn publish_owned(&mut self, snapshot: Snapshot) {
+        let events = self.differ.diff_owned(snapshot);
         if !events.is_empty() {
             for event in &events {
                 self.broadcast(event);
@@ -942,9 +1011,41 @@ mod enabled_tests {
         // without a request must make the accepted fd disappear in one
         // service pass, or its permanent HUP keeps waking the desktop.
         drop(probe);
-        server.service(&Snapshot::default(), |_| false);
+        let _ = server.service(&Snapshot::default(), |_| false);
         assert!(server.request_clients.is_empty());
         assert!(server.poll_fds().is_empty(), "no dead fd may survive into the next event-loop wait");
+    }
+
+    #[test]
+    fn service_reports_only_actions_the_compositor_applied() {
+        use std::io::Write;
+        use std::os::unix::net::UnixStream;
+
+        let (mut requester, accepted) = UnixStream::pair().expect("socket pair");
+        requester.write_all(b"/dispatch workspace 2").expect("request is written");
+        let stream = Stream::from_fd(accepted.into());
+        let mut server = Server {
+            directory: PathBuf::new(),
+            requests: None,
+            events: None,
+            request_clients: vec![RequestClient {
+                stream,
+                inbound: Vec::new(),
+                outbound: Vec::new(),
+                answered: false,
+                doomed: false,
+            }],
+            event_clients: Vec::new(),
+            differ: Differ::new(),
+            refusals: 0,
+        };
+
+        let changed = server.service(&Snapshot::default(), |action| {
+            assert!(matches!(action, Action::FocusWorkspace(1)));
+            true
+        });
+
+        assert!(changed, "the event publisher needs to know that its retained baseline is stale");
     }
 
     #[test]
@@ -964,13 +1065,14 @@ mod enabled_tests {
         };
 
         // Establish the differ's baseline while the subscriber is
-        // alive, then close it while no state is changing. The second
-        // publish has no event bytes whose failed send could reveal the
-        // death; the explicit HUP check must still prune the fd.
+        // alive, then close it while no state is changing. Snapshot-
+        // free maintenance has no event bytes whose failed send could
+        // reveal the death; its explicit HUP check must still prune the
+        // fd.
         let snapshot = Snapshot::default();
         server.publish(&snapshot);
         drop(subscriber);
-        server.publish(&snapshot);
+        server.maintain();
         assert!(server.event_clients.is_empty());
         assert!(server.poll_fds().is_empty(), "no dead event fd may survive into the next wait");
     }
