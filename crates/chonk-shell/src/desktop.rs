@@ -1887,7 +1887,9 @@ impl<B: Backend> Desktop<B> {
             // would keep whatever hover state it drew.
             self.clear_dock_hover(backend, theme);
             backend.unmap_shell_surface(self.dock_window);
+            backend.release_shell_buffer(self.dock_window);
             backend.unmap_shell_surface(self.clip_window);
+            backend.release_shell_buffer(self.clip_window);
         } else {
             // Configured and painted before it is mapped, so the column
             // never appears for a frame at the geometry or the palette
@@ -4152,6 +4154,65 @@ mod tests {
         assert!(desktop.set_reservation(&mut backend, &theme, EdgeReservation::default()));
         assert_eq!(backend.shell_geometries[&desktop.dock_window()], before);
         assert_eq!(desktop.primary_workarea().size.w, screen.w - tile);
+    }
+
+    #[test]
+    fn hiding_the_dock_releases_the_columns_and_the_clips_pixels() {
+        use wm_core::fake_backend::FakeBackend;
+
+        // The Dock and the Clip keep their surfaces across a hide —
+        // destroy/recreate churn is what the stable identity avoids —
+        // but nothing can draw them while hidden, so the column's
+        // raster (one tile wide by the summed height of every widget
+        // slot) and the Clip's tile are dead weight until the show path
+        // repaints them, which it does before mapping.
+        let primary = Rect { pos: Point::new(0, 0), size: TEST_SCREEN };
+        let mut backend = FakeBackend::new();
+        let mut desktop: Desktop<FakeBackend> = Desktop::new(
+            &mut backend,
+            TEST_SCREEN,
+            primary,
+            1.0,
+            &test_theme(),
+            wm_theme::Appearance::Dark,
+            Vec::new(),
+            wm_theme::FontState::new(),
+        );
+        let theme = wm_theme::default_theme::theme_by_id("nextstep-classic").unwrap();
+        let (dock, clip) = (desktop.dock_window(), desktop.clip_window());
+
+        // Both are painted while shown — otherwise the assertions below
+        // would pass on a Dock that never had pixels to release.
+        desktop.redraw_dock(&mut backend, &theme);
+        desktop.reposition_clip(&mut backend, &theme);
+        assert!(
+            backend.shell_buffer_bytes.get(&dock).is_some_and(|bytes| *bytes > 0),
+            "the column must hold pixels before the hide under test"
+        );
+        assert!(
+            backend.shell_buffer_bytes.get(&clip).is_some_and(|bytes| *bytes > 0),
+            "the Clip must hold pixels before the hide under test"
+        );
+
+        assert!(desktop.set_dock_visibility(&mut backend, &theme, DockVisibility::Hidden));
+        assert_eq!(backend.shell_buffer_bytes.get(&dock), None, "the hidden column kept its raster");
+        assert_eq!(backend.shell_buffer_bytes.get(&clip), None, "the hidden Clip kept its raster");
+        // Released, not destroyed: the surfaces are what the next show
+        // reuses.
+        assert!(backend.shell_geometries.contains_key(&dock), "the column's surface must survive the hide");
+        assert!(backend.shell_geometries.contains_key(&clip), "the Clip's surface must survive the hide");
+
+        // And showing paints again before mapping, so the column never
+        // appears as its background fill for a frame.
+        assert!(desktop.set_dock_visibility(&mut backend, &theme, DockVisibility::Shown));
+        assert!(
+            backend.shell_buffer_bytes.get(&dock).is_some_and(|bytes| *bytes > 0),
+            "showing the Dock must repaint the column"
+        );
+        assert!(
+            backend.shell_buffer_bytes.get(&clip).is_some_and(|bytes| *bytes > 0),
+            "showing the Dock must repaint the Clip"
+        );
     }
 
     #[test]

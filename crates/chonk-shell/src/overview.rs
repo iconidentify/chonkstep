@@ -227,6 +227,7 @@ impl<B: Backend> OverviewPanel<B> {
             // No cards on this desk: nothing to select, nothing shown.
             if let Some(selection) = self.selection {
                 backend.unmap_shell_surface(selection);
+                backend.release_shell_buffer(selection);
             }
             return;
         };

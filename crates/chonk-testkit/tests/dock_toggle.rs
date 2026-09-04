@@ -145,6 +145,39 @@ fn hiding_the_dock_from_the_root_menu_gives_a_maximized_window_its_strip() {
     })
     .expect("hiding the Dock takes the Clip with it");
 
+    // -- and both give their pixels back ------------------------------
+    // The column and the Clip keep their surfaces across a hide — the
+    // stable identity is what avoids display-server churn — but nothing
+    // can draw them while they are unmapped, so the column's raster
+    // (one tile wide by the summed height of every widget slot) and the
+    // Clip's tile are dead weight until the show path repaints them.
+    // `buffer_bytes` is the compositor's own account of the CPU-side
+    // pixels it is holding for a surface; a released one reads zero
+    // while the surface itself stays in the ledger.
+    let released = poll_until(Duration::from_secs(10), "the hidden Dock and Clip to release their pixels", || {
+        let world = session.world().ok()?;
+        let dock = world.shells.iter().find(|s| s.id == home.id)?;
+        (!dock.mapped && dock.buffer_bytes == 0).then_some(())
+    })
+    .map(|()| session.world().unwrap());
+    let world = released.unwrap_or_else(|e| {
+        let world = session.world().unwrap();
+        panic!("{e}; shells now: {:?}", world.shells)
+    });
+    assert!(
+        world.shells.iter().any(|s| s.id == home.id),
+        "the column's surface must survive the hide, not be destroyed"
+    );
+    // The Clip by the same shape test the visibility check above uses —
+    // a square tile in the far corner — since it has no id in hand here.
+    let clip = world
+        .shells
+        .iter()
+        .find(|s| s.w == s.h && s.x + s.w as i32 == output_w as i32 && s.y + s.h as i32 == output_h as i32)
+        .expect("the Clip's surface must survive the hide too");
+    assert!(!clip.mapped, "the Clip is unmapped");
+    assert_eq!(clip.buffer_bytes, 0, "the hidden Clip is still holding its tile: {clip:?}");
+
     // -- and the equivalent binding shows it again --------------------
     // With the window now covering the entire output there is still no
     // bare desktop on which to summon a root menu. The public action is
@@ -167,6 +200,15 @@ fn hiding_the_dock_from_the_root_menu_gives_a_maximized_window_its_strip() {
             .then_some(())
     })
     .expect("showing the Dock brings the Clip back");
+    // Painted before mapped, so the column never appears for a frame as
+    // the bare background fill its released state draws.
+    let world = session.world().unwrap();
+    let column = world.shells.iter().find(|s| s.id == home.id).expect("the column is back");
+    assert!(column.mapped, "the column is mapped again");
+    assert!(
+        column.buffer_bytes > 0,
+        "showing the Dock must repaint the column it released, saw {column:?}"
+    );
     assert_eq!(std::fs::read_to_string(session.state_file("dock-visibility")).unwrap().trim(), "shown");
 }
 
