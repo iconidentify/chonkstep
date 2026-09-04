@@ -11,10 +11,10 @@ root=""
 if [ "${1:-}" = "--root" ]; then
     [ "$#" -eq 2 ] || { echo "usage: $0 [--root DIR]" >&2; exit 2; }
     root="${2%/}"
-    [ -n "$root" ] && [ "$root" != "/" ] && [ -d "$root" ] || {
+    if [ -z "$root" ] || [ "$root" = "/" ] || [ ! -d "$root" ]; then
         echo "--root must name an existing directory other than /" >&2
         exit 2
-    }
+    fi
 elif [ "$#" -ne 0 ]; then
     echo "usage: $0 [--root DIR]" >&2
     exit 2
