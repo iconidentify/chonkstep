@@ -174,6 +174,14 @@ pub(crate) struct EwmhLedger {
     /// Pending `_NET_FRAME_EXTENTS` per window, in EWMH order
     /// (left, right, top, bottom). Same bounds as `window_desktops`.
     frame_extents: HashMap<WlWindowId, (u32, u32, u32, u32)>,
+    /// Pending ICCCM `WM_STATE` per window: `true` is IconicState,
+    /// `false` is NormalState. Smithay writes this from
+    /// `X11Surface::set_mapped`, but physically unmapping through that
+    /// API tears down its managed surface. Miniaturization on a
+    /// compositor is deliberately only a scene hide, so this ordinary
+    /// X connection publishes the protocol state without destroying
+    /// the restorable window.
+    window_iconic: HashMap<WlWindowId, bool>,
 }
 
 impl EwmhLedger {
@@ -258,6 +266,10 @@ impl EwmhLedger {
         self.frame_extents.insert(window, (left, right, top, bottom));
     }
 
+    pub(crate) fn note_window_iconic(&mut self, window: WlWindowId, iconic: bool) {
+        self.window_iconic.insert(window, iconic);
+    }
+
     /// Re-flags the client list without new content — the fix for the
     /// one interleaving with smithay's XWM that does NOT converge on
     /// its own. Smithay APPENDs every freshly mapped window to
@@ -280,6 +292,7 @@ impl EwmhLedger {
     pub(crate) fn prune_window(&mut self, window: WlWindowId) {
         self.window_desktops.remove(&window);
         self.frame_extents.remove(&window);
+        self.window_iconic.remove(&window);
     }
 
     /// Re-dirties every root property, so a connection arriving late
@@ -313,6 +326,7 @@ struct WriteAtoms {
     net_wm_desktop: Atom,
     net_workarea: Atom,
     net_frame_extents: Atom,
+    wm_state: Atom,
 }
 
 impl WriteAtoms {
@@ -329,6 +343,7 @@ impl WriteAtoms {
             net_wm_desktop: conn.intern_atom(false, b"_NET_WM_DESKTOP")?.reply()?.atom,
             net_workarea: conn.intern_atom(false, b"_NET_WORKAREA")?.reply()?.atom,
             net_frame_extents: conn.intern_atom(false, b"_NET_FRAME_EXTENTS")?.reply()?.atom,
+            wm_state: conn.intern_atom(false, b"WM_STATE")?.reply()?.atom,
         })
     }
 }
@@ -423,6 +438,11 @@ impl XEwmh {
         for &(window, extents) in &writes.frame_extents {
             self.conn.change_property32(PropMode::REPLACE, window, self.atoms.net_frame_extents, AtomEnum::CARDINAL, &extents)?;
         }
+        for &(window, state) in &writes.window_states {
+            // ICCCM 4.1.3.1: two 32-bit values, state and icon window
+            // (None because this WM uses its own shell tile).
+            self.conn.change_property32(PropMode::REPLACE, window, self.atoms.wm_state, self.atoms.wm_state, &[state, 0])?;
+        }
         self.conn.flush()?;
         Ok(())
     }
@@ -439,6 +459,7 @@ struct Writes {
     workarea: Option<Vec<u32>>,
     window_desktops: Vec<(XWindow, u32)>,
     frame_extents: Vec<(XWindow, [u32; 4])>,
+    window_states: Vec<(XWindow, u32)>,
 }
 
 impl Writes {
@@ -449,6 +470,7 @@ impl Writes {
             && self.workarea.is_none()
             && self.window_desktops.is_empty()
             && self.frame_extents.is_empty()
+            && self.window_states.is_empty()
     }
 }
 
@@ -471,6 +493,13 @@ fn workarea_values(area: Rect, workspace_count: usize) -> Vec<u32> {
         values.extend_from_slice(&[area.pos.x.max(0) as u32, area.pos.y.max(0) as u32, area.size.w, area.size.h]);
     }
     values
+}
+
+/// ICCCM `WM_STATE`'s wire value. The protocol names these as
+/// `NormalState = 1` and `IconicState = 3`; keeping the conversion in
+/// one function makes the otherwise magic integers testable.
+fn icccm_wm_state(iconic: bool) -> u32 {
+    if iconic { 3 } else { 1 }
 }
 
 /// Drains the ledger's dirty state into wire-ready writes. Per-window
@@ -513,6 +542,11 @@ fn take_writes(backend: &mut WaylandBackend) -> Writes {
             .frame_extents
             .drain()
             .filter_map(|(id, (l, r, t, b))| Some((x11_id(windows, id)?, [l, r, t, b])))
+            .collect(),
+        window_states: ledger
+            .window_iconic
+            .drain()
+            .filter_map(|(id, iconic)| Some((x11_id(windows, id)?, icccm_wm_state(iconic))))
             .collect(),
     }
 }
@@ -777,6 +811,12 @@ mod tests {
     }
 
     #[test]
+    fn icccm_window_state_uses_the_protocols_normal_and_iconic_values() {
+        assert_eq!(icccm_wm_state(false), 1);
+        assert_eq!(icccm_wm_state(true), 3);
+    }
+
+    #[test]
     fn ledger_verbs_keep_only_the_newest_value() {
         // Overwrite, not queue: a burst of workspace switches between
         // flushes must publish once, with the final value.
@@ -797,8 +837,10 @@ mod tests {
         let mut ledger = EwmhLedger::default();
         ledger.note_window_desktop(WlWindowId(7), 1);
         ledger.note_frame_extents(WlWindowId(7), 1, 1, 24, 1);
+        ledger.note_window_iconic(WlWindowId(7), true);
         ledger.prune_window(WlWindowId(7));
         assert!(ledger.window_desktops.is_empty());
         assert!(ledger.frame_extents.is_empty());
+        assert!(ledger.window_iconic.is_empty());
     }
 }

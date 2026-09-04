@@ -352,6 +352,31 @@ impl XwmHandler for Compositor {
         self.queue_x11_net_state(&window, NetStateAction::Remove, NetState::Fullscreen, None);
     }
 
+    fn minimize_request(&mut self, _xwm: XwmId, window: X11Surface) {
+        // `WM_CHANGE_STATE(IconicState)` is the X11 spelling of the
+        // same request `xdg_toplevel.set_minimized` carries: an
+        // application asking the desktop to run its normal minimize
+        // gesture. Leaving this method at smithay's no-op default made
+        // client-drawn minimize buttons visibly press and do nothing.
+        // Route it into the same miniaturize path as our titlebar
+        // button, including the icon tile and protocol publication.
+        let backend = self.wm.backend_mut();
+        if let Some(id) = x11_window_id(backend, &window) {
+            backend.queue(WmEvent::MinimizeRequest(id));
+        }
+    }
+
+    fn unminimize_request(&mut self, _xwm: XwmId, window: X11Surface) {
+        // `NormalState` means make this iconic window visible again.
+        // Activation already has exactly those semantics in wm-core:
+        // it deminiaturizes first, then focuses and raises. A dedicated
+        // second restore path would only give the two a way to drift.
+        let backend = self.wm.backend_mut();
+        if let Some(id) = x11_window_id(backend, &window) {
+            backend.queue(WmEvent::ActivateRequested(id));
+        }
+    }
+
     fn resize_request(
         &mut self,
         _xwm: XwmId,

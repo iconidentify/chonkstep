@@ -392,6 +392,13 @@ used to hear they were maximized. Shading remains unpublished on the
 Wayland session (no protocol vocabulary for it) and is omitted from
 `_NET_SUPPORTED` there accordingly.
 
+**Client-initiated minimize.** Fixed on both client kinds. An X11
+client's `WM_CHANGE_STATE` request now enters the same miniaturize and
+restore paths as the compositor's titlebar and shell icon tile. The
+round trip publishes `_NET_WM_STATE_HIDDEN` plus ICCCM `WM_STATE`
+(`IconicState` while hidden, `NormalState` after restore), so toolkits
+that draw their own minimize button see the state they requested.
+
 **Client-initiated resize.** `_NET_WM_MOVERESIZE`'s eight *resize* directions
 are dropped: this window manager's resize machinery is driven by its own
 resizebar geometry and has no edge to take from a client that has none. An

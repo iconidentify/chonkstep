@@ -1349,6 +1349,14 @@ impl Backend for WaylandBackend {
                 // the client may be mid-teardown, and state styling is
                 // not worth failing anything over.
                 if surface.alive() {
+                    // `set_suspended` publishes EWMH hidden, but
+                    // ICCCM clients also read `WM_STATE` to learn
+                    // whether they are iconic. `X11Surface::set_mapped`
+                    // would write it, but its real X unmap makes
+                    // smithay dismantle the managed surface. Queue the
+                    // property-only counterpart through our ordinary
+                    // XWayland EWMH connection instead.
+                    self.ewmh.note_window_iconic(window, hidden);
                     if let Err(error) = surface.set_fullscreen(fullscreen) {
                         tracing::warn!(?error, ?window, "X11 set_fullscreen failed");
                     }
