@@ -358,6 +358,12 @@ impl<B: Backend> LaunchDock<B> {
             if self.mapped {
                 if let Some(window) = self.window {
                     backend.unmap_shell_surface(window);
+                    // The surface survives the last pin being removed —
+                    // re-pinning should not churn the display server —
+                    // but the strip's raster grows with the pin count
+                    // and is rebuilt in full below the moment one comes
+                    // back, so nothing is kept by keeping it.
+                    backend.release_shell_buffer(window);
                 }
                 self.mapped = false;
             }
@@ -658,6 +664,59 @@ mod tests {
             "org.mozilla.firefox\norg.gnome.Calculator\n"
         );
         cleanup(&path);
+    }
+
+    #[test]
+    fn unpinning_the_last_pin_releases_the_strips_pixels_but_keeps_its_surface() {
+        use wm_core::fake_backend::FakeBackend;
+
+        // The strip's surface outlives an empty spell on purpose (see
+        // the field doc on `window`), but its raster grows with the pin
+        // count — up to the screen height minus one tile — and nothing
+        // can draw it while it is unmapped. The re-pin path repaints in
+        // full, so releasing costs the next pin nothing.
+        let theme = wm_theme::default_theme::theme_by_id("nextstep-classic").unwrap();
+        let primary = Rect { pos: Point::new(0, 0), size: Size::new(1920, 1200) };
+        let mut backend = FakeBackend::new();
+        let mut dock: LaunchDock<FakeBackend> =
+            LaunchDock::new(&mut backend, &theme, primary, 56, &[], wm_theme::FontState::new());
+
+        // Pin two, so the strip has a surface and pixels to release.
+        // Written straight into the fields rather than through a drag:
+        // this test is about `sync_window`, and a synthesized drag would
+        // also be testing the pointer path.
+        dock.pins = vec![entry("app.a"), entry("app.b")];
+        dock.lit = vec![false; dock.pins.len()];
+        dock.sync_window(&mut backend, &theme);
+        let window = dock.window.expect("pinning creates the strip's surface");
+        assert!(dock.mapped, "a strip with pins is mapped");
+        assert!(
+            backend.shell_buffer_bytes.get(&window).is_some_and(|bytes| *bytes > 0),
+            "the strip must hold pixels before the unpin under test"
+        );
+
+        // Unpin both — the empty-strip arm of `sync_window`.
+        dock.pins.clear();
+        dock.lit.clear();
+        dock.sync_window(&mut backend, &theme);
+        assert!(!dock.mapped, "an empty strip is unmapped");
+        assert_eq!(dock.window, Some(window), "the surface must survive the empty spell");
+        assert!(backend.shell_geometries.contains_key(&window), "released, not destroyed");
+        assert_eq!(
+            backend.shell_buffer_bytes.get(&window),
+            None,
+            "the unmapped strip kept its raster"
+        );
+
+        // Re-pinning repaints, so nothing was lost by releasing.
+        dock.pins = vec![entry("app.c")];
+        dock.lit = vec![false];
+        dock.sync_window(&mut backend, &theme);
+        assert_eq!(dock.window, Some(window), "re-pinning reuses the surface");
+        assert!(
+            backend.shell_buffer_bytes.get(&window).is_some_and(|bytes| *bytes > 0),
+            "re-pinning must repaint the strip"
+        );
     }
 
     #[test]

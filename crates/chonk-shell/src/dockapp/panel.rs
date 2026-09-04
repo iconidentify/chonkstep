@@ -219,10 +219,15 @@ impl<B: Backend> InstrumentPanel<B> {
     }
 
     /// Takes the panel off screen and forgets its owner. The surface is
-    /// kept for the next open.
+    /// kept for the next open; its pixels are not. A granted panel is
+    /// bounded at `MAX_PANEL_BYTES` (4 MB) rather than by anything the
+    /// shell chooses, and nothing can draw it while it is hidden, so
+    /// the raster is dead weight until [`Self::show`] repaints it —
+    /// which it does before mapping.
     pub(crate) fn hide(&mut self, backend: &mut B) {
         if let Some(window) = self.window {
             backend.unmap_shell_surface(window);
+            backend.release_shell_buffer(window);
         }
         self.visible = false;
         self.owner = None;
@@ -266,6 +271,50 @@ mod tests {
         assert_eq!(rect.pos.x + rect.size.w as i32, dock.pos.x, "flush against the dock strip");
         assert_eq!(rect.pos.y, 112, "level with the owning tile's slot");
         assert_eq!(rect.size, Size::new(300 + inset * 2, 200 + inset * 2));
+    }
+
+    #[test]
+    fn closing_a_panel_releases_its_raster_and_reopening_reuses_the_surface() {
+        use wm_core::fake_backend::FakeBackend;
+
+        // The biggest of the four: a dockapp may be granted up to
+        // `MAX_PANEL_BYTES` (4 MB), and `hide` fires on every Dock hide
+        // too, by way of `dismiss_instrument_panel`. The surface is kept
+        // for the next open — that policy is what the doc comment on
+        // `hide` states and is not being changed — but nothing can draw
+        // the panel while it is off screen, and `show` repaints before
+        // it maps.
+        let theme = theme();
+        let mut backend = FakeBackend::new();
+        let mut panel: InstrumentPanel<FakeBackend> = InstrumentPanel::default();
+
+        panel.show(&mut backend, &theme, "probe", (300, 200), area((100, 100), (312, 212)), None);
+        let window = panel.window.expect("showing creates the surface");
+        assert!(panel.visible);
+        assert!(
+            backend.shell_buffer_bytes.get(&window).is_some_and(|bytes| *bytes > 0),
+            "an open panel must hold pixels before the close under test"
+        );
+
+        panel.hide(&mut backend);
+        assert!(!panel.visible);
+        assert_eq!(panel.owner, None, "hiding forgets the owner");
+        assert_eq!(panel.window, Some(window), "the surface is kept for the next open");
+        assert!(backend.shell_geometries.contains_key(&window), "released, not destroyed");
+        assert_eq!(
+            backend.shell_buffer_bytes.get(&window),
+            None,
+            "the closed panel kept its raster"
+        );
+
+        // Reopening neither recreates the surface nor shows an unpainted
+        // one.
+        panel.show(&mut backend, &theme, "probe", (300, 200), area((100, 100), (312, 212)), None);
+        assert_eq!(panel.window, Some(window), "reopening must reuse the surface");
+        assert!(
+            backend.shell_buffer_bytes.get(&window).is_some_and(|bytes| *bytes > 0),
+            "reopening must repaint before mapping"
+        );
     }
 
     #[test]
