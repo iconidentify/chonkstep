@@ -220,6 +220,11 @@ sudo install -Dm644 packaging/sddm/chonkstep/theme.conf \
     /usr/share/sddm/themes/chonkstep/theme.conf
 sudo install -Dm644 packaging/sddm/zz-chonkstep-theme.conf \
     /etc/sddm.conf.d/zz-chonkstep-theme.conf
+sudo install -Dm644 packaging/systemd/sddm.service.d/90-chonkstep-resilience.conf \
+    /etc/systemd/system/sddm.service.d/90-chonkstep-resilience.conf
+if [ -d /run/systemd/system ]; then
+    sudo systemctl daemon-reload
+fi
 
 sddm_value() {
     local wanted_section="$1" wanted_key="$2" directory file
@@ -249,7 +254,7 @@ else
     sudo rm -f /etc/sddm.conf.d/zz-chonkstep-autologin.conf
 fi
 sudo rm -f /etc/sddm.conf.d/20-chonkstep-theme.conf
-echo "Installed chonkstep's SDDM integration. Undo: sudo rm -f /etc/sddm.conf.d/zz-chonkstep-{theme,autologin}.conf"
+echo "Installed chonkstep's SDDM integration. Undo: sudo rm -f /etc/sddm.conf.d/zz-chonkstep-{theme,autologin}.conf /etc/systemd/system/sddm.service.d/90-chonkstep-resilience.conf"
 
 # The portal backend map: ScreenCast/Screenshot to the wlr backend
 # (screen sharing — see docs/screen-sharing.md), the rest to GTK. The
@@ -397,6 +402,8 @@ if [ "$has_dm" = "sddm" ]; then
   - Omarchy's greeter and autologin files were not edited. Undo only
     chonkstep's integration with:
       sudo rm -f /etc/sddm.conf.d/zz-chonkstep-{theme,autologin}.conf
+      sudo rm -f /etc/systemd/system/sddm.service.d/90-chonkstep-resilience.conf
+      sudo systemctl daemon-reload
 DONE
 elif [ -n "$has_dm" ]; then
     cat <<DONE

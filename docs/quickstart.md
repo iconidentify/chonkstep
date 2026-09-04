@@ -123,6 +123,23 @@ cleanup. The direct entry remains for non-systemd and recovery use.
   opens a window that is its screen — same chrome, dock, menus,
   themes, with X11 apps through XWayland.
 
+Do not run `systemctl restart sddm` from the only graphical session as a
+login-recovery shortcut: restarting SDDM deliberately terminates that whole
+session, including the terminal that issued it. Log out or reboot for a normal
+session change. If SDDM has already failed, first switch to a text VT
+(`Ctrl+Alt+F3`) and log in there, then recover it without losing your console:
+
+```sh
+sudo systemctl reset-failed sddm.service
+sudo systemctl start sddm.service
+```
+
+The Omarchy integration installs a service drop-in that gives the compositor
+20 seconds to release DRM/VT, waits 3 seconds before a retry, and prevents a
+transient greeter failure from permanently latching SDDM off. The text-VT
+procedure remains the safe manual recovery path because it leaves you a shell
+if the graphics driver or greeter itself is broken.
+
 Seat access needs no setup on any systemd machine — logind hands the
 session its devices. Without logind, enable `seatd` and join the
 `seat` group.

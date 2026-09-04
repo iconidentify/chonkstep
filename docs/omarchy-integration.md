@@ -34,6 +34,15 @@ choosers broken. The command then installs
 fresh Omarchy writes its own selection to `99-omarchy-login.conf`, so an
 earlier filename would silently lose.
 
+It also installs
+`/etc/systemd/system/sddm.service.d/90-chonkstep-resilience.conf`. Stock
+Omarchy allows only five seconds for SDDM's entire session cgroup to stop and
+permanently rate-limits the service after two quick starts. The ChonkStep
+drop-in allows a 20-second orderly compositor teardown, adds a 3-second DRM/VT
+reacquisition delay, and disables the permanent start-limit latch. It does not
+restart SDDM or disturb the current session; the installer only reloads
+systemd's unit definitions.
+
 On an encrypted fresh install, Omarchy also enables SDDM autologin. Chonkstep
 preserves that file and its `User=` value, adding only
 `zz-chonkstep-autologin.conf` to select `chonkstep-uwsm.desktop`. On an
@@ -88,6 +97,12 @@ create the marker and enter the bounded crash-recovery loop.
 
 This means the unmodified `omarchy-system-logout` works in the recommended
 uwsm session. No logout shim or upstream patch is carried.
+
+For manual recovery, switch to and log into a text VT first (for example
+`Ctrl+Alt+F3`), then run `sudo systemctl reset-failed sddm.service` followed by
+`sudo systemctl start sddm.service`. Do not use `systemctl restart sddm` from
+the only graphical session as a recovery command: its intended first action is
+to terminate that session and the terminal running the command.
 
 ## Compatibility inventory
 

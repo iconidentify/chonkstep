@@ -170,6 +170,68 @@ fn terminating_the_supervisor_is_a_logout_not_a_recovery() {
 }
 
 #[test]
+fn uwsm_logout_never_waits_on_the_user_manager_during_cleanup() {
+    let dir = std::env::temp_dir().join("chonk-testkit-supervisor").join("uwsm-term");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("run")).unwrap();
+    std::fs::create_dir_all(dir.join("state")).unwrap();
+    std::fs::create_dir_all(dir.join("bin")).unwrap();
+    let runs = dir.join("runs");
+    let calls = dir.join("systemctl-calls");
+    let stub = dir.join("stub-compositor.sh");
+    std::fs::write(
+        &stub,
+        format!(
+            "#!/bin/sh\necho run >> \"{}\"\ntrap 'exit 0' TERM HUP INT\nwhile :; do sleep 1; done\n",
+            runs.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let systemctl = dir.join("bin/systemctl");
+    std::fs::write(
+        &systemctl,
+        format!("#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\n", calls.display()),
+    )
+    .unwrap();
+    std::fs::set_permissions(&systemctl, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let path = format!("{}:{}", dir.join("bin").display(), std::env::var("PATH").unwrap_or_default());
+    let mut child = Command::new("bash")
+        .arg(script_path())
+        .env_clear()
+        .env("HOME", &dir)
+        .env("PATH", path)
+        .env("XDG_STATE_HOME", dir.join("state"))
+        .env("XDG_RUNTIME_DIR", dir.join("run"))
+        .env("CHONKSTEP_SESSION_BIN", &stub)
+        .env("CHONKSTEP_SESSION_TESTING", "1")
+        .env("DBUS_SESSION_BUS_ADDRESS", "unix:path=/isolated")
+        .env("UWSM_ID", "chonkstep.desktop")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    poll_until(Duration::from_secs(5), "the managed compositor stub to start", || {
+        (std::fs::read_to_string(&runs).unwrap_or_default().lines().count() == 1).then_some(())
+    })
+    .expect("stub did not start");
+
+    // SAFETY: the child was spawned by this test, has not been reaped, and
+    // `kill` only passes its numeric pid and a valid signal to the kernel.
+    unsafe { libc::kill(child.id() as i32, libc::SIGTERM) };
+    assert!(wait_exit(&mut child).success());
+
+    let calls = std::fs::read_to_string(&calls).unwrap_or_default();
+    assert_eq!(
+        calls.lines().count(),
+        1,
+        "UWSM logout must not make another user-manager call after the one startup scrub; calls were:\n{calls}"
+    );
+    assert!(calls.contains("--user unset-environment DISPLAY WAYLAND_DISPLAY"));
+}
+
+#[test]
 fn direct_session_owns_graphical_targets_and_publishes_only_curated_environment() {
     let dir = std::env::temp_dir().join("chonk-testkit-supervisor").join("graphical-targets");
     let _ = std::fs::remove_dir_all(&dir);

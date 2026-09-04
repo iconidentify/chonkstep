@@ -7,6 +7,14 @@ crate and both session binaries carry the same number.
 
 ### Fixed
 
+- **Stopping SDDM can no longer turn a transient DRM/VT handoff race into
+  a permanent black screen.** The managed UWSM supervisor performs no
+  synchronous user-manager calls during teardown. Omarchy integration also
+  installs a reversible SDDM service drop-in that expands orderly shutdown
+  from 5 to 20 seconds, backs retries off by 3 seconds, and disables the
+  two-start permanent rate-limit latch. Recovery docs now require a logged-in
+  text VT plus `reset-failed`/`start` rather than presenting a live-session
+  restart as safe ([#29](https://github.com/iconidentify/chonkstep/issues/29)).
 - **Long window titles are middle-elided and confined to one titlebar
   line.** Real window chrome now shares the same elision policy as the
   Alt-Tab switcher and Overview cards. The common text rasterizer also

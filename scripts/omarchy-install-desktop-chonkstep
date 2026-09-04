@@ -51,6 +51,10 @@ remove_system_file() {
     fi
 }
 
+reload_systemd_manager() {
+    [ -n "$root" ] || sudo systemctl daemon-reload
+}
+
 enable_omarchy_posture() {
     [ -n "$config_home" ] || return 0
 
@@ -112,8 +116,10 @@ sddm_value() {
 }
 
 share_dir="$(system_path /usr/share/chonkstep/sddm)"
+systemd_share_dir="$(system_path /usr/share/chonkstep/systemd)"
 theme_template="$share_dir/zz-chonkstep-theme.conf"
 autologin_template="$share_dir/zz-chonkstep-autologin.conf"
+resilience_template="$systemd_share_dir/90-chonkstep-sddm-resilience.conf"
 verifier="$(system_path /usr/lib/chonkstep/verify-install.sh)"
 omarchy_theme_dir="$(system_path /usr/share/sddm/themes/omarchy)"
 
@@ -140,7 +146,7 @@ MESSAGE
     fi
 fi
 
-for required in "$theme_template" "$autologin_template" "$verifier"; do
+for required in "$theme_template" "$autologin_template" "$resilience_template" "$verifier"; do
     [ -f "$required" ] || {
         echo "chonkstep installation is incomplete; missing $required" >&2
         exit 1
@@ -155,6 +161,9 @@ done
 
 echo "Enabling chonkstep's SDDM login integration..."
 install_system_file "$theme_template" /etc/sddm.conf.d/zz-chonkstep-theme.conf
+install_system_file "$resilience_template" \
+    /etc/systemd/system/sddm.service.d/90-chonkstep-resilience.conf
+reload_systemd_manager
 enable_omarchy_posture
 
 # Fresh encrypted Omarchy installs autologin through an Omarchy-owned snippet.

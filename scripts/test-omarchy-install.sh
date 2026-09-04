@@ -26,15 +26,19 @@ stage_package() {
         "$root/usr/share/wayland-sessions" \
         "$root/usr/share/sddm/themes/chonkstep" \
         "$root/usr/share/chonkstep/sddm" \
+        "$root/usr/share/chonkstep/systemd" \
         "$root/usr/share/doc/chonkstep" \
         "$root/usr/share/xdg-desktop-portal" \
         "$root/usr/lib/chonkstep" \
+        "$root/usr/lib/systemd/system" \
         "$root/usr/bin"
 
     install -m644 packaging/sddm/chonkstep/{Main.qml,metadata.desktop,theme.conf} \
         "$root/usr/share/sddm/themes/chonkstep/"
     install -m644 packaging/sddm/zz-chonkstep-{theme,autologin}.conf \
         "$root/usr/share/chonkstep/sddm/"
+    install -m644 packaging/systemd/sddm.service.d/90-chonkstep-resilience.conf \
+        "$root/usr/share/chonkstep/systemd/90-chonkstep-sddm-resilience.conf"
     install -m644 packaging/portal/chonkstep-portals.conf \
         "$root/usr/share/xdg-desktop-portal/chonkstep-portals.conf"
     install -m755 scripts/verify-install.sh "$root/usr/lib/chonkstep/verify-install.sh"
@@ -46,6 +50,17 @@ stage_package() {
     done
     printf '#!/bin/sh\nexit 0\n' > "$root/usr/bin/uwsm"
     chmod 755 "$root/usr/bin/uwsm"
+    printf '#!/bin/sh\nexit 0\n' > "$root/usr/bin/sddm"
+    chmod 755 "$root/usr/bin/sddm"
+    printf '%s\n' \
+        '[Unit]' \
+        'DefaultDependencies=no' \
+        'StartLimitIntervalSec=30' \
+        'StartLimitBurst=2' \
+        '[Service]' \
+        'ExecStart=/usr/bin/sddm' \
+        'Restart=always' \
+        > "$root/usr/lib/systemd/system/sddm.service"
 
     printf '%s\n' \
         '[Desktop Entry]' \
@@ -122,6 +137,23 @@ printf '%s\n' 'scale = 2.0' '[keybindings]' > "$config_home/chonkstep/config.tom
 CHONKSTEP_TEST_CONFIG_HOME="$config_home" scripts/omarchy-install-desktop-chonkstep --root "$encrypted"
 assert_file "$encrypted/etc/sddm.conf.d/zz-chonkstep-theme.conf"
 assert_file "$encrypted/etc/sddm.conf.d/zz-chonkstep-autologin.conf"
+resilience="$encrypted/etc/systemd/system/sddm.service.d/90-chonkstep-resilience.conf"
+assert_file "$resilience"
+grep -qx 'StartLimitIntervalSec=0' "$resilience" \
+    || fail "SDDM resilience drop-in does not disable the permanent start-limit latch"
+grep -qx 'TimeoutStopSec=20s' "$resilience" \
+    || fail "SDDM resilience drop-in does not allow orderly compositor teardown"
+grep -qx 'RestartSec=3s' "$resilience" \
+    || fail "SDDM resilience drop-in does not back off before reacquiring DRM/VT"
+if command -v systemd-analyze >/dev/null 2>&1; then
+    systemd-analyze --root="$encrypted" verify sddm.service \
+        || fail "systemd rejected the installed SDDM unit/drop-in combination"
+    merged_unit=$(systemd-analyze --root="$encrypted" cat-config systemd/system/sddm.service)
+    for directive in StartLimitIntervalSec=0 StartLimitBurst=10 TimeoutStopSec=20s RestartSec=3s; do
+        grep -qx "$directive" <<<"$merged_unit" \
+            || fail "systemd did not merge $directive from the ChonkStep drop-in"
+    done
+fi
 grep -qx 'Session=chonkstep-uwsm.desktop' \
     "$encrypted/etc/sddm.conf.d/zz-chonkstep-autologin.conf" \
     || fail "encrypted install does not select the managed session"
@@ -141,6 +173,8 @@ grep -qx 'scale = 2.0' "$config_home/chonkstep/config.toml" \
 CHONKSTEP_TEST_CONFIG_HOME="$config_home" scripts/omarchy-install-desktop-chonkstep --root "$encrypted"
 [ "$(find "$encrypted/etc/sddm.conf.d" -maxdepth 1 -type f | wc -l)" -eq 4 ] \
     || fail "idempotent rerun changed the SDDM snippet set"
+[ "$(find "$encrypted/etc/systemd/system/sddm.service.d" -maxdepth 1 -type f | wc -l)" -eq 1 ] \
+    || fail "idempotent rerun changed the SDDM service drop-in set"
 [ "$(grep -c '^desktop[[:space:]]*=' "$config_home/chonkstep/config.toml")" -eq 1 ] \
     || fail "idempotent rerun duplicated the desktop posture"
 
@@ -161,6 +195,7 @@ grep -q '^# Focus policy' "$fresh_home/chonkstep/config.toml" \
 scripts/omarchy-remove-desktop-chonkstep --root "$encrypted"
 assert_absent "$encrypted/etc/sddm.conf.d/zz-chonkstep-theme.conf"
 assert_absent "$encrypted/etc/sddm.conf.d/zz-chonkstep-autologin.conf"
+assert_absent "$resilience"
 cmp -s "$work/99.expected" "$encrypted/etc/sddm.conf.d/99-omarchy-login.conf" \
     || fail "removal modified Omarchy's login configuration"
 cmp -s "$work/autologin.expected" "$encrypted/etc/sddm.conf.d/autologin.conf" \
@@ -174,6 +209,7 @@ printf '%s\n' '[Theme]' 'Current=chonkstep' \
     > "$unencrypted/etc/sddm.conf.d/20-chonkstep-theme.conf"
 scripts/omarchy-install-desktop-chonkstep --root "$unencrypted"
 assert_file "$unencrypted/etc/sddm.conf.d/zz-chonkstep-theme.conf"
+assert_file "$unencrypted/etc/systemd/system/sddm.service.d/90-chonkstep-resilience.conf"
 assert_absent "$unencrypted/etc/sddm.conf.d/zz-chonkstep-autologin.conf"
 assert_absent "$unencrypted/etc/sddm.conf.d/20-chonkstep-theme.conf"
 grep -q 'name === "chonkstep (uwsm)"' \

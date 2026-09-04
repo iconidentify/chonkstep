@@ -260,6 +260,36 @@ else
     warn "autologin override template is absent (expected for a checkout install)"
 fi
 
+resilience_active="$root/etc/systemd/system/sddm.service.d/90-chonkstep-resilience.conf"
+resilience_template="$root/usr/share/chonkstep/systemd/90-chonkstep-sddm-resilience.conf"
+resilience_file=""
+if [ -f "$resilience_active" ]; then
+    resilience_file="$resilience_active"
+    pass "SDDM teardown/start-limit resilience is enabled"
+elif [ -f "$resilience_template" ]; then
+    resilience_file="$resilience_template"
+    pass "SDDM resilience drop-in is available to the Omarchy installer"
+else
+    fail "SDDM resilience drop-in is missing"
+fi
+if [ -n "$resilience_file" ]; then
+    for directive in StartLimitIntervalSec=0 StartLimitBurst=10 TimeoutStopSec=20s RestartSec=3s; do
+        if ! grep -qx "$directive" "$resilience_file"; then
+            fail "SDDM resilience drop-in is missing $directive: $resilience_file"
+        fi
+    done
+fi
+if [ -z "$root" ] && [ -f "$resilience_active" ] && command -v systemctl >/dev/null 2>&1; then
+    effective_sddm=$(systemctl show sddm.service \
+        -p StartLimitIntervalUSec -p StartLimitBurst -p TimeoutStopUSec -p RestartUSec \
+        2>/dev/null || true)
+    for directive in StartLimitIntervalUSec=0 StartLimitBurst=10 TimeoutStopUSec=20s RestartUSec=3s; do
+        if ! grep -qx "$directive" <<<"$effective_sddm"; then
+            fail "SDDM has not loaded the expected $directive value; run sudo systemctl daemon-reload"
+        fi
+    done
+fi
+
 echo
 echo "== portal map =="
 portal_map="$root/usr/share/xdg-desktop-portal/chonkstep-portals.conf"

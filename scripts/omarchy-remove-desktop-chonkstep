@@ -34,6 +34,10 @@ fi
 remove_file /etc/sddm.conf.d/zz-chonkstep-autologin.conf
 remove_file /etc/sddm.conf.d/zz-chonkstep-theme.conf
 remove_file /etc/sddm.conf.d/20-chonkstep-theme.conf
+remove_file /etc/systemd/system/sddm.service.d/90-chonkstep-resilience.conf
+if [ -z "$root" ]; then
+    sudo systemctl daemon-reload
+fi
 
 if [ -n "$root" ]; then
     echo "Removed chonkstep's SDDM integration beneath $root; the staged package was left installed."

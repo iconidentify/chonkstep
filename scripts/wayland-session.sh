@@ -362,19 +362,23 @@ _session_stopping=0
 _compositor_pid=""
 cleanup_session() {
     kill "$_env_watcher" 2>/dev/null || true
-    # UWSM cleans the variables it owns, but it cannot know about
-    # ChonkStep's private/test controls. Scrub those in both session
-    # modes; doing this again is harmless and closes the window in
-    # which a child could have imported one after startup.
+    # UWSM owns its activation environment and graphical targets. More
+    # importantly, its logout may have been initiated by SDDM stopping
+    # the entire session cgroup: do not put a synchronous user-manager
+    # round trip on that time-critical path. The next login's startup
+    # scrub above removes any private variable a child imported late.
+    if [ "$_CHONKSTEP_UWSM" -eq 1 ]; then
+        return
+    fi
+    # A direct/TTY session has no outer lifecycle owner, so it performs
+    # the corresponding best-effort cleanup itself.
     scrub_stale_activation_env
-    if [ "$_CHONKSTEP_UWSM" -eq 0 ]; then
-        if command -v systemctl >/dev/null 2>&1; then
-            systemctl --user stop xdg-desktop-autostart.target graphical-session.target \
-                >>"$LOG" 2>&1 || true
-            systemctl --user unset-environment WAYLAND_DISPLAY HYPRLAND_INSTANCE_SIGNATURE \
-                XDG_CURRENT_DESKTOP XDG_SESSION_DESKTOP XDG_SESSION_TYPE XDG_MENU_PREFIX XDG_BACKEND \
-                >>"$LOG" 2>&1 || true
-        fi
+    if command -v systemctl >/dev/null 2>&1; then
+        systemctl --user stop xdg-desktop-autostart.target graphical-session.target \
+            >>"$LOG" 2>&1 || true
+        systemctl --user unset-environment WAYLAND_DISPLAY HYPRLAND_INSTANCE_SIGNATURE \
+            XDG_CURRENT_DESKTOP XDG_SESSION_DESKTOP XDG_SESSION_TYPE XDG_MENU_PREFIX XDG_BACKEND \
+            >>"$LOG" 2>&1 || true
     fi
 }
 stop_session() {

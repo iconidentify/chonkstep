@@ -163,6 +163,8 @@ DESKTOP
     "$pkgdir/usr/share/chonkstep/sddm/zz-chonkstep-theme.conf"
   install -Dm644 packaging/sddm/zz-chonkstep-autologin.conf \
     "$pkgdir/usr/share/chonkstep/sddm/zz-chonkstep-autologin.conf"
+  install -Dm644 packaging/systemd/sddm.service.d/90-chonkstep-resilience.conf \
+    "$pkgdir/usr/share/chonkstep/systemd/90-chonkstep-sddm-resilience.conf"
   install -Dm755 scripts/omarchy-install-desktop-chonkstep \
     "$pkgdir/usr/bin/omarchy-install-desktop-chonkstep"
   install -Dm755 scripts/omarchy-remove-desktop-chonkstep \
