@@ -524,12 +524,17 @@ fn take_writes(backend: &mut WaylandBackend) -> Writes {
 pub(crate) fn start(comp: &mut Compositor, display_number: u32) {
     match XEwmh::connect(display_number) {
         Ok(xewmh) => {
-            tracing::info!(display = display_number, "publishing EWMH to the XWayland root");
             comp.xewmh = Some(xewmh);
             // Everything `wm-core` published before the display
             // existed (workspaces, workarea, possibly a client list)
             // goes out on the first flush.
             comp.wm.backend_mut().ewmh.mark_all_dirty();
+            // This is a readiness marker, not merely an attempt marker:
+            // `connect` has selected SubstructureNotify on the root and
+            // flushed it, and both halves of the compositor now hold the
+            // publisher.  E2E pagers may safely send control messages once
+            // this line is visible.
+            tracing::info!(display = display_number, "EWMH ready on the XWayland root");
         }
         Err(error) => {
             tracing::warn!(%error, display = display_number, "could not connect for EWMH publishing; X11 pagers and tools will not see this desktop");

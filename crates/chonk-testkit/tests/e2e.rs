@@ -663,17 +663,21 @@ fn an_x11_pager_can_switch_the_workspace() {
 
     let session = Session::boot("ewmh-inbound-desktop", SessionOptions::default()).unwrap();
 
-    // XWayland starts with the session; its display number is
-    // announced in the log once the server is ready. `Session::log`
-    // has already stripped the ANSI color escapes tracing writes
-    // between the key and the value (the same trap `Session::boot`
-    // documents for the socket line), so the field parses as written.
+    // Wait for the EWMH connection, not merely the XWayland server. The
+    // latter becomes ready just before the publisher selects root-window
+    // events, which left a small window where CI could send and lose this
+    // ClientMessage. `Session::log` has already stripped the ANSI color
+    // escapes tracing writes between the key and the value (the same trap
+    // `Session::boot` documents for the socket line), so the field parses
+    // as written.
     let display = poll_until(
         Duration::from_secs(30),
         "XWayland to announce its display",
         || {
             let log = session.log();
-            let line = log.lines().find(|line| line.contains("XWayland ready"))?;
+            let line = log
+                .lines()
+                .find(|line| line.contains("EWMH ready on the XWayland root"))?;
             line.split("display=").nth(1)?.trim().parse::<u32>().ok()
         },
     )
