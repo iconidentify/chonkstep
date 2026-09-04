@@ -222,6 +222,60 @@ fn answers_the_queries_quickshell_makes_on_connect() {
     assert!(!request(&dir, "binds").trim().is_empty(), "the keybinding menu receives the live keymap");
 }
 
+/// `hyprctl binds` must name keys, because the thing reading it prints
+/// the name to a human.
+///
+/// `omarchy-menu-keybindings` — the script behind `SUPER + K` — parses
+/// the PLAIN bind block (deliberately, not `-j`: its own comment says
+/// Hyprland 0.56.0 emits invalid JSON for binds), awk-splits out the
+/// `key` field and puts it straight into a menu row. So the field is
+/// read by a person, and a `key` of `0x1008ff13` is a cheat sheet that
+/// has failed at the one thing it exists for.
+///
+/// The four chords bound here are the four shapes that were broken:
+/// the whole `XF86` block, the function keys, the editing keys, and
+/// `space` — which is not merely wrong but blank, and which on a real
+/// Omarchy desktop is `SUPER + SPACE`, the chord that opens the menu.
+#[test]
+#[ignore = "needs a Wayland session to nest inside"]
+fn binds_names_every_key_rather_than_reporting_its_keysym_in_hex() {
+    let mut options = SessionOptions::default();
+    options.env.push(("CHONKSTEP_HYPRLAND_IPC".to_string(), "1".to_string()));
+    options.config_extra = "\n[keybindings]\n\
+        \"super+space\" = \"overview\"\n\
+        \"volumeup\" = \"toggle-dock\"\n\
+        \"super+f9\" = \"miniaturize\"\n\
+        \"super+shift+backspace\" = \"close\"\n"
+        .to_string();
+    let session = Session::boot("hypr-ipc-bind-names", options).expect("nested session");
+    let dir = socket_dir(&session);
+
+    let plain = request(&dir, "binds");
+    let keys: Vec<&str> = plain
+        .lines()
+        .filter_map(|line| line.trim().strip_prefix("key: "))
+        .map(str::trim_end)
+        .collect();
+    assert!(!keys.is_empty(), "no key fields in the bind block:\n{plain}");
+
+    // Not one row may be a hex number or blank — the two failures.
+    for key in &keys {
+        assert!(!key.starts_with("0x"), "a bind is reported as hex: {key:?}\n{plain}");
+        assert!(!key.is_empty(), "a bind is reported as blank\n{plain}");
+    }
+    // And the specific keys that used to be, by name.
+    for expected in ["space", "F9", "BackSpace", "XF86AudioRaiseVolume"] {
+        assert!(keys.contains(&expected), "no bind reported as {expected:?}, saw {keys:?}");
+    }
+
+    // The JSON encoding carries the same field and had the same bug.
+    let binds = json(&dir, "j/binds");
+    for bind in binds.as_array().expect("binds is an array") {
+        let key = bind["key"].as_str().expect("every bind has a string key");
+        assert!(!key.starts_with("0x") && !key.is_empty(), "j/binds key {key:?}");
+    }
+}
+
 /// A real window reaches both halves of the protocol, with one address.
 ///
 /// Quickshell correlates event payloads with `j/clients` entries by

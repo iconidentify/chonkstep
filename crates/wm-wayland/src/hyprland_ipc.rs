@@ -35,6 +35,8 @@
 //! the pattern `docs/control-socket.md` established and the one
 //! `clippy.toml`'s incident report exists to protect.
 
+use smithay::input::keyboard::{xkb, Keysym};
+
 use chonk_hyprland_ipc::dispatch::{Action, Fullscreen};
 use chonk_hyprland_ipc::state::{Binding, Devices, Keyboard, Monitor, PointerDevice, Snapshot, Window, Workspace};
 use chonk_hyprland_ipc::Server;
@@ -315,12 +317,49 @@ fn hypr_modmask(modifiers: wm_core::Modifiers) -> u32 {
         | (u32::from(modifiers.contains(wm_core::Modifiers::SUPER)) << 6)
 }
 
+/// The name `hyprctl binds` reports for a bound key, in both the plain
+/// and the JSON encoding.
+///
+/// The consumer prints this string verbatim — `omarchy-menu-keybindings`,
+/// the script behind `SUPER + K`, awk-splits the plain bind block and
+/// puts the `key` field straight into a menu row — so a name that is
+/// not a key name is a cheat sheet that has failed at the one thing it
+/// exists for.
+///
+/// This used to be a seven-entry table with a `format!("0x{keysym:x}")`
+/// catch-all, which took the entire `XF86` block, `F1`-`F12`,
+/// `BackSpace`, `Delete`, `Insert`, `Home`, `End`, `Page_Up`,
+/// `Page_Down` and `Print` — about a quarter of Omarchy's shipped
+/// keymap, rendered as hexadecimal. `space` was worse: it fell inside
+/// the printable-ASCII arm at `0x20` and came out as a literal space,
+/// so `SUPER + SPACE`, the chord that opens Omarchy's own menu, listed
+/// itself as blank.
+///
+/// libxkbcommon's registry is the authority instead. It has a name for
+/// every keysym this compositor can bind, and the name it gives is the
+/// spelling Hyprland's config syntax uses for that key — so the round
+/// trip out through here and back through `wm_config`'s `keysym_for`
+/// lands on the same key.
 fn keysym_name(keysym: u32) -> String {
-    match keysym {
-        0xff0d => "RETURN".into(), 0xff09 => "TAB".into(), 0xff1b => "ESCAPE".into(),
-        0xff51 => "LEFT".into(), 0xff52 => "UP".into(), 0xff53 => "RIGHT".into(), 0xff54 => "DOWN".into(),
-        0x20..=0x7e => char::from_u32(keysym).unwrap_or('?').to_ascii_uppercase().to_string(),
-        _ => format!("0x{keysym:x}"),
+    // Printable ASCII above space keeps the existing behaviour: its own
+    // character, uppercased. That half already agreed with Hyprland,
+    // which prints `W` rather than the registry's `w`, and a working
+    // case is not worth moving. `0x20` is deliberately NOT in this
+    // range any more — it is `space`, and it has a name.
+    if (0x21..=0x7e).contains(&keysym) {
+        return char::from_u32(keysym).unwrap_or('?').to_ascii_uppercase().to_string();
+    }
+    // `keysym_get_name` has its own zero-padded hex fallback for a
+    // keysym it does not know (`0x0ffffffe`), so this rarely fires —
+    // but its documented failure answer is an empty string, and a
+    // blank `key` field reads as "no key", which is exactly the
+    // failure `space` used to have. The hex is ugly on purpose: an
+    // unmappable value should stay visibly unmappable.
+    let name = xkb::keysym_get_name(Keysym::new(keysym));
+    if name.is_empty() {
+        format!("0x{keysym:x}")
+    } else {
+        name
     }
 }
 
@@ -493,4 +532,115 @@ fn window_of(wm: &WindowManager<WaylandBackend>, id: u64) -> Option<<WaylandBack
     wm.iter_clients()
         .find(|(candidate, _): &(wm_core::ClientId, _)| candidate.as_u64() == id)
         .map(|(_, client)| client.window)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::keysym_name;
+
+    /// Key names the config format documents whose keysym is above
+    /// printable ASCII — precisely the set the old `format!("0x{:x}")`
+    /// catch-all swallowed, plus `space`, which the printable-ASCII arm
+    /// rendered as a literal space. Listed rather than derived so that
+    /// a key added to `wm-config` without a thought for the cheat sheet
+    /// is caught here rather than shipped as hex.
+    const NAMED_KEYS: &[&str] = &[
+        // Navigation and editing: the old table had seven of these and
+        // the catch-all took the rest.
+        "space", "return", "tab", "escape", "left", "up", "right", "down", "home", "end",
+        "pageup", "pagedown", "backspace", "delete", "insert", "print",
+        // The function keys.
+        "f1", "f9", "f12", "f23",
+        // The XF86 block, which the catch-all took whole.
+        "volumeup", "volumedown", "volumemute", "micmute", "playpause", "audiopause",
+        "audiostop", "audionext", "audioprev", "brightnessup", "brightnessdown",
+        "kbdbrightnessup", "kbdbrightnessdown", "kbdlightonoff", "poweroff", "search",
+        "touchpadtoggle", "touchpadon", "touchpadoff", "calculator", "eject",
+    ];
+
+    #[test]
+    fn no_named_key_is_reported_as_a_hex_number() {
+        // The defect: everything above 0x7e came out as hexadecimal,
+        // which is about a quarter of Omarchy's shipped keymap — every
+        // XF86 chord, both F9 chords and SUPER+SHIFT+BACKSPACE.
+        for spec in NAMED_KEYS {
+            let combo = wm_config::parse_key(spec).unwrap_or_else(|| panic!("{spec} must parse"));
+            let name = keysym_name(combo.keysym);
+            assert!(
+                !name.starts_with("0x"),
+                "{spec} (keysym {:#x}) is reported to hyprctl as {name:?}",
+                combo.keysym
+            );
+            assert!(!name.trim().is_empty(), "{spec} is reported as blank");
+        }
+    }
+
+    #[test]
+    fn space_is_named_rather_than_printed_as_a_space() {
+        // `space` is keysym 0x20, inside the old printable-ASCII arm,
+        // so it was rendered as a literal space character. `SUPER +
+        // SPACE` opens Omarchy's menu and is the most-pressed chord on
+        // the desktop; the cheat sheet listed it as blank.
+        let space = wm_config::parse_key("space").expect("space parses");
+        assert_eq!(space.keysym, 0x20);
+        assert_eq!(keysym_name(space.keysym), "space");
+    }
+
+    #[test]
+    fn every_named_key_is_reported_as_a_name_the_config_reader_can_read_back() {
+        // What makes these names right rather than merely non-hex:
+        // libxkbcommon's registry spelling is the one Hyprland's config
+        // syntax uses, so a chord this compositor prints into a cheat
+        // sheet can be pasted back into a Hyprland config and bind the
+        // same key. That closes the loop, and it is the property that
+        // would break first if the lookup were swapped for a hand table
+        // again.
+        for spec in NAMED_KEYS {
+            let combo = wm_config::parse_key(spec).expect("documented key parses");
+            let reported = keysym_name(combo.keysym);
+            let round_trip = wm_config::hyprland::keys::spec_for(&format!("SUPER, {reported}"))
+                .unwrap_or_else(|trouble| {
+                    panic!("hyprctl reports {spec} as {reported:?}, which reads back as {trouble:?}")
+                });
+            let parsed = wm_config::parse_key(&round_trip)
+                .unwrap_or_else(|| panic!("{round_trip:?} must parse"));
+            assert_eq!(
+                parsed.keysym, combo.keysym,
+                "{spec} is reported as {reported:?}, which reads back as a different key"
+            );
+        }
+    }
+
+    #[test]
+    fn printable_ascii_keeps_hyprlands_own_spelling() {
+        // The half that already worked and is deliberately left alone:
+        // Hyprland's `binds` prints `W`, not the registry's `w`.
+        //
+        // The punctuation here is the documented exception to the round
+        // trip above. `keysym_for` insists on the word `minus` in a
+        // spec — a literal `-` beside the `+` separator reads like a
+        // typo — so `-` does not read back, and that is the right
+        // trade: a cheat sheet row saying `SUPER + -` tells a user
+        // which key to press, and `SUPER + minus` makes them think.
+        for (spec, reported) in
+            [("w", "W"), ("7", "7"), ("slash", "/"), ("minus", "-"), ("period", ".")]
+        {
+            let combo = wm_config::parse_key(spec).expect("parses");
+            assert_eq!(keysym_name(combo.keysym), reported, "{spec}");
+        }
+    }
+
+    #[test]
+    fn a_keysym_with_no_name_stays_visibly_unmappable() {
+        // libxkbcommon answers an unknown keysym with its own
+        // zero-padded hex rather than the empty string its docs allow,
+        // so this is what actually reaches the field. Either way the
+        // requirement is the same and is what is asserted: never blank,
+        // and obviously not a key name.
+        for unknown in [0x0fff_fffe_u32, 0xdead_beef, 0xffff_ffff] {
+            let name = keysym_name(unknown);
+            assert!(name.starts_with("0x"), "{unknown:#x} -> {name:?}");
+            assert!(!name.trim().is_empty(), "{unknown:#x} -> blank");
+        }
+    }
 }
