@@ -159,20 +159,38 @@ fn build_snapshot(
     let mut workspace_fullscreen = vec![false; workspace_count];
     let mut windows = Vec::new();
     let focused = wm.focused_client();
-    // This preserves the existing protocol order exactly: the focused
-    // client is zero and every other client follows in the window
-    // manager's stable iteration order. Computing each position while
-    // walking that order keeps snapshot construction linear; looking
-    // every id up in a separately allocated vector made it quadratic.
-    let mut next_unfocused_history_id = i32::from(focused.is_some());
+    // The real focus history: `wm.focus_history()` is oldest-first, so
+    // reversing it numbers the focused client 0, the one before it 1,
+    // and so on — which is what the field is documented to mean
+    // ("Position in the focus history, 0 = focused").
+    //
+    // This used to be the window manager's iteration order, which for a
+    // `SlotMap` is creation order, so every client but the focused one
+    // carried a plausible-looking fabricated number and a consumer
+    // asking "what was the previously focused window" got an arbitrary
+    // answer. Built once into a map rather than searched per client:
+    // that keeps snapshot construction linear, which is what the
+    // previous comment here was protecting.
+    let history: std::collections::HashMap<wm_core::ClientId, i32> = wm
+        .focus_history()
+        .iter()
+        .rev()
+        .enumerate()
+        .map(|(position, &id)| (id, i32::try_from(position).unwrap_or(i32::MAX)))
+        .collect();
+    // Clients that have never held focus have no position in it, and
+    // are numbered after everything that has.
+    let mut next_unfocused_history_id =
+        i32::try_from(history.len()).unwrap_or(i32::MAX);
     for (id, client) in wm.iter_clients() {
         let id: wm_core::ClientId = id;
-        let focus_history_id = if Some(id) == focused {
-            0
-        } else {
-            let current = next_unfocused_history_id;
-            next_unfocused_history_id = next_unfocused_history_id.saturating_add(1);
-            current
+        let focus_history_id = match history.get(&id) {
+            Some(&position) => position,
+            None => {
+                let current = next_unfocused_history_id;
+                next_unfocused_history_id = next_unfocused_history_id.saturating_add(1);
+                current
+            }
         };
         if client.lifecycle == Lifecycle::Withdrawn {
             continue;

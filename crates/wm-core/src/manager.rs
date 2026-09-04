@@ -159,6 +159,25 @@ pub struct WindowManager<B: Backend> {
     /// keep it empty for the entire session.
     idle_inhibit_clients: HashSet<ClientId>,
     focused: Option<ClientId>,
+    /// Every client that has ever held focus and still exists, oldest
+    /// first, each appearing exactly once.
+    ///
+    /// Focus is not only something a window *takes* — it is something
+    /// three ordinary gestures make a window *give up*: closing it,
+    /// miniaturizing it, and walking to another workspace. With only
+    /// `focused` to work from, each of those could do nothing but set
+    /// the field to `None`, which on a click-to-focus desktop reads to
+    /// the user as "I closed a window and my keyboard stopped
+    /// working". Picking a successor is not focus stealing: a window
+    /// that is closing, hidden or left behind is not competing with
+    /// anything, and the alternative to choosing is choosing nothing.
+    ///
+    /// Two writers only — [`Self::focus_client`] pushes (after
+    /// removing any earlier entry) and [`Self::forget`] removes — so
+    /// the two invariants hold by construction and are asserted in the
+    /// tests: no id here is absent from `clients`, and none appears
+    /// twice. The same discipline `managed_order` follows.
+    focus_history: Vec<ClientId>,
     active_move: Option<ActiveMove>,
     /// The pointer grab held for the duration of an interactive drag.
     ///
@@ -344,6 +363,7 @@ impl<B: Backend> WindowManager<B> {
             workspace_count: 1,
             cycle: None,
             managed_order: Vec::new(),
+            focus_history: Vec::new(),
             fullscreen_restore: HashMap::new(),
         }
     }
@@ -818,16 +838,118 @@ impl<B: Backend> WindowManager<B> {
         true
     }
 
+    /// Whether `id` can be given the keyboard right now: a live
+    /// client, on the workspace being looked at (or sticky, so on all
+    /// of them), that no window rule has excused from focus.
+    ///
+    /// One predicate rather than the four hand-copied filters this
+    /// replaced. They had already drifted — the modal switcher's
+    /// omitted `NO_FOCUS`, so Alt-Tab could land on a window a rule
+    /// said must never be focused, and `focus_client` would then
+    /// silently refuse it and leave the switcher pointing at a window
+    /// that never got focus.
+    fn is_focusable(&self, id: ClientId) -> bool {
+        self.clients.get(id).is_some_and(|client| {
+            client.lifecycle == Lifecycle::Normal
+                && (client.workspace == self.current_workspace
+                    || client.flags.contains(ClientFlags::STICKY))
+                && !client.flags.contains(ClientFlags::NO_FOCUS)
+        })
+    }
+
+    /// Every focusable client, most-recently-focused first, with any
+    /// that has never held focus appended in creation order.
+    ///
+    /// This is the order a user means by "the last window I was in".
+    /// Cycling used to read `self.clients.iter()` directly, which for a
+    /// `SlotMap` is ascending slot order — creation order, with slots
+    /// reused as windows die — so Alt-Tab was a fixed ring around the
+    /// order windows happened to open in, and pressing it twice
+    /// advanced two windows along that ring instead of returning you
+    /// to where you started.
+    ///
+    /// Never-focused windows go last rather than being dropped: a
+    /// window that has only just mapped is still somewhere the user can
+    /// mean to go, and leaving it unreachable would be a worse bug than
+    /// the one this fixes.
+    fn focus_order(&self) -> Vec<ClientId> {
+        let mut order: Vec<ClientId> =
+            self.focus_history.iter().rev().copied().filter(|&id| self.is_focusable(id)).collect();
+        let never_focused: Vec<ClientId> = self
+            .clients
+            .iter()
+            .map(|(id, _)| id)
+            .filter(|&id| self.is_focusable(id) && !order.contains(&id))
+            .collect();
+        order.extend(never_focused);
+        order
+    }
+
+    /// The client that should receive focus when the focused one stops
+    /// being able to hold it — most-recently-focused first, skipping
+    /// `excluding` (the window on its way out, which may still be in
+    /// `clients` when this is asked).
+    ///
+    /// Falls through to any other focusable client when the history is
+    /// exhausted, so a desk whose windows have never been focused —
+    /// every one mapped while the user was elsewhere — still hands the
+    /// keyboard to something rather than to nothing.
+    fn focus_successor(&self, excluding: Option<ClientId>) -> Option<ClientId> {
+        self.focus_order().into_iter().find(|&id| Some(id) != excluding)
+    }
+
+    /// Hands focus to [`Self::focus_successor`], or clears it when the
+    /// desk has nothing eligible left. The shared tail of the three
+    /// gestures that take focus away from a window without another one
+    /// asking for it: closing, miniaturizing, and switching workspace.
+    ///
+    /// `losing` is the client giving focus up. It is excluded from the
+    /// search rather than assumed already gone, because two of the
+    /// three callers still have it in `clients` — miniaturized, or
+    /// parked on another workspace — where [`Self::is_focusable`]
+    /// would reject it anyway; saying so explicitly is what makes that
+    /// a guarantee rather than a coincidence.
+    fn focus_successor_of(&mut self, losing: ClientId) {
+        if self.focused != Some(losing) {
+            return;
+        }
+        match self.focus_successor(Some(losing)) {
+            Some(next) => {
+                // `focus_client` clears the previous client's FOCUSED
+                // flag, publishes the new active window and repaints
+                // both, so nothing else is owed here.
+                self.focus_client(next);
+            }
+            None => {
+                self.focused = None;
+                if let Some(client) = self.clients.get_mut(losing) {
+                    client.flags.remove(ClientFlags::FOCUSED);
+                }
+                self.backend.publish_active_window(None);
+            }
+        }
+    }
+
+    /// Every client that has held focus and still exists, oldest
+    /// first — so the last entry is the focused one and the one before
+    /// it is where "the previous window" points.
+    ///
+    /// Exposed for the Hyprland compatibility wire's
+    /// `focus_history_id`, which is documented as "Position in the
+    /// focus history, 0 = focused" and used to be filled in from the
+    /// window manager's iteration order, i.e. creation order: a
+    /// plausible shape carrying a fabricated value, so a consumer
+    /// asking "what was the previously focused window" got an
+    /// arbitrary answer.
+    pub fn focus_history(&self) -> &[ClientId] {
+        &self.focus_history
+    }
+
     /// Focus the next or previous visible client immediately. IPC has
     /// no held-modifier lifetime, so it must not enter the modal
     /// Alt-Tab state machine.
     pub fn focus_adjacent_client(&mut self, forward: bool) -> bool {
-        let order: Vec<ClientId> = self.clients.iter()
-            .filter(|(_, client)| client.lifecycle == Lifecycle::Normal
-                && (client.workspace == self.current_workspace || client.flags.contains(ClientFlags::STICKY))
-                && !client.flags.contains(ClientFlags::NO_FOCUS))
-            .map(|(id, _)| id)
-            .collect();
+        let order = self.focus_order();
         if order.is_empty() {
             return false;
         }
@@ -926,11 +1048,15 @@ impl<B: Backend> WindowManager<B> {
             .and_then(|id| self.clients.get(id))
             .is_some_and(|c| c.workspace == workspace || c.flags.contains(ClientFlags::STICKY));
         if !still_visible {
-            if let Some(prev) = self.focused.take() {
-                if let Some(c) = self.clients.get_mut(prev) {
-                    c.flags.remove(ClientFlags::FOCUSED);
-                }
-                self.backend.publish_active_window(None);
+            if let Some(prev) = self.focused {
+                // `current_workspace` is already the new one, so
+                // `is_focusable` sees the left-behind window as
+                // ineligible and the successor comes from the
+                // workspace being entered — which is what makes a
+                // workspace come back the way it was left, rather than
+                // with three windows on screen and none of them
+                // holding the keyboard.
+                self.focus_successor_of(prev);
             }
         }
         tracing::info!(workspace, "switched workspace");
@@ -1468,10 +1594,11 @@ impl<B: Backend> WindowManager<B> {
             return false;
         };
 
-        if self.focused == Some(id) {
-            self.focused = None;
-            self.backend.publish_active_window(None);
-        }
+        // Out of the history before anything can pick a successor from
+        // it, and before `clients` loses the entry below — the two
+        // invariants this vector has are that every id in it is live
+        // and that none repeats, and this is the removal half.
+        self.focus_history.retain(|&other| other != id);
         if self.active_move.as_ref().is_some_and(|m| m.client == id)
             || self.active_resize.as_ref().is_some_and(|r| r.client == id)
         {
@@ -1490,6 +1617,17 @@ impl<B: Backend> WindowManager<B> {
         }
         self.managed_order.retain(|&other| other != window);
         self.backend.publish_client_list(&self.managed_order);
+        // After `clients.remove`, so the dying window can never be
+        // chosen as its own successor. Closing the focused terminal
+        // with three windows still on screen used to leave the keyboard
+        // pointed at nothing until the user clicked something.
+        if self.focused == Some(id) {
+            self.focused = None;
+            match self.focus_successor(Some(id)) {
+                Some(next) => self.focus_client(next),
+                None => self.backend.publish_active_window(None),
+            }
+        }
         // Keep an active switcher session honest when one of its
         // candidates disappears mid-cycle: prune it from the snapshot
         // (clamping the selection) and let the shell redraw — or end
@@ -2431,10 +2569,10 @@ impl<B: Backend> WindowManager<B> {
         client.lifecycle = Lifecycle::Miniaturized;
         self.bump_protocol_state_revision();
         self.hide_client_surface(id);
-        if self.focused == Some(id) {
-            self.focused = None;
-            self.backend.publish_active_window(None);
-        }
+        // `lifecycle` is already `Miniaturized`, so `is_focusable`
+        // rejects this client and the successor search cannot pick it
+        // back up; `Some(id)` says so rather than relying on it.
+        self.focus_successor_of(id);
         self.notifications.push_back(Notification::Miniaturized(id, preview));
         self.publish_client_net_state(id);
         tracing::info!(?id, "miniaturized");
@@ -2669,19 +2807,24 @@ impl<B: Backend> WindowManager<B> {
     /// window, and nothing visibly happened.
     fn cycle_step(&mut self, direction: i32) {
         if self.cycle.is_none() {
-            let order: Vec<ClientId> = self
-                .clients
-                .iter()
-                .filter(|(_, c)| {
-                    c.lifecycle == Lifecycle::Normal
-                        && (c.workspace == self.current_workspace || c.flags.contains(ClientFlags::STICKY))
-                })
-                .map(|(id, _)| id)
-                .collect();
+            // Most-recently-focused first, so index 0 is the window the
+            // user is in and index 1 is the one they were in before it.
+            // This used to be `self.clients.iter()`, which for a
+            // `SlotMap` is creation order: Alt-Tab was a fixed ring
+            // around the order windows happened to open in, and
+            // pressing it twice advanced two windows along that ring
+            // rather than returning you to where you started.
+            let order = self.focus_order();
             if order.is_empty() {
                 return;
             }
-            let selected = self.focused.and_then(|focused| order.iter().position(|&id| id == focused)).unwrap_or(0);
+            // Start one step in rather than on the focused window. A
+            // single Tab is the flip-to-the-last-window gesture, which
+            // is what the key is mostly for; without this the first
+            // press selected the window already focused and committed
+            // to a no-op. `direction` is applied below, so opening
+            // backwards still lands on the far end of the ring.
+            let selected = if direction >= 0 { 0 } else { order.len() - 1 };
             self.backend.grab_keyboard();
             self.cycle = Some(CycleSession { order, selected });
         }
@@ -2807,6 +2950,11 @@ impl<B: Backend> WindowManager<B> {
         client.flags.insert(ClientFlags::FOCUSED);
         let window = client.window;
         self.focused = Some(id);
+        // Remove-then-push, so a client appears exactly once and the
+        // back of the vector is always the most recent. One of the two
+        // writers of `focus_history`; `forget` is the other.
+        self.focus_history.retain(|&other| other != id);
+        self.focus_history.push(id);
         self.bump_protocol_state_revision();
         // Ungrab: a focused client's own clicks (placing a text cursor,
         // clicking a button inside it, ...) should reach it directly,
@@ -3994,6 +4142,154 @@ mod tests {
         wm.switch_workspace(3);
 
         assert_eq!(wm.workspace_count(), 4, "switching to index 3 means 4 workspaces (0..=3) now exist");
+    }
+
+    /// Three mapped windows on the current workspace, focused in the
+    /// order returned: `a`, then `b`, then `c` — so `c` holds focus and
+    /// `b` is "the last window I was in".
+    fn three_focused_in_order() -> (WindowManager<FakeBackend>, ClientId, ClientId, ClientId) {
+        let mut backend = FakeBackend::new();
+        let windows: Vec<_> = (0..3).map(|_| backend.create_window()).collect();
+        let mut wm = wm(backend);
+        let mut ids = Vec::new();
+        for window in windows {
+            wm.dispatch(BackendEvent::MapRequest(window));
+            ids.push(wm.client_for_window(window).unwrap());
+        }
+        // Mapping focuses each in turn, so the history is already
+        // a, b, c — but say so explicitly rather than depend on it.
+        for &id in &ids {
+            wm.focus_client(id);
+        }
+        (wm, ids[0], ids[1], ids[2])
+    }
+
+    #[test]
+    fn closing_the_focused_window_hands_the_keyboard_to_the_previous_one() {
+        // The headline symptom: on a click-to-focus desktop this read
+        // as "I closed a window and my keyboard stopped working".
+        let (mut wm, a, b, c) = three_focused_in_order();
+        let window = wm.client(c).unwrap().window;
+
+        wm.dispatch(BackendEvent::Destroyed(window));
+
+        assert_eq!(wm.focused_client(), Some(b), "focus goes to the most recently used survivor");
+        assert!(wm.client(b).unwrap().flags.contains(ClientFlags::FOCUSED));
+        assert!(!wm.focus_history().contains(&c), "a destroyed client leaves the history");
+        assert!(wm.client(a).is_some(), "and the older window is untouched");
+    }
+
+    #[test]
+    fn miniaturizing_the_focused_window_hands_the_keyboard_on() {
+        let (mut wm, _a, b, c) = three_focused_in_order();
+
+        wm.miniaturize(c);
+
+        assert_eq!(wm.focused_client(), Some(b));
+        assert_eq!(wm.client(c).unwrap().lifecycle, Lifecycle::Miniaturized);
+        assert!(
+            !wm.client(c).unwrap().flags.contains(ClientFlags::FOCUSED),
+            "a miniaturized window must not stay marked focused"
+        );
+    }
+
+    #[test]
+    fn switching_to_a_workspace_focuses_something_that_is_actually_on_it() {
+        // The one that most changes the felt behaviour: a workspace you
+        // return to should come back the way you left it, not with its
+        // windows on screen and none of them holding the keyboard.
+        let (mut wm, a, _b, c) = three_focused_in_order();
+        wm.move_client_to_workspace(a, 1);
+        wm.switch_workspace(1);
+
+        assert_eq!(wm.focused_client(), Some(a), "the window on the destination takes focus");
+
+        // And back again, to the window that was focused here.
+        wm.switch_workspace(0);
+        assert_eq!(wm.focused_client(), Some(c), "returning restores the workspace's own last focus");
+    }
+
+    #[test]
+    fn an_empty_destination_workspace_still_clears_focus() {
+        // The successor search must not invent one. This is the
+        // behaviour `switching_away_defocuses_a_client_left_behind`
+        // pins for a single window; asserted here for the flag *and*
+        // the field together.
+        let mut backend = FakeBackend::new();
+        let window = backend.create_window();
+        let mut wm = wm(backend);
+        wm.dispatch(BackendEvent::MapRequest(window));
+        let id = wm.client_for_window(window).unwrap();
+
+        wm.switch_workspace(1);
+
+        assert_eq!(wm.focused_client(), None);
+        assert!(!wm.client(id).unwrap().flags.contains(ClientFlags::FOCUSED));
+    }
+
+    #[test]
+    fn one_alt_tab_flips_to_the_previous_window() {
+        // The single most common use of the key, and the one that did
+        // not exist: cycling walked creation order, so the first press
+        // selected whatever opened first and pressing twice advanced
+        // two along that ring instead of coming back.
+        let (mut wm, _a, b, c) = three_focused_in_order();
+
+        wm.dispatch(alt_tab());
+        wm.dispatch(alt_release());
+        assert_eq!(wm.focused_client(), Some(b), "one Tab lands on the previous window");
+
+        // And again returns to where it started: the flip.
+        wm.dispatch(alt_tab());
+        wm.dispatch(alt_release());
+        assert_eq!(wm.focused_client(), Some(c), "a second flip returns");
+    }
+
+    #[test]
+    fn a_never_focused_window_is_still_reachable_by_cycling() {
+        // Ordering by focus history must not make a window that has
+        // never held focus unreachable — that would be a worse bug than
+        // the one being fixed.
+        let (mut wm, _a, _b, c) = three_focused_in_order();
+        let fresh = wm.backend_mut().create_window();
+        wm.dispatch(BackendEvent::MapRequest(fresh));
+        let fresh_id = wm.client_for_window(fresh).unwrap();
+        // Mapping focused it; put focus back on `c` without touching
+        // the newcomer again, leaving it in the history behind `c`.
+        wm.focus_client(c);
+
+        let order = wm.focus_order();
+        assert!(order.contains(&fresh_id), "every focusable window is reachable: {order:?}");
+        assert_eq!(order.first(), Some(&c), "and the focused one leads");
+    }
+
+    #[test]
+    fn the_focus_history_holds_each_live_client_exactly_once() {
+        // The two invariants the vector has, and the reason it has only
+        // two writers. Refocusing must not duplicate, and a destroyed
+        // client must not linger — a stale id would make the successor
+        // search hand focus to a window that no longer exists.
+        let (mut wm, a, b, c) = three_focused_in_order();
+        for _ in 0..3 {
+            wm.focus_client(a);
+            wm.focus_client(b);
+        }
+        let history = wm.focus_history().to_vec();
+        let mut unique = history.clone();
+        unique.sort_by_key(|id| format!("{id:?}"));
+        unique.dedup();
+        assert_eq!(unique.len(), history.len(), "a client appears at most once: {history:?}");
+        for &id in &history {
+            assert!(wm.client(id).is_some(), "the history names a client that no longer exists");
+        }
+        assert_eq!(history.last(), Some(&b), "the back of the vector is the focused client");
+
+        let window = wm.client(c).unwrap().window;
+        wm.dispatch(BackendEvent::Destroyed(window));
+        assert!(!wm.focus_history().contains(&c));
+        for &id in wm.focus_history() {
+            assert!(wm.client(id).is_some());
+        }
     }
 
     #[test]
