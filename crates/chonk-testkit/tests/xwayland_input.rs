@@ -36,25 +36,34 @@ fn assert_x11_rect(
     xid: u32,
     drawn: &WindowInfo,
 ) {
-    let geometry = conn.get_geometry(xid).unwrap().reply().unwrap();
-    let translated = conn
-        .translate_coordinates(xid, root, 0, 0)
-        .unwrap()
-        .reply()
-        .unwrap();
+    let expected = (
+        drawn.x as i16,
+        drawn.y as i16,
+        drawn.w as u16,
+        drawn.h as u16,
+    );
+    let observed = poll_until(
+        EVENT,
+        "XWayland to apply the compositor's content rectangle",
+        || {
+            let geometry = conn.get_geometry(xid).ok()?.reply().ok()?;
+            let translated = conn
+                .translate_coordinates(xid, root, 0, 0)
+                .ok()?
+                .reply()
+                .ok()?;
+            let observed = (
+                translated.dst_x,
+                translated.dst_y,
+                geometry.width,
+                geometry.height,
+            );
+            (observed == expected).then_some(observed)
+        },
+    )
+    .unwrap_or_else(|timeout| panic!("{timeout}; expected {expected:?}"));
     assert_eq!(
-        (
-            translated.dst_x,
-            translated.dst_y,
-            geometry.width,
-            geometry.height
-        ),
-        (
-            drawn.x as i16,
-            drawn.y as i16,
-            drawn.w as u16,
-            drawn.h as u16
-        ),
+        observed, expected,
         "the X server and compositor must describe one content rectangle"
     );
 }
