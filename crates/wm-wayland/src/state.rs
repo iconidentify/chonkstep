@@ -2182,12 +2182,12 @@ impl Compositor {
             if self.dock_sources.iter().any(|(known, _)| *known == fd) {
                 continue;
             }
+            let is_hyprland_ipc = self.hyprland_ipc.as_ref().is_some_and(|server| server.owns_poll_fd(fd));
             // SAFETY: `fd` is owned by a `Seqpacket` or
             // `SeqpacketListener` inside the shell, and the source is
             // removed above on the same pass that drops the owner and
             // before calloop next polls — see the ordering argument in
             // this method's docs.
-            let is_hyprland_ipc = self.hyprland_ipc.as_ref().is_some_and(|server| server.owns_poll_fd(fd));
             let borrowed = unsafe { BorrowedFd::borrow_raw(fd) };
             let source = Generic::new(borrowed, Interest::READ, TriggerMode::Level);
             match self.loop_handle.insert_source(source, move |_, _, comp| {
