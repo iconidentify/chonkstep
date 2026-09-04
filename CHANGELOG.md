@@ -7,6 +7,13 @@ crate and both session binaries carry the same number.
 
 ### Fixed
 
+- **linux-dmabuf no longer advertises a display-only KMS primary as its
+  render device on split hardware.** DRM sessions now prefer EGL's actual
+  renderer node, use a KMS fallback only when it resolves to a real render
+  node, and otherwise disable dmabuf feedback and direct client-buffer
+  scanout. This prevents xdg-desktop-portal-wlr from crashing on Asahi's
+  separate `apple-drm` / `asahi` devices while retaining the safe fast path
+  ([#28](https://github.com/iconidentify/chonkstep/issues/28)).
 - **A stock Omarchy configuration no longer silently changes the
   desktop to focus-follows-mouse.** The live Hyprland bridge now imports
   hardware-facing keyboard and repeat settings but deliberately leaves

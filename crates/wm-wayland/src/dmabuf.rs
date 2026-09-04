@@ -75,10 +75,12 @@
 //! main tranche. Multi-GPU remains out of scope with multi-GPU support
 //! generally.
 //!
-//! The DRM session does not depend on EGL's optional device-query extension
-//! to find that node: it derives the render node paired with the KMS fd it
-//! already owns. This matters on virtio/TCG and other stacks that can import
-//! dmabufs but do not implement `EGL_EXT_device_drm`.
+//! A DRM session asks EGL first, because the renderer can live on a
+//! different device from the display-only KMS controller (`kmsro` on
+//! split hardware). If EGL's optional device-query extension is absent,
+//! it may fall back to a render node paired with the KMS fd—but never to
+//! the primary node itself. That retains virtio/TCG support where a real
+//! paired render node exists without lying on split devices.
 //!
 //! When neither the session nor EGL can identify a render node, or when the
 //! feedback's sealed format-table memfd cannot be created, the compositor
@@ -92,7 +94,7 @@
 use smithay::backend::allocator::dmabuf::Dmabuf;
 use smithay::backend::allocator::format::FormatSet;
 use smithay::backend::allocator::Buffer;
-use smithay::backend::drm::DrmNode;
+use smithay::backend::drm::{DrmNode, NodeType};
 use smithay::backend::egl::EGLDevice;
 use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::backend::renderer::ImportDma;
@@ -203,32 +205,20 @@ pub(crate) fn init(
 /// Builds default feedback, or `None` to decline the global.
 ///
 /// Feedback is keyed by the render node's `dev_t`. A DRM login session
-/// supplies the node derived from its authoritative KMS fd; nested sessions
-/// query the EGL device. Missing EGL device-query support in a nested stack,
-/// or a `build()` that cannot create the sealed memfd carrying the format
-/// table, is degraded but not fatal.
+/// supplies the renderer node resolved during graphics initialization;
+/// nested sessions query EGL here. Missing device-query support, a KMS
+/// device with no safe paired render-node fallback, or a `build()` that
+/// cannot create the sealed memfd carrying the format table is degraded
+/// but not fatal.
 fn default_feedback(
     renderer: &GlesRenderer,
     formats: &FormatSet,
     session_render_node: Option<DrmNode>,
     scanout_formats: &FormatSet,
 ) -> Option<DmabufFeedback> {
-    let node = match session_render_node {
-        Some(node) => node,
-        None => match EGLDevice::device_for_display(renderer.egl_context().display())
-            .and_then(|device| device.try_get_render_node())
-        {
-            Ok(Some(node)) => node,
-            Ok(None) => {
-                tracing::warn!("EGL reports no DRM render node; linux-dmabuf feedback is unavailable");
-                return None;
-            }
-            Err(error) => {
-                tracing::warn!(?error, "could not query the EGL device; linux-dmabuf feedback is unavailable");
-                return None;
-            }
-        },
-    };
+    let node = session_render_node
+        .and_then(actual_render_node)
+        .or_else(|| render_node_for_renderer(renderer))?;
 
     let mut builder = DmabufFeedbackBuilder::new(node.dev_id(), formats.clone());
     if !scanout_formats.indexset().is_empty() {
@@ -245,6 +235,49 @@ fn default_feedback(
             None
         }
     }
+}
+
+/// Returns the renderer's actual DRM render node, never a primary node.
+///
+/// Smithay's convenience query intentionally falls back to the DRM
+/// primary returned by `EGL_EXT_device_drm` when that device has no
+/// render node. That is useful to callers which merely need *a* DRM
+/// identity, but linux-dmabuf feedback specifically promises a device
+/// clients can open for rendering. Filter the fallback here so the wire
+/// never carries a display-only `dev_t`.
+pub(crate) fn render_node_for_renderer(renderer: &GlesRenderer) -> Option<DrmNode> {
+    match EGLDevice::device_for_display(renderer.egl_context().display())
+        .and_then(|device| device.try_get_render_node())
+    {
+        Ok(Some(node)) => match actual_render_node(node) {
+            Some(node) => Some(node),
+            None => {
+                tracing::warn!(
+                    drm_node = %node,
+                    "EGL identified a DRM primary with no render node; refusing it for linux-dmabuf feedback"
+                );
+                None
+            }
+        },
+        Ok(None) => {
+            tracing::debug!("EGL reports no DRM render node");
+            None
+        }
+        Err(error) => {
+            tracing::debug!(?error, "could not query the EGL renderer device");
+            None
+        }
+    }
+}
+
+/// Accepts only a node clients can actually open for rendering.
+/// Kept pure so the split-device regression needs no `/dev/dri` fixture.
+fn actual_render_node(node: DrmNode) -> Option<DrmNode> {
+    is_render_node_type(node.ty()).then_some(node)
+}
+
+fn is_render_node_type(node_type: NodeType) -> bool {
+    node_type == NodeType::Render
 }
 
 /// The session's `GlesRenderer`, whichever graphics stack is running —
@@ -569,6 +602,16 @@ fn arm_blocker_deadline(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Regression for #28: a primary node is a display/control endpoint,
+    /// never a valid linux-dmabuf `main_device`. Test the type gate
+    /// directly so this remains hermetic—no `/dev/dri` fixture needed.
+    #[test]
+    fn feedback_accepts_only_an_actual_render_node() {
+        assert!(!is_render_node_type(NodeType::Primary));
+        assert!(!is_render_node_type(NodeType::Control));
+        assert!(is_render_node_type(NodeType::Render));
+    }
 
     /// A stand-in fence: answers whatever the test last set.
     struct FakeBlocker(std::sync::Mutex<BlockerState>);

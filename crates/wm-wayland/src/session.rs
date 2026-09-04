@@ -474,6 +474,12 @@ pub(crate) struct SessionGraphics {
     /// backend-blind code uses so both arms of [`Graphics`] read the
     /// same.
     pub(crate) renderer: GlesRenderer,
+    /// The exact render node backing `renderer`, if it could be proved.
+    /// This is deliberately not the KMS primary node: split display /
+    /// render hardware has no render node on the display device, and
+    /// publishing that primary node as a render device crashes clients
+    /// such as xdg-desktop-portal-wlr. See [`render_node_for_fd`].
+    render_node: Option<DrmNode>,
     /// One per connected connector, in the order [`init`] enumerated
     /// them. That order is load-bearing: it is the order
     /// `Compositor::outputs` holds the matching `Output`s in, which is
@@ -646,13 +652,10 @@ impl SessionGraphics {
         self.drm.device_fd().clone()
     }
 
-    /// The render node paired with the KMS device this session already
-    /// opened. EGL's optional device-query extension is not universal (the
-    /// virtio/TCG stack is a real example), but linux-dmabuf feedback still
-    /// needs a stable `dev_t`. The DRM fd is authoritative and lets us find
-    /// that node without guessing which `/dev/dri/renderD*` belongs to it.
+    /// The actual render node backing this session's EGL renderer.
+    /// Resolved once during initialization and absent rather than guessed.
     pub(crate) fn render_node(&self) -> Option<DrmNode> {
-        render_node_for_fd(self.drm.device_fd())
+        self.render_node
     }
 
     /// Formats a client can allocate for the conservative primary-plane
@@ -691,14 +694,16 @@ fn common_scanout_formats<'a>(
     common.into_iter().collect()
 }
 
-/// Resolves the render node paired with a KMS fd, falling back to the
-/// primary node when the driver exposes no separate render node. The
-/// same identity filters direct-scanout imports and keys linux-dmabuf
-/// feedback, so keeping it in one helper prevents those claims from
-/// disagreeing.
+/// Resolves a render node paired with a KMS fd.
+///
+/// There is intentionally no primary-node fallback. A DRM primary is
+/// not a render node, and on split display/render hardware the GPU that
+/// actually rendered the buffers can be another DRM device entirely.
+/// `None` disables direct client-buffer scanout and, if EGL cannot name
+/// its own device either, linux-dmabuf feedback; that is slower but true.
 fn render_node_for_fd(fd: &DrmDeviceFd) -> Option<DrmNode> {
     let primary = DrmNode::from_file(fd).ok()?;
-    primary.node_with_type(NodeType::Render).and_then(Result::ok).or(Some(primary))
+    primary.node_with_type(NodeType::Render).and_then(Result::ok)
 }
 
 /// What [`init`] hands back to `run`: the graphics stack plus every
@@ -763,6 +768,20 @@ pub(crate) fn init(
     // the conditions its `new` documents.
     let renderer = unsafe { GlesRenderer::new(egl_context) }
         .map_err(|error| format!("GLES renderer init failed on {}: {error}", device_path.display()))?;
+    // EGL knows the renderer, which may be a different DRM device from
+    // the KMS display controller (kmsro on split hardware). Prefer that
+    // exact identity. If the optional EGL query extension is absent,
+    // pairing the KMS node is safe only when a real render node exists;
+    // `render_node_for_fd` deliberately declines a primary-node guess.
+    let render_node = crate::dmabuf::render_node_for_renderer(&renderer)
+        .or_else(|| render_node_for_fd(drm.device_fd()));
+    match render_node {
+        Some(node) => tracing::info!(render_node = %node, "session backend: renderer device identified"),
+        None => tracing::warn!(
+            kms_device = %device_path.display(),
+            "session backend: renderer has no identifiable render node; linux-dmabuf and direct client-buffer scanout will be disabled"
+        ),
+    }
     // Which dmabuf formats the renderer can draw into; intersected
     // against the primary plane's formats by `DrmCompositor::new` to
     // choose the swapchain format. Collected eagerly so the borrow of
@@ -783,7 +802,7 @@ pub(crate) fn init(
     for target in connectors {
         let name = connector_name(&target.info);
         let position = Point::new(next_x, 0);
-        match attach_output(&mut drm, &gbm, &render_formats, &target, position) {
+        match attach_output(&mut drm, &gbm, render_node, &render_formats, &target, position) {
             Ok((session_output, setup)) => {
                 tracing::info!(
                     output = %name,
@@ -1037,6 +1056,7 @@ pub(crate) fn init(
             seat_session,
             drm,
             renderer,
+            render_node,
             outputs: session_outputs,
             libinput,
             last_service: Instant::now(),
@@ -1058,6 +1078,7 @@ pub(crate) fn init(
 fn attach_output(
     drm: &mut DrmDevice,
     gbm: &GbmDevice<DrmDeviceFd>,
+    render_node: Option<DrmNode>,
     render_formats: &[Format],
     target: &ConnectorTarget,
     position: Point,
@@ -1118,11 +1139,11 @@ fn attach_output(
         // other.
         GbmBufferFlags::RENDERING | GbmBufferFlags::SCANOUT,
     );
-    // Filter client buffers against this exact GPU before even trying
-    // direct scanout. Passing no import node disables that path in
-    // Smithay; deriving it from the already-open KMS fd avoids both an
-    // EGL-extension dependency and a multi-device guess.
-    let framebuffer_exporter = GbmFramebufferExporter::new(gbm.clone(), render_node_for_fd(drm.device_fd()));
+    // Filter client buffers against the renderer's exact GPU before
+    // even trying direct scanout. Passing no import node disables that
+    // path in Smithay. On a split display/render system this is the
+    // renderer's node, not the display-only KMS primary.
+    let framebuffer_exporter = GbmFramebufferExporter::new(gbm.clone(), render_node);
     // A *static* mode source, deliberately not the `Output`: the
     // output advertises the session's UI scale to clients
     // (`state.rs`'s `advertise_scale`), and an auto-tracking source

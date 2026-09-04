@@ -42,13 +42,22 @@ is the separate path GPU clients use to submit their own buffers.
 xdg-desktop-portal-wlr 0.8.2 nevertheless requires both globals and
 installs linux-dmabuf feedback listeners before capture starts.
 
-For a hardware login, ChonkStep derives the matching render node from
-the KMS fd the session already owns. It therefore publishes modern
-default feedback even when EGL lacks the optional device-query
-extension. The clean virtio/TCG test is this exact case: `wayland-info`
+For a hardware login, ChonkStep asks EGL for the node of the GPU that
+actually renders. That distinction matters on split hardware such as
+Apple Silicon: `apple-drm` owns the KMS connector while `asahi` owns
+`/dev/dri/renderD128`. Advertising the display-only primary node as
+`main_device` makes xdg-desktop-portal-wlr 0.8.2 dereference a missing
+render device and crash. ChonkStep now accepts only a node whose DRM
+type is `Render`, uses it for both feedback and direct-scanout filtering,
+and declines both paths when the identity cannot be proven.
+
+When EGL lacks its optional device-query extension, a hardware session
+may use the render node paired with its KMS fd—but only if that real node
+exists. This preserves the clean virtio/TCG path: `wayland-info`
 reported linux-dmabuf version 5, `/dev/dri/renderD128` as the main
 device, and the renderer's 114 real format/modifier pairs; the wlr
-portal then stayed active and delivered frames.
+portal then stayed active and delivered frames. There is deliberately
+no fallback to a primary node.
 
 A nested backend has no KMS fd, so it asks EGL for its render node.
 Reproduction with a minimal registry walk proved that ChonkStep's
@@ -136,6 +145,7 @@ Backend matrix:
 | Chonkstep graphics path | Screencopy | linux-dmabuf | ScreenCast |
 | --- | --- | --- | --- |
 | DRM login (physical or virtual GPU) | v3 | v5 with default feedback | **Supported; clean Omarchy VM verified** |
+| DRM login with separate KMS/render devices | v3 | v5 when EGL identifies the actual render node; otherwise absent | Supported when the driver exposes its renderer identity; otherwise fails cleanly |
 | Nested GPU with EGL render-node discovery | v3 | v5 with default feedback | Supported |
 | Nested EGL with formats but no discoverable node | v3 | absent | Unsupported, but the portal fails cleanly instead of crashing |
 | Renderer without dmabuf import formats | v3 | absent | Unsupported by the current wlr portal backend |
