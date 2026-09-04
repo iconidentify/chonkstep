@@ -877,6 +877,13 @@ fn chromium_resize_at_scale_2_keeps_its_scale() {
     // Local runs retain Chromium's normal sandbox.
     if std::env::var_os("CI").is_some() {
         chromium_args.push("--no-sandbox");
+        // Hosted runners expose neither a DRM render node nor a usable
+        // Vulkan device. Let Chromium use its software compositor
+        // immediately instead of spending repeated 15-second GPU-process
+        // attempts probing hardware that is not there. It still commits a
+        // 2x buffer through wp_viewport, so this keeps the integration path
+        // whose scale handling the regression asserts.
+        chromium_args.push("--disable-gpu");
     }
     session
         .launch("chromium", &chromium_args)

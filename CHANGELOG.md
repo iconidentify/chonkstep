@@ -19,7 +19,10 @@ crate and both session binaries carry the same number.
   avoidable per-pixel slice chunking; every warning now fails CI for every crate.
 - **Headless browser tests get a real private D-Bus session.** Chromium no
   longer burns its startup deadline retrying the hosted runner's invalid bus
-  address, eliminating the intermittent scale-and-resize test failure.
+  address. Hardwareless runners also select Chromium's software compositor
+  immediately instead of intermittently spending the entire deadline on DRM
+  and Vulkan probes; the real viewport-backed scale-and-resize path remains
+  exercised.
 - **Release automation now trusts immutable action revisions.** CI, native
   package attestation, artifact assembly, and the future AUR publisher pin
   every third-party GitHub Action to a full commit instead of a mutable tag.
