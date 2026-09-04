@@ -39,6 +39,14 @@
 //!    mandatory first configure and so can never draw
 //!    (`lock::prime_reused_lock_surface`).
 //!
+//! The second test in this file is about the way out rather than the
+//! teardown: `ext-session-lock-v1` is the session's one security
+//! boundary, and `unlock_and_destroy` has to be answered on the
+//! strength of WHO sent it. Two clients — the locker holding a
+//! confirmed lock, and `chonk-lock-thief` making the three requests a
+//! bypass needs — against the assertion that the screen is still a
+//! wall afterwards. See its own comments for the mechanism.
+//!
 //! Same run rules as `e2e.rs`: needs a live Wayland session to nest
 //! in, so `#[ignore]`d; run with `scripts/e2e.sh` or
 //! `cargo test -p chonk-testkit -- --ignored --test-threads=1`.
@@ -49,7 +57,7 @@ use std::time::Duration;
 /// The probe's captured stdout/stderr — checkpoint lines, and on a
 /// kill, the connection post-mortem it prints before exiting.
 fn probe_log(session: &Session) -> String {
-    std::fs::read_to_string(session.dir.join("client-0-chonk-lock-probe.log")).unwrap_or_default()
+    session.client_log("chonk-lock-probe")
 }
 
 /// Waits for the probe to print `checkpoint`, failing with the whole
@@ -57,10 +65,17 @@ fn probe_log(session: &Session) -> String {
 /// "connection broke" post-mortem, the most useful thing a failure
 /// here can say.
 fn checkpoint(session: &Session, checkpoint: &str) {
-    poll_until(Duration::from_secs(15), &format!("the probe to report {checkpoint:?}"), || {
-        probe_log(session).contains(checkpoint).then_some(())
+    client_checkpoint(session, "chonk-lock-probe", checkpoint);
+}
+
+/// [`checkpoint`] for any of this test file's probes, named by binary.
+fn client_checkpoint(session: &Session, client: &str, checkpoint: &str) {
+    poll_until(Duration::from_secs(15), &format!("{client} to report {checkpoint:?}"), || {
+        session.client_log(client).contains(checkpoint).then_some(())
     })
-    .unwrap_or_else(|timeout| panic!("{timeout}\n-- probe log --\n{}", probe_log(session)));
+    .unwrap_or_else(|timeout| {
+        panic!("{timeout}\n-- {client} log --\n{}", session.client_log(client))
+    });
 }
 
 #[test]
@@ -125,5 +140,117 @@ fn a_lockers_other_surfaces_survive_the_unlock_teardown() {
     let log = probe_log(&session);
     assert!(!log.contains("connection broke"), "the probe reported a broken connection:\n{log}");
     assert!(session.compositor_alive(), "the compositor must outlive all three cycles");
+    session.kill_client("chonk-lock-probe");
+}
+
+/// The lock screen's fill, as `chonk-lock-probe` paints it —
+/// `LOCK_NAVY` in the probe is premultiplied ARGB8888 little-endian
+/// (B, G, R, A), so the RGB a screenshot reads back is its middle
+/// three bytes reversed.
+const LOCK_NAVY_RGB: [u8; 3] = [0x08, 0x18, 0x40];
+
+#[test]
+#[ignore = "needs a live Wayland session to nest in: scripts/e2e.sh, or cargo test -p chonk-testkit -- --ignored --test-threads=1"]
+fn a_client_that_does_not_hold_the_lock_cannot_unlock_the_session() {
+    // The lock-screen bypass, driven over the real wire by two real
+    // clients. `chonk-lock-probe --hold` is the user's locker: it takes
+    // the lock, draws, is confirmed, and then does nothing — the state
+    // a locker sits in while its owner is away from the machine.
+    // `chonk-lock-thief` is any other process on the socket, and makes
+    // the only three requests the bypass needs.
+    //
+    // The regression this pins is not the thief's fate — a compositor
+    // may answer an impostor with a protocol error or with silence, and
+    // either is defensible. It is whether the SESSION is still locked
+    // afterwards, which is why the assertions below are a screenshot of
+    // the desk and the compositor's own log, not the attacker's report.
+    let mut session =
+        Session::boot("session-lock-bypass", SessionOptions { scale: Some(1.0), ..Default::default() })
+            .unwrap();
+    let probe = profile_binary("chonk-lock-probe").expect("cargo build -p chonk-testkit builds the probe");
+    let thief = profile_binary("chonk-lock-thief").expect("cargo build -p chonk-testkit builds the thief");
+
+    // -- the locker takes the session and keeps it ------------------------
+    session.launch(probe.to_str().unwrap(), &["--hold"]).expect("the locker launches");
+    checkpoint(&session, "locked ");
+    checkpoint(&session, "holding the lock");
+
+    // What a locked session looks like from outside: the locker's navy
+    // fills the output, because `renderer::build_scene` returns before
+    // it can reach a single non-lock surface — including for `grim`,
+    // which is the client taking this picture.
+    session.door().barrier().expect("the compositor answers a barrier while locked");
+    let locked = session.screenshot("locked").expect("grim captures the locked session");
+    assert!(
+        chonk_testkit::near(locked.centre_rgb(), LOCK_NAVY_RGB),
+        "the session should be showing the lock screen before the attack, saw {:?} in {}",
+        locked.centre_rgb(),
+        locked.path.display()
+    );
+
+    // -- the attack --------------------------------------------------------
+    session.launch(thief.to_str().unwrap(), &[]).expect("the thief launches");
+    client_checkpoint(&session, "chonk-lock-thief", "bound the lock manager");
+    // The compositor must refuse a second lock while a live locker
+    // holds one — the denial is what leaves the thief a live
+    // `ext_session_lock_v1` to send the bypass on, so a session that
+    // GRANTED the lock here would be broken in a worse way.
+    client_checkpoint(&session, "chonk-lock-thief", "lock refused");
+    assert!(
+        session.log().contains("refusing a session lock"),
+        "the compositor should have logged refusing the second lock"
+    );
+    client_checkpoint(&session, "chonk-lock-thief", "unlock_and_destroy sent");
+    // Whichever way it was answered, the answer has been dispatched by
+    // the time the thief prints this.
+    poll_until(Duration::from_secs(15), "the thief to report how the unlock was answered", || {
+        let log = session.client_log("chonk-lock-thief");
+        (log.contains("refused: ") || log.contains("accepted without error")).then_some(())
+    })
+    .unwrap_or_else(|timeout| {
+        panic!("{timeout}\n-- thief log --\n{}", session.client_log("chonk-lock-thief"))
+    });
+
+    // -- the session is still a wall ---------------------------------------
+    // `unlock()` is the only writer of "session unlocked" and the only
+    // path that clears `backend.locked`, so its absence is a direct
+    // assertion on the flag every render and input gate reads.
+    let log = session.log();
+    assert!(
+        !log.contains("session unlocked"),
+        "a client that does not hold the lock unlocked the session:\n{}",
+        chonk_testkit::strip_ansi(&log)
+    );
+    // And the refusal is on the record as a security event, at `error`,
+    // with the offending process named.
+    assert!(
+        log.contains("refusing unlock_and_destroy"),
+        "the refused unlock should have been logged:\n{}",
+        chonk_testkit::strip_ansi(&log)
+    );
+
+    // The picture is the proof: still the locker's navy, and the same
+    // frame as before the attack rather than the desktop behind it.
+    session.door().barrier().expect("the compositor still answers a barrier");
+    let after = session.screenshot("after-bypass-attempt").expect("grim captures the session again");
+    assert!(
+        chonk_testkit::near(after.centre_rgb(), LOCK_NAVY_RGB),
+        "the session came out of the lock: centre {:?} in {}",
+        after.centre_rgb(),
+        after.path.display()
+    );
+    assert!(
+        locked.diff_fraction(&after, 8) < 0.01,
+        "the screen changed across the bypass attempt: {} in {}",
+        locked.diff_fraction(&after, 8),
+        after.path.display()
+    );
+
+    // The locker itself was never collateral: refusing the impostor
+    // must cost the client that legitimately holds the lock nothing.
+    let held = probe_log(&session);
+    assert!(!held.contains("connection broke"), "the locker's connection was broken:\n{held}");
+    assert!(session.compositor_alive(), "the compositor must outlive the bypass attempt");
+    session.kill_client("chonk-lock-thief");
     session.kill_client("chonk-lock-probe");
 }

@@ -66,6 +66,11 @@
 //!    arrive. **`relocked on a reused surface WxH`**,
 //!    **`survived the third unlock teardown`**
 //!
+//! Run with `--hold` the script stops after step 2 and keeps the lock
+//! (**`holding the lock`**) instead of ever unlocking: that is the
+//! standing lock `chonk-lock-thief` is pointed at, and a bypass can
+//! only be attempted against a lock that is actually in force.
+//!
 //! Then it sits in its dispatch loop like any shell process would. A
 //! broken connection at any step prints `connection broke: ...` (with
 //! the protocol error, if one was posted) and exits 2.
@@ -462,6 +467,11 @@ fn unlock_and_teardown(
 }
 
 fn main() {
+    // `--hold` stops the script after the first lock and keeps it, for
+    // the bypass e2e; without it the full seven-step teardown script
+    // below runs. `Session::launch` passes argv but not environment, so
+    // the switch is a flag.
+    let hold = std::env::args().any(|arg| arg == "--hold");
     let conn = Connection::connect_to_env().unwrap_or_else(|e| fatal(&format!("no compositor: {e}")));
     let mut queue = conn.new_event_queue();
     let qh = queue.handle();
@@ -520,6 +530,22 @@ fn main() {
     let kept_wl_surface = compositor.create_surface(&qh, ());
     let (held, (w, h)) = lock_and_draw(&conn, &mut queue, &mut probe, &qh, &kept_wl_surface);
     println!("locked {w}x{h}");
+
+    // -- `--hold`: stop here, still locked ------------------------------
+    // The holder half of the bypass e2e. Everything below this point
+    // unlocks, and the bypass can only be attempted against a lock that
+    // is actually in force, so that test needs a locker that takes the
+    // lock and then does nothing but stay alive — the state a real
+    // locker sits in for as long as the user is away.
+    if hold {
+        println!("holding the lock");
+        let _ = std::io::stdout().flush();
+        loop {
+            if let Err(error) = queue.blocking_dispatch(&mut probe) {
+                broken(&conn, "the hold loop", &error);
+            }
+        }
+    }
 
     // -- 3: the teardown that killed omarchy-shell ----------------------
     unlock_and_teardown(
