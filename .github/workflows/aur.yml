@@ -17,7 +17,7 @@ jobs:
     runs-on: ubuntu-latest
     container: archlinux:base-devel
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install publishing tools
         run: pacman -Syu --noconfirm --needed git openssh pacman-contrib
