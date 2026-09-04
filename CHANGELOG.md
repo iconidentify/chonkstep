@@ -262,6 +262,12 @@ crate and both session binaries carry the same number.
 
 ### Release hardening
 
+- **Cold software-renderer startup no longer flakes the Wayland CI.**
+  GitHub's llvmpipe runner was observed spending 16 seconds inside EGL
+  initialization before its fallback, exhausting nearly all of the old
+  20-second socket deadline. The boot poll now allows 45 seconds while
+  still returning immediately on success and failing immediately if the
+  compositor exits, so it is more tolerant without weakening assertions.
 - **Connection-close teardown cannot leave ghost Wayland windows.** Some
   clients destroy their `wl_surface` explicitly; others exit and let the
   server tear their object graph down. Smithay may report the generic surface

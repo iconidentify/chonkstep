@@ -70,10 +70,14 @@ use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
 /// How long [`Session::boot`] waits for the compositor to open its
-/// wayland socket and its test door. Generous because the first boot
-/// after a rebuild pays cold caches; the poll returns the instant the
-/// door accepts.
-const BOOT_TIMEOUT: Duration = Duration::from_secs(20);
+/// wayland socket and its test door. GitHub's cold llvmpipe path has
+/// taken 16 seconds in `eglInitialize` alone before falling back from
+/// Zink, leaving the former 20-second bound only a few seconds for the
+/// rest of boot and producing a false red build. This larger bound does
+/// not slow a success (the poll returns immediately) or hide a crashed
+/// compositor (`try_wait` fails fast); it only gives a genuinely slow
+/// software renderer enough time to become observable.
+const BOOT_TIMEOUT: Duration = Duration::from_secs(45);
 
 /// Default deadline for everything after boot: a window appearing, a
 /// barrier acking, grim finishing. Anything slower than this on an
