@@ -329,7 +329,7 @@ first try instead of running into NeXTSTEP `alt+shift` chords.
 It is a set of defaults, never a lock: every value it sets is
 overridden by writing that key out (`show_dock = true` gets the Dock
 back, `keymap = "chonkstep"` keeps the NeXTSTEP chords). What it
-changes, what it deliberately leaves alone, all 114 bindings and the 34
+changes, what it deliberately leaves alone, all 117 bindings and the 33
 groups of Omarchy chord it leaves *unbound* rather than approximate,
 are in [docs/omarchy-mode.md](docs/omarchy-mode.md) and
 [docs/keybindings.md](docs/keybindings.md).

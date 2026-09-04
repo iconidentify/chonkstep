@@ -172,14 +172,18 @@ crate and both session binaries carry the same number.
 - **Omarchy's configuration has real effects.** Monitor position and scale,
   input repeat settings, bind flags, layer-scoped bindings, window rules, Lua
   long strings, and window move/resize/centre/fullscreen dispatchers are
-  applied or refused with a named reason. Bindings inside unsupported submaps
-  can no longer leak into the global keymap.
+  applied or refused with a named reason. `movefocus l/r/u/d` and Omarchy's
+  `SUPER + Arrow` chords now perform native geometry-ranked spatial focus over
+  floating frames, while hidden, miniaturized, and no-focus clients are
+  excluded. Bindings inside unsupported submaps can no longer leak into the
+  global keymap.
 - **Hyprland-compatible IPC reports live state.** Window, monitor, workspace,
   keyboard, binding, reload, and refusal data now come from the running desk;
   `exec --` preserves argv; mapping events and addresses agree with the
-  foreign-toplevel protocol; and unsupported tiling commands no longer claim
-  success. This is enough for Omarchy's current shell, menus, scripts, and bar
-  to operate without a ChonkStep-specific fork.
+  foreign-toplevel protocol; `hyprctl dispatch movefocus l/r/u/d` reaches the
+  same native spatial focus as Omarchy's bindings; and unsupported tiling
+  commands no longer claim success. This is enough for Omarchy's current shell,
+  menus, scripts, and bar to operate without a ChonkStep-specific fork.
 - **The protocols ordinary clients expect.** The Wayland compositor now serves
   activation, cursor-shape, primary-selection, text-input/input-method,
   relative-pointer and pointer-constraints, presentation-time,

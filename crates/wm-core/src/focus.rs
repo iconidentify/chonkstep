@@ -8,3 +8,16 @@ pub enum FocusPolicy {
     ClickToFocus,
     FocusFollowsMouse,
 }
+
+/// A direction in the desktop's root-coordinate space.
+///
+/// Kept in `wm-core` because deciding which floating window is "left"
+/// of another is window-manager policy, not a property of whichever
+/// configuration syntax requested it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FocusDirection {
+    Left,
+    Right,
+    Up,
+    Down,
+}

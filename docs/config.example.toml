@@ -445,7 +445,8 @@
 #
 # Actions (kebab-case, a closed set):
 #   spawn-terminal, close, toggle-maximize, toggle-shade, miniaturize,
-#   toggle-fullscreen, workspace-next, workspace-prev,
+#   toggle-fullscreen, focus-left, focus-right, focus-up, focus-down,
+#   workspace-next, workspace-prev,
 #   workspace-carry-next, workspace-carry-prev, overview, window-menu,
 #   toggle-dock, reload, restart, none
 #
@@ -486,10 +487,10 @@
 #   "super+d" = "toggle-dock"        # for instance
 #
 # Window-targeted actions (close, toggle-maximize, toggle-shade,
-# miniaturize, toggle-fullscreen, window-menu) act on the focused window and do
-# nothing when no window is focused. The Alt+Tab window switcher is
-# part of the window manager's modal machinery and is not rebindable
-# here.
+# miniaturize, toggle-fullscreen, focus-left/right/up/down, window-menu)
+# act on the focused window and do nothing when no window is focused.
+# The Alt+Tab window switcher is part of the window manager's modal
+# machinery and is not rebindable here.
 [keybindings]
 # The full default set, spelled out -- this is the "chonkstep" keymap.
 # Since entries merge over the defaults, restating them changes

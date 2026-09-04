@@ -8,7 +8,7 @@ use wm_theme_api::{
 
 use crate::backend::Backend;
 use crate::client::{Client, ClientFlags, ClientId, Lifecycle, MaximizeDirections, MonitorInfo};
-use crate::focus::FocusPolicy;
+use crate::focus::{FocusDirection, FocusPolicy};
 use crate::hittest::{hit_test, HitTarget};
 use crate::placement::{self, FloatPolicy, PlacementPolicy};
 use crate::resize;
@@ -734,6 +734,35 @@ impl<B: Backend> WindowManager<B> {
             (None, _) => 0,
         };
         self.focus_client(order[next]);
+        true
+    }
+
+    /// Focuses the nearest visible window in `direction` from the
+    /// focused window, using the windows' actual frame geometry.
+    ///
+    /// A floating desktop has no tiling tree, but it does have a stable
+    /// two-dimensional arrangement. Ranking by the gap between frame
+    /// edges makes neighbouring windows win without their differing
+    /// sizes distorting the result; perpendicular displacement breaks
+    /// ties, and center distance makes overlapping stacks deterministic.
+    /// Miniaturized, hidden-workspace and `NO_FOCUS` clients cannot be
+    /// destinations, exactly as for immediate focus cycling.
+    pub fn focus_direction(&mut self, direction: FocusDirection) -> bool {
+        let Some(source) = self.focused.and_then(|id| self.clients.get(id)).map(client_frame_rect) else {
+            return false;
+        };
+        let target = self.clients.iter()
+            .filter(|(_, client)| client.lifecycle == Lifecycle::Normal
+                && (client.workspace == self.current_workspace || client.flags.contains(ClientFlags::STICKY))
+                && !client.flags.contains(ClientFlags::NO_FOCUS))
+            .filter_map(|(id, client)| {
+                let candidate = client_frame_rect(client);
+                directional_score(source, candidate, direction).map(|score| (id, score))
+            })
+            .min_by_key(|(_, score)| *score)
+            .map(|(id, _)| id);
+        let Some(target) = target else { return false };
+        self.focus_client(target);
         true
     }
 
@@ -3228,6 +3257,58 @@ fn squared_distance_to(rect: Rect, point: Point) -> i64 {
     dx * dx + dy * dy
 }
 
+/// The root-coordinate rectangle of a managed client's outer frame.
+/// Frameless clients use a zero-offset layout, so this is also their
+/// content rectangle without a special case.
+fn client_frame_rect<B: Backend>(client: &Client<B>) -> Rect {
+    Rect {
+        pos: Point::new(
+            client.geometry.pos.x - client.layout.client_offset.x,
+            client.geometry.pos.y - client.layout.client_offset.y,
+        ),
+        size: client.layout.frame_size,
+    }
+}
+
+/// A sortable proximity score when `candidate` lies in `direction`
+/// from `source`; `None` when it lies outside that half-plane.
+///
+/// Centers are doubled so odd-sized frames retain half-pixel precision.
+/// The 13:1 major/perpendicular weighting is intentionally biased toward
+/// progress along the requested axis while still letting a nearby
+/// diagonal window beat a distant aligned one. `u128` keeps adversarial
+/// protocol geometry from overflowing while squared.
+fn directional_score(source: Rect, candidate: Rect, direction: FocusDirection) -> Option<(u128, u128)> {
+    let edges = |rect: Rect| {
+        let left = i64::from(rect.pos.x);
+        let top = i64::from(rect.pos.y);
+        (left, top, left + i64::from(rect.size.w), top + i64::from(rect.size.h))
+    };
+    let (sl, st, sr, sb) = edges(source);
+    let (cl, ct, cr, cb) = edges(candidate);
+    let source_center = (sl + sr, st + sb);
+    let candidate_center = (cl + cr, ct + cb);
+    let eligible = match direction {
+        FocusDirection::Left => candidate_center.0 < source_center.0,
+        FocusDirection::Right => candidate_center.0 > source_center.0,
+        FocusDirection::Up => candidate_center.1 < source_center.1,
+        FocusDirection::Down => candidate_center.1 > source_center.1,
+    };
+    if !eligible {
+        return None;
+    }
+    let interval_gap = |a0: i64, a1: i64, b0: i64, b1: i64| (a0 - b1).max(b0 - a1).max(0) as u128;
+    let (major, perpendicular) = match direction {
+        FocusDirection::Left => ((sl - cr).max(0) as u128, interval_gap(st, sb, ct, cb)),
+        FocusDirection::Right => ((cl - sr).max(0) as u128, interval_gap(st, sb, ct, cb)),
+        FocusDirection::Up => ((st - cb).max(0) as u128, interval_gap(sl, sr, cl, cr)),
+        FocusDirection::Down => ((ct - sb).max(0) as u128, interval_gap(sl, sr, cl, cr)),
+    };
+    let dx = source_center.0.abs_diff(candidate_center.0) as u128;
+    let dy = source_center.1.abs_diff(candidate_center.1) as u128;
+    Some((13 * major * major + perpendicular * perpendicular, dx * dx + dy * dy))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3253,6 +3334,83 @@ mod tests {
 
     fn escape() -> BackendEvent<FakeWindowId, FakeFrameId> {
         BackendEvent::KeyPress(KeyCombo { keysym: XK_ESCAPE, modifiers: Modifiers::empty() })
+    }
+
+    #[test]
+    fn directional_focus_follows_the_visible_frame_arrangement() {
+        let mut backend = FakeBackend::new();
+        let left = backend.create_window();
+        let right = backend.create_window();
+        let up = backend.create_window();
+        let down = backend.create_window();
+        let source = backend.create_window();
+        for (window, pos) in [
+            (left, Point::new(100, 400)),
+            (right, Point::new(700, 400)),
+            (up, Point::new(400, 100)),
+            (down, Point::new(400, 700)),
+            (source, Point::new(400, 400)),
+        ] {
+            backend.set_geometry(window, Rect { pos, size: Size::new(100, 100) });
+        }
+        let mut wm = wm(backend);
+        for window in [left, right, up, down, source] {
+            wm.dispatch(BackendEvent::MapRequest(window));
+        }
+        let source_id = wm.client_for_window(source).unwrap();
+        for (direction, expected) in [
+            (FocusDirection::Left, left),
+            (FocusDirection::Right, right),
+            (FocusDirection::Up, up),
+            (FocusDirection::Down, down),
+        ] {
+            wm.focus_client(source_id);
+            assert!(wm.focus_direction(direction));
+            assert_eq!(wm.focused_client(), wm.client_for_window(expected), "{direction:?}");
+        }
+    }
+
+    #[test]
+    fn directional_focus_skips_ineligible_windows() {
+        let mut backend = FakeBackend::new();
+        let eligible = backend.create_window();
+        let hidden = backend.create_window();
+        let miniaturized = backend.create_window();
+        let no_focus = backend.create_window();
+        let source = backend.create_window();
+        for (window, x) in [(eligible, 100), (hidden, 350), (miniaturized, 375), (no_focus, 400), (source, 500)] {
+            backend.set_geometry(window, Rect { pos: Point::new(x, 400), size: Size::new(50, 50) });
+        }
+        let mut wm = wm(backend);
+        for window in [eligible, hidden, miniaturized, no_focus, source] {
+            wm.dispatch(BackendEvent::MapRequest(window));
+        }
+        let hidden_id = wm.client_for_window(hidden).unwrap();
+        let miniaturized_id = wm.client_for_window(miniaturized).unwrap();
+        let no_focus_id = wm.client_for_window(no_focus).unwrap();
+        let source_id = wm.client_for_window(source).unwrap();
+        wm.move_client_to_workspace(hidden_id, 1);
+        wm.miniaturize(miniaturized_id);
+        wm.clients.get_mut(no_focus_id).unwrap().flags.insert(ClientFlags::NO_FOCUS);
+        wm.focus_client(source_id);
+
+        assert!(wm.focus_direction(FocusDirection::Left));
+        assert_eq!(wm.focused_client(), wm.client_for_window(eligible));
+        assert!(!wm.focus_direction(FocusDirection::Left), "no destination beyond the eligible window");
+    }
+
+    #[test]
+    fn directional_score_prefers_nearby_diagonal_frames_to_distant_aligned_ones() {
+        let source = Rect { pos: Point::new(400, 400), size: Size::new(100, 100) };
+        let distant = Rect { pos: Point::new(0, 400), size: Size::new(100, 100) };
+        let nearby_diagonal = Rect { pos: Point::new(250, 510), size: Size::new(100, 100) };
+        assert!(
+            directional_score(source, nearby_diagonal, FocusDirection::Left)
+                < directional_score(source, distant, FocusDirection::Left),
+            "a small perpendicular gap must not make a physically nearby window unreachable"
+        );
+        assert_eq!(directional_score(source, source, FocusDirection::Left), None);
+        assert_eq!(directional_score(source, distant, FocusDirection::Right), None);
     }
 
     #[test]

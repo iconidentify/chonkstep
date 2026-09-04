@@ -77,7 +77,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 pub use wm_core::DecorationRules;
-pub use wm_core::FocusPolicy;
+pub use wm_core::{FocusDirection, FocusPolicy};
 use wm_core::{KeyCombo, Modifiers, PlacementPolicy};
 
 /// Everything a keybinding can do. Deliberately a closed set of verbs
@@ -99,6 +99,10 @@ pub enum Action {
     ToggleShade,
     Miniaturize,
     ToggleFullscreen,
+    /// Focus the nearest visible window in this root-coordinate
+    /// direction. This is spatial navigation over floating frames, not
+    /// a tiling-tree approximation.
+    Focus(FocusDirection),
     WorkspaceNext,
     WorkspacePrev,
     WorkspaceCarryNext,
@@ -230,6 +234,10 @@ fn action_from_name(name: &str) -> Option<Action> {
         "toggle-shade" => Some(Action::ToggleShade),
         "miniaturize" => Some(Action::Miniaturize),
         "toggle-fullscreen" => Some(Action::ToggleFullscreen),
+        "focus-left" => Some(Action::Focus(FocusDirection::Left)),
+        "focus-right" => Some(Action::Focus(FocusDirection::Right)),
+        "focus-up" => Some(Action::Focus(FocusDirection::Up)),
+        "focus-down" => Some(Action::Focus(FocusDirection::Down)),
         "workspace-next" => Some(Action::WorkspaceNext),
         "workspace-prev" => Some(Action::WorkspacePrev),
         "workspace-carry-next" => Some(Action::WorkspaceCarryNext),
@@ -1914,6 +1922,10 @@ mod tests {
             ("toggle-shade", Action::ToggleShade),
             ("miniaturize", Action::Miniaturize),
             ("toggle-fullscreen", Action::ToggleFullscreen),
+            ("focus-left", Action::Focus(FocusDirection::Left)),
+            ("focus-right", Action::Focus(FocusDirection::Right)),
+            ("focus-up", Action::Focus(FocusDirection::Up)),
+            ("focus-down", Action::Focus(FocusDirection::Down)),
             ("workspace-next", Action::WorkspaceNext),
             ("workspace-prev", Action::WorkspacePrev),
             ("workspace-carry-next", Action::WorkspaceCarryNext),

@@ -1720,6 +1720,9 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
                     wm.toggle_fullscreen(id);
                 }
             }
+            Action::Focus(direction) => {
+                wm.focus_direction(*direction);
+            }
             // The window commands menu, from the keyboard. The whole
             // point is the window that has no titlebar to right-click:
             // a client that draws its own chrome gets no frame from us,

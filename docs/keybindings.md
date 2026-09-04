@@ -62,7 +62,7 @@ time. Bind them like anything else:
 keymap = "omarchy"        # ...or desktop = "omarchy", which defaults it
 ```
 
-114 bindings, derived from Omarchy's own configuration on the machine —
+117 bindings, derived from Omarchy's own configuration on the machine —
 `$OMARCHY_PATH/default/hypr/bindings/*.lua` — rather than from memory of
 Hyprland, with the `o.bind` helpers expanded the way `helpers.lua`
 expands them. A `run <name>` action names an entry the preset declares
@@ -71,8 +71,8 @@ Omarchy's own command line. Selecting this keymap declares all 77 of
 those commands, so nothing here needs a `[commands]` table of your own.
 
 Three of these differ from what Omarchy does with the chord —
-`super+f`/`super+alt+f`, `super+alt+s`, and the two chonkstep verbs on
-`super+up` and `control+escape` — and
+`super+f`/`super+alt+f`, `super+alt+s`, and the chonkstep verb on
+`control+escape` — and
 [omarchy-mode.md](omarchy-mode.md#three-chords-we-do-differently) spells
 out how. Omarchy's locked media/brightness keys, repeating ramps, and
 release bindings retain those firing semantics under chonkstep.
@@ -99,6 +99,10 @@ helpers are supported directly.
 | `super+w`                | `close`                                | --                                                                                                                  |
 | `super+f`                | `toggle-fullscreen`                    | --                                                                                                                  |
 | `super+alt+f`            | `toggle-maximize`                      | --                                                                                                                  |
+| `super+left`             | `focus-left`                           | --                                                                                                                  |
+| `super+right`            | `focus-right`                          | --                                                                                                                  |
+| `super+up`               | `focus-up`                             | --                                                                                                                  |
+| `super+down`             | `focus-down`                           | --                                                                                                                  |
 | `super+tab`              | `workspace-next`                       | --                                                                                                                  |
 | `super+shift+tab`        | `workspace-prev`                       | --                                                                                                                  |
 | `super+1`                | `workspace 1`                          | --                                                                                                                  |
@@ -201,12 +205,11 @@ helpers are supported directly.
 | `shift+playpause`        | `run omarchy-audio-source-switch`      | `omarchy-audio-source-switch`                                                                                       |
 | `shift+audiopause`       | `run omarchy-audio-source-switch`      | `omarchy-audio-source-switch`                                                                                       |
 | `eject`                  | `run omarchy-eject`                    | `eject`                                                                                                             |
-| `super+up`               | `overview`                             | --                                                                                                                  |
 | `control+escape`         | `window-menu`                          | --                                                                                                                  |
 
 ### Deliberately unbound
 
-34 groups of Omarchy chord this keymap leaves dead, and why. Left dead
+33 groups of Omarchy chord this keymap leaves dead, and why. Left dead
 rather than approximated: a dead key is looked up in five seconds,
 while a `super+j` that does something *else* is a bug report.
 
@@ -226,7 +229,6 @@ while a `super+j` that does something *else* is a bug report.
 | `super+alt+tab / super+alt+shift+tab`                                                              | next / previous window in the group                                  | tiling-only: no meaning on a stacking desk                  |
 | `super+ctrl+left / super+ctrl+right`                                                               | move the grouped-window focus                                        | tiling-only: no meaning on a stacking desk                  |
 | `super+alt+1..5`                                                                                   | focus the nth window of the group                                    | tiling-only: no meaning on a stacking desk                  |
-| `super+left/right/up/down`                                                                         | focus the window in that direction                                   | chonkstep has no verb for it, and no command can stand in   |
 | `super+shift+left/right/up/down`                                                                   | swap the window with its neighbour                                   | tiling-only: no meaning on a stacking desk                  |
 | `super+minus / super+equal, +shift/alt/ctrl variants`                                              | grow and shrink the window by 25 / 100 / 300 px                      | tiling-only: no meaning on a stacking desk                  |
 | `super+shift+alt+1..0`                                                                             | move the window to workspace n without following                     | chonkstep has no verb for it, and no command can stand in   |
@@ -247,9 +249,9 @@ while a `super+j` that does something *else* is a bug report.
 | `touchpad toggle / on / off`                                                                       | enable and disable the touchpad                                      | commands Hyprland, which is not running                     |
 | `super+ctrl+x, f9`                                                                                 | voxtype dictation: toggle, and push-to-talk                          | Omarchy binds it conditionally; a table of constants cannot |
 
-The two gaps most worth knowing about — directional focus and toggling
-Omarchy's bar — have workarounds listed in
-[omarchy-mode.md](omarchy-mode.md#the-gaps-worth-knowing-about).
+The remaining gap most worth knowing about — toggling Omarchy's bar —
+has a workaround listed in
+[omarchy-mode.md](omarchy-mode.md#the-gap-worth-knowing-about).
 
 ## The mouse gestures
 

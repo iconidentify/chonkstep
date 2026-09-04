@@ -169,6 +169,23 @@ fn workspace_dispatch_round_trips_the_offset() {
     assert!(response.starts_with("Invalid dispatcher"), "got {response:?}");
 }
 
+#[test]
+fn directional_focus_dispatches_are_actions_not_tiling_refusals() {
+    for (argument, direction) in [
+        ("l", chonk_hyprland_ipc::dispatch::Direction::Left),
+        ("right", chonk_hyprland_ipc::dispatch::Direction::Right),
+        ("u", chonk_hyprland_ipc::dispatch::Direction::Up),
+        ("down", chonk_hyprland_ipc::dispatch::Direction::Down),
+    ] {
+        let (response, actions) = answer_payload(format!("/dispatch movefocus {argument}").as_bytes(), &desktop());
+        assert_eq!(response.trim(), "ok");
+        assert_eq!(actions, vec![Action::FocusDirection(direction)]);
+    }
+    let (response, actions) = answer_payload(b"/dispatch movefocus sideways", &desktop());
+    assert!(actions.is_empty());
+    assert!(response.starts_with("Invalid dispatcher"), "got {response:?}");
+}
+
 /// The regression test for a bug an end-to-end run against the real
 /// `hyprctl` found: `dispatch workspace 3` answered `ok` and then did
 /// nothing, because feasibility was decided when the action was applied

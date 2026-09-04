@@ -346,7 +346,7 @@ pub const OMARCHY_BINDINGS: &[(&str, &str)] = &[
     ("super+shift+n", "run omarchy-editor"),
     // -- tiling.lua: the window and workspace verbs -------------------
     //
-    // Twenty-six of forty. The rest of that file is the tiling
+    // Thirty of forty. The rest of that file is the tiling
     // vocabulary itself, and `OMARCHY_UNBOUND` says so one chord at a
     // time.
     ("super+w", "close"),
@@ -358,6 +358,14 @@ pub const OMARCHY_BINDINGS: &[(&str, &str)] = &[
     // keeps its shape: the plain chord takes the screen, the modified
     // one takes the workarea.
     ("super+alt+f", "toggle-maximize"),
+    // Floating windows still occupy a real two-dimensional arrangement.
+    // These select the closest focusable frame in the requested
+    // direction, which preserves Omarchy's intent without inventing a
+    // tiling tree.
+    ("super+left", "focus-left"),
+    ("super+right", "focus-right"),
+    ("super+up", "focus-up"),
+    ("super+down", "focus-down"),
     ("super+tab", "workspace-next"),
     ("super+shift+tab", "workspace-prev"),
     // The twenty chords an Omarchy user has in their fingers before
@@ -499,16 +507,10 @@ pub const OMARCHY_BINDINGS: &[(&str, &str)] = &[
     ("shift+playpause", "run omarchy-audio-source-switch"),
     ("shift+audiopause", "run omarchy-audio-source-switch"),
     ("eject", "run omarchy-eject"),
-    // -- chonkstep's own, on chords Omarchy leaves us -----------------
+    // -- chonkstep's own, on a chord Omarchy leaves us ----------------
     //
-    // Two verbs this desktop has and Omarchy has no vocabulary for at
-    // all. They keep chonkstep's own default chords, which are free
-    // here because the Omarchy chords they would have collided with
-    // (`SUPER + UP` directional focus) have no meaning on a stacking
-    // desk and are unbound above. Carrying them is not inventing an
-    // Omarchy binding: it is refusing to make a chonkstep feature
-    // unreachable just because the guest desktop never had one.
-    ("super+up", "overview"),
+    // The window menu has no Omarchy vocabulary and keeps chonkstep's
+    // own default chord, which is otherwise unused there.
     ("control+escape", "window-menu"),
 ];
 
@@ -595,7 +597,6 @@ pub const OMARCHY_UNBOUND: &[(&str, &str, Unbound)] = &[
     ("super+alt+tab / super+alt+shift+tab", "next / previous window in the group", Unbound::TilingOnly),
     ("super+ctrl+left / super+ctrl+right", "move the grouped-window focus", Unbound::TilingOnly),
     ("super+alt+1..5", "focus the nth window of the group", Unbound::TilingOnly),
-    ("super+left/right/up/down", "focus the window in that direction", Unbound::NoVerb),
     ("super+shift+left/right/up/down", "swap the window with its neighbour", Unbound::TilingOnly),
     (
         "super+minus / super+equal, +shift/alt/ctrl variants",
@@ -837,9 +838,6 @@ mod tests {
             "super+alt+shift+tab",
             "super+ctrl+left",
             "super+ctrl+right",
-            "super+left",
-            "super+right",
-            "super+down",
             "super+shift+left",
             "super+shift+right",
             "super+shift+up",
@@ -903,10 +901,12 @@ mod tests {
                 Some(Action::WorkspaceCarry(digit - 1))
             );
         }
-        // `super+up` is the one arrow the preset does claim, for the
-        // Overview, and the docs say so: assert it rather than let it
-        // hide in the gap between the two lists above.
-        assert!(bound.contains(&parse_key("super+up").unwrap()));
+        for direction in ["left", "right", "up", "down"] {
+            assert!(
+                bound.contains(&parse_key(&format!("super+{direction}")).unwrap()),
+                "directional focus must survive in the frozen fallback too"
+            );
+        }
     }
 
     /// The posture, resolved: what `desktop = "omarchy"` is worth as

@@ -66,7 +66,7 @@ pub mod request;
 pub mod server;
 pub mod state;
 
-pub use dispatch::{Action, Outcome};
+pub use dispatch::{Action, Direction, Outcome};
 pub use event::{Differ, Event};
 pub use request::Request;
 pub use server::Server;

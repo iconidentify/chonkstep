@@ -162,7 +162,7 @@ Three kinds of Omarchy binding get three different answers:
 |---|---|---|---|
 | `super+f` / `super+alt+f` | fullscreen / "full width" (Hyprland's `maximized`) | `toggle-fullscreen` / `toggle-maximize` | The pair keeps its shape: the plain chord takes the whole output with no chrome, the modified one fills the workarea and keeps the titlebar. |
 | `super+alt+s` | move the window to the scratchpad workspace | `miniaturize` | Both mean "send this window away, recoverably". Omarchy's goes to a hidden workspace and comes back with the same chord; chonkstep's collapses to an **icon tile on the desk** and comes back by double-clicking that tile. There is no chord for the way back — `super+s` (toggle scratchpad) is unbound. |
-| `super+up` / `control+escape` | directional focus / nothing | `overview` / `window-menu` | Two chonkstep verbs Omarchy has no vocabulary for at all. They keep chonkstep's own chords, which are free here because the Omarchy chords they would have collided with are unbound anyway. Carrying them is not inventing an Omarchy binding; it is refusing to make a chonkstep feature unreachable. |
+| `control+escape` | nothing | `window-menu` | The window menu is a chonkstep verb Omarchy has no vocabulary for. It keeps its own chord, which Omarchy leaves free. |
 
 Binding firing semantics are preserved too. Omarchy's media and brightness
 keys marked `locked = true` work over the lock screen, ramps marked
@@ -190,8 +190,8 @@ between "chonkstep knows what Omarchy's chords were in August" and
 "Omarchy's menu still configures your machine": rebind a key through
 their UI and the running session follows it within a second.
 
-On the machine this was developed on the live read produced **139
-bindings over 113 commands**, against the baked table's 114 over 77 —
+On the machine this was developed on the live read produced **143
+bindings over 113 commands**, against the baked table's 117 over 77 —
 the extra ones are mostly the preinstalled webapp and TUI chords, which
 a table of constants had to write off because Omarchy gates them on a
 file test that only a live read can make.
@@ -211,7 +211,7 @@ what the live read falls back to.
 
 Both tables live in the keybinding card, beside chonkstep's own:
 **[keybindings.md](keybindings.md), under "The Omarchy keymap"**
-— 114 bindings over 77 declared commands, then the 34 groups of Omarchy
+— 117 bindings over 77 declared commands, then the 33 groups of Omarchy
 chords that are deliberately dead here and why. Both are transcribed
 from `crates/wm-config/src/preset.rs`, which is the authoritative list;
 `crates/wm-config/tests/preset_doc.rs` fails if the card and the table
@@ -227,19 +227,19 @@ The two `declined on purpose` rows:
   want Omarchy's modifier: `drag_modifier = "super"`). The
   scroll-through-workspaces half has no equivalent.
 
-### The gaps worth knowing about
+### The gap worth knowing about
 
-Two things an Omarchy user will reach for and not find, with the
-workaround for each. Workspaces by number used to be the first entry on
+One thing an Omarchy user will reach for and not find, with its
+workaround. Workspaces by number used to be the first entry on
 this list; `super+1..9` and `super+0`, and `super+shift+1..9` and
 `super+shift+0` to take the window along, are bound now and go exactly
 where an Omarchy user expects. Chonkstep counts workspaces from one in
 the config file, as Omarchy does, and grows the row on demand — press
 `super+7` on a desk with three workspaces and you have seven.
+Directional focus has graduated from this list too:
+`super+left/right/up/down` ranks the visible floating frames by their
+actual geometry and focuses the closest candidate in that direction.
 
-- **Directional focus** (`super+left/right/up/down`) does not exist on a
-  stacking desk. Alt+Tab does, and it is fixed modal machinery here —
-  hold Alt, Tab through live thumbnails — exactly as Omarchy binds it.
 - **Toggling Omarchy's bar** (`super+shift+space`) has no chonkstep
   verb: `toggle-dock` toggles *this desk's* Dock, which is a different
   piece of furniture, and mapping one to the other would hide the wrong

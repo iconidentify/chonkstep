@@ -64,7 +64,8 @@ Each binding gets one of three answers:
 1. **A verb chonkstep also has** becomes that verb. `killactive` →
    `close`, `fullscreen 0` → `toggle-fullscreen`, `fullscreen 1` →
    `toggle-maximize`, `workspace 4` → `workspace 4`, `workspace e+1` →
-   `workspace-next`.
+   `workspace-next`, `movefocus l/r/u/d` → geometry-ranked directional
+   focus.
 2. **A command** becomes a `run` binding naming that command, declared
    automatically in `[commands]` under a generated `hypr:…` name. This
    is the whole "install chonkstep, keep your Omarchy" claim made
@@ -212,13 +213,9 @@ specific directive, not a count. Turn on `RUST_LOG=debug` to see them.
 
 ### Bindings this desktop has no verb for
 
-Beyond the tiling vocabulary, three specific chord families stay dead
+Beyond the tiling vocabulary, two specific chord families stay dead
 and are worth knowing about:
 
-- **Directional focus and window movement** (`movefocus l`,
-  `swapwindow`). A stacking desk has no grid for "the window to the
-  left" to mean anything in, and Alt-Tab order is a different question
-  with a different answer.
 - **`movetoworkspacesilent`** — Omarchy's `SUPER + SHIFT + ALT + 1..0`,
   "move this window away but stay here". `workspace-carry` *follows*,
   so binding it there would take your attention somewhere you did not
@@ -229,6 +226,12 @@ and are worth knowing about:
 - **The universal clipboard chords** (`SUPER + C/V/X`), which Omarchy
   builds by synthesising `Ctrl+C` at the seat. That is the
   compositor's own input path; no command could stand in.
+
+Directional focus (`movefocus l/r/u/d`) is native: Chonkstep ranks the
+visible floating frames by their actual root-coordinate geometry and
+focuses the closest candidate in that direction. Directional movement
+and swapping remain tiling-only because a free-form window has no
+neighbouring slot to move into.
 
 A last group is refused for a different reason — *declined on purpose*,
 meaning chonkstep could bind them and does not, because what it would
@@ -416,8 +419,8 @@ One `info` line per read, and one `debug` line per thing skipped:
 
 ```
 INFO  hyprland-config: read the desktop's live Hyprland configuration
-      files=42 bindings=139 commands=113 env=8 autostart=4
-      float_rules=45 monitors=1 skipped=188
+      files=42 bindings=143 commands=113 env=8 autostart=4
+      float_rules=45 monitors=1 skipped=184
 DEBUG hyprland-config: not carried over kind=bind what="SUPER + J (Toggle window split)"
       why="tiling-only: no meaning on a stacking desk"
 ```

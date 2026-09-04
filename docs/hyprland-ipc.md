@@ -106,7 +106,8 @@ Classic dispatch and Omarchy's Lua dispatch vocabulary reach the same
 actions. Supported families include:
 
 - workspace focus and moving a window to a workspace;
-- focus, close, kill-active, cycle, fullscreen/maximize;
+- focus by selector or spatial direction, close, kill-active, cycle,
+  fullscreen/maximize;
 - move, resize, center, raise, pin, tags, and confirm-floating;
 - `exec -- <argv...>` as direct argv and Lua `exec_cmd` as shell
   source, including `[[...]]` and `[=[...]=]` strings;

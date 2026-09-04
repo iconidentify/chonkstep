@@ -30,7 +30,7 @@ pub mod fake_backend;
 
 pub use backend::Backend;
 pub use client::{Client, ClientFlags, ClientId, Lifecycle, MaximizeDirections, MonitorId, MonitorInfo};
-pub use focus::FocusPolicy;
+pub use focus::{FocusDirection, FocusPolicy};
 pub use hittest::{hit_test, HitTarget};
 pub use manager::{Notification, WindowManager, DEFAULT_DRAG_MODIFIER};
 pub use motif::{hints_say_client_decorates, MIN_HINT_WORDS};

@@ -294,6 +294,46 @@ fn the_desktops_own_hyprland_config_drives_the_session_and_follows_an_edit() {
         .expect("super+shift+j, the chord the edit moved the close verb onto, should close the window");
 }
 
+/// Omarchy's stock `SUPER + Arrow` binding crosses the complete live
+/// path: Lua dispatcher, config action, seat grab, shell dispatch, and
+/// geometry-ranked core focus. Closing after the focus move makes the
+/// result observable without a test-only focus hook.
+#[test]
+#[ignore = "needs a session to nest in; run via scripts/e2e.sh"]
+fn stock_directional_focus_moves_between_real_floating_windows() {
+    let (_omarchy_root, options) = scratch_machine("hyprland-directional-focus", FIRST_SIZE, "SUPER + SHIFT + K");
+    let mut session = Session::boot("hyprland-directional-focus", options).expect("session boots");
+    let probe = profile_binary(PROBE).expect("the probe is built");
+    let program = probe.display().to_string();
+    session.launch(&program, &["SpatialA"]).expect("left probe launches");
+    let left = session.wait_for_window("SpatialA").expect("left probe maps");
+    let frame = session
+        .world()
+        .expect("left probe geometry")
+        .frame_of(left.id)
+        .cloned()
+        .expect("probe has server decorations");
+    let grip = (f64::from(frame.x + frame.w as i32 / 2), f64::from(frame.y + 10));
+    session.door().drag_to(grip, (grip.0 - 300.0, grip.1)).expect("move A left");
+    session.door().button("left", false).expect("finish moving A");
+    session.door().barrier().expect("move settles");
+    session.launch(&program, &["SpatialB"]).expect("right probe launches");
+    session.wait_for_window("SpatialB").expect("right probe maps and takes focus");
+
+    let before = session.world().expect("window geometry");
+    let a = before.window_matching("SpatialA").unwrap();
+    let b = before.window_matching("SpatialB").unwrap();
+    assert!(a.x < b.x, "the posed arrangement must put A to B's left: A={a:?}, B={b:?}");
+
+    session.door().chord(keys::LEFTMETA, keys::LEFT).expect("stock super+left binding");
+    session.door().chord(keys::LEFTMETA, KEY_W).expect("close whichever window now has focus");
+    session.wait_for_window_gone("SpatialA").expect("super+left must have focused the left-hand window");
+    assert!(
+        session.world().expect("remaining windows").window_matching("SpatialB").is_some(),
+        "directional focus must not have left the right-hand window focused"
+    );
+}
+
 #[test]
 #[ignore = "needs a session to nest in; run via scripts/e2e.sh"]
 fn selection_layer_bindings_override_only_for_the_layers_lifetime() {

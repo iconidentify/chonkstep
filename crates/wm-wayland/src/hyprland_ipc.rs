@@ -266,6 +266,12 @@ fn ipc_binding(binding: &wm_config::Binding, session: &chonk_shell::startup::Ses
         wm_config::Action::SpawnTerminal => ("exec".to_string(), session.terminal.as_ref().map(|argv| argv.join(" ")).unwrap_or_else(|| "foot".to_string())),
         wm_config::Action::Close => ("killactive".to_string(), String::new()),
         wm_config::Action::ToggleFullscreen => ("fullscreen".to_string(), "0".to_string()),
+        wm_config::Action::Focus(direction) => ("movefocus".to_string(), match direction {
+            wm_core::FocusDirection::Left => "l",
+            wm_core::FocusDirection::Right => "r",
+            wm_core::FocusDirection::Up => "u",
+            wm_core::FocusDirection::Down => "d",
+        }.to_string()),
         wm_config::Action::Workspace(index) => ("workspace".to_string(), (index + 1).to_string()),
         wm_config::Action::WorkspaceCarry(index) => ("movetoworkspace".to_string(), (index + 1).to_string()),
         other => ("chonkstep".to_string(), format!("{other:?}")),
@@ -399,6 +405,12 @@ pub(crate) fn apply(comp: &mut Compositor, action: Action) -> bool {
             None => false,
         },
         Action::CycleFocus { forward } => wm.focus_adjacent_client(forward),
+        Action::FocusDirection(direction) => wm.focus_direction(match direction {
+            chonk_hyprland_ipc::dispatch::Direction::Left => wm_core::FocusDirection::Left,
+            chonk_hyprland_ipc::dispatch::Direction::Right => wm_core::FocusDirection::Right,
+            chonk_hyprland_ipc::dispatch::Direction::Up => wm_core::FocusDirection::Up,
+            chonk_hyprland_ipc::dispatch::Direction::Down => wm_core::FocusDirection::Down,
+        }),
         Action::MoveWindow { window, x, y, relative } => match client_of(wm, window) {
             Some(id) => {
                 let Some(client) = wm.client(id) else { return false };

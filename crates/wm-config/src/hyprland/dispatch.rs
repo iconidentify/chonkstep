@@ -35,7 +35,7 @@
 //! exists to follow.
 
 use crate::preset::Unbound;
-use crate::Action;
+use crate::{Action, FocusDirection};
 
 use super::directive::Dispatcher;
 
@@ -172,12 +172,17 @@ fn compositor_verb(name: &str, arg: &str) -> Verb {
         | "lockactivegroup"
         | "lockgroups"
         | "denywindowfromgroup" => Verb::Unbound(Unbound::TilingOnly),
-        // Directional focus and directional window movement: a stacking
-        // desk has no grid for "the window to the left" to mean
-        // anything in. Left unbound rather than approximated with
-        // Alt-Tab order, which is a different question with a
-        // different answer.
-        "movefocus" | "movewindow" => Verb::Unbound(Unbound::NoVerb),
+        // Directional focus is spatial over the actual floating frame
+        // geometry. Directional movement remains a tiling operation:
+        // there is no neighbouring slot to move a free-form window into.
+        "movefocus" => match arg.to_ascii_lowercase().as_str() {
+            "l" | "left" => Verb::Action(Action::Focus(FocusDirection::Left)),
+            "r" | "right" => Verb::Action(Action::Focus(FocusDirection::Right)),
+            "u" | "up" => Verb::Action(Action::Focus(FocusDirection::Up)),
+            "d" | "down" => Verb::Action(Action::Focus(FocusDirection::Down)),
+            _ => Verb::Unbound(Unbound::NoVerb),
+        },
+        "movewindow" => Verb::Unbound(Unbound::TilingOnly),
         // Workspaces. `e+1`/`e-1` are "the next/previous workspace that
         // exists", which is exactly what this desktop's two workspace
         // verbs do; a bare number is a workspace by index, and

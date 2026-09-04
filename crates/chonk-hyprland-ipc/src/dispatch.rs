@@ -49,6 +49,8 @@ pub enum Action {
     FocusWorkspace(usize),
     /// Focus a specific window, by `ClientId::as_u64()`.
     FocusWindow(u64),
+    /// Focus the nearest visible window in a root-coordinate direction.
+    FocusDirection(Direction),
     /// Close a specific window.
     CloseWindow(u64),
     /// Close the focused window.
@@ -88,6 +90,16 @@ pub enum Fullscreen {
     Toggle,
     On,
     Off,
+}
+
+/// A root-coordinate direction, kept protocol-local so this crate
+/// remains independent of `wm-core` as promised by its public design.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Direction {
+    Left,
+    Right,
+    Up,
+    Down,
 }
 
 /// The result of parsing one dispatch request.
@@ -206,6 +218,13 @@ fn parse_classic(verb: &str, rest: &str, snapshot: &Snapshot) -> Outcome {
         "focuswindow" => match resolve_window(rest, snapshot) {
             Some(window) => Outcome::Run(Action::FocusWindow(window.id)),
             None => Outcome::Unsupported(format!("no window matches {rest:?}")),
+        },
+        "movefocus" => match rest.trim().to_ascii_lowercase().as_str() {
+            "l" | "left" => Outcome::Run(Action::FocusDirection(Direction::Left)),
+            "r" | "right" => Outcome::Run(Action::FocusDirection(Direction::Right)),
+            "u" | "up" => Outcome::Run(Action::FocusDirection(Direction::Up)),
+            "d" | "down" => Outcome::Run(Action::FocusDirection(Direction::Down)),
+            other => Outcome::Unsupported(format!("unknown focus direction {other:?}")),
         },
         "closewindow" => match resolve_window(rest, snapshot) {
             Some(window) => Outcome::Run(Action::CloseWindow(window.id)),
