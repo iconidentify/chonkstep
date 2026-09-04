@@ -84,11 +84,11 @@ use std::time::Duration;
 
 use smithay::backend::renderer::element::memory::MemoryRenderBufferRenderElement;
 use smithay::backend::renderer::element::solid::SolidColorRenderElement;
-use smithay::backend::renderer::element::surface::{render_elements_from_surface_tree, WaylandSurfaceRenderElement};
+use smithay::backend::renderer::element::surface::WaylandSurfaceRenderElement;
 use smithay::backend::renderer::element::utils::RescaleRenderElement;
 use smithay::backend::renderer::element::Kind;
 use smithay::backend::renderer::gles::GlesRenderer;
-use smithay::backend::renderer::utils::CommitCounter;
+use smithay::backend::renderer::utils::{CommitCounter, RendererSurfaceStateUserData};
 use smithay::backend::renderer::{Color32F, ImportAll, ImportMem};
 use smithay::desktop::utils::{
     send_frames_surface_tree, take_presentation_feedback_surface_tree, OutputPresentationFeedback,
@@ -97,8 +97,8 @@ use smithay::desktop::PopupManager;
 use smithay::input::pointer::{CursorImageAttributes, CursorImageStatus};
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::render_elements;
-use smithay::utils::{IsAlive, Physical, Point as SPoint, Rectangle as SRect};
-use smithay::wayland::compositor::with_states;
+use smithay::utils::{IsAlive, Physical, Point as SPoint, Rectangle as SRect, Scale};
+use smithay::wayland::compositor::{self, with_states, TraversalAction};
 use smithay::wayland::shell::wlr_layer::Layer as WlrLayer;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
@@ -989,10 +989,55 @@ pub(crate) fn push_surface_tree(
     render_scale: f64,
     kind: Kind,
 ) {
-    let tree: Vec<WaylandSurfaceRenderElement<GlesRenderer>> =
-        render_elements_from_surface_tree(renderer, surface, location, render_scale, 1.0, kind);
-    elements
-        .extend(tree.into_iter().map(|element| RescaleRenderElement::from_element(element, location, factor).into()));
+    // This is smithay's `render_elements_from_surface_tree` traversal
+    // with its sink made caller-owned. That helper necessarily returns
+    // a fresh Vec, which meant one allocator round trip per visible
+    // Wayland tree, per output, per frame even after the outer scene
+    // storage became reusable. Pushing the same elements straight into
+    // the retained scene keeps ordering and import semantics identical
+    // while removing the hidden inner allocation.
+    let tree_origin = location;
+    let location = tree_origin.to_f64();
+    let scale: Scale<f64> = render_scale.into();
+    compositor::with_surface_tree_downward(
+        surface,
+        location,
+        |_, states, location| {
+            let mut location = *location;
+            let data = states.data_map.get::<RendererSurfaceStateUserData>();
+            if let Some(data) = data {
+                if let Some(view) = data.lock().unwrap().view() {
+                    location += view.offset.to_f64().to_physical(scale);
+                    TraversalAction::DoChildren(location)
+                } else {
+                    TraversalAction::SkipChildren
+                }
+            } else {
+                TraversalAction::SkipChildren
+            }
+        },
+        |surface, states, location| {
+            let mut location = *location;
+            let data = states.data_map.get::<RendererSurfaceStateUserData>();
+            let has_view = data
+                .and_then(|data| data.lock().unwrap().view())
+                .map(|view| {
+                    location += view.offset.to_f64().to_physical(scale);
+                })
+                .is_some();
+            if !has_view {
+                return;
+            }
+            match WaylandSurfaceRenderElement::from_surface(renderer, surface, states, location, 1.0, kind) {
+                Ok(Some(element)) => elements.push(
+                    RescaleRenderElement::from_element(element, tree_origin, factor).into(),
+                ),
+                Ok(None) => {}
+                Err(error) => tracing::warn!(%error, "failed to import a Wayland surface"),
+            }
+        },
+        |_, _, _| true,
+    );
 }
 
 /// Pushes the pointer's elements, picking the image by what the

@@ -7,6 +7,16 @@ crate and both session binaries carry the same number.
 
 ### Performance
 
+- **Steady scene and protocol assembly no longer hide nested vector
+  allocations.** Wayland surface trees now stream render elements directly
+  into each output's retained scene instead of allocating one temporary vector
+  per visible tree, per output, per frame. Output management compares live
+  heads directly with its retained baseline, and lock upkeep walks the disjoint
+  output/surface ledgers in place. At 60 Hz, the old code created and freed 60
+  vectors per visible surface tree/output, plus 60 for a persistent manager and
+  60 for a live lock screen; all three paths are now allocation-free after
+  their retained ledgers reach capacity, with identical ordering, protocol,
+  and configure behavior.
 - **Idle inhibition follows the visible scene and reconciles only on its
   edges.** A decorated toplevel stays protocol-mapped when its hidden frame is
   parked, so checking only that mapped bit let an invisible video/player

@@ -37,10 +37,10 @@
 //!   non-`Normal`/`Flipped180` transform in the compositor. Both are
 //!   real work, and a truthful `failed` beats a lying `succeeded`.
 //!
-//! When no output manager is bound, publication is a zero-allocation
-//! fast path. Once one binds, retained snapshots keep unchanged passes
-//! event-free while every new manager still receives a complete
-//! initial listing.
+//! When no output manager is bound, publication is an immediate fast
+//! path. Once one binds, retained snapshots keep unchanged passes both
+//! allocation- and event-free while every new manager still receives a
+//! complete initial listing.
 //!
 //! # Timing
 //!
@@ -211,16 +211,16 @@ fn publish(comp: &mut Compositor) {
     if comp.output_mgmt.managers.is_empty() {
         return;
     }
-    let snapshot: Vec<HeadSnapshot> = comp
-        .outputs
-        .iter()
-        .map(|entry| HeadSnapshot {
-            position: entry.position,
-            scale: entry.scale,
-            current_mode: current_mode_index(entry),
-        })
-        .collect();
-    let changed = snapshot != comp.output_mgmt.published;
+    // Compare directly against the retained baseline. Building a fresh
+    // Vec here made a persistent `kanshi`/`wlr-randr` connection pay
+    // one allocation and free for every unrelated client commit. The
+    // baseline is rewritten in place only on the rare changed path.
+    let changed = comp.outputs.len() != comp.output_mgmt.published.len()
+        || comp
+            .outputs
+            .iter()
+            .zip(&comp.output_mgmt.published)
+            .any(|(entry, previous)| head_snapshot(entry) != *previous);
     let any_new = comp.output_mgmt.managers.iter().any(|manager| !manager.announced);
     if !changed && !any_new {
         return;
@@ -249,7 +249,18 @@ fn publish(comp: &mut Compositor) {
             manager.resource.done(serial);
         }
     }
-    output_mgmt.published = snapshot;
+    if changed {
+        output_mgmt.published.clear();
+        output_mgmt.published.extend(outputs.iter().map(head_snapshot));
+    }
+}
+
+fn head_snapshot(entry: &crate::state::OutputEntry) -> HeadSnapshot {
+    HeadSnapshot {
+        position: entry.position,
+        scale: entry.scale,
+        current_mode: current_mode_index(entry),
+    }
 }
 
 /// The index of the output's current mode in its own mode list. The

@@ -346,31 +346,29 @@ pub(crate) fn confirm_after_frame(comp: &mut Compositor) {
 /// its output's current size (an output resize mid-lock re-configures;
 /// the send is deduped so idle passes cost a comparison), and keep the
 /// keyboard on a lock surface — a locker that maps its surface after
-/// the lock was granted has no other path to focus.
+/// the lock was granted has no other path to focus. The output and lock
+/// ledgers are disjoint fields, so the walk borrows them together and
+/// allocates no intermediate surface list.
 pub(crate) fn refresh(comp: &mut Compositor) {
     if !comp.wm.backend().locked {
         return;
     }
     let advertised = crate::state::advertised_output_scale(comp.ui_scale).integer_scale().max(1);
-    let sizes: Vec<(usize, LockSurface)> = comp
-        .wm
-        .backend()
-        .lock_surfaces
-        .iter()
-        .filter(|entry| entry.surface.alive())
-        .map(|entry| (entry.output, entry.surface.clone()))
-        .collect();
-    for (output, surface) in sizes {
-        let Some(entry) = comp.outputs.get(output) else { continue };
-        let logical = (
-            (entry.size.w as i32 / advertised).max(1) as u32,
-            (entry.size.h as i32 / advertised).max(1) as u32,
-        );
-        surface.with_pending_state(|state| {
-            state.size = Some(logical.into());
-        });
-        // Dedups internally: sends only when the size actually moved.
-        surface.send_configure();
+    {
+        let Compositor { outputs, wm, .. } = comp;
+        for lock in wm.backend().lock_surfaces.iter().filter(|entry| entry.surface.alive()) {
+            let Some(entry) = outputs.get(lock.output) else { continue };
+            let logical = (
+                (entry.size.w as i32 / advertised).max(1) as u32,
+                (entry.size.h as i32 / advertised).max(1) as u32,
+            );
+            lock.surface.with_pending_state(|state| {
+                state.size = Some(logical.into());
+            });
+            // Dedups internally: sends only when the size actually
+            // moved.
+            lock.surface.send_configure();
+        }
     }
     // A locker whose focused surface died (output unplugged, client
     // recovering) gets the keyboard onto another of its surfaces; a
