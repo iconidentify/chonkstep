@@ -53,7 +53,11 @@ fn write(path: &Path, text: &str) {
 /// The action bound to a chonkstep key spec, if any.
 fn action_for(reading: &Reading, spec: &str) -> Option<Action> {
     let combo = crate::parse_key(spec).expect("test spec must parse");
-    reading.keybindings.iter().find(|(existing, _)| *existing == combo).map(|(_, action)| action.clone())
+    reading
+        .keybindings
+        .iter()
+        .find(|(existing, _)| *existing == combo)
+        .map(|(_, action)| action.clone())
 }
 
 /// The argv a chord ends up running, following the `run` name into the
@@ -67,7 +71,11 @@ fn argv_for(reading: &Reading, spec: &str) -> Option<Vec<String>> {
 }
 
 fn skipped_why(reading: &Reading, needle: &str) -> Option<String> {
-    reading.skipped.iter().find(|s| s.what.contains(needle)).map(|s| s.why.clone())
+    reading
+        .skipped
+        .iter()
+        .find(|s| s.what.contains(needle))
+        .map(|s| s.why.clone())
 }
 
 // ---- the Omarchy 4 machine, end to end --------------------------------
@@ -88,15 +96,60 @@ fn a_real_omarchy_4_machine_reads_end_to_end() {
     );
     // The entry file is the Lua one, not the `hyprland.conf` sitting
     // beside it — the migration leftover this machine actually had.
-    assert!(reading.files[0].ends_with("hyprland.lua"), "entry was {:?}", reading.files[0]);
+    assert!(
+        reading.files[0].ends_with("hyprland.lua"),
+        "entry was {:?}",
+        reading.files[0]
+    );
     assert!(
         !reading.files.iter().any(|f| f.ends_with("hyprland.conf")),
         "the conf entry point must not be read when the Lua one exists"
     );
-    assert!(reading.keybindings.len() >= 80, "only {} bindings", reading.keybindings.len());
+    assert!(
+        reading.keybindings.len() >= 80,
+        "only {} bindings",
+        reading.keybindings.len()
+    );
     assert!(!reading.float_rules.is_empty(), "no float rules");
     assert!(!reading.autostart.is_empty(), "no autostart");
     assert!(!reading.env.is_empty(), "no environment");
+}
+
+#[test]
+fn selection_layer_bindings_are_scoped_and_complete() {
+    let reading = read(&machine());
+    let bindings = reading
+        .layer_bindings
+        .get("selection")
+        .expect("selection layer bindings");
+    assert_eq!(
+        bindings.len(),
+        8,
+        "Return variants, Tab variants, and four arrows"
+    );
+    for spec in [
+        "return",
+        "ctrl+return",
+        "tab",
+        "ctrl+tab",
+        "left",
+        "right",
+        "up",
+        "down",
+    ] {
+        let combo = crate::parse_key(spec).unwrap();
+        assert!(
+            bindings.iter().any(|binding| binding.combo == combo),
+            "missing scoped {spec}"
+        );
+        assert!(
+            !reading
+                .keybindings
+                .iter()
+                .any(|(global, _)| *global == combo),
+            "{spec} leaked into global bindings"
+        );
+    }
 }
 
 /// The three kinds of answer, one chord each, from the real files.
@@ -106,13 +159,26 @@ fn the_three_answers_each_land_on_a_real_chord() {
     // 1. A window verb chonkstep also has. `o.bind("SUPER + W",
     //    "Close window", hl.dsp.window.close())`.
     assert_eq!(action_for(&reading, "super+w"), Some(Action::Close));
-    assert_eq!(action_for(&reading, "super+f"), Some(Action::ToggleFullscreen));
-    assert_eq!(action_for(&reading, "super+alt+f"), Some(Action::ToggleMaximize));
+    assert_eq!(
+        action_for(&reading, "super+f"),
+        Some(Action::ToggleFullscreen)
+    );
+    assert_eq!(
+        action_for(&reading, "super+alt+f"),
+        Some(Action::ToggleMaximize)
+    );
     // 2. An Omarchy command, run by name. `o.bind("SUPER + SPACE",
     //    "Omarchy menu", "omarchy-menu toggle")`.
-    assert_eq!(argv_for(&reading, "super+space"), Some(vec!["omarchy-menu".into(), "toggle".into()]));
+    assert_eq!(
+        argv_for(&reading, "super+space"),
+        Some(vec!["omarchy-menu".into(), "toggle".into()])
+    );
     // 3. A tiling verb, deliberately unbound with a reason.
-    assert_eq!(action_for(&reading, "super+j"), None, "toggle split must not be approximated");
+    assert_eq!(
+        action_for(&reading, "super+j"),
+        None,
+        "toggle split must not be approximated"
+    );
     assert_eq!(
         skipped_why(&reading, "SUPER + J"),
         Some(crate::preset::Unbound::TilingOnly.reason().to_string()),
@@ -130,16 +196,36 @@ fn the_generated_workspace_chords_are_expanded_from_the_loop() {
     let reading = read(&machine());
     // `for workspace = 1, 10 do … "SUPER + " .. "code:" ..
     //  tostring(workspace + 9) … hl.dsp.focus({ workspace = "1" })`
-    for (spec, index) in [("super+1", 0usize), ("super+5", 4), ("super+9", 8), ("super+0", 9)] {
-        assert_eq!(action_for(&reading, spec), Some(Action::Workspace(index)), "{spec}");
+    for (spec, index) in [
+        ("super+1", 0usize),
+        ("super+5", 4),
+        ("super+9", 8),
+        ("super+0", 9),
+    ] {
+        assert_eq!(
+            action_for(&reading, spec),
+            Some(Action::Workspace(index)),
+            "{spec}"
+        );
     }
     for (spec, index) in [("super+shift+1", 0usize), ("super+shift+0", 9)] {
-        assert_eq!(action_for(&reading, spec), Some(Action::WorkspaceCarry(index)), "{spec}");
+        assert_eq!(
+            action_for(&reading, spec),
+            Some(Action::WorkspaceCarry(index)),
+            "{spec}"
+        );
     }
     // The third loop: the bar's panels, by position.
     assert_eq!(
         argv_for(&reading, "super+ctrl+3"),
-        Some(vec!["omarchy-shell".into(), "-q".into(), "shell".into(), "togglePanelAt".into(), "right".into(), "3".into()])
+        Some(vec![
+            "omarchy-shell".into(),
+            "-q".into(),
+            "shell".into(),
+            "togglePanelAt".into(),
+            "right".into(),
+            "3".into()
+        ])
     );
 }
 
@@ -155,7 +241,10 @@ fn moving_a_window_without_following_it_stays_unbound() {
     // ...except for the scratchpad, where "silent" is the whole point
     // and `miniaturize` is the honest match. Omarchy's own
     // `SUPER + ALT + S`.
-    assert_eq!(action_for(&reading, "super+alt+s"), Some(Action::Miniaturize));
+    assert_eq!(
+        action_for(&reading, "super+alt+s"),
+        Some(Action::Miniaturize)
+    );
 }
 
 /// The conditional Omarchy gates its preinstalled application chords
@@ -172,7 +261,10 @@ fn the_preinstalled_gate_is_answered_from_the_file_system() {
     let open = read(&roots);
     assert_eq!(
         argv_for(&open, "super+shift+a"),
-        Some(vec!["omarchy-launch-webapp".into(), "https://chatgpt.com".into()]),
+        Some(vec![
+            "omarchy-launch-webapp".into(),
+            "https://chatgpt.com".into()
+        ]),
         "the ChatGPT webapp chord is inside `if o.preinstalled_bindings_enabled() then`"
     );
     // Now say the preinstalls were removed, the way Omarchy says it.
@@ -183,9 +275,16 @@ fn the_preinstalled_gate_is_answered_from_the_file_system() {
     roots.facts.state_home = Some(state.join(".local/state"));
     write(&state.join(".local/state/omarchy/preinstalls-removed"), "");
     let closed = read(&roots);
-    assert_eq!(action_for(&closed, "super+shift+a"), None, "the gate is shut; the chord must not be bound");
+    assert_eq!(
+        action_for(&closed, "super+shift+a"),
+        None,
+        "the gate is shut; the chord must not be bound"
+    );
     // The ungated essentials in the same file are unaffected.
-    assert!(action_for(&closed, "super+return").is_some(), "SUPER+RETURN is outside the gate");
+    assert!(
+        action_for(&closed, "super+return").is_some(),
+        "SUPER+RETURN is outside the gate"
+    );
     let _ = std::fs::remove_dir_all(&state);
 }
 
@@ -204,9 +303,16 @@ fn a_global_set_before_a_require_reaches_the_file_that_reads_it() {
         "omarchy_default_bindings = false\nrequire(\"default.hypr.omarchy\")\n",
     );
     let reading = read(&Roots::under(&root));
-    assert_eq!(action_for(&reading, "super+w"), None, "`omarchy_default_bindings = false` must silence the default bindings");
+    assert_eq!(
+        action_for(&reading, "super+w"),
+        None,
+        "`omarchy_default_bindings = false` must silence the default bindings"
+    );
     // ...and the same tree with the global left alone binds it.
-    write(&root.join(".config/hypr/hyprland.lua"), "require(\"default.hypr.omarchy\")\n");
+    write(
+        &root.join(".config/hypr/hyprland.lua"),
+        "require(\"default.hypr.omarchy\")\n",
+    );
     let reading = read(&Roots::under(&root));
     assert_eq!(action_for(&reading, "super+w"), Some(Action::Close));
     let _ = std::fs::remove_dir_all(&root);
@@ -220,10 +326,19 @@ fn a_global_set_before_a_require_reaches_the_file_that_reads_it() {
 #[test]
 fn the_bind_helper_forms_expand_exactly_as_omarchy_expands_them() {
     let reading = read(&machine());
-    assert_eq!(argv_for(&reading, "super+shift+return"), Some(vec!["omarchy-launch-browser".into()]));
-    assert_eq!(argv_for(&reading, "super+shift+alt+b"), Some(vec!["omarchy-launch-browser".into(), "--private".into()]));
+    assert_eq!(
+        argv_for(&reading, "super+shift+return"),
+        Some(vec!["omarchy-launch-browser".into()])
+    );
+    assert_eq!(
+        argv_for(&reading, "super+shift+alt+b"),
+        Some(vec!["omarchy-launch-browser".into(), "--private".into()])
+    );
     // `{ tui = "cliamp", focus = true }`
-    assert_eq!(argv_for(&reading, "super+shift+alt+m"), Some(vec!["omarchy-launch-or-focus-tui".into(), "cliamp".into()]));
+    assert_eq!(
+        argv_for(&reading, "super+shift+alt+m"),
+        Some(vec!["omarchy-launch-or-focus-tui".into(), "cliamp".into()])
+    );
     // `{ launch = "obsidian", focus = "^obsidian$" }`. The expansion
     // carries a `$` — inside single quotes, where it is a regex anchor
     // rather than a variable — and a line with shell grammar anywhere
@@ -232,10 +347,17 @@ fn the_bind_helper_forms_expand_exactly_as_omarchy_expands_them() {
     // so this is the faithful answer as well as the safe one.
     assert_eq!(
         argv_for(&reading, "super+shift+o"),
-        Some(vec!["bash".into(), "-lc".into(), "omarchy-launch-or-focus '^obsidian$' 'uwsm-app -- obsidian'".into()])
+        Some(vec![
+            "bash".into(),
+            "-lc".into(),
+            "omarchy-launch-or-focus '^obsidian$' 'uwsm-app -- obsidian'".into()
+        ])
     );
     // `o.bind_toggle("SUPER + CTRL + I", …, "idle")`
-    assert_eq!(argv_for(&reading, "super+ctrl+i"), Some(vec!["omarchy-toggle-idle".into()]));
+    assert_eq!(
+        argv_for(&reading, "super+ctrl+i"),
+        Some(vec!["omarchy-toggle-idle".into()])
+    );
 }
 
 /// A chord that runs `hyprctl` or an `omarchy-hyprland-*` script
@@ -246,15 +368,27 @@ fn the_bind_helper_forms_expand_exactly_as_omarchy_expands_them() {
 #[test]
 fn bindings_that_command_hyprland_stay_unbound_and_hyprpicker_does_not() {
     let reading = read(&machine());
-    assert_eq!(action_for(&reading, "super+backspace"), None, "omarchy-hyprland-window-transparency-toggle");
-    assert_eq!(action_for(&reading, "super+slash"), None, "omarchy-hyprland-monitor-scaling");
+    assert_eq!(
+        action_for(&reading, "super+backspace"),
+        None,
+        "omarchy-hyprland-window-transparency-toggle"
+    );
+    assert_eq!(
+        action_for(&reading, "super+slash"),
+        None,
+        "omarchy-hyprland-monitor-scaling"
+    );
     assert_eq!(
         skipped_why(&reading, "SUPER + BACKSPACE"),
         Some(crate::preset::Unbound::HyprlandOnly.reason().to_string())
     );
     assert_eq!(
         argv_for(&reading, "super+print"),
-        Some(vec!["bash".into(), "-lc".into(), "pkill hyprpicker || hyprpicker -a".into()]),
+        Some(vec![
+            "bash".into(),
+            "-lc".into(),
+            "pkill hyprpicker || hyprpicker -a".into()
+        ]),
         "hyprpicker is an ordinary client; its `||` needs a shell"
     );
 }
@@ -265,10 +399,100 @@ fn bindings_that_command_hyprland_stay_unbound_and_hyprpicker_does_not() {
 #[test]
 fn the_media_keys_survive_the_rename() {
     let reading = read(&machine());
-    assert_eq!(argv_for(&reading, "volumeup"), Some(vec!["omarchy-audio-output-volume".into(), "raise".into()]));
-    assert_eq!(argv_for(&reading, "brightnessdown"), Some(vec!["omarchy-brightness-display".into(), "5%-".into()]));
-    assert_eq!(argv_for(&reading, "playpause"), Some(vec!["omarchy-shell".into(), "media".into(), "playPause".into()]));
-    assert_eq!(argv_for(&reading, "poweroff"), Some(vec!["omarchy-menu".into(), "toggle".into(), "system".into()]));
+    assert_eq!(
+        argv_for(&reading, "volumeup"),
+        Some(vec!["omarchy-audio-output-volume".into(), "raise".into()])
+    );
+    assert_eq!(
+        argv_for(&reading, "brightnessdown"),
+        Some(vec!["omarchy-brightness-display".into(), "5%-".into()])
+    );
+    assert_eq!(
+        argv_for(&reading, "playpause"),
+        Some(vec![
+            "omarchy-shell".into(),
+            "media".into(),
+            "playPause".into()
+        ])
+    );
+    assert_eq!(
+        argv_for(&reading, "poweroff"),
+        Some(vec![
+            "omarchy-menu".into(),
+            "toggle".into(),
+            "system".into()
+        ])
+    );
+}
+
+#[test]
+fn binding_flags_preserve_press_release_lock_and_repeat() {
+    let root = scratch("binding-flags");
+    write(
+        &root.join(".config/hypr/hyprland.lua"),
+        r#"
+o.bind("F9", "Start dictation", "voxtype record start")
+o.bind("F9", "Stop dictation", "voxtype record stop", { release = true })
+o.bind("XF86AudioRaiseVolume", "Volume up", "volume up", { locked = true, repeating = true })
+"#,
+    );
+    let reading = read(&Roots::under(&root));
+    assert_eq!(
+        argv_for(&reading, "f9"),
+        Some(vec!["voxtype".into(), "record".into(), "start".into()])
+    );
+    let f9 = crate::parse_key("f9").unwrap();
+    let release = reading
+        .bindings
+        .iter()
+        .find(|binding| binding.combo == f9 && binding.release)
+        .unwrap();
+    let Action::Run(name) = &release.action else {
+        panic!("release should run the stop command")
+    };
+    assert_eq!(reading.commands[name], vec!["voxtype", "record", "stop"]);
+    let volume = crate::parse_key("volumeup").unwrap();
+    let volume = reading
+        .bindings
+        .iter()
+        .find(|binding| binding.combo == volume)
+        .unwrap();
+    assert!(volume.locked && volume.repeating && !volume.release);
+}
+
+#[test]
+fn input_tables_and_missing_hardware_keysyms_are_carried() {
+    let root = scratch("input-table");
+    write(
+        &root.join(".config/hypr/hyprland.lua"),
+        r#"
+hl.config({ input = {
+  kb_layout = "de", kb_variant = "nodeadkeys", kb_model = "pc105",
+  kb_options = "compose:caps", repeat_rate = 40, repeat_delay = 250,
+  follow_mouse = 1,
+} })
+o.bind("XF86TouchpadToggle", "Touchpad", "touchpad toggle")
+o.bind("XF86TouchpadOn", "Touchpad on", "touchpad on")
+o.bind("XF86TouchpadOff", "Touchpad off", "touchpad off")
+o.bind("SUPER + SHIFT + code:201", "Menu", "omarchy-menu")
+"#,
+    );
+    let reading = read(&Roots::under(&root));
+    assert_eq!(reading.input.layout.as_deref(), Some("de"));
+    assert_eq!(reading.input.variant.as_deref(), Some("nodeadkeys"));
+    assert_eq!(reading.input.model.as_deref(), Some("pc105"));
+    assert_eq!(reading.input.options.as_deref(), Some("compose:caps"));
+    assert_eq!(reading.input.repeat_rate, Some(40));
+    assert_eq!(reading.input.repeat_delay, Some(250));
+    assert_eq!(reading.follow_mouse, Some(true));
+    for spec in [
+        "touchpadtoggle",
+        "touchpadon",
+        "touchpadoff",
+        "super+shift+f23",
+    ] {
+        assert!(action_for(&reading, spec).is_some(), "missing {spec}");
+    }
 }
 
 /// Bindings that are not key chords at all — the mouse wheel, a mouse
@@ -292,8 +516,14 @@ fn pointer_and_switch_bindings_are_refused_by_name() {
 fn float_rules_resolve_through_omarchys_tags() {
     let reading = read(&machine());
     let policy = reading.float_rules;
-    let decision = policy.decision_for("org.omarchy.btop", "").expect("Omarchy's own terminals float");
-    assert_eq!(decision.size, Some(wm_core::Size::new(875, 600)), "the size the hardcoded rule was a transcription of");
+    let decision = policy
+        .decision_for("org.omarchy.btop", "")
+        .expect("Omarchy's own terminals float");
+    assert_eq!(
+        decision.size,
+        Some(wm_core::Size::new(875, 600)),
+        "the size the hardcoded rule was a transcription of"
+    );
     assert!(decision.center);
     // The `.*` rules that carry no float property must not float
     // everything on the desk.
@@ -310,18 +540,33 @@ fn the_sizes_the_hardcoded_rule_could_not_express_come_through() {
     let policy = reading.float_rules;
     // `apps/steam.lua`: `o.window({ class = "steam", title = "Steam" },
     // { center = true, size = { 1100, 700 } })`
-    assert_eq!(policy.decision_for("steam", "Steam").and_then(|d| d.size), Some(wm_core::Size::new(1100, 700)));
+    assert_eq!(
+        policy.decision_for("steam", "Steam").and_then(|d| d.size),
+        Some(wm_core::Size::new(1100, 700))
+    );
     // `apps/pip.lua`: picture-in-picture, matched on *title*.
     assert_eq!(
-        policy.decision_for("firefox", "Picture-in-Picture").and_then(|d| d.size),
+        policy
+            .decision_for("firefox", "Picture-in-Picture")
+            .and_then(|d| d.size),
         Some(wm_core::Size::new(600, 338)),
         "a title-matched rule, through the `pip` tag"
     );
     // `apps/system.lua`: the About box has its own size.
-    assert_eq!(policy.decision_for("org.omarchy.about", "").and_then(|d| d.size), Some(wm_core::Size::new(920, 480)));
+    assert_eq!(
+        policy
+            .decision_for("org.omarchy.about", "")
+            .and_then(|d| d.size),
+        Some(wm_core::Size::new(920, 480))
+    );
     // `apps/localsend.lua`, whose pattern has no anchors — Hyprland
     // matches by search, so it catches the real class `localsend_app`.
-    assert_eq!(policy.decision_for("localsend_app", "").and_then(|d| d.size), Some(wm_core::Size::new(1100, 700)));
+    assert_eq!(
+        policy
+            .decision_for("localsend_app", "")
+            .and_then(|d| d.size),
+        Some(wm_core::Size::new(1100, 700))
+    );
 }
 
 /// A rule this reader only half-understands is dropped whole and says
@@ -332,13 +577,19 @@ fn a_rule_with_an_unimplemented_matcher_is_refused_whole_and_loudly() {
     let rule = directive::WindowRule {
         matchers: vec![
             directive::Matcher::Class("^$".into()),
-            directive::Matcher::Other { key: "xwayland".into(), value: "1".into() },
+            directive::Matcher::Other {
+                key: "xwayland".into(),
+                value: "1".into(),
+            },
         ],
         props: vec![("float".into(), "on".into())],
     };
     let (rules, notes) = rules::compile(&[rule]);
     assert!(rules.is_empty(), "half a rule must not be applied");
-    assert!(notes.iter().any(|n| n.contains("match:xwayland 1")), "and it must say which matcher: {notes:?}");
+    assert!(
+        notes.iter().any(|n| n.contains("match:xwayland 1")),
+        "and it must say which matcher: {notes:?}"
+    );
 }
 
 /// A float rule naming a tag nothing adds cannot be resolved, and says
@@ -364,8 +615,16 @@ fn a_size_expression_is_dropped_with_its_own_reason() {
         props: vec![("size".into(), "(monitor_h*4/25) (monitor_h*9/50)".into())],
     };
     let (rules, notes) = rules::compile(&[rule]);
-    assert_eq!(rules.decision_for("WebcamOverlay-small", "").and_then(|d| d.size), None);
-    assert!(notes.iter().any(|n| n.contains("needs a monitor")), "{notes:?}");
+    assert_eq!(
+        rules
+            .decision_for("WebcamOverlay-small", "")
+            .and_then(|d| d.size),
+        None
+    );
+    assert!(
+        notes.iter().any(|n| n.contains("needs a monitor")),
+        "{notes:?}"
+    );
 }
 
 // ---- autostart and environment ----------------------------------------
@@ -376,12 +635,24 @@ fn a_size_expression_is_dropped_with_its_own_reason() {
 #[test]
 fn autostart_comes_out_of_the_start_handler() {
     let reading = read(&machine());
-    let flat: Vec<String> = reading.autostart.iter().map(|argv| argv.join(" ")).collect();
+    let flat: Vec<String> = reading
+        .autostart
+        .iter()
+        .map(|argv| argv.join(" "))
+        .collect();
     assert!(flat.iter().any(|c| c.contains("udiskie")), "{flat:?}");
-    assert!(flat.iter().any(|c| c.contains("omarchy-powerprofiles-init")), "{flat:?}");
+    assert!(
+        flat.iter()
+            .any(|c| c.contains("omarchy-powerprofiles-init")),
+        "{flat:?}"
+    );
     // A line with shell grammar in it keeps its shell rather than
     // being mis-split into argv.
-    assert!(flat.iter().any(|c| c.starts_with("bash -lc") && c.contains("post-boot")), "{flat:?}");
+    assert!(
+        flat.iter()
+            .any(|c| c.starts_with("bash -lc") && c.contains("post-boot")),
+        "{flat:?}"
+    );
 }
 
 /// Two autostart entries must not be carried: one commands Hyprland,
@@ -389,10 +660,52 @@ fn autostart_comes_out_of_the_start_handler() {
 #[test]
 fn autostart_refuses_the_two_things_that_would_be_worse_than_nothing() {
     let reading = read(&machine());
-    let flat: Vec<String> = reading.autostart.iter().map(|argv| argv.join(" ")).collect();
-    assert!(!flat.iter().any(|c| c.contains("omarchy-hyprland-monitor-watch")), "commands Hyprland: {flat:?}");
-    assert!(!flat.iter().any(|c| c.contains("omarchy-launch-shell")), "we start the shell ourselves: {flat:?}");
-    assert!(skipped_why(&reading, "omarchy-launch-shell").is_some_and(|w| w.contains("second copy")));
+    let flat: Vec<String> = reading
+        .autostart
+        .iter()
+        .map(|argv| argv.join(" "))
+        .collect();
+    assert!(
+        !flat
+            .iter()
+            .any(|c| c.contains("omarchy-hyprland-monitor-watch")),
+        "commands Hyprland: {flat:?}"
+    );
+    assert!(
+        !flat.iter().any(|c| c.contains("omarchy-launch-shell")),
+        "we start the shell ourselves: {flat:?}"
+    );
+    assert!(
+        skipped_why(&reading, "omarchy-launch-shell").is_some_and(|w| w.contains("second copy"))
+    );
+}
+
+#[test]
+fn blanket_activation_environment_imports_are_never_autostarted() {
+    let root = scratch("activation-import");
+    write(
+        &root.join(".config/hypr/hyprland.lua"),
+        concat!(
+            "hl.on(\"hyprland.start\", function()\n",
+            "  hl.exec_cmd(\"systemctl --user import-environment $(env | cut -d'=' -f 1)\")\n",
+            "  hl.exec_cmd(\"dbus-update-activation-environment --systemd --all\")\n",
+            "  hl.exec_cmd(\"safe-program --flag\")\n",
+            "end)\n",
+        ),
+    );
+    let reading = read(&Roots::under(&root));
+    assert_eq!(
+        reading.autostart,
+        vec![vec!["safe-program".to_string(), "--flag".to_string()]]
+    );
+    assert_eq!(
+        reading
+            .skipped
+            .iter()
+            .filter(|skip| skip.why.contains("blanket activation-environment"))
+            .count(),
+        2
+    );
 }
 
 /// The environment carries the guest desktop's own expectations, minus
@@ -404,9 +717,13 @@ fn the_environment_is_carried_except_where_it_would_lie() {
     assert!(names.contains(&"GDK_BACKEND"), "{names:?}");
     assert!(names.contains(&"MOZ_ENABLE_WAYLAND"), "{names:?}");
     assert!(names.contains(&"XCURSOR_SIZE"), "{names:?}");
-    assert!(!names.contains(&"XDG_CURRENT_DESKTOP"), "naming Hyprland as the running desktop would break portals");
+    assert!(
+        !names.contains(&"XDG_CURRENT_DESKTOP"),
+        "naming Hyprland as the running desktop would break portals"
+    );
     assert!(!names.contains(&"XDG_SESSION_DESKTOP"), "{names:?}");
-    assert!(skipped_why(&reading, "XDG_CURRENT_DESKTOP").is_some_and(|w| w.contains("under chonkstep it is not")));
+    assert!(skipped_why(&reading, "XDG_CURRENT_DESKTOP")
+        .is_some_and(|w| w.contains("under chonkstep it is not")));
 }
 
 /// `monitor =` lines are read and kept, so they can be reported —
@@ -415,7 +732,11 @@ fn the_environment_is_carried_except_where_it_would_lie() {
 fn monitor_lines_are_read_and_reported_rather_than_applied() {
     let reading = read(&conf_machine());
     assert!(
-        reading.monitors.lines.iter().any(|m| m.output == "DP-2" && m.scale == "1.5"),
+        reading
+            .monitors
+            .lines
+            .iter()
+            .any(|m| m.output == "DP-2" && m.scale == "1.5"),
         "{:?}",
         reading.monitors.lines
     );
@@ -437,9 +758,18 @@ fn the_classic_conf_syntax_reads_the_same_desktop() {
     assert!(reading.files.len() >= 15, "{:?}", reading.files);
     assert_eq!(action_for(&reading, "super+w"), Some(Action::Close));
     assert_eq!(action_for(&reading, "super+1"), Some(Action::Workspace(0)));
-    assert_eq!(action_for(&reading, "super+shift+9"), Some(Action::WorkspaceCarry(8)));
-    assert_eq!(action_for(&reading, "super+tab"), Some(Action::WorkspaceNext));
-    assert_eq!(argv_for(&reading, "super+space"), Some(vec!["omarchy-launch-walker".into()]));
+    assert_eq!(
+        action_for(&reading, "super+shift+9"),
+        Some(Action::WorkspaceCarry(8))
+    );
+    assert_eq!(
+        action_for(&reading, "super+tab"),
+        Some(Action::WorkspaceNext)
+    );
+    assert_eq!(
+        argv_for(&reading, "super+space"),
+        Some(vec!["omarchy-launch-walker".into()])
+    );
     assert!(!reading.float_rules.is_empty());
 }
 
@@ -452,7 +782,10 @@ fn the_users_own_conf_overrides_the_default_it_sources() {
     // `~/.config/hypr/bindings.conf` rebinds SUPER+SPACE's neighbours
     // and adds `SUPER SHIFT, S, Screenshot`; the default file has
     // `SUPER SHIFT, S` unbound and `SUPER SHIFT, SLASH` on 1password.
-    assert_eq!(argv_for(&reading, "super+shift+s"), Some(vec!["omarchy-capture-screenshot".into()]));
+    assert_eq!(
+        argv_for(&reading, "super+shift+s"),
+        Some(vec!["omarchy-capture-screenshot".into()])
+    );
     assert_eq!(
         argv_for(&reading, "super+shift+slash"),
         Some(vec!["uwsm-app".into(), "--".into(), "1password".into()]),
@@ -468,8 +801,16 @@ fn the_users_own_conf_overrides_the_default_it_sources() {
 fn a_doubled_hash_stays_a_hash_in_a_url() {
     let mut vars = BTreeMap::new();
     let mut out = Vec::new();
-    conf::read("bind = SUPER, A, exec, launch-webapp \"https://x.com/##anchor\" # trailing\n", &mut vars, &mut out);
-    let Directive::Bind { dispatcher: directive::Dispatcher::Exec(command), .. } = &out[0] else {
+    conf::read(
+        "bind = SUPER, A, exec, launch-webapp \"https://x.com/##anchor\" # trailing\n",
+        &mut vars,
+        &mut out,
+    );
+    let Directive::Bind {
+        dispatcher: directive::Dispatcher::Exec(command),
+        ..
+    } = &out[0]
+    else {
         panic!("expected a bind, got {out:?}");
     };
     assert_eq!(command, "launch-webapp \"https://x.com/#anchor\"");
@@ -496,6 +837,43 @@ fn conf_variables_are_substituted_longest_name_first() {
     assert_eq!(keys, vec!["SUPER SHIFT Q", "SUPER W"]);
 }
 
+#[test]
+fn conf_submap_bindings_never_leak_into_the_global_keymap() {
+    let root = scratch("conf-submap");
+    write(
+        &root.join(".config/hypr/hyprland.conf"),
+        "bind = SUPER, R, submap, resize\nsubmap = resize\nbind = , 1, exec, notify-send ONE\nbind = , escape, submap, reset\nsubmap = reset\nbind = SUPER, Q, killactive,\n",
+    );
+    let reading = read(&Roots::under(&root));
+    assert!(
+        action_for(&reading, "1").is_none(),
+        "a submap typing key became global"
+    );
+    assert!(
+        action_for(&reading, "super+q").is_some(),
+        "global parsing did not resume after reset"
+    );
+    assert!(reading.skipped.iter().any(|skip| skip.kind == "submap-bind"
+        && skip.what.contains("1")
+        && skip.what.contains("resize")));
+}
+
+#[test]
+fn lua_submap_bindings_are_reported_without_becoming_global() {
+    let root = scratch("lua-submap");
+    write(
+        &root.join(".config/hypr/hyprland.lua"),
+        "hl.define_submap(\"resize\", function()\n  hl.bind(\"1\", hl.dsp.exec_cmd(\"notify-send ONE\"))\nend)\nhl.bind(\"SUPER + Q\", hl.dsp.window.close())\n",
+    );
+    let reading = read(&Roots::under(&root));
+    assert!(action_for(&reading, "1").is_none());
+    assert!(action_for(&reading, "super+q").is_some());
+    assert!(reading
+        .skipped
+        .iter()
+        .any(|skip| skip.kind == "submap-bind" && skip.what.contains("resize")));
+}
+
 /// All three window-rule syntaxes a real machine can carry.
 #[test]
 fn every_window_rule_syntax_hyprland_has_shipped_is_read() {
@@ -520,10 +898,100 @@ fn every_window_rule_syntax_hyprland_has_shipped_is_read() {
         .collect();
     let (compiled, notes) = rules::compile(&rules);
     assert!(notes.is_empty(), "{notes:?}");
-    assert!(compiled.decision_for("v1app", "").is_some(), "v1 bare-pattern form");
-    assert!(compiled.decision_for("v2app", "Dialog").is_some(), "v2 colon form");
-    assert!(compiled.decision_for("v2app", "Other").is_none(), "v2 title matcher must actually constrain");
-    assert_eq!(compiled.decision_for("modern", "").and_then(|d| d.size), Some(wm_core::Size::new(400, 300)), "0.53+ match: form");
+    assert!(
+        compiled.decision_for("v1app", "").is_some(),
+        "v1 bare-pattern form"
+    );
+    assert!(
+        compiled.decision_for("v2app", "Dialog").is_some(),
+        "v2 colon form"
+    );
+    assert!(
+        compiled.decision_for("v2app", "Other").is_none(),
+        "v2 title matcher must actually constrain"
+    );
+    assert_eq!(
+        compiled.decision_for("modern", "").and_then(|d| d.size),
+        Some(wm_core::Size::new(400, 300)),
+        "0.53+ match: form"
+    );
+}
+
+#[test]
+fn non_geometric_window_rules_are_combined_property_by_property() {
+    let mut vars = BTreeMap::new();
+    let mut out = Vec::new();
+    conf::read(
+        concat!(
+            "windowrule = pin on, match:class ^player$\n",
+            "windowrule = idle_inhibit always, match:class ^player$\n",
+            "windowrule = no_focus on, match:class ^player$\n",
+            "windowrule = no_focus off, match:class ^player$\n",
+            "windowrule = no_initial_focus on, match:class ^player$\n",
+            "windowrule = focus_on_activate off, match:class ^player$\n",
+            "windowrule = maximize on, match:title ^Cinema$\n",
+            "windowrule = fullscreen on, match:title ^Cinema$\n",
+        ),
+        &mut vars,
+        &mut out,
+    );
+    let parsed: Vec<_> = out
+        .into_iter()
+        .filter_map(|directive| match directive {
+            Directive::WindowRule(rule) => Some(rule),
+            _ => None,
+        })
+        .collect();
+    let (rules, notes) = rules::compile(&parsed);
+    assert!(
+        notes.is_empty(),
+        "every property in this fixture is supported: {notes:?}"
+    );
+
+    let decision = rules.window_decision_for("player", "Cinema");
+    assert!(decision.pin && decision.idle_inhibit);
+    assert!(
+        !decision.no_focus,
+        "the later property overrides only no_focus"
+    );
+    assert!(decision.no_initial_focus);
+    assert_eq!(decision.focus_on_activate, Some(false));
+    assert!(decision.maximize && decision.fullscreen);
+}
+
+#[test]
+fn unsupported_rule_properties_are_named_without_discarding_supported_siblings() {
+    let mut vars = BTreeMap::new();
+    let mut out = Vec::new();
+    conf::read(
+        "windowrule = pin on, match:class ^notes$\n\
+         windowrule = mystery_value 7, match:class ^notes$\n\
+         windowrule = pin on, match:xwayland 1, match:class ^xterm$\n",
+        &mut vars,
+        &mut out,
+    );
+    let parsed: Vec<_> = out
+        .into_iter()
+        .filter_map(|directive| match directive {
+            Directive::WindowRule(rule) => Some(rule),
+            _ => None,
+        })
+        .collect();
+    let (rules, notes) = rules::compile(&parsed);
+    assert!(
+        rules.window_decision_for("notes", "").pin,
+        "a supported sibling property remains effective"
+    );
+    assert!(
+        !rules.window_decision_for("xterm", "").pin,
+        "an unsupported matcher refuses the whole rule"
+    );
+    assert!(notes
+        .iter()
+        .any(|note| note.contains("property mystery_value") && note.contains("property skipped")));
+    assert!(notes
+        .iter()
+        .any(|note| note.contains("match:xwayland 1") && note.contains("rule skipped")));
 }
 
 // ---- activation and layering ------------------------------------------
@@ -533,19 +1001,31 @@ fn every_window_rule_syntax_hyprland_has_shipped_is_read() {
 #[test]
 fn the_posture_decides_whether_anybody_elses_config_is_read() {
     let mut config = crate::Config::default_config();
-    assert!(!wanted(&config), "a plain chonkstep desk reads nobody else's files");
+    assert!(
+        !wanted(&config),
+        "a plain chonkstep desk reads nobody else's files"
+    );
     config.desktop = crate::preset::Desktop::Omarchy;
-    assert!(wanted(&config), "`desktop = \"omarchy\"` has already asked for this");
+    assert!(
+        wanted(&config),
+        "`desktop = \"omarchy\"` has already asked for this"
+    );
     config.hyprland_config = Some(false);
     assert!(!wanted(&config), "and the key is the escape hatch");
     let mut config = crate::Config::default_config();
     config.keymap = crate::preset::Keymap::Omarchy;
-    assert!(wanted(&config), "wanting Hyprland chords means wanting *your* Hyprland chords");
+    assert!(
+        wanted(&config),
+        "wanting Hyprland chords means wanting *your* Hyprland chords"
+    );
     config.hyprland_config = Some(true);
     assert!(wanted(&config));
     let mut config = crate::Config::default_config();
     config.hyprland_config = Some(true);
-    assert!(wanted(&config), "and it can be turned on from a chonkstep posture too");
+    assert!(
+        wanted(&config),
+        "and it can be turned on from a chonkstep posture too"
+    );
 }
 
 /// The read replaces the baked preset rather than merging with it —
@@ -559,7 +1039,11 @@ fn the_live_read_replaces_the_baked_preset() {
     assert!(baked > 0);
     let reading = read(&machine());
     apply(&mut config, Some(&reading));
-    assert_eq!(config.keybindings.len(), reading.keybindings.len(), "replaced, not merged with, the {baked} baked entries");
+    assert_eq!(
+        config.keybindings.len(),
+        reading.keybindings.len(),
+        "replaced, not merged with, the {baked} baked entries"
+    );
     assert!(config.float_policy.is_some());
     assert!(!config.session_env.is_empty());
 }
@@ -589,16 +1073,28 @@ fn chonksteps_own_config_still_wins_over_the_read() {
     config.keymap = crate::preset::Keymap::Omarchy;
     apply(&mut config, Some(&read(&Roots::under(&root))));
     let from_their_file = config.keybindings.clone();
-    assert!(from_their_file.iter().any(|(c, a)| *c == crate::parse_key("super+w").unwrap() && *a == Action::Close));
+    assert!(from_their_file
+        .iter()
+        .any(|(c, a)| *c == crate::parse_key("super+w").unwrap() && *a == Action::Close));
     // Now the layer above: a `[keybindings]` entry, applied the way
     // `parse` applies it.
-    let table: toml::Table = "\"super+w\" = \"overview\"\n\"super+f\" = \"none\"\n".parse().unwrap();
+    let table: toml::Table = "\"super+w\" = \"overview\"\n\"super+f\" = \"none\"\n"
+        .parse()
+        .unwrap();
     crate::apply_keybindings(&mut config.keybindings, &table);
     let action = |spec: &str| {
         let combo = crate::parse_key(spec).unwrap();
-        config.keybindings.iter().find(|(c, _)| *c == combo).map(|(_, a)| a.clone())
+        config
+            .keybindings
+            .iter()
+            .find(|(c, _)| *c == combo)
+            .map(|(_, a)| a.clone())
     };
-    assert_eq!(action("super+w"), Some(Action::Overview), "the file's own key beats the read");
+    assert_eq!(
+        action("super+w"),
+        Some(Action::Overview),
+        "the file's own key beats the read"
+    );
     assert_eq!(action("super+f"), None, "and `none` still unbinds one");
 }
 
@@ -617,15 +1113,24 @@ fn an_edit_to_a_watched_file_is_noticed_once() {
     let mut watch = Watch::new(&roots, &reading);
     let t0 = std::time::Instant::now();
     assert!(!watch.changed(t0), "the first look is a baseline");
-    assert!(!watch.changed(t0 + std::time::Duration::from_secs(2)), "nothing moved");
+    assert!(
+        !watch.changed(t0 + std::time::Duration::from_secs(2)),
+        "nothing moved"
+    );
 
     // The way Omarchy's menu writes: a temporary file renamed over the
     // original, so the inode changes and the mtime may not.
     let staged = root.join(".config/hypr/hyprland.conf.new");
     write(&staged, "bind = SUPER, Q, killactive,\n");
     std::fs::rename(&staged, &entry).unwrap();
-    assert!(watch.changed(t0 + std::time::Duration::from_secs(4)), "a rename-over must be seen");
-    assert!(!watch.changed(t0 + std::time::Duration::from_secs(6)), "reported once");
+    assert!(
+        watch.changed(t0 + std::time::Duration::from_secs(4)),
+        "a rename-over must be seen"
+    );
+    assert!(
+        !watch.changed(t0 + std::time::Duration::from_secs(6)),
+        "reported once"
+    );
 
     let reread = read(&roots);
     assert_eq!(action_for(&reread, "super+w"), None);
@@ -637,15 +1142,27 @@ fn an_edit_to_a_watched_file_is_noticed_once() {
 #[test]
 fn the_watch_rate_limits_itself_to_a_look_a_second() {
     let root = scratch("cadence");
-    write(&root.join(".config/hypr/hyprland.conf"), "bind = SUPER, W, killactive,\n");
+    write(
+        &root.join(".config/hypr/hyprland.conf"),
+        "bind = SUPER, W, killactive,\n",
+    );
     let roots = Roots::under(&root);
     let reading = read(&roots);
     let mut watch = Watch::new(&roots, &reading);
     let t0 = std::time::Instant::now();
     assert!(!watch.changed(t0));
-    write(&root.join(".config/hypr/hyprland.conf"), "bind = SUPER, Q, killactive,\n");
-    assert!(!watch.changed(t0 + std::time::Duration::from_millis(500)), "too soon to look");
-    assert!(watch.changed(t0 + std::time::Duration::from_millis(1000)), "the second look sees it");
+    write(
+        &root.join(".config/hypr/hyprland.conf"),
+        "bind = SUPER, Q, killactive,\n",
+    );
+    assert!(
+        !watch.changed(t0 + std::time::Duration::from_millis(500)),
+        "too soon to look"
+    );
+    assert!(
+        watch.changed(t0 + std::time::Duration::from_millis(1000)),
+        "the second look sees it"
+    );
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -654,14 +1171,23 @@ fn the_watch_rate_limits_itself_to_a_look_a_second() {
 #[test]
 fn a_new_config_file_appearing_is_a_change() {
     let root = scratch("newfile");
-    write(&root.join(".config/hypr/hyprland.conf"), "bind = SUPER, W, killactive,\n");
+    write(
+        &root.join(".config/hypr/hyprland.conf"),
+        "bind = SUPER, W, killactive,\n",
+    );
     let roots = Roots::under(&root);
     let reading = read(&roots);
     let mut watch = Watch::new(&roots, &reading);
     let t0 = std::time::Instant::now();
     assert!(!watch.changed(t0));
-    write(&root.join(".config/hypr/extra.conf"), "bind = SUPER, E, killactive,\n");
-    assert!(watch.changed(t0 + std::time::Duration::from_secs(2)), "the directory's mtime moved");
+    write(
+        &root.join(".config/hypr/extra.conf"),
+        "bind = SUPER, E, killactive,\n",
+    );
+    assert!(
+        watch.changed(t0 + std::time::Duration::from_secs(2)),
+        "the directory's mtime moved"
+    );
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -672,21 +1198,37 @@ fn the_watch_follows_a_freshly_sourced_file() {
     let root = scratch("follow");
     let entry = root.join(".config/hypr/hyprland.conf");
     write(&entry, "bind = SUPER, W, killactive,\n");
-    write(&root.join(".config/hypr/more.conf"), "bind = SUPER, E, killactive,\n");
+    write(
+        &root.join(".config/hypr/more.conf"),
+        "bind = SUPER, E, killactive,\n",
+    );
     let roots = Roots::under(&root);
     let mut watch = Watch::new(&roots, &read(&roots));
     let t0 = std::time::Instant::now();
     assert!(!watch.changed(t0));
 
-    write(&entry, "source = ~/.config/hypr/more.conf\nbind = SUPER, W, killactive,\n");
+    write(
+        &entry,
+        "source = ~/.config/hypr/more.conf\nbind = SUPER, W, killactive,\n",
+    );
     assert!(watch.changed(t0 + std::time::Duration::from_secs(2)));
     let reread = read(&roots);
-    assert_eq!(action_for(&reread, "super+e"), Some(Action::Close), "the sourced file was read");
+    assert_eq!(
+        action_for(&reread, "super+e"),
+        Some(Action::Close),
+        "the sourced file was read"
+    );
     watch.follow(&reread);
 
     // The newly sourced file is now watched in its own right.
-    write(&root.join(".config/hypr/more.conf"), "bind = SUPER, R, killactive,\n");
-    assert!(watch.changed(t0 + std::time::Duration::from_secs(4)), "an edit to the sourced file must now count");
+    write(
+        &root.join(".config/hypr/more.conf"),
+        "bind = SUPER, R, killactive,\n",
+    );
+    assert!(
+        watch.changed(t0 + std::time::Duration::from_secs(4)),
+        "an edit to the sourced file must now count"
+    );
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -694,8 +1236,17 @@ fn the_watch_follows_a_freshly_sourced_file() {
 
 #[test]
 fn every_separator_hyprland_accepts_between_modifiers_is_accepted() {
-    for spelling in ["SUPER SHIFT, RETURN", "SUPER + SHIFT + RETURN", "SUPER_SHIFT RETURN", "super shift return"] {
-        assert_eq!(keys::spec_for(spelling).as_deref(), Ok("super+shift+return"), "{spelling}");
+    for spelling in [
+        "SUPER SHIFT, RETURN",
+        "SUPER + SHIFT + RETURN",
+        "SUPER_SHIFT RETURN",
+        "super shift return",
+    ] {
+        assert_eq!(
+            keys::spec_for(spelling).as_deref(),
+            Ok("super+shift+return"),
+            "{spelling}"
+        );
     }
 }
 
@@ -703,16 +1254,27 @@ fn every_separator_hyprland_accepts_between_modifiers_is_accepted() {
 fn a_keycode_resolves_through_the_layout_the_numbers_were_chosen_against() {
     assert_eq!(keys::spec_for("SUPER + code:10").as_deref(), Ok("super+1"));
     assert_eq!(keys::spec_for("SUPER + code:19").as_deref(), Ok("super+0"));
-    assert_eq!(keys::spec_for("SUPER + code:20").as_deref(), Ok("super+minus"));
-    assert_eq!(keys::spec_for("SUPER + ALT + code:34").as_deref(), Ok("super+alt+bracketleft"));
-    // Omarchy's own `SUPER + SHIFT + code:201`: a keycode with no key
-    // on any standard board behind it.
-    assert_eq!(keys::spec_for("SUPER + SHIFT + code:201"), Err(keys::KeyTrouble::UnknownKeycode(201)));
+    assert_eq!(
+        keys::spec_for("SUPER + code:20").as_deref(),
+        Ok("super+minus")
+    );
+    assert_eq!(
+        keys::spec_for("SUPER + ALT + code:34").as_deref(),
+        Ok("super+alt+bracketleft")
+    );
+    // Omarchy's Apple-keyboard menu position: evdev aliases it to F23.
+    assert_eq!(
+        keys::spec_for("SUPER + SHIFT + code:201").as_deref(),
+        Ok("super+shift+f23")
+    );
 }
 
 #[test]
 fn a_chord_of_nothing_but_modifiers_is_not_a_binding() {
-    assert_eq!(keys::spec_for("SUPER + SHIFT"), Err(keys::KeyTrouble::NoKey));
+    assert_eq!(
+        keys::spec_for("SUPER + SHIFT"),
+        Err(keys::KeyTrouble::NoKey)
+    );
     assert_eq!(keys::spec_for(""), Err(keys::KeyTrouble::NoKey));
     assert_eq!(keys::spec_for("   "), Err(keys::KeyTrouble::NoKey));
 }
@@ -723,7 +1285,10 @@ fn command_names_are_a_function_of_the_argv_and_nothing_else() {
     let b = dispatch::command_name(&["omarchy-menu".into(), "toggle".into(), "apps".into()]);
     assert_eq!(a, b, "the same argv must always name the same command");
     assert!(a.starts_with("hypr:omarchy-menu-toggle-apps"), "{a}");
-    assert_ne!(a, dispatch::command_name(&["omarchy-menu".into(), "toggle".into()]));
+    assert_ne!(
+        a,
+        dispatch::command_name(&["omarchy-menu".into(), "toggle".into()])
+    );
     // Bounded, because a name is a log line and a docs-table row.
     let long = dispatch::command_name(&[(0..500).map(|_| 'x').collect::<String>()]);
     assert!(long.len() <= 64, "{}", long.len());
@@ -731,7 +1296,10 @@ fn command_names_are_a_function_of_the_argv_and_nothing_else() {
     // different names, because the fingerprint is taken over all of it.
     let a_long = dispatch::command_name(&["x".repeat(200) + "a"]);
     let b_long = dispatch::command_name(&["x".repeat(200) + "b"]);
-    assert_ne!(a_long, b_long, "truncation must cost legibility, never uniqueness");
+    assert_ne!(
+        a_long, b_long,
+        "truncation must cost legibility, never uniqueness"
+    );
 }
 
 /// Omarchy's `shell_quote` produces single-quoted arguments that must
@@ -740,7 +1308,11 @@ fn command_names_are_a_function_of_the_argv_and_nothing_else() {
 fn quoted_arguments_survive_the_split() {
     assert_eq!(
         dispatch::split_command("omarchy-launch-or-focus '^obsidian$' 'uwsm-app -- obsidian'"),
-        vec!["omarchy-launch-or-focus", "^obsidian$", "uwsm-app -- obsidian"]
+        vec![
+            "omarchy-launch-or-focus",
+            "^obsidian$",
+            "uwsm-app -- obsidian"
+        ]
     );
     assert_eq!(dispatch::split_command("  "), Vec::<String>::new());
 }
@@ -787,7 +1359,10 @@ fn hostile_input_never_panics_and_always_yields_something() {
         // engine should compile.
         "windowrule = float on, match:class (a+)+$".into(),
         "windowrule = float on, match:class (((((((((((a)))))))))))*[".into(),
-        format!("windowrule = float on, match:class {}", "a{100}{100}{100}".repeat(20)),
+        format!(
+            "windowrule = float on, match:class {}",
+            "a{100}{100}{100}".repeat(20)
+        ),
         // Key specs from nowhere.
         "bind = SUPER, code:4294967295, killactive,".into(),
         "bind = SUPER, code:-1, killactive,".into(),
@@ -810,21 +1385,42 @@ fn hostile_input_never_panics_and_always_yields_something() {
         // A very long line, and a very wide one.
         format!("bind = SUPER, W, exec, {}", "x".repeat(200_000)),
         "a".repeat(500_000),
-        (0..5000).map(|i| format!("bind = SUPER, W, exec, cmd{i}\n")).collect(),
+        (0..5000)
+            .map(|i| format!("bind = SUPER, W, exec, cmd{i}\n"))
+            .collect(),
     ];
     for source in hostile {
         let mut globals = lua::Globals::default();
         let mut out = Vec::new();
-        lua::read(&source, &lua::Facts { path: Vec::new(), home: None, state_home: None }, &mut globals, &mut out);
+        lua::read(
+            &source,
+            &lua::Facts {
+                path: Vec::new(),
+                home: None,
+                state_home: None,
+            },
+            &mut globals,
+            &mut out,
+        );
         let mut vars = BTreeMap::new();
         let mut out2 = Vec::new();
         conf::read(&source, &mut vars, &mut out2);
         // Whatever came out, lowering it must also be total.
         for stream in [out, out2] {
-            let reading = lower(stream, LoadReport { files: Vec::new(), skipped: Vec::new() });
+            let reading = lower(
+                stream,
+                LoadReport {
+                    files: Vec::new(),
+                    skipped: Vec::new(),
+                },
+            );
             // Nothing bound to a chord this desktop cannot express.
             for (combo, _) in &reading.keybindings {
-                assert!(combo.keysym != 0, "bound a null keysym from {:?}", &source[..source.len().min(60)]);
+                assert!(
+                    combo.keysym != 0,
+                    "bound a null keysym from {:?}",
+                    &source[..source.len().min(60)]
+                );
             }
         }
     }
@@ -844,7 +1440,16 @@ fn arbitrary_bytes_are_read_without_panicking() {
         let text = String::from_utf8_lossy(&bytes).into_owned();
         let mut globals = lua::Globals::default();
         let mut out = Vec::new();
-        lua::read(&text, &lua::Facts { path: Vec::new(), home: None, state_home: None }, &mut globals, &mut out);
+        lua::read(
+            &text,
+            &lua::Facts {
+                path: Vec::new(),
+                home: None,
+                state_home: None,
+            },
+            &mut globals,
+            &mut out,
+        );
         let mut vars = BTreeMap::new();
         let mut out2 = Vec::new();
         conf::read(&text, &mut vars, &mut out2);
@@ -858,17 +1463,32 @@ fn arbitrary_bytes_are_read_without_panicking() {
 /// is *almost* valid, which is where parsers break.
 #[test]
 fn every_truncation_of_a_real_file_is_read_without_panicking() {
-    for name in ["machine/omarchy/default/hypr/bindings/tiling.lua", "machine/omarchy/default/hypr/apps/pip.lua"] {
+    for name in [
+        "machine/omarchy/default/hypr/bindings/tiling.lua",
+        "machine/omarchy/default/hypr/apps/pip.lua",
+    ] {
         let text = std::fs::read_to_string(fixtures().join(name)).unwrap();
         let chars: Vec<char> = text.chars().collect();
         for cut in (0..chars.len()).step_by(3) {
             let fragment: String = chars[..cut].iter().collect();
             let mut globals = lua::Globals::default();
             let mut out = Vec::new();
-            lua::read(&fragment, &lua::Facts { path: Vec::new(), home: None, state_home: None }, &mut globals, &mut out);
+            lua::read(
+                &fragment,
+                &lua::Facts {
+                    path: Vec::new(),
+                    home: None,
+                    state_home: None,
+                },
+                &mut globals,
+                &mut out,
+            );
         }
     }
-    for name in ["conf-machine/omarchy/default/hypr/bindings/tiling-v2.conf", "conf-machine/omarchy/default/hypr/apps/system.conf"] {
+    for name in [
+        "conf-machine/omarchy/default/hypr/bindings/tiling-v2.conf",
+        "conf-machine/omarchy/default/hypr/apps/system.conf",
+    ] {
         let text = std::fs::read_to_string(fixtures().join(name)).unwrap();
         let chars: Vec<char> = text.chars().collect();
         for cut in (0..chars.len()).step_by(3) {
@@ -893,10 +1513,21 @@ fn a_condition_that_would_need_a_shell_is_refused_rather_than_run() {
     );
     let mut globals = lua::Globals::default();
     let mut out = Vec::new();
-    lua::read(&source, &lua::Facts { path: Vec::new(), home: None, state_home: None }, &mut globals, &mut out);
+    lua::read(
+        &source,
+        &lua::Facts {
+            path: Vec::new(),
+            home: None,
+            state_home: None,
+        },
+        &mut globals,
+        &mut out,
+    );
     assert!(!marker.exists(), "a config file must never run anything");
     assert!(
-        out.iter().any(|d| matches!(d, Directive::Ignored { detail, .. } if detail.contains("cannot answer"))),
+        out.iter().any(
+            |d| matches!(d, Directive::Ignored { detail, .. } if detail.contains("cannot answer"))
+        ),
         "and the refusal must be visible: {out:?}"
     );
     let _ = std::fs::remove_dir_all(marker.parent().unwrap());
@@ -907,8 +1538,14 @@ fn a_condition_that_would_need_a_shell_is_refused_rather_than_run() {
 #[test]
 fn a_cyclic_include_graph_terminates() {
     let root = scratch("cycle");
-    write(&root.join(".config/hypr/hyprland.conf"), "source = ~/.config/hypr/b.conf\nbind = SUPER, W, killactive,\n");
-    write(&root.join(".config/hypr/b.conf"), "source = ~/.config/hypr/hyprland.conf\nbind = SUPER, E, killactive,\n");
+    write(
+        &root.join(".config/hypr/hyprland.conf"),
+        "source = ~/.config/hypr/b.conf\nbind = SUPER, W, killactive,\n",
+    );
+    write(
+        &root.join(".config/hypr/b.conf"),
+        "source = ~/.config/hypr/hyprland.conf\nbind = SUPER, E, killactive,\n",
+    );
     let reading = read(&Roots::under(&root));
     assert_eq!(action_for(&reading, "super+w"), Some(Action::Close));
     assert_eq!(action_for(&reading, "super+e"), Some(Action::Close));
@@ -916,7 +1553,11 @@ fn a_cyclic_include_graph_terminates() {
     // ...and through a symlink loop, which canonicalization is what
     // actually catches.
     let _ = std::fs::remove_file(root.join(".config/hypr/b.conf"));
-    std::os::unix::fs::symlink(root.join(".config/hypr/hyprland.conf"), root.join(".config/hypr/b.conf")).unwrap();
+    std::os::unix::fs::symlink(
+        root.join(".config/hypr/hyprland.conf"),
+        root.join(".config/hypr/b.conf"),
+    )
+    .unwrap();
     let reading = read(&Roots::under(&root));
     assert_eq!(action_for(&reading, "super+w"), Some(Action::Close));
     let _ = std::fs::remove_dir_all(&root);
@@ -930,10 +1571,17 @@ fn a_cyclic_include_graph_terminates() {
 #[test]
 fn a_module_name_cannot_climb_out_of_the_search_path() {
     assert_eq!(module_relative("../../etc/passwd"), None);
-    assert_eq!(module_relative("a..b"), None, "an empty path segment is not a module name");
+    assert_eq!(
+        module_relative("a..b"),
+        None,
+        "an empty path segment is not a module name"
+    );
     assert_eq!(module_relative("a/b"), None);
     assert_eq!(module_relative(""), None);
-    assert_eq!(module_relative("default.hypr.omarchy"), Some(PathBuf::from("default/hypr/omarchy")));
+    assert_eq!(
+        module_relative("default.hypr.omarchy"),
+        Some(PathBuf::from("default/hypr/omarchy"))
+    );
 }
 
 /// A file bigger than the per-file budget is skipped with a reason
@@ -942,14 +1590,22 @@ fn a_module_name_cannot_climb_out_of_the_search_path() {
 fn an_enormous_file_is_skipped_with_a_reason() {
     let root = scratch("huge");
     let entry = root.join(".config/hypr/hyprland.conf");
-    write(&entry, &"# comment\n".repeat((MAX_FILE_BYTES as usize / 10) + 100));
+    write(
+        &entry,
+        &"# comment\n".repeat((MAX_FILE_BYTES as usize / 10) + 100),
+    );
     let reading = read(&Roots::under(&root));
     assert!(reading.files.is_empty());
-    assert!(reading.skipped.iter().any(|s| s.why.contains("larger than")), "{:?}", reading.skipped);
+    assert!(
+        reading
+            .skipped
+            .iter()
+            .any(|s| s.why.contains("larger than")),
+        "{:?}",
+        reading.skipped
+    );
     let _ = std::fs::remove_dir_all(&root);
 }
-
-
 
 /// A maintainer's-eye summary of what this machine's configuration
 /// produces. Not an assertion — the numbers move whenever Omarchy
@@ -961,8 +1617,22 @@ fn debug_summary() {
     let reading = read(&machine());
     println!("files read      {}", reading.files.len());
     println!("bindings        {}", reading.keybindings.len());
-    println!("  verbs         {}", reading.keybindings.iter().filter(|(_, a)| !matches!(a, Action::Run(_))).count());
-    println!("  run           {}", reading.keybindings.iter().filter(|(_, a)| matches!(a, Action::Run(_))).count());
+    println!(
+        "  verbs         {}",
+        reading
+            .keybindings
+            .iter()
+            .filter(|(_, a)| !matches!(a, Action::Run(_)))
+            .count()
+    );
+    println!(
+        "  run           {}",
+        reading
+            .keybindings
+            .iter()
+            .filter(|(_, a)| matches!(a, Action::Run(_)))
+            .count()
+    );
     println!("commands        {}", reading.commands.len());
     println!("env             {}", reading.env.len());
     println!("autostart       {}", reading.autostart.len());
@@ -1013,19 +1683,34 @@ fn debug_summary() {
 fn the_documented_switch_is_the_real_one() {
     const REFERENCE: &str = include_str!("../../../../docs/config.example.toml");
     const GUIDE: &str = include_str!("../../../../docs/hyprland-config.md");
-    assert!(REFERENCE.contains("#hyprland_config = false"), "the reference must show the key, commented like its neighbours");
+    assert!(
+        REFERENCE.contains("#hyprland_config = false"),
+        "the reference must show the key, commented like its neighbours"
+    );
     for spelling in ["hyprland_config = false", "hyprland_config = true"] {
-        assert!(GUIDE.contains(spelling), "docs/hyprland-config.md must document `{spelling}`");
+        assert!(
+            GUIDE.contains(spelling),
+            "docs/hyprland-config.md must document `{spelling}`"
+        );
     }
     // Both spellings parse, and each does what the documents claim.
     let off = crate::parse("desktop = \"omarchy\"\nhyprland_config = false\n").expect("documented");
-    assert!(!wanted(&off), "`hyprland_config = false` must be the escape hatch from any posture");
+    assert!(
+        !wanted(&off),
+        "`hyprland_config = false` must be the escape hatch from any posture"
+    );
     let on = crate::parse("hyprland_config = true\n").expect("documented");
-    assert!(wanted(&on), "`hyprland_config = true` must work on a plain chonkstep desk");
+    assert!(
+        wanted(&on),
+        "`hyprland_config = true` must work on a plain chonkstep desk"
+    );
     // ...and the posture-decides default the documents lead with.
     let posture = crate::parse("desktop = \"omarchy\"").expect("the one-liner");
     assert!(wanted(&posture));
-    assert!(!wanted(&crate::parse("").expect("empty")), "a plain chonkstep desk reads nobody else's files");
+    assert!(
+        !wanted(&crate::parse("").expect("empty")),
+        "a plain chonkstep desk reads nobody else's files"
+    );
 }
 
 /// Every `Unbound` reason this reader can hand a user has to be one
@@ -1070,7 +1755,7 @@ fn explained_in_prose(guide: &str, reason: crate::preset::Unbound) -> bool {
 /// reader actually produces from it.
 ///
 /// `docs/omarchy-mode.md` tells a reader what they gain by having a
-/// real Omarchy configuration rather than the baked table — "135
+/// real Omarchy configuration rather than the baked table — "139
 /// bindings over 101 commands, against the baked table's 113 over 77",
 /// and 38 float rules where the hardcoded one had a single prefix.
 /// Those numbers are the argument for the whole module, and a number
@@ -1081,22 +1766,38 @@ fn explained_in_prose(guide: &str, reason: crate::preset::Unbound) -> bool {
 fn the_numbers_the_documents_quote_are_the_numbers_this_machine_produces() {
     const MODE: &str = include_str!("../../../../docs/omarchy-mode.md");
     let reading = read(&machine());
-    assert_eq!(reading.keybindings.len(), 135, "bindings read from the captured machine");
-    assert_eq!(reading.commands.len(), 101, "commands declared for them");
-    assert_eq!(reading.float_rules.len(), 38, "float rules resolved through Omarchy's tags");
+    assert_eq!(
+        reading.keybindings.len(),
+        139,
+        "bindings read from the captured machine"
+    );
+    assert_eq!(
+        reading.commands.len(),
+        113,
+        "commands declared for global and scoped bindings"
+    );
+    assert_eq!(
+        reading.float_rules.len(),
+        45,
+        "window behaviors resolved through Omarchy's tags"
+    );
     // The skipped count is quoted too, in the guide's sample log line.
     // It is by far the largest number this module reports, and a reader
     // who has just been told "ignore loudly" needs to see that a big
     // number there is the normal case rather than a fault.
-    assert_eq!(reading.skipped.len(), 148, "directives this desktop has its own answer for");
+    assert_eq!(
+        reading.skipped.len(),
+        188,
+        "directives this desktop has its own answer for"
+    );
     const GUIDE: &str = include_str!("../../../../docs/hyprland-config.md");
     assert!(
-        MODE.contains("135\nbindings over 101 commands") || MODE.contains("135 bindings over 101 commands"),
-        "docs/omarchy-mode.md no longer quotes the 135 bindings over 101 commands this machine produces"
+        MODE.contains("139\nbindings over 113 commands") || MODE.contains("139 bindings over 113 commands"),
+        "docs/omarchy-mode.md no longer quotes the 139 bindings over 113 commands this machine produces"
     );
     assert!(
-        GUIDE.contains("files=42 bindings=135 commands=101 env=9 autostart=6")
-            && GUIDE.contains("float_rules=38 monitors=1 skipped=148"),
+        GUIDE.contains("files=42 bindings=139 commands=113 env=8 autostart=4")
+            && GUIDE.contains("float_rules=45 monitors=1 skipped=188"),
         "the guide's sample log line no longer matches what this machine reports"
     );
 }

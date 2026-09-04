@@ -2112,11 +2112,10 @@ mod tests {
     /// eventually disconnects the peer. None of that may take
     /// measurable time.
     ///
-    /// The bound is one whole frame (16ms, the housekeeping interval)
-    /// for a thousand servicing passes carrying a thousand pings —
-    /// loose enough that a debug build on a loaded runner cannot fail
-    /// it by accident, and still tighter than the failure it guards
-    /// against by more than two orders of magnitude.
+    /// The bound is 100ms for a thousand servicing passes carrying a
+    /// thousand pings. That is 100µs per pass: loose enough for a debug
+    /// build sharing a loaded package runner, but still more than an order
+    /// of magnitude below the multi-second blocking failure this guards.
     #[test]
     fn a_dockapp_that_never_reads_costs_the_servicing_pass_nothing() {
         let (ours, _peer) = seqpacket_pair();
@@ -2140,7 +2139,7 @@ mod tests {
         }
         let elapsed = start.elapsed();
         assert!(
-            elapsed < Duration::from_millis(16),
+            elapsed < Duration::from_millis(100),
             "a thousand servicing passes against a dockapp that never reads took {elapsed:?}; \
              the shell must never block on a dockapp"
         );

@@ -13,21 +13,26 @@
 use std::collections::HashMap;
 
 use wm_config::Action;
-use wm_core::{Backend, BackendEvent, ClientFlags, ClientId, KeyCombo, Lifecycle, MaximizeDirections, MonitorInfo, MouseButton, Notification, ScrollDelta, WindowManager};
+use wm_core::{
+    Backend, BackendEvent, ClientFlags, ClientId, KeyCombo, Lifecycle, MaximizeDirections, MonitorInfo, MouseButton,
+    Notification, ScrollDelta, WindowManager,
+};
 use wm_theme::{FontState, RasterThemeEngine, Theme};
 use wm_theme_api::{DecorationBuffer, Point, PopupHost, Rect, Size};
 
 use crate::apps::{self, AppEntry};
-use crate::desktop::{Desktop, EdgeReservation, IconDragResult, MenuAction, RootMenuAction, WindowMenuAction, WindowMenuContext};
 use crate::control::{self, ControlSocket};
+use crate::desktop::{
+    Desktop, EdgeReservation, IconDragResult, MenuAction, RootMenuAction, WindowMenuAction, WindowMenuContext,
+};
 use crate::dockapp::Farewell;
-use chonk_dock_proto::wire::PanelCloseReason;
 use crate::launchdock::{LaunchDock, LaunchDockAction};
 use crate::overview::{OverviewHit, OverviewItem};
 use crate::session_layout::{RelaunchPlan, SessionLayout, WindowRecord};
 use crate::startup::SessionState;
 use crate::widgets::DockInput;
 use crate::{spawn, theme_select, wallpaper};
+use chonk_dock_proto::wire::PanelCloseReason;
 
 /// What the binary's event loop must do after handing an event to the
 /// shell. The shell never exits or re-execs the process itself — those
@@ -135,10 +140,8 @@ fn terminal_args(theme: &Theme, font_px: f32, screen: Size, client_scale: f32) -
     let ui_scale = theme.titlebar.font.size / 12.0;
     let px = (font_px * ui_scale * (client_scale / ui_scale.max(0.01))).round().max(8.0) as u32;
     let divisor = (ui_scale / client_scale.max(0.01)).max(1.0);
-    let logical_screen = Size::new(
-        ((screen.w as f32 / divisor) as u32).max(1),
-        ((screen.h as f32 / divisor) as u32).max(1),
-    );
+    let logical_screen =
+        Size::new(((screen.w as f32 / divisor) as u32).max(1), ((screen.h as f32 / divisor) as u32).max(1));
     let size_args = if standard_cells_fit(px as f32 / client_scale.max(0.01), theme, logical_screen) {
         let (cols, rows) = TERMINAL_STANDARD_CELLS;
         ("--window-size-chars".to_string(), format!("{cols}x{rows}"))
@@ -212,11 +215,8 @@ fn push_palette_args(args: &mut Vec<String>, section: &str, palette: &wm_theme::
     for (index, color) in palette.ansi.iter().enumerate() {
         // 0-7 are the regular ANSI slots, 8-15 the bright ones; the
         // theme stores them as one flat 16-slot array.
-        let key = if index < 8 {
-            format!("{section}.regular{index}")
-        } else {
-            format!("{section}.bright{}", index - 8)
-        };
+        let key =
+            if index < 8 { format!("{section}.regular{index}") } else { format!("{section}.bright{}", index - 8) };
         args.push("--override".to_string());
         args.push(format!("{key}={}", hex(*color)));
     }
@@ -236,9 +236,8 @@ fn terminal_screen<B: Backend + PopupHost<PopupId = B::ShellId>>(shell: &Shell<B
 fn standard_cells_fit(font_px: f32, theme: &Theme, screen: Size) -> bool {
     let (cols, rows) = TERMINAL_STANDARD_CELLS;
     let (cw, ch) = TERMINAL_CELL_ESTIMATE;
-    let chrome_h = f32::from(theme.titlebar.height)
-        + f32::from(theme.resize_bar.height)
-        + 2.0 * f32::from(theme.border.width);
+    let chrome_h =
+        f32::from(theme.titlebar.height) + f32::from(theme.resize_bar.height) + 2.0 * f32::from(theme.border.width);
     let need_w = cols as f32 * font_px * cw;
     let need_h = rows as f32 * font_px * ch + chrome_h;
     need_w <= screen.w as f32 && need_h <= screen.h as f32
@@ -254,12 +253,9 @@ fn standard_cells_fit(font_px: f32, theme: &Theme, screen: Size) -> bool {
 /// frame overhangs the bottom of the head by exactly one titlebar,
 /// which is the sort of thing nobody notices until the screen is small.
 fn terminal_window_size(theme: &Theme, screen: Size) -> (u32, u32) {
-    let chrome_h = u32::from(theme.titlebar.height)
-        + u32::from(theme.resize_bar.height)
-        + 2 * u32::from(theme.border.width);
-    let width = ((screen.w as f32 * TERMINAL_SCREEN_FRACTION.0) as u32)
-        .max(TERMINAL_MIN_SIZE.0)
-        .min(screen.w.max(1));
+    let chrome_h =
+        u32::from(theme.titlebar.height) + u32::from(theme.resize_bar.height) + 2 * u32::from(theme.border.width);
+    let width = ((screen.w as f32 * TERMINAL_SCREEN_FRACTION.0) as u32).max(TERMINAL_MIN_SIZE.0).min(screen.w.max(1));
     let height = ((screen.h as f32 * TERMINAL_SCREEN_FRACTION.1) as u32)
         .max(TERMINAL_MIN_SIZE.1)
         .min(screen.h.saturating_sub(chrome_h).max(1));
@@ -318,11 +314,7 @@ fn spawn_terminal(
 /// as the doc above says, and an appearance switch must leave it alone
 /// in the most literal sense. Always `None` for that reason.
 #[must_use]
-fn spawn_configured_terminal(
-    argv: &[String],
-    command: &[String],
-    scale: f32,
-) -> Option<spawn::SpawnedChild> {
+fn spawn_configured_terminal(argv: &[String], command: &[String], scale: f32) -> Option<spawn::SpawnedChild> {
     let Some((program, args)) = argv.split_first() else {
         tracing::warn!("configured terminal has an empty argument list; not launching");
         return None;
@@ -508,7 +500,11 @@ fn launch_app(
     // telling to draw at 2x.
     let stack = spawn::current_display_stack();
     let scale_fixups = matches!(stack, spawn::DisplayStack::X11);
-    if base.contains("chrom") || base.contains("chrome") || base.starts_with("microsoft-edge") || base.starts_with("brave") {
+    if base.contains("chrom")
+        || base.contains("chrome")
+        || base.starts_with("microsoft-edge")
+        || base.starts_with("brave")
+    {
         if scale_fixups {
             argv.extend(spawn::chromium_scale_args(scale));
         }
@@ -516,7 +512,12 @@ fn launch_app(
         argv.extend(spawn::chromium_platform_args(stack));
     }
     let arg_refs: Vec<&str> = argv.iter().map(String::as_str).collect();
-    spawn::spawn_detached_with_env(program, &arg_refs, &launch_env(&theme.id, crate::appearance::load_published(), scale), &[]);
+    spawn::spawn_detached_with_env(
+        program,
+        &arg_refs,
+        &launch_env(&theme.id, crate::appearance::load_published(), scale),
+        &[],
+    );
     None
 }
 
@@ -565,7 +566,11 @@ fn omarchy_menu_for(state: &SessionState) -> Option<crate::omarchy_menu::Omarchy
 /// have the live value (the desktop, which is wearing it) pass `Some`
 /// while the ones that would have to go and look pass whatever the
 /// published file says.
-pub(crate) fn launch_env(theme_id: &str, appearance: Option<wm_theme::Appearance>, scale: f32) -> Vec<(String, String)> {
+pub(crate) fn launch_env(
+    theme_id: &str,
+    appearance: Option<wm_theme::Appearance>,
+    scale: f32,
+) -> Vec<(String, String)> {
     let mut env = vec![
         ("CHONKSTEP_THEME".to_string(), theme_id.to_string()),
         // Four decimals, exactly as the dockapp launch writes it — one
@@ -597,7 +602,12 @@ fn run_omarchy_command(command: &str, theme: &Theme) {
     let scale = theme.titlebar.font.size / 12.0;
     let (program, args) = crate::omarchy_menu::action_argv(command);
     tracing::info!(command, "running omarchy menu command");
-    spawn::spawn_detached_with_env(program, &args, &launch_env(&theme.id, crate::appearance::load_published(), scale), &[]);
+    spawn::spawn_detached_with_env(
+        program,
+        &args,
+        &launch_env(&theme.id, crate::appearance::load_published(), scale),
+        &[],
+    );
 }
 
 /// Starts Omarchy's shell if this session is one that should host it
@@ -606,19 +616,30 @@ fn run_omarchy_command(command: &str, theme: &Theme) {
 /// desktop's launch environment — running the launcher by the path the
 /// verdict resolved. Every outcome is logged once, so the session log
 /// answers "why is there no bar".
-fn host_omarchy_shell(verdict: &crate::omarchy_shell::Verdict, theme_id: &str, appearance: wm_theme::Appearance, scale: f32) {
+fn host_omarchy_shell(
+    verdict: &crate::omarchy_shell::Verdict,
+    theme_id: &str,
+    appearance: wm_theme::Appearance,
+    scale: f32,
+) {
     use crate::omarchy_shell::{self, Verdict};
     match verdict {
         Verdict::Launch(paths) => {
             let command = omarchy_shell::launch_command(paths);
             let (program, args) = crate::omarchy_menu::action_argv(&command);
             match spawn::spawn_detached_with_env(program, &args, &launch_env(theme_id, Some(appearance), scale), &[]) {
-                Some(pid) => tracing::info!(pid, launcher = %paths.launcher.display(), "hosting Omarchy's shell"),
-                None => tracing::warn!(launcher = %paths.launcher.display(), "Omarchy's shell launcher failed to start"),
+                Some(pid) => {
+                    tracing::info!(pid, launcher = %paths.launcher.display(), "hosting Omarchy's shell")
+                }
+                None => {
+                    tracing::warn!(launcher = %paths.launcher.display(), "Omarchy's shell launcher failed to start")
+                }
             }
         }
         Verdict::Disabled => tracing::info!("not hosting Omarchy's shell: omarchy_shell = false"),
-        Verdict::NotWayland => tracing::debug!("not hosting Omarchy's shell: not a Wayland session"),
+        Verdict::NotWayland => {
+            tracing::debug!("not hosting Omarchy's shell: not a Wayland session")
+        }
         Verdict::NotInstalled => tracing::info!("no Omarchy shell installed; nothing to host"),
     }
 }
@@ -671,6 +692,41 @@ fn grab_delta(previous: &[KeyCombo], next: &[(KeyCombo, Action)]) -> (Vec<KeyCom
 
 fn build_keymap(bindings: &[(KeyCombo, Action)]) -> HashMap<KeyCombo, Action> {
     bindings.iter().cloned().collect()
+}
+
+fn bindings_for_grabs(state: &SessionState) -> Vec<(KeyCombo, Action)> {
+    let mut bindings = state.keybindings.clone();
+    for binding in &state.bindings {
+        if !bindings.iter().any(|(combo, _)| *combo == binding.combo) {
+            bindings.push((binding.combo, binding.action.clone()));
+        }
+    }
+    bindings
+}
+
+fn apply_binding_behaviors<B: Backend>(backend: &mut B, previous: &[wm_config::Binding], next: &[wm_config::Binding]) {
+    for binding in previous {
+        if binding.release {
+            backend.set_key_release(binding.combo, false);
+        }
+        if binding.locked {
+            backend.set_key_locked(binding.combo, false);
+        }
+        if binding.repeating {
+            backend.set_key_repeating(binding.combo, false);
+        }
+    }
+    for binding in next {
+        if binding.release {
+            backend.set_key_release(binding.combo, true);
+        }
+        if binding.locked {
+            backend.set_key_locked(binding.combo, true);
+        }
+        if binding.repeating {
+            backend.set_key_repeating(binding.combo, true);
+        }
+    }
 }
 
 // The keysyms the modal Overview owns, spelled as the X11 values both
@@ -816,6 +872,14 @@ fn primary_rect(monitors: &[MonitorInfo], screen: Size) -> Rect {
 /// loop drives. The fields are exactly the state the original event
 /// loop threaded between its handler functions; the methods are those
 /// handlers, verbatim in behavior.
+/// Result of resolving one intercepted key press. `Consumed` is used
+/// by modal shell UI that owns a key without running a configurable
+/// action, so the event does not leak through to the focused client.
+pub enum KeyResolution {
+    Action(Action),
+    Consumed,
+}
+
 pub struct Shell<B: Backend + PopupHost<PopupId = B::ShellId>> {
     desktop: Desktop<B>,
     launchdock: LaunchDock<B>,
@@ -847,6 +911,10 @@ pub struct Shell<B: Backend + PopupHost<PopupId = B::ShellId>> {
     /// separately is two chances to leak a grab.
     grabbed: Vec<KeyCombo>,
     keymap: HashMap<KeyCombo, Action>,
+    release_keymap: HashMap<KeyCombo, Action>,
+    layer_keymap: HashMap<KeyCombo, Action>,
+    active_layer_namespaces: std::collections::BTreeMap<String, usize>,
+    scoped_grabbed: Vec<KeyCombo>,
     /// The session-layout store: records the live window arrangement
     /// (debounced, from `tick`) and holds the previous session's
     /// records while a restore is matching mapped windows against
@@ -888,13 +956,14 @@ pub struct Shell<B: Backend + PopupHost<PopupId = B::ShellId>> {
     /// (`docs/control-socket.md`). Serviced in [`Shell::tick`]; costs
     /// nothing while no bar is connected.
     control: ControlSocket,
-    /// Set by [`Shell::keymap_action`] when the panel-dismiss Escape
+    /// Set by [`Shell::keymap_action`] when a transient-dismiss Escape
     /// lands, consumed by [`Shell::tick`]. Parked rather than acted on
     /// inline because `keymap_action` has no `WindowManager` to close
     /// the panel with — the same two-phase shape the Overview's parked
     /// combo uses, and `tick` runs later in the very same loop
     /// iteration, so the dismissal is never a frame behind.
-    panel_escape: bool,
+    transient_escape: bool,
+    config_reloaded: bool,
     /// Notices Omarchy switching its theme underneath a session that
     /// follows it (`SessionState::following`); asked once a second from
     /// [`Shell::tick`] while following — and while an adoption is
@@ -974,7 +1043,8 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         // the one `FontSystem` this session ever builds. They used to
         // construct their own, which cost two more full font scans at
         // boot for databases identical to the one already in hand.
-        let mut desktop = Desktop::new(backend, screen, primary, scale, &theme, state.appearance, apps.clone(), fonts.clone());
+        let mut desktop =
+            Desktop::new(backend, screen, primary, scale, &theme, state.appearance, apps.clone(), fonts.clone());
         desktop.set_omarchy_menu(omarchy_menu_for(state));
         // The control socket, bound here — after the dock socket it
         // sits beside, and before the first process meant to see it
@@ -994,7 +1064,8 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         // It is handed the *primary's* size rather than the screen's,
         // so the strip's height clamp is measured against the head it
         // sits on rather than against every head at once.
-        let launchdock = LaunchDock::new(backend, &theme, primary, crate::desktop::tile_px(scale), &apps, fonts.clone());
+        let launchdock =
+            LaunchDock::new(backend, &theme, primary, crate::desktop::tile_px(scale), &apps, fonts.clone());
 
         // Session-layout restore, opt-in and only for a genuinely new
         // session: a hot restart on the X11 stack keeps every client
@@ -1011,8 +1082,12 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         let mut terminals = Vec::new();
         for plan in relaunch {
             let terminal = match plan {
-                RelaunchPlan::Terminal => spawn_terminal(state.terminal.as_deref(), &theme, state.terminal_font_px, primary.size),
-                RelaunchPlan::App(entry) => launch_app(state.terminal.as_deref(), &entry, &theme, state.terminal_font_px, primary.size),
+                RelaunchPlan::Terminal => {
+                    spawn_terminal(state.terminal.as_deref(), &theme, state.terminal_font_px, primary.size)
+                }
+                RelaunchPlan::App(entry) => {
+                    launch_app(state.terminal.as_deref(), &entry, &theme, state.terminal_font_px, primary.size)
+                }
             };
             terminals.extend(terminal);
         }
@@ -1046,7 +1121,8 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         // its surface arrives a few hundred milliseconds later.
         let verdict = crate::omarchy_shell::decide(state.omarchy_shell);
         let hosted = matches!(verdict, crate::omarchy_shell::Verdict::Launch(_));
-        desktop.set_omarchy_bar(backend, hosted.then(|| crate::omarchy_shell::BarVisibility::resolve(state.omarchy_bar)));
+        desktop
+            .set_omarchy_bar(backend, hosted.then(|| crate::omarchy_shell::BarVisibility::resolve(state.omarchy_bar)));
         // And this desk's own column, beside the guest's bar and for
         // the same reason: settled before the first frame, so a session
         // configured (or remembered) dockless never shows the Dock at
@@ -1069,16 +1145,27 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         // uses, from an empty starting set: one implementation, so a
         // fresh session and a reloaded one cannot end up holding
         // different grabs for the same config file.
-        let (_, to_grab) = grab_delta(&[], &state.keybindings);
+        let grab_bindings = bindings_for_grabs(state);
+        let (_, to_grab) = grab_delta(&[], &grab_bindings);
         for combo in &to_grab {
             backend.grab_key(*combo);
         }
+        apply_binding_behaviors(backend, &[], &state.bindings);
 
         Self {
             desktop,
             launchdock,
             apps,
             keymap: build_keymap(&state.keybindings),
+            release_keymap: state
+                .bindings
+                .iter()
+                .filter(|binding| binding.release)
+                .map(|binding| (binding.combo, binding.action.clone()))
+                .collect(),
+            layer_keymap: HashMap::new(),
+            active_layer_namespaces: std::collections::BTreeMap::new(),
+            scoped_grabbed: Vec::new(),
             overview_key: None,
             grabbed: to_grab,
             layout,
@@ -1088,7 +1175,8 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
             fonts,
             pointer_root: Point::new(0, 0),
             control,
-            panel_escape: false,
+            transient_escape: false,
+            config_reloaded: false,
             omarchy: crate::omarchy_follow::Watch::new(),
             omarchy_adoption_armed: None,
             // Armed only for a session that actually reads somebody
@@ -1151,7 +1239,15 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         // the user is trying to fix.
         wm.refresh_all_client_chrome();
         self.keymap = build_keymap(&next.keybindings);
-        let (to_ungrab, to_grab) = grab_delta(&self.grabbed, &next.keybindings);
+        self.release_keymap = next
+            .bindings
+            .iter()
+            .filter(|binding| binding.release)
+            .map(|binding| (binding.combo, binding.action.clone()))
+            .collect();
+        let grab_bindings = bindings_for_grabs(&next);
+        let (to_ungrab, to_grab) = grab_delta(&self.grabbed, &grab_bindings);
+        apply_binding_behaviors(wm.backend_mut(), &self.state.bindings, &next.bindings);
         for combo in &to_ungrab {
             wm.ungrab_key(*combo);
         }
@@ -1160,6 +1256,7 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         }
         self.grabbed.retain(|combo| !to_ungrab.contains(combo));
         self.grabbed.extend(to_grab);
+        self.rebuild_layer_keymap(wm.backend_mut(), &next.layer_bindings);
         // The Omarchy submenu is policy too: re-resolved from the key
         // on every pass, which also re-reads the definition files —
         // a reload is the user's way of saying "look again".
@@ -1214,12 +1311,8 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         // 4. The shell's own chrome. Icon-tile thumbnails are gathered
         //    before the backend is borrowed mutably — see
         //    `Desktop::icon_clients`.
-        let previews: Vec<(ClientId, Option<DecorationBuffer>)> = self
-            .desktop
-            .icon_clients()
-            .into_iter()
-            .map(|id| (id, wm.client_preview(id)))
-            .collect();
+        let previews: Vec<(ClientId, Option<DecorationBuffer>)> =
+            self.desktop.icon_clients().into_iter().map(|id| (id, wm.client_preview(id))).collect();
         let tile = crate::desktop::tile_px(self.state.scale);
         self.desktop.relayout(wm.backend_mut(), &self.theme, &previews);
         self.launchdock.restyle(wm.backend_mut(), &self.theme, tile);
@@ -1251,6 +1344,17 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
     /// by different rules.
     fn reresolve(&mut self, wm: &mut WindowManager<B>) {
         self.apply_session_state(wm, SessionState::resolve(&wm_config::load()));
+    }
+
+    /// Re-read the complete configuration and remember that IPC
+    /// clients need a `configreloaded` event after the apply settles.
+    pub fn reload_config(&mut self, wm: &mut WindowManager<B>) {
+        self.reresolve(wm);
+        self.config_reloaded = true;
+    }
+
+    pub fn take_config_reloaded(&mut self) -> bool {
+        std::mem::take(&mut self.config_reloaded)
     }
 
     /// Moves the session to the other side of the light/dark axis (or
@@ -1329,7 +1433,11 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
             terminal.signal(signal);
         }
         if !self.terminals.is_empty() {
-            tracing::info!(count = self.terminals.len(), appearance = self.state.appearance.name(), "retinted running terminals");
+            tracing::info!(
+                count = self.terminals.len(),
+                appearance = self.state.appearance.name(),
+                "retinted running terminals"
+            );
         }
     }
 
@@ -1365,11 +1473,8 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
     /// screen on such a backend.
     pub fn apply_workareas(&self, wm: &mut WindowManager<B>) {
         let monitors: Vec<Rect> = wm.monitors().into_iter().map(|m| m.geometry).collect();
-        let areas = if monitors.is_empty() {
-            vec![self.desktop.primary_workarea()]
-        } else {
-            self.desktop.workareas(&monitors)
-        };
+        let areas =
+            if monitors.is_empty() { vec![self.desktop.primary_workarea()] } else { self.desktop.workareas(&monitors) };
         wm.set_workareas(areas);
     }
 
@@ -1427,26 +1532,70 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
     /// moment for the miss rule above to serve — the Overview declines
     /// to open during one (see `run_action`) and its grab intercepts
     /// the keys that would start one.
-    pub fn keymap_action(&mut self, combo: &KeyCombo) -> Option<Action> {
+    pub fn keymap_action(&mut self, combo: &KeyCombo) -> Option<KeyResolution> {
         if self.desktop.overview_visible() {
             self.overview_key = Some(*combo);
-            return Some(Action::Overview);
+            return Some(KeyResolution::Action(Action::Overview));
         }
-        // The instrument panel's Escape. The key is only grabbed while
-        // a panel is up (`Desktop::set_panel_key_grab`), so this arm is
-        // unreachable otherwise; the dismissal itself is parked for
-        // `tick`, which runs later in this same loop iteration and has
-        // the `WindowManager` this method does not. The combo still
-        // answers `None` — Escape is bound to nothing in the keymap,
-        // and swallowing the flow-through would break the rule the
-        // switcher relies on.
-        if self.desktop.instrument_panel_visible()
+        // Escape belongs to the open transient before it belongs to a
+        // configured binding or the focused client. The shared grab is
+        // held only while a menu or instrument panel is visible, and
+        // `Consumed` makes that ownership explicit to both event loops.
+        if (self.desktop.instrument_panel_visible() || self.desktop.menu_visible())
             && combo.modifiers.is_empty()
             && combo.keysym == crate::desktop::PANEL_DISMISS_KEYSYM
         {
-            self.panel_escape = true;
+            self.transient_escape = true;
+            return Some(KeyResolution::Consumed);
         }
-        self.keymap.get(combo).cloned()
+        self.layer_keymap.get(combo).or_else(|| self.keymap.get(combo)).cloned().map(KeyResolution::Action)
+    }
+
+    /// Install or remove the bindings scoped to a live layer-shell
+    /// namespace. A namespace may have one surface per monitor, so the
+    /// count—not a boolean—owns the lifetime.
+    pub fn set_layer_namespace_active(&mut self, backend: &mut B, namespace: &str, active: bool) {
+        if active {
+            *self.active_layer_namespaces.entry(namespace.to_string()).or_default() += 1;
+        } else if let Some(count) = self.active_layer_namespaces.get_mut(namespace) {
+            *count = count.saturating_sub(1);
+            if *count == 0 {
+                self.active_layer_namespaces.remove(namespace);
+            }
+        }
+        let definitions = self.state.layer_bindings.clone();
+        self.rebuild_layer_keymap(backend, &definitions);
+    }
+
+    fn rebuild_layer_keymap(
+        &mut self,
+        backend: &mut B,
+        definitions: &std::collections::BTreeMap<String, Vec<wm_config::Binding>>,
+    ) {
+        let mut keymap = HashMap::new();
+        for namespace in self.active_layer_namespaces.keys() {
+            if let Some(bindings) = definitions.get(namespace) {
+                for binding in bindings.iter().filter(|binding| !binding.release) {
+                    keymap.insert(binding.combo, binding.action.clone());
+                }
+            }
+        }
+        let mut wanted: Vec<KeyCombo> = keymap.keys().copied().filter(|combo| !self.grabbed.contains(combo)).collect();
+        wanted.sort_by_key(|combo| (combo.keysym, combo.modifiers.bits()));
+        wanted.dedup();
+        for combo in self.scoped_grabbed.iter().filter(|combo| !wanted.contains(combo) && !self.grabbed.contains(combo)) {
+            backend.ungrab_key(*combo);
+        }
+        for combo in wanted.iter().filter(|combo| !self.scoped_grabbed.contains(combo)) {
+            backend.grab_key(*combo);
+        }
+        self.scoped_grabbed = wanted;
+        self.layer_keymap = keymap;
+    }
+
+    /// Resolves the release half of a `bindr`/`release = true` pair.
+    pub fn keymap_release_action(&self, combo: &KeyCombo) -> Option<Action> {
+        self.release_keymap.get(combo).cloned()
     }
 
     /// Runs one configured keybinding action (the binary already
@@ -1462,7 +1611,12 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
     pub fn run_action(&mut self, wm: &mut WindowManager<B>, action: &Action) -> ShellOutcome {
         match action {
             Action::SpawnTerminal => {
-                let terminal = spawn_terminal(self.state.terminal.as_deref(), &self.theme, self.state.terminal_font_px, terminal_screen(self));
+                let terminal = spawn_terminal(
+                    self.state.terminal.as_deref(),
+                    &self.theme,
+                    self.state.terminal_font_px,
+                    terminal_screen(self),
+                );
                 self.terminals.extend(terminal);
             }
             Action::Close => {
@@ -1631,8 +1785,7 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         let mut items: Vec<OverviewItem<B>> = wm
             .iter_clients()
             .filter(|(_, client)| {
-                client.workspace == current
-                    && matches!(client.lifecycle, Lifecycle::Normal | Lifecycle::Miniaturized)
+                client.workspace == current && matches!(client.lifecycle, Lifecycle::Normal | Lifecycle::Miniaturized)
             })
             .map(|(id, client)| OverviewItem {
                 client: id,
@@ -1650,10 +1803,8 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         for item in &mut items {
             item.preview = wm.client_preview(item.client);
         }
-        let selected = wm
-            .focused_client()
-            .and_then(|focused| items.iter().position(|item| item.client == focused))
-            .unwrap_or(0);
+        let selected =
+            wm.focused_client().and_then(|focused| items.iter().position(|item| item.client == focused)).unwrap_or(0);
         let workspace = (current, wm.workspace_count());
         self.desktop.show_overview(wm.backend_mut(), &self.theme, items, workspace, selected);
     }
@@ -1697,7 +1848,13 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
     /// plate), releasing over the same card commits — so a press
     /// dragged off a card and released elsewhere changes the selection
     /// but commits nothing, exactly like backing out of a menu row.
-    fn on_overview_click(&mut self, wm: &mut WindowManager<B>, local: Point, button: MouseButton, pressed: bool) -> ShellOutcome {
+    fn on_overview_click(
+        &mut self,
+        wm: &mut WindowManager<B>,
+        local: Point,
+        button: MouseButton,
+        pressed: bool,
+    ) -> ShellOutcome {
         let hit = self.desktop.overview_hit(local);
         if pressed {
             match (button, hit) {
@@ -1856,10 +2013,17 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         // the click its focus-or-launch answer for the pressed tile.
         if self.launchdock.owns_window(surface) {
             let running = running_pairs(wm);
-            if let Some(action) = self.launchdock.handle_click(wm.backend_mut(), &self.theme, local, pressed, &running) {
+            if let Some(action) = self.launchdock.handle_click(wm.backend_mut(), &self.theme, local, pressed, &running)
+            {
                 match action {
                     LaunchDockAction::Launch(entry) => {
-                        let terminal = launch_app(self.state.terminal.as_deref(), &entry, &self.theme, self.state.terminal_font_px, terminal_screen(self));
+                        let terminal = launch_app(
+                            self.state.terminal.as_deref(),
+                            &entry,
+                            &self.theme,
+                            self.state.terminal_font_px,
+                            terminal_screen(self),
+                        );
                         self.terminals.extend(terminal);
                     }
                     // The same activate path a pager's
@@ -1909,11 +2073,8 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
                     }
                 }
                 MouseButton::Left => {
-                    let input = if pressed {
-                        DockInput::Press { local, button }
-                    } else {
-                        DockInput::Release { local, button }
-                    };
+                    let input =
+                        if pressed { DockInput::Press { local, button } } else { DockInput::Release { local, button } };
                     self.desktop.dock_input(wm.backend_mut(), &self.theme, input);
                 }
                 MouseButton::Right => {
@@ -2064,7 +2225,13 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
     /// column of square tiles and `DockInput::Scroll` carries one
     /// delta; inventing a rule that folds `right` into it would make
     /// two different gestures indistinguishable to every tile.
-    pub fn on_shell_scroll(&mut self, wm: &mut WindowManager<B>, surface: B::ShellId, local: Point, delta: ScrollDelta) {
+    pub fn on_shell_scroll(
+        &mut self,
+        wm: &mut WindowManager<B>,
+        surface: B::ShellId,
+        local: Point,
+        delta: ScrollDelta,
+    ) {
         let panel = self.desktop.instrument_panel_owns(surface);
         if !panel && surface != self.desktop.dock_window() {
             return;
@@ -2096,7 +2263,12 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
     fn run_root_menu_action(&mut self, wm: &mut WindowManager<B>, action: RootMenuAction) {
         match action {
             RootMenuAction::LaunchTerminal => {
-                let terminal = spawn_terminal(self.state.terminal.as_deref(), &self.theme, self.state.terminal_font_px, terminal_screen(self));
+                let terminal = spawn_terminal(
+                    self.state.terminal.as_deref(),
+                    &self.theme,
+                    self.state.terminal_font_px,
+                    terminal_screen(self),
+                );
                 self.terminals.extend(terminal);
             }
             RootMenuAction::LaunchAbout => {
@@ -2137,7 +2309,13 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
             // doesn't get to panic.
             RootMenuAction::LaunchApp(i) => {
                 if let Some(entry) = self.apps.get(i) {
-                    let terminal = launch_app(self.state.terminal.as_deref(), entry, &self.theme, self.state.terminal_font_px, terminal_screen(self));
+                    let terminal = launch_app(
+                        self.state.terminal.as_deref(),
+                        entry,
+                        &self.theme,
+                        self.state.terminal_font_px,
+                        terminal_screen(self),
+                    );
                     self.terminals.extend(terminal);
                 } else {
                     tracing::warn!(index = i, count = self.apps.len(), "menu fired an out-of-range application index");
@@ -2354,7 +2532,10 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
                     let entries = (self.desktop.switcher_entry_count() != Some(candidates.len())).then(|| {
                         candidates
                             .iter()
-                            .map(|(id, title)| wm_theme::switcher::SwitcherEntry { title: title.clone(), preview: wm.client_preview(*id) })
+                            .map(|(id, title)| wm_theme::switcher::SwitcherEntry {
+                                title: title.clone(),
+                                preview: wm.client_preview(*id),
+                            })
                             .collect()
                     });
                     self.desktop.show_switcher(wm.backend_mut(), &self.theme, entries, selected);
@@ -2421,9 +2602,7 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         // through this desktop's menu can be noticed *before* the desk
         // follows. A session wearing a built-in with nothing armed
         // never polls.
-        let armed = self
-            .omarchy_adoption_armed
-            .is_some_and(|since| since.elapsed() < ADOPTION_ARM_WINDOW);
+        let armed = self.omarchy_adoption_armed.is_some_and(|since| since.elapsed() < ADOPTION_ARM_WINDOW);
         if self.state.following.is_none() && !armed {
             self.omarchy_adoption_armed = None;
         } else if self.omarchy.changed(std::time::Instant::now()) {
@@ -2466,17 +2645,17 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
                 reading.report();
                 watch.follow(&reading);
                 self.reresolve(wm);
+                self.config_reloaded = true;
             }
         }
         if let Some(target) = self.desktop.take_workspace_request() {
             wm.switch_workspace(target);
         }
         self.service_control(wm);
-        // The instrument panel's parked Escape (see `keymap_action`) —
-        // consumed here because this is the first point after the key
-        // event where a `WindowManager` is in hand, still inside the
-        // same loop iteration.
-        if std::mem::take(&mut self.panel_escape) {
+        // The transient UI's parked Escape (see `keymap_action`) is
+        // consumed here, still inside the key event's loop iteration.
+        if std::mem::take(&mut self.transient_escape) {
+            self.desktop.close_menu(wm.backend_mut());
             self.desktop.dismiss_instrument_panel(wm.backend_mut(), PanelCloseReason::Dismissed);
         }
         // The Overview's one-shot preview catch-up: the panel opened
@@ -2487,12 +2666,8 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         // doc. Almost every call is one integer comparison.
         let generation = wm.backend().preview_generation();
         if self.desktop.overview_wants_fresh_previews(generation) {
-            let previews: Vec<Option<DecorationBuffer>> = self
-                .desktop
-                .overview_clients()
-                .into_iter()
-                .map(|client| wm.client_preview(client))
-                .collect();
+            let previews: Vec<Option<DecorationBuffer>> =
+                self.desktop.overview_clients().into_iter().map(|client| wm.client_preview(client)).collect();
             self.desktop.update_overview_previews(wm.backend_mut(), &self.theme, previews, generation);
         }
         let (current, count) = (wm.current_workspace(), wm.workspace_count());

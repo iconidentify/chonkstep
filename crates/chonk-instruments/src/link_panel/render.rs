@@ -1189,7 +1189,9 @@ mod tests {
             let buffer = render_link_panel(&theme, &mut fs, &mut sc, 56, &view);
             let glass = buffer
                 .pixels
-                .chunks_exact(4)
+                .as_chunks::<4>()
+                .0
+                .iter()
                 .filter(|p| (p[0], p[1], p[2]) == (pal.glass.r, pal.glass.g, pal.glass.b))
                 .count();
             assert!(glass > 2000, "theme {}: expected a substantial glass area, found {glass}", theme.id);

@@ -76,8 +76,8 @@ pub mod preset;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 
-pub use wm_core::FocusPolicy;
 pub use wm_core::DecorationRules;
+pub use wm_core::FocusPolicy;
 use wm_core::{KeyCombo, Modifiers, PlacementPolicy};
 
 /// Everything a keybinding can do. Deliberately a closed set of verbs
@@ -192,6 +192,31 @@ pub enum Action {
     Run(String),
 }
 
+/// A configured binding with the behavioral facts Hyprland attaches
+/// to it. The legacy `Config::keybindings` projection remains the
+/// press-action map used by both window-manager backends.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Binding {
+    pub combo: KeyCombo,
+    pub action: Action,
+    pub description: Option<String>,
+    pub locked: bool,
+    pub repeating: bool,
+    pub release: bool,
+}
+
+/// Keyboard settings imported from Hyprland's `input {}` table.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct InputConfig {
+    pub rules: Option<String>,
+    pub model: Option<String>,
+    pub layout: Option<String>,
+    pub variant: Option<String>,
+    pub options: Option<String>,
+    pub repeat_rate: Option<i32>,
+    pub repeat_delay: Option<i32>,
+}
+
 /// Maps a kebab-case action name from a config file to its [`Action`].
 /// Case-insensitive for the same reason key specs are: nothing is
 /// gained by making `"Close"` a startup-breaking typo. Returns `None`
@@ -225,7 +250,11 @@ fn action_from_name(name: &str) -> Option<Action> {
         rest if rest.starts_with("workspace ") || rest.starts_with("workspace-carry ") => {
             let (verb, number) = rest.split_once(' ')?;
             let index = workspace_index(number)?;
-            Some(if verb == "workspace" { Action::Workspace(index) } else { Action::WorkspaceCarry(index) })
+            Some(if verb == "workspace" {
+                Action::Workspace(index)
+            } else {
+                Action::WorkspaceCarry(index)
+            })
         }
         // `run <name>` carries an argument like the two workspace
         // verbs above, but its argument is a key into `[commands]` —
@@ -456,6 +485,10 @@ pub struct Config {
     /// own tooling expects to find, applied to the session before
     /// anything is started under it.
     pub session_env: Vec<(String, String)>,
+    pub input: InputConfig,
+    pub monitor_rules: Vec<hyprland::directive::Monitor>,
+    pub bindings: Vec<Binding>,
+    pub layer_bindings: BTreeMap<String, Vec<Binding>>,
     pub keybindings: Vec<(KeyCombo, Action)>,
 }
 
@@ -545,6 +578,10 @@ impl Config {
             hyprland_config: None,
             float_policy: None,
             session_env: Vec::new(),
+            input: InputConfig::default(),
+            monitor_rules: Vec::new(),
+            bindings: Vec::new(),
+            layer_bindings: BTreeMap::new(),
             keybindings: vec![
                 bind("alt+shift+return", Action::SpawnTerminal),
                 bind("alt+shift+q", Action::Close),
@@ -650,6 +687,7 @@ fn keysym_for(token: &str) -> Option<u32> {
         "f10" => 0xffc7,
         "f11" => 0xffc8,
         "f12" => 0xffc9,
+        "f23" => 0xffd4,
         // The XF86 block: the keys with pictures on them rather than
         // letters. Spelled here in the same run-together style as
         // "pageup" rather than as their X11 names, because
@@ -677,6 +715,9 @@ fn keysym_for(token: &str) -> Option<u32> {
         "kbdbrightnessdown" => 0x1008ff06,
         "poweroff" => 0x1008ff2a,
         "search" => 0x1008ff1b,
+        "touchpadtoggle" => 0x1008ffa9,
+        "touchpadon" => 0x1008ffb0,
+        "touchpadoff" => 0x1008ffb1,
         // The rest of the laptop's picture keys Omarchy binds: the
         // backlight's own on/off/cycle key beside the two ramps above
         // it, the calculator, and the eject key.
@@ -863,7 +904,10 @@ pub fn parse(text: &str) -> Result<Config, String> {
 /// The closure is lazy on purpose: it is called only when
 /// [`hyprland::wanted`] says this config asked for a live read, so a
 /// plain chonkstep session does no I/O at all.
-pub fn parse_with(text: &str, live: &dyn Fn() -> Option<hyprland::Reading>) -> Result<Config, String> {
+pub fn parse_with(
+    text: &str,
+    live: &dyn Fn() -> Option<hyprland::Reading>,
+) -> Result<Config, String> {
     let table: toml::Table = text
         .parse()
         .map_err(|err: toml::de::Error| format!("invalid TOML: {err}"))?;
@@ -872,6 +916,27 @@ pub fn parse_with(text: &str, live: &dyn Fn() -> Option<hyprland::Reading>) -> R
     // a preset default" (see `preset::base`, which also explains why
     // this cannot happen inside the walk below).
     let mut config = preset::base(&table);
+    // `desktop = "omarchy"` asks for all of Omarchy's non-keymap
+    // integration too, so it still has to read the live files when an
+    // explicit `keymap = "chonkstep"` peels just the bindings back off
+    // the posture. Preserve that selected keymap across the read. This
+    // cannot be recovered afterwards from `config.keymap` alone:
+    // Chonkstep is also the implicit default, where
+    // `hyprland_config = true` deliberately *does* ask for live
+    // bindings.
+    let preserve_keymap = matches!(
+        table.get("keymap"),
+        Some(toml::Value::String(name))
+            if preset::Keymap::from_name(name) == Some(preset::Keymap::Chonkstep)
+    )
+    .then(|| {
+        (
+            config.keybindings.clone(),
+            config.bindings.clone(),
+            config.layer_bindings.clone(),
+            config.commands.clone(),
+        )
+    });
     // The user's live Hyprland configuration, read over the preset and
     // under the file's own keys — the exact position the presets
     // themselves occupy, and for the same reason: by the time any key
@@ -886,6 +951,12 @@ pub fn parse_with(text: &str, live: &dyn Fn() -> Option<hyprland::Reading>) -> R
     config.hyprland_config = hyprland_switch(&table);
     if hyprland::wanted(&config) {
         hyprland::apply(&mut config, live().as_ref());
+    }
+    if let Some((keybindings, bindings, layer_bindings, commands)) = preserve_keymap {
+        config.keybindings = keybindings;
+        config.bindings = bindings;
+        config.layer_bindings = layer_bindings;
+        config.commands = commands;
     }
     for (key, value) in &table {
         match key.as_str() {
@@ -994,9 +1065,9 @@ pub fn parse_with(text: &str, live: &dyn Fn() -> Option<hyprland::Reading>) -> R
                 toml::Value::String(command) if !command.trim().is_empty() => {
                     config.lock_command = Some(command.clone());
                 }
-                toml::Value::String(_) => tracing::warn!(
-                    "config: lock_command is empty, treating it as unset"
-                ),
+                toml::Value::String(_) => {
+                    tracing::warn!("config: lock_command is empty, treating it as unset")
+                }
                 other => tracing::warn!(
                     value = ?other,
                     "config: lock_command must be a command-line string, ignoring it"
@@ -1037,8 +1108,14 @@ pub fn parse_with(text: &str, live: &dyn Fn() -> Option<hyprland::Reading>) -> R
                 toml::Value::Table(entries) => {
                     for (key, value) in entries {
                         match key.as_str() {
-                            "server_side" => config.decorations.server_side = string_list(value, "decorations.server_side"),
-                            "client_side" => config.decorations.client_side = string_list(value, "decorations.client_side"),
+                            "server_side" => {
+                                config.decorations.server_side =
+                                    string_list(value, "decorations.server_side")
+                            }
+                            "client_side" => {
+                                config.decorations.client_side =
+                                    string_list(value, "decorations.client_side")
+                            }
                             unknown => tracing::warn!(
                                 key = %unknown,
                                 "config: unknown key in [decorations], ignoring it"
@@ -1056,7 +1133,9 @@ pub fn parse_with(text: &str, live: &dyn Fn() -> Option<hyprland::Reading>) -> R
                     for (name, value) in entries {
                         let name = name.trim().to_ascii_lowercase();
                         if name.is_empty() {
-                            tracing::warn!("config: [commands] entry with an empty name, skipping it");
+                            tracing::warn!(
+                                "config: [commands] entry with an empty name, skipping it"
+                            );
                             continue;
                         }
                         match argv_from_value(value, "commands") {
@@ -1131,7 +1210,9 @@ pub fn parse_with(text: &str, live: &dyn Fn() -> Option<hyprland::Reading>) -> R
     // startup naming both the key and the command, instead of a key
     // that silently does nothing whenever it is pressed.
     config.keybindings.retain(|(combo, action)| {
-        let Action::Run(name) = action else { return true };
+        let Action::Run(name) = action else {
+            return true;
+        };
         if config.commands.contains_key(name) {
             return true;
         }
@@ -1284,6 +1365,54 @@ mod tests {
             .map(|(_, action)| action.clone())
     }
 
+    #[test]
+    fn an_explicit_chonkstep_keymap_survives_an_omarchy_live_read() {
+        let live = || {
+            let combo = parse_key("super+w").unwrap();
+            let binding = Binding {
+                combo,
+                action: Action::Close,
+                description: Some("Close".into()),
+                locked: true,
+                repeating: false,
+                release: false,
+            };
+            let mut reading = hyprland::Reading::default();
+            reading.keybindings.push((combo, Action::Close));
+            reading.bindings.push(binding.clone());
+            reading
+                .layer_bindings
+                .insert("fake-bar".into(), vec![binding]);
+            reading
+                .commands
+                .insert("live-command".into(), vec!["false".into()]);
+            reading
+                .env
+                .push(("OMARCHY_TEST".into(), "still-integrated".into()));
+            Some(reading)
+        };
+
+        let config = parse_with("desktop = \"omarchy\"\nkeymap = \"chonkstep\"", &live).unwrap();
+
+        assert_eq!(config.keybindings, Config::default_config().keybindings);
+        assert!(
+            config.bindings.is_empty(),
+            "live binding flags must not leak around the chosen keymap"
+        );
+        assert!(
+            config.layer_bindings.is_empty(),
+            "layer-scoped live bindings are part of that keymap too"
+        );
+        assert!(
+            config.commands.is_empty(),
+            "commands owned only by the rejected live bindings go with them"
+        );
+        assert_eq!(
+            config.session_env,
+            [("OMARCHY_TEST".into(), "still-integrated".into())]
+        );
+    }
+
     fn combo(keysym: u32, modifiers: Modifiers) -> KeyCombo {
         KeyCombo { keysym, modifiers }
     }
@@ -1356,7 +1485,11 @@ mod tests {
             ("win+a", Modifiers::SUPER),
         ];
         for (spec, modifiers) in cases {
-            assert_eq!(parse_key(spec), Some(combo(0x61, *modifiers)), "spec {spec:?}");
+            assert_eq!(
+                parse_key(spec),
+                Some(combo(0x61, *modifiers)),
+                "spec {spec:?}"
+            );
         }
     }
 
@@ -1401,14 +1534,23 @@ mod tests {
 
     #[test]
     fn rejects_modifier_only_specs() {
-        for spec in ["alt", "shift", "ctrl", "super", "alt+shift", "alt+ctrl+shift"] {
+        for spec in [
+            "alt",
+            "shift",
+            "ctrl",
+            "super",
+            "alt+shift",
+            "alt+ctrl+shift",
+        ] {
             assert_eq!(parse_key(spec), None, "spec {spec:?}");
         }
     }
 
     #[test]
     fn rejects_unknown_tokens() {
-        for spec in ["banana", "alt+foo", "hyper+a", "alt+esc", "alt+f0", "alt+f13", "alt+f01"] {
+        for spec in [
+            "banana", "alt+foo", "hyper+a", "alt+esc", "alt+f0", "alt+f13", "alt+f01",
+        ] {
             assert_eq!(parse_key(spec), None, "spec {spec:?}");
         }
     }
@@ -1470,7 +1612,12 @@ mod tests {
         // observed, and an entry here is a correction, not the
         // mechanism.
         assert_eq!(config.decorations, DecorationRules::default());
-        assert_eq!(config.decorations.decision_for(Some("org.omarchy.terminal")), None);
+        assert_eq!(
+            config
+                .decorations
+                .decision_for(Some("org.omarchy.terminal")),
+            None
+        );
         assert_eq!(config.drag_modifier, Some(DEFAULT_DRAG_MODIFIER));
     }
 
@@ -1478,12 +1625,24 @@ mod tests {
     /// the one the old policy's comments claimed already existed.
     #[test]
     fn the_drag_modifier_is_configurable_and_can_be_turned_off() {
-        assert_eq!(parse("drag_modifier = \"super\"\n").unwrap().drag_modifier, Some(Modifiers::SUPER));
-        assert_eq!(parse("drag_modifier = \"MOD1\"\n").unwrap().drag_modifier, Some(Modifiers::ALT));
-        assert_eq!(parse("drag_modifier = \"none\"\n").unwrap().drag_modifier, None);
+        assert_eq!(
+            parse("drag_modifier = \"super\"\n").unwrap().drag_modifier,
+            Some(Modifiers::SUPER)
+        );
+        assert_eq!(
+            parse("drag_modifier = \"MOD1\"\n").unwrap().drag_modifier,
+            Some(Modifiers::ALT)
+        );
+        assert_eq!(
+            parse("drag_modifier = \"none\"\n").unwrap().drag_modifier,
+            None
+        );
         // A typo keeps the default rather than silently disabling the
         // only way to move a window that has no titlebar.
-        assert_eq!(parse("drag_modifier = \"hyper\"\n").unwrap().drag_modifier, Some(DEFAULT_DRAG_MODIFIER));
+        assert_eq!(
+            parse("drag_modifier = \"hyper\"\n").unwrap().drag_modifier,
+            Some(DEFAULT_DRAG_MODIFIER)
+        );
     }
 
     /// Both directions, matched as a case-insensitive prefix, with the
@@ -1494,10 +1653,19 @@ mod tests {
             "[decorations]\nserver_side = [\"Alacritty\"]\nclient_side = [\"google-chrome\"]\n",
         )
         .unwrap();
-        assert_eq!(config.decorations.decision_for(Some("alacritty")), Some(true));
-        assert_eq!(config.decorations.decision_for(Some("google-chrome")), Some(false));
+        assert_eq!(
+            config.decorations.decision_for(Some("alacritty")),
+            Some(true)
+        );
+        assert_eq!(
+            config.decorations.decision_for(Some("google-chrome")),
+            Some(false)
+        );
         // Prefix, so one entry covers a family's per-profile ids.
-        assert_eq!(config.decorations.decision_for(Some("GOOGLE-CHROME-beta")), Some(false));
+        assert_eq!(
+            config.decorations.decision_for(Some("GOOGLE-CHROME-beta")),
+            Some(false)
+        );
         // Unmatched clients are left to their own negotiation, which is
         // the whole point: the lists are exceptions, not the policy.
         assert_eq!(config.decorations.decision_for(Some("foot")), None);
@@ -1510,7 +1678,11 @@ mod tests {
             server_side: vec!["contested".to_string()],
             client_side: vec!["contested".to_string()],
         };
-        assert_eq!(rules.decision_for(Some("contested")), Some(true), "the usable window wins the tie");
+        assert_eq!(
+            rules.decision_for(Some("contested")),
+            Some(true),
+            "the usable window wins the tie"
+        );
     }
 
     /// An existing config file must not lose the override it was
@@ -1526,7 +1698,10 @@ mod tests {
     /// window on the desk.
     #[test]
     fn an_empty_entry_matches_nothing() {
-        let rules = DecorationRules { server_side: vec![String::new()], client_side: Vec::new() };
+        let rules = DecorationRules {
+            server_side: vec![String::new()],
+            client_side: Vec::new(),
+        };
         assert_eq!(rules.decision_for(Some("anything")), None);
     }
 
@@ -1575,13 +1750,28 @@ mod tests {
         assert_eq!(config.edge_resistance, 4);
         // Restating a default is harmless; a new binding is added; the
         // unbound default is gone; everything unlisted survives.
-        assert_eq!(action_for(&config, "alt+shift+return"), Some(Action::SpawnTerminal));
+        assert_eq!(
+            action_for(&config, "alt+shift+return"),
+            Some(Action::SpawnTerminal)
+        );
         assert_eq!(action_for(&config, "super+t"), Some(Action::SpawnTerminal));
         assert_eq!(action_for(&config, "alt+shift+q"), None);
-        assert_eq!(action_for(&config, "alt+ctrl+right"), Some(Action::WorkspaceNext));
-        assert_eq!(action_for(&config, "super+f11"), Some(Action::ToggleFullscreen));
-        assert_eq!(action_for(&config, "alt+shift+x"), Some(Action::ToggleMaximize));
-        assert_eq!(action_for(&config, "alt+shift+left"), Some(Action::WorkspaceCarryPrev));
+        assert_eq!(
+            action_for(&config, "alt+ctrl+right"),
+            Some(Action::WorkspaceNext)
+        );
+        assert_eq!(
+            action_for(&config, "super+f11"),
+            Some(Action::ToggleFullscreen)
+        );
+        assert_eq!(
+            action_for(&config, "alt+shift+x"),
+            Some(Action::ToggleMaximize)
+        );
+        assert_eq!(
+            action_for(&config, "alt+shift+left"),
+            Some(Action::WorkspaceCarryPrev)
+        );
         // 12 defaults - 1 unbound + 2 new = 13.
         assert_eq!(config.keybindings.len(), 13);
     }
@@ -1605,11 +1795,25 @@ mod tests {
             "#,
         )
         .unwrap();
-        assert_eq!(action_for(&config, "super+1"), Some(Action::Workspace(0)), "the first workspace is index 0");
+        assert_eq!(
+            action_for(&config, "super+1"),
+            Some(Action::Workspace(0)),
+            "the first workspace is index 0"
+        );
         assert_eq!(action_for(&config, "super+9"), Some(Action::Workspace(8)));
-        assert_eq!(action_for(&config, "super+0"), Some(Action::Workspace(9)), "Omarchy's tenth, on the zero key");
-        assert_eq!(action_for(&config, "super+shift+1"), Some(Action::WorkspaceCarry(0)));
-        assert_eq!(action_for(&config, "super+shift+9"), Some(Action::WorkspaceCarry(8)));
+        assert_eq!(
+            action_for(&config, "super+0"),
+            Some(Action::Workspace(9)),
+            "Omarchy's tenth, on the zero key"
+        );
+        assert_eq!(
+            action_for(&config, "super+shift+1"),
+            Some(Action::WorkspaceCarry(0))
+        );
+        assert_eq!(
+            action_for(&config, "super+shift+9"),
+            Some(Action::WorkspaceCarry(8))
+        );
     }
 
     /// The argument is read the way every other name in this file is:
@@ -1631,9 +1835,19 @@ mod tests {
         .unwrap();
         assert_eq!(action_for(&config, "super+a"), Some(Action::Workspace(2)));
         assert_eq!(action_for(&config, "super+b"), Some(Action::Workspace(2)));
-        assert_eq!(action_for(&config, "super+c"), Some(Action::WorkspaceCarry(2)));
-        assert_eq!(action_for(&config, "super+d"), Some(Action::WorkspaceNext), "the relative verbs keep their names");
-        assert_eq!(action_for(&config, "super+e"), Some(Action::WorkspaceCarryNext));
+        assert_eq!(
+            action_for(&config, "super+c"),
+            Some(Action::WorkspaceCarry(2))
+        );
+        assert_eq!(
+            action_for(&config, "super+d"),
+            Some(Action::WorkspaceNext),
+            "the relative verbs keep their names"
+        );
+        assert_eq!(
+            action_for(&config, "super+e"),
+            Some(Action::WorkspaceCarryNext)
+        );
     }
 
     /// A number this file cannot honour is dropped with the same
@@ -1643,10 +1857,23 @@ mod tests {
     /// for as long as the file existed.
     #[test]
     fn a_workspace_number_that_is_not_one_is_skipped_rather_than_clamped() {
-        for bad in ["workspace 0", "workspace -1", "workspace 100", "workspace", "workspace x", "workspace 3 4", "workspace-carry 0", "workspace-carry 100"] {
+        for bad in [
+            "workspace 0",
+            "workspace -1",
+            "workspace 100",
+            "workspace",
+            "workspace x",
+            "workspace 3 4",
+            "workspace-carry 0",
+            "workspace-carry 100",
+        ] {
             let text = format!("[keybindings]\n\"super+a\" = \"{bad}\"\n");
             let config = parse(&text).unwrap();
-            assert_eq!(action_for(&config, "super+a"), None, "{bad:?} must not bind");
+            assert_eq!(
+                action_for(&config, "super+a"),
+                None,
+                "{bad:?} must not bind"
+            );
         }
         // ...and, exactly like an unknown action name, a bad number
         // leaves any existing binding for that combo alone rather than
@@ -1666,9 +1893,15 @@ mod tests {
     fn the_workspace_ceiling_is_inclusive() {
         let text = format!("[keybindings]\n\"super+a\" = \"workspace {MAX_WORKSPACE}\"\n");
         let config = parse(&text).unwrap();
-        assert_eq!(action_for(&config, "super+a"), Some(Action::Workspace(MAX_WORKSPACE - 1)));
+        assert_eq!(
+            action_for(&config, "super+a"),
+            Some(Action::Workspace(MAX_WORKSPACE - 1))
+        );
         assert_eq!(workspace_index("1"), Some(0));
-        assert_eq!(workspace_index(&MAX_WORKSPACE.to_string()), Some(MAX_WORKSPACE - 1));
+        assert_eq!(
+            workspace_index(&MAX_WORKSPACE.to_string()),
+            Some(MAX_WORKSPACE - 1)
+        );
         assert_eq!(workspace_index(&(MAX_WORKSPACE + 1).to_string()), None);
     }
 
@@ -1705,7 +1938,11 @@ mod tests {
         }
         let config = parse(&text).unwrap();
         for (n, (name, action)) in names.iter().enumerate() {
-            assert_eq!(action_for(&config, &spec_for(n)).as_ref(), Some(action), "action {name:?}");
+            assert_eq!(
+                action_for(&config, &spec_for(n)).as_ref(),
+                Some(action),
+                "action {name:?}"
+            );
         }
     }
 
@@ -1760,7 +1997,10 @@ mod tests {
             \"alt+ctrl+right\" = \"none\"\n\
             \"alt+control+right\" = \"spawn-terminal\"\n";
         let config = parse(unbind_then_bind).unwrap();
-        assert_eq!(action_for(&config, "alt+ctrl+right"), Some(Action::SpawnTerminal));
+        assert_eq!(
+            action_for(&config, "alt+ctrl+right"),
+            Some(Action::SpawnTerminal)
+        );
 
         let bind_then_unbind = "[keybindings]\n\
             \"alt+control+right\" = \"spawn-terminal\"\n\
@@ -1802,7 +2042,10 @@ mod tests {
         assert_eq!(action_for(&config, "super+v"), None);
         // ...and the untouched defaults survived: 12 - 1 + 1 = 12.
         assert_eq!(config.keybindings.len(), 12);
-        assert_eq!(action_for(&config, "alt+shift+x"), Some(Action::ToggleMaximize));
+        assert_eq!(
+            action_for(&config, "alt+shift+x"),
+            Some(Action::ToggleMaximize)
+        );
     }
 
     #[test]
@@ -1968,14 +2211,34 @@ mod tests {
     fn appearance_defaults_unset_and_parses_both_moods() {
         assert_eq!(Config::default_config().appearance, None);
         assert_eq!(parse("").unwrap().appearance, None);
-        assert_eq!(parse("appearance = \"dark\"").unwrap().appearance.as_deref(), Some("dark"));
-        assert_eq!(parse("appearance = \"light\"").unwrap().appearance.as_deref(), Some("light"));
+        assert_eq!(
+            parse("appearance = \"dark\"")
+                .unwrap()
+                .appearance
+                .as_deref(),
+            Some("dark")
+        );
+        assert_eq!(
+            parse("appearance = \"light\"")
+                .unwrap()
+                .appearance
+                .as_deref(),
+            Some("light")
+        );
     }
 
     #[test]
     fn appearance_is_trimmed_and_case_insensitive_and_normalized() {
-        for text in ["appearance = \"Dark\"", "appearance = \"DARK\"", "appearance = \" dark \""] {
-            assert_eq!(parse(text).unwrap().appearance.as_deref(), Some("dark"), "text {text:?}");
+        for text in [
+            "appearance = \"Dark\"",
+            "appearance = \"DARK\"",
+            "appearance = \" dark \"",
+        ] {
+            assert_eq!(
+                parse(text).unwrap().appearance.as_deref(),
+                Some("dark"),
+                "text {text:?}"
+            );
         }
     }
 
@@ -2072,7 +2335,10 @@ mod tests {
     fn lock_command_defaults_unset_and_parses_as_a_string() {
         assert_eq!(Config::default_config().lock_command, None);
         assert_eq!(
-            parse("lock_command = \"swaylock -f -c 000000\"").unwrap().lock_command.as_deref(),
+            parse("lock_command = \"swaylock -f -c 000000\"")
+                .unwrap()
+                .lock_command
+                .as_deref(),
             Some("swaylock -f -c 000000")
         );
     }
@@ -2081,7 +2347,12 @@ mod tests {
     fn empty_or_wrongly_typed_lock_command_stays_unset() {
         // An empty command is indistinguishable in effect from no key,
         // and normalizing it here means no consumer ever spawns "".
-        for text in ["lock_command = \"\"", "lock_command = \"   \"", "lock_command = 3", "lock_command = true"] {
+        for text in [
+            "lock_command = \"\"",
+            "lock_command = \"   \"",
+            "lock_command = 3",
+            "lock_command = true",
+        ] {
             assert_eq!(parse(text).unwrap().lock_command, None, "text {text:?}");
         }
     }
@@ -2095,7 +2366,8 @@ mod tests {
     fn load_reads_the_xdg_path_and_never_fails() {
         let saved_xdg = std::env::var_os("XDG_CONFIG_HOME");
         let saved_home = std::env::var_os("HOME");
-        let scratch = std::env::temp_dir().join(format!("wm-config-load-test-{}", std::process::id()));
+        let scratch =
+            std::env::temp_dir().join(format!("wm-config-load-test-{}", std::process::id()));
         let config_dir = scratch.join("chonkstep");
         std::fs::create_dir_all(&config_dir).unwrap();
         let config_file = config_dir.join("config.toml");
@@ -2120,7 +2392,11 @@ mod tests {
         let home = scratch.join("home");
         let home_config_dir = home.join(".config").join("chonkstep");
         std::fs::create_dir_all(&home_config_dir).unwrap();
-        std::fs::write(home_config_dir.join("config.toml"), "theme = \"from-home\"\n").unwrap();
+        std::fs::write(
+            home_config_dir.join("config.toml"),
+            "theme = \"from-home\"\n",
+        )
+        .unwrap();
         std::env::remove_var("XDG_CONFIG_HOME");
         std::env::set_var("HOME", &home);
         assert_eq!(load().theme.as_deref(), Some("from-home"));
@@ -2175,7 +2451,11 @@ mod command_tests {
         );
         assert_eq!(
             config.commands.get("omarchy-menu").map(Vec::as_slice),
-            Some(["omarchy-shell", "shell", "toggle", "omarchy.menu"].map(String::from).as_slice())
+            Some(
+                ["omarchy-shell", "shell", "toggle", "omarchy.menu"]
+                    .map(String::from)
+                    .as_slice()
+            )
         );
     }
 
@@ -2195,7 +2475,10 @@ mod command_tests {
             "#,
         )
         .expect("valid config");
-        assert_eq!(action_for(&config, "super+space"), Some(Action::Run("menu".into())));
+        assert_eq!(
+            action_for(&config, "super+space"),
+            Some(Action::Run("menu".into()))
+        );
     }
 
     /// A binding naming a command nobody declared is dropped at parse
@@ -2229,7 +2512,10 @@ mod command_tests {
         .expect("valid config");
         let defaults = Config::default_config();
         assert_eq!(config.keybindings.len(), defaults.keybindings.len());
-        assert_eq!(action_for(&config, "alt+shift+return"), Some(Action::SpawnTerminal));
+        assert_eq!(
+            action_for(&config, "alt+shift+return"),
+            Some(Action::SpawnTerminal)
+        );
     }
 
     /// Command names fold case on both sides, so capitalization can
@@ -2246,7 +2532,10 @@ mod command_tests {
             "#,
         )
         .expect("valid config");
-        assert_eq!(action_for(&config, "super+l"), Some(Action::Run("lock".into())));
+        assert_eq!(
+            action_for(&config, "super+l"),
+            Some(Action::Run("lock".into()))
+        );
         assert!(config.commands.contains_key("lock"));
     }
 
@@ -2332,10 +2621,17 @@ mod command_tests {
         let from_string = parse(r#"terminal = "alacritty --class term""#).expect("valid");
         assert_eq!(
             from_string.terminal.as_deref(),
-            Some(["alacritty", "--class", "term"].map(String::from).as_slice())
+            Some(
+                ["alacritty", "--class", "term"]
+                    .map(String::from)
+                    .as_slice()
+            )
         );
         let from_array = parse(r#"terminal = ["ghostty"]"#).expect("valid");
-        assert_eq!(from_array.terminal.as_deref(), Some(["ghostty".to_string()].as_slice()));
+        assert_eq!(
+            from_array.terminal.as_deref(),
+            Some(["ghostty".to_string()].as_slice())
+        );
     }
 
     /// Nothing configured means the built-in terminal, and that has to

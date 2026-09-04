@@ -58,7 +58,9 @@ impl KeyTrouble {
     /// The one-line reason, for a log line and for the docs table.
     pub fn reason(&self) -> String {
         match self {
-            Self::NotAKey(what) => format!("{what} is a pointer or switch binding, not a key chord"),
+            Self::NotAKey(what) => {
+                format!("{what} is a pointer or switch binding, not a key chord")
+            }
             Self::UnknownKeycode(code) => format!("code:{code} has no key on a standard layout"),
             Self::UnknownKey(name) => format!("no keysym named {name:?}"),
             Self::UnknownModifier(name) => format!("no modifier named {name:?}"),
@@ -80,7 +82,11 @@ pub fn spec_for(keys: &str) -> Result<String, KeyTrouble> {
     // the diagnostic, so it is carried into the message rather than
     // reduced to "unknown key".
     let lower = keys.to_ascii_lowercase();
-    if lower.starts_with("switch:") || lower.contains("mouse:") || lower.contains("mouse_up") || lower.contains("mouse_down") {
+    if lower.starts_with("switch:")
+        || lower.contains("mouse:")
+        || lower.contains("mouse_up")
+        || lower.contains("mouse_down")
+    {
         return Err(KeyTrouble::NotAKey(keys.to_string()));
     }
     // `code:N` may carry modifiers before it, and the colon must not be
@@ -102,7 +108,12 @@ pub fn spec_for(keys: &str) -> Result<String, KeyTrouble> {
         // `SUPER_SHIFT` is one chunk holding two modifiers; a key name
         // never contains `_`, so splitting here is unambiguous.
         if chunk.contains('_') && !chunk.to_ascii_lowercase().starts_with("code:") {
-            tokens.extend(chunk.split('_').filter(|p| !p.is_empty()).map(str::to_string));
+            tokens.extend(
+                chunk
+                    .split('_')
+                    .filter(|p| !p.is_empty())
+                    .map(str::to_string),
+            );
         } else {
             tokens.push(chunk.to_string());
         }
@@ -112,7 +123,8 @@ pub fn spec_for(keys: &str) -> Result<String, KeyTrouble> {
     };
     let mut spec = String::new();
     for token in mods {
-        let name = modifier_name(token).ok_or_else(|| KeyTrouble::UnknownModifier(token.clone()))?;
+        let name =
+            modifier_name(token).ok_or_else(|| KeyTrouble::UnknownModifier(token.clone()))?;
         spec.push_str(name);
         spec.push('+');
     }
@@ -144,8 +156,13 @@ fn modifier_name(token: &str) -> Option<&'static str> {
 fn key_name(token: &str) -> Result<String, KeyTrouble> {
     let token = token.trim();
     if let Some(digits) = token.to_ascii_lowercase().strip_prefix("code:") {
-        let code: u32 = digits.trim().parse().map_err(|_| KeyTrouble::UnknownKey(token.to_string()))?;
-        return keycode_name(code).map(str::to_string).ok_or(KeyTrouble::UnknownKeycode(code));
+        let code: u32 = digits
+            .trim()
+            .parse()
+            .map_err(|_| KeyTrouble::UnknownKey(token.to_string()))?;
+        return keycode_name(code)
+            .map(str::to_string)
+            .ok_or(KeyTrouble::UnknownKeycode(code));
     }
     let lower = token.to_ascii_lowercase();
     // The XF86 prefix and Hyprland's other long names, reduced to the
@@ -248,6 +265,9 @@ pub fn keycode_name(code: u32) -> Option<&'static str> {
         117 => "pagedown",
         118 => "insert",
         119 => "delete",
+        // Omarchy binds this Apple-keyboard position as its menu key;
+        // the evdev map aliases X keycode 201 to F23.
+        201 => "f23",
         _ => return None,
     };
     Some(name)
@@ -255,7 +275,7 @@ pub fn keycode_name(code: u32) -> Option<&'static str> {
 
 /// The keycodes this reader resolves, as a documentation handle — the
 /// module docs and the tests both want to name the range.
-pub const KEYCODES: std::ops::RangeInclusive<u32> = 9..=119;
+pub const KEYCODES: std::ops::RangeInclusive<u32> = 9..=201;
 
 /// X11 and Hyprland key names, mapped to the run-together names
 /// [`crate::parse_key`] reads. Lowercased on both sides: Hyprland's own
@@ -281,6 +301,9 @@ const XKEYSYM_ALIASES: &[(&str, &str)] = &[
     ("xf86calculator", "calculator"),
     ("xf86eject", "eject"),
     ("xf86search", "search"),
+    ("xf86touchpadtoggle", "touchpadtoggle"),
+    ("xf86touchpadon", "touchpadon"),
+    ("xf86touchpadoff", "touchpadoff"),
     // Not an XF86 key, but the same kind of rename: X spells the
     // screenshot key `Print`, and Hyprland's configs use both.
     ("printscreen", "print"),

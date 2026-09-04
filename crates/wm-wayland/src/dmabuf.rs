@@ -77,14 +77,24 @@
 //! same change that answers it. Multi-GPU is feedback's other reason
 //! to exist, and it waits on multi-GPU support generally.
 //!
-//! When the render node cannot be identified, or the feedback's sealed
-//! format-table memfd cannot be created, the global drops to version 3
-//! (a flat format list, no feedback). Clients handle that fine; it is
-//! what every compositor advertised before 2022.
+//! The DRM session does not depend on EGL's optional device-query extension
+//! to find that node: it derives the render node paired with the KMS fd it
+//! already owns. This matters on virtio/TCG and other stacks that can import
+//! dmabufs but do not implement `EGL_EXT_device_drm`.
+//!
+//! When neither the session nor EGL can identify a render node, or when the
+//! feedback's sealed format-table memfd cannot be created, the compositor
+//! advertises no linux-dmabuf global. A version-3 format list would be legal,
+//! but xdg-desktop-portal-wlr 0.8.2 incorrectly installs feedback listeners
+//! against it and segfaults when the version-4-only events never arrive.
+//! Declining the optional protocol makes that degraded path slower or
+//! unavailable, but it cannot kill a critical session service. Hardware
+//! login sessions do not take this path.
 
 use smithay::backend::allocator::dmabuf::Dmabuf;
 use smithay::backend::allocator::format::FormatSet;
 use smithay::backend::allocator::Buffer;
+use smithay::backend::drm::DrmNode;
 use smithay::backend::egl::EGLDevice;
 use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::backend::renderer::ImportDma;
@@ -123,11 +133,12 @@ impl DmabufSupport {
 /// The one call `run` makes — see the module docs. Picks the renderer
 /// out of whichever graphics stack this session ended up with and
 /// defers to [`init`].
-pub(crate) fn init_for_graphics(
-    display_handle: &DisplayHandle,
-    graphics: &mut Graphics,
-) -> DmabufSupport {
-    init(display_handle, graphics_renderer(graphics))
+pub(crate) fn init_for_graphics(display_handle: &DisplayHandle, graphics: &mut Graphics) -> DmabufSupport {
+    let session_render_node = match graphics {
+        Graphics::Session(session) => session.render_node(),
+        Graphics::Winit(_) => None,
+    };
+    init(display_handle, graphics_renderer(graphics), session_render_node)
 }
 
 /// Registers the linux-dmabuf global for `renderer`'s formats.
@@ -142,7 +153,11 @@ pub(crate) fn init_for_graphics(
 /// is software-only" is a degraded session, not a broken one — the
 /// same call every other optional piece of this compositor makes
 /// (XWayland missing, a theme that will not load).
-pub(crate) fn init(display_handle: &DisplayHandle, renderer: &mut GlesRenderer) -> DmabufSupport {
+pub(crate) fn init(
+    display_handle: &DisplayHandle,
+    renderer: &mut GlesRenderer,
+    session_render_node: Option<DrmNode>,
+) -> DmabufSupport {
     let formats = renderer.dmabuf_formats();
     if formats.indexset().is_empty() {
         // llvmpipe without the dmabuf import extensions, or an EGL
@@ -155,42 +170,50 @@ pub(crate) fn init(display_handle: &DisplayHandle, renderer: &mut GlesRenderer) 
     }
 
     let mut state = DmabufState::new();
-    match default_feedback(renderer, &formats) {
+    match default_feedback(renderer, &formats, session_render_node) {
         Some(feedback) => {
             let _global =
                 state.create_global_with_default_feedback::<Compositor>(display_handle, &feedback);
-            tracing::info!(formats = formats.indexset().len(), "linux-dmabuf v4 advertised");
+            tracing::info!(formats = formats.indexset().len(), "linux-dmabuf with default feedback advertised");
         }
         None => {
-            let _global = state.create_global::<Compositor>(display_handle, formats.clone());
-            tracing::info!(formats = formats.indexset().len(), "linux-dmabuf v3 advertised");
+            tracing::warn!(
+                formats = formats.indexset().len(),
+                "linux-dmabuf feedback is unavailable; not advertising the global"
+            );
+            return DmabufSupport::disabled();
         }
     }
     DmabufSupport { state, formats }
 }
 
-/// Builds the version-4 default feedback, or `None` to fall back to a
-/// version-3 format list.
+/// Builds default feedback, or `None` to decline the global.
 ///
-/// Feedback is keyed by the render node's `dev_t`, so it needs the DRM
-/// node behind the EGL display. Two things can deny us that and
-/// neither is fatal: an EGL implementation without the
-/// `EGL_EXT_device_drm*` extensions (software rendering, some nested
-/// setups), and a `build()` that cannot create the sealed memfd the
-/// format table is sent over.
-fn default_feedback(renderer: &GlesRenderer, formats: &FormatSet) -> Option<DmabufFeedback> {
-    let node = match EGLDevice::device_for_display(renderer.egl_context().display())
-        .and_then(|device| device.try_get_render_node())
-    {
-        Ok(Some(node)) => node,
-        Ok(None) => {
-            tracing::warn!("EGL reports no DRM render node; linux-dmabuf drops to v3");
-            return None;
-        }
-        Err(error) => {
-            tracing::warn!(?error, "could not query the EGL device; linux-dmabuf drops to v3");
-            return None;
-        }
+/// Feedback is keyed by the render node's `dev_t`. A DRM login session
+/// supplies the node derived from its authoritative KMS fd; nested sessions
+/// query the EGL device. Missing EGL device-query support in a nested stack,
+/// or a `build()` that cannot create the sealed memfd carrying the format
+/// table, is degraded but not fatal.
+fn default_feedback(
+    renderer: &GlesRenderer,
+    formats: &FormatSet,
+    session_render_node: Option<DrmNode>,
+) -> Option<DmabufFeedback> {
+    let node = match session_render_node {
+        Some(node) => node,
+        None => match EGLDevice::device_for_display(renderer.egl_context().display())
+            .and_then(|device| device.try_get_render_node())
+        {
+            Ok(Some(node)) => node,
+            Ok(None) => {
+                tracing::warn!("EGL reports no DRM render node; linux-dmabuf feedback is unavailable");
+                return None;
+            }
+            Err(error) => {
+                tracing::warn!(?error, "could not query the EGL device; linux-dmabuf feedback is unavailable");
+                return None;
+            }
+        },
     };
 
     // One tranche, the main one — the single-GPU, always-composite
@@ -198,7 +221,7 @@ fn default_feedback(renderer: &GlesRenderer, formats: &FormatSet) -> Option<Dmab
     match DmabufFeedbackBuilder::new(node.dev_id(), formats.clone()).build() {
         Ok(feedback) => Some(feedback),
         Err(error) => {
-            tracing::warn!(?error, "could not build dmabuf feedback; linux-dmabuf drops to v3");
+            tracing::warn!(?error, "could not build dmabuf feedback; linux-dmabuf is unavailable");
             None
         }
     }
@@ -324,8 +347,7 @@ use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::reexports::wayland_server::Resource as _;
 use smithay::wayland::compositor::CompositorHandler as _;
 use smithay::wayland::compositor::{
-    add_blocker, add_pre_commit_hook, with_states, Blocker, BlockerState, BufferAssignment,
-    SurfaceAttributes,
+    add_blocker, add_pre_commit_hook, with_states, Blocker, BlockerState, BufferAssignment, SurfaceAttributes,
 };
 use smithay::wayland::dmabuf::get_dmabuf;
 use smithay::wayland::drm_syncobj::{
@@ -345,10 +367,7 @@ delegate_drm_syncobj!(Compositor);
 /// backend registers nothing: it owns no DRM device to import a
 /// timeline into, and the host compositor already syncs the buffers it
 /// passes on.
-pub(crate) fn init_syncobj(
-    display: &DisplayHandle,
-    graphics: &crate::state::Graphics,
-) -> Option<DrmSyncobjState> {
+pub(crate) fn init_syncobj(display: &DisplayHandle, graphics: &crate::state::Graphics) -> Option<DrmSyncobjState> {
     let crate::state::Graphics::Session(session) = graphics else {
         return None;
     };
@@ -430,12 +449,7 @@ pub(crate) fn install_readiness_hook(surface: &WlSurface) {
         // client's own statement of readiness and outranks any
         // guess from the buffer fd.
         let acquire = with_states(surface, |states| {
-            states
-                .cached_state
-                .get::<DrmSyncobjCachedState>()
-                .pending()
-                .acquire_point
-                .clone()
+            states.cached_state.get::<DrmSyncobjCachedState>().pending().acquire_point.clone()
         });
         if let Some(point) = acquire {
             if let Ok((blocker, source)) = point.generate_blocker() {
@@ -466,16 +480,12 @@ pub(crate) fn install_readiness_hook(surface: &WlSurface) {
         // readability. `AlreadyReady` — the overwhelmingly common
         // case — adds nothing to the commit.
         let committed_dmabuf = with_states(surface, |states| {
-            states
-                .cached_state
-                .get::<SurfaceAttributes>()
-                .pending()
-                .buffer
-                .as_ref()
-                .and_then(|assignment| match assignment {
+            states.cached_state.get::<SurfaceAttributes>().pending().buffer.as_ref().and_then(|assignment| {
+                match assignment {
                     BufferAssignment::NewBuffer(buffer) => get_dmabuf(buffer).cloned().ok(),
                     _ => None,
-                })
+                }
+            })
         });
         if let Some(dmabuf) = committed_dmabuf {
             if let Ok((blocker, source)) = dmabuf.generate_blocker(Interest::READ) {
@@ -511,27 +521,22 @@ fn arm_blocker_deadline(
     flags: Arc<BlockerFlags>,
 ) {
     let timer_flags = flags.clone();
-    let inserted = state.loop_handle.insert_source(
-        Timer::from_duration(BLOCKER_DEADLINE),
-        move |_, _, comp| {
-            // A fence that was ever seen resolved makes this firing
-            // the routine cleanup case: nothing to release, nothing to
-            // say. Only a blocker still pending at the deadline is a
-            // stall worth a log line.
-            if !timer_flags.settled.load(Ordering::Relaxed)
-                && !timer_flags.expired.swap(true, Ordering::Relaxed)
-            {
-                tracing::warn!(
-                    "a commit readiness blocker overran its deadline; releasing the commit \
+    let inserted = state.loop_handle.insert_source(Timer::from_duration(BLOCKER_DEADLINE), move |_, _, comp| {
+        // A fence that was ever seen resolved makes this firing
+        // the routine cleanup case: nothing to release, nothing to
+        // say. Only a blocker still pending at the deadline is a
+        // stall worth a log line.
+        if !timer_flags.settled.load(Ordering::Relaxed) && !timer_flags.expired.swap(true, Ordering::Relaxed) {
+            tracing::warn!(
+                "a commit readiness blocker overran its deadline; releasing the commit \
                      (the frame degrades to sample-and-hope for this one buffer)"
-                );
-            }
-            let handle = comp.display_handle.clone();
-            let client_state = comp.client_compositor_state(&client);
-            client_state.blocker_cleared(comp, &handle);
-            TimeoutAction::Drop
-        },
-    );
+            );
+        }
+        let handle = comp.display_handle.clone();
+        let client_state = comp.client_compositor_state(&client);
+        client_state.blocker_cleared(comp, &handle);
+        TimeoutAction::Drop
+    });
     if inserted.is_err() {
         // No timer means no bounded escape: rather than arm a blocker
         // that nothing is guaranteed to come back for, expire it now
@@ -561,10 +566,8 @@ mod tests {
     #[test]
     fn a_blocker_past_its_deadline_releases_the_commit() {
         let flags = Arc::new(BlockerFlags::default());
-        let bounded = BoundedBlocker {
-            inner: FakeBlocker(std::sync::Mutex::new(BlockerState::Pending)),
-            flags: flags.clone(),
-        };
+        let bounded =
+            BoundedBlocker { inner: FakeBlocker(std::sync::Mutex::new(BlockerState::Pending)), flags: flags.clone() };
         // In time: the fence's word stands.
         assert!(matches!(bounded.state(), BlockerState::Pending));
         assert!(!flags.settled.load(Ordering::Relaxed));
@@ -576,19 +579,15 @@ mod tests {
 
         // The other life: a fence that resolves is observed settled.
         let flags = Arc::new(BlockerFlags::default());
-        let bounded = BoundedBlocker {
-            inner: FakeBlocker(std::sync::Mutex::new(BlockerState::Released)),
-            flags: flags.clone(),
-        };
+        let bounded =
+            BoundedBlocker { inner: FakeBlocker(std::sync::Mutex::new(BlockerState::Released)), flags: flags.clone() };
         assert!(matches!(bounded.state(), BlockerState::Released));
         assert!(flags.settled.load(Ordering::Relaxed));
         // A cancelled fence settles too — cancellation is smithay's
         // own teardown path and must not be reported as a stall.
         let flags = Arc::new(BlockerFlags::default());
-        let bounded = BoundedBlocker {
-            inner: FakeBlocker(std::sync::Mutex::new(BlockerState::Cancelled)),
-            flags: flags.clone(),
-        };
+        let bounded =
+            BoundedBlocker { inner: FakeBlocker(std::sync::Mutex::new(BlockerState::Cancelled)), flags: flags.clone() };
         assert!(matches!(bounded.state(), BlockerState::Cancelled));
         assert!(flags.settled.load(Ordering::Relaxed));
     }

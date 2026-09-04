@@ -81,14 +81,11 @@ pub(crate) fn note_activity(comp: &mut Compositor) {
 /// state costs one walk over a nearly-always-empty vec.
 pub(crate) fn refresh(comp: &mut Compositor) {
     comp.idle.inhibitors.retain(IsAlive::alive);
-    let inhibited = !comp.wm.backend().locked
-        && {
-            let backend = comp.wm.backend();
-            comp.idle
-                .inhibitors
-                .iter()
-                .any(|surface| surface_visible(backend, surface))
-        };
+    let inhibited = !comp.wm.backend().locked && {
+        let rule_inhibited = comp.wm.rule_idle_inhibited();
+        let backend = comp.wm.backend();
+        rule_inhibited || comp.idle.inhibitors.iter().any(|surface| surface_visible(backend, surface))
+    };
     comp.idle.notifier.set_is_inhibited(inhibited);
 }
 
@@ -100,12 +97,9 @@ fn surface_visible(backend: &WaylandBackend, surface: &WlSurface) -> bool {
     while let Some(parent) = get_parent(&root) {
         root = parent;
     }
-    let window_mapped = backend.windows.values().any(|record| {
-        record.mapped && record.surface.wl_surface().as_ref() == Some(&root)
-    });
-    let layer_mapped = backend
-        .layers
-        .iter()
-        .any(|record| backend.layer_presented(record) && *record.surface.wl_surface() == root);
+    let window_mapped =
+        backend.windows.values().any(|record| record.mapped && record.surface.wl_surface().as_ref() == Some(&root));
+    let layer_mapped =
+        backend.layers.iter().any(|record| backend.layer_presented(record) && *record.surface.wl_surface() == root);
     window_mapped || layer_mapped
 }

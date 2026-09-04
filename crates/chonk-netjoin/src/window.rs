@@ -164,7 +164,7 @@ fn fetch_keymap(conn: &RustConnection) -> Vec<(u8, Vec<u32>)> {
 fn to_server_bytes(pixmap: &Pixmap, order: ImageOrder) -> Vec<u8> {
     let msb_first = order == ImageOrder::MSB_FIRST;
     let mut out = Vec::with_capacity(pixmap.data().len());
-    for px in pixmap.data().chunks_exact(4) {
+    for px in pixmap.data().as_chunks::<4>().0 {
         let (r, g, b, a) = (px[0], px[1], px[2], px[3]);
         if msb_first {
             out.extend_from_slice(&[a, r, g, b]);

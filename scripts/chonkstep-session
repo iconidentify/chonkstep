@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Stable, chonkstep-specific compositor entry point. uwsm derives its
+# compositor id from Exec[0], so pointing the session at this wrapper
+# yields `chonkstep_session` instead of the generic
+# `wayland_session_sh` and gives user plugins an unambiguous name.
+set -e
+exec "$(dirname "$0")/wayland-session.sh" "$@"

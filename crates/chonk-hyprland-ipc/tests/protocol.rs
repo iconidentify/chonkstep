@@ -9,10 +9,10 @@
 //! becomes a silent wrong answer downstream, which is the exact failure
 //! this whole crate is built to prevent.
 
-use chonk_hyprland_ipc::dispatch::{Action, Fullscreen};
+use chonk_hyprland_ipc::dispatch::{self, Action, Fullscreen};
 use chonk_hyprland_ipc::request::Request;
 use chonk_hyprland_ipc::server::answer_payload;
-use chonk_hyprland_ipc::state::{Monitor, Snapshot, Window, Workspace};
+use chonk_hyprland_ipc::state::{Devices, Monitor, Snapshot, Window, Workspace};
 use chonk_hyprland_ipc::{Differ, Outcome};
 
 fn monitor(id: i32, name: &str, focused: bool, active_workspace: usize) -> Monitor {
@@ -31,13 +31,7 @@ fn monitor(id: i32, name: &str, focused: bool, active_workspace: usize) -> Monit
 }
 
 fn workspace(index: usize, windows: u32) -> Workspace {
-    Workspace {
-        index,
-        monitor: "eDP-1".to_string(),
-        monitor_id: 0,
-        windows,
-        has_fullscreen: false,
-    }
+    Workspace { index, monitor: "eDP-1".to_string(), monitor_id: 0, windows, has_fullscreen: false }
 }
 
 fn window(id: u64, title: &str, class: &str, workspace: usize) -> Window {
@@ -56,6 +50,11 @@ fn window(id: u64, title: &str, class: &str, workspace: usize) -> Window {
         fullscreen: false,
         hidden: false,
         urgent: false,
+        pinned: false,
+        inhibiting_idle: false,
+        tags: Vec::new(),
+        xdg_tag: String::new(),
+        xdg_description: String::new(),
         focus_history_id: 0,
     }
 }
@@ -67,6 +66,9 @@ fn desktop() -> Snapshot {
         windows: vec![window(4_294_967_297, "~ — foot", "foot", 0)],
         focused: Some(4_294_967_297),
         locked: false,
+        cursor_position: Some((321, 654)),
+        bindings: Vec::new(),
+        devices: Devices::default(),
     }
 }
 
@@ -94,14 +96,12 @@ fn ask_json(wire: &str, snapshot: &Snapshot) -> serde_json::Value {
 #[test]
 fn workspaces_are_served_one_based() {
     let value = ask_json("j/workspaces", &desktop());
-    let ids: Vec<i64> =
-        value.as_array().unwrap().iter().map(|w| w["id"].as_i64().unwrap()).collect();
+    let ids: Vec<i64> = value.as_array().unwrap().iter().map(|w| w["id"].as_i64().unwrap()).collect();
     assert_eq!(ids, vec![1, 2, 3], "chonkstep workspace 0 must be served as Hyprland workspace 1");
 
     // The name must be the decimal id: Quickshell matches workspaces by
     // NAME in `focusedmon`, `openwindow` and `findWorkspaceByName`.
-    let names: Vec<&str> =
-        value.as_array().unwrap().iter().map(|w| w["name"].as_str().unwrap()).collect();
+    let names: Vec<&str> = value.as_array().unwrap().iter().map(|w| w["name"].as_str().unwrap()).collect();
     assert_eq!(names, vec!["1", "2", "3"]);
 }
 
@@ -118,8 +118,7 @@ fn workspaces_are_served_one_based() {
 fn the_one_based_conversion_happens_exactly_once() {
     let snapshot = desktop();
     for (hypr_id, chonk_index) in [(1_i32, 0_usize), (2, 1), (3, 2), (10, 9), (99, 98)] {
-        let (_, actions) =
-            answer_payload(format!("/dispatch workspace {hypr_id}").as_bytes(), &snapshot);
+        let (_, actions) = answer_payload(format!("/dispatch workspace {hypr_id}").as_bytes(), &snapshot);
         assert_eq!(
             actions,
             vec![Action::FocusWorkspace(chonk_index)],
@@ -134,10 +133,7 @@ fn the_one_based_conversion_happens_exactly_once() {
     // `movetoworkspace` converts through the same function, so it must
     // agree — a second conversion site is how the two would drift.
     let (_, actions) = answer_payload(b"/dispatch movetoworkspace 3", &snapshot);
-    assert_eq!(
-        actions,
-        vec![Action::MoveToWorkspace { window: None, workspace: 2 }]
-    );
+    assert_eq!(actions, vec![Action::MoveToWorkspace { window: None, workspace: 2 }]);
 }
 
 /// Arriving on a workspace by a bare switch leaves nothing focused —
@@ -202,8 +198,7 @@ fn an_ok_answer_always_comes_with_an_action() {
         "focuswindow class:^(foot)$",
         "focuswindow class:^(absent)$",
     ] {
-        let (response, actions) =
-            answer_payload(format!("/dispatch {verb}").as_bytes(), &snapshot);
+        let (response, actions) = answer_payload(format!("/dispatch {verb}").as_bytes(), &snapshot);
         let claimed = response.trim() == "ok";
         assert_eq!(
             claimed,
@@ -272,8 +267,20 @@ fn monitor_json_carries_every_consumed_key() {
     let value = ask_json("j/monitors", &desktop());
     let m = &value[0];
     for key in [
-        "id", "name", "description", "x", "y", "width", "height", "scale", "focused",
-        "activeWorkspace", "make", "model", "disabled", "dpmsStatus",
+        "id",
+        "name",
+        "description",
+        "x",
+        "y",
+        "width",
+        "height",
+        "scale",
+        "focused",
+        "activeWorkspace",
+        "make",
+        "model",
+        "disabled",
+        "dpmsStatus",
     ] {
         assert!(!m[key].is_null(), "monitors[0].{key} must be present");
     }
@@ -330,6 +337,7 @@ fn status_answers_and_does_not_claim_lua() {
 #[test]
 fn cursorpos_is_plain_text_with_comma_space() {
     let response = ask("/cursorpos", &desktop());
+    assert_eq!(response, "321, 654");
     assert!(response.contains(", "), "got {response:?}");
     let (x, y) = response.split_once(", ").expect("comma-space separated");
     assert!(x.parse::<i32>().is_ok() && y.parse::<i32>().is_ok(), "got {response:?}");
@@ -357,10 +365,7 @@ fn tiling_dispatchers_fail_cleanly_and_never_act() {
     ] {
         let (response, actions) = answer_payload(format!("/dispatch {verb}").as_bytes(), &snapshot);
         assert!(actions.is_empty(), "{verb} must not act, got {actions:?}");
-        assert!(
-            response.starts_with("Invalid dispatcher"),
-            "{verb} must fail like Hyprland does, got {response:?}"
-        );
+        assert!(response.starts_with("Invalid dispatcher"), "{verb} must fail like Hyprland does, got {response:?}");
         assert_ne!(response.trim(), "ok", "{verb} must never claim success");
     }
 }
@@ -381,10 +386,7 @@ fn both_dispatch_dialects_reach_the_same_action() {
     let snapshot = desktop();
 
     // What `plugins/bar/widgets/Workspaces.qml` sends on a click.
-    let (_, lua) = answer_payload(
-        br#"dispatch hl.dsp.focus({ workspace = "3" })"#,
-        &snapshot,
-    );
+    let (_, lua) = answer_payload(br#"dispatch hl.dsp.focus({ workspace = "3" })"#, &snapshot);
     assert_eq!(lua, vec![Action::FocusWorkspace(2)]);
 
     // What `omarchy-launch-or-focus` falls back to.
@@ -398,19 +400,15 @@ fn window_selectors_resolve() {
     let snapshot = desktop();
     let address = format!("0x{:x}", 4_294_967_297_u64);
 
-    let (_, actions) =
-        answer_payload(format!("/dispatch focuswindow address:{address}").as_bytes(), &snapshot);
+    let (_, actions) = answer_payload(format!("/dispatch focuswindow address:{address}").as_bytes(), &snapshot);
     assert_eq!(actions, vec![Action::FocusWindow(4_294_967_297)]);
 
-    let (_, actions) = answer_payload(
-        format!(r#"dispatch hl.dsp.focus({{ window = "address:{address}" }})"#).as_bytes(),
-        &snapshot,
-    );
+    let (_, actions) =
+        answer_payload(format!(r#"dispatch hl.dsp.focus({{ window = "address:{address}" }})"#).as_bytes(), &snapshot);
     assert_eq!(actions, vec![Action::FocusWindow(4_294_967_297)]);
 
     // Hyprland's anchored-regex class selector, as Omarchy writes it.
-    let (_, actions) =
-        answer_payload(b"/dispatch focuswindow class:^(foot)$", &snapshot);
+    let (_, actions) = answer_payload(b"/dispatch focuswindow class:^(foot)$", &snapshot);
     assert_eq!(actions, vec![Action::FocusWindow(4_294_967_297)]);
 }
 
@@ -419,17 +417,47 @@ fn window_selectors_resolve() {
 /// `omarchy-launch-or-focus` would raise a second copy of an app.
 #[test]
 fn an_unmatched_selector_fails_rather_than_guessing() {
-    let (response, actions) =
-        answer_payload(b"/dispatch focuswindow class:^(nothing-like-this)$", &desktop());
+    let (response, actions) = answer_payload(b"/dispatch focuswindow class:^(nothing-like-this)$", &desktop());
     assert!(actions.is_empty());
     assert!(response.starts_with("Invalid dispatcher"), "got {response:?}");
 }
 
 #[test]
-fn exec_strips_hyprlands_double_dash() {
-    let (_, actions) =
-        answer_payload(b"/dispatch exec -- bash -lc 'echo hi'", &desktop());
-    assert_eq!(actions, vec![Action::Exec("bash -lc 'echo hi'".to_string())]);
+fn classic_exec_preserves_direct_argv_and_shell_c_source() {
+    let (_, actions) = answer_payload(b"/dispatch exec -- bash -lc 'echo hi'", &desktop());
+    assert_eq!(actions, vec![Action::ExecShell("bash -lc 'echo hi'".to_string())]);
+
+    let (_, actions) = answer_payload(b"/dispatch exec /usr/bin/touch /tmp/chonkstep-exec", &desktop());
+    assert_eq!(actions, vec![Action::ExecArgv(vec!["/usr/bin/touch".into(), "/tmp/chonkstep-exec".into()])]);
+
+    // This is the exact byte shape hyprctl sends after receiving
+    // `dispatch exec -- bash -lc 'touch /tmp/x'`: it consumes both the
+    // marker and the shell's grouping before joining its own argv.
+    let (_, actions) = answer_payload(b"/dispatch exec bash -lc touch /tmp/chonkstep-shell-c", &desktop());
+    assert_eq!(
+        actions,
+        vec![Action::ExecArgv(vec!["bash".into(), "-lc".into(), "touch /tmp/chonkstep-shell-c".into()])]
+    );
+}
+
+#[test]
+fn lua_long_bracket_exec_is_the_same_command_as_a_quoted_string() {
+    let (_, quoted) = answer_payload(b"/dispatch hl.dsp.exec_cmd(\"touch /tmp/x\")", &desktop());
+    let (_, long) = answer_payload(b"/dispatch hl.dsp.exec_cmd([[touch /tmp/x]])", &desktop());
+    assert_eq!(quoted, vec![Action::ExecShell("touch /tmp/x".into())]);
+    assert_eq!(long, quoted);
+}
+
+#[test]
+fn lua_geometry_fields_are_not_hidden_by_hex_window_addresses() {
+    let (_, actions) = answer_payload(
+        br#"eval hl.dispatch(hl.dsp.window.resize({ window = "address:0x100000001", x = 25, y = 10, relative = true }))"#,
+        &desktop(),
+    );
+    assert_eq!(
+        actions,
+        vec![Action::ResizeWindow { window: 4_294_967_297, width: 25, height: 10, relative: true }]
+    );
 }
 
 #[test]
@@ -441,14 +469,39 @@ fn fullscreen_arguments_map() {
     assert_eq!(actions, vec![Action::Fullscreen(Fullscreen::On)]);
 }
 
+#[test]
+fn classic_geometry_distinguishes_relative_from_exact_for_every_target_form() {
+    let s = desktop();
+    for (request, expected_relative) in [
+        ("resizeactive 20 -10", true),
+        ("resizeactive exact 800 600", false),
+        ("resizewindowpixel 20 -10,address:0x100000001", true),
+        ("resizewindowpixel exact 800 600,address:0x100000001", false),
+        ("moveactive 20 -10", true),
+        ("moveactive exact 100 200", false),
+        ("movewindowpixel 20 -10,address:0x100000001", true),
+        ("movewindowpixel exact 100 200,address:0x100000001", false),
+    ] {
+        let Outcome::Run(action) = dispatch::parse(request, &s) else {
+            panic!("{request:?} was not accepted")
+        };
+        let relative = match action {
+            Action::ResizeWindow { relative, .. } | Action::MoveWindow { relative, .. } => relative,
+            other => panic!("wrong action for {request:?}: {other:?}"),
+        };
+        assert_eq!(relative, expected_relative, "{request}");
+    }
+}
+
 /// `getoption` feeds `Commons/Style.qml`'s corner radius and gap. A
 /// fabricated number would restyle the user's bar to match a compositor
 /// they are not running; the documented "unset" shape leaves Style.qml's
 /// `catch` to keep its previous value, which is the correct outcome.
 #[test]
-fn getoption_declines_rather_than_inventing_a_number() {
+fn getoption_returns_a_complete_explicitly_unset_shape() {
     let value = ask_json("j/getoption decoration:rounding", &desktop());
-    assert!(value.get("int").is_none(), "must not invent a rounding value");
+    assert_eq!(value["int"], 0);
+    assert_eq!(value["css"], "0px");
     assert_eq!(value["set"], serde_json::json!(false));
 }
 
@@ -587,8 +640,7 @@ fn removals_are_emitted_last() {
     let events = differ.diff(&desktop());
     let names: Vec<&str> = events.iter().map(chonk_hyprland_ipc::Event::name).collect();
     let closed = names.iter().position(|n| *n == "closewindow").expect("closewindow");
-    let destroyed =
-        names.iter().position(|n| *n == "destroyworkspacev2").expect("destroyworkspacev2");
+    let destroyed = names.iter().position(|n| *n == "destroyworkspacev2").expect("destroyworkspacev2");
     assert!(closed < destroyed, "window before its workspace, got {names:?}");
 }
 
@@ -668,8 +720,7 @@ fn hostile_payloads_do_not_panic() {
 /// A batch answers each segment in order and collects every action.
 #[test]
 fn batches_answer_each_segment() {
-    let (response, actions) =
-        answer_payload(b"[[BATCH]]/dispatch workspace 2;j/status", &desktop());
+    let (response, actions) = answer_payload(b"[[BATCH]]/dispatch workspace 2;j/status", &desktop());
     assert_eq!(actions, vec![Action::FocusWorkspace(1)]);
     assert!(response.starts_with("ok"), "got {response:?}");
     assert!(response.contains("configProvider"));
@@ -693,7 +744,6 @@ fn unsupported_outcomes_report_as_invalid_dispatcher() {
     assert!(!outcome.is_ok());
 }
 
-
 /// Past the keyboard's own reach, a switch is refused rather than
 /// silently clamped — clamping would move the user somewhere they did
 /// not ask for, which is the confident wrong answer again.
@@ -716,7 +766,7 @@ fn a_locked_session_says_so_where_the_only_caller_looks() {
     let json = ask("j/monitors", &locked_desktop());
     let parsed: serde_json::Value = serde_json::from_str(&json).expect("monitors is json");
     let blocked = &parsed[0]["solitaryBlockedBy"];
-    assert_eq!(blocked, "LOCK", "a locked session must name the lock: {json}");
+    assert_eq!(blocked, &serde_json::json!(["LOCK"]), "a locked session must name the lock: {json}");
 }
 
 #[test]
@@ -724,7 +774,7 @@ fn an_unlocked_session_blocks_nothing_which_is_what_hyprland_reports() {
     let json = ask("j/monitors", &desktop());
     let parsed: serde_json::Value = serde_json::from_str(&json).expect("monitors is json");
     assert!(
-        parsed[0]["solitaryBlockedBy"].is_null(),
+        parsed[0]["solitaryBlockedBy"] == serde_json::json!([]),
         "nothing is blocking a solitary client on an unlocked desk: {json}"
     );
 }

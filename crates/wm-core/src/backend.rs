@@ -1,7 +1,10 @@
-use wm_theme_api::{DecorationBuffer, DecorationLayout, Rect, ResizeEdge, Size, Point};
+use wm_theme_api::{DecorationBuffer, DecorationLayout, Point, Rect, ResizeEdge, Size};
 
 use crate::client::MonitorInfo;
-use crate::types::{BackendEvent, DecorationRules, DragHandle, KeyCombo, Modifiers, MouseButton, ScrollDelta, SizeHints, WmClass, WmProtocol, WindowType};
+use crate::types::{
+    BackendEvent, DecorationRules, DragHandle, KeyCombo, Modifiers, MouseButton, ScrollDelta, SizeHints, WindowType,
+    WmClass, WmProtocol,
+};
 
 /// Everything the protocol-agnostic core needs from a windowing backend
 /// (X11 today via `wm-x11`, a future Wayland/Smithay backend later).
@@ -332,6 +335,12 @@ pub trait Backend {
     fn ungrab_pointer(&mut self, handle: DragHandle);
     fn grab_key(&mut self, combo: KeyCombo);
     fn ungrab_key(&mut self, combo: KeyCombo);
+    /// Marks behavioral variants of an already-grabbed combo. Backends
+    /// without phase/lock/repeat routing may leave these as no-ops;
+    /// the ordinary grab is still installed separately.
+    fn set_key_release(&mut self, _combo: KeyCombo, _enabled: bool) {}
+    fn set_key_locked(&mut self, _combo: KeyCombo, _enabled: bool) {}
+    fn set_key_repeating(&mut self, _combo: KeyCombo, _enabled: bool) {}
     /// Exclusive keyboard grab for a modal interaction (the Alt-Tab
     /// switcher): every key press and release reaches the WM until
     /// `ungrab_keyboard`, letting it see the plain Tab repeats and the
@@ -456,7 +465,16 @@ pub trait Backend {
     fn publish_workarea(&mut self, _area: Rect, _workspace_count: usize) {}
     /// Publishes a client's `_NET_WM_STATE` property from the WM's own
     /// authoritative flags.
-    fn publish_net_state(&mut self, _window: Self::WindowId, _fullscreen: bool, _max_h: bool, _max_v: bool, _shaded: bool, _hidden: bool) {}
+    fn publish_net_state(
+        &mut self,
+        _window: Self::WindowId,
+        _fullscreen: bool,
+        _max_h: bool,
+        _max_v: bool,
+        _shaded: bool,
+        _hidden: bool,
+    ) {
+    }
     /// Publishes a client's `_NET_WM_DESKTOP` property — which
     /// workspace the window lives on, for pagers and taskbars.
     fn publish_window_desktop(&mut self, _window: Self::WindowId, _desktop: usize) {}

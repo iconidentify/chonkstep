@@ -62,7 +62,7 @@ time. Bind them like anything else:
 keymap = "omarchy"        # ...or desktop = "omarchy", which defaults it
 ```
 
-113 bindings, derived from Omarchy's own configuration on the machine —
+114 bindings, derived from Omarchy's own configuration on the machine —
 `$OMARCHY_PATH/default/hypr/bindings/*.lua` — rather than from memory of
 Hyprland, with the `o.bind` helpers expanded the way `helpers.lua`
 expands them. A `run <name>` action names an entry the preset declares
@@ -74,9 +74,8 @@ Three of these differ from what Omarchy does with the chord —
 `super+f`/`super+alt+f`, `super+alt+s`, and the two chonkstep verbs on
 `super+up` and `control+escape` — and
 [omarchy-mode.md](omarchy-mode.md#three-chords-we-do-differently) spells
-out how. Two more differ in *how* they fire: Omarchy marks its media and
-brightness keys "locked" (working over the lock screen) and its ramps
-"repeating" (firing while held), and chonkstep's bindings do neither.
+out how. Omarchy's locked media/brightness keys, repeating ramps, and
+release bindings retain those firing semantics under chonkstep.
 
 Whether a mapped chord *works* is two questions, and this table answers
 only the first. The chord reaching the command is what the keymap
@@ -84,10 +83,9 @@ guarantees; whether that Omarchy command does anything under a
 compositor that is not Hyprland is
 [omarchy-integration.md](omarchy-integration.md)'s subject — it is the
 honest inventory, script by script, and a few of the commands below
-are on its broken list (`omarchy-toggle-nightlight` wants a gamma
-protocol chonkstep does not implement yet). They are bound anyway,
-because they are Omarchy's own commands on Omarchy's own chords: the
-day the gap closes, the binding is already right.
+are intentional floating-desktop refusals. The integration guide records
+those boundaries; night light, capture layers, and the common window
+helpers are supported directly.
 
 | Binding                  | Action                                 | Omarchy's own command                                                                                               |
 |--------------------------|----------------------------------------|---------------------------------------------------------------------------------------------------------------------|
@@ -126,6 +124,7 @@ day the gap closes, the binding is already right.
 | `super+alt+s`            | `miniaturize`                          | --                                                                                                                  |
 | `super+ctrl+v`           | `run omarchy-clipboard`                | `omarchy-shell shell toggle omarchy.clipboard`                                                                      |
 | `super+space`            | `run omarchy-menu`                     | `omarchy-menu toggle`                                                                                               |
+| `super+shift+f23`        | `run omarchy-menu`                     | `omarchy-menu toggle`                                                                                               |
 | `super+alt+space`        | `run omarchy-menu-apps`                | `omarchy-menu toggle apps`                                                                                          |
 | `super+escape`           | `run omarchy-menu-system`              | `omarchy-menu toggle system`                                                                                        |
 | `poweroff`               | `run omarchy-menu-system`              | `omarchy-menu toggle system`                                                                                        |
@@ -207,7 +206,7 @@ day the gap closes, the binding is already right.
 
 ### Deliberately unbound
 
-35 groups of Omarchy chord this keymap leaves dead, and why. Left dead
+34 groups of Omarchy chord this keymap leaves dead, and why. Left dead
 rather than approximated: a dead key is looked up in five seconds,
 while a `super+j` that does something *else* is a bug report.
 
@@ -244,7 +243,6 @@ while a `super+j` that does something *else* is a bug report.
 | `super+backspace / super+shift+backspace / super+ctrl+backspace`                                   | window transparency; window gaps; single-window square aspect        | commands Hyprland, which is not running                     |
 | `super+ctrl+delete / super+ctrl+alt+delete`                                                        | toggle the laptop display; toggle mirroring                          | commands Hyprland, which is not running                     |
 | `super+ctrl+z / super+ctrl+alt+z`                                                                  | cursor zoom in / reset                                               | commands Hyprland, which is not running                     |
-| `super+shift+code:201`                                                                             | Omarchy's root menu, on a bare keycode                               | not a key chord this config format can express              |
 | `switch:on/off:Lid Switch`                                                                         | run the lid-close and clamshell handlers                             | not a key chord this config format can express              |
 | `touchpad toggle / on / off`                                                                       | enable and disable the touchpad                                      | commands Hyprland, which is not running                     |
 | `super+ctrl+x, f9`                                                                                 | voxtype dictation: toggle, and push-to-talk                          | Omarchy binds it conditionally; a table of constants cannot |

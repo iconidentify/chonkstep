@@ -36,12 +36,12 @@
 //! `clippy.toml`'s incident report exists to protect.
 
 use chonk_hyprland_ipc::dispatch::{Action, Fullscreen};
-use chonk_hyprland_ipc::state::{Monitor, Snapshot, Window, Workspace};
+use chonk_hyprland_ipc::state::{Binding, Devices, Keyboard, Monitor, PointerDevice, Snapshot, Window, Workspace};
 use chonk_hyprland_ipc::Server;
 use wm_core::{Backend, BackendEvent, Lifecycle, WindowManager};
 use wm_theme_api::Point;
 
-use crate::state::WaylandBackend;
+use crate::state::{Compositor, ManagedSurface, WaylandBackend};
 
 /// Bring the server up, if the session asked for it.
 ///
@@ -97,7 +97,11 @@ pub(crate) fn init() -> Option<Server> {
 /// passed in. It reaches clients as `LOCK` in every monitor's
 /// `solitaryBlockedBy`, the one field Hyprland's IPC exposes lock
 /// state through and the one Omarchy's tooling reads.
-pub(crate) fn snapshot(wm: &WindowManager<WaylandBackend>, locked: bool) -> Snapshot {
+pub(crate) fn snapshot(
+    wm: &WindowManager<WaylandBackend>,
+    locked: bool,
+    session: &chonk_shell::startup::SessionState,
+) -> Snapshot {
     let monitors_info = wm.monitors();
     let current = wm.current_workspace();
 
@@ -112,8 +116,7 @@ pub(crate) fn snapshot(wm: &WindowManager<WaylandBackend>, locked: bool) -> Snap
             y: info.geometry.pos.y,
             width: i32::try_from(info.geometry.size.w).unwrap_or(i32::MAX),
             height: i32::try_from(info.geometry.size.h).unwrap_or(i32::MAX),
-            // chonkstep has one UI scale, not a per-output one.
-            scale: 1.0,
+            scale: wm.backend().monitor_scales.get(index).copied().unwrap_or(1.0),
             // chonkstep has a single global current workspace rather
             // than one per output, so exactly one monitor is focused
             // and every monitor shows the same workspace. Saying
@@ -131,6 +134,11 @@ pub(crate) fn snapshot(wm: &WindowManager<WaylandBackend>, locked: bool) -> Snap
     let mut windows = Vec::new();
     let focused = wm.focused_client();
 
+    let focus_order: Vec<u64> = focused
+        .into_iter()
+        .chain(wm.iter_clients().map(|(id, _)| id).filter(|id| Some(*id) != focused))
+        .map(wm_core::ClientId::as_u64)
+        .collect();
     for (id, client) in wm.iter_clients() {
         let id: wm_core::ClientId = id;
         if client.lifecycle == Lifecycle::Withdrawn {
@@ -167,38 +175,110 @@ pub(crate) fn snapshot(wm: &WindowManager<WaylandBackend>, locked: bool) -> Snap
             // `pid` is the client's. Not every client sets it, and 0 is
             // Hyprland's own "unknown" — a number invented to fill the
             // gap would let a script signal the wrong process.
-            pid: wm
-                .backend()
-                .window_pid(client.window)
-                .and_then(|pid| i32::try_from(pid).ok())
-                .unwrap_or(0),
-            xwayland: false,
+            pid: wm.backend().window_pid(client.window).and_then(|pid| i32::try_from(pid).ok()).unwrap_or(0),
+            xwayland: wm.backend().windows.get(&client.window)
+                .is_some_and(|record| matches!(record.surface, ManagedSurface::X11(_))),
             fullscreen: client.flags.contains(wm_core::ClientFlags::FULLSCREEN),
             hidden: client.lifecycle == Lifecycle::Miniaturized,
             urgent: client.flags.contains(wm_core::ClientFlags::URGENT),
-            focus_history_id: i32::from(Some(id) != focused),
+            pinned: client.flags.contains(wm_core::ClientFlags::STICKY),
+            inhibiting_idle: client.flags.contains(wm_core::ClientFlags::IDLE_INHIBIT),
+            tags: client.tags.clone(),
+            xdg_tag: String::new(),
+            xdg_description: String::new(),
+            focus_history_id: focus_order.iter().position(|candidate| *candidate == id.as_u64())
+                .and_then(|index| i32::try_from(index).ok()).unwrap_or(i32::MAX),
         });
     }
 
     let workspaces: Vec<Workspace> = counts
         .iter()
         .enumerate()
-        .map(|(index, windows)| Workspace {
-            index,
-            monitor: monitors.first().map(|m| m.name.clone()).unwrap_or_default(),
-            monitor_id: 0,
-            windows: *windows,
-            has_fullscreen: false,
+        .map(|(index, count)| {
+            let monitor_id = windows.iter().find(|window| window.workspace == index).map(|window| window.monitor)
+                .or_else(|| monitors.iter().find(|monitor| monitor.active_workspace == index).map(|monitor| monitor.id))
+                .unwrap_or(0);
+            Workspace {
+                index,
+                monitor: monitors.iter().find(|monitor| monitor.id == monitor_id)
+                    .map(|monitor| monitor.name.clone()).unwrap_or_default(),
+                monitor_id,
+                windows: *count,
+                has_fullscreen: windows.iter().any(|window| window.workspace == index && window.fullscreen),
+            }
         })
         .collect();
-
-    Snapshot { monitors, workspaces, windows, focused: focused.map(wm_core::ClientId::as_u64), locked }
+    let bindings = session.bindings.iter().map(|binding| ipc_binding(binding, session)).collect();
+    let layout = session.input.layout.clone().unwrap_or_else(|| "us".to_string());
+    let mut devices = Devices::default();
+    for device in &wm.backend().input_devices {
+        if device.keyboard {
+            devices.keyboards.push(Keyboard {
+                name: device.name.clone(), layout: layout.clone(), active_keymap: layout.clone(), active_layout_index: 0,
+            });
+        }
+        let entry = PointerDevice { name: device.name.clone() };
+        if device.pointer { devices.mice.push(entry.clone()); }
+        if device.touch { devices.touch.push(entry.clone()); }
+        if device.tablet { devices.tablets.push(entry.clone()); }
+        if device.switch { devices.switches.push(entry); }
+    }
+    // The nested backend supplies one logical keyboard and pointer
+    // through winit, but has no libinput hotplug event from which to
+    // build an InputDeviceRecord. They are still real seat devices:
+    // clients type and point through them, and reporting an empty
+    // keyboard list makes Omarchy's layout widget poll forever.
+    if devices.keyboards.is_empty() {
+        devices.keyboards.push(Keyboard {
+            name: "chonkstep-keyboard".into(),
+            layout: layout.clone(),
+            active_keymap: layout,
+            active_layout_index: 0,
+        });
+    }
+    if devices.mice.is_empty() {
+        devices.mice.push(PointerDevice { name: "chonkstep-pointer".into() });
+    }
+    Snapshot {
+        monitors, workspaces, windows, focused: focused.map(wm_core::ClientId::as_u64), locked,
+        cursor_position: wm.backend().pointer_position().map(|point| (point.x, point.y)), bindings, devices,
+    }
 }
 
-fn focused_monitor_index(
-    wm: &WindowManager<WaylandBackend>,
-    monitors: &[wm_core::MonitorInfo],
-) -> usize {
+fn ipc_binding(binding: &wm_config::Binding, session: &chonk_shell::startup::SessionState) -> Binding {
+    let (dispatcher, argument) = match &binding.action {
+        wm_config::Action::Run(name) => ("exec".to_string(), session.commands.get(name).map(|argv| argv.join(" ")).unwrap_or_default()),
+        wm_config::Action::SpawnTerminal => ("exec".to_string(), session.terminal.as_ref().map(|argv| argv.join(" ")).unwrap_or_else(|| "foot".to_string())),
+        wm_config::Action::Close => ("killactive".to_string(), String::new()),
+        wm_config::Action::ToggleFullscreen => ("fullscreen".to_string(), "0".to_string()),
+        wm_config::Action::Workspace(index) => ("workspace".to_string(), (index + 1).to_string()),
+        wm_config::Action::WorkspaceCarry(index) => ("movetoworkspace".to_string(), (index + 1).to_string()),
+        other => ("chonkstep".to_string(), format!("{other:?}")),
+    };
+    Binding {
+        modifiers: hypr_modmask(binding.combo.modifiers), key: keysym_name(binding.combo.keysym),
+        description: binding.description.clone().unwrap_or_default(), dispatcher, argument,
+        locked: binding.locked, repeating: binding.repeating, release: binding.release,
+    }
+}
+
+fn hypr_modmask(modifiers: wm_core::Modifiers) -> u32 {
+    u32::from(modifiers.contains(wm_core::Modifiers::SHIFT))
+        | (u32::from(modifiers.contains(wm_core::Modifiers::CONTROL)) << 2)
+        | (u32::from(modifiers.contains(wm_core::Modifiers::ALT)) << 3)
+        | (u32::from(modifiers.contains(wm_core::Modifiers::SUPER)) << 6)
+}
+
+fn keysym_name(keysym: u32) -> String {
+    match keysym {
+        0xff0d => "RETURN".into(), 0xff09 => "TAB".into(), 0xff1b => "ESCAPE".into(),
+        0xff51 => "LEFT".into(), 0xff52 => "UP".into(), 0xff53 => "RIGHT".into(), 0xff54 => "DOWN".into(),
+        0x20..=0x7e => char::from_u32(keysym).unwrap_or('?').to_ascii_uppercase().to_string(),
+        _ => format!("0x{keysym:x}"),
+    }
+}
+
+fn focused_monitor_index(wm: &WindowManager<WaylandBackend>, monitors: &[wm_core::MonitorInfo]) -> usize {
     if monitors.is_empty() {
         return 0;
     }
@@ -215,7 +295,8 @@ fn focused_monitor_index(
 ///
 /// Returns `true` when something changed, so the caller knows to
 /// publish a fresh snapshot in the same tick.
-pub(crate) fn apply(wm: &mut WindowManager<WaylandBackend>, action: Action) -> bool {
+pub(crate) fn apply(comp: &mut Compositor, action: Action) -> bool {
+    let wm = &mut comp.wm;
     match action {
         Action::FocusWorkspace(index) => {
             // `dispatch::workspace_target` has already refused any
@@ -302,19 +383,53 @@ pub(crate) fn apply(wm: &mut WindowManager<WaylandBackend>, action: Action) -> b
             }
             None => false,
         },
-        Action::CycleFocus { .. } => {
-            // Alt-Tab is a held-modifier interaction in chonkstep, not a
-            // single verb, so there is nothing honest to do here yet.
-            // Reported as a no-op rather than faked.
-            false
+        Action::CycleFocus { forward } => wm.focus_adjacent_client(forward),
+        Action::MoveWindow { window, x, y, relative } => match client_of(wm, window) {
+            Some(id) => {
+                let Some(client) = wm.client(id) else { return false };
+                let mut geometry = client.geometry;
+                geometry.pos = if relative {
+                    Point::new(geometry.pos.x.saturating_add(x), geometry.pos.y.saturating_add(y))
+                } else { Point::new(x, y) };
+                wm.set_client_content_geometry(id, geometry);
+                true
+            }
+            None => false,
+        },
+        Action::ResizeWindow { window, width, height, relative } => match client_of(wm, window) {
+            Some(id) => {
+                let Some(client) = wm.client(id) else { return false };
+                let width = if relative { i64::from(client.geometry.size.w) + i64::from(width) } else { i64::from(width) };
+                let height = if relative { i64::from(client.geometry.size.h) + i64::from(height) } else { i64::from(height) };
+                if width <= 0 || height <= 0 { return false; }
+                wm.resize_client_content(id, wm_theme_api::Size::new(width.min(u32::MAX as i64) as u32, height.min(u32::MAX as i64) as u32));
+                true
+            }
+            None => false,
+        },
+        Action::CenterWindow(window) => client_of(wm, window).is_some_and(|id| wm.center_client(id)),
+        Action::RaiseWindow(window) => client_of(wm, window).is_some_and(|id| wm.raise_client_to_top(id)),
+        Action::SetPinned { window, pinned } => match client_of(wm, window) {
+            Some(id) => {
+                let current = wm.client(id).is_some_and(|client| client.flags.contains(wm_core::ClientFlags::STICKY));
+                wm.set_client_pinned(id, pinned.unwrap_or(!current))
+            }
+            None => false,
+        },
+        Action::SetTag { window, tag, present } => client_of(wm, window).is_some_and(|id| wm.set_client_tag(id, &tag, present)),
+        Action::ConfirmFloating(window) => client_of(wm, window).is_some(),
+        Action::SetMonitorScale { output, scale_120 } => comp.set_output_scale(&output, scale_120 as f64 / 120.0),
+        Action::ReloadConfig => {
+            comp.shell.reload_config(&mut comp.wm);
+            true
         }
-        Action::Exec(command) => {
-            // Hyprland's `exec` takes a shell command line, not an
-            // argv, and Omarchy sends one (`exec -- bash -lc '...'`).
-            // `spawn_detached` never waits — the workspace's
-            // `clippy.toml` bans the three calls that would, and this
-            // runs on the compositor's repaint thread.
-            chonk_shell::spawn::spawn_detached("sh", &["-c", &command]).is_some()
+        Action::ExecShell(command) => chonk_shell::spawn::spawn_detached("sh", &["-c", &command]).is_some(),
+        Action::ExecArgv(argv) => {
+            let Some((program, args)) = argv.split_first() else {
+                return false;
+            };
+            let args: Vec<&str> = args.iter().map(String::as_str).collect();
+            chonk_shell::spawn::spawn_detached(program, &args).is_some()
         }
     }
 }
@@ -325,10 +440,7 @@ fn client_of(wm: &WindowManager<WaylandBackend>, id: u64) -> Option<wm_core::Cli
         .map(|(candidate, _)| candidate)
 }
 
-fn window_of(
-    wm: &WindowManager<WaylandBackend>,
-    id: u64,
-) -> Option<<WaylandBackend as wm_core::Backend>::WindowId> {
+fn window_of(wm: &WindowManager<WaylandBackend>, id: u64) -> Option<<WaylandBackend as wm_core::Backend>::WindowId> {
     wm.iter_clients()
         .find(|(candidate, _): &(wm_core::ClientId, _)| candidate.as_u64() == id)
         .map(|(_, client)| client.window)

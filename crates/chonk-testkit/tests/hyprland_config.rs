@@ -43,10 +43,11 @@
 //! `#[ignore]`d. `scripts/e2e.sh`, or
 //! `cargo test -p chonk-testkit --test hyprland_config -- --ignored`.
 
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use chonk_testkit::{poll_until, profile_binary, session_dir, Session, SessionOptions};
+use chonk_testkit::{keys, poll_until, profile_binary, session_dir, Session, SessionOptions};
 
 /// `KEY_K` from input-event-codes.h. `super+shift+k` is the chord the
 /// scratch configuration binds, and it is chosen precisely because
@@ -258,10 +259,7 @@ fn the_desktops_own_hyprland_config_drives_the_session_and_follows_an_edit() {
     // noticed, rather than sleeping a guessed interval.
     let log_path = session.dir.join("compositor.log");
     poll_until(Duration::from_secs(15), "the session to notice the edited Hyprland config", || {
-        std::fs::read_to_string(&log_path)
-            .ok()
-            .filter(|log| log.contains("Hyprland configuration changed"))
-            .map(|_| ())
+        std::fs::read_to_string(&log_path).ok().filter(|log| log.contains("Hyprland configuration changed")).map(|_| ())
     })
     .expect("the watch should have noticed the edit");
 
@@ -275,7 +273,9 @@ fn the_desktops_own_hyprland_config_drives_the_session_and_follows_an_edit() {
         (window.w == SECOND_SIZE.0 && window.h == SECOND_SIZE.1).then_some(())
     });
     let observed = probe_size(&mut session);
-    resized.unwrap_or_else(|e| panic!("the edited window rule should size a new window {SECOND_SIZE:?}, got {observed:?}: {e}"));
+    resized.unwrap_or_else(|e| {
+        panic!("the edited window rule should size a new window {SECOND_SIZE:?}, got {observed:?}: {e}")
+    });
 
     // ...and the rebound chord, on the new key, closes it — while the
     // old key does not, because their file no longer binds it.
@@ -289,6 +289,76 @@ fn the_desktops_own_hyprland_config_drives_the_session_and_follows_an_edit() {
     session
         .wait_for_window_gone(PROBE)
         .expect("super+shift+j, the chord the edit moved the close verb onto, should close the window");
+}
+
+#[test]
+#[ignore = "needs a session to nest in; run via scripts/e2e.sh"]
+fn selection_layer_bindings_override_only_for_the_layers_lifetime() {
+    let (omarchy_root, mut options) = scratch_machine("hyprland-layer-bindings", FIRST_SIZE, "SUPER + SHIFT + K");
+    let marker = session_dir("hyprland-layer-binding-command");
+    let _ = std::fs::remove_dir_all(&marker);
+    let bin = marker.join("bin");
+    let calls = marker.join("calls");
+    std::fs::create_dir_all(&bin).unwrap();
+
+    let write_command = |name: &str, source: &str| {
+        let path = bin.join(name);
+        std::fs::write(&path, format!("#!/bin/sh\nprintf '%s\\n' {source} >> '{}'\n", calls.display())).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    };
+    write_command("global-return-probe", "global");
+    write_command("omarchy-capture-region", "\"$*\"");
+
+    let user = options
+        .config_root_files
+        .iter_mut()
+        .find(|(path, _)| path == "hypr/hyprland.lua")
+        .expect("scratch machine has its user entry point");
+    user.1.push_str("\no.bind(\"RETURN\", \"Global Return probe\", \"global-return-probe\")\n");
+    let inherited_path = std::env::var("PATH").unwrap_or_default();
+    options.env.push(("PATH".into(), format!("{}:{inherited_path}", bin.display())));
+    options.env.push(("OMARCHY_PATH".into(), omarchy_root.display().to_string()));
+
+    let mut session = Session::boot("hyprland-layer-bindings", options).expect("session boots");
+
+    // Outside the overlay, Return is the user's ordinary global bind.
+    session.door().tap_key(keys::ENTER).unwrap();
+    poll_until(Duration::from_secs(5), "the global Return binding", || {
+        std::fs::read_to_string(&calls).ok().filter(|text| text.contains("global"))
+    })
+    .expect("the global binding works before the layer maps");
+    std::fs::write(&calls, "").unwrap();
+
+    // Omarchy's slurp surface maps with namespace=selection. The same
+    // chord must now take the layer-local command, even though a global
+    // binding exists for it.
+    let bar = profile_binary("chonk-fake-bar").expect("fake layer client is built");
+    session.launch(bar.to_str().unwrap(), &["24", "top", "selection"]).unwrap();
+    poll_until(Duration::from_secs(5), "the selection layer to map", || {
+        session.log().contains("namespace=selection mapped=true").then_some(())
+    })
+    .expect("selection layer maps");
+    session.door().tap_key(keys::ENTER).unwrap();
+    let scoped = poll_until(Duration::from_secs(5), "the selection-scoped Return binding", || {
+        std::fs::read_to_string(&calls).ok().filter(|text| text.contains("--take-window"))
+    })
+    .expect("Return invokes Omarchy's capture action while selection is live");
+    assert!(!scoped.contains("global"), "the scoped action, not both actions, owns the chord: {scoped}");
+
+    // Destroying the final surface in that namespace restores the
+    // exact global keymap; no scoped bind survives it.
+    session.kill_client("chonk-fake-bar");
+    poll_until(Duration::from_secs(5), "the selection layer to unmap", || {
+        session.log().contains("layer surface destroyed").then_some(())
+    })
+    .expect("selection layer is destroyed");
+    std::fs::write(&calls, "").unwrap();
+    session.door().tap_key(keys::ENTER).unwrap();
+    let after = poll_until(Duration::from_secs(5), "the global Return binding to be restored", || {
+        std::fs::read_to_string(&calls).ok().filter(|text| text.contains("global"))
+    })
+    .expect("the global binding owns Return again after the layer closes");
+    assert!(!after.contains("--take-window"), "the layer binding leaked after unmap: {after}");
 }
 
 /// Reading somebody else's configuration must never be able to break

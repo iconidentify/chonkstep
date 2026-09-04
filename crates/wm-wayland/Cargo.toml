@@ -39,6 +39,10 @@ chonk-xsettings = { path = "../chonk-xsettings" }
 # and `chonk-xsettings` use so the workspace resolves one copy.
 x11rb = "0.13"
 tracing = "0.1"
+# Smithay reexports this same version; enabling its Linux signalfd
+# source lets TERM/HUP/INT enter the compositor event loop and receive
+# orderly logout teardown.
+calloop = { version = "0.14", features = ["signals"] }
 # Screenshot encoding (see `capture.rs`) - the same rasterizer the
 # theme engine draws with, so no second image stack enters the graph.
 tiny-skia = "0.11"

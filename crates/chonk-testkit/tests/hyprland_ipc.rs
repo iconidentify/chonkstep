@@ -31,7 +31,7 @@ use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use chonk_testkit::{poll_until, Session, SessionOptions};
+use chonk_testkit::{poll_until, profile_binary, Session, SessionOptions};
 
 const EVENT: Duration = Duration::from_secs(10);
 
@@ -127,11 +127,7 @@ fn binds_two_private_sockets_where_the_protocol_says() {
     let dir = socket_dir(&session);
 
     let mode = |p: PathBuf| {
-        std::fs::metadata(&p)
-            .unwrap_or_else(|e| panic!("{}: {e}", p.display()))
-            .permissions()
-            .mode()
-            & 0o777
+        std::fs::metadata(&p).unwrap_or_else(|e| panic!("{}: {e}", p.display())).permissions().mode() & 0o777
     };
 
     assert_eq!(mode(dir.clone()), 0o700, "the instance directory must be private");
@@ -170,6 +166,14 @@ fn answers_the_queries_quickshell_makes_on_connect() {
     // Nothing is focused in a session with no windows, and Hyprland's
     // shape for that is an empty object — not null, not [].
     assert_eq!(json(&dir, "j/activewindow"), serde_json::json!({}));
+
+    let devices = json(&dir, "j/devices");
+    let keyboard = &devices["keyboards"][0];
+    for key in ["name", "active_keymap", "layout", "active_layout_index"] {
+        assert!(!keyboard[key].is_null(), "devices.keyboards[0].{key}");
+    }
+    assert!(devices["mice"].as_array().is_some_and(|mice| !mice.is_empty()));
+    assert!(!request(&dir, "binds").trim().is_empty(), "the keybinding menu receives the live keymap");
 }
 
 /// A real window reaches both halves of the protocol, with one address.
@@ -188,16 +192,13 @@ fn a_real_window_appears_in_the_stream_and_the_client_list() {
     // `zenity --question` is the harness's long-lived window: it sits
     // on a dialog until dismissed, where a terminal with no command
     // exits the moment its shell finds no tty.
-    session
-        .launch("zenity", &["--question", "--title", "ipc-probe", "--text", "hold still"])
-        .expect("launch a window");
+    session.launch("zenity", &["--question", "--title", "ipc-probe", "--text", "hold still"]).expect("launch a window");
     session.wait_for_window("ipc-probe").expect("the window maps");
 
     let data = events.wait_for("openwindow");
     let fields: Vec<&str> = data.splitn(4, ',').collect();
     assert_eq!(fields.len(), 4, "openwindow carries address,workspace,class,title: {data:?}");
-    let from_event =
-        u64::from_str_radix(fields[0], 16).unwrap_or_else(|e| panic!("event address {data:?}: {e}"));
+    let from_event = u64::from_str_radix(fields[0], 16).unwrap_or_else(|e| panic!("event address {data:?}: {e}"));
     assert!(fields[3].contains("ipc-probe"), "the title travels with the event: {data:?}");
 
     let clients = json(&dir, "j/clients");
@@ -216,6 +217,152 @@ fn a_real_window_appears_in_the_stream_and_the_client_list() {
     // The geometry keys `omarchy-capture-region` indexes as arrays.
     assert_eq!(entry["at"].as_array().map(Vec::len), Some(2), "at is [x, y]");
     assert_eq!(entry["size"].as_array().map(Vec::len), Some(2), "size is [w, h]");
+}
+
+#[test]
+#[ignore = "needs a Wayland session to nest inside"]
+fn foreign_toplevel_mapping_returns_the_same_live_ipc_address() {
+    let mut session = boot("hypr-toplevel-mapping");
+    let dir = socket_dir(&session);
+    let probe = profile_binary("chonk-toplevel-mapping-probe").expect("mapping probe built");
+    session.launch(probe.to_str().unwrap(), &[]).expect("mapping probe launches");
+    poll_until(EVENT, "the mapping probe to bind both globals", || {
+        session.client_log("chonk-toplevel-mapping-probe").contains("**mapping ready**").then_some(())
+    })
+    .expect("mapping globals are available");
+
+    session.launch("zenity", &["--question", "--title", "mapping-probe", "--text", "hold still"]).unwrap();
+    session.wait_for_window("mapping-probe").expect("window maps");
+    let mapped = poll_until(EVENT, "the protocol to return a window address", || {
+        let report = session.client_log("chonk-toplevel-mapping-probe");
+        let address = report.split("**mapped address ").nth(1)?.split("**").next()?;
+        Some(address.to_string())
+    })
+    .expect("mapping returns an address");
+
+    let clients = json(&dir, "j/clients");
+    let ipc = clients
+        .as_array().unwrap()
+        .iter()
+        .find(|client| client["title"].as_str().is_some_and(|title| title.contains("mapping-probe")))
+        .and_then(|client| client["address"].as_str())
+        .expect("the same window appears in IPC");
+    assert_eq!(mapped, ipc, "the protocol is a join, so both surfaces must return one identity");
+
+    session.kill_client("zenity");
+    session.wait_for_window_gone("mapping-probe").expect("window unmaps cleanly");
+    assert!(session.compositor_alive(), "stale foreign handles are cleaned rather than dereferenced");
+}
+
+#[test]
+#[ignore = "needs a Wayland session to nest inside"]
+fn window_geometry_plain_fields_and_monitor_eval_are_applied_before_ok() {
+    let mut session = boot("hypr-ipc-window-actions");
+    let dir = socket_dir(&session);
+    session.launch("zenity", &["--question", "--title", "geometry-probe", "--text", "hold still"]).unwrap();
+    session.wait_for_window("geometry-probe").expect("window maps");
+
+    let client = || {
+        json(&dir, "j/clients")
+            .as_array().unwrap()
+            .iter()
+            .find(|client| client["title"].as_str().is_some_and(|title| title.contains("geometry-probe")))
+            .cloned()
+            .expect("client stays mapped")
+    };
+    let before = client();
+    let address = before["address"].as_str().unwrap().to_string();
+    let original_size = before["size"].clone();
+
+    assert_eq!(
+        request(&dir, &format!("/dispatch resizewindowpixel exact 500 320,address:{address}")).trim(),
+        "ok"
+    );
+    poll_until(EVENT, "the exact resize to reach the live client", || {
+        (client()["size"] == serde_json::json!([500, 320])).then_some(())
+    })
+    .expect("resize changes geometry rather than only replying");
+
+    assert_eq!(
+        request(
+            &dir,
+            &format!(
+                "eval hl.dispatch(hl.dsp.window.resize({{ window = \"address:{address}\", x = 25, y = 10, relative = true }}))"
+            ),
+        )
+        .trim(),
+        "ok"
+    );
+    poll_until(EVENT, "the Lua relative resize to apply", || {
+        (client()["size"] == serde_json::json!([525, 330])).then_some(())
+    })
+    .expect("Lua window dispatch reaches the same geometry path");
+
+    let original_w = original_size[0].as_i64().unwrap();
+    let original_h = original_size[1].as_i64().unwrap();
+    assert_eq!(
+        request(
+            &dir,
+            &format!("/dispatch resizewindowpixel exact {original_w} {original_h},address:{address}"),
+        )
+        .trim(),
+        "ok"
+    );
+    poll_until(EVENT, "saved dimensions to round-trip", || (client()["size"] == original_size).then_some(()))
+        .expect("a saved width/height can be restored exactly");
+
+    let plain = request(&dir, "activewindow");
+    for field in [
+        "\tpid:", "\tclass:", "\ttitle:", "\tat:", "\tsize:", "\tworkspace:", "\tfloating:",
+        "\tmonitor:", "\txwayland:", "\tpinned:", "\tfullscreen:",
+    ] {
+        assert!(plain.contains(field), "plain activewindow omitted {field:?}: {plain}");
+    }
+    let pid = client()["pid"].as_u64().expect("live client pid");
+    assert!(pid > 0, "the pid must come from client credentials, not a zero placeholder");
+    assert!(plain.contains(&format!("\tpid: {pid}")), "plain and JSON views must report one pid: {plain}");
+    assert_eq!(
+        std::fs::read_link(format!("/proc/{pid}/cwd")).expect("the focused client's cwd remains inspectable"),
+        std::env::current_dir().unwrap(),
+        "omarchy-cmd-terminal-cwd reads this pid and must reach the real client cwd"
+    );
+
+    assert_eq!(request(&dir, "eval hl.monitor({ output = \"chonkstep\", scale = 1.5 })").trim(), "ok");
+    poll_until(EVENT, "monitor scale eval to update live output state", || {
+        ((json(&dir, "j/monitors")[0]["scale"].as_f64()? - 1.5).abs() < f64::EPSILON).then_some(())
+    })
+    .expect("monitor mutation must happen before success is observable");
+}
+
+#[test]
+#[ignore = "needs a Wayland session to nest inside"]
+fn exec_and_reload_have_observable_effects_before_success() {
+    let session = boot("hypr-ipc-exec-reload");
+    let dir = socket_dir(&session);
+
+    let direct = session.dir.join("direct-argv-executed");
+    assert_eq!(
+        request(&dir, &format!("/dispatch exec -- /usr/bin/touch {}", direct.display())).trim(),
+        "ok"
+    );
+    poll_until(EVENT, "direct exec argv to create its marker", || direct.exists().then_some(()))
+        .expect("exec -- must preserve argv rather than reinterpret it as shell source");
+
+    let lua = session.dir.join("lua-long-string-executed");
+    assert_eq!(
+        request(
+            &dir,
+            &format!("/dispatch hl.dsp.exec_cmd([=[/usr/bin/touch {}]=])", lua.display()),
+        )
+        .trim(),
+        "ok"
+    );
+    poll_until(EVENT, "Lua long-string exec to create its marker", || lua.exists().then_some(()))
+        .expect("Lua long brackets and quoted strings must reach the same shell-command path");
+
+    let mut events = Events::connect(&dir);
+    assert_eq!(request(&dir, "/reload").trim(), "ok");
+    assert_eq!(events.wait_for("configreloaded"), "", "a live re-read must tell Quickshell to refresh");
 }
 
 /// The regression test for the bug an end-to-end run found and the unit
@@ -266,10 +413,7 @@ fn tiling_verbs_fail_honestly_against_a_live_desktop() {
     for verb in ["togglesplit", "layoutmsg orientationtop", "pseudo", "togglegroup"] {
         let response = request(&dir, &format!("/dispatch {verb}"));
         assert_ne!(response.trim(), "ok", "{verb} must not claim success");
-        assert!(
-            response.starts_with("Invalid dispatcher"),
-            "{verb} must fail the way Hyprland does, got {response:?}"
-        );
+        assert!(response.starts_with("Invalid dispatcher"), "{verb} must fail the way Hyprland does, got {response:?}");
     }
 
     assert_eq!(json(&dir, "j/activeworkspace"), before, "a refused verb changes nothing");

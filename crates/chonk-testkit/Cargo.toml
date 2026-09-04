@@ -45,6 +45,11 @@ wayland-protocols-wlr = { version = "0.3", features = ["client"] }
 # server side (smithay) already pulls; only the `client`+`staging`
 # features are new.
 wayland-protocols = { version = "0.32", features = ["client", "staging"] }
+# Client code for chonkstep's two vendored Hyprland protocols is
+# generated from the exact XML the compositor builds against. Keeping
+# the probe and server on one source makes a protocol drift a compile
+# failure instead of a mysterious wire failure.
+wayland-scanner = "0.31"
 # The menu e2e tests aim their clicks with the same pure layout math
 # the shell renders and hit-tests through — asserting against the real
 # geometry instead of hand-tuned magic coordinates that break the day
@@ -66,3 +71,7 @@ x11rb = "0.13"
 # write one: a `UnixStream` and `serde_json`, nothing from the shell.
 # Already in the graph through `chonk-shell`.
 serde_json = "1"
+# Send SIGTERM to the supervisor process in the session-lifecycle test
+# without spawning a `kill` subprocess (the workspace deliberately
+# keeps test waits explicit and bounded).
+libc = "0.2"

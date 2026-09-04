@@ -65,7 +65,7 @@ pub enum Lifecycle {
 
 bitflags::bitflags! {
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-    pub struct ClientFlags: u8 {
+    pub struct ClientFlags: u16 {
         const FOCUSED    = 1 << 0;
         const SHADED     = 1 << 1;
         /// A modern addition — the classic NeXTSTEP desktop predates
@@ -88,6 +88,13 @@ bitflags::bitflags! {
         /// most apps resize themselves for perfectly good reasons and
         /// should keep being able to.
         const SIZE_LOCKED = 1 << 7;
+        /// A mapped, visible window with this rule keeps idle/lock
+        /// timers inhibited.
+        const IDLE_INHIBIT = 1 << 8;
+        /// This client never accepts keyboard focus.
+        const NO_FOCUS = 1 << 9;
+        /// Client-originated activation requests may not steal focus.
+        const NO_ACTIVATE = 1 << 10;
     }
 }
 
@@ -142,6 +149,10 @@ pub struct Client<B: Backend> {
     /// isn't needed here.
     pub workspace: usize,
     pub monitor: MonitorId,
+    /// User-visible labels attached through compositor control APIs.
+    /// Kept in core state so IPC queries and rule-driven behavior see
+    /// the same lifetime as the managed window.
+    pub tags: Vec<String>,
 }
 
 impl<B: Backend> Client<B> {
@@ -171,6 +182,7 @@ impl<B: Backend> Client<B> {
             // remembered one would be the thing that goes stale when an
             // output is unplugged out from under it.
             monitor: MonitorId::default(),
+            tags: Vec::new(),
         }
     }
 }

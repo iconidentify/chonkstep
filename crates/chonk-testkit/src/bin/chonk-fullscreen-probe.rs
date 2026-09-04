@@ -267,7 +267,7 @@ impl Dispatch<XdgToplevel, ()> for Probe {
                 // u32 enum values.
                 let mut told = Vec::new();
                 let mut names = Vec::new();
-                for chunk in states.chunks_exact(4) {
+                for chunk in states.as_chunks::<4>().0 {
                     let value = u32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
                     match xdg_toplevel::State::try_from(value) {
                         Ok(xdg_toplevel::State::Fullscreen) => {

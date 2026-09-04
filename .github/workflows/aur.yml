@@ -1,0 +1,74 @@
+name: publish AUR package
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: aur-chonkstep
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    container: archlinux:base-devel
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install publishing tools
+        run: pacman -Syu --noconfirm --needed git openssh pacman-contrib
+
+      - name: Build the AUR metadata from the tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          release_version=${GITHUB_REF_NAME#v}
+          workspace_version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n1)
+          test "$release_version" = "$workspace_version" || {
+            echo "tag $release_version does not match workspace version $workspace_version" >&2
+            exit 1
+          }
+
+          install -d /tmp/chonkstep-aur
+          cp packaging/arch/PKGBUILD-release /tmp/chonkstep-aur/PKGBUILD
+          sed -i "s/^pkgver=.*/pkgver=$release_version/" /tmp/chonkstep-aur/PKGBUILD
+          useradd --create-home aur-builder
+          chown -R aur-builder:aur-builder /tmp/chonkstep-aur
+          runuser -u aur-builder -- bash -lc '
+            set -euo pipefail
+            cd /tmp/chonkstep-aur
+            updpkgsums
+            makepkg --printsrcinfo > .SRCINFO
+          '
+
+      - name: Publish to aur.archlinux.org
+        shell: bash
+        env:
+          AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          test -n "$AUR_SSH_PRIVATE_KEY" || {
+            echo "repository secret AUR_SSH_PRIVATE_KEY is required" >&2
+            exit 1
+          }
+          install -d -m700 /root/.ssh
+          printf '%s\n' "$AUR_SSH_PRIVATE_KEY" > /root/.ssh/aur
+          chmod 600 /root/.ssh/aur
+          export GIT_SSH_COMMAND='ssh -i /root/.ssh/aur -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new'
+
+          git clone ssh://aur@aur.archlinux.org/chonkstep.git /tmp/aur-repository
+          cp /tmp/chonkstep-aur/PKGBUILD /tmp/chonkstep-aur/.SRCINFO /tmp/aur-repository/
+          cd /tmp/aur-repository
+          git config user.name "chonkstep release automation"
+          git config user.email "chris@kearneymail.com"
+          git add PKGBUILD .SRCINFO
+          if git diff --cached --quiet; then
+            echo "AUR metadata already matches ${GITHUB_REF_NAME}"
+            exit 0
+          fi
+          git commit -m "chonkstep ${GITHUB_REF_NAME}"
+          git push origin master

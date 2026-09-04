@@ -808,7 +808,7 @@ mod tests {
             assert_eq!((frame.width(), frame.height()), size);
             assert_eq!(frame.buffer().pixels.len(), (size.0 * size.1 * 4) as usize);
             assert!(
-                frame.buffer().pixels.chunks_exact(4).all(|px| px[3] == 255),
+                frame.buffer().pixels.as_chunks::<4>().0.iter().all(|px| px[3] == 255),
                 "grant {size:?}: the panel fills its grant — no transparent hole"
             );
             // And the hit-test moved with it: the mute square tracks the

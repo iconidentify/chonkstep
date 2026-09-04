@@ -34,7 +34,9 @@ fn overview_shell(world: &World) -> Option<&ShellInfo> {
 /// black/gray treatment).
 fn titlebar_brightness(shot: &Screenshot, world: &World, needle: &str) -> f64 {
     let window = world.window_matching(needle).expect("window in ledger");
-    let frame = world.frame_of(window.id).expect("server-side frame (foot draws no CSD)");
+    let frame = world
+        .frame_of(window.id)
+        .expect("server-side frame (foot draws no CSD)");
     let bar_h = (window.y - frame.y).max(4) as u32;
     let mean = shot.mean_rgb(
         (frame.x + frame.w as i32 / 4).max(0) as u32,
@@ -50,13 +52,20 @@ fn focused_of_two(session: &mut Session, a: &str, b: &str) -> String {
     session.door().barrier().unwrap();
     let world = session.world().unwrap();
     let shot = session.screenshot("focus-probe").unwrap();
-    let (ba, bb) = (titlebar_brightness(&shot, &world, a), titlebar_brightness(&shot, &world, b));
+    let (ba, bb) = (
+        titlebar_brightness(&shot, &world, a),
+        titlebar_brightness(&shot, &world, b),
+    );
     assert!(
         (ba - bb).abs() > 15.0,
         "the two titlebars should be visibly focused-vs-unfocused (brightness {ba:.0} vs {bb:.0}, screenshot: {})",
         shot.path.display()
     );
-    if ba < bb { a.to_string() } else { b.to_string() }
+    if ba < bb {
+        a.to_string()
+    } else {
+        b.to_string()
+    }
 }
 
 /// Launches a foot terminal and waits — generously — for it to map.
@@ -70,33 +79,58 @@ fn launch_terminal(session: &mut Session, title: &str) {
     // before the ledger poll ever sees the one we asked for —
     // confirmed on a live ledger dump.
     session
-        .launch("foot", &[&format!("--title={title}"), "--override", "locked-title=yes"])
+        .launch(
+            "foot",
+            &[
+                &format!("--title={title}"),
+                // Keep both titlebars independently visible. At foot's
+                // machine-dependent default size the two frames can
+                // overlap almost completely, making a screenshot of
+                // the lower frame sample the upper frame's pixels and
+                // falsely report identical focus treatment.
+                "--window-size-pixels=260x140",
+                "--override",
+                "locked-title=yes",
+            ],
+        )
         .unwrap();
     let needle = title.to_string();
     let door = session.door();
-    poll_until(Duration::from_secs(40), &format!("a mapped window titled {needle:?}"), || {
-        let world = door.windows().ok()?;
-        world.window_matching(&needle).map(|_| ())
-    })
+    poll_until(
+        Duration::from_secs(40),
+        &format!("a mapped window titled {needle:?}"),
+        || {
+            let world = door.windows().ok()?;
+            world.window_matching(&needle).map(|_| ())
+        },
+    )
     .expect("foot should launch and map");
 }
 
 fn open_overview(session: &mut Session) {
     session.door().chord(keys::LEFTMETA, keys::UP).unwrap();
     let door = session.door();
-    poll_until(Duration::from_secs(10), "the overview panel to appear in the ledger", || {
-        let world = door.windows().ok()?;
-        overview_shell(&world).map(|_| ())
-    })
+    poll_until(
+        Duration::from_secs(10),
+        "the overview panel to appear in the ledger",
+        || {
+            let world = door.windows().ok()?;
+            overview_shell(&world).map(|_| ())
+        },
+    )
     .expect("super+up should open the Overview");
 }
 
 fn assert_overview_closed(session: &mut Session, why: &str) {
     let door = session.door();
-    poll_until(Duration::from_secs(10), "the overview panel to leave the ledger", || {
-        let world = door.windows().ok()?;
-        overview_shell(&world).is_none().then_some(())
-    })
+    poll_until(
+        Duration::from_secs(10),
+        "the overview panel to leave the ledger",
+        || {
+            let world = door.windows().ok()?;
+            overview_shell(&world).is_none().then_some(())
+        },
+    )
     .unwrap_or_else(|e| panic!("the Overview should have closed after {why}: {e}"));
 }
 
@@ -108,7 +142,14 @@ fn assert_overview_closed(session: &mut Session, why: &str) {
 #[test]
 #[ignore = "needs a live Wayland session to nest in: scripts/e2e.sh, or cargo test -p chonk-testkit -- --ignored --test-threads=1"]
 fn overview_opens_navigates_and_commits() {
-    let mut session = Session::boot("overview", SessionOptions { scale: Some(2.0), ..SessionOptions::default() }).unwrap();
+    let mut session = Session::boot(
+        "overview",
+        SessionOptions {
+            scale: Some(2.0),
+            ..SessionOptions::default()
+        },
+    )
+    .unwrap();
     launch_terminal(&mut session, "OverviewA");
     launch_terminal(&mut session, "OverviewB");
 
@@ -124,13 +165,20 @@ fn overview_opens_navigates_and_commits() {
     // launch order (A, B), so stepping toward the *other* card is Left
     // when B is focused, Right when A is. The commit must then move
     // focus — observable as the dark titlebar changing windows.
-    let step = if before == "OverviewB" { keys::LEFT } else { keys::RIGHT };
+    let step = if before == "OverviewB" {
+        keys::LEFT
+    } else {
+        keys::RIGHT
+    };
     session.door().tap_key(step).unwrap();
     session.screenshot("overview-selection-moved").unwrap();
     session.door().tap_key(keys::ENTER).unwrap();
     assert_overview_closed(&mut session, "Return committed the selection");
     let after = focused_of_two(&mut session, "OverviewA", "OverviewB");
-    assert_ne!(after, before, "committing the other card should move focus (dark titlebar)");
+    assert_ne!(
+        after, before,
+        "committing the other card should move focus (dark titlebar)"
+    );
 
     // -- Escape dismisses without committing ----------------------------
     open_overview(&mut session);
@@ -173,11 +221,21 @@ fn overview_opens_navigates_and_commits() {
 #[test]
 #[ignore = "needs a live Wayland session to nest in: scripts/e2e.sh, or cargo test -p chonk-testkit -- --ignored --test-threads=1"]
 fn overview_on_an_empty_desk_is_quiet_not_a_crash() {
-    let mut session = Session::boot("overview-empty", SessionOptions { scale: Some(2.0), ..SessionOptions::default() }).unwrap();
+    let mut session = Session::boot(
+        "overview-empty",
+        SessionOptions {
+            scale: Some(2.0),
+            ..SessionOptions::default()
+        },
+    )
+    .unwrap();
     open_overview(&mut session);
     session.door().barrier().unwrap();
     session.screenshot("overview-empty").unwrap();
-    assert!(session.compositor_alive(), "an empty overview must not take the compositor down");
+    assert!(
+        session.compositor_alive(),
+        "an empty overview must not take the compositor down"
+    );
     session.door().tap_key(keys::ESC).unwrap();
     assert_overview_closed(&mut session, "Escape on an empty desk");
     assert!(session.compositor_alive());

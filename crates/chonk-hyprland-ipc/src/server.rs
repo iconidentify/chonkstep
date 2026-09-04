@@ -158,9 +158,7 @@ pub fn answer(request: &Request, snapshot: &Snapshot) -> (String, Option<Action>
             None,
         ),
         "monitors" => (encode(json, &snapshot.monitors_json(), plain_monitors(snapshot)), None),
-        "workspaces" => {
-            (encode(json, &snapshot.workspaces_json(), plain_workspaces(snapshot)), None)
-        }
+        "workspaces" => (encode(json, &snapshot.workspaces_json(), plain_workspaces(snapshot)), None),
         "clients" => (encode(json, &snapshot.clients_json(), plain_clients(snapshot)), None),
         "activewindow" => {
             let value = snapshot.active_window_json();
@@ -170,7 +168,7 @@ pub fn answer(request: &Request, snapshot: &Snapshot) -> (String, Option<Action>
                 (
                     snapshot
                         .focused_window()
-                        .map(|window| format!("Window {} -> {}", window.address(), window.title))
+                        .map(plain_client)
                         .unwrap_or_default(),
                     None,
                 )
@@ -181,7 +179,7 @@ pub fn answer(request: &Request, snapshot: &Snapshot) -> (String, Option<Action>
             if json {
                 (value.to_string(), None)
             } else {
-                (plain_workspaces(snapshot), None)
+                (snapshot.active_workspace().map(|workspace| plain_workspace(snapshot, workspace)).unwrap_or_default(), None)
             }
         }
         "version" => {
@@ -197,10 +195,7 @@ pub fn answer(request: &Request, snapshot: &Snapshot) -> (String, Option<Action>
             // `omarchy-capture-region` as `${pos%,*}` / `${pos#*, }` —
             // a comma AND a space, which is why the format string has
             // both.
-            let (x, y) = snapshot
-                .focused_monitor()
-                .map(|monitor| (monitor.x + monitor.width / 2, monitor.y + monitor.height / 2))
-                .unwrap_or((0, 0));
+            let (x, y) = snapshot.cursor_position.unwrap_or((0, 0));
             (format!("{x}, {y}"), None)
         }
         "dispatch" => {
@@ -211,48 +206,46 @@ pub fn answer(request: &Request, snapshot: &Snapshot) -> (String, Option<Action>
                 _ => (response, None),
             }
         }
+        "eval" => {
+            let outcome = dispatch::parse_eval(&request.args, snapshot);
+            let response = outcome.response();
+            match outcome {
+                Outcome::Run(action) => (response, Some(action)),
+                _ => (response, None),
+            }
+        }
         // Deliberately refused rather than faked. Each of these is a
-        // real Omarchy caller, and each would take a wrong branch on a
-        // plausible answer:
+        // real Omarchy caller, and each would consume a wrong value:
         //
         //  - `getoption` feeds `Style.qml`'s corner radius and gap. A
         //    made-up number would restyle the user's bar to match a
         //    compositor they are not running. Answering with the
         //    documented "does not exist" shape leaves Style.qml's
         //    `catch` to keep its previous value, which is right.
-        //  - `keyword` and `reload` would claim to have changed a
-        //    Hyprland config chonkstep does not read.
-        //  - `binds` feeds the keybindings menu; ours are not Hyprland's.
+        //  - `keyword` would claim to have changed a Hyprland config;
+        //    `reload` instead reloads chonkstep's live configuration.
+        //  - `binds` and `devices` below report chonkstep's real seat.
         "getoption" => (
             if json {
-                serde_json::json!({ "option": request.args, "set": false }).to_string()
+                // This is the complete Hyprland option shape. The
+                // value is explicitly unset rather than a fabricated
+                // compositor setting, so callers can use their own
+                // fallback without receiving `undefined` fields.
+                serde_json::json!({
+                    "option": request.args, "int": 0, "float": 0.0,
+                    "str": "", "data": "0", "css": "0px", "set": false
+                }).to_string()
             } else {
                 "no such option".to_string()
             },
             None,
         ),
-        "keyword" => (
-            "Invalid dispatcher: chonkstep does not read a Hyprland config; keyword changes nothing"
-                .to_string(),
-            None,
-        ),
-        "reload" => (
-            "Invalid dispatcher: chonkstep has no Hyprland config to reload".to_string(),
-            None,
-        ),
-        "binds" => (if json { "[]".to_string() } else { String::new() }, None),
-        "devices" => (
-            // Shape matters more than content: `KeyboardLayout.qml`
-            // checks `Array.isArray(parsed.keyboards)` and refuses to
-            // speak for the seat unless it is one. An empty array is the
-            // honest "chonkstep does not switch layouts" and keeps the
-            // widget on its previous value instead of blanking it.
-            serde_json::json!({
-                "mice": [], "keyboards": [], "tablets": [], "touch": [], "switches": []
-            })
-            .to_string(),
-            None,
-        ),
+        "keyword" => {
+            ("Invalid dispatcher: chonkstep does not read a Hyprland config; keyword changes nothing".to_string(), None)
+        }
+        "reload" => ("ok".to_string(), Some(Action::ReloadConfig)),
+        "binds" => (if json { json_bindings(snapshot) } else { plain_bindings(snapshot) }, None),
+        "devices" => (json_devices(snapshot), None),
         "configerrors" => (if json { "[]".to_string() } else { String::new() }, None),
         "splash" => ("chonkstep".to_string(), None),
         // Hyprland's literal reply for a verb it does not have, and the
@@ -290,33 +283,78 @@ fn plain_monitors(snapshot: &Snapshot) -> String {
 fn plain_workspaces(snapshot: &Snapshot) -> String {
     let mut out = String::new();
     for workspace in &snapshot.workspaces {
-        out.push_str(&format!(
-            "workspace ID {} ({}) on monitor {}:\n\twindows: {}\n\n",
-            workspace.hypr_id(),
-            workspace.hypr_name(),
-            workspace.monitor,
-            workspace.windows,
-        ));
+        out.push_str(&plain_workspace(snapshot, workspace));
     }
     out
+}
+
+fn plain_workspace(snapshot: &Snapshot, workspace: &crate::state::Workspace) -> String {
+    let last = snapshot.focused_window().filter(|window| window.workspace == workspace.index);
+    format!(
+        "workspace ID {} ({}) on monitor {}:\n\tmonitorID: {}\n\twindows: {}\n\thasfullscreen: {}\n\tlastwindow: {}\n\tlastwindowtitle: {}\n\n",
+        workspace.hypr_id(), workspace.hypr_name(), workspace.monitor, workspace.monitor_id,
+        workspace.windows, workspace.has_fullscreen,
+        last.map(crate::state::Window::address).unwrap_or_else(|| "0x0".to_string()),
+        last.map(|window| window.title.as_str()).unwrap_or_default(),
+    )
 }
 
 fn plain_clients(snapshot: &Snapshot) -> String {
     let mut out = String::new();
     for window in &snapshot.windows {
+        out.push_str(&plain_client(window));
+        out.push('\n');
+    }
+    out
+}
+
+fn plain_client(window: &crate::state::Window) -> String {
+    format!(
+        "Window {} -> {}:\n\tmapped: {}\n\thidden: {}\n\tat: {},{}\n\tsize: {},{}\n\tworkspace: {} ({})\n\tfloating: 1\n\tpseudo: 0\n\tmonitor: {}\n\tclass: {}\n\ttitle: {}\n\tinitialClass: {}\n\tinitialTitle: {}\n\tpid: {}\n\txwayland: {}\n\tpinned: {}\n\tfullscreen: {}\n",
+        window.address(), window.title, !window.hidden, window.hidden, window.x, window.y,
+        window.width, window.height, window.workspace + 1, window.workspace + 1,
+        window.monitor, window.class, window.title, window.class, window.title, window.pid,
+        window.xwayland, window.pinned, i32::from(window.fullscreen),
+    )
+}
+
+fn plain_bindings(snapshot: &Snapshot) -> String {
+    let mut out = String::new();
+    for binding in &snapshot.bindings {
         out.push_str(&format!(
-            "Window {} -> {}:\n\tclass: {}\n\tat: {},{}\n\tsize: {},{}\n\tworkspace: {}\n\n",
-            window.address(),
-            window.title,
-            window.class,
-            window.x,
-            window.y,
-            window.width,
-            window.height,
-            window.workspace + 1,
+            "bind\n\tlocked: {}\n\tmouse: false\n\trelease: {}\n\trepeat: {}\n\tlongPress: false\n\tnon_consuming: false\n\thas_description: {}\n\tmodmask: {}\n\tsubmap: \n\tkey: {}\n\tkeycode: 0\n\tcatch_all: false\n\tdescription: {}\n\tdispatcher: {}\n\targ: {}\n\n",
+            binding.locked, binding.release, binding.repeating, !binding.description.is_empty(),
+            binding.modifiers, binding.key, binding.description, binding.dispatcher, binding.argument,
         ));
     }
     out
+}
+
+fn json_bindings(snapshot: &Snapshot) -> String {
+    serde_json::Value::Array(snapshot.bindings.iter().map(|binding| serde_json::json!({
+        "locked": binding.locked, "mouse": false, "release": binding.release,
+        "repeat": binding.repeating, "longPress": false, "non_consuming": false,
+        "has_description": !binding.description.is_empty(), "modmask": binding.modifiers,
+        "submap": "", "key": binding.key, "keycode": 0, "catch_all": false,
+        "description": binding.description, "dispatcher": binding.dispatcher, "arg": binding.argument,
+    })).collect()).to_string()
+}
+
+fn json_devices(snapshot: &Snapshot) -> String {
+    let keyboards: Vec<_> = snapshot.devices.keyboards.iter().map(|keyboard| serde_json::json!({
+        "address": keyboard.name, "name": keyboard.name, "rules": "", "model": "",
+        "layout": keyboard.layout, "variant": "", "options": "",
+        "active_keymap": keyboard.active_keymap, "active_layout_index": keyboard.active_layout_index,
+        "main": true,
+    })).collect();
+    let devices = |items: &[crate::state::PointerDevice]| -> Vec<_> {
+        items.iter().map(|device| serde_json::json!({ "address": device.name, "name": device.name })).collect()
+    };
+    serde_json::json!({
+        "mice": devices(&snapshot.devices.mice), "keyboards": keyboards,
+        "tablets": devices(&snapshot.devices.tablets), "touch": devices(&snapshot.devices.touch),
+        "switches": devices(&snapshot.devices.switches),
+    }).to_string()
 }
 
 /// Answer a whole payload, which may be a `[[BATCH]]`.
@@ -343,6 +381,47 @@ pub fn answer_payload(payload: &[u8], snapshot: &Snapshot) -> (String, Vec<Actio
         }
         None => ("unknown request".to_string(), Vec::new()),
     }
+}
+
+/// Answer a payload and run each mutation before claiming success.
+/// `hyprctl` exits zero for arbitrary response text, including an
+/// `Invalid dispatcher` reply, so the wire text is diagnostic rather
+/// than a reliable shell status. This boundary therefore makes the
+/// stronger promise we can enforce: `ok` is written only after the
+/// compositor reports that the requested action was applied.
+pub fn answer_payload_applying<F>(payload: &[u8], snapshot: &Snapshot, mut apply: F) -> String
+where
+    F: FnMut(Action) -> bool,
+{
+    fn one<F>(request: &Request, snapshot: &Snapshot, apply: &mut F) -> String
+    where
+        F: FnMut(Action) -> bool,
+    {
+        let (response, action) = answer(request, snapshot);
+        if let Some(action) = action {
+            if apply(action) {
+                response
+            } else {
+                "Invalid dispatcher: action could not be applied to the current desktop state".to_string()
+            }
+        } else {
+            response
+        }
+    }
+
+    if let Some(segments) = request::split_batch(payload) {
+        let mut response = String::new();
+        for segment in segments {
+            if let Some(request) = Request::parse(&segment) {
+                response.push_str(&one(&request, snapshot, &mut apply));
+                response.push('\n');
+            }
+        }
+        return response;
+    }
+    Request::parse(payload)
+        .map(|request| one(&request, snapshot, &mut apply))
+        .unwrap_or_else(|| "unknown request".to_string())
 }
 
 // ---------------------------------------------------------------------
@@ -375,6 +454,7 @@ pub struct Server {
     request_clients: Vec<RequestClient>,
     event_clients: Vec<EventClient>,
     differ: Differ,
+    refusals: u64,
 }
 
 impl Server {
@@ -398,10 +478,7 @@ impl Server {
     /// a typo should be the feature working, not a silently inert
     /// server whose absence looks like a bug in Omarchy's tooling.
     pub fn enabled() -> bool {
-        !matches!(
-            std::env::var(ENABLE_ENV).as_deref(),
-            Ok("0") | Ok("false") | Ok("no") | Ok("")
-        )
+        !matches!(std::env::var(ENABLE_ENV).as_deref(), Ok("0") | Ok("false") | Ok("no") | Ok(""))
     }
 
     /// Generate an instance signature.
@@ -412,10 +489,7 @@ impl Server {
     /// sessions on one machine disjoint, which is the actual
     /// requirement.
     pub fn signature() -> String {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
+        let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
         format!("chonkstep_{now}_{}", std::process::id())
     }
 
@@ -476,6 +550,7 @@ impl Server {
             request_clients: Vec::new(),
             event_clients: Vec::new(),
             differ: Differ::new(),
+            refusals: 0,
         })
     }
 
@@ -514,23 +589,21 @@ impl Server {
                 if !accepted_from_this_user(&stream) {
                     continue;
                 }
-                self.event_clients.push(EventClient {
-                    stream,
-                    outbound: Vec::new(),
-                    doomed: false,
-                });
+                self.event_clients.push(EventClient { stream, outbound: Vec::new(), doomed: false });
             }
         }
     }
 
-    /// Read requests, answer them, and return the actions they ask for.
+    /// Read requests, apply mutations, and answer them.
     ///
     /// The caller applies the actions and then calls [`Server::publish`]
     /// with a *fresh* snapshot, so that the events a request causes
     /// describe the state it produced — the same two-snapshot discipline
     /// `Shell::service_control` uses.
-    pub fn service(&mut self, snapshot: &Snapshot) -> Vec<Action> {
-        let mut actions = Vec::new();
+    pub fn service<F>(&mut self, snapshot: &Snapshot, mut apply: F)
+    where
+        F: FnMut(Action) -> bool,
+    {
         for client in &mut self.request_clients {
             if client.answered {
                 client.flush();
@@ -560,8 +633,7 @@ impl Server {
                         }
                     }
                     Err(error)
-                        if error.kind() == io::ErrorKind::WouldBlock
-                            || error.kind() == io::ErrorKind::Interrupted =>
+                        if error.kind() == io::ErrorKind::WouldBlock || error.kind() == io::ErrorKind::Interrupted =>
                     {
                         break
                     }
@@ -576,8 +648,13 @@ impl Server {
                 continue;
             }
 
-            let (response, mut requested) = answer_payload(&client.inbound, snapshot);
-            actions.append(&mut requested);
+            let response = answer_payload_applying(&client.inbound, snapshot, &mut apply);
+            for line in response.lines().filter(|line| {
+                line.starts_with("Invalid dispatcher:") || line.starts_with("unknown request")
+            }) {
+                self.refusals = self.refusals.saturating_add(1);
+                tracing::warn!(refusals = self.refusals, response = line, "hyprland IPC request refused");
+            }
             client.outbound.extend_from_slice(response.as_bytes());
             client.answered = true;
             client.flush();
@@ -585,9 +662,12 @@ impl Server {
         // One connection, one request, one response, close: a client
         // whose answer has left is done with, and `hyprctl` reads to
         // EOF, so the close IS the framing.
-        self.request_clients
-            .retain(|client| !(client.doomed || client.answered && client.outbound.is_empty()));
-        actions
+        self.request_clients.retain(|client| !(client.doomed || client.answered && client.outbound.is_empty()));
+    }
+
+    /// Number of refused request segments since this server started.
+    pub fn refusal_count(&self) -> u64 {
+        self.refusals
     }
 
     /// Derive events from the new state and stream them.
@@ -602,6 +682,10 @@ impl Server {
             client.flush();
         }
         self.event_clients.retain(|client| !client.doomed);
+    }
+
+    pub fn reset_diff(&mut self) {
+        self.differ.reset();
     }
 
     /// Queue one event to every connected event client.
@@ -719,10 +803,7 @@ fn flush(stream: &Stream, outbound: &mut Vec<u8>, doomed: &mut bool) {
             Ok(n) => {
                 outbound.drain(..n);
             }
-            Err(error)
-                if error.kind() == io::ErrorKind::WouldBlock
-                    || error.kind() == io::ErrorKind::Interrupted =>
-            {
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock || error.kind() == io::ErrorKind::Interrupted => {
                 break
             }
             Err(_) => {

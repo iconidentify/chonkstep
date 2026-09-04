@@ -52,7 +52,7 @@
 //! `o.shell_succeeds`, which would run a shell — is not answered. The
 //! block is skipped and said so.
 
-use super::directive::{Directive, Dispatcher, Include, Matcher, Monitor, WindowRule};
+use super::directive::{BindFlags, Directive, Dispatcher, Include, Matcher, Monitor, WindowRule};
 
 /// The most iterations a numeric `for` is expanded to. Omarchy's
 /// longest is ten; a file asking for a million is either broken or
@@ -84,7 +84,10 @@ pub enum Value {
     Table(Vec<(Option<String>, Value)>),
     /// A call, kept unevaluated: `hl.dsp.window.close()`,
     /// `tostring(n)`, `o.cmd_present("voxtype")`.
-    Call { path: String, args: Vec<Value> },
+    Call {
+        path: String,
+        args: Vec<Value>,
+    },
     /// A bare name — a `local`, a loop variable, or a global.
     Name(String),
     /// `function() … end`, with its body parsed.
@@ -109,7 +112,11 @@ pub enum Value {
     /// existed, producing an unresolvable expression and losing all
     /// thirty generated chords. Folding at *eval* time, once per
     /// iteration with the variable bound, is what makes them work.
-    Binary { op: &'static str, left: Box<Value>, right: Box<Value> },
+    Binary {
+        op: &'static str,
+        left: Box<Value>,
+        right: Box<Value>,
+    },
     /// An expression this parser declines to represent. The string is
     /// the source text, truncated, for the log.
     Opaque(String),
@@ -121,12 +128,33 @@ const START_EVENT: &str = "hyprland.start";
 /// A statement, to the extent this reader needs one.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Stmt {
-    Call { path: String, args: Vec<Value> },
+    Call {
+        path: String,
+        args: Vec<Value>,
+    },
     /// `local x = …` and plain `x = …`, which is how a user's
     /// `hyprland.lua` sets `omarchy_default_bindings = false`.
-    Assign { name: String, value: Value },
-    NumericFor { var: String, from: Value, to: Value, step: Option<Value>, body: Vec<Stmt> },
-    If { cond: Value, then_body: Vec<Stmt>, else_body: Vec<Stmt> },
+    Assign {
+        name: String,
+        value: Value,
+    },
+    NumericFor {
+        var: String,
+        from: Value,
+        to: Value,
+        step: Option<Value>,
+        body: Vec<Stmt>,
+    },
+    GenericFor {
+        var: String,
+        values: Value,
+        body: Vec<Stmt>,
+    },
+    If {
+        cond: Value,
+        then_body: Vec<Stmt>,
+        else_body: Vec<Stmt>,
+    },
     /// A bare `do … end` scope: its statements, transparently.
     Block(Vec<Stmt>),
     /// A construct parsed well enough to be skipped over safely, named
@@ -152,9 +180,13 @@ impl Facts {
     /// The facts as this machine actually is.
     pub fn of_this_machine() -> Self {
         Self {
-            path: std::env::var_os("PATH").map(|p| std::env::split_paths(&p).collect()).unwrap_or_default(),
+            path: std::env::var_os("PATH")
+                .map(|p| std::env::split_paths(&p).collect())
+                .unwrap_or_default(),
             home: std::env::var_os("HOME").map(Into::into),
-            state_home: std::env::var_os("XDG_STATE_HOME").filter(|v| !v.is_empty()).map(Into::into),
+            state_home: std::env::var_os("XDG_STATE_HOME")
+                .filter(|v| !v.is_empty())
+                .map(Into::into),
         }
     }
 
@@ -212,9 +244,19 @@ type Env = std::collections::BTreeMap<String, Value>;
 
 // ---- the walk ---------------------------------------------------------
 
-fn walk(body: &[Stmt], facts: &Facts, globals: &mut Globals, env: &mut Env, out: &mut Vec<Directive>, depth: u32) {
+fn walk(
+    body: &[Stmt],
+    facts: &Facts,
+    globals: &mut Globals,
+    env: &mut Env,
+    out: &mut Vec<Directive>,
+    depth: u32,
+) {
     if depth > MAX_DEPTH {
-        out.push(Directive::Ignored { kind: "lua", detail: "block nested too deeply".into() });
+        out.push(Directive::Ignored {
+            kind: "lua",
+            detail: "block nested too deeply".into(),
+        });
         return;
     }
     for stmt in body {
@@ -230,11 +272,43 @@ fn walk(body: &[Stmt], facts: &Facts, globals: &mut Globals, env: &mut Env, out:
                         (Some(Value::Str(name)), Some(Value::Function(body))) if name == START_EVENT => {
                             walk(&body, facts, globals, env, out, depth + 1);
                         }
+                        (Some(Value::Str(name)), Some(Value::Function(body))) if name == "layer.opened" => {
+                            match layer_bindings(&body, env) {
+                                Ok(bindings) if !bindings.is_empty() => out.extend(bindings),
+                                Ok(_) => out.push(Directive::Ignored {
+                                    kind: "event",
+                                    detail: "hl.on(\"layer.opened\") contains no safely scoped bindings".into(),
+                                }),
+                                Err(why) => out.push(Directive::Ignored {
+                                    kind: "event",
+                                    detail: format!("hl.on(\"layer.opened\") handler refused whole: {why}"),
+                                }),
+                            }
+                        }
                         (Some(Value::Str(name)), _) => out.push(Directive::Ignored {
                             kind: "event",
-                            detail: format!("hl.on({name:?}) handler: only the {START_EVENT} handler's body becomes autostart"),
+                            detail: format!(
+                                "hl.on({name:?}) handler: only the {START_EVENT} handler's body becomes autostart"
+                            ),
                         }),
-                        _ => out.push(Directive::Ignored { kind: "event", detail: "hl.on with an unreadable event".into() }),
+                        _ => out.push(Directive::Ignored {
+                            kind: "event",
+                            detail: "hl.on with an unreadable event".into(),
+                        }),
+                    }
+                    continue;
+                }
+                if path == "hl.define_submap" {
+                    let name = args.first().map(|value| eval(value, env));
+                    let body = args.get(1).map(|value| eval(value, env));
+                    match (name, body) {
+                        (Some(Value::Str(name)), Some(Value::Function(body))) => {
+                            note_submap_bindings(&name, &body, env, out, depth + 1);
+                        }
+                        _ => out.push(Directive::Ignored {
+                            kind: "submap",
+                            detail: "hl.define_submap with an unreadable name or body".into(),
+                        }),
                     }
                     continue;
                 }
@@ -245,21 +319,42 @@ fn walk(body: &[Stmt], facts: &Facts, globals: &mut Globals, env: &mut Env, out:
                 env.insert(name.clone(), value.clone());
                 globals.values.insert(name.clone(), value);
             }
-            Stmt::NumericFor { var, from, to, step, body } => {
-                let (Some(from), Some(to)) = (as_int(&eval(from, env)), as_int(&eval(to, env))) else {
-                    out.push(Directive::Ignored { kind: "lua", detail: format!("for {var} = … over non-integer bounds") });
+            Stmt::NumericFor {
+                var,
+                from,
+                to,
+                step,
+                body,
+            } => {
+                let (Some(from), Some(to)) = (as_int(&eval(from, env)), as_int(&eval(to, env)))
+                else {
+                    out.push(Directive::Ignored {
+                        kind: "lua",
+                        detail: format!("for {var} = … over non-integer bounds"),
+                    });
                     continue;
                 };
                 // A step other than 1 is refused rather than
                 // implemented: Omarchy has none, and a reader that
                 // quietly got a step wrong would generate bindings on
                 // chords nobody wrote.
-                if step.as_ref().is_some_and(|s| as_int(&eval(s, env)) != Some(1)) {
-                    out.push(Directive::Ignored { kind: "lua", detail: format!("for {var} = … with a step this reader does not expand") });
+                if step
+                    .as_ref()
+                    .is_some_and(|s| as_int(&eval(s, env)) != Some(1))
+                {
+                    out.push(Directive::Ignored {
+                        kind: "lua",
+                        detail: format!("for {var} = … with a step this reader does not expand"),
+                    });
                     continue;
                 }
                 if to.saturating_sub(from) >= MAX_LOOP {
-                    out.push(Directive::Ignored { kind: "lua", detail: format!("for {var} = {from}, {to} exceeds the {MAX_LOOP}-iteration bound") });
+                    out.push(Directive::Ignored {
+                        kind: "lua",
+                        detail: format!(
+                            "for {var} = {from}, {to} exceeds the {MAX_LOOP}-iteration bound"
+                        ),
+                    });
                     continue;
                 }
                 let shadowed = env.get(var).cloned();
@@ -272,18 +367,259 @@ fn walk(body: &[Stmt], facts: &Facts, globals: &mut Globals, env: &mut Env, out:
                     None => env.remove(var),
                 };
             }
-            Stmt::If { cond, then_body, else_body } => match truth(cond, facts, globals, env) {
+            Stmt::GenericFor { var, values, body } => {
+                let values = iterable(&eval(values, env));
+                let Some(values) = values else {
+                    out.push(Directive::Ignored {
+                        kind: "lua",
+                        detail: format!("generic for {var} uses an unreadable iterator"),
+                    });
+                    continue;
+                };
+                let shadowed = env.get(var).cloned();
+                for value in values.into_iter().take(MAX_LOOP as usize) {
+                    env.insert(var.clone(), value);
+                    walk(body, facts, globals, env, out, depth + 1);
+                }
+                match shadowed {
+                    Some(old) => {
+                        env.insert(var.clone(), old);
+                    }
+                    None => {
+                        env.remove(var);
+                    }
+                }
+            }
+            Stmt::If {
+                cond,
+                then_body,
+                else_body,
+            } => match truth(cond, facts, globals, env) {
                 Some(true) => walk(then_body, facts, globals, env, out, depth + 1),
                 Some(false) => walk(else_body, facts, globals, env, out, depth + 1),
                 None => out.push(Directive::Ignored {
                     kind: "lua",
-                    detail: format!("if {} — a condition this reader cannot answer without running it", describe(cond)),
+                    detail: format!(
+                        "if {} — a condition this reader cannot answer without running it",
+                        describe(cond)
+                    ),
                 }),
             },
             Stmt::Block(body) => walk(body, facts, globals, env, out, depth + 1),
-            Stmt::Skipped(what) => out.push(Directive::Ignored { kind: "lua", detail: format!("{what} block") }),
+            Stmt::Skipped(what) => out.push(Directive::Ignored {
+                kind: "lua",
+                detail: format!("{what} block"),
+            }),
         }
     }
+}
+
+/// Report every binding inside a Lua submap without lowering any of
+/// them into the global keymap. Definitions may contain simple blocks
+/// and numeric loops, so recurse through those shapes; anything more
+/// dynamic is named as one unsupported construct rather than partially
+/// interpreting a modal scope.
+fn note_submap_bindings(
+    name: &str,
+    body: &[Stmt],
+    env: &Env,
+    out: &mut Vec<Directive>,
+    depth: u32,
+) {
+    if depth > MAX_DEPTH {
+        out.push(Directive::Ignored {
+            kind: "submap",
+            detail: format!("submap {name:?} nested too deeply"),
+        });
+        return;
+    }
+    for stmt in body {
+        match stmt {
+            Stmt::Call { path, args }
+                if matches!(path.as_str(), "hl.bind" | "o.bind" | "o.bind_toggle") =>
+            {
+                let chord = args
+                    .first()
+                    .map(|value| eval(value, env))
+                    .and_then(|value| as_string(&value))
+                    .unwrap_or_else(|| "<unreadable chord>".into());
+                out.push(Directive::Ignored {
+                    kind: "submap-bind",
+                    detail: format!(
+                        "{chord} in submap {name:?}: scoped submap bindings are unsupported and were not made global"
+                    ),
+                });
+            }
+            Stmt::Block(nested) => note_submap_bindings(name, nested, env, out, depth + 1),
+            Stmt::NumericFor { .. }
+            | Stmt::GenericFor { .. }
+            | Stmt::If { .. }
+            | Stmt::Call { .. }
+            | Stmt::Assign { .. }
+            | Stmt::Skipped(_) => {
+                out.push(Directive::Ignored {
+                    kind: "submap",
+                    detail: format!(
+                        "submap {name:?} contains a construct this reader cannot safely scope"
+                    ),
+                });
+            }
+        }
+    }
+}
+
+fn iterable(value: &Value) -> Option<Vec<Value>> {
+    match value {
+        Value::Call { path, args } if path == "ipairs" || path == "pairs" => match args.first()? {
+            Value::Table(items) => Some(items.iter().map(|(_, value)| value.clone()).collect()),
+            _ => None,
+        },
+        Value::Table(items) => Some(items.iter().map(|(_, value)| value.clone()).collect()),
+        _ => None,
+    }
+}
+
+/// Compile the deliberately narrow layer-lifetime binding pattern used
+/// by Omarchy's selection overlay. The whole handler is validated
+/// before any directive is returned, so an unexpected side effect can
+/// never leave a partially interpreted modal keymap behind.
+fn layer_bindings(body: &[Stmt], env: &Env) -> Result<Vec<Directive>, String> {
+    fn walk_layer(
+        body: &[Stmt],
+        env: &mut Env,
+        namespace: Option<&str>,
+        out: &mut Vec<Directive>,
+        depth: u32,
+    ) -> Result<(), String> {
+        if depth > MAX_DEPTH {
+            return Err("handler nested too deeply".into());
+        }
+        for stmt in body {
+            match stmt {
+                Stmt::If {
+                    cond,
+                    then_body,
+                    else_body,
+                } => {
+                    let discovered = namespace_from_condition(cond);
+                    let namespace = discovered.as_deref().or(namespace);
+                    walk_layer(then_body, env, namespace, out, depth + 1)?;
+                    // An else branch may contain alternate bindings and
+                    // is safe only when it has no executable content.
+                    if !else_body.is_empty() {
+                        return Err("an else branch could install a different binding set".into());
+                    }
+                }
+                Stmt::GenericFor { var, values, body } => {
+                    let values = iterable(&eval(values, env))
+                        .ok_or_else(|| format!("generic for {var} has a dynamic iterator"))?;
+                    if values.len() > MAX_LOOP as usize {
+                        return Err("iterator exceeds the expansion limit".into());
+                    }
+                    let shadowed = env.get(var).cloned();
+                    for value in values {
+                        env.insert(var.clone(), value);
+                        walk_layer(body, env, namespace, out, depth + 1)?;
+                    }
+                    match shadowed {
+                        Some(old) => {
+                            env.insert(var.clone(), old);
+                        }
+                        None => {
+                            env.remove(var);
+                        }
+                    }
+                }
+                Stmt::NumericFor { .. } => {
+                    return Err("numeric loops are not a layer-binding lifecycle".into())
+                }
+                Stmt::Assign { value, .. } => collect_layer_value(value, env, namespace, out)?,
+                Stmt::Call { path, args } if path == "table.insert" => {
+                    for value in args {
+                        collect_layer_value(value, env, namespace, out)?;
+                    }
+                }
+                // Counter assignments and the bind table are lifecycle
+                // bookkeeping. Calls other than table.insert would be
+                // arbitrary handler side effects and refuse the whole.
+                Stmt::Call { path, .. } => return Err(format!("unexpected call {path}")),
+                Stmt::Block(body) => walk_layer(body, env, namespace, out, depth + 1)?,
+                Stmt::Skipped(kind) => return Err(format!("unsupported {kind} construct")),
+            }
+        }
+        Ok(())
+    }
+
+    let mut out = Vec::new();
+    let mut env = env.clone();
+    walk_layer(body, &mut env, None, &mut out, 0)?;
+    Ok(out)
+}
+
+fn namespace_from_condition(condition: &Value) -> Option<String> {
+    let text = describe(condition);
+    let at = text.find("namespace")?;
+    let rest = &text[at + "namespace".len()..];
+    let quote = rest.find(['\'', '"'])?;
+    let delimiter = rest.as_bytes()[quote] as char;
+    let value = &rest[quote + 1..];
+    let end = value.find(delimiter)?;
+    Some(value[..end].to_string())
+}
+
+fn collect_layer_value(
+    value: &Value,
+    env: &Env,
+    namespace: Option<&str>,
+    out: &mut Vec<Directive>,
+) -> Result<(), String> {
+    match eval(value, env) {
+        Value::Table(items) => {
+            for (_, value) in items {
+                collect_layer_value(&value, env, namespace, out)?;
+            }
+        }
+        Value::Call { path, args } if path == "hl.bind" => {
+            let namespace =
+                namespace.ok_or_else(|| "binding is not guarded by layer.namespace".to_string())?;
+            let keys = args
+                .first()
+                .and_then(as_string)
+                .ok_or_else(|| "binding has an unreadable chord".to_string())?;
+            let dispatcher = args
+                .get(1)
+                .map(|value| dispatcher_from(value, None))
+                .unwrap_or(Dispatcher::Opaque("missing dispatcher".into()));
+            let options = args.get(2).cloned().unwrap_or(Value::Nil);
+            let description = match &options {
+                Value::Table(fields) => fields
+                    .iter()
+                    .find(|(key, _)| key.as_deref() == Some("description"))
+                    .and_then(|(_, value)| as_string(value)),
+                _ => None,
+            };
+            out.push(Directive::LayerBind {
+                namespace: namespace.to_string(),
+                keys,
+                description,
+                flags: binding_flags(&options),
+                dispatcher,
+            });
+        }
+        Value::Call { path, args } if path == "table.insert" => {
+            for value in args {
+                collect_layer_value(&value, env, namespace, out)?;
+            }
+        }
+        Value::Nil | Value::Num(_) | Value::Str(_) | Value::Bool(_) | Value::Name(_) => {}
+        other => {
+            return Err(format!(
+                "unreadable binding expression {}",
+                describe(&other)
+            ))
+        }
+    }
+    Ok(())
 }
 
 /// Answers a branch condition, or `None` for one that cannot be
@@ -312,7 +648,10 @@ fn truth(cond: &Value, facts: &Facts, globals: &Globals, env: &Env) -> Option<bo
             // unless the user set the global — Omarchy's own
             // definition in `helpers.lua`, reproduced.
             ("o.preinstalled_bindings_enabled", _) => {
-                if let Some(value) = globals.get("omarchy_preinstalled_bindings").or_else(|| globals.get("_G.omarchy_preinstalled_bindings")) {
+                if let Some(value) = globals
+                    .get("omarchy_preinstalled_bindings")
+                    .or_else(|| globals.get("_G.omarchy_preinstalled_bindings"))
+                {
                     return Some(matches!(value, Value::Bool(true)));
                 }
                 Some(!facts.omarchy_state()?.join("preinstalls-removed").exists())
@@ -326,7 +665,9 @@ fn truth(cond: &Value, facts: &Facts, globals: &Globals, env: &Env) -> Option<bo
         // nothing else needs.
         Value::Opaque(text) => {
             let text = text.replace(char::is_whitespace, "");
-            let name = text.strip_suffix("~=false").or_else(|| text.strip_suffix("~=nil"))?;
+            let name = text
+                .strip_suffix("~=false")
+                .or_else(|| text.strip_suffix("~=nil"))?;
             let name = name.trim_start_matches("_G.");
             match globals.get(name).or_else(|| env.get(name)) {
                 Some(Value::Bool(false)) | Some(Value::Nil) => Some(text.ends_with("~=nil")),
@@ -359,6 +700,7 @@ fn emit_call(path: &str, args: &[Value], env: &Env, out: &mut Vec<Directive>) {
             out.push(Directive::Bind {
                 keys,
                 description: as_string(&arg(1)),
+                flags: binding_flags(&arg(3)),
                 dispatcher: dispatcher_from(&arg(2), as_string(&arg(1)).as_deref()),
             });
         }
@@ -372,6 +714,7 @@ fn emit_call(path: &str, args: &[Value], env: &Env, out: &mut Vec<Directive>) {
             out.push(Directive::Bind {
                 keys,
                 description: as_string(&arg(1)),
+                flags: binding_flags(&arg(3)),
                 dispatcher: Dispatcher::Exec(format!("omarchy-toggle-{toggle}")),
             });
         }
@@ -387,7 +730,12 @@ fn emit_call(path: &str, args: &[Value], env: &Env, out: &mut Vec<Directive>) {
                 Value::Table(fields) => fields.iter().find(|(k, _)| k.as_deref() == Some("description")).and_then(|(_, v)| as_string(v)),
                 _ => None,
             };
-            out.push(Directive::Bind { keys, description: description.clone(), dispatcher: dispatcher_from(&arg(1), description.as_deref()) });
+            out.push(Directive::Bind {
+                keys,
+                description: description.clone(),
+                flags: binding_flags(&arg(2)),
+                dispatcher: dispatcher_from(&arg(1), description.as_deref()),
+            });
         }
         "hl.unbind" => match as_string(&arg(0)) {
             Some(keys) => out.push(Directive::Unbind { keys }),
@@ -420,7 +768,7 @@ fn emit_call(path: &str, args: &[Value], env: &Env, out: &mut Vec<Directive>) {
         // layer rule" and "chonkstep ignored your gesture" are
         // different sentences to the person reading the log.
         "hl.layer_rule" => out.push(Directive::Ignored { kind: "layer-rule", detail: "layer-shell rules are Hyprland's; this compositor has its own".into() }),
-        "hl.config" => out.push(Directive::Ignored { kind: "config", detail: "hl.config: gaps, borders, animations and layouts are Hyprland's look, not this desktop's".into() }),
+        "hl.config" => emit_config(&arg(0), out),
         "hl.gesture" => out.push(Directive::Ignored { kind: "gesture", detail: "touchpad gestures".into() }),
         "hl.on" => out.push(Directive::Ignored { kind: "event", detail: "hl.on event handlers other than the start handler's body".into() }),
         "hl.timer" | "hl.dispatch" | "hl.get_config" | "hl.get_active_window" => {}
@@ -457,6 +805,64 @@ fn emit_call(path: &str, args: &[Value], env: &Env, out: &mut Vec<Directive>) {
     }
 }
 
+fn binding_flags(value: &Value) -> BindFlags {
+    let Value::Table(fields) = value else {
+        return BindFlags::default();
+    };
+    let enabled = |name: &str| {
+        fields
+            .iter()
+            .find(|(key, _)| key.as_deref() == Some(name))
+            .is_some_and(|(_, value)| matches!(value, Value::Bool(true)))
+    };
+    BindFlags {
+        locked: enabled("locked"),
+        repeating: enabled("repeating"),
+        release: enabled("release"),
+    }
+}
+
+fn emit_config(value: &Value, out: &mut Vec<Directive>) {
+    let Value::Table(root) = value else {
+        out.push(Directive::Ignored {
+            kind: "config",
+            detail: format!("hl.config with unreadable value: {}", describe(value)),
+        });
+        return;
+    };
+    let input = root
+        .iter()
+        .find(|(key, _)| key.as_deref() == Some("input"))
+        .map(|(_, value)| value);
+    if let Some(Value::Table(fields)) = input {
+        for (key, value) in fields {
+            let Some(key) = key else { continue };
+            if matches!(value, Value::Table(_)) {
+                out.push(Directive::Ignored {
+                    kind: "input",
+                    detail: format!("nested input setting {key} is not implemented"),
+                });
+            } else {
+                out.push(Directive::Input {
+                    name: key.clone(),
+                    value: property_text(value),
+                });
+            }
+        }
+    } else if input.is_some() {
+        out.push(Directive::Ignored {
+            kind: "input",
+            detail: "hl.config input table is unreadable".into(),
+        });
+    }
+    if root.iter().any(|(key, _)| key.as_deref() != Some("input")) {
+        out.push(Directive::Ignored {
+            kind: "config",
+            detail: "hl.config settings outside input are not carried over".into(),
+        });
+    }
+}
+
 /// A dispatcher value, normalized onto [`Dispatcher`].
 ///
 /// The `o.bind` helper forms are expanded exactly as `helpers.lua`
@@ -468,7 +874,12 @@ fn dispatcher_from(value: &Value, description: Option<&str>) -> Dispatcher {
     match value {
         Value::Str(command) => Dispatcher::Exec(command.clone()),
         Value::Table(fields) => {
-            let field = |name: &str| fields.iter().find(|(k, _)| k.as_deref() == Some(name)).map(|(_, v)| v);
+            let field = |name: &str| {
+                fields
+                    .iter()
+                    .find(|(k, _)| k.as_deref() == Some(name))
+                    .map(|(_, v)| v)
+            };
             let text = |name: &str| field(name).and_then(as_string);
             let truthy = |name: &str| matches!(field(name), Some(Value::Bool(true)));
             if let Some(app) = text("omarchy") {
@@ -476,19 +887,31 @@ fn dispatcher_from(value: &Value, description: Option<&str>) -> Dispatcher {
             }
             if let Some(launch) = text("launch") {
                 return match text("focus") {
-                    Some(focus) => Dispatcher::Exec(format!("omarchy-launch-or-focus {} {}", shell_quote(&focus), shell_quote(&format!("uwsm-app -- {launch}")))),
+                    Some(focus) => Dispatcher::Exec(format!(
+                        "omarchy-launch-or-focus {} {}",
+                        shell_quote(&focus),
+                        shell_quote(&format!("uwsm-app -- {launch}"))
+                    )),
                     None => Dispatcher::Exec(format!("uwsm-app -- {launch}")),
                 };
             }
             if let Some(url) = text("webapp") {
                 return if truthy("focus") {
-                    Dispatcher::Exec(format!("omarchy-launch-or-focus-webapp {} {}", shell_quote(description.unwrap_or("")), shell_quote(&url)))
+                    Dispatcher::Exec(format!(
+                        "omarchy-launch-or-focus-webapp {} {}",
+                        shell_quote(description.unwrap_or("")),
+                        shell_quote(&url)
+                    ))
                 } else {
                     Dispatcher::Exec(format!("omarchy-launch-webapp {}", shell_quote(&url)))
                 };
             }
             if let Some(tui) = text("tui") {
-                let program = if truthy("focus") { "omarchy-launch-or-focus-tui" } else { "omarchy-launch-tui" };
+                let program = if truthy("focus") {
+                    "omarchy-launch-or-focus-tui"
+                } else {
+                    "omarchy-launch-tui"
+                };
                 return Dispatcher::Exec(format!("{program} {}", shell_quote(&tui)));
             }
             Dispatcher::Opaque(describe(value))
@@ -512,15 +935,28 @@ fn dispatcher_from(value: &Value, description: Option<&str>) -> Dispatcher {
 fn dsp(path: &str, args: &[Value]) -> Dispatcher {
     let table = args.first();
     let field = |name: &str| match table {
-        Some(Value::Table(fields)) => fields.iter().find(|(k, _)| k.as_deref() == Some(name)).map(|(_, v)| v),
+        Some(Value::Table(fields)) => fields
+            .iter()
+            .find(|(k, _)| k.as_deref() == Some(name))
+            .map(|(_, v)| v),
         _ => None,
     };
     let text = |name: &str| field(name).and_then(as_string).unwrap_or_default();
-    let verb = |name: &str, arg: String| Dispatcher::Verb { name: name.to_string(), arg };
+    let verb = |name: &str, arg: String| Dispatcher::Verb {
+        name: name.to_string(),
+        arg,
+    };
     match path.strip_prefix("hl.dsp.").unwrap_or(path) {
         "exec_cmd" => Dispatcher::Exec(args.first().and_then(as_string).unwrap_or_default()),
         "window.close" => verb("killactive", String::new()),
-        "window.fullscreen" => verb("fullscreen", if text("mode") == "maximized" { "1".into() } else { "0".into() }),
+        "window.fullscreen" => verb(
+            "fullscreen",
+            if text("mode") == "maximized" {
+                "1".into()
+            } else {
+                "0".into()
+            },
+        ),
         "window.pseudo" => verb("pseudo", String::new()),
         "window.float" => verb("togglefloating", String::new()),
         "window.pin" => verb("pin", String::new()),
@@ -538,7 +974,11 @@ fn dsp(path: &str, args: &[Value]) -> Dispatcher {
             if field("out_of_group").is_some() {
                 return verb("moveoutofgroup", String::new());
             }
-            let name = if matches!(field("follow"), Some(Value::Bool(false))) { "movetoworkspacesilent" } else { "movetoworkspace" };
+            let name = if matches!(field("follow"), Some(Value::Bool(false))) {
+                "movetoworkspacesilent"
+            } else {
+                "movetoworkspace"
+            };
             verb(name, text("workspace"))
         }
         "focus" => {
@@ -550,9 +990,15 @@ fn dsp(path: &str, args: &[Value]) -> Dispatcher {
             }
             verb("movefocus", text("direction"))
         }
-        "workspace.toggle_special" => verb("togglespecialworkspace", args.first().and_then(as_string).unwrap_or_default()),
+        "workspace.toggle_special" => verb(
+            "togglespecialworkspace",
+            args.first().and_then(as_string).unwrap_or_default(),
+        ),
         "workspace.move" => verb("movecurrentworkspacetomonitor", text("monitor")),
-        "layout" => verb("layoutmsg", args.first().and_then(as_string).unwrap_or_default()),
+        "layout" => verb(
+            "layoutmsg",
+            args.first().and_then(as_string).unwrap_or_default(),
+        ),
         "group.toggle" => verb("togglegroup", String::new()),
         "group.next" | "group.prev" | "group.active" => verb("changegroupactive", String::new()),
         "send_key_state" | "send_shortcut" => verb("sendshortcut", String::new()),
@@ -574,7 +1020,10 @@ fn window_rule(match_arg: &Value, rules: &Value) -> WindowRule {
             "class" => Matcher::Class(text),
             "title" => Matcher::Title(text),
             "tag" => Matcher::Tag(text),
-            other => Matcher::Other { key: other.to_string(), value: text },
+            other => Matcher::Other {
+                key: other.to_string(),
+                value: text,
+            },
         });
     };
     match match_arg {
@@ -616,7 +1065,11 @@ fn property_text(value: &Value) -> String {
         Value::Num(n) => format_number(*n),
         Value::Bool(true) => "on".into(),
         Value::Bool(false) => "off".into(),
-        Value::Table(items) => items.iter().map(|(_, v)| property_text(v)).collect::<Vec<_>>().join(" "),
+        Value::Table(items) => items
+            .iter()
+            .map(|(_, v)| property_text(v))
+            .collect::<Vec<_>>()
+            .join(" "),
         other => describe(other),
     }
 }
@@ -636,7 +1089,13 @@ fn monitor_from(fields: &[(Option<String>, Value)]) -> Monitor {
             extra.push(format!("{key} {}", property_text(value)));
         }
     }
-    Monitor { output: field("output"), mode: field("mode"), position: field("position"), scale: field("scale"), extra }
+    Monitor {
+        output: field("output"),
+        mode: field("mode"),
+        position: field("position"),
+        scale: field("scale"),
+        extra,
+    }
 }
 
 // ---- evaluation -------------------------------------------------------
@@ -646,8 +1105,16 @@ fn monitor_from(fields: &[(Option<String>, Value)]) -> Monitor {
 /// [`Value::Opaque`] and is reported by whoever asked for it.
 fn eval(value: &Value, env: &Env) -> Value {
     match value {
-        Value::Name(name) => env.get(name).cloned().unwrap_or_else(|| Value::Name(name.clone())),
-        Value::Table(fields) => Value::Table(fields.iter().map(|(k, v)| (k.clone(), eval(v, env))).collect()),
+        Value::Name(name) => env
+            .get(name)
+            .cloned()
+            .unwrap_or_else(|| Value::Name(name.clone())),
+        Value::Table(fields) => Value::Table(
+            fields
+                .iter()
+                .map(|(k, v)| (k.clone(), eval(v, env)))
+                .collect(),
+        ),
         // The whole point of `Value::Binary`: both halves resolve
         // against the environment *first*, so a loop variable inside
         // one is bound by the time the fold happens.
@@ -677,21 +1144,43 @@ fn eval(value: &Value, env: &Env) -> Value {
             let built = match path.as_str() {
                 "o.launch" => text(0).map(|c| format!("uwsm-app -- {c}")),
                 "o.shell_quote" => text(0).map(|c| shell_quote(&c)),
-                "o.launch_webapp" => text(0).map(|url| format!("omarchy-launch-webapp {}", shell_quote(&url))),
+                "o.launch_webapp" => {
+                    text(0).map(|url| format!("omarchy-launch-webapp {}", shell_quote(&url)))
+                }
                 "o.launch_webapp_sole" => match (text(0), text(1)) {
-                    (Some(name), Some(url)) => Some(format!("omarchy-launch-or-focus-webapp {} {}", shell_quote(&name), shell_quote(&url))),
+                    (Some(name), Some(url)) => Some(format!(
+                        "omarchy-launch-or-focus-webapp {} {}",
+                        shell_quote(&name),
+                        shell_quote(&url)
+                    )),
                     _ => None,
                 },
                 "o.launch_sole" => match (text(0), text(1)) {
-                    (Some(m), Some(c)) => Some(format!("omarchy-launch-or-focus {} {}", shell_quote(&m), shell_quote(&format!("uwsm-app -- {c}")))),
+                    (Some(m), Some(c)) => Some(format!(
+                        "omarchy-launch-or-focus {} {}",
+                        shell_quote(&m),
+                        shell_quote(&format!("uwsm-app -- {c}"))
+                    )),
                     _ => None,
                 },
-                "o.notify" => text(0).map(|m| format!("omarchy-notification-send -u low {}", shell_quote(&m))),
+                "o.notify" => {
+                    text(0).map(|m| format!("omarchy-notification-send -u low {}", shell_quote(&m)))
+                }
                 _ => None,
             };
+            if let Some(receiver) = path.strip_suffix(".upper") {
+                if args.is_empty() {
+                    if let Some(Value::Str(text)) = env.get(receiver) {
+                        return Value::Str(text.to_ascii_uppercase());
+                    }
+                }
+            }
             match built {
                 Some(text) => Value::Str(text),
-                None => Value::Call { path: path.clone(), args },
+                None => Value::Call {
+                    path: path.clone(),
+                    args,
+                },
             }
         }
         other => other.clone(),
@@ -769,7 +1258,11 @@ struct Parser {
 
 impl Parser {
     fn new(source: &str) -> Self {
-        Self { chars: source.chars().collect(), at: 0, statements: 0 }
+        Self {
+            chars: source.chars().collect(),
+            at: 0,
+            statements: 0,
+        }
     }
 
     fn peek(&self) -> Option<char> {
@@ -913,19 +1406,43 @@ impl Parser {
                 }
                 if self.peek() == Some('=') && self.peek_at(1) != Some('=') {
                     self.at += 1;
-                    return Some(Stmt::Assign { name, value: self.expr(0) });
+                    return Some(Stmt::Assign {
+                        name,
+                        value: self.expr(0),
+                    });
                 }
-                Some(Stmt::Assign { name, value: Value::Nil })
+                Some(Stmt::Assign {
+                    name,
+                    value: Value::Nil,
+                })
             }
             "for" => {
                 self.take_word();
                 let var = self.take_word();
                 self.trivia();
                 if self.peek() != Some('=') {
-                    // A generic `for … in …`: not expandable without
-                    // evaluating the iterator.
-                    self.skip_to_end();
-                    return Some(Stmt::Skipped("generic for"));
+                    let mut last_var = var;
+                    while self.peek() == Some(',') {
+                        self.at += 1;
+                        last_var = self.take_word();
+                        self.trivia();
+                    }
+                    if self.take_word() != "in" {
+                        self.skip_to_end();
+                        return Some(Stmt::Skipped("generic for"));
+                    }
+                    let values = self.expr(0);
+                    if self.take_word() != "do" {
+                        self.skip_to_end();
+                        return Some(Stmt::Skipped("generic for"));
+                    }
+                    let body = self.block(depth + 1);
+                    self.take_word();
+                    return Some(Stmt::GenericFor {
+                        var: last_var,
+                        values,
+                        body,
+                    });
                 }
                 self.at += 1;
                 let from = self.expr(0);
@@ -949,7 +1466,13 @@ impl Parser {
                 }
                 let body = self.block(depth + 1);
                 self.take_word();
-                Some(Stmt::NumericFor { var, from, to, step, body })
+                Some(Stmt::NumericFor {
+                    var,
+                    from,
+                    to,
+                    step,
+                    body,
+                })
             }
             "if" => {
                 self.take_word();
@@ -963,7 +1486,11 @@ impl Parser {
                 // is how an `if a then … elseif b then … end` swallowed
                 // whatever statement came after it.
                 let else_body = self.else_chain(depth);
-                Some(Stmt::If { cond, then_body, else_body })
+                Some(Stmt::If {
+                    cond,
+                    then_body,
+                    else_body,
+                })
             }
             "function" => {
                 self.take_word();
@@ -973,15 +1500,19 @@ impl Parser {
             "while" | "repeat" => {
                 self.take_word();
                 self.skip_to_end();
-                Some(Stmt::Skipped(if word == "while" { "while" } else { "repeat" }))
+                Some(Stmt::Skipped(if word == "while" {
+                    "while"
+                } else {
+                    "repeat"
+                }))
             }
             "do" => {
                 self.take_word();
                 let body = self.block(depth + 1);
                 self.take_word(); // `end`
-                // A bare `do … end` is only a scope. Its statements are
-                // the enclosing block's as far as this reader cares —
-                // which means all of them, not just the first.
+                                  // A bare `do … end` is only a scope. Its statements are
+                                  // the enclosing block's as far as this reader cares —
+                                  // which means all of them, not just the first.
                 Some(Stmt::Block(body))
             }
             "return" | "break" => {
@@ -1001,7 +1532,10 @@ impl Parser {
                 if self.peek() == Some('=') && self.peek_at(1) != Some('=') {
                     self.at += 1;
                     let value = self.expr(0);
-                    return Some(Stmt::Assign { name: path.trim_start_matches("_G.").to_string(), value });
+                    return Some(Stmt::Assign {
+                        name: path.trim_start_matches("_G.").to_string(),
+                        value,
+                    });
                 }
                 if self.peek() == Some('(') {
                     let args = self.call_args();
@@ -1066,7 +1600,11 @@ impl Parser {
                 self.take_word(); // `then`
                 let then_body = self.block(depth + 1);
                 let else_body = self.else_chain(depth + 1);
-                vec![Stmt::If { cond, then_body, else_body }]
+                vec![Stmt::If {
+                    cond,
+                    then_body,
+                    else_body,
+                }]
             }
             "else" => {
                 self.take_word();
@@ -1223,10 +1761,16 @@ impl Parser {
                     }
                     // `require "x"` and `f{…}`: Lua's parenthesis-free
                     // call forms.
-                    Some('"') | Some('\'') => Value::Call { path, args: vec![Value::Str(self.string())] },
+                    Some('"') | Some('\'') => Value::Call {
+                        path,
+                        args: vec![Value::Str(self.string())],
+                    },
                     Some('{') => {
                         let table = self.table(depth + 1);
-                        Value::Call { path, args: vec![table] }
+                        Value::Call {
+                            path,
+                            args: vec![table],
+                        }
                     }
                     _ => Value::Name(path),
                 }
@@ -1355,7 +1899,9 @@ impl Parser {
     /// A quoted string, with Lua's escape sequences. The opening quote
     /// is at the cursor.
     fn string(&mut self) -> String {
-        let Some(quote) = self.bump() else { return String::new() };
+        let Some(quote) = self.bump() else {
+            return String::new();
+        };
         let mut text = String::new();
         while let Some(ch) = self.bump() {
             if ch == quote {
@@ -1393,14 +1939,18 @@ impl Parser {
         while !self.eof() && !self.at_long_bracket_close() {
             self.at += 1;
         }
-        let text: String = self.chars[start..self.at.min(self.chars.len())].iter().collect();
+        let text: String = self.chars[start..self.at.min(self.chars.len())]
+            .iter()
+            .collect();
         self.at = (self.at + 2).min(self.chars.len());
         text
     }
 
     fn number(&mut self) -> Value {
         let start = self.at;
-        while self.peek().is_some_and(|c| c.is_ascii_digit() || c == '.' || c == 'x' || c == 'X' || c.is_ascii_hexdigit()) {
+        while self.peek().is_some_and(|c| {
+            c.is_ascii_digit() || c == '.' || c == 'x' || c == 'X' || c.is_ascii_hexdigit()
+        }) {
             self.at += 1;
         }
         let text: String = self.chars[start..self.at].iter().collect();
@@ -1424,11 +1974,19 @@ fn fold(op: &'static str, left: Value, right: Value) -> Value {
             // concatenation still unresolved when a binding asks for it
             // is refused there, whole: half a key spec is not a key
             // spec.
-            _ => Value::Binary { op, left: Box::new(left), right: Box::new(right) },
+            _ => Value::Binary {
+                op,
+                left: Box::new(left),
+                right: Box::new(right),
+            },
         },
         "+" | "-" => match (as_number(&left), as_number(&right)) {
             (Some(a), Some(b)) => Value::Num(if op == "+" { a + b } else { a - b }),
-            _ => Value::Binary { op, left: Box::new(left), right: Box::new(right) },
+            _ => Value::Binary {
+                op,
+                left: Box::new(left),
+                right: Box::new(right),
+            },
         },
         _ => Value::Opaque(render(&left)),
     }

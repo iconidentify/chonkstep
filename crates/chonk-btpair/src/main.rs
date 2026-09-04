@@ -401,7 +401,9 @@ impl Window {
         let msb_first = self.conn.setup().image_byte_order == ImageOrder::MSB_FIRST;
         pixmap
             .data()
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .flat_map(|px| {
                 let (r, g, b, a) = (px[0], px[1], px[2], px[3]);
                 if msb_first {

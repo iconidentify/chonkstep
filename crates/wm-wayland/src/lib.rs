@@ -25,6 +25,8 @@
 
 mod backend_impl;
 mod capture;
+mod core_protocols;
+mod ctm;
 mod data_control;
 mod decoration;
 mod dmabuf;
@@ -50,6 +52,7 @@ mod state;
 // End-to-end test injection door — inert unless CHONKSTEP_TEST_SOCKET
 // is set; see its module docs for the three regressions it exists for.
 mod test_door;
+mod toplevel_mapping;
 // virtual-keyboard-v1: `wtype` and everything Omarchy builds on it.
 mod virtual_keyboard;
 mod xdg;

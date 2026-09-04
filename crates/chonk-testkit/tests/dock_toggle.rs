@@ -44,12 +44,9 @@ fn toggle_maximize(session: &mut Session) {
     door.barrier().unwrap();
 }
 
-/// Picks the `Dock` row of the root menu, by its label.
-fn toggle_dock_from_menu(session: &mut Session, metrics: &MenuMetrics) {
-    let menu = session
-        .open_root_menu(metrics, PLAIN.row_count())
-        .expect("a right-click on the desk should open the root menu with a Dock row");
-    let (x, y) = metrics.row_center(&menu, PLAIN.row_of("Dock").unwrap());
+/// Picks the `Dock` row of an already-open root menu, by its label.
+fn hide_dock_from_menu(session: &mut Session, metrics: &MenuMetrics, menu: &chonk_testkit::ShellInfo) {
+    let (x, y) = metrics.row_center(menu, PLAIN.row_of("Dock").unwrap());
     session.door().click(x, y).unwrap();
     poll_until(Duration::from_secs(10), "the root menu to close after the pick", || {
         let world = session.world().ok()?;
@@ -70,6 +67,7 @@ fn hiding_the_dock_from_the_root_menu_gives_a_maximized_window_its_strip() {
         "dock-toggle",
         SessionOptions {
             scale: Some(1.0),
+            config_extra: "[keybindings]\n\"super+d\" = \"toggle-dock\"\n".to_string(),
             env: vec![("OMARCHY_PATH".to_string(), no_omarchy.to_string_lossy().into_owned())],
             ..SessionOptions::default()
         },
@@ -86,6 +84,14 @@ fn hiding_the_dock_from_the_root_menu_gives_a_maximized_window_its_strip() {
     assert_eq!(home.x + home.w as i32, output_w as i32, "flush against the right edge");
     assert!(!session.state_file("dock-visibility").exists(), "no choice made yet, so none is stored");
 
+    // Open the root menu while there is still bare desktop to click.
+    // Once the window below is maximized there is intentionally no
+    // background under the pointer, so asking a later right-click to
+    // open the root menu would send that click to the client instead.
+    let menu = session
+        .open_root_menu(&metrics, PLAIN.row_count())
+        .expect("a right-click on bare desk should open the root menu with a Dock row");
+
     session.launch("foot", &[]).unwrap();
     let window = session.wait_for_window("foot").unwrap();
     toggle_maximize(&mut session);
@@ -97,7 +103,7 @@ fn hiding_the_dock_from_the_root_menu_gives_a_maximized_window_its_strip() {
     assert_eq!(short.x, 0, "and start at the left edge");
 
     // -- the menu hides it: the surface goes, the strip is released ----
-    toggle_dock_from_menu(&mut session, &metrics);
+    hide_dock_from_menu(&mut session, &metrics, &menu);
     poll_until(Duration::from_secs(10), "the dock surface to be gone", || {
         let world = session.world().ok()?;
         // Shape-based, like `World::dock` itself: nothing mapped,
@@ -139,8 +145,12 @@ fn hiding_the_dock_from_the_root_menu_gives_a_maximized_window_its_strip() {
     })
     .expect("hiding the Dock takes the Clip with it");
 
-    // -- and shows it again: both halves come back --------------------
-    toggle_dock_from_menu(&mut session, &metrics);
+    // -- and the equivalent binding shows it again --------------------
+    // With the window now covering the entire output there is still no
+    // bare desktop on which to summon a root menu. The public action is
+    // the same one used by the row, and the second test below separately
+    // pins the configured-off startup path.
+    session.door().chord(keys::LEFTMETA, KEY_D).unwrap();
     let back = session.wait_for_dock_at(0, 0).expect("showing the dock maps it back into its corner");
     assert_eq!((back.x, back.y, back.w, back.h), (home.x, home.y, home.w, home.h), "exactly where it started");
     poll_until(Duration::from_secs(10), "the maximized frame to give the column back", || {

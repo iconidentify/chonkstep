@@ -1,0 +1,155 @@
+#!/usr/bin/env bash
+# omarchy:summary=Enable the installed chonkstep desktop for Omarchy login
+# omarchy:args=
+# omarchy:examples=omarchy install desktop-chonkstep
+# omarchy:requires-sudo=true
+set -euo pipefail
+
+# --root is intentionally available for package/installer acceptance tests. It
+# performs no package-manager or sudo operations and writes only beneath DIR.
+root=""
+if [ "${1:-}" = "--root" ]; then
+    [ "$#" -eq 2 ] || { echo "usage: $0 [--root DIR]" >&2; exit 2; }
+    root="${2%/}"
+    [ -n "$root" ] && [ "$root" != "/" ] && [ -d "$root" ] || {
+        echo "--root must name an existing directory other than /" >&2
+        exit 2
+    }
+elif [ "$#" -ne 0 ]; then
+    echo "usage: $0 [--root DIR]" >&2
+    exit 2
+fi
+
+system_path() {
+    printf '%s%s\n' "$root" "$1"
+}
+
+install_system_file() {
+    local source="$1" destination="$2"
+    if [ -n "$root" ]; then
+        install -Dm644 "$source" "$(system_path "$destination")"
+    else
+        sudo install -Dm644 "$source" "$destination"
+    fi
+}
+
+remove_system_file() {
+    local destination="$1"
+    if [ -n "$root" ]; then
+        rm -f "$(system_path "$destination")"
+    else
+        sudo rm -f "$destination"
+    fi
+}
+
+# Emit SDDM's configuration sources in effective precedence order: vendor
+# snippets, administrator snippets, then the monolithic administrator file.
+# Sorting explicitly avoids depending on the shell locale or glob behaviour.
+sddm_config() {
+    local directory file
+    for directory in /usr/lib/sddm/sddm.conf.d /etc/sddm.conf.d; do
+        directory="$(system_path "$directory")"
+        [ -d "$directory" ] || continue
+        while IFS= read -r file; do
+            cat "$file"
+        done < <(find "$directory" -maxdepth 1 -type f -name '*.conf' -print | LC_ALL=C sort)
+    done
+    file="$(system_path /etc/sddm.conf)"
+    [ ! -f "$file" ] || cat "$file"
+}
+
+sddm_value() {
+    local wanted_section="$1" wanted_key="$2"
+    sddm_config | awk -v wanted_section="$wanted_section" -v wanted_key="$wanted_key" '
+        /^\[/ { section=$0; next }
+        section == "[" wanted_section "]" && index($0, wanted_key "=") == 1 {
+            print substr($0, length(wanted_key) + 2)
+        }
+    ' | tail -n 1
+}
+
+share_dir="$(system_path /usr/share/chonkstep/sddm)"
+theme_template="$share_dir/zz-chonkstep-theme.conf"
+autologin_template="$share_dir/zz-chonkstep-autologin.conf"
+verifier="$(system_path /usr/lib/chonkstep/verify-install.sh)"
+omarchy_theme_dir="$(system_path /usr/share/sddm/themes/omarchy)"
+
+if [ -z "$root" ]; then
+    if ! command -v pacman >/dev/null 2>&1 || ! pacman -T chonkstep >/dev/null 2>&1; then
+        cat >&2 <<'MESSAGE'
+chonkstep is not installed. Install it first, then rerun this command:
+
+    omarchy pkg aur add chonkstep
+    omarchy install desktop-chonkstep
+MESSAGE
+        exit 1
+    fi
+
+    missing_runtime=()
+    for runtime in uwsm xdg-desktop-portal xdg-desktop-portal-wlr xdg-desktop-portal-gtk; do
+        if ! pacman -T "$runtime" >/dev/null 2>&1; then
+            missing_runtime+=("$runtime")
+        fi
+    done
+    if [ "${#missing_runtime[@]}" -gt 0 ]; then
+        echo "Installing chonkstep's Omarchy runtime: ${missing_runtime[*]}..."
+        omarchy-pkg-add "${missing_runtime[@]}"
+    fi
+fi
+
+for required in "$theme_template" "$autologin_template" "$verifier"; do
+    [ -f "$required" ] || {
+        echo "chonkstep installation is incomplete; missing $required" >&2
+        exit 1
+    }
+done
+for asset in logo.png lock.png lock-failed.png entry.png entry-failed.png bullet.png; do
+    [ -r "$omarchy_theme_dir/$asset" ] || {
+        echo "Omarchy's SDDM theme is incomplete; missing $omarchy_theme_dir/$asset" >&2
+        exit 1
+    }
+done
+
+echo "Enabling chonkstep's SDDM login integration..."
+install_system_file "$theme_template" /etc/sddm.conf.d/zz-chonkstep-theme.conf
+
+# Fresh encrypted Omarchy installs autologin through an Omarchy-owned snippet.
+# Override only its Session key, preserving its User and every other setting.
+# On systems without autologin, the picker defaults visibly to chonkstep (uwsm).
+autologin_user="$(sddm_value Autologin User)"
+if [ -n "$autologin_user" ]; then
+    install_system_file "$autologin_template" /etc/sddm.conf.d/zz-chonkstep-autologin.conf
+else
+    remove_system_file /etc/sddm.conf.d/zz-chonkstep-autologin.conf
+fi
+
+# Remove the obsolete early-sorting filename used by development builds. It is
+# ours, and leaving it behind makes reversibility and effective-order diagnosis
+# unnecessarily ambiguous.
+remove_system_file /etc/sddm.conf.d/20-chonkstep-theme.conf
+
+if [ -n "$root" ]; then
+    "$verifier" --root "$root"
+else
+    "$verifier"
+fi
+
+effective_theme="$(sddm_value Theme Current)"
+effective_session="$(sddm_value Autologin Session)"
+if [ "$effective_theme" != "chonkstep" ]; then
+    echo "SDDM still resolves Theme/Current to '${effective_theme:-<unset>}' instead of chonkstep." >&2
+    echo "Check /etc/sddm.conf for a later Theme/Current override." >&2
+    exit 1
+fi
+if [ -n "$autologin_user" ] && [ "$effective_session" != "chonkstep-uwsm.desktop" ]; then
+    echo "SDDM autologin still resolves to '${effective_session:-<unset>}' instead of chonkstep-uwsm.desktop." >&2
+    echo "Check /etc/sddm.conf for a later Autologin/Session override." >&2
+    exit 1
+fi
+
+if [ -n "$autologin_user" ]; then
+    echo "Ready: SDDM autologin for $autologin_user now starts chonkstep (uwsm)."
+else
+    echo "Ready: SDDM's picker is active and defaults to chonkstep (uwsm)."
+fi
+echo "Log out or reboot to enter chonkstep. Undo: omarchy remove desktop-chonkstep"

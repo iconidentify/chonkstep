@@ -17,9 +17,9 @@ use wm_x11::X11Backend;
 
 use chonk_shell::dockapp::Farewell;
 use chonk_shell::shell::{Shell, ShellOutcome};
+use chonk_shell::spawn;
 use chonk_shell::startup::{ensure_xcursor_size, reload_requested, restart_requested, SessionState};
 use chonk_xsettings::{DesktopAppearance, XSettingsManager};
-use chonk_shell::spawn;
 
 fn main() {
     tracing_subscriber::fmt().with_env_filter(tracing_subscriber::EnvFilter::from_default_env()).init();
@@ -120,7 +120,10 @@ fn main() {
     let mut xsettings = match XSettingsManager::acquire(None) {
         Ok(manager) => Some(manager),
         Err(e) => {
-            tracing::warn!(?e, "could not become the XSETTINGS manager; X clients will not be told this desktop's scale");
+            tracing::warn!(
+                ?e,
+                "could not become the XSETTINGS manager; X clients will not be told this desktop's scale"
+            );
             None
         }
     };
@@ -229,12 +232,26 @@ fn main() {
             // open and eat its Escape. (`KeyRelease` — the Alt release
             // that commits a cycle — is never intercepted at all.)
             if let BackendEvent::KeyPress(combo) = &event {
-                if let Some(action) = shell.keymap_action(combo) {
+                if let Some(resolution) = shell.keymap_action(combo) {
                     // An action observes the same ordering rule as any
                     // other non-motion event: the held-back motion
                     // commits first, so e.g. a focus-follows-mouse focus
                     // change from this same burst lands before an action
                     // that targets the focused client.
+                    if let Some(motion) = pending_motion.take() {
+                        dispatch_motion(&mut wm, &mut shell, motion);
+                    }
+                    if let chonk_shell::shell::KeyResolution::Action(action) = resolution {
+                        let outcome = shell.run_action(&mut wm, &action);
+                        if exit_requested(&mut shell, outcome) {
+                            should_exit = true;
+                        }
+                    }
+                    continue;
+                }
+            }
+            if let BackendEvent::KeyRelease(combo) = &event {
+                if let Some(action) = shell.keymap_release_action(combo) {
                     if let Some(motion) = pending_motion.take() {
                         dispatch_motion(&mut wm, &mut shell, motion);
                     }
@@ -394,7 +411,8 @@ fn wait_for_activity(fds: &[std::os::unix::io::RawFd], timeout: Duration) {
     if fds.is_empty() {
         return;
     }
-    let mut poll_fds: Vec<libc::pollfd> = fds.iter().map(|&fd| libc::pollfd { fd, events: libc::POLLIN, revents: 0 }).collect();
+    let mut poll_fds: Vec<libc::pollfd> =
+        fds.iter().map(|&fd| libc::pollfd { fd, events: libc::POLLIN, revents: 0 }).collect();
     // SAFETY: `poll_fds` is a valid array of exactly the length passed
     // as `nfds`; `poll` only reads/writes through that pointer for the
     // duration of the call.
@@ -448,14 +466,6 @@ fn exit_requested(shell: &mut Shell<X11Backend>, outcome: ShellOutcome) -> bool 
         }
     }
 }
-
-
-
-
-
-
-
-
 
 /// Publishes this session's scale and theme to every X client through
 /// XSETTINGS, if this session managed to become the settings manager.

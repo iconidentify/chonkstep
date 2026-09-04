@@ -6,15 +6,11 @@ that read chonkstep's own control socket instead (`docs/control-socket.md`
 in `docs/` at the repository root is the protocol; the plugins are clients of
 it and change nothing about it).
 
-This directory also carries the other half of the same relationship:
-where one of Omarchy's own *scripts* still asks a question this session
-cannot answer, `shims/` holds a drop-in that answers it portably, and
-`upstream/` holds the same fix prepared as a patch to Omarchy itself.
-Most of what used to live in both is gone: chonkstep now answers
-Hyprland's IPC (`docs/hyprland-ipc.md`), so the scripts that only ever
-needed `hyprctl` work unmodified. The rule is the same throughout —
-nothing under `/usr/share/omarchy` or `/usr/bin` is ever written, and
-every piece here is opt-in.
+Chonkstep now answers the Hyprland IPC and protocol calls used by
+Omarchy's own scripts (`docs/hyprland-ipc.md`), including logout through
+the recommended uwsm session and night light through the real
+`hyprsunset` protocol. The former shim and upstream-patch directories are
+kept only as short historical notices. Nothing here modifies Omarchy.
 
 ```
 omarchy/
@@ -23,13 +19,8 @@ omarchy/
     chonkstep.theme/        bar widget: the active theme's name ("NeXTSTEP Classic · dark")
                             (each carries its own README, LICENSE and ControlSocket.qml,
                             so it can be split out and published on its own)
-  shims/                    one script: logout, whose `uwsm stop` is a no-op in a
-                            session uwsm did not start. Symlinked onto PATH by
-                            shims/install.sh; see docs/omarchy-integration.md.
-  upstream/                 two fixes as a reviewable patch set for Omarchy — logout,
-                            and the nightlight fallback chain that no compositor IPC
-                            can reach. Omarchy's path kept first in both. Prepared,
-                            not sent.
+  shims/                    no shims remain; compatibility is compositor-side
+  upstream/                 no Omarchy patches remain
   tools/
     fake-control-socket.py  a stand-in server for developing without a compositor
     check-plugins.sh        manifest validation, qmllint, and a diff of the shared file

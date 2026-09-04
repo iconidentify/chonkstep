@@ -157,6 +157,24 @@ impl Differ {
                 format!("{},{},{},{}", address(window), workspace, window.class, window.title),
             ));
         }
+        for workspace in &now.workspaces {
+            let Some(old) = previous.workspaces.iter().find(|old| old.index == workspace.index) else { continue };
+            if old.monitor_id != workspace.monitor_id || old.monitor != workspace.monitor {
+                events.push(Event::new(
+                    "moveworkspacev2",
+                    format!("{},{},{}", workspace.hypr_id(), workspace.hypr_name(), workspace.monitor),
+                ));
+            }
+        }
+
+        for keyboard in &now.devices.keyboards {
+            let old = previous.devices.keyboards.iter().find(|old| old.name == keyboard.name);
+            if old.is_some_and(|old| old.active_keymap != keyboard.active_keymap
+                || old.active_layout_index != keyboard.active_layout_index)
+            {
+                events.push(Event::new("activelayout", format!("{},{}", keyboard.name, keyboard.active_keymap)));
+            }
+        }
 
         // --- 3. per-window changes ------------------------------------
         for window in &now.windows {
@@ -176,10 +194,7 @@ impl Differ {
                 ));
             }
             if old.title != window.title {
-                events.push(Event::new(
-                    "windowtitlev2",
-                    format!("{},{}", address(window), window.title),
-                ));
+                events.push(Event::new("windowtitlev2", format!("{},{}", address(window), window.title)));
                 // Hyprland emits the v1 form too, and it carries the
                 // title only. Kept because scripts that grep the raw
                 // stream were written against it.
@@ -195,10 +210,7 @@ impl Differ {
         let new_active = now.active_workspace().map(Workspace::hypr_id);
         if old_active != new_active {
             if let Some(workspace) = now.active_workspace() {
-                events.push(Event::new(
-                    "workspacev2",
-                    format!("{},{}", workspace.hypr_id(), workspace.hypr_name()),
-                ));
+                events.push(Event::new("workspacev2", format!("{},{}", workspace.hypr_id(), workspace.hypr_name())));
                 events.push(Event::new("workspace", workspace.hypr_name()));
             }
         }
@@ -217,10 +229,7 @@ impl Differ {
                     .iter()
                     .find(|w| w.index == monitor.active_workspace)
                     .map_or_else(|| "?".to_string(), Workspace::hypr_name);
-                events.push(Event::new(
-                    "focusedmon",
-                    format!("{},{}", monitor.name, workspace),
-                ));
+                events.push(Event::new("focusedmon", format!("{},{}", monitor.name, workspace)));
             }
         }
 
@@ -228,10 +237,7 @@ impl Differ {
             match now.focused_window() {
                 Some(window) => {
                     events.push(Event::new("activewindowv2", address(window)));
-                    events.push(Event::new(
-                        "activewindow",
-                        format!("{},{}", window.class, window.title),
-                    ));
+                    events.push(Event::new("activewindow", format!("{},{}", window.class, window.title)));
                 }
                 None => {
                     // Hyprland announces "nothing is focused" as an

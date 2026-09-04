@@ -15,28 +15,26 @@
 //! A script that gets `ok` from `togglesplit` believes the layout
 //! changed and takes its next branch accordingly; the mistake is now
 //! invisible and permanent, and it surfaces later as behaviour the user
-//! cannot explain. A script that gets an error takes its *error* branch
-//! — which its author wrote, and tested, and which usually falls back to
-//! something that works.
+//! cannot explain.
 //!
-//! Omarchy proves the point in its own source.
-//! `omarchy-launch-or-focus` does this:
+//! Omarchy often appears to provide a fallback:
 //!
 //! ```sh
 //! hyprctl dispatch "hl.dsp.focus({ window = \"address:$ADDR\" })" \
 //!   || hyprctl dispatch focuswindow "address:$ADDR"
 //! ```
 //!
-//! A server that rejects the Lua form cleanly gets handed the classic
-//! form on the next line, for free. A server that accepts the Lua form
-//! and does nothing gets a script that opens a second copy of the app
-//! every time — which is precisely the bug
-//! `docs/omarchy-integration.md` records as "broken, silently".
+//! But `hyprctl` 0.56.2 exits zero regardless of the response text, so
+//! that `||` branch is dead when the refusal is discarded. Refusal is
+//! therefore not treated as a compatibility mechanism: caller-visible
+//! paths are implemented, hidden from chonkstep-owned menus, or tracked
+//! as a bug. It remains the only truthful protocol answer for a request
+//! with no meaning on this floating desktop.
 //!
 //! So: [`Outcome::Unsupported`] is a first-class result here, not a
 //! shortfall, and it is reported to the caller as an error string
-//! beginning with `Invalid dispatcher`, which is what Hyprland itself
-//! says and therefore what callers already branch on.
+//! beginning with `Invalid dispatcher`. The server logs and counts each
+//! one because most non-interactive callers will otherwise hide it.
 
 use crate::state::{workspace_index_from_hypr_id, Snapshot, Window};
 
@@ -57,12 +55,32 @@ pub enum Action {
     KillActive,
     /// Move a window (or the focused one) to a 0-based workspace index.
     MoveToWorkspace { window: Option<u64>, workspace: usize },
-    /// Run a command line.
-    Exec(String),
+    /// Run a command line through the user's POSIX shell. This is the
+    /// spelling used by Lua's `hl.dsp.exec_cmd`, whose single string is
+    /// explicitly shell source.
+    ExecShell(String),
+    /// Execute an argv exactly. `hyprctl dispatch exec -- <argv...>`
+    /// removes its `--` client-side and flattens the arguments on the
+    /// wire, so [`classic_exec`] reconstructs the only unambiguous
+    /// direct-argv forms before this crosses into the compositor.
+    ExecArgv(Vec<String>),
     /// Set or toggle fullscreen on the focused window.
     Fullscreen(Fullscreen),
     /// Focus the next/previous window.
     CycleFocus { forward: bool },
+    MoveWindow { window: u64, x: i32, y: i32, relative: bool },
+    ResizeWindow { window: u64, width: i32, height: i32, relative: bool },
+    CenterWindow(u64),
+    RaiseWindow(u64),
+    SetPinned { window: u64, pinned: Option<bool> },
+    SetTag { window: u64, tag: String, present: bool },
+    /// Scale in protocol units (120 == 1.0), avoiding floating-point
+    /// equality in an action that is compared in conformance tests.
+    SetMonitorScale { output: String, scale_120: u32 },
+    ReloadConfig,
+    /// The requested window is already floating; applying this still
+    /// validates that the target survived until the action ran.
+    ConfirmFloating(u64),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -127,7 +145,7 @@ const TILING_ONLY: &[(&str, &str)] = &[
     ("togglespecialworkspace", "chonkstep has no special (scratchpad) workspaces"),
     ("movetoworkspacesilent", "chonkstep cannot move a window without following it"),
     ("workspaceopt", "chonkstep has no per-workspace layout options"),
-    ("dpms", "chonkstep does not control output power from IPC"),
+    ("dpms", "chonkstep does not control output power from IPC; dpmsStatus remains the real powered-on state"),
     ("submap", "chonkstep's keybindings do not have submaps"),
 ];
 
@@ -135,9 +153,6 @@ const TILING_ONLY: &[(&str, &str)] = &[
 /// model, listed separately from the tiling ones because the reason is
 /// different and a reader deserves to know which kind of "no" this is.
 const NOT_MODELLED: &[(&str, &str)] = &[
-    ("pin", "chonkstep has no always-on-top pin"),
-    ("togglefloating", "every chonkstep window already floats; there is nothing to toggle"),
-    ("setfloating", "every chonkstep window already floats"),
     ("settiled", "chonkstep cannot tile a window"),
 ];
 
@@ -211,24 +226,12 @@ fn parse_classic(verb: &str, rest: &str, snapshot: &Snapshot) -> Outcome {
                 None => None,
                 Some(selector) => match resolve_window(selector, snapshot) {
                     Some(window) => Some(window.id),
-                    None => {
-                        return Outcome::Unsupported(format!("no window matches {selector:?}"))
-                    }
+                    None => return Outcome::Unsupported(format!("no window matches {selector:?}")),
                 },
             };
             Outcome::Run(Action::MoveToWorkspace { window, workspace })
         }
-        "exec" => {
-            // `hyprctl dispatch exec -- bash -lc '...'` is the form
-            // `omarchy-launch-screensaver` uses; the `--` is Hyprland's
-            // own "no more flags" marker and is not part of the command.
-            let command = rest.strip_prefix("--").unwrap_or(rest).trim();
-            if command.is_empty() {
-                Outcome::Unknown("exec with no command".to_string())
-            } else {
-                Outcome::Run(Action::Exec(command.to_string()))
-            }
-        }
+        "exec" => classic_exec(rest),
         "fullscreen" => Outcome::Run(Action::Fullscreen(match rest.trim() {
             "" | "0" => Fullscreen::Toggle,
             // Hyprland's `1` is "maximize to the window's monitor",
@@ -237,10 +240,37 @@ fn parse_classic(verb: &str, rest: &str, snapshot: &Snapshot) -> Outcome {
             "1" | "2" => Fullscreen::On,
             _ => Fullscreen::Toggle,
         })),
-        "fullscreenstate" => Outcome::Unsupported(
-            "chonkstep has one fullscreen state, not a client/internal pair".to_string(),
-        ),
+        "fullscreenstate" => {
+            let client = rest.split_whitespace().nth(1).unwrap_or("0");
+            Outcome::Run(Action::Fullscreen(if client == "0" { Fullscreen::Off } else { Fullscreen::On }))
+        }
         "cyclenext" => Outcome::Run(Action::CycleFocus { forward: !rest.contains("prev") }),
+        "resizeactive" => classic_geometry(rest, snapshot, true, true),
+        "resizewindowpixel" => classic_geometry(rest, snapshot, true, false),
+        "moveactive" => classic_geometry(rest, snapshot, false, true),
+        "movewindowpixel" => classic_geometry(rest, snapshot, false, false),
+        "centerwindow" => selected_window(rest, snapshot)
+            .map(|window| Outcome::Run(Action::CenterWindow(window.id)))
+            .unwrap_or_else(|| Outcome::Unsupported(format!("no window matches {rest:?}"))),
+        "alterzorder" => {
+            let mut fields = rest.split_whitespace();
+            let mode = fields.next().unwrap_or("");
+            let selector = fields.collect::<Vec<_>>().join(" ");
+            if mode != "top" {
+                Outcome::Unsupported(format!("alterzorder mode {mode:?} is not supported; only top is available"))
+            } else {
+                selected_window(&selector, snapshot)
+                    .map(|window| Outcome::Run(Action::RaiseWindow(window.id)))
+                    .unwrap_or_else(|| Outcome::Unsupported(format!("no window matches {selector:?}")))
+            }
+        }
+        "pin" => selected_window(rest, snapshot)
+            .map(|window| Outcome::Run(Action::SetPinned { window: window.id, pinned: None }))
+            .unwrap_or_else(|| Outcome::Unsupported(format!("no window matches {rest:?}"))),
+        "togglefloating" | "setfloating" => selected_window(rest, snapshot)
+            .map(|window| Outcome::Run(Action::ConfirmFloating(window.id)))
+            .unwrap_or_else(|| Outcome::Unsupported(format!("no window matches {rest:?}"))),
+        "tagwindow" => classic_tag(rest, snapshot),
         "focusmonitor" | "movecurrentworkspacetomonitor" | "focuswindowbyclass" => {
             Outcome::Unsupported(format!("{verb} is not implemented yet"))
         }
@@ -285,53 +315,244 @@ fn parse_lua(rest: &str, snapshot: &Snapshot) -> Outcome {
             None => Outcome::Run(Action::KillActive),
         },
         "exec_cmd" => match lua_field(body, "cmd").or_else(|| lua_string(body)) {
-            Some(command) => Outcome::Run(Action::Exec(command)),
+            Some(command) => Outcome::Run(Action::ExecShell(command)),
             None => Outcome::Unknown("hl.dsp.exec_cmd with no command".to_string()),
         },
-        "window.float" | "window.set_prop" | "window.pin" => Outcome::Unsupported(format!(
-            "hl.dsp.{path} controls a window property chonkstep does not model"
-        )),
-        "window.resize" | "window.move" | "window.center" | "window.alter_zorder"
-        | "window.tag" => Outcome::Unsupported(format!(
-            "hl.dsp.{path} is not implemented yet"
-        )),
-        "cursor.move" => {
-            Outcome::Unsupported("chonkstep does not warp the pointer from IPC".to_string())
+        "window.float" => lua_window(body, snapshot, |window| Action::ConfirmFloating(window.id)),
+        "window.pin" => lua_window(body, snapshot, |window| Action::SetPinned { window: window.id, pinned: None }),
+        "window.resize" => lua_geometry(body, snapshot, true),
+        "window.move" => lua_geometry(body, snapshot, false),
+        "window.center" => lua_window(body, snapshot, |window| Action::CenterWindow(window.id)),
+        "window.alter_zorder" => {
+            if lua_field(body, "mode").as_deref() != Some("top") {
+                Outcome::Unsupported("hl.dsp.window.alter_zorder supports mode=top only".to_string())
+            } else {
+                lua_window(body, snapshot, |window| Action::RaiseWindow(window.id))
+            }
         }
+        "window.tag" => {
+            let Some(tag) = lua_field(body, "tag") else {
+                return Outcome::Unknown("hl.dsp.window.tag with no tag".to_string());
+            };
+            let (present, tag) = match tag.strip_prefix('-') {
+                Some(tag) => (false, tag.to_string()),
+                None => (true, tag.trim_start_matches('+').to_string()),
+            };
+            lua_window(body, snapshot, |window| Action::SetTag { window: window.id, tag, present })
+        }
+        "window.fullscreen_state" => {
+            let client = lua_field(body, "client").and_then(|value| value.parse::<i32>().ok()).unwrap_or(0);
+            Outcome::Run(Action::Fullscreen(if client == 0 { Fullscreen::Off } else { Fullscreen::On }))
+        }
+        "window.set_prop" => Outcome::Unsupported("window opacity and other dynamic properties are not modeled".to_string()),
+        "cursor.move" => Outcome::Unsupported("chonkstep does not warp the pointer from IPC".to_string()),
         "dpms" => Outcome::Unsupported("chonkstep does not control output power from IPC".to_string()),
         other => Outcome::Unknown(format!("unknown Lua dispatcher hl.dsp.{other}")),
     }
 }
 
+/// Parse an expression sent through `hyprctl eval`. Eval is mutation in
+/// Omarchy's Lua configuration API; known families are either lowered
+/// to an action or refused by name, never misreported as an unknown
+/// request.
+pub fn parse_eval(source: &str, snapshot: &Snapshot) -> Outcome {
+    let source = source.trim();
+    if source.starts_with("hl.dispatch(hl.dsp.") {
+        return parse(source, snapshot);
+    }
+    if let Some(body) = source.strip_prefix("hl.monitor(").and_then(|value| value.strip_suffix(')')) {
+        let Some(output) = lua_field(body, "output") else {
+            return Outcome::Unsupported("hl.monitor requires a named output".to_string());
+        };
+        if !snapshot.monitors.iter().any(|monitor| monitor.name == output) {
+            return Outcome::Unsupported(format!("hl.monitor names unknown output {output:?}"));
+        }
+        let Some(scale) = lua_field(body, "scale").and_then(|value| value.parse::<f64>().ok()) else {
+            return Outcome::Unsupported("hl.monitor currently changes scale only, and needs a numeric scale".to_string());
+        };
+        if !scale.is_finite() || !(0.5..=4.0).contains(&scale) {
+            return Outcome::Unsupported("hl.monitor scale must be between 0.5 and 4".to_string());
+        }
+        return Outcome::Run(Action::SetMonitorScale { output, scale_120: (scale * 120.0).round() as u32 });
+    }
+    if source.starts_with("hl.config(") {
+        return Outcome::Unsupported("hl.config property mutation is not supported by chonkstep".to_string());
+    }
+    if source.starts_with("hl.device(") {
+        return Outcome::Unsupported("hl.device enable/disable is not supported by this input backend".to_string());
+    }
+    if source.starts_with("hl.workspace_rule(") {
+        return Outcome::Unsupported("chonkstep is floating-only and cannot apply a tiled workspace layout".to_string());
+    }
+    Outcome::Unknown(format!("unknown eval expression {source:?}"))
+}
+
+fn selected_window<'a>(selector: &str, snapshot: &'a Snapshot) -> Option<&'a Window> {
+    if selector.trim().is_empty() {
+        snapshot.focused_window()
+    } else {
+        resolve_window(selector.trim(), snapshot)
+    }
+}
+
+fn lua_window<F>(body: &str, snapshot: &Snapshot, action: F) -> Outcome
+where
+    F: FnOnce(&Window) -> Action,
+{
+    let window = lua_field(body, "window")
+        .as_deref()
+        .and_then(|selector| resolve_window(selector, snapshot))
+        .or_else(|| snapshot.focused_window());
+    window.map(|window| Outcome::Run(action(window)))
+        .unwrap_or_else(|| Outcome::Unsupported("window dispatcher has no matching target".to_string()))
+}
+
+fn lua_geometry(body: &str, snapshot: &Snapshot, resize: bool) -> Outcome {
+    let Some(x) = lua_field(body, "x").and_then(|value| value.parse::<i32>().ok()) else {
+        return Outcome::Unsupported("window geometry requires an integer x".to_string());
+    };
+    let Some(y) = lua_field(body, "y").and_then(|value| value.parse::<i32>().ok()) else {
+        return Outcome::Unsupported("window geometry requires an integer y".to_string());
+    };
+    let relative = lua_field(body, "relative").is_some_and(|value| value == "true");
+    lua_window(body, snapshot, |window| {
+        if resize {
+            Action::ResizeWindow { window: window.id, width: x, height: y, relative }
+        } else {
+            Action::MoveWindow { window: window.id, x, y, relative }
+        }
+    })
+}
+
+fn classic_geometry(rest: &str, snapshot: &Snapshot, resize: bool, active_form: bool) -> Outcome {
+    let original = rest.trim();
+    let (rest, exact) = original
+        .strip_prefix("exact")
+        .map(|rest| (rest.trim(), true))
+        .unwrap_or((original, false));
+    let (numbers, selector) = rest.split_once(',').map_or((rest, ""), |(a, b)| (a.trim(), b.trim()));
+    let mut fields = numbers.split_whitespace();
+    let Some(x) = fields.next().and_then(|value| value.parse::<i32>().ok()) else {
+        return Outcome::Unsupported("window geometry requires two integer coordinates".to_string());
+    };
+    let Some(y) = fields.next().and_then(|value| value.parse::<i32>().ok()) else {
+        return Outcome::Unsupported("window geometry requires two integer coordinates".to_string());
+    };
+    let selector = if active_form { fields.collect::<Vec<_>>().join(" ") } else { selector.to_string() };
+    let Some(window) = selected_window(&selector, snapshot) else {
+        return Outcome::Unsupported(format!("no window matches {selector:?}"));
+    };
+    if resize {
+        Outcome::Run(Action::ResizeWindow { window: window.id, width: x, height: y, relative: !exact })
+    } else {
+        Outcome::Run(Action::MoveWindow { window: window.id, x, y, relative: !exact })
+    }
+}
+
+fn classic_tag(rest: &str, snapshot: &Snapshot) -> Outcome {
+    let mut fields = rest.split_whitespace();
+    let Some(raw_tag) = fields.next() else { return Outcome::Unsupported("tagwindow requires a tag".to_string()) };
+    let selector = fields.collect::<Vec<_>>().join(" ");
+    let Some(window) = selected_window(&selector, snapshot) else {
+        return Outcome::Unsupported(format!("no window matches {selector:?}"));
+    };
+    let (present, tag) = raw_tag.strip_prefix('-').map_or((true, raw_tag.trim_start_matches('+')), |tag| (false, tag));
+    Outcome::Run(Action::SetTag { window: window.id, tag: tag.to_string(), present })
+}
+
 /// Pull `key = "value"` (or `key = value`) out of a Lua table literal.
 fn lua_field(body: &str, key: &str) -> Option<String> {
-    let at = body.find(key)?;
-    // Guard against `key` matching inside a longer identifier —
-    // `subworkspace = ...` must not answer a lookup for `workspace`.
-    if at > 0 {
-        let before = body[..at].chars().next_back().unwrap_or(' ');
-        if before.is_alphanumeric() || before == '_' || before == '.' {
-            return None;
+    for (at, _) in body.match_indices(key) {
+        // Guard against `key` matching inside a longer identifier or a
+        // value. In particular, looking for `x` must skip the `x` in an
+        // address such as `address:0x12` and continue to the real field.
+        if at > 0 {
+            let before = body[..at].chars().next_back().unwrap_or(' ');
+            if before.is_alphanumeric() || before == '_' || before == '.' {
+                continue;
+            }
         }
+        let after_key = &body[at + key.len()..];
+        if after_key.chars().next().is_some_and(|after| after.is_alphanumeric() || after == '_') {
+            continue;
+        }
+        let rest = after_key.trim_start();
+        let Some(rest) = rest.strip_prefix('=') else { continue };
+        let rest = rest.trim_start();
+        return Some(match rest.strip_prefix('"') {
+            Some(quoted) => quoted.split('"').next().unwrap_or_default().to_string(),
+            None => rest.split([',', '}', ' ']).next().unwrap_or_default().trim().to_string(),
+        });
     }
-    let rest = body[at + key.len()..].trim_start();
-    let rest = rest.strip_prefix('=')?.trim_start();
-    Some(match rest.strip_prefix('"') {
-        Some(quoted) => quoted.split('"').next().unwrap_or_default().to_string(),
-        None => rest
-            .split([',', '}', ' '])
-            .next()
-            .unwrap_or_default()
-            .trim()
-            .to_string(),
-    })
+    None
 }
 
 /// The first bare string literal in a Lua argument list.
 fn lua_string(body: &str) -> Option<String> {
+    // Lua long-bracket strings are ordinary string literals. Omarchy's
+    // screensaver launcher uses exactly this spelling so accepting only
+    // quotes turns a visible menu action into a silent refusal.
+    if let Some(rest) = body.trim_start().strip_prefix("[[") {
+        return rest.find("]]").map(|end| rest[..end].to_string());
+    }
+    // Also accept the delimiter-with-equals form (`[=[...]=]`). It
+    // costs a small bounded scan and avoids making the same parser gap
+    // reappear the first time a command itself contains `]]`.
+    let trimmed = body.trim_start();
+    if let Some(after_open) = trimmed.strip_prefix('[') {
+        let equals = after_open.bytes().take_while(|byte| *byte == b'=').count();
+        if after_open.as_bytes().get(equals) == Some(&b'[') {
+            let content = &after_open[equals + 1..];
+            let close = format!("]{}]", "=".repeat(equals));
+            if let Some(end) = content.find(&close) {
+                return Some(content[..end].to_string());
+            }
+        }
+    }
     let start = body.find('"')?;
     let rest = &body[start + 1..];
     Some(rest.split('"').next()?.to_string())
+}
+
+/// Decode classic `dispatch exec` without changing its argv.
+///
+/// `hyprctl`'s wire format has no argument framing: it joins its argv
+/// with spaces and even consumes the conventional `--` before sending.
+/// Shell metacharacters and quotes therefore still mean "one shell
+/// command", while a plain word sequence is safest as direct argv.
+/// The important ambiguous case is a shell with `-c`/`-lc`: the shell
+/// has already removed the quotes around its command argument before
+/// `hyprctl` sees them, so everything after that option must be joined
+/// back into the one argument the shell was asked to evaluate.
+fn classic_exec(rest: &str) -> Outcome {
+    let command = rest.strip_prefix("--").unwrap_or(rest).trim();
+    if command.is_empty() {
+        return Outcome::Unknown("exec with no command".to_string());
+    }
+    if command.chars().any(|ch| {
+        matches!(
+            ch,
+            '\'' | '"' | '$' | '`' | '|' | '&' | ';' | '<' | '>' | '(' | ')' | '*' | '?' | '[' | ']' | '{' | '}'
+        )
+    }) {
+        return Outcome::Run(Action::ExecShell(command.to_string()));
+    }
+
+    let mut argv: Vec<String> = command.split_whitespace().map(str::to_string).collect();
+    if argv.is_empty() {
+        return Outcome::Unknown("exec with no command".to_string());
+    }
+    let shell = argv[0].rsplit('/').next().unwrap_or(&argv[0]);
+    let command_option = argv.get(1).is_some_and(|option| {
+        option.starts_with('-')
+            && option.contains('c')
+            && matches!(shell, "sh" | "bash" | "dash" | "zsh" | "ksh" | "mksh" | "busybox")
+    });
+    if command_option && argv.len() > 3 {
+        let source = argv.drain(2..).collect::<Vec<_>>().join(" ");
+        argv.push(source);
+    }
+    Outcome::Run(Action::ExecArgv(argv))
 }
 
 /// The workspaces a switch may name.
@@ -369,10 +590,7 @@ fn in_range(index: usize) -> Result<usize, String> {
     if index < MAX_WORKSPACE {
         return Ok(index);
     }
-    Err(format!(
-        "chonkstep has workspaces 1 to {MAX_WORKSPACE}; {} is past the end",
-        index + 1
-    ))
+    Err(format!("chonkstep has workspaces 1 to {MAX_WORKSPACE}; {} is past the end", index + 1))
 }
 
 /// Resolve a workspace selector to a 0-based chonkstep index.
@@ -382,8 +600,7 @@ fn workspace_target(target: &str, snapshot: &Snapshot) -> Result<usize, String> 
         return Err("workspace with no argument".to_string());
     }
     if let Ok(id) = target.parse::<i32>() {
-        let index = workspace_index_from_hypr_id(id)
-            .ok_or_else(|| format!("chonkstep has no workspace {id}"))?;
+        let index = workspace_index_from_hypr_id(id).ok_or_else(|| format!("chonkstep has no workspace {id}"))?;
         return in_range(index);
     }
     // Relative and named selectors. `e+1`/`e-1` and `+1`/`-1` are what
@@ -444,11 +661,7 @@ fn resolve_window<'a>(selector: &str, snapshot: &'a Snapshot) -> Option<&'a Wind
 
 /// Strip the `^(...)$` a Hyprland selector is usually written with.
 fn unanchor(value: &str) -> &str {
-    value
-        .trim_start_matches('^')
-        .trim_end_matches('$')
-        .trim_start_matches('(')
-        .trim_end_matches(')')
+    value.trim_start_matches('^').trim_end_matches('$').trim_start_matches('(').trim_end_matches(')')
 }
 
 fn contains_ignore_case(haystack: &str, needle: &str) -> bool {

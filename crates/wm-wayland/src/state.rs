@@ -37,6 +37,7 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use calloop::signals::{Signal, Signals};
 use smithay::backend::allocator::Fourcc;
 use smithay::backend::renderer::damage::OutputDamageTracker;
 use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
@@ -48,7 +49,9 @@ use smithay::input::pointer::CursorImageStatus;
 use smithay::input::{Seat, SeatState};
 use smithay::output::{Mode, Output, PhysicalProperties, Scale as OutputScale, Subpixel};
 use smithay::reexports::calloop::generic::Generic;
-use smithay::reexports::calloop::{EventLoop, Interest, LoopHandle, Mode as TriggerMode, PostAction, RegistrationToken};
+use smithay::reexports::calloop::{
+    EventLoop, Interest, LoopHandle, Mode as TriggerMode, PostAction, RegistrationToken,
+};
 use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::State as XdgToplevelState;
 use smithay::reexports::wayland_server::backend::{ClientData, ClientId, DisconnectReason, GlobalId};
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
@@ -67,19 +70,18 @@ use smithay::wayland::socket::ListeningSocketSource;
 use smithay::wayland::xwayland_shell::XWaylandShellState;
 use smithay::xwayland::{X11Surface, X11Wm, XWayland, XWaylandEvent};
 
-use wm_core::{
-    Backend, BackendEvent, KeyCombo, MonitorInfo, MouseButton, ScrollDelta, WindowManager,
-    WindowType,
-};
+use wm_core::{Backend, BackendEvent, KeyCombo, MonitorInfo, MouseButton, ScrollDelta, WindowManager, WindowType};
 use wm_theme::{FontState, RasterThemeEngine};
 use wm_theme_api::{DecorationBuffer, Point, Rect, ResizeEdge, Size};
 
 use crate::input::DragGrab;
 
 use chonk_shell::dockapp::Farewell;
-use chonk_xsettings::{DesktopAppearance, ManagerState, XSettingsError, XSettingsManager};
 use chonk_shell::shell::{Shell, ShellOutcome};
-use chonk_shell::startup::{ensure_xcursor_size, recovering_from_crash, reload_requested, restart_requested, SessionState};
+use chonk_shell::startup::{
+    ensure_xcursor_size, recovering_from_crash, reload_requested, restart_requested, SessionState,
+};
+use chonk_xsettings::{DesktopAppearance, ManagerState, XSettingsError, XSettingsManager};
 
 /// A managed client window (an xdg toplevel or an XWayland surface) in
 /// the id space `wm-core` reasons about. Plain integers rather than
@@ -154,11 +156,7 @@ pub(crate) enum StackEntry {
 /// leaving both in `stacking` draws the client twice, at two depths,
 /// and dropping both leaves a mapped window with no slot at all,
 /// invisible to the renderer and to the hit-test alike.
-pub(crate) fn replace_stack_entry(
-    stacking: &mut Vec<StackEntry>,
-    old: StackEntry,
-    new: StackEntry,
-) {
+pub(crate) fn replace_stack_entry(stacking: &mut Vec<StackEntry>, old: StackEntry, new: StackEntry) {
     match stacking.iter().position(|entry| *entry == old) {
         Some(index) => stacking[index] = new,
         None => stacking.push(new),
@@ -208,6 +206,17 @@ pub(crate) fn raise_stack_entry(stacking: &mut Vec<StackEntry>, entry: StackEntr
 pub(crate) enum ManagedSurface {
     Xdg(ToplevelSurface),
     X11(X11Surface),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct InputDeviceRecord {
+    pub id: String,
+    pub name: String,
+    pub keyboard: bool,
+    pub pointer: bool,
+    pub touch: bool,
+    pub tablet: bool,
+    pub switch: bool,
 }
 
 impl ManagedSurface {
@@ -481,6 +490,11 @@ pub struct WaylandBackend {
     /// input code consults before deciding whether a press becomes a
     /// `BackendEvent::KeyPress` or is forwarded to the focused client.
     pub(crate) grabbed_combos: Vec<KeyCombo>,
+    pub(crate) release_combos: Vec<KeyCombo>,
+    pub(crate) locked_combos: Vec<KeyCombo>,
+    pub(crate) repeating_combos: Vec<KeyCombo>,
+    pub(crate) repeat_rate: u32,
+    pub(crate) repeat_delay: std::time::Duration,
     /// The modal exclusive grab (`Backend::grab_keyboard`, the Alt-Tab
     /// switcher): while set, *every* press becomes a `KeyPress` and
     /// releases additionally queue `KeyRelease` — see wm-x11's
@@ -509,6 +523,12 @@ pub struct WaylandBackend {
     /// scale has no meaning (the X session is scaled by rasterizing the
     /// theme larger, not by telling anyone a factor).
     pub(crate) monitor_scales: Vec<f64>,
+    /// Live input devices, maintained from backend hotplug events and
+    /// served through Hyprland-compatible IPC.
+    pub(crate) input_devices: Vec<InputDeviceRecord>,
+    /// Live input-method candidate popups. Kept in the scene ledger so
+    /// rendering and hit-testing consult the same collection.
+    pub(crate) ime_popups: Vec<smithay::wayland::input_method::PopupSurface>,
     /// The union bounding box of [`WaylandBackend::monitors`] — what
     /// `Backend::screen_size` reports, and the space every rect in this
     /// ledger lives in. With one output it is that output's size, which
@@ -683,7 +703,11 @@ impl WaylandBackend {
         toplevel
             .wl_surface()
             .client()
-            .and_then(|client| client.get_data::<ClientState>().map(|data| data.kde_decoration_bound.load(std::sync::atomic::Ordering::Relaxed)))
+            .and_then(|client| {
+                client
+                    .get_data::<ClientState>()
+                    .map(|data| data.kde_decoration_bound.load(std::sync::atomic::Ordering::Relaxed))
+            })
             .unwrap_or(false)
     }
 
@@ -704,10 +728,17 @@ impl WaylandBackend {
             shell_scrolls: VecDeque::new(),
             pending_resize: None,
             grabbed_combos: Vec::new(),
+            release_combos: Vec::new(),
+            locked_combos: Vec::new(),
+            repeating_combos: Vec::new(),
+            repeat_rate: 25,
+            repeat_delay: std::time::Duration::from_millis(200),
             keyboard_grabbed: false,
             root_background: RootBackground::Color((0, 0, 0)),
             monitors,
             monitor_scales,
+            input_devices: Vec::new(),
+            ime_popups: Vec::new(),
             output_size,
             damage: true,
             display_handle,
@@ -820,10 +851,7 @@ impl WaylandBackend {
     /// the window count — fine at WM scale, and it avoids a second
     /// index that could drift from the authoritative `windows` map.
     pub(crate) fn window_for_surface(&self, surface: &WlSurface) -> Option<WlWindowId> {
-        self.windows
-            .iter()
-            .find(|(_, record)| record.surface.wl_surface().as_ref() == Some(surface))
-            .map(|(id, _)| *id)
+        self.windows.iter().find(|(_, record)| record.surface.wl_surface().as_ref() == Some(surface)).map(|(id, _)| *id)
     }
 
     /// Drops a window's ledger entry *and* the stacking slot a
@@ -840,8 +868,7 @@ impl WaylandBackend {
     /// the session ever opened.
     pub(crate) fn forget_window(&mut self, window: WlWindowId) {
         self.windows.remove(&window);
-        self.stacking
-            .retain(|entry| !matches!(entry, StackEntry::Window(w) if *w == window));
+        self.stacking.retain(|entry| !matches!(entry, StackEntry::Window(w) if *w == window));
         // Same collection duty for the pending EWMH properties: keyed
         // by window id, and nothing downstream would ever drain an
         // entry whose window no longer resolves.
@@ -1100,6 +1127,140 @@ fn advertise_scale(outputs: &mut [OutputEntry], scale: f32) {
     }
 }
 
+fn advertise_scales(outputs: &mut [OutputEntry], scales: &[f64]) {
+    for (entry, scale) in outputs.iter_mut().zip(scales.iter().copied()) {
+        entry.scale = scale.max(0.125);
+        entry.output.change_current_state(None, None, Some(advertised_output_scale(entry.scale as f32)), None);
+    }
+}
+
+/// Applies the supported, whole `monitor =` lines while real outputs
+/// and their EDID facts are available. Unsupported fields refuse their
+/// entire line so a rotated/disabled/mirrored request is never partly
+/// honored as only a scale or position change.
+fn apply_monitor_rules(
+    setups: &mut [OutputSetup],
+    rules: &[wm_config::hyprland::directive::Monitor],
+    fallback_scale: f64,
+) -> Vec<f64> {
+    let mut scales = vec![fallback_scale.max(0.125); setups.len()];
+    let mut auto_x = 0i32;
+    let mut changed_position = false;
+    for (index, setup) in setups.iter_mut().enumerate() {
+        let exact = rules.iter().rev().find(|rule| rule.output == setup.output.name());
+        let catch_all = rules.iter().rev().find(|rule| rule.output.trim().is_empty());
+        let Some(rule) = exact.or(catch_all) else {
+            auto_x = auto_x.max(setup.position.x.saturating_add(setup.size.w as i32));
+            continue;
+        };
+        let unsupported = rule.extra.first().map(String::as_str).or_else(|| {
+            let mode = rule.mode.trim().to_ascii_lowercase();
+            (mode == "disable" || mode.starts_with("mirror")).then_some(rule.mode.as_str())
+        });
+        if let Some(field) = unsupported {
+            tracing::warn!(
+                output = %setup.output.name(),
+                field,
+                "hyprland-config: monitor line refused whole because this field is unsupported"
+            );
+            auto_x = auto_x.max(setup.position.x.saturating_add(setup.size.w as i32));
+            continue;
+        }
+
+        let mode = rule.mode.trim();
+        let new_size = if mode.is_empty() || mode.eq_ignore_ascii_case("preferred") {
+            setup.output.preferred_mode().map_or(setup.size, |preferred| {
+                Size::new(preferred.size.w.max(0) as u32, preferred.size.h.max(0) as u32)
+            })
+        } else {
+            tracing::warn!(
+                output = %setup.output.name(),
+                mode,
+                "hyprland-config: monitor line refused whole; explicit modes are not applied during output bootstrap"
+            );
+            auto_x = auto_x.max(setup.position.x.saturating_add(setup.size.w as i32));
+            continue;
+        };
+
+        let position = rule.position.trim();
+        let new_position = if position.is_empty() || position.eq_ignore_ascii_case("auto") {
+            Point::new(auto_x, 0)
+        } else if let Some(point) = parse_monitor_position(position) {
+            point
+        } else {
+            tracing::warn!(
+                output = %setup.output.name(),
+                position,
+                "hyprland-config: monitor line refused whole; position must be auto or XxY"
+            );
+            auto_x = auto_x.max(setup.position.x.saturating_add(setup.size.w as i32));
+            continue;
+        };
+
+        let requested_scale = rule.scale.trim();
+        let scale = if requested_scale.is_empty() {
+            fallback_scale
+        } else if requested_scale.eq_ignore_ascii_case("auto") {
+            automatic_output_scale(&setup.output, new_size).unwrap_or(fallback_scale)
+        } else {
+            match requested_scale.parse::<f64>() {
+                Ok(scale) if scale.is_finite() && (0.5..=4.0).contains(&scale) => scale,
+                _ => {
+                    tracing::warn!(
+                        output = %setup.output.name(),
+                        scale = requested_scale,
+                        "hyprland-config: monitor line refused whole; scale must be auto or 0.5 through 4"
+                    );
+                    continue;
+                }
+            }
+        };
+        setup.size = new_size;
+        setup.position = new_position;
+        changed_position = true;
+        auto_x = auto_x.max(setup.position.x.saturating_add(setup.size.w as i32));
+        scales[index] = scale;
+        tracing::info!(
+            output = %setup.output.name(),
+            x = setup.position.x,
+            y = setup.position.y,
+            scale,
+            "hyprland-config: monitor line applied"
+        );
+    }
+    if changed_position {
+        let min_x = setups.iter().map(|setup| setup.position.x).min().unwrap_or(0);
+        let min_y = setups.iter().map(|setup| setup.position.y).min().unwrap_or(0);
+        for setup in setups {
+            setup.position.x -= min_x;
+            setup.position.y -= min_y;
+        }
+    }
+    scales
+}
+
+fn parse_monitor_position(value: &str) -> Option<Point> {
+    let (x, y) = value.split_once(['x', 'X'])?;
+    Some(Point::new(x.trim().parse().ok()?, y.trim().parse().ok()?))
+}
+
+fn automatic_output_scale(output: &Output, size: Size) -> Option<f64> {
+    let physical = output.physical_properties().size;
+    if physical.w <= 0 || physical.h <= 0 {
+        return None;
+    }
+    let dpi_x = size.w as f64 * 25.4 / physical.w as f64;
+    let dpi_y = size.h as f64 * 25.4 / physical.h as f64;
+    let dpi = dpi_x.max(dpi_y);
+    Some(if dpi >= 200.0 {
+        2.0
+    } else if dpi >= 140.0 {
+        1.5
+    } else {
+        1.0
+    })
+}
+
 /// Re-advertises ONE output's own fractional scale: the integer ceiling
 /// on its `wl_output`, the exact fraction to every fractional-scale
 /// client. The per-output half of what [`advertise_scale`] does for the
@@ -1127,14 +1288,8 @@ pub(crate) fn advertise_output_scale_change(entry: &OutputEntry) {
 /// straddling two screens has to be measured by ONE factor, and the
 /// monitor holding most of it is the least surprising choice.
 pub(crate) fn scale_for_rect(monitors: &[MonitorInfo], scales: &[f64], rect: Rect) -> f64 {
-    let center = Point::new(
-        rect.pos.x + (rect.size.w / 2) as i32,
-        rect.pos.y + (rect.size.h / 2) as i32,
-    );
-    let index = monitors
-        .iter()
-        .position(|monitor| monitor.geometry.contains(center))
-        .unwrap_or(0);
+    let center = Point::new(rect.pos.x + (rect.size.w / 2) as i32, rect.pos.y + (rect.size.h / 2) as i32);
+    let index = monitors.iter().position(|monitor| monitor.geometry.contains(center)).unwrap_or(0);
     scales.get(index).copied().unwrap_or(1.0)
 }
 
@@ -1215,6 +1370,8 @@ pub struct Compositor {
     /// of `w` logical. smithay's surface state resolves the viewport;
     /// the ledger recovers the factor from the ratio.
     pub viewporter_state: smithay::wayland::viewporter::ViewporterState,
+    /// Standard desktop protocols grouped behind Smithay's helpers.
+    pub(crate) core_protocols: crate::core_protocols::CoreProtocols,
     /// Tracks xdg popups (client menus, tooltips) so the renderer can
     /// draw them above their parent window — `wm-core` never learns
     /// about them, exactly as it never learns about X11
@@ -1281,6 +1438,7 @@ pub struct Compositor {
     /// foreign-toplevel window list and screencopy capture. The
     /// Wayland counterpart to the X11 session's EWMH properties.
     pub(crate) protocols: crate::protocols::ProtocolState,
+    pub(crate) _toplevel_mapping: crate::toplevel_mapping::ToplevelMapping,
     /// wlr-output-management: what `wlr-randr` and `kanshi` list and
     /// configure outputs through — see `output_mgmt.rs`.
     pub(crate) output_mgmt: crate::output_mgmt::OutputManagement,
@@ -1290,6 +1448,7 @@ pub struct Compositor {
     /// originals a crashed one is undone from. Advertised only where
     /// there is a crtc to program — see `gamma.rs`.
     pub(crate) gamma: crate::gamma::GammaControl,
+    pub(crate) _ctm: crate::ctm::CtmControl,
     /// wlr-layer-shell: launchers, bars, notification daemons, OSDs —
     /// protocol state plus the focus/reservation bookkeeping in
     /// `layers.rs` (the surface records themselves live on the ledger).
@@ -1312,8 +1471,7 @@ pub struct Compositor {
     /// keyboard's whole state lives on its own protocol object, so
     /// there is nothing here to reconcile per pass. Same shape as
     /// `Idle::_inhibit`. See `virtual_keyboard.rs`.
-    pub(crate) _virtual_keyboard:
-        smithay::wayland::virtual_keyboard::VirtualKeyboardManagerState,
+    pub(crate) _virtual_keyboard: smithay::wayland::virtual_keyboard::VirtualKeyboardManagerState,
 
     /// Latest pointer position in compositor space, maintained by
     /// `input.rs` — the renderer draws the cursor here, and hit-tests
@@ -1361,6 +1519,7 @@ impl Compositor {
     /// than a porting promise, so change that file first if this order
     /// ever needs to move.
     pub(crate) fn dispatch_pending(&mut self) {
+        crate::input::tick_repeating_binding(self);
         // Consecutive `PointerMotion` events coalesce to the most
         // recent one — same rationale as the X11 loop: during a fast
         // drag every intermediate position is stale by the time it
@@ -1385,7 +1544,19 @@ impl Compositor {
             // switcher open (see the X11 loop's longer commentary;
             // `KeyRelease` is never intercepted at all).
             if let BackendEvent::KeyPress(combo) = &event {
-                if let Some(action) = self.shell.keymap_action(combo) {
+                if let Some(resolution) = self.shell.keymap_action(combo) {
+                    if let Some(motion) = pending_motion.take() {
+                        self.dispatch_motion(motion);
+                    }
+                    if let chonk_shell::shell::KeyResolution::Action(action) = resolution {
+                        let outcome = self.shell.run_action(&mut self.wm, &action);
+                        self.note_outcome(outcome);
+                    }
+                    continue;
+                }
+            }
+            if let BackendEvent::KeyRelease(combo) = &event {
+                if let Some(action) = self.shell.keymap_release_action(combo) {
                     if let Some(motion) = pending_motion.take() {
                         self.dispatch_motion(motion);
                     }
@@ -1580,12 +1751,7 @@ impl Compositor {
                 .collect();
             for surface in surfaces {
                 smithay::wayland::compositor::with_states(&surface, |states| {
-                    smithay::wayland::compositor::send_surface_state(
-                        &surface,
-                        states,
-                        advertised,
-                        Transform::Normal,
-                    );
+                    smithay::wayland::compositor::send_surface_state(&surface, states, advertised, Transform::Normal);
                     // The exact fraction, for clients that bound
                     // fractional-scale-v1 — the integer above is only
                     // their fallback. Dedup'd per surface by smithay.
@@ -1803,10 +1969,9 @@ impl Compositor {
             return;
         };
         match manager.publish_appearance(&appearance) {
-            Ok(true) => tracing::info!(
-                scale = appearance.ui_scale,
-                "told X11 clients about the new UI scale through XSETTINGS"
-            ),
+            Ok(true) => {
+                tracing::info!(scale = appearance.ui_scale, "told X11 clients about the new UI scale through XSETTINGS")
+            }
             Ok(false) => {}
             Err(error) => {
                 // Losing the selection to another manager is one of the
@@ -1864,25 +2029,33 @@ impl Compositor {
     /// those actions produced. A single snapshot would either answer
     /// from the future or announce the past.
     fn service_hyprland_ipc(&mut self) {
-        let Some(server) = &mut self.hyprland_ipc else {
+        let Some(mut server) = self.hyprland_ipc.take() else {
             return;
         };
         server.accept();
         if !server.has_clients() {
+            self.hyprland_ipc = Some(server);
             return;
         }
 
-        let before = crate::hyprland_ipc::snapshot(&self.wm, self.session_lock.machine.locked());
-        let actions = server.service(&before);
-        for action in actions {
-            crate::hyprland_ipc::apply(&mut self.wm, action);
-        }
+        let before = crate::hyprland_ipc::snapshot(
+            &self.wm,
+            self.session_lock.machine.locked(),
+            self.shell.session_state(),
+        );
+        server.service(&before, |action| crate::hyprland_ipc::apply(self, action));
 
-        let after = crate::hyprland_ipc::snapshot(&self.wm, self.session_lock.machine.locked());
-        // Borrow again: `apply` needed `&mut self.wm` above.
-        if let Some(server) = &mut self.hyprland_ipc {
-            server.publish(&after);
+        let after = crate::hyprland_ipc::snapshot(
+            &self.wm,
+            self.session_lock.machine.locked(),
+            self.shell.session_state(),
+        );
+        if self.shell.take_config_reloaded() {
+            server.broadcast(&chonk_hyprland_ipc::event::config_reloaded());
+            server.reset_diff();
         }
+        server.publish(&after);
+        self.hyprland_ipc = Some(server);
     }
 
     fn sync_dock_sources(&mut self) {
@@ -1930,7 +2103,11 @@ impl Compositor {
                     // to 16ms of frame latency and nothing else. This
                     // is a latency optimisation, not a correctness
                     // requirement.
-                    tracing::warn!(fd, ?error, "could not watch a dockapp socket; its frames will arrive on the housekeeping tick instead");
+                    tracing::warn!(
+                        fd,
+                        ?error,
+                        "could not watch a dockapp socket; its frames will arrive on the housekeeping tick instead"
+                    );
                 }
             }
         }
@@ -2021,6 +2198,30 @@ impl Compositor {
     pub(crate) fn sync_monitor_scales(&mut self) {
         let scales: Vec<f64> = self.outputs.iter().map(|entry| entry.scale).collect();
         self.wm.backend_mut().monitor_scales = scales;
+    }
+
+    /// Change one live output's advertised scale from IPC. The scale
+    /// ledger, wl_output metadata, fractional-scale preference and the
+    /// primary output's compositor chrome are updated as one action so
+    /// an `ok` response cannot describe only half a change.
+    pub(crate) fn set_output_scale(&mut self, name: &str, scale: f64) -> bool {
+        if !scale.is_finite() || !(0.5..=4.0).contains(&scale) {
+            return false;
+        }
+        let Some(index) = self.outputs.iter().position(|entry| entry.output.name() == name) else {
+            return false;
+        };
+        let entry = &mut self.outputs[index];
+        entry.scale = scale;
+        entry.output.change_current_state(None, None, Some(advertised_output_scale(scale as f32)), None);
+        self.sync_monitor_scales();
+        if index == 0 {
+            let mut state = self.shell.session_state().clone();
+            state.scale = scale as f32;
+            self.shell.apply_session_state(&mut self.wm, state);
+        }
+        self.wm.backend_mut().mark_damaged();
+        true
     }
 
     /// Lands a deferred focus intent on the seat's keyboard — a
@@ -2169,6 +2370,20 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
     let mut event_loop: EventLoop<Compositor> = EventLoop::try_new()?;
     let loop_handle = event_loop.handle();
 
+    // A display-manager/session-scope stop is a logout, not a crash.
+    // signalfd integrates the three ordinary termination signals into
+    // the same event loop as every protocol client, so teardown below
+    // runs in order and `main` returns success. SIGABRT is deliberately
+    // absent: the panic hook uses it as the watchdog's crash signal.
+    loop_handle.insert_source(
+        Signals::new(&[Signal::SIGTERM, Signal::SIGHUP, Signal::SIGINT])?,
+        |event, &mut (), comp| {
+            tracing::info!(signal = ?event.signal(), "session termination requested; logging out cleanly");
+            comp.restart = false;
+            comp.running = false;
+        },
+    )?;
+
     let display: Display<Compositor> = Display::new()?;
     let display_handle = display.handle();
 
@@ -2208,11 +2423,9 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
     // mode; registered here so they exist before any client can bind —
     // the same timing rule as every global below.
     let fractional_scale_state =
-        smithay::wayland::fractional_scale::FractionalScaleManagerState::new::<Compositor>(
-            &display_handle,
-        );
-    let viewporter_state =
-        smithay::wayland::viewporter::ViewporterState::new::<Compositor>(&display_handle);
+        smithay::wayland::fractional_scale::FractionalScaleManagerState::new::<Compositor>(&display_handle);
+    let viewporter_state = smithay::wayland::viewporter::ViewporterState::new::<Compositor>(&display_handle);
+    let core_protocols = crate::core_protocols::init(&display_handle);
 
     let mut seat_state: SeatState<Compositor> = SeatState::new();
     let mut seat: Seat<Compositor> = seat_state.new_wl_seat(&display_handle, "chonkstep");
@@ -2225,11 +2438,11 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
     // session.sh` is where a login session sets these; the nested
     // backend inherits whatever the host desktop already exported.
     let xkb_env = |name: &str| std::env::var(name).ok().filter(|value| !value.is_empty());
-    let xkb_rules = xkb_env("XKB_DEFAULT_RULES").unwrap_or_default();
-    let xkb_model = xkb_env("XKB_DEFAULT_MODEL").unwrap_or_default();
-    let xkb_layout = xkb_env("XKB_DEFAULT_LAYOUT").unwrap_or_default();
-    let xkb_variant = xkb_env("XKB_DEFAULT_VARIANT").unwrap_or_default();
-    let xkb_options = xkb_env("XKB_DEFAULT_OPTIONS");
+    let xkb_rules = xkb_env("XKB_DEFAULT_RULES").or_else(|| config.input.rules.clone()).unwrap_or_default();
+    let xkb_model = xkb_env("XKB_DEFAULT_MODEL").or_else(|| config.input.model.clone()).unwrap_or_default();
+    let xkb_layout = xkb_env("XKB_DEFAULT_LAYOUT").or_else(|| config.input.layout.clone()).unwrap_or_default();
+    let xkb_variant = xkb_env("XKB_DEFAULT_VARIANT").or_else(|| config.input.variant.clone()).unwrap_or_default();
+    let xkb_options = xkb_env("XKB_DEFAULT_OPTIONS").or_else(|| config.input.options.clone());
     let xkb_config = XkbConfig {
         rules: &xkb_rules,
         model: &xkb_model,
@@ -2237,8 +2450,25 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
         variant: &xkb_variant,
         options: xkb_options.clone(),
     };
-    seat.add_keyboard(xkb_config, 200, 25)
-        .map_err(|error| format!("failed to initialize the seat keyboard: {error}"))?;
+    let repeat_delay = config.input.repeat_delay.unwrap_or(200);
+    let repeat_rate = config.input.repeat_rate.unwrap_or(25);
+    if let Err(error) = seat.add_keyboard(xkb_config, repeat_delay, repeat_rate) {
+        // A typo—or a Lua value whose runtime source the static config
+        // reader cannot resolve—must cost the requested layout, never
+        // the login. libxkbcommon has already produced the precise
+        // diagnostic; fall back to its default keymap and keep a usable
+        // keyboard so the user can fix the file from this session.
+        tracing::warn!(
+            %error,
+            rules = %xkb_rules,
+            model = %xkb_model,
+            layout = %xkb_layout,
+            variant = %xkb_variant,
+            "configured xkb keymap was rejected; using the libxkbcommon default"
+        );
+        seat.add_keyboard(XkbConfig::default(), repeat_delay, repeat_rate)
+            .map_err(|fallback| format!("failed to initialize even the default seat keyboard: {fallback}"))?;
+    }
     seat.add_pointer();
 
     // Which kind of session this process is. Owning the hardware and
@@ -2260,10 +2490,10 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
         None => nesting_desktop_present(),
     };
 
-    let (mut graphics, output_setups) = if nested {
+    let (mut graphics, mut output_setups) = if nested {
         tracing::info!("nested backend: rendering into a window on the host desktop");
-        let (winit_backend, winit_source) = winit::init::<GlesRenderer>()
-            .map_err(|error| format!("winit backend init failed: {error}"))?;
+        let (winit_backend, winit_source) =
+            winit::init::<GlesRenderer>().map_err(|error| format!("winit backend init failed: {error}"))?;
         let window_size = winit_backend.window_size();
 
         // Flipped180 is deliberately copied from Smithay's own winit
@@ -2317,10 +2547,12 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
         let init = crate::session::init(&loop_handle, &display_handle)?;
         (init.graphics, init.outputs)
     };
-    let mut outputs: Vec<OutputEntry> = output_setups
-        .into_iter()
-        .map(|setup| OutputEntry::new(setup, &display_handle))
-        .collect();
+    let configured_scale = chonk_shell::startup::read_scale_factor(config.scale) as f64;
+    let monitor_scales = apply_monitor_rules(&mut output_setups, &config.monitor_rules, configured_scale);
+    let initial_layout: Vec<(Point, Size)> = output_setups.iter().map(|setup| (setup.position, setup.size)).collect();
+    crate::session::sync_positions(&mut graphics, &initial_layout);
+    let mut outputs: Vec<OutputEntry> =
+        output_setups.into_iter().map(|setup| OutputEntry::new(setup, &display_handle)).collect();
     // The ledger's copy of the layout, which is what `wm-core` and the
     // shell see through `Backend::monitors`. Built here, from the same
     // list the renderer draws through, so the two can never disagree
@@ -2361,6 +2593,7 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
     let syncobj = crate::dmabuf::init_syncobj(&display_handle, &graphics);
     // Same timing rule as dmabuf: bound before any client can connect.
     let protocols = crate::protocols::init(&display_handle);
+    let toplevel_mapping = crate::toplevel_mapping::init(&display_handle);
     let output_mgmt = crate::output_mgmt::init(&display_handle);
     // Gamma control rides the same timing rule and additionally asks
     // the graphics stack what its hardware can do: an output with no
@@ -2368,6 +2601,7 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
     // honestly, and a session where no output can be tinted advertises
     // no global at all rather than one that lies.
     let gamma = crate::gamma::init(&display_handle, &graphics);
+    let ctm = crate::ctm::init(&display_handle, crate::gamma::available(&gamma));
     // And again for the one protocol with no crate behind it: this is
     // the global Omarchy's Quickshell looks for the moment it connects,
     // and finding it absent is what makes every popout in that shell
@@ -2379,20 +2613,15 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
     // just a client, and a filter would only be worth its complexity
     // with a sandboxing story this desktop does not have); the idle
     // notifier's timers live on this very event loop.
-    let layer_shell = crate::layers::LayerShell::new(
-        smithay::wayland::shell::wlr_layer::WlrLayerShellState::new::<Compositor>(&display_handle),
-    );
-    let session_lock = crate::lock::SessionLock::new(
-        smithay::wayland::session_lock::SessionLockManagerState::new::<Compositor, _>(
-            &display_handle,
-            |_| true,
-        ),
-    );
+    let layer_shell = crate::layers::LayerShell::new(smithay::wayland::shell::wlr_layer::WlrLayerShellState::new::<
+        Compositor,
+    >(&display_handle));
+    let session_lock = crate::lock::SessionLock::new(smithay::wayland::session_lock::SessionLockManagerState::new::<
+        Compositor,
+        _,
+    >(&display_handle, |_| true));
     let idle = crate::idle::Idle::new(
-        smithay::wayland::idle_notify::IdleNotifierState::<Compositor>::new(
-            &display_handle,
-            loop_handle.clone(),
-        ),
+        smithay::wayland::idle_notify::IdleNotifierState::<Compositor>::new(&display_handle, loop_handle.clone()),
         smithay::wayland::idle_inhibit::IdleInhibitManagerState::new::<Compositor>(&display_handle),
     );
     tracing::info!("layer-shell, session-lock and idle-notify advertised");
@@ -2410,28 +2639,22 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
     let socket_name = listening_socket.socket_name().to_os_string();
     loop_handle
         .insert_source(listening_socket, |client_stream, _, comp| {
-            if let Err(error) = comp
-                .display_handle
-                .insert_client(client_stream, Arc::new(ClientState::default()))
-            {
+            if let Err(error) = comp.display_handle.insert_client(client_stream, Arc::new(ClientState::default())) {
                 tracing::warn!(?error, "failed to admit a wayland client");
             }
         })
         .map_err(|error| format!("failed to register the wayland socket source: {error}"))?;
     loop_handle
-        .insert_source(
-            Generic::new(display, Interest::READ, TriggerMode::Level),
-            |_, display, comp| {
-                // SAFETY: the display is owned by this source and never
-                // moved out of it; `get_mut` is the documented access
-                // pattern for dispatching from inside calloop.
-                if let Err(error) = unsafe { display.get_mut().dispatch_clients(comp) } {
-                    tracing::error!(?error, "wayland display dispatch failed, shutting down");
-                    comp.running = false;
-                }
-                Ok(PostAction::Continue)
-            },
-        )
+        .insert_source(Generic::new(display, Interest::READ, TriggerMode::Level), |_, display, comp| {
+            // SAFETY: the display is owned by this source and never
+            // moved out of it; `get_mut` is the documented access
+            // pattern for dispatching from inside calloop.
+            if let Err(error) = unsafe { display.get_mut().dispatch_clients(comp) } {
+                tracing::error!(?error, "wayland display dispatch failed, shutting down");
+                comp.running = false;
+            }
+            Ok(PostAction::Continue)
+        })
         .map_err(|error| format!("failed to register the wayland display source: {error}"))?;
 
     // This binary IS the Wayland session, and says so rather than
@@ -2474,7 +2697,13 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
     // the same call the reload below makes, so a session that has been
     // reloaded a dozen times is indistinguishable from one that started
     // where it now stands.
-    let state = SessionState::resolve(&config);
+    let explicit_scale = std::env::var_os("CHONKSTEP_SCALE").is_some() || config.scale.is_some();
+    let mut state = SessionState::resolve(&config);
+    if !explicit_scale {
+        if let Some(primary_scale) = monitor_scales.first() {
+            state.scale = *primary_scale as f32;
+        }
+    }
     // Kept separately because `state` is handed off to the applier
     // below, and the compositor's own pointer is sized from the scale
     // here (and only here — every later change to it arrives through
@@ -2528,12 +2757,16 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
     // theme and the shell remain physical end to end and never hear
     // about any of it. Fractional-scale clients additionally hear the
     // exact fraction per surface (see `xdg.rs`'s commit handler).
-    advertise_scale(&mut outputs, scale);
+    let effective_monitor_scales = if explicit_scale { vec![scale as f64; outputs.len()] } else { monitor_scales };
+    advertise_scales(&mut outputs, &effective_monitor_scales);
 
     // The desktop shell is built against the mutable backend before
     // `WindowManager::new` takes ownership — the exact construction
     // order the X11 binary uses, for the exact same borrow reason.
     let mut backend = WaylandBackend::new(display_handle.clone(), monitors, scale);
+    backend.monitor_scales = effective_monitor_scales;
+    backend.repeat_delay = std::time::Duration::from_millis(repeat_delay as u64);
+    backend.repeat_rate = repeat_rate as u32;
     // The whole screen, as the shell sizes the desktop against it: the
     // union of every monitor. Where the dock and the workareas land
     // inside that union is the shell's decision, not this loop's.
@@ -2665,6 +2898,7 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
         xwayland_shell_state,
         fractional_scale_state,
         viewporter_state,
+        core_protocols,
         popups: PopupManager::default(),
         dock_sources: Vec::new(),
         seat,
@@ -2678,8 +2912,10 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
         dmabuf,
         syncobj,
         protocols,
+        _toplevel_mapping: toplevel_mapping,
         output_mgmt,
         gamma,
+        _ctm: ctm,
         layer_shell,
         session_lock,
         focus_grab,
@@ -2753,15 +2989,13 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
         // restart with the same file would have done.
         if reload_requested() {
             tracing::info!("reload requested — re-reading the config and applying it in place");
-            let reloaded = wm_config::load();
             // Everything this reload touches — decoration rules and
             // the drag modifier included — travels through
             // `SessionState`, so the marker file and the bound `reload`
             // key apply exactly the same set. They did not: the
             // decoration policy was assigned here and nowhere else, so
             // the key silently skipped it.
-            let state = SessionState::resolve(&reloaded);
-            comp.shell.apply_session_state(&mut comp.wm, state);
+            comp.shell.reload_config(&mut comp.wm);
         }
         // Blocks on every source at once (wayland clients, winit
         // input, XWayland) with the housekeeping bound — the calloop
@@ -2947,14 +3181,7 @@ impl CursorSet {
 /// physical pixels, so a buffer already rasterized at the UI scale is
 /// 1 buffer pixel per unit of that space.
 fn import_cursor(pixels: &[u8], width: i32, height: i32) -> MemoryRenderBuffer {
-    MemoryRenderBuffer::from_slice(
-        pixels,
-        Fourcc::Abgr8888,
-        (width, height),
-        1,
-        Transform::Normal,
-        None,
-    )
+    MemoryRenderBuffer::from_slice(pixels, Fourcc::Abgr8888, (width, height), 1, Transform::Normal, None)
 }
 
 fn build_default_cursor(scale: f32) -> MemoryRenderBuffer {
@@ -3105,13 +3332,9 @@ fn resize_cursor_pixels(scale: f32, angle_rad: f32) -> (Vec<u8>, i32, i32, (i32,
     let shift_y = margin as f32 - min_y;
     let width = (((max_x - min_x).round() as i32) + margin * 2).max(1) as usize;
     let height = (((max_y - min_y).round() as i32) + margin * 2).max(1) as usize;
-    let hotspot = (
-        (hotspot_f.0 + shift_x).round() as i32,
-        (hotspot_f.1 + shift_y).round() as i32,
-    );
+    let hotspot = ((hotspot_f.0 + shift_x).round() as i32, (hotspot_f.1 + shift_y).round() as i32);
 
-    let shifted: Vec<(f32, f32)> =
-        outline.iter().map(|&(x, y)| (x + shift_x, y + shift_y)).collect();
+    let shifted: Vec<(f32, f32)> = outline.iter().map(|&(x, y)| (x + shift_x, y + shift_y)).collect();
     let shape: Vec<bool> = (0..width * height)
         .map(|i| {
             let (x, y) = ((i % width) as f32 + 0.5, (i / width) as f32 + 0.5);
@@ -3181,10 +3404,7 @@ mod tests {
     fn side_by_side_monitors_span_their_widths() {
         // The layout `session::init` builds: left to right, from the
         // origin, at each output's mode size.
-        assert_eq!(
-            union_size(&[monitor(0, 0, 1920, 1080), monitor(1920, 0, 1280, 1024)]),
-            Size::new(3200, 1080)
-        );
+        assert_eq!(union_size(&[monitor(0, 0, 1920, 1080), monitor(1920, 0, 1280, 1024)]), Size::new(3200, 1080));
     }
 
     #[test]
@@ -3194,10 +3414,7 @@ mod tests {
         // the outline of the monitors — which is what makes it a
         // bounding box and why the pointer needs its own confinement
         // (see `input::confine_to_outputs`).
-        assert_eq!(
-            union_size(&[monitor(0, 0, 1280, 1024), monitor(1280, 0, 1920, 1080)]),
-            Size::new(3200, 1080)
-        );
+        assert_eq!(union_size(&[monitor(0, 0, 1280, 1024), monitor(1280, 0, 1920, 1080)]), Size::new(3200, 1080));
     }
 
     // The cursor pixels are pure arithmetic over a const string
@@ -3249,10 +3466,7 @@ mod tests {
             for x in 0..width {
                 let at = ((y * width + x) * 4) as usize;
                 let rgba = &pixels[at..at + 4];
-                assert!(
-                    rgba == [0, 0, 0, 0] || rgba == [0, 0, 0, 0xFF] || rgba == [0xFF; 4],
-                    "({x}, {y}) is {rgba:?}"
-                );
+                assert!(rgba == [0, 0, 0, 0] || rgba == [0, 0, 0, 0xFF] || rgba == [0xFF; 4], "({x}, {y}) is {rgba:?}");
             }
         }
         // The source's transparent gap at (3, 12) ("o#o o##o") becomes
@@ -3270,6 +3484,75 @@ mod tests {
         let (_, width, height) = default_cursor_pixels(1.0);
         assert_eq!(default_cursor_pixels(0.25).1, width);
         assert_eq!(default_cursor_pixels(0.0).2, height);
+    }
+
+    fn output_setup(name: &str, physical_mm: (i32, i32), size: Size, position: Point) -> OutputSetup {
+        use smithay::output::{Mode, PhysicalProperties, Subpixel};
+
+        let output = Output::new(
+            name.to_string(),
+            PhysicalProperties {
+                size: smithay::utils::Size::from(physical_mm),
+                subpixel: Subpixel::Unknown,
+                make: "test".into(),
+                model: "test".into(),
+            },
+        );
+        let mode = Mode { size: smithay::utils::Size::from((size.w as i32, size.h as i32)), refresh: 60_000 };
+        output.change_current_state(Some(mode), None, None, Some((0, 0).into()));
+        output.set_preferred(mode);
+        OutputSetup { output, position, size, modes: vec![mode] }
+    }
+
+    fn monitor_rule(
+        output: &str,
+        mode: &str,
+        position: &str,
+        scale: &str,
+        extra: &[&str],
+    ) -> wm_config::hyprland::directive::Monitor {
+        wm_config::hyprland::directive::Monitor {
+            output: output.into(),
+            mode: mode.into(),
+            position: position.into(),
+            scale: scale.into(),
+            extra: extra.iter().map(|value| (*value).into()).collect(),
+        }
+    }
+
+    #[test]
+    fn monitor_rules_apply_exact_over_catchall_and_normalize_negative_positions() {
+        let mut setups = vec![
+            output_setup("DP-1", (600, 340), Size::new(1920, 1080), Point::new(0, 0)),
+            output_setup("HDMI-A-1", (300, 170), Size::new(1920, 1080), Point::new(1920, 0)),
+        ];
+        let rules = vec![
+            monitor_rule("", "preferred", "auto", "1", &[]),
+            monitor_rule("DP-1", "preferred", "-1920x100", "1.5", &[]),
+        ];
+        let scales = apply_monitor_rules(&mut setups, &rules, 2.0);
+        assert_eq!(scales, vec![1.5, 1.0]);
+        assert_eq!(setups[0].position, Point::new(0, 100));
+        assert_eq!(setups[1].position, Point::new(1920, 0));
+    }
+
+    #[test]
+    fn unsupported_monitor_fields_refuse_the_whole_line() {
+        let original = Point::new(77, 88);
+        let mut setups = vec![output_setup("DP-1", (600, 340), Size::new(1920, 1080), original)];
+        let rules = vec![monitor_rule("DP-1", "preferred", "0x0", "2", &["transform", "1"])];
+        let scales = apply_monitor_rules(&mut setups, &rules, 1.25);
+        assert_eq!(scales, vec![1.25]);
+        assert_eq!(setups[0].position, original, "position was not partially applied");
+        assert_eq!(setups[0].size, Size::new(1920, 1080));
+    }
+
+    #[test]
+    fn automatic_monitor_scale_uses_physical_dpi_and_has_a_safe_fallback() {
+        let hidpi = output_setup("eDP-1", (280, 160), Size::new(2560, 1600), Point::new(0, 0));
+        assert_eq!(automatic_output_scale(&hidpi.output, hidpi.size), Some(2.0));
+        let unknown = output_setup("virtual", (0, 0), Size::new(1920, 1080), Point::new(0, 0));
+        assert_eq!(automatic_output_scale(&unknown.output, unknown.size), None);
     }
 
     // -- the resize cursors ------------------------------------------
@@ -3299,8 +3582,7 @@ mod tests {
     #[test]
     fn the_hotspot_is_inside_the_shape_at_every_rotation() {
         for angle in [0.0_f32, 45.0, 90.0, -45.0] {
-            let (pixels, width, height, (hx, hy)) =
-                resize_cursor_pixels(2.0, angle.to_radians());
+            let (pixels, width, height, (hx, hy)) = resize_cursor_pixels(2.0, angle.to_radians());
             assert!(hx > 0 && hx < width && hy > 0 && hy < height);
             assert_eq!(
                 resize_alpha_at(&pixels, width, hx, hy),
@@ -3464,13 +3746,9 @@ mod tests {
         // (see `StackEntry`), and the bands are decided at paint time
         // from `above`, so a chrome change must leave their relative
         // order alone rather than shuffling the dock.
-        let mut stacking =
-            vec![StackEntry::Shell(WlShellId(9)), frame(2), StackEntry::Shell(WlShellId(8))];
+        let mut stacking = vec![StackEntry::Shell(WlShellId(9)), frame(2), StackEntry::Shell(WlShellId(8))];
         replace_stack_entry(&mut stacking, frame(2), window(20));
-        assert_eq!(
-            stacking,
-            vec![StackEntry::Shell(WlShellId(9)), window(20), StackEntry::Shell(WlShellId(8))]
-        );
+        assert_eq!(stacking, vec![StackEntry::Shell(WlShellId(9)), window(20), StackEntry::Shell(WlShellId(8))]);
     }
 
     // Per-output scale resolution: the mixed-DPI question ("which

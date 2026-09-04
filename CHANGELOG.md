@@ -5,6 +5,44 @@ crate and both session binaries carry the same number.
 
 ## [Unreleased]
 
+### Omarchy-compatible session and install path
+
+- **A real managed login.** ChonkStep now ships a dedicated UWSM session,
+  publishes only the desktop environment variables a session owns, reaches
+  `graphical-session.target` and `xdg-desktop-autostart.target`, and treats a
+  session-manager stop as logout rather than a compositor crash. Omarchy's
+  suspend lock, input method, portals, shell, and application scopes therefore
+  follow the same lifecycle they do under Hyprland.
+- **Explicit, reversible installation.** The release package provides
+  `omarchy install desktop-chonkstep` and its matching remove command. The
+  installer preserves Omarchy's autologin user, selects the managed ChonkStep
+  session, and enables an Omarchy-native SDDM theme with a session picker; it
+  never patches Omarchy-owned files. A tag-driven workflow publishes the
+  release PKGBUILD and `.SRCINFO` to the AUR, making the intended entry path
+  `omarchy pkg aur add chonkstep` followed by the install command.
+- **Omarchy's configuration has real effects.** Monitor position and scale,
+  input repeat settings, bind flags, layer-scoped bindings, window rules, Lua
+  long strings, and window move/resize/centre/fullscreen dispatchers are
+  applied or refused with a named reason. Bindings inside unsupported submaps
+  can no longer leak into the global keymap.
+- **Hyprland-compatible IPC reports live state.** Window, monitor, workspace,
+  keyboard, binding, reload, and refusal data now come from the running desk;
+  `exec --` preserves argv; mapping events and addresses agree with the
+  foreign-toplevel protocol; and unsupported tiling commands no longer claim
+  success. This is enough for Omarchy's current shell, menus, scripts, and bar
+  to operate without a ChonkStep-specific fork.
+- **The protocols ordinary clients expect.** The Wayland compositor now serves
+  activation, cursor-shape, primary-selection, text-input/input-method,
+  relative-pointer and pointer-constraints, presentation-time,
+  `hyprland-ctm-control-v1`, and `hyprland-toplevel-mapping-v1`. Night light
+  works through the stock `hyprsunset`; linux-dmabuf publishes default
+  feedback from the session's authoritative DRM node even when EGL device
+  discovery is unavailable. The public ScreenCast portal path was exercised
+  through PipeWire on a clean Omarchy VM and returned real desktop frames.
+- **Small interaction parity.** Escape closes the root menu and all of its
+  cascades, while preserving the existing Escape behavior for instrument
+  panels and modal overlays.
+
 ### A desktop that hosts Omarchy
 
 chonkstep now stands where Hyprland stands on an Omarchy 4 machine:

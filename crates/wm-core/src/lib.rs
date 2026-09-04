@@ -34,15 +34,15 @@ pub use focus::FocusPolicy;
 pub use hittest::{hit_test, HitTarget};
 pub use manager::{Notification, WindowManager, DEFAULT_DRAG_MODIFIER};
 pub use motif::{hints_say_client_decorates, MIN_HINT_WORDS};
-pub use placement::{place_frame, FloatDecision, FloatPolicy, PlacementPolicy};
+pub use placement::{place_frame, FloatDecision, FloatPolicy, PlacementPolicy, WindowRuleDecision};
 // `FloatDecision` carries a `Size`, so a crate that implements
 // `FloatPolicy` needs the type to name it. Re-exported here rather
 // than making every such crate depend on `wm-theme-api` directly: the
 // geometry is part of this crate's own published interface the moment
 // one of its public types contains it.
-pub use wm_theme_api::{Point, Rect, Size};
 pub use snap::snap_position;
 pub use types::{
     BackendEvent, ClientChrome, DecorationRules, DragHandle, KeyCombo, Modifiers, MouseButton, NetState,
     NetStateAction, ScrollDelta, SizeHints, SurfaceRef, WindowType, WmClass, WmProtocol,
 };
+pub use wm_theme_api::{Point, Rect, Size};

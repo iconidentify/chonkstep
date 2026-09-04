@@ -184,7 +184,8 @@ impl Keymap {
 /// had already merged into.
 pub fn base(table: &toml::Table) -> Config {
     let desktop = preset_name(table, "desktop", Desktop::from_name).unwrap_or_default();
-    let keymap = preset_name(table, "keymap", Keymap::from_name).unwrap_or_else(|| desktop.keymap());
+    let keymap =
+        preset_name(table, "keymap", Keymap::from_name).unwrap_or_else(|| desktop.keymap());
     let mut config = Config::default_config();
     config.desktop = desktop;
     config.keymap = keymap;
@@ -197,7 +198,11 @@ pub fn base(table: &toml::Table) -> Config {
 /// not a string or not a name we know. The warning lives here rather
 /// than in `parse`'s walk so the key is diagnosed once, in the place
 /// that acts on it, instead of twice from two readers.
-fn preset_name<T>(table: &toml::Table, key: &str, from_name: impl Fn(&str) -> Option<T>) -> Option<T> {
+fn preset_name<T>(
+    table: &toml::Table,
+    key: &str,
+    from_name: impl Fn(&str) -> Option<T>,
+) -> Option<T> {
     match table.get(key)? {
         toml::Value::String(name) => match from_name(name) {
             Some(value) => Some(value),
@@ -286,7 +291,12 @@ pub fn apply_keymap(config: &mut Config, keymap: Keymap) {
 pub fn omarchy_commands() -> BTreeMap<String, Vec<String>> {
     OMARCHY_COMMANDS
         .iter()
-        .map(|(name, argv)| (name.to_string(), argv.iter().map(|arg| arg.to_string()).collect()))
+        .map(|(name, argv)| {
+            (
+                name.to_string(),
+                argv.iter().map(|arg| arg.to_string()).collect(),
+            )
+        })
         .collect()
 }
 
@@ -302,7 +312,8 @@ pub fn omarchy_keybindings() -> Vec<(wm_core::KeyCombo, Action)> {
     OMARCHY_BINDINGS
         .iter()
         .map(|(spec, action)| {
-            let combo = parse_key(spec).unwrap_or_else(|| panic!("preset key spec {spec:?} must parse"));
+            let combo =
+                parse_key(spec).unwrap_or_else(|| panic!("preset key spec {spec:?} must parse"));
             let action = crate::action_from_name(action)
                 .unwrap_or_else(|| panic!("preset action name {action:?} must be a known action"));
             (combo, action)
@@ -391,6 +402,10 @@ pub const OMARCHY_BINDINGS: &[(&str, &str)] = &[
     ("super+ctrl+v", "run omarchy-clipboard"),
     // -- utilities.lua: the menu, the pickers, the panels -------------
     ("super+space", "run omarchy-menu"),
+    // Omarchy binds the same menu on Apple keyboards through the
+    // evdev/XKB `code:201` spelling. The live reader normalizes that
+    // spelling to F23; keep the baked fallback equivalent too.
+    ("super+shift+f23", "run omarchy-menu"),
     ("super+alt+space", "run omarchy-menu-apps"),
     ("super+escape", "run omarchy-menu-system"),
     ("poweroff", "run omarchy-menu-system"),
@@ -556,9 +571,17 @@ impl Unbound {
 /// them is to enumerate it.
 pub const OMARCHY_UNBOUND: &[(&str, &str, Unbound)] = &[
     // applications.lua
-    ("super+alt+return, super+ctrl+return, super+shift+{a,c,d,e,g,m,o,p,s,w,x,y,/}, +alt/ctrl variants", "Omarchy's preinstalled application, TUI and webapp chords", Unbound::Conditional),
+    (
+        "super+alt+return, super+ctrl+return, super+shift+{a,c,d,e,g,m,o,p,s,w,x,y,/}, +alt/ctrl variants",
+        "Omarchy's preinstalled application, TUI and webapp chords",
+        Unbound::Conditional,
+    ),
     // clipboard.lua
-    ("super+c / super+v / super+x", "universal copy / paste / cut, by synthesising Ctrl+C/V/X at the seat", Unbound::NoVerb),
+    (
+        "super+c / super+v / super+x",
+        "universal copy / paste / cut, by synthesising Ctrl+C/V/X at the seat",
+        Unbound::NoVerb,
+    ),
     // tiling.lua
     ("super+j", "toggle window split", Unbound::TilingOnly),
     ("super+p", "pseudo-tile the window", Unbound::TilingOnly),
@@ -574,7 +597,11 @@ pub const OMARCHY_UNBOUND: &[(&str, &str, Unbound)] = &[
     ("super+alt+1..5", "focus the nth window of the group", Unbound::TilingOnly),
     ("super+left/right/up/down", "focus the window in that direction", Unbound::NoVerb),
     ("super+shift+left/right/up/down", "swap the window with its neighbour", Unbound::TilingOnly),
-    ("super+minus / super+equal, +shift/alt/ctrl variants", "grow and shrink the window by 25 / 100 / 300 px", Unbound::TilingOnly),
+    (
+        "super+minus / super+equal, +shift/alt/ctrl variants",
+        "grow and shrink the window by 25 / 100 / 300 px",
+        Unbound::TilingOnly,
+    ),
     ("super+shift+alt+1..0", "move the window to workspace n without following", Unbound::NoVerb),
     ("super+s", "toggle the scratchpad workspace", Unbound::NoVerb),
     ("super+ctrl+tab", "the workspace before this one", Unbound::NoVerb),
@@ -587,10 +614,13 @@ pub const OMARCHY_UNBOUND: &[(&str, &str, Unbound)] = &[
     ("super+k", "Omarchy's keybinding cheatsheet", Unbound::Declined),
     ("super+shift+space", "toggle Omarchy's top bar", Unbound::NoVerb),
     ("super+ctrl+d", "Omarchy's display panel", Unbound::HyprlandOnly),
-    ("super+backspace / super+shift+backspace / super+ctrl+backspace", "window transparency; window gaps; single-window square aspect", Unbound::HyprlandOnly),
+    (
+        "super+backspace / super+shift+backspace / super+ctrl+backspace",
+        "window transparency; window gaps; single-window square aspect",
+        Unbound::HyprlandOnly,
+    ),
     ("super+ctrl+delete / super+ctrl+alt+delete", "toggle the laptop display; toggle mirroring", Unbound::HyprlandOnly),
     ("super+ctrl+z / super+ctrl+alt+z", "cursor zoom in / reset", Unbound::HyprlandOnly),
-    ("super+shift+code:201", "Omarchy's root menu, on a bare keycode", Unbound::NotAKey),
     ("switch:on/off:Lid Switch", "run the lid-close and clamshell handlers", Unbound::NotAKey),
     // media.lua
     ("touchpad toggle / on / off", "enable and disable the touchpad", Unbound::HyprlandOnly),
@@ -683,7 +713,11 @@ pub const OMARCHY_COMMANDS: &[(&str, &[&str])] = &[
     // or open the menu that starts one.
     (
         "omarchy-screenrecord",
-        &["bash", "-lc", "omarchy-capture-screenrecording --stop-recording || omarchy-menu toggle trigger.capture.screenrecord"],
+        &[
+            "bash",
+            "-lc",
+            "omarchy-capture-screenrecording --stop-recording || omarchy-menu toggle trigger.capture.screenrecord",
+        ],
     ),
     ("omarchy-screenshot", &["omarchy-capture-screenshot"]),
     ("omarchy-show-battery", &["omarchy-notification-battery"]),
@@ -715,7 +749,10 @@ mod tests {
         let commands = omarchy_commands();
         for (combo, action) in omarchy_keybindings() {
             if let Action::Run(name) = &action {
-                assert!(commands.contains_key(name), "{combo:?} runs undeclared command {name:?}");
+                assert!(
+                    commands.contains_key(name),
+                    "{combo:?} runs undeclared command {name:?}"
+                );
             }
         }
         // And nothing is declared that nothing runs: a dangling command
@@ -725,7 +762,10 @@ mod tests {
             .filter_map(|(_, action)| action.strip_prefix("run "))
             .collect();
         for (name, _) in OMARCHY_COMMANDS {
-            assert!(named.contains(name), "[commands] entry {name:?} is not named by any binding");
+            assert!(
+                named.contains(name),
+                "[commands] entry {name:?} is not named by any binding"
+            );
         }
     }
 
@@ -747,6 +787,7 @@ mod tests {
         // The intended aliases, as (action, how many chords reach it).
         let expected: BTreeMap<&str, usize> = [
             ("run omarchy-browser", 2),
+            ("run omarchy-menu", 2),
             ("run omarchy-menu-system", 2),
             ("run omarchy-calculator", 2),
             ("run omarchy-media-play-pause", 2),
@@ -762,7 +803,10 @@ mod tests {
         }
         for (action, count) in counts {
             let allowed = expected.get(action).copied().unwrap_or(1);
-            assert_eq!(count, allowed, "{action} is reachable from {count} chords, expected {allowed}");
+            assert_eq!(
+                count, allowed,
+                "{action} is reachable from {count} chords, expected {allowed}"
+            );
         }
     }
 
@@ -771,21 +815,55 @@ mod tests {
     /// promise and the table cannot drift apart.
     #[test]
     fn every_chord_declared_unbound_is_unbound() {
-        let bound: std::collections::HashSet<wm_core::KeyCombo> =
-            omarchy_keybindings().into_iter().map(|(combo, _)| combo).collect();
+        let bound: std::collections::HashSet<wm_core::KeyCombo> = omarchy_keybindings()
+            .into_iter()
+            .map(|(combo, _)| combo)
+            .collect();
         // Only the entries that name a single literal chord can be
         // checked mechanically; the rest describe a family (`super+1..0`)
         // and are expanded here by hand where a family is checkable.
         let literal = [
-            "super+j", "super+p", "super+t", "super+ctrl+f", "super+o", "super+home", "super+alt+home", "super+l",
-            "super+g", "super+alt+g", "super+alt+tab", "super+alt+shift+tab", "super+ctrl+left", "super+ctrl+right",
-            "super+left", "super+right", "super+down", "super+shift+left", "super+shift+right", "super+shift+up",
-            "super+shift+down", "super+minus", "super+equal", "super+s", "super+ctrl+tab", "ctrl+alt+tab", "super+k",
-            "super+shift+space", "super+ctrl+d", "super+ctrl+x", "f9", "super+c", "super+v", "super+x",
+            "super+j",
+            "super+p",
+            "super+t",
+            "super+ctrl+f",
+            "super+o",
+            "super+home",
+            "super+alt+home",
+            "super+l",
+            "super+g",
+            "super+alt+g",
+            "super+alt+tab",
+            "super+alt+shift+tab",
+            "super+ctrl+left",
+            "super+ctrl+right",
+            "super+left",
+            "super+right",
+            "super+down",
+            "super+shift+left",
+            "super+shift+right",
+            "super+shift+up",
+            "super+shift+down",
+            "super+minus",
+            "super+equal",
+            "super+s",
+            "super+ctrl+tab",
+            "ctrl+alt+tab",
+            "super+k",
+            "super+shift+space",
+            "super+ctrl+d",
+            "super+ctrl+x",
+            "f9",
+            "super+c",
+            "super+v",
+            "super+x",
         ];
         for spec in literal {
             let combo = parse_key(spec).unwrap_or_else(|| panic!("{spec} should parse"));
-            assert!(!bound.contains(&combo), "{spec} is documented unbound but the preset binds it");
+            assert!(
+                !bound.contains(&combo),
+                "{spec} is documented unbound but the preset binds it"
+            );
         }
         // The digit families that stay dead, every member: moving a
         // window without following it, and the group-focus chords.
@@ -793,7 +871,10 @@ mod tests {
             for prefix in ["super+shift+alt", "super+alt"] {
                 let spec = format!("{prefix}+{digit}");
                 let combo = parse_key(&spec).unwrap();
-                assert!(!bound.contains(&combo), "{spec} is documented unbound but the preset binds it");
+                assert!(
+                    !bound.contains(&combo),
+                    "{spec} is documented unbound but the preset binds it"
+                );
             }
         }
         // ...and the two that are alive, asserted rather than left to
@@ -802,12 +883,25 @@ mod tests {
         // with `super+0` as the tenth, which is where Omarchy puts it.
         let by_number = |spec: &str| {
             let combo = parse_key(spec).unwrap();
-            omarchy_keybindings().into_iter().find(|(c, _)| *c == combo).map(|(_, a)| a)
+            omarchy_keybindings()
+                .into_iter()
+                .find(|(c, _)| *c == combo)
+                .map(|(_, a)| a)
         };
         for digit in 1..=10 {
-            let key = if digit == 10 { "0".to_string() } else { digit.to_string() };
-            assert_eq!(by_number(&format!("super+{key}")), Some(Action::Workspace(digit - 1)));
-            assert_eq!(by_number(&format!("super+shift+{key}")), Some(Action::WorkspaceCarry(digit - 1)));
+            let key = if digit == 10 {
+                "0".to_string()
+            } else {
+                digit.to_string()
+            };
+            assert_eq!(
+                by_number(&format!("super+{key}")),
+                Some(Action::Workspace(digit - 1))
+            );
+            assert_eq!(
+                by_number(&format!("super+shift+{key}")),
+                Some(Action::WorkspaceCarry(digit - 1))
+            );
         }
         // `super+up` is the one arrow the preset does claim, for the
         // Overview, and the docs say so: assert it rather than let it
@@ -822,9 +916,20 @@ mod tests {
         let config = parse("desktop = \"omarchy\"").expect("the preset must parse");
         assert_eq!(config.desktop, Desktop::Omarchy);
         assert!(!config.show_dock, "the Dock steps aside for Omarchy's bar");
-        assert_eq!(config.omarchy_bar, Some(true), "and the bar it steps aside for is shown");
-        assert_eq!(config.theme.as_deref(), Some("omarchy"), "the desk follows Omarchy's theme");
-        assert!(config.omarchy_menu && config.omarchy_shell, "the menu and the shell are hosted");
+        assert_eq!(
+            config.omarchy_bar,
+            Some(true),
+            "and the bar it steps aside for is shown"
+        );
+        assert_eq!(
+            config.theme.as_deref(),
+            Some("omarchy"),
+            "the desk follows Omarchy's theme"
+        );
+        assert!(
+            config.omarchy_menu && config.omarchy_shell,
+            "the menu and the shell are hosted"
+        );
         // One line also picks the keymap up.
         assert_eq!(config.keymap, Keymap::Omarchy);
         assert_eq!(config.keybindings.len(), OMARCHY_BINDINGS.len());
@@ -875,8 +980,14 @@ mod tests {
 
         // And the keymap without the posture.
         let config = parse("keymap = \"omarchy\"").unwrap();
-        assert_eq!((config.desktop, config.keymap), (Desktop::Chonkstep, Keymap::Omarchy));
-        assert!(config.show_dock, "the keymap says nothing about the furniture");
+        assert_eq!(
+            (config.desktop, config.keymap),
+            (Desktop::Chonkstep, Keymap::Omarchy)
+        );
+        assert!(
+            config.show_dock,
+            "the keymap says nothing about the furniture"
+        );
         assert_eq!(config.keybindings.len(), OMARCHY_BINDINGS.len());
     }
 
@@ -901,7 +1012,12 @@ mod tests {
             Some(["my-own-launcher".to_string()].as_slice()),
             "the user's command of that name wins"
         );
-        let has = |spec: &str| config.keybindings.iter().any(|(c, _)| *c == parse_key(spec).unwrap());
+        let has = |spec: &str| {
+            config
+                .keybindings
+                .iter()
+                .any(|(c, _)| *c == parse_key(spec).unwrap())
+        };
         assert!(!has("super+space"), "\"none\" unbinds a preset binding");
         assert!(has("super+shift+m"), "and a new one is added");
         assert!(has("super+w"), "while the rest of the preset survives");
@@ -948,7 +1064,11 @@ mod tests {
         let config = parse("desktop = \"omarchy\"").unwrap();
         let action = |spec: &str| {
             let combo = parse_key(spec).unwrap();
-            config.keybindings.iter().find(|(c, _)| *c == combo).map(|(_, a)| a.clone())
+            config
+                .keybindings
+                .iter()
+                .find(|(c, _)| *c == combo)
+                .map(|(_, a)| a.clone())
         };
         assert_eq!(action("super+return"), Some(Action::SpawnTerminal));
         assert_eq!(action("super+w"), Some(Action::Close));
@@ -957,7 +1077,10 @@ mod tests {
         assert_eq!(action("super+tab"), Some(Action::WorkspaceNext));
         assert_eq!(action("super+shift+tab"), Some(Action::WorkspacePrev));
         assert_eq!(action("super+alt+s"), Some(Action::Miniaturize));
-        assert_eq!(action("super+space"), Some(Action::Run("omarchy-menu".to_string())));
+        assert_eq!(
+            action("super+space"),
+            Some(Action::Run("omarchy-menu".to_string()))
+        );
         assert_eq!(
             config.commands.get("omarchy-menu").map(Vec::as_slice),
             Some(["omarchy-menu".to_string(), "toggle".to_string()].as_slice())

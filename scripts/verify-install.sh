@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Verifies that a chonkstep install is one a login manager will
-# actually offer: both session entries present, parseable, readable by
+# actually offer: all session entries present, parseable, readable by
 # the greeter, and pointing at launchers that exist and are
 # executable. Runnable by any user, no root needed, after either
 # install route - scripts/install.sh (entries point into the checkout)
@@ -91,7 +91,7 @@ world_traversable() {
 }
 
 check_entry() {
-    local kind="$1" entry="$2" value target
+    local kind="$1" entry="$2" expected_exec="${3:-}" value target executable
     if [ ! -f "$entry" ]; then
         fail "$kind entry missing: $entry"
         return
@@ -134,20 +134,31 @@ check_entry() {
         fi
     done
 
-    # Exec: a single absolute path here (both installers write one).
-    # Whitespace in it is fatal at launch - SDDM's stock session
-    # wrappers (/usr/share/sddm/scripts/{Xsession,wayland-session})
-    # end in an unquoted `exec $@`.
+    # Direct entries contain one absolute launcher path. Managed
+    # entries are ordinary desktop commands (currently uwsm plus its
+    # arguments), which SDDM intentionally word-splits into argv.
     value=$(entry_value "$entry" Exec)
-    case "$value" in
-        *[[:space:]]*)
-            fail "$kind Exec contains whitespace ('$value') - SDDM's session wrapper word-splits it and the session cannot start" ;;
-    esac
-    target="$root$value"
-    if [ -f "$target" ] && [ -x "$target" ]; then
-        pass "$kind Exec target exists and is executable: $target"
+    if [ -n "$expected_exec" ] && [ "$value" != "$expected_exec" ]; then
+        fail "$kind Exec is '$value', expected '$expected_exec'"
+    fi
+    executable="${value%%[[:space:]]*}"
+    if [ "${executable#/}" != "$executable" ]; then
+        case "$executable" in
+            *[[:space:]]*)
+                fail "$kind absolute Exec contains whitespace ('$value') - SDDM's session wrapper word-splits it" ;;
+        esac
+        target="$root$executable"
+    elif [ -n "$root" ]; then
+        target="$root/usr/bin/$executable"
     else
-        fail "$kind Exec target missing or not executable: $target (moved checkout? re-run scripts/install.sh; broken package? reinstall it)"
+        target=$(command -v "$executable" 2>/dev/null || true)
+    fi
+    if [ -n "$target" ] && [ -f "$target" ] && [ -x "$target" ]; then
+        pass "$kind Exec executable exists: $target"
+    elif [ "$executable" = "uwsm" ]; then
+        warn "$kind is hidden until the optional uwsm package is installed"
+    else
+        fail "$kind Exec executable missing or not executable: ${target:-$executable} (moved checkout? re-run scripts/install.sh; broken package? reinstall it)"
     fi
 
     # TryExec, when present, is stat'ed by the greeter as the sddm
@@ -155,13 +166,21 @@ check_entry() {
     # directories that user can traverse.
     value=$(entry_value "$entry" TryExec)
     if [ -n "$value" ]; then
-        target="$root$value"
+        if [ "${value#/}" != "$value" ]; then
+            target="$root$value"
+        elif [ -n "$root" ]; then
+            target="$root/usr/bin/$value"
+        else
+            target=$(command -v "$value" 2>/dev/null || true)
+        fi
         if [ -f "$target" ] && [ -x "$target" ]; then
             pass "$kind TryExec target exists and is executable: $target"
+        elif [ "$value" = "uwsm" ]; then
+            warn "$kind TryExec=uwsm is currently absent; install the optional uwsm package to show this entry"
         else
             fail "$kind TryExec target missing or not executable: $target - SDDM hides the session when this stat fails"
         fi
-        if [ -z "$root" ]; then
+        if [ -z "$root" ] && [ "${value#/}" != "$value" ]; then
             if world_traversable "$value"; then
                 pass "$kind TryExec path is traversable by other users"
             else
@@ -190,13 +209,75 @@ check_entry() {
 echo "== session entries =="
 check_entry "X11" "$root/usr/share/xsessions/chonkstep.desktop"
 check_entry "Wayland" "$root/usr/share/wayland-sessions/chonkstep.desktop"
+check_entry "Wayland/uwsm" "$root/usr/share/wayland-sessions/chonkstep-uwsm.desktop" \
+    "uwsm start -g -1 -e -D chonkstep chonkstep.desktop"
+
+echo
+echo "== SDDM picker =="
+for picker_file in Main.qml metadata.desktop theme.conf; do
+    if [ -f "$root/usr/share/sddm/themes/chonkstep/$picker_file" ]; then
+        pass "chonkstep SDDM picker has $picker_file"
+    else
+        fail "chonkstep SDDM picker is missing $root/usr/share/sddm/themes/chonkstep/$picker_file"
+    fi
+done
+theme_metadata="$root/usr/share/sddm/themes/chonkstep/metadata.desktop"
+if [ -f "$theme_metadata" ]; then
+    if grep -qx 'QtVersion=6' "$theme_metadata"; then
+        pass "chonkstep SDDM picker selects the Qt 6 greeter used by Omarchy"
+    else
+        fail "chonkstep SDDM picker must declare QtVersion=6 (fresh Omarchy installs do not ship the Qt 5 Quick runtime)"
+    fi
+fi
+theme_qml="$root/usr/share/sddm/themes/chonkstep/Main.qml"
+if [ -f "$theme_qml" ]; then
+    if grep -Eq '(^|[[:space:]])(placeholderText|onAccepted):' "$theme_qml"; then
+        fail "chonkstep SDDM picker uses properties absent from SddmComponents 2.0"
+    elif command -v qmllint >/dev/null 2>&1; then
+        if qml_error=$(qmllint "$theme_qml" 2>&1); then
+            pass "chonkstep SDDM picker passes qmllint"
+        else
+            fail "chonkstep SDDM picker fails qmllint: $qml_error"
+        fi
+    else
+        warn "qmllint not installed; skipping QML type validation"
+    fi
+fi
+if [ -f "$root/etc/sddm.conf.d/zz-chonkstep-theme.conf" ]; then
+    pass "chonkstep SDDM picker is enabled"
+elif [ -f "$root/usr/share/chonkstep/sddm/zz-chonkstep-theme.conf" ]; then
+    pass "chonkstep SDDM picker drop-in is available to the Omarchy installer"
+else
+    fail "chonkstep SDDM picker drop-in is missing"
+fi
+if [ -f "$root/usr/share/chonkstep/sddm/zz-chonkstep-autologin.conf" ]; then
+    pass "chonkstep SDDM autologin override is available to the Omarchy installer"
+elif [ -f "$root/etc/sddm.conf.d/zz-chonkstep-autologin.conf" ]; then
+    pass "chonkstep SDDM autologin override is enabled"
+elif [ -n "$root" ]; then
+    fail "chonkstep SDDM autologin override template is missing"
+else
+    warn "autologin override template is absent (expected for a checkout install)"
+fi
 
 echo
 echo "== portal map =="
-if [ -f "$root/usr/share/xdg-desktop-portal/chonkstep-portals.conf" ]; then
-    pass "portal backend map installed (screen sharing routes to the wlr backend)"
+portal_map="$root/usr/share/xdg-desktop-portal/chonkstep-portals.conf"
+if [ -f "$portal_map" ] \
+    && grep -qx 'org.freedesktop.impl.portal.ScreenCast=wlr' "$portal_map" \
+    && grep -qx 'org.freedesktop.impl.portal.Screenshot=wlr' "$portal_map"; then
+    pass "portal backend map installed (ScreenCast and Screenshot route to wlr)"
+elif [ -f "$portal_map" ]; then
+    fail "portal backend map does not route ScreenCast and Screenshot to wlr: $portal_map"
 else
-    fail "portal backend map missing: $root/usr/share/xdg-desktop-portal/chonkstep-portals.conf - both installers ship it; screen sharing will silently fail without it"
+    fail "portal backend map missing: $portal_map - both installers ship it; screen sharing will silently fail without it"
+fi
+if [ -x "$root/usr/lib/xdg-desktop-portal-wlr" ]; then
+    pass "wlr portal backend installed for screen sharing and portal screenshots"
+elif [ -z "$root" ] && [ -f /etc/sddm.conf.d/zz-chonkstep-theme.conf ]; then
+    fail "chonkstep login integration is enabled but xdg-desktop-portal-wlr is absent; rerun 'omarchy install desktop-chonkstep'"
+else
+    warn "xdg-desktop-portal-wlr is external to this staged package; the Omarchy integration command installs it"
 fi
 
 if [ -z "$root" ]; then
@@ -217,16 +298,55 @@ if [ -z "$root" ]; then
             warn "display manager enabled: $dm"
         fi
     done
-    [ -n "$dm_found" ] || warn "no display manager enabled - log in from a TTY (docs/quickstart.md, 'Log in') or enable one (e.g. sudo systemctl enable sddm.service)"
+    if [ -z "$dm_found" ]; then
+        warn "login mode: no display manager; start the uwsm session from a TTY (docs/quickstart.md, 'Log in')"
+    fi
 
-    if [ -d /etc/sddm.conf.d ] || [ -f /etc/sddm.conf ]; then
-        # Last assignment wins, matching SDDM's read order closely
-        # enough for a diagnostic (conf.d sorted, then sddm.conf).
-        sddm_theme=$(cat /etc/sddm.conf.d/*.conf /etc/sddm.conf 2>/dev/null | sed -n 's/^Current=//p' | tail -n 1)
-        if [ "$sddm_theme" = "omarchy" ]; then
-            warn "SDDM uses Omarchy's greeter theme, which has NO session picker and logs every interactive login into Hyprland (uwsm). chonkstep can be perfectly installed and still never appear. See 'Log in' in docs/quickstart.md for the autologin and theme routes around this"
+    if [ "$dm_found" = "sddm" ] && { [ -d /etc/sddm.conf.d ] || [ -f /etc/sddm.conf ]; }; then
+        # SDDM reads vendor drop-ins, administrator drop-ins, then the
+        # monolithic administrator file; the last assignment in a
+        # section wins. Track the section so an unrelated Session= key
+        # cannot be mistaken for autologin.
+        sddm_config=$(
+            for directory in /usr/lib/sddm/sddm.conf.d /etc/sddm.conf.d; do
+                [ -d "$directory" ] || continue
+                while IFS= read -r file; do
+                    cat "$file"
+                done < <(find "$directory" -maxdepth 1 -type f -name '*.conf' -print | LC_ALL=C sort)
+            done
+            [ ! -f /etc/sddm.conf ] || cat /etc/sddm.conf
+        )
+        sddm_theme=$(printf '%s\n' "$sddm_config" | awk '
+            /^\[/ { section=$0; next }
+            section == "[Theme]" && /^Current=/ { print substr($0, 9) }
+        ' | tail -n 1)
+        autologin_user=$(printf '%s\n' "$sddm_config" | awk '
+            /^\[/ { section=$0; next }
+            section == "[Autologin]" && /^User=/ { print substr($0, 6) }
+        ' | tail -n 1)
+        autologin_session=$(printf '%s\n' "$sddm_config" | awk '
+            /^\[/ { section=$0; next }
+            section == "[Autologin]" && /^Session=/ { print substr($0, 9) }
+        ' | tail -n 1)
+        if [ -f /etc/sddm.conf.d/zz-chonkstep-theme.conf ] && [ "$sddm_theme" != "chonkstep" ]; then
+            fail "chonkstep theme override is installed but SDDM resolves Theme/Current to '${sddm_theme:-<unset>}' - check /etc/sddm.conf for a later override"
+        fi
+        if [ -f /etc/sddm.conf.d/zz-chonkstep-autologin.conf ]; then
+            if [ -z "$autologin_user" ]; then
+                fail "chonkstep autologin override is installed but SDDM has no Autologin/User"
+            elif [ "$autologin_session" != "chonkstep-uwsm.desktop" ]; then
+                fail "chonkstep autologin override is installed but SDDM resolves Autologin/Session to '${autologin_session:-<unset>}'"
+            else
+                pass "login mode: SDDM autologin for $autologin_user selects chonkstep-uwsm.desktop"
+            fi
+        elif [ -n "$autologin_user" ]; then
+            warn "login mode: SDDM autologin for $autologin_user selects ${autologin_session:-<unset>}; the picker is bypassed"
+        elif [ "$sddm_theme" = "chonkstep" ]; then
+            pass "login mode: chonkstep SDDM picker theme is active"
+        elif [ "$sddm_theme" = "omarchy" ]; then
+            warn "login mode: stock Omarchy greeter (no picker); run 'omarchy install desktop-chonkstep'"
         elif [ -n "$sddm_theme" ]; then
-            warn "SDDM greeter theme: $sddm_theme (if you see no session menu at login, the theme may not offer one)"
+            warn "login mode: SDDM theme '$sddm_theme'; confirm that it presents a session picker"
         fi
         overrides=$(cat /etc/sddm.conf.d/*.conf /etc/sddm.conf 2>/dev/null | grep -c '^SessionDir=' || true)
         if [ "${overrides:-0}" -gt 0 ]; then

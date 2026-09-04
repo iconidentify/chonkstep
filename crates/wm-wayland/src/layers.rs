@@ -74,16 +74,16 @@
 //! column with the bar's own strip would otherwise leave the column
 //! standing over windows.
 
-use smithay::delegate_layer_shell;
 use smithay::backend::renderer::utils::with_renderer_surface_state;
+use smithay::delegate_layer_shell;
 use smithay::output::Output;
 use smithay::reexports::wayland_server::protocol::wl_output::WlOutput;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::utils::SERIAL_COUNTER;
 use smithay::wayland::compositor::{add_pre_commit_hook, with_states};
 use smithay::wayland::shell::wlr_layer::{
-    Anchor, ExclusiveZone, KeyboardInteractivity, Layer, LayerSurface, LayerSurfaceCachedState,
-    Margins, WlrLayerShellHandler, WlrLayerShellState, LAYER_SURFACE_ROLE,
+    Anchor, ExclusiveZone, KeyboardInteractivity, Layer, LayerSurface, LayerSurfaceCachedState, Margins,
+    WlrLayerShellHandler, WlrLayerShellState, LAYER_SURFACE_ROLE,
 };
 use smithay::wayland::shell::xdg::PopupSurface;
 
@@ -180,13 +180,7 @@ pub(crate) struct LayerShell {
 
 impl LayerShell {
     pub(crate) fn new(state: WlrLayerShellState) -> Self {
-        Self {
-            state,
-            exclusive_focus: None,
-            on_demand_focus: None,
-            reserved: Vec::new(),
-            reserved_last_pass: false,
-        }
+        Self { state, exclusive_focus: None, on_demand_focus: None, reserved: Vec::new(), reserved_last_pass: false }
     }
 }
 
@@ -252,7 +246,15 @@ pub(crate) fn shrink(area: Rect, insets: EdgeInsets) -> Rect {
 /// both-anchored with an explicit size is the protocol's "stretch
 /// intent, fixed size" case and centering is what every wlr
 /// compositor does with it.
-fn axis_place(area_start: i32, area_len: i32, len: i32, near: bool, far: bool, margin_near: i32, margin_far: i32) -> i32 {
+fn axis_place(
+    area_start: i32,
+    area_len: i32,
+    len: i32,
+    near: bool,
+    far: bool,
+    margin_near: i32,
+    margin_far: i32,
+) -> i32 {
     match (near, far) {
         (true, false) => area_start + margin_near,
         (false, true) => area_start + area_len - margin_far - len,
@@ -373,10 +375,7 @@ fn committed_physical_size(surface: &WlSurface, factor: f64) -> Option<Size> {
         .flatten()
         .filter(|size| size.w > 0 && size.h > 0)
         .map(|size| {
-            Size::new(
-                crate::xdg::scale_length(size.w, factor) as u32,
-                crate::xdg::scale_length(size.h, factor) as u32,
-            )
+            Size::new(crate::xdg::scale_length(size.w, factor) as u32, crate::xdg::scale_length(size.h, factor) as u32)
         })
 }
 
@@ -425,9 +424,8 @@ fn arrange(comp: &mut Compositor) {
     // Each output's own fractional scale — the factor an unmapped
     // surface on it is predicted to adopt, and the correction basis for
     // a mapped one (`surface_factor`).
-    let output_scales: Vec<f64> = (0..outputs.len())
-        .map(|index| backend.monitor_scales.get(index).copied().unwrap_or(1.0))
-        .collect();
+    let output_scales: Vec<f64> =
+        (0..outputs.len()).map(|index| backend.monitor_scales.get(index).copied().unwrap_or(1.0)).collect();
     let had_dead = backend.layers.iter().any(|record| !record.surface.alive());
     if had_dead {
         backend.layers.retain(|record| record.surface.alive());
@@ -704,11 +702,7 @@ fn apply_workareas(comp: &mut Compositor) {
             // The shell's baseline: its primary workarea (the Dock's
             // reservation), full geometry elsewhere — the same rects
             // `Shell::apply_workareas` would set.
-            let base = if monitor.primary {
-                comp.shell.workarea(output_size)
-            } else {
-                monitor.geometry
-            };
+            let base = if monitor.primary { comp.shell.workarea(output_size) } else { monitor.geometry };
             let insets = comp.layer_shell.reserved.get(index).copied().unwrap_or_default();
             let carved = shrink(monitor.geometry, insets);
             // Disjoint only when a bar reserved the very strip the
@@ -741,20 +735,24 @@ fn dock_reservation(insets: EdgeInsets) -> EdgeReservation {
 /// configure arrives, so the arrangement (which computes the size that
 /// configure must carry) runs right here.
 pub(crate) fn handle_commit(comp: &mut Compositor, root: &WlSurface) -> bool {
-    let backend = comp.wm.backend_mut();
-    let Some(index) = backend
-        .layers
-        .iter()
-        .position(|record| record.surface.wl_surface() == root)
-    else {
+    let Some(index) = comp.wm.backend().layers.iter().position(|record| record.surface.wl_surface() == root) else {
         return false;
     };
     let has_buffer = with_renderer_surface_state(root, |state| state.buffer().is_some()).unwrap_or(false);
-    let record = &mut backend.layers[index];
-    if record.mapped != has_buffer {
-        record.mapped = has_buffer;
-        tracing::info!(id = record.id.0, namespace = %record.namespace, mapped = has_buffer, "layer surface map state changed");
-        backend.mark_damaged();
+    let transition = {
+        let backend = comp.wm.backend_mut();
+        let record = &mut backend.layers[index];
+        if record.mapped == has_buffer {
+            None
+        } else {
+            record.mapped = has_buffer;
+            tracing::info!(id = record.id.0, namespace = %record.namespace, mapped = has_buffer, "layer surface map state changed");
+            Some(record.namespace.clone())
+        }
+    };
+    if let Some(namespace) = transition {
+        comp.shell.set_layer_namespace_active(comp.wm.backend_mut(), &namespace, has_buffer);
+        comp.wm.backend_mut().mark_damaged();
     }
     // Whether this was the blocked initial commit or a later one, the
     // full pass answers it: the initial configure goes out (the send
@@ -907,9 +905,7 @@ pub(crate) fn install_orphaned_role_guard(surface: &WlSurface) {
             let mut cached = states.cached_state.get::<LayerSurfaceCachedState>();
             neutralize_orphan(cached.pending());
         });
-        tracing::debug!(
-            "neutralized a commit on a destroyed layer surface — smithay's stale pre-commit hook"
-        );
+        tracing::debug!("neutralized a commit on a destroyed layer surface — smithay's stale pre-commit hook");
     });
 }
 
@@ -968,10 +964,15 @@ impl WlrLayerShellHandler for Compositor {
     }
 
     fn layer_destroyed(&mut self, surface: LayerSurface) {
-        let backend = self.wm.backend_mut();
-        if let Some(record) = backend.layers.iter().find(|record| record.surface == surface) {
-            tracing::info!(id = record.id.0, namespace = %record.namespace, "layer surface destroyed");
+        let removed = self.wm.backend().layers.iter().find(|record| record.surface == surface)
+            .map(|record| (record.id, record.namespace.clone(), record.mapped));
+        if let Some((id, namespace, mapped)) = &removed {
+            tracing::info!(id = id.0, namespace = %namespace, "layer surface destroyed");
+            if *mapped {
+                self.shell.set_layer_namespace_active(self.wm.backend_mut(), namespace, false);
+            }
         }
+        let backend = self.wm.backend_mut();
         backend.layers.retain(|record| record.surface != surface);
         backend.mark_damaged();
         // Focus, exclusive zones and workareas settle on the pass this
@@ -1035,10 +1036,7 @@ mod tests {
     #[test]
     fn the_exclusive_edge_is_the_single_anchored_edge_or_the_bars() {
         assert_eq!(exclusive_edge(Anchor::TOP), Some(Anchor::TOP));
-        assert_eq!(
-            exclusive_edge(Anchor::TOP | Anchor::LEFT | Anchor::RIGHT),
-            Some(Anchor::TOP)
-        );
+        assert_eq!(exclusive_edge(Anchor::TOP | Anchor::LEFT | Anchor::RIGHT), Some(Anchor::TOP));
         assert_eq!(exclusive_edge(Anchor::LEFT | Anchor::TOP | Anchor::BOTTOM), Some(Anchor::LEFT));
         // A corner, two parallel edges, everything, nothing: no single
         // edge to reserve from — the spec's "treat as neutral" cases.

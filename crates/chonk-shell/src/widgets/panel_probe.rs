@@ -32,7 +32,7 @@ const RED: [u8; 4] = [0xFF, 0x00, 0x00, 0xFF];
 const FACE: [u8; 4] = [0x30, 0x60, 0x90, 0xFF];
 
 fn fill(pixels: &mut [u8], rgba: [u8; 4]) {
-    for px in pixels.chunks_exact_mut(4) {
+    for px in pixels.as_chunks_mut::<4>().0 {
         px.copy_from_slice(&rgba);
     }
 }

@@ -1,0 +1,47 @@
+#!/usr/bin/env bash
+# omarchy:summary=Remove chonkstep and restore Omarchy's previous login setup
+# omarchy:args=
+# omarchy:examples=omarchy remove desktop-chonkstep
+# omarchy:requires-sudo=true
+set -euo pipefail
+
+root=""
+if [ "${1:-}" = "--root" ]; then
+    [ "$#" -eq 2 ] || { echo "usage: $0 [--root DIR]" >&2; exit 2; }
+    root="${2%/}"
+    [ -n "$root" ] && [ "$root" != "/" ] && [ -d "$root" ] || {
+        echo "--root must name an existing directory other than /" >&2
+        exit 2
+    }
+elif [ "$#" -ne 0 ]; then
+    echo "usage: $0 [--root DIR]" >&2
+    exit 2
+fi
+
+remove_file() {
+    if [ -n "$root" ]; then
+        rm -f "$root$1"
+    else
+        sudo rm -f "$1"
+    fi
+}
+
+package=""
+if [ -z "$root" ] && command -v pacman >/dev/null 2>&1; then
+    package="$(pacman -Qoq "$(readlink -f "$0")" 2>/dev/null || true)"
+fi
+
+remove_file /etc/sddm.conf.d/zz-chonkstep-autologin.conf
+remove_file /etc/sddm.conf.d/zz-chonkstep-theme.conf
+remove_file /etc/sddm.conf.d/20-chonkstep-theme.conf
+
+if [ -n "$root" ]; then
+    echo "Removed chonkstep's SDDM integration beneath $root; the staged package was left installed."
+elif [ -n "$package" ]; then
+    echo "Restored Omarchy's previous SDDM configuration; removing $package..."
+    omarchy-pkg-drop "$package"
+    echo "chonkstep has been removed. User configuration and state were preserved."
+else
+    echo "Restored Omarchy's previous SDDM configuration."
+    echo "No owning package was found; user configuration and state were preserved."
+fi

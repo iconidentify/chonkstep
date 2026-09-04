@@ -5,10 +5,11 @@ session, and this document is the map of how — what carries the pixels,
 what has to be installed, what the session script sets up, and what to
 check when a call shows a black rectangle instead of the desktop.
 
-Verified end to end on 2026-08-30 against a nested compositor: a
-ScreenCast request driven over D-Bus returned a PipeWire node, and
-frames pulled off that node were the live desktop, pixel for pixel.
-The transcript is reproduced at the bottom.
+Verified end to end on 2026-09-03 in a clean Omarchy 4.0.2 virtual
+machine installed from the official ISO: a ScreenCast request driven
+through the public portal API returned a PipeWire node, and five
+1280x800 frames pulled from that node were the live ChonkStep desktop.
+The reusable probe and transcript are at the bottom.
 
 ## The chain
 
@@ -26,14 +27,39 @@ windows. What it talks to instead is a chain of brokers:
 to. It picks a *backend* per portal interface, and
 `xdg-desktop-portal-wlr` is the one that captures wlroots-style
 compositors. It never checks whether the compositor actually is
-wlroots — it speaks protocols, and the two it needs for capture are
+wlroots — it speaks protocols, and the ones it needs for capture are
 ones chonkstep-wayland advertises: `zwlr_screencopy_manager_v1`
-version 3 and `zxdg_output_manager_v1` version 3 (see
-`crates/wm-wayland/src/protocols.rs`; the compositor's screencopy is
-shm-only, which is exactly the path xdg-desktop-portal-wlr implements
-for every compositor without dmabuf capture). Frames captured over
-screencopy are pushed into a PipeWire stream, and the node id of that
-stream is what the portal hands back to the browser.
+version 3, `zxdg_output_manager_v1` version 3, and a feedback-capable
+`zwp_linux_dmabuf_v1` global (see
+`crates/wm-wayland/src/protocols.rs` and `dmabuf.rs`). Frames captured
+over screencopy are pushed into a PipeWire stream, and the node id of
+that stream is what the portal hands back to the browser.
+
+### linux-dmabuf feedback
+
+Screen capture itself uses `zwlr_screencopy`; `zwp_linux_dmabuf_v1`
+is the separate path GPU clients use to submit their own buffers.
+xdg-desktop-portal-wlr 0.8.2 nevertheless requires both globals and
+installs linux-dmabuf feedback listeners before capture starts.
+
+For a hardware login, ChonkStep derives the matching render node from
+the KMS fd the session already owns. It therefore publishes modern
+default feedback even when EGL lacks the optional device-query
+extension. The clean virtio/TCG test is this exact case: `wayland-info`
+reported linux-dmabuf version 5, `/dev/dri/renderD128` as the main
+device, and the renderer's 114 real format/modifier pairs; the wlr
+portal then stayed active and delivered frames.
+
+A nested backend has no KMS fd, so it asks EGL for its render node.
+Reproduction with a minimal registry walk proved that ChonkStep's
+version-3 format list was protocol-correct, but xdg-desktop-portal-wlr
+0.8.2 incorrectly installed version-4 feedback listeners against it
+and then segfaulted because those events do not exist before version 4.
+ChonkStep therefore declines to advertise linux-dmabuf when it cannot
+construct modern feedback. The portal can report the missing capability
+instead of crashing. It does not affect an SDDM/UWSM hardware session,
+including the tested virtual GPU session, because the compositor
+already has the KMS node.
 
 ## What has to be installed
 
@@ -105,6 +131,15 @@ Checked against the frontend with the chonkstep config active:
 | FileChooser, Notification, Settings, and the rest | gtk | **Backend activates and answers** (D-Bus ping + interface version 4 confirmed); the dialogs themselves are ordinary windows and were not driven headlessly |
 | Window/toplevel capture (`types=2` in SelectSources) | wlr | **Not available** — xdg-desktop-portal-wlr only captures outputs (`AvailableSourceTypes=1`); this is an upstream backend limitation, not a chonkstep gap. "Share entire screen" works; "share a single window" is not offered |
 
+Backend matrix:
+
+| Chonkstep graphics path | Screencopy | linux-dmabuf | ScreenCast |
+| --- | --- | --- | --- |
+| DRM login (physical or virtual GPU) | v3 | v5 with default feedback | **Supported; clean Omarchy VM verified** |
+| Nested GPU with EGL render-node discovery | v3 | v5 with default feedback | Supported |
+| Nested EGL with formats but no discoverable node | v3 | absent | Unsupported, but the portal fails cleanly instead of crashing |
+| Renderer without dmabuf import formats | v3 | absent | Unsupported by the current wlr portal backend |
+
 ## Troubleshooting
 
 The three classic failures, in the order to check them:
@@ -154,35 +189,34 @@ Two smaller ones met while verifying:
 
 ## Reproducing the verification
 
-Everything below ran against a nested compositor
-(`CHONKSTEP_BACKEND=winit`), with the frontend pointed at it —
-which is exactly what the session script automates on a real login:
+The repository includes a browser-equivalent probe. For a deterministic
+test, temporarily give xdg-desktop-portal-wlr the chooser-free fixture,
+restart the frontend, and run it from the ChonkStep session:
 
-    dbus-update-activation-environment --systemd \
-        WAYLAND_DISPLAY=wayland-3 XDG_CURRENT_DESKTOP=chonkstep
-    systemctl --user restart xdg-desktop-portal
+    install -Dm644 scripts/fixtures/xdg-desktop-portal-wlr-e2e.conf \
+        ~/.config/xdg-desktop-portal-wlr/config
+    systemctl --user restart xdg-desktop-portal-wlr xdg-desktop-portal
+    scripts/portal-screencast-e2e.py --buffers 5
 
-then a plain D-Bus client doing what a browser does — `CreateSession`,
-`SelectSources` (monitor, single), `Start`:
+It does `CreateSession`, `SelectSources` (one monitor), `Start`, and
+`OpenPipeWireRemote` through `org.freedesktop.portal.ScreenCast`, then
+uses `pipewiresrc` to consume the returned node. The clean Omarchy VM
+run reported:
 
     ScreenCast portal version=4 AvailableSourceTypes=1
     <- Response(CreateSession): code=0
-       results={'session_handle': '/org/freedesktop/portal/desktop/session/1_42391/probesess'}
+       results={'session_handle': '/org/freedesktop/portal/desktop/session/...'}
     <- Response(SelectSources): code=0 results={}
     <- Response(Start): code=0 results={'streams':
-       [(86, {'position': (0, 0), 'size': (1280, 800), 'source_type': 1})]}
+       [(59, {'position': (0, 0), 'size': (1280, 800), 'source_type': 1})]}
 
-and frames pulled off node 86 while the session stayed open:
-
-    gst-launch-1.0 pipewiresrc path=86 num-buffers=5 \
-        ! videoconvert ! pngenc snapshot=true ! filesink location=frame.png
-
-produced a 2560×1600 PNG (a scale-2 session) of the live desktop.
+and wrote five complete 1280x800 PPM frames (15,360,080 bytes) from
+node 59. The captured pixels showed the running Omarchy shell, a native
+Wayland terminal, cursor, notifications, wallpaper, and dock.
 The `Screenshot` portal answered the same way:
 
     <- Response(Screenshot): code=0 results={'uri': 'file:///tmp/out.png'}
 
-For the interactive chooser-free run above, the backend was given a
-config (`~/.config/xdg-desktop-portal-wlr/config`) naming the output;
-in normal use xdg-desktop-portal-wlr pops its chooser (`slurp`) so the
+Remove the temporary config and restart both portal services after the test.
+In normal use xdg-desktop-portal-wlr opens its chooser (`slurp`) so the
 user picks the screen, exactly as a browser share dialog expects.

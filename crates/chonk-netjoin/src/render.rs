@@ -556,7 +556,7 @@ mod tests {
         });
         for theme in wm_theme::default_theme::all_themes() {
             let pixmap = render_join_dialog(&theme, &mut fs, &mut sc, 1.0, &view);
-            let opaque = pixmap.data().chunks_exact(4).filter(|p| p[3] == 0xFF).count();
+            let opaque = pixmap.data().as_chunks::<4>().0.iter().filter(|p| p[3] == 0xFF).count();
             assert_eq!(opaque, (pixmap.width() * pixmap.height()) as usize, "theme {}: a dialog is an opaque window", theme.id);
         }
     }

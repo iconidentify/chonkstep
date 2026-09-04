@@ -46,26 +46,22 @@ use smithay::wayland::shell::xdg::{SurfaceCachedState, ToplevelSurface, XdgTople
 use smithay::xwayland::xwm::WmWindowType;
 
 use wm_core::{
-    Backend, BackendEvent, DragHandle, KeyCombo, MonitorInfo, MouseButton, ScrollDelta, SizeHints,
-    WindowType, WmClass, WmProtocol,
+    Backend, BackendEvent, DragHandle, KeyCombo, MonitorInfo, MouseButton, ScrollDelta, SizeHints, WindowType, WmClass,
+    WmProtocol,
 };
 use wm_theme_api::{DecorationBuffer, DecorationLayout, Point, Rect, ResizeEdge, Size};
 
 use crate::input::DragGrab;
 use crate::state::{
-    ensure_stack_entry, raise_stack_entry, replace_stack_entry, FrameRecord, ManagedSurface,
-    PointerGrabChange, RootBackground, ShellRecord, StackEntry, WaylandBackend, WlFrameId,
-    WlShellId, WlWindowId,
+    ensure_stack_entry, raise_stack_entry, replace_stack_entry, FrameRecord, ManagedSurface, PointerGrabChange,
+    RootBackground, ShellRecord, StackEntry, WaylandBackend, WlFrameId, WlShellId, WlWindowId,
 };
 
 /// `wm-theme` rect -> smithay logical rect. The theme side is
 /// `i32`/`u32`, smithay is `i32`/`i32`; sizes are window-sized, nowhere
 /// near the cast boundary.
 fn smithay_rect(rect: Rect) -> SmithayRect<i32, Logical> {
-    SmithayRect::new(
-        (rect.pos.x, rect.pos.y).into(),
-        (rect.size.w as i32, rect.size.h as i32).into(),
-    )
+    SmithayRect::new((rect.pos.x, rect.pos.y).into(), (rect.size.w as i32, rect.size.h as i32).into())
 }
 
 /// Imports theme-rendered pixels into a renderer-side buffer. The
@@ -154,6 +150,16 @@ fn both_axes_maximized(max_h: bool, max_v: bool) -> bool {
     max_h && max_v
 }
 
+fn set_combo_membership(combos: &mut Vec<KeyCombo>, combo: KeyCombo, enabled: bool) {
+    if enabled {
+        if !combos.contains(&combo) {
+            combos.push(combo);
+        }
+    } else {
+        combos.retain(|existing| *existing != combo);
+    }
+}
+
 impl Backend for WaylandBackend {
     type WindowId = WlWindowId;
     type FrameId = WlFrameId;
@@ -186,12 +192,7 @@ impl Backend for WaylandBackend {
     // scene records the renderer draws directly — creation cannot fail,
     // and none of these verbs involve a client at all.
 
-    fn create_shell_surface(
-        &mut self,
-        geometry: Rect,
-        background: (u8, u8, u8),
-        above: bool,
-    ) -> Option<Self::ShellId> {
+    fn create_shell_surface(&mut self, geometry: Rect, background: (u8, u8, u8), above: bool) -> Option<Self::ShellId> {
         let id = WlShellId(self.alloc_id());
         self.shells.insert(
             id,
@@ -225,8 +226,7 @@ impl Backend for WaylandBackend {
 
     fn destroy_shell_surface(&mut self, id: Self::ShellId) {
         if self.shells.remove(&id).is_some() {
-            self.stacking
-                .retain(|entry| !matches!(entry, StackEntry::Shell(s) if *s == id));
+            self.stacking.retain(|entry| !matches!(entry, StackEntry::Shell(s) if *s == id));
             self.damage = true;
         }
     }
@@ -365,9 +365,7 @@ impl Backend for WaylandBackend {
     fn window_title(&self, window: Self::WindowId) -> Option<String> {
         let record = self.windows.get(&window)?;
         match &record.surface {
-            ManagedSurface::Xdg(toplevel) => {
-                xdg_attribute(toplevel, |attributes| attributes.title.clone())
-            }
+            ManagedSurface::Xdg(toplevel) => xdg_attribute(toplevel, |attributes| attributes.title.clone()),
             ManagedSurface::X11(surface) => {
                 // Smithay tracks `_NET_WM_NAME`/`WM_NAME` itself and
                 // hands back one string; empty means "never set", which
@@ -581,10 +579,7 @@ impl Backend for WaylandBackend {
             record.content.pos = Point::new(layout.client_offset.x, layout.client_offset.y);
             record.mapped = true;
         }
-        self.frames.insert(
-            frame,
-            FrameRecord { window, geometry, buffer: None, mapped: false },
-        );
+        self.frames.insert(frame, FrameRecord { window, geometry, buffer: None, mapped: false });
         // A window arriving here with a `StackEntry::Window` slot is one
         // that changed its mind: it mapped client-decorated, and a
         // `_MOTIF_WM_HINTS` rewrite has since made `wm-core` decide it
@@ -593,11 +588,7 @@ impl Backend for WaylandBackend {
         // does not jump to the front of the stack merely for growing a
         // titlebar; leaving both would draw and hit-test the client
         // twice, at two different depths.
-        replace_stack_entry(
-            &mut self.stacking,
-            StackEntry::Window(window),
-            StackEntry::Frame(frame),
-        );
+        replace_stack_entry(&mut self.stacking, StackEntry::Window(window), StackEntry::Frame(frame));
         frame
     }
 
@@ -608,8 +599,7 @@ impl Backend for WaylandBackend {
         // is ever reused for.
         self.frame_cursors.remove(&frame);
         if self.frames.remove(&frame).is_some() {
-            self.stacking
-                .retain(|entry| !matches!(entry, StackEntry::Frame(f) if *f == frame));
+            self.stacking.retain(|entry| !matches!(entry, StackEntry::Frame(f) if *f == frame));
             self.damage = true;
         }
     }
@@ -640,11 +630,7 @@ impl Backend for WaylandBackend {
         if self.frames.remove(&frame).is_none() {
             return;
         }
-        replace_stack_entry(
-            &mut self.stacking,
-            StackEntry::Frame(frame),
-            StackEntry::Window(window),
-        );
+        replace_stack_entry(&mut self.stacking, StackEntry::Frame(frame), StackEntry::Window(window));
         self.damage = true;
     }
 
@@ -707,10 +693,7 @@ impl Backend for WaylandBackend {
         // moves are exactly this; resizes leave the content alone until
         // the separate `resize_client` call that always accompanies
         // them.
-        let delta = Point::new(
-            geometry.pos.x - record.geometry.pos.x,
-            geometry.pos.y - record.geometry.pos.y,
-        );
+        let delta = Point::new(geometry.pos.x - record.geometry.pos.x, geometry.pos.y - record.geometry.pos.y);
         record.geometry = geometry;
         let window = record.window;
         if let Some(window_record) = self.windows.get_mut(&window) {
@@ -972,8 +955,7 @@ impl Backend for WaylandBackend {
             .filter(|frame| self.frames.contains_key(frame))
             .map(|&frame| StackEntry::Frame(frame))
             .collect();
-        self.stacking
-            .retain(|entry| !matches!(entry, StackEntry::Frame(f) if order_back_to_front.contains(f)));
+        self.stacking.retain(|entry| !matches!(entry, StackEntry::Frame(f) if order_back_to_front.contains(f)));
         self.stacking.extend(listed);
         self.damage = true;
     }
@@ -1033,8 +1015,7 @@ impl Backend for WaylandBackend {
                             code: 0,
                             object_id: 0,
                             object_interface: String::new(),
-                            message: "killed by the window manager (close request unanswered)"
-                                .to_string(),
+                            message: "killed by the window manager (close request unanswered)".to_string(),
                         },
                     );
                 }
@@ -1112,6 +1093,18 @@ impl Backend for WaylandBackend {
 
     fn ungrab_key(&mut self, combo: KeyCombo) {
         self.grabbed_combos.retain(|existing| *existing != combo);
+    }
+
+    fn set_key_release(&mut self, combo: KeyCombo, enabled: bool) {
+        set_combo_membership(&mut self.release_combos, combo, enabled);
+    }
+
+    fn set_key_locked(&mut self, combo: KeyCombo, enabled: bool) {
+        set_combo_membership(&mut self.locked_combos, combo, enabled);
+    }
+
+    fn set_key_repeating(&mut self, combo: KeyCombo, enabled: bool) {
+        set_combo_membership(&mut self.repeating_combos, combo, enabled);
     }
 
     fn grab_keyboard(&mut self) {
@@ -1231,7 +1224,15 @@ impl Backend for WaylandBackend {
     ///   no xdg state) and is deliberately unpublished — which is why
     ///   `xewmh.rs` leaves `_NET_WM_STATE_SHADED` out of
     ///   `_NET_SUPPORTED`.
-    fn publish_net_state(&mut self, window: Self::WindowId, fullscreen: bool, max_h: bool, max_v: bool, shaded: bool, hidden: bool) {
+    fn publish_net_state(
+        &mut self,
+        window: Self::WindowId,
+        fullscreen: bool,
+        max_h: bool,
+        max_v: bool,
+        shaded: bool,
+        hidden: bool,
+    ) {
         let _ = shaded;
         let Some(record) = self.windows.get(&window) else {
             return;
@@ -1311,9 +1312,7 @@ impl Backend for WaylandBackend {
                 }
                 match surface.window_type() {
                     Some(WmWindowType::Dialog) => WindowType::Dialog,
-                    Some(WmWindowType::Normal) | Some(WmWindowType::Utility) | None => {
-                        WindowType::Normal
-                    }
+                    Some(WmWindowType::Normal) | Some(WmWindowType::Utility) | None => WindowType::Normal,
                     // Menus, docks, tooltips, splashes, notifications:
                     // draw their own chrome, place themselves — same
                     // bucket `wm-x11` sorts these atoms into.

@@ -134,6 +134,11 @@ pub struct Window {
     /// to keep iconified windows out of its rectangle list.
     pub hidden: bool,
     pub urgent: bool,
+    pub pinned: bool,
+    pub inhibiting_idle: bool,
+    pub tags: Vec<String>,
+    pub xdg_tag: String,
+    pub xdg_description: String,
     /// Position in the focus history, 0 = focused. Omarchy reads
     /// `.focusHistoryID` in one place.
     pub focus_history_id: i32,
@@ -166,6 +171,46 @@ pub struct Snapshot {
     /// place Hyprland's IPC exposes lock state and therefore the only
     /// place anything on an Omarchy machine looks for it.
     pub locked: bool,
+    /// Real root-coordinate pointer position, absent only before the
+    /// compositor has received its first pointer motion.
+    pub cursor_position: Option<(i32, i32)>,
+    pub bindings: Vec<Binding>,
+    pub devices: Devices,
+}
+
+/// One keybinding in the subset `hyprctl binds` exposes to menus.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Binding {
+    pub modifiers: u32,
+    pub key: String,
+    pub description: String,
+    pub dispatcher: String,
+    pub argument: String,
+    pub locked: bool,
+    pub repeating: bool,
+    pub release: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Devices {
+    pub keyboards: Vec<Keyboard>,
+    pub mice: Vec<PointerDevice>,
+    pub touch: Vec<PointerDevice>,
+    pub tablets: Vec<PointerDevice>,
+    pub switches: Vec<PointerDevice>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Keyboard {
+    pub name: String,
+    pub layout: String,
+    pub active_keymap: String,
+    pub active_layout_index: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PointerDevice {
+    pub name: String,
 }
 
 impl Snapshot {
@@ -178,12 +223,8 @@ impl Snapshot {
     /// The workspace the session is on: the active workspace of the
     /// focused monitor, falling back to the first monitor.
     pub fn active_workspace(&self) -> Option<&Workspace> {
-        let index = self
-            .monitors
-            .iter()
-            .find(|monitor| monitor.focused)
-            .or_else(|| self.monitors.first())?
-            .active_workspace;
+        let index =
+            self.monitors.iter().find(|monitor| monitor.focused).or_else(|| self.monitors.first())?.active_workspace;
         self.workspaces.iter().find(|workspace| workspace.index == index)
     }
 
@@ -193,11 +234,7 @@ impl Snapshot {
     }
 
     fn monitor_name(&self, id: i32) -> String {
-        self.monitors
-            .iter()
-            .find(|monitor| monitor.id == id)
-            .map(|monitor| monitor.name.clone())
-            .unwrap_or_default()
+        self.monitors.iter().find(|monitor| monitor.id == id).map(|monitor| monitor.name.clone()).unwrap_or_default()
     }
 }
 
@@ -264,7 +301,7 @@ pub struct MonitorJson {
     /// session was unlocked: `omarchy-restart-shell` would then kill
     /// the locker it was supposed to protect and leave the desk open.
     #[serde(rename = "solitaryBlockedBy")]
-    pub solitary_blocked_by: Option<String>,
+    pub solitary_blocked_by: Vec<String>,
     #[serde(rename = "activelyTearing")]
     pub actively_tearing: bool,
     #[serde(rename = "directScanoutTo")]
@@ -340,10 +377,7 @@ impl Snapshot {
         self.monitors
             .iter()
             .map(|monitor| {
-                let workspace = self
-                    .workspaces
-                    .iter()
-                    .find(|workspace| workspace.index == monitor.active_workspace);
+                let workspace = self.workspaces.iter().find(|workspace| workspace.index == monitor.active_workspace);
                 MonitorJson {
                     id: monitor.id,
                     name: monitor.name.clone(),
@@ -376,7 +410,7 @@ impl Snapshot {
                     focused: monitor.focused,
                     dpms_status: true,
                     vrr: false,
-                    solitary_blocked_by: self.locked.then(|| "LOCK".to_string()),
+                    solitary_blocked_by: self.locked.then(|| "LOCK".to_string()).into_iter().collect(),
                     actively_tearing: false,
                     direct_scanout_to: None,
                     disabled: false,
@@ -399,9 +433,7 @@ impl Snapshot {
         // window, if it is on this workspace" — it keeps no per-workspace
         // focus history — so say that and leave it empty otherwise
         // rather than naming an arbitrary window as the last one.
-        let last = self
-            .focused_window()
-            .filter(|window| window.workspace == workspace.index);
+        let last = self.focused_window().filter(|window| window.workspace == workspace.index);
         WorkspaceJson {
             id: workspace.hypr_id(),
             name: workspace.hypr_name(),
@@ -447,16 +479,16 @@ impl Snapshot {
             initial_title: window.title.clone(),
             pid: window.pid,
             xwayland: window.xwayland,
-            pinned: false,
+            pinned: window.pinned,
             fullscreen: i32::from(window.fullscreen),
             fullscreen_client: 0,
             grouped: Vec::new(),
-            tags: Vec::new(),
+            tags: window.tags.clone(),
             swallowing: "0x0".to_string(),
             focus_history_id: window.focus_history_id,
-            inhibiting_idle: false,
-            xdg_tag: String::new(),
-            xdg_description: String::new(),
+            inhibiting_idle: window.inhibiting_idle,
+            xdg_tag: window.xdg_tag.clone(),
+            xdg_description: window.xdg_description.clone(),
         }
     }
 
@@ -468,9 +500,7 @@ impl Snapshot {
     /// would fail on a bare `null`.
     pub fn active_window_json(&self) -> serde_json::Value {
         match self.focused_window() {
-            Some(window) => {
-                serde_json::to_value(self.client_json(window)).unwrap_or_else(|_| serde_json::json!({}))
-            }
+            Some(window) => serde_json::to_value(self.client_json(window)).unwrap_or_else(|_| serde_json::json!({})),
             None => serde_json::json!({}),
         }
     }
@@ -478,8 +508,9 @@ impl Snapshot {
     /// `j/activeworkspace`.
     pub fn active_workspace_json(&self) -> serde_json::Value {
         match self.active_workspace() {
-            Some(workspace) => serde_json::to_value(self.workspace_json(workspace))
-                .unwrap_or_else(|_| serde_json::json!({})),
+            Some(workspace) => {
+                serde_json::to_value(self.workspace_json(workspace)).unwrap_or_else(|_| serde_json::json!({}))
+            }
             None => serde_json::json!({}),
         }
     }

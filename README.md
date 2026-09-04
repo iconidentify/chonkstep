@@ -163,14 +163,24 @@ a walkthrough from install to first hour in
 
 ## Installing on Omarchy (or any Arch)
 
-Two routes. As a package (binaries to `/usr/bin`, session scripts to
-`/usr/lib/chonkstep/`, both session entries installed):
+On Omarchy, install the release package and enable chonkstep's login
+picker with the Omarchy-shaped extension command:
+
+```sh
+omarchy pkg aur add chonkstep
+omarchy install desktop-chonkstep
+```
+
+The first command installs the release package. The second is an explicit,
+package-provided Omarchy integration step; it does not patch or fork Omarchy.
+
+For the branch head, build the Arch package (binaries in `/usr/bin`,
+session scripts in `/usr/lib/chonkstep/`, three session entries):
 
 ```sh
 git clone https://github.com/iconidentify/chonkstep.git
 cd chonkstep/packaging/arch
-makepkg -si                   # the branch head; PKGBUILD-release pins
-                              # the v0.2.0 release tag once it is published
+makepkg -si
 ```
 
 Or straight from the checkout, which is what `scripts/update.sh`
@@ -182,15 +192,16 @@ cd chonkstep
 scripts/install.sh
 ```
 
-The installer pulls the runtime dependencies with pacman (Xorg, foot -
+The checkout installer pulls the runtime dependencies with pacman (Xorg, foot -
 the terminal the desktop spawns - picom, wireplumber for the sound
 instrument, the theme fonts, the stack the Wayland compositor builds
 and runs against - libxkbcommon, EGL/mesa, Xwayland, and
 libdrm/libinput/libudev/libseat for the hardware session - the portal
 stack for screen sharing, and a Rust toolchain if needed), builds the
-release binaries, installs **two** session entries that point back into
-the checkout - `/usr/share/xsessions/chonkstep.desktop` and
-`/usr/share/wayland-sessions/chonkstep.desktop` - plus the portal
+release binaries, installs an X11 entry plus direct and uwsm-managed
+Wayland entries that point back into the checkout -
+`/usr/share/xsessions/chonkstep.desktop` and
+`/usr/share/wayland-sessions/{chonkstep,chonkstep-uwsm}.desktop` - plus the portal
 backend map, links `chonk-get` and `omarchy-export-themes` into
 `~/.local/bin`, and seeds `~/.config/chonkstep/config.toml` from the
 fully-commented example if you don't have one.
@@ -198,15 +209,20 @@ fully-commented example if you don't have one.
 Both halves are real login sessions. How you start one depends on the
 machine, and on which you want:
 
-- **With a display manager** (sddm, gdm, lightdm, ...), log out and
-  pick either "chonkstep" (X11) or "chonkstep (Wayland)" from the
-  session list.
-- **On stock Omarchy** there is no session picker at all (it boots
-  straight into Hyprland via autologin), so switch to a TTY
-  (Ctrl+Alt+F3), log in, and run either `startx scripts/xsession.sh`
-  or `exec scripts/wayland-session.sh` from the checkout. The Wayland
-  one needs no `startx`: the compositor *is* the display server, and it
-  takes the graphics device, the input devices, and the VT for itself.
+- **With a display manager**, log out and choose **chonkstep (uwsm)**.
+  The direct **chonkstep (Wayland)** entry remains for recovery and
+  non-systemd systems; **chonkstep** is the X11 session.
+- **On stock Omarchy / SDDM**, the integration command installs late-sorting
+  `zz-chonkstep-*` drop-ins. On an encrypted install it preserves Omarchy's
+  autologin user and changes only the session to `chonkstep (uwsm)`; without
+  autologin it activates a real session picker that defaults to that entry.
+  It never edits Omarchy-owned files. Run `omarchy remove desktop-chonkstep`
+  to restore the previous login setup and remove the package.
+- **Without a display manager**, run
+  `exec uwsm start -g -1 -e -D chonkstep chonkstep.desktop` from a TTY. The direct fallback
+  is `exec /usr/lib/chonkstep/chonkstep-session` for a package or
+  `exec scripts/chonkstep-session` from a checkout. Wayland needs no
+  `startx`: the compositor is the display server.
 - **Nested**, for development or a look before you log in:
   `./target/release/chonkstep-wayland` from a terminal inside your
   current desktop opens a window that is its screen. See
@@ -239,7 +255,7 @@ first try instead of running into NeXTSTEP `alt+shift` chords.
 It is a set of defaults, never a lock: every value it sets is
 overridden by writing that key out (`show_dock = true` gets the Dock
 back, `keymap = "chonkstep"` keeps the NeXTSTEP chords). What it
-changes, what it deliberately leaves alone, all 113 bindings and the 35
+changes, what it deliberately leaves alone, all 114 bindings and the 34
 groups of Omarchy chord it leaves *unbound* rather than approximate,
 are in [docs/omarchy-mode.md](docs/omarchy-mode.md) and
 [docs/keybindings.md](docs/keybindings.md).
@@ -491,9 +507,8 @@ What the session backend does not do yet, stated plainly:
   frame extents - and the command half works too: a pager's
   `_NET_ACTIVE_WINDOW` and `_NET_CURRENT_DESKTOP` messages drive the
   desktop (`wmctrl -l` lists, `wmctrl -a` activates, `wmctrl -s`
-  switches desks). Still absent: DRM leasing, and text-input/IME - a
-  CJK input method cannot compose into native Wayland clients on this
-  desktop yet. X11-to-Wayland drag-and-drop does not cross the
+  switches desks). Still absent: DRM leasing. X11-to-Wayland
+  drag-and-drop does not cross the
   boundary in either direction (each world drags within itself). The
   desktop's own dock, Clip, and menus need none of it: they are drawn
   by the compositor, not by clients.

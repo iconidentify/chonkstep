@@ -72,8 +72,30 @@ export XDG_SESSION_TYPE=wayland
 # .desktop entry set the same value anyway. Toolkits also read it, but
 # only for desktop-specific quirks; an unknown name is a safe default.
 export XDG_CURRENT_DESKTOP=chonkstep
+export XDG_SESSION_DESKTOP=chonkstep
+export XDG_MENU_PREFIX=chonkstep-
+export XDG_BACKEND=wayland
 
-# Deliberately NO CHONKSTEP_BACKEND export. The compositor decides for
+# uwsm already owns the session bus, graphical targets, readiness and
+# activation-environment cleanup. The direct/TTY entry keeps the
+# fallback path below. INVOCATION_ID is accepted only together with a
+# uwsm marker so an unrelated service invocation cannot accidentally
+# suppress the fallback session setup.
+_CHONKSTEP_UWSM=0
+if [ -n "${UWSM_FINALIZE_VARNAMES:-}${UWSM_WAIT_VARNAMES:-}${UWSM_ID:-}" ]; then
+    _CHONKSTEP_UWSM=1
+elif [ -r /proc/self/cgroup ] \
+        && grep -Eq '(^|/)wayland-wm@[^/]+\.service($|/)' /proc/self/cgroup; then
+    # uwsm does not promise to export a UWSM_* marker to the compositor,
+    # but its systemd unit name is part of our cgroup before the service
+    # reaches active. Checking the cgroup also avoids the startup race in
+    # `systemctl is-active`: while this script starts, the unit is still
+    # `activating`, not `active`.
+    _CHONKSTEP_UWSM=1
+fi
+export _CHONKSTEP_UWSM
+
+# Deliberately NO CHONKSTEP_BACKEND override. The compositor decides for
 # itself which half of its dual backend to run: an existing
 # WAYLAND_DISPLAY or DISPLAY means there is already a desktop here to
 # nest a window inside, and their absence means it owns the hardware.
@@ -86,11 +108,15 @@ export XDG_CURRENT_DESKTOP=chonkstep
 # unconditionally) would make the compositor try to open a window on a
 # desktop that is not there and fail on a black screen. This is a
 # login session; by definition neither variable is meaningful yet, so
-# clear both and let the decision be made from the truth. The
+# clear all three selectors and let the decision be made from the truth.
+# This includes CHONKSTEP_BACKEND because a prior nested development run
+# may have imported `winit` into the persistent systemd user environment;
+# uwsm intentionally carries arbitrary environment variables forward.
+# The
 # compositor exports its own values — the socket it allocates, and
 # DISPLAY from the XWayland server it starts — to everything it
 # spawns.
-unset DISPLAY WAYLAND_DISPLAY
+unset DISPLAY WAYLAND_DISPLAY CHONKSTEP_BACKEND
 
 # Keyboard layout. libxkbcommon's XKB_DEFAULT_* convention is what the
 # compositor reads to build the seat's keymap (see state.rs), because a
@@ -190,7 +216,7 @@ if the checkout moved), or install the chonkstep package"
 # variable this condition checks; the marker export is a belt for the
 # suspenders — if dbus-run-session somehow ran us without a bus we log
 # and carry on rather than exec forever.
-if [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ] && [ -z "${_CHONKSTEP_BUS_WRAPPED:-}" ] \
+if [ "$_CHONKSTEP_UWSM" -eq 0 ] && [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ] && [ -z "${_CHONKSTEP_BUS_WRAPPED:-}" ] \
         && command -v dbus-run-session >/dev/null 2>&1; then
     export _CHONKSTEP_BUS_WRAPPED=1
     exec dbus-run-session -- "$0" "$@"
@@ -219,6 +245,9 @@ fi
 # supervisor test's scratch environment, where the stub compositor
 # never logs a socket line).
 publish_portal_env() {
+    # A nested test compositor must never acquire the real login
+    # session's bus and mutate its activation environment.
+    [ -z "${CHONKSTEP_TEST_SOCKET:-}" ] || return 0
     command -v dbus-update-activation-environment >/dev/null 2>&1 || return 0
     local published="" sock
     while :; do
@@ -235,16 +264,35 @@ publish_portal_env() {
         # Republished on the same change-detection as the socket, so a
         # crash recovery — which re-execs the compositor and mints a new
         # signature — repoints instead of leaving a dead one.
-        sig=$(sed -n '/hyprland ipc listening/s/.*signature="\([^"]*\)".*/\1/p' \
+        # Tracing decorates the field name and `=` with ANSI sequences,
+        # even in the redirected log. Match from the plain `signature`
+        # word to its next quoted value instead of requiring a literal
+        # `signature="` adjacency.
+        sig=$(sed -n '/hyprland ipc listening/s/.*signature[^"]*"\([^"]*\)".*/\1/p' \
             "$LOG" 2>/dev/null | tail -n 1)
         if [ -n "$sock" ] && [ "$sock$sig" != "$published" ] \
                 && [ -S "$XDG_RUNTIME_DIR/$sock" ]; then
             dbus-update-activation-environment --systemd \
                 "WAYLAND_DISPLAY=$sock" \
                 "XDG_CURRENT_DESKTOP=$XDG_CURRENT_DESKTOP" \
+                "XDG_SESSION_DESKTOP=$XDG_SESSION_DESKTOP" \
                 "XDG_SESSION_TYPE=$XDG_SESSION_TYPE" \
+                "XDG_MENU_PREFIX=$XDG_MENU_PREFIX" \
+                "XDG_BACKEND=$XDG_BACKEND" \
                 ${sig:+"HYPRLAND_INSTANCE_SIGNATURE=$sig"} \
                 >>"$LOG" 2>&1 || true
+            if [ "$_CHONKSTEP_UWSM" -eq 1 ] && command -v uwsm >/dev/null 2>&1; then
+                WAYLAND_DISPLAY="$sock" \
+                    HYPRLAND_INSTANCE_SIGNATURE="$sig" \
+                    uwsm finalize HYPRLAND_INSTANCE_SIGNATURE >>"$LOG" 2>&1 || true
+            elif command -v systemctl >/dev/null 2>&1; then
+                # The direct session owns these targets and therefore
+                # owns stopping them at logout too. This brings the
+                # lock-before-suspend, IME and desktop-autostart units
+                # up on non-uwsm/systemd logins.
+                systemctl --user start graphical-session.target xdg-desktop-autostart.target \
+                    >>"$LOG" 2>&1 || true
+            fi
             published="$sock$sig"
         fi
         sleep 1
@@ -254,7 +302,37 @@ publish_portal_env &
 _env_watcher=$!
 # The watcher must not outlive the session: it holds the log open and
 # would republish a stale socket into the next login's environment.
-trap 'kill "$_env_watcher" 2>/dev/null' EXIT
+_session_stopping=0
+_compositor_pid=""
+cleanup_session() {
+    kill "$_env_watcher" 2>/dev/null || true
+    if [ "$_CHONKSTEP_UWSM" -eq 0 ]; then
+        if command -v systemctl >/dev/null 2>&1; then
+            systemctl --user stop xdg-desktop-autostart.target graphical-session.target \
+                >>"$LOG" 2>&1 || true
+            systemctl --user unset-environment WAYLAND_DISPLAY HYPRLAND_INSTANCE_SIGNATURE \
+                XDG_CURRENT_DESKTOP XDG_SESSION_DESKTOP XDG_SESSION_TYPE XDG_MENU_PREFIX XDG_BACKEND \
+                >>"$LOG" 2>&1 || true
+        fi
+        if command -v dbus-update-activation-environment >/dev/null 2>&1; then
+            dbus-update-activation-environment --systemd --unset \
+                WAYLAND_DISPLAY HYPRLAND_INSTANCE_SIGNATURE XDG_CURRENT_DESKTOP \
+                XDG_SESSION_DESKTOP XDG_SESSION_TYPE XDG_MENU_PREFIX XDG_BACKEND \
+                >>"$LOG" 2>&1 || true
+        fi
+    fi
+}
+stop_session() {
+    _session_stopping=1
+    # Forward one TERM even when only the supervisor was signalled.
+    # When the whole process group was signalled the child may already
+    # be gone; kill's failure is expected and harmless.
+    if [ -n "$_compositor_pid" ]; then
+        kill -TERM "$_compositor_pid" 2>/dev/null || true
+    fi
+}
+trap cleanup_session EXIT
+trap stop_session TERM HUP INT
 
 # ---------------------------------------------------------------------
 # The crash watchdog. A compositor panic used to be a black screen and
@@ -280,8 +358,19 @@ CRASH_WINDOW_SECS=60
 crash_times=""
 
 while :; do
-    "$BIN" >> "$LOG" 2>&1
+    "$BIN" >> "$LOG" 2>&1 &
+    _compositor_pid=$!
+    wait "$_compositor_pid"
     status=$?
+    _compositor_pid=""
+
+    # A TERM/HUP/INT delivered to the supervisor is a session-manager
+    # logout. The child either handled the forwarded TERM cleanly or
+    # died with 128+signal because it predates that handler; neither is
+    # a crash to recover while the session itself is being torn down.
+    if [ "$_session_stopping" -eq 1 ]; then
+        exit 0
+    fi
 
     # A clean exit is the user logging out: the loop's one normal end.
     if [ "$status" -eq 0 ]; then
@@ -303,6 +392,11 @@ while :; do
     count=$(echo "$crash_times" | wc -w)
 
     if [ "$count" -gt "$MAX_CRASHES" ]; then
+        # The marker belongs to a restart inside this supervisor. Once the
+        # brake returns to the greeter there is no session left to recover;
+        # carrying it into a later login would report a false recovery and
+        # could unnecessarily lock an otherwise clean new session.
+        rm -f "$LOG_DIR/recovery"
         printf 'chonkstep-wayland session: crash loop (%s abnormal exits in %ss) - giving up. See %s\n' \
             "$count" "$CRASH_WINDOW_SECS" "$LOG" | tee -a "$LOG" >&2
         exit 1

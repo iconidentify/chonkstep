@@ -107,10 +107,24 @@ windowrulev2 = float, class:^(steam)$, title:^(Steam)$   # v2
 windowrule   = float on, match:class steam               # 0.53+
 ```
 
-Three properties are acted on — `float`, `size` and `center` — matched
-on `class` and `title` as regular expressions, unanchored (a *search*,
-which is how Hyprland matches and why `o.window("localsend", …)`
-catches a window whose class is `localsend_app`).
+The supported properties are `float`, `size`, `center`, `idle_inhibit`,
+`pin`, `no_focus`, `no_initial_focus`, `focus_on_activate`,
+`fullscreen`, and `maximize`. They match `class` and `title` as regular
+expressions, unanchored (a *search*, which is how Hyprland matches and
+why `o.window("localsend", …)` catches `localsend_app`). Last matching
+rule wins independently for each property.
+
+`idle_inhibit` follows the mapped/visible interpretation: a matching
+window inhibits idle while it is visible on the current workspace (or
+pinned), without requiring keyboard focus. `pin` makes the client
+sticky across workspaces. Focus exclusions affect initial focus and
+later activation requests separately. Fullscreen and maximize are
+applied after initial placement, with maximize underneath fullscreen so
+unfullscreen restores the expected state.
+
+Every unsupported property produces its own `Skipped` line naming both
+the property and matcher. A rule with an unsupported matcher is refused
+whole, so a partially understood condition can never broaden the rule.
 
 **Tags are resolved**, one level deep. Omarchy never writes `float`
 next to a class; it writes two rules:
@@ -155,12 +169,21 @@ A variable already set in the session's environment is left alone: the
 launcher, your shell profile and systemd are all more specific than a
 config file being read on somebody else's behalf.
 
-Two are refused by name, and logged:
+Session-identity and toolkit-wide scale variables are refused by name
+and logged:
 
 | Refused | Why |
 |---|---|
 | `XDG_CURRENT_DESKTOP`, `XDG_SESSION_DESKTOP` | Omarchy sets both to `Hyprland`, which under chonkstep is false. Carrying them routes xdg-desktop-portal at `xdg-desktop-portal-hyprland`, which would then try to talk to a compositor that is not there — and break screen sharing rather than one key. |
 | `WAYLAND_DISPLAY`, `DISPLAY`, `XDG_SESSION_TYPE`, `XDG_RUNTIME_DIR`, `HYPRLAND_INSTANCE_SIGNATURE` | They name *this* session, which the compositor sets for itself. A stale value out of a file points every child at a display that does not exist. |
+| `GDK_SCALE`, `GDK_DPI_SCALE`, `QT_SCALE_FACTOR`, `ELM_SCALE` | Global toolkit scaling can disagree with per-output Wayland scale. Monitor rules and fractional scale are the single scale path. |
+
+Blanket activation-environment commands are never admitted as
+autostart. In particular, `systemctl --user import-environment $(env
+...)` and `dbus-update-activation-environment --all` are skipped with a
+named reason. The session launcher publishes only its curated Wayland,
+desktop, menu-prefix, backend, and IPC variables; test sessions publish
+nothing to the real bus.
 
 Editing an `env` line takes effect at your next login, not on the live
 re-read. A process's environment is fixed when it starts.
@@ -177,14 +200,15 @@ specific directive, not a count. Turn on `RUST_LOG=debug` to see them.
 | Anything commanding Hyprland — `hyprctl`, `omarchy-hyprland-*` | It talks to a compositor that is not running, so the binding could only fail. The same filter chonkstep's Omarchy menu already applies to menu rows. `hyprpicker`, `hyprlock` and `hypridle` are *not* caught by it: they are ordinary Wayland clients and work here. |
 | Gaps, borders, rounding, blur, shadows, animations, layouts (`hl.config`, `general { … }`, `decoration { … }`) | Hyprland's look. This desktop has its own — a theme, a titlebar, a decoration policy. Following them would mean drawing a NeXTSTEP frame in Hyprland's border colour. |
 | Layer rules (`layerrule`, `hl.layer_rule`) | They configure Hyprland's layer-shell implementation. This compositor has its own. |
-| Input settings (`input { … }`, `kb_layout`, touchpad, `gesture`) | The seat's, configured elsewhere in this compositor. |
-| Window-rule properties other than `float`, `size`, `center` | `opacity`, `tag`, `no_blur`, `idle_inhibit`, `suppress_event`, `workspace`, `move`, `keep_aspect_ratio`, … Each is a Hyprland feature this desktop either has its own answer for or does not have. |
+| Unsupported input settings (touchpad device policy, sensitivity, gestures) | Keyboard xkb/repeat and `follow_mouse` are supported; device-specific policy is logged. |
+| Unsupported window-rule properties | `opacity`, `no_blur`, `suppress_event`, `workspace`, `move`, `keep_aspect_ratio`, … are each logged with their matcher. Tags used to select another supported rule are resolved. |
 | Window rules carrying a matcher not implemented here (`match:xwayland 1`, `match:workspace 5`, `match:fullscreen 0`) | Refused **whole**. Applying a rule on the matchers that *were* understood turns "float this one XWayland window" into "float every window of this class". |
 | A `size` given as a Hyprland layout expression (`(monitor_h*4/25)`) | It needs a monitor to evaluate against, and a config reader has a file, not an output. |
 | Mouse, wheel and switch bindings (`bindm`, `mouse:272`, `mouse_up`, `switch:on:Lid Switch`) | Not key chords; this config format cannot express one. |
 | `exec` (as opposed to `exec-once`) | It re-runs on every config reload, which here would mean on every poll. Taking it as autostart would start a fresh copy each time you edited anything. |
-| `submap`, `workspace` rules, `plugin`, `bezier`, `animation` | Hyprland's own machinery. |
-| `monitor =` lines | Read and reported, never applied. See below. |
+| `submap`, workspace rules, `plugin`, `bezier`, `animation` | Hyprland's own machinery. Every binding inside conf `submap = name … reset` or Lua `hl.define_submap` is skipped with its chord and submap; it is never promoted to a global grab. |
+| `hl.on("layer.opened")` selection bindings | Read as a namespace-scoped keymap. It is installed only while a matching layer-shell surface is mapped and removed after the last such surface closes. A handler with unknown side effects is refused whole. |
+| Unsupported `monitor =` lines | A line containing disable, mirror, transform/extra fields, or an explicit mode is refused whole. The supported subset is applied as described below. |
 
 ### Bindings this desktop has no verb for
 
@@ -219,26 +243,47 @@ do is not what you are asking for:
   Omarchy's *Hyprland* bindings. About a third of them are wrong here,
   and a cheatsheet that lies is worse than none.
 
+### Input and binding behavior
+
+`kb_rules`, `kb_model`, `kb_layout`, `kb_variant`, and `kb_options`
+build the seat's xkb keymap. `repeat_rate` and `repeat_delay` configure
+both client key repeat and `binde` actions; `follow_mouse` selects the
+existing focus policy. Environment `XKB_DEFAULT_*` values remain more
+specific and win. If libxkbcommon rejects a configured map, the error
+is logged and the session falls back to the default usable keymap
+instead of aborting the login.
+
+Binding flags retain their behavior: `bindl`/`locked` actions may run
+on the lock screen, `binde`/`repeating` actions repeat after the
+configured delay, and `bindr`/`release` actions fire on release without
+overwriting a press action on the same chord. Hardware key names include
+the touchpad toggle/on/off symbols and F23 used by Omarchy.
+
+Omarchy's `hl.on("layer.opened")` screenshot handler is compiled only
+when its body is a namespace guard plus `hl.bind` lifecycle
+bookkeeping. Its Return, Tab and arrow bindings are installed while a
+`selection` layer-shell surface is mapped and removed after the final
+surface unmaps; a user binding on the same chord resumes afterwards.
+Any additional side effect refuses the entire handler.
+
 ### `monitor =`
 
-Parsed, kept, and logged at startup — not applied. Two reasons, and
-both would have to be fixed to change that:
+Monitor rules are resolved only after the compositor has the connected
+outputs and their EDID facts. An exact output rule beats the last
+catch-all rule. The supported transaction is:
 
-1. Chonkstep's output management (`zwlr_output_management`) applies
-   scale everywhere and position on both backends, but **refuses
-   disable, transform and adaptive sync** with an honest `failed`.
-   Hyprland's `monitor =` uses all of them, and Omarchy's own template
-   offers `transform, 1` and `monitor=DP-2,disable` as its two
-   commonest edits. Applying the half that works gives you a monitor
-   that comes back unrotated and one that stays on — worse than not
-   applying it, because it looks like it worked.
-2. `preferred` and `auto` are resolved against connected hardware at
-   the moment the compositor comes up. A config reader has a file, not
-   a list of outputs.
+- `preferred` mode (or omitted), resolved from that head's mode list;
+- `auto` position, laid out left-to-right, or an explicit `XxY`;
+- numeric scale from 0.5 through 4, or `auto` from physical DPI
+  (1.0/1.5/2.0 thresholds).
 
-**What to do instead:** the session speaks `zwlr_output_management`, so
-`wlr-randr` and `kanshi` work today and are the honest answer for a
-layout you need applied.
+Negative positions are normalized together so the logical desktop
+starts at zero without changing relative placement. Any unsupported
+field, `disable`, `mirror`, malformed position/scale, or explicit mode
+refuses the whole line with the output and field in the log. The same
+output state backs IPC and `zwlr_output_management`, so advertised
+scale, renderer scale, shell geometry, and application fractional scale
+cannot diverge.
 
 ---
 
@@ -371,8 +416,8 @@ One `info` line per read, and one `debug` line per thing skipped:
 
 ```
 INFO  hyprland-config: read the desktop's live Hyprland configuration
-      files=42 bindings=135 commands=101 env=9 autostart=6
-      float_rules=38 monitors=1 skipped=148
+      files=42 bindings=139 commands=113 env=8 autostart=4
+      float_rules=45 monitors=1 skipped=188
 DEBUG hyprland-config: not carried over kind=bind what="SUPER + J (Toggle window split)"
       why="tiling-only: no meaning on a stacking desk"
 ```

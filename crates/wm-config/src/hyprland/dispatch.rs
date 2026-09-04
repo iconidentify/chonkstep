@@ -94,14 +94,23 @@ fn exec_verb(command: &str) -> Verb {
     // Only the bare launcher. `omarchy-launch-terminal-tmux` and
     // `…-herdr` run a *program* in a terminal, which is a different
     // request and stays an ordinary command.
-    if argv.len() == 1 && matches!(program.rsplit('/').next().unwrap_or(program), "omarchy-launch-terminal" | "xdg-terminal-exec") {
+    if argv.len() == 1
+        && matches!(
+            program.rsplit('/').next().unwrap_or(program),
+            "omarchy-launch-terminal" | "xdg-terminal-exec"
+        )
+    {
         return Verb::Action(Action::SpawnTerminal);
     }
     // A command line only a shell can read keeps its shell, exactly as
     // the preset spells its two such entries: `omarchy-screenrecord`
     // and the colour picker both carry a `||`.
     if needs_a_shell(command) {
-        return Verb::Run(vec!["bash".into(), "-lc".into(), command.trim().to_string()]);
+        return Verb::Run(vec![
+            "bash".into(),
+            "-lc".into(),
+            command.trim().to_string(),
+        ]);
     }
     Verb::Run(argv)
 }
@@ -122,7 +131,12 @@ pub fn commands_hyprland(program: &str) -> bool {
 /// Whether a command line contains shell grammar that argv splitting
 /// would destroy.
 fn needs_a_shell(command: &str) -> bool {
-    command.contains("&&") || command.contains("||") || command.contains('|') || command.contains(';') || command.contains('$') || command.contains('>')
+    command.contains("&&")
+        || command.contains("||")
+        || command.contains('|')
+        || command.contains(';')
+        || command.contains('$')
+        || command.contains('>')
 }
 
 /// A compositor dispatcher and its argument.
@@ -148,11 +162,16 @@ fn compositor_verb(name: &str, arg: &str) -> Verb {
         // compositor's separately, which is how Omarchy builds "tiled
         // fullscreen". There is no tiling here to be full inside of.
         "fullscreenstate" => Verb::Unbound(Unbound::TilingOnly),
-        "layoutmsg" | "pseudo" | "togglefloating" | "setfloating" | "settiled" | "swapwindow" | "swapnext" | "resizeactive" | "moveactive" | "splitratio"
-        | "pin" | "togglesplit" | "movewindoworgroup" | "centerwindow" => Verb::Unbound(Unbound::TilingOnly),
-        "togglegroup" | "changegroupactive" | "moveintogroup" | "moveoutofgroup" | "lockactivegroup" | "lockgroups" | "denywindowfromgroup" => {
-            Verb::Unbound(Unbound::TilingOnly)
-        }
+        "layoutmsg" | "pseudo" | "togglefloating" | "setfloating" | "settiled" | "swapwindow"
+        | "swapnext" | "resizeactive" | "moveactive" | "splitratio" | "pin" | "togglesplit"
+        | "movewindoworgroup" | "centerwindow" => Verb::Unbound(Unbound::TilingOnly),
+        "togglegroup"
+        | "changegroupactive"
+        | "moveintogroup"
+        | "moveoutofgroup"
+        | "lockactivegroup"
+        | "lockgroups"
+        | "denywindowfromgroup" => Verb::Unbound(Unbound::TilingOnly),
         // Directional focus and directional window movement: a stacking
         // desk has no grid for "the window to the left" to mean
         // anything in. Left unbound rather than approximated with
@@ -207,23 +226,35 @@ fn compositor_verb(name: &str, arg: &str) -> Verb {
             WorkspaceTarget::Special => Verb::Action(Action::Miniaturize),
             WorkspaceTarget::Other => Verb::Unbound(Unbound::NoVerb),
         },
-        "togglespecialworkspace" | "movecurrentworkspacetomonitor" | "moveworkspacetomonitor" | "focusmonitor" | "swapactiveworkspaces" => {
-            Verb::Unbound(Unbound::NoVerb)
-        }
+        "togglespecialworkspace"
+        | "movecurrentworkspacetomonitor"
+        | "moveworkspacetomonitor"
+        | "focusmonitor"
+        | "swapactiveworkspaces" => Verb::Unbound(Unbound::NoVerb),
         // Alt-Tab. This desktop's switcher is modal machinery rather
         // than a binding — while it is up the shell owns the keyboard —
         // so the chord is already answered, correctly, by something
         // that is not in the binding table at all. Binding it to
         // anything from here would break it.
-        "cyclenext" | "bringactivetotop" | "focuscurrentorlast" | "alterzorder" => Verb::Unbound(Unbound::Declined),
+        "cyclenext" | "bringactivetotop" | "focuscurrentorlast" | "alterzorder" => {
+            Verb::Unbound(Unbound::Declined)
+        }
         // Synthesising a key chord at the seat, which is how Omarchy
         // builds its universal copy/paste. No verb here, and no command
         // could stand in: it is the compositor's own input path.
-        "sendshortcut" | "sendkeystate" | "send_key_state" | "sendkey" => Verb::Unbound(Unbound::NoVerb),
-        // Talking to the compositor about itself.
-        "exit" | "forcerendererreload" | "dpms" | "exec-shutdown" | "submap" | "global" | "setprop" | "toggleopaque" | "renameworkspace" => {
-            Verb::Unbound(Unbound::HyprlandOnly)
+        "sendshortcut" | "sendkeystate" | "send_key_state" | "sendkey" => {
+            Verb::Unbound(Unbound::NoVerb)
         }
+        // Talking to the compositor about itself.
+        "exit"
+        | "forcerendererreload"
+        | "dpms"
+        | "exec-shutdown"
+        | "submap"
+        | "global"
+        | "setprop"
+        | "toggleopaque"
+        | "renameworkspace" => Verb::Unbound(Unbound::HyprlandOnly),
         _ => Verb::Unbound(Unbound::NoVerb),
     }
 }
@@ -251,7 +282,10 @@ fn workspace_target(arg: &str) -> WorkspaceTarget {
     // `e`/`r` are Hyprland's "next existing" and "next in range";
     // both are "the workspace after this one" for a desktop whose
     // workspace list has no holes in it.
-    let relative = arg.strip_prefix('e').or_else(|| arg.strip_prefix('r')).unwrap_or(arg);
+    let relative = arg
+        .strip_prefix('e')
+        .or_else(|| arg.strip_prefix('r'))
+        .unwrap_or(arg);
     match relative {
         "+1" => return WorkspaceTarget::Next,
         "-1" => return WorkspaceTarget::Prev,
@@ -289,7 +323,9 @@ fn workspace_carry_index_action(index: u32) -> Option<Action> {
 
 fn zero_based(index: u32) -> Option<usize> {
     let index = usize::try_from(index).ok()?;
-    (1..=crate::MAX_WORKSPACE).contains(&index).then(|| index - 1)
+    (1..=crate::MAX_WORKSPACE)
+        .contains(&index)
+        .then(|| index - 1)
 }
 
 /// The `[commands]` name an argv is declared under.
@@ -345,7 +381,11 @@ pub fn command_name(argv: &[String]) -> String {
             break;
         }
     }
-    format!("{}-{:08x}", slug.trim_end_matches('-'), fingerprint(&joined))
+    format!(
+        "{}-{:08x}",
+        slug.trim_end_matches('-'),
+        fingerprint(&joined)
+    )
 }
 
 /// FNV-1a over the argv. Chosen for being four lines of obvious code

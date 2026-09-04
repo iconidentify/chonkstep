@@ -1,0 +1,213 @@
+//! Small, standard Wayland globals ordinary desktop clients expect.
+//!
+//! Smithay owns the wire implementations. This module keeps their
+//! lifecycle and the handful of compositor policy callbacks together,
+//! rather than scattering one-field protocol states through `state.rs`.
+
+use smithay::input::pointer::PointerHandle;
+use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
+use smithay::reexports::wayland_server::DisplayHandle;
+use smithay::utils::{Logical, Point as LogicalPoint, Rectangle};
+use smithay::wayland::input_method::{InputMethodHandler, InputMethodManagerState, PopupSurface};
+use smithay::wayland::keyboard_shortcuts_inhibit::{
+    KeyboardShortcutsInhibitHandler, KeyboardShortcutsInhibitState, KeyboardShortcutsInhibitor,
+};
+use smithay::wayland::pointer_constraints::{
+    with_pointer_constraint, PointerConstraintsHandler, PointerConstraintsState,
+};
+use smithay::wayland::xdg_activation::{
+    XdgActivationHandler, XdgActivationState, XdgActivationToken, XdgActivationTokenData,
+};
+use smithay::wayland::xdg_foreign::{XdgForeignHandler, XdgForeignState};
+use smithay::{
+    delegate_cursor_shape, delegate_input_method_manager, delegate_keyboard_shortcuts_inhibit,
+    delegate_pointer_constraints, delegate_pointer_gestures, delegate_presentation, delegate_relative_pointer,
+    delegate_single_pixel_buffer, delegate_text_input_manager, delegate_xdg_activation, delegate_xdg_dialog,
+    delegate_tablet_manager, delegate_xdg_foreign, delegate_xdg_system_bell, delegate_xdg_toplevel_tag,
+};
+
+use wm_core::BackendEvent;
+
+use crate::state::Compositor;
+
+impl smithay::wayland::tablet_manager::TabletSeatHandler for Compositor {}
+
+/// State retained for the globals whose helpers need a getter or whose
+/// `GlobalId` lifetime is tied to the state value.
+pub(crate) struct CoreProtocols {
+    pub activation: XdgActivationState,
+    pub xdg_foreign: XdgForeignState,
+    pub shortcuts: KeyboardShortcutsInhibitState,
+    pub active_shortcut_inhibitor: Option<KeyboardShortcutsInhibitor>,
+    pub _cursor_shape: smithay::wayland::cursor_shape::CursorShapeManagerState,
+    pub _single_pixel: smithay::wayland::single_pixel_buffer::SinglePixelBufferState,
+    pub _presentation: smithay::wayland::presentation::PresentationState,
+    pub _relative_pointer: smithay::wayland::relative_pointer::RelativePointerManagerState,
+    pub _pointer_constraints: PointerConstraintsState,
+    pub _pointer_gestures: smithay::wayland::pointer_gestures::PointerGesturesState,
+    pub _tablet: smithay::wayland::tablet_manager::TabletManagerState,
+    pub _text_input: smithay::wayland::text_input::TextInputManagerState,
+    pub _input_method: InputMethodManagerState,
+    pub _xdg_dialog: smithay::wayland::shell::xdg::dialog::XdgDialogState,
+    pub _system_bell: smithay::wayland::xdg_system_bell::XdgSystemBellState,
+    pub _toplevel_tag: smithay::wayland::xdg_toplevel_tag::XdgToplevelTagManager,
+}
+
+pub(crate) fn init(display: &DisplayHandle) -> CoreProtocols {
+    CoreProtocols {
+        activation: XdgActivationState::new::<Compositor>(display),
+        xdg_foreign: XdgForeignState::new::<Compositor>(display),
+        shortcuts: KeyboardShortcutsInhibitState::new::<Compositor>(display),
+        active_shortcut_inhibitor: None,
+        _cursor_shape: smithay::wayland::cursor_shape::CursorShapeManagerState::new::<Compositor>(display),
+        _single_pixel: smithay::wayland::single_pixel_buffer::SinglePixelBufferState::new::<Compositor>(display),
+        // Linux CLOCK_MONOTONIC. Presentation timestamps emitted by
+        // the renderer use the same monotonic time base.
+        _presentation: smithay::wayland::presentation::PresentationState::new::<Compositor>(display, 1),
+        _relative_pointer: smithay::wayland::relative_pointer::RelativePointerManagerState::new::<Compositor>(display),
+        _pointer_constraints: PointerConstraintsState::new::<Compositor>(display),
+        _pointer_gestures: smithay::wayland::pointer_gestures::PointerGesturesState::new::<Compositor>(display),
+        _tablet: smithay::wayland::tablet_manager::TabletManagerState::new::<Compositor>(display),
+        _text_input: smithay::wayland::text_input::TextInputManagerState::new::<Compositor>(display),
+        _input_method: InputMethodManagerState::new::<Compositor, _>(display, |_| true),
+        _xdg_dialog: smithay::wayland::shell::xdg::dialog::XdgDialogState::new::<Compositor>(display),
+        _system_bell: smithay::wayland::xdg_system_bell::XdgSystemBellState::new::<Compositor>(display),
+        _toplevel_tag: smithay::wayland::xdg_toplevel_tag::XdgToplevelTagManager::new::<Compositor>(display),
+    }
+}
+
+impl XdgActivationHandler for Compositor {
+    fn activation_state(&mut self) -> &mut XdgActivationState {
+        &mut self.core_protocols.activation
+    }
+
+    fn request_activation(
+        &mut self,
+        token: XdgActivationToken,
+        _token_data: XdgActivationTokenData,
+        surface: WlSurface,
+    ) {
+        let mut root = surface;
+        while let Some(parent) = smithay::wayland::compositor::get_parent(&root) {
+            root = parent;
+        }
+        if let Some(window) = self.wm.backend().window_for_surface(&root) {
+            self.wm.dispatch(BackendEvent::ActivateRequested(window));
+        }
+        // Tokens are single-use on this desktop. Retaining an already
+        // consumed token would let an unrelated later request steal focus.
+        self.core_protocols.activation.remove_token(&token);
+    }
+}
+
+impl XdgForeignHandler for Compositor {
+    fn xdg_foreign_state(&mut self) -> &mut XdgForeignState {
+        &mut self.core_protocols.xdg_foreign
+    }
+}
+
+impl KeyboardShortcutsInhibitHandler for Compositor {
+    fn keyboard_shortcuts_inhibit_state(&mut self) -> &mut KeyboardShortcutsInhibitState {
+        &mut self.core_protocols.shortcuts
+    }
+
+    fn new_inhibitor(&mut self, inhibitor: KeyboardShortcutsInhibitor) {
+        let focused = self.seat.get_keyboard().and_then(|keyboard| keyboard.current_focus());
+        if focused.as_ref() == Some(inhibitor.wl_surface()) {
+            inhibitor.activate();
+            self.core_protocols.active_shortcut_inhibitor = Some(inhibitor);
+        }
+    }
+
+    fn inhibitor_destroyed(&mut self, inhibitor: KeyboardShortcutsInhibitor) {
+        if self.core_protocols.active_shortcut_inhibitor.as_ref().is_some_and(|active| active == &inhibitor) {
+            self.core_protocols.active_shortcut_inhibitor = None;
+        }
+    }
+}
+
+impl PointerConstraintsHandler for Compositor {
+    fn new_constraint(&mut self, surface: &WlSurface, pointer: &PointerHandle<Self>) {
+        if pointer.current_focus().as_ref() == Some(surface) {
+            with_pointer_constraint(surface, pointer, |constraint| {
+                if let Some(constraint) = constraint {
+                    constraint.activate();
+                }
+            });
+        }
+    }
+
+    fn cursor_position_hint(
+        &mut self,
+        _surface: &WlSurface,
+        _pointer: &PointerHandle<Self>,
+        _location: LogicalPoint<f64, Logical>,
+    ) {
+        // The hint is consumed when a lock is released. Smithay keeps
+        // the committed hint on the constraint; no cursor warp occurs
+        // merely because a client updates it while still locked.
+    }
+}
+
+impl InputMethodHandler for Compositor {
+    fn new_popup(&mut self, surface: PopupSurface) {
+        self.wm.backend_mut().ime_popups.push(surface);
+        self.wm.backend_mut().mark_damaged();
+    }
+
+    fn dismiss_popup(&mut self, surface: PopupSurface) {
+        self.wm.backend_mut().ime_popups.retain(|popup| popup != &surface);
+        self.wm.backend_mut().mark_damaged();
+    }
+
+    fn popup_repositioned(&mut self, _surface: PopupSurface) {
+        self.wm.backend_mut().mark_damaged();
+    }
+
+    fn parent_geometry(&self, parent: &WlSurface) -> Rectangle<i32, Logical> {
+        self.wm
+            .backend()
+            .window_for_surface(parent)
+            .and_then(|id| self.wm.backend().windows.get(&id))
+            .map(|record| {
+                Rectangle::new(
+                    (record.content.pos.x, record.content.pos.y).into(),
+                    (record.content.size.w as i32, record.content.size.h as i32).into(),
+                )
+            })
+            .unwrap_or_default()
+    }
+}
+
+impl smithay::wayland::shell::xdg::dialog::XdgDialogHandler for Compositor {}
+
+impl smithay::wayland::xdg_toplevel_tag::XdgToplevelTagHandler for Compositor {}
+
+impl smithay::wayland::xdg_system_bell::XdgSystemBellHandler for Compositor {
+    fn ring(&mut self, surface: Option<WlSurface>) {
+        let id = surface
+            .as_ref()
+            .and_then(|surface| self.wm.backend().window_for_surface(surface))
+            .and_then(|window| self.wm.client_for_window(window));
+        if let Some(id) = id {
+            self.wm.set_urgent(id, true);
+        }
+        tracing::info!(?id, "client rang the system bell");
+    }
+}
+
+delegate_xdg_activation!(Compositor);
+delegate_cursor_shape!(Compositor);
+delegate_single_pixel_buffer!(Compositor);
+delegate_presentation!(Compositor);
+delegate_relative_pointer!(Compositor);
+delegate_pointer_constraints!(Compositor);
+delegate_pointer_gestures!(Compositor);
+delegate_tablet_manager!(Compositor);
+delegate_xdg_foreign!(Compositor);
+delegate_keyboard_shortcuts_inhibit!(Compositor);
+delegate_text_input_manager!(Compositor);
+delegate_input_method_manager!(Compositor);
+delegate_xdg_dialog!(Compositor);
+delegate_xdg_system_bell!(Compositor);
+delegate_xdg_toplevel_tag!(Compositor);

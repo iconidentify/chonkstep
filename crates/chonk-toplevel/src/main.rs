@@ -234,7 +234,7 @@ impl Dispatch<ZwlrForeignToplevelHandleV1, ()> for App {
                 };
                 top.activated = false;
                 top.minimized = false;
-                for chunk in bytes.chunks_exact(4) {
+                for chunk in bytes.as_chunks::<4>().0 {
                     let value = u32::from_ne_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
                     match State::try_from(value) {
                         Ok(State::Activated) => top.activated = true,

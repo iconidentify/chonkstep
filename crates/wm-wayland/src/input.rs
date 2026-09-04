@@ -60,28 +60,36 @@
 use std::cell::RefCell;
 
 use smithay::backend::input::{
-    AbsolutePositionEvent, Axis, AxisSource, ButtonState, Event, InputBackend, InputEvent,
-    KeyState, KeyboardKeyEvent, MouseButton as InputMouseButton, PointerAxisEvent,
-    PointerButtonEvent, PointerMotionEvent,
+    AbsolutePositionEvent, Axis, AxisSource, ButtonState, Event, GestureBeginEvent, GestureEndEvent,
+    GesturePinchUpdateEvent as BackendPinchUpdateEvent, GestureSwipeUpdateEvent as BackendSwipeUpdateEvent,
+    Device, DeviceCapability, InputBackend, InputEvent, KeyState, KeyboardKeyEvent, MouseButton as InputMouseButton, PointerAxisEvent,
+    PointerButtonEvent, PointerMotionEvent, ProximityState, TabletToolButtonEvent,
+    TabletToolEvent, TabletToolProximityEvent, TabletToolTipEvent, TabletToolTipState,
 };
 use smithay::desktop::utils::under_from_surface_tree;
 use smithay::desktop::{PopupManager, WindowSurfaceType};
 use smithay::input::keyboard::{keysyms, FilterResult, Keycode, Keysym, ModifiersState};
-use smithay::input::pointer::{AxisFrame, ButtonEvent, MotionEvent};
+use smithay::input::pointer::{
+    AxisFrame, ButtonEvent, GestureHoldBeginEvent, GestureHoldEndEvent, GesturePinchBeginEvent, GesturePinchEndEvent,
+    GesturePinchUpdateEvent, GestureSwipeBeginEvent, GestureSwipeEndEvent, GestureSwipeUpdateEvent, MotionEvent,
+    RelativeMotionEvent,
+};
 use smithay::input::Seat;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::utils::{Logical, Point as LogicalPoint, SERIAL_COUNTER};
+use smithay::wayland::keyboard_shortcuts_inhibit::KeyboardShortcutsInhibitorSeat;
+use smithay::wayland::pointer_constraints::{with_pointer_constraint, PointerConstraint};
 use smithay::wayland::shell::wlr_layer;
+use smithay::wayland::tablet_manager::{TabletDescriptor, TabletSeatTrait};
 
 use wm_core::{
-    BackendEvent, DragHandle, KeyCombo, Modifiers, MonitorInfo, MouseButton, ScrollDelta,
-    SurfaceRef, WindowType,
+    BackendEvent, DragHandle, KeyCombo, Modifiers, MonitorInfo, MouseButton, ScrollDelta, SurfaceRef, WindowType,
 };
 use wm_theme_api::{Point, Rect, ResizeEdge};
 
 use crate::state::{
-    Compositor, ManagedSurface, PointerGrabChange, StackEntry, WaylandBackend, WlFrameId,
-    WlShellId, WlWindowId, ROOT_SHELL,
+    Compositor, ManagedSurface, PointerGrabChange, StackEntry, WaylandBackend, WlFrameId, WlShellId, WlWindowId,
+    ROOT_SHELL,
 };
 
 /// The event shorthand every queue in this module speaks.
@@ -130,9 +138,20 @@ struct InputState {
     /// stray release confuses stateful clients (games, VMs) even though
     /// most toolkits shrug it off.
     suppressed_keys: Vec<Keycode>,
+    /// One held `binde` binding. XKB sends repeat parameters to clients
+    /// but compositors must repeat their own bindings themselves.
+    repeating: Option<RepeatingKey>,
     /// Leftover fractions of a wheel notch, for the shell's discrete
     /// scroll channel — see [`ScrollAccumulator`].
     scroll: ScrollAccumulator,
+}
+
+#[derive(Clone, Copy)]
+struct RepeatingKey {
+    keycode: Keycode,
+    combo: KeyCombo,
+    next: std::time::Instant,
+    interval: std::time::Duration,
 }
 
 struct ImplicitGrab {
@@ -165,6 +184,9 @@ pub(crate) enum PressTarget {
     /// but with no managed window behind it for `wm-core` to hear
     /// about.
     Layer(crate::layers::LayerId),
+    /// An input-method candidate popup. It has no wm-core owner, but
+    /// the seat must preserve its client-side click grab.
+    Ime,
     Root,
 }
 
@@ -242,9 +264,8 @@ impl DragGrab {
             Some(PressTarget::Shell(shell)) => backend.shells.contains_key(&shell),
             Some(PressTarget::Frame(frame)) => backend.frames.contains_key(&frame),
             Some(PressTarget::Content(window)) => backend.windows.contains_key(&window),
-            Some(PressTarget::Layer(layer)) => {
-                backend.layers.iter().any(|record| record.id == layer)
-            }
+            Some(PressTarget::Layer(layer)) => backend.layers.iter().any(|record| record.id == layer),
+            Some(PressTarget::Ime) => backend.ime_popups.iter().any(|popup| popup.alive()),
             // The desktop background outlives every drag made on it.
             Some(PressTarget::Root) => true,
         }
@@ -347,10 +368,8 @@ fn resolve_route(backend: &mut WaylandBackend, seat: &Seat<Compositor>, hit: &Hi
 fn reclaim_leaked_grab(state: &mut Compositor, seat: &Seat<Compositor>) {
     let buttons_held = with_input(seat, |input| input.implicit_grab.is_some());
     let backend = state.wm.backend_mut();
-    let leaked = backend
-        .pointer_grab
-        .as_ref()
-        .is_some_and(|grab| grab.expired(buttons_held, grab.anchor_alive(backend)));
+    let leaked =
+        backend.pointer_grab.as_ref().is_some_and(|grab| grab.expired(buttons_held, grab.anchor_alive(backend)));
     if !leaked {
         return;
     }
@@ -429,18 +448,256 @@ pub(crate) fn process_input_event<I: InputBackend>(state: &mut Compositor, event
             | InputEvent::PointerMotion { .. }
             | InputEvent::PointerButton { .. }
             | InputEvent::PointerAxis { .. }
+            | InputEvent::GestureSwipeBegin { .. }
+            | InputEvent::GestureSwipeUpdate { .. }
+            | InputEvent::GestureSwipeEnd { .. }
+            | InputEvent::GesturePinchBegin { .. }
+            | InputEvent::GesturePinchUpdate { .. }
+            | InputEvent::GesturePinchEnd { .. }
+            | InputEvent::GestureHoldBegin { .. }
+            | InputEvent::GestureHoldEnd { .. }
     ) {
         crate::idle::note_activity(state);
     }
     match event {
+        InputEvent::DeviceAdded { device } => {
+            let record = crate::state::InputDeviceRecord {
+                id: device.id(),
+                name: device.name(),
+                keyboard: device.has_capability(DeviceCapability::Keyboard),
+                pointer: device.has_capability(DeviceCapability::Pointer),
+                touch: device.has_capability(DeviceCapability::Touch),
+                tablet: device.has_capability(DeviceCapability::TabletTool)
+                    || device.has_capability(DeviceCapability::TabletPad),
+                switch: device.has_capability(DeviceCapability::Switch),
+            };
+            let devices = &mut state.wm.backend_mut().input_devices;
+            devices.retain(|held| held.id != record.id);
+            devices.push(record);
+            if device.has_capability(DeviceCapability::TabletTool) {
+                state
+                    .seat
+                    .tablet_seat()
+                    .add_tablet::<Compositor>(&state.display_handle, &TabletDescriptor::from(&device));
+            }
+        }
+        InputEvent::DeviceRemoved { device } => {
+            state.wm.backend_mut().input_devices.retain(|held| held.id != device.id());
+            if device.has_capability(DeviceCapability::TabletTool) {
+                state.seat.tablet_seat().remove_tablet(&TabletDescriptor::from(&device));
+            }
+        }
         InputEvent::Keyboard { event } => on_keyboard_key::<I>(state, event),
         InputEvent::PointerMotionAbsolute { event } => on_pointer_move_absolute::<I>(state, event),
         InputEvent::PointerMotion { event } => on_pointer_move_relative::<I>(state, event),
         InputEvent::PointerButton { event } => on_pointer_button::<I>(state, event),
         InputEvent::PointerAxis { event } => on_pointer_axis::<I>(state, event),
-        // Touch, gestures, device hotplug: nothing chonkstep models yet.
+        InputEvent::GestureSwipeBegin { event } => {
+            if let Some(pointer) = state.seat.get_pointer() {
+                pointer.gesture_swipe_begin(
+                    state,
+                    &GestureSwipeBeginEvent {
+                        serial: SERIAL_COUNTER.next_serial(),
+                        time: event.time_msec(),
+                        fingers: event.fingers(),
+                    },
+                );
+            }
+        }
+        InputEvent::GestureSwipeUpdate { event } => {
+            if let Some(pointer) = state.seat.get_pointer() {
+                pointer.gesture_swipe_update(
+                    state,
+                    &GestureSwipeUpdateEvent { time: event.time_msec(), delta: event.delta() },
+                );
+            }
+        }
+        InputEvent::GestureSwipeEnd { event } => {
+            if let Some(pointer) = state.seat.get_pointer() {
+                pointer.gesture_swipe_end(
+                    state,
+                    &GestureSwipeEndEvent {
+                        serial: SERIAL_COUNTER.next_serial(),
+                        time: event.time_msec(),
+                        cancelled: event.cancelled(),
+                    },
+                );
+            }
+        }
+        InputEvent::GesturePinchBegin { event } => {
+            if let Some(pointer) = state.seat.get_pointer() {
+                pointer.gesture_pinch_begin(
+                    state,
+                    &GesturePinchBeginEvent {
+                        serial: SERIAL_COUNTER.next_serial(),
+                        time: event.time_msec(),
+                        fingers: event.fingers(),
+                    },
+                );
+            }
+        }
+        InputEvent::GesturePinchUpdate { event } => {
+            if let Some(pointer) = state.seat.get_pointer() {
+                pointer.gesture_pinch_update(
+                    state,
+                    &GesturePinchUpdateEvent {
+                        time: event.time_msec(),
+                        delta: event.delta(),
+                        scale: event.scale(),
+                        rotation: event.rotation(),
+                    },
+                );
+            }
+        }
+        InputEvent::GesturePinchEnd { event } => {
+            if let Some(pointer) = state.seat.get_pointer() {
+                pointer.gesture_pinch_end(
+                    state,
+                    &GesturePinchEndEvent {
+                        serial: SERIAL_COUNTER.next_serial(),
+                        time: event.time_msec(),
+                        cancelled: event.cancelled(),
+                    },
+                );
+            }
+        }
+        InputEvent::GestureHoldBegin { event } => {
+            if let Some(pointer) = state.seat.get_pointer() {
+                pointer.gesture_hold_begin(
+                    state,
+                    &GestureHoldBeginEvent {
+                        serial: SERIAL_COUNTER.next_serial(),
+                        time: event.time_msec(),
+                        fingers: event.fingers(),
+                    },
+                );
+            }
+        }
+        InputEvent::GestureHoldEnd { event } => {
+            if let Some(pointer) = state.seat.get_pointer() {
+                pointer.gesture_hold_end(
+                    state,
+                    &GestureHoldEndEvent {
+                        serial: SERIAL_COUNTER.next_serial(),
+                        time: event.time_msec(),
+                        cancelled: event.cancelled(),
+                    },
+                );
+            }
+        }
+        InputEvent::TabletToolAxis { event } => on_tablet_axis::<I>(state, event),
+        InputEvent::TabletToolProximity { event } => on_tablet_proximity::<I>(state, event),
+        InputEvent::TabletToolTip { event } => on_tablet_tip::<I>(state, event),
+        InputEvent::TabletToolButton { event } => on_tablet_button::<I>(state, event),
+        // Touch and switch devices remain represented in the device
+        // registry above; their protocol/event policy is independent.
         _ => {}
     }
+}
+
+// -- tablet tools -------------------------------------------------------
+
+fn tablet_handles<I: InputBackend, E: TabletToolEvent<I>>(
+    state: &mut Compositor,
+    event: &E,
+) -> (
+    smithay::wayland::tablet_manager::TabletHandle,
+    smithay::wayland::tablet_manager::TabletToolHandle,
+) {
+    let seat = state.seat.clone();
+    let tablet_seat = seat.tablet_seat();
+    let device = event.device();
+    let tablet_desc = TabletDescriptor::from(&device);
+    let display = state.display_handle.clone();
+    let tablet = tablet_seat
+        .get_tablet(&tablet_desc)
+        .unwrap_or_else(|| tablet_seat.add_tablet::<Compositor>(&display, &tablet_desc));
+    let tool = tablet_seat.add_tool::<Compositor>(state, &display, &event.tool());
+    (tablet, tool)
+}
+
+fn tablet_position<I: InputBackend, E: TabletToolEvent<I>>(state: &Compositor, event: &E) -> LogicalPoint<f64, Logical> {
+    let size = state.wm.backend().output_size;
+    event.position_transformed((size.w as i32, size.h as i32).into())
+}
+
+fn tablet_focus(
+    backend: &WaylandBackend,
+    position: LogicalPoint<f64, Logical>,
+) -> Option<(WlSurface, LogicalPoint<f64, Logical>)> {
+    let at = Point::new(position.x.floor() as i32, position.y.floor() as i32);
+    match hit_at(backend, at, position) {
+        Hit::Content { surface: Some(surface), origin, .. }
+        | Hit::Layer { surface, origin, .. }
+        | Hit::Ime { surface, origin } => Some((surface, origin)),
+        _ => None,
+    }
+}
+
+fn queue_tablet_axes<I: InputBackend, E: TabletToolEvent<I>>(
+    tool: &smithay::wayland::tablet_manager::TabletToolHandle,
+    event: &E,
+) {
+    if event.pressure_has_changed() {
+        tool.pressure(event.pressure());
+    }
+    if event.distance_has_changed() {
+        tool.distance(event.distance());
+    }
+    if event.tilt_has_changed() {
+        tool.tilt(event.tilt());
+    }
+    if event.rotation_has_changed() {
+        tool.rotation(event.rotation());
+    }
+    if event.slider_has_changed() {
+        tool.slider_position(event.slider_position());
+    }
+    if event.wheel_has_changed() {
+        tool.wheel(event.wheel_delta(), event.wheel_delta_discrete());
+    }
+}
+
+fn on_tablet_axis<I: InputBackend>(state: &mut Compositor, event: I::TabletToolAxisEvent) {
+    let position = tablet_position::<I, _>(state, &event);
+    let (tablet, tool) = tablet_handles::<I, _>(state, &event);
+    queue_tablet_axes::<I, _>(&tool, &event);
+    let focus = tablet_focus(state.wm.backend(), position);
+    tool.motion(position, focus, &tablet, SERIAL_COUNTER.next_serial(), event.time_msec());
+    state.wm.backend_mut().mark_damaged();
+}
+
+fn on_tablet_proximity<I: InputBackend>(state: &mut Compositor, event: I::TabletToolProximityEvent) {
+    let position = tablet_position::<I, _>(state, &event);
+    let (tablet, tool) = tablet_handles::<I, _>(state, &event);
+    queue_tablet_axes::<I, _>(&tool, &event);
+    match event.state() {
+        ProximityState::In => {
+            let focus = tablet_focus(state.wm.backend(), position);
+            tool.motion(position, focus, &tablet, SERIAL_COUNTER.next_serial(), event.time_msec());
+        }
+        ProximityState::Out => tool.proximity_out(event.time_msec()),
+    }
+    state.wm.backend_mut().mark_damaged();
+}
+
+fn on_tablet_tip<I: InputBackend>(state: &mut Compositor, event: I::TabletToolTipEvent) {
+    let position = tablet_position::<I, _>(state, &event);
+    let (tablet, tool) = tablet_handles::<I, _>(state, &event);
+    queue_tablet_axes::<I, _>(&tool, &event);
+    let focus = tablet_focus(state.wm.backend(), position);
+    let serial = SERIAL_COUNTER.next_serial();
+    tool.motion(position, focus, &tablet, serial, event.time_msec());
+    match event.tip_state() {
+        TabletToolTipState::Down => tool.tip_down(serial, event.time_msec()),
+        TabletToolTipState::Up => tool.tip_up(event.time_msec()),
+    }
+    state.wm.backend_mut().mark_damaged();
+}
+
+fn on_tablet_button<I: InputBackend>(state: &mut Compositor, event: I::TabletToolButtonEvent) {
+    let (_, tool) = tablet_handles::<I, _>(state, &event);
+    tool.button(event.button(), event.button_state(), SERIAL_COUNTER.next_serial(), event.time_msec());
 }
 
 // -- keyboard ------------------------------------------------------------
@@ -473,6 +730,7 @@ fn on_keyboard_key<I: InputBackend>(state: &mut Compositor, event: I::KeyboardKe
         return;
     };
     let seat = state.seat.clone();
+    let shortcuts_inhibited = seat.keyboard_shortcuts_inhibited();
     keyboard.input::<(), _>(state, keycode, key_state, serial, time, |data, mods, handle| {
         // Level-0 (unshifted) keysym, exactly like `wm-x11`'s
         // `keysym_for_keycode` taking the keycode's first sym: a combo
@@ -482,9 +740,7 @@ fn on_keyboard_key<I: InputBackend>(state: &mut Compositor, event: I::KeyboardKe
         // ISO_Left_Tab — `wm-core`'s cycle-backwards match depends on
         // it). The latin fallback keeps bindings working on non-latin
         // layouts.
-        let keysym = handle
-            .raw_latin_sym_or_raw_current_sym()
-            .unwrap_or_else(|| handle.modified_sym());
+        let keysym = handle.raw_latin_sym_or_raw_current_sym().unwrap_or_else(|| handle.modified_sym());
         let combo = KeyCombo { keysym: keysym.raw(), modifiers: combo_modifiers(mods) };
         match key_state {
             KeyState::Pressed => {
@@ -516,12 +772,31 @@ fn on_keyboard_key<I: InputBackend>(state: &mut Compositor, event: I::KeyboardKe
                 // compositor). Intercepting a bound combo here would
                 // both swallow a password character and run a desktop
                 // action behind the lock.
-                if backend.locked {
+                let works_locked = backend.locked_combos.contains(&combo);
+                if backend.locked && !works_locked {
+                    return FilterResult::Forward;
+                }
+                if shortcuts_inhibited {
                     return FilterResult::Forward;
                 }
                 if backend.keyboard_grabbed || backend.grabbed_combos.contains(&combo) {
-                    backend.queue(WmEvent::KeyPress(combo));
-                    with_input(&seat, |input| input.suppressed_keys.push(keycode));
+                    if !backend.release_combos.contains(&combo) {
+                        backend.queue(WmEvent::KeyPress(combo));
+                    }
+                    let repeating = backend.repeating_combos.contains(&combo);
+                    let delay = backend.repeat_delay;
+                    let rate = backend.repeat_rate.max(1);
+                    with_input(&seat, |input| {
+                        input.suppressed_keys.push(keycode);
+                        if repeating {
+                            input.repeating = Some(RepeatingKey {
+                                keycode,
+                                combo,
+                                next: std::time::Instant::now() + delay,
+                                interval: std::time::Duration::from_secs_f64(1.0 / rate as f64),
+                            });
+                        }
+                    });
                     FilterResult::Intercept(())
                 } else {
                     FilterResult::Forward
@@ -536,7 +811,15 @@ fn on_keyboard_key<I: InputBackend>(state: &mut Compositor, event: I::KeyboardKe
                 if backend.keyboard_grabbed && !backend.locked {
                     backend.queue(WmEvent::KeyRelease(combo));
                 }
+                if backend.release_combos.contains(&combo)
+                    && (!backend.locked || backend.locked_combos.contains(&combo))
+                {
+                    backend.queue(WmEvent::KeyRelease(combo));
+                }
                 let suppressed = with_input(&seat, |input| {
+                    if input.repeating.is_some_and(|repeat| repeat.keycode == keycode) {
+                        input.repeating = None;
+                    }
                     match input.suppressed_keys.iter().position(|k| *k == keycode) {
                         Some(index) => {
                             input.suppressed_keys.swap_remove(index);
@@ -553,6 +836,33 @@ fn on_keyboard_key<I: InputBackend>(state: &mut Compositor, event: I::KeyboardKe
             }
         }
     });
+}
+
+/// Queues due compositor-side repeats. Called once per event-loop
+/// dispatch; catches up a bounded number after a stalled frame so a
+/// resumed desktop cannot emit an unbounded burst.
+pub(crate) fn tick_repeating_binding(state: &mut Compositor) {
+    let seat = state.seat.clone();
+    let now = std::time::Instant::now();
+    let mut due = Vec::new();
+    with_input(&seat, |input| {
+        let Some(repeat) = input.repeating.as_mut() else {
+            return;
+        };
+        for _ in 0..4 {
+            if repeat.next > now {
+                break;
+            }
+            due.push(repeat.combo);
+            repeat.next += repeat.interval;
+        }
+        if repeat.next <= now {
+            repeat.next = now + repeat.interval;
+        }
+    });
+    for combo in due {
+        state.wm.backend_mut().queue(WmEvent::KeyPress(combo));
+    }
 }
 
 /// Which virtual terminal a press asks for, if any: 1-12, or `None`.
@@ -614,26 +924,70 @@ fn combo_modifiers(mods: &ModifiersState) -> Modifiers {
 /// one does everywhere. Mapping a tablet to a single output is a
 /// libinput device-configuration feature this session does not read
 /// yet.
-fn on_pointer_move_absolute<I: InputBackend>(
-    state: &mut Compositor,
-    event: I::PointerMotionAbsoluteEvent,
-) {
+fn on_pointer_move_absolute<I: InputBackend>(state: &mut Compositor, event: I::PointerMotionAbsoluteEvent) {
     let size = state.wm.backend().output_size;
     let position = event.position_transformed((size.w as i32, size.h as i32).into());
-    pointer_moved(state, position, event.time_msec());
+    pointer_moved(state, position, event.time_msec(), None);
 }
 
 /// Relative motion (the libinput/session path): accumulate onto the
 /// current location and confine the result to the outputs — the
 /// compositor equivalent of the X server keeping the pointer on the
 /// screen.
-fn on_pointer_move_relative<I: InputBackend>(
-    state: &mut Compositor,
-    event: I::PointerMotionEvent,
-) {
-    let position =
-        confine_to_outputs(&state.wm.backend().monitors, state.pointer_location + event.delta());
-    pointer_moved(state, position, event.time_msec());
+fn on_pointer_move_relative<I: InputBackend>(state: &mut Compositor, event: I::PointerMotionEvent) {
+    let relative = RelativeMotionEvent {
+        delta: event.delta(),
+        delta_unaccel: event.delta_unaccel(),
+        utime: event.time_msec() as u64 * 1_000,
+    };
+    let proposed = confine_to_outputs(&state.wm.backend().monitors, state.pointer_location + event.delta());
+    let mut position = proposed;
+    if let Some((pointer, surface)) = state
+        .seat
+        .get_pointer()
+        .and_then(|pointer| pointer.current_focus().map(|surface| (pointer, surface)))
+    {
+        let current_origin = surface_focus_at(state.wm.backend(), state.pointer_location, &surface).map(|(_, origin)| origin);
+        with_pointer_constraint(&surface, &pointer, |constraint| {
+            let Some(constraint) = constraint else { return };
+            if !constraint.is_active() {
+                constraint.activate();
+            }
+            match &*constraint {
+                PointerConstraint::Locked(_) => position = state.pointer_location,
+                PointerConstraint::Confined(confined) => {
+                    let inside = match (confined.region(), current_origin) {
+                        (Some(region), Some(origin)) => region.contains((
+                            (proposed.x - origin.x).floor() as i32,
+                            (proposed.y - origin.y).floor() as i32,
+                        )),
+                        // With no explicit region the complete surface
+                        // is the confinement region.
+                        _ => surface_focus_at(state.wm.backend(), proposed, &surface).is_some(),
+                    };
+                    if !inside {
+                        position = state.pointer_location;
+                    }
+                }
+            }
+        });
+    }
+    pointer_moved(state, position, event.time_msec(), Some(relative));
+}
+
+fn surface_focus_at(
+    backend: &WaylandBackend,
+    position: LogicalPoint<f64, Logical>,
+    wanted: &WlSurface,
+) -> Option<(WlSurface, LogicalPoint<f64, Logical>)> {
+    let at = Point::new(position.x.floor() as i32, position.y.floor() as i32);
+    match hit_at(backend, at, position) {
+        Hit::Content { surface: Some(surface), origin, .. }
+        | Hit::Layer { surface, origin, .. }
+        | Hit::Ime { surface, origin }
+            if &surface == wanted => Some((surface, origin)),
+        _ => None,
+    }
 }
 
 /// Pulls a pointer position onto the nearest output.
@@ -652,22 +1006,15 @@ fn on_pointer_move_relative<I: InputBackend>(
 /// Note this only confines; it does not stop the pointer at a monitor
 /// edge. A drag across the boundary passes straight through, which is
 /// the behavior every desktop with a contiguous layout has.
-fn confine_to_outputs(
-    monitors: &[MonitorInfo],
-    position: LogicalPoint<f64, Logical>,
-) -> LogicalPoint<f64, Logical> {
+fn confine_to_outputs(monitors: &[MonitorInfo], position: LogicalPoint<f64, Logical>) -> LogicalPoint<f64, Logical> {
     let mut best: Option<(f64, LogicalPoint<f64, Logical>)> = None;
     for monitor in monitors {
         let rect = monitor.geometry;
         // The far edge is the last pixel INSIDE the monitor, matching
         // `Rect::contains`'s half-open convention — a pointer at exactly
         // `pos.x + size.w` belongs to the next monitor, or to nothing.
-        let x = position
-            .x
-            .clamp(rect.pos.x as f64, (rect.pos.x + rect.size.w.max(1) as i32 - 1) as f64);
-        let y = position
-            .y
-            .clamp(rect.pos.y as f64, (rect.pos.y + rect.size.h.max(1) as i32 - 1) as f64);
+        let x = position.x.clamp(rect.pos.x as f64, (rect.pos.x + rect.size.w.max(1) as i32 - 1) as f64);
+        let y = position.y.clamp(rect.pos.y as f64, (rect.pos.y + rect.size.h.max(1) as i32 - 1) as f64);
         // Zero for a position already on this monitor, which is what
         // makes the common case fall out of the same comparison.
         let distance = (position.x - x).powi(2) + (position.y - y).powi(2);
@@ -685,7 +1032,12 @@ fn confine_to_outputs(
 /// routing (honoring an implicit grab), then one seat `motion` +
 /// `frame` so smithay's location tracking and client enter/leave stay
 /// correct no matter where the event was routed.
-fn pointer_moved(state: &mut Compositor, position: LogicalPoint<f64, Logical>, time: u32) {
+fn pointer_moved(
+    state: &mut Compositor,
+    position: LogicalPoint<f64, Logical>,
+    time: u32,
+    relative: Option<RelativeMotionEvent>,
+) {
     let serial = SERIAL_COUNTER.next_serial();
     // Floor, not round: a pointer at x=10.7 is over pixel 10, and
     // rounding at the output's far edge would name a pixel outside
@@ -712,6 +1064,9 @@ fn pointer_moved(state: &mut Compositor, position: LogicalPoint<f64, Logical>, t
     if state.wm.backend().locked {
         state.wm.backend_mut().mark_damaged();
         let focus = lock_hit(state.wm.backend(), position);
+        if let Some(relative) = &relative {
+            pointer.relative_motion(state, focus.clone(), relative);
+        }
         pointer.motion(state, focus, &MotionEvent { location: position, serial, time });
         pointer.frame(state);
         return;
@@ -796,17 +1151,13 @@ fn pointer_moved(state: &mut Compositor, position: LogicalPoint<f64, Logical>, t
         }
         Some(PressTarget::Shell(shell)) => {
             if let Some(record) = backend.shells.get(&shell) {
-                backend
-                    .shell_motions
-                    .push_back((shell, local_to(at, record.geometry.pos)));
+                backend.shell_motions.push_back((shell, local_to(at, record.geometry.pos)));
             }
             backend.queue(WmEvent::PointerMotion { root: at, surface_local: None });
         }
         Some(PressTarget::Frame(frame)) => {
-            let surface_local = backend
-                .frames
-                .get(&frame)
-                .map(|record| (SurfaceRef::Frame(frame), local_to(at, record.geometry.pos)));
+            let surface_local =
+                backend.frames.get(&frame).map(|record| (SurfaceRef::Frame(frame), local_to(at, record.geometry.pos)));
             backend.queue(WmEvent::PointerMotion { root: at, surface_local });
         }
         Some(PressTarget::Content(_)) => {
@@ -824,6 +1175,11 @@ fn pointer_moved(state: &mut Compositor, position: LogicalPoint<f64, Logical>, t
             // already carrying it, so the hit under the pointer passes
             // through exactly as the `Content` arm's does.
             if let Hit::Layer { surface, origin, .. } = &hit {
+                focus = Some((surface.clone(), *origin));
+            }
+        }
+        Some(PressTarget::Ime) => {
+            if let Hit::Ime { surface, origin } = &hit {
                 focus = Some((surface.clone(), *origin));
             }
         }
@@ -859,12 +1215,18 @@ fn pointer_moved(state: &mut Compositor, position: LogicalPoint<f64, Logical>, t
                 // as for content.
                 focus = Some((surface.clone(), *origin));
             }
+            Hit::Ime { surface, origin } => {
+                focus = Some((surface.clone(), *origin));
+            }
             Hit::Root => {
                 backend.queue(WmEvent::PointerMotion { root: at, surface_local: None });
             }
         },
     }
 
+    if let Some(relative) = &relative {
+        pointer.relative_motion(state, focus.clone(), relative);
+    }
     pointer.motion(state, focus, &MotionEvent { location: position, serial, time });
     pointer.frame(state);
 }
@@ -902,10 +1264,7 @@ fn on_pointer_button<I: InputBackend>(state: &mut Compositor, event: I::PointerB
     // queues, no WM events, no implicit-grab bookkeeping to inherit
     // after unlock.
     if state.wm.backend().locked {
-        pointer.button(
-            state,
-            &ButtonEvent { serial, time, button: event.button_code(), state: event.state() },
-        );
+        pointer.button(state, &ButtonEvent { serial, time, button: event.button_code(), state: event.state() });
         pointer.frame(state);
         return;
     }
@@ -962,8 +1321,7 @@ fn on_pointer_button<I: InputBackend>(state: &mut Compositor, event: I::PointerB
                 }
                 None => {
                     let target = press_target(&hit);
-                    input.implicit_grab =
-                        Some(ImplicitGrab { target, buttons: button.into_iter().collect() });
+                    input.implicit_grab = Some(ImplicitGrab { target, buttons: button.into_iter().collect() });
                     target
                 }
             }
@@ -1012,12 +1370,7 @@ fn on_pointer_button<I: InputBackend>(state: &mut Compositor, event: I::PointerB
     match target {
         PressTarget::Shell(shell) => {
             if let (Some(button), Some(record)) = (button, backend.shells.get(&shell)) {
-                backend.shell_clicks.push_back((
-                    shell,
-                    local_to(at, record.geometry.pos),
-                    button,
-                    pressed,
-                ));
+                backend.shell_clicks.push_back((shell, local_to(at, record.geometry.pos), button, pressed));
             }
         }
         PressTarget::Frame(frame) => {
@@ -1052,11 +1405,7 @@ fn on_pointer_button<I: InputBackend>(state: &mut Compositor, event: I::PointerB
             let wm_drag_gesture =
                 pressed && drag_gesture && matches!(button, Some(MouseButton::Left) | Some(MouseButton::Right));
             if let Some(button) = button {
-                let local = backend
-                    .windows
-                    .get(&window)
-                    .map(|record| local_to(at, record.content.pos))
-                    .unwrap_or(at);
+                let local = backend.windows.get(&window).map(|record| local_to(at, record.content.pos)).unwrap_or(at);
                 backend.queue(WmEvent::PointerButton {
                     surface: SurfaceRef::Client(window),
                     local,
@@ -1080,6 +1429,9 @@ fn on_pointer_button<I: InputBackend>(state: &mut Compositor, event: I::PointerB
             // manages no window here, so there is nothing to tell it.
             // The keyboard-interactivity side of the click is handled
             // below, after the borrow of the ledger ends.
+            deliver_to_client = !route.dragging;
+        }
+        PressTarget::Ime => {
             deliver_to_client = !route.dragging;
         }
         PressTarget::Root => {
@@ -1131,15 +1483,15 @@ fn on_pointer_button<I: InputBackend>(state: &mut Compositor, event: I::PointerB
     if pressed && !route.dragging && !state.focus_grab.is_active() {
         match target {
             PressTarget::Layer(layer) => claim_on_demand_focus(state, layer, serial),
+            // Clicking a candidate must leave keyboard focus on the
+            // text-input surface that owns the IME session.
+            PressTarget::Ime => {}
             _ => release_on_demand_focus(state, serial),
         }
     }
 
     if deliver_to_client {
-        pointer.button(
-            state,
-            &ButtonEvent { serial, time, button: event.button_code(), state: event.state() },
-        );
+        pointer.button(state, &ButtonEvent { serial, time, button: event.button_code(), state: event.state() });
         pointer.frame(state);
     }
 }
@@ -1227,6 +1579,7 @@ fn grab_excludes(state: &Compositor, hit: &Hit) -> bool {
                 .and_then(|record| record.surface.wl_surface());
             (surface.clone(), root)
         }
+        Hit::Ime { surface, .. } => (Some(surface.clone()), Some(surface.clone())),
         // Our own chrome around a client's window. The client owns no
         // pixel of it, so only the whole window being whitelisted keeps
         // a titlebar click from dismissing.
@@ -1259,6 +1612,7 @@ fn press_target(hit: &Hit) -> PressTarget {
         Hit::FrameChrome { frame, .. } => PressTarget::Frame(*frame),
         Hit::Content { window, .. } => PressTarget::Content(*window),
         Hit::Layer { layer, .. } => PressTarget::Layer(*layer),
+        Hit::Ime { .. } => PressTarget::Ime,
         Hit::Root => PressTarget::Root,
     }
 }
@@ -1282,14 +1636,12 @@ fn on_pointer_axis<I: InputBackend>(state: &mut Compositor, event: I::PointerAxi
     let horizontal = event
         .amount(Axis::Horizontal)
         .unwrap_or_else(|| event.amount_v120(Axis::Horizontal).unwrap_or(0.0) * 15.0 / 120.0);
-    let vertical = event
-        .amount(Axis::Vertical)
-        .unwrap_or_else(|| event.amount_v120(Axis::Vertical).unwrap_or(0.0) * 15.0 / 120.0);
+    let vertical =
+        event.amount(Axis::Vertical).unwrap_or_else(|| event.amount_v120(Axis::Vertical).unwrap_or(0.0) * 15.0 / 120.0);
 
     let mut frame = AxisFrame::new(event.time_msec()).source(event.source());
     if horizontal != 0.0 {
-        frame = frame
-            .relative_direction(Axis::Horizontal, event.relative_direction(Axis::Horizontal));
+        frame = frame.relative_direction(Axis::Horizontal, event.relative_direction(Axis::Horizontal));
         frame = frame.value(Axis::Horizontal, horizontal);
         if let Some(discrete) = event.amount_v120(Axis::Horizontal) {
             frame = frame.v120(Axis::Horizontal, discrete as i32);
@@ -1463,7 +1815,7 @@ fn route_shell_scroll<I: InputBackend>(state: &mut Compositor, event: &I::Pointe
         // to the seat below, which is where they went before this
         // channel existed. A layer surface is a client too (a bar
         // scrolling through workspaces wants the continuous axis).
-        PressTarget::Frame(_) | PressTarget::Content(_) | PressTarget::Layer(_) => {
+        PressTarget::Frame(_) | PressTarget::Content(_) | PressTarget::Layer(_) | PressTarget::Ime => {
             with_input(&seat, |input| input.scroll.reset());
             return false;
         }
@@ -1513,6 +1865,32 @@ fn route_shell_scroll<I: InputBackend>(state: &mut Compositor, event: &I::Pointe
 /// clicks land on things the user cannot see, so both sides cite
 /// `backend_impl.rs`'s stacking-band contract.
 fn hit_at(backend: &WaylandBackend, at: Point, position: LogicalPoint<f64, Logical>) -> Hit {
+    // Candidate windows are rendered above every layer and therefore
+    // get the first chance at pointer input.
+    for popup in backend.ime_popups.iter().rev() {
+        if !popup.alive() {
+            continue;
+        }
+        let Some(parent) = popup.get_parent() else { continue };
+        let location = popup.location();
+        let global = Point::new(parent.location.loc.x + location.x, parent.location.loc.y + location.y);
+        let parent_rect = Rect::new(
+            Point::new(parent.location.loc.x, parent.location.loc.y),
+            wm_theme_api::Size::new(parent.location.size.w.max(0) as u32, parent.location.size.h.max(0) as u32),
+        );
+        let anchor: LogicalPoint<f64, Logical> = (global.x as f64, global.y as f64).into();
+        let scale = crate::xdg::effective_surface_scale(
+            crate::xdg::committed_surface_scale(popup.wl_surface()),
+            backend.scale_at(parent_rect),
+        );
+        let probe = surface_probe(anchor, position, scale);
+        if let Some((surface, found)) =
+            under_from_surface_tree(popup.wl_surface(), probe, (global.x, global.y), WindowSurfaceType::ALL)
+        {
+            return Hit::Ime { surface, origin: seat_origin(position, probe, found.to_f64()) };
+        }
+    }
+
     // The `Overlay` layer band beats everything — the renderer draws
     // it in front of even the dock and the shell's menus, so it must
     // win the click there too (every band insertion in this walk
@@ -1615,10 +1993,8 @@ fn hit_at(backend: &WaylandBackend, at: Point, position: LogicalPoint<f64, Logic
         if !record.geometry.contains(at) {
             continue;
         }
-        let over_content = backend
-            .windows
-            .get(&record.window)
-            .is_some_and(|window| window.mapped && window.content.contains(at));
+        let over_content =
+            backend.windows.get(&record.window).is_some_and(|window| window.mapped && window.content.contains(at));
         if over_content {
             if let Some(hit) = content_hit(backend, Some(*frame), record.window, position) {
                 return hit;
@@ -1672,10 +2048,7 @@ fn layer_band_hit(
         }
         let root = record.surface.wl_surface();
         let output_scale = backend.scale_at(record.geometry);
-        let scale = crate::xdg::effective_surface_scale(
-            crate::xdg::committed_surface_scale(root),
-            output_scale,
-        );
+        let scale = crate::xdg::effective_surface_scale(crate::xdg::committed_surface_scale(root), output_scale);
         for (popup, offset) in PopupManager::popups_for_surface(root) {
             let popup_surface = popup.wl_surface();
             let popup_origin: LogicalPoint<i32, Logical> = (
@@ -1683,15 +2056,11 @@ fn layer_band_hit(
                 record.geometry.pos.y + crate::xdg::scale_length(offset.y, scale),
             )
                 .into();
-            let anchor: LogicalPoint<f64, Logical> =
-                (popup_origin.x as f64, popup_origin.y as f64).into();
+            let anchor: LogicalPoint<f64, Logical> = (popup_origin.x as f64, popup_origin.y as f64).into();
             let probe = surface_probe(
                 anchor,
                 position,
-                crate::xdg::effective_surface_scale(
-                    crate::xdg::committed_surface_scale(popup_surface),
-                    output_scale,
-                ),
+                crate::xdg::effective_surface_scale(crate::xdg::committed_surface_scale(popup_surface), output_scale),
             );
             if let Some((surface, found)) =
                 under_from_surface_tree(popup_surface, probe, popup_origin, WindowSurfaceType::ALL)
@@ -1706,15 +2075,11 @@ fn layer_band_hit(
         if !record.geometry.contains(at) {
             continue;
         }
-        let anchor: LogicalPoint<f64, Logical> =
-            (record.geometry.pos.x as f64, record.geometry.pos.y as f64).into();
+        let anchor: LogicalPoint<f64, Logical> = (record.geometry.pos.x as f64, record.geometry.pos.y as f64).into();
         let probe = surface_probe(anchor, position, scale);
-        if let Some((surface, found)) = under_from_surface_tree(
-            root,
-            probe,
-            (record.geometry.pos.x, record.geometry.pos.y),
-            WindowSurfaceType::ALL,
-        ) {
+        if let Some((surface, found)) =
+            under_from_surface_tree(root, probe, (record.geometry.pos.x, record.geometry.pos.y), WindowSurfaceType::ALL)
+        {
             return Some(Hit::Layer {
                 layer: record.id,
                 surface,
@@ -1746,8 +2111,7 @@ fn lock_hit(
             continue;
         }
         let root = entry.surface.wl_surface();
-        let anchor: LogicalPoint<f64, Logical> =
-            (monitor.geometry.pos.x as f64, monitor.geometry.pos.y as f64).into();
+        let anchor: LogicalPoint<f64, Logical> = (monitor.geometry.pos.x as f64, monitor.geometry.pos.y as f64).into();
         let probe = surface_probe(
             anchor,
             position,
@@ -1799,25 +2163,16 @@ pub(crate) enum PointerSubject {
 /// frame-edge resize keeps its edge cursor up even as the pointer
 /// overshoots the chrome onto content or desktop mid-drag, which every
 /// fast resize does.
-pub(crate) fn pointer_subject(
-    backend: &WaylandBackend,
-    position: LogicalPoint<f64, Logical>,
-) -> PointerSubject {
+pub(crate) fn pointer_subject(backend: &WaylandBackend, position: LogicalPoint<f64, Logical>) -> PointerSubject {
     // Locked: the locker's own cursor choice applies over its surface
     // (swaylock hides the pointer, and that statement must hold);
     // everywhere else — a blanked output — the compositor's arrow.
     if backend.locked {
-        return if lock_hit(backend, position).is_some() {
-            PointerSubject::Client
-        } else {
-            PointerSubject::Desktop
-        };
+        return if lock_hit(backend, position).is_some() { PointerSubject::Client } else { PointerSubject::Desktop };
     }
     if let Some(grab) = &backend.pointer_grab {
         return match grab.target() {
-            Some(PressTarget::Frame(frame)) => {
-                PointerSubject::Frame(backend.frame_cursors.get(&frame).copied())
-            }
+            Some(PressTarget::Frame(frame)) => PointerSubject::Frame(backend.frame_cursors.get(&frame).copied()),
             _ => PointerSubject::Desktop,
         };
     }
@@ -1825,10 +2180,8 @@ pub(crate) fn pointer_subject(
     match hit_at(backend, at, position) {
         // A layer surface is client territory like any window content:
         // its `set_cursor` choice applies while the pointer is on it.
-        Hit::Content { .. } | Hit::Layer { .. } => PointerSubject::Client,
-        Hit::FrameChrome { frame, .. } => {
-            PointerSubject::Frame(backend.frame_cursors.get(&frame).copied())
-        }
+        Hit::Content { .. } | Hit::Layer { .. } | Hit::Ime { .. } => PointerSubject::Client,
+        Hit::FrameChrome { frame, .. } => PointerSubject::Frame(backend.frame_cursors.get(&frame).copied()),
         Hit::Shell { .. } | Hit::Root => PointerSubject::Desktop,
     }
 }
@@ -1868,11 +2221,9 @@ enum Hit {
     /// delivery contract as `Content` — `surface` is the exact
     /// wl_surface to focus and `origin` the point the seat subtracts
     /// from (see [`seat_origin`]).
-    Layer {
-        layer: crate::layers::LayerId,
-        surface: WlSurface,
-        origin: LogicalPoint<f64, Logical>,
-    },
+    Layer { layer: crate::layers::LayerId, surface: WlSurface, origin: LogicalPoint<f64, Logical> },
+    /// An input-method candidate popup, above every normal layer.
+    Ime { surface: WlSurface, origin: LogicalPoint<f64, Logical> },
     /// The desktop background.
     Root,
 }
@@ -1928,12 +2279,9 @@ fn content_hit(
     // window-geometry offset — so that a click resolves to the same
     // pixel the user is looking at. Anchoring on the window instead
     // would send every client coordinates shifted by its drop shadow.
-    let content_origin = Point::new(
-        record.content.pos.x - record.content_offset.x,
-        record.content.pos.y - record.content_offset.y,
-    );
-    let anchor: LogicalPoint<f64, Logical> =
-        (content_origin.x as f64, content_origin.y as f64).into();
+    let content_origin =
+        Point::new(record.content.pos.x - record.content_offset.x, record.content.pos.y - record.content_offset.y);
+    let anchor: LogicalPoint<f64, Logical> = (content_origin.x as f64, content_origin.y as f64).into();
     let (surface, origin) = match &root_surface {
         Some(root) => {
             let scale = backend.window_surface_scale(record);
@@ -2017,10 +2365,8 @@ fn popup_hit(
     };
     // Popup offsets are measured from the parent surface's own origin,
     // which is the buffer's, so the same correction as `hit_at` applies.
-    let content_origin = Point::new(
-        record.content.pos.x - record.content_offset.x,
-        record.content.pos.y - record.content_offset.y,
-    );
+    let content_origin =
+        Point::new(record.content.pos.x - record.content_offset.x, record.content.pos.y - record.content_offset.y);
     // The offset is surface-local to the parent, so it is measured in
     // the parent's pixels and converts by the parent's factor — while
     // the popup's own tree is walked at the popup's, because a menu is
@@ -2036,8 +2382,7 @@ fn popup_hit(
             content_origin.y + crate::xdg::scale_length(offset.y, parent_scale),
         )
             .into();
-        let anchor: LogicalPoint<f64, Logical> =
-            (popup_origin.x as f64, popup_origin.y as f64).into();
+        let anchor: LogicalPoint<f64, Logical> = (popup_origin.x as f64, popup_origin.y as f64).into();
         let probe = surface_probe(
             anchor,
             position,
@@ -2247,7 +2592,11 @@ mod tests {
         // A wheel tilted right: positive horizontal on both platforms,
         // so no negation.
         let right = axis_notches(Some(120.0), Some(15.0));
-        assert_eq!(scroll.fold(DOCK, 0.0, right), Some(ScrollDelta { up: 0, right: 1 }), "must equal wm-x11's button 7");
+        assert_eq!(
+            scroll.fold(DOCK, 0.0, right),
+            Some(ScrollDelta { up: 0, right: 1 }),
+            "must equal wm-x11's button 7"
+        );
     }
 
     /// A delta the drain would queue is never empty, matching
@@ -2475,11 +2824,7 @@ mod tests {
         let mut backend = ledger();
         backend.frame_cursors.insert(FRAME, ResizeEdge::SouthEast);
         backend.grab_pointer_for_drag();
-        backend
-            .pointer_grab
-            .as_mut()
-            .unwrap()
-            .anchor(Some(PressTarget::Frame(FRAME)), &Hit::Root);
+        backend.pointer_grab.as_mut().unwrap().anchor(Some(PressTarget::Frame(FRAME)), &Hit::Root);
         match pointer_subject(&backend, (5.0, 5.0).into()) {
             PointerSubject::Frame(Some(ResizeEdge::SouthEast)) => {}
             _ => panic!("a drag anchored on a frame must show that frame's cursor"),
@@ -2493,11 +2838,7 @@ mod tests {
     fn a_content_drag_shows_the_compositors_own_cursor() {
         let mut backend = ledger();
         backend.grab_pointer_for_drag();
-        backend
-            .pointer_grab
-            .as_mut()
-            .unwrap()
-            .anchor(Some(PressTarget::Content(WINDOW)), &Hit::Root);
+        backend.pointer_grab.as_mut().unwrap().anchor(Some(PressTarget::Content(WINDOW)), &Hit::Root);
         assert!(matches!(pointer_subject(&backend, (5.0, 5.0).into()), PointerSubject::Desktop));
     }
 

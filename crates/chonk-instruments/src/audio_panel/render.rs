@@ -290,7 +290,7 @@ fn elide_middle(fonts: &mut cosmic_text::FontSystem, font: &ip::PanelFont, text:
 /// near enough that the trimmed word was not worth keeping.
 fn snap_back(chars: &[char], at: usize) -> usize {
     let floor = at.saturating_sub(6);
-    (floor..at).rev().find(|&i| chars[i] == ' ').map_or(at, |i| i)
+    (floor..at).rev().find(|&i| chars[i] == ' ').unwrap_or(at)
 }
 
 /// Pushes a cut point forward to the start of the next word, on the

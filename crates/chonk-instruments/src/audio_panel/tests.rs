@@ -602,7 +602,7 @@ fn a_clamped_grant_is_filled_floor_to_floor() {
         let m = PanelMetrics::granted(56, w, h, 3);
         let buf = render_audio_panel(&theme, &mut fs, &mut sc, &m, &panel);
         assert_eq!((buf.width, buf.height), (w, h), "grant {w}x{h}");
-        assert!(buf.pixels.chunks_exact(4).all(|px| px[3] == 255), "grant {w}x{h}: no hole under a clamped panel");
+        assert!(buf.pixels.as_chunks::<4>().0.iter().all(|px| px[3] == 255), "grant {w}x{h}: no hole under a clamped panel");
     }
 }
 
@@ -687,7 +687,7 @@ fn the_empty_panel_is_a_face_not_a_hole() {
         let m = granted(56, 0);
         let buf = render_audio_panel(&theme, &mut fs, &mut sc, &m, &panel);
         assert_eq!((buf.width, buf.height), (m.width, m.height), "theme {}", theme.id);
-        assert!(buf.pixels.chunks_exact(4).all(|px| px[3] == 255), "theme {}: fully painted, fully opaque", theme.id);
+        assert!(buf.pixels.as_chunks::<4>().0.iter().all(|px| px[3] == 255), "theme {}: fully painted, fully opaque", theme.id);
     }
 }
 
@@ -697,6 +697,6 @@ fn every_theme_renders_the_populated_panel_opaquely() {
     let panel = fixture_panel();
     for theme in all_themes() {
         let buf = render_audio_panel(&theme, &mut fs, &mut sc, &m56(), &panel);
-        assert!(buf.pixels.chunks_exact(4).all(|px| px[3] == 255), "theme {}: the panel ground must be opaque", theme.id);
+        assert!(buf.pixels.as_chunks::<4>().0.iter().all(|px| px[3] == 255), "theme {}: the panel ground must be opaque", theme.id);
     }
 }

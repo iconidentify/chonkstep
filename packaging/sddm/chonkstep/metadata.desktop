@@ -1,0 +1,14 @@
+[SddmGreeterTheme]
+Name=chonkstep
+Description=Omarchy-native login with chonkstep session selection
+Author=chonkstep contributors
+License=GPL-3.0-only
+Type=sddm-theme
+Version=1.0
+QtVersion=6
+Website=https://github.com/iconidentify/chonkstep
+MainScript=Main.qml
+ConfigFile=theme.conf
+TranslationsDirectory=translations
+Theme-Id=chonkstep
+Theme-API=2.0

@@ -18,6 +18,36 @@ on:
   pull_request:
 
 jobs:
+  omarchy-install:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install validation tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y desktop-file-utils shellcheck
+
+      - name: Validate package and installer scripts
+        run: |
+          bash -n \
+            packaging/arch/PKGBUILD \
+            packaging/arch/PKGBUILD-release \
+            scripts/install.sh \
+            scripts/omarchy-install-desktop-chonkstep \
+            scripts/omarchy-remove-desktop-chonkstep \
+            scripts/test-omarchy-install.sh \
+            scripts/verify-install.sh \
+            scripts/wayland-session.sh
+          shellcheck \
+            scripts/omarchy-install-desktop-chonkstep \
+            scripts/omarchy-remove-desktop-chonkstep \
+            scripts/test-omarchy-install.sh \
+            scripts/verify-install.sh
+
+      - name: Exercise fresh Omarchy login integration
+        run: scripts/test-omarchy-install.sh
+
   test:
     runs-on: ubuntu-latest
     steps:
@@ -426,8 +456,8 @@ jobs:
       #
       # `chonk-toplevel` was added the day it was written for the same
       # reason: it is a ~500-line Wayland client with no dependency on
-      # anything else here, it arrived clean, and it is what
-      # `omarchy/shims/` puts on a user's keybindings.
+      # anything else here, it arrived clean, and it is a small public
+      # client of the foreign-toplevel protocol.
       #
       # `chonk-hyprland-ipc` was added the day it was written, and it is
       # the strongest case on this list. Every JSON field name, every

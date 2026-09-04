@@ -13,7 +13,8 @@
 #      for screen sharing) and a Rust toolchain if the system has none.
 #   2. Builds the release binaries - chonkstep, chonkstep-wayland and
 #      omarchy-export-themes.
-#   3. Installs both session entries pointing at this checkout's
+#   3. Installs the X11, direct Wayland, and uwsm Wayland session
+#      entries pointing at this checkout's
 #      launcher scripts - /usr/share/xsessions/chonkstep.desktop
 #      (scripts/xsession.sh) and
 #      /usr/share/wayland-sessions/chonkstep.desktop
@@ -131,7 +132,8 @@ sudo pacman -S --needed --noconfirm \
     ttf-dejavu gsfonts $jb_font noto-fonts \
     libxkbcommon libglvnd mesa xorg-xwayland \
     libdrm libinput systemd-libs seatd \
-    pipewire xdg-desktop-portal xdg-desktop-portal-wlr xdg-desktop-portal-gtk
+    pipewire xdg-desktop-portal xdg-desktop-portal-wlr xdg-desktop-portal-gtk \
+    uwsm
 
 if ! command -v cargo >/dev/null 2>&1; then
     echo "Installing Rust toolchain..."
@@ -185,11 +187,69 @@ cat > "$entry_tmp" <<DESKTOP
 [Desktop Entry]
 Name=chonkstep (Wayland)
 Comment=The chonkstep desktop as a native Wayland compositor
-Exec=${repo}/scripts/wayland-session.sh
+Exec=${repo}/scripts/chonkstep-session
 DesktopNames=chonkstep
 Type=Application
 DESKTOP
 sudo install -Dm644 "$entry_tmp" /usr/share/wayland-sessions/chonkstep.desktop
+
+# uwsm's generic session wrapper supplies graphical-session.target,
+# desktop autostart lifetime, readiness and environment cleanup. Keep
+# the direct entry above for non-systemd and recovery use.
+cat > "$entry_tmp" <<DESKTOP
+[Desktop Entry]
+Name=chonkstep (uwsm)
+Comment=The chonkstep desktop managed by the Universal Wayland Session Manager
+Exec=uwsm start -g -1 -e -D chonkstep chonkstep.desktop
+TryExec=uwsm
+DesktopNames=chonkstep
+Type=Application
+DESKTOP
+sudo install -Dm644 "$entry_tmp" /usr/share/wayland-sessions/chonkstep-uwsm.desktop
+
+# Omarchy's stock greeter exposes no picker. Install our own small picker
+# theme and a lexically late conf.d drop-in instead of editing Omarchy's
+# package-owned theme; either Omarchy refresh command can then run without
+# undoing it. The late name is required because fresh Omarchy writes its
+# theme choice to 99-omarchy-login.conf.
+sudo install -Dm644 packaging/sddm/chonkstep/Main.qml \
+    /usr/share/sddm/themes/chonkstep/Main.qml
+sudo install -Dm644 packaging/sddm/chonkstep/metadata.desktop \
+    /usr/share/sddm/themes/chonkstep/metadata.desktop
+sudo install -Dm644 packaging/sddm/chonkstep/theme.conf \
+    /usr/share/sddm/themes/chonkstep/theme.conf
+sudo install -Dm644 packaging/sddm/zz-chonkstep-theme.conf \
+    /etc/sddm.conf.d/zz-chonkstep-theme.conf
+
+sddm_value() {
+    local wanted_section="$1" wanted_key="$2" directory file
+    {
+        for directory in /usr/lib/sddm/sddm.conf.d /etc/sddm.conf.d; do
+            [ -d "$directory" ] || continue
+            while IFS= read -r file; do
+                cat "$file"
+            done < <(find "$directory" -maxdepth 1 -type f -name '*.conf' -print | LC_ALL=C sort)
+        done
+        [ ! -f /etc/sddm.conf ] || cat /etc/sddm.conf
+    } | awk -v wanted_section="$wanted_section" -v wanted_key="$wanted_key" '
+        /^\[/ { section=$0; next }
+        section == "[" wanted_section "]" && index($0, wanted_key "=") == 1 {
+            print substr($0, length(wanted_key) + 2)
+        }
+    ' | tail -n 1
+}
+
+# Encrypted fresh Omarchy installs autologin. Preserve its User setting and
+# override only the selected session; otherwise show the picker, which defaults
+# to the exact "chonkstep (uwsm)" entry while remaining user-selectable.
+if [ -n "$(sddm_value Autologin User)" ]; then
+    sudo install -Dm644 packaging/sddm/zz-chonkstep-autologin.conf \
+        /etc/sddm.conf.d/zz-chonkstep-autologin.conf
+else
+    sudo rm -f /etc/sddm.conf.d/zz-chonkstep-autologin.conf
+fi
+sudo rm -f /etc/sddm.conf.d/20-chonkstep-theme.conf
+echo "Installed chonkstep's SDDM integration. Undo: sudo rm -f /etc/sddm.conf.d/zz-chonkstep-{theme,autologin}.conf"
 
 # The portal backend map: ScreenCast/Screenshot to the wlr backend
 # (screen sharing — see docs/screen-sharing.md), the rest to GTK. The
@@ -295,17 +355,10 @@ TAILSCALE
     echo
 fi
 
-# How this machine logs in decides which instructions are honest.
-# Three shapes in the wild:
-#   - a display manager with a session picker: log out, pick chonkstep;
-#   - Omarchy 4: SDDM is enabled, but its stock greeter theme
-#     (Theme Current=omarchy) draws NO session picker - it takes a
-#     password and hardwires the login to the Hyprland (uwsm) session
-#     (see its Main.qml: sessionIndex searches the list for "uwsm").
-#     chonkstep can be perfectly registered and never appear; those
-#     users need the autologin route or a theme with a picker;
-#   - no display manager at all (Omarchy <= 3 and minimal Arch): the
-#     TTY routes.
+# How this machine logs in decides which instructions are honest. The
+# installer has already enabled chonkstep's own SDDM picker without
+# touching Omarchy's package-owned theme; other display managers use
+# their existing picker, and machines with no DM use uwsm from a TTY.
 has_dm=""
 for dm in sddm gdm lightdm greetd lemurs ly; do
     if systemctl is-enabled "$dm" >/dev/null 2>&1; then
@@ -313,13 +366,6 @@ for dm in sddm gdm lightdm greetd lemurs ly; do
         break
     fi
 done
-# SDDM's config: conf.d sorted then sddm.conf, last assignment wins -
-# close enough for a diagnostic.
-sddm_theme=""
-if [ "$has_dm" = "sddm" ]; then
-    sddm_theme="$(cat /etc/sddm.conf.d/*.conf /etc/sddm.conf 2>/dev/null | sed -n 's/^Current=//p' | tail -n 1)"
-fi
-
 # Whether this machine has logind, which decides whether the Wayland
 # session needs any seat setup at all. libseat prefers logind and falls
 # back to the seatd daemon; on a systemd machine (every Omarchy, and
@@ -342,29 +388,22 @@ chonkstep-wayland (the Smithay compositor) - and both are real login
 sessions, running the same desktop.
 
 DONE
-if [ "$sddm_theme" = "omarchy" ]; then
+if [ "$has_dm" = "sddm" ]; then
     cat <<DONE
-  - This is Omarchy: SDDM is the login manager, but its stock greeter
-    theme has no session picker - it logs every interactive login into
-    Hyprland, so chonkstep will NOT appear at the login screen even
-    though both entries are installed. Two ways in:
-      1. Make chonkstep the boot session (autologin):
-           printf '[Autologin]\nUser=$USER\nSession=chonkstep.desktop\n' |
-             sudo tee /etc/sddm.conf.d/20-chonkstep-session.conf
-         Session=chonkstep.desktop resolves to the Wayland session
-         (SDDM searches wayland-sessions first). Remove the file to go
-         back to Hyprland.
-      2. Switch the greeter to a theme with a session menu (SDDM ships
-         elarun, maldives, maya): edit /etc/sddm.conf.d/10-theme.conf
-         and set Current= to one of them, then pick "chonkstep
-         (Wayland)" from its session menu at login.
+  - SDDM is configured for "chonkstep (uwsm)". When autologin is
+    enabled it starts that session directly; otherwise the picker is
+    shown and defaults to it. The direct "chonkstep (Wayland)" entry
+    remains available for non-systemd/recovery use.
+  - Omarchy's greeter and autologin files were not edited. Undo only
+    chonkstep's integration with:
+      sudo rm -f /etc/sddm.conf.d/zz-chonkstep-{theme,autologin}.conf
 DONE
 elif [ -n "$has_dm" ]; then
     cat <<DONE
   - X11 session: log out and pick "chonkstep" in ${has_dm}'s session list.
-  - Wayland session: log out and pick "chonkstep (Wayland)" in the same
-    list. It takes the graphics device, the input devices, and the VT
-    for itself - a session in its own right, not a window inside one.
+  - Wayland session: log out and pick "chonkstep (uwsm)" in the same
+    list (or the direct "chonkstep (Wayland)" recovery entry). It takes
+    the graphics device, input devices and VT for itself.
 DONE
 else
     cat <<DONE
@@ -372,12 +411,13 @@ else
     boot straight into Hyprland), so switch to a TTY (Ctrl+Alt+F3),
     log in, and run:
       startx ${repo}/scripts/xsession.sh
-  - Wayland session: from that same TTY, instead run:
-      exec ${repo}/scripts/wayland-session.sh
-    (exec, so the compositor replaces the login shell and the session
-    ends when it does. No startx: it is the display server.)
+  - Wayland session: from that same TTY, prefer the managed route:
+      exec uwsm start -g -1 -e -D chonkstep chonkstep.desktop
+    It activates graphical-session.target, desktop autostart and clean
+    logout. Without systemd/uwsm, use the direct recovery route:
+      exec ${repo}/scripts/chonkstep-session
     To get a graphical session picker offering both instead, install
-    and enable a display manager (e.g. sddm) - both session entries are
+    and enable a display manager (e.g. sddm) - all session entries are
     already in place.
 DONE
 fi

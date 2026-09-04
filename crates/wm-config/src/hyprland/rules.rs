@@ -52,7 +52,7 @@
 use std::sync::Arc;
 
 use regex::{Regex, RegexBuilder};
-use wm_core::{FloatDecision, FloatPolicy, Size};
+use wm_core::{FloatDecision, FloatPolicy, Size, WindowRuleDecision};
 
 use super::directive::{Matcher, WindowRule};
 
@@ -78,7 +78,10 @@ impl Pattern {
             .dfa_size_limit(1 << 20)
             .build()
             .ok()
-            .map(|regex| Self { regex, source: pattern.to_string() })
+            .map(|regex| Self {
+                regex,
+                source: pattern.to_string(),
+            })
     }
 
     /// Hyprland matches window rules by *search*, not by full match:
@@ -103,6 +106,13 @@ struct Rule {
     /// Logical pixels, as Omarchy writes them. Scaled at the point of
     /// use, exactly as the hardcoded 875×600 always was.
     size: Option<Size>,
+    idle_inhibit: Option<bool>,
+    pin: Option<bool>,
+    no_focus: Option<bool>,
+    no_initial_focus: Option<bool>,
+    focus_on_activate: Option<bool>,
+    fullscreen: Option<bool>,
+    maximize: Option<bool>,
 }
 
 impl Rule {
@@ -112,7 +122,8 @@ impl Rule {
         // `suppress_event` and `tag +default-opacity` rules are written
         // that way. Correct, and harmless here: neither carries a
         // float property.
-        self.class.as_ref().is_none_or(|p| p.matches(class)) && self.title.as_ref().is_none_or(|p| p.matches(title))
+        self.class.as_ref().is_none_or(|p| p.matches(class))
+            && self.title.as_ref().is_none_or(|p| p.matches(title))
     }
 
     fn describe(&self) -> String {
@@ -167,6 +178,21 @@ impl FloatRules {
                 if rule.center == Some(true) {
                     what.push("centered".to_string());
                 }
+                for (enabled, label) in [
+                    (rule.idle_inhibit, "idle inhibited"),
+                    (rule.pin, "pinned"),
+                    (rule.no_focus, "never focused"),
+                    (rule.no_initial_focus, "no initial focus"),
+                    (rule.fullscreen, "fullscreen"),
+                    (rule.maximize, "maximized"),
+                ] {
+                    if enabled == Some(true) {
+                        what.push(label.to_string());
+                    }
+                }
+                if rule.focus_on_activate == Some(false) {
+                    what.push("activation cannot focus".to_string());
+                }
                 format!("{} -> {}", rule.describe(), what.join(", "))
             })
             .collect()
@@ -211,7 +237,41 @@ impl FloatPolicy for FloatRules {
         if float.is_none() && size.is_none() {
             return None;
         }
-        Some(FloatDecision { size, center: center.unwrap_or(true) })
+        Some(FloatDecision {
+            size,
+            center: center.unwrap_or(true),
+        })
+    }
+
+    fn window_decision_for(&self, class: &str, title: &str) -> WindowRuleDecision {
+        let mut decision = WindowRuleDecision::default();
+        for rule in &self.rules {
+            if !rule.matches(class, title) {
+                continue;
+            }
+            if let Some(value) = rule.idle_inhibit {
+                decision.idle_inhibit = value;
+            }
+            if let Some(value) = rule.pin {
+                decision.pin = value;
+            }
+            if let Some(value) = rule.no_focus {
+                decision.no_focus = value;
+            }
+            if let Some(value) = rule.no_initial_focus {
+                decision.no_initial_focus = value;
+            }
+            if let Some(value) = rule.focus_on_activate {
+                decision.focus_on_activate = Some(value);
+            }
+            if let Some(value) = rule.fullscreen {
+                decision.fullscreen = value;
+            }
+            if let Some(value) = rule.maximize {
+                decision.maximize = value;
+            }
+        }
+        decision
     }
 }
 
@@ -238,47 +298,78 @@ pub fn compile(rules: &[WindowRule]) -> (FloatRules, Vec<String>) {
             }
             let Some(tag) = value.strip_prefix('+') else {
                 if let Some(removed) = value.strip_prefix('-') {
-                    notes.push(format!("window rule removes tag {removed}: tag removal is not followed"));
+                    notes.push(format!(
+                        "window rule removes tag {removed}: tag removal is not followed"
+                    ));
                 }
                 continue;
             };
             // A rule that tags on the strength of another tag would
             // need a second resolution pass; see the module docs.
             if rule.matchers.iter().any(|m| matches!(m, Matcher::Tag(_))) {
-                notes.push(format!("window rule tags {tag} based on another tag: chained tags are not followed"));
+                notes.push(format!(
+                    "window rule tags {tag} based on another tag: chained tags are not followed"
+                ));
                 continue;
             }
             let (class, title, refused) = split_matchers(&rule.matchers);
             if let Some(refused) = refused {
-                notes.push(format!("window rule tagging {tag} carries {refused}, which this reader does not implement: rule skipped"));
+                notes.push(format!(
+                    "window rule tagging {tag} carries {refused}, which this reader does not implement: rule skipped"
+                ));
                 continue;
             }
-            tagged.entry(tag.to_string()).or_default().push((class, title));
+            tagged
+                .entry(tag.to_string())
+                .or_default()
+                .push((class, title));
         }
     }
     // Pass two: the rules that actually say something about floating.
     let mut out = FloatRules::default();
     for rule in rules {
-        let Some(spec) = float_spec(rule) else { continue };
+        let Some(spec) = rule_spec(rule, &mut notes) else {
+            continue;
+        };
         let (class, title, refused) = split_matchers(&rule.matchers);
         if let Some(refused) = refused {
-            notes.push(format!("float rule carries {refused}, which this reader does not implement: rule skipped"));
+            notes.push(format!(
+                "float rule carries {refused}, which this reader does not implement: rule skipped"
+            ));
             continue;
         }
-        let tags: Vec<&String> = rule.matchers.iter().filter_map(|m| if let Matcher::Tag(t) = m { Some(t) } else { None }).collect();
+        let tags: Vec<&String> = rule
+            .matchers
+            .iter()
+            .filter_map(|m| {
+                if let Matcher::Tag(t) = m {
+                    Some(t)
+                } else {
+                    None
+                }
+            })
+            .collect();
         if tags.is_empty() {
             push(&mut out, &mut notes, class, title, &spec);
             continue;
         }
         for tag in tags {
             let Some(carriers) = tagged.get(tag) else {
-                notes.push(format!("float rule matches tag {tag}, which no rule in this configuration adds: rule skipped"));
+                notes.push(format!(
+                    "float rule matches tag {tag}, which no rule in this configuration adds: rule skipped"
+                ));
                 continue;
             };
             for (carrier_class, carrier_title) in carriers {
                 // The tag rule's own class/title matchers, if it had
                 // any, still apply on top of the carrier's.
-                push(&mut out, &mut notes, carrier_class.clone().or_else(|| class.clone()), carrier_title.clone().or_else(|| title.clone()), &spec);
+                push(
+                    &mut out,
+                    &mut notes,
+                    carrier_class.clone().or_else(|| class.clone()),
+                    carrier_title.clone().or_else(|| title.clone()),
+                    &spec,
+                );
             }
         }
     }
@@ -287,7 +378,7 @@ pub fn compile(rules: &[WindowRule]) -> (FloatRules, Vec<String>) {
 
 /// The float-relevant half of a rule's properties, or `None` if it has
 /// none — which is most of them.
-fn float_spec(rule: &WindowRule) -> Option<Spec> {
+fn rule_spec(rule: &WindowRule, notes: &mut Vec<String>) -> Option<Spec> {
     let mut spec = Spec::default();
     let mut any = false;
     for (name, value) in &rule.props {
@@ -309,7 +400,10 @@ fn float_spec(rule: &WindowRule) -> Option<Spec> {
                 // reader has no monitor to evaluate it against, and a
                 // guessed size is a window in the wrong place.
                 let mut parts = value.split_whitespace();
-                match (parts.next().and_then(|w| w.parse().ok()), parts.next().and_then(|h| h.parse().ok())) {
+                match (
+                    parts.next().and_then(|w| w.parse().ok()),
+                    parts.next().and_then(|h| h.parse().ok()),
+                ) {
                     (Some(w), Some(h)) if w > 0 && h > 0 => {
                         spec.size = Some(Size::new(w, h));
                         any = true;
@@ -326,7 +420,42 @@ fn float_spec(rule: &WindowRule) -> Option<Spec> {
                     }
                 }
             }
-            _ => {}
+            "idle_inhibit" | "idleinhibit" => {
+                spec.idle_inhibit = Some(truthy(value));
+                any = true;
+            }
+            "pin" | "pinned" => {
+                spec.pin = Some(truthy(value));
+                any = true;
+            }
+            "no_focus" | "nofocus" => {
+                spec.no_focus = Some(truthy(value));
+                any = true;
+            }
+            "no_initial_focus" | "noinitialfocus" => {
+                spec.no_initial_focus = Some(truthy(value));
+                any = true;
+            }
+            "focus_on_activate" | "focusonactivate" => {
+                spec.focus_on_activate = Some(truthy(value));
+                any = true;
+            }
+            "fullscreen" => {
+                spec.fullscreen = Some(truthy(value));
+                any = true;
+            }
+            "maximize" | "maximized" => {
+                spec.maximize = Some(truthy(value));
+                any = true;
+            }
+            // `tag +name` is consumed by compile's first pass. A tag
+            // matcher likewise participates in expansion, so neither
+            // is a silently dropped property.
+            "tag" => {}
+            unsupported => notes.push(format!(
+                "window rule property {unsupported} on {} is not implemented: property skipped",
+                describe_matchers(rule)
+            )),
         }
     }
     any.then_some(spec)
@@ -338,17 +467,34 @@ struct Spec {
     center: Option<bool>,
     size: Option<Size>,
     unreadable_size: Option<String>,
+    idle_inhibit: Option<bool>,
+    pin: Option<bool>,
+    no_focus: Option<bool>,
+    no_initial_focus: Option<bool>,
+    focus_on_activate: Option<bool>,
+    fullscreen: Option<bool>,
+    maximize: Option<bool>,
 }
 
-fn push(out: &mut FloatRules, notes: &mut Vec<String>, class: Option<String>, title: Option<String>, spec: &Spec) {
+fn push(
+    out: &mut FloatRules,
+    notes: &mut Vec<String>,
+    class: Option<String>,
+    title: Option<String>,
+    spec: &Spec,
+) {
     if let Some(text) = &spec.unreadable_size {
-        notes.push(format!("float rule sizes a window with the expression {text:?}, which needs a monitor to evaluate: size ignored"));
+        notes.push(format!(
+            "float rule sizes a window with the expression {text:?}, which needs a monitor to evaluate: size ignored"
+        ));
     }
     let class = match class {
         Some(text) => match Pattern::compile(&text) {
             Some(pattern) => Some(pattern),
             None => {
-                notes.push(format!("float rule has an unreadable class pattern {text:?}: rule skipped"));
+                notes.push(format!(
+                    "float rule has an unreadable class pattern {text:?}: rule skipped"
+                ));
                 return;
             }
         },
@@ -358,13 +504,46 @@ fn push(out: &mut FloatRules, notes: &mut Vec<String>, class: Option<String>, ti
         Some(text) => match Pattern::compile(&text) {
             Some(pattern) => Some(pattern),
             None => {
-                notes.push(format!("float rule has an unreadable title pattern {text:?}: rule skipped"));
+                notes.push(format!(
+                    "float rule has an unreadable title pattern {text:?}: rule skipped"
+                ));
                 return;
             }
         },
         None => None,
     };
-    out.rules.push(Rule { class, title, float: spec.float, center: spec.center, size: spec.size });
+    out.rules.push(Rule {
+        class,
+        title,
+        float: spec.float,
+        center: spec.center,
+        size: spec.size,
+        idle_inhibit: spec.idle_inhibit,
+        pin: spec.pin,
+        no_focus: spec.no_focus,
+        no_initial_focus: spec.no_initial_focus,
+        focus_on_activate: spec.focus_on_activate,
+        fullscreen: spec.fullscreen,
+        maximize: spec.maximize,
+    });
+}
+
+fn describe_matchers(rule: &WindowRule) -> String {
+    let parts: Vec<String> = rule
+        .matchers
+        .iter()
+        .map(|matcher| match matcher {
+            Matcher::Class(value) => format!("match:class {value}"),
+            Matcher::Title(value) => format!("match:title {value}"),
+            Matcher::Tag(value) => format!("match:tag {value}"),
+            Matcher::Other { key, value } => format!("match:{key} {value}"),
+        })
+        .collect();
+    if parts.is_empty() {
+        "any window".into()
+    } else {
+        parts.join(", ")
+    }
 }
 
 /// Splits a rule's matchers into the class and title patterns this
@@ -377,7 +556,9 @@ fn split_matchers(matchers: &[Matcher]) -> (Option<String>, Option<String>, Opti
             Matcher::Class(pattern) => class = Some(pattern.clone()),
             Matcher::Title(pattern) => title = Some(pattern.clone()),
             Matcher::Tag(_) => {}
-            Matcher::Other { key, value } => return (class, title, Some(format!("match:{key} {value}"))),
+            Matcher::Other { key, value } => {
+                return (class, title, Some(format!("match:{key} {value}")))
+            }
         }
     }
     (class, title, None)
@@ -385,5 +566,8 @@ fn split_matchers(matchers: &[Matcher]) -> (Option<String>, Option<String>, Opti
 
 /// Hyprland's spelling of a boolean rule property.
 fn truthy(value: &str) -> bool {
-    !matches!(value.trim().to_ascii_lowercase().as_str(), "off" | "0" | "false" | "no")
+    !matches!(
+        value.trim().to_ascii_lowercase().as_str(),
+        "off" | "0" | "false" | "no"
+    )
 }

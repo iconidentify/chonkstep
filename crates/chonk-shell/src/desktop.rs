@@ -37,13 +37,13 @@ use chonk_dock_proto::wire::{InputEvent, InputKind, PanelCloseReason};
 use crate::dockapp::panel::{self as instrument, InstrumentPanel};
 use crate::dockapp::tile::{clamp_panel_grant, reserved_filter, RemoteTile, ServiceContext, StopReason, TileState};
 use crate::dockapp::{self, DockHost, Farewell};
-use crate::overview::{OverviewHit, OverviewItem, OverviewPanel};
 use crate::omarchy_shell::BarVisibility;
+use crate::overview::{OverviewHit, OverviewItem, OverviewPanel};
 use crate::wallpaper::Wallpaper;
 use crate::widgets::{
-    run_detached, BluetoothWidget, ClockWidget, DockInput, DockItem, DockWidget, Effect, NetTrafficWidget, PanelCtx, PanelEvent,
-    PanelFrame, PanelReaction, PowerWidget, SamplerRegistry, SoundWidget, SupervisedWidget, SysLoadWidget, WifiWidget,
-    WorkspaceShared,
+    run_detached, BluetoothWidget, ClockWidget, DockInput, DockItem, DockWidget, Effect, NetTrafficWidget, PanelCtx,
+    PanelEvent, PanelFrame, PanelReaction, PowerWidget, SamplerRegistry, SoundWidget, SupervisedWidget, SysLoadWidget,
+    WifiWidget, WorkspaceShared,
 };
 
 /// The keysym the open instrument panel grabs for its dismissal —
@@ -243,7 +243,10 @@ pub enum RootMenuAction {
     /// index from a generation it has since rebuilt — a menu opened
     /// before an Omarchy upgrade landed cannot run the command that
     /// now sits at that index.
-    OmarchyCommand { index: usize, generation: u64 },
+    OmarchyCommand {
+        index: usize,
+        generation: u64,
+    },
     Exit,
 }
 
@@ -452,10 +455,7 @@ fn applications_items(apps: &[crate::apps::AppEntry]) -> Vec<MenuItem> {
     by_category
         .into_iter()
         .map(|(category, entries)| MenuItem::Submenu { label: category.label().to_string(), items: entries })
-        .chain(std::iter::once(MenuItem::Action {
-            label: "About chonkstep".to_string(),
-            action: ACTION_LAUNCH_ABOUT,
-        }))
+        .chain(std::iter::once(MenuItem::Action { label: "About chonkstep".to_string(), action: ACTION_LAUNCH_ABOUT }))
         .collect()
 }
 
@@ -540,7 +540,10 @@ fn root_menu_items(
     // current choice, so a glance at the menu says whether the bar is
     // on.
     if let Some(bar) = omarchy_bar {
-        items.push(MenuItem::Action { label: bullet_label(!bar.is_hidden(), "Omarchy Bar"), action: ACTION_OMARCHY_BAR });
+        items.push(MenuItem::Action {
+            label: bullet_label(!bar.is_hidden(), "Omarchy Bar"),
+            action: ACTION_OMARCHY_BAR,
+        });
     }
     // After chonkstep's own choices and before Exit: it is a guest's
     // menu inside the host's, so it sits below the host's rows and
@@ -569,22 +572,25 @@ fn resolve_action(action: u32, bounds: RootMenuBounds) -> Option<RootMenuAction>
         // principle overflow u32, and the subtraction form has no such
         // edge. Checked before the app range, whose upper bound is
         // this range's base.
-        action if action >= ACTION_OMARCHY_BASE
-            && ((action - ACTION_OMARCHY_BASE) as usize) < bounds.omarchy_count =>
+        action if action >= ACTION_OMARCHY_BASE && ((action - ACTION_OMARCHY_BASE) as usize) < bounds.omarchy_count => {
             Some(RootMenuAction::OmarchyCommand {
                 index: (action - ACTION_OMARCHY_BASE) as usize,
                 generation: bounds.omarchy_generation,
-            }),
-        action if (ACTION_APP_BASE..ACTION_OMARCHY_BASE).contains(&action)
-            && ((action - ACTION_APP_BASE) as usize) < bounds.app_count =>
-            Some(RootMenuAction::LaunchApp((action - ACTION_APP_BASE) as usize)),
-        action if (ACTION_WALLPAPER_BASE..ACTION_WALLPAPER_OMARCHY).contains(&action) => Some(RootMenuAction::SetWallpaper(
-            Wallpaper::ALL[(action - ACTION_WALLPAPER_BASE) as usize],
-        )),
+            })
+        }
+        action
+            if (ACTION_APP_BASE..ACTION_OMARCHY_BASE).contains(&action)
+                && ((action - ACTION_APP_BASE) as usize) < bounds.app_count =>
+        {
+            Some(RootMenuAction::LaunchApp((action - ACTION_APP_BASE) as usize))
+        }
+        action if (ACTION_WALLPAPER_BASE..ACTION_WALLPAPER_OMARCHY).contains(&action) => {
+            Some(RootMenuAction::SetWallpaper(Wallpaper::ALL[(action - ACTION_WALLPAPER_BASE) as usize]))
+        }
         ACTION_WALLPAPER_OMARCHY => Some(RootMenuAction::SetWallpaper(Wallpaper::Omarchy)),
-        action if (ACTION_THEME_BASE..ACTION_THEME_OMARCHY).contains(&action) => Some(RootMenuAction::SetTheme(
-            wm_theme::default_theme::CHOICES[(action - ACTION_THEME_BASE) as usize].0,
-        )),
+        action if (ACTION_THEME_BASE..ACTION_THEME_OMARCHY).contains(&action) => {
+            Some(RootMenuAction::SetTheme(wm_theme::default_theme::CHOICES[(action - ACTION_THEME_BASE) as usize].0))
+        }
         ACTION_THEME_OMARCHY => Some(RootMenuAction::SetTheme(wm_theme::omarchy::ID)),
         _ => None,
     }
@@ -669,10 +675,9 @@ fn resolve_window_action(action: u32, workspace_count: usize) -> Option<WindowMe
         ACTION_WINDOW_KILL => Some(WindowMenuAction::Kill),
         // `..=`, not `..`: one past the last workspace is the "New
         // Workspace" entry.
-        action if (ACTION_MOVE_TO_BASE..=ACTION_MOVE_TO_BASE + workspace_count as u32)
-            .contains(&action) => Some(WindowMenuAction::MoveToWorkspace(
-            (action - ACTION_MOVE_TO_BASE) as usize,
-        )),
+        action if (ACTION_MOVE_TO_BASE..=ACTION_MOVE_TO_BASE + workspace_count as u32).contains(&action) => {
+            Some(WindowMenuAction::MoveToWorkspace((action - ACTION_MOVE_TO_BASE) as usize))
+        }
         _ => None,
     }
 }
@@ -696,9 +701,7 @@ enum MenuSession {
     /// its slot: a middle-drag or a crash can change the column while
     /// the menu is open, and an index would then command a different
     /// tile than the one the user right-clicked.
-    DockItem {
-        id: String,
-    },
+    DockItem { id: String },
     Window {
         /// Who the open menu commands — attached to every resolved
         /// action so the dispatch in `crate::shell` needs no other
@@ -721,11 +724,11 @@ enum MenuSession {
 fn resolve_session_action(session: &MenuSession, action: u32) -> Option<MenuAction> {
     match session {
         MenuSession::Root { bounds } => resolve_action(action, *bounds).map(MenuAction::Root),
-        MenuSession::DockItem { id } => resolve_dock_item_action(action).map(|command| MenuAction::DockItem(id.clone(), command)),
-        MenuSession::Window { client, workspace_count } => {
-            resolve_window_action(action, *workspace_count)
-                .map(|window_action| MenuAction::Window(*client, window_action))
+        MenuSession::DockItem { id } => {
+            resolve_dock_item_action(action).map(|command| MenuAction::DockItem(id.clone(), command))
         }
+        MenuSession::Window { client, workspace_count } => resolve_window_action(action, *workspace_count)
+            .map(|window_action| MenuAction::Window(*client, window_action)),
     }
 }
 
@@ -752,7 +755,10 @@ fn dock_item_menu_items(tile: &RemoteTile, now: std::time::Instant) -> Vec<MenuI
     let entry = tile.entry();
     let facts = vec![
         MenuItem::Action { label: format!("id: {}", entry.id), action: ACTION_DOCK_ABOUT_ROW },
-        MenuItem::Action { label: format!("state: {}", describe_tile_state(tile.state(), now)), action: ACTION_DOCK_ABOUT_ROW },
+        MenuItem::Action {
+            label: format!("state: {}", describe_tile_state(tile.state(), now)),
+            action: ACTION_DOCK_ABOUT_ROW,
+        },
         MenuItem::Action {
             label: match tile.pid() {
                 Some(pid) => format!("pid: {pid}"),
@@ -775,7 +781,9 @@ fn dock_item_menu_items(tile: &RemoteTile, now: std::time::Instant) -> Vec<MenuI
 /// minutes" call for different reactions.
 fn describe_tile_state(state: TileState, now: std::time::Instant) -> String {
     match state {
-        TileState::Waiting { until } => format!("restarting in {:?}", until.saturating_duration_since(now)),
+        TileState::Waiting { until } => {
+            format!("restarting in {:?}", until.saturating_duration_since(now))
+        }
         TileState::Starting { .. } => "starting".to_string(),
         // Worth naming rather than folding into "starting": the user
         // just restarted the shell, and "still running from before the
@@ -819,7 +827,10 @@ impl<Id: Copy + Eq + std::fmt::Debug> ShellMenu<Id> {
         // screen no click can reach the resolver, so the placeholder
         // is never consulted — and zero is the value that would refuse
         // every app and Omarchy id anyway.
-        Self { menu: CascadeMenu::new(ROOT_MENU_TITLE, DESKTOP_BG), session: MenuSession::Root { bounds: RootMenuBounds::default() } }
+        Self {
+            menu: CascadeMenu::new(ROOT_MENU_TITLE, DESKTOP_BG),
+            session: MenuSession::Root { bounds: RootMenuBounds::default() },
+        }
     }
 
     /// Swaps in a fresh controller titled for the session about to
@@ -831,7 +842,12 @@ impl<Id: Copy + Eq + std::fmt::Debug> ShellMenu<Id> {
     /// predecessor the replacement never knew about, and a dropped but
     /// unclosed session would leak its popup windows and its pointer
     /// grab.
-    fn begin_session<H: wm_theme_api::PopupHost<PopupId = Id>>(&mut self, host: &mut H, session: MenuSession, title: String) {
+    fn begin_session<H: wm_theme_api::PopupHost<PopupId = Id>>(
+        &mut self,
+        host: &mut H,
+        session: MenuSession,
+        title: String,
+    ) {
         self.menu.close(host);
         self.menu = CascadeMenu::new(title, DESKTOP_BG);
         self.session = session;
@@ -923,6 +939,10 @@ impl<Id: Copy + Eq + std::fmt::Debug> ShellMenu<Id> {
         self.menu.close(host);
     }
 
+    fn is_open(&self) -> bool {
+        self.menu.is_open()
+    }
+
     fn hover<H: wm_theme_api::PopupHost<PopupId = Id>>(
         &mut self,
         host: &mut H,
@@ -934,7 +954,12 @@ impl<Id: Copy + Eq + std::fmt::Debug> ShellMenu<Id> {
         self.menu.hover(host, theme, font_system, window, local);
     }
 
-    fn tick<H: wm_theme_api::PopupHost<PopupId = Id>>(&mut self, host: &mut H, theme: &Theme, font_system: &mut cosmic_text::FontSystem) {
+    fn tick<H: wm_theme_api::PopupHost<PopupId = Id>>(
+        &mut self,
+        host: &mut H,
+        theme: &Theme,
+        font_system: &mut cosmic_text::FontSystem,
+    ) {
         self.menu.tick(host, theme, font_system);
     }
 }
@@ -1550,11 +1575,10 @@ pub struct Desktop<B: Backend> {
     /// whichever kind lost. The surface, chrome and placement are the
     /// same [`InstrumentPanel`] whoever the owner is.
     builtin_panel: Option<BuiltinPanel>,
-    /// Whether the shell holds the bare-Escape key grab that makes
-    /// panel dismissal work while the panel is up. Tracked so the grab
-    /// and its release are exactly paired whatever order the teardown
-    /// paths fire in.
-    panel_key_grabbed: bool,
+    /// Whether the shell holds the shared bare-Escape grab used by
+    /// transient menus and instrument panels. Tracked so one transient
+    /// closing cannot release Escape while the other is still visible.
+    escape_key_grabbed: bool,
     /// A tile id whose next `Release` is swallowed: the toggle gesture
     /// consumed its `Press` (re-clicking the owning tile dismisses the
     /// panel), and delivering the orphan release would hand the dockapp
@@ -1600,7 +1624,16 @@ impl<B: Backend> Desktop<B> {
     /// caller must still pass both — the shell cannot recover the
     /// primary's origin from a size.
     #[allow(clippy::too_many_arguments)]
-    pub fn new(backend: &mut B, screen: Size, primary: Rect, scale: f32, theme: &wm_theme::Theme, appearance: wm_theme::Appearance, apps: Vec<crate::apps::AppEntry>, fonts: wm_theme::FontState) -> Self {
+    pub fn new(
+        backend: &mut B,
+        screen: Size,
+        primary: Rect,
+        scale: f32,
+        theme: &wm_theme::Theme,
+        appearance: wm_theme::Appearance,
+        apps: Vec<crate::apps::AppEntry>,
+        fonts: wm_theme::FontState,
+    ) -> Self {
         let tile = tile_px(scale);
         let pad = icon_pad_px(scale);
         // The dock is exactly one tile wide, tiles touch directly with
@@ -1645,7 +1678,10 @@ impl<B: Backend> Desktop<B> {
         // injection door uses (`CHONKSTEP_TEST_SOCKET`), so a
         // production dock never shows it. See `widgets::panel_probe`.
         if std::env::var_os("CHONKSTEP_TEST_PANEL_TILE").is_some() {
-            builtins.push(DockItem::builtin("builtin:panel-probe", Box::new(crate::widgets::panel_probe::PanelProbeWidget::new())));
+            builtins.push(DockItem::builtin(
+                "builtin:panel-probe",
+                Box::new(crate::widgets::panel_probe::PanelProbeWidget::new()),
+            ));
         }
         let items: Vec<SupervisedWidget> = builtins
             .into_iter()
@@ -1726,7 +1762,7 @@ impl<B: Backend> Desktop<B> {
             overview: OverviewPanel::default(),
             instrument_panel: InstrumentPanel::default(),
             builtin_panel: None,
-            panel_key_grabbed: false,
+            escape_key_grabbed: false,
             panel_swallow_release: None,
             theme_id,
             apps,
@@ -2062,22 +2098,17 @@ impl<B: Backend> Desktop<B> {
     /// old theme.
     fn relayout_icons(&mut self, backend: &mut B, theme: &Theme, previews: &[(ClientId, Option<DecorationBuffer>)]) {
         let tile = self.tile;
-        let entries: Vec<(B::ShellId, ClientId, Option<usize>, String)> = self
-            .icons
-            .values()
-            .map(|icon| (icon.window, icon.client, icon.auto_slot, icon.title.clone()))
-            .collect();
+        let entries: Vec<(B::ShellId, ClientId, Option<usize>, String)> =
+            self.icons.values().map(|icon| (icon.window, icon.client, icon.auto_slot, icon.title.clone())).collect();
         for (window, client, auto_slot, title) in entries {
             let pos = match auto_slot {
                 Some(slot) => self.icon_slot_position(slot),
                 None => self.icons.get(&window).map(|icon| icon.pos).unwrap_or(Point::new(0, 0)),
             };
             backend.configure_shell_surface(window, Rect { pos, size: Size::new(tile, tile) });
-            let preview = previews
-                .iter()
-                .find(|(id, _)| *id == client)
-                .and_then(|(_, preview)| preview.as_ref());
-            let buffer = icon::render_icon_tile(theme, &mut self.fonts.system(), &mut self.fonts.swash(), tile, &title, preview);
+            let preview = previews.iter().find(|(id, _)| *id == client).and_then(|(_, preview)| preview.as_ref());
+            let buffer =
+                icon::render_icon_tile(theme, &mut self.fonts.system(), &mut self.fonts.swash(), tile, &title, preview);
             backend.paint_shell_surface(window, &buffer);
             if let Some(icon) = self.icons.get_mut(&window) {
                 icon.pos = pos;
@@ -2185,7 +2216,14 @@ impl<B: Backend> Desktop<B> {
         }
         let (current, count) = self.clip_drawn;
         let current = if current == usize::MAX { 0 } else { current };
-        let buffer = workspace::render_clip_tile(theme, &mut self.fonts.system(), &mut self.fonts.swash(), self.tile, current, count.max(1));
+        let buffer = workspace::render_clip_tile(
+            theme,
+            &mut self.fonts.system(),
+            &mut self.fonts.swash(),
+            self.tile,
+            current,
+            count.max(1),
+        );
         backend.paint_shell_surface(self.clip_window, &buffer);
     }
 
@@ -2258,7 +2296,9 @@ impl<B: Backend> Desktop<B> {
     /// isn't over a widget slot, so callers know whether to treat the
     /// press as consumed.
     pub fn begin_item_drag(&mut self, backend: &mut B, theme: &Theme, local: Point) -> bool {
-        let Some(index) = self.item_index_at(local) else { return false };
+        let Some(index) = self.item_index_at(local) else {
+            return false;
+        };
         // Same reasoning as `begin_icon_drag`: without a grab, a fast
         // drag could outrun the dock's own (narrow) window bounds and
         // stop reporting motion against it.
@@ -2274,8 +2314,12 @@ impl<B: Backend> Desktop<B> {
     /// starts at screen `y = 0`, so root-Y and dock-local-Y are already
     /// the same value; no translation needed.
     pub fn drag_item_motion(&mut self, backend: &mut B, theme: &Theme, root: Point) {
-        let Some(dragged) = self.item_drag.as_ref().map(|d| d.index) else { return };
-        let Some(target) = self.item_index_at(Point::new(0, root.y)) else { return };
+        let Some(dragged) = self.item_drag.as_ref().map(|d| d.index) else {
+            return;
+        };
+        let Some(target) = self.item_index_at(Point::new(0, root.y)) else {
+            return;
+        };
         if target == dragged {
             return;
         }
@@ -2290,7 +2334,9 @@ impl<B: Backend> Desktop<B> {
     /// if no drag was active, so callers can tell whether the release
     /// was actually theirs to handle.
     pub fn end_item_drag(&mut self, backend: &mut B, theme: &Theme) -> bool {
-        let Some(drag) = self.item_drag.take() else { return false };
+        let Some(drag) = self.item_drag.take() else {
+            return false;
+        };
         backend.ungrab_pointer(drag.grab);
         self.persist_order();
         self.redraw_dock(backend, theme);
@@ -2339,7 +2385,9 @@ impl<B: Backend> Desktop<B> {
     /// performed here, off this thread where it needs to be — see
     /// `apply_effects`.
     pub fn dock_input(&mut self, backend: &mut B, theme: &Theme, input: DockInput) -> bool {
-        let Some(local) = input.local() else { return false };
+        let Some(local) = input.local() else {
+            return false;
+        };
         let Some((index, rect)) = self.item_slots().into_iter().find(|(_, rect)| rect.contains(local)) else {
             return false;
         };
@@ -2552,7 +2600,7 @@ impl<B: Backend> Desktop<B> {
             if self.instrument_panel.visible() {
                 self.instrument_panel.hide(backend);
             }
-            self.set_panel_key_grab(backend, false);
+            self.sync_escape_key_grab(backend);
             return;
         };
 
@@ -2576,12 +2624,18 @@ impl<B: Backend> Desktop<B> {
         // panel data rides the same pass that folds its samples.
         let (granted, ready) = if self.builtin_panel.is_some() {
             let ticked = self.items[index].panel_tick(now);
-            let Some(panel) = self.builtin_panel.as_mut() else { return };
+            let Some(panel) = self.builtin_panel.as_mut() else {
+                return;
+            };
             let ready = std::mem::take(&mut panel.dirty) || ticked;
             (panel.granted, ready)
         } else {
-            let Some(tile) = self.items[index].remote_mut() else { return };
-            let Some(granted) = tile.panel_granted() else { return };
+            let Some(tile) = self.items[index].remote_mut() else {
+                return;
+            };
+            let Some(granted) = tile.panel_granted() else {
+                return;
+            };
             (granted, tile.take_panel_ready(now))
         };
 
@@ -2619,7 +2673,7 @@ impl<B: Backend> Desktop<B> {
         };
         if restage {
             self.instrument_panel.show(backend, theme, &owner, granted, geometry, frame);
-            self.set_panel_key_grab(backend, true);
+            self.sync_escape_key_grab(backend);
         } else {
             self.instrument_panel.repaint(backend, theme, frame);
         }
@@ -2640,7 +2694,9 @@ impl<B: Backend> Desktop<B> {
     /// panel of the other kind gets closed — one arbitration path for
     /// every opener, however it arrived.
     pub fn toggle_builtin_panel(&mut self, backend: &mut B, theme: &Theme, local: Point) -> bool {
-        let Some(index) = self.item_index_at(local) else { return false };
+        let Some(index) = self.item_index_at(local) else {
+            return false;
+        };
         let id = self.items[index].id().to_string();
         if self.builtin_panel.as_ref().is_some_and(|panel| panel.id == id) {
             // The re-click is the toggle, resolved through the same
@@ -2658,7 +2714,9 @@ impl<B: Backend> Desktop<B> {
         if self.builtin_panel.is_some() {
             self.dismiss_instrument_panel(backend, PanelCloseReason::Dismissed);
         }
-        let Some(spec) = self.items[index].panel_spec(self.tile) else { return false };
+        let Some(spec) = self.items[index].panel_spec(self.tile) else {
+            return false;
+        };
         // The same clamp a remote `OpenPanel` is granted through, so a
         // built-in cannot hold a panel a dockapp would be refused; the
         // same refusal for a degenerate spec or workarea.
@@ -2718,12 +2776,13 @@ impl<B: Backend> Desktop<B> {
         run_detached(commands, self.launch_env());
     }
 
-    /// Pairs the bare-Escape grab exactly with panel visibility. The
-    /// grab is what routes Escape to the shell while a panel is up —
-    /// and it is also why Escape does not reach the focused client
-    /// then, which the protocol document states plainly.
-    fn set_panel_key_grab(&mut self, backend: &mut B, wanted: bool) {
-        if wanted == self.panel_key_grabbed {
+    /// Pairs the bare-Escape grab with all transient UI that Escape
+    /// dismisses. Menus and instrument panels can briefly overlap, so
+    /// this derives the desired state instead of letting either owner
+    /// ungrab the other's key.
+    fn sync_escape_key_grab(&mut self, backend: &mut B) {
+        let wanted = self.menu.is_open() || self.instrument_panel.visible();
+        if wanted == self.escape_key_grabbed {
             return;
         }
         let combo = wm_core::KeyCombo { keysym: PANEL_DISMISS_KEYSYM, modifiers: wm_core::Modifiers::empty() };
@@ -2732,7 +2791,7 @@ impl<B: Backend> Desktop<B> {
         } else {
             backend.ungrab_key(combo);
         }
-        self.panel_key_grabbed = wanted;
+        self.escape_key_grabbed = wanted;
     }
 
     /// Whether an instrument panel is on screen.
@@ -2764,7 +2823,7 @@ impl<B: Backend> Desktop<B> {
         if self.instrument_panel.visible() {
             self.instrument_panel.hide(backend);
         }
-        self.set_panel_key_grab(backend, false);
+        self.sync_escape_key_grab(backend);
     }
 
     /// A click on the panel surface: content-local points go to the
@@ -2773,8 +2832,12 @@ impl<B: Backend> Desktop<B> {
     /// nor a dismissal). Left only — the dock's reserved-button policy
     /// applies to panels exactly as to tiles.
     pub fn instrument_panel_click(&mut self, theme: &Theme, local: Point, button: wm_core::MouseButton, pressed: bool) {
-        let Some(point) = self.instrument_panel.content_point(theme, local) else { return };
-        let Some(button) = reserved_filter(button) else { return };
+        let Some(point) = self.instrument_panel.content_point(theme, local) else {
+            return;
+        };
+        let Some(button) = reserved_filter(button) else {
+            return;
+        };
         let kind = if pressed { InputKind::Press } else { InputKind::Release };
         let event = InputEvent { kind, button: Some(button), x: point.x, y: point.y, delta: 0 };
         self.deliver_panel_event(event);
@@ -2783,7 +2846,9 @@ impl<B: Backend> Desktop<B> {
     /// One scroll step inside the panel; the shell replays a multi-notch
     /// gesture as discrete steps, exactly as it does for tiles.
     pub fn instrument_panel_scroll(&mut self, theme: &Theme, local: Point, step: i32) {
-        let Some(point) = self.instrument_panel.content_point(theme, local) else { return };
+        let Some(point) = self.instrument_panel.content_point(theme, local) else {
+            return;
+        };
         let event = InputEvent { kind: InputKind::Scroll, button: None, x: point.x, y: point.y, delta: step };
         self.deliver_panel_event(event);
     }
@@ -2812,19 +2877,29 @@ impl<B: Backend> Desktop<B> {
         // is deduplicated entirely.
         if let Some(point) = content {
             if self.instrument_panel.note_motion(point) {
-                self.deliver_panel_event(InputEvent { kind: InputKind::Motion, button: None, x: point.x, y: point.y, delta: 0 });
+                self.deliver_panel_event(InputEvent {
+                    kind: InputKind::Motion,
+                    button: None,
+                    x: point.x,
+                    y: point.y,
+                    delta: 0,
+                });
             }
         }
     }
 
     fn deliver_panel_event(&mut self, event: InputEvent) {
-        let Some(owner) = self.instrument_panel.owner().map(str::to_string) else { return };
+        let Some(owner) = self.instrument_panel.owner().map(str::to_string) else {
+            return;
+        };
         // A built-in owner hears the SDK vocabulary and answers with a
         // reaction, applied here; a remote one hears the wire shape
         // unchanged. One routing above this line, so click, scroll and
         // hover cannot treat the two kinds differently.
         if self.builtin_panel.as_ref().is_some_and(|panel| panel.id == owner) {
-            let Some(index) = self.items.iter().position(|item| item.id() == owner) else { return };
+            let Some(index) = self.items.iter().position(|item| item.id() == owner) else {
+                return;
+            };
             let reaction = self.items[index].panel_input(builtin_panel_event(&event), self.tile);
             self.apply_panel_reaction(reaction);
             return;
@@ -2845,12 +2920,18 @@ impl<B: Backend> Desktop<B> {
     where
         B: wm_theme_api::PopupHost<PopupId = B::ShellId>,
     {
-        let Some(index) = self.item_index_at(local) else { return false };
+        let Some(index) = self.item_index_at(local) else {
+            return false;
+        };
         let now = std::time::Instant::now();
-        let Some(tile) = self.items[index].remote() else { return false };
-        let (id, title, items) = (tile.id().to_string(), dock_item_menu_title(tile.name()), dock_item_menu_items(tile, now));
+        let Some(tile) = self.items[index].remote() else {
+            return false;
+        };
+        let (id, title, items) =
+            (tile.id().to_string(), dock_item_menu_title(tile.name()), dock_item_menu_items(tile, now));
         let bounds = self.screen_size();
         self.menu.open_dock_item(backend, theme, &mut self.fonts.system(), id, title, items, root, bounds);
+        self.sync_escape_key_grab(backend);
         true
     }
 
@@ -2861,12 +2942,16 @@ impl<B: Backend> Desktop<B> {
         let now = std::time::Instant::now();
         match action {
             DockItemMenuAction::Restart => {
-                if let Some(tile) = self.items.iter_mut().filter_map(|item| item.remote_mut()).find(|tile| tile.id() == id) {
+                if let Some(tile) =
+                    self.items.iter_mut().filter_map(|item| item.remote_mut()).find(|tile| tile.id() == id)
+                {
                     tile.user_restart(now);
                 }
             }
             DockItemMenuAction::Remove => {
-                let Some(index) = self.items.iter().position(|item| item.id() == id) else { return };
+                let Some(index) = self.items.iter().position(|item| item.id() == id) else {
+                    return;
+                };
                 if let Some(tile) = self.items[index].remote_mut() {
                     tracing::info!(%id, source = %tile.entry().source.display(), "removing a dockapp tile for this session; delete or edit that file to remove it permanently");
                     tile.shut_down(chonk_dock_proto::wire::GoodbyeReason::Removed);
@@ -2929,7 +3014,9 @@ impl<B: Backend> Desktop<B> {
     /// Tells whichever tile the pointer was over that it has left, and
     /// forgets it — the crossing half of taking the column off screen.
     fn clear_dock_hover(&mut self, backend: &mut B, theme: &Theme) {
-        let Some(id) = self.hovered_item.take() else { return };
+        let Some(id) = self.hovered_item.take() else {
+            return;
+        };
         let effects = self.deliver_by_id(&id, DockInput::Leave);
         self.apply_effects(backend, theme, effects);
     }
@@ -2938,7 +3025,9 @@ impl<B: Backend> Desktop<B> {
     /// column. Used by the crossing events, which name a tile rather
     /// than a position for the reason on `hovered_item`.
     fn deliver_by_id(&mut self, id: &str, input: DockInput) -> Vec<Effect> {
-        let Some(index) = self.items.iter().position(|item| item.id() == id) else { return Vec::new() };
+        let Some(index) = self.items.iter().position(|item| item.id() == id) else {
+            return Vec::new();
+        };
         self.items[index].on_input(input, self.tile)
     }
 
@@ -3068,10 +3157,7 @@ impl<B: Backend> Desktop<B> {
         let logo_inset = (self.tile / 9).max(2);
         let logo_size = self.tile.saturating_sub(logo_inset * 2);
         let logo_scale = logo_size as f32 / self.logo.width() as f32;
-        let logo_paint = PixmapPaint {
-            quality: FilterQuality::Bicubic,
-            ..PixmapPaint::default()
-        };
+        let logo_paint = PixmapPaint { quality: FilterQuality::Bicubic, ..PixmapPaint::default() };
         pixmap.draw_pixmap(
             0,
             0,
@@ -3091,13 +3177,20 @@ impl<B: Backend> Desktop<B> {
             // as a hole punched in the column. The widget's own name is
             // the label, so the dock says *which* one went dark without
             // the user having to find the log.
-            let buffer = match self.items[index].render(theme, self.tile, &mut self.fonts.system(), &mut self.fonts.swash()) {
-                Some(buffer) => buffer,
-                None => {
-                    let label = self.items[index].name();
-                    panel::render_dead_tile(theme, &mut self.fonts.system(), &mut self.fonts.swash(), self.tile, label)
-                }
-            };
+            let buffer =
+                match self.items[index].render(theme, self.tile, &mut self.fonts.system(), &mut self.fonts.swash()) {
+                    Some(buffer) => buffer,
+                    None => {
+                        let label = self.items[index].name();
+                        panel::render_dead_tile(
+                            theme,
+                            &mut self.fonts.system(),
+                            &mut self.fonts.swash(),
+                            self.tile,
+                            label,
+                        )
+                    }
+                };
             blit_into(&mut pixmap, rect.pos.x as u32, rect.pos.y as u32, &buffer);
 
             if self.item_drag.as_ref().is_some_and(|d| d.index == index) {
@@ -3127,7 +3220,11 @@ impl<B: Backend> Desktop<B> {
         B: wm_theme_api::PopupHost<PopupId = B::ShellId>,
     {
         let bounds = self.screen_size();
-        let omarchy_items = self.omarchy.as_ref().map(|menu| menu.items(ACTION_OMARCHY_BASE, ACTION_OMARCHY_INERT_ROW)).unwrap_or_default();
+        let omarchy_items = self
+            .omarchy
+            .as_ref()
+            .map(|menu| menu.items(ACTION_OMARCHY_BASE, ACTION_OMARCHY_INERT_ROW))
+            .unwrap_or_default();
         let root_bounds = RootMenuBounds {
             app_count: self.apps.len(),
             omarchy_count: self.omarchy.as_ref().map_or(0, |menu| menu.action_count()),
@@ -3137,11 +3234,22 @@ impl<B: Backend> Desktop<B> {
         // the row must appear the moment `omarchy-theme-set` first runs
         // and vanish if Omarchy is removed, and a menu open is a user
         // gesture that can afford two file reads.
-        let follow_omarchy = wm_theme::omarchy::is_available()
-            .then(|| wm_theme::omarchy::display_name(&wm_theme::omarchy::current_theme_name().map(|n| wm_theme::omarchy::title_case(&n)).unwrap_or_default()));
-        let items =
-            root_menu_items(self.wallpaper, &self.theme_id, &self.apps, follow_omarchy.as_deref(), omarchy_items, self.omarchy_bar, self.dock);
+        let follow_omarchy = wm_theme::omarchy::is_available().then(|| {
+            wm_theme::omarchy::display_name(
+                &wm_theme::omarchy::current_theme_name().map(|n| wm_theme::omarchy::title_case(&n)).unwrap_or_default(),
+            )
+        });
+        let items = root_menu_items(
+            self.wallpaper,
+            &self.theme_id,
+            &self.apps,
+            follow_omarchy.as_deref(),
+            omarchy_items,
+            self.omarchy_bar,
+            self.dock,
+        );
         self.menu.open_root(backend, theme, &mut self.fonts.system(), items, root_bounds, at, bounds);
+        self.sync_escape_key_grab(backend);
     }
 
     /// Tells the desktop whether this session hosts Omarchy's shell
@@ -3216,6 +3324,7 @@ impl<B: Backend> Desktop<B> {
     {
         let bounds = self.screen_size();
         self.menu.open_window(backend, theme, &mut self.fonts.system(), &ctx, at, bounds);
+        self.sync_escape_key_grab(backend);
     }
 
     /// Applies a built-in wallpaper immediately and repaints the dock to
@@ -3258,11 +3367,18 @@ impl<B: Backend> Desktop<B> {
     /// — while `None` reuses the stored one, so stepping the selection
     /// never re-captures every window. The popup window is recreated
     /// only when the rendered size changes.
-    pub fn show_switcher(&mut self, backend: &mut B, theme: &Theme, entries: Option<Vec<SwitcherEntry>>, selected: usize) {
+    pub fn show_switcher(
+        &mut self,
+        backend: &mut B,
+        theme: &Theme,
+        entries: Option<Vec<SwitcherEntry>>,
+        selected: usize,
+    ) {
         match (entries, self.switcher.as_mut()) {
             (Some(new_entries), Some(panel)) => panel.entries = new_entries,
             (Some(new_entries), None) => {
-                self.switcher = Some(SwitcherPanel { window: None, size: Size::new(0, 0), entries: new_entries, visible: false });
+                self.switcher =
+                    Some(SwitcherPanel { window: None, size: Size::new(0, 0), entries: new_entries, visible: false });
             }
             (None, _) => {}
         }
@@ -3271,7 +3387,8 @@ impl<B: Backend> Desktop<B> {
         let Some(panel) = switcher.as_mut() else {
             return;
         };
-        let buffer = switcher::render_switcher(theme, &mut font_system, &mut swash_cache, &panel.entries, selected, *tile);
+        let buffer =
+            switcher::render_switcher(theme, &mut font_system, &mut swash_cache, &panel.entries, selected, *tile);
         if buffer.width == 0 || buffer.height == 0 {
             return;
         }
@@ -3425,6 +3542,11 @@ impl<B: Backend> Desktop<B> {
         B: wm_theme_api::PopupHost<PopupId = B::ShellId>,
     {
         self.menu.close(backend);
+        self.sync_escape_key_grab(backend);
+    }
+
+    pub fn menu_visible(&self) -> bool {
+        self.menu.is_open()
     }
 
     /// If `window` belongs to the open menu chain, resolves a click on
@@ -3440,7 +3562,9 @@ impl<B: Backend> Desktop<B> {
     where
         B: wm_theme_api::PopupHost<PopupId = B::ShellId>,
     {
-        self.menu.click(backend, theme, &mut self.fonts.system(), window, local)
+        let action = self.menu.click(backend, theme, &mut self.fonts.system(), window, local);
+        self.sync_escape_key_grab(backend);
+        action
     }
 
     pub fn hover_menu(&mut self, backend: &mut B, theme: &Theme, window: B::ShellId, local: Point)
@@ -3471,7 +3595,14 @@ impl<B: Backend> Desktop<B> {
     /// bottom-left of the screen, wrapping upward — matching the icon
     /// row layout in the reference NeXTSTEP screenshot this theme is
     /// matched against — clear of the dock on the right.
-    pub fn show_icon(&mut self, backend: &mut B, theme: &Theme, client: ClientId, title: &str, preview: Option<&DecorationBuffer>) {
+    pub fn show_icon(
+        &mut self,
+        backend: &mut B,
+        theme: &Theme,
+        client: ClientId,
+        title: &str,
+        preview: Option<&DecorationBuffer>,
+    ) {
         let slot = (0..).find(|s| !self.icons.values().any(|icon| icon.auto_slot == Some(*s))).unwrap_or(0);
         let pos = self.icon_slot_position(slot);
         let geom = Rect { pos, size: Size::new(self.tile, self.tile) };
@@ -3492,7 +3623,8 @@ impl<B: Backend> Desktop<B> {
         // Still raised, but now only against its own band: this orders
         // icons among themselves without lifting them over any frame.
         backend.raise_shell_surface(window);
-        let buffer = icon::render_icon_tile(theme, &mut self.fonts.system(), &mut self.fonts.swash(), self.tile, title, preview);
+        let buffer =
+            icon::render_icon_tile(theme, &mut self.fonts.system(), &mut self.fonts.swash(), self.tile, title, preview);
         backend.paint_shell_surface(window, &buffer);
 
         self.icons.insert(window, IconTile { window, client, title: title.to_string(), pos, auto_slot: Some(slot) });
@@ -3549,7 +3681,8 @@ impl<B: Backend> Desktop<B> {
             return;
         };
 
-        let Some(new_pos) = resolve_drag_position(icon.pos, drag.grab_offset, root, self.drag_threshold, drag.moved) else {
+        let Some(new_pos) = resolve_drag_position(icon.pos, drag.grab_offset, root, self.drag_threshold, drag.moved)
+        else {
             return;
         };
         drag.moved = true;
@@ -3592,7 +3725,13 @@ impl<B: Backend> Desktop<B> {
 /// press-then-release with no real movement still works as a plain
 /// click instead of "dragging" the icon a few pixels and never
 /// restoring the window.
-fn resolve_drag_position(icon_pos: Point, grab_offset: Point, root: Point, threshold: i32, already_moved: bool) -> Option<Point> {
+fn resolve_drag_position(
+    icon_pos: Point,
+    grab_offset: Point,
+    root: Point,
+    threshold: i32,
+    already_moved: bool,
+) -> Option<Point> {
     let candidate = Point::new(root.x - grab_offset.x, root.y - grab_offset.y);
     if already_moved {
         return Some(candidate);
@@ -3663,7 +3802,8 @@ mod tests {
 
     /// The flagship, as every desk under test wears it.
     fn test_theme() -> wm_theme::Theme {
-        wm_theme::default_theme::theme_variant("nextstep-classic", wm_theme::Appearance::Dark).expect("the flagship theme exists")
+        wm_theme::default_theme::theme_variant("nextstep-classic", wm_theme::Appearance::Dark)
+            .expect("the flagship theme exists")
     }
 
     /// The invariant the whole live-scale path rests on: a session that
@@ -3687,8 +3827,16 @@ mod tests {
 
         let primary = Rect { pos: Point::new(0, 0), size: TEST_SCREEN };
         let mut backend = FakeBackend::new();
-        let mut desktop: Desktop<FakeBackend> =
-            Desktop::new(&mut backend, TEST_SCREEN, primary, 1.0, &test_theme(), wm_theme::Appearance::Dark, Vec::new(), wm_theme::FontState::new());
+        let mut desktop: Desktop<FakeBackend> = Desktop::new(
+            &mut backend,
+            TEST_SCREEN,
+            primary,
+            1.0,
+            &test_theme(),
+            wm_theme::Appearance::Dark,
+            Vec::new(),
+            wm_theme::FontState::new(),
+        );
 
         let area = desktop.primary_workarea();
         assert_eq!(area.size.w, TEST_SCREEN.w - tile_px(1.0), "one dock column reserved on the right");
@@ -3705,7 +3853,16 @@ mod tests {
 
         let primary = Rect { pos: Point::new(0, 0), size: TEST_SCREEN };
         let build = |backend: &mut FakeBackend, scale: f32| -> Desktop<FakeBackend> {
-            Desktop::new(backend, TEST_SCREEN, primary, scale, &test_theme(), wm_theme::Appearance::Dark, Vec::new(), wm_theme::FontState::new())
+            Desktop::new(
+                backend,
+                TEST_SCREEN,
+                primary,
+                scale,
+                &test_theme(),
+                wm_theme::Appearance::Dark,
+                Vec::new(),
+                wm_theme::FontState::new(),
+            )
         };
 
         let mut backend = FakeBackend::new();
@@ -3740,8 +3897,16 @@ mod tests {
 
         let primary = Rect { pos: Point::new(0, 0), size: TEST_SCREEN };
         let mut backend = FakeBackend::new();
-        let mut desktop: Desktop<FakeBackend> =
-            Desktop::new(&mut backend, TEST_SCREEN, primary, 1.0, &test_theme(), wm_theme::Appearance::Dark, Vec::new(), wm_theme::FontState::new());
+        let mut desktop: Desktop<FakeBackend> = Desktop::new(
+            &mut backend,
+            TEST_SCREEN,
+            primary,
+            1.0,
+            &test_theme(),
+            wm_theme::Appearance::Dark,
+            Vec::new(),
+            wm_theme::FontState::new(),
+        );
 
         let dock = desktop.dock_window();
         let clip = desktop.clip_window();
@@ -3822,7 +3987,15 @@ mod tests {
         // doc names exactly this case.
         assert_eq!(
             ids,
-            ["builtin:net", "builtin:sysload", "builtin:sound", "builtin:wifi", "builtin:bluetooth", "builtin:power", "builtin:clock"]
+            [
+                "builtin:net",
+                "builtin:sysload",
+                "builtin:sound",
+                "builtin:wifi",
+                "builtin:bluetooth",
+                "builtin:power",
+                "builtin:clock"
+            ]
         );
     }
 
@@ -3837,7 +4010,13 @@ mod tests {
             false
         }
 
-        fn render(&self, _theme: &Theme, _tile: u32, _fonts: &mut cosmic_text::FontSystem, _swash: &mut cosmic_text::SwashCache) -> DecorationBuffer {
+        fn render(
+            &self,
+            _theme: &Theme,
+            _tile: u32,
+            _fonts: &mut cosmic_text::FontSystem,
+            _swash: &mut cosmic_text::SwashCache,
+        ) -> DecorationBuffer {
             DecorationBuffer { width: 1, height: 1, pixels: vec![0; 4] }
         }
 
@@ -3901,10 +4080,24 @@ mod tests {
     fn a_reservation_rehangs_the_dock_and_widens_the_workarea_and_an_unchanged_one_is_free() {
         use wm_core::fake_backend::FakeBackend;
 
-        let primary = Rect { pos: Point::new(0, 0), size: TEST_SCREEN };
+        // Give the default instrument stack genuine room below the bar.
+        // TEST_SCREEN is intentionally tiny to keep the broader desktop
+        // suite cheap, but the current stack fills all 480 of its pixels;
+        // that would turn this into a test of the height clamp instead of
+        // the re-hang behavior named here (which has its own test below).
+        let screen = Size { w: TEST_SCREEN.w, h: 768 };
+        let primary = Rect { pos: Point::new(0, 0), size: screen };
         let mut backend = FakeBackend::new();
-        let mut desktop: Desktop<FakeBackend> =
-            Desktop::new(&mut backend, TEST_SCREEN, primary, 1.0, &test_theme(), wm_theme::Appearance::Dark, Vec::new(), wm_theme::FontState::new());
+        let mut desktop: Desktop<FakeBackend> = Desktop::new(
+            &mut backend,
+            screen,
+            primary,
+            1.0,
+            &test_theme(),
+            wm_theme::Appearance::Dark,
+            Vec::new(),
+            wm_theme::FontState::new(),
+        );
         let theme = wm_theme::default_theme::theme_by_id("nextstep-classic").unwrap();
         let tile = tile_px(1.0);
         let before = backend.shell_geometries[&desktop.dock_window()];
@@ -3915,7 +4108,11 @@ mod tests {
         let after = backend.shell_geometries[&desktop.dock_window()];
         assert_eq!(after.pos, Point::new(before.pos.x, 32), "the column starts under the bar");
         assert_eq!(after.size.h, before.size.h, "a stack that fits below the bar keeps its content height");
-        assert_eq!(desktop.primary_workarea().size.w, TEST_SCREEN.w - tile, "a top bar changes nothing about the column's own reservation");
+        assert_eq!(
+            desktop.primary_workarea().size.w,
+            screen.w - tile,
+            "a top bar changes nothing about the column's own reservation"
+        );
 
         assert!(!desktop.set_reservation(&mut backend, &theme, bar), "the same reservation again is not a change");
 
@@ -3926,13 +4123,13 @@ mod tests {
         let panel = EdgeReservation { top: 0, right: 24 };
         assert!(desktop.set_reservation(&mut backend, &theme, panel));
         let beside = backend.shell_geometries[&desktop.dock_window()];
-        assert_eq!(beside.pos, Point::new((TEST_SCREEN.w - tile - 24) as i32, 0));
-        assert_eq!(desktop.primary_workarea().size.w, TEST_SCREEN.w - tile - 24);
+        assert_eq!(beside.pos, Point::new((screen.w - tile - 24) as i32, 0));
+        assert_eq!(desktop.primary_workarea().size.w, screen.w - tile - 24);
 
         // The bar leaving restores the corner exactly.
         assert!(desktop.set_reservation(&mut backend, &theme, EdgeReservation::default()));
         assert_eq!(backend.shell_geometries[&desktop.dock_window()], before);
-        assert_eq!(desktop.primary_workarea().size.w, TEST_SCREEN.w - tile);
+        assert_eq!(desktop.primary_workarea().size.w, screen.w - tile);
     }
 
     #[test]
@@ -3944,8 +4141,16 @@ mod tests {
         // must not be configured to hang past it.
         let primary = Rect { pos: Point::new(0, 0), size: TEST_SCREEN };
         let mut backend = FakeBackend::new();
-        let mut desktop: Desktop<FakeBackend> =
-            Desktop::new(&mut backend, TEST_SCREEN, primary, 1.0, &test_theme(), wm_theme::Appearance::Dark, Vec::new(), wm_theme::FontState::new());
+        let mut desktop: Desktop<FakeBackend> = Desktop::new(
+            &mut backend,
+            TEST_SCREEN,
+            primary,
+            1.0,
+            &test_theme(),
+            wm_theme::Appearance::Dark,
+            Vec::new(),
+            wm_theme::FontState::new(),
+        );
         let theme = wm_theme::default_theme::theme_by_id("nextstep-classic").unwrap();
         let room = tile_px(1.0) / 2;
 
@@ -3969,10 +4174,7 @@ mod tests {
     fn the_clip_sits_in_the_primary_monitors_own_corner() {
         // Bottom-right, tucked under the dock's column rather than in
         // the top-left corner every maximized window wants.
-        assert_eq!(
-            clip_geometry(PRIMARY, 56),
-            Rect { pos: Point::new(1600 - 56, 1200 - 56), size: Size::new(56, 56) }
-        );
+        assert_eq!(clip_geometry(PRIMARY, 56), Rect { pos: Point::new(1600 - 56, 1200 - 56), size: Size::new(56, 56) });
         // On a primary that is *not* at the desktop's origin, the Clip
         // follows the monitor rather than measuring from root — the
         // corner it lands in must be the primary's own.
@@ -3994,7 +4196,11 @@ mod tests {
         // monitor's bottom edge.
         assert_eq!(icon_slot_position(PRIMARY, 56, 4, 0), Point::new(4, 1140));
         assert_eq!(icon_slot_position(PRIMARY, 56, 4, 1), Point::new(64, 1140));
-        assert_eq!(icon_slot_position(PRIMARY, 56, 4, 26), Point::new(4, 1080), "the 27th tile wraps onto a second row");
+        assert_eq!(
+            icon_slot_position(PRIMARY, 56, 4, 26),
+            Point::new(4, 1080),
+            "the 27th tile wraps onto a second row"
+        );
 
         // The same slots on a head at negative x land in *its* bottom
         // -left corner, not at the desktop's origin.
@@ -4086,7 +4292,8 @@ mod tests {
     }
 
     fn wallpaper_submenu(selected: Wallpaper, omarchy: Option<&str>) -> Vec<MenuItem> {
-        let items = root_menu_items(selected, "nextstep-classic", &[], omarchy, Vec::new(), None, DockVisibility::Shown);
+        let items =
+            root_menu_items(selected, "nextstep-classic", &[], omarchy, Vec::new(), None, DockVisibility::Shown);
         let submenu = items.iter().find(|item| item.label() == "Wallpaper").expect("wallpaper submenu");
         let MenuItem::Submenu { items, .. } = submenu else { panic!("expected submenu") };
         items.clone()
@@ -4100,10 +4307,18 @@ mod tests {
     fn the_omarchy_bar_row_comes_with_a_hosted_shell_and_marks_a_shown_bar() {
         let omarchy = vec![MenuItem::Action { label: "Row".to_string(), action: ACTION_OMARCHY_BASE }];
         let labels = |bar: Option<BarVisibility>| -> Vec<String> {
-            root_menu_items(Wallpaper::DEFAULT, "nextstep-classic", &[], None, omarchy.clone(), bar, DockVisibility::Shown)
-                .iter()
-                .map(|item| item.label().to_string())
-                .collect()
+            root_menu_items(
+                Wallpaper::DEFAULT,
+                "nextstep-classic",
+                &[],
+                None,
+                omarchy.clone(),
+                bar,
+                DockVisibility::Shown,
+            )
+            .iter()
+            .map(|item| item.label().to_string())
+            .collect()
         };
         assert!(labels(None).iter().all(|label| !label.contains("Omarchy Bar")), "no shell, no row");
         let hidden = labels(Some(BarVisibility::Hidden));
@@ -4111,7 +4326,10 @@ mod tests {
         assert_eq!(hidden[row + 1], "Omarchy", "chonkstep's row, then the guest's submenu");
         assert_eq!(hidden.last().unwrap(), "Exit");
         assert!(labels(Some(BarVisibility::Shown)).contains(&"\u{2022} Omarchy Bar".to_string()), "marked when shown");
-        assert!(matches!(resolve_action(ACTION_OMARCHY_BAR, RootMenuBounds::default()), Some(RootMenuAction::ToggleOmarchyBar)));
+        assert!(matches!(
+            resolve_action(ACTION_OMARCHY_BAR, RootMenuBounds::default()),
+            Some(RootMenuAction::ToggleOmarchyBar)
+        ));
     }
 
     /// The choice reaches the compositor as the bar's namespace, hidden
@@ -4122,8 +4340,16 @@ mod tests {
         use wm_core::fake_backend::FakeBackend;
         let primary = Rect { pos: Point::new(0, 0), size: TEST_SCREEN };
         let mut backend = FakeBackend::new();
-        let mut desktop: Desktop<FakeBackend> =
-            Desktop::new(&mut backend, TEST_SCREEN, primary, 1.0, &test_theme(), wm_theme::Appearance::Dark, Vec::new(), wm_theme::FontState::new());
+        let mut desktop: Desktop<FakeBackend> = Desktop::new(
+            &mut backend,
+            TEST_SCREEN,
+            primary,
+            1.0,
+            &test_theme(),
+            wm_theme::Appearance::Dark,
+            Vec::new(),
+            wm_theme::FontState::new(),
+        );
         backend.layer_visibility_calls.clear();
 
         desktop.set_omarchy_bar(&mut backend, Some(BarVisibility::Hidden));
@@ -4192,8 +4418,16 @@ mod tests {
 
         let primary = Rect { pos: Point::new(0, 0), size: TEST_SCREEN };
         let mut backend = FakeBackend::new();
-        let mut desktop: Desktop<FakeBackend> =
-            Desktop::new(&mut backend, TEST_SCREEN, primary, 1.0, &test_theme(), wm_theme::Appearance::Dark, Vec::new(), wm_theme::FontState::new());
+        let mut desktop: Desktop<FakeBackend> = Desktop::new(
+            &mut backend,
+            TEST_SCREEN,
+            primary,
+            1.0,
+            &test_theme(),
+            wm_theme::Appearance::Dark,
+            Vec::new(),
+            wm_theme::FontState::new(),
+        );
         let theme = wm_theme::default_theme::theme_by_id("nextstep-classic").unwrap();
         let tile = tile_px(1.0);
         let dock = desktop.dock_window();
@@ -4251,8 +4485,16 @@ mod tests {
 
         let primary = Rect { pos: Point::new(0, 0), size: TEST_SCREEN };
         let mut backend = FakeBackend::new();
-        let mut desktop: Desktop<FakeBackend> =
-            Desktop::new(&mut backend, TEST_SCREEN, primary, 1.0, &test_theme(), wm_theme::Appearance::Dark, Vec::new(), wm_theme::FontState::new());
+        let mut desktop: Desktop<FakeBackend> = Desktop::new(
+            &mut backend,
+            TEST_SCREEN,
+            primary,
+            1.0,
+            &test_theme(),
+            wm_theme::Appearance::Dark,
+            Vec::new(),
+            wm_theme::FontState::new(),
+        );
         let theme = wm_theme::default_theme::theme_by_id("nextstep-classic").unwrap();
         let tile = tile_px(1.0);
         let dock = desktop.dock_window();
@@ -4281,7 +4523,11 @@ mod tests {
         // the displaced position it was hidden at.
         desktop.set_dock_visibility(&mut backend, &theme, DockVisibility::Shown);
         let back = backend.shell_geometries[&dock];
-        assert_eq!(back.pos, Point::new((TEST_SCREEN.w - tile) as i32, 0), "shown into the corner as it is now, not as it was");
+        assert_eq!(
+            back.pos,
+            Point::new((TEST_SCREEN.w - tile) as i32, 0),
+            "shown into the corner as it is now, not as it was"
+        );
         assert_eq!(desktop.primary_workarea().size.w, TEST_SCREEN.w - tile);
     }
 
@@ -4296,8 +4542,16 @@ mod tests {
 
         let primary = Rect { pos: Point::new(0, 0), size: TEST_SCREEN };
         let mut backend = FakeBackend::new();
-        let mut desktop: Desktop<FakeBackend> =
-            Desktop::new(&mut backend, TEST_SCREEN, primary, 1.0, &test_theme(), wm_theme::Appearance::Dark, Vec::new(), wm_theme::FontState::new());
+        let mut desktop: Desktop<FakeBackend> = Desktop::new(
+            &mut backend,
+            TEST_SCREEN,
+            primary,
+            1.0,
+            &test_theme(),
+            wm_theme::Appearance::Dark,
+            Vec::new(),
+            wm_theme::FontState::new(),
+        );
         let theme = wm_theme::default_theme::theme_by_id("nextstep-classic").unwrap();
         let tile = tile_px(1.0);
 
@@ -4361,7 +4615,10 @@ mod tests {
         // key decides, and with something stored it does not.
         assert_eq!(DockVisibility::from_config(true), DockVisibility::Shown);
         assert_eq!(DockVisibility::from_config(false), DockVisibility::Hidden);
-        assert_eq!(DockVisibility::from_state(None).unwrap_or(DockVisibility::from_config(false)), DockVisibility::Hidden);
+        assert_eq!(
+            DockVisibility::from_state(None).unwrap_or(DockVisibility::from_config(false)),
+            DockVisibility::Hidden
+        );
         assert_eq!(
             DockVisibility::from_state(Some("shown")).unwrap_or(DockVisibility::from_config(false)),
             DockVisibility::Shown,
@@ -4387,17 +4644,29 @@ mod tests {
 
         let with = wallpaper_submenu(Wallpaper::Omarchy, Some("Omarchy (Tokyo Night)"));
         assert_eq!(with.len(), Wallpaper::ALL.len() + 1);
-        assert_eq!(with.last().unwrap().label(), "\u{2022} Omarchy's Background", "offered last, and marked when current");
+        assert_eq!(
+            with.last().unwrap().label(),
+            "\u{2022} Omarchy's Background",
+            "offered last, and marked when current"
+        );
         let MenuItem::Action { action, .. } = with.last().unwrap() else { panic!("expected an action row") };
-        assert!(matches!(resolve_action(*action, RootMenuBounds::default()), Some(RootMenuAction::SetWallpaper(Wallpaper::Omarchy))));
+        assert!(matches!(
+            resolve_action(*action, RootMenuBounds::default()),
+            Some(RootMenuAction::SetWallpaper(Wallpaper::Omarchy))
+        ));
 
         let unmarked = wallpaper_submenu(Wallpaper::TealBlueprint, Some("Omarchy"));
         assert_eq!(unmarked.last().unwrap().label(), "  Omarchy's Background");
-        assert_eq!(unmarked.iter().filter(|item| item.label().starts_with('\u{2022}')).count(), 1, "one bullet in the submenu");
+        assert_eq!(
+            unmarked.iter().filter(|item| item.label().starts_with('\u{2022}')).count(),
+            1,
+            "one bullet in the submenu"
+        );
     }
 
     fn theme_submenu(selected: &str, omarchy: Option<&str>) -> Vec<MenuItem> {
-        let items = root_menu_items(Wallpaper::TealBlueprint, selected, &[], omarchy, Vec::new(), None, DockVisibility::Shown);
+        let items =
+            root_menu_items(Wallpaper::TealBlueprint, selected, &[], omarchy, Vec::new(), None, DockVisibility::Shown);
         let submenu = items.iter().find(|item| item.label() == "Theme").expect("theme submenu");
         let MenuItem::Submenu { items, .. } = submenu else { panic!("expected submenu") };
         items.clone()
@@ -4412,7 +4681,11 @@ mod tests {
         let with = theme_submenu("nextstep-classic", Some("Omarchy (Tokyo Night)"));
         assert_eq!(with.len(), wm_theme::default_theme::CHOICES.len() + 1);
         let row = with.last().unwrap();
-        assert_eq!(row.label(), "  Omarchy (Tokyo Night)", "labelled with the current Omarchy theme, unbulleted while not following");
+        assert_eq!(
+            row.label(),
+            "  Omarchy (Tokyo Night)",
+            "labelled with the current Omarchy theme, unbulleted while not following"
+        );
         assert!(matches!(row, MenuItem::Action { action, .. } if *action == ACTION_THEME_OMARCHY));
     }
 
@@ -4425,11 +4698,19 @@ mod tests {
 
     #[test]
     fn the_omarchy_theme_action_resolves_and_the_slot_after_it_does_not() {
-        assert!(matches!(resolve_action(ACTION_THEME_OMARCHY, RootMenuBounds::default()), Some(RootMenuAction::SetTheme(wm_theme::omarchy::ID))));
-        assert!(resolve_action(ACTION_THEME_OMARCHY + 1, RootMenuBounds::default()).is_none(), "the Theme range ends at the Omarchy row");
+        assert!(matches!(
+            resolve_action(ACTION_THEME_OMARCHY, RootMenuBounds::default()),
+            Some(RootMenuAction::SetTheme(wm_theme::omarchy::ID))
+        ));
+        assert!(
+            resolve_action(ACTION_THEME_OMARCHY + 1, RootMenuBounds::default()).is_none(),
+            "the Theme range ends at the Omarchy row"
+        );
         // The built-ins keep their slots below it.
         for (index, (id, _)) in wm_theme::default_theme::CHOICES.iter().enumerate() {
-            assert!(matches!(resolve_action(ACTION_THEME_BASE + index as u32, RootMenuBounds::default()), Some(RootMenuAction::SetTheme(resolved)) if resolved == *id));
+            assert!(
+                matches!(resolve_action(ACTION_THEME_BASE + index as u32, RootMenuBounds::default()), Some(RootMenuAction::SetTheme(resolved)) if resolved == *id)
+            );
         }
     }
 
@@ -4463,7 +4744,15 @@ mod tests {
     /// menu build so these tests exercise the real assembly path, not
     /// `applications_items` in isolation.
     fn applications_submenu(apps: &[AppEntry]) -> Vec<MenuItem> {
-        let items = root_menu_items(Wallpaper::TealBlueprint, "nextstep-classic", apps, None, Vec::new(), None, DockVisibility::Shown);
+        let items = root_menu_items(
+            Wallpaper::TealBlueprint,
+            "nextstep-classic",
+            apps,
+            None,
+            Vec::new(),
+            None,
+            DockVisibility::Shown,
+        );
         let submenu = items.iter().find(|item| item.label() == "Applications").expect("Applications submenu");
         let MenuItem::Submenu { items, .. } = submenu else { panic!("expected a submenu") };
         items.clone()
@@ -4503,7 +4792,9 @@ mod tests {
 
         let mut resolved = 0;
         for cascade in &applications {
-            let MenuItem::Submenu { items, .. } = cascade else { continue };
+            let MenuItem::Submenu { items, .. } = cascade else {
+                continue;
+            };
             for item in items {
                 let MenuItem::Action { label, action } = item else { panic!("app rows are actions") };
                 let Some(RootMenuAction::LaunchApp(index)) = resolve_action(*action, apps_only(apps.len())) else {
@@ -4567,12 +4858,21 @@ mod tests {
 
     #[test]
     fn the_omarchy_submenu_sits_between_wallpaper_and_exit_only_when_it_has_rows() {
-        let without = root_menu_items(Wallpaper::TealBlueprint, "nextstep-classic", &[], None, Vec::new(), None, DockVisibility::Shown);
+        let without = root_menu_items(
+            Wallpaper::TealBlueprint,
+            "nextstep-classic",
+            &[],
+            None,
+            Vec::new(),
+            None,
+            DockVisibility::Shown,
+        );
         let labels: Vec<&str> = without.iter().map(MenuItem::label).collect();
         assert_eq!(labels, ["Terminal", "Applications", "Theme", "Wallpaper", "\u{2022} Dock", "Exit"]);
 
         let rows = vec![MenuItem::Action { label: "About".to_string(), action: ACTION_OMARCHY_BASE }];
-        let with = root_menu_items(Wallpaper::TealBlueprint, "nextstep-classic", &[], None, rows, None, DockVisibility::Shown);
+        let with =
+            root_menu_items(Wallpaper::TealBlueprint, "nextstep-classic", &[], None, rows, None, DockVisibility::Shown);
         let labels: Vec<&str> = with.iter().map(MenuItem::label).collect();
         assert_eq!(labels, ["Terminal", "Applications", "Theme", "Wallpaper", "\u{2022} Dock", "Omarchy", "Exit"]);
     }
@@ -4641,10 +4941,7 @@ mod tests {
         // `move_client_to_workspace` grows a workspace for.
         for (index, item) in move_to.iter().enumerate() {
             let MenuItem::Action { action, .. } = item else { panic!("Move To rows are actions") };
-            assert_eq!(
-                resolve_window_action(*action, 3),
-                Some(WindowMenuAction::MoveToWorkspace(index)),
-            );
+            assert_eq!(resolve_window_action(*action, 3), Some(WindowMenuAction::MoveToWorkspace(index)),);
         }
     }
 
@@ -4757,12 +5054,35 @@ mod tests {
         }
 
         fn open_root(&mut self) {
-            let items = root_menu_items(Wallpaper::TealBlueprint, "nextstep-classic", &[], None, Vec::new(), None, DockVisibility::Shown);
-            self.menu.open_root(&mut self.host, &self.theme, &mut self.font_system, items, RootMenuBounds::default(), Point::new(0, 0), Size::new(1600, 1000));
+            let items = root_menu_items(
+                Wallpaper::TealBlueprint,
+                "nextstep-classic",
+                &[],
+                None,
+                Vec::new(),
+                None,
+                DockVisibility::Shown,
+            );
+            self.menu.open_root(
+                &mut self.host,
+                &self.theme,
+                &mut self.font_system,
+                items,
+                RootMenuBounds::default(),
+                Point::new(0, 0),
+                Size::new(1600, 1000),
+            );
         }
 
         fn open_window(&mut self, ctx: &WindowMenuContext) {
-            self.menu.open_window(&mut self.host, &self.theme, &mut self.font_system, ctx, Point::new(0, 0), Size::new(1600, 1000));
+            self.menu.open_window(
+                &mut self.host,
+                &self.theme,
+                &mut self.font_system,
+                ctx,
+                Point::new(0, 0),
+                Size::new(1600, 1000),
+            );
         }
 
         /// Center of item row `index`, computed from a real render of
@@ -4777,6 +5097,10 @@ mod tests {
 
         fn click(&mut self, window: u32, local: Point) -> Option<MenuAction> {
             self.menu.click(&mut self.host, &self.theme, &mut self.font_system, window, local)
+        }
+
+        fn close(&mut self) {
+            self.menu.close(&mut self.host);
         }
 
         fn only_open_window(&self) -> u32 {
@@ -4804,10 +5128,7 @@ mod tests {
         let window = f.only_open_window();
         let items = window_menu_items(&ctx);
         let row = f.row_point(&window_menu_title(&ctx.title), &items, 0);
-        assert!(matches!(
-            f.click(window, row),
-            Some(MenuAction::Window(_, WindowMenuAction::ToggleMaximize))
-        ));
+        assert!(matches!(f.click(window, row), Some(MenuAction::Window(_, WindowMenuAction::ToggleMaximize))));
         assert!(f.host.open.is_empty(), "firing an action closes the session");
     }
 
@@ -4819,12 +5140,43 @@ mod tests {
         assert_eq!(f.host.open.len(), 1);
 
         let window = f.only_open_window();
-        let items = root_menu_items(Wallpaper::TealBlueprint, "nextstep-classic", &[], None, Vec::new(), None, DockVisibility::Shown);
+        let items = root_menu_items(
+            Wallpaper::TealBlueprint,
+            "nextstep-classic",
+            &[],
+            None,
+            Vec::new(),
+            None,
+            DockVisibility::Shown,
+        );
         let row = f.row_point(ROOT_MENU_TITLE, &items, 0);
-        assert!(matches!(
-            f.click(window, row),
-            Some(MenuAction::Root(RootMenuAction::LaunchTerminal))
-        ));
+        assert!(matches!(f.click(window, row), Some(MenuAction::Root(RootMenuAction::LaunchTerminal))));
+    }
+
+    #[test]
+    fn closing_a_root_menu_tears_down_its_entire_open_cascade() {
+        let mut f = MenuFixture::new();
+        f.open_root();
+        let root = f.only_open_window();
+        let items = root_menu_items(
+            Wallpaper::TealBlueprint,
+            "nextstep-classic",
+            &[],
+            None,
+            Vec::new(),
+            None,
+            DockVisibility::Shown,
+        );
+        let applications = f.row_point(ROOT_MENU_TITLE, &items, 1);
+        assert!(f.click(root, applications).is_none());
+        assert_eq!(f.host.open.len(), 2, "the Applications cascade opened");
+        assert!(f.menu.is_open());
+
+        f.close();
+
+        assert!(f.host.open.is_empty(), "Escape's close path removes every cascade level");
+        assert!(!f.menu.is_open());
+        assert_eq!(f.host.ungrabs, 1, "the menu's pointer grab is released exactly once");
     }
 
     // ------------------------------------------------------------------
@@ -4838,10 +5190,20 @@ mod tests {
 
     /// A desk with the panel probe appended to the stock column, plus
     /// the probe's slot center in dock-local coordinates.
-    fn desk_with_probe(backend: &mut wm_core::fake_backend::FakeBackend) -> (Desktop<wm_core::fake_backend::FakeBackend>, Point) {
+    fn desk_with_probe(
+        backend: &mut wm_core::fake_backend::FakeBackend,
+    ) -> (Desktop<wm_core::fake_backend::FakeBackend>, Point) {
         let primary = Rect { pos: Point::new(0, 0), size: TEST_SCREEN };
-        let mut desktop: Desktop<wm_core::fake_backend::FakeBackend> =
-            Desktop::new(backend, TEST_SCREEN, primary, 1.0, &test_theme(), wm_theme::Appearance::Dark, Vec::new(), wm_theme::FontState::new());
+        let mut desktop: Desktop<wm_core::fake_backend::FakeBackend> = Desktop::new(
+            backend,
+            TEST_SCREEN,
+            primary,
+            1.0,
+            &test_theme(),
+            wm_theme::Appearance::Dark,
+            Vec::new(),
+            wm_theme::FontState::new(),
+        );
         desktop.items.push(SupervisedWidget::new(DockItem::builtin(
             "builtin:panel-probe",
             Box::new(crate::widgets::panel_probe::PanelProbeWidget::new()),
@@ -4879,13 +5241,16 @@ mod tests {
         );
         assert!(desktop.builtin_panel.is_none());
 
-        assert!(desktop.toggle_builtin_panel(&mut backend, &theme, probe_center), "the probe's tile consumes the press");
+        assert!(
+            desktop.toggle_builtin_panel(&mut backend, &theme, probe_center),
+            "the probe's tile consumes the press"
+        );
         assert!(!desktop.instrument_panel.visible(), "the press only stages; the surface appears on the next pass");
         desktop.sync_instrument_panel(&mut backend, &theme);
 
         assert!(desktop.instrument_panel.visible());
         assert_eq!(desktop.instrument_panel.owner(), Some("builtin:panel-probe"));
-        assert!(desktop.panel_key_grabbed, "Escape is grabbed exactly while a panel is up");
+        assert!(desktop.escape_key_grabbed, "Escape is grabbed exactly while a panel is up");
         // Flush against the dock strip, like every instrument panel.
         let geometry = desktop.instrument_panel.geometry();
         let dock = desktop.dock_geom();
@@ -4899,7 +5264,7 @@ mod tests {
         assert!(desktop.toggle_builtin_panel(&mut backend, &theme, probe_center), "the re-click is the toggle");
         assert!(desktop.builtin_panel.is_none());
         assert!(!desktop.instrument_panel.visible());
-        assert!(!desktop.panel_key_grabbed, "the grab is released with the panel");
+        assert!(!desktop.escape_key_grabbed, "the grab is released with the panel");
     }
 
     /// The open gesture is a click-away too: a right-click on a tile
@@ -4927,7 +5292,7 @@ mod tests {
         );
         assert!(desktop.builtin_panel.is_none(), "but the open panel is dismissed by the click-away");
         assert!(!desktop.instrument_panel.visible());
-        assert!(!desktop.panel_key_grabbed);
+        assert!(!desktop.escape_key_grabbed);
     }
 
     /// The input round trip, and the reactions that come back: a click
@@ -4961,11 +5326,19 @@ mod tests {
 
         // Left press on the owning tile: the toggle, press consumed,
         // release swallowed — the exact contract remote panels have.
-        assert!(desktop.dock_input(&mut backend, &theme, DockInput::Press { local: probe_center, button: wm_core::MouseButton::Left }));
+        assert!(desktop.dock_input(
+            &mut backend,
+            &theme,
+            DockInput::Press { local: probe_center, button: wm_core::MouseButton::Left }
+        ));
         assert!(desktop.builtin_panel.is_none(), "the tile press dismissed the panel");
         assert!(!desktop.instrument_panel.visible());
         assert!(
-            desktop.dock_input(&mut backend, &theme, DockInput::Release { local: probe_center, button: wm_core::MouseButton::Left }),
+            desktop.dock_input(
+                &mut backend,
+                &theme,
+                DockInput::Release { local: probe_center, button: wm_core::MouseButton::Left }
+            ),
             "the orphan release is swallowed, not delivered"
         );
     }
@@ -4994,9 +5367,16 @@ mod tests {
         desktop.sync_instrument_panel(&mut backend, &theme);
         assert_eq!(desktop.instrument_panel.owner(), Some("builtin:panel-probe"));
 
-        assert!(desktop.toggle_builtin_panel(&mut backend, &theme, rect_b.pos), "a right-click elsewhere opens, not toggles");
+        assert!(
+            desktop.toggle_builtin_panel(&mut backend, &theme, rect_b.pos),
+            "a right-click elsewhere opens, not toggles"
+        );
         desktop.sync_instrument_panel(&mut backend, &theme);
-        assert_eq!(desktop.instrument_panel.owner(), Some("builtin:panel-probe-b"), "the newest opener wins the screen");
+        assert_eq!(
+            desktop.instrument_panel.owner(),
+            Some("builtin:panel-probe-b"),
+            "the newest opener wins the screen"
+        );
         assert_eq!(desktop.builtin_panel.as_ref().map(|p| p.id.as_str()), Some("builtin:panel-probe-b"));
 
         // The owner is evicted mid-session: the next pass tears the
@@ -5006,7 +5386,7 @@ mod tests {
         desktop.sync_instrument_panel(&mut backend, &theme);
         assert!(desktop.builtin_panel.is_none(), "an evicted owner's grant is gone");
         assert!(!desktop.instrument_panel.visible(), "and its surface with it");
-        assert!(!desktop.panel_key_grabbed);
+        assert!(!desktop.escape_key_grabbed);
     }
 
     /// A panel action that is several commands: both `Run` arities go
@@ -5080,7 +5460,9 @@ mod dock_order_tests {
     fn temp_state_file(tag: &str) -> PathBuf {
         static COUNTER: AtomicU32 = AtomicU32::new(0);
         let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
-        std::env::temp_dir().join(format!("chonkstep-dock-order-{}-{tag}-{unique}", std::process::id())).join("dock-items")
+        std::env::temp_dir()
+            .join(format!("chonkstep-dock-order-{}-{tag}-{unique}", std::process::id()))
+            .join("dock-items")
     }
 
     fn cleanup(path: &Path) {

@@ -1,0 +1,170 @@
+#!/usr/bin/env bash
+# Exercise the public Omarchy integration against disposable fresh-install
+# filesystem fixtures. No root access, package manager, or live SDDM is used.
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+work="$(mktemp -d)"
+trap 'rm -rf "$work"' EXIT
+
+fail() {
+    echo "FAIL: $*" >&2
+    exit 1
+}
+
+assert_file() {
+    [ -f "$1" ] || fail "missing file: $1"
+}
+
+assert_absent() {
+    [ ! -e "$1" ] || fail "unexpected file: $1"
+}
+
+stage_package() {
+    local root="$1" executable
+    install -d "$root/usr/share/xsessions" \
+        "$root/usr/share/wayland-sessions" \
+        "$root/usr/share/sddm/themes/chonkstep" \
+        "$root/usr/share/chonkstep/sddm" \
+        "$root/usr/share/xdg-desktop-portal" \
+        "$root/usr/lib/chonkstep" \
+        "$root/usr/bin"
+
+    install -m644 packaging/sddm/chonkstep/{Main.qml,metadata.desktop,theme.conf} \
+        "$root/usr/share/sddm/themes/chonkstep/"
+    install -m644 packaging/sddm/zz-chonkstep-{theme,autologin}.conf \
+        "$root/usr/share/chonkstep/sddm/"
+    install -m644 packaging/portal/chonkstep-portals.conf \
+        "$root/usr/share/xdg-desktop-portal/chonkstep-portals.conf"
+    install -m755 scripts/verify-install.sh "$root/usr/lib/chonkstep/verify-install.sh"
+
+    for executable in xsession.sh chonkstep-session; do
+        printf '#!/bin/sh\nexit 0\n' > "$root/usr/lib/chonkstep/$executable"
+        chmod 755 "$root/usr/lib/chonkstep/$executable"
+    done
+    printf '#!/bin/sh\nexit 0\n' > "$root/usr/bin/uwsm"
+    chmod 755 "$root/usr/bin/uwsm"
+
+    printf '%s\n' \
+        '[Desktop Entry]' \
+        'Name=chonkstep' \
+        'Exec=/usr/lib/chonkstep/xsession.sh' \
+        'TryExec=/usr/lib/chonkstep/xsession.sh' \
+        'Type=Application' \
+        > "$root/usr/share/xsessions/chonkstep.desktop"
+    printf '%s\n' \
+        '[Desktop Entry]' \
+        'Name=chonkstep (Wayland)' \
+        'Exec=/usr/lib/chonkstep/chonkstep-session' \
+        'TryExec=/usr/lib/chonkstep/chonkstep-session' \
+        'DesktopNames=chonkstep' \
+        'Type=Application' \
+        > "$root/usr/share/wayland-sessions/chonkstep.desktop"
+    printf '%s\n' \
+        '[Desktop Entry]' \
+        'Name=chonkstep (uwsm)' \
+        'Exec=uwsm start -g -1 -e -D chonkstep chonkstep.desktop' \
+        'TryExec=uwsm' \
+        'DesktopNames=chonkstep' \
+        'Type=Application' \
+        > "$root/usr/share/wayland-sessions/chonkstep-uwsm.desktop"
+    chmod 644 "$root/usr/share/xsessions/chonkstep.desktop" \
+        "$root/usr/share/wayland-sessions/"*.desktop
+
+    grep -qx 'QtVersion=6' \
+        "$root/usr/share/sddm/themes/chonkstep/metadata.desktop" \
+        || fail "SDDM picker does not select Omarchy's Qt 6 greeter"
+    grep -qx 'org.freedesktop.impl.portal.ScreenCast=wlr' \
+        "$root/usr/share/xdg-desktop-portal/chonkstep-portals.conf" \
+        || fail "portal map does not route ScreenCast to xdg-desktop-portal-wlr"
+    grep -qx 'org.freedesktop.impl.portal.Screenshot=wlr' \
+        "$root/usr/share/xdg-desktop-portal/chonkstep-portals.conf" \
+        || fail "portal map does not route Screenshot to xdg-desktop-portal-wlr"
+}
+
+write_fresh_omarchy() {
+    local root="$1" asset
+    install -d "$root/etc/sddm.conf.d" "$root/var/lib/sddm" \
+        "$root/usr/share/sddm/themes/omarchy"
+    for asset in logo.png lock.png lock-failed.png entry.png entry-failed.png bullet.png; do
+        : > "$root/usr/share/sddm/themes/omarchy/$asset"
+    done
+    printf '%s\n' \
+        '[Theme]' \
+        'Current=omarchy' \
+        '[Users]' \
+        'RememberLastUser=true' \
+        'RememberLastSession=true' \
+        > "$root/etc/sddm.conf.d/99-omarchy-login.conf"
+    printf '%s\n' \
+        '[Last]' \
+        'Session=omarchy.desktop' \
+        > "$root/var/lib/sddm/state.conf"
+}
+
+encrypted="$work/encrypted"
+stage_package "$encrypted"
+write_fresh_omarchy "$encrypted"
+printf '%s\n' \
+    '[Autologin]' \
+    'User=alice' \
+    'Session=omarchy.desktop' \
+    > "$encrypted/etc/sddm.conf.d/autologin.conf"
+cp "$encrypted/etc/sddm.conf.d/99-omarchy-login.conf" "$work/99.expected"
+cp "$encrypted/etc/sddm.conf.d/autologin.conf" "$work/autologin.expected"
+
+scripts/omarchy-install-desktop-chonkstep --root "$encrypted"
+assert_file "$encrypted/etc/sddm.conf.d/zz-chonkstep-theme.conf"
+assert_file "$encrypted/etc/sddm.conf.d/zz-chonkstep-autologin.conf"
+grep -qx 'Session=chonkstep-uwsm.desktop' \
+    "$encrypted/etc/sddm.conf.d/zz-chonkstep-autologin.conf" \
+    || fail "encrypted install does not select the managed session"
+cmp -s "$work/99.expected" "$encrypted/etc/sddm.conf.d/99-omarchy-login.conf" \
+    || fail "integration modified Omarchy's login configuration"
+cmp -s "$work/autologin.expected" "$encrypted/etc/sddm.conf.d/autologin.conf" \
+    || fail "integration modified Omarchy's autologin configuration"
+cmp -s "$work/99.expected" "$encrypted/etc/sddm.conf.d/99-omarchy-login.conf" \
+    || fail "integration modified Omarchy configuration on rerun"
+
+# A rerun must be a no-op in effect and must not create backup snippets that
+# SDDM would parse as additional configuration.
+scripts/omarchy-install-desktop-chonkstep --root "$encrypted"
+[ "$(find "$encrypted/etc/sddm.conf.d" -maxdepth 1 -type f | wc -l)" -eq 4 ] \
+    || fail "idempotent rerun changed the SDDM snippet set"
+
+scripts/omarchy-remove-desktop-chonkstep --root "$encrypted"
+assert_absent "$encrypted/etc/sddm.conf.d/zz-chonkstep-theme.conf"
+assert_absent "$encrypted/etc/sddm.conf.d/zz-chonkstep-autologin.conf"
+cmp -s "$work/99.expected" "$encrypted/etc/sddm.conf.d/99-omarchy-login.conf" \
+    || fail "removal modified Omarchy's login configuration"
+cmp -s "$work/autologin.expected" "$encrypted/etc/sddm.conf.d/autologin.conf" \
+    || fail "removal modified Omarchy's autologin configuration"
+assert_file "$encrypted/usr/bin/uwsm"
+
+unencrypted="$work/unencrypted"
+stage_package "$unencrypted"
+write_fresh_omarchy "$unencrypted"
+printf '%s\n' '[Theme]' 'Current=chonkstep' \
+    > "$unencrypted/etc/sddm.conf.d/20-chonkstep-theme.conf"
+scripts/omarchy-install-desktop-chonkstep --root "$unencrypted"
+assert_file "$unencrypted/etc/sddm.conf.d/zz-chonkstep-theme.conf"
+assert_absent "$unencrypted/etc/sddm.conf.d/zz-chonkstep-autologin.conf"
+assert_absent "$unencrypted/etc/sddm.conf.d/20-chonkstep-theme.conf"
+grep -q 'name === "chonkstep (uwsm)"' \
+    "$unencrypted/usr/share/sddm/themes/chonkstep/Main.qml" \
+    || fail "picker does not default to the exact managed chonkstep session"
+
+# /etc/sddm.conf has higher precedence than conf.d. Refuse to claim success
+# when an administrator override makes the requested login setup ineffective.
+overridden="$work/overridden"
+stage_package "$overridden"
+write_fresh_omarchy "$overridden"
+printf '%s\n' '[Theme]' 'Current=site-theme' > "$overridden/etc/sddm.conf"
+if scripts/omarchy-install-desktop-chonkstep --root "$overridden" \
+    > "$work/override.log" 2>&1; then
+    fail "installer accepted an ineffective /etc/sddm.conf theme override"
+fi
+grep -q "resolves Theme/Current to 'site-theme'" "$work/override.log" \
+    || fail "installer did not diagnose the effective SDDM override"
+
+echo "test-omarchy-install: encrypted, picker, idempotence, removal, and precedence checks passed"

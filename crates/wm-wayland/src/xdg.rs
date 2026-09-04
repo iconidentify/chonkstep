@@ -42,13 +42,12 @@ use smithay::reexports::wayland_server::{Client, Resource};
 use smithay::utils::Serial;
 use smithay::wayland::buffer::BufferHandler;
 use smithay::wayland::compositor::{
-    get_parent, with_states, CompositorClientState, CompositorHandler, CompositorState,
-    SurfaceAttributes,
+    get_parent, with_states, CompositorClientState, CompositorHandler, CompositorState, SurfaceAttributes,
 };
+use smithay::wayland::keyboard_shortcuts_inhibit::KeyboardShortcutsInhibitorSeat;
 use smithay::wayland::output::OutputHandler;
 use smithay::wayland::selection::data_device::{
-    set_data_device_focus, ClientDndGrabHandler, DataDeviceHandler, DataDeviceState,
-    ServerDndGrabHandler,
+    set_data_device_focus, ClientDndGrabHandler, DataDeviceHandler, DataDeviceState, ServerDndGrabHandler,
 };
 use smithay::wayland::selection::primary_selection::{
     set_primary_focus, PrimarySelectionHandler, PrimarySelectionState,
@@ -56,22 +55,21 @@ use smithay::wayland::selection::primary_selection::{
 use smithay::wayland::selection::{SelectionHandler, SelectionSource, SelectionTarget};
 use smithay::wayland::shell::xdg::decoration::XdgDecorationHandler;
 use smithay::wayland::shell::xdg::{
-    PopupSurface, PositionerState, SurfaceCachedState, ToplevelSurface, XdgShellHandler,
-    XdgShellState, XdgToplevelSurfaceData,
+    PopupSurface, PositionerState, SurfaceCachedState, ToplevelSurface, XdgShellHandler, XdgShellState,
+    XdgToplevelSurfaceData,
 };
 use smithay::wayland::shm::{ShmHandler, ShmState};
+use smithay::wayland::text_input::TextInputSeat;
 use smithay::xwayland::XWaylandClientData;
 use smithay::{
-    delegate_compositor, delegate_data_device, delegate_output, delegate_primary_selection,
-    delegate_seat, delegate_shm, delegate_xdg_decoration, delegate_xdg_shell,
+    delegate_compositor, delegate_data_device, delegate_output, delegate_primary_selection, delegate_seat,
+    delegate_shm, delegate_xdg_decoration, delegate_xdg_shell,
 };
 
 use wm_core::{BackendEvent, NetState, NetStateAction};
 use wm_theme_api::{Point, Rect, ResizeEdge, Size};
 
-use crate::state::{
-    ClientState, Compositor, ManagedSurface, WaylandBackend, WindowRecord, WlFrameId, WlWindowId,
-};
+use crate::state::{ClientState, Compositor, ManagedSurface, WaylandBackend, WindowRecord, WlFrameId, WlWindowId};
 
 type WmEvent = BackendEvent<WlWindowId, WlFrameId>;
 
@@ -244,13 +242,7 @@ pub(crate) fn committed_surface_scale(surface: &WlSurface) -> f64 {
 /// fails silently, and it needs no live surface to pin down.
 fn ratio_scale(shown: (f64, f64), dst: (i32, i32)) -> Option<f64> {
     let ((shown_w, shown_h), (dst_w, dst_h)) = (shown, dst);
-    if dst_w <= 0
-        || dst_h <= 0
-        || !shown_w.is_finite()
-        || !shown_h.is_finite()
-        || shown_w <= 0.0
-        || shown_h <= 0.0
-    {
+    if dst_w <= 0 || dst_h <= 0 || !shown_w.is_finite() || !shown_h.is_finite() || shown_w <= 0.0 || shown_h <= 0.0 {
         return None;
     }
     let ratio_w = shown_w / dst_w as f64;
@@ -306,9 +298,7 @@ fn committed_content_offset(surface: &WlSurface, factor: f64) -> Point {
         guard.current().geometry
     })
     .filter(|geometry| geometry.size.w > 0 && geometry.size.h > 0)
-    .map(|geometry| {
-        Point::new(scale_length(geometry.loc.x, factor), scale_length(geometry.loc.y, factor))
-    })
+    .map(|geometry| Point::new(scale_length(geometry.loc.x, factor), scale_length(geometry.loc.y, factor)))
     .unwrap_or(Point::new(0, 0))
 }
 
@@ -343,9 +333,7 @@ fn committed_content_size(surface: &WlSurface, factor: f64) -> Option<Size> {
     with_renderer_surface_state(surface, |state| state.surface_size())
         .flatten()
         .filter(|size| size.w > 0 && size.h > 0)
-        .map(|size| {
-            Size::new(scale_length(size.w, factor) as u32, scale_length(size.h, factor) as u32)
-        })
+        .map(|size| Size::new(scale_length(size.w, factor) as u32, scale_length(size.h, factor) as u32))
 }
 
 // -- wl_compositor -------------------------------------------------------
@@ -429,9 +417,7 @@ impl CompositorHandler for Compositor {
         while let Some(parent) = get_parent(&root) {
             root = parent;
         }
-        let xwayland = surface
-            .client()
-            .is_some_and(|client| client.get_data::<XWaylandClientData>().is_some());
+        let xwayland = surface.client().is_some_and(|client| client.get_data::<XWaylandClientData>().is_some());
         if !xwayland {
             // Which output's scale this surface should draw for. The
             // integer is the ceiling fallback (`advertised_output_scale`
@@ -440,8 +426,7 @@ impl CompositorHandler for Compositor {
             // per surface inside smithay, so the hot path sends nothing
             // after the first commit at a given scale.
             let preferred = self.preferred_scale_for(&root);
-            let advertised =
-                crate::state::advertised_output_scale(preferred as f32).integer_scale();
+            let advertised = crate::state::advertised_output_scale(preferred as f32).integer_scale();
             with_states(surface, |states| {
                 smithay::wayland::compositor::send_surface_state(
                     surface,
@@ -468,12 +453,8 @@ impl CompositorHandler for Compositor {
             return;
         }
 
-        let toplevel = self
-            .xdg_shell_state
-            .toplevel_surfaces()
-            .iter()
-            .find(|toplevel| *toplevel.wl_surface() == root)
-            .cloned();
+        let toplevel =
+            self.xdg_shell_state.toplevel_surfaces().iter().find(|toplevel| *toplevel.wl_surface() == root).cloned();
         if let Some(toplevel) = toplevel {
             self.toplevel_committed(&toplevel);
         } else if let Some(PopupKind::Xdg(popup)) = self.popups.find_popup(&root) {
@@ -507,11 +488,7 @@ impl Compositor {
                 return backend.scale_at(record.content);
             }
         }
-        if let Some(record) = backend
-            .layers
-            .iter()
-            .find(|record| record.surface.wl_surface() == root)
-        {
+        if let Some(record) = backend.layers.iter().find(|record| record.surface.wl_surface() == root) {
             return backend.scale_at(record.geometry);
         }
         for entry in &backend.lock_surfaces {
@@ -531,10 +508,7 @@ impl Compositor {
     fn toplevel_committed(&mut self, toplevel: &ToplevelSurface) {
         let root = toplevel.wl_surface().clone();
         let initial_configure_sent = with_states(&root, |states| {
-            states
-                .data_map
-                .get::<XdgToplevelSurfaceData>()
-                .map(|data| data.lock().unwrap().initial_configure_sent)
+            states.data_map.get::<XdgToplevelSurfaceData>().map(|data| data.lock().unwrap().initial_configure_sent)
         })
         .unwrap_or(true);
         if !initial_configure_sent {
@@ -546,8 +520,7 @@ impl Compositor {
             return;
         }
 
-        let has_buffer =
-            with_renderer_surface_state(&root, |state| state.buffer().is_some()).unwrap_or(false);
+        let has_buffer = with_renderer_surface_state(&root, |state| state.buffer().is_some()).unwrap_or(false);
         let was_mapped = mapped_marker(&root);
         let backend = self.wm.backend_mut();
         let Some(id) = backend.window_for_surface(&root) else {
@@ -558,11 +531,7 @@ impl Compositor {
         // corrected for the integral-fallback case on this window's
         // output — one number, shared with the renderer and the
         // hit-test through `window_surface_scale`.
-        let surface_scale = backend
-            .windows
-            .get(&id)
-            .map(|record| backend.window_surface_scale(record))
-            .unwrap_or(1.0);
+        let surface_scale = backend.windows.get(&id).map(|record| backend.window_surface_scale(record)).unwrap_or(1.0);
         let committed = committed_content_size(&root, surface_scale);
         if has_buffer && !was_mapped {
             set_mapped_marker(&root, true);
@@ -646,12 +615,8 @@ impl Compositor {
             // commits trail rendering. Obedience, prompt or tardy, is
             // never a resize request. See `WindowRecord::recent_asks`
             // for the ping-pong this gate broke.
-            let echoes_ask = committed.is_some_and(|size| {
-                backend
-                    .windows
-                    .get(&id)
-                    .is_some_and(|record| record.recent_asks.contains(&size))
-            });
+            let echoes_ask = committed
+                .is_some_and(|size| backend.windows.get(&id).is_some_and(|record| record.recent_asks.contains(&size)));
             if let (Some(size), Some(record)) = (committed, backend.windows.get(&id)) {
                 if record.mapped && !client_behind && !echoes_ask && size != record.content.size {
                     let requested = Rect { pos: record.content.pos, size };
@@ -901,6 +866,24 @@ impl SeatHandler for Compositor {
         let client = target.and_then(|surface| surface.client());
         set_data_device_focus(&display_handle, seat, client.clone());
         set_primary_focus(&display_handle, seat, client);
+
+        // Text-input-v3 and input-method-v2 meet at the seat. Without
+        // moving this focus, both globals bind successfully but an IME
+        // never learns which application's text field owns its edits.
+        seat.text_input().set_focus(target.cloned());
+
+        // Only the focused surface may suppress compositor shortcuts.
+        // Move the active grant with keyboard focus and explicitly
+        // revoke the old one so a background VM cannot retain raw keys.
+        if let Some(active) = self.core_protocols.active_shortcut_inhibitor.take() {
+            active.inactivate();
+        }
+        if let Some(surface) = target {
+            if let Some(inhibitor) = seat.keyboard_shortcuts_inhibitor_for_surface(surface) {
+                inhibitor.activate();
+                self.core_protocols.active_shortcut_inhibitor = Some(inhibitor);
+            }
+        }
     }
 
     fn cursor_image(&mut self, _seat: &Seat<Self>, image: CursorImageStatus) {
@@ -926,12 +909,7 @@ impl SeatHandler for Compositor {
 impl SelectionHandler for Compositor {
     type SelectionUserData = ();
 
-    fn new_selection(
-        &mut self,
-        ty: SelectionTarget,
-        source: Option<SelectionSource>,
-        _seat: Seat<Self>,
-    ) {
+    fn new_selection(&mut self, ty: SelectionTarget, source: Option<SelectionSource>, _seat: Seat<Self>) {
         // A Wayland client copied something. Xwayland owns the X-side
         // selection window, so it has to be told to claim CLIPBOARD (or
         // PRIMARY) on the X server and advertise these mime types;
@@ -1017,10 +995,7 @@ impl XdgShellHandler for Compositor {
         // `toplevel_committed`.
         let backend = self.wm.backend_mut();
         let id = WlWindowId(backend.alloc_id());
-        backend.windows.insert(
-            id,
-            WindowRecord::new(ManagedSurface::Xdg(surface), Rect::default()),
-        );
+        backend.windows.insert(id, WindowRecord::new(ManagedSurface::Xdg(surface), Rect::default()));
     }
 
     fn new_popup(&mut self, surface: PopupSurface, positioner: PositionerState) {
@@ -1038,12 +1013,7 @@ impl XdgShellHandler for Compositor {
         }
     }
 
-    fn reposition_request(
-        &mut self,
-        surface: PopupSurface,
-        positioner: PositionerState,
-        token: u32,
-    ) {
+    fn reposition_request(&mut self, surface: PopupSurface, positioner: PositionerState, token: u32) {
         surface.with_pending_state(|state| {
             state.geometry = positioner.get_geometry();
             state.positioner = positioner;
@@ -1153,23 +1123,14 @@ impl XdgShellHandler for Compositor {
         );
     }
 
-    fn fullscreen_request(
-        &mut self,
-        surface: ToplevelSurface,
-        _output: Option<wl_output::WlOutput>,
-    ) {
+    fn fullscreen_request(&mut self, surface: ToplevelSurface, _output: Option<wl_output::WlOutput>) {
         // Single output today — the output hint has nothing to select.
         // The reply is booked, not written: see `maximize_request`.
         self.queue_net_state(surface.wl_surface(), NetStateAction::Add, NetState::Fullscreen, None);
     }
 
     fn unfullscreen_request(&mut self, surface: ToplevelSurface) {
-        self.queue_net_state(
-            surface.wl_surface(),
-            NetStateAction::Remove,
-            NetState::Fullscreen,
-            None,
-        );
+        self.queue_net_state(surface.wl_surface(), NetStateAction::Remove, NetState::Fullscreen, None);
     }
 
     fn minimize_request(&mut self, surface: ToplevelSurface) {
@@ -1193,10 +1154,7 @@ impl XdgShellHandler for Compositor {
         // `BackendEvent::TitleChanged`'s doc), so the titlebar must
         // repaint on the property change, not the map.
         let title = with_states(surface.wl_surface(), |states| {
-            states
-                .data_map
-                .get::<XdgToplevelSurfaceData>()
-                .and_then(|data| data.lock().unwrap().title.clone())
+            states.data_map.get::<XdgToplevelSurfaceData>().and_then(|data| data.lock().unwrap().title.clone())
         });
         let backend = self.wm.backend_mut();
         if let Some(id) = backend.window_for_surface(surface.wl_surface()) {
@@ -1211,10 +1169,7 @@ impl XdgShellHandler for Compositor {
 
     fn app_id_changed(&mut self, surface: ToplevelSurface) {
         let app_id = with_states(surface.wl_surface(), |states| {
-            states
-                .data_map
-                .get::<XdgToplevelSurfaceData>()
-                .and_then(|data| data.lock().unwrap().app_id.clone())
+            states.data_map.get::<XdgToplevelSurfaceData>().and_then(|data| data.lock().unwrap().app_id.clone())
         });
         let backend = self.wm.backend_mut();
         if let Some(id) = backend.window_for_surface(surface.wl_surface()) {
@@ -1309,7 +1264,8 @@ impl XdgDecorationHandler for Compositor {
             backend.queue(WmEvent::ChromeChanged(id));
         }
         toplevel.with_pending_state(|state| {
-            state.decoration_mode = Some(if client_side { DecorationMode::ClientSide } else { DecorationMode::ServerSide });
+            state.decoration_mode =
+                Some(if client_side { DecorationMode::ClientSide } else { DecorationMode::ServerSide });
         });
         // No configure here: if this races the initial commit, the
         // initial configure carries the mode; otherwise request_mode/
@@ -1339,12 +1295,17 @@ impl XdgDecorationHandler for Compositor {
                 client_side = backend.xdg_client_draws_own_chrome(record);
             }
             if client_side != asked_client_side {
-                tracing::debug!(?id, asked_client_side, "answering the other way: this desktop's chrome is the product");
+                tracing::debug!(
+                    ?id,
+                    asked_client_side,
+                    "answering the other way: this desktop's chrome is the product"
+                );
             }
             backend.queue(WmEvent::ChromeChanged(id));
         }
         toplevel.with_pending_state(|state| {
-            state.decoration_mode = Some(if client_side { DecorationMode::ClientSide } else { DecorationMode::ServerSide });
+            state.decoration_mode =
+                Some(if client_side { DecorationMode::ClientSide } else { DecorationMode::ServerSide });
         });
         book_decoration_configure(self, &toplevel);
     }
@@ -1365,7 +1326,8 @@ impl XdgDecorationHandler for Compositor {
             backend.queue(WmEvent::ChromeChanged(id));
         }
         toplevel.with_pending_state(|state| {
-            state.decoration_mode = Some(if client_side { DecorationMode::ClientSide } else { DecorationMode::ServerSide });
+            state.decoration_mode =
+                Some(if client_side { DecorationMode::ClientSide } else { DecorationMode::ServerSide });
         });
         book_decoration_configure(self, &toplevel);
     }
@@ -1573,11 +1535,9 @@ mod tests {
     fn a_cropped_over_allocated_buffer_still_states_its_scale() {
         // Captured commits: buffer 2560x2048 raw, src crop / dst pairs
         // from three consecutive drag motions.
-        for (src, dst) in [
-            ((2108.0, 1568.0), (1054, 784)),
-            ((2112.0, 1572.0), (1056, 786)),
-            ((2128.0, 1588.0), (1064, 794)),
-        ] {
+        for (src, dst) in
+            [((2108.0, 1568.0), (1054, 784)), ((2112.0, 1572.0), (1056, 786)), ((2128.0, 1588.0), (1064, 794))]
+        {
             assert_eq!(ratio_scale(src, dst), Some(2.0), "{src:?} over {dst:?}");
         }
         // The regression, pinned: the full buffer extent over the same

@@ -175,6 +175,11 @@ pub struct SessionState {
     /// re-run these — "run once at session start" would otherwise mean
     /// "run again every time the user edits their config".
     pub autostart: Vec<Vec<String>>,
+    /// Full binding metadata for phase, lock and repeat behavior.
+    pub bindings: Vec<wm_config::Binding>,
+    pub layer_bindings: std::collections::BTreeMap<String, Vec<wm_config::Binding>>,
+    pub input: wm_config::InputConfig,
+    pub monitor_rules: Vec<wm_config::hyprland::directive::Monitor>,
     pub keybindings: Vec<(KeyCombo, Action)>,
 }
 
@@ -215,6 +220,25 @@ impl SessionState {
             commands: config.commands.clone(),
             terminal: config.terminal.clone(),
             autostart: config.autostart.clone(),
+            bindings: if config.bindings.is_empty() {
+                config
+                    .keybindings
+                    .iter()
+                    .map(|(combo, action)| wm_config::Binding {
+                        combo: *combo,
+                        action: action.clone(),
+                        description: None,
+                        locked: false,
+                        repeating: false,
+                        release: false,
+                    })
+                    .collect()
+            } else {
+                config.bindings.clone()
+            },
+            layer_bindings: config.layer_bindings.clone(),
+            input: config.input.clone(),
+            monitor_rules: config.monitor_rules.clone(),
             keybindings: config.keybindings.clone(),
         }
     }
@@ -241,10 +265,7 @@ pub fn read_scale_factor(config_scale: Option<f32>) -> f32 {
 /// next-best answer instead of a garbage scale or a dead session.
 pub fn resolve_scale(env: Option<&str>, config: Option<f32>) -> f32 {
     let valid = |s: &f32| s.is_finite() && *s > 0.0;
-    env.and_then(|s| s.trim().parse::<f32>().ok())
-        .filter(valid)
-        .or_else(|| config.filter(valid))
-        .unwrap_or(1.0)
+    env.and_then(|s| s.trim().parse::<f32>().ok()).filter(valid).or_else(|| config.filter(valid)).unwrap_or(1.0)
 }
 
 /// Whether to switch from click-to-focus to focus-follows-mouse.
@@ -254,10 +275,7 @@ pub fn resolve_scale(env: Option<&str>, config: Option<f32>) -> f32 {
 /// either behavior. Only its total absence lets the config value
 /// apply.
 pub fn read_focus_follows_mouse(config_value: bool) -> bool {
-    resolve_focus_follows_mouse(
-        std::env::var("CHONKSTEP_FOCUS_FOLLOWS_MOUSE").ok().as_deref(),
-        config_value,
-    )
+    resolve_focus_follows_mouse(std::env::var("CHONKSTEP_FOCUS_FOLLOWS_MOUSE").ok().as_deref(), config_value)
 }
 
 /// Pure core of [`read_focus_follows_mouse`].
@@ -349,7 +367,10 @@ fn omarchy_trouble(reason: Option<String>) {
     static LAST: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
     let mut last = LAST.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     if reason.is_some() && *last != reason {
-        tracing::warn!(reason = reason.as_deref().unwrap_or_default(), "following Omarchy, but its current theme has no readable colors.toml; wearing the default until it does");
+        tracing::warn!(
+            reason = reason.as_deref().unwrap_or_default(),
+            "following Omarchy, but its current theme has no readable colors.toml; wearing the default until it does"
+        );
     }
     *last = reason;
 }
@@ -701,7 +722,10 @@ pub fn apply_session_env(env: &[(String, String)]) {
         unsafe { std::env::set_var(name, value) };
     }
     if !env.is_empty() {
-        tracing::info!(count = env.len(), "session env applied; a later edit to these lines takes effect at the next login");
+        tracing::info!(
+            count = env.len(),
+            "session env applied; a later edit to these lines takes effect at the next login"
+        );
     }
 }
 
@@ -744,6 +768,10 @@ mod tests {
             float_policy: None,
             reads_hyprland_config: false,
             session_env: Vec::new(),
+            bindings: Vec::new(),
+            layer_bindings: BTreeMap::new(),
+            input: wm_config::InputConfig::default(),
+            monitor_rules: Vec::new(),
             keybindings: Vec::new(),
         };
         assert_eq!(state.theme(), base.scaled(2.0));
@@ -827,7 +855,11 @@ mod tests {
     #[test]
     fn config_theme_resolves_known_ids() {
         for id in ["nextstep-classic", "amber-phosphor", "teal-blueprint", "graphite", "next-lavender"] {
-            assert_eq!(config_theme_fallback(Some(id)), Some(id.to_string()), "built-in theme id {id} must resolve from config");
+            assert_eq!(
+                config_theme_fallback(Some(id)),
+                Some(id.to_string()),
+                "built-in theme id {id} must resolve from config"
+            );
         }
     }
     #[test]

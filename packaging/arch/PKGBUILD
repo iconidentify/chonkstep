@@ -52,6 +52,7 @@ optdepends=(
   'python: dockapps written against the Python binding'
   'omarchy: host Omarchy'\''s shell and menu'
   'socat: watch the control socket'
+  'uwsm: managed Wayland session lifecycle and desktop autostart targets'
 )
 makedepends=('rust' 'git')
 provides=('chonkstep')
@@ -107,6 +108,7 @@ package() {
 
   install -Dm755 scripts/xsession.sh "$pkgdir/usr/lib/chonkstep/xsession.sh"
   install -Dm755 scripts/wayland-session.sh "$pkgdir/usr/lib/chonkstep/wayland-session.sh"
+  install -Dm755 scripts/chonkstep-session "$pkgdir/usr/lib/chonkstep/chonkstep-session"
   install -Dm755 scripts/reload.sh "$pkgdir/usr/lib/chonkstep/reload.sh"
   install -Dm755 scripts/restart.sh "$pkgdir/usr/lib/chonkstep/restart.sh"
   install -Dm755 scripts/verify-install.sh "$pkgdir/usr/lib/chonkstep/verify-install.sh"
@@ -135,11 +137,35 @@ DESKTOP
 [Desktop Entry]
 Name=chonkstep (Wayland)
 Comment=The chonkstep desktop as a native Wayland compositor
-Exec=/usr/lib/chonkstep/wayland-session.sh
-TryExec=/usr/lib/chonkstep/wayland-session.sh
+Exec=/usr/lib/chonkstep/chonkstep-session
+TryExec=/usr/lib/chonkstep/chonkstep-session
 DesktopNames=chonkstep
 Type=Application
 DESKTOP
+  cat > "$pkgdir/usr/share/wayland-sessions/chonkstep-uwsm.desktop" <<'DESKTOP'
+[Desktop Entry]
+Name=chonkstep (uwsm)
+Comment=The chonkstep desktop managed by the Universal Wayland Session Manager
+Exec=uwsm start -g -1 -e -D chonkstep chonkstep.desktop
+TryExec=uwsm
+DesktopNames=chonkstep
+Type=Application
+DESKTOP
+
+  install -Dm644 packaging/sddm/chonkstep/Main.qml \
+    "$pkgdir/usr/share/sddm/themes/chonkstep/Main.qml"
+  install -Dm644 packaging/sddm/chonkstep/metadata.desktop \
+    "$pkgdir/usr/share/sddm/themes/chonkstep/metadata.desktop"
+  install -Dm644 packaging/sddm/chonkstep/theme.conf \
+    "$pkgdir/usr/share/sddm/themes/chonkstep/theme.conf"
+  install -Dm644 packaging/sddm/zz-chonkstep-theme.conf \
+    "$pkgdir/usr/share/chonkstep/sddm/zz-chonkstep-theme.conf"
+  install -Dm644 packaging/sddm/zz-chonkstep-autologin.conf \
+    "$pkgdir/usr/share/chonkstep/sddm/zz-chonkstep-autologin.conf"
+  install -Dm755 scripts/omarchy-install-desktop-chonkstep \
+    "$pkgdir/usr/bin/omarchy-install-desktop-chonkstep"
+  install -Dm755 scripts/omarchy-remove-desktop-chonkstep \
+    "$pkgdir/usr/bin/omarchy-remove-desktop-chonkstep"
 
   # Portal backend map: ScreenCast/Screenshot to xdg-desktop-portal-wlr
   # (chonkstep-wayland advertises zwlr_screencopy), the rest to the GTK
@@ -155,6 +181,10 @@ DESKTOP
   install -Dm644 docs/dockapp-protocol.md -t "$pkgdir/usr/share/doc/$pkgname"
   install -Dm644 docs/xwayland-compatibility.md -t "$pkgdir/usr/share/doc/$pkgname"
   install -Dm644 docs/screen-sharing.md -t "$pkgdir/usr/share/doc/$pkgname"
+  install -Dm644 docs/night-light.md -t "$pkgdir/usr/share/doc/$pkgname"
+  install -Dm644 docs/hyprland-ipc.md -t "$pkgdir/usr/share/doc/$pkgname"
+  install -Dm644 docs/hyprland-config.md -t "$pkgdir/usr/share/doc/$pkgname"
+  install -Dm644 docs/omarchy-integration.md -t "$pkgdir/usr/share/doc/$pkgname"
   install -Dm644 docs/appearance.md -t "$pkgdir/usr/share/doc/$pkgname"
   install -Dm644 docs/control-socket.md -t "$pkgdir/usr/share/doc/$pkgname"
   install -Dm644 README.md CHANGELOG.md -t "$pkgdir/usr/share/doc/$pkgname"

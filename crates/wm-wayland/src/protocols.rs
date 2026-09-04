@@ -151,9 +151,7 @@ use smithay::reexports::wayland_protocols_wlr::screencopy::v1::server::zwlr_scre
 use smithay::reexports::wayland_server::protocol::wl_buffer::WlBuffer;
 use smithay::reexports::wayland_server::protocol::wl_output::WlOutput;
 use smithay::reexports::wayland_server::protocol::wl_shm;
-use smithay::reexports::wayland_server::{
-    Client, DataInit, Dispatch, DisplayHandle, GlobalDispatch, New, Resource,
-};
+use smithay::reexports::wayland_server::{Client, DataInit, Dispatch, DisplayHandle, GlobalDispatch, New, Resource};
 use smithay::utils::{Buffer as BufferCoords, Physical, Rectangle as SRect, Size as SSize, Transform};
 use smithay::wayland::shm::{with_buffer_contents, with_buffer_contents_mut, BufferData};
 
@@ -222,6 +220,20 @@ pub(crate) struct ProtocolState {
     minimize_requests: Vec<(WlWindowId, bool)>,
     /// Capture requests waiting for a frame to answer them.
     captures: Vec<PendingCapture>,
+}
+
+/// Resolve a wlr foreign-toplevel resource back to its managed window.
+/// A handle disappears from these vectors on destruction/unmap, so a
+/// stale mapping request naturally returns `None`.
+pub(crate) fn window_for_wlr_toplevel(
+    state: &ProtocolState,
+    handle: &ZwlrForeignToplevelHandleV1,
+) -> Option<WlWindowId> {
+    state
+        .toplevels
+        .iter()
+        .find(|(_, entry)| entry.handles.iter().any(|candidate| candidate == handle))
+        .map(|(window, _)| *window)
 }
 
 /// One bound foreign-toplevel manager.
@@ -352,10 +364,9 @@ pub(crate) fn init(display_handle: &DisplayHandle) -> ProtocolState {
     // withdraw the global (that takes `DisplayHandle::remove_global`),
     // and nothing in a session's life withdraws these. Same call
     // `dmabuf.rs` makes with its `DmabufGlobal`.
-    let _foreign_toplevel = display_handle
-        .create_global::<Compositor, ZwlrForeignToplevelManagerV1, ()>(FOREIGN_TOPLEVEL_VERSION, ());
-    let _screencopy = display_handle
-        .create_global::<Compositor, ZwlrScreencopyManagerV1, ()>(SCREENCOPY_VERSION, ());
+    let _foreign_toplevel =
+        display_handle.create_global::<Compositor, ZwlrForeignToplevelManagerV1, ()>(FOREIGN_TOPLEVEL_VERSION, ());
+    let _screencopy = display_handle.create_global::<Compositor, ZwlrScreencopyManagerV1, ()>(SCREENCOPY_VERSION, ());
     tracing::info!(
         foreign_toplevel = FOREIGN_TOPLEVEL_VERSION,
         screencopy = SCREENCOPY_VERSION,
@@ -449,8 +460,7 @@ fn sync_toplevels(comp: &mut Compositor) {
     // carry a `wl_output` belonging to the receiving client, so every
     // send needs both the name (to diff) and the `Output` (to find that
     // client's resources for it).
-    let screens: Vec<(String, &Output)> =
-        outputs.iter().map(|setup| (setup.output.name(), &setup.output)).collect();
+    let screens: Vec<(String, &Output)> = outputs.iter().map(|setup| (setup.output.name(), &setup.output)).collect();
 
     let backend = wm.backend();
     let focused = wm.focused_client();
@@ -471,9 +481,7 @@ fn sync_toplevels(comp: &mut Compositor) {
                     .and_then(|record| record.app_id.clone())
                     .unwrap_or_else(|| client.class.clone()),
                 states: ToplevelStates {
-                    maximized: client
-                        .flags
-                        .contains(ClientFlags::MAXIMIZED_H | ClientFlags::MAXIMIZED_V),
+                    maximized: client.flags.contains(ClientFlags::MAXIMIZED_H | ClientFlags::MAXIMIZED_V),
                     minimized: client.lifecycle == Lifecycle::Miniaturized,
                     activated: focused == Some(id),
                     fullscreen: client.flags.contains(ClientFlags::FULLSCREEN),
@@ -485,9 +493,7 @@ fn sync_toplevels(comp: &mut Compositor) {
                 // answer to "where does this window live".
                 outputs: outputs
                     .iter()
-                    .filter(|setup| {
-                        overlaps(client.geometry, Rect::new(setup.position, setup.size))
-                    })
+                    .filter(|setup| overlaps(client.geometry, Rect::new(setup.position, setup.size)))
                     .map(|setup| setup.output.name())
                     .collect(),
             }
@@ -639,14 +645,9 @@ fn update(entry: &mut ToplevelEntry, snapshot: &ToplevelSnapshot, screens: &[(St
 /// to exist first. A window whose parent this client cannot see gets an
 /// explicit `None`, which the protocol spells as "no parent" — the only
 /// honest answer available.
-fn sync_parents(
-    toplevels: &mut HashMap<WlWindowId, ToplevelEntry>,
-    snapshots: &[ToplevelSnapshot],
-) {
+fn sync_parents(toplevels: &mut HashMap<WlWindowId, ToplevelEntry>, snapshots: &[ToplevelSnapshot]) {
     for snapshot in snapshots {
-        let unchanged = toplevels
-            .get(&snapshot.window)
-            .is_some_and(|entry| entry.parent == snapshot.parent);
+        let unchanged = toplevels.get(&snapshot.window).is_some_and(|entry| entry.parent == snapshot.parent);
         if unchanged {
             continue;
         }
@@ -686,12 +687,7 @@ fn sync_parents(
 /// the manager already has them — and one that never binds `wl_output`
 /// has no use for the event. wlroots has the same shape, with a
 /// per-output bind listener papering over it.
-fn send_output(
-    handle: &ZwlrForeignToplevelHandleV1,
-    name: &str,
-    screens: &[(String, &Output)],
-    entering: bool,
-) {
+fn send_output(handle: &ZwlrForeignToplevelHandleV1, name: &str, screens: &[(String, &Output)], entering: bool) {
     let Some((_, output)) = screens.iter().find(|(candidate, _)| candidate == name) else {
         // The output went away between the snapshot and here, or has
         // already been dropped from `Compositor::outputs`. There is
@@ -930,8 +926,7 @@ impl Dispatch<ZwlrScreencopyManagerV1, ()> for Compositor {
         use zwlr_screencopy_manager_v1::Request;
         match request {
             Request::CaptureOutput { frame, overlay_cursor, output } => {
-                let source =
-                    output_geometry(&output).map(|(rect, transform, _scale)| (rect, transform));
+                let source = output_geometry(&output).map(|(rect, transform, _scale)| (rect, transform));
                 new_frame(data_init, frame, source, overlay_cursor != 0);
             }
             Request::CaptureOutputRegion { frame, overlay_cursor, output, x, y, width, height } => {
@@ -957,10 +952,7 @@ impl Dispatch<ZwlrScreencopyManagerV1, ()> for Compositor {
                             output_rect.pos.x.saturating_add(physical(x)),
                             output_rect.pos.y.saturating_add(physical(y)),
                         ),
-                        Size::new(
-                            physical(width.max(0)) as u32,
-                            physical(height.max(0)) as u32,
-                        ),
+                        Size::new(physical(width.max(0)) as u32, physical(height.max(0)) as u32),
                     );
                     Some((intersection(requested, output_rect)?, transform))
                 });
@@ -985,10 +977,8 @@ fn new_frame(
     overlay_cursor: bool,
 ) {
     let (region, transform) = source.unwrap_or((Rect::default(), Transform::Normal));
-    let frame = data_init.init(
-        frame,
-        ScreencopyFrameData { region, transform, overlay_cursor, used: AtomicBool::new(false) },
-    );
+    let frame =
+        data_init.init(frame, ScreencopyFrameData { region, transform, overlay_cursor, used: AtomicBool::new(false) });
     if region.size.w == 0 || region.size.h == 0 {
         // An unknown output, or a region entirely off its edge. Failing
         // now beats advertising a zero-sized buffer the client cannot
@@ -1005,12 +995,7 @@ fn new_frame(
     // every consumer of this protocol handles. `copy` is lenient about
     // what actually arrives (see `shm_layout`) — advertising one format
     // and accepting four costs nothing and rejects nobody.
-    frame.buffer(
-        wl_shm::Format::Xrgb8888,
-        size.w,
-        size.h,
-        size.w.saturating_mul(BYTES_PER_PIXEL as u32),
-    );
+    frame.buffer(wl_shm::Format::Xrgb8888, size.w, size.h, size.w.saturating_mul(BYTES_PER_PIXEL as u32));
     // No `linux_dmabuf` event: shm only, deliberately (module docs).
     if frame.version() >= BUFFER_DONE_SINCE {
         frame.buffer_done();
@@ -1099,9 +1084,7 @@ fn service_captures(comp: &mut Compositor) {
     });
 
     for capture in due {
-        let Some(pixels) =
-            capture_region(comp, capture.region, capture.transform, capture.overlay_cursor)
-        else {
+        let Some(pixels) = capture_region(comp, capture.region, capture.transform, capture.overlay_cursor) else {
             capture.frame.failed();
             continue;
         };
@@ -1159,21 +1142,13 @@ fn output_geometry(output: &WlOutput) -> Option<(Rect, Transform, f64)> {
         return None;
     }
     let location = output.current_location();
-    Some((
-        Rect::new(
-            Point::new(location.x, location.y),
-            Size::new(size.w as u32, size.h as u32),
-        ),
-        transform,
-        scale,
-    ))
+    Some((Rect::new(Point::new(location.x, location.y), Size::new(size.w as u32, size.h as u32)), transform, scale))
 }
 
 /// The size of the buffer a logically-`size` region is captured into.
 /// A quarter-turn output swaps the axes; everything else keeps them.
 fn buffer_size(size: Size, transform: Transform) -> Size {
-    let transformed =
-        transform.transform_size(SSize::<i32, Physical>::from((size.w as i32, size.h as i32)));
+    let transformed = transform.transform_size(SSize::<i32, Physical>::from((size.w as i32, size.h as i32)));
     Size::new(transformed.w.max(0) as u32, transformed.h.max(0) as u32)
 }
 
@@ -1187,10 +1162,7 @@ fn intersection(a: Rect, b: Rect) -> Option<Rect> {
     if right <= left || bottom <= top {
         return None;
     }
-    Some(Rect::new(
-        Point::new(left, top),
-        Size::new((right - left) as u32, (bottom - top) as u32),
-    ))
+    Some(Rect::new(Point::new(left, top), Size::new((right - left) as u32, (bottom - top) as u32)))
 }
 
 /// Draws the scene as it stands into an RGBA buffer covering `region`.
@@ -1225,14 +1197,7 @@ fn capture_region(
     let renderer = graphics_renderer(graphics);
     let hidden = CursorImageStatus::Hidden;
     let status = if overlay_cursor { &*cursor_status } else { &hidden };
-    let (elements, clear_color) = build_scene(
-        wm.backend(),
-        renderer,
-        *pointer_location,
-        status,
-        cursors,
-        region.pos,
-    );
+    let (elements, clear_color) = build_scene(wm.backend(), renderer, *pointer_location, status, cursors, region.pos);
     render_offscreen(renderer, &elements, region.size, transform, clear_color)
 }
 
@@ -1279,15 +1244,14 @@ fn render_offscreen(
     let width = target.w as i32;
     let height = target.h as i32;
 
-    let mut texture: GlesTexture = match renderer
-        .create_buffer(Fourcc::Abgr8888, SSize::<i32, BufferCoords>::from((width, height)))
-    {
-        Ok(texture) => texture,
-        Err(error) => {
-            tracing::warn!(?error, width, height, "could not allocate a screencopy buffer");
-            return None;
-        }
-    };
+    let mut texture: GlesTexture =
+        match renderer.create_buffer(Fourcc::Abgr8888, SSize::<i32, BufferCoords>::from((width, height))) {
+            Ok(texture) => texture,
+            Err(error) => {
+                tracing::warn!(?error, width, height, "could not allocate a screencopy buffer");
+                return None;
+            }
+        };
     let mut framebuffer = match renderer.bind(&mut texture) {
         Ok(framebuffer) => framebuffer,
         Err(error) => {
@@ -1296,11 +1260,8 @@ fn render_offscreen(
         }
     };
 
-    let mut damage_tracker =
-        OutputDamageTracker::new(SSize::<i32, Physical>::from((width, height)), 1.0, transform);
-    if let Err(error) =
-        damage_tracker.render_output(renderer, &mut framebuffer, 0, elements, clear_color)
-    {
+    let mut damage_tracker = OutputDamageTracker::new(SSize::<i32, Physical>::from((width, height)), 1.0, transform);
+    if let Err(error) = damage_tracker.render_output(renderer, &mut framebuffer, 0, elements, clear_color) {
         tracing::warn!(?error, "screencopy render failed");
         return None;
     }
@@ -1331,8 +1292,8 @@ fn render_offscreen(
 /// Lenient about the stride: a toolkit that pads its rows is not
 /// wrong, and honouring the stride it reports costs nothing.
 fn shm_layout(buffer: &WlBuffer, expected: Size) -> Result<BufferData, String> {
-    let data = with_buffer_contents(buffer, |_, _, data| data)
-        .map_err(|error| format!("not a wl_shm buffer ({error})"))?;
+    let data =
+        with_buffer_contents(buffer, |_, _, data| data).map_err(|error| format!("not a wl_shm buffer ({error})"))?;
     if data.width != expected.w as i32 || data.height != expected.h as i32 {
         return Err(format!(
             "buffer is {}x{}, this frame advertised {}x{}",
@@ -1387,9 +1348,7 @@ fn write_capture(buffer: &WlBuffer, capture: &DecorationBuffer) -> Result<(), St
         // The last row needs only its own bytes, not a full stride —
         // accepting that is what lets a client allocate exactly
         // `(h - 1) * stride + w * 4`.
-        let needed = offset
-            .saturating_add(height.saturating_sub(1).saturating_mul(stride))
-            .saturating_add(row_bytes);
+        let needed = offset.saturating_add(height.saturating_sub(1).saturating_mul(stride)).saturating_add(row_bytes);
         if len < needed {
             return Err(format!("buffer holds {len} bytes, the capture needs {needed}"));
         }
@@ -1402,8 +1361,7 @@ fn write_capture(buffer: &WlBuffer, capture: &DecorationBuffer) -> Result<(), St
             // every row this loop forms lies inside `len`, and the
             // slice is dropped before the next iteration, so no two
             // live slices ever alias.
-            let destination =
-                unsafe { std::slice::from_raw_parts_mut(ptr.add(offset + y * stride), row_bytes) };
+            let destination = unsafe { std::slice::from_raw_parts_mut(ptr.add(offset + y * stride), row_bytes) };
             for (source, destination) in
                 source.chunks_exact(BYTES_PER_PIXEL).zip(destination.chunks_exact_mut(BYTES_PER_PIXEL))
             {
@@ -1432,12 +1390,7 @@ mod tests {
 
     #[test]
     fn the_state_array_is_native_endian_u32s_in_enum_order() {
-        let states = ToplevelStates {
-            maximized: true,
-            minimized: false,
-            activated: true,
-            fullscreen: true,
-        };
+        let states = ToplevelStates { maximized: true, minimized: false, activated: true, fullscreen: true };
         let mut expected = Vec::new();
         expected.extend_from_slice(&0u32.to_ne_bytes()); // maximized
         expected.extend_from_slice(&2u32.to_ne_bytes()); // activated
@@ -1450,12 +1403,7 @@ mod tests {
         // The enum entry is `since = 2`; sending it to an older handle
         // would name a state that version of the protocol has no word
         // for.
-        let states = ToplevelStates {
-            maximized: false,
-            minimized: false,
-            activated: false,
-            fullscreen: true,
-        };
+        let states = ToplevelStates { maximized: false, minimized: false, activated: false, fullscreen: true };
         assert!(states.encode(1).is_empty());
         assert_eq!(states.encode(2), 3u32.to_ne_bytes().to_vec());
     }
@@ -1479,15 +1427,9 @@ mod tests {
             Some(Rect::new(Point::new(3800, 1000), Size::new(40, 80)))
         );
         // Entirely on the neighbouring screen.
-        assert_eq!(
-            intersection(Rect::new(Point::new(0, 0), Size::new(1920, 1080)), output),
-            None
-        );
+        assert_eq!(intersection(Rect::new(Point::new(0, 0), Size::new(1920, 1080)), output), None);
         // Touching an edge is not overlapping it.
-        assert_eq!(
-            intersection(Rect::new(Point::new(1820, 0), Size::new(100, 100)), output),
-            None
-        );
+        assert_eq!(intersection(Rect::new(Point::new(1820, 0), Size::new(100, 100)), output), None);
     }
 
     #[test]

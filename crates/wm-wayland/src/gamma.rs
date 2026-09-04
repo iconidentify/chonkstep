@@ -145,10 +145,8 @@ use smithay::reexports::wayland_protocols_wlr::gamma_control::v1::server::zwlr_g
 use smithay::reexports::wayland_protocols_wlr::gamma_control::v1::server::zwlr_gamma_control_v1::{
     self, ZwlrGammaControlV1,
 };
-use smithay::reexports::wayland_server::backend::{ClientId, GlobalId};
-use smithay::reexports::wayland_server::{
-    Client, DataInit, Dispatch, DisplayHandle, GlobalDispatch, New, Resource,
-};
+use smithay::reexports::wayland_server::backend::{ClientId, GlobalId, ObjectId};
+use smithay::reexports::wayland_server::{Client, DataInit, Dispatch, DisplayHandle, GlobalDispatch, New, Resource};
 
 use crate::state::Compositor;
 
@@ -175,6 +173,10 @@ pub(crate) struct GammaControl {
     /// force, so [`refresh`] programs it back rather than making the
     /// daemon notice and re-send.
     reprogram_after_vt_switch: bool,
+    /// The active hyprland-ctm-control manager, if any. Kept in the
+    /// same state as wlr ownership so two protocols cannot fight over
+    /// one CRTC.
+    ctm_manager: Option<ObjectId>,
 }
 
 /// One output's gamma state.
@@ -188,7 +190,7 @@ struct OutputGamma {
     /// protocol's exclusivity lives entirely in this one `Option`: a
     /// claim while it is `Some` is refused, and a `set_gamma` from any
     /// object that is not the one in here is ignored.
-    owner: Option<ZwlrGammaControlV1>,
+    owner: Option<Owner>,
     /// What the crtc's LUT held before the current owner touched it,
     /// captured at claim time. This is what a crashed night-light
     /// daemon's screen goes back to.
@@ -208,6 +210,12 @@ struct OutputGamma {
 /// be decided from and no second flag to fall out of step with it.
 struct ControlData {
     index: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Owner {
+    Wlr(ObjectId),
+    Ctm(ObjectId),
 }
 
 /// Three gamma ramps, one per channel, each of the output's
@@ -330,10 +338,7 @@ impl Ramps {
         if size == 0 {
             return Err(RampError::Unsupported);
         }
-        let expected = size
-            .checked_mul(3)
-            .and_then(|entries| entries.checked_mul(2))
-            .ok_or(RampError::Unsupported)?;
+        let expected = size.checked_mul(3).and_then(|entries| entries.checked_mul(2)).ok_or(RampError::Unsupported)?;
         if bytes.len() != expected {
             return Err(RampError::Length { expected, got: bytes.len() });
         }
@@ -381,13 +386,7 @@ pub(crate) fn init(display_handle: &DisplayHandle, graphics: &crate::state::Grap
     let simulated = simulated.is_some();
     let outputs: Vec<OutputGamma> = sizes
         .iter()
-        .map(|&size| OutputGamma {
-            size: size as usize,
-            owner: None,
-            original: None,
-            live: None,
-            pending: None,
-        })
+        .map(|&size| OutputGamma { size: size as usize, owner: None, original: None, live: None, pending: None })
         .collect();
     if outputs.iter().all(|output| output.size == 0) {
         tracing::info!(
@@ -395,25 +394,83 @@ pub(crate) fn init(display_handle: &DisplayHandle, graphics: &crate::state::Grap
             "no output can set a gamma ramp on this backend; wlr-gamma-control is NOT advertised \
              (night-light tools will say so and exit rather than silently do nothing)"
         );
-        return GammaControl {
-            _global: None,
-            outputs,
-            simulated,
-            reprogram_after_vt_switch: false,
-        };
+        return GammaControl { _global: None, outputs, simulated, reprogram_after_vt_switch: false, ctm_manager: None };
     }
-    let global = display_handle
-        .create_global::<Compositor, ZwlrGammaControlManagerV1, ()>(GAMMA_CONTROL_VERSION, ());
+    let global = display_handle.create_global::<Compositor, ZwlrGammaControlManagerV1, ()>(GAMMA_CONTROL_VERSION, ());
     tracing::info!(
         version = GAMMA_CONTROL_VERSION,
         sizes = ?sizes,
         "wlr-gamma-control advertised; wlsunset/gammastep/redshift can warm this session"
     );
-    GammaControl {
-        _global: Some(global),
-        outputs,
-        simulated,
-        reprogram_after_vt_switch: false,
+    GammaControl { _global: Some(global), outputs, simulated, reprogram_after_vt_switch: false, ctm_manager: None }
+}
+
+pub(crate) fn available(gamma: &GammaControl) -> bool {
+    gamma.outputs.iter().any(|output| output.size > 0)
+}
+
+/// Reserves color ownership for one CTM manager. A live wlr-gamma
+/// control is a conflict too: the wire protocols differ, the CRTC does not.
+pub(crate) fn claim_ctm_manager(gamma: &mut GammaControl, id: ObjectId) -> bool {
+    if gamma.ctm_manager.is_some() || gamma.outputs.iter().any(|output| output.owner.is_some()) {
+        return false;
+    }
+    gamma.ctm_manager = Some(id);
+    true
+}
+
+pub(crate) fn ctm_manager_is(gamma: &GammaControl, id: &ObjectId) -> bool {
+    gamma.ctm_manager.as_ref() == Some(id)
+}
+
+/// Stages a diagonal CTM as three scaled identity ramps. Outputs not
+/// named in `scales` are restored to identity on this commit, matching
+/// the CTM protocol's transaction semantics.
+pub(crate) fn commit_ctm(comp: &mut Compositor, id: &ObjectId, scales: &[(usize, [f64; 3])]) {
+    if comp.gamma.ctm_manager.as_ref() != Some(id) {
+        return;
+    }
+    for index in 0..comp.gamma.outputs.len() {
+        let diagonal =
+            scales.iter().find_map(|(candidate, value)| (*candidate == index).then_some(*value)).unwrap_or([1.0; 3]);
+        let slot = &mut comp.gamma.outputs[index];
+        if slot.size == 0 {
+            tracing::info!(index, "CTM skipped: this output has no hardware gamma ramp");
+            continue;
+        }
+        let size = slot.size;
+        if slot.original.is_none() {
+            slot.original = Some(
+                crate::session::read_gamma(&comp.graphics, index, size)
+                    .map(|(red, green, blue)| Ramps { red, green, blue })
+                    .unwrap_or_else(|| Ramps::linear(size)),
+            );
+        }
+        let base = slot.original.as_ref().cloned().unwrap_or_else(|| Ramps::linear(size));
+        let scale_channel = |channel: &[u16], factor: f64| {
+            channel.iter().map(|value| ((*value as f64 * factor).round().clamp(0.0, u16::MAX as f64)) as u16).collect()
+        };
+        slot.owner = Some(Owner::Ctm(id.clone()));
+        slot.pending = Some(Ramps {
+            red: scale_channel(&base.red, diagonal[0]),
+            green: scale_channel(&base.green, diagonal[1]),
+            blue: scale_channel(&base.blue, diagonal[2]),
+        });
+    }
+}
+
+/// Releases a CTM manager and schedules restoration even if the client died.
+pub(crate) fn release_ctm_manager(gamma: &mut GammaControl, id: &ObjectId) {
+    if gamma.ctm_manager.as_ref() != Some(id) {
+        return;
+    }
+    gamma.ctm_manager = None;
+    for output in &mut gamma.outputs {
+        if output.owner.as_ref() != Some(&Owner::Ctm(id.clone())) {
+            continue;
+        }
+        output.owner = None;
+        output.pending = restore_target(output.live.as_ref(), output.original.as_ref());
     }
 }
 
@@ -449,8 +506,7 @@ pub(crate) fn refresh(comp: &mut Compositor) {
             // reset. Whatever ramp is logically in force — a client's,
             // or the original if nobody owns this output — is put back.
             if output.pending.is_none() {
-                output.pending =
-                    reprogram_target(output.live.as_ref(), output.original.as_ref());
+                output.pending = reprogram_target(output.live.as_ref(), output.original.as_ref());
             }
         }
     }
@@ -469,8 +525,10 @@ pub(crate) fn refresh(comp: &mut Compositor) {
                 // "setting the gamma tables failed". The owner is told
                 // and released, so the next client gets a real chance
                 // rather than inheriting a wedged claim.
-                if let Some(owner) = comp.gamma.outputs[index].owner.take() {
-                    owner.failed();
+                if let Some(Owner::Wlr(owner)) = comp.gamma.outputs[index].owner.take() {
+                    if let Ok(owner) = ZwlrGammaControlV1::from_id(&comp.display_handle, owner) {
+                        owner.failed();
+                    }
                 }
             }
         }
@@ -545,7 +603,7 @@ pub(crate) fn note_session_resumed(gamma: &mut GammaControl) {
 /// for a resource that is not one of ours. Same derivation as
 /// `lock.rs` and `protocols.rs` use — the client named a specific
 /// output and `Output::from_resource` answers exactly that.
-fn output_index(
+pub(crate) fn output_index(
     comp: &Compositor,
     resource: &smithay::reexports::wayland_server::protocol::wl_output::WlOutput,
 ) -> Option<usize> {
@@ -645,8 +703,7 @@ impl Dispatch<ZwlrGammaControlManagerV1, ()> for Compositor {
                 // match a real slot, so such a control owns nothing and
                 // every later request on it is ignored.
                 let index = output_index(state, &output);
-                let control =
-                    data_init.init(id, ControlData { index: index.unwrap_or(usize::MAX) });
+                let control = data_init.init(id, ControlData { index: index.unwrap_or(usize::MAX) });
                 let Some(index) = index else {
                     tracing::debug!("gamma control asked for an output that is not ours");
                     control.failed();
@@ -656,16 +713,12 @@ impl Dispatch<ZwlrGammaControlManagerV1, ()> for Compositor {
                     control.failed();
                     return;
                 };
-                let size = match claim(slot.size, slot.owner.is_some()) {
+                let size = match claim(slot.size, slot.owner.is_some() || state.gamma.ctm_manager.is_some()) {
                     Ok(size) => size,
                     Err(refusal) => {
                         let reason = match refusal {
-                            ClaimRefusal::NoHardwareRamp => {
-                                "this output's hardware has no gamma ramp"
-                            }
-                            ClaimRefusal::AlreadyOwned => {
-                                "another client already owns this output"
-                            }
+                            ClaimRefusal::NoHardwareRamp => "this output's hardware has no gamma ramp",
+                            ClaimRefusal::AlreadyOwned => "another client already owns this output",
                         };
                         tracing::info!(index, reason, "gamma control refused");
                         control.failed();
@@ -692,7 +745,7 @@ impl Dispatch<ZwlrGammaControlManagerV1, ()> for Compositor {
                             }),
                     );
                 }
-                slot.owner = Some(control.clone());
+                slot.owner = Some(Owner::Wlr(control.id()));
                 // "This event is sent immediately when the gamma control
                 // object is created."
                 control.gamma_size(size as u32);
@@ -728,7 +781,7 @@ impl Dispatch<ZwlrGammaControlV1, ControlData> for Compositor {
                 // The object was sent `failed` and is inert, or it never
                 // owned this output. Either way it does not get to move
                 // the screen; the owner is the only object that can.
-                if slot.owner.as_ref() != Some(resource) {
+                if slot.owner.as_ref() != Some(&Owner::Wlr(resource.id())) {
                     return;
                 }
                 let size = slot.size;
@@ -743,10 +796,7 @@ impl Dispatch<ZwlrGammaControlV1, ControlData> for Compositor {
                     }
                     Err(reason) => {
                         tracing::info!(index, %reason, "gamma table refused");
-                        resource.post_error(
-                            zwlr_gamma_control_v1::Error::InvalidGamma,
-                            reason,
-                        );
+                        resource.post_error(zwlr_gamma_control_v1::Error::InvalidGamma, reason);
                     }
                 }
             }
@@ -765,7 +815,7 @@ impl Dispatch<ZwlrGammaControlV1, ControlData> for Compositor {
         let Some(slot) = state.gamma.outputs.get_mut(data.index) else {
             return;
         };
-        if slot.owner.as_ref() != Some(resource) {
+        if slot.owner.as_ref() != Some(&Owner::Wlr(resource.id())) {
             return;
         }
         slot.owner = None;
@@ -812,22 +862,13 @@ mod tests {
         // that trusts the length and indexes anyway reads off the end.
         let mut short = table(256);
         short.pop();
-        assert_eq!(
-            Ramps::parse(&short, 256),
-            Err(RampError::Length { expected: 1536, got: 1535 })
-        );
+        assert_eq!(Ramps::parse(&short, 256), Err(RampError::Length { expected: 1536, got: 1535 }));
         // Empty, which is what an fd to an empty memfd produces.
         assert_eq!(Ramps::parse(&[], 256), Err(RampError::Length { expected: 1536, got: 0 }));
         // Oversized: a table for bigger hardware than this output has.
-        assert_eq!(
-            Ramps::parse(&table(1024), 256),
-            Err(RampError::Length { expected: 1536, got: 6144 })
-        );
+        assert_eq!(Ramps::parse(&table(1024), 256), Err(RampError::Length { expected: 1536, got: 6144 }));
         // Misaligned: an odd byte count can never be whole u16s.
-        assert_eq!(
-            Ramps::parse(&[0u8; 7], 256),
-            Err(RampError::Length { expected: 1536, got: 7 })
-        );
+        assert_eq!(Ramps::parse(&[0u8; 7], 256), Err(RampError::Length { expected: 1536, got: 7 }));
         // A table for an output that cannot do gamma at all is refused
         // whatever it contains, including when it is empty and
         // therefore "the right length" for a zero-entry ramp.

@@ -184,7 +184,16 @@ fn a_bar_sees_the_snapshot_the_windows_and_its_own_switches() {
     // environment, under the name the document gives, at the path the
     // bar itself connected to.
     session.door().tap_key(keys::VOLUMEUP).expect("key injects");
-    poll_until(SPAWNED, "the environment dump", || dump.exists().then_some(())).expect("the dump command should have run");
+    // The shell creates the redirection target before `env` writes its first
+    // line. Waiting only for the path made this assertion race an empty file
+    // on fast runs, so wait for the fact under test to become observable.
+    poll_until(SPAWNED, "the control socket in the environment dump", || {
+        std::fs::read_to_string(&dump)
+            .ok()
+            .filter(|contents| contents.lines().any(|line| line.starts_with("CHONKSTEP_CONTROL_SOCKET=")))
+            .map(|_| ())
+    })
+    .expect("the dump command should have exported the control socket");
     let env = std::fs::read_to_string(&dump).expect("dump readable");
     let exported = env.lines().find_map(|l| l.strip_prefix("CHONKSTEP_CONTROL_SOCKET="));
     assert_eq!(exported, Some(path.to_str().unwrap()), "launched processes inherit the control socket path; env was:\n{env}");

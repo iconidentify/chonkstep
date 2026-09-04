@@ -28,21 +28,18 @@
 //!
 //! It is the worst available option. A script that gets a confident
 //! wrong answer takes an unexpected branch and carries the mistake
-//! forward silently, surfacing later as behaviour nobody can explain. A
-//! script that gets a clean error takes its error branch — which its
-//! author wrote, and tested, and which usually falls back to something
-//! that works. `docs/omarchy-integration.md` already catalogues four
-//! Omarchy commands that fail under chonkstep by *doing nothing* rather
-//! than by reporting anything, and records that the silence is the
-//! expensive part, not the failure.
+//! forward silently, surfacing later as behaviour nobody can explain.
+//! A textual refusal is still useful to an interactive caller—but the
+//! real `hyprctl` 0.56.2 exits zero for *every* server reply, including
+//! `Invalid dispatcher`. Omarchy's common `cmd || fallback` idiom thus
+//! never takes the fallback when its output is redirected.
 //!
-//! Omarchy's own source settles the argument.
-//! `omarchy-launch-or-focus` sends the Lua dispatch form and falls back
-//! to the classic one when it fails; a server that refuses cleanly gets
-//! the form it can serve, on the next line, for free.
-//!
-//! So: [`dispatch::Outcome::Unsupported`] is a first-class result, and
-//! every refusal says what chonkstep *is* rather than what it lacks.
+//! Consequently, supported caller paths are implemented rather than
+//! relying on refusal, and unsupported paths are removed from the UI
+//! we control. [`dispatch::Outcome::Unsupported`] remains a first-class
+//! result for truth and diagnostics. The server logs every refusal at
+//! warning level with a monotonically increasing counter so invisible
+//! callers can be found in a real session.
 //!
 //! # Shape
 //!

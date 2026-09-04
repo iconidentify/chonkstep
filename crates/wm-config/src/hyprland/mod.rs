@@ -92,10 +92,12 @@
 //!   drawing a NeXTSTEP frame with Hyprland's border colour on it.
 //! - **Layer rules.** They configure Hyprland's layer-shell
 //!   implementation; this compositor has its own.
-//! - **Input settings.** `kb_layout`, `repeat_rate` and the touchpad
-//!   block are the seat's, which this compositor configures elsewhere.
-//! - **`monitor =` lines.** Read and reported, not applied — see
-//!   [`Monitors`] for why the mapping is not clean enough to force.
+//! - **Unsupported input settings.** Keyboard xkb/repeat values and
+//!   `follow_mouse` are carried; touchpad policy and gestures are named
+//!   and skipped.
+//! - **Unsupported `monitor =` lines.** Preferred mode, position and
+//!   scale are applied once outputs exist. Disable, mirror, transform,
+//!   extras and explicit modes refuse their whole line.
 //! - **Anything that commands Hyprland.** `hyprctl` and the
 //!   `omarchy-hyprland-*` scripts talk to a compositor that is not
 //!   running; those bindings stay unbound, the same filter
@@ -167,7 +169,9 @@ impl Roots {
             .filter(|v| !v.is_empty() && Path::new(v).is_absolute())
             .map(PathBuf::from)
             .unwrap_or_else(|| home.join(".local/state"));
-        let omarchy = std::env::var_os("OMARCHY_PATH").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("/usr/share/omarchy"));
+        let omarchy = std::env::var_os("OMARCHY_PATH")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("/usr/share/omarchy"));
         Some(Self {
             user: config.join("hypr"),
             defaults: omarchy.join("default/hypr"),
@@ -194,8 +198,16 @@ impl Roots {
         Self {
             user: root.join(".config/hypr"),
             defaults: root.join("omarchy/default/hypr"),
-            module_path: vec![root.join(".local/state"), root.join(".config"), root.join("omarchy")],
-            facts: lua::Facts { path: Vec::new(), home: Some(root.to_path_buf()), state_home: Some(root.join(".local/state")) },
+            module_path: vec![
+                root.join(".local/state"),
+                root.join(".config"),
+                root.join("omarchy"),
+            ],
+            facts: lua::Facts {
+                path: Vec::new(),
+                home: Some(root.to_path_buf()),
+                state_home: Some(root.join(".local/state")),
+            },
         }
     }
 
@@ -244,6 +256,10 @@ pub struct Reading {
     /// later entries winning — Hyprland's own rule for a chord bound
     /// twice.
     pub keybindings: Vec<(KeyCombo, Action)>,
+    /// Every accepted binding including release/locked/repeat behavior
+    /// and its human description.
+    pub bindings: Vec<crate::Binding>,
+    pub layer_bindings: BTreeMap<String, Vec<crate::Binding>>,
     /// The argv every [`Action::Run`] above names, keyed by the name
     /// [`dispatch::command_name`] derived from the argv.
     pub commands: BTreeMap<String, Vec<String>>,
@@ -255,6 +271,8 @@ pub struct Reading {
     pub float_rules: rules::FloatRules,
     /// `monitor =` lines, parsed and reported. See [`Monitors`].
     pub monitors: Monitors,
+    pub input: crate::InputConfig,
+    pub follow_mouse: Option<bool>,
     /// Every file actually read, in order. The [`Watch`]'s signature is
     /// taken over exactly this list.
     pub files: Vec<PathBuf>,
@@ -274,42 +292,15 @@ pub struct Skipped {
     pub why: String,
 }
 
-/// The `monitor =` lines a configuration carries, kept and reported
-/// rather than applied.
+/// The `monitor =` lines a configuration carries.
 ///
-/// The brief for this work asked for output layout "if it can be
-/// honoured through the output-management work already in
-/// `wm-wayland`; if the mapping is not clean, report rather than force
-/// it". It is not clean, and this is the report.
-///
-/// `wm_wayland::output_mgmt` is a *server* for `zwlr_output_management`
-/// — the protocol `wlr-randr` and `kanshi` drive outputs through. Its
-/// own documentation is candid about what it can do: scale applies
-/// everywhere, position applies on both backends, mode applies only on
-/// the DRM session backend, and **disable, transform and adaptive sync
-/// are refused with `failed()`** because disabling an output means
-/// tearing it out of three index-aligned lists that the lock module and
-/// the shell hold indices into.
-///
-/// A Hyprland `monitor =` line uses all of those. This machine's own
-/// carries `cm, srgb`; Omarchy's template offers `transform, 1` and
-/// `monitor=DP-2,disable` as its two commonest edits. Applying the
-/// half that works would give a user a rotated monitor that came back
-/// unrotated and a disabled monitor that stayed on — which is worse
-/// than not applying it, because it looks like it worked.
-///
-/// There is a second reason, and it would still hold if every refusal
-/// above were implemented. Hyprland's `auto` position and `preferred`
-/// mode are resolved against the connected hardware at the moment the
-/// compositor comes up. This reader has no outputs; it has a config
-/// file. Turning `monitor = DP-2, preferred, auto, 1.5` into a real
-/// layout means knowing what DP-2's preferred mode is and where `auto`
-/// puts it relative to heads this reader cannot see.
-///
-/// So the lines are parsed, kept, and logged at startup, and the door
-/// is left open: a session already exposes `zwlr_output_management`, so
-/// `wlr-randr` and `kanshi` work today and are the honest answer for
-/// anyone who needs a layout applied.
+/// This parser deliberately keeps the requests unevaluated: preferred
+/// mode, automatic DPI scale, and automatic placement can only be
+/// resolved after real outputs exist. `wm-wayland` consumes the list at
+/// output bootstrap, gives exact-name rules precedence over catch-all
+/// rules, and applies preferred mode, position, and scale as one
+/// transaction. A line containing disable, mirror, transform, another
+/// extra field, or an explicit mode is refused whole and logged.
 #[derive(Clone, Debug, Default)]
 pub struct Monitors {
     pub lines: Vec<directive::Monitor>,
@@ -321,7 +312,10 @@ impl Reading {
     /// the caller, which keeps the baked preset rather than replacing a
     /// working keymap with an empty one.
     pub fn is_empty(&self) -> bool {
-        self.keybindings.is_empty() && self.env.is_empty() && self.autostart.is_empty() && self.float_rules.is_empty()
+        self.keybindings.is_empty()
+            && self.env.is_empty()
+            && self.autostart.is_empty()
+            && self.float_rules.is_empty()
     }
 
     /// Logs the read: one summary line, and one line per thing
@@ -450,9 +444,10 @@ pub fn read(roots: &Roots) -> Reading {
 /// machine where Omarchy is not installed, or is installed in a shape
 /// this reader cannot follow.
 pub fn wanted(config: &crate::Config) -> bool {
-    config
-        .hyprland_config
-        .unwrap_or(config.desktop == crate::preset::Desktop::Omarchy || config.keymap == crate::preset::Keymap::Omarchy)
+    config.hyprland_config.unwrap_or(
+        config.desktop == crate::preset::Desktop::Omarchy
+            || config.keymap == crate::preset::Keymap::Omarchy,
+    )
 }
 
 /// Applies a reading to a config, in the position the module docs
@@ -469,10 +464,14 @@ pub fn apply(config: &mut crate::Config, reading: Option<&Reading>) {
         // this module did not notice, and replacing a working keymap
         // with an empty one would leave a user with no way to open a
         // terminal and fix it. The rest of the read still applies.
-        tracing::warn!("hyprland-config: no bindings came out of the read; keeping the built-in keymap");
+        tracing::warn!(
+            "hyprland-config: no bindings came out of the read; keeping the built-in keymap"
+        );
     } else {
         config.keybindings = reading.keybindings.clone();
     }
+    config.bindings = reading.bindings.clone();
+    config.layer_bindings = reading.layer_bindings.clone();
     // Commands are *inserted*, so a `[commands]` entry of the same name
     // read later from the user's own file replaces this one — the same
     // rule `preset::apply_keymap` applies to its own declarations.
@@ -480,6 +479,11 @@ pub fn apply(config: &mut crate::Config, reading: Option<&Reading>) {
         config.commands.insert(name.clone(), argv.clone());
     }
     config.session_env = reading.env.clone();
+    config.input = reading.input.clone();
+    config.monitor_rules = reading.monitors.lines.clone();
+    if let Some(follow) = reading.follow_mouse {
+        config.focus_follows_mouse = follow;
+    }
     config.autostart = reading.autostart.clone();
     config.float_policy = reading.float_rules.clone().policy();
 }
@@ -510,21 +514,36 @@ impl<'a> Loader<'a> {
     }
 
     fn finish(self) -> LoadReport {
-        LoadReport { files: self.files, skipped: self.skipped }
+        LoadReport {
+            files: self.files,
+            skipped: self.skipped,
+        }
     }
 
     fn note(&mut self, kind: &str, what: impl Into<String>, why: impl Into<String>) {
-        self.skipped.push(Skipped { kind: kind.to_string(), what: what.into(), why: why.into() });
+        self.skipped.push(Skipped {
+            kind: kind.to_string(),
+            what: what.into(),
+            why: why.into(),
+        });
     }
 
     /// Reads one file into `out`, following its includes in place.
     fn file(&mut self, path: &Path, syntax: Syntax, out: &mut Vec<Directive>, depth: u32) {
         if depth > MAX_INCLUDE_DEPTH {
-            self.note("include", path.display().to_string(), "include graph nested too deeply");
+            self.note(
+                "include",
+                path.display().to_string(),
+                "include graph nested too deeply",
+            );
             return;
         }
         if self.files.len() >= MAX_FILES {
-            self.note("include", path.display().to_string(), format!("more than {MAX_FILES} files in one read"));
+            self.note(
+                "include",
+                path.display().to_string(),
+                format!("more than {MAX_FILES} files in one read"),
+            );
             return;
         }
         // Canonicalized so two names for one file — a symlink into a
@@ -536,11 +555,19 @@ impl<'a> Loader<'a> {
         }
         let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
         if size > MAX_FILE_BYTES {
-            self.note("include", path.display().to_string(), format!("larger than {MAX_FILE_BYTES} bytes"));
+            self.note(
+                "include",
+                path.display().to_string(),
+                format!("larger than {MAX_FILE_BYTES} bytes"),
+            );
             return;
         }
         if self.bytes.saturating_add(size) > MAX_TOTAL_BYTES {
-            self.note("include", path.display().to_string(), "read budget exhausted");
+            self.note(
+                "include",
+                path.display().to_string(),
+                "read budget exhausted",
+            );
             return;
         }
         let Ok(bytes) = std::fs::read(path) else {
@@ -591,11 +618,19 @@ impl<'a> Loader<'a> {
             Include::Module { name, optional } => match self.resolve_module(name) {
                 Some(path) => self.file(&path, Syntax::Lua, out, depth + 1),
                 None if *optional => {}
-                None => self.note("include", format!("require(\"{name}\")"), "no module of that name on the search path"),
+                None => self.note(
+                    "include",
+                    format!("require(\"{name}\")"),
+                    "no module of that name on the search path",
+                ),
             },
             Include::ModuleDirectory { prefix } => match self.resolve_directory(prefix) {
                 Some(dir) => self.directory(&dir, out, depth + 1),
-                None => self.note("include", format!("require_all.files(…, \"{prefix}\")"), "no directory of that name on the search path"),
+                None => self.note(
+                    "include",
+                    format!("require_all.files(…, \"{prefix}\")"),
+                    "no directory of that name on the search path",
+                ),
             },
         }
     }
@@ -611,7 +646,13 @@ impl<'a> Loader<'a> {
         let mut paths: Vec<PathBuf> = entries
             .flatten()
             .map(|e| e.path())
-            .filter(|p| p.is_file() && matches!(p.extension().and_then(|e| e.to_str()), Some("lua") | Some("conf")))
+            .filter(|p| {
+                p.is_file()
+                    && matches!(
+                        p.extension().and_then(|e| e.to_str()),
+                        Some("lua") | Some("conf")
+                    )
+            })
             .collect();
         paths.sort();
         for path in paths {
@@ -639,7 +680,11 @@ impl<'a> Loader<'a> {
             return Vec::new();
         };
         if !name.contains('*') {
-            return if path.is_file() { vec![path] } else { Vec::new() };
+            return if path.is_file() {
+                vec![path]
+            } else {
+                Vec::new()
+            };
         }
         // One glob, in the last component, which is the only shape
         // Hyprland's own `source` lines and Omarchy's toggles directory
@@ -650,15 +695,19 @@ impl<'a> Loader<'a> {
             return Vec::new();
         };
         let dir = path.parent().unwrap_or(Path::new("."));
-        let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return Vec::new();
+        };
         let mut matched: Vec<PathBuf> = entries
             .flatten()
             .map(|e| e.path())
             .filter(|p| {
                 p.is_file()
-                    && p.file_name()
-                        .and_then(|n| n.to_str())
-                        .is_some_and(|n| n.len() >= before.len() + after.len() && n.starts_with(before) && n.ends_with(after))
+                    && p.file_name().and_then(|n| n.to_str()).is_some_and(|n| {
+                        n.len() >= before.len() + after.len()
+                            && n.starts_with(before)
+                            && n.ends_with(after)
+                    })
             })
             .collect();
         matched.sort();
@@ -670,12 +719,20 @@ impl<'a> Loader<'a> {
     /// `~/.config`, then `$OMARCHY_PATH`.
     fn resolve_module(&self, name: &str) -> Option<PathBuf> {
         let relative = module_relative(name)?;
-        self.roots.module_path.iter().map(|root| root.join(&relative).with_extension("lua")).find(|p| p.is_file())
+        self.roots
+            .module_path
+            .iter()
+            .map(|root| root.join(&relative).with_extension("lua"))
+            .find(|p| p.is_file())
     }
 
     fn resolve_directory(&self, prefix: &str) -> Option<PathBuf> {
         let relative = module_relative(prefix)?;
-        self.roots.module_path.iter().map(|root| root.join(&relative)).find(|p| p.is_dir())
+        self.roots
+            .module_path
+            .iter()
+            .map(|root| root.join(&relative))
+            .find(|p| p.is_dir())
     }
 }
 
@@ -706,25 +763,62 @@ struct LoadReport {
 /// Turns the directive stream into a [`Reading`]: the one place a
 /// Hyprland statement becomes a chonkstep setting.
 fn lower(stream: Vec<Directive>, report: LoadReport) -> Reading {
-    let mut reading = Reading { files: report.files, skipped: report.skipped, ..Default::default() };
+    let mut reading = Reading {
+        files: report.files,
+        skipped: report.skipped,
+        ..Default::default()
+    };
     let mut window_rules = Vec::new();
     let mut env: Vec<(String, String)> = Vec::new();
     for entry in stream {
         match entry {
-            Directive::Bind { keys, description, dispatcher } => bind(&mut reading, &keys, description.as_deref(), &dispatcher),
+            Directive::Bind {
+                keys,
+                description,
+                flags,
+                dispatcher,
+            } => bind(
+                &mut reading,
+                &keys,
+                description.as_deref(),
+                flags,
+                &dispatcher,
+            ),
+            Directive::LayerBind {
+                namespace,
+                keys,
+                description,
+                flags,
+                dispatcher,
+            } => layer_bind(
+                &mut reading,
+                namespace,
+                &keys,
+                description.as_deref(),
+                flags,
+                &dispatcher,
+            ),
             Directive::Unbind { keys } => match keys::spec_for(&keys) {
                 Ok(spec) => {
                     if let Some(combo) = crate::parse_key(&spec) {
-                        reading.keybindings.retain(|(existing, _)| *existing != combo);
+                        reading
+                            .keybindings
+                            .retain(|(existing, _)| *existing != combo);
+                        reading.bindings.retain(|binding| binding.combo != combo);
                     }
                 }
-                Err(trouble) => reading.skipped.push(Skipped { kind: "unbind".into(), what: keys, why: trouble.reason() }),
+                Err(trouble) => reading.skipped.push(Skipped {
+                    kind: "unbind".into(),
+                    what: keys,
+                    why: trouble.reason(),
+                }),
             },
             Directive::Env { name, value } => {
                 // Later wins, the way a config file's last word does.
                 env.retain(|(existing, _)| *existing != name);
                 env.push((name, value));
             }
+            Directive::Input { name, value } => input(&mut reading, &name, &value),
             Directive::ExecOnce { command } => autostart(&mut reading, &command),
             Directive::WindowRule(rule) => window_rules.push(rule),
             Directive::Monitor(line) => reading.monitors.lines.push(line),
@@ -740,14 +834,45 @@ fn lower(stream: Vec<Directive>, report: LoadReport) -> Reading {
     let (float_rules, notes) = rules::compile(&window_rules);
     reading.float_rules = float_rules;
     for note in notes {
-        reading.skipped.push(Skipped { kind: "window-rule".into(), what: note, why: "see docs/hyprland-config.md".into() });
+        reading.skipped.push(Skipped {
+            kind: "window-rule".into(),
+            what: note,
+            why: "see docs/hyprland-config.md".into(),
+        });
     }
     reading.env = filter_env(env, &mut reading.skipped);
     reading
 }
 
+fn layer_bind(
+    reading: &mut Reading,
+    namespace: String,
+    keys: &str,
+    description: Option<&str>,
+    flags: directive::BindFlags,
+    dispatcher: &directive::Dispatcher,
+) {
+    let mut scoped = Reading::default();
+    bind(&mut scoped, keys, description, flags, dispatcher);
+    reading.commands.extend(scoped.commands);
+    reading.skipped.extend(scoped.skipped);
+    let Some(binding) = scoped.bindings.pop() else {
+        return;
+    };
+    let bindings = reading.layer_bindings.entry(namespace).or_default();
+    bindings
+        .retain(|existing| existing.combo != binding.combo || existing.release != binding.release);
+    bindings.push(binding);
+}
+
 /// One binding, through the three answers in [`dispatch`].
-fn bind(reading: &mut Reading, keys: &str, description: Option<&str>, dispatcher: &directive::Dispatcher) {
+fn bind(
+    reading: &mut Reading,
+    keys: &str,
+    description: Option<&str>,
+    flags: directive::BindFlags,
+    dispatcher: &directive::Dispatcher,
+) {
     let what = match description {
         Some(text) => format!("{keys} ({text})"),
         None => keys.to_string(),
@@ -755,19 +880,31 @@ fn bind(reading: &mut Reading, keys: &str, description: Option<&str>, dispatcher
     let spec = match keys::spec_for(keys) {
         Ok(spec) => spec,
         Err(trouble) => {
-            reading.skipped.push(Skipped { kind: "bind".into(), what, why: trouble.reason() });
+            reading.skipped.push(Skipped {
+                kind: "bind".into(),
+                what,
+                why: trouble.reason(),
+            });
             return;
         }
     };
     let Some(combo) = crate::parse_key(&spec) else {
-        reading.skipped.push(Skipped { kind: "bind".into(), what, why: format!("{spec:?} is not a chord this desktop can grab") });
+        reading.skipped.push(Skipped {
+            kind: "bind".into(),
+            what,
+            why: format!("{spec:?} is not a chord this desktop can grab"),
+        });
         return;
     };
     let action = match dispatch::verb_for(dispatcher) {
         dispatch::Verb::Action(action) => action,
         dispatch::Verb::Run(argv) => {
             if argv.is_empty() {
-                reading.skipped.push(Skipped { kind: "bind".into(), what, why: "empty command".into() });
+                reading.skipped.push(Skipped {
+                    kind: "bind".into(),
+                    what,
+                    why: "empty command".into(),
+                });
                 return;
             }
             let name = dispatch::command_name(&argv);
@@ -775,15 +912,74 @@ fn bind(reading: &mut Reading, keys: &str, description: Option<&str>, dispatcher
             Action::Run(name)
         }
         dispatch::Verb::Unbound(reason) => {
-            reading.skipped.push(Skipped { kind: "bind".into(), what, why: reason.reason().to_string() });
+            reading.skipped.push(Skipped {
+                kind: "bind".into(),
+                what,
+                why: reason.reason().to_string(),
+            });
             return;
         }
     };
-    // Replace-then-append: one entry per chord, last spelling wins —
-    // the same invariant `apply_keybindings` keeps for the user's own
-    // `[keybindings]` table.
-    reading.keybindings.retain(|(existing, _)| *existing != combo);
-    reading.keybindings.push((combo, action));
+    // Press and release are independent namespaces. In particular the
+    // F9 release half of push-to-talk must not replace its press half.
+    reading
+        .bindings
+        .retain(|existing| existing.combo != combo || existing.release != flags.release);
+    reading.bindings.push(crate::Binding {
+        combo,
+        action: action.clone(),
+        description: description.map(str::to_string),
+        locked: flags.locked,
+        repeating: flags.repeating,
+        release: flags.release,
+    });
+    if !flags.release {
+        reading
+            .keybindings
+            .retain(|(existing, _)| *existing != combo);
+        reading.keybindings.push((combo, action));
+    }
+}
+
+fn input(reading: &mut Reading, name: &str, value: &str) {
+    let value = value.trim().trim_matches(['\"', '\'']).to_string();
+    match name.trim().to_ascii_lowercase().as_str() {
+        "kb_rules" => reading.input.rules = Some(value),
+        "kb_model" => reading.input.model = Some(value),
+        "kb_layout" => reading.input.layout = Some(value),
+        "kb_variant" => reading.input.variant = Some(value),
+        "kb_options" => reading.input.options = Some(value),
+        "repeat_rate" => match value.parse::<i32>() {
+            Ok(rate) if (1..=1000).contains(&rate) => reading.input.repeat_rate = Some(rate),
+            _ => reading.skipped.push(Skipped {
+                kind: "input".into(),
+                what: format!("repeat_rate = {value}"),
+                why: "repeat rate must be an integer from 1 through 1000".into(),
+            }),
+        },
+        "repeat_delay" => match value.parse::<i32>() {
+            Ok(delay) if (1..=5000).contains(&delay) => reading.input.repeat_delay = Some(delay),
+            _ => reading.skipped.push(Skipped {
+                kind: "input".into(),
+                what: format!("repeat_delay = {value}"),
+                why: "repeat delay must be an integer from 1 through 5000 milliseconds".into(),
+            }),
+        },
+        "follow_mouse" => match value.to_ascii_lowercase().as_str() {
+            "1" | "true" | "on" => reading.follow_mouse = Some(true),
+            "0" | "false" | "off" => reading.follow_mouse = Some(false),
+            _ => reading.skipped.push(Skipped {
+                kind: "input".into(),
+                what: format!("follow_mouse = {value}"),
+                why: "follow_mouse must be 0/1 or false/true".into(),
+            }),
+        },
+        other => reading.skipped.push(Skipped {
+            kind: "input".into(),
+            what: format!("{other} = {value}"),
+            why: "input setting is not implemented".into(),
+        }),
+    }
 }
 
 /// One `exec-once` line, filtered.
@@ -795,31 +991,68 @@ fn bind(reading: &mut Reading, keys: &str, description: Option<&str>, dispatcher
 /// Hyprland's `autostart` would have started it, so taking it from
 /// this list too would start a second copy of the bar.
 fn autostart(reading: &mut Reading, command: &str) {
+    let compact = command.split_whitespace().collect::<Vec<_>>().join(" ");
+    let blanket_systemd_import = compact.contains("systemctl --user import-environment")
+        && (compact.contains("$(env") || compact.ends_with(" import-environment"));
+    let blanket_dbus_import = compact.contains("dbus-update-activation-environment")
+        && compact.split_whitespace().any(|word| word == "--all");
+    if blanket_systemd_import || blanket_dbus_import {
+        reading.skipped.push(Skipped {
+            kind: "exec-once".into(),
+            what: command.to_string(),
+            why: "blanket activation-environment imports can leak credentials, build variables, or another session's display; chonkstep publishes a curated session set".into(),
+        });
+        return;
+    }
     let argv = dispatch::split_command(command);
-    let Some(program) = argv.first().cloned() else { return };
+    let Some(program) = argv.first().cloned() else {
+        return;
+    };
     let base = program.rsplit('/').next().unwrap_or(&program).to_string();
     // `uwsm-app -- <thing>`: look past the wrapper, so the checks below
     // see the program Omarchy is actually starting.
     let effective = if base == "uwsm-app" {
-        argv.iter().find(|a| *a != "uwsm-app" && *a != "--").cloned().unwrap_or_else(|| base.clone())
+        argv.iter()
+            .find(|a| *a != "uwsm-app" && *a != "--")
+            .cloned()
+            .unwrap_or_else(|| base.clone())
     } else {
         base.clone()
     };
-    let effective = effective.rsplit('/').next().unwrap_or(&effective).to_string();
+    let effective = effective
+        .rsplit('/')
+        .next()
+        .unwrap_or(&effective)
+        .to_string();
     if dispatch::commands_hyprland(&base) || dispatch::commands_hyprland(&effective) {
-        reading.skipped.push(Skipped { kind: "exec-once".into(), what: command.to_string(), why: Unbound::HyprlandOnly.reason().to_string() });
+        reading.skipped.push(Skipped {
+            kind: "exec-once".into(),
+            what: command.to_string(),
+            why: Unbound::HyprlandOnly.reason().to_string(),
+        });
         return;
     }
     if ALREADY_OURS.contains(&effective.as_str()) {
         reading.skipped.push(Skipped {
             kind: "exec-once".into(),
             what: command.to_string(),
-            why: "this desktop starts it itself; running it from here too would start a second copy".into(),
+            why:
+                "this desktop starts it itself; running it from here too would start a second copy"
+                    .into(),
         });
         return;
     }
-    if command.contains("&&") || command.contains("||") || command.contains('|') || command.contains('$') || command.contains(';') {
-        reading.autostart.push(vec!["bash".into(), "-lc".into(), command.trim().to_string()]);
+    if command.contains("&&")
+        || command.contains("||")
+        || command.contains('|')
+        || command.contains('$')
+        || command.contains(';')
+    {
+        reading.autostart.push(vec![
+            "bash".into(),
+            "-lc".into(),
+            command.trim().to_string(),
+        ]);
         return;
     }
     reading.autostart.push(argv);
@@ -855,10 +1088,17 @@ fn filter_env(env: Vec<(String, String)>, skipped: &mut Vec<Skipped>) -> Vec<(St
     env.into_iter()
         .filter(|(name, value)| {
             let refused = match name.as_str() {
-                "XDG_CURRENT_DESKTOP" | "XDG_SESSION_DESKTOP" => Some("names Hyprland as the running desktop, which under chonkstep it is not"),
-                "WAYLAND_DISPLAY" | "DISPLAY" | "XDG_SESSION_TYPE" | "XDG_RUNTIME_DIR" | "HYPRLAND_INSTANCE_SIGNATURE" => {
-                    Some("names this session, which the compositor sets for itself")
+                "XDG_CURRENT_DESKTOP" | "XDG_SESSION_DESKTOP" => {
+                    Some("names Hyprland as the running desktop, which under chonkstep it is not")
                 }
+                "WAYLAND_DISPLAY"
+                | "DISPLAY"
+                | "XDG_SESSION_TYPE"
+                | "XDG_RUNTIME_DIR"
+                | "HYPRLAND_INSTANCE_SIGNATURE" => Some("names this session, which the compositor sets for itself"),
+                "GDK_SCALE" | "GDK_DPI_SCALE" | "QT_SCALE_FACTOR" | "ELM_SCALE" => Some(
+                    "toolkit-wide scale would double-apply or contradict the compositor's per-output monitor scale",
+                ),
                 _ => None,
             };
             match refused {
@@ -930,7 +1170,12 @@ impl Watch {
             last_checked: None,
             seen: None,
             watched: reading.files.clone(),
-            directories: vec![roots.user.clone(), roots.defaults.clone(), roots.defaults.join("bindings"), roots.defaults.join("apps")],
+            directories: vec![
+                roots.user.clone(),
+                roots.defaults.clone(),
+                roots.defaults.join("bindings"),
+                roots.defaults.join("apps"),
+            ],
         }
     }
 
@@ -943,7 +1188,10 @@ impl Watch {
     /// is what it is already wearing. Same contract, and the same
     /// reasoning, as `omarchy_follow::Watch::changed`.
     pub fn changed(&mut self, now: std::time::Instant) -> bool {
-        if self.last_checked.is_some_and(|last| now.duration_since(last) < self.cadence) {
+        if self
+            .last_checked
+            .is_some_and(|last| now.duration_since(last) < self.cadence)
+        {
             return false;
         }
         self.last_checked = Some(now);
@@ -972,14 +1220,21 @@ impl Watch {
                 .watched
                 .iter()
                 .map(|path| {
-                    let identity = std::fs::metadata(path).ok().and_then(|m| Some((m.modified().ok()?, m.len(), m.ino())));
+                    let identity = std::fs::metadata(path)
+                        .ok()
+                        .and_then(|m| Some((m.modified().ok()?, m.len(), m.ino())));
                     (path.clone(), identity)
                 })
                 .collect(),
             directories: self
                 .directories
                 .iter()
-                .map(|path| (path.clone(), std::fs::metadata(path).and_then(|m| m.modified()).ok()))
+                .map(|path| {
+                    (
+                        path.clone(),
+                        std::fs::metadata(path).and_then(|m| m.modified()).ok(),
+                    )
+                })
                 .collect(),
         }
     }

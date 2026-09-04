@@ -70,9 +70,14 @@ fn csd_options() -> SessionOptions {
 /// treats it as self-decorating and leaves it unframed.
 fn launch_question(session: &mut Session, title: &str) -> WindowInfo {
     session
-        .launch("zenity", &["--question", "--title", title, "--text", "Click OK"])
+        .launch(
+            "zenity",
+            &["--question", "--title", title, "--text", "Click OK"],
+        )
         .expect("zenity should launch");
-    session.wait_for_window(title).expect("the zenity dialog should map")
+    session
+        .wait_for_window(title)
+        .expect("the zenity dialog should map")
 }
 
 /// The regression: a drag whose release was delivered to the client
@@ -95,7 +100,10 @@ fn drag_ends_when_the_button_comes_up() {
 
     // Press in the CSD headerbar (top strip of the client's own
     // content — there is no server frame on a GTK dialog) and drag.
-    let grip = (window.x as f64 + window.w as f64 / 2.0, window.y as f64 + 20.0);
+    let grip = (
+        window.x as f64 + window.w as f64 / 2.0,
+        window.y as f64 + 20.0,
+    );
     let target = (grip.0 + 240.0, grip.1 + 180.0);
     session.door().drag_to(grip, target).unwrap();
 
@@ -103,10 +111,25 @@ fn drag_ends_when_the_button_comes_up() {
     // vacuously against a compositor that ignores drags entirely.
     let moved = {
         let door = session.door();
+        let mut nudged = false;
         poll_until(ACT, "the dialog to follow the drag", || {
             let world = door.windows().ok()?;
             let now = world.window_matching("TestDrag")?;
-            ((now.x, now.y) != start).then_some((now.x, now.y))
+            if (now.x, now.y) != start {
+                return Some((now.x, now.y));
+            }
+            // The door's barrier synchronizes with the compositor, not
+            // with GTK. On a loaded run GTK can receive the press and
+            // issue xdg_toplevel.move only after `drag_to`'s last
+            // motion. Keep producing real held-button motion while we
+            // wait, so the first event after that asynchronous request
+            // proves and drives the drag instead of leaving it parked
+            // at its zero-delta anchor.
+            nudged = !nudged;
+            let dx = if nudged { 16.0 } else { 0.0 };
+            door.motion(target.0 + dx, target.1).ok()?;
+            door.barrier().ok()?;
+            None
         })
         .unwrap()
     };
@@ -125,7 +148,10 @@ fn drag_ends_when_the_button_comes_up() {
 
     // Post-release motion, big and in several settled steps: a window
     // still glued to the cursor follows every one of them.
-    for (x, y) in [(target.0 + 300.0, target.1 + 200.0), (target.0 + 600.0, target.1 + 400.0)] {
+    for (x, y) in [
+        (target.0 + 300.0, target.1 + 200.0),
+        (target.0 + 600.0, target.1 + 400.0),
+    ] {
         session.door().motion(x, y).unwrap();
         session.door().barrier().unwrap();
     }
@@ -203,17 +229,33 @@ fn click_lands_where_it_visually_lands() {
 fn scale_2_composition_stays_intact() {
     // Reference run at scale 1: how wide is the same dialog?
     let width_at_1 = {
-        let mut session =
-            Session::boot("scale-ref", SessionOptions { scale: Some(1.0), ..csd_options() }).unwrap();
+        let mut session = Session::boot(
+            "scale-ref",
+            SessionOptions {
+                scale: Some(1.0),
+                ..csd_options()
+            },
+        )
+        .unwrap();
         let window = launch_question(&mut session, "TestScale");
         window.w
     };
 
-    let mut session = Session::boot("scale-2", SessionOptions { scale: Some(2.0), ..csd_options() }).unwrap();
+    let mut session = Session::boot(
+        "scale-2",
+        SessionOptions {
+            scale: Some(2.0),
+            ..csd_options()
+        },
+    )
+    .unwrap();
     let window = launch_question(&mut session, "TestScale");
     session.door().barrier().unwrap();
     let world = session.world().unwrap();
-    assert_eq!(world.scale, 2.0, "the session should be running at the configured scale");
+    assert_eq!(
+        world.scale, 2.0,
+        "the session should be running at the configured scale"
+    );
 
     let shot = session.screenshot("scale2-desktop").unwrap();
 
@@ -221,9 +263,12 @@ fn scale_2_composition_stays_intact() {
     // none of them black. In the shipped bug everything right of and
     // below the half-way lines was unpainted.
     let (w, h) = (shot.width, shot.height);
-    for (name, x, y) in
-        [("top-left", 2, 2), ("top-right", w - 18, 2), ("bottom-left", 2, h - 18), ("bottom-right", w - 18, h - 18)]
-    {
+    for (name, x, y) in [
+        ("top-left", 2, 2),
+        ("top-right", w - 18, 2),
+        ("bottom-left", 2, h - 18),
+        ("bottom-right", w - 18, h - 18),
+    ] {
         let mean = shot.mean_rgb(x, y, 16, 16);
         assert!(
             !is_dark(mean),
@@ -239,10 +284,22 @@ fn scale_2_composition_stays_intact() {
     // nothing like the wallpaper, and in the shipped bug this
     // rectangle held bare wallpaper while the dock itself was drawn
     // off-screen.
-    let dock = world.dock().expect("a dock column at the right edge of the ledger").clone();
-    let inside = shot.mean_rgb(dock.x as u32 + dock.w / 4, dock.y as u32 + dock.w / 2, dock.w / 2, 16);
-    let beside =
-        shot.mean_rgb((dock.x - dock.w as i32) as u32, dock.y as u32 + dock.w / 2, dock.w / 2, 16);
+    let dock = world
+        .dock()
+        .expect("a dock column at the right edge of the ledger")
+        .clone();
+    let inside = shot.mean_rgb(
+        dock.x as u32 + dock.w / 4,
+        dock.y as u32 + dock.w / 2,
+        dock.w / 2,
+        16,
+    );
+    let beside = shot.mean_rgb(
+        (dock.x - dock.w as i32) as u32,
+        dock.y as u32 + dock.w / 2,
+        dock.w / 2,
+        16,
+    );
     let contrast = inside
         .iter()
         .zip(beside.iter())
@@ -285,7 +342,16 @@ fn frameless_resize_works() {
     let text = session.dir.join("resize-me.txt");
     std::fs::write(&text, "resize me\n").unwrap();
     session
-        .launch("zenity", &["--text-info", "--title", "TestResize", "--filename", text.to_str().unwrap()])
+        .launch(
+            "zenity",
+            &[
+                "--text-info",
+                "--title",
+                "TestResize",
+                "--filename",
+                text.to_str().unwrap(),
+            ],
+        )
         .unwrap();
     let window = session.wait_for_window("TestResize").unwrap();
     session.screenshot("before-resize").unwrap();
@@ -293,8 +359,14 @@ fn frameless_resize_works() {
     // 2px outside the bottom-right corner of the content rect: on the
     // GTK shadow, where its resize grip lives — and where a hit test
     // that stops at the content rect would see only the desktop.
-    let grip = (window.x as f64 + window.w as f64 + 2.0, window.y as f64 + window.h as f64 + 2.0);
-    session.door().drag_to(grip, (grip.0 + 120.0, grip.1 + 120.0)).unwrap();
+    let grip = (
+        window.x as f64 + window.w as f64 + 2.0,
+        window.y as f64 + window.h as f64 + 2.0,
+    );
+    session
+        .door()
+        .drag_to(grip, (grip.0 + 120.0, grip.1 + 120.0))
+        .unwrap();
 
     // Grown yet? The client acks configures asynchronously, so poll
     // the ledger rather than reading it once.
@@ -324,7 +396,14 @@ fn frameless_resize_works() {
 #[test]
 #[ignore = "needs a live Wayland session to nest in: scripts/e2e.sh, or cargo test -p chonk-testkit -- --ignored --test-threads=1"]
 fn live_reload_applies() {
-    let mut session = Session::boot("live-reload", SessionOptions { scale: Some(1.0), ..SessionOptions::default() }).unwrap();
+    let mut session = Session::boot(
+        "live-reload",
+        SessionOptions {
+            scale: Some(1.0),
+            ..SessionOptions::default()
+        },
+    )
+    .unwrap();
     session.door().barrier().unwrap();
     let before = session.world().unwrap();
     assert_eq!(before.scale, 1.0);
@@ -349,16 +428,22 @@ fn live_reload_applies() {
         )
         .expect("the live reload never applied");
     }
-    assert!(session.compositor_alive(), "the reload killed the compositor");
+    assert!(
+        session.compositor_alive(),
+        "the reload killed the compositor"
+    );
 
     // And the rescaled composition is whole — the collapse regression
     // check, after a *live* rescale rather than a boot.
     session.door().barrier().unwrap();
     let shot = session.screenshot("after-live-reload").unwrap();
     let (w, h) = (shot.width, shot.height);
-    for (name, x, y) in
-        [("top-left", 2, 2), ("top-right", w - 18, 2), ("bottom-left", 2, h - 18), ("bottom-right", w - 18, h - 18)]
-    {
+    for (name, x, y) in [
+        ("top-left", 2, 2),
+        ("top-right", w - 18, 2),
+        ("bottom-left", 2, h - 18),
+        ("bottom-right", w - 18, h - 18),
+    ] {
         let mean = shot.mean_rgb(x, y, 16, 16);
         assert!(
             !is_dark(mean),
@@ -413,18 +498,35 @@ fn wire_events(log: &std::path::Path, object: &str, event: &str) -> usize {
 #[test]
 #[ignore = "needs a live Wayland session to nest in: scripts/e2e.sh, or cargo test -p chonk-testkit -- --ignored --test-threads=1"]
 fn restore_after_miniaturize_is_a_real_focus_cycle() {
-    let mut session = Session::boot("miniaturize-restore-focus", SessionOptions::default()).unwrap();
+    let mut session =
+        Session::boot("miniaturize-restore-focus", SessionOptions::default()).unwrap();
     session
-        .launch("env", &["WAYLAND_DEBUG=1", "zenity", "--question", "--title", "TestMini", "--text", "hide me"])
+        .launch(
+            "env",
+            &[
+                "WAYLAND_DEBUG=1",
+                "zenity",
+                "--question",
+                "--title",
+                "TestMini",
+                "--text",
+                "hide me",
+            ],
+        )
         .expect("zenity should launch");
-    let window = session.wait_for_window("TestMini").expect("the zenity dialog should map");
+    let window = session
+        .wait_for_window("TestMini")
+        .expect("the zenity dialog should map");
     let log = session.dir.join("client-0-env.log");
 
     // Focus it with a click in its content and wait until the client
     // itself has seen keyboard focus at least once.
     session
         .door()
-        .click(window.x as f64 + window.w as f64 / 2.0, window.y as f64 + window.h as f64 / 3.0)
+        .click(
+            window.x as f64 + window.w as f64 / 2.0,
+            window.y as f64 + window.h as f64 / 3.0,
+        )
         .unwrap();
     poll_until(ACT, "the client to see a wl_keyboard.enter", || {
         (wire_events(&log, "wl_keyboard#", ".enter(") >= 1).then_some(())
@@ -433,8 +535,14 @@ fn restore_after_miniaturize_is_a_real_focus_cycle() {
 
     let enters_before = wire_events(&log, "wl_keyboard#", ".enter(");
     let leaves_before = wire_events(&log, "wl_keyboard#", ".leave(");
-    let shells_before: Vec<u64> =
-        session.door().windows().unwrap().shells.iter().map(|s| s.id).collect();
+    let shells_before: Vec<u64> = session
+        .door()
+        .windows()
+        .unwrap()
+        .shells
+        .iter()
+        .map(|s| s.id)
+        .collect();
 
     // Miniaturize via the default alt+shift+m chord. Two modifiers,
     // so the raw key path rather than `Door::chord` (which holds one).
@@ -454,7 +562,10 @@ fn restore_after_miniaturize_is_a_real_focus_cycle() {
         let door = session.door();
         poll_until(ACT, "the ledger to show the window hidden", || {
             let world = door.windows().ok()?;
-            let now = world.windows.iter().find(|w| w.title.contains("TestMini"))?;
+            let now = world
+                .windows
+                .iter()
+                .find(|w| w.title.contains("TestMini"))?;
             (!now.mapped).then_some(())
         })
         .expect("the miniaturize chord never hid the window");
@@ -479,7 +590,10 @@ fn restore_after_miniaturize_is_a_real_focus_cycle() {
         .expect("miniaturizing should have grown an icon tile shell");
     session
         .door()
-        .click(tile.x as f64 + tile.w as f64 / 2.0, tile.y as f64 + tile.h as f64 / 2.0)
+        .click(
+            tile.x as f64 + tile.w as f64 / 2.0,
+            tile.y as f64 + tile.h as f64 / 2.0,
+        )
         .unwrap();
 
     {
@@ -529,11 +643,15 @@ fn an_x11_pager_can_switch_the_workspace() {
     // has already stripped the ANSI color escapes tracing writes
     // between the key and the value (the same trap `Session::boot`
     // documents for the socket line), so the field parses as written.
-    let display = poll_until(Duration::from_secs(30), "XWayland to announce its display", || {
-        let log = session.log();
-        let line = log.lines().find(|line| line.contains("XWayland ready"))?;
-        line.split("display=").nth(1)?.trim().parse::<u32>().ok()
-    })
+    let display = poll_until(
+        Duration::from_secs(30),
+        "XWayland to announce its display",
+        || {
+            let log = session.log();
+            let line = log.lines().find(|line| line.contains("XWayland ready"))?;
+            line.split("display=").nth(1)?.trim().parse::<u32>().ok()
+        },
+    )
     .expect("the nested session never brought XWayland up");
 
     let (conn, screen_num) =
@@ -577,16 +695,30 @@ fn an_x11_pager_can_switch_the_workspace() {
 #[test]
 #[ignore = "needs a live Wayland session to nest in: scripts/e2e.sh, or cargo test -p chonk-testkit -- --ignored --test-threads=1"]
 fn appearance_request_flips_the_desktop_live() {
-    let mut session =
-        Session::boot("appearance-switch", SessionOptions { scale: Some(1.0), ..SessionOptions::default() }).unwrap();
+    let mut session = Session::boot(
+        "appearance-switch",
+        SessionOptions {
+            scale: Some(1.0),
+            ..SessionOptions::default()
+        },
+    )
+    .unwrap();
     session.door().barrier().unwrap();
 
     // The contract's reader half is present from the first frame: the
     // published mode, which with nothing configured is the flagship
     // theme's native dark.
     let published = session.state_file("appearance");
-    let read_mode = || std::fs::read_to_string(&published).map(|s| s.trim().to_string()).unwrap_or_default();
-    assert_eq!(read_mode(), "dark", "a fresh session publishes its resolved appearance");
+    let read_mode = || {
+        std::fs::read_to_string(&published)
+            .map(|s| s.trim().to_string())
+            .unwrap_or_default()
+    };
+    assert_eq!(
+        read_mode(),
+        "dark",
+        "a fresh session publishes its resolved appearance"
+    );
 
     let dark = session.screenshot("dark").unwrap();
 
@@ -595,11 +727,16 @@ fn appearance_request_flips_the_desktop_live() {
     // the new mode, and repaint, all with no further prodding.
     let request = session.state_file("appearance-request");
     std::fs::write(&request, "light").unwrap();
-    poll_until(Duration::from_secs(30), "the appearance request to be consumed and published", || {
-        (!request.exists() && read_mode() == "light").then_some(())
-    })
+    poll_until(
+        Duration::from_secs(30),
+        "the appearance request to be consumed and published",
+        || (!request.exists() && read_mode() == "light").then_some(()),
+    )
     .expect("the appearance switch never landed");
-    assert!(session.compositor_alive(), "the appearance switch killed the compositor");
+    assert!(
+        session.compositor_alive(),
+        "the appearance switch killed the compositor"
+    );
 
     session.door().barrier().unwrap();
     let light = session.screenshot("light").unwrap();
@@ -662,9 +799,8 @@ fn chromium_resize_at_scale_2_keeps_its_scale() {
     // commit pattern; without it there is nothing to test against. A
     // PATH scan rather than `Command::status` — the workspace bans the
     // blocking wait, and existence is all that is being asked.
-    let chromium_on_path = std::env::var_os("PATH").is_some_and(|path| {
-        std::env::split_paths(&path).any(|dir| dir.join("chromium").is_file())
-    });
+    let chromium_on_path = std::env::var_os("PATH")
+        .is_some_and(|path| std::env::split_paths(&path).any(|dir| dir.join("chromium").is_file()));
     if !chromium_on_path {
         eprintln!("chromium not installed; skipping");
         return;
@@ -702,12 +838,20 @@ fn chromium_resize_at_scale_2_keeps_its_scale() {
         .unwrap();
     session.wait_for_window("hromium").unwrap();
     session.door().barrier().unwrap();
-    let window = session.world().unwrap().window_matching("hromium").cloned().unwrap();
+    let window = session
+        .world()
+        .unwrap()
+        .window_matching("hromium")
+        .cloned()
+        .unwrap();
 
     // Corner drag, frameless CSD style: grip just outside the content
     // rect (the shadow margin), cross the drag threshold in small
     // steps, then cruise.
-    let grip = (window.x as f64 + window.w as f64 + 2.0, window.y as f64 + window.h as f64 + 2.0);
+    let grip = (
+        window.x as f64 + window.w as f64 + 2.0,
+        window.y as f64 + window.h as f64 + 2.0,
+    );
     session.door().motion(grip.0, grip.1).unwrap();
     session.door().barrier().unwrap();
     session.door().button("left", true).unwrap();
@@ -734,7 +878,12 @@ fn chromium_resize_at_scale_2_keeps_its_scale() {
         // the ledger to roughly HALF the physical size. Growing
         // monotonically is client-timing-dependent; never collapsing
         // is the invariant.
-        let now = session.world().unwrap().window_matching("hromium").cloned().unwrap();
+        let now = session
+            .world()
+            .unwrap()
+            .window_matching("hromium")
+            .cloned()
+            .unwrap();
         assert!(
             now.w >= window.w && now.h >= window.h,
             "mid-drag the ledger collapsed to {}x{} from {}x{} — a commit was measured at \
@@ -748,7 +897,12 @@ fn chromium_resize_at_scale_2_keeps_its_scale() {
     session.door().button("left", false).unwrap();
     session.door().barrier().unwrap();
 
-    let released = session.world().unwrap().window_matching("hromium").cloned().unwrap();
+    let released = session
+        .world()
+        .unwrap()
+        .window_matching("hromium")
+        .cloned()
+        .unwrap();
     assert!(
         released.w > window.w && released.h > window.h,
         "the drag should have grown the window ({}x{} -> {}x{})",
@@ -764,12 +918,16 @@ fn chromium_resize_at_scale_2_keeps_its_scale() {
     // same size across a full second of quiet.
     {
         let door = session.door();
-        poll_until(Duration::from_secs(20), "the geometry to stop moving", || {
-            let first = door.windows().ok()?.window_matching("hromium")?.clone();
-            std::thread::sleep(Duration::from_millis(1000));
-            let second = door.windows().ok()?.window_matching("hromium")?.clone();
-            (first.w == second.w && first.h == second.h).then_some(())
-        })
+        poll_until(
+            Duration::from_secs(20),
+            "the geometry to stop moving",
+            || {
+                let first = door.windows().ok()?.window_matching("hromium")?.clone();
+                std::thread::sleep(Duration::from_millis(1000));
+                let second = door.windows().ok()?.window_matching("hromium")?.clone();
+                (first.w == second.w && first.h == second.h).then_some(())
+            },
+        )
         .expect(
             "the window never stopped resizing after the release — the configure/commit \
              loop is running at mismatched scales",

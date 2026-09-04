@@ -79,9 +79,7 @@ pub fn place_frame(
     let pos = match policy {
         PlacementPolicy::Center => center_of(workarea, frame),
         PlacementPolicy::Cascade => cascade_origin(workarea, frame, cascade_index, cascade_step),
-        PlacementPolicy::Smart => {
-            smart_origin(workarea, frame, existing, cascade_index, cascade_step)
-        }
+        PlacementPolicy::Smart => smart_origin(workarea, frame, existing, cascade_index, cascade_step),
     };
     clamp_to(workarea, frame, pos)
 }
@@ -107,13 +105,7 @@ pub fn place_frame(
 ///   stacked overlaps, so a pathological pile-up could trip this while
 ///   a sliver of the frame would still have been visible — an acceptable
 ///   trade for keeping the test a cheap sum rather than a union.)
-fn smart_origin(
-    workarea: Rect,
-    frame: Size,
-    existing: &[Rect],
-    cascade_index: usize,
-    cascade_step: u32,
-) -> Point {
+fn smart_origin(workarea: Rect, frame: Size, existing: &[Rect], cascade_index: usize, cascade_step: u32) -> Point {
     let xs = axis_candidates(
         workarea.pos.x,
         workarea.pos.x + workarea.size.w.saturating_sub(frame.w) as i32,
@@ -132,10 +124,7 @@ fn smart_origin(
     'scan: for &y in &ys {
         for &x in &xs {
             let candidate = Rect::new(Point::new(x, y), frame);
-            let score = existing
-                .iter()
-                .map(|r| overlap_area(candidate, *r))
-                .fold(0u64, u64::saturating_add);
+            let score = existing.iter().map(|r| overlap_area(candidate, *r)).fold(0u64, u64::saturating_add);
             if best.is_none_or(|(incumbent, _)| score < incumbent) {
                 best = Some((score, Point::new(x, y)));
                 if score == 0 {
@@ -161,12 +150,7 @@ fn smart_origin(
 /// sit exactly against a neighbor. Sorted ascending — the scan order
 /// *is* the tie-break policy — and deduplicated so no candidate is
 /// scored twice.
-fn axis_candidates(
-    min: i32,
-    max: i32,
-    step: i32,
-    packed_edges: impl Iterator<Item = i32>,
-) -> Vec<i32> {
+fn axis_candidates(min: i32, max: i32, step: i32, packed_edges: impl Iterator<Item = i32>) -> Vec<i32> {
     let max = max.max(min);
     let mut candidates: Vec<i32> = (min..=max).step_by(step as usize).collect();
     candidates.push(max);
@@ -211,10 +195,7 @@ fn cascade_origin(workarea: Rect, frame: Size, cascade_index: usize, cascade_ste
     let run = cascade_index as i64 / per_run;
     let diag = cascade_index as i64 % per_run;
     let column_shift = if usable_w > 0 { (run * step * 2) % (usable_w + 1) } else { 0 };
-    Point::new(
-        workarea.pos.x + (column_shift + diag * step) as i32,
-        workarea.pos.y + (diag * step) as i32,
-    )
+    Point::new(workarea.pos.x + (column_shift + diag * step) as i32, workarea.pos.y + (diag * step) as i32)
 }
 
 /// The `app_id` prefix Omarchy stamps on every window it opens for
@@ -292,6 +273,29 @@ pub struct FloatDecision {
     pub center: bool,
 }
 
+/// Non-geometric window-rule decisions made when a window maps.
+///
+/// These are deliberately separate from [`FloatDecision`]: a rule such
+/// as `no_initial_focus` says nothing about placement and must not
+/// accidentally opt the window into centered placement.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct WindowRuleDecision {
+    /// Keep the idle notifier inhibited while this window is mapped and visible.
+    pub idle_inhibit: bool,
+    /// Keep the window visible on every workspace and above ordinary windows.
+    pub pin: bool,
+    /// Never give this window keyboard focus.
+    pub no_focus: bool,
+    /// Do not focus it merely because it has just mapped.
+    pub no_initial_focus: bool,
+    /// Whether later client activation requests may focus it.
+    pub focus_on_activate: Option<bool>,
+    /// Enter fullscreen immediately after mapping.
+    pub fullscreen: bool,
+    /// Enter full horizontal-and-vertical maximize after mapping.
+    pub maximize: bool,
+}
+
 /// A source of per-window float rules, supplied by the shell.
 ///
 /// A trait rather than a data type because the rules this desktop
@@ -307,6 +311,13 @@ pub struct FloatDecision {
 /// called once per mapped window, on the compositor's own thread.
 pub trait FloatPolicy: std::fmt::Debug + Send + Sync {
     fn decision_for(&self, class: &str, title: &str) -> Option<FloatDecision>;
+
+    /// Answers the non-placement half of the same identity rules.
+    /// Existing/custom policies remain source-compatible and simply
+    /// make no such decisions.
+    fn window_decision_for(&self, _class: &str, _title: &str) -> WindowRuleDecision {
+        WindowRuleDecision::default()
+    }
 }
 
 /// The content size to map a window at, consulting `policy` first and
@@ -368,7 +379,10 @@ fn center_of(workarea: Rect, frame: Size) -> Point {
 pub(crate) fn clamp_to(workarea: Rect, frame: Size, pos: Point) -> Point {
     let max_x = workarea.pos.x + (workarea.size.w.saturating_sub(frame.w)) as i32;
     let max_y = workarea.pos.y + (workarea.size.h.saturating_sub(frame.h)) as i32;
-    Point::new(pos.x.clamp(workarea.pos.x, max_x.max(workarea.pos.x)), pos.y.clamp(workarea.pos.y, max_y.max(workarea.pos.y)))
+    Point::new(
+        pos.x.clamp(workarea.pos.x, max_x.max(workarea.pos.x)),
+        pos.y.clamp(workarea.pos.y, max_y.max(workarea.pos.y)),
+    )
 }
 
 #[cfg(test)]
@@ -400,7 +414,10 @@ mod tests {
         for policy in [PlacementPolicy::Smart, PlacementPolicy::Cascade, PlacementPolicy::Center] {
             for index in 0..200 {
                 let pos = place_frame(policy, AREA, Size::new(500, 400), &[], index, 23);
-                assert!(pos.x >= AREA.pos.x && pos.y >= AREA.pos.y, "{policy:?} index {index} escaped top-left: {pos:?}");
+                assert!(
+                    pos.x >= AREA.pos.x && pos.y >= AREA.pos.y,
+                    "{policy:?} index {index} escaped top-left: {pos:?}"
+                );
                 assert!(
                     pos.x + 500 <= AREA.pos.x + AREA.size.w as i32 && pos.y + 400 <= AREA.pos.y + AREA.size.h as i32,
                     "{policy:?} index {index} escaped bottom-right: {pos:?}"
@@ -706,7 +723,10 @@ mod tests {
         assert_eq!(float_override("org.omarchy.terminal", area, NO_CHROME, 1.0), Some(Size::new(875, 600)));
         assert_eq!(float_override("org.omarchy.about", area, NO_CHROME, 1.0), Some(Size::new(875, 600)));
         // An open set: the rule is the prefix, not a list of scripts.
-        assert_eq!(float_override("org.omarchy.something-invented-tomorrow", area, NO_CHROME, 1.0), Some(Size::new(875, 600)));
+        assert_eq!(
+            float_override("org.omarchy.something-invented-tomorrow", area, NO_CHROME, 1.0),
+            Some(Size::new(875, 600))
+        );
         // Matched the way every other identity rule here is matched.
         assert_eq!(float_override("ORG.Omarchy.Terminal", area, NO_CHROME, 1.0), Some(Size::new(875, 600)));
 
@@ -732,8 +752,15 @@ mod tests {
 
         // Degenerate inputs give a small window, never a zero-sized or
         // panicking one.
-        assert_eq!(float_override("org.omarchy.about", rect(0, 0, 10, 10), Size::new(40, 40), 1.0), Some(Size::new(1, 1)));
-        assert_eq!(float_override("org.omarchy.about", area, NO_CHROME, 0.0), Some(Size::new(875, 600)), "a nonsense scale is no scale");
+        assert_eq!(
+            float_override("org.omarchy.about", rect(0, 0, 10, 10), Size::new(40, 40), 1.0),
+            Some(Size::new(1, 1))
+        );
+        assert_eq!(
+            float_override("org.omarchy.about", area, NO_CHROME, 0.0),
+            Some(Size::new(875, 600)),
+            "a nonsense scale is no scale"
+        );
         assert_eq!(float_override("org.omarchy.about", area, NO_CHROME, f32::NAN), Some(Size::new(875, 600)));
     }
 }

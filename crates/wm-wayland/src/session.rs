@@ -63,12 +63,12 @@ use std::error::Error;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use smithay::backend::allocator::gbm::{GbmAllocator, GbmBufferFlags, GbmDevice};
 use smithay::backend::allocator::format::FormatSet;
+use smithay::backend::allocator::gbm::{GbmAllocator, GbmBufferFlags, GbmDevice};
 use smithay::backend::allocator::{Format, Fourcc, Modifier};
 use smithay::backend::drm::compositor::{DrmCompositor, FrameError, FrameFlags, PrimaryPlaneElement};
 use smithay::backend::drm::exporter::gbm::GbmFramebufferExporter;
-use smithay::backend::drm::{DrmDevice, DrmDeviceFd, DrmDeviceNotifier, DrmEvent, PlaneInfo};
+use smithay::backend::drm::{DrmDevice, DrmDeviceFd, DrmDeviceNotifier, DrmEvent, DrmEventTime, DrmNode, NodeType, PlaneInfo};
 use smithay::backend::egl::{EGLContext, EGLDisplay};
 use smithay::backend::libinput::{LibinputInputBackend, LibinputSessionInterface};
 use smithay::backend::renderer::gles::GlesRenderer;
@@ -78,13 +78,14 @@ use smithay::backend::udev::{all_gpus, primary_gpu, UdevBackend, UdevEvent};
 use smithay::output::{Mode as OutputMode, Output, OutputModeSource, PhysicalProperties};
 use smithay::reexports::calloop::LoopHandle;
 use smithay::reexports::drm::control::{
-    connector, crtc, plane, Device as ControlDevice, Mode as DrmMode, ModeTypeFlags, PlaneType,
-    ResourceHandles,
+    connector, crtc, plane, Device as ControlDevice, Mode as DrmMode, ModeTypeFlags, PlaneType, ResourceHandles,
 };
 use smithay::reexports::input::Libinput;
 use smithay::reexports::rustix::fs::OFlags;
 use smithay::reexports::wayland_server::DisplayHandle;
 use smithay::utils::{DeviceFd, Transform};
+use smithay::wayland::presentation::Refresh;
+use smithay::desktop::utils::OutputPresentationFeedback;
 
 use wm_theme_api::{Point, Size};
 
@@ -148,7 +149,9 @@ fn rediscover_cursor_planes(drm: &DrmDeviceFd, crtc: crtc::Handle) -> Vec<PlaneI
     };
     let mut cursor = Vec::new();
     for handle in handles {
-        let Ok(info) = drm.get_plane(handle) else { continue };
+        let Ok(info) = drm.get_plane(handle) else {
+            continue;
+        };
         if !resources.filter_crtcs(info.possible_crtcs()).contains(&crtc) {
             continue;
         }
@@ -163,10 +166,7 @@ fn rediscover_cursor_planes(drm: &DrmDeviceFd, crtc: crtc::Handle) -> Vec<PlaneI
             .iter()
             .filter_map(|code| Fourcc::try_from(*code).ok())
             .flat_map(|code| {
-                [
-                    Format { code, modifier: Modifier::Invalid },
-                    Format { code, modifier: Modifier::Linear },
-                ]
+                [Format { code, modifier: Modifier::Invalid }, Format { code, modifier: Modifier::Linear }]
             })
             .collect();
         cursor.push(PlaneInfo { handle, type_: PlaneType::Cursor, zpos: None, formats, size_hints: None });
@@ -312,13 +312,7 @@ fn strict_release_configured(env: Option<std::ffi::OsString>, nvidia_driver: boo
 fn driver_is_nvidia(fd: &DrmDeviceFd) -> bool {
     use smithay::reexports::drm::Device as _;
     fd.get_driver()
-        .map(|driver| {
-            driver
-                .name()
-                .to_string_lossy()
-                .to_ascii_lowercase()
-                .contains("nvidia")
-        })
+        .map(|driver| driver.name().to_string_lossy().to_ascii_lowercase().contains("nvidia"))
         .unwrap_or(false)
 }
 
@@ -333,10 +327,7 @@ fn driver_is_nvidia(fd: &DrmDeviceFd) -> bool {
 /// with seatd's own flags. It is passed anyway because the `Session`
 /// trait takes it and other implementations honor it, and because the
 /// intent is what a reader needs.
-const DEVICE_FLAGS: OFlags = OFlags::RDWR
-    .union(OFlags::CLOEXEC)
-    .union(OFlags::NOCTTY)
-    .union(OFlags::NONBLOCK);
+const DEVICE_FLAGS: OFlags = OFlags::RDWR.union(OFlags::CLOEXEC).union(OFlags::NOCTTY).union(OFlags::NONBLOCK);
 
 /// How long a page flip may stay in flight before the session says so.
 ///
@@ -423,9 +414,7 @@ pub(crate) fn full_damage_forced() -> bool {
     *FORCED.get_or_init(|| {
         let forced = std::env::var_os("CHONKSTEP_FULL_DAMAGE").is_some_and(|value| value != "0");
         if forced {
-            tracing::info!(
-                "CHONKSTEP_FULL_DAMAGE is set; forcing full-output damage on every frame"
-            );
+            tracing::info!("CHONKSTEP_FULL_DAMAGE is set; forcing full-output damage on every frame");
         }
         forced
     })
@@ -545,6 +534,11 @@ struct SessionOutput {
     /// render fence covering those sampling commands) has provably
     /// signalled.
     sampled_scene: Vec<crate::renderer::SceneElement<GlesRenderer>>,
+    /// Presentation requests drained for the page flip in flight.
+    /// They are completed with the kernel's vblank timestamp, never
+    /// merely when rendering finished.
+    presentation: Option<OutputPresentationFeedback>,
+    refresh: Refresh,
 }
 
 /// A page flip the kernel has accepted and not yet reported back.
@@ -571,6 +565,16 @@ impl SessionGraphics {
     /// timelines into this device to wait on them.
     pub(crate) fn drm_device_fd(&self) -> DrmDeviceFd {
         self.drm.device_fd().clone()
+    }
+
+    /// The render node paired with the KMS device this session already
+    /// opened. EGL's optional device-query extension is not universal (the
+    /// virtio/TCG stack is a real example), but linux-dmabuf feedback still
+    /// needs a stable `dev_t`. The DRM fd is authoritative and lets us find
+    /// that node without guessing which `/dev/dri/renderD*` belongs to it.
+    pub(crate) fn render_node(&self) -> Option<DrmNode> {
+        let primary = DrmNode::from_file(self.drm.device_fd()).ok()?;
+        primary.node_with_type(NodeType::Render).and_then(Result::ok).or(Some(primary))
     }
 }
 
@@ -637,8 +641,7 @@ pub(crate) fn init(
     // against the primary plane's formats by `DrmCompositor::new` to
     // choose the swapchain format. Collected eagerly so the borrow of
     // the renderer ends here.
-    let render_formats: Vec<Format> =
-        renderer.egl_context().dmabuf_render_formats().iter().copied().collect();
+    let render_formats: Vec<Format> = renderer.egl_context().dmabuf_render_formats().iter().copied().collect();
 
     // 4. One output per connected connector, laid out left to right in
     //    connector order at their mode sizes (see the module docs on
@@ -679,12 +682,9 @@ pub(crate) fn init(
         }
     }
     if session_outputs.is_empty() {
-        return Err(format!(
-            "no output could be brought up on {} ({})",
-            device_path.display(),
-            failures.join("; ")
-        )
-        .into());
+        return Err(
+            format!("no output could be brought up on {} ({})", device_path.display(), failures.join("; ")).into()
+        );
     }
 
     // 5. Event sources. All four are registered before `run` builds the
@@ -699,10 +699,7 @@ pub(crate) fn init(
     // means the session and nested backends schedule redraws by exactly
     // the same rule — "damage, then draw".
     loop_handle
-        .insert_source(drm_notifier, |event, _metadata, comp: &mut Compositor| {
-            // `_metadata` carries the vblank timestamp and sequence,
-            // which only matter for `wp_presentation` feedback we do
-            // not advertise.
+        .insert_source(drm_notifier, |event, metadata, comp: &mut Compositor| {
             let Graphics::Session(session) = &mut comp.graphics else {
                 return;
             };
@@ -717,6 +714,23 @@ pub(crate) fn init(
                         return;
                     };
                     output.frame_pending = None;
+                    if let Some(mut feedback) = output.presentation.take() {
+                        let flags = smithay::reexports::wayland_protocols::wp::presentation_time::server::wp_presentation_feedback::Kind::Vsync
+                            | smithay::reexports::wayland_protocols::wp::presentation_time::server::wp_presentation_feedback::Kind::HwClock
+                            | smithay::reexports::wayland_protocols::wp::presentation_time::server::wp_presentation_feedback::Kind::HwCompletion;
+                        match metadata {
+                            Some(meta) if matches!(meta.time, DrmEventTime::Monotonic(_)) => {
+                                let DrmEventTime::Monotonic(time) = meta.time else { unreachable!() };
+                                feedback.presented::<_, smithay::utils::Monotonic>(
+                                    time,
+                                    output.refresh,
+                                    meta.sequence as u64,
+                                    flags,
+                                );
+                            }
+                            _ => crate::renderer::present_now(&mut feedback, output.refresh, flags),
+                        }
+                    }
                     // The flip that just completed carried the render
                     // fence as its in-fence, so every client buffer this
                     // frame sampled is provably done being read — the
@@ -742,8 +756,8 @@ pub(crate) fn init(
     // connector hot-plug. Logging it is still worth the source, because
     // "the screen went black" and "the kernel took your GPU away" look
     // identical over SSH otherwise.
-    let udev_backend = UdevBackend::new(&seat_name)
-        .map_err(|error| format!("could not watch udev for seat {seat_name}: {error}"))?;
+    let udev_backend =
+        UdevBackend::new(&seat_name).map_err(|error| format!("could not watch udev for seat {seat_name}: {error}"))?;
     loop_handle
         .insert_source(udev_backend, |event, _, _comp: &mut Compositor| match event {
             UdevEvent::Added { device_id, path } => {
@@ -763,9 +777,7 @@ pub(crate) fn init(
     // `crate::input::process_input_event` — the identical routing the
     // nested backend feeds with winit events, because that function is
     // generic over the input backend.
-    let mut libinput = Libinput::new_with_udev::<LibinputSessionInterface<LibSeatSession>>(
-        seat_session.clone().into(),
-    );
+    let mut libinput = Libinput::new_with_udev::<LibinputSessionInterface<LibSeatSession>>(seat_session.clone().into());
     libinput
         .udev_assign_seat(&seat_name)
         .map_err(|()| format!("libinput could not take seat {seat_name}; no keyboard or mouse would work"))?;
@@ -928,12 +940,7 @@ fn attach_output(
         },
     );
     output.set_preferred(wl_mode);
-    output.change_current_state(
-        Some(wl_mode),
-        Some(Transform::Normal),
-        None,
-        Some((position.x, position.y).into()),
-    );
+    output.change_current_state(Some(wl_mode), Some(Transform::Normal), None, Some((position.x, position.y).into()));
     let size = Size::new(wl_mode.size.w.max(0) as u32, wl_mode.size.h.max(0) as u32);
     // The connector's full mode list, current-first and deduplicated by
     // (size, refresh): what wlr-output-management enumerates, and the
@@ -1000,9 +1007,8 @@ fn attach_output(
     // discovery independent of when activation happened to land.
     {
         use smithay::reexports::drm::Device as _;
-        if let Err(error) = drm
-            .device_fd()
-            .set_client_capability(smithay::reexports::drm::ClientCapability::UniversalPlanes, true)
+        if let Err(error) =
+            drm.device_fd().set_client_capability(smithay::reexports::drm::ClientCapability::UniversalPlanes, true)
         {
             tracing::warn!(?error, "universal planes refused at surface time; no hardware cursor");
         }
@@ -1063,6 +1069,12 @@ fn attach_output(
             // Nothing has ever been drawn on it.
             dirty: true,
             sampled_scene: Vec::new(),
+            presentation: None,
+            refresh: if wl_mode.refresh > 0 {
+                Refresh::fixed(Duration::from_nanos(1_000_000_000_000 / wl_mode.refresh as u64))
+            } else {
+                Refresh::Unknown
+            },
         },
         OutputSetup { output, position, size, modes },
     ))
@@ -1094,10 +1106,9 @@ fn attach_output(
 pub(crate) fn redraw_pending(graphics: &Graphics) -> bool {
     match graphics {
         Graphics::Winit(_) => false,
-        Graphics::Session(session) => session
-            .outputs
-            .iter()
-            .any(|output| output.dirty || output.frame_pending.is_some()),
+        Graphics::Session(session) => {
+            session.outputs.iter().any(|output| output.dirty || output.frame_pending.is_some())
+        }
     }
 }
 
@@ -1217,6 +1228,9 @@ fn service_pending_flips(session: &mut SessionGraphics) -> bool {
         // clear it, and a device being reset out from under a stuck
         // flip has bigger problems than one racy release.
         output.sampled_scene.clear();
+        if let Some(mut feedback) = output.presentation.take() {
+            feedback.discarded();
+        }
         output.dirty = true;
     }
     true
@@ -1229,10 +1243,9 @@ fn service_pending_flips(session: &mut SessionGraphics) -> bool {
 pub(crate) fn mode_is_applicable(graphics: &Graphics, index: usize, mode_index: usize) -> bool {
     match graphics {
         Graphics::Winit(_) => mode_index == 0,
-        Graphics::Session(session) => session
-            .outputs
-            .get(index)
-            .is_some_and(|output| mode_index < output.drm_modes.len()),
+        Graphics::Session(session) => {
+            session.outputs.get(index).is_some_and(|output| mode_index < output.drm_modes.len())
+        }
     }
 }
 
@@ -1242,11 +1255,7 @@ pub(crate) fn mode_is_applicable(graphics: &Graphics, index: usize, mode_index: 
 /// the static mode source it renders against is retuned here so the
 /// swapchain and damage arithmetic follow the new size (see
 /// `attach_output` for why the source is static in the first place).
-pub(crate) fn apply_mode(
-    graphics: &mut Graphics,
-    index: usize,
-    mode_index: usize,
-) -> Result<(), String> {
+pub(crate) fn apply_mode(graphics: &mut Graphics, index: usize, mode_index: usize) -> Result<(), String> {
     match graphics {
         Graphics::Winit(_) => {
             if mode_index == 0 {
@@ -1256,24 +1265,22 @@ pub(crate) fn apply_mode(
             }
         }
         Graphics::Session(session) => {
-            let output = session
-                .outputs
-                .get_mut(index)
-                .ok_or_else(|| format!("no session output at index {index}"))?;
-            let mode = *output
-                .drm_modes
-                .get(mode_index)
-                .ok_or_else(|| format!("no mode {mode_index} on {}", output.name))?;
-            output
-                .drm_compositor
-                .use_mode(mode)
-                .map_err(|error| format!("modeset refused: {error}"))?;
+            let output = session.outputs.get_mut(index).ok_or_else(|| format!("no session output at index {index}"))?;
+            let mode =
+                *output.drm_modes.get(mode_index).ok_or_else(|| format!("no mode {mode_index} on {}", output.name))?;
+            output.drm_compositor.use_mode(mode).map_err(|error| format!("modeset refused: {error}"))?;
             let size = smithay::utils::Size::from((mode.size().0 as i32, mode.size().1 as i32));
             output.drm_compositor.set_output_mode_source(OutputModeSource::Static {
                 size,
                 scale: smithay::utils::Scale::from(1.0),
                 transform: Transform::Normal,
             });
+            let millihertz = OutputMode::from(mode).refresh;
+            output.refresh = if millihertz > 0 {
+                Refresh::fixed(Duration::from_nanos(1_000_000_000_000 / millihertz as u64))
+            } else {
+                Refresh::Unknown
+            };
             output.dirty = true;
             Ok(())
         }
@@ -1331,11 +1338,7 @@ pub(crate) fn gamma_ramp_sizes(graphics: &Graphics) -> Vec<u32> {
 /// `None` when the driver will not answer — some do not implement
 /// `GETGAMMA` even when they accept `SETGAMMA` — and the caller falls
 /// back to a linear ramp, which is what an untouched LUT holds.
-pub(crate) fn read_gamma(
-    graphics: &Graphics,
-    index: usize,
-    size: usize,
-) -> Option<(Vec<u16>, Vec<u16>, Vec<u16>)> {
+pub(crate) fn read_gamma(graphics: &Graphics, index: usize, size: usize) -> Option<(Vec<u16>, Vec<u16>, Vec<u16>)> {
     let Graphics::Session(session) = graphics else {
         return None;
     };
@@ -1377,10 +1380,7 @@ pub(crate) fn write_gamma(
     let Graphics::Session(session) = graphics else {
         return Err("the nested backend has no crtc to program a gamma ramp on".into());
     };
-    let output = session
-        .outputs
-        .get(index)
-        .ok_or_else(|| format!("no session output at index {index}"))?;
+    let output = session.outputs.get(index).ok_or_else(|| format!("no session output at index {index}"))?;
     session
         .drm
         .device_fd()
@@ -1450,16 +1450,7 @@ pub(crate) fn render_frame_session(comp: &mut Compositor) {
     // Disjoint field borrows: the graphics stack mutates while the
     // ledger is read. Both live on `Compositor`, so destructure rather
     // than going through `&mut self` methods.
-    let Compositor {
-        wm,
-        graphics,
-        outputs,
-        pointer_location,
-        cursor_status,
-        cursors,
-        start_time,
-        ..
-    } = comp;
+    let Compositor { wm, graphics, outputs, pointer_location, cursor_status, cursors, start_time, .. } = comp;
     let Graphics::Session(session) = graphics else {
         return;
     };
@@ -1487,7 +1478,7 @@ pub(crate) fn render_frame_session(comp: &mut Compositor) {
     let SessionGraphics { renderer, outputs: session_outputs, strict_release, .. } = &mut **session;
     let strict_release = *strict_release;
     let mut drew_any = false;
-    for output in session_outputs.iter_mut() {
+    for (output_index, output) in session_outputs.iter_mut().enumerate() {
         if output.frame_pending.is_some() {
             // A page flip is in flight on this crtc. Rendering now would
             // burn a swapchain slot on a frame the display cannot show
@@ -1548,10 +1539,7 @@ pub(crate) fn render_frame_session(comp: &mut Compositor) {
             output.position,
         );
 
-        let rendered = match output
-            .drm_compositor
-            .render_frame(renderer, &elements, clear_color, frame_flags())
-        {
+        let rendered = match output.drm_compositor.render_frame(renderer, &elements, clear_color, frame_flags()) {
             Ok(result) => {
                 // The GPU may still be drawing into the buffer we are
                 // about to hand the scanout engine. Where the driver
@@ -1583,13 +1571,35 @@ pub(crate) fn render_frame_session(comp: &mut Compositor) {
         if rendered {
             match output.drm_compositor.queue_frame(()) {
                 Ok(()) => {
-                    output.frame_pending =
-                        Some(PendingFlip { queued_at: Instant::now(), stall_reported: false });
+                    output.frame_pending = Some(PendingFlip { queued_at: Instant::now(), stall_reported: false });
+                    if let (Some(entry), Some(monitor)) =
+                        (outputs.get(output_index), wm.backend().monitors.get(output_index))
+                    {
+                        output.presentation = Some(crate::renderer::take_presentation_feedback(
+                            wm.backend(),
+                            &entry.output,
+                            monitor.geometry,
+                        ));
+                    }
                 }
                 // Nothing on the crtc actually changed. Not an error,
                 // and not worth a retry: the scene is already on screen.
                 Err(FrameError::EmptyFrame) => {
                     tracing::trace!(output = %output.name, "frame produced no crtc changes; no page flip queued");
+                    if let (Some(entry), Some(monitor)) =
+                        (outputs.get(output_index), wm.backend().monitors.get(output_index))
+                    {
+                        let mut feedback = crate::renderer::take_presentation_feedback(
+                            wm.backend(),
+                            &entry.output,
+                            monitor.geometry,
+                        );
+                        crate::renderer::present_now(
+                            &mut feedback,
+                            output.refresh,
+                            smithay::reexports::wayland_protocols::wp::presentation_time::server::wp_presentation_feedback::Kind::Vsync,
+                        );
+                    }
                 }
                 Err(error) => {
                     // The prepared frame was consumed and its
@@ -1641,12 +1651,7 @@ pub(crate) fn render_frame_session(comp: &mut Compositor) {
         // throttles the warnings above is over.
         crate::renderer::note_frame_success();
         if let Some(primary) = outputs.first() {
-            crate::renderer::send_frame_callbacks(
-                wm.backend(),
-                &primary.output,
-                cursor_status,
-                start_time.elapsed(),
-            );
+            crate::renderer::send_frame_callbacks(wm.backend(), &primary.output, cursor_status, start_time.elapsed());
         }
     }
 }
@@ -1747,9 +1752,7 @@ fn candidate_devices(seat_name: &str) -> Vec<PathBuf> {
                 .filter_map(|entry| entry.ok())
                 .map(|entry| entry.path())
                 .filter(|path| {
-                    path.file_name()
-                        .and_then(|name| name.to_str())
-                        .is_some_and(|name| name.starts_with("card"))
+                    path.file_name().and_then(|name| name.to_str()).is_some_and(|name| name.starts_with("card"))
                 })
                 .collect();
             // `read_dir` order is whatever the filesystem hands back, so
@@ -1777,9 +1780,7 @@ fn candidate_devices(seat_name: &str) -> Vec<PathBuf> {
 /// at most a handful of times before the process either has a screen or
 /// exits.
 fn probe_device(seat_session: &mut LibSeatSession, path: &Path) -> Result<Device, String> {
-    let fd = seat_session
-        .open(path, DEVICE_FLAGS)
-        .map_err(|error| format!("the seat would not open it: {error:?}"))?;
+    let fd = seat_session.open(path, DEVICE_FLAGS).map_err(|error| format!("the seat would not open it: {error:?}"))?;
     let fd = DrmDeviceFd::new(DeviceFd::from(fd));
 
     // `true`: start with every connector disabled. smithay enables the
@@ -1803,15 +1804,13 @@ fn probe_device(seat_session: &mut LibSeatSession, path: &Path) -> Result<Device
     // then puts back what Smithay's own bookkeeping dropped.
     {
         use smithay::reexports::drm::Device as _;
-        if let Err(error) =
-            fd.set_client_capability(smithay::reexports::drm::ClientCapability::UniversalPlanes, true)
-        {
+        if let Err(error) = fd.set_client_capability(smithay::reexports::drm::ClientCapability::UniversalPlanes, true) {
             tracing::warn!(?error, "universal planes refused at open; the hardware cursor may be unavailable");
         }
     }
 
-    let (drm, notifier) = DrmDevice::new(fd.clone(), true)
-        .map_err(|error| format!("not a usable DRM device: {error}"))?;
+    let (drm, notifier) =
+        DrmDevice::new(fd.clone(), true).map_err(|error| format!("not a usable DRM device: {error}"))?;
     let connectors = pick_outputs(&drm)?;
     let gbm = GbmDevice::new(fd).map_err(|error| format!("GBM init failed: {error}"))?;
 
@@ -1831,9 +1830,8 @@ fn probe_device(seat_session: &mut LibSeatSession, path: &Path) -> Result<Device
 /// candidate walk should move on to the next one rather than come up
 /// with a session nobody can see.
 fn pick_outputs(drm: &DrmDevice) -> Result<Vec<ConnectorTarget>, String> {
-    let resources = drm
-        .resource_handles()
-        .map_err(|error| format!("no KMS resources (a render-only node?): {error}"))?;
+    let resources =
+        drm.resource_handles().map_err(|error| format!("no KMS resources (a render-only node?): {error}"))?;
 
     // Why each connector was passed over, so a black screen is
     // diagnosable from one log line instead of a bisect.

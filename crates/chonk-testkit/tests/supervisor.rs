@@ -13,11 +13,12 @@
 #![cfg(unix)]
 
 use std::os::unix::fs::PermissionsExt;
+use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::Duration;
 
-use chonk_testkit::poll_until;
+use chonk_testkit::{poll_until, Session, SessionOptions};
 
 fn script_path() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/wayland-session.sh")
@@ -39,11 +40,7 @@ fn scratch(name: &str, exit_code: i32) -> Scratch {
     std::fs::create_dir_all(dir.join("state")).unwrap();
     let runs = dir.join("runs");
     let stub = dir.join("stub-compositor.sh");
-    std::fs::write(
-        &stub,
-        format!("#!/bin/sh\necho run >> \"{}\"\nexit {exit_code}\n", runs.display()),
-    )
-    .unwrap();
+    std::fs::write(&stub, format!("#!/bin/sh\necho run >> \"{}\"\nexit {exit_code}\n", runs.display())).unwrap();
     std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
     Scratch { dir, stub, runs }
 }
@@ -69,10 +66,8 @@ fn launch(scratch: &Scratch) -> Child {
 }
 
 fn wait_exit(child: &mut Child) -> std::process::ExitStatus {
-    poll_until(Duration::from_secs(30), "the session script to exit", || {
-        child.try_wait().ok().flatten()
-    })
-    .expect("the supervisor loop must terminate")
+    poll_until(Duration::from_secs(30), "the session script to exit", || child.try_wait().ok().flatten())
+        .expect("the supervisor loop must terminate")
 }
 
 fn run_count(scratch: &Scratch) -> usize {
@@ -91,12 +86,11 @@ fn a_crash_loop_is_braked_after_the_allowed_retries_with_the_marker_dropped() {
     assert!(!status.success(), "a braked crash loop must exit nonzero, got {status}");
     assert_eq!(run_count(&scratch), 4, "one initial run plus exactly three re-execs before the brake");
 
-    // Each re-exec was preceded by the recovery marker — the channel
-    // the recovering compositor reads. The stub never consumes it, so
-    // it must still be there.
+    // The marker is only for a re-exec inside this supervisor. Once the
+    // brake returns to the greeter, it must not leak into a later login.
     assert!(
-        scratch.dir.join("state/chonkstep/recovery").exists(),
-        "the supervisor must drop the recovery marker before re-execing after a crash"
+        !scratch.dir.join("state/chonkstep/recovery").exists(),
+        "a braked crash loop must clear its stale recovery marker"
     );
 
     // And the log says what happened and where to look.
@@ -131,11 +125,7 @@ fn a_signal_death_counts_as_a_crash() {
     std::fs::create_dir_all(dir.join("state")).unwrap();
     let runs = dir.join("runs");
     let stub = dir.join("stub-compositor.sh");
-    std::fs::write(
-        &stub,
-        format!("#!/bin/sh\necho run >> \"{}\"\nkill -ABRT $$\n", runs.display()),
-    )
-    .unwrap();
+    std::fs::write(&stub, format!("#!/bin/sh\necho run >> \"{}\"\nkill -ABRT $$\n", runs.display())).unwrap();
     std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
     let scratch = Scratch { dir, stub, runs };
 
@@ -144,5 +134,119 @@ fn a_signal_death_counts_as_a_crash() {
 
     assert!(!status.success());
     assert_eq!(run_count(&scratch), 4, "signal deaths ride the same brake as nonzero exits");
-    assert!(scratch.dir.join("state/chonkstep/recovery").exists());
+    assert!(!scratch.dir.join("state/chonkstep/recovery").exists());
+}
+
+#[test]
+fn terminating_the_supervisor_is_a_logout_not_a_recovery() {
+    let dir = std::env::temp_dir().join("chonk-testkit-supervisor").join("session-term");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("run")).unwrap();
+    std::fs::create_dir_all(dir.join("state")).unwrap();
+    let runs = dir.join("runs");
+    let stub = dir.join("stub-compositor.sh");
+    std::fs::write(
+        &stub,
+        format!(
+            "#!/bin/sh\necho run >> \"{}\"\ntrap 'exit 0' TERM HUP INT\nwhile :; do sleep 1; done\n",
+            runs.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let scratch = Scratch { dir, stub, runs };
+    let mut child = launch(&scratch);
+    poll_until(Duration::from_secs(5), "stub compositor to start", || (run_count(&scratch) == 1).then_some(()))
+        .expect("stub did not start");
+
+    unsafe { libc::kill(child.id() as i32, libc::SIGTERM) };
+    let status = wait_exit(&mut child);
+    assert!(status.success(), "session-manager TERM must be a clean logout: {status}");
+    assert_eq!(run_count(&scratch), 1, "a terminating session must never restart its compositor");
+    assert!(!scratch.dir.join("state/chonkstep/recovery").exists());
+}
+
+#[test]
+fn direct_session_owns_graphical_targets_and_publishes_only_curated_environment() {
+    let dir = std::env::temp_dir().join("chonk-testkit-supervisor").join("graphical-targets");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("run")).unwrap();
+    std::fs::create_dir_all(dir.join("state")).unwrap();
+    std::fs::create_dir_all(dir.join("bin")).unwrap();
+    let calls = dir.join("calls");
+
+    let command = |name: &str, body: &str| {
+        let path = dir.join("bin").join(name);
+        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    };
+    command("systemctl", &format!("printf 'systemctl %s\\n' \"$*\" >> '{}'\nexit 0", calls.display()));
+    command(
+        "dbus-update-activation-environment",
+        &format!("printf 'dbus %s\\n' \"$*\" >> '{}'\nexit 0", calls.display()),
+    );
+
+    let socket_name = "wayland-session-test";
+    let _socket = UnixListener::bind(dir.join("run").join(socket_name)).unwrap();
+    let stub = dir.join("stub-compositor.sh");
+    std::fs::write(
+        &stub,
+        format!(
+            "#!/bin/sh\nprintf 'backend=%s\\n' \"${{CHONKSTEP_BACKEND-unset}}\" >> '{}'\nprintf '%s\\n' 'wayland socket listening socket=\"{socket_name}\"'\nprintf '%s\\n' 'hyprland ipc listening signature=\"session-test\"'\ntrap 'exit 0' TERM HUP INT\nwhile :; do sleep 1; done\n",
+            calls.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let path = format!("{}:{}", dir.join("bin").display(), std::env::var("PATH").unwrap_or_default());
+    let mut child = Command::new("bash")
+        .arg(script_path())
+        .env_clear()
+        .env("HOME", &dir)
+        .env("PATH", path)
+        .env("XDG_STATE_HOME", dir.join("state"))
+        .env("XDG_RUNTIME_DIR", dir.join("run"))
+        .env("CHONKSTEP_SESSION_BIN", &stub)
+        .env("DBUS_SESSION_BUS_ADDRESS", "unix:path=/isolated")
+        .env("CHONKSTEP_BACKEND", "winit")
+        .env("CARGO_POISON", "must-not-be-published")
+        .env("LD_LIBRARY_PATH", "/also/not/published")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+
+    let started = poll_until(Duration::from_secs(10), "the direct session to start its user targets", || {
+        let text = std::fs::read_to_string(&calls).ok()?;
+        text.contains("--user start graphical-session.target xdg-desktop-autostart.target").then_some(text)
+    })
+    .expect("the non-uwsm session owns graphical-session.target");
+    assert!(started.contains("WAYLAND_DISPLAY=wayland-session-test"));
+    assert!(started.contains("XDG_MENU_PREFIX=chonkstep-"));
+    assert!(started.contains("XDG_BACKEND=wayland"));
+    assert!(started.contains("backend=unset"), "a login session must discard a stale nested-backend override");
+    assert!(!started.contains("CARGO_POISON"));
+    assert!(!started.contains("LD_LIBRARY_PATH"));
+
+    unsafe { libc::kill(child.id() as i32, libc::SIGTERM) };
+    assert!(wait_exit(&mut child).success());
+    let stopped = std::fs::read_to_string(&calls).unwrap();
+    assert!(stopped.contains("--user stop xdg-desktop-autostart.target graphical-session.target"));
+    assert!(stopped.contains("--user unset-environment WAYLAND_DISPLAY HYPRLAND_INSTANCE_SIGNATURE"));
+}
+
+#[test]
+#[ignore = "needs a Wayland session to nest inside"]
+fn terminating_the_real_compositor_is_a_clean_logout() {
+    let mut session = Session::boot("compositor-term", SessionOptions::default()).expect("nested compositor boots");
+    unsafe { libc::kill(session.compositor_pid() as i32, libc::SIGTERM) };
+    let status = session
+        .wait_for_compositor_exit(Duration::from_secs(10))
+        .expect("the signalfd handler must end the event loop");
+    assert!(status.success(), "SIGTERM is a requested logout, not a crash: {status}");
+    assert!(
+        session.log().contains("session termination requested; logging out cleanly"),
+        "the reason should be explicit in the session log"
+    );
 }

@@ -29,6 +29,16 @@ pub enum Directive {
         /// The human label `bindd` and `o.bind`'s second argument
         /// carry. `None` for the undescribed forms.
         description: Option<String>,
+        flags: BindFlags,
+        dispatcher: Dispatcher,
+    },
+    /// A binding owned by the lifetime of a layer-shell namespace.
+    /// Unlike `Bind`, this is never installed in the global keymap.
+    LayerBind {
+        namespace: String,
+        keys: String,
+        description: Option<String>,
+        flags: BindFlags,
         dispatcher: Dispatcher,
     },
     /// `unbind = SUPER, SPACE` / `hl.unbind("SUPER + SPACE")`. Applied
@@ -37,6 +47,8 @@ pub enum Directive {
     Unbind { keys: String },
     /// `env = NAME,VALUE` / `hl.env("NAME", "VALUE")`.
     Env { name: String, value: String },
+    /// One supported key from Hyprland's `input {}` table.
+    Input { name: String, value: String },
     /// `exec-once = cmd` / `hl.exec_cmd(cmd)` inside an
     /// `hl.on("hyprland.start", …)` block / `o.launch_on_start(cmd)`.
     ExecOnce { command: String },
@@ -59,6 +71,14 @@ pub enum Directive {
     /// act on, kept so it can be logged with its own words rather than
     /// dropped into silence. The brief's rule: ignore loudly.
     Ignored { kind: &'static str, detail: String },
+}
+
+/// Behavioral suffix/options carried by a Hyprland binding.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct BindFlags {
+    pub locked: bool,
+    pub repeating: bool,
+    pub release: bool,
 }
 
 /// What a binding does, normalized across the two syntaxes.
@@ -90,9 +110,10 @@ pub enum Dispatcher {
 ///
 /// Properties are kept as `(name, value)` string pairs rather than a
 /// closed enum because Hyprland's property vocabulary is long, mostly
-/// irrelevant here, and still growing. The three this desktop acts on
-/// are picked out downstream; the rest ride along so the count of
-/// ignored properties can be logged honestly.
+/// irrelevant here, and still growing. Supported geometry, focus,
+/// idle, pin and initial-state properties are picked out downstream;
+/// every other property rides along so it can earn an individual,
+/// matcher-qualified skip line.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct WindowRule {
     pub matchers: Vec<Matcher>,
@@ -117,7 +138,8 @@ pub enum Matcher {
     Other { key: String, value: String },
 }
 
-/// A `monitor =` line, parsed but — see the module docs — not applied.
+/// A `monitor =` line. The Wayland backend applies the supported
+/// preferred-mode, position, and scale subset transactionally.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Monitor {
     /// The output name, or empty for Hyprland's catch-all `monitor=,…`.

@@ -125,11 +125,7 @@ pub fn strip_ansi(text: &str) -> String {
 /// has elapsed. The only wait primitive in this crate — every use
 /// names the observable condition it polls, which is the whole
 /// anti-flake policy in one function signature.
-pub fn poll_until<T>(
-    timeout: Duration,
-    what: &str,
-    mut condition: impl FnMut() -> Option<T>,
-) -> Result<T, String> {
+pub fn poll_until<T>(timeout: Duration, what: &str, mut condition: impl FnMut() -> Option<T>) -> Result<T, String> {
     let deadline = Instant::now() + timeout;
     loop {
         if let Some(value) = condition() {
@@ -295,11 +291,9 @@ impl Session {
             config.push_str(&format!("scale = {scale}\n"));
         }
         config.push_str(&options.config_extra);
-        std::fs::write(config_home.join("chonkstep/config.toml"), config)
-            .map_err(|e| e.to_string())?;
+        std::fs::write(config_home.join("chonkstep/config.toml"), config).map_err(|e| e.to_string())?;
         for (name, contents) in &options.state_files {
-            std::fs::write(state_home.join("chonkstep").join(name), contents)
-                .map_err(|e| e.to_string())?;
+            std::fs::write(state_home.join("chonkstep").join(name), contents).map_err(|e| e.to_string())?;
         }
         for (name, contents) in &options.config_files {
             let path = config_home.join("chonkstep").join(name);
@@ -406,9 +400,8 @@ impl Session {
                     .map(|number| Ok(format!("wayland-{number}")))
             })??
         };
-        session.door = poll_until(BOOT_TIMEOUT, "the test door to accept a connection", || {
-            Door::connect(&door_path).ok()
-        })?;
+        session.door =
+            poll_until(BOOT_TIMEOUT, "the test door to accept a connection", || Door::connect(&door_path).ok())?;
         // Connecting only proves the listener is bound (that happens
         // before the event loop starts). A session is booted when it
         // *answers*: one barrier round-trip, bounded by the door's own
@@ -420,10 +413,7 @@ impl Session {
         // workspace `[profile.dev.package.*]` opt-levels — but the
         // barrier stays, because "booted" should mean "answers", not
         // "probably fast now".)
-        session
-            .door
-            .barrier()
-            .map_err(|e| format!("the compositor never answered its first barrier: {e}"))?;
+        session.door.barrier().map_err(|e| format!("the compositor never answered its first barrier: {e}"))?;
         Ok(session)
     }
 
@@ -447,10 +437,13 @@ impl Session {
         let log_path = self.dir.join(format!("client-{}-{short}.log", self.clients.len()));
         let log = std::fs::File::create(&log_path).map_err(|e| e.to_string())?;
         let log_err = log.try_clone().map_err(|e| e.to_string())?;
-        let child = Command::new(program)
+        let signature = self.hyprland_signature();
+        let mut command = Command::new(program);
+        command
             .args(args)
             .env("WAYLAND_DISPLAY", &self.wayland_display)
             .env_remove("DISPLAY")
+            .env_remove("HYPRLAND_INSTANCE_SIGNATURE")
             .env("GDK_BACKEND", "wayland")
             // The client's log is machine-read (`WAYLAND_DEBUG`
             // assertions match substrings), and libwayland ≥1.26
@@ -460,13 +453,32 @@ impl Session {
             // plain logs fails one environment change later instead
             // of two.
             .env_remove("FORCE_COLOR")
-            .env_remove("CLICOLOR_FORCE")
+            .env_remove("CLICOLOR_FORCE");
+        if let Some(signature) = signature {
+            // Clients spawned by the real shell inherit this value
+            // from the compositor. Harness clients are siblings of
+            // the compositor, so copy its announced value explicitly;
+            // otherwise hyprsunset creates its control socket in the
+            // wrong directory and an IPC integration test can only
+            // prove the Wayland half of its behavior.
+            command.env("HYPRLAND_INSTANCE_SIGNATURE", signature);
+        }
+        let child = command
             .stdout(Stdio::from(log))
             .stderr(Stdio::from(log_err))
             .spawn()
             .map_err(|e| format!("could not launch {program}: {e}"))?;
         self.clients.push((short.to_string(), child));
         Ok(())
+    }
+
+    /// The signature the compositor exported before entering its
+    /// event loop. `None` only when the compatibility server was
+    /// explicitly disabled or failed to bind.
+    pub fn hyprland_signature(&self) -> Option<String> {
+        let log = self.log();
+        let line = log.lines().find(|line| line.contains("hyprland ipc listening"))?;
+        line.split("signature=\"").nth(1)?.split('"').next().map(str::to_owned)
     }
 
     /// Waits for a mapped window whose app id or title contains
@@ -509,9 +521,7 @@ impl Session {
             .stderr(Stdio::null())
             .spawn()
             .map_err(|e| format!("could not spawn grim: {e}"))?;
-        let status = poll_until(DEFAULT_TIMEOUT, "grim to finish", || {
-            grim.try_wait().ok().flatten()
-        });
+        let status = poll_until(DEFAULT_TIMEOUT, "grim to finish", || grim.try_wait().ok().flatten());
         let status = match status {
             Ok(status) => status,
             Err(timeout) => {
@@ -528,8 +538,7 @@ impl Session {
     /// Rewrites the isolated config file — the file half of the
     /// live-reload gesture.
     pub fn rewrite_config(&self, contents: &str) -> Result<(), String> {
-        std::fs::write(self.dir.join("config/chonkstep/config.toml"), contents)
-            .map_err(|e| e.to_string())
+        std::fs::write(self.dir.join("config/chonkstep/config.toml"), contents).map_err(|e| e.to_string())
     }
 
     /// Touches the reload marker in the isolated state dir — the
@@ -542,6 +551,19 @@ impl Session {
     /// "reload must not kill the session" assertion.
     pub fn compositor_alive(&mut self) -> bool {
         matches!(self.compositor.try_wait(), Ok(None))
+    }
+
+    /// The compositor process id, for signal-lifecycle tests. Keeping
+    /// the child private prevents tests from bypassing the harness's
+    /// bounded reaping; a pid is enough to deliver the same signal a
+    /// session manager does.
+    pub fn compositor_pid(&self) -> u32 {
+        self.compositor.id()
+    }
+
+    /// Wait for the compositor to exit without a blocking `wait(2)`.
+    pub fn wait_for_compositor_exit(&mut self, timeout: Duration) -> Result<std::process::ExitStatus, String> {
+        poll_until(timeout, "the compositor to exit", || self.compositor.try_wait().ok().flatten())
     }
 
     /// The compositor's captured log so far, with the colour escapes
@@ -577,15 +599,25 @@ impl Session {
         let mut newest: Option<(usize, PathBuf)> = None;
         for entry in std::fs::read_dir(&self.dir).into_iter().flatten().flatten() {
             let path = entry.path();
-            let Some(name) = path.file_name().and_then(|name| name.to_str()) else { continue };
-            let Some(rest) = name.strip_prefix("client-") else { continue };
-            let Some(number) = rest.strip_suffix(&suffix) else { continue };
-            let Ok(number) = number.parse::<usize>() else { continue };
+            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            let Some(rest) = name.strip_prefix("client-") else {
+                continue;
+            };
+            let Some(number) = rest.strip_suffix(&suffix) else {
+                continue;
+            };
+            let Ok(number) = number.parse::<usize>() else {
+                continue;
+            };
             if newest.as_ref().is_none_or(|(seen, _)| number >= *seen) {
                 newest = Some((number, path));
             }
         }
-        let Some((_, path)) = newest else { return String::new() };
+        let Some((_, path)) = newest else {
+            return String::new();
+        };
         strip_ansi(&std::fs::read_to_string(path).unwrap_or_default())
     }
 
@@ -641,9 +673,8 @@ impl Session {
             let _ = client.kill();
         }
         for (_, client) in &mut self.clients {
-            let _ = poll_until(Duration::from_secs(2), "a killed client to be reaped", || {
-                client.try_wait().ok().flatten()
-            });
+            let _ =
+                poll_until(Duration::from_secs(2), "a killed client to be reaped", || client.try_wait().ok().flatten());
         }
         self.clients.clear();
     }
@@ -691,9 +722,7 @@ impl Drop for Session {
         }
         let _ = self.compositor.kill();
         for (_, client) in &mut self.clients {
-            let _ = poll_until(Duration::from_secs(2), "a client to be reaped", || {
-                client.try_wait().ok().flatten()
-            });
+            let _ = poll_until(Duration::from_secs(2), "a client to be reaped", || client.try_wait().ok().flatten());
         }
         let _ = poll_until(Duration::from_secs(2), "the compositor to be reaped", || {
             self.compositor.try_wait().ok().flatten()
@@ -720,10 +749,7 @@ fn compositor_binary() -> Result<PathBuf, String> {
 pub fn profile_binary(name: &str) -> Result<PathBuf, String> {
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     // target/debug/deps/e2e-... -> target/debug/<name>
-    let profile_dir = exe
-        .parent()
-        .and_then(Path::parent)
-        .ok_or("cannot locate the target profile directory")?;
+    let profile_dir = exe.parent().and_then(Path::parent).ok_or("cannot locate the target profile directory")?;
     let bin = profile_dir.join(name);
     if !bin.exists() {
         return Err(format!(
@@ -808,9 +834,7 @@ impl World {
     /// The first mapped window whose app id or title contains
     /// `needle`.
     pub fn window_matching(&self, needle: &str) -> Option<&WindowInfo> {
-        self.windows
-            .iter()
-            .find(|w| w.mapped && (w.app.contains(needle) || w.title.contains(needle)))
+        self.windows.iter().find(|w| w.mapped && (w.app.contains(needle) || w.title.contains(needle)))
     }
 
     /// The frame decorating `window`, if the server drew one.
@@ -830,9 +854,7 @@ impl World {
     /// unobstructed corner, a right-edge panel's width once one has
     /// reserved the edge and the column has stepped left.
     pub fn dock_inset(&self, right_inset: u32) -> Option<&ShellInfo> {
-        self.shells.iter().find(|s| {
-            s.mapped && s.h > s.w && s.x + s.w as i32 == (self.output_w - right_inset) as i32
-        })
+        self.shells.iter().find(|s| s.mapped && s.h > s.w && s.x + s.w as i32 == (self.output_w - right_inset) as i32)
     }
 
     /// Mapped menu surfaces: every mapped, raised shell that does not
@@ -920,11 +942,7 @@ impl MenuMetrics {
     pub fn at_scale_1() -> Self {
         let theme = wm_theme::default_theme::nextstep_classic();
         let item_h = (theme.menu.item_height as u32).max(4);
-        Self {
-            border: (theme.border.width as u32).max(1),
-            title_h: (theme.titlebar.height as u32).max(item_h),
-            item_h,
-        }
+        Self { border: (theme.border.width as u32).max(1), title_h: (theme.titlebar.height as u32).max(item_h), item_h }
     }
 
     /// The expected surface height of a menu with `rows` rows.
@@ -964,18 +982,13 @@ impl Door {
         // A barrier ack can legitimately trail a heavy pass by many
         // seconds in a debug build — a live restyle to scale 2 was
         // measured at ~11s — so the read deadline is the long one.
-        stream
-            .set_read_timeout(Some(Duration::from_secs(30)))
-            .map_err(|e| e.to_string())?;
+        stream.set_read_timeout(Some(Duration::from_secs(30))).map_err(|e| e.to_string())?;
         Ok(Door { stream: Some(BufReader::new(stream)) })
     }
 
     fn send(&mut self, line: &str) -> Result<(), String> {
         let stream = self.stream.as_mut().ok_or("door not connected")?;
-        stream
-            .get_mut()
-            .write_all(format!("{line}\n").as_bytes())
-            .map_err(|e| format!("door write failed: {e}"))
+        stream.get_mut().write_all(format!("{line}\n").as_bytes()).map_err(|e| format!("door write failed: {e}"))
     }
 
     fn read_line(&mut self) -> Result<String, String> {
@@ -1139,9 +1152,7 @@ impl Door {
 
 /// Value of `key=` in a `key=value` word list, numerics only.
 fn field<T: std::str::FromStr>(line: &str, key: &str) -> Option<T> {
-    line.split_whitespace()
-        .find_map(|word| word.strip_prefix(key))
-        .and_then(|value| value.parse().ok())
+    line.split_whitespace().find_map(|word| word.strip_prefix(key)).and_then(|value| value.parse().ok())
 }
 
 /// Value of a trailing quoted field like `app="..."`. The door quotes
@@ -1149,10 +1160,7 @@ fn field<T: std::str::FromStr>(line: &str, key: &str) -> Option<T> {
 /// look for is a bare `"` — good enough for the substring matching
 /// tests do (no test names a window with an escaped quote).
 fn quoted_field(line: &str, key: &str) -> String {
-    line.split_once(&format!("{key}=\""))
-        .and_then(|(_, rest)| rest.split('"').next())
-        .unwrap_or("")
-        .to_string()
+    line.split_once(&format!("{key}=\"")).and_then(|(_, rest)| rest.split('"').next()).unwrap_or("").to_string()
 }
 
 fn parse_window_line(line: &str) -> Option<WindowInfo> {
@@ -1217,30 +1225,25 @@ impl Screenshot {
         buffer.truncate(info.buffer_size());
         let rgba = match info.color_type {
             png::ColorType::Rgba => buffer,
-            png::ColorType::Rgb => buffer
-                .as_chunks::<3>()
-                .0
-                .iter()
-                .flat_map(|px| [px[0], px[1], px[2], 255])
-                .collect(),
+            png::ColorType::Rgb => buffer.as_chunks::<3>().0.iter().flat_map(|px| [px[0], px[1], px[2], 255]).collect(),
             other => return Err(format!("unsupported screenshot color type {other:?}")),
         };
         if info.bit_depth != png::BitDepth::Eight {
             return Err(format!("unsupported screenshot bit depth {:?}", info.bit_depth));
         }
-        Ok(Screenshot {
-            width: info.width,
-            height: info.height,
-            rgba,
-            path: path.to_path_buf(),
-        })
+        Ok(Screenshot { width: info.width, height: info.height, rgba, path: path.to_path_buf() })
     }
 
     /// The RGBA pixel at (x, y). Out of range is a test bug and
     /// panics with the coordinates, which beats a wrapped index
     /// silently sampling the wrong row.
     pub fn pixel(&self, x: u32, y: u32) -> [u8; 4] {
-        assert!(x < self.width && y < self.height, "pixel ({x}, {y}) outside {}x{} screenshot", self.width, self.height);
+        assert!(
+            x < self.width && y < self.height,
+            "pixel ({x}, {y}) outside {}x{} screenshot",
+            self.width,
+            self.height
+        );
         let index = ((y * self.width + x) * 4) as usize;
         self.rgba[index..index + 4].try_into().unwrap()
     }
@@ -1282,21 +1285,11 @@ impl Screenshot {
     /// primitive: a window that followed a post-release drag shows up
     /// as a large fraction, compression noise does not.
     pub fn diff_fraction(&self, other: &Screenshot, threshold: u8) -> f64 {
-        assert_eq!(
-            (self.width, self.height),
-            (other.width, other.height),
-            "diffing screenshots of different sizes"
-        );
+        assert_eq!((self.width, self.height), (other.width, other.height), "diffing screenshots of different sizes");
         let mut differing = 0usize;
         let total = (self.width * self.height) as usize;
         for (a, b) in self.rgba.as_chunks::<4>().0.iter().zip(other.rgba.as_chunks::<4>().0) {
-            let delta = a
-                .iter()
-                .zip(b.iter())
-                .take(3)
-                .map(|(x, y)| x.abs_diff(*y))
-                .max()
-                .unwrap_or(0);
+            let delta = a.iter().zip(b.iter()).take(3).map(|(x, y)| x.abs_diff(*y)).max().unwrap_or(0);
             if delta > threshold {
                 differing += 1;
             }
@@ -1326,7 +1319,8 @@ mod tests {
 
     #[test]
     fn window_lines_parse_including_quoted_tails() {
-        let line = r#"window id=3 x=100 y=-8 w=400 h=300 mapped=true app="org.gnome.zenity" title="Question two words""#;
+        let line =
+            r#"window id=3 x=100 y=-8 w=400 h=300 mapped=true app="org.gnome.zenity" title="Question two words""#;
         let window = parse_window_line(line).unwrap();
         assert_eq!(window.id, 3);
         assert_eq!(window.x, 100);

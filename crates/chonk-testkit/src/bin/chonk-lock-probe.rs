@@ -249,10 +249,10 @@ impl Dispatch<WlKeyboard, ()> for Probe {
     ) {
         match event {
             wl_keyboard::Event::Enter { surface, .. } => probe.keyboard_on = Some(surface.id().protocol_id()),
-            wl_keyboard::Event::Leave { surface, .. } => {
-                if probe.keyboard_on == Some(surface.id().protocol_id()) {
-                    probe.keyboard_on = None;
-                }
+            wl_keyboard::Event::Leave { surface, .. }
+                if probe.keyboard_on == Some(surface.id().protocol_id()) =>
+            {
+                probe.keyboard_on = None;
             }
             // The keymap arrives as a file descriptor this probe has no
             // use for; letting it drop closes it.

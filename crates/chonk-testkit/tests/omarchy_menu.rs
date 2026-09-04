@@ -16,7 +16,7 @@
 //! in, so `#[ignore]`d; run with `scripts/e2e.sh` or
 //! `cargo test -p chonk-testkit --test omarchy_menu -- --ignored`.
 
-use chonk_testkit::{poll_until, session_dir, MenuMetrics, RootMenu, Session, SessionOptions, ShellInfo};
+use chonk_testkit::{keys, poll_until, session_dir, MenuMetrics, RootMenu, Session, SessionOptions, ShellInfo};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -150,6 +150,41 @@ fn omarchy_submenu_lists_the_conditioned_rows_and_runs_a_picked_action() {
         last.is_empty().then_some(())
     })
     .unwrap_or_else(|e| panic!("an action pick closes the whole cascade: {e}; still mapped: {last:?}"));
+}
+
+/// Escape owns the whole open menu session, not merely its deepest
+/// surface. Exercise a three-level cascade because closing just the root
+/// (or just the leaf) can look correct in a unit ledger while leaving an
+/// orphaned popup mapped by the real compositor.
+#[test]
+#[ignore = "needs a live Wayland session to nest in: scripts/e2e.sh, or cargo test -p chonk-testkit --test omarchy_menu -- --ignored"]
+fn escape_closes_the_root_menu_and_every_open_submenu_without_running_an_action() {
+    let (mut session, markers) = boot("omarchy-menu-escape", "");
+    let metrics = MenuMetrics::at_scale_1();
+    poll_until(Duration::from_secs(30), "the scratch menu to load (log line)", || {
+        session.log().contains("omarchy menu loaded").then_some(())
+    })
+    .expect("the shell should find the scratch OMARCHY_PATH");
+    wait_for_conditions(&mut session);
+
+    let root = session
+        .open_root_menu(&metrics, WITH_OMARCHY.row_count())
+        .expect("a right-click should open the root menu");
+    let omarchy = cascade_from(&mut session, &metrics, &root, WITH_OMARCHY.row_of("Omarchy").unwrap());
+    let _test = cascade_from(&mut session, &metrics, &omarchy, 0);
+    assert_eq!(session.world().unwrap().menus().len(), 3, "the root and both cascades are mapped before Escape");
+
+    session.door().tap_key(keys::ESC).expect("the test door should deliver Escape");
+    let mut last = Vec::new();
+    poll_until(Duration::from_secs(10), "Escape to unmap the complete menu cascade", || {
+        last = session.world().ok()?.menus();
+        last.is_empty().then_some(())
+    })
+    .unwrap_or_else(|e| panic!("Escape closes every menu surface: {e}; still mapped: {last:?}"));
+
+    for action in ["plain", "guarded", "hidden", "marked"] {
+        assert!(!markers.join(action).exists(), "Escape must not run the {action} action");
+    }
 }
 
 /// The one config key: `omarchy_menu = false` leaves the root menu
