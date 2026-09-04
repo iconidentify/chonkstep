@@ -8,7 +8,7 @@
 
 use std::time::Duration;
 
-use chonk_testkit::{poll_until, Session, SessionOptions};
+use chonk_testkit::{poll_until, profile_binary, Session, SessionOptions};
 
 /// Layout writes are debounced (2s of stillness — see
 /// `chonk_shell::session_layout::DEBOUNCE`), so waits that span one
@@ -80,32 +80,37 @@ fn a_settled_layout_survives_sigkill() {
 #[ignore = "needs a live Wayland session to nest in: scripts/e2e.sh, or cargo test -p chonk-testkit -- --ignored --test-threads=1"]
 fn a_recorded_layout_is_relaunched_and_replaced_at_startup() {
     let recorded = (320, 240, 500, 380);
+    // Use the repository's deterministic xdg client as the configured
+    // terminal and have it identify as `foot`, the class that maps a
+    // saved terminal record to `RelaunchPlan::Terminal`. Ubuntu's Foot
+    // package has intermittently retained its command-line startup
+    // width after the restore configure (the position still restored),
+    // which made this a test of an external release's cell negotiation
+    // rather than of Chonkstep's restore pipeline.
+    let probe = profile_binary("chonk-fullscreen-probe").expect("the restore probe is built");
+    let config = format!(
+        "restore_session = true\nterminal = [\"{}\", \"restored-foot\", \"foot\"]\n",
+        probe.display()
+    );
     let mut session = Session::boot(
         "layout-restores",
         SessionOptions {
-            config_extra: "restore_session = true\n".to_string(),
+            config_extra: config,
             state_files: vec![("session".to_string(), foot_record(recorded.0, recorded.1, recorded.2, recorded.3))],
             ..SessionOptions::default()
         },
     )
     .unwrap();
 
-    // Nothing was launched from this test: the terminal in the ledger
-    // is the shell restoring its record. Position must land exactly;
-    // size is the record modulo the client's own negotiation — a
-    // terminal answers a configure by rounding down to whole cells
-    // (observed live: 500x380 requested, 492x378 committed), and
-    // restore is about giving the client back its rectangle, not about
-    // overruling its size rules.
-    let _ = session.wait_for_window("foot").expect("restore should relaunch the recorded terminal");
+    // Nothing was launched from this test: the client in the ledger is
+    // the shell restoring its terminal record. The in-tree probe obeys
+    // compositor sizes exactly, so both position and size can assert
+    // the saved rectangle without client-specific tolerance.
+    let _ = session.wait_for_window("restored-foot").expect("restore should relaunch the recorded terminal");
     poll_until(PERSIST, "the restored terminal to take its recorded geometry", || {
         let world = session.world().ok()?;
-        let now = world.window_matching("foot")?;
-        let cell_slack = |actual: u32, wanted: u32| actual <= wanted && wanted - actual < 24;
-        ((now.x, now.y) == (recorded.0, recorded.1)
-            && cell_slack(now.w, recorded.2)
-            && cell_slack(now.h, recorded.3))
-        .then_some(())
+        let now = world.window_matching("restored-foot")?;
+        ((now.x, now.y, now.w, now.h) == recorded).then_some(())
     })
     .unwrap_or_else(|e| {
         let world = session.world().ok();

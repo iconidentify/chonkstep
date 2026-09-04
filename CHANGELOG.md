@@ -7,6 +7,12 @@ crate and both session binaries carry the same number.
 
 ### Performance
 
+- **Held compositor bindings no longer allocate on every repeat tick.**
+  The Wayland repeat scheduler batches its bounded catch-up count in scalar
+  state instead of constructing a temporary vector. At Omarchy's default
+  25 Hz repeat rate this removes roughly 25 heap allocations per second while
+  a repeatable volume or brightness binding is held, without changing delay,
+  cadence, or the four-event post-stall burst limit.
 - **Screenshot requests are deadline-driven and work on an idle desktop.**
   The Wayland compositor resolves the marker path once, probes it at the same
   bounded 100 ms cadence as restart/reload requests, and services it before
@@ -88,6 +94,13 @@ crate and both session binaries carry the same number.
 
 ### Release hardening
 
+- **Nested restore and key-repeat coverage is deterministic across distros.**
+  Session restore now relaunches an in-tree xdg client under the saved terminal
+  identity, so the assertion measures Chonkstep's geometry pipeline rather than
+  a particular Foot release's cell negotiation. The repeat regression observes
+  the compositor's live emission count and 40 ms interval directly instead of
+  timing a burst of shell processes on a loaded runner. The restore path passed
+  ten consecutive real nested sessions locally before the replacement landed.
 - **Workspace examples have collision-free artifact names.** The Bluetooth
   pairing and Wi-Fi join design sheets no longer both compile to
   `target/.../examples/preview`; their explicit `preview-btpair` and

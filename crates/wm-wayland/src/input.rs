@@ -152,6 +152,12 @@ struct RepeatingKey {
     combo: KeyCombo,
     next: std::time::Instant,
     interval: std::time::Duration,
+    /// Number of compositor-owned repeat presses emitted for this
+    /// hold. Besides making the state self-describing in diagnostics,
+    /// this gives the end-to-end test door a direct observation of the
+    /// scheduler without making repeat correctness depend on child
+    /// process startup time.
+    emitted: u64,
 }
 
 struct ImplicitGrab {
@@ -796,6 +802,7 @@ fn on_keyboard_key<I: InputBackend>(state: &mut Compositor, event: I::KeyboardKe
                                 combo,
                                 next: std::time::Instant::now() + delay,
                                 interval: std::time::Duration::from_secs_f64(1.0 / rate as f64),
+                                emitted: 0,
                             });
                         }
                     });
@@ -846,25 +853,41 @@ fn on_keyboard_key<I: InputBackend>(state: &mut Compositor, event: I::KeyboardKe
 pub(crate) fn tick_repeating_binding(state: &mut Compositor) {
     let seat = state.seat.clone();
     let now = std::time::Instant::now();
-    let mut due = Vec::new();
+    let mut due = None;
     with_input(&seat, |input| {
         let Some(repeat) = input.repeating.as_mut() else {
             return;
         };
+        let mut count = 0u8;
         for _ in 0..4 {
             if repeat.next > now {
                 break;
             }
-            due.push(repeat.combo);
+            count += 1;
             repeat.next += repeat.interval;
         }
         if repeat.next <= now {
             repeat.next = now + repeat.interval;
         }
+        if count != 0 {
+            repeat.emitted = repeat.emitted.saturating_add(u64::from(count));
+            due = Some((repeat.combo, count));
+        }
     });
-    for combo in due {
-        state.wm.backend_mut().queue(WmEvent::KeyPress(combo));
+    if let Some((combo, count)) = due {
+        for _ in 0..count {
+            state.wm.backend_mut().queue(WmEvent::KeyPress(combo));
+        }
     }
+}
+
+/// Diagnostic state for the currently held compositor-owned binding:
+/// emitted repeats and the configured interval. The production loop
+/// never calls this; the opt-in test door uses it to verify the live
+/// scheduler without timing external programs.
+pub(crate) fn repeating_binding_status(state: &Compositor) -> Option<(u64, std::time::Duration)> {
+    let seat = state.seat.clone();
+    with_input(&seat, |input| input.repeating.map(|repeat| (repeat.emitted, repeat.interval)))
 }
 
 /// When compositor-owned key repeat next becomes due. Client key repeat

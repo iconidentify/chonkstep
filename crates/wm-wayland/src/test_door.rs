@@ -62,6 +62,7 @@
 //! | `motion X Y` | absolute pointer motion to (X, Y) in global (output) coordinates; floats accepted |
 //! | `button left\|middle\|right press\|release` | pointer button by name |
 //! | `key CODE press\|release` | keyboard key by *evdev* keycode (`KEY_*` from input-event-codes.h; the xkb +8 offset is applied here) |
+//! | `repeat` | replies with the held compositor-binding repeat count and interval, or `repeat none` |
 //! | `barrier` | replies `ok` once every command before it has been dispatched **and** a frame has been rendered with no damage left over |
 //! | `windows` | replies one line per ledger entry (see below), then `done` |
 //!
@@ -472,6 +473,15 @@ fn handle_command(line: &str, stream: &mut UnixStream, comp: &mut Compositor) {
                     reply_err(stream, "barrier could not be parked");
                 }
             }
+        }
+        Some("repeat") => {
+            let reply = match crate::input::repeating_binding_status(comp) {
+                Some((emitted, interval)) => {
+                    format!("repeat emitted={emitted} interval_us={}\n", interval.as_micros())
+                }
+                None => "repeat none\n".to_string(),
+            };
+            let _ = stream.write_all(reply.as_bytes());
         }
         Some("windows") => {
             let mut reply = String::new();

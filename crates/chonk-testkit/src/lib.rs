@@ -1111,6 +1111,26 @@ impl Door {
         }
     }
 
+    /// The active compositor-owned binding's emitted-repeat count and
+    /// interval. `None` means no repeating binding is currently held.
+    /// This is deliberately a test-door observation rather than an
+    /// inference from external command effects: process scheduling is
+    /// unrelated to the compositor's key-repeat deadline.
+    pub fn repeating_binding(&mut self) -> Result<Option<(u64, Duration)>, String> {
+        self.send("repeat")?;
+        let line = self.read_line()?;
+        if line == "repeat none" {
+            return Ok(None);
+        }
+        if !line.starts_with("repeat ") {
+            return Err(format!("unexpected repeat reply: {line}"));
+        }
+        let emitted = field(&line, "emitted=").ok_or_else(|| format!("repeat reply has no count: {line}"))?;
+        let interval_us: u64 =
+            field(&line, "interval_us=").ok_or_else(|| format!("repeat reply has no interval: {line}"))?;
+        Ok(Some((emitted, Duration::from_micros(interval_us))))
+    }
+
     /// Move, press, settle, release, settle: a full click at (x, y),
     /// with a barrier between press and release so the two edges land
     /// in different dispatch passes the way a human's do.

@@ -35,7 +35,7 @@
 //!
 //! # Usage
 //!
-//! `chonk-fullscreen-probe [title]` — then drive it with injected keys
+//! `chonk-fullscreen-probe [title] [app-id]` — then drive it with injected keys
 //! through the test door, on the window once it has keyboard focus:
 //!
 //! | key | evdev | meaning |
@@ -378,6 +378,7 @@ fn frame_file(width: i32, height: i32) -> std::fs::File {
 
 fn main() {
     let title = std::env::args().nth(1).unwrap_or_else(|| "chonk-fullscreen-probe".to_string());
+    let app_id = std::env::args().nth(2).unwrap_or_else(|| "chonk-fullscreen-probe".to_string());
 
     let connection = Connection::connect_to_env()
         .unwrap_or_else(|error| fatal(&format!("no wayland display: {error}")));
@@ -403,7 +404,7 @@ fn main() {
     let xdg_surface = wm_base.get_xdg_surface(&surface, &qh, ());
     let toplevel = xdg_surface.get_toplevel(&qh, ());
     toplevel.set_title(title.clone());
-    toplevel.set_app_id("chonk-fullscreen-probe".to_string());
+    toplevel.set_app_id(app_id);
     surface.commit();
     probe.surface = Some(surface.clone());
     probe.toplevel = Some(toplevel);

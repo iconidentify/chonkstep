@@ -404,23 +404,20 @@ fn selection_layer_bindings_override_only_for_the_layers_lifetime() {
     assert!(!after.contains("--take-window"), "the layer binding leaked after unmap: {after}");
 }
 
-/// The deadline-driven idle loop must not turn Hyprland's `binde`
-/// into a 10 Hz binding. Hold a real injected key and count an external
-/// command's durable effects: this crosses the live config reader,
-/// grab table, seat repeat state, scheduler deadline, action dispatch,
-/// and child launcher in one observation.
+/// The deadline-driven idle loop must honor Hyprland's `binde` cadence.
+/// Hold a real injected key and inspect the compositor-owned repeat
+/// state through the opt-in test door: this crosses the live config
+/// reader, grab table, seat repeat state, scheduler deadline, and
+/// action dispatch without coupling their correctness to child-process
+/// scheduling on a loaded CI runner.
 #[test]
 #[ignore = "needs a session to nest in; run via scripts/e2e.sh"]
 fn a_held_binde_keeps_the_configured_repeat_rate_under_idle_scheduling() {
-    let marker = session_dir("hyprland-repeat").join("repeats");
-    let config = format!(
-        "input {{\n  repeat_rate = 25\n  repeat_delay = 120\n}}\n\
-         binde = SUPER, R, exec, sh -c 'printf x >> {}'\n",
-        marker.display()
-    );
+    let config = "input {\n  repeat_rate = 25\n  repeat_delay = 120\n}\n\
+                  binde = SUPER, R, workspace, 1\n";
     let options = SessionOptions {
         config_extra: "desktop = \"omarchy\"\nomarchy_bar = false\n".into(),
-        config_root_files: vec![("hypr/hyprland.conf".into(), config)],
+        config_root_files: vec![("hypr/hyprland.conf".into(), config.into())],
         ..Default::default()
     };
     let mut session = Session::boot("hyprland-repeat", options).expect("session boots");
@@ -432,9 +429,9 @@ fn a_held_binde_keeps_the_configured_repeat_rate_under_idle_scheduling() {
         door.key(KEY_R, true).expect("repeating key down");
         door.barrier().expect("initial press settles");
     }
-    let repeated = poll_until(Duration::from_secs(2), "five effects from the held 25 Hz binding", || {
-        let bytes = std::fs::read(&marker).ok()?;
-        (bytes.len() >= 5).then_some(bytes.len())
+    let repeated = poll_until(Duration::from_secs(2), "five emissions from the held 25 Hz binding", || {
+        let (emitted, interval) = session.door().repeating_binding().ok().flatten()?;
+        (emitted >= 5).then_some((emitted, interval))
     });
     {
         let door = session.door();
@@ -443,9 +440,10 @@ fn a_held_binde_keeps_the_configured_repeat_rate_under_idle_scheduling() {
         door.barrier().expect("release settles");
     }
 
-    let count = repeated.expect("the compositor-owned repeat deadline should keep firing the binding");
-    assert!(count >= 5, "the initial press plus configured repeats must all run, got {count}");
-    assert!(session.compositor_alive(), "repeating a command must not destabilize the compositor");
+    let (count, interval) = repeated.expect("the compositor-owned repeat deadline should keep firing the binding");
+    assert!(count >= 5, "the configured repeats must keep running while held, got {count}");
+    assert_eq!(interval, Duration::from_millis(40), "repeat_rate = 25 must become a 40 ms cadence");
+    assert!(session.compositor_alive(), "a repeating binding must not destabilize the compositor");
 }
 
 /// Reading somebody else's configuration must never be able to break
