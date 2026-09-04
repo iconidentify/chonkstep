@@ -1049,6 +1049,14 @@ pub struct ProtocolLedgers {
     pub lock: usize,
 }
 
+/// Hyprland IPC descriptors owned by the server and corresponding
+/// calloop sources currently registered by the compositor.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HyprlandSources {
+    pub desired: usize,
+    pub registered: usize,
+}
+
 impl Door {
     fn unconnected() -> Door {
         Door { stream: None }
@@ -1203,6 +1211,23 @@ impl Door {
                 .ok_or_else(|| format!("protocol-publishes reply has no full-sync count: {line}"))?,
             foreign_drag: field(&line, "foreign_drag=")
                 .ok_or_else(|| format!("protocol-publishes reply has no drag-sync count: {line}"))?,
+        })
+    }
+
+    /// Exact Hyprland IPC source population from inside the
+    /// compositor. Unlike `/proc/<pid>/fd`, this excludes independent
+    /// render, D-Bus, XWayland, and child-process descriptor churn.
+    pub fn hyprland_sources(&mut self) -> Result<HyprlandSources, String> {
+        self.send("hyprland-sources")?;
+        let line = self.read_line()?;
+        if !line.starts_with("hyprland-sources ") {
+            return Err(format!("unexpected Hyprland-source reply: {line}"));
+        }
+        Ok(HyprlandSources {
+            desired: field(&line, "desired=")
+                .ok_or_else(|| format!("Hyprland-source reply has no desired count: {line}"))?,
+            registered: field(&line, "registered=")
+                .ok_or_else(|| format!("Hyprland-source reply has no registered count: {line}"))?,
         })
     }
 

@@ -32,7 +32,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use chonk_hyprland_ipc::{MAX_EVENT_CLIENTS, MAX_REQUEST_CLIENTS};
-use chonk_testkit::{poll_until, profile_binary, Session, SessionOptions};
+use chonk_testkit::{HyprlandSources, poll_until, profile_binary, Session, SessionOptions};
 
 const EVENT: Duration = Duration::from_secs(10);
 
@@ -191,12 +191,6 @@ fn disconnected_socket_probes_leave_no_fds_and_no_busy_loop_behind() {
 fn a_connection_storm_is_capped_before_it_can_grow_the_source_set() {
     let mut session = boot("hypr-ipc-connection-cap");
     let dir = socket_dir(&session);
-    let compositor_pid = session.compositor_pid();
-    let fd_count = || {
-        std::fs::read_dir(format!("/proc/{compositor_pid}/fd"))
-            .expect("the harness can inspect its child process")
-            .count()
-    };
     fn connect(session: &mut Session, dir: &Path, socket: &str, count: usize) -> Vec<UnixStream> {
         let mut peers = Vec::new();
         for index in 0..count {
@@ -213,25 +207,20 @@ fn a_connection_storm_is_capped_before_it_can_grow_the_source_set() {
     }
 
     session.door().barrier().unwrap();
-    let baseline = fd_count();
+    assert_eq!(
+        session.door().hyprland_sources().unwrap(),
+        HyprlandSources { desired: 2, registered: 2 },
+        "an idle server retains only its two listeners"
+    );
     let mut requests = connect(&mut session, &dir, ".socket.sock", MAX_REQUEST_CLIENTS + 32);
     let mut events = connect(&mut session, &dir, ".socket2.sock", MAX_EVENT_CLIENTS + 32);
 
-    let retained_bound = baseline + MAX_REQUEST_CLIENTS + MAX_EVENT_CLIENTS + 4;
-    // The barrier's own native-control connection and a render fence
-    // can still be disappearing while /proc enumerates the process.
-    // Keep the strict bound, but measure the settled retained set: a
-    // genuinely retained 65th IPC client never satisfies this poll.
-    poll_until(EVENT, "the storm descriptor set to settle within both caps", || {
-        let current = fd_count();
-        (current <= retained_bound).then_some(current)
-    })
-    .unwrap_or_else(|error| {
-        panic!(
-            "{error}; excess clients grew the compositor past its two caps: baseline={baseline}, now={}, bound={retained_bound}",
-            fd_count()
-        )
-    });
+    let capped = 2 + MAX_REQUEST_CLIENTS + MAX_EVENT_CLIENTS;
+    assert_eq!(
+        session.door().hyprland_sources().unwrap(),
+        HyprlandSources { desired: capped, registered: capped },
+        "excess clients must grow neither the retained server population nor the calloop source set"
+    );
     for excess in [requests.last_mut().unwrap(), events.last_mut().unwrap()] {
         excess.set_read_timeout(Some(EVENT)).unwrap();
         let mut byte = [0_u8; 1];
@@ -249,14 +238,22 @@ fn a_connection_storm_is_capped_before_it_can_grow_the_source_set() {
 
     drop(requests);
     session.door().barrier().unwrap();
+    assert_eq!(
+        session.door().hyprland_sources().unwrap(),
+        HyprlandSources {
+            desired: 2 + MAX_EVENT_CLIENTS,
+            registered: 2 + MAX_EVENT_CLIENTS,
+        },
+        "request clients and sources prune while event subscribers remain"
+    );
     assert!(json(&dir, "j/version").is_object(), "a slot reopens without disturbing full event subscribers");
     drop(events);
     session.door().barrier().unwrap();
-    poll_until(EVENT, "storm descriptors and sources to be pruned", || {
-        let current = fd_count();
-        (current <= baseline + 2).then_some(current)
-    })
-    .unwrap_or_else(|error| panic!("{error}; baseline={baseline}, now={}", fd_count()));
+    assert_eq!(
+        session.door().hyprland_sources().unwrap(),
+        HyprlandSources { desired: 2, registered: 2 },
+        "every storm client and calloop source is pruned"
+    );
 }
 
 /// The four requests Quickshell makes on connect, in the shapes it

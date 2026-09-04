@@ -2585,6 +2585,20 @@ impl Compositor {
         self.foreign_toplevel_dirty = true;
     }
 
+    /// Current and registered Hyprland IPC source counts for the
+    /// opt-in E2E door. Counting the owned source set directly keeps a
+    /// connection-storm assertion independent of unrelated compositor
+    /// descriptors such as render fences and notification helpers.
+    pub(crate) fn hyprland_ipc_source_counts(&self) -> (usize, usize) {
+        let desired = self.hyprland_ipc.as_ref().map_or(0, |server| server.poll_fds().len());
+        let registered = self
+            .dock_sources
+            .iter()
+            .filter(|(fd, _)| self.hyprland_source_scratch.contains(fd))
+            .count();
+        (desired, registered)
+    }
+
     fn sync_dock_sources(&mut self) {
         let mut wanted = std::mem::take(&mut self.source_scratch);
         let mut membership = std::mem::take(&mut self.source_membership_scratch);

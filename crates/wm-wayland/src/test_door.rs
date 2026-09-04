@@ -66,6 +66,7 @@
 //! | `activation-tokens` | replies with the number of retained xdg-activation tokens |
 //! | `protocol-ledgers` | replies with retained input-method popup, idle-inhibitor object, and lock-surface counts |
 //! | `protocol-publishes` | replies with native-control and Hyprland event-snapshot, foreign full-sync and foreign dragged-window-sync counters |
+//! | `hyprland-sources` | replies with desired and registered Hyprland IPC calloop-source counts |
 //! | `hit X Y` | replies with `hit root\|shell\|frame\|content\|layer\|ime\|lock` from the production scene hit-test |
 //! | `barrier` | replies `ok` once every command before it has been dispatched **and** a frame has been rendered with no damage left over |
 //! | `windows` | replies one line per ledger entry (see below), then `done` |
@@ -508,6 +509,12 @@ fn handle_command(line: &str, stream: &mut UnixStream, comp: &mut Compositor) {
                     metrics.foreign_toplevel_drag_syncs,
                 )
                 .as_bytes(),
+            );
+        }
+        Some("hyprland-sources") => {
+            let (desired, registered) = comp.hyprland_ipc_source_counts();
+            let _ = stream.write_all(
+                format!("hyprland-sources desired={desired} registered={registered}\n").as_bytes(),
             );
         }
         Some("hit") => {
