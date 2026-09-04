@@ -7,6 +7,13 @@ crate and both session binaries carry the same number.
 
 ### Release hardening
 
+- **Disconnected Hyprland IPC clients no longer pin a CPU core.** Empty
+  request probes and quiet event subscribers are removed as soon as their
+  peer closes. Previously their permanently readable hangup fds survived
+  forever; a live desktop with 23 accumulated probes was measured at 1,560
+  event-loop passes per second and 99% of one core. Unit tests cover both
+  sockets, and a nested-compositor regression verifies that repeated probes
+  leave neither descriptors nor an unhealthy server behind.
 - **Full desktop behavior now runs in CI.** The Wayland job boots an isolated
   Weston headless host and runs ChonkStep's complete real-client integration
   suite: Chromium and native terminals, window input/geometry, Omarchy's
@@ -27,7 +34,9 @@ crate and both session binaries carry the same number.
   scenario no longer clicks through the always-on-top dock while intending to
   grab Chromium's client-side resize edge. It runs dockless, exercises the
   actual browser surface, and passes against current Chromium under the same
-  headless compositor path CI uses.
+  headless compositor path CI uses. On hosted runners that prohibit Chromium's
+  user-namespace sandbox, only this isolated `about:blank` test process opts
+  out; local browser tests retain normal sandboxing.
 
 ### Omarchy-compatible session and install path
 

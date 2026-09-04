@@ -135,6 +135,47 @@ fn binds_two_private_sockets_where_the_protocol_says() {
     assert_eq!(mode(dir.join(".socket2.sock")), 0o600, "the event socket must be private");
 }
 
+/// A socket-existence probe connects and closes without writing. The
+/// server's own stale-instance sweep does exactly that, so this is a
+/// normal lifecycle event rather than a hostile-client curiosity.
+/// Retaining the accepted EOF fd leaves HUP permanently readable: one
+/// live session accumulated 23 of them, spun 1,560 passes/second, and
+/// consumed 99% of one CPU core.
+#[test]
+#[ignore = "needs a Wayland session to nest inside"]
+fn disconnected_socket_probes_leave_no_fds_and_no_busy_loop_behind() {
+    let mut session = boot("hypr-ipc-probe-eof");
+    let dir = socket_dir(&session);
+    let compositor_pid = session.compositor_pid();
+    let fd_count = || {
+        std::fs::read_dir(format!("/proc/{compositor_pid}/fd"))
+            .expect("the harness can inspect its child process")
+            .count()
+    };
+
+    // Settle startup/XWayland first. A tolerance of two covers a
+    // transient render fence without being large enough to hide even
+    // one full batch of leaked request/event connections.
+    session.door().barrier().unwrap();
+    let baseline = fd_count();
+    for _ in 0..8 {
+        for socket in [".socket.sock", ".socket2.sock"] {
+            for _ in 0..4 {
+                drop(UnixStream::connect(dir.join(socket)).expect("probe connects"));
+            }
+        }
+        session.door().barrier().unwrap();
+    }
+
+    poll_until(EVENT, "disconnected probe fds to be pruned", || {
+        let current = fd_count();
+        (current <= baseline + 2).then_some(current)
+    })
+    .unwrap_or_else(|error| panic!("{error}; baseline={baseline}, now={}", fd_count()));
+
+    assert!(json(&dir, "j/version").is_object(), "the request socket still answers after the probe storm");
+}
+
 /// The four requests Quickshell makes on connect, in the shapes it
 /// parses. `j/status` is first because Quickshell will not even connect
 /// to the event socket until it is answered.

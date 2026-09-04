@@ -830,6 +830,21 @@ impl Stream {
         peer_is_this_user_on(self.fd.as_raw_fd())
     }
 
+    /// Whether the peer has fully closed the connection.
+    ///
+    /// This is the server-side liveness check for a write-only event
+    /// stream: when there are no bytes queued, `send` has nothing to
+    /// call and `recv` would violate the protocol's direction, but a
+    /// dead peer still leaves `POLLHUP` permanently asserted. Zero
+    /// timeout means this is a query, never a wait. A failed or
+    /// interrupted poll is deliberately "not known dead"; keeping an
+    /// ambiguous connection is safer than dropping a live one.
+    pub fn peer_gone(&self) -> bool {
+        let mut fd = libc::pollfd { fd: self.fd.as_raw_fd(), events: 0, revents: 0 };
+        let ready = unsafe { libc::poll(&mut fd, 1, 0) };
+        ready > 0 && fd.revents & (libc::POLLHUP | libc::POLLERR) != 0
+    }
+
     /// Blocks (with `poll`) until bytes arrive or `deadline` passes —
     /// for a *client* only, exactly as [`Seqpacket::recv_until`] is.
     /// `Ok(None)` on timeout, `Ok(Some(0))` on EOF.

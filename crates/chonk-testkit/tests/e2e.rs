@@ -847,17 +847,23 @@ fn chromium_resize_at_scale_2_keeps_its_scale() {
     let data_dir = session.dir.join("chromium-data");
     std::fs::create_dir_all(&data_dir).unwrap();
     let data = format!("--user-data-dir={}", data_dir.display());
+    let mut chromium_args = vec![
+        "--ozone-platform=wayland",
+        data.as_str(),
+        "--no-first-run",
+        "--no-default-browser-check",
+        "about:blank",
+    ];
+    // GitHub's hosted Ubuntu runner denies the unprivileged user
+    // namespaces Chromium needs for its sandbox. This process has an
+    // isolated temporary profile and opens only about:blank, so opt
+    // out there rather than silently skipping the real-browser test.
+    // Local runs retain Chromium's normal sandbox.
+    if std::env::var_os("CI").is_some() {
+        chromium_args.push("--no-sandbox");
+    }
     session
-        .launch(
-            "chromium",
-            &[
-                "--ozone-platform=wayland",
-                &data,
-                "--no-first-run",
-                "--no-default-browser-check",
-                "about:blank",
-            ],
-        )
+        .launch("chromium", &chromium_args)
         .unwrap();
     // A cold browser profile can spend more than the harness's usual
     // ten-second client budget initializing SwiftShader on a hosted

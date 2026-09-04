@@ -623,7 +623,24 @@ impl Server {
                     // Quickshell, which does not shut down its write
                     // side; so the request is also answered as soon as
                     // any bytes have arrived, below.
-                    Ok(0) => break,
+                    Ok(0) => {
+                        // A connection that closes before writing a
+                        // request is not an idle client; it is gone.
+                        // This is the exact shape of the liveness probe
+                        // in `sweep_dead_instances`: connect, learn
+                        // that a server owns the path, then drop. The
+                        // old code retained that empty EOF forever.
+                        // Its fd consequently reported EPOLLHUP on
+                        // every calloop wait, turning the compositor's
+                        // 16 ms housekeeping loop into an unbounded
+                        // busy loop. A live session measured 1,560
+                        // passes/second and 99% of one CPU after 23
+                        // such probes had accumulated.
+                        if client.inbound.is_empty() {
+                            client.doomed = true;
+                        }
+                        break;
+                    }
                     Ok(n) => {
                         client.inbound.extend_from_slice(&buffer[..n]);
                         budget = budget.saturating_sub(n);
@@ -787,6 +804,15 @@ impl RequestClient {
 
 impl EventClient {
     fn flush(&mut self) {
+        // Event clients never write, and an unchanged desktop queues
+        // nothing to send. Without an explicit HUP check a client that
+        // disconnected during that quiet period survived forever and
+        // its permanently-readable fd spun the compositor loop.
+        if self.stream.peer_gone() {
+            self.outbound.clear();
+            self.doomed = true;
+            return;
+        }
         flush(&self.stream, &mut self.outbound, &mut self.doomed);
     }
 }
@@ -864,5 +890,64 @@ mod enabled_tests {
                 assert!(Server::enabled(), "{odd:?} should still answer");
             });
         }
+    }
+
+    #[test]
+    fn an_empty_probe_connection_is_dropped_on_its_first_eof() {
+        use std::os::unix::net::UnixStream;
+
+        let (probe, accepted) = UnixStream::pair().expect("socket pair");
+        let stream = Stream::from_fd(accepted.into());
+        let mut server = Server {
+            directory: PathBuf::new(),
+            requests: None,
+            events: None,
+            request_clients: vec![RequestClient {
+                stream,
+                inbound: Vec::new(),
+                outbound: Vec::new(),
+                answered: false,
+                doomed: false,
+            }],
+            event_clients: Vec::new(),
+            differ: Differ::new(),
+            refusals: 0,
+        };
+
+        // The stale-instance health check only connects. Dropping it
+        // without a request must make the accepted fd disappear in one
+        // service pass, or its permanent HUP keeps waking the desktop.
+        drop(probe);
+        server.service(&Snapshot::default(), |_| false);
+        assert!(server.request_clients.is_empty());
+        assert!(server.poll_fds().is_empty(), "no dead fd may survive into the next event-loop wait");
+    }
+
+    #[test]
+    fn a_quiet_event_client_is_dropped_when_its_peer_closes() {
+        use std::os::unix::net::UnixStream;
+
+        let (subscriber, accepted) = UnixStream::pair().expect("socket pair");
+        let stream = Stream::from_fd(accepted.into());
+        let mut server = Server {
+            directory: PathBuf::new(),
+            requests: None,
+            events: None,
+            request_clients: Vec::new(),
+            event_clients: vec![EventClient { stream, outbound: Vec::new(), doomed: false }],
+            differ: Differ::new(),
+            refusals: 0,
+        };
+
+        // Establish the differ's baseline while the subscriber is
+        // alive, then close it while no state is changing. The second
+        // publish has no event bytes whose failed send could reveal the
+        // death; the explicit HUP check must still prune the fd.
+        let snapshot = Snapshot::default();
+        server.publish(&snapshot);
+        drop(subscriber);
+        server.publish(&snapshot);
+        assert!(server.event_clients.is_empty());
+        assert!(server.poll_fds().is_empty(), "no dead event fd may survive into the next wait");
     }
 }
