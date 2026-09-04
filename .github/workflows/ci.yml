@@ -96,7 +96,7 @@ jobs:
         # compiled client rather than a shell one-liner.
         run: |
           sudo apt-get update
-          sudo apt-get install -y xvfb xterm x11-utils libx11-dev
+          sudo apt-get install -y xvfb xterm x11-utils libx11-dev libgtk-3-bin
 
       - name: Build release binaries
         run: cargo build --release -p chonkstep
@@ -276,6 +276,14 @@ jobs:
           XVFB_PID=$!
           await 15 xprop -display :99 -root \
             || fail "Xvfb never accepted a connection on :99"
+
+          # The crate's real-server selection tests, including a GTK
+          # consumer reading the fractional DPI pair. These are ignored
+          # in the display-free workspace pass by design; this is the
+          # display-bearing job that makes them required instead of
+          # silently skipped.
+          DISPLAY=:99 cargo test -p chonk-xsettings --test live_manager -- --ignored --test-threads=1 \
+            || fail "the live XSETTINGS manager tests failed"
 
           # The WM under test. Logs are captured so an assertion
           # failure below can show what the WM itself saw.

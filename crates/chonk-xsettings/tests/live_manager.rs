@@ -17,10 +17,16 @@
 //! DISPLAY=:99 cargo test -p chonk-xsettings -- --ignored --test-threads=1
 //! ```
 //!
+//! `gtk-query-settings` (from `libgtk-3-bin`) is also required for the
+//! consumer-side scale test. CI installs it explicitly before running
+//! this file, so a missing probe is a test failure rather than a skip.
+//!
 //! `--test-threads=1` is not optional. Every test in this file competes
 //! for the *same* `_XSETTINGS_S0` selection on the same display, which
 //! is precisely the resource the crate exists to hold exclusively;
 //! running them concurrently would have them fail each other on purpose.
+
+use std::process::Command;
 
 use x11rb::COPY_DEPTH_FROM_PARENT;
 use x11rb::connection::Connection as _;
@@ -229,6 +235,32 @@ fn acquiring_puts_a_readable_property_behind_the_selection() {
     let text = String::from_utf8_lossy(&published);
     assert!(text.contains(keys::XFT_DPI));
     assert!(text.contains("NeXT"));
+}
+
+#[test]
+#[ignore = "needs an X server and gtk-query-settings; see the module documentation"]
+// This probe runs on Cargo's integration-test thread, never a WM or
+// compositor dispatch thread, and must finish before its output can be
+// asserted.
+#[allow(clippy::disallowed_methods)]
+fn gtk_consumes_the_fractional_dpi_pair_and_the_physical_cursor_size() {
+    let mut manager = XSettingsManager::acquire(None).expect("to acquire the selection");
+    assert!(manager.publish_appearance(&DesktopAppearance::new(1.5, "NeXT")).unwrap());
+
+    let output = Command::new("gtk-query-settings").output().expect("gtk-query-settings is installed");
+    assert!(
+        output.status.success(),
+        "gtk-query-settings exited with {}: {}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report = String::from_utf8(output.stdout).expect("gtk-query-settings writes UTF-8");
+    let has = |expected: &str| report.lines().any(|line| line.trim() == expected);
+    assert!(has("gtk-xft-dpi: 73728"), "GTK did not consume the 72-DPI pre-scale value:\n{report}");
+    assert!(
+        has("gtk-cursor-theme-size: 36"),
+        "GTK must hand the already-scaled physical cursor size to Xcursor:\n{report}"
+    );
 }
 
 #[test]

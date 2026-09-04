@@ -114,7 +114,7 @@ pub mod resources;
 pub use appearance::{
     BASE_CURSOR_SIZE_PX, BASE_DPI, DesktopAppearance, MAX_UI_SCALE, MIN_UI_SCALE,
     UNSCALED_XFT_DPI, XFT_DPI_UNITS_PER_POINT, cursor_size_for_scale, keys, sanitize_ui_scale,
-    window_scaling_factor_for_scale, xft_dpi_for_scale,
+    unscaled_xft_dpi_for_scale, window_scaling_factor_for_scale, xft_dpi_for_scale,
 };
 pub use format::{
     ByteOrder, Header, MAX_NAME_BYTES, MAX_STRING_BYTES, SettingValue, Settings, parse_header,

@@ -7,6 +7,13 @@ crate and both session binaries carry the same number.
 
 ### Fixed
 
+- **Fractional XSETTINGS scales no longer round GTK X11 applications to
+  the nearest integer size.** `Gdk/UnscaledDPI` now carries the remainder
+  left by `Gdk/WindowScalingFactor`, so their product reproduces
+  `Xft/DPI`: a 1.5x desktop publishes 72 pre-scale DPI times a 2x window
+  factor instead of 96 DPI times 2. Wire-level tests cover 1.25x, 1.5x,
+  and 2.5x; the independently physical-pixel Xcursor size remains scaled
+  once ([#86](https://github.com/iconidentify/chonkstep/issues/86)).
 - **Protocol-object teardown now removes every hot-path ledger entry it
   created.** Input-method popups and idle inhibitors are bounded and
   pruned on object or client destruction, same-surface idle inhibitors

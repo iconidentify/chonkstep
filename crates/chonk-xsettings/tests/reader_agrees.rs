@@ -291,7 +291,7 @@ fn every_name_and_value_length_combination_survives_the_round_trip() {
 fn a_published_appearance_reads_back_as_the_settings_it_promised() {
     // The end-to-end shape: what the desktop means, through the typed
     // layer, through the encoder, and back out as a client sees it.
-    let appearance = DesktopAppearance::new(2.0, "NeXT")
+    let appearance = DesktopAppearance::new(1.5, "NeXT")
         .with_icon_theme("NeXT-icons")
         .with_cursor_theme("Adwaita")
         .with_font_name("Sans 10");
@@ -308,13 +308,13 @@ fn a_published_appearance_reads_back_as_the_settings_it_promised() {
             .clone()
     };
 
-    assert_eq!(lookup(keys::XFT_DPI), SettingValue::Integer(196_608));
-    assert_eq!(lookup(keys::GDK_UNSCALED_DPI), SettingValue::Integer(98_304));
+    assert_eq!(lookup(keys::XFT_DPI), SettingValue::Integer(147_456));
+    assert_eq!(lookup(keys::GDK_UNSCALED_DPI), SettingValue::Integer(73_728));
     assert_eq!(
         lookup(keys::GDK_WINDOW_SCALING_FACTOR),
         SettingValue::Integer(2)
     );
-    assert_eq!(lookup(keys::GTK_CURSOR_THEME_SIZE), SettingValue::Integer(48));
+    assert_eq!(lookup(keys::GTK_CURSOR_THEME_SIZE), SettingValue::Integer(36));
     assert_eq!(
         lookup(keys::NET_THEME_NAME),
         SettingValue::String("NeXT".to_string())
@@ -334,6 +334,28 @@ fn a_published_appearance_reads_back_as_the_settings_it_promised() {
 }
 
 #[test]
+fn fractional_dpi_pairs_survive_the_wire_without_rounding_the_desktop_scale() {
+    for scale in [1.25f32, 1.5, 2.5] {
+        let property = parse(&DesktopAppearance::new(scale, "NeXT").to_settings().serialize());
+        let integer = |name: &str| {
+            let setting = property
+                .settings
+                .iter()
+                .find(|setting| setting.name == name)
+                .unwrap_or_else(|| panic!("{name} should have been published at scale {scale}"));
+            match &setting.value {
+                SettingValue::Integer(value) => *value,
+                other => panic!("{name} was not an integer: {other:?}"),
+            }
+        };
+        let requested = integer(keys::XFT_DPI);
+        let unscaled = integer(keys::GDK_UNSCALED_DPI);
+        let factor = integer(keys::GDK_WINDOW_SCALING_FACTOR);
+        assert!((unscaled * factor - requested).abs() <= 1, "scale {scale}");
+    }
+}
+
+#[test]
 fn a_live_scale_change_is_visible_to_a_reader_as_a_higher_serial() {
     // The property a client re-reads after a `PropertyNotify`: the
     // header serial has moved, the settings that changed carry new
@@ -343,7 +365,7 @@ fn a_live_scale_change_is_visible_to_a_reader_as_a_higher_serial() {
     let mut settings = DesktopAppearance::new(1.0, "NeXT").to_settings();
     let before = parse(&settings.serialize());
 
-    assert!(DesktopAppearance::new(2.0, "NeXT").apply_to(&mut settings));
+    assert!(DesktopAppearance::new(1.5, "NeXT").apply_to(&mut settings));
     let after = parse(&settings.serialize());
 
     assert!(
@@ -365,9 +387,8 @@ fn a_live_scale_change_is_visible_to_a_reader_as_a_higher_serial() {
         stamp(&before, keys::GTK_THEME_NAME),
         "an unchanged setting must keep its stamp"
     );
-    assert_eq!(
-        stamp(&after, keys::GDK_UNSCALED_DPI),
-        stamp(&before, keys::GDK_UNSCALED_DPI),
-        "the unscaled DPI is constant across scales by design"
+    assert!(
+        stamp(&after, keys::GDK_UNSCALED_DPI) > stamp(&before, keys::GDK_UNSCALED_DPI),
+        "the fractional remainder must reach a running reader"
     );
 }

@@ -226,6 +226,14 @@ every GTK client fail to find it and fall back — overriding whatever the user
 set in their own `gtk-3.0/settings.ini`. The desktop says true things about
 DPI and nothing about taste.
 
+At a fractional scale the integer GDK window factor and unscaled text DPI
+are a pair: at 1.5x the factor is 2 and the pre-scale DPI is 72, whose
+product is the requested 144 DPI. GTK substitutes `Gdk/UnscaledDPI` for
+its text DPI before applying the window factor, so leaving it fixed at 96
+would silently turn 1.5x into 2x. Cursor size follows a different GTK path:
+`Gtk/CursorThemeSize` is handed directly to Xcursor without the window
+factor, and therefore remains the pre-multiplied physical-pixel size.
+
 **This now works on both sessions, and the Wayland half required a
 policy call worth recording.** XWayland claims `_XSETTINGS_S0` the
 moment it starts and publishes an *empty* settings block — a

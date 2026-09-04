@@ -35,18 +35,22 @@
 //! window at two. Publishing `Gdk/UnscaledDPI = 98304` alongside says
 //! explicitly "lay text out at 96 DPI and let the window scale carry the
 //! factor of two", which is the arrangement the widely used `xsettingsd`
-//! HiDPI recipe prescribes and the one GTK is written to expect. The
-//! constant is [`UNSCALED_XFT_DPI`] and it does not vary with the scale,
-//! which is the whole point of it.
+//! HiDPI recipe prescribes and the one GTK is written to expect. At a
+//! fractional 1.5x, however, the integer window factor is 2 and the
+//! pre-scale DPI must be 72: `72 * 2 = 144`, the requested effective
+//! DPI. [`unscaled_xft_dpi_for_scale`] performs that division;
+//! [`UNSCALED_XFT_DPI`] remains its 96-DPI answer at integral scales.
 //!
 //! **`Gtk/CursorThemeSize` is a size in pixels**, and it is deliberately
 //! the same number this session already puts in `XCURSOR_SIZE` — 24 px
 //! at 1x, Xcursor's own conventional base size, times the scale. See
 //! `chonk-shell`'s `startup::xcursor_size_for`, which computes it
-//! identically. Two mechanisms disagreeing about the pointer size is a
-//! visible glitch every time the pointer crosses a window border, so the
-//! base is stated in both places and [`DesktopAppearance::cursor_size`]
-//! exists for a caller who needs to override it anyway.
+//! identically. GTK hands this value directly to Xcursor; unlike text
+//! DPI it is not subsequently multiplied by `Gdk/WindowScalingFactor`.
+//! Two mechanisms disagreeing about the pointer size is a visible glitch
+//! every time the pointer crosses a window border, so the base is stated
+//! in both places and [`DesktopAppearance::cursor_size`] exists for a
+//! caller who needs to override it anyway.
 //!
 //! **`Net/ThemeName` and `Gtk/ThemeName` are the same string.**
 //! `Net/ThemeName` is the name in the XSETTINGS registry; `Gtk/ThemeName`
@@ -98,8 +102,8 @@ pub const BASE_DPI: f32 = 96.0;
 /// documentation.
 pub const XFT_DPI_UNITS_PER_POINT: i32 = 1024;
 
-/// `Gdk/UnscaledDPI`: 96 DPI in 1024ths, constant at every scale
-/// because the scale is carried by `Gdk/WindowScalingFactor` instead.
+/// 96 DPI in 1024ths: the `Gdk/UnscaledDPI` value at every integral
+/// scale, and the harmless fallback for an unusable scale.
 pub const UNSCALED_XFT_DPI: i32 = 98_304;
 
 /// Xcursor's conventional 1x pointer size in pixels — the same base
@@ -154,6 +158,18 @@ pub fn window_scaling_factor_for_scale(scale: f32) -> i32 {
     (sanitize_ui_scale(scale).round() as i32).max(1)
 }
 
+/// The `Gdk/UnscaledDPI` value for a UI scale.
+///
+/// GDK uses this DPI for text and independently multiplies surfaces by
+/// [`window_scaling_factor_for_scale`]. Dividing the requested
+/// [`xft_dpi_for_scale`] by that integer factor preserves a fractional
+/// desktop scale instead of rounding it away. Both wire values are
+/// integers; rounding chooses the closest representable effective DPI.
+pub fn unscaled_xft_dpi_for_scale(scale: f32) -> i32 {
+    let factor = window_scaling_factor_for_scale(scale);
+    (xft_dpi_for_scale(scale) as f32 / factor as f32).round() as i32
+}
+
 /// The pointer cursor size in pixels for a UI scale: 24 px at 1x.
 ///
 /// Floored at 1 for the same reason `chonk-shell` floors its own: a
@@ -200,10 +216,10 @@ pub struct DesktopAppearance {
     /// Pointer size in pixels. `None` derives it from
     /// [`ui_scale`](Self::ui_scale) via [`cursor_size_for_scale`], which
     /// is what keeps it consistent with the `XCURSOR_SIZE` the session
-    /// hands to the processes it launches. Set it explicitly if a
-    /// particular toolkit's cursor comes out the wrong size — GTK
-    /// clients that also honour `Gdk/WindowScalingFactor` may apply
-    /// both, and this is the escape hatch for that.
+    /// hands to the processes it launches. GTK passes the XSETTING
+    /// straight to Xcursor, so the integer window scale is deliberately
+    /// not divided out here. Set it explicitly if a particular cursor
+    /// theme needs a different pixel size.
     pub cursor_size: Option<u32>,
     /// Default UI font as a Pango description, e.g. `"Sans 10"`, for
     /// `Gtk/FontName`. Left `None` by default: this desktop's own
@@ -303,7 +319,7 @@ impl DesktopAppearance {
         let mut changed = false;
 
         changed |= settings.set(keys::XFT_DPI, xft_dpi_for_scale(self.ui_scale));
-        changed |= settings.set(keys::GDK_UNSCALED_DPI, UNSCALED_XFT_DPI);
+        changed |= settings.set(keys::GDK_UNSCALED_DPI, unscaled_xft_dpi_for_scale(self.ui_scale));
         changed |= settings.set(
             keys::GDK_WINDOW_SCALING_FACTOR,
             window_scaling_factor_for_scale(self.ui_scale),
@@ -426,6 +442,7 @@ mod tests {
             assert_eq!(sanitize_ui_scale(scale), 1.0, "scale {scale} should fall back to 1.0");
             assert_eq!(xft_dpi_for_scale(scale), UNSCALED_XFT_DPI);
             assert_eq!(window_scaling_factor_for_scale(scale), 1);
+            assert_eq!(unscaled_xft_dpi_for_scale(scale), UNSCALED_XFT_DPI);
             assert_eq!(cursor_size_for_scale(scale), 24);
         }
         // Absurd but positive values clamp rather than fall back.
@@ -434,13 +451,17 @@ mod tests {
     }
 
     #[test]
-    fn the_unscaled_dpi_does_not_move_with_the_scale() {
-        // It is the constant half of the pair that stops GTK applying
-        // the scale twice; if it tracked the scale it would be useless.
-        for scale in [1.0f32, 1.5, 2.0, 3.0] {
+    fn unscaled_dpi_times_window_scale_reproduces_the_requested_dpi() {
+        // GDK substitutes this value for Xft/DPI before independently
+        // applying its integer window scale. The two settings must put
+        // the fractional remainder back together rather than round the
+        // requested desktop scale away.
+        for scale in [1.0f32, 1.25, 1.5, 2.0, 2.5, 3.0] {
             let settings = DesktopAppearance::new(scale, "NeXT").to_settings();
-            assert_eq!(integer(&settings, keys::GDK_UNSCALED_DPI), Some(UNSCALED_XFT_DPI));
-            assert_eq!(integer(&settings, keys::XFT_DPI), Some(xft_dpi_for_scale(scale)));
+            let unscaled = integer(&settings, keys::GDK_UNSCALED_DPI).unwrap();
+            let factor = integer(&settings, keys::GDK_WINDOW_SCALING_FACTOR).unwrap();
+            let requested = integer(&settings, keys::XFT_DPI).unwrap();
+            assert!((unscaled * factor - requested).abs() <= 1, "scale {scale}");
         }
     }
 
@@ -535,7 +556,7 @@ mod tests {
         assert_eq!(
             settings.last_change_serial(keys::GDK_UNSCALED_DPI),
             Some(2),
-            "and neither did the unscaled DPI"
+            "integral scales all reduce to the same 96-DPI pre-scale value"
         );
     }
 
