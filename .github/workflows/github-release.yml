@@ -1,0 +1,176 @@
+name: build GitHub Arch packages
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "preview-v*"
+
+permissions:
+  contents: read
+  attestations: write
+  id-token: write
+
+concurrency:
+  group: github-package-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  package:
+    name: package (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x86_64
+            platform: amd64
+            runner: ubuntu-24.04
+          - arch: aarch64
+            platform: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Validate version and prepare an exact source archive
+        id: metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n1)
+          if [[ $GITHUB_REF == refs/tags/preview-v* ]]; then
+            tag_version=${GITHUB_REF_NAME#preview-v}
+            test "$tag_version" = "$version" || {
+              echo "tag version $tag_version does not match workspace version $version" >&2
+              exit 1
+            }
+          fi
+          build_dir="$RUNNER_TEMP/chonkstep-package"
+          install -d -m777 "$build_dir"
+          git archive \
+            --format=tar.gz \
+            --prefix="chonkstep-$version/" \
+            --output="$build_dir/chonkstep-$version.tar.gz" \
+            HEAD
+          install -m644 packaging/arch/PKGBUILD-release "$build_dir/PKGBUILD"
+
+          package_name="chonkstep-$version-1-${{ matrix.arch }}.pkg.tar.zst"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "package_name=$package_name" >> "$GITHUB_OUTPUT"
+
+      - name: Build the native Arch package environment
+        run: |
+          docker build \
+            --pull \
+            --platform "linux/${{ matrix.platform }}" \
+            --file packaging/arch/Dockerfile.builder \
+            --tag "chonkstep-arch-builder:${{ matrix.arch }}" \
+            packaging/arch
+
+      - name: Build, test, and inspect the package natively
+        run: |
+          docker run --rm \
+            --platform "linux/${{ matrix.platform }}" \
+            --env CARGO_INCREMENTAL=0 \
+            --env CARGO_PROFILE_DEV_DEBUG=0 \
+            --env CARGO_PROFILE_TEST_DEBUG=0 \
+            --volume "$RUNNER_TEMP/chonkstep-package:/build" \
+            --volume "$GITHUB_WORKSPACE:/source:ro" \
+            "chonkstep-arch-builder:${{ matrix.arch }}" \
+            bash -lc '
+              set -euo pipefail
+              makepkg --syncdeps --cleanbuild --clean --force --noconfirm
+              package="/build/${{ steps.metadata.outputs.package_name }}"
+              /source/scripts/verify-release-package.sh \
+                "$package" \
+                "${{ matrix.arch }}" \
+                "${{ steps.metadata.outputs.version }}-1"
+              install -d /build/dist
+              install -m644 "$package" /build/dist/
+            '
+
+      - name: Record package digest
+        run: sha256sum "$RUNNER_TEMP/chonkstep-package/dist/${{ steps.metadata.outputs.package_name }}"
+
+      - name: Attest package provenance
+        uses: actions/attest@v4
+        with:
+          subject-path: ${{ runner.temp }}/chonkstep-package/dist/${{ steps.metadata.outputs.package_name }}
+
+      - name: Upload package for release assembly
+        uses: actions/upload-artifact@v4
+        with:
+          name: chonkstep-package-${{ matrix.arch }}
+          path: ${{ runner.temp }}/chonkstep-package/dist/${{ steps.metadata.outputs.package_name }}
+          if-no-files-found: error
+          retention-days: 14
+
+  publish-preview:
+    name: publish preview release
+    if: startsWith(github.ref, 'refs/tags/preview-v')
+    needs: package
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: chonkstep-package-*
+          path: dist
+          merge-multiple: true
+
+      - name: Verify the assembled release and publish it
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          version=${GITHUB_REF_NAME#preview-v}
+          cd dist
+          test -f "chonkstep-$version-1-x86_64.pkg.tar.zst"
+          test -f "chonkstep-$version-1-aarch64.pkg.tar.zst"
+          LC_ALL=C sha256sum chonkstep-*.pkg.tar.zst | sort -k2 > SHA256SUMS
+
+          cat > "$RUNNER_TEMP/release-notes.md" <<EOF
+          Native Arch packages for ChonkStep $version while AUR account registration is unavailable.
+
+          Install on x86-64 or ARM64/AArch64 Arch with:
+
+          \`\`\`sh
+          sudo pacman -U "https://github.com/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME/chonkstep-$version-1-\$(uname -m).pkg.tar.zst"
+          omarchy install desktop-chonkstep
+          \`\`\`
+
+          Supported package architectures are \`x86_64\` and \`aarch64\`. The
+          AArch64 package is built natively against Arch Linux ARM; upstream
+          Omarchy itself does not yet provide an official ARM64 installation.
+
+          Verify a downloaded package's GitHub build provenance with:
+
+          \`\`\`sh
+          gh attestation verify chonkstep-$version-1-\$(uname -m).pkg.tar.zst --repo $GITHUB_REPOSITORY
+          \`\`\`
+
+          \`SHA256SUMS\` covers both package files. This is a prerelease
+          distribution path; the eventual stable \`v$version\` tag will also
+          publish the source recipe to the AUR.
+          EOF
+
+          assets=(chonkstep-*.pkg.tar.zst SHA256SUMS)
+          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" "${assets[@]}" \
+              --repo "$GITHUB_REPOSITORY" --clobber
+            gh release edit "$GITHUB_REF_NAME" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "ChonkStep $version preview packages" \
+              --notes-file "$RUNNER_TEMP/release-notes.md" \
+              --prerelease
+          else
+            gh release create "$GITHUB_REF_NAME" "${assets[@]}" \
+              --repo "$GITHUB_REPOSITORY" \
+              --verify-tag \
+              --title "ChonkStep $version preview packages" \
+              --notes-file "$RUNNER_TEMP/release-notes.md" \
+              --prerelease
+          fi

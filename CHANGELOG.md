@@ -20,6 +20,11 @@ crate and both session binaries carry the same number.
   never patches Omarchy-owned files. A tag-driven workflow publishes the
   release PKGBUILD and `.SRCINFO` to the AUR, making the intended entry path
   `omarchy pkg aur add chonkstep` followed by the install command.
+- **Native GitHub packages while AUR registration is unavailable.** A preview
+  tag builds, tests, and publishes pacman-installable `x86_64` and `aarch64`
+  packages on matching GitHub runners, with checksums and GitHub provenance
+  attestations. The ARM package links against Arch Linux ARM rather than an
+  Ubuntu cross-toolchain.
 - **Omarchy's configuration has real effects.** Monitor position and scale,
   input repeat settings, bind flags, layer-scoped bindings, window rules, Lua
   long strings, and window move/resize/centre/fullscreen dispatchers are

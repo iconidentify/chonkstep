@@ -8,17 +8,27 @@ the path from "installed" to "mine".
 
 ## 1. Install
 
-**Omarchy / stable AUR package:**
+**Omarchy / GitHub release package (x86-64 or ARM64/AArch64):**
 
 ```sh
-omarchy pkg aur add chonkstep
+sudo pacman -U "https://github.com/iconidentify/chonkstep/releases/download/preview-v0.2.0/chonkstep-0.2.0-1-$(uname -m).pkg.tar.zst"
 omarchy install desktop-chonkstep
 ```
 
-The first command installs the package; the second is chonkstep's explicit,
-idempotent Omarchy integration step. It configures SDDM for the managed uwsm
-session and prints the exact removal command. Neither command modifies
-`/usr/share/omarchy`, `~/.config/hypr`, or `~/.config/omarchy`.
+The first command asks pacman to install the native package produced by
+ChonkStep's GitHub release workflow; the release also carries `SHA256SUMS` and
+GitHub provenance attestations. The second is chonkstep's explicit, idempotent
+Omarchy integration step. It configures SDDM for the managed uwsm session and
+prints the exact removal command. Neither command modifies `/usr/share/omarchy`,
+`~/.config/hypr`, or `~/.config/omarchy`. Upstream Omarchy does not yet ship an
+official ARM64 installation, but the AArch64 ChonkStep package is compiled and
+checked natively against Arch Linux ARM.
+
+After the stable AUR entry is published, pacman installation can instead be:
+
+```sh
+omarchy pkg aur add chonkstep
+```
 
 **Branch-head Arch package** (builds from source via `makepkg`):
 

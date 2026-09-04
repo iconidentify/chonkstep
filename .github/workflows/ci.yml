@@ -37,12 +37,14 @@ jobs:
             scripts/omarchy-install-desktop-chonkstep \
             scripts/omarchy-remove-desktop-chonkstep \
             scripts/test-omarchy-install.sh \
+            scripts/verify-release-package.sh \
             scripts/verify-install.sh \
             scripts/wayland-session.sh
           shellcheck \
             scripts/omarchy-install-desktop-chonkstep \
             scripts/omarchy-remove-desktop-chonkstep \
             scripts/test-omarchy-install.sh \
+            scripts/verify-release-package.sh \
             scripts/verify-install.sh
 
       - name: Exercise fresh Omarchy login integration

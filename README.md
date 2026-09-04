@@ -163,16 +163,27 @@ a walkthrough from install to first hour in
 
 ## Installing on Omarchy (or any Arch)
 
-On Omarchy, install the release package and enable chonkstep's login
-picker with the Omarchy-shaped extension command:
+Until the stable AUR entry can be published, GitHub provides native packages
+for both x86-64 and ARM64/AArch64. Pacman selects the file matching the
+machine's native Arch architecture:
 
 ```sh
-omarchy pkg aur add chonkstep
+sudo pacman -U "https://github.com/iconidentify/chonkstep/releases/download/preview-v0.2.0/chonkstep-0.2.0-1-$(uname -m).pkg.tar.zst"
 omarchy install desktop-chonkstep
 ```
 
-The first command installs the release package. The second is an explicit,
-package-provided Omarchy integration step; it does not patch or fork Omarchy.
+The packages are built and tested on matching native GitHub runners, carry
+GitHub build-provenance attestations, and are covered by the release's
+`SHA256SUMS`. The second command is an explicit, package-provided Omarchy
+integration step; it does not patch or fork Omarchy. Upstream Omarchy does not
+yet provide an official ARM64 installation, but the ChonkStep package itself
+is built natively against Arch Linux ARM.
+
+Once the AUR entry is live, the first command becomes:
+
+```sh
+omarchy pkg aur add chonkstep
+```
 
 For the branch head, build the Arch package (binaries in `/usr/bin`,
 session scripts in `/usr/lib/chonkstep/`, three session entries):
