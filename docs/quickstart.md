@@ -11,18 +11,28 @@ the path from "installed" to "mine".
 **Omarchy / GitHub release package (x86-64 or ARM64/AArch64):**
 
 ```sh
-sudo pacman -U "https://github.com/iconidentify/chonkstep/releases/download/preview-v0.2.0/chonkstep-0.2.0-1-$(uname -m).pkg.tar.zst"
+chonkstep_dir="$(mktemp -d)"
+chonkstep_arch="$(uname -m)"
+chonkstep_pkg="chonkstep-0.2.0-1-$chonkstep_arch.pkg.tar.zst"
+curl -fL -o "$chonkstep_dir/$chonkstep_pkg" \
+  "https://github.com/iconidentify/chonkstep/releases/download/preview-v0.2.0/$chonkstep_pkg"
+curl -fL -o "$chonkstep_dir/SHA256SUMS" \
+  "https://github.com/iconidentify/chonkstep/releases/download/preview-v0.2.0/SHA256SUMS"
+(cd "$chonkstep_dir" && sha256sum --ignore-missing --check SHA256SUMS)
+sudo pacman -U "$chonkstep_dir/$chonkstep_pkg"
 omarchy install desktop-chonkstep
 ```
 
-The first command asks pacman to install the native package produced by
-ChonkStep's GitHub release workflow; the release also carries `SHA256SUMS` and
-GitHub provenance attestations. The second is chonkstep's explicit, idempotent
-Omarchy integration step. It configures SDDM for the managed uwsm session and
-prints the exact removal command. Neither command modifies `/usr/share/omarchy`,
-`~/.config/hypr`, or `~/.config/omarchy`. Upstream Omarchy does not yet ship an
-official ARM64 installation, but the AArch64 ChonkStep package is compiled and
-checked natively against Arch Linux ARM.
+The release also carries GitHub provenance attestations. Downloading before
+calling pacman is deliberate: Arch applies its repository signature policy to
+remote `pacman -U` URLs, while this temporary GitHub path uses release
+checksums and provenance attestations rather than pacman-key signatures. The
+last command is chonkstep's explicit, idempotent Omarchy integration step. It
+configures SDDM for the managed uwsm session and prints the exact removal
+command. None of these commands modifies `/usr/share/omarchy`, `~/.config/hypr`,
+or `~/.config/omarchy`. Upstream Omarchy does not yet ship an official ARM64
+installation, but the AArch64 ChonkStep package is compiled and checked
+natively against Arch Linux ARM.
 
 After the stable AUR entry is published, pacman installation can instead be:
 

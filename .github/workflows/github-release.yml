@@ -138,9 +138,21 @@ jobs:
           Install on x86-64 or ARM64/AArch64 Arch with:
 
           \`\`\`sh
-          sudo pacman -U "https://github.com/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME/chonkstep-$version-1-\$(uname -m).pkg.tar.zst"
+          chonkstep_dir="\$(mktemp -d)"
+          chonkstep_arch="\$(uname -m)"
+          chonkstep_pkg="chonkstep-$version-1-\$chonkstep_arch.pkg.tar.zst"
+          curl -fL -o "\$chonkstep_dir/\$chonkstep_pkg" \
+            "https://github.com/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME/\$chonkstep_pkg"
+          curl -fL -o "\$chonkstep_dir/SHA256SUMS" \
+            "https://github.com/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME/SHA256SUMS"
+          (cd "\$chonkstep_dir" && sha256sum --ignore-missing --check SHA256SUMS)
+          sudo pacman -U "\$chonkstep_dir/\$chonkstep_pkg"
           omarchy install desktop-chonkstep
           \`\`\`
+
+          Downloading first is required on systems whose pacman configuration
+          requires repository-style signatures for remote package URLs. This
+          preview path uses the checksum above and GitHub build provenance.
 
           Supported package architectures are \`x86_64\` and \`aarch64\`. The
           AArch64 package is built natively against Arch Linux ARM; upstream
@@ -149,7 +161,7 @@ jobs:
           Verify a downloaded package's GitHub build provenance with:
 
           \`\`\`sh
-          gh attestation verify chonkstep-$version-1-\$(uname -m).pkg.tar.zst --repo $GITHUB_REPOSITORY
+          gh attestation verify "\$chonkstep_dir/\$chonkstep_pkg" --repo $GITHUB_REPOSITORY
           \`\`\`
 
           \`SHA256SUMS\` covers both package files. This is a prerelease

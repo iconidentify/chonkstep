@@ -164,17 +164,29 @@ a walkthrough from install to first hour in
 ## Installing on Omarchy (or any Arch)
 
 Until the stable AUR entry can be published, GitHub provides native packages
-for both x86-64 and ARM64/AArch64. Pacman selects the file matching the
-machine's native Arch architecture:
+for both x86-64 and ARM64/AArch64. Download the file matching the machine's
+native Arch architecture, verify it against the release checksum, then give
+the local file to pacman:
 
 ```sh
-sudo pacman -U "https://github.com/iconidentify/chonkstep/releases/download/preview-v0.2.0/chonkstep-0.2.0-1-$(uname -m).pkg.tar.zst"
+chonkstep_dir="$(mktemp -d)"
+chonkstep_arch="$(uname -m)"
+chonkstep_pkg="chonkstep-0.2.0-1-$chonkstep_arch.pkg.tar.zst"
+curl -fL -o "$chonkstep_dir/$chonkstep_pkg" \
+  "https://github.com/iconidentify/chonkstep/releases/download/preview-v0.2.0/$chonkstep_pkg"
+curl -fL -o "$chonkstep_dir/SHA256SUMS" \
+  "https://github.com/iconidentify/chonkstep/releases/download/preview-v0.2.0/SHA256SUMS"
+(cd "$chonkstep_dir" && sha256sum --ignore-missing --check SHA256SUMS)
+sudo pacman -U "$chonkstep_dir/$chonkstep_pkg"
 omarchy install desktop-chonkstep
 ```
 
 The packages are built and tested on matching native GitHub runners, carry
 GitHub build-provenance attestations, and are covered by the release's
-`SHA256SUMS`. The second command is an explicit, package-provided Omarchy
+`SHA256SUMS`. Downloading first is deliberate: Arch applies its repository
+signature policy to remote `pacman -U` URLs, while this temporary GitHub path
+publishes provenance attestations rather than pacman-key signatures. The last
+command is an explicit, package-provided Omarchy
 integration step; it does not patch or fork Omarchy. Upstream Omarchy does not
 yet provide an official ARM64 installation, but the ChonkStep package itself
 is built natively against Arch Linux ARM.
