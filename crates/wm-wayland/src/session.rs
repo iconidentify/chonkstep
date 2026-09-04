@@ -537,6 +537,10 @@ struct SessionOutput {
     /// into the many, and [`redraw_pending`] is what keeps the dispatch
     /// loop coming back until every output has caught up.
     dirty: bool,
+    /// Reusable scene-construction storage. Draining this into
+    /// `pending_scene` preserves the allocation for the next frame
+    /// while the latter owns any client buffers until vblank.
+    scene_scratch: Vec<crate::renderer::SceneElement<GlesRenderer>>,
     /// The render elements of the frame whose page flip is in flight.
     /// Held for composited frames only while
     /// [`SessionGraphics::strict_release`] is on, and unconditionally
@@ -598,7 +602,15 @@ struct PendingFlip {
 /// transition log rather than one line per frame.
 fn complete_scene_flip<T>(pending: &mut Vec<T>, scanout: &mut Vec<T>, active: &mut bool, direct: bool) -> bool {
     if direct {
-        *scanout = std::mem::take(pending);
+        // Rotate rather than assign: the scene which has just stopped
+        // being scanned out can release its element handles while its
+        // allocation becomes the next pending-frame buffer. Together
+        // with `scene_scratch`, this forms a three-vector ring matching
+        // the three possible owners (building, in flight, on screen).
+        let completed = std::mem::take(pending);
+        let mut retired = std::mem::replace(scanout, completed);
+        retired.clear();
+        *pending = retired;
     } else {
         pending.clear();
         scanout.clear();
@@ -1205,6 +1217,7 @@ fn attach_output(
             frame_pending: None,
             // Nothing has ever been drawn on it.
             dirty: true,
+            scene_scratch: Vec::new(),
             pending_scene: Vec::new(),
             scanout_scene: Vec::new(),
             direct_scanout_active: false,
@@ -1673,7 +1686,8 @@ pub(crate) fn render_frame_session(comp: &mut Compositor) {
         // in different places, since `render_frame` intersects them
         // against a rectangle anchored at this output's own origin and
         // knows nothing of where the output sits globally.
-        let (elements, clear_color) = crate::renderer::build_scene(
+        let clear_color = crate::renderer::build_scene_into(
+            &mut output.scene_scratch,
             wm.backend(),
             renderer,
             *pointer_location,
@@ -1683,7 +1697,7 @@ pub(crate) fn render_frame_session(comp: &mut Compositor) {
         );
 
         let (rendered, direct_scanout) =
-            match output.drm_compositor.render_frame(renderer, &elements, clear_color, frame_flags()) {
+            match output.drm_compositor.render_frame(renderer, &output.scene_scratch, clear_color, frame_flags()) {
             Ok(result) => {
                 let direct_scanout = matches!(&result.primary_element, PrimaryPlaneElement::Element(_));
                 // The GPU may still be drawing into the buffer we are
@@ -1709,6 +1723,7 @@ pub(crate) fn render_frame_session(comp: &mut Compositor) {
                 if crate::renderer::note_frame_failure() {
                     tracing::warn!(?error, output = %output.name, "DRM render failed; keeping this output dirty for a retry");
                 }
+                output.scene_scratch.clear();
                 continue;
             }
         };
@@ -1766,6 +1781,7 @@ pub(crate) fn render_frame_session(comp: &mut Compositor) {
                     // retry a full-frame render and a real flip.
                     output.drm_compositor.reset_buffer_ages();
                     tracing::warn!(?error, output = %output.name, "queueing the page flip failed; keeping this output dirty for a retry");
+                    output.scene_scratch.clear();
                     continue;
                 }
             }
@@ -1779,9 +1795,18 @@ pub(crate) fn render_frame_session(comp: &mut Compositor) {
             // vblank coming, deferring those releases to the next real
             // flip errs on the side the mechanism exists for.
             if strict_release || (direct_scanout && frame_queued) {
-                output.pending_scene = elements;
+                // `append` transfers element ownership without taking
+                // the source vector's allocation. Usually pending is
+                // empty; after a strict EmptyFrame it deliberately
+                // retains both scenes until the next real vblank.
+                output.pending_scene.append(&mut output.scene_scratch);
             }
         }
+        // When no buffer-lifetime hold was needed, release the
+        // element handles at the old temporary vector's boundary. If
+        // they were appended above this is an empty, allocation-
+        // preserving no-op.
+        output.scene_scratch.clear();
         output.dirty = false;
         drew_any = true;
     }
@@ -2123,7 +2148,9 @@ mod tests {
     /// both direct scenes.
     #[test]
     fn direct_scanout_scene_lives_until_its_replacement_is_current() {
-        let mut pending = vec![1];
+        let mut pending = Vec::with_capacity(8);
+        pending.push(1);
+        let first_capacity = pending.capacity();
         let mut scanout = Vec::new();
         let mut active = false;
 
@@ -2138,6 +2165,10 @@ mod tests {
         assert_eq!(scanout, vec![1]);
         assert!(!complete_scene_flip(&mut pending, &mut scanout, &mut active, true));
         assert_eq!(scanout, vec![2]);
+        assert_eq!(
+            pending.capacity(), first_capacity,
+            "the retired scanout allocation becomes storage for the next in-flight scene"
+        );
 
         pending.push(3);
         assert!(complete_scene_flip(&mut pending, &mut scanout, &mut active, false));

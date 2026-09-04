@@ -7,6 +7,17 @@ crate and both session binaries carry the same number.
 
 ### Performance
 
+- **On-screen scene assembly is allocation-stable after warm-up.** Each
+  output now rebuilds its heterogeneous render-element list in retained
+  storage instead of creating and dropping a fresh vector per frame. The DRM
+  path rotates three buffers for the scene being built, the flip in flight,
+  and a directly scanned-out scene, preserving the exact `wl_buffer.release`
+  lifetime while recycling the retired scanout allocation. A non-empty scene
+  previously required at least one vector allocation and free per output per
+  frame (60 pairs/second on one 60 Hz display, 120 on two); after capacities
+  settle, unchanged scene cardinality requires zero. Unit coverage proves the
+  direct-scanout rotation recovers the retired buffer's capacity rather than
+  discarding it.
 - **Parked applications receive no invisible animation budget.** Frame
   callbacks and presentation feedback now follow the same stacking visibility
   predicate as rendering: windows on another workspace, miniaturized windows,

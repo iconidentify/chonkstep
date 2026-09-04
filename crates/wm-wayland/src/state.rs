@@ -1087,6 +1087,11 @@ pub(crate) struct OutputEntry {
     /// It is built from the `Output`, so a resize of that output
     /// retunes it with no work here.
     pub damage_tracker: OutputDamageTracker,
+    /// Reusable storage for the nested backend's on-screen scene. The
+    /// element handles are cleared between frames while the vector's
+    /// allocation stays hot; offscreen captures intentionally keep
+    /// their one-shot storage separate.
+    pub scene_scratch: Vec<crate::renderer::SceneElement<GlesRenderer>>,
     /// The `wl_output` global clients bind to. Dropping the id does not
     /// take the global down — that needs
     /// `DisplayHandle::remove_global` — so this is held for the one
@@ -1107,6 +1112,7 @@ impl OutputEntry {
             scale: 1.0,
             modes: setup.modes,
             damage_tracker,
+            scene_scratch: Vec::new(),
             _global,
         }
     }

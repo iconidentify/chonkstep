@@ -142,19 +142,44 @@ pub(crate) fn build_scene(
     cursors: &crate::state::CursorSet,
     viewport: Point,
 ) -> (Vec<SceneElement<GlesRenderer>>, Color32F) {
+    let mut elements = Vec::new();
+    let clear_color = build_scene_into(
+        &mut elements,
+        backend,
+        renderer,
+        pointer_location,
+        cursor_status,
+        cursors,
+        viewport,
+    );
+    (elements, clear_color)
+}
+
+/// Rebuilds a scene in caller-owned storage, retaining the vector's
+/// allocation across frames. On-screen rendering uses one instance per
+/// output; one-shot offscreen consumers use [`build_scene`] instead.
+pub(crate) fn build_scene_into(
+    elements: &mut Vec<SceneElement<GlesRenderer>>,
+    backend: &WaylandBackend,
+    renderer: &mut GlesRenderer,
+    pointer_location: SPoint<f64, smithay::utils::Logical>,
+    cursor_status: &CursorImageStatus,
+    cursors: &crate::state::CursorSet,
+    viewport: Point,
+) -> Color32F {
     // Elements are assembled FRONT to BACK — the damage tracker's
     // convention (first element occludes later ones) — so this walk is
     // the module-doc composition order reversed: cursor, above-shells,
     // override-redirect windows, frames, below-shells, wallpaper.
-    let mut elements: Vec<SceneElement<GlesRenderer>> = Vec::new();
+    elements.clear();
 
-    push_cursor_elements(&mut elements, renderer, backend, pointer_location, cursor_status, cursors, viewport);
+    push_cursor_elements(elements, renderer, backend, pointer_location, cursor_status, cursors, viewport);
 
     // Input-method candidate windows belong above every application
     // surface (including overlay layers) and below only the pointer.
     // They live in the same ledger the hit-test reads, so the visible
     // popup and the clickable popup can never drift apart.
-    push_ime_popups(&mut elements, renderer, backend, viewport);
+    push_ime_popups(elements, renderer, backend, viewport);
 
     // A locked session is a different scene, not a filtered one: only
     // the lock client's surfaces exist, over a black clear. The branch
@@ -185,7 +210,7 @@ pub(crate) fn build_scene(
                 backend.scale_at(monitor.geometry),
             );
             push_surface_tree(
-                &mut elements,
+                elements,
                 renderer,
                 entry.surface.wl_surface(),
                 origin,
@@ -194,13 +219,13 @@ pub(crate) fn build_scene(
                 Kind::Unspecified,
             );
         }
-        return (elements, Color32F::new(0.0, 0.0, 0.0, 1.0));
+        return Color32F::new(0.0, 0.0, 0.0, 1.0);
     }
 
     // The `Overlay` layer band beats everything but the cursor —
     // that is what the protocol reserves it for (OSDs, screen
     // annotations) — including the desktop's own dock and menus.
-    push_layer_band(&mut elements, renderer, backend, WlrLayer::Overlay, viewport);
+    push_layer_band(elements, renderer, backend, WlrLayer::Overlay, viewport);
 
     for entry in backend.stacking.iter().rev() {
         if let StackEntry::Shell(id) = entry {
@@ -208,7 +233,7 @@ pub(crate) fn build_scene(
                 continue;
             };
             if record.above && record.mapped {
-                push_shell_elements(&mut elements, renderer, record, viewport);
+                push_shell_elements(elements, renderer, record, viewport);
             }
         }
     }
@@ -218,7 +243,7 @@ pub(crate) fn build_scene(
     // cover the menu the user just opened or the dock's tiles, while
     // still floating over every managed window. The input walk in
     // `input.rs::hit_at` slots the band identically.
-    push_layer_band(&mut elements, renderer, backend, WlrLayer::Top, viewport);
+    push_layer_band(elements, renderer, backend, WlrLayer::Top, viewport);
 
     // XWayland override-redirect windows (menus, tooltips —
     // `WindowType::Unmanaged`, so they own no frame and no
@@ -227,7 +252,7 @@ pub(crate) fn build_scene(
     // window in practice.
     for record in backend.windows.values() {
         if record.window_type == wm_core::WindowType::Unmanaged && record.mapped {
-            push_window_content(&mut elements, renderer, backend, record.content, record, viewport);
+            push_window_content(elements, renderer, backend, record.content, record, viewport);
         }
     }
 
@@ -245,7 +270,7 @@ pub(crate) fn build_scene(
                 continue;
             };
             if record.mapped {
-                push_window_content(&mut elements, renderer, backend, record.content, record, viewport);
+                push_window_content(elements, renderer, backend, record.content, record, viewport);
             }
         }
         if let StackEntry::Frame(id) = entry {
@@ -263,7 +288,7 @@ pub(crate) fn build_scene(
             // falls out naturally here.
             if let Some(record) = window {
                 if record.mapped {
-                    push_window_content(&mut elements, renderer, backend, record.content, record, viewport);
+                    push_window_content(elements, renderer, backend, record.content, record, viewport);
                 }
             }
             if let Some(buffer) = &frame.buffer {
@@ -291,7 +316,7 @@ pub(crate) fn build_scene(
     // shell's `below` furniture; `Background` (a wallpaper client like
     // swaybg, should someone run one) under everything but the root
     // wallpaper itself.
-    push_layer_band(&mut elements, renderer, backend, WlrLayer::Bottom, viewport);
+    push_layer_band(elements, renderer, backend, WlrLayer::Bottom, viewport);
 
     for entry in backend.stacking.iter().rev() {
         if let StackEntry::Shell(id) = entry {
@@ -299,12 +324,12 @@ pub(crate) fn build_scene(
                 continue;
             };
             if !record.above && record.mapped {
-                push_shell_elements(&mut elements, renderer, record, viewport);
+                push_shell_elements(elements, renderer, record, viewport);
             }
         }
     }
 
-    push_layer_band(&mut elements, renderer, backend, WlrLayer::Background, viewport);
+    push_layer_band(elements, renderer, backend, WlrLayer::Background, viewport);
 
     // Root background. A solid color is simply the clear color —
     // with full-frame damage every pixel gets cleared, so no
@@ -333,7 +358,7 @@ pub(crate) fn build_scene(
         }
     };
 
-    (elements, clear_color)
+    clear_color
 }
 
 /// Tells every surface in the rendered scene which frame it just
@@ -480,7 +505,7 @@ pub(crate) fn take_presentation_feedback(
 /// through their one direct-window or mapped-frame stacking slot.
 ///
 /// This is deliberately a traversal rather than `windows.filter` plus
-/// [`crate::xdg::window_is_in_scene`]: that predicate is ideal for one
+/// `xdg::window_is_in_scene`: that predicate is ideal for one
 /// commit's known owner but scans the stack, so applying it to every
 /// window would make per-frame protocol routing quadratic.
 fn for_each_presented_window(backend: &WaylandBackend, mut visit: impl FnMut(&WindowRecord)) {
@@ -598,6 +623,7 @@ fn render_frame_winit(comp: &mut Compositor) {
     };
     let output = &entry.output;
     let damage_tracker = &mut entry.damage_tracker;
+    let scene_scratch = &mut entry.scene_scratch;
 
     // Make the EGL surface current before asking its buffer age:
     // `EGL_BUFFER_AGE_EXT` is defined only for the current surface, and
@@ -630,10 +656,17 @@ fn render_frame_winit(comp: &mut Compositor) {
             }
         };
 
-        let (elements, clear_color) =
-            build_scene(wm.backend(), renderer, *pointer_location, cursor_status, cursors, Point::new(0, 0));
+        let clear_color = build_scene_into(
+            scene_scratch,
+            wm.backend(),
+            renderer,
+            *pointer_location,
+            cursor_status,
+            cursors,
+            Point::new(0, 0),
+        );
 
-        match damage_tracker.render_output(renderer, &mut framebuffer, age, &elements, clear_color) {
+        match damage_tracker.render_output(renderer, &mut framebuffer, age, scene_scratch, clear_color) {
             Ok(result) => {
                 log_damage(age, result.damage.map(Vec::as_slice));
                 result.damage.is_some()
@@ -642,10 +675,19 @@ fn render_frame_winit(comp: &mut Compositor) {
                 if note_frame_failure() {
                     tracing::warn!(?error, "render failed; keeping damage for a retry");
                 }
+                // Release element-owned client buffers on the same
+                // boundary the former temporary vector did, while
+                // retaining only its allocation for the retry.
+                scene_scratch.clear();
                 return;
             }
         }
     };
+    // The nested backend has no asynchronous page-flip ownership to
+    // honor. Do not make reusable storage delay `wl_buffer.release`
+    // until some future frame; clear the handles now, exactly where
+    // the old per-frame vector was dropped.
+    scene_scratch.clear();
 
     if drew {
         // The buffer holds a complete frame either way (the tracker
