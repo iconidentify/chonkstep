@@ -70,7 +70,7 @@ pub fn render_switcher(
     paint::draw_raised2_bevel(&mut pixmap, 0, 0, width, height, bevel_t);
 
     if let Some(entry) = entries.get(selected) {
-        let label = elide(&entry.title, width.saturating_sub(pad * 2), theme.titlebar.font.size);
+        let label = paint::elide(&entry.title, width.saturating_sub(pad * 2), theme.titlebar.font.size);
         paint::draw_text(
             &mut pixmap,
             font_system,
@@ -87,28 +87,6 @@ pub fn render_switcher(
     }
 
     DecorationBuffer { width, height, pixels: pixmap.data().to_vec() }
-}
-
-/// Shortens `title` to roughly what fits on one line of `font_size`
-/// within `width`, eliding the middle — the start and end of a window
-/// title are usually both meaningful (app name, document name), the
-/// middle least so. The 0.75 average-advance estimate suits the bold
-/// titlebar face; `draw_text` clips whatever still overflows.
-/// Crate-shared: the Overview's window cards elide their titles by
-/// this same rule, so a title reads identically on both panels.
-pub(crate) fn elide(title: &str, width: u32, font_size: f32) -> String {
-    let fits = ((width as f32) / (font_size * 0.75)).max(4.0) as usize;
-    let chars: Vec<char> = title.chars().collect();
-    if chars.len() <= fits {
-        return title.to_string();
-    }
-    let keep = fits.saturating_sub(3);
-    let head = keep / 2 + keep % 2;
-    let tail = keep / 2;
-    let mut out: String = chars[..head].iter().collect();
-    out.push_str("...");
-    out.extend(&chars[chars.len() - tail..]);
-    out
 }
 
 /// The panel's own window background color for the shell window that

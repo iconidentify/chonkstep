@@ -364,11 +364,12 @@ fn render_decoration(
     let text_inset = 6i32;
     let text_x = (leftmost_button + text_inset).min(w as i32);
     let text_w = (rightmost_button - text_inset - text_x).max(0) as u32;
+    let title = paint::elide(&request.title, text_w, theme.titlebar.font.size);
     paint::draw_text(
         &mut pixmap,
         font_system,
         swash_cache,
-        &request.title,
+        &title,
         &theme.titlebar.font,
         text_color,
         text_x,
@@ -819,6 +820,35 @@ mod tests {
         let titled_buffer = engine.render(&titled, &layout);
 
         assert_ne!(empty_buffer.pixels, titled_buffer.pixels, "a non-empty title must actually paint glyph pixels between the titlebar buttons");
+    }
+
+    #[test]
+    fn long_title_ink_stays_inside_the_titlebar() {
+        let engine = RasterThemeEngine::nextstep_classic();
+        let empty = sample_request("", true);
+        let long = sample_request(
+            "iconidentify/chonkstep: A traditional floating compositor for Omarchy, designed as a drop-in replacement for Hyprland. - Google Chrome",
+            true,
+        );
+        let layout = engine.layout(&empty);
+        let empty_buffer = engine.render(&empty, &layout);
+        let long_buffer = engine.render(&long, &layout);
+        let border = engine.theme().border.width as u32;
+        let first_title_row = border;
+        let after_title_row = border + layout.titlebar_height;
+
+        let changed_rows: Vec<u32> = (0..long_buffer.height)
+            .filter(|y| {
+                let start = (*y * long_buffer.width * 4) as usize;
+                let end = start + (long_buffer.width * 4) as usize;
+                long_buffer.pixels[start..end] != empty_buffer.pixels[start..end]
+            })
+            .collect();
+        assert!(!changed_rows.is_empty(), "the long title must render visible ink");
+        assert!(
+            changed_rows.iter().all(|row| *row >= first_title_row && *row < after_title_row),
+            "title ink escaped rows {first_title_row}..{after_title_row}: changed rows were {changed_rows:?}"
+        );
     }
 
     #[test]

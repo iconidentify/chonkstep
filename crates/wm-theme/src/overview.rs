@@ -29,7 +29,7 @@ use tiny_skia::Pixmap;
 use wm_theme_api::{DecorationBuffer, Point, Rect, Size};
 
 use crate::model::{TextAlign, Theme};
-use crate::switcher::{blit_buffer, elide};
+use crate::switcher::blit_buffer;
 use crate::{paint, tile, workspace};
 
 /// One window's card, borrowed from the shell's stored session state:
@@ -420,7 +420,7 @@ fn draw_card(
     let ink = if awake { theme.titlebar.text_color_active } else { theme.titlebar.text_color_inactive };
     paint::fill_area(pixmap, x, y, w, bar_h, bar_fill);
     paint::draw_raised2_bevel(pixmap, x, y, w, bar_h, t);
-    let label = elide(entry.title, w.saturating_sub(pad), theme.titlebar.font.size);
+    let label = paint::elide(entry.title, w.saturating_sub(pad), theme.titlebar.font.size);
     paint::draw_text(
         pixmap,
         font_system,

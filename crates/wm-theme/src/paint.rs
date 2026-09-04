@@ -283,8 +283,33 @@ pub fn text_width(font_system: &mut cosmic_text::FontSystem, font: &FontSpec, te
     width.ceil() as u32
 }
 
+/// Shortens a single-line label to roughly what fits in `width`,
+/// preserving both meaningful ends around a middle ellipsis. This is
+/// intentionally the one title-elision policy shared by real window
+/// chrome, Overview cards, and the Alt-Tab switcher.
+///
+/// The estimate is cheap enough for decoration rendering and suits the
+/// bold titlebar face. [`draw_text`] clips to its box as the final guard
+/// for unusually wide glyphs and fallback fonts.
+pub(crate) fn elide(title: &str, width: u32, font_size: f32) -> String {
+    let fits = ((width as f32) / (font_size * 0.75)).max(4.0) as usize;
+    let chars: Vec<char> = title.chars().collect();
+    if chars.len() <= fits {
+        return title.to_string();
+    }
+    let keep = fits.saturating_sub(3);
+    let head = keep / 2 + keep % 2;
+    let tail = keep / 2;
+    let mut out: String = chars[..head].iter().collect();
+    out.push_str("...");
+    out.extend(&chars[chars.len() - tail..]);
+    out
+}
+
 /// Renders `text` with `font`, blending glyph coverage onto `pixmap`
-/// within the `(x, y, w, h)` box per `align`. Assumes the destination
+/// on one non-wrapping line within the `(x, y, w, h)` box per `align`.
+/// Glyph pixels are clipped to that box, including fallback-font ink
+/// whose bearings extend past the shaped advance. Assumes the destination
 /// pixels in that box are already fully opaque (alpha 255) — true for
 /// every caller here, since text is always drawn over an
 /// already-filled titlebar/menu/item background — which lets this treat
@@ -304,7 +329,7 @@ pub fn draw_text(
     h: u32,
     align: TextAlign,
 ) {
-    use cosmic_text::{Attrs, Buffer, Family, Metrics, Shaping, Style, Weight};
+    use cosmic_text::{Attrs, Buffer, Family, Metrics, Shaping, Style, Weight, Wrap};
 
     if text.is_empty() || w == 0 || h == 0 {
         return;
@@ -313,6 +338,7 @@ pub fn draw_text(
     let metrics = Metrics::new(font.size, font.size * 1.25);
     let mut buffer = Buffer::new(font_system, metrics);
     buffer.set_size(Some(w as f32), Some(h as f32));
+    buffer.set_wrap(Wrap::None);
 
     let weight = match font.weight {
         FontWeight::Bold => Weight::BOLD,
@@ -376,6 +402,12 @@ pub fn draw_text(
         // nothing real to measure.
         _ => ((h as f32 - font.size) / 2.0).max(0.0) as i32,
     };
+    let clip = TextClip {
+        left: x as i64,
+        top: y as i64,
+        right: x as i64 + w as i64,
+        bottom: y as i64 + h as i64,
+    };
 
     for run in buffer.layout_runs() {
         for glyph in run.glyphs.iter() {
@@ -383,18 +415,40 @@ pub fn draw_text(
             if let Some(image) = swash_cache.get_image(font_system, physical.cache_key) {
                 let img_x = physical.x + image.placement.left;
                 let img_y = physical.y - image.placement.top + run.line_y as i32;
-                blend_glyph_image(pixmap, img_x, img_y, image, color);
+                blend_glyph_image(pixmap, img_x, img_y, image, color, clip);
             }
         }
     }
 }
 
-fn blend_glyph_image(pixmap: &mut Pixmap, x: i32, y: i32, image: &cosmic_text::SwashImage, color: Color) {
+#[derive(Clone, Copy)]
+struct TextClip {
+    left: i64,
+    top: i64,
+    right: i64,
+    bottom: i64,
+}
+
+fn blend_glyph_image(
+    pixmap: &mut Pixmap,
+    x: i32,
+    y: i32,
+    image: &cosmic_text::SwashImage,
+    color: Color,
+    clip: TextClip,
+) {
     let (pw, ph) = (image.placement.width, image.placement.height);
+    let col_start = (clip.left - x as i64).clamp(0, pw as i64) as u32;
+    let col_end = (clip.right - x as i64).clamp(0, pw as i64) as u32;
+    let row_start = (clip.top - y as i64).clamp(0, ph as i64) as u32;
+    let row_end = (clip.bottom - y as i64).clamp(0, ph as i64) as u32;
+    if col_start >= col_end || row_start >= row_end {
+        return;
+    }
     match image.content {
         cosmic_text::SwashContent::Mask => {
-            for row in 0..ph {
-                for col in 0..pw {
+            for row in row_start..row_end {
+                for col in col_start..col_end {
                     let coverage = image.data[(row * pw + col) as usize];
                     if coverage == 0 {
                         continue;
@@ -405,8 +459,8 @@ fn blend_glyph_image(pixmap: &mut Pixmap, x: i32, y: i32, image: &cosmic_text::S
             }
         }
         cosmic_text::SwashContent::Color => {
-            for row in 0..ph {
-                for col in 0..pw {
+            for row in row_start..row_end {
+                for col in col_start..col_end {
                     let idx = ((row * pw + col) * 4) as usize;
                     let a = image.data[idx + 3];
                     if a == 0 {

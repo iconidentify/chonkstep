@@ -7,6 +7,12 @@ crate and both session binaries carry the same number.
 
 ### Fixed
 
+- **Long window titles are middle-elided and confined to one titlebar
+  line.** Real window chrome now shares the same elision policy as the
+  Alt-Tab switcher and Overview cards. The common text rasterizer also
+  disables cosmic-text's default word wrapping and clips every glyph to
+  its requested box, so even wide fallback glyphs cannot paint into the
+  client area ([#31](https://github.com/iconidentify/chonkstep/issues/31)).
 - **linux-dmabuf no longer advertises a display-only KMS primary as its
   render device on split hardware.** DRM sessions now prefer EGL's actual
   renderer node, use a KMS fallback only when it resolves to a real render
