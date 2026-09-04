@@ -153,14 +153,20 @@ type appEvent struct {
 	err    error
 }
 
+type scriptedPress struct {
+	action func(ctx *Ctx)
+	done   chan struct{}
+}
+
 type harness struct {
 	t      *testing.T
 	fd     int // the shell's side of the accepted connection
 	app    *Dockapp
 	events chan appEvent
 	done   chan error
-	// scripted behavior for the next tile press, run in the app's loop
-	onPress func(ctx *Ctx)
+	// Each test transfers the next press action to the app goroutine;
+	// closing done transfers every value the action produced back.
+	presses chan scriptedPress
 }
 
 func newHarness(t *testing.T) *harness { return newHarnessProto(t, 2) }
@@ -182,7 +188,12 @@ func newHarnessProto(t *testing.T, shellProto uint16) *harness {
 	t.Setenv(EnvSocket, sockPath)
 	t.Setenv(EnvToken, "000102030405060708090a0b0c0d0e0f")
 
-	h := &harness{t: t, events: make(chan appEvent, 64), done: make(chan error, 1)}
+	h := &harness{
+		t:       t,
+		events:  make(chan appEvent, 64),
+		done:    make(chan error, 1),
+		presses: make(chan scriptedPress, 1),
+	}
 	h.app = &Dockapp{
 		ID:             "panel-probe",
 		RedrawInterval: 50 * time.Millisecond,
@@ -191,8 +202,14 @@ func newHarnessProto(t *testing.T, shellProto uint16) *harness {
 		// easy to see.
 		Draw: func(ctx *Ctx, buf []byte) bool { return false },
 		OnInput: func(ctx *Ctx, ev InputEvent) bool {
-			if ev.Kind == InputPress && h.onPress != nil {
-				h.onPress(ctx)
+			if ev.Kind == InputPress {
+				press := <-h.presses
+				func() {
+					defer close(press.done)
+					if press.action != nil {
+						press.action(ctx)
+					}
+				}()
 			}
 			return false
 		},
@@ -344,8 +361,15 @@ func (h *harness) collectRepaint(wantW, wantH uint32) []byte {
 	return out
 }
 
-func (h *harness) pressTile() {
+func (h *harness) pressTile(action func(ctx *Ctx)) {
+	done := make(chan struct{})
+	h.presses <- scriptedPress{action: action, done: done}
 	h.send(shellInput(InputPress, testTile/2, testTile/2, ButtonLeft, 0))
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		h.t.Fatal("the dockapp did not run the scripted press in time")
+	}
 }
 
 func (h *harness) event(timeout time.Duration) appEvent {
@@ -378,14 +402,17 @@ func (h *harness) shutdown() {
 func TestPanelGrantFlowWithAClampedGrant(t *testing.T) {
 	h := newHarness(t)
 	var panel *Panel
-	h.onPress = func(ctx *Ctx) { panel, _ = ctx.OpenPanel(300, 200) }
-	h.pressTile()
+	var openedBeforeGrant bool
+	h.pressTile(func(ctx *Ctx) {
+		panel, _ = ctx.OpenPanel(300, 200)
+		openedBeforeGrant = panel.Opened()
+	})
 	if msg := h.expect("open_panel", 5*time.Second); msg.openW != 300 || msg.openH != 200 {
 		t.Fatalf("OpenPanel asked for %dx%d", msg.openW, msg.openH)
 	}
 	// No PanelFrame may cross before the grant.
 	h.expectSilence("panel_frame", 300*time.Millisecond)
-	if panel.Opened() {
+	if openedBeforeGrant {
 		t.Fatal("Opened() before any grant arrived")
 	}
 	// Grant it — clamped smaller than asked.
@@ -409,15 +436,14 @@ func TestPanelGrantFlowWithAClampedGrant(t *testing.T) {
 func TestDrawBeforeTheGrantIsBlockedBySDK(t *testing.T) {
 	h := newHarness(t)
 	drawErr := make(chan error, 1)
-	h.onPress = func(ctx *Ctx) {
+	h.pressTile(func(ctx *Ctx) {
 		p, err := ctx.OpenPanel(100, 100)
 		if err != nil {
 			t.Error(err)
 			return
 		}
 		drawErr <- p.Draw(make([]byte, 100*100*4))
-	}
-	h.pressTile()
+	})
 	h.expect("open_panel", 5*time.Second)
 	select {
 	case err := <-drawErr:
@@ -433,8 +459,7 @@ func TestDrawBeforeTheGrantIsBlockedBySDK(t *testing.T) {
 
 func TestARefusedPanelReportsRefusedAndNeverOpens(t *testing.T) {
 	h := newHarness(t)
-	h.onPress = func(ctx *Ctx) { _, _ = ctx.OpenPanel(64, 64) }
-	h.pressTile()
+	h.pressTile(func(ctx *Ctx) { _, _ = ctx.OpenPanel(64, 64) })
 	h.expect("open_panel", 5*time.Second)
 	h.send(shellPanelClosed(3)) // refused
 	if ev := h.event(5 * time.Second); ev.kind != "closed" || ev.reason != PanelRefused {
@@ -447,8 +472,7 @@ func TestARefusedPanelReportsRefusedAndNeverOpens(t *testing.T) {
 func TestDismissedBehindYourBackDeadensTheHandle(t *testing.T) {
 	h := newHarness(t)
 	var panel *Panel
-	h.onPress = func(ctx *Ctx) { panel, _ = ctx.OpenPanel(64, 64) }
-	h.pressTile()
+	h.pressTile(func(ctx *Ctx) { panel, _ = ctx.OpenPanel(64, 64) })
 	h.expect("open_panel", 5*time.Second)
 	h.send(shellPanelOpened(64, 64))
 	h.expect("panel_frame", 5*time.Second)
@@ -471,16 +495,14 @@ func TestDismissedBehindYourBackDeadensTheHandle(t *testing.T) {
 
 func TestCloseIsARoundTripEndingInClosed(t *testing.T) {
 	h := newHarness(t)
-	h.onPress = func(ctx *Ctx) { _, _ = ctx.OpenPanel(64, 64) }
-	h.pressTile()
+	h.pressTile(func(ctx *Ctx) { _, _ = ctx.OpenPanel(64, 64) })
 	h.expect("open_panel", 5*time.Second)
 	h.send(shellPanelOpened(64, 64))
 	h.expect("panel_frame", 5*time.Second)
 	if ev := h.event(time.Second); ev.kind != "opened" {
 		t.Fatalf("expected opened, got %+v", ev)
 	}
-	h.onPress = func(ctx *Ctx) { ctx.Panel().Close() }
-	h.pressTile()
+	h.pressTile(func(ctx *Ctx) { ctx.Panel().Close() })
 	h.expect("close_panel", 5*time.Second)
 	h.send(shellPanelClosed(0)) // the shell confirms
 	if ev := h.event(5 * time.Second); ev.kind != "closed" || ev.reason != PanelClosedByClient {
@@ -492,8 +514,8 @@ func TestCloseIsARoundTripEndingInClosed(t *testing.T) {
 func TestRenegotiationBlocksFramesUntilTheNewGrant(t *testing.T) {
 	h := newHarness(t)
 	var first, second *Panel
-	h.onPress = func(ctx *Ctx) { first, _ = ctx.OpenPanel(64, 64) }
-	h.pressTile()
+	var framesPaused bool
+	h.pressTile(func(ctx *Ctx) { first, _ = ctx.OpenPanel(64, 64) })
 	h.expect("open_panel", 5*time.Second)
 	h.send(shellPanelOpened(64, 64))
 	h.expect("panel_frame", 5*time.Second)
@@ -501,15 +523,17 @@ func TestRenegotiationBlocksFramesUntilTheNewGrant(t *testing.T) {
 		t.Fatalf("expected opened, got %+v", ev)
 	}
 	// Ask again, bigger: same handle, a fresh OpenPanel on the wire.
-	h.onPress = func(ctx *Ctx) { second, _ = ctx.OpenPanel(128, 96) }
-	h.pressTile()
+	h.pressTile(func(ctx *Ctx) {
+		second, _ = ctx.OpenPanel(128, 96)
+		framesPaused = !second.Opened()
+	})
 	if msg := h.expect("open_panel", 5*time.Second); msg.openW != 128 || msg.openH != 96 {
 		t.Fatalf("renegotiation asked for %dx%d", msg.openW, msg.openH)
 	}
 	if first != second {
 		t.Fatal("renegotiation must keep the handle")
 	}
-	if second.Opened() {
+	if !framesPaused {
 		t.Fatal("frames must pause until the new grant")
 	}
 	h.expectSilence("panel_frame", 300*time.Millisecond)
@@ -526,8 +550,7 @@ func TestRenegotiationBlocksFramesUntilTheNewGrant(t *testing.T) {
 
 func TestPanelInputIsDispatchedInPanelCoordinates(t *testing.T) {
 	h := newHarness(t)
-	h.onPress = func(ctx *Ctx) { _, _ = ctx.OpenPanel(64, 64) }
-	h.pressTile()
+	h.pressTile(func(ctx *Ctx) { _, _ = ctx.OpenPanel(64, 64) })
 	h.expect("open_panel", 5*time.Second)
 	h.send(shellPanelOpened(64, 64))
 	h.expect("panel_frame", 5*time.Second)
@@ -562,8 +585,7 @@ func TestAFullRepaintStreamsAsContiguousBands(t *testing.T) {
 	// 640 wide: a band carries at most 262080 / 2560 = 102 rows, so a
 	// 300-row repaint is exactly 102 + 102 + 96.
 	h := newHarness(t)
-	h.onPress = func(ctx *Ctx) { _, _ = ctx.OpenPanel(640, 300) }
-	h.pressTile()
+	h.pressTile(func(ctx *Ctx) { _, _ = ctx.OpenPanel(640, 300) })
 	h.expect("open_panel", 5*time.Second)
 	h.send(shellPanelOpened(640, 300))
 	if ev := h.event(5 * time.Second); ev.kind != "opened" || ev.w != 640 || ev.h != 300 {
@@ -606,8 +628,7 @@ func TestDrawRowsSendsOneNarrowBand(t *testing.T) {
 	h := newHarness(t)
 	h.app.DrawPanel = nil // push-style panel
 	var panel *Panel
-	h.onPress = func(ctx *Ctx) { panel, _ = ctx.OpenPanel(64, 64) }
-	h.pressTile()
+	h.pressTile(func(ctx *Ctx) { panel, _ = ctx.OpenPanel(64, 64) })
 	h.expect("open_panel", 5*time.Second)
 	h.send(shellPanelOpened(64, 64))
 	if ev := h.event(5 * time.Second); ev.kind != "opened" {
@@ -615,8 +636,9 @@ func TestDrawRowsSendsOneNarrowBand(t *testing.T) {
 	}
 	row := bytes.Repeat([]byte{0xEE, 0xDD, 0xCC, 0xFF}, 64)
 	rowErr := make(chan error, 1)
-	h.onPress = func(ctx *Ctx) { rowErr <- panel.DrawRows(10, append(append([]byte{}, row...), row...)) }
-	h.pressTile()
+	h.pressTile(func(ctx *Ctx) {
+		rowErr <- panel.DrawRows(10, append(append([]byte{}, row...), row...))
+	})
 	msg := h.expect("panel_frame", 5*time.Second)
 	if msg.y != 10 || msg.bandRows != 2 || msg.w != 64 {
 		t.Fatalf("partial update band = y%d h%d w%d, want y10 h2 w64", msg.y, msg.bandRows, msg.w)
@@ -625,8 +647,9 @@ func TestDrawRowsSendsOneNarrowBand(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Out-of-grant partial updates are refused locally.
-	h.onPress = func(ctx *Ctx) { rowErr <- panel.DrawRows(63, append(append([]byte{}, row...), row...)) }
-	h.pressTile()
+	h.pressTile(func(ctx *Ctx) {
+		rowErr <- panel.DrawRows(63, append(append([]byte{}, row...), row...))
+	})
 	if err := <-rowErr; err == nil {
 		t.Fatal("DrawRows past the granted height must fail")
 	}
@@ -642,11 +665,10 @@ func TestOpenPanelIsGatedOffOnAProtocol1Shell(t *testing.T) {
 	// take the tile down too.
 	h := newHarnessProto(t, 0)
 	gateErr := make(chan error, 1)
-	h.onPress = func(ctx *Ctx) {
+	h.pressTile(func(ctx *Ctx) {
 		_, err := ctx.OpenPanel(64, 64)
 		gateErr <- err
-	}
-	h.pressTile()
+	})
 	select {
 	case err := <-gateErr:
 		if !errors.Is(err, ErrPanelsUnsupported) {
@@ -662,8 +684,7 @@ func TestOpenPanelIsGatedOffOnAProtocol1Shell(t *testing.T) {
 
 func TestShellShutdownReachesThePanelAsShutdown(t *testing.T) {
 	h := newHarness(t)
-	h.onPress = func(ctx *Ctx) { _, _ = ctx.OpenPanel(64, 64) }
-	h.pressTile()
+	h.pressTile(func(ctx *Ctx) { _, _ = ctx.OpenPanel(64, 64) })
 	h.expect("open_panel", 5*time.Second)
 	h.send(shellPanelOpened(64, 64))
 	h.expect("panel_frame", 5*time.Second)
