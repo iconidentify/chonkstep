@@ -7,6 +7,13 @@ crate and both session binaries carry the same number.
 
 ### Performance
 
+- **A connected output manager is now idle when the outputs are.** Host
+  resize, config reload, IPC scale, and wlr-output-management apply paths
+  explicitly invalidate the retained protocol snapshot; clean dispatch
+  passes return before reading any `Output` state. A persistent `kanshi`
+  connection at 60 compositor wakes per second therefore goes from 60N
+  mode-lock/read comparisons per second for N outputs to zero, while
+  repeated mutations still coalesce into one exact delta batch.
 - **Multi-output visibility math is now genuinely disjoint.** The old
   overlap helper used signed `saturating_sub`, which preserves a negative
   distance; casting that miss to `u64` made a non-overlapping monitor look

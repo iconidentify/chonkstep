@@ -95,6 +95,10 @@ pub(crate) struct OutputManagement {
     /// What was last published, one entry per output, for the diff in
     /// [`refresh`].
     published: Vec<HeadSnapshot>,
+    /// Whether compositor-owned output state may differ from
+    /// `published`. Every mutation site marks this so a persistent
+    /// manager does not make clean dispatches inspect each `Output`.
+    dirty: bool,
     /// A validated `apply` waiting for [`refresh`] to perform it.
     pending_apply: Option<PendingApply>,
     /// A primary-scale change from an applied configuration, waiting
@@ -179,8 +183,18 @@ pub(crate) fn init(display_handle: &DisplayHandle) -> OutputManagement {
         managers: Vec::new(),
         serial: 1,
         published: Vec::new(),
+        dirty: true,
         pending_apply: None,
         pending_primary_scale: None,
+    }
+}
+
+impl OutputManagement {
+    /// Invalidates the retained protocol snapshot after output state
+    /// changed outside this module. The next [`refresh`] performs the
+    /// exact diff; repeated mutations coalesce into one batch.
+    pub(crate) fn mark_dirty(&mut self) {
+        self.dirty = true;
     }
 }
 
@@ -211,17 +225,24 @@ fn publish(comp: &mut Compositor) {
     if comp.output_mgmt.managers.is_empty() {
         return;
     }
+    let any_new = comp.output_mgmt.managers.iter().any(|manager| !manager.announced);
+    if !comp.output_mgmt.dirty && !any_new {
+        return;
+    }
     // Compare directly against the retained baseline. Building a fresh
     // Vec here made a persistent `kanshi`/`wlr-randr` connection pay
     // one allocation and free for every unrelated client commit. The
     // baseline is rewritten in place only on the rare changed path.
-    let changed = comp.outputs.len() != comp.output_mgmt.published.len()
-        || comp
-            .outputs
-            .iter()
-            .zip(&comp.output_mgmt.published)
-            .any(|(entry, previous)| head_snapshot(entry) != *previous);
-    let any_new = comp.output_mgmt.managers.iter().any(|manager| !manager.announced);
+    let changed = comp.output_mgmt.dirty
+        && (comp.outputs.len() != comp.output_mgmt.published.len()
+            || comp
+                .outputs
+                .iter()
+                .zip(&comp.output_mgmt.published)
+                .any(|(entry, previous)| head_snapshot(entry) != *previous));
+    // The potentially-different state has now been compared, even if
+    // the mutation proved idempotent and there is no batch to send.
+    comp.output_mgmt.dirty = false;
     if !changed && !any_new {
         return;
     }
@@ -494,6 +515,7 @@ fn perform_pending_apply(comp: &mut Compositor) {
         normalize_layout(comp);
     }
     if scaled_any || moved_any {
+        comp.output_mgmt.mark_dirty();
         comp.sync_monitor_scales();
         relayout_ledger(comp);
         comp.layer_shell.needs_arrange = true;

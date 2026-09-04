@@ -1889,6 +1889,7 @@ impl Compositor {
             // rescaled buffers; the ledger reflows around those commits
             // exactly as it does around any client resize.
             advertise_scale(&mut self.outputs, scale);
+            self.output_mgmt.mark_dirty();
             self.sync_monitor_scales();
             self.layer_shell.needs_arrange = true;
             let advertised = advertised_output_scale(scale).integer_scale();
@@ -2399,6 +2400,7 @@ impl Compositor {
         // so a resize rebuilds it. A fresh tracker starts at age 0,
         // which is what every frame here renders at anyway.
         entry.damage_tracker = physical_damage_tracker(&entry.output, logical);
+        self.output_mgmt.mark_dirty();
         let backend = self.wm.backend_mut();
         if let Some(monitor) = backend.monitors.first_mut() {
             monitor.geometry.size = logical;
@@ -2436,6 +2438,7 @@ impl Compositor {
         let entry = &mut self.outputs[index];
         entry.scale = scale;
         entry.output.change_current_state(None, None, Some(advertised_output_scale(scale as f32)), None);
+        self.output_mgmt.mark_dirty();
         self.sync_monitor_scales();
         self.layer_shell.needs_arrange = true;
         if index == 0 {
