@@ -57,6 +57,7 @@ fn ordinary_desktop_globals_bind_successfully() {
         "xdg_wm_dialog_v1",
         "xdg_system_bell_v1",
         "xdg_toplevel_tag_manager_v1",
+        "zxdg_output_manager_v1",
         "hyprland_toplevel_mapping_manager_v1",
         "hyprland_focus_grab_manager_v1",
     ] {

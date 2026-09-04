@@ -43,18 +43,25 @@ use smithay::input::pointer::CursorImageStatus;
 use smithay::input::{Seat, SeatHandler, SeatState};
 use smithay::output::Output;
 use smithay::reexports::wayland_protocols::xdg::decoration::zv1::server::zxdg_toplevel_decoration_v1::Mode as DecorationMode;
+use smithay::reexports::wayland_protocols::xdg::xdg_output::zv1::server::{
+    zxdg_output_manager_v1::ZxdgOutputManagerV1, zxdg_output_v1::ZxdgOutputV1,
+};
 use smithay::reexports::wayland_server::protocol::wl_buffer::WlBuffer;
 use smithay::reexports::wayland_server::protocol::wl_output;
 use smithay::reexports::wayland_server::protocol::wl_seat::WlSeat;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
-use smithay::reexports::wayland_server::{Client, Resource};
+use smithay::reexports::wayland_server::{
+    Client, DataInit, DisplayHandle, GlobalDispatch, New, Resource,
+};
 use smithay::utils::Serial;
 use smithay::wayland::buffer::BufferHandler;
 use smithay::wayland::compositor::{
     get_parent, with_states, CompositorClientState, CompositorHandler, CompositorState, SurfaceAttributes,
 };
 use smithay::wayland::keyboard_shortcuts_inhibit::KeyboardShortcutsInhibitorSeat;
-use smithay::wayland::output::OutputHandler;
+use smithay::wayland::output::{
+    OutputHandler, OutputManagerState, OutputUserData, WlOutputData, XdgOutputUserData,
+};
 use smithay::wayland::selection::data_device::{
     set_data_device_focus, ClientDndGrabHandler, DataDeviceHandler, DataDeviceState, ServerDndGrabHandler,
 };
@@ -71,8 +78,8 @@ use smithay::wayland::shm::{ShmHandler, ShmState};
 use smithay::wayland::text_input::TextInputSeat;
 use smithay::xwayland::XWaylandClientData;
 use smithay::{
-    delegate_compositor, delegate_data_device, delegate_output, delegate_primary_selection, delegate_seat,
-    delegate_shm, delegate_xdg_decoration, delegate_xdg_shell,
+    delegate_compositor, delegate_data_device, delegate_primary_selection, delegate_seat, delegate_shm,
+    delegate_xdg_decoration, delegate_xdg_shell,
 };
 
 use wm_core::{BackendEvent, NetState, NetStateAction};
@@ -1169,6 +1176,37 @@ impl OutputHandler for Compositor {
     fn output_bound(&mut self, _output: Output, _wl_output: wl_output::WlOutput) {}
 }
 
+// XWayland uses xdg-output's *logical* size as its X root size whenever
+// that optional protocol is visible. ChonkStep deliberately keeps its WM,
+// renderer and input ledger in physical pixels, while native clients still
+// need the scaled xdg-output description. Hide only this optional manager
+// from the compositor-owned XWayland client: XWayland then follows the
+// physical wl_output mode, and every other Wayland client retains the normal
+// logical output contract.
+impl GlobalDispatch<ZxdgOutputManagerV1, ()> for Compositor {
+    fn bind(
+        state: &mut Self,
+        handle: &DisplayHandle,
+        client: &Client,
+        resource: New<ZxdgOutputManagerV1>,
+        global_data: &(),
+        data_init: &mut DataInit<'_, Self>,
+    ) {
+        <OutputManagerState as GlobalDispatch<ZxdgOutputManagerV1, (), Self>>::bind(
+            state,
+            handle,
+            client,
+            resource,
+            global_data,
+            data_init,
+        );
+    }
+
+    fn can_view(client: Client, _global_data: &()) -> bool {
+        client.get_data::<XWaylandClientData>().is_none()
+    }
+}
+
 // -- wl_seat -------------------------------------------------------------
 
 impl SeatHandler for Compositor {
@@ -1776,7 +1814,18 @@ smithay::delegate_viewporter!(Compositor);
 
 delegate_compositor!(Compositor);
 delegate_shm!(Compositor);
-delegate_output!(Compositor);
+smithay::reexports::wayland_server::delegate_global_dispatch!(Compositor: [
+    wl_output::WlOutput: WlOutputData
+] => OutputManagerState);
+smithay::reexports::wayland_server::delegate_dispatch!(Compositor: [
+    wl_output::WlOutput: OutputUserData
+] => OutputManagerState);
+smithay::reexports::wayland_server::delegate_dispatch!(Compositor: [
+    ZxdgOutputV1: XdgOutputUserData
+] => OutputManagerState);
+smithay::reexports::wayland_server::delegate_dispatch!(Compositor: [
+    ZxdgOutputManagerV1: ()
+] => OutputManagerState);
 delegate_seat!(Compositor);
 delegate_data_device!(Compositor);
 delegate_primary_selection!(Compositor);

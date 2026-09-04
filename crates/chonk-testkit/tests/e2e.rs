@@ -861,7 +861,11 @@ fn chromium_resize_at_scale_2_keeps_its_scale() {
         // pointer drag to grow it before hitting the output clamp. A
         // fixed ordinary window is still large enough to exercise its
         // over-allocated, viewport-cropped buffers.
-        "--window-size=800,600",
+        // Chromium interprets this in logical units. At scale 2 its
+        // content is roughly twice this size in our physical ledger;
+        // keep enough room for the southeast drag below instead of
+        // starting already clamped to the 1280x800 test output.
+        "--window-size=560,360",
         "--no-first-run",
         "--no-default-browser-check",
         // A blank local page needs none of Chromium's background
