@@ -4,7 +4,7 @@
 //! format — `SUPER SHIFT, RETURN` in conf, `"SUPER + SHIFT + RETURN"`
 //! in Lua, `super+shift+return` here — and all three name the same two
 //! modifiers and the same key. So this module does not build a
-//! [`KeyCombo`] itself: it *rewrites the spelling* and hands the result
+//! [`wm_core::KeyCombo`] itself: it *rewrites the spelling* and hands the result
 //! to [`crate::parse_key`], the parser a user's own `[keybindings]`
 //! entries go through.
 //!

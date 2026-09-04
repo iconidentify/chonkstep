@@ -3,16 +3,16 @@
 //!
 //! Same discipline as every instrument in this crate. The panel is a
 //! pure fold: it is fed already-sampled state by [`crate::BluetoothWidget`],
-//! turns it into a [`BtView`] the renderer draws, and answers input
-//! with a [`PanelReaction`] instead of performing anything. No entry
+//! turns it into a [`crate::bt_panel::render::BtView`] the renderer draws, and answers input
+//! with a [`chonk_dock_widget::PanelReaction`] instead of performing anything. No entry
 //! point here can reach a syscall — the crate's `clippy.toml` makes
 //! that a build error and its dependency list makes it moot.
 //!
 //! The host is [`crate::BluetoothWidget`], through the panel half of
 //! the `DockWidget` trait (`panel_spec` / `render_panel` /
 //! `panel_input` / `panel_tick`); this type is the brain those four
-//! methods delegate to. Drawing is [`render`], which also owns the
-//! band geometry ([`render::bt_layout`]) that the hit test below asks,
+//! methods delegate to. Drawing is [`crate::bt_panel::render`], which also owns the
+//! band geometry ([`crate::bt_panel::render::bt_layout`]) that the hit test below asks,
 //! so the pixels and the pointer cannot disagree about where a cell is.
 //!
 //! # The three absences
@@ -20,18 +20,18 @@
 //! Most desks running this instrument have no Bluetooth at all, and
 //! there are three different ways for that to be true. They used to
 //! render alike — one row saying `NO ADAPTER`, in a panel 50 pixels
-//! tall — and the whole point of [`BtStatus`] having three absent
+//! tall — and the whole point of [`crate::bt_panel::render::BtStatus`] having three absent
 //! variants is that they are three different truths with three
 //! different remedies:
 //!
 //! | Reading | Status | What the panel offers |
 //! |---|---|---|
-//! | `/sys/class/bluetooth` empty | [`BtStatus::NoRadio`] | nothing: there is no radio to act on, so there is no control to draw |
-//! | a controller in sysfs, no adapter in BlueZ's reply | [`BtStatus::NoDaemon`] | the command that starts the service — plus an unblock, but only if rfkill is what is standing in the way |
-//! | BlueZ answering, no adapter powered | [`BtStatus::Off`] | the power row, and the known devices in the disabled treatment |
+//! | `/sys/class/bluetooth` empty | [`crate::bt_panel::render::BtStatus::NoRadio`] | nothing: there is no radio to act on, so there is no control to draw |
+//! | a controller in sysfs, no adapter in BlueZ's reply | [`crate::bt_panel::render::BtStatus::NoDaemon`] | the command that starts the service — plus an unblock, but only if rfkill is what is standing in the way |
+//! | BlueZ answering, no adapter powered | [`crate::bt_panel::render::BtStatus::Off`] | the power row, and the known devices in the disabled treatment |
 //!
 //! The sysfs walk and the BlueZ call are deliberately different
-//! questions — see [`bluez`]'s module doc — and this is where the
+//! questions — see [`crate::bt_panel::bluez`]'s module doc — and this is where the
 //! difference is finally *shown* rather than only measured.
 //!
 //! # The action table
@@ -80,10 +80,10 @@
 //! A Bluetooth connect takes seconds — a headset has to be woken,
 //! negotiated with, and its profiles brought up. So a clicked row dims
 //! and gains an ellipsis immediately, but the toggle is a request, not
-//! a fact. The truth is the next sample: every [`Effect::Run`] here
+//! a fact. The truth is the next sample: every [`chonk_dock_widget::Effect::Run`] here
 //! sets `then:` to the BlueZ source that can confirm it, a pending row
 //! reconciles the moment that sample agrees, and a pending that
-//! outlives [`PENDING_DEADLINE_SAMPLES`] fresh samples reverts to
+//! outlives [`crate::bt_panel::PENDING_DEADLINE_SAMPLES`] fresh samples reverts to
 //! showing reality — because an instrument still saying "connecting…"
 //! after the system gave up is lying with extra steps.
 //!
@@ -93,10 +93,10 @@
 //! panel: the pairing keys go with it, and getting the device back
 //! means pairing it again, in person, with the device in pairing mode.
 //! It therefore wants a confirmation. The panel input vocabulary
-//! ([`PanelEvent`]) has no long-press — it is press, release, scroll,
+//! ([`chonk_dock_widget::PanelEvent`]) has no long-press — it is press, release, scroll,
 //! motion and crossings, and a panel takes no keyboard *ever*, by
 //! design — so the confirm is two clicks on the same `[x]` within
-//! [`FORGET_GRACE`]. The first arms it, and the *row* becomes the
+//! [`crate::bt_panel::FORGET_GRACE`]. The first arms it, and the *row* becomes the
 //! question — `FORGET?` in lit ink where the battery reading was, the
 //! cell inverted beside it — so the pending question is on the face
 //! rather than in someone's memory; the second commits; anything else

@@ -61,7 +61,7 @@ pub enum Action {
     ExecShell(String),
     /// Execute an argv exactly. `hyprctl dispatch exec -- <argv...>`
     /// removes its `--` client-side and flattens the arguments on the
-    /// wire, so [`classic_exec`] reconstructs the only unambiguous
+    /// wire, so the private `classic_exec` reconstructs the only unambiguous
     /// direct-argv forms before this crosses into the compositor.
     ExecArgv(Vec<String>),
     /// Set or toggle fullscreen on the focused window.

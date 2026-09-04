@@ -580,7 +580,7 @@ impl ThemeState {
     /// until the dockapp's send queue overflowed and the tile was
     /// disconnected — a compositor busy-loop provoked by one bad float.
     ///
-    /// [`theme_state_decode`] now rejects an unusable scale outright
+    /// The private `theme_state_decode` now rejects an unusable scale outright
     /// ([`DecodeError::BadFloat`]), so a *decoded* `ThemeState` can no
     /// longer carry one. This is the second lock, on the side of the
     /// socket where the value is *constructed* rather than parsed: the

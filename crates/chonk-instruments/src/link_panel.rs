@@ -5,10 +5,10 @@
 //! Tailscale tailnet, in one chiseled instrument.
 //!
 //! Same discipline as every instrument in this crate: the panel is a
-//! pure fold. It declares [`Source`]s (all read-only nmcli/tailscale
-//! queries), folds the sampled stdout in [`LinkPanel::update`],
-//! renders through [`render::render_link_panel`], and answers input
-//! with a [`PanelReaction`] instead of performing anything. No entry
+//! pure fold. It declares [`chonk_dock_widget::Source`]s (all read-only nmcli/tailscale
+//! queries), folds the sampled stdout in [`crate::link_panel::LinkPanel::update`],
+//! renders through [`crate::link_panel::render::render_link_panel`], and answers input
+//! with a [`chonk_dock_widget::PanelReaction`] instead of performing anything. No entry
 //! point here can reach a syscall — the crate's `clippy.toml` makes
 //! that a build error, and its dependency list makes it moot.
 //!
@@ -48,7 +48,7 @@
 //! fact. The truth is the next sample: every `Effect::Run` here sets
 //! `then:` to the source that can confirm it, a pending row
 //! reconciles the moment that sample agrees, and a pending that
-//! outlives [`PENDING_DEADLINE_SAMPLES`] fresh samples reverts to
+//! outlives [`crate::link_panel::PENDING_DEADLINE_SAMPLES`] fresh samples reverts to
 //! showing reality, because an instrument that keeps saying BUSY
 //! after the system said no is lying with extra steps.
 //!
@@ -57,11 +57,11 @@
 //! Tailscale reads are unprivileged; mutation is root-or-operator,
 //! and a refused `tailscale down` prints `Access denied: ...` with
 //! the `sudo tailscale set --operator=$USER` remedy in it
-//! ([`tailscale::classify_toggle_output`]). The panel cannot know the
+//! ([`crate::link_panel::tailscale::classify_toggle_output`]). The panel cannot know the
 //! grant in advance, so the first toggle is attempted; a toggle the
 //! status sample never confirms — against an operator state never
 //! proven — flips the row to
-//! [`tailscale::OperatorState::NeedsOperator`]: the toggle goes
+//! [`crate::link_panel::tailscale::OperatorState::NeedsOperator`]: the toggle goes
 //! inert, shows `LOCKED`, and the remedy line is drawn under it,
 //! because the honest answer to a click that cannot work is the
 //! command that would make it work. A toggle whose confirmation
@@ -73,7 +73,7 @@
 //!
 //! The denial is only *visible* in the toggle's own output, and the
 //! effect executor (`run_detached`) collects and discards that
-//! output. [`LinkPanel::command_finished`] is the precise hook — feed
+//! output. [`crate::link_panel::LinkPanel::command_finished`] is the precise hook — feed
 //! it the combined output and the classification is exact — but
 //! nothing can call it today, so the shipping detection is the
 //! deadline inference above: right whenever the grant is really the
@@ -86,7 +86,7 @@
 //!
 //! A widget's sources are declared once and sample for the life of
 //! the session — there is no "only while the panel is open" — so the
-//! panel's four queries run at [`PANEL_INTERVAL`]/[`TAILSCALE_INTERVAL`]
+//! panel's four queries run at [`crate::link_panel::PANEL_INTERVAL`]/[`crate::link_panel::TAILSCALE_INTERVAL`]
 //! rather than the tile's 1s: cache reads, but process spawns all the
 //! same, and nothing on a closed panel is worth a spawn a second.
 //! Every action's `then:` hurries the confirming source, so the

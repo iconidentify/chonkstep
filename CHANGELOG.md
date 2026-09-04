@@ -11,6 +11,9 @@ crate and both session binaries carry the same number.
   to publish its Wayland socket, or never answers the test door, the harness
   includes the final 80 compositor log lines in the failure instead of a bare
   timeout while preserving the existing performance deadline.
+- **Public Rust documentation is a CI gate.** Broken API links and rustdoc
+  warnings now fail the build; the existing stale/private links have been
+  corrected, while all executable examples continue to pass as doctests.
 - **Release automation now trusts immutable action revisions.** CI, native
   package attestation, artifact assembly, and the future AUR publisher pin
   every third-party GitHub Action to a full commit instead of a mutable tag.

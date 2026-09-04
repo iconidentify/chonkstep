@@ -588,7 +588,7 @@ pub(crate) struct SupervisedWidget {
     /// An eviction happened outside `tick` (in `render` or a click) and
     /// the dock has not laid out for it yet: this slot's height just
     /// collapsed to one tile and its face just became a tombstone.
-    /// Cleared by the next [`SupervisedWidget::tick`], which reports
+    /// Cleared by the next [`SupervisedWidget::update`], which reports
     /// "changed" so the dock relays out exactly once.
     relayout: bool,
 }
@@ -1196,4 +1196,3 @@ mod tests {
         assert_eq!(unique.len(), names.len(), "two widgets sharing a name make the log ambiguous: {names:?}");
     }
 }
-

@@ -531,7 +531,7 @@ pub struct SeqpacketListener {
 
 impl SeqpacketListener {
     /// Creates the directory, clears a stale socket, binds, chmods
-    /// 0600, and listens — see [`bind_listener`], which is the body,
+    /// 0600, and listens — see the private `bind_listener`, which is the body,
     /// shared with the control socket's [`StreamListener`] so the two
     /// cannot drift on the properties that matter.
     pub fn bind(path: &Path) -> io::Result<Self> {
@@ -541,7 +541,7 @@ impl SeqpacketListener {
 
     /// Accepts one pending connection, or `Ok(None)` if none is
     /// waiting — already `O_NONBLOCK`, by construction rather than by
-    /// discipline; see [`accept_nonblocking`].
+    /// discipline; see the private `accept_nonblocking` helper.
     pub fn accept(&self) -> io::Result<Option<Seqpacket>> {
         let Some(fd) = accept_nonblocking(self.fd.as_raw_fd())? else { return Ok(None) };
         widen_socket_buffers(fd.as_raw_fd());
@@ -784,7 +784,7 @@ pub fn peer_is_this_user_on(fd: RawFd) -> io::Result<bool> {
 /// object per newline); the transport's job is unchanged — the same
 /// 0700 directory, the same stale-socket probe, the same
 /// non-blocking-by-construction accept — which is why this is a second
-/// type over the same [`bind_listener`] rather than a second copy of
+/// type over the same private `bind_listener` rather than a second copy of
 /// it.
 #[derive(Debug)]
 pub struct StreamListener {
@@ -802,7 +802,7 @@ impl StreamListener {
 
     /// Accepts one pending connection as a socket that is already
     /// `O_NONBLOCK` and `CLOEXEC`, or `Ok(None)` if none is waiting.
-    /// See [`accept_nonblocking`] for why it is `accept4` and not
+    /// See the private `accept_nonblocking` helper for why it is `accept4` and not
     /// `accept` + `fcntl`.
     pub fn accept(&self) -> io::Result<Option<Stream>> {
         Ok(accept_nonblocking(self.fd.as_raw_fd())?.map(Stream::from_fd))
@@ -835,7 +835,7 @@ pub struct Stream {
 }
 
 impl Stream {
-    /// A non-blocking connect — see [`connect_nonblocking`]. Used by
+    /// A non-blocking connect — see the private `connect_nonblocking`. Used by
     /// tests and by anything in this workspace that wants to read the
     /// control socket without being a shell.
     pub fn connect(path: &Path) -> io::Result<Self> {

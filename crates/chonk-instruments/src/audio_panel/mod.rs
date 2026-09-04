@@ -10,13 +10,13 @@
 //! is the only tool in the stack with machine-readable output (`wpctl`
 //! has no JSON and cannot list ports):
 //!
-//! * `pactl --format=json list sinks` → [`parse_sinks`]: one
-//!   [`AudioSink`] per device — description, mute, level, whether any
+//! * `pactl --format=json list sinks` → [`crate::audio_panel::parse_sinks`]: one
+//!   [`crate::audio_panel::AudioSink`] per device — description, mute, level, whether any
 //!   port is physically present, whether it is currently rendering
 //!   audio.
-//! * `pactl get-default-sink` → [`parse_default_sink`]: the name of
+//! * `pactl get-default-sink` → [`crate::audio_panel::parse_default_sink`]: the name of
 //!   the default, matched against the list by *name*.
-//! * `pactl --format=json list sink-inputs` → [`parse_sink_inputs`]:
+//! * `pactl --format=json list sink-inputs` → [`crate::audio_panel::parse_sink_inputs`]:
 //!   the playing streams a default-switch must carry across.
 //!
 //! **Sinks are keyed by `name` everywhere.** Verified on real
@@ -39,7 +39,7 @@
 //!    `application.name` is a DSP chain's own plumbing, and EasyEffects
 //!    in particular routes its processed output through a sink input —
 //!    moving either rewires the processing itself (onto headphones, or
-//!    into its own virtual sink, which is a cycle). [`eligible_moves`]
+//!    into its own virtual sink, which is a cycle). [`crate::audio_panel::eligible_moves`]
 //!    is that filter.
 //!
 //! Everything runs as the plain user session; nothing here wants or
@@ -51,15 +51,15 @@
 //! that as a *prediction*, not a fact — the `chonk-switch` lesson: the
 //! next `pactl get-default-sink` sample is the truth, the lamp is an
 //! animation of what the click asked for. A confirming sample retires
-//! the prediction silently; [`PREDICTION_SAMPLES`] unconfirming
+//! the prediction silently; [`crate::audio_panel::PREDICTION_SAMPLES`] unconfirming
 //! samples (~2.5s against the resample-then-1Hz cadence) expire it and
 //! the lamp falls back to whatever the mixer actually says.
 //!
 //! # What this module is not
 //!
 //! It performs nothing. Parsing is pure functions over sampled text,
-//! actions come out as [`Effect::Run`] argv for the dock to execute
-//! off-thread, and the interaction state ([`AudioPanel`]) is a plain
+//! actions come out as [`chonk_dock_widget::Effect::Run`] argv for the dock to execute
+//! off-thread, and the interaction state ([`crate::audio_panel::AudioPanel`]) is a plain
 //! state machine over panel-local points — all of it fixture-tested
 //! with no audio stack behind it.
 

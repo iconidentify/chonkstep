@@ -533,3 +533,8 @@ jobs:
             -p wm-theme-api \
             -p wm-x11 \
             -- -D warnings
+
+      - name: Deny broken links and warnings in public Rust documentation
+        env:
+          RUSTDOCFLAGS: -D warnings -A rustdoc::private_intra_doc_links
+        run: cargo doc --workspace --no-deps --locked --document-private-items

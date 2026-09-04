@@ -6,7 +6,7 @@
 //! against a binding table, useless for text entry, where the whole
 //! point is that `shift`+`2` is `@` and not `2`. So this module exists,
 //! and it is pure: keycode lookup and modifier state come from the X
-//! connection in [`crate::window`], and everything from there down is a
+//! connection in `main.rs`'s private `window` module, and everything from there down is a
 //! function of two integers that a test can call.
 //!
 //! # What is deliberately not here

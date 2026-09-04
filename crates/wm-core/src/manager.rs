@@ -333,7 +333,7 @@ impl<B: Backend> WindowManager<B> {
     /// re-laid-out by it, because everything that *draws* is scaled by
     /// the theme engine the shell swaps in on the same pass. This is
     /// only the factor for the logical measurements written into this
-    /// crate itself — see [`placement::float_override`] — so a window
+    /// crate itself — see the private `placement::float_override` — so a window
     /// that maps after the change gets the new scale and one already
     /// mapped keeps the size it has, which is the same deal every
     /// other window on the desk gets.

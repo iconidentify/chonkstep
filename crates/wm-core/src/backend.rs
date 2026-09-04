@@ -427,7 +427,7 @@ pub trait Backend {
     /// to override.
     fn set_decoration_rules(&mut self, _rules: DecorationRules) {}
     /// Whether the client has already drawn its own window chrome, and
-    /// so must not be framed. See [`ClientChrome`] for why this is not
+    /// so must not be framed. See [`crate::ClientChrome`] for why this is not
     /// derivable from [`Self::window_type`].
     ///
     /// Read at map time and again whenever the backend reports the

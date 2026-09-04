@@ -9,7 +9,7 @@
 //! compositors integrate it through `desktop::Space`/`LayerMap`. This
 //! compositor has no Space — `renderer.rs` composes an explicit
 //! front-to-back walk and `input.rs` routes by an explicit hit walk,
-//! both over the [`WaylandBackend`] ledger — so the integration here is
+//! both over the [`crate::state::WaylandBackend`] ledger — so the integration here is
 //! the same shape as every other surface family: a ledger record per
 //! layer surface ([`LayerRecord`] on the backend, where the renderer
 //! and the hit-test can see it), and one reconciliation pass per

@@ -5,7 +5,7 @@
 //!
 //! A widget says *what* it needs — this command, that file, this sysfs
 //! subtree, at this interval — and never *when* or *on which thread*.
-//! The dock owns every sampler thread; [`DockWidget::update`] is handed
+//! The dock owns every sampler thread; [`crate::DockWidget::update`] is handed
 //! a [`Samples`] of readings that have already been collected and is a
 //! pure fold over them. A widget never gets to say "now", so there is
 //! nothing left that a `read_to_string`, a `read_dir` or a

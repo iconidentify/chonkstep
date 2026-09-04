@@ -478,7 +478,7 @@ fn program_on_path(program: &str) -> bool {
     path_var.split(':').filter(|dir| !dir.is_empty()).any(|dir| is_executable_file(&Path::new(dir).join(program)))
 }
 
-/// The final path component, for matching `WM_CLASS` against an argv[0]
+/// The final path component, for matching `WM_CLASS` against an `argv[0]`
 /// that may be an absolute path.
 fn basename(path: &str) -> &str {
     path.rsplit('/').next().unwrap_or(path)

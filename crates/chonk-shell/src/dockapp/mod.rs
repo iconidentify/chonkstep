@@ -1,5 +1,5 @@
 //! Out-of-process dock tiles: the listener, the registry, and one
-//! [`RemoteTile`] per registered dockapp.
+//! [`tile::RemoteTile`] per registered dockapp.
 //!
 //! # What a dockapp is, and what it is not
 //!
@@ -413,7 +413,7 @@ impl DockHost {
 /// # The adoption rule
 ///
 /// A `Hello` is admitted when the id names a registered tile, that tile
-/// is *expecting* a connection ([`RemoteTile::awaiting_hello`] — either
+/// is *expecting* a connection ([`tile::RemoteTile::awaiting_hello`] — either
 /// it just launched a process, or it inherited a token across the
 /// shell's restart and is holding the slot open), and the token it
 /// presents is still that tile's. All three, every time. The reconnect

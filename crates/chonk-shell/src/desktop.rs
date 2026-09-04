@@ -95,7 +95,7 @@ pub const DESKTOP_BG_LIGHT: (u8, u8, u8) = (198, 199, 216);
 /// a filesystem that has not mounted yet. Forgetting where the user had
 /// put it — permanently, on the next drag — because it happened to be
 /// absent for one session is a worse answer than carrying a line
-/// nobody can currently resolve. [`merge`] is what keeps it, and keeps
+/// nobody can currently resolve. [`dock_order::merge`] is what keeps it, and keeps
 /// it *in place* rather than at the end.
 pub(crate) mod dock_order {
     use std::path::{Path, PathBuf};
@@ -3081,7 +3081,7 @@ impl<B: Backend> Desktop<B> {
     /// Performs the effects the dock can perform here and now — a
     /// resample is a condvar poke — and hands back the commands, in
     /// the widget's own order, for
-    /// [`run_detached`](crate::widgets::run_detached)
+    /// [`run_detached`]
     /// to run one after another on one thread, plus whether a
     /// `Repaint` was asked for.
     ///

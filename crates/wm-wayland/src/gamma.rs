@@ -39,7 +39,7 @@
 //! # Which DRM mechanism, and why
 //!
 //! The legacy `DRM_IOCTL_MODE_SETGAMMA` ioctl, reached through the
-//! `drm` crate's [`ControlDevice::set_gamma`] — not the atomic
+//! `drm` crate's `ControlDevice::set_gamma` — not the atomic
 //! `GAMMA_LUT` property blob.
 //!
 //! Both work on this stack, so the choice is about which one this

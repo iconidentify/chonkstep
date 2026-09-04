@@ -88,7 +88,7 @@ const BT_CLASS_ROOT: &str = "/sys/class/bluetooth";
 /// The rfkill switches, and the three files that say what each one is
 /// and whether it is blocking. Positional, like every
 /// [`Source::Tree`]: this array and
-/// [`rfkill_from`](crate::bt_panel::bluez::rfkill_from) stay in step.
+/// [`rfkill_from`] stay in step.
 const RFKILL_ROOT: &str = "/sys/class/rfkill";
 const RFKILL_FIELDS: &[&str] = &["type", "soft", "hard"];
 

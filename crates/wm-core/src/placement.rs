@@ -261,7 +261,7 @@ pub fn float_override(identity: &str, workarea: Rect, chrome: Size, scale: f32) 
 
 /// What a window-identity rule says about a window that is mapping.
 ///
-/// The size is *logical* pixels, like [`OMARCHY_FLOAT_SIZE`] beside it
+/// The size is *logical* pixels, like the private `OMARCHY_FLOAT_SIZE` beside it
 /// and for the same reason: a rule read out of a config file was
 /// written against a 1x desk, and scaling it is this crate's job.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

@@ -68,7 +68,7 @@
 //! which re-asserts the seat's own keymap on every physical key event
 //! before delivering it. That restoration is therefore *conditional on
 //! real input still going through `KeyboardHandle::input`* — which is
-//! precisely what [`crate::input::on_keyboard_key`] does today. If
+//! precisely what `crate::input::on_keyboard_key` does today. If
 //! anyone ever routes physical keys around it and sends
 //! `wl_keyboard.key` by hand, the visible symptom will not be a
 //! virtual-keyboard bug: it will be the user's real keyboard typing
@@ -79,7 +79,7 @@
 //!
 //! Smithay's handler writes straight to the focused surface's
 //! `wl_keyboard`. It does not run the key through the seat's xkb state
-//! and it does not pass through [`crate::input::on_keyboard_key`], so
+//! and it does not pass through `crate::input::on_keyboard_key`, so
 //! the WM's grab contract never sees it: a virtual keyboard cannot
 //! trigger a compositor keybinding, cannot drive Alt-Tab, and cannot
 //! switch VTs. That is the right shape — a program synthesising text

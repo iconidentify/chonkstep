@@ -356,7 +356,7 @@ fn read_tree(root: &Path, files: &[&str], dirs: &[&str]) -> Vec<TreeEntry> {
 
 /// Runs a widget's commands **in the order it listed them**, one after
 /// another, on a single thread of the dock's own — the executor half
-/// of [`Effect::Run`], one command or several
+/// of [`chonk_dock_widget::Effect::Run`], one command or several
 /// (`PanelReaction::RunAll`).
 ///
 /// This is the click path's version of the whole argument: `wpctl
@@ -944,4 +944,3 @@ mod tests {
         assert_eq!(wait_with_deadline(child, "false", Duration::from_secs(5)), None, "a non-zero exit is still no reading");
     }
 }
-

@@ -296,7 +296,7 @@ pub(crate) fn mirrored_row_edges(y: i32, h: u32, half_rows: u32, k: u32, element
 /// levels fill *downward* from the top edge, `bottom` levels fill
 /// *upward* from the bottom edge, each `0..=half_rows` — direction is
 /// shown by position, not hue. Columns come from the longer of the two
-/// slices, oldest first. Rows sit on [`mirrored_row_edges`]'s integer
+/// slices, oldest first. Rows sit on the private `mirrored_row_edges` integer
 /// grid, so the two halves reflect each other exactly at any band
 /// height.
 pub fn draw_led_matrix(

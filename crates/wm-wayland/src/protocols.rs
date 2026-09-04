@@ -215,7 +215,7 @@ pub(crate) struct ProtocolState {
     toplevels: HashMap<WlWindowId, ToplevelEntry>,
     /// Minimize/unminimize asked for by a taskbar, applied at the top of
     /// [`refresh`]. Unlike the other four requests these have no
-    /// `BackendEvent` shape to ride (see [`ToplevelRequest`]), so they
+    /// `BackendEvent` shape to ride, so they
     /// are recorded here rather than queued on the ledger.
     minimize_requests: Vec<(WlWindowId, bool)>,
     /// Capture requests waiting for a frame to answer them.
