@@ -416,6 +416,16 @@ impl CompositorHandler for Compositor {
         for entry in &self.outputs {
             entry.output.cleanup();
         }
+        let was_lock_surface = self.wm.backend().locked
+            && self
+                .wm
+                .backend()
+                .lock_surfaces
+                .iter()
+                .any(|entry| entry.surface.wl_surface() == surface);
+        if was_lock_surface {
+            self.session_lock.mark_dirty();
+        }
         let backend = self.wm.backend_mut();
         backend.forget_surface(surface);
         // The surface may own an idle inhibitor (including as a

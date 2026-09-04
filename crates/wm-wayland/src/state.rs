@@ -1831,14 +1831,9 @@ impl Compositor {
         // a sequence: the layer surfaces a grab whitelists have just
         // been arranged and had their exclusive-focus claim resolved,
         // so the keyboard decision here sees the settled answer; and
-        // `lock::refresh` runs immediately after, so a lock that
-        // engages on this very pass still lands on top of a grab this
-        // one just ended.
+        // `lock::refresh` runs later in this same pass, so a lock still
+        // lands on top of a grab this one just ended.
         crate::focus_grab::refresh(self);
-        // Lock upkeep (re-configures on resize, keyboard onto a late
-        // lock surface); a no-op the instant the test above it — the
-        // ledger's `locked` flag — is clear.
-        crate::lock::refresh(self);
         // Idle inhibition follows visibility, which everything above
         // may have changed.
         crate::idle::refresh(self);
@@ -1890,6 +1885,7 @@ impl Compositor {
             // exactly as it does around any client resize.
             advertise_scale(&mut self.outputs, scale);
             self.output_mgmt.mark_dirty();
+            self.session_lock.mark_dirty();
             self.sync_monitor_scales();
             self.layer_shell.needs_arrange = true;
             let advertised = advertised_output_scale(scale).integer_scale();
@@ -1918,6 +1914,12 @@ impl Compositor {
                 });
             }
         }
+
+        // Lock upkeep comes after the scale drain so a lock surface is
+        // reconfigured to a newly advertised scale in this same pass,
+        // before rendering. It is event-driven: without a new surface,
+        // output change, or surface death this returns immediately.
+        crate::lock::refresh(self);
 
         // Everything above that changed a toplevel's size or state
         // staged it and booked a configure; this is where those go out,
@@ -2401,6 +2403,7 @@ impl Compositor {
         // which is what every frame here renders at anyway.
         entry.damage_tracker = physical_damage_tracker(&entry.output, logical);
         self.output_mgmt.mark_dirty();
+        self.session_lock.mark_dirty();
         let backend = self.wm.backend_mut();
         if let Some(monitor) = backend.monitors.first_mut() {
             monitor.geometry.size = logical;
@@ -2439,6 +2442,7 @@ impl Compositor {
         entry.scale = scale;
         entry.output.change_current_state(None, None, Some(advertised_output_scale(scale as f32)), None);
         self.output_mgmt.mark_dirty();
+        self.session_lock.mark_dirty();
         self.sync_monitor_scales();
         self.layer_shell.needs_arrange = true;
         if index == 0 {

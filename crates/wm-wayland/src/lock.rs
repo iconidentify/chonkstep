@@ -98,11 +98,22 @@ pub(crate) struct SessionLock {
     /// is what distinguishes "someone else holds the lock" (deny)
     /// from "the locker crashed" (allow a new one to recover).
     pub holder: Option<ExtSessionLockV1>,
+    /// Whether output geometry or lock-surface liveness changed since
+    /// the last reconciliation. Animated lockers can drive the loop at
+    /// frame rate; neither fact needs polling at frame rate.
+    refresh_dirty: bool,
 }
 
 impl SessionLock {
     pub(crate) fn new(state: SessionLockManagerState) -> Self {
-        Self { state, machine: LockMachine::default(), pending_ack: None, holder: None }
+        Self { state, machine: LockMachine::default(), pending_ack: None, holder: None, refresh_dirty: false }
+    }
+
+    /// Schedules one lock-surface geometry/focus reconciliation. Every
+    /// path that can change its answers calls this; repeated changes in
+    /// one dispatch pass coalesce.
+    pub(crate) fn mark_dirty(&mut self) {
+        self.refresh_dirty = true;
     }
 }
 
@@ -210,6 +221,7 @@ impl SessionLockHandler for Compositor {
                 self.mark_hyprland_state_dirty();
                 self.session_lock.holder = Some(confirmation.ext_session_lock().clone());
                 self.session_lock.pending_ack = Some(confirmation);
+                self.session_lock.mark_dirty();
                 let backend = self.wm.backend_mut();
                 backend.locked = true;
                 backend.mark_idle_policy_dirty();
@@ -244,6 +256,7 @@ impl SessionLockHandler for Compositor {
         self.session_lock.machine.unlocked();
         self.session_lock.pending_ack = None;
         self.session_lock.holder = None;
+        self.session_lock.refresh_dirty = false;
         let backend = self.wm.backend_mut();
         backend.locked = false;
         backend.mark_idle_policy_dirty();
@@ -308,6 +321,7 @@ impl SessionLockHandler for Compositor {
         // of them reaches the same client).
         let focus_target = self.wm.backend().lock_surfaces.is_empty();
         self.wm.backend_mut().lock_surfaces.push(LockSurfaceEntry { output: index, surface: surface.clone() });
+        self.session_lock.mark_dirty();
         self.wm.backend_mut().mark_damaged();
         if focus_target {
             if let Some(keyboard) = self.seat.get_keyboard() {
@@ -342,15 +356,18 @@ pub(crate) fn confirm_after_frame(comp: &mut Compositor) {
     }
 }
 
-/// Per-pass upkeep while locked: keep every lock surface configured to
-/// its output's current size (an output resize mid-lock re-configures;
-/// the send is deduped so idle passes cost a comparison), and keep the
-/// keyboard on a lock surface — a locker that maps its surface after
-/// the lock was granted has no other path to focus. The output and lock
-/// ledgers are disjoint fields, so the walk borrows them together and
-/// allocates no intermediate surface list.
+/// Event-driven upkeep while locked: keep every lock surface configured
+/// to its output's current size after a size/scale change, and move the
+/// keyboard after a lock surface dies. The output and lock ledgers are
+/// disjoint fields, so the walk borrows them together and allocates no
+/// intermediate surface list. An animated but otherwise unchanged lock
+/// screen returns before touching either ledger.
 pub(crate) fn refresh(comp: &mut Compositor) {
     if !comp.wm.backend().locked {
+        comp.session_lock.refresh_dirty = false;
+        return;
+    }
+    if !std::mem::take(&mut comp.session_lock.refresh_dirty) {
         return;
     }
     let advertised = crate::state::advertised_output_scale(comp.ui_scale).integer_scale().max(1);

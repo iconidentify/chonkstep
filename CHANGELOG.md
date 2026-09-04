@@ -7,6 +7,14 @@ crate and both session binaries carry the same number.
 
 ### Performance
 
+- **Lock-surface upkeep is now event-driven.** A new lock surface, its
+  destruction, or an output size/scale change schedules one configure
+  and focus reconciliation; an animated but otherwise stable lock screen
+  returns immediately. With M lock surfaces and 60 compositor wakes per
+  second, the steady state drops 120M lock-surface state mutex acquisitions
+  plus 60 focus-membership scans per second to zero. Scale changes also
+  reconfigure the lock before the same pass renders, eliminating a stale-
+  size frame at the new scale.
 - **A connected output manager is now idle when the outputs are.** Host
   resize, config reload, IPC scale, and wlr-output-management apply paths
   explicitly invalidate the retained protocol snapshot; clean dispatch
