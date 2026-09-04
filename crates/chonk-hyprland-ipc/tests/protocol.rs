@@ -133,7 +133,9 @@ fn the_one_based_conversion_happens_exactly_once() {
     // `movetoworkspace` converts through the same function, so it must
     // agree — a second conversion site is how the two would drift.
     let (_, actions) = answer_payload(b"/dispatch movetoworkspace 3", &snapshot);
-    assert_eq!(actions, vec![Action::MoveToWorkspace { window: None, workspace: 2 }]);
+    assert_eq!(actions, vec![Action::MoveToWorkspace { window: None, workspace: 2, follow: true }]);
+    let (_, actions) = answer_payload(b"/dispatch movetoworkspacesilent 3", &snapshot);
+    assert_eq!(actions, vec![Action::MoveToWorkspace { window: None, workspace: 2, follow: false }]);
 }
 
 /// Arriving on a workspace by a bare switch leaves nothing focused —

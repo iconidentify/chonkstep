@@ -1,6 +1,6 @@
-//! The workspace-by-number chords, end to end: `workspace <n>` and
-//! `workspace-carry <n>` on a real session, with a real client, driven
-//! by real key presses.
+//! The workspace-by-number chords, end to end: `workspace <n>`,
+//! `workspace-carry <n>` and `workspace-send <n>` on a real session,
+//! with real clients, driven by real key presses.
 //!
 //! # Why this test and not a unit test
 //!
@@ -28,7 +28,9 @@
 
 use std::time::Duration;
 
-use chonk_testkit::{keys, poll_until, Session, SessionOptions, World};
+use chonk_testkit::{keys, poll_until, profile_binary, Session, SessionOptions, World};
+
+const KEY_W: u32 = 17;
 
 /// Long enough for a key press to travel through the compositor and
 /// for the map or unmap it causes to reach the door's ledger.
@@ -47,6 +49,20 @@ fn workspace_chord(session: &mut Session, shift: bool, digit: u32) {
     if shift {
         door.key(keys::LEFTSHIFT, false).unwrap();
     }
+    door.key(keys::LEFTMETA, false).unwrap();
+    door.barrier().unwrap();
+}
+
+/// Omarchy's `super+shift+alt+<digit>` silent-send chord.
+fn workspace_send_chord(session: &mut Session, digit: u32) {
+    let door = session.door();
+    door.key(keys::LEFTMETA, true).unwrap();
+    door.key(keys::LEFTSHIFT, true).unwrap();
+    door.key(keys::LEFTALT, true).unwrap();
+    door.barrier().unwrap();
+    door.tap_key(digit).unwrap();
+    door.key(keys::LEFTALT, false).unwrap();
+    door.key(keys::LEFTSHIFT, false).unwrap();
     door.key(keys::LEFTMETA, false).unwrap();
     door.barrier().unwrap();
 }
@@ -71,9 +87,13 @@ fn on_screen(world: &World, needle: &str) -> bool {
 
 /// Waits until the terminal is on screen, or off it.
 fn wait_until_on_screen(session: &mut Session, visible: bool, what: &str) {
+    wait_for_named_window(session, "foot", visible, what);
+}
+
+fn wait_for_named_window(session: &mut Session, needle: &str, visible: bool, what: &str) {
     poll_until(SETTLE, what, || {
         let world = session.world().ok()?;
-        (on_screen(&world, "foot") == visible).then_some(())
+        (on_screen(&world, needle) == visible).then_some(())
     })
     .unwrap_or_else(|e| panic!("{what}: {e}"));
 }
@@ -133,4 +153,34 @@ fn the_workspace_chords_count_from_one_and_carry_the_window_along() {
     // workspace 2 and the terminal would appear.
     workspace_chord(&mut session, true, keys::TWO);
     wait_until_on_screen(&mut session, false, "a carry with nothing in hand to leave the desk alone");
+}
+
+/// The stock Omarchy silent-send chord crosses the full session path:
+/// baked preset, grab table, shell action and core workspace move. Two
+/// real surfaces make both promises observable: the sent window leaves
+/// while the desk stays put, and the exposed window receives focus.
+#[test]
+#[ignore = "needs a live Wayland session to nest in: scripts/e2e.sh, or cargo test -p chonk-testkit -- --ignored --test-threads=1"]
+fn the_omarchy_silent_send_stays_and_focuses_the_exposed_window() {
+    let options = SessionOptions {
+        config_extra: "desktop = \"omarchy\"\nomarchy_bar = false\nshow_dock = false\n".into(),
+        ..Default::default()
+    };
+    let mut session = Session::boot("workspace-send", options).expect("session boots");
+    let probe = profile_binary("chonk-fullscreen-probe").expect("probe is built");
+    let program = probe.display().to_string();
+    session.launch(&program, &["SendA"]).expect("first probe launches");
+    session.wait_for_window("SendA").expect("first probe maps");
+    session.launch(&program, &["SendB"]).expect("second probe launches");
+    session.wait_for_window("SendB").expect("second probe maps and takes focus");
+
+    workspace_send_chord(&mut session, keys::TWO);
+    wait_for_named_window(&mut session, "SendB", false, "the focused window to leave for workspace 2");
+    wait_for_named_window(&mut session, "SendA", true, "the current workspace and exposed window to remain visible");
+
+    session.door().chord(keys::LEFTMETA, KEY_W).expect("stock Omarchy close chord");
+    session.wait_for_window_gone("SendA").expect("the exposed window must have received focus");
+
+    workspace_chord(&mut session, false, keys::TWO);
+    wait_for_named_window(&mut session, "SendB", true, "the sent window to be waiting on workspace 2");
 }

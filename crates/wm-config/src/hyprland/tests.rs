@@ -238,14 +238,13 @@ fn the_generated_workspace_chords_are_expanded_from_the_loop() {
 }
 
 /// Hyprland's `movetoworkspacesilent` moves a window *without*
-/// following it. There is no verb for that here, and `workspace-carry`
-/// follows — so the chord stays dead rather than taking the user
-/// somewhere they did not ask to go.
+/// following it. The translated action preserves that distinction from
+/// `workspace-carry`, including Omarchy's tenth workspace on zero.
 #[test]
-fn moving_a_window_without_following_it_stays_unbound() {
+fn moving_a_window_without_following_it_is_native() {
     let reading = read(&machine());
-    assert_eq!(action_for(&reading, "super+shift+alt+1"), None);
-    assert_eq!(action_for(&reading, "super+shift+alt+0"), None);
+    assert_eq!(action_for(&reading, "super+shift+alt+1"), Some(Action::WorkspaceSend(0)));
+    assert_eq!(action_for(&reading, "super+shift+alt+0"), Some(Action::WorkspaceSend(9)));
     // ...except for the scratchpad, where "silent" is the whole point
     // and `miniaturize` is the honest match. Omarchy's own
     // `SUPER + ALT + S`.
@@ -1763,8 +1762,8 @@ fn explained_in_prose(guide: &str, reason: crate::preset::Unbound) -> bool {
 /// reader actually produces from it.
 ///
 /// `docs/omarchy-mode.md` tells a reader what they gain by having a
-/// real Omarchy configuration rather than the baked table — "143
-/// bindings over 113 commands, against the baked table's 117 over 77",
+/// real Omarchy configuration rather than the baked table — "153
+/// bindings over 113 commands, against the baked table's 127 over 77",
 /// and 38 float rules where the hardcoded one had a single prefix.
 /// Those numbers are the argument for the whole module, and a number
 /// in prose is the first thing to go stale. Pinned here against the
@@ -1776,7 +1775,7 @@ fn the_numbers_the_documents_quote_are_the_numbers_this_machine_produces() {
     let reading = read(&machine());
     assert_eq!(
         reading.keybindings.len(),
-        143,
+        153,
         "bindings read from the captured machine"
     );
     assert_eq!(
@@ -1795,17 +1794,17 @@ fn the_numbers_the_documents_quote_are_the_numbers_this_machine_produces() {
     // number there is the normal case rather than a fault.
     assert_eq!(
         reading.skipped.len(),
-        184,
+        174,
         "directives this desktop has its own answer for"
     );
     const GUIDE: &str = include_str!("../../../../docs/hyprland-config.md");
     assert!(
-        MODE.contains("143\nbindings over 113 commands") || MODE.contains("143 bindings over 113 commands"),
-        "docs/omarchy-mode.md no longer quotes the 143 bindings over 113 commands this machine produces"
+        MODE.contains("153\nbindings over 113 commands") || MODE.contains("153 bindings over 113 commands"),
+        "docs/omarchy-mode.md no longer quotes the 153 bindings over 113 commands this machine produces"
     );
     assert!(
-        GUIDE.contains("files=42 bindings=143 commands=113 env=8 autostart=4")
-            && GUIDE.contains("float_rules=45 monitors=1 skipped=184"),
+        GUIDE.contains("files=42 bindings=153 commands=113 env=8 autostart=4")
+            && GUIDE.contains("float_rules=45 monitors=1 skipped=174"),
         "the guide's sample log line no longer matches what this machine reports"
     );
 }

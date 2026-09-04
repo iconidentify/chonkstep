@@ -200,17 +200,15 @@ fn compositor_verb(name: &str, arg: &str) -> Verb {
             // workspace this desktop does not have.
             WorkspaceTarget::Special | WorkspaceTarget::Other => Verb::Unbound(Unbound::NoVerb),
         },
-        // `movetoworkspacesilent` moves the window *without following
-        // it*, which is a different verb from `movetoworkspace` and
-        // one this desktop does not have. Left unbound rather than
-        // approximated with the following one: a user who presses
-        // "move this away and stay here" and lands on the other
-        // workspace has had their attention taken somewhere they did
-        // not ask to go, which is exactly the "an approximation is
-        // worse than a dead key" case. The one exception is the
-        // scratchpad below, where "silent" is the whole point and
-        // `miniaturize` matches it.
+        // Silent sends are native: the window leaves and the workspace
+        // does not. Relative targets are deliberately left alone here
+        // because config actions carry a stable workspace number while
+        // direct IPC resolves them against its live snapshot.
         "movetoworkspacesilent" => match workspace_target(arg) {
+            WorkspaceTarget::Index(n) => match workspace_send_index_action(n) {
+                Some(action) => Verb::Action(action),
+                None => Verb::Unbound(Unbound::NoVerb),
+            },
             WorkspaceTarget::Special => Verb::Action(Action::Miniaturize),
             _ => Verb::Unbound(Unbound::NoVerb),
         },
@@ -324,6 +322,12 @@ fn workspace_index_action(index: u32) -> Option<Action> {
 /// `n`".
 fn workspace_carry_index_action(index: u32) -> Option<Action> {
     zero_based(index).map(Action::WorkspaceCarry)
+}
+
+/// As [`workspace_index_action`], for "send this window to workspace
+/// `n` and remain here".
+fn workspace_send_index_action(index: u32) -> Option<Action> {
+    zero_based(index).map(Action::WorkspaceSend)
 }
 
 fn zero_based(index: u32) -> Option<usize> {

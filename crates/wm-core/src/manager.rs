@@ -839,12 +839,30 @@ impl<B: Backend> WindowManager<B> {
             // — a pager showing the workspace row needs to hear it.
             self.backend.publish_workspaces(self.workspace_count, self.current_workspace);
         }
-        let Some(client) = self.clients.get_mut(id) else {
+        let Some(client) = self.clients.get(id) else {
             return;
         };
         if client.workspace == workspace {
             return;
         }
+        // Sending the active window away should expose a usable
+        // desktop, not strand keyboard focus on `None`. Select the next
+        // visible client while the departing one is still in the
+        // cycle, so the ordinary focus path handles decorations,
+        // passive grabs, raising and active-window publication. With no
+        // alternative the cycle lands back on `id` and the hide path
+        // below clears it exactly as before. A pinned client remains
+        // visible on every workspace, so moving its membership must not
+        // move focus away from it.
+        if self.focused == Some(id)
+            && workspace != self.current_workspace
+            && !client.flags.contains(ClientFlags::STICKY)
+        {
+            self.focus_adjacent_client(true);
+        }
+        let Some(client) = self.clients.get_mut(id) else {
+            return;
+        };
         client.workspace = workspace;
         let window = client.window;
         // A move is precisely when a window's `_NET_WM_DESKTOP`
@@ -3893,6 +3911,41 @@ mod tests {
         assert_eq!(wm.client(id).unwrap().workspace, 1);
         assert!(wm.backend().unmapped_frames.contains(&frame));
         assert_eq!(wm.current_workspace(), 0, "moving a client must not itself change the active workspace");
+    }
+
+    #[test]
+    fn moving_the_focused_client_away_focuses_the_exposed_client() {
+        let mut backend = FakeBackend::new();
+        let remaining_window = backend.create_window();
+        let departing_window = backend.create_window();
+        let mut wm = wm(backend);
+        wm.dispatch(BackendEvent::MapRequest(remaining_window));
+        wm.dispatch(BackendEvent::MapRequest(departing_window));
+        let remaining = wm.client_for_window(remaining_window).unwrap();
+        let departing = wm.client_for_window(departing_window).unwrap();
+        assert_eq!(wm.focused_client(), Some(departing));
+
+        wm.move_client_to_workspace(departing, 1);
+
+        assert_eq!(wm.current_workspace(), 0, "a silent send must leave the user on the current workspace");
+        assert_eq!(wm.client(departing).unwrap().workspace, 1);
+        assert_eq!(wm.focused_client(), Some(remaining), "the exposed window should receive keyboard focus");
+        assert_eq!(wm.backend().published_active_windows.last(), Some(&Some(remaining_window)));
+    }
+
+    #[test]
+    fn moving_a_pinned_client_does_not_take_focus_from_it() {
+        let mut backend = FakeBackend::new();
+        let window = backend.create_window();
+        let mut wm = wm(backend);
+        wm.dispatch(BackendEvent::MapRequest(window));
+        let id = wm.client_for_window(window).unwrap();
+        assert!(wm.set_client_pinned(id, true));
+
+        wm.move_client_to_workspace(id, 1);
+
+        assert_eq!(wm.focused_client(), Some(id));
+        assert_eq!(wm.client(id).unwrap().workspace, 1);
     }
 
     // Workspace keybindings are config-driven from the binary now

@@ -130,6 +130,11 @@ pub enum Action {
     /// demand and cannot be destroyed, so there is no state in which
     /// this verb could sensibly refuse.
     Workspace(usize),
+    /// Send the focused window to a workspace by number without
+    /// following it there — `"workspace-send 4"`. 0-based payload and
+    /// grow-on-demand semantics exactly as [`Self::Workspace`]. The
+    /// exposed window, when there is one, becomes focused.
+    WorkspaceSend(usize),
     /// Carry the focused window to a workspace by number and follow it
     /// there — `"workspace-carry 4"`, the by-number
     /// [`Self::WorkspaceCarryNext`]. 0-based payload and grow-on-demand
@@ -255,16 +260,18 @@ fn action_from_name(name: &str) -> Option<Action> {
         // workspaces — which is exactly what Omarchy's `SUPER + 0`
         // wants. `run <name>` already established the shape: verb,
         // space, argument.
-        rest if rest.starts_with("workspace ") || rest.starts_with("workspace-carry ") => {
+        rest if rest.starts_with("workspace ")
+            || rest.starts_with("workspace-send ")
+            || rest.starts_with("workspace-carry ") => {
             let (verb, number) = rest.split_once(' ')?;
             let index = workspace_index(number)?;
-            Some(if verb == "workspace" {
-                Action::Workspace(index)
-            } else {
-                Action::WorkspaceCarry(index)
+            Some(match verb {
+                "workspace" => Action::Workspace(index),
+                "workspace-send" => Action::WorkspaceSend(index),
+                _ => Action::WorkspaceCarry(index),
             })
         }
-        // `run <name>` carries an argument like the two workspace
+        // `run <name>` carries an argument like the three workspace
         // verbs above, but its argument is a key into `[commands]` —
         // not a command line. Everything after the verb is taken
         // whole, including inner whitespace, so a command may be named
@@ -1800,6 +1807,7 @@ mod tests {
             "super+0" = "workspace 10"
             "super+shift+1" = "workspace-carry 1"
             "super+shift+9" = "workspace-carry 9"
+            "super+shift+alt+9" = "workspace-send 9"
             "#,
         )
         .unwrap();
@@ -1821,6 +1829,10 @@ mod tests {
         assert_eq!(
             action_for(&config, "super+shift+9"),
             Some(Action::WorkspaceCarry(8))
+        );
+        assert_eq!(
+            action_for(&config, "super+shift+alt+9"),
+            Some(Action::WorkspaceSend(8))
         );
     }
 
@@ -1930,9 +1942,10 @@ mod tests {
             ("workspace-prev", Action::WorkspacePrev),
             ("workspace-carry-next", Action::WorkspaceCarryNext),
             ("workspace-carry-prev", Action::WorkspaceCarryPrev),
-            // The parameterised pair, one number each: the argument is
+            // The parameterised actions, one number each: the argument is
             // covered exhaustively below, this pins the names.
             ("workspace 4", Action::Workspace(3)),
+            ("workspace-send 4", Action::WorkspaceSend(3)),
             ("workspace-carry 4", Action::WorkspaceCarry(3)),
             ("overview", Action::Overview),
             ("window-menu", Action::WindowMenu),

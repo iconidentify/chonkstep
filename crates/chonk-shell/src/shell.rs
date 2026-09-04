@@ -1746,6 +1746,11 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
             // the row on demand exactly as `workspace-next` does one
             // step at a time.
             Action::Workspace(index) => wm.switch_workspace(*index),
+            Action::WorkspaceSend(index) => {
+                if let Some(id) = wm.focused_client() {
+                    wm.move_client_to_workspace(id, *index);
+                }
+            }
             Action::WorkspaceCarry(index) => wm.carry_focused_to_workspace(*index),
             // The modal Overview. Closed: open it (declined during a
             // live Alt+Tab session — two modal keyboard owners cannot

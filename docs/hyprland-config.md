@@ -213,16 +213,9 @@ specific directive, not a count. Turn on `RUST_LOG=debug` to see them.
 
 ### Bindings this desktop has no verb for
 
-Beyond the tiling vocabulary, two specific chord families stay dead
-and are worth knowing about:
+Beyond the tiling vocabulary, one specific chord family stays dead and
+is worth knowing about:
 
-- **`movetoworkspacesilent`** — Omarchy's `SUPER + SHIFT + ALT + 1..0`,
-  "move this window away but stay here". `workspace-carry` *follows*,
-  so binding it there would take your attention somewhere you did not
-  ask to go. The one exception is the scratchpad
-  (`movetoworkspacesilent special:scratchpad`, Omarchy's
-  `SUPER + ALT + S`), which becomes `miniaturize`: the window collapses
-  to an icon tile on the desk and comes back by double-clicking it.
 - **The universal clipboard chords** (`SUPER + C/V/X`), which Omarchy
   builds by synthesising `Ctrl+C` at the seat. That is the
   compositor's own input path; no command could stand in.
@@ -232,6 +225,12 @@ visible floating frames by their actual root-coordinate geometry and
 focuses the closest candidate in that direction. Directional movement
 and swapping remain tiling-only because a free-form window has no
 neighbouring slot to move into.
+
+Silent workspace sends (`movetoworkspacesilent 1..99`) are native too:
+the active window moves without changing the current workspace, and an
+exposed window receives focus. The scratchpad form remains mapped to
+`miniaturize`, because Chonkstep models recoverable desktop icons rather
+than a special scratchpad workspace.
 
 A last group is refused for a different reason — *declined on purpose*,
 meaning chonkstep could bind them and does not, because what it would
@@ -419,8 +418,8 @@ One `info` line per read, and one `debug` line per thing skipped:
 
 ```
 INFO  hyprland-config: read the desktop's live Hyprland configuration
-      files=42 bindings=143 commands=113 env=8 autostart=4
-      float_rules=45 monitors=1 skipped=184
+      files=42 bindings=153 commands=113 env=8 autostart=4
+      float_rules=45 monitors=1 skipped=174
 DEBUG hyprland-config: not carried over kind=bind what="SUPER + J (Toggle window split)"
       why="tiling-only: no meaning on a stacking desk"
 ```

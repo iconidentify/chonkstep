@@ -190,8 +190,8 @@ between "chonkstep knows what Omarchy's chords were in August" and
 "Omarchy's menu still configures your machine": rebind a key through
 their UI and the running session follows it within a second.
 
-On the machine this was developed on the live read produced **143
-bindings over 113 commands**, against the baked table's 117 over 77 —
+On the machine this was developed on the live read produced **153
+bindings over 113 commands**, against the baked table's 127 over 77 —
 the extra ones are mostly the preinstalled webapp and TUI chords, which
 a table of constants had to write off because Omarchy gates them on a
 file test that only a live read can make.
@@ -211,7 +211,7 @@ what the live read falls back to.
 
 Both tables live in the keybinding card, beside chonkstep's own:
 **[keybindings.md](keybindings.md), under "The Omarchy keymap"**
-— 117 bindings over 77 declared commands, then the 33 groups of Omarchy
+— 127 bindings over 77 declared commands, then the 32 groups of Omarchy
 chords that are deliberately dead here and why. Both are transcribed
 from `crates/wm-config/src/preset.rs`, which is the authoritative list;
 `crates/wm-config/tests/preset_doc.rs` fails if the card and the table
@@ -239,6 +239,9 @@ the config file, as Omarchy does, and grows the row on demand — press
 Directional focus has graduated from this list too:
 `super+left/right/up/down` ranks the visible floating frames by their
 actual geometry and focuses the closest candidate in that direction.
+So has silent workspace movement: `super+shift+alt+1..0` sends the
+focused window to that workspace, keeps the current workspace on
+screen, and focuses the window it exposed.
 
 - **Toggling Omarchy's bar** (`super+shift+space`) has no chonkstep
   verb: `toggle-dock` toggles *this desk's* Dock, which is a different

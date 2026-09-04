@@ -450,11 +450,13 @@
 #   workspace-carry-next, workspace-carry-prev, overview, window-menu,
 #   toggle-dock, reload, restart, none
 #
-# ...plus three actions that take an argument:
+# ...plus four actions that take an argument:
 #
 #   "workspace <n>"        go to workspace n
 #   "workspace-carry <n>"  take the focused window to workspace n, and
 #                          follow it there
+#   "workspace-send <n>"   send the focused window to workspace n, but
+#                          keep this workspace on screen
 #   "run <name>"           run the [commands] entry called <name>. The
 #                          argument is a name, never a command line --
 #                          see [commands] above for why.
@@ -513,10 +515,12 @@
 
 # Workspaces by number are unbound in this keymap -- the defaults above
 # reach them by stepping -- but the verbs are there for the taking, and
-# `keymap = "omarchy"` binds all twenty of them on super+1..0 and
-# super+shift+1..0 for a user who arrives with that muscle memory:
+# `keymap = "omarchy"` binds all thirty of them on super+1..0,
+# super+shift+1..0 and super+shift+alt+1..0 for a user who arrives with
+# that muscle memory:
 #"alt+ctrl+1" = "workspace 1"                # go to the first workspace
 #"alt+shift+1" = "workspace-carry 1"         # ...and take this window along
+#"alt+ctrl+shift+1" = "workspace-send 1"     # ...or send it and stay here
 
 # "overview" opens a modal view of every window on the current desk as
 # a grid of live thumbnails, with a workspace strip along the bottom.

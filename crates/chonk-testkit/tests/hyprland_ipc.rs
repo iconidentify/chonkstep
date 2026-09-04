@@ -446,6 +446,35 @@ fn switches_the_workspace_for_real() {
     .expect("the Lua dispatch dialect must work too");
 }
 
+/// The direct dispatcher must preserve the semantic difference between
+/// `movetoworkspace` and `movetoworkspacesilent`: move the active
+/// window, leave the output on its current workspace, and focus what
+/// the move exposed.
+#[test]
+#[ignore = "needs a Wayland session to nest inside"]
+fn silently_moves_a_real_window_without_following_it() {
+    let mut session = boot("hypr-ipc-workspace-send");
+    let dir = socket_dir(&session);
+    let probe = profile_binary("chonk-fullscreen-probe").expect("probe is built");
+    let program = probe.display().to_string();
+    session.launch(&program, &["SilentA"]).expect("first probe launches");
+    session.wait_for_window("SilentA").expect("first probe maps");
+    session.launch(&program, &["SilentB"]).expect("second probe launches");
+    session.wait_for_window("SilentB").expect("second probe maps and takes focus");
+
+    assert_eq!(request(&dir, "/dispatch movetoworkspacesilent 2").trim(), "ok");
+
+    poll_until(EVENT, "the active window to move while the desktop stays", || {
+        let clients = json(&dir, "j/clients");
+        let moved = clients.as_array()?.iter().find(|client| client["title"] == "SilentB")?;
+        (moved["workspace"]["id"] == serde_json::json!(2)
+            && json(&dir, "j/activeworkspace")["id"] == serde_json::json!(1)
+            && json(&dir, "j/activewindow")["title"] == "SilentA")
+            .then_some(())
+    })
+    .expect("silent move must send B, remain on workspace 1, and focus A");
+}
+
 /// A mutation arriving through chonkstep's native bar protocol must
 /// invalidate the Hyprland event baseline too. Omarchy can have both
 /// clients connected at once; treating only Hyprland requests as dirty

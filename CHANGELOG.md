@@ -180,14 +180,17 @@ crate and both session binaries carry the same number.
   applied or refused with a named reason. `movefocus l/r/u/d` and Omarchy's
   `SUPER + Arrow` chords now perform native geometry-ranked spatial focus over
   floating frames, while hidden, miniaturized, and no-focus clients are
-  excluded. Bindings inside unsupported submaps can no longer leak into the
-  global keymap.
+  excluded. `movetoworkspacesilent` and Omarchy's ten
+  `SUPER + SHIFT + ALT + digit` chords now send a window without following it;
+  the exposed window receives focus instead of leaving the keyboard stranded.
+  Bindings inside unsupported submaps can no longer leak into the global keymap.
 - **Hyprland-compatible IPC reports live state.** Window, monitor, workspace,
   keyboard, binding, reload, and refusal data now come from the running desk;
   `exec --` preserves argv; mapping events and addresses agree with the
   foreign-toplevel protocol; `hyprctl dispatch movefocus l/r/u/d` reaches the
-  same native spatial focus as Omarchy's bindings; and unsupported tiling
-  commands no longer claim success. This is enough for Omarchy's current shell,
+  same native spatial focus as Omarchy's bindings, and
+  `hyprctl dispatch movetoworkspacesilent` reaches the native send path;
+  unsupported tiling commands no longer claim success. This is enough for Omarchy's current shell,
   menus, scripts, and bar to operate without a ChonkStep-specific fork.
 - **The protocols ordinary clients expect.** The Wayland compositor now serves
   activation, cursor-shape, primary-selection, text-input/input-method,

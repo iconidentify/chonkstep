@@ -399,6 +399,16 @@ pub const OMARCHY_BINDINGS: &[(&str, &str)] = &[
     ("super+shift+8", "workspace-carry 8"),
     ("super+shift+9", "workspace-carry 9"),
     ("super+shift+0", "workspace-carry 10"),
+    ("super+shift+alt+1", "workspace-send 1"),
+    ("super+shift+alt+2", "workspace-send 2"),
+    ("super+shift+alt+3", "workspace-send 3"),
+    ("super+shift+alt+4", "workspace-send 4"),
+    ("super+shift+alt+5", "workspace-send 5"),
+    ("super+shift+alt+6", "workspace-send 6"),
+    ("super+shift+alt+7", "workspace-send 7"),
+    ("super+shift+alt+8", "workspace-send 8"),
+    ("super+shift+alt+9", "workspace-send 9"),
+    ("super+shift+alt+0", "workspace-send 10"),
     // "Move window to scratchpad": send this window out of the way and
     // leave it recoverable. Chonkstep's nearest true verb is
     // `miniaturize` — the window collapses to an icon tile on the desk
@@ -603,7 +613,6 @@ pub const OMARCHY_UNBOUND: &[(&str, &str, Unbound)] = &[
         "grow and shrink the window by 25 / 100 / 300 px",
         Unbound::TilingOnly,
     ),
-    ("super+shift+alt+1..0", "move the window to workspace n without following", Unbound::NoVerb),
     ("super+s", "toggle the scratchpad workspace", Unbound::NoVerb),
     ("super+ctrl+tab", "the workspace before this one", Unbound::NoVerb),
     ("super+shift+alt+left/right/up/down", "move the workspace to the monitor in that direction", Unbound::NoVerb),
@@ -863,22 +872,20 @@ mod tests {
                 "{spec} is documented unbound but the preset binds it"
             );
         }
-        // The digit families that stay dead, every member: moving a
-        // window without following it, and the group-focus chords.
+        // The group-focus digit family stays dead, every member.
         for digit in '1'..='9' {
-            for prefix in ["super+shift+alt", "super+alt"] {
-                let spec = format!("{prefix}+{digit}");
-                let combo = parse_key(&spec).unwrap();
-                assert!(
-                    !bound.contains(&combo),
-                    "{spec} is documented unbound but the preset binds it"
-                );
-            }
+            let spec = format!("super+alt+{digit}");
+            let combo = parse_key(&spec).unwrap();
+            assert!(
+                !bound.contains(&combo),
+                "{spec} is documented unbound but the preset binds it"
+            );
         }
-        // ...and the two that are alive, asserted rather than left to
+        // ...and the three that are alive, asserted rather than left to
         // the gap between the lists: `super+n` is workspace n and
-        // `super+shift+n` carries the window there, counting from one
-        // with `super+0` as the tenth, which is where Omarchy puts it.
+        // `super+shift+n` carries the window there, while adding Alt
+        // sends it without following. All count from one with zero as
+        // the tenth, which is where Omarchy puts them.
         let by_number = |spec: &str| {
             let combo = parse_key(spec).unwrap();
             omarchy_keybindings()
@@ -899,6 +906,10 @@ mod tests {
             assert_eq!(
                 by_number(&format!("super+shift+{key}")),
                 Some(Action::WorkspaceCarry(digit - 1))
+            );
+            assert_eq!(
+                by_number(&format!("super+shift+alt+{key}")),
+                Some(Action::WorkspaceSend(digit - 1))
             );
         }
         for direction in ["left", "right", "up", "down"] {

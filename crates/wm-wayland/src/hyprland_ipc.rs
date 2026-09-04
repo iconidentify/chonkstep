@@ -273,6 +273,7 @@ fn ipc_binding(binding: &wm_config::Binding, session: &chonk_shell::startup::Ses
             wm_core::FocusDirection::Down => "d",
         }.to_string()),
         wm_config::Action::Workspace(index) => ("workspace".to_string(), (index + 1).to_string()),
+        wm_config::Action::WorkspaceSend(index) => ("movetoworkspacesilent".to_string(), (index + 1).to_string()),
         wm_config::Action::WorkspaceCarry(index) => ("movetoworkspace".to_string(), (index + 1).to_string()),
         other => ("chonkstep".to_string(), format!("{other:?}")),
     };
@@ -368,29 +369,25 @@ pub(crate) fn apply(comp: &mut Compositor, action: Action) -> bool {
             }
             None => false,
         },
-        Action::MoveToWorkspace { window, workspace } => {
+        Action::MoveToWorkspace { window, workspace, follow } => {
             let client = match window {
                 Some(id) => client_of(wm, id),
                 None => wm.focused_client(),
             };
-            match (client, window) {
-                // Hyprland's `movetoworkspace` moves the window *and
-                // follows it*; `movetoworkspacesilent` is the variant
-                // that does not, and this module refuses that one
-                // because chonkstep cannot move without following.
+            match (client, window, follow) {
                 // `carry_focused_to_workspace` is exactly move + switch
                 // + activate, and it grows the row on demand.
-                (Some(_), None) => {
+                (Some(_), None, true) => {
                     wm.carry_focused_to_workspace(workspace);
                     true
                 }
-                // A named window that is not the focused one can only
-                // be moved; there is nothing to carry.
-                (Some(client), Some(_)) => {
+                // A named target is moved without stealing attention;
+                // the silent verb does the same for the active target.
+                (Some(client), _, _) => {
                     wm.move_client_to_workspace(client, workspace);
                     true
                 }
-                (None, _) => false,
+                (None, _, _) => false,
             }
         }
         Action::Fullscreen(which) => match wm.focused_client() {

@@ -56,7 +56,8 @@ pub enum Action {
     /// Close the focused window.
     KillActive,
     /// Move a window (or the focused one) to a 0-based workspace index.
-    MoveToWorkspace { window: Option<u64>, workspace: usize },
+    /// `follow` distinguishes Hyprland's ordinary and `silent` verbs.
+    MoveToWorkspace { window: Option<u64>, workspace: usize, follow: bool },
     /// Run a command line through the user's POSIX shell. This is the
     /// spelling used by Lua's `hl.dsp.exec_cmd`, whose single string is
     /// explicitly shell source.
@@ -155,7 +156,6 @@ const TILING_ONLY: &[(&str, &str)] = &[
     ("moveoutofgroup", "chonkstep has no window groups"),
     ("lockgroups", "chonkstep has no window groups"),
     ("togglespecialworkspace", "chonkstep has no special (scratchpad) workspaces"),
-    ("movetoworkspacesilent", "chonkstep cannot move a window without following it"),
     ("workspaceopt", "chonkstep has no per-workspace layout options"),
     ("dpms", "chonkstep does not control output power from IPC; dpmsStatus remains the real powered-on state"),
     ("submap", "chonkstep's keybindings do not have submaps"),
@@ -231,8 +231,10 @@ fn parse_classic(verb: &str, rest: &str, snapshot: &Snapshot) -> Outcome {
             None => Outcome::Unsupported(format!("no window matches {rest:?}")),
         },
         "killactive" => Outcome::Run(Action::KillActive),
-        "movetoworkspace" => {
-            // `movetoworkspace 3` or `movetoworkspace 3,address:0x...`
+        "movetoworkspace" | "movetoworkspacesilent" => {
+            // `movetoworkspace 3`, its `silent` counterpart, or either
+            // spelling with `,address:0x...` selecting a window.
+            let follow = verb == "movetoworkspace";
             let (target, window) = match rest.split_once(',') {
                 Some((target, window)) => (target.trim(), Some(window.trim())),
                 None => (rest, None),
@@ -248,7 +250,7 @@ fn parse_classic(verb: &str, rest: &str, snapshot: &Snapshot) -> Outcome {
                     None => return Outcome::Unsupported(format!("no window matches {selector:?}")),
                 },
             };
-            Outcome::Run(Action::MoveToWorkspace { window, workspace })
+            Outcome::Run(Action::MoveToWorkspace { window, workspace, follow })
         }
         "exec" => classic_exec(rest),
         "fullscreen" => Outcome::Run(Action::Fullscreen(match rest.trim() {
