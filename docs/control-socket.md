@@ -38,6 +38,9 @@ intended clients (Quickshell's `Socket`, `socat`, a shell script with
   (0x0A). The object itself contains no raw newline.
 - A client line longer than **65,536 bytes** including the newline is a
   framing violation; the shell disconnects the client.
+- All clients share one **131,072-byte read budget per shell pass**.
+  The first reader rotates between passes, so a permanent writer cannot
+  spend the budget before the same later client every time.
 - Empty lines are ignored.
 
 ### 1.1 Path
@@ -74,6 +77,15 @@ on the shell sends a facet's event whenever that facet changes.
 Requests (§4) may be sent at any time after connecting, including
 before `hello` has been read. The shell answers each request with
 either the events it caused or an `error`.
+
+The shell retains at most **64 simultaneous clients**. It still accepts
+connections beyond that limit and closes them immediately, so a client
+gets EOF rather than hanging in a full listener backlog. One warning is
+logged when a continuously-full population starts refusing; another is
+allowed only after a slot has reopened. A connected subscriber is
+allowed to stay quiet indefinitely — receiving state without sending
+requests is the protocol's ordinary shape, so silence is not an idle
+timeout signal here.
 
 The shell disconnects a client when: the client closes; a line
 overflows (§1); the client's outbound buffer on the shell's side

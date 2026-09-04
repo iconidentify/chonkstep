@@ -1623,6 +1623,15 @@ pub struct Compositor {
     /// it in `sync_dock_sources` keeps the hot dispatch path allocation
     /// free after the largest set seen so far establishes its capacity.
     source_scratch: Vec<RawFd>,
+    /// Reused set for desired membership during pruning, then for the
+    /// registered set during insertion. That makes each reconciliation
+    /// linear instead of nesting a scan of one descriptor list inside
+    /// every element of the other.
+    source_membership_scratch: HashSet<RawFd>,
+    /// Which entries in `source_scratch` belong to Hyprland IPC. The
+    /// callback needs this bit; collecting it once avoids a nested
+    /// ownership scan for every descriptor.
+    hyprland_source_scratch: HashSet<RawFd>,
     /// The Hyprland IPC server, when the session asked for one
     /// (`CHONKSTEP_HYPRLAND_IPC=1`). `None` in an ordinary session,
     /// which then pays one env lookup at startup and nothing else.
@@ -1839,7 +1848,11 @@ pub struct Compositor {
 /// allocating a replacement vector. Source order has no meaning to
 /// calloop, so `swap_remove` is the constant-time erasure that keeps
 /// the capacity established by the largest connection set.
-fn retain_wanted_sources<T>(registered: &mut Vec<(RawFd, T)>, wanted: &[RawFd], mut remove: impl FnMut(T)) {
+fn retain_wanted_sources<T>(
+    registered: &mut Vec<(RawFd, T)>,
+    wanted: &HashSet<RawFd>,
+    mut remove: impl FnMut(T),
+) {
     let mut index = 0;
     while index < registered.len() {
         if wanted.contains(&registered[index].0) {
@@ -2513,11 +2526,6 @@ impl Compositor {
             let _ = server.service(&before, |action| crate::hyprland_ipc::apply(self, action));
             self.notice_wm_protocol_changes();
             publish |= self.hyprland_state_dirty;
-        } else if server.has_pending_output() {
-            // A response or event which met socket backpressure still
-            // gets a bounded retry on the housekeeping cadence, but a
-            // retry cannot alter desktop state and needs no snapshot.
-            server.maintain();
         }
 
         let config_reloaded = self.shell.take_config_reloaded();
@@ -2545,13 +2553,13 @@ impl Compositor {
                     self.shell.session_state(),
                 );
                 server.publish_owned(after);
-            } else if socket_ready {
-                // A readable event fd with no state delta is normally
-                // a hangup. Probe and prune it so calloop cannot spin
-                // forever on a dead subscriber.
-                server.maintain();
             }
         }
+        // Exactly once per compositor pass: retry bounded output,
+        // prune readable hangups, and advance the silent one-shot
+        // request timeout even on an otherwise quiet desktop. None of
+        // those jobs needs a snapshot.
+        server.maintain();
         self.hyprland_state_dirty = false;
         self.hyprland_ipc = Some(server);
     }
@@ -2579,7 +2587,11 @@ impl Compositor {
 
     fn sync_dock_sources(&mut self) {
         let mut wanted = std::mem::take(&mut self.source_scratch);
+        let mut membership = std::mem::take(&mut self.source_membership_scratch);
+        let mut hyprland = std::mem::take(&mut self.hyprland_source_scratch);
         wanted.clear();
+        membership.clear();
+        hyprland.clear();
         self.shell.extend_extra_poll_fds(&mut wanted);
         // The Hyprland IPC sockets ride the same reconciliation rather
         // than owning calloop sources of their own, because they have
@@ -2589,19 +2601,24 @@ impl Compositor {
         // unchanged — the source is removed on the same pass that drops
         // the owner, and before calloop next polls.
         if let Some(server) = &self.hyprland_ipc {
+            let first = wanted.len();
             server.extend_poll_fds(&mut wanted);
+            hyprland.extend(wanted[first..].iter().copied());
         }
+        membership.extend(wanted.iter().copied());
         // Removals first, so a descriptor that was closed this pass is
         // unregistered before anything else can be inserted at the same
         // number.
         let loop_handle = &self.loop_handle;
-        retain_wanted_sources(&mut self.dock_sources, &wanted, |token| loop_handle.remove(token));
+        retain_wanted_sources(&mut self.dock_sources, &membership, |token| loop_handle.remove(token));
 
+        membership.clear();
+        membership.extend(self.dock_sources.iter().map(|(fd, _)| *fd));
         for &fd in &wanted {
-            if self.dock_sources.iter().any(|(known, _)| *known == fd) {
+            if !membership.insert(fd) {
                 continue;
             }
-            let is_hyprland_ipc = self.hyprland_ipc.as_ref().is_some_and(|server| server.owns_poll_fd(fd));
+            let is_hyprland_ipc = hyprland.contains(&fd);
             // SAFETY: `fd` is owned by a `Seqpacket` or
             // `SeqpacketListener` inside the shell, and the source is
             // removed above on the same pass that drops the owner and
@@ -2632,6 +2649,8 @@ impl Compositor {
             }
         }
         self.source_scratch = wanted;
+        self.source_membership_scratch = membership;
+        self.hyprland_source_scratch = hyprland;
     }
 
     /// Feeds one already-coalesced `PointerMotion` to the shell's drag
@@ -3486,6 +3505,8 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
         popups: PopupManager::default(),
         dock_sources: Vec::new(),
         source_scratch: Vec::new(),
+        source_membership_scratch: HashSet::new(),
+        hyprland_source_scratch: HashSet::new(),
         seat,
         outputs,
         xwm: None,
@@ -4483,7 +4504,8 @@ mod tests {
         let allocation = registered.as_ptr();
         let mut removed = Vec::new();
 
-        retain_wanted_sources(&mut registered, &[5, 3, 7], |token| removed.push(token));
+        let wanted = HashSet::from([5, 3, 7]);
+        retain_wanted_sources(&mut registered, &wanted, |token| removed.push(token));
 
         registered.sort_by_key(|(fd, _)| *fd);
         assert_eq!(registered, [(3, 'a'), (5, 'c')]);

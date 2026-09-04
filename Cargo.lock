@@ -369,6 +369,7 @@ name = "chonk-testkit"
 version = "0.2.0"
 dependencies = [
  "chonk-dock-proto",
+ "chonk-hyprland-ipc",
  "libc",
  "png 0.17.16",
  "serde_json",

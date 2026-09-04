@@ -69,5 +69,5 @@ pub mod state;
 pub use dispatch::{Action, Direction, Outcome};
 pub use event::{Differ, Event};
 pub use request::Request;
-pub use server::Server;
+pub use server::{Server, MAX_EVENT_CLIENTS, MAX_REQUEST_CLIENTS, REQUEST_IDLE_PASSES};
 pub use state::{Monitor, Snapshot, Window, Workspace};

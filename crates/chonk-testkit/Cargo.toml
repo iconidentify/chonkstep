@@ -62,6 +62,10 @@ wayland-scanner = "0.31"
 wm-theme = { path = "../wm-theme" }
 
 [dev-dependencies]
+# The Hyprland IPC connection-storm e2e uses the server's public caps
+# as the contract it drives past; sharing the names keeps the live
+# assertion in lockstep with the documented limit.
+chonk-hyprland-ipc = { path = "../chonk-hyprland-ipc" }
 # The Overview e2e test lays out its expected tiles through the theme
 # API's geometry types.
 wm-theme-api = { path = "../wm-theme-api" }

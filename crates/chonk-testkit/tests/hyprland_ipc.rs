@@ -31,6 +31,7 @@ use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use chonk_hyprland_ipc::{MAX_EVENT_CLIENTS, MAX_REQUEST_CLIENTS};
 use chonk_testkit::{poll_until, profile_binary, Session, SessionOptions};
 
 const EVENT: Duration = Duration::from_secs(10);
@@ -179,6 +180,74 @@ fn disconnected_socket_probes_leave_no_fds_and_no_busy_loop_behind() {
     .unwrap_or_else(|error| panic!("{error}; baseline={baseline}, now={}", fd_count()));
 
     assert!(json(&dir, "j/version").is_object(), "the request socket still answers after the probe storm");
+}
+
+/// Excess connections are accepted and closed, never retained as
+/// compositor descriptors/calloop sources. The two populations are
+/// capped independently so a real query can recover as soon as the
+/// silent request peers leave even while a full event audience stays.
+#[test]
+#[ignore = "needs a Wayland session to nest inside"]
+fn a_connection_storm_is_capped_before_it_can_grow_the_source_set() {
+    let mut session = boot("hypr-ipc-connection-cap");
+    let dir = socket_dir(&session);
+    let compositor_pid = session.compositor_pid();
+    let fd_count = || {
+        std::fs::read_dir(format!("/proc/{compositor_pid}/fd"))
+            .expect("the harness can inspect its child process")
+            .count()
+    };
+    fn connect(session: &mut Session, dir: &Path, socket: &str, count: usize) -> Vec<UnixStream> {
+        let mut peers = Vec::new();
+        for index in 0..count {
+            peers.push(UnixStream::connect(dir.join(socket)).expect("storm connection"));
+            // Stay below the transport's pending backlog. The property
+            // under test is the accepted population and its one-source-
+            // per-fd compositor cost, not connect(2) scheduling.
+            if index % 8 == 7 {
+                session.door().barrier().unwrap();
+            }
+        }
+        session.door().barrier().unwrap();
+        peers
+    }
+
+    session.door().barrier().unwrap();
+    let baseline = fd_count();
+    let mut requests = connect(&mut session, &dir, ".socket.sock", MAX_REQUEST_CLIENTS + 32);
+    let mut events = connect(&mut session, &dir, ".socket2.sock", MAX_EVENT_CLIENTS + 32);
+
+    let retained_bound = baseline + MAX_REQUEST_CLIENTS + MAX_EVENT_CLIENTS + 4;
+    assert!(
+        fd_count() <= retained_bound,
+        "excess clients grew the compositor past its two caps: baseline={baseline}, now={}, bound={retained_bound}",
+        fd_count()
+    );
+    for excess in [requests.last_mut().unwrap(), events.last_mut().unwrap()] {
+        excess.set_read_timeout(Some(EVENT)).unwrap();
+        let mut byte = [0_u8; 1];
+        match excess.read(&mut byte) {
+            Ok(0) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => {}
+            result => panic!("an accepted excess client must be closed immediately, got {result:?}"),
+        }
+    }
+    assert_eq!(
+        session.log().matches("hyprland IPC client limit reached").count(),
+        2,
+        "one warning per continuously-full request/event population"
+    );
+
+    drop(requests);
+    session.door().barrier().unwrap();
+    assert!(json(&dir, "j/version").is_object(), "a slot reopens without disturbing full event subscribers");
+    drop(events);
+    session.door().barrier().unwrap();
+    poll_until(EVENT, "storm descriptors and sources to be pruned", || {
+        let current = fd_count();
+        (current <= baseline + 2).then_some(current)
+    })
+    .unwrap_or_else(|error| panic!("{error}; baseline={baseline}, now={}", fd_count()));
 }
 
 /// The four requests Quickshell makes on connect, in the shapes it

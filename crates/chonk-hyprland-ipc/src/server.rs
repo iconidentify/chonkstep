@@ -37,8 +37,8 @@
 //! - Every fd is non-blocking **by construction** — `SOCK_NONBLOCK` at
 //!   `socket(2)` and `accept4(2)`, never an `fcntl` afterwards, so
 //!   there is no window in which a blocking fd exists.
-//! - Reads are budgeted per pass, so a flooding client costs a bounded
-//!   number of bytes per tick rather than a tick.
+//! - Reads share one aggregate budget per pass, so 64 flooding clients
+//!   cost the same bounded number of bytes per tick as one.
 //! - Writes are attempted once and judged afterwards: a client whose
 //!   unsent backlog exceeds [`OUTBOUND_CAP`] has stopped reading, and is
 //!   disconnected rather than waited for.
@@ -96,7 +96,19 @@ use chonk_dock_proto::transport::{Stream, StreamListener};
 /// by while still being a bar.
 pub const OUTBOUND_CAP: usize = 262_144;
 
-/// Bytes read from one client in one pass.
+/// Most simultaneous one-shot request connections retained by the server.
+pub const MAX_REQUEST_CLIENTS: usize = 64;
+
+/// Most simultaneous event-stream subscribers retained by the server.
+pub const MAX_EVENT_CLIENTS: usize = 64;
+
+/// Server passes a one-shot client may remain completely silent before
+/// it is reaped. At the compositor's 100 ms maximum housekeeping wait
+/// this gives an idle desktop about 25 seconds; animation-driven passes
+/// shorten it, but a real `hyprctl` writes as part of connecting.
+pub const REQUEST_IDLE_PASSES: u16 = 256;
+
+/// Bytes read from every request client together in one server pass.
 const READ_BUDGET: usize = 2 * request::MAX_REQUEST;
 
 /// The environment variable that turns this server off.
@@ -444,6 +456,8 @@ struct RequestClient {
     /// one-shot, so it is closed as soon as the answer is flushed.
     answered: bool,
     doomed: bool,
+    /// Consecutive servicing/maintenance passes with no request byte.
+    idle_passes: u16,
 }
 
 /// The Hyprland IPC server.
@@ -455,6 +469,11 @@ pub struct Server {
     event_clients: Vec<EventClient>,
     differ: Differ,
     refusals: u64,
+    capacity_refusals: u64,
+    request_cap_refusing: bool,
+    event_cap_refusing: bool,
+    /// First request client offered the aggregate read budget next.
+    request_read_cursor: usize,
 }
 
 impl Server {
@@ -551,6 +570,10 @@ impl Server {
             event_clients: Vec::new(),
             differ: Differ::new(),
             refusals: 0,
+            capacity_refusals: 0,
+            request_cap_refusing: false,
+            event_cap_refusing: false,
+            request_read_cursor: 0,
         })
     }
 
@@ -568,18 +591,6 @@ impl Server {
         fds.extend(self.events.iter().map(AsRawFd::as_raw_fd));
         fds.extend(self.request_clients.iter().map(|c| c.stream.as_raw_fd()));
         fds.extend(self.event_clients.iter().map(|c| c.stream.as_raw_fd()));
-    }
-
-    /// Whether `fd` is one of this server's current listeners or
-    /// clients. Event loops which share one source registry with other
-    /// subsystems use this to attribute a wakeup without allocating a
-    /// second descriptor list.
-    #[must_use]
-    pub fn owns_poll_fd(&self, fd: RawFd) -> bool {
-        self.requests.as_ref().is_some_and(|listener| listener.as_raw_fd() == fd)
-            || self.events.as_ref().is_some_and(|listener| listener.as_raw_fd() == fd)
-            || self.request_clients.iter().any(|client| client.stream.as_raw_fd() == fd)
-            || self.event_clients.iter().any(|client| client.stream.as_raw_fd() == fd)
     }
 
     /// Whether at least one request or event client is connected.
@@ -602,9 +613,26 @@ impl Server {
 
     /// Accept everything pending on both listeners.
     pub fn accept(&mut self) {
+        if self.request_clients.len() < MAX_REQUEST_CLIENTS {
+            self.request_cap_refusing = false;
+        }
         if let Some(listener) = &self.requests {
             while let Ok(Some(stream)) = listener.accept() {
                 if !accepted_from_this_user(&stream) {
+                    continue;
+                }
+                if self.request_clients.len() >= MAX_REQUEST_CLIENTS {
+                    self.capacity_refusals = self.capacity_refusals.saturating_add(1);
+                    if !self.request_cap_refusing {
+                        tracing::warn!(
+                            socket = "request",
+                            retained = self.request_clients.len(),
+                            maximum = MAX_REQUEST_CLIENTS,
+                            refusals = self.capacity_refusals,
+                            "hyprland IPC client limit reached; refusing excess connections"
+                        );
+                        self.request_cap_refusing = true;
+                    }
                     continue;
                 }
                 self.request_clients.push(RequestClient {
@@ -613,12 +641,30 @@ impl Server {
                     outbound: Vec::new(),
                     answered: false,
                     doomed: false,
+                    idle_passes: 0,
                 });
             }
+        }
+        if self.event_clients.len() < MAX_EVENT_CLIENTS {
+            self.event_cap_refusing = false;
         }
         if let Some(listener) = &self.events {
             while let Ok(Some(stream)) = listener.accept() {
                 if !accepted_from_this_user(&stream) {
+                    continue;
+                }
+                if self.event_clients.len() >= MAX_EVENT_CLIENTS {
+                    self.capacity_refusals = self.capacity_refusals.saturating_add(1);
+                    if !self.event_cap_refusing {
+                        tracing::warn!(
+                            socket = "event",
+                            retained = self.event_clients.len(),
+                            maximum = MAX_EVENT_CLIENTS,
+                            refusals = self.capacity_refusals,
+                            "hyprland IPC client limit reached; refusing excess connections"
+                        );
+                        self.event_cap_refusing = true;
+                    }
                     continue;
                 }
                 self.event_clients.push(EventClient { stream, outbound: Vec::new(), doomed: false });
@@ -640,18 +686,31 @@ impl Server {
         F: FnMut(Action) -> bool,
     {
         let mut applied_any = false;
-        for client in &mut self.request_clients {
+        let client_count = self.request_clients.len();
+        let start = self.request_read_cursor.min(client_count.saturating_sub(1));
+        let mut budget = READ_BUDGET;
+        for offset in 0..client_count {
+            let index = (start + offset) % client_count;
+            let client = &mut self.request_clients[index];
             if client.answered {
                 client.flush();
                 continue;
             }
-            let mut budget = READ_BUDGET;
+            // One request has no delimiter, so it must be allowed to
+            // drain through its size cap and one byte beyond before a
+            // response is parsed. Leaving less would turn a valid
+            // fragmented request into a truncated one merely because
+            // an earlier peer spent the shared budget.
+            if budget <= request::MAX_REQUEST {
+                continue;
+            }
             let mut buffer = [0_u8; 4096];
             loop {
                 if budget == 0 {
                     break;
                 }
-                match client.stream.recv(&mut buffer) {
+                let want = buffer.len().min(budget);
+                match client.stream.recv(&mut buffer[..want]) {
                     // A zero-length read on this socket means the client
                     // finished writing its request — which is exactly
                     // what `hyprctl` does, and is the cue to answer, not
@@ -678,6 +737,7 @@ impl Server {
                         break;
                     }
                     Ok(n) => {
+                        client.idle_passes = 0;
                         client.inbound.extend_from_slice(&buffer[..n]);
                         budget = budget.saturating_sub(n);
                         if client.inbound.len() > request::MAX_REQUEST {
@@ -720,6 +780,11 @@ impl Server {
         // whose answer has left is done with, and `hyprctl` reads to
         // EOF, so the close IS the framing.
         self.request_clients.retain(|client| !(client.doomed || client.answered && client.outbound.is_empty()));
+        self.request_read_cursor = if self.request_clients.is_empty() {
+            0
+        } else {
+            (start + 1) % self.request_clients.len()
+        };
         applied_any
     }
 
@@ -731,6 +796,7 @@ impl Server {
     /// subscriber's hangup still need maintenance, but neither can
     /// change the answer to a query or produce a compositor event.
     pub fn maintain(&mut self) {
+        self.age_idle_request_clients();
         for client in &mut self.request_clients {
             if client.answered {
                 client.flush();
@@ -741,6 +807,23 @@ impl Server {
             client.flush();
         }
         self.event_clients.retain(|client| !client.doomed);
+    }
+
+    fn age_idle_request_clients(&mut self) {
+        let mut reaped = 0_u64;
+        for client in &mut self.request_clients {
+            if client.doomed || client.answered || !client.inbound.is_empty() {
+                continue;
+            }
+            client.idle_passes = client.idle_passes.saturating_add(1);
+            if client.idle_passes >= REQUEST_IDLE_PASSES {
+                client.doomed = true;
+                reaped += 1;
+            }
+        }
+        if reaped != 0 {
+            tracing::warn!(reaped, idle_passes = REQUEST_IDLE_PASSES, "reaped silent hyprland IPC request clients");
+        }
     }
 
     /// Whether output which hit socket backpressure still needs a
@@ -922,6 +1005,38 @@ fn flush(stream: &Stream, outbound: &mut Vec<u8>, doomed: &mut bool) {
 mod enabled_tests {
     use super::*;
 
+    static SOCKET_COUNTER: std::sync::atomic::AtomicUsize =
+        std::sync::atomic::AtomicUsize::new(0);
+
+    struct Scratch(PathBuf);
+
+    impl Scratch {
+        fn new() -> Self {
+            use std::os::unix::fs::PermissionsExt as _;
+            use std::sync::atomic::Ordering;
+
+            let unique = SOCKET_COUNTER.fetch_add(1, Ordering::Relaxed);
+            let directory = std::env::temp_dir().join(format!(
+                "chonk-hyprland-ipc-{}-{unique}",
+                std::process::id()
+            ));
+            std::fs::create_dir_all(&directory).unwrap();
+            std::fs::set_permissions(&directory, std::fs::Permissions::from_mode(0o700))
+                .unwrap();
+            Self(directory)
+        }
+
+        fn socket(&self, name: &str) -> PathBuf {
+            self.0.join(name)
+        }
+    }
+
+    impl Drop for Scratch {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
     /// The switch is read from the process environment, so these run
     /// under one lock rather than in parallel: `set_var`/`remove_var`
     /// are process-wide and two tests racing would flap.
@@ -977,12 +1092,143 @@ mod enabled_tests {
             event_clients: Vec::new(),
             differ: Differ::new(),
             refusals: 0,
+            capacity_refusals: 0,
+            request_cap_refusing: false,
+            event_cap_refusing: false,
+            request_read_cursor: 0,
         };
         let mut fds = Vec::with_capacity(8);
         let allocation = fds.as_ptr();
         server.extend_poll_fds(&mut fds);
         assert!(fds.is_empty());
         assert_eq!(fds.as_ptr(), allocation, "an unchanged source set must not replace caller storage");
+    }
+
+    #[test]
+    fn accepting_past_the_named_caps_never_retains_the_excess() {
+        let scratch = Scratch::new();
+        let request_path = scratch.socket("requests.sock");
+        let event_path = scratch.socket("events.sock");
+        let mut server = Server {
+            directory: PathBuf::new(),
+            requests: Some(StreamListener::bind(&request_path).unwrap()),
+            events: Some(StreamListener::bind(&event_path).unwrap()),
+            request_clients: Vec::new(),
+            event_clients: Vec::new(),
+            differ: Differ::new(),
+            refusals: 0,
+            capacity_refusals: 0,
+            request_cap_refusing: false,
+            event_cap_refusing: false,
+            request_read_cursor: 0,
+        };
+        let mut request_peers = Vec::new();
+        let mut event_peers = Vec::new();
+
+        // Accept after every connect so the kernel's small pending
+        // backlog cannot become the quantity this test accidentally
+        // measures. The server itself is the only intended ceiling.
+        for _ in 0..MAX_REQUEST_CLIENTS + 8 {
+            request_peers.push(Stream::connect(&request_path).unwrap());
+            server.accept();
+        }
+        for _ in 0..MAX_EVENT_CLIENTS + 8 {
+            event_peers.push(Stream::connect(&event_path).unwrap());
+            server.accept();
+        }
+
+        assert_eq!(server.request_clients.len(), MAX_REQUEST_CLIENTS);
+        assert_eq!(server.event_clients.len(), MAX_EVENT_CLIENTS);
+        assert_eq!(server.poll_fds().len(), 2 + MAX_REQUEST_CLIENTS + MAX_EVENT_CLIENTS);
+        assert_eq!(server.capacity_refusals, 16);
+        assert!(server.request_cap_refusing && server.event_cap_refusing);
+    }
+
+    #[test]
+    fn request_clients_share_one_read_budget_and_the_remainder_gets_the_next_pass() {
+        use std::io::Write as _;
+        use std::os::unix::net::UnixStream;
+
+        let payload_len = request::MAX_REQUEST * 3 / 4;
+        let mut payload = b"/dispatch workspace 2".to_vec();
+        payload.resize(payload_len, b' ');
+        let mut requesters = Vec::new();
+        let mut clients = Vec::new();
+        for _ in 0..3 {
+            let (mut requester, accepted) = UnixStream::pair().unwrap();
+            requester.write_all(&payload).unwrap();
+            requesters.push(requester);
+            clients.push(RequestClient {
+                stream: Stream::from_fd(accepted.into()),
+                inbound: Vec::new(),
+                outbound: Vec::new(),
+                answered: false,
+                doomed: false,
+                idle_passes: 0,
+            });
+        }
+        let mut server = Server {
+            directory: PathBuf::new(),
+            requests: None,
+            events: None,
+            request_clients: clients,
+            event_clients: Vec::new(),
+            differ: Differ::new(),
+            refusals: 0,
+            capacity_refusals: 0,
+            request_cap_refusing: false,
+            event_cap_refusing: false,
+            request_read_cursor: 0,
+        };
+        let mut applied = 0;
+
+        let _ = server.service(&Snapshot::default(), |_| {
+            applied += 1;
+            true
+        });
+        assert_eq!(applied, 2, "three 48 KiB requests must not all fit in one 128 KiB pass");
+        assert_eq!(server.request_clients.len(), 1, "the client behind the spent budget stays queued");
+
+        let _ = server.service(&Snapshot::default(), |_| {
+            applied += 1;
+            true
+        });
+        assert_eq!(applied, 3, "the queued client receives the next pass rather than starving");
+        assert!(server.request_clients.is_empty());
+    }
+
+    #[test]
+    fn a_silent_one_shot_request_client_is_reaped_at_the_idle_bound() {
+        use std::os::unix::net::UnixStream;
+
+        let (_silent_peer, accepted) = UnixStream::pair().unwrap();
+        let mut server = Server {
+            directory: PathBuf::new(),
+            requests: None,
+            events: None,
+            request_clients: vec![RequestClient {
+                stream: Stream::from_fd(accepted.into()),
+                inbound: Vec::new(),
+                outbound: Vec::new(),
+                answered: false,
+                doomed: false,
+                idle_passes: 0,
+            }],
+            event_clients: Vec::new(),
+            differ: Differ::new(),
+            refusals: 0,
+            capacity_refusals: 0,
+            request_cap_refusing: false,
+            event_cap_refusing: false,
+            request_read_cursor: 0,
+        };
+
+        for _ in 1..REQUEST_IDLE_PASSES {
+            server.maintain();
+            assert_eq!(server.request_clients.len(), 1, "the documented idle grace must be real");
+        }
+        server.maintain();
+        assert!(server.request_clients.is_empty());
     }
 
     #[test]
@@ -1001,10 +1247,15 @@ mod enabled_tests {
                 outbound: Vec::new(),
                 answered: false,
                 doomed: false,
+                idle_passes: 0,
             }],
             event_clients: Vec::new(),
             differ: Differ::new(),
             refusals: 0,
+            capacity_refusals: 0,
+            request_cap_refusing: false,
+            event_cap_refusing: false,
+            request_read_cursor: 0,
         };
 
         // The stale-instance health check only connects. Dropping it
@@ -1034,10 +1285,15 @@ mod enabled_tests {
                 outbound: Vec::new(),
                 answered: false,
                 doomed: false,
+                idle_passes: 0,
             }],
             event_clients: Vec::new(),
             differ: Differ::new(),
             refusals: 0,
+            capacity_refusals: 0,
+            request_cap_refusing: false,
+            event_cap_refusing: false,
+            request_read_cursor: 0,
         };
 
         let applied = server.service(&Snapshot::default(), |action| {
@@ -1062,6 +1318,10 @@ mod enabled_tests {
             event_clients: vec![EventClient { stream, outbound: Vec::new(), doomed: false }],
             differ: Differ::new(),
             refusals: 0,
+            capacity_refusals: 0,
+            request_cap_refusing: false,
+            event_cap_refusing: false,
+            request_read_cursor: 0,
         };
 
         // Establish the differ's baseline while the subscriber is

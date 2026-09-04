@@ -7,6 +7,16 @@ crate and both session binaries carry the same number.
 
 ### Fixed
 
+- **Local socket connection storms can no longer grow compositor work
+  without bound.** The Hyprland request/event sockets and native control
+  socket retain at most 64 clients apiece, accept-and-close overflow with
+  once-per-episode diagnostics, and share rotating aggregate read budgets.
+  Silent one-shot requests expire while legitimately quiet subscribers do
+  not. Wayland calloop source reconciliation now uses reusable membership
+  sets and remains linear in the retained descriptor count; a live storm
+  test drives both Hyprland populations past their caps and proves overflow
+  never enters the compositor source set
+  ([#80](https://github.com/iconidentify/chonkstep/issues/80)).
 - **Fractional XSETTINGS scales no longer round GTK X11 applications to
   the nearest integer size.** `Gdk/UnscaledDPI` now carries the remainder
   left by `Gdk/WindowScalingFactor`, so their product reproduces

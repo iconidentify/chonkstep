@@ -52,9 +52,16 @@ $XDG_RUNTIME_DIR/hypr/$HYPRLAND_INSTANCE_SIGNATURE/.socket2.sock
 
 The instance directory is mode `0700`; both sockets are `0600`, and
 accepted peers must have the compositor user's uid. There is no `/tmp`
-fallback. Requests are capped at 64 KiB, all descriptors are
-non-blocking, and a client that stops reading is disconnected rather
-than allowed to stall the compositor.
+fallback. Requests are capped at 64 KiB, all request readers together
+share a 128 KiB budget per server pass, and all descriptors are
+non-blocking. The server retains at most **64 one-shot request clients**
+and **64 event subscribers**; an accepted connection beyond either cap
+is closed immediately and the continuously-full population is logged
+once. A request client which sends no byte for 256 service passes is
+reaped. Event subscribers are deliberately exempt because their valid
+protocol behavior is to connect, never write, and wait for events. A
+client that stops reading is disconnected rather than allowed to stall
+the compositor.
 
 `scripts/wayland-session.sh` publishes the live signature and
 `WAYLAND_DISPLAY` through a curated activation environment. Under uwsm

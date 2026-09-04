@@ -19,11 +19,12 @@
 //! **The shell never blocks on a client.** Every socket the shell holds
 //! is `O_NONBLOCK` from the syscall that created it (`accept4`, see
 //! `chonk_dock_proto::transport`), every read and write is a single
-//! non-blocking pass, and a client that stops reading is disconnected
-//! when the shell's buffer for it crosses `OUTBOUND_CAP` rather than
-//! being waited for. This is the same rule the dockapp host lives by,
-//! for the same reason: a bar that hangs must cost the user that bar,
-//! never the desktop.
+//! non-blocking pass, all readers share one rotating aggregate budget,
+//! and no more than [`MAX_CLIENTS`] are retained. A client that stops
+//! reading is disconnected when the shell's buffer for it crosses
+//! `OUTBOUND_CAP` rather than being waited for. This is the same rule
+//! the dockapp host lives by, for the same reason: a bar that hangs
+//! must cost the user that bar, never the desktop.
 //!
 //! A client that shuts down only its writing side has said its last
 //! request, not goodbye. `printf '{"request":"snapshot"}' | socat -
@@ -95,11 +96,13 @@ pub(crate) const LINE_CAP: usize = 65_536;
 /// that is merely slow never sees it, a client that is wedged does.
 pub(crate) const OUTBOUND_CAP: usize = 262_144;
 
-/// How much one client may hand the shell in one servicing pass.
-/// Requests are drained per line as they arrive, so this is not a
-/// framing limit; it is a bound on how long the read loop can run
-/// against a client writing faster than the shell parses, so a tick
-/// stays a tick.
+/// Most simultaneous control subscribers retained by the shell.
+pub(crate) const MAX_CLIENTS: usize = 64;
+
+/// How much all clients together may hand the shell in one servicing
+/// pass. Requests are drained per line as they arrive, so this is not
+/// a framing limit; it bounds the whole read phase even when every
+/// retained client is writing faster than the shell parses.
 const READ_BUDGET: usize = 2 * LINE_CAP;
 
 // ---------------------------------------------------------------------
@@ -497,14 +500,18 @@ impl ControlClient {
     /// in the kernel, and those bytes are the whole reason it
     /// connected. Only a peer already known to have finished writing is
     /// judged without a read.
-    fn read(&mut self, now: &Snapshot, commands: &mut Vec<Command>) -> Option<Farewell> {
+    fn read(
+        &mut self,
+        now: &Snapshot,
+        commands: &mut Vec<Command>,
+        budget: &mut usize,
+    ) -> Option<Farewell> {
         if self.peer_finished {
             return self.peer_gone().then_some(Farewell::ClosedByPeer);
         }
-        let mut budget = READ_BUDGET;
         let mut buffer = [0u8; 4096];
-        while budget > 0 {
-            let want = buffer.len().min(budget);
+        while *budget > 0 {
+            let want = buffer.len().min(*budget);
             match self.stream.recv(&mut buffer[..want]) {
                 Ok(0) => {
                     self.peer_finished = true;
@@ -514,7 +521,7 @@ impl ControlClient {
                     return self.drain_lines(now, commands).or_else(|| self.peer_gone().then_some(Farewell::ClosedByPeer));
                 }
                 Ok(n) => {
-                    budget -= n;
+                    *budget -= n;
                     self.inbound.extend_from_slice(&buffer[..n]);
                     if let Some(farewell) = self.drain_lines(now, commands) {
                         return Some(farewell);
@@ -662,6 +669,15 @@ pub(crate) struct ControlSocket {
     /// Kept separately from `last`: comparing `last` would first have
     /// to construct the allocation-heavy value this gate avoids.
     observed: Option<SnapshotStamp>,
+    /// First client offered the shared read budget on the next pass.
+    /// Advancing it even when the budget was exhausted prevents one
+    /// permanent writer at the front from starving every later peer.
+    read_cursor: usize,
+    /// Suppresses one warning per refused connection while the socket
+    /// remains continuously at its population cap. Reset as soon as a
+    /// slot opens so a later leak episode is visible again.
+    cap_refusing: bool,
+    capacity_refusals: u64,
 }
 
 impl ControlSocket {
@@ -699,6 +715,9 @@ impl ControlSocket {
                     hello: Self::hello(),
                     last: None,
                     observed: None,
+                    read_cursor: 0,
+                    cap_refusing: false,
+                    capacity_refusals: 0,
                 }
             }
             Err(error) => {
@@ -716,6 +735,9 @@ impl ControlSocket {
             hello: Self::hello(),
             last: None,
             observed: None,
+            read_cursor: 0,
+            cap_refusing: false,
+            capacity_refusals: 0,
         }
     }
 
@@ -778,6 +800,9 @@ impl ControlSocket {
     /// fresh client is never told stale state.
     pub(crate) fn accept(&mut self) {
         let Some(listener) = &self.listener else { return };
+        if self.clients.len() < MAX_CLIENTS {
+            self.cap_refusing = false;
+        }
         loop {
             match listener.accept() {
                 Ok(Some(stream)) => {
@@ -795,6 +820,22 @@ impl ControlSocket {
                             tracing::warn!(?error, "control connection's peer could not be identified; refused");
                             continue;
                         }
+                    }
+                    if self.clients.len() >= MAX_CLIENTS {
+                        self.capacity_refusals = self.capacity_refusals.saturating_add(1);
+                        if !self.cap_refusing {
+                            tracing::warn!(
+                                retained = self.clients.len(),
+                                maximum = MAX_CLIENTS,
+                                refusals = self.capacity_refusals,
+                                "control client limit reached; refusing excess connections"
+                            );
+                            self.cap_refusing = true;
+                        }
+                        // Dropping the accepted stream closes it now.
+                        // Leaving it pending in the listener backlog
+                        // would make a well-behaved reconnect hang.
+                        continue;
                     }
                     let mut client = ControlClient::new(stream);
                     client.queue(&self.hello);
@@ -838,9 +879,14 @@ impl ControlSocket {
     pub(crate) fn service(&mut self, now: &Snapshot) -> Vec<Command> {
         let mut commands = Vec::new();
         let changed = self.note(now);
-        for client in &mut self.clients {
+        let client_count = self.clients.len();
+        let start = self.read_cursor.min(client_count.saturating_sub(1));
+        let mut budget = READ_BUDGET;
+        for offset in 0..client_count {
+            let index = (start + offset) % client_count;
+            let client = &mut self.clients[index];
             client.publish(now, &changed);
-            if let Some(farewell) = client.read(now, &mut commands) {
+            if let Some(farewell) = client.read(now, &mut commands, &mut budget) {
                 client.doom(farewell);
                 continue;
             }
@@ -852,6 +898,11 @@ impl ControlSocket {
             }
         }
         self.clients.retain(|client| !client.doomed);
+        self.read_cursor = if self.clients.is_empty() {
+            0
+        } else {
+            (start + 1) % self.clients.len()
+        };
         commands
     }
 
@@ -1077,6 +1128,52 @@ mod tests {
             socket.accept();
             std::thread::sleep(Duration::from_millis(1));
         }
+    }
+
+    #[test]
+    fn accepting_past_the_named_cap_never_retains_the_excess() {
+        let scratch = Scratch::new();
+        let mut socket = ControlSocket::bind_at(scratch.socket());
+        let mut bars = Vec::new();
+
+        // Drain the listener after each connect so the transport's
+        // pending backlog does not hide an unbounded accepted list.
+        for _ in 0..MAX_CLIENTS + 8 {
+            bars.push(Bar::connect(&socket));
+            socket.accept();
+        }
+
+        assert_eq!(socket.client_count(), MAX_CLIENTS);
+        assert_eq!(socket.poll_fds().count(), 1 + MAX_CLIENTS);
+        assert_eq!(socket.capacity_refusals, 8);
+        assert!(socket.cap_refusing);
+    }
+
+    #[test]
+    fn all_clients_share_one_read_budget_per_service_pass() {
+        use std::io::Write as _;
+        use std::os::unix::net::UnixStream;
+
+        let mut socket = ControlSocket::unbound(PathBuf::new());
+        let mut writers = Vec::new();
+        for _ in 0..5 {
+            let (mut writer, accepted) = UnixStream::pair().unwrap();
+            writer.write_all(&vec![b' '; LINE_CAP / 2]).unwrap();
+            socket.admit(Stream::from_fd(accepted.into()));
+            writers.push(writer);
+        }
+
+        let _ = socket.service(&sample_snapshot());
+        let read = socket.clients.iter().map(|client| client.inbound.len()).sum::<usize>();
+        assert!(read <= READ_BUDGET, "one pass consumed {read} bytes, above the aggregate {READ_BUDGET}-byte budget");
+        assert_eq!(socket.clients[4].inbound.len(), 0, "the aggregate budget must stop this pass");
+
+        let _ = socket.service(&sample_snapshot());
+        assert_eq!(
+            socket.clients[4].inbound.len(),
+            LINE_CAP / 2,
+            "the rotating first reader must keep a client behind the spent budget from starving"
+        );
     }
 
     /// Services until the shell has read `bar`'s request: a request
