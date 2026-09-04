@@ -361,7 +361,7 @@ The crate is now a library plus a thin binary, exactly as
 no BlueZ and no radio:
 
 ```sh
-cargo run -p chonk-btpair --example preview -- /tmp/btpair
+cargo run -p chonk-btpair --example preview-btpair -- /tmp/btpair
 ```
 
 ### The command stream
@@ -470,4 +470,3 @@ One remains open:
   `run_with(Options { redraw_interval })`, the affordance
   `chonk_ui::dockapp` already has on the socket side. When it grows
   one, `chonk-btpair/src/main.rs` should lose its loop.
-

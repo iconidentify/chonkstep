@@ -4,7 +4,7 @@
 //! `Unavailable` on real hardware.
 //!
 //! ```sh
-//! cargo run -p chonk-btpair --example preview -- /tmp/btpair
+//! cargo run -p chonk-btpair --example preview-btpair -- /tmp/btpair
 //! ```
 //!
 //! One sheet per built-in theme and appearance, so the "does it match

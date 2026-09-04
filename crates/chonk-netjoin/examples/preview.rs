@@ -2,7 +2,7 @@
 //! appearances, so the look can be reviewed without a wifi radio, a
 //! secured network in range, or a wrong passphrase to type at it.
 //!
-//! `cargo run -p chonk-netjoin --example preview -- <outdir>`
+//! `cargo run -p chonk-netjoin --example preview-netjoin -- <outdir>`
 //!
 //! The twin of `wm-theme`'s own `preview_*` examples, and the reason
 //! this crate carries `wm-theme` as a dev-dependency: an app needs one

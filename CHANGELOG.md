@@ -88,6 +88,11 @@ crate and both session binaries carry the same number.
 
 ### Release hardening
 
+- **Workspace examples have collision-free artifact names.** The Bluetooth
+  pairing and Wi-Fi join design sheets no longer both compile to
+  `target/.../examples/preview`; their explicit `preview-btpair` and
+  `preview-netjoin` targets remove Cargo's overwrite warning and the future
+  hard-error it warned about.
 - **A slow nested boot now explains itself.** If the compositor exits, fails
   to publish its Wayland socket, or never answers the test door, the harness
   includes the final 80 compositor log lines in the failure instead of a bare

@@ -11,7 +11,7 @@
 //! was written on, which has no Bluetooth controller: every phase —
 //! the discovery list, the passkey confirmation, the failures — can be
 //! rasterized from canned state with no X server, no BlueZ and no
-//! radio. `cargo run -p chonk-btpair --example preview -- /tmp/sheet`
+//! radio. `cargo run -p chonk-btpair --example preview-btpair -- /tmp/sheet`
 //! is that review, and the `render` tests are it as assertions.
 //!
 //! The window belongs to the binary, not the library: it is the one

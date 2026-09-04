@@ -4,6 +4,11 @@ description = "The wifi join dialog: the keyboard the LNK panel is not allowed t
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+autoexamples = false
+
+[[example]]
+name = "preview-netjoin"
+path = "examples/preview.rs"
 
 [dependencies]
 # The look-and-feel SDK: the theme model, the paint primitives, and the

@@ -4,6 +4,11 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 description = "The Bluetooth pairing dialog: discovery and passkey confirmation, in a chiseled window the dock's BT panel spawns."
+autoexamples = false
+
+[[example]]
+name = "preview-btpair"
+path = "examples/preview.rs"
 
 [dependencies]
 chonk-ui = { path = "../chonk-ui" }
