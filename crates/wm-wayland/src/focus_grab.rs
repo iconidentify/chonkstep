@@ -157,7 +157,7 @@
 //! simply not alive on the next pass — so the protocol's "destroying
 //! the surface is treated the same as an explicit call to
 //! `remove_surface`" clause cannot be forgotten by a future code path,
-//! and cannot leak an entry either. The cost is one pass (≤16ms) of
+//! and cannot leak an entry either. The cost is one dispatch pass of
 //! latency on a keyboard focus move nobody can perceive.
 
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;

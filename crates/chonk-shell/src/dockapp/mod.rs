@@ -1,5 +1,5 @@
 //! Out-of-process dock tiles: the listener, the registry, and one
-//! [`tile::RemoteTile`] per registered dockapp.
+//! `tile::RemoteTile` per registered dockapp.
 //!
 //! # What a dockapp is, and what it is not
 //!
@@ -30,7 +30,7 @@
 //! **The shell never blocks on a dockapp.** Not on a frame, not on a
 //! reply, not on a socket becoming writable. A dockapp that hangs costs
 //! the compositor nothing at all; its frames simply stop arriving. Read
-//! [`tile`]'s module docs for why the liveness check therefore exists
+//! `tile`'s module docs for why the liveness check therefore exists
 //! to inform the *user* rather than to protect the desktop, and why
 //! that inversion is the whole point of the boundary.
 //!
@@ -98,7 +98,7 @@ use wm_theme::model::Theme;
 pub enum Farewell {
     /// This process is about to `exec` its replacement. Dockapps stay
     /// running and their tokens are written where the incoming shell
-    /// will find them — see [`handoff`].
+    /// will find them — see `handoff`.
     Restarting,
     /// The session is over. Dockapps are told `Goodbye { Shutdown }` and
     /// terminated, and any handoff file is cleared.
@@ -151,9 +151,9 @@ pub(crate) struct DockHost {
 /// The cache is not a micro-optimisation. `theme_toml` is
 /// `toml::to_string(theme)`, which walks and formats the whole palette
 /// and allocates a few kilobytes; the servicing pass that needs this
-/// value runs on the compositor's repaint thread once per housekeeping
-/// tick (16 ms), so serializing unconditionally would be ~60 full theme
-/// serializations a second, forever, to produce the same string.
+/// value runs on the compositor's repaint thread once per event-loop
+/// pass, so serializing unconditionally would repeatedly walk the same
+/// palette forever merely because a client or timer woke the loop.
 ///
 /// So the comparison is on the *source* — the `Theme` itself, by value,
 /// plus the tile edge and scale — and the serialization happens only
@@ -587,9 +587,9 @@ mod tests {
     #[test]
     fn the_serialized_theme_is_produced_once_and_reused() {
         // The property that makes it safe to evaluate this on the
-        // repaint thread every 16 ms. `toml::to_string` walks the whole
-        // palette; doing it per pass would be ~60 full serializations a
-        // second to produce the same string.
+        // repaint thread every pass. `toml::to_string` walks the whole
+        // palette; doing it unconditionally would serialize the same
+        // string on every client event and timer wake.
         let mut broadcast = ThemeBroadcast::new();
         broadcast.refresh(56, 1.0, &theme("nextstep-classic"));
         let first = broadcast.state().clone();

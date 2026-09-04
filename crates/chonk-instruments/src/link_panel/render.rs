@@ -49,7 +49,7 @@
 //!   cell, a lock glyph beside the verdict on secured networks, and
 //!   the row's one-word verdict (`LINKED`, `SAVED`, `JOIN…`, `OPEN`).
 //!   No radio, or nothing in range, is a *designed* empty state — a
-//!   dead meter in a socket milled into the glass ([`Band::Empty`]),
+//!   dead meter in a socket milled into the glass (`Band::Empty`),
 //!   the panel's version of the SDK's dead tile — not a line of body
 //!   text where a row should be.
 //! - **TAILSCALE** — the tailnet row, the exit-node field (which is
@@ -70,7 +70,7 @@
 //! [`panel_layout`] is the single authority on where every band sits;
 //! the renderer draws inside its bands and the state machine hit-tests
 //! against them, so what the pointer feels is exactly what the eye
-//! sees. Both sides take their numbers from one [`Metrics`], so a
+//! sees. Both sides take their numbers from one `Metrics`, so a
 //! spacing change cannot desync the two. Like `wm_theme::soundctl`'s
 //! zone map, the layout assumes the built-in themes' 1px tile bevel
 //! rather than taking a theme — input handlers have no theme to offer.

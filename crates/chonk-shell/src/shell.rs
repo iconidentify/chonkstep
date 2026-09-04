@@ -11,6 +11,7 @@
 //! event calls for, the binary performs it.
 
 use std::collections::HashMap;
+use std::time::{Duration, Instant};
 
 use wm_config::Action;
 use wm_core::{
@@ -811,6 +812,23 @@ fn running_pairs<B: Backend>(wm: &WindowManager<B>) -> Vec<(String, B::WindowId)
     wm.iter_clients().map(|(_, client)| (client.class.clone(), client.window)).collect()
 }
 
+/// Exact borrowed comparison for the launcher strip's cached client
+/// identities. Window geometry and state deliberately do not enter:
+/// neither changes which pinned application's lamp is lit or which
+/// window a click focuses.
+fn running_matches_clients<B: Backend>(wm: &WindowManager<B>, running: &[(String, B::WindowId)]) -> bool {
+    let mut clients = wm.iter_clients();
+    for (class, window) in running {
+        let Some((_, client)) = clients.next() else {
+            return false;
+        };
+        if class != &client.class || *window != client.window {
+            return false;
+        }
+    }
+    clients.next().is_none()
+}
+
 /// The live client set as session-layout records — what the layout
 /// store debounces and persists (see `crate::session_layout`). Windows
 /// with no class are skipped: there is nothing to relaunch them by and
@@ -834,6 +852,53 @@ fn layout_snapshot<B: Backend>(wm: &WindowManager<B>, apps: &[AppEntry]) -> Vec<
             }
         })
         .collect()
+}
+
+/// Whether `records` still describe the live client set exactly,
+/// without cloning a class name or consulting the application index.
+///
+/// This is the steady-state counterpart to [`layout_snapshot`]. The
+/// compositor ticks even on an otherwise idle desktop so timers can
+/// mature; rebuilding the owned snapshot on every one of those ticks
+/// used to clone every class and perform `windows × applications`
+/// identity comparisons only to have `SessionLayout` discover that
+/// the resulting vector equalled the one it already held. The fields
+/// below deliberately mirror `layout_snapshot` one for one (except
+/// `app`, which is a pure function of the unchanged class and the
+/// immutable startup index). A future persisted field therefore has
+/// one obvious second site that the compiler review must update.
+fn layout_matches_clients<B: Backend>(wm: &WindowManager<B>, records: &[WindowRecord]) -> bool {
+    let mut clients = wm.iter_clients().filter(|(_, client)| !client.class.is_empty());
+    for record in records {
+        let Some((_, client)) = clients.next() else {
+            return false;
+        };
+        let maximized = client.flags.intersects(ClientFlags::MAXIMIZED_H | ClientFlags::MAXIMIZED_V);
+        let geometry = if maximized { client.restore_geometry.unwrap_or(client.geometry) } else { client.geometry };
+        if record.class != client.class
+            || record.geometry != geometry
+            || record.workspace != client.workspace
+            || record.maximized != maximized
+            || record.shaded != client.flags.contains(ClientFlags::SHADED)
+            || record.miniaturized != (client.lifecycle == Lifecycle::Miniaturized)
+        {
+            return false;
+        }
+    }
+    clients.next().is_none()
+}
+
+/// Longest an otherwise idle backend may sleep before polling the few
+/// housekeeping inputs which have no file descriptor (sampler results,
+/// reload/appearance markers, and one-second configuration watches).
+/// Pointer, client, XWayland, control and dockapp activity wakes both
+/// backend loops immediately. Menu, dockapp and Wayland key-repeat
+/// deadlines shorten this bound independently, so 100 ms is not input
+/// or animation latency.
+const MAX_IDLE_HOUSEKEEPING: Duration = Duration::from_millis(100);
+
+fn bounded_housekeeping_wait(now: Instant, deadline: Option<Instant>) -> Duration {
+    deadline.map(|at| at.saturating_duration_since(now)).unwrap_or(MAX_IDLE_HOUSEKEEPING).min(MAX_IDLE_HOUSEKEEPING)
 }
 
 /// Moves the focused client to `workspace` and follows it there — the
@@ -920,6 +985,10 @@ pub struct Shell<B: Backend + PopupHost<PopupId = B::ShellId>> {
     /// records while a restore is matching mapped windows against
     /// them. See `crate::session_layout` for all the rules.
     layout: SessionLayout,
+    /// Owned identities last reconciled into the launcher strip's
+    /// running lamps. Most ticks prove these still match through
+    /// borrowed comparisons and avoid allocating/cloning them again.
+    running_clients: Vec<(String, B::WindowId)>,
     /// The key press an open Overview session intercepted, parked
     /// between the two halves of the binaries' key protocol:
     /// [`Shell::keymap_action`] resolves a combo, [`Shell::run_action`]
@@ -1169,6 +1238,7 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
             overview_key: None,
             grabbed: to_grab,
             layout,
+            running_clients: Vec::new(),
             terminals,
             state: state.clone(),
             theme,
@@ -1209,7 +1279,7 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
     /// poll the tile edge, the scale and the whole theme once per
     /// servicing pass and push a `ThemeChanged` when any of it moves,
     /// so updating `Desktop`'s fields in step 2 *is* telling them —
-    /// within one 16ms tick, with no call here that a fourth trigger
+    /// later in this same servicing pass, with no call here that a fourth trigger
     /// could forget to make.
     pub fn apply_session_state(&mut self, wm: &mut WindowManager<B>, next: SessionState) {
         // 1. Policy.
@@ -2185,9 +2255,9 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
     ///
     /// Call it immediately before waiting: the set changes as dockapps
     /// connect, die and restart, and a stale fd is at best a spurious
-    /// wakeup. Getting it wrong is bounded — both loops already wake on
-    /// a 16ms housekeeping bound, so a missing fd costs a dockapp frame
-    /// up to 16ms and nothing else.
+    /// wakeup. Getting it wrong is bounded — both loops retain a 100 ms
+    /// maximum idle poll, so a missing fd costs a dockapp frame up to
+    /// that bound and nothing else.
     pub fn extra_poll_fds(&self) -> Vec<std::os::fd::RawFd> {
         let mut fds = self.desktop.extra_poll_fds();
         fds.extend(self.control.poll_fds());
@@ -2216,7 +2286,7 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
     /// future high-resolution path has somewhere to go.
     ///
     /// The step count is capped at
-    /// [`MAX_SCROLL_STEPS`](crate::dockapp::tile::MAX_SCROLL_STEPS),
+    /// `crate::dockapp::tile::MAX_SCROLL_STEPS`,
     /// because "replay it N times" with an unbounded N read off an
     /// input event is a loop on the repaint thread whose length a
     /// backend bug decides.
@@ -2585,7 +2655,8 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
     pub fn tick(&mut self, wm: &mut WindowManager<B>) {
         // The appearance-request file, consumed the way the binaries
         // consume the reload/restart markers and on the same cadence:
-        // this method runs once per event-loop wakeup (~16ms), and the
+        // this method runs once per event-loop wakeup (at most 100 ms
+        // apart when entirely idle), and the
         // check costs one failed read on a path that is almost never
         // there. Consumed-then-acted so a request is honored exactly
         // once; a request naming the mode the session is already in is
@@ -2675,16 +2746,33 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         self.desktop.tick_menu(wm.backend_mut(), &self.theme);
         self.desktop.tick_items(wm.backend_mut(), &self.theme);
         // Same cadence as the widget tick: refresh the launcher
-        // strip's running-app indicators from the live client set — a
-        // cheap no-op inside `update_running` whenever nothing
-        // changed.
-        let running = running_pairs(wm);
-        self.launchdock.update_running(wm.backend_mut(), &self.theme, &running);
-        // The session-layout store rides the same cadence: hand it the
-        // live arrangement and let its debounce decide whether the
-        // moment has come to write. Almost every call is a comparison
-        // that finds nothing changed and returns.
-        self.layout.service(layout_snapshot(wm, &self.apps), std::time::Instant::now());
+        // strip's running-app indicators only when either the client
+        // identities or the pin set moved. Geometry-only changes are
+        // irrelevant here, and the steady state now compares borrowed
+        // ids/classes instead of allocating and cloning them on every wake.
+        if self.launchdock.running_refresh_needed() || !running_matches_clients(wm, &self.running_clients) {
+            self.running_clients = running_pairs(wm);
+            self.launchdock.update_running(wm.backend_mut(), &self.theme, &self.running_clients);
+        }
+        // The session-layout store rides the same cadence. Most ticks
+        // find the exact arrangement it already holds; prove that by
+        // borrowed field comparisons so those ticks can advance the
+        // debounce without allocating, cloning every class, or
+        // rescanning the application index. A real change still builds
+        // the full owned snapshot once and resets the settle clock.
+        let now = std::time::Instant::now();
+        if layout_matches_clients(wm, self.layout.current()) {
+            self.layout.service_current(now);
+        } else {
+            self.layout.service(layout_snapshot(wm, &self.apps), now);
+        }
+    }
+
+    /// How long a backend may block when no display/socket activity is
+    /// ready. Exact transient deadlines win; otherwise the bounded idle
+    /// poll services filesystem markers and worker-thread samples.
+    pub fn next_housekeeping_in(&self, now: Instant) -> Duration {
+        bounded_housekeeping_wait(now, self.desktop.next_housekeeping_deadline(now))
     }
 
     /// Winds the session down, in the way the binary says it is ending.
@@ -2830,6 +2918,21 @@ mod tests {
         // rather than resolve to anything.
         let keymap = build_keymap(&[(combo(1), Action::Close)]);
         assert_eq!(keymap.get(&combo(99)), None);
+    }
+
+    #[test]
+    fn housekeeping_waits_for_the_earliest_real_deadline_with_an_idle_cap() {
+        let now = Instant::now();
+        assert_eq!(bounded_housekeeping_wait(now, None), MAX_IDLE_HOUSEKEEPING);
+        assert_eq!(bounded_housekeeping_wait(now, Some(now - Duration::from_millis(1))), Duration::ZERO);
+        assert_eq!(
+            bounded_housekeeping_wait(now, Some(now + Duration::from_millis(37))),
+            Duration::from_millis(37)
+        );
+        assert_eq!(
+            bounded_housekeeping_wait(now, Some(now + MAX_IDLE_HOUSEKEEPING * 2)),
+            MAX_IDLE_HOUSEKEEPING
+        );
     }
 
     #[test]

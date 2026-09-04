@@ -237,7 +237,7 @@ impl BarVisibility {
         Self::stored_in(&bar_state_path()?)
     }
 
-    /// [`Self::stored`] against an explicit file.
+    /// `Self::stored` against an explicit file.
     pub fn stored_in(path: &Path) -> Option<Self> {
         Self::from_state(std::fs::read_to_string(path).ok().as_deref())
     }
@@ -247,7 +247,7 @@ impl BarVisibility {
         Self::stored_in(path).unwrap_or(Self::DEFAULT)
     }
 
-    /// The pure half of [`Self::stored`]: the state file's text.
+    /// The pure half of `Self::stored`: the state file's text.
     /// `None` for anything that is not one of the two words, so a
     /// truncated or hand-edited file falls through to the config key
     /// rather than reading as a deliberate choice.

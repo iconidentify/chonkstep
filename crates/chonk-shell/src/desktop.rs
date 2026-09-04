@@ -1141,7 +1141,7 @@ impl DockVisibility {
         Self::stored_in(&dock_state_path()?)
     }
 
-    /// [`Self::stored`] against an explicit file.
+    /// `Self::stored` against an explicit file.
     pub fn stored_in(path: &Path) -> Option<Self> {
         Self::from_state(std::fs::read_to_string(path).ok().as_deref())
     }
@@ -1152,7 +1152,7 @@ impl DockVisibility {
         Self::stored_in(path).unwrap_or(Self::DEFAULT)
     }
 
-    /// The pure half of [`Self::stored`]: the state file's text.
+    /// The pure half of `Self::stored`: the state file's text.
     /// `None` for anything that is not one of the two words, so a
     /// truncated or hand-edited file falls through to the config key
     /// rather than resolving to a choice nobody made.
@@ -2153,7 +2153,7 @@ impl<B: Backend> Desktop<B> {
     /// Every widget is updated (never short-circuited) so one further
     /// down the list still gets to fold even if an earlier one had
     /// nothing new. All of it is timed and budgeted by
-    /// [`SupervisedWidget`]: this loop runs on the compositor's single
+    /// `SupervisedWidget`: this loop runs on the compositor's single
     /// repaint thread, so a widget that blocks here freezes the whole
     /// desktop, and one that does it repeatedly is dropped from the
     /// dock rather than allowed to keep doing it. What it can no longer
@@ -2163,7 +2163,7 @@ impl<B: Backend> Desktop<B> {
         // Out-of-process tiles first, so a frame that arrived this pass
         // is folded by the same `update` sweep that folds a sampler
         // reading, and reaches the screen on the same repaint. Doing it
-        // after would show every dockapp frame one pass (16ms) late for
+        // after would show every dockapp frame one servicing pass late for
         // no reason.
         self.service_dockapps(theme);
         // The panel rides the same cadence: reconcile what the tiles
@@ -2443,15 +2443,26 @@ impl<B: Backend> Desktop<B> {
     /// only moment the answer is knowable.
     ///
     /// Getting this *wrong* is bounded, which is worth knowing before
-    /// anyone spends a day on it: both loops already wake on a 16ms
-    /// housekeeping bound, so an fd omitted here costs a dockapp frame
-    /// up to 16ms of latency and nothing else. It is a latency
+    /// anyone spends a day on it: both loops retain a 100 ms maximum
+    /// idle bound, so an fd omitted here costs a dockapp frame up to
+    /// that much latency and nothing else. It is a latency
     /// optimisation with a correctness-shaped API, not a correctness
     /// requirement.
     pub fn extra_poll_fds(&self) -> Vec<std::os::fd::RawFd> {
         let mut fds = self.dockapps.poll_fds();
         fds.extend(self.items.iter().filter_map(|item| item.remote().and_then(RemoteTile::poll_fd)));
         fds
+    }
+
+    /// Earliest deadline owned by transient menu or dockapp state.
+    /// Read by both backend loops so time-sensitive UI remains exact
+    /// while an otherwise idle desktop stops polling at frame rate.
+    pub fn next_housekeeping_deadline(&self, now: std::time::Instant) -> Option<std::time::Instant> {
+        self.items
+            .iter()
+            .filter_map(|item| item.remote().and_then(|tile| tile.next_service_deadline(now)))
+            .chain(self.menu.menu.next_deadline())
+            .min()
     }
 
     /// One servicing pass over every out-of-process tile: admit new
@@ -2480,7 +2491,7 @@ impl<B: Backend> Desktop<B> {
         let admissions = self.dockapps.service(now);
 
         // Borrowed, never cloned. `theme_toml` is a few kilobytes and
-        // this runs at ~60Hz on the repaint thread, so a clone per pass
+        // this runs on the repaint thread, so a clone per pass
         // would be a quarter of a megabyte a second of copying to
         // produce a value that is almost always identical. Disjoint
         // field borrows (`dockapps` shared, `items` mutable) are what
@@ -2556,7 +2567,7 @@ impl<B: Backend> Desktop<B> {
                 }
             }
         }
-        // A built-in open that raced a remote one inside the same 16ms
+        // A built-in open that raced a remote one inside the same pass
         // pass wins the tie: the right-click is the user's own hand on
         // the tile this instant, where a remote open is a client
         // reacting to an earlier click. Either way the loser is closed
@@ -2689,7 +2700,7 @@ impl<B: Backend> Desktop<B> {
     /// whatever its client decided a click means).
     ///
     /// The press only *stages* the open. The surface appears on the
-    /// next reconciliation pass ([`Desktop::sync_instrument_panel`],
+    /// next reconciliation pass (`Desktop::sync_instrument_panel`,
     /// at most one housekeeping tick away), which is also where a
     /// panel of the other kind gets closed — one arbitration path for
     /// every opener, however it arrived.
@@ -3034,7 +3045,7 @@ impl<B: Backend> Desktop<B> {
     /// Lets go of every out-of-process tile, for a session that is
     /// ending or re-execing.
     ///
-    /// The decision is [`dockapp::shut_down`]'s; this supplies the
+    /// The decision is `dockapp::shut_down`'s; this supplies the
     /// tiles and the path. See there for what the two farewells mean and
     /// why the restarting one is the whole of Phase 4c's payoff.
     pub fn shut_down_dockapps(&mut self, farewell: Farewell) {

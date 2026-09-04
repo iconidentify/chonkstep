@@ -32,7 +32,7 @@ use std::time::{Duration, Instant};
 ///
 /// Sized against what a *human* can generate: pointer events arrive at
 /// most a few dozen per second and the shell's event loop drains this
-/// queue on every pass (16 ms), so a healthy dockapp never sees more
+/// queue promptly on the next event-loop pass, so a healthy dockapp never sees more
 /// than one or two entries here. 64 is therefore already deep into
 /// "this peer is not reading" territory, while being small enough that
 /// a hundred wedged dockapps cost kilobytes, not megabytes.

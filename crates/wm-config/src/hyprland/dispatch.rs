@@ -407,7 +407,7 @@ fn fingerprint(text: &str) -> u32 {
 /// escapes, and leaving everything else alone.
 ///
 /// Not a shell: a line with grammar in it is handed to `bash -lc`
-/// whole ([`needs_a_shell`]) rather than mis-split here. This function
+/// whole (`needs_a_shell`) rather than mis-split here. This function
 /// only has to be right about quoting, which is what Omarchy's own
 /// `shell_quote` helper produces — `omarchy-launch-or-focus '^obsidian$'
 /// 'uwsm-app -- obsidian'` must come out as three arguments, not six.

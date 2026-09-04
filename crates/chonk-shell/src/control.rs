@@ -20,7 +20,7 @@
 //! is `O_NONBLOCK` from the syscall that created it (`accept4`, see
 //! `chonk_dock_proto::transport`), every read and write is a single
 //! non-blocking pass, and a client that stops reading is disconnected
-//! when the shell's buffer for it crosses [`OUTBOUND_CAP`] rather than
+//! when the shell's buffer for it crosses `OUTBOUND_CAP` rather than
 //! being waited for. This is the same rule the dockapp host lives by,
 //! for the same reason: a bar that hangs must cost the user that bar,
 //! never the desktop.
@@ -810,7 +810,7 @@ impl ControlSocket {
     }
 
     /// The fds the event loop should wake on, so a request is answered
-    /// on arrival rather than on the next 16ms housekeeping bound. Like
+    /// on arrival rather than on the next bounded housekeeping poll. Like
     /// the dock's, missing one costs latency, not correctness.
     pub(crate) fn poll_fds(&self) -> impl Iterator<Item = RawFd> + '_ {
         self.listener.iter().map(|l| l.as_raw_fd()).chain(self.clients.iter().map(|c| c.stream.as_raw_fd()))

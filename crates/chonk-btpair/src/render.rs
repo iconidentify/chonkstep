@@ -27,13 +27,13 @@
 //! | surface | `theme.menu.background` + `theme.menu.bevel` |
 //! | title | `theme.menu.title_font` in `menu.text_color` |
 //! | caption | the item font, one step dim |
-//! | the well | a sunken bevel over [`field_tone`] — the join dialog's passphrase field, grown to hold a list |
+//! | the well | a sunken bevel over `field_tone` — the join dialog's passphrase field, grown to hold a list |
 //! | a list row | the menu's own highlight bar under the pointer, in `menu.highlight_text_color` |
 //! | a button | [`paint::draw_button`] on the menu fill and bevel, sinking one pixel when pressed |
 //! | a complaint | the highlight bar behind the reason, exactly as a failed join reports one |
 //!
-//! Its geometry constants are the join dialog's too ([`MARGIN`],
-//! [`TITLE_H`], [`BUTTON_W`], [`BUTTON_H`], [`BUTTON_GAP`]), so the two
+//! Its geometry constants are the join dialog's too (`MARGIN`,
+//! `TITLE_H`, `BUTTON_W`, `BUTTON_H`, `BUTTON_GAP`), so the two
 //! windows share a rhythm and not just a palette.
 //!
 //! The one deliberate difference is the mark: the join dialog's subject

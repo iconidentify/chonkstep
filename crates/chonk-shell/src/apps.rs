@@ -6,7 +6,7 @@
 //! The module follows the freedesktop Desktop Entry specification, but
 //! is deliberately split into a pure core and a thin filesystem shell:
 //! parsing ([`parse_desktop_entry`]) and cross-directory collation
-//! ([`collate_scanned`]) operate on plain strings and are exhaustively
+//! (`collate_scanned`) operate on plain strings and are exhaustively
 //! unit-tested, while [`scan_applications`] only walks the XDG
 //! directories and feeds what it finds into that core. The `TryExec`
 //! existence probe likewise goes through a function-pointer seam so the
@@ -95,7 +95,7 @@ pub fn scan_applications() -> Vec<AppEntry> {
 /// unparsable).
 ///
 /// `TryExec` (when present) is probed against the real `$PATH` here;
-/// tests exercise that skip through [`parse_with_lookup`]'s seam
+/// tests exercise that skip through `parse_with_lookup`'s seam
 /// instead so they never depend on what happens to be installed.
 #[allow(dead_code)] // The scan pipeline goes through `parse_with_lookup`'s testable seam; this is the module's standalone entry point, kept as documented API surface.
 pub fn parse_desktop_entry(id: &str, text: &str) -> Option<AppEntry> {

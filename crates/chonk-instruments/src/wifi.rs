@@ -282,7 +282,7 @@ impl WifiWidget {
 
     /// The most recent nmcli reading, or `None` when nmcli is unusable,
     /// has not answered yet, or reports no active network. Also settles
-    /// [`WifiWidget::nmcli`], since a sample that landed at all is the
+    /// `WifiWidget::nmcli`, since a sample that landed at all is the
     /// proof that nmcli runs here — which is what gates the
     /// click-to-toggle behavior.
     /// The tile's current link, in the shape the link panel's header

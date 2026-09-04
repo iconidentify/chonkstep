@@ -208,7 +208,7 @@ impl LinkPanel {
 
     /// The four read-only queries the panel lives on, in [`bind`]
     /// order. All cache reads: the wifi list is `--rescan no` (see
-    /// [`crate::wifi`] for the measured 3.5s-vs-11ms difference), and
+    /// `crate::wifi` for the measured 3.5s-vs-11ms difference), and
     /// the only rescan is the explicit, cooldown-gated row.
     ///
     /// [`bind`]: LinkPanel::bind

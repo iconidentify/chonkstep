@@ -99,6 +99,16 @@ impl<Id: Copy + Eq + std::fmt::Debug> CascadeMenu<Id> {
         !self.levels.is_empty()
     }
 
+    /// The instant a hovered submenu should open, if one is armed.
+    ///
+    /// Event loops can sleep until this deadline instead of polling the
+    /// controller at display refresh rate. Pointer input still wakes the
+    /// loop immediately; this deadline exists for the quiet case where
+    /// the pointer stops on the row and no later event arrives to open it.
+    pub fn next_deadline(&self) -> Option<Instant> {
+        self.pending_submenu.as_ref().map(|pending| pending.hovered_since + SUBMENU_HOVER_DELAY)
+    }
+
     /// Opens (replacing any existing session) a root-level popup at `at`
     /// and grabs the pointer for the whole session. `bounds` is the
     /// host's screen/window extent, used to keep later cascades on
@@ -585,6 +595,24 @@ mod tests {
         f.tick();
 
         assert_eq!(f.host.open.len(), 1, "must not open before SUBMENU_HOVER_DELAY elapses");
+    }
+
+    #[test]
+    fn a_hovered_submenu_publishes_its_exact_wakeup_deadline() {
+        let mut f = Fixture::new();
+        let items = vec![submenu("Applications", vec![action("About", 2)])];
+        f.open(items.clone());
+        assert!(f.cascade.next_deadline().is_none(), "an open menu with no pending hover owns no timer");
+
+        let root = f.only_open_window();
+        let row = f.row_point(&items, 0);
+        let before = Instant::now();
+        f.hover(root, row);
+        let after = Instant::now();
+        let deadline = f.cascade.next_deadline().expect("hovering a submenu arms its dwell timer");
+
+        assert!(deadline >= before + SUBMENU_HOVER_DELAY);
+        assert!(deadline <= after + SUBMENU_HOVER_DELAY);
     }
 
     #[test]

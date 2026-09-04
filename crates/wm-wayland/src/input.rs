@@ -865,6 +865,14 @@ pub(crate) fn tick_repeating_binding(state: &mut Compositor) {
     }
 }
 
+/// When compositor-owned key repeat next becomes due. Client key repeat
+/// is announced through `wl_keyboard` and belongs to the client; this is
+/// only for a held `binde` binding intercepted by the compositor.
+pub(crate) fn repeating_binding_deadline(state: &Compositor) -> Option<std::time::Instant> {
+    let seat = state.seat.clone();
+    with_input(&seat, |input| input.repeating.map(|repeat| repeat.next))
+}
+
 /// Which virtual terminal a press asks for, if any: 1-12, or `None`.
 ///
 /// Both spellings of the gesture are accepted because which one arrives

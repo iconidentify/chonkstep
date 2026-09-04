@@ -5,6 +5,29 @@ crate and both session binaries carry the same number.
 
 ## [Unreleased]
 
+### Performance
+
+- **Housekeeping sleeps until real deadlines instead of polling at 60 Hz.**
+  Display/input/IPC/dockapp descriptors still wake both backends immediately;
+  submenu dwell, metered dockapp frames and panels, supervision, and Wayland
+  `binde` repeat contribute their exact next deadline. Only worker results and
+  marker files use the conservative 100 ms idle ceiling. Alternating release
+  builds under an isolated 2560x1600 Weston host reduced zero-client CPU from
+  1.175% to 0.850% of one core (27.7%) and voluntary context switches from
+  1,462 to 457 per 20 seconds (68.7%). With 12 real Wayland terminals mapped,
+  CPU fell from 6.499% to 5.875% (9.6%) and wakeups fell 53.4%. Real nested
+  tests cover reload markers, menu cascades, built-in and streamed panels, and
+  a held 25 Hz binding sourced from an Omarchy/Hyprland config.
+- **Idle housekeeping reuses live client snapshots.** The launcher lamps and
+  session-layout debounce now compare borrowed client state before allocating,
+  cloning class names, or rescanning the desktop-application index. Real
+  client and pin changes still rebuild the owned snapshots immediately, and
+  the unchanged path still advances restore/debounce deadlines. In alternating
+  release-build trials under one isolated 2560x1600 Weston host with 12 real
+  Wayland terminals mapped, compositor CPU fell from 6.582% to 6.305% of one
+  core on average (4.2% relative); the 16 ms event cadence and UI behavior were
+  unchanged.
+
 ### Release hardening
 
 - **A slow nested boot now explains itself.** If the compositor exits, fails

@@ -99,7 +99,7 @@ pub fn hello(id: &str, tile_units: u8, token: [u8; TOKEN_BYTES], wants: InputMas
 /// How long a dockapp waits for its `Welcome` before giving up.
 ///
 /// The shell answers a `Hello` from its event loop, so the honest
-/// bound is "one or two repaint passes" (16 ms each). Two seconds is
+/// bound is "one or two event-loop passes". Two seconds is
 /// three orders of magnitude of slack for a machine under load, and
 /// still short enough that a dockapp pointed at a wedged shell exits
 /// while the user is still looking at it.

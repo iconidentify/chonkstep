@@ -173,12 +173,46 @@ impl SessionLayout {
         }
     }
 
+    /// Advances expiry and debounce timers when the caller has proved
+    /// that the live arrangement still equals [`Self::current`].
+    ///
+    /// Keeping this separate from [`Self::service`] matters on the
+    /// compositor's steady-state path: constructing a snapshot clones
+    /// every window class and resolves every class through the desktop
+    /// application index. None of that work contributes anything when
+    /// the arrangement has not moved, but the debounce clock still has
+    /// to mature so the last real change reaches disk. This entry point
+    /// performs exactly that timer half without manufacturing an
+    /// identical `Vec<WindowRecord>` first.
+    pub fn service_current(&mut self, now: Instant) {
+        if self.ready(now) {
+            self.write_out();
+        }
+    }
+
+    /// The most recent live arrangement handed to [`Self::service`].
+    /// Callers may compare borrowed client state against it and use
+    /// [`Self::service_current`] when it is still exact.
+    pub fn current(&self) -> &[WindowRecord] {
+        &self.last_snapshot
+    }
+
     /// The pure decision core of [`Self::service`] — updates the
     /// debounce/expiry state and answers "write now?". Split out so
     /// the rules are testable with plain `Instant` arithmetic and no
     /// filesystem. When it returns `true` the store already considers
     /// `last_snapshot` persisted; the caller's job is only the I/O.
     fn note(&mut self, snapshot: Vec<WindowRecord>, now: Instant) -> bool {
+        if snapshot != self.last_snapshot {
+            self.last_snapshot = snapshot;
+            self.settled_at = now;
+        }
+        self.ready(now)
+    }
+
+    /// Advances the time-dependent half of [`Self::note`] against the
+    /// snapshot already held in `last_snapshot`.
+    fn ready(&mut self, now: Instant) -> bool {
         if let Some(deadline) = self.restore_deadline {
             if !self.pending.is_empty() && now >= deadline {
                 tracing::info!(
@@ -190,10 +224,6 @@ impl SessionLayout {
             if self.pending.is_empty() {
                 self.restore_deadline = None;
             }
-        }
-        if snapshot != self.last_snapshot {
-            self.last_snapshot = snapshot;
-            self.settled_at = now;
         }
         // Suppressed mid-restore: the live set is still filling in,
         // and writing it now would replace the full recorded layout
@@ -439,6 +469,23 @@ mod tests {
         // Persisted state is remembered: the same snapshot never
         // writes twice.
         assert!(!layout.note(vec![record("foot", 100)], start + DEBOUNCE * 2));
+    }
+
+    #[test]
+    fn an_unchanged_borrowed_snapshot_still_matures_the_debounce() {
+        let start = Instant::now();
+        let mut layout = fresh(start);
+        let snapshot = vec![record("foot", 100)];
+        layout.service(snapshot.clone(), start);
+
+        assert_eq!(layout.current(), snapshot);
+        layout.service_current(start + DEBOUNCE / 2);
+        assert!(layout.persisted.is_none(), "an unchanged arrangement is still inside its debounce");
+
+        layout.service_current(start + DEBOUNCE);
+        assert_eq!(layout.persisted.as_deref(), Some(snapshot.as_slice()));
+        layout.service_current(start + DEBOUNCE * 2);
+        assert_eq!(layout.persisted.as_deref(), Some(snapshot.as_slice()), "it is not re-persisted on every tick");
     }
 
     #[test]

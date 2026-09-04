@@ -37,7 +37,7 @@
 //! workspace chord, every "move window to workspace n" chord, and every
 //! bar-panel chord — thirty bindings, and exactly the ones an Omarchy
 //! user reaches for first. So numeric `for` over integer literals is
-//! expanded, bounded at [`MAX_LOOP`] iterations.
+//! expanded, bounded at `MAX_LOOP` iterations.
 //!
 //! The branches earn their keep the same way. Omarchy gates its
 //! preinstalled application chords on `o.preinstalled_bindings_enabled()`
@@ -97,7 +97,7 @@ pub enum Value {
     /// `hl.on("hyprland.start", function() … end)`, so a reader that
     /// threw function bodies away would find no autostart entries at
     /// all. Only that one handler's body is ever walked — see
-    /// [`START_EVENT`] — because every other function in these files
+    /// `START_EVENT` — because every other function in these files
     /// is a *definition* (`helpers.lua` defines `o.bind` in terms of
     /// `hl.bind`), and walking a definition would emit the bindings its
     /// own body describes rather than the ones its callers ask for.

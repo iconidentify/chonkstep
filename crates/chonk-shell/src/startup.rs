@@ -445,10 +445,10 @@ pub fn restart_requested() -> bool {
 /// keeps every window, every client connection and every dockapp,
 /// where a restart on the Wayland session keeps only the compositor
 /// and its dockapps. Polled rather than watched with inotify — the
-/// same argument the dockapp theme broadcast makes for polling, plus
-/// a much smaller one: the session already wakes at 16ms to do
-/// housekeeping, so a poll costs a `unlink` syscall on a path that is
-/// almost never there.
+/// same argument the dockapp theme broadcast makes for polling. The
+/// session's adaptive loop bounds this path's response to 100 ms, so a
+/// poll costs an `unlink` syscall on a path that is almost never there
+/// without imposing a frame-rate wakeup on an idle desktop.
 pub fn reload_requested() -> bool {
     std::fs::remove_file(state_dir().join("reload")).is_ok()
 }

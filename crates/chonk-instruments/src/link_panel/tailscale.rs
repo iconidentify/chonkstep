@@ -56,7 +56,7 @@
 //! of that argument: the SDK, the theme, a pixel buffer, a text
 //! shaper. `serde` would be harmless — but the list stays short by
 //! policy, and the status document needs six fields out of a ~78KB
-//! blob. [`Json`] below is a ~150-line recursive-descent parser with a
+//! blob. `Json` below is a ~150-line recursive-descent parser with a
 //! depth cap, fixture-tested against a real `tailscale status --json`
 //! capture. If a second instrument ever needs JSON, revisit the
 //! trade.

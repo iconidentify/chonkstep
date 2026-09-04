@@ -40,7 +40,7 @@
 //!   interval. On the repaint thread it was a dropped frame at best and
 //!   an evicted instrument at worst.
 //! * `wpctl`, `nmcli` (sound, wifi) — [`Source::Command`], via
-//!   [`BackgroundCommand`].
+//!   `BackgroundCommand`.
 //!
 //! # Built-in only, deliberately
 //!
@@ -863,7 +863,7 @@ mod tests {
     /// exact opposite of what `nmcli dev wifi` did from `tick()` on
     /// 2026-08-29, when a ~3.6s scan became a ~3.6s freeze.
     ///
-    /// The bound is one whole frame (16ms, `HOUSEKEEPING_INTERVAL`) for
+    /// The bound is one 60 Hz display frame (16 ms) for
     /// a *thousand* refreshes taken while the child is parked — chosen
     /// loose enough that a debug build on a loaded runner cannot fail
     /// it by accident, and still tighter than the failure it guards

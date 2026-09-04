@@ -389,7 +389,7 @@ const FLIP_STALL_RECOVERY: Duration = Duration::from_secs(5);
 /// away is credited back to every flip in flight instead of counted
 /// against it.
 ///
-/// Generous relative to the 16ms housekeeping cadence, because the cost
+/// Generous relative to the 100 ms maximum idle cadence, because the cost
 /// of being wrong is asymmetric: crediting a little real driver latency
 /// only delays a warning, while charging a little blocked time can fire
 /// a modeset.
@@ -1103,9 +1103,9 @@ fn attach_output(
 /// happening. That is precisely the state a lost flip leaves behind: no
 /// damage, no dirty output, nothing to bring the render path back, and
 /// so no one left to notice. The cost is one extra pass over the
-/// outputs per housekeeping wakeup while a flip is outstanding, which
-/// at 60Hz is most of them, and each pass is a `Duration` comparison
-/// per output.
+/// outputs per housekeeping wakeup while a flip is outstanding, each a
+/// `Duration` comparison per output. A completion on the DRM fd wakes
+/// the loop directly; this poll is only the lost-completion backstop.
 pub(crate) fn redraw_pending(graphics: &Graphics) -> bool {
     match graphics {
         Graphics::Winit(_) => false,

@@ -1043,7 +1043,7 @@ impl OmarchyMenu {
     }
 
     /// The shell-tick hook: polls the files for change at
-    /// [`FILE_POLL_INTERVAL`] and starts a condition batch if one is
+    /// `FILE_POLL_INTERVAL` and starts a condition batch if one is
     /// due. Never blocks.
     pub fn tick(&mut self, now: Instant) {
         if now.duration_since(self.last_poll) >= FILE_POLL_INTERVAL {

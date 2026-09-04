@@ -156,7 +156,7 @@ fn main() {
     // shell-surface clicks before anything reaches the shell.
     let root = wm.backend().root();
     // Reused across iterations so building the wait set is a `clear`
-    // and a few pushes rather than an allocation at 60Hz — see
+    // and a few pushes rather than an allocation on every wake — see
     // `wait_for_activity`.
     let mut wait_fds: Vec<std::os::unix::io::RawFd> = Vec::new();
     loop {
@@ -342,7 +342,7 @@ fn main() {
         // switched the session's mode; XSETTINGS is the binary's to
         // publish (the manager lives here), so mirror the change out
         // to X clients. Comparing first keeps this a no-op integer
-        // check on the 60Hz path.
+        // check on the hot path.
         if shell.appearance() != published_appearance {
             published_appearance = shell.appearance();
             publish_appearance(&mut xsettings, shell.session_state());
@@ -353,10 +353,10 @@ fn main() {
         // used to feel like they were catching up to the cursor in
         // steps: with a flat `sleep(100ms)` here, no input got
         // processed for up to 100ms at a time no matter how fast the
-        // pointer was moving. `HOUSEKEEPING_INTERVAL` bounds the wait
-        // so the clock/menu-hover-timeout ticks above still run
-        // regularly even with zero X11 activity; real input wakes this
-        // up immediately, every time, regardless of that bound.
+        // pointer was moving. The shell supplies the bound: exact
+        // menu/dockapp deadlines win, with a conservative idle ceiling
+        // for sampler results and marker files. Real input wakes this
+        // immediately regardless.
         // The X socket plus everything the shell is waiting on that
         // the display server knows nothing about: the dockapp
         // listener, and one fd per connected dockapp. Rebuilt every
@@ -365,11 +365,11 @@ fn main() {
         // at worst a wait on a descriptor this process has since reused
         // for something else. The `Vec` lives outside the loop so the
         // rebuild is a `clear` and some pushes rather than an
-        // allocation at 60Hz.
+        // allocation on every wake.
         wait_fds.clear();
         wait_fds.push(wm.backend().connection_fd());
         wait_fds.extend(shell.extra_poll_fds());
-        wait_for_activity(&wait_fds, HOUSEKEEPING_INTERVAL);
+        wait_for_activity(&wait_fds, shell.next_housekeeping_in(std::time::Instant::now()));
     }
 
     // Whatever ended the loop — the root menu's Exit, a lost display —
@@ -378,13 +378,6 @@ fn main() {
     // is no incoming shell to hand it to.
     shell.shut_down(Farewell::SessionOver);
 }
-
-/// How often the main loop wakes up on its own even with no X11
-/// activity at all, to run `Shell::tick`/`restart_requested` — ~60Hz,
-/// far more than any of those actually need, but cheap and keeps them
-/// feeling responsive rather than picking a number tied to any one of
-/// their specific timing requirements.
-const HOUSEKEEPING_INTERVAL: Duration = Duration::from_millis(16);
 
 /// Blocks the calling thread until one of `fds` is readable or
 /// `timeout` elapses, whichever comes first — the integration pattern

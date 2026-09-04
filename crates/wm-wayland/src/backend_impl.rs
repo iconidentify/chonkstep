@@ -876,7 +876,7 @@ impl Backend for WaylandBackend {
     /// window type stays whatever it is; only the frame is missing.
     ///
     /// The stacking slot is what actually makes such a window visible
-    /// (see [`StackEntry::Window`]). A window mapping for the first time
+    /// (see `StackEntry::Window`). A window mapping for the first time
     /// gets one on top, which is where `create_decoration` puts a fresh
     /// frame; a window already holding one — remapped after a workspace
     /// switch or a deminiaturize — keeps its depth, because coming back
@@ -924,7 +924,7 @@ impl Backend for WaylandBackend {
 
     /// The same raise for a window whose client draws its own chrome:
     /// it holds its own slot in the frame band rather than borrowing a
-    /// frame's (see [`StackEntry::Window`]), so raising it is raising
+    /// frame's (see `StackEntry::Window`), so raising it is raising
     /// that slot.
     ///
     /// Deliberately the identical call to `raise` above, against a
@@ -1041,7 +1041,7 @@ impl Backend for WaylandBackend {
     /// The input module then routes every motion and button to the
     /// window manager instead of the surface under the cursor, and the
     /// seat takes the pointer off the client that had it (see
-    /// [`DragGrab`], and `input::apply_pointer_grab_change` for the
+    /// `DragGrab`, and `input::apply_pointer_grab_change` for the
     /// half that has to reach the seat).
     ///
     /// This used to return a no-op handle, on the reasoning that a

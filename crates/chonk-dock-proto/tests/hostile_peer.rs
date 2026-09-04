@@ -67,7 +67,7 @@ use chonk_dock_proto::transport::{Seqpacket, SeqpacketListener};
 use chonk_dock_proto::wire::{Button, ClientMessage, InputEvent, InputKind, ServerMessage};
 use chonk_dock_proto::MAX_MESSAGE_BYTES;
 
-/// One whole frame at the shell's 16 ms `HOUSEKEEPING_INTERVAL`. The
+/// One whole frame on a 60 Hz output (16 ms). The
 /// budget for a *thousand* passes, deliberately: the same bound
 /// `chonk-shell`'s sampler test uses, chosen loose enough that a debug
 /// build on a loaded CI runner cannot fail it by accident and still

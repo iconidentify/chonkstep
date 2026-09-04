@@ -35,7 +35,7 @@ use std::collections::{HashMap, VecDeque};
 use std::os::fd::{BorrowedFd, RawFd};
 use std::process::Stdio;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use calloop::signals::{Signal, Signals};
 use smithay::backend::allocator::Fourcc;
@@ -936,14 +936,6 @@ impl ClientData for ClientState {
     }
 }
 
-/// How often the dispatch loop wakes with zero protocol activity, to
-/// run `Shell::tick` and the restart-marker check — same value and
-/// same rationale as the X11 binary's `HOUSEKEEPING_INTERVAL`: ~60Hz
-/// is far more than the clock or menu timers need, but cheap, and
-/// real events (client commits, input) wake calloop immediately
-/// regardless of this bound.
-const HOUSEKEEPING_INTERVAL: Duration = Duration::from_millis(16);
-
 /// The one calloop data type — see the module docs for why everything
 /// must live on a single struct. Fields are `pub` (not `pub(crate)`)
 /// only where the re-exported API surface needs them; the protocol
@@ -1481,7 +1473,7 @@ pub struct Compositor {
     /// `wl_pointer.set_cursor` (maintained by `input.rs`'s
     /// `SeatHandler::cursor_image`). Honored only while the pointer is
     /// over client content; the renderer falls back to
-    /// [`Compositor::cursors`] for `Named` shapes and everywhere else
+    /// `Compositor::cursors` for `Named` shapes and everywhere else
     /// (see `push_cursor_elements`).
     pub cursor_status: CursorImageStatus,
     /// The compositor's own pointer images — the arrow, and the resize
@@ -1926,11 +1918,11 @@ impl Compositor {
     ///
     /// Driven off this loop's existing wakeups rather than a calloop
     /// source on the connection's descriptor: `poll` is non-blocking and
-    /// drains whatever has arrived, the loop already wakes at least
-    /// every `HOUSEKEEPING_INTERVAL`, and the crate's own documentation
-    /// says a timer is a sufficient home for it. The cost of being up to
-    /// 16ms late to notice a takeover is nothing; the cost of a second
-    /// event source is a second thing to unregister on teardown.
+    /// drains whatever has arrived, the loop already has a bounded idle
+    /// housekeeping poll, and the crate's own documentation says a timer
+    /// is a sufficient home for it. The cost of being up to 100 ms late
+    /// to notice a takeover is nothing; the cost of a second event source
+    /// is a second thing to unregister on teardown.
     fn poll_xsettings(&mut self) {
         let Some(manager) = self.xsettings.as_mut() else {
             return;
@@ -2098,9 +2090,9 @@ impl Compositor {
                 Ok(token) => self.dock_sources.push((fd, token)),
                 Err(error) => {
                     // Not fatal, and worth being precise about why: the
-                    // loop already wakes on a 16ms housekeeping bound,
-                    // so an unregistered dockapp fd costs that tile up
-                    // to 16ms of frame latency and nothing else. This
+                    // loop still has a 100 ms maximum idle bound, so an
+                    // unregistered dockapp fd costs that tile up to that
+                    // much frame latency and nothing else. This
                     // is a latency optimisation, not a correctness
                     // requirement.
                     tracing::warn!(
@@ -2997,10 +2989,19 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
             // the key silently skipped it.
             comp.shell.reload_config(&mut comp.wm);
         }
-        // Blocks on every source at once (wayland clients, winit
-        // input, XWayland) with the housekeeping bound — the calloop
-        // equivalent of the X11 loop's poll-on-the-socket-fd.
-        event_loop.dispatch(Some(HOUSEKEEPING_INTERVAL), &mut comp)?;
+        // Blocks on every source at once (Wayland clients, input,
+        // XWayland and dockapps). Time-only work contributes its exact
+        // deadline; otherwise the shell's bounded idle poll covers
+        // worker results and marker files without waking at display
+        // refresh rate. A held compositor binding contributes the
+        // key-repeat deadline separately because that state belongs to
+        // the seat, not to the backend-generic shell.
+        let now = std::time::Instant::now();
+        let mut wait = comp.shell.next_housekeeping_in(now);
+        if let Some(deadline) = crate::input::repeating_binding_deadline(&comp) {
+            wait = wait.min(deadline.saturating_duration_since(now));
+        }
+        event_loop.dispatch(Some(wait), &mut comp)?;
         comp.dispatch_pending();
     }
 

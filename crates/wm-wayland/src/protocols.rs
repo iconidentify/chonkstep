@@ -406,7 +406,7 @@ pub(crate) fn refresh(comp: &mut Compositor) {
 /// Running here rather than inside the protocol handler is the same
 /// deferral `WaylandBackend::pending_focus` documents: a request lands
 /// mid-dispatch and takes effect once the pass settles. The visible
-/// cost is one pass (≤16ms): `miniaturize` pushes
+/// cost is one dispatch pass: `miniaturize` pushes
 /// `Notification::Miniaturized`, and the shell's drain has already run
 /// by the time this does, so the icon tile appears on the next frame
 /// rather than the one where the window vanished.
@@ -803,7 +803,7 @@ impl Dispatch<ZwlrForeignToplevelHandleV1, WlWindowId> for Compositor {
     /// under X11 reach `wm-core` through byte-identical code — the same
     /// translation discipline `xdg.rs` follows for xdg-shell's own
     /// maximize/fullscreen requests. Minimize is the exception and is
-    /// deferred to [`apply_minimize_requests`].
+    /// deferred to `apply_minimize_requests`.
     fn request(
         state: &mut Self,
         _client: &Client,

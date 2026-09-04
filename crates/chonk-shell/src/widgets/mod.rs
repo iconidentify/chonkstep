@@ -15,7 +15,7 @@
 //!
 //! What is left in this module is what belongs to the dock rather than
 //! to a widget: [`sampling`], the runtime that turns declared `Source`s
-//! into `Samples` on threads of its own, and [`SupervisedWidget`], the
+//! into `Samples` on threads of its own, and `SupervisedWidget`, the
 //! timing guard the dock wraps every item in.
 //!
 //! Read the two together and the layering is the whole story. Sampling
@@ -269,9 +269,8 @@ impl DockWidget for DockItem {
 /// slot.
 ///
 /// Every `update`, `render` and `on_input` in this SDK runs on the
-/// compositor's single repaint thread, which wakes on a 16ms
-/// housekeeping bound (`HOUSEKEEPING_INTERVAL`, `wm-wayland/src/
-/// state.rs`). That 16ms is the *whole* frame's budget — every widget
+/// compositor's single repaint thread. A 60 Hz output gives that thread
+/// 16 ms for the *whole* frame — every widget
 /// in the stack, plus the dock blit, plus compositing — so half of it
 /// spent inside one widget is already an unambiguous fault rather than
 /// a slow day.
@@ -304,7 +303,7 @@ const BUDGET: Duration = Duration::from_millis(8);
 /// a log line and nothing more.
 ///
 /// 100ms is where "stuttered" becomes "stopped": six-plus consecutive
-/// frames dropped at the 16ms cadence, and the long-standing UI
+/// 60 Hz frames dropped in succession, and the long-standing UI
 /// threshold past which an interaction stops reading as instantaneous
 /// and starts reading as broken. A widget that does that repeatedly is
 /// not having a bad moment, it is the thing wrong with the desktop.

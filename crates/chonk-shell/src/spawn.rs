@@ -108,7 +108,7 @@ static CONTROL_SOCKET: std::sync::OnceLock<std::path::PathBuf> = std::sync::Once
 /// which walks `environ` — and `setenv` racing a reader of `environ` is
 /// a use-after-free the Rust standard library documents as such (the
 /// `XCURSOR_SIZE` export in `startup.rs` is safe only because it runs
-/// before any thread exists). Injecting at [`apply_env`] instead
+/// before any thread exists). Injecting at `apply_env` instead
 /// touches only the `Command` being built, needs no unsafety, reaches
 /// every launch path the shell has — autostart, `[commands]`, menus,
 /// terminals, session-layout relaunches — because they all go through

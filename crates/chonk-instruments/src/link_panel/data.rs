@@ -7,8 +7,8 @@
 //!
 //! Terse mode (`-t`) is the stable parse surface nmcli(1) documents:
 //! colon-separated fields with `\:` and `\\` escaping inside values.
-//! [`split_terse`] is the one splitter everything shares — including
-//! the LNK tile's own parser in [`crate::wifi`] — because an SSID or a
+//! `split_terse` is the one splitter everything shares — including
+//! the LNK tile's own parser in `crate::wifi` — because an SSID or a
 //! connection name may legally contain both `:` and `\`, and a naive
 //! `split(':')` shears such a value apart and misreads its tail.
 //!
@@ -191,7 +191,7 @@ pub struct WifiNetwork {
 }
 
 /// `nmcli -t -f IN-USE,SSID,SIGNAL,SECURITY dev wifi list --rescan no`
-/// — the cache read, never the radio (see [`crate::wifi`] for the
+/// — the cache read, never the radio (see `crate::wifi` for the
 /// measured difference). Deduplicates by SSID keeping the strongest
 /// BSS (an in-use BSS always wins its SSID), sorts in-use first then
 /// strongest first, and drops hidden (empty-SSID) entries — a row the

@@ -58,6 +58,9 @@ use chonk_testkit::{keys, poll_until, profile_binary, session_dir, Session, Sess
 const KEY_K: u32 = 37;
 /// `KEY_J` — what the *edited* configuration moves the close verb onto.
 const KEY_J: u32 = 36;
+/// `KEY_R` — deliberately unbound by this test's otherwise-minimal
+/// config, except for the repeating probe below.
+const KEY_R: u32 = 19;
 /// `KEY_LEFTMETA`, the Super the chords are held with.
 const KEY_LEFTMETA: u32 = 125;
 /// `KEY_LEFTSHIFT`.
@@ -359,6 +362,50 @@ fn selection_layer_bindings_override_only_for_the_layers_lifetime() {
     })
     .expect("the global binding owns Return again after the layer closes");
     assert!(!after.contains("--take-window"), "the layer binding leaked after unmap: {after}");
+}
+
+/// The deadline-driven idle loop must not turn Hyprland's `binde`
+/// into a 10 Hz binding. Hold a real injected key and count an external
+/// command's durable effects: this crosses the live config reader,
+/// grab table, seat repeat state, scheduler deadline, action dispatch,
+/// and child launcher in one observation.
+#[test]
+#[ignore = "needs a session to nest in; run via scripts/e2e.sh"]
+fn a_held_binde_keeps_the_configured_repeat_rate_under_idle_scheduling() {
+    let marker = session_dir("hyprland-repeat").join("repeats");
+    let config = format!(
+        "input {{\n  repeat_rate = 25\n  repeat_delay = 120\n}}\n\
+         binde = SUPER, R, exec, sh -c 'printf x >> {}'\n",
+        marker.display()
+    );
+    let options = SessionOptions {
+        config_extra: "desktop = \"omarchy\"\nomarchy_bar = false\n".into(),
+        config_root_files: vec![("hypr/hyprland.conf".into(), config)],
+        ..Default::default()
+    };
+    let mut session = Session::boot("hyprland-repeat", options).expect("session boots");
+
+    {
+        let door = session.door();
+        door.key(KEY_LEFTMETA, true).expect("meta down");
+        door.barrier().expect("modifier settles");
+        door.key(KEY_R, true).expect("repeating key down");
+        door.barrier().expect("initial press settles");
+    }
+    let repeated = poll_until(Duration::from_secs(2), "five effects from the held 25 Hz binding", || {
+        let bytes = std::fs::read(&marker).ok()?;
+        (bytes.len() >= 5).then_some(bytes.len())
+    });
+    {
+        let door = session.door();
+        door.key(KEY_R, false).expect("repeating key up");
+        door.key(KEY_LEFTMETA, false).expect("meta up");
+        door.barrier().expect("release settles");
+    }
+
+    let count = repeated.expect("the compositor-owned repeat deadline should keep firing the binding");
+    assert!(count >= 5, "the initial press plus configured repeats must all run, got {count}");
+    assert!(session.compositor_alive(), "repeating a command must not destabilize the compositor");
 }
 
 /// Reading somebody else's configuration must never be able to break

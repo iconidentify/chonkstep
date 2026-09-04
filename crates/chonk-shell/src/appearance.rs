@@ -25,7 +25,7 @@
 //!   changed: `light`, `dark`, or `toggle`. The shell consumes it
 //!   (acts, then deletes) from its housekeeping tick, the same
 //!   poll-and-unlink pattern as the `reload`/`restart` markers in
-//!   [`crate::startup`] and on the same ~16ms cadence. A request that
+//!   [`crate::startup`] and on the same bounded (at most 100 ms) cadence. A request that
 //!   names the mode the session is already in is consumed and does
 //!   nothing.
 //!
@@ -142,8 +142,8 @@ pub fn publish(mode: Appearance) {
 ///
 /// A destructive read like `startup::restart_requested`: the file is
 /// removed once observed, so a request is honored exactly once. An
-/// unparsable request is still consumed (leaving it would warn at
-/// 60Hz forever) and answered with a warning naming the text.
+/// unparsable request is still consumed (leaving it would warn on
+/// every housekeeping pass forever) and answered with a warning naming the text.
 pub fn take_request() -> Option<Request> {
     let path = state_dir().join(REQUEST_FILE);
     let text = std::fs::read_to_string(&path).ok()?;

@@ -361,7 +361,7 @@ impl KdeDecorationHandler for Compositor {
 /// Hand-written rather than delegated, for one reason: smithay's own
 /// `bind` reports nothing to the compositor, and *which clients bound
 /// this manager* is load-bearing evidence here (see
-/// [`DecorationNegotiation::kde_manager_bound`]). The two per-object
+/// `DecorationNegotiation::kde_manager_bound`). The two per-object
 /// dispatches below stay delegated to smithay.
 impl GlobalDispatch<OrgKdeKwinServerDecorationManager, KdeDecorationManagerGlobalData> for Compositor {
     fn bind(

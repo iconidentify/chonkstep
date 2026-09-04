@@ -536,6 +536,36 @@ impl RemoteTile {
         self.connection.as_ref().map(|c| c.socket.as_raw_fd())
     }
 
+    /// The next instant at which time alone can change this tile.
+    ///
+    /// Socket readability wakes the event loop for new messages. This
+    /// complements that edge with the deadlines which have no fd of
+    /// their own: a metered frame/panel present, liveness ping, launch
+    /// backoff, handshake grace, or restart rejoin window. Advertising
+    /// them lets an idle compositor sleep without adding latency to a
+    /// streaming panel or to dockapp supervision.
+    pub(crate) fn next_service_deadline(&self, now: Instant) -> Option<Instant> {
+        let mut next = self.limiter.next_ready_in(now).map(|wait| now + wait);
+        let mut consider = |candidate: Instant| {
+            next = Some(next.map_or(candidate, |current| current.min(candidate)));
+        };
+
+        if let Some(panel) = &self.panel {
+            if panel.dirty {
+                consider(panel.last_present.map_or(now, |presented| presented + PANEL_PRESENT_INTERVAL));
+            }
+        }
+        if let Some(connection) = &self.connection {
+            consider(connection.last_ping + PING_INTERVAL);
+        }
+        match self.state {
+            TileState::Waiting { until } | TileState::Rejoining { until } => consider(until),
+            TileState::Starting { since } if self.connection.is_none() => consider(since + HANDSHAKE_GRACE),
+            TileState::Starting { .. } | TileState::Live | TileState::Hung { .. } | TileState::Stopped { .. } => {}
+        }
+        next
+    }
+
     /// Everything [`launch`](Self::launch) does to this tile's own state
     /// except the `fork`/`exec`.
     ///
@@ -719,10 +749,9 @@ impl RemoteTile {
         self.push_visibility(ctx);
         self.check_liveness(ctx.now);
         // A frame parked by the rate limiter becomes visible on the
-        // pass after its token refills. `next_ready_in` exists for a
-        // loop that wants to size its poll timeout; this one already
-        // wakes every 16ms, which is finer than the 33ms the limiter
-        // meters at, so calling it would buy nothing.
+        // pass after its token refills. `next_service_deadline` carries
+        // `next_ready_in` to both backend loops, so their adaptive idle
+        // wait never adds latency to the 30 Hz meter.
         if let Some(frame) = self.limiter.take_ready(ctx.now) {
             self.last_frame = Some(frame);
             self.dirty = true;
@@ -1876,6 +1905,45 @@ mod tests {
         assert_eq!(budget.recent_failures(), 0);
         let now = start + Duration::from_secs(10);
         assert_eq!(budget.record_failure(now, false), Fate::Retry { at: now + Duration::from_secs(1) }, "and the backoff starts over at one second");
+    }
+
+    #[test]
+    fn time_driven_tile_states_publish_the_deadline_that_services_them() {
+        let now = Instant::now();
+        let mut tile = RemoteTile::new(entry(RestartPolicy::OnCrash, 1), 56, now);
+        assert_eq!(tile.next_service_deadline(now), Some(now), "the initial launch is due immediately");
+
+        tile.state = TileState::Starting { since: now };
+        assert_eq!(tile.next_service_deadline(now), Some(now + HANDSHAKE_GRACE));
+
+        let rejoin = now + REJOIN_WINDOW;
+        tile.state = TileState::Rejoining { until: rejoin };
+        assert_eq!(tile.next_service_deadline(now), Some(rejoin));
+
+        tile.state = TileState::Stopped { reason: StopReason::PolicyNever };
+        assert_eq!(tile.next_service_deadline(now), None, "a stopped tile cannot change merely because time passed");
+    }
+
+    #[test]
+    fn a_parked_frame_shortens_idle_sleep_to_the_limiter_refill() {
+        let now = Instant::now();
+        let mut tile = RemoteTile::new(entry(RestartPolicy::OnCrash, 1), 56, now);
+        let frame = || DecorationBuffer { width: 56, height: 56, pixels: vec![0; 56 * 56 * 4] };
+
+        // The limiter begins with one second's burst. Spend every token
+        // at one instant, then the next frame has to wait for a refill.
+        for _ in 0..chonk_dock_proto::queue::DEFAULT_FRAME_RATE_HZ as usize {
+            assert!(tile.limiter.offer(frame(), now).is_some());
+        }
+        assert!(tile.limiter.offer(frame(), now).is_none(), "the next frame is parked, not dropped");
+        // Remove the independently-due initial launch so this assertion
+        // isolates the limiter's deadline rather than the tile's state
+        // machine choosing the (earlier) launch instant.
+        tile.state = TileState::Stopped { reason: StopReason::PolicyNever };
+
+        let deadline = tile.next_service_deadline(now).expect("a parked frame owns a wakeup");
+        assert!(deadline > now);
+        assert!(deadline <= now + Duration::from_millis(34), "30 Hz refill is due after about 33.3 ms");
     }
 
     // -----------------------------------------------------------------

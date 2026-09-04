@@ -38,7 +38,7 @@ use crate::apps::{match_window_class, AppEntry};
 /// Generic over the backend's client-window id (`W` =
 /// `Backend::WindowId` in the shell) rather than over the backend
 /// itself: the enum only carries an id, and the free helpers below
-/// ([`resolve_click`], [`running_lamps`]) stay directly testable with
+/// (`resolve_click`, `running_lamps`) stay directly testable with
 /// plain integers.
 pub enum LaunchDockAction<W> {
     Launch(AppEntry),
@@ -87,6 +87,11 @@ pub struct LaunchDock<B: Backend> {
     /// `Focus` resolution always reads the fresh `running` pairs the
     /// shell passes into `handle_click`.
     lit: Vec<bool>,
+    /// A pin mutation made the current lamp vector provisional. The
+    /// shell's client cache may still match perfectly after a new pin
+    /// is inserted, so this independent bit guarantees the next tick
+    /// reconciles that pin against the already-running applications.
+    running_dirty: bool,
     drag: Option<StripDrag>,
     /// The session's one shared font database — see
     /// `wm_theme::FontState` ("call it once per session"); the strip
@@ -112,6 +117,7 @@ impl<B: Backend> LaunchDock<B> {
             state_path,
             pins,
             lit,
+            running_dirty: true,
             drag: None,
             fonts,
         };
@@ -206,10 +212,18 @@ impl<B: Backend> LaunchDock<B> {
     /// changed.
     pub fn update_running(&mut self, backend: &mut B, theme: &Theme, running: &[(String, B::WindowId)]) {
         let lit = running_lamps(&self.pins, running);
+        self.running_dirty = false;
         if lit != self.lit {
             self.lit = lit;
             self.repaint(backend, theme);
         }
+    }
+
+    /// Whether the pin set changed since running lamps were last
+    /// reconciled. Kept separate from the shell's client cache because
+    /// pinning an application changes no client at all.
+    pub fn running_refresh_needed(&self) -> bool {
+        self.running_dirty
     }
 
     /// Attempts to pin `app` at the strip position under `root` — the
@@ -237,6 +251,7 @@ impl<B: Backend> LaunchDock<B> {
                 self.lit.insert(slot, false);
             }
         }
+        self.running_dirty = true;
         self.persist();
         self.sync_window(backend, theme);
         true
@@ -266,6 +281,7 @@ impl<B: Backend> LaunchDock<B> {
             Some(slot) => {
                 move_pin(&mut self.pins, drag.index, slot);
                 move_pin(&mut self.lit, drag.index, slot);
+                self.running_dirty = true;
                 self.persist();
                 self.repaint(backend, theme);
             }
@@ -273,6 +289,7 @@ impl<B: Backend> LaunchDock<B> {
                 if drag.index < self.pins.len() {
                     self.pins.remove(drag.index);
                     self.lit.remove(drag.index);
+                    self.running_dirty = true;
                     self.persist();
                     self.sync_window(backend, theme);
                 }
@@ -321,7 +338,7 @@ impl<B: Backend> LaunchDock<B> {
     }
 
     /// The strip anchors to the primary monitor rather than the
-    /// desktop origin (see [`strip_origin`]), so the rect it was built
+    /// desktop origin (see `strip_origin`), so the rect it was built
     /// with goes stale the moment a display is plugged in, unplugged,
     /// or the session is resized. Everything geometric here reads that
     /// stored rect - where the surface is configured, and where clicks
@@ -802,5 +819,29 @@ mod tests {
         // id type gives the same lamps, which is the point of the
         // helper being generic.
         assert_eq!(running_lamps::<u32>(&pins, &[]), [false, false]);
+    }
+
+    #[test]
+    fn a_pin_change_invalidates_lamps_even_when_the_client_set_did_not_change() {
+        use wm_core::fake_backend::FakeBackend;
+
+        let theme = wm_theme::default_theme::nextstep_classic();
+        let mut backend = FakeBackend::new();
+        let primary = Rect { pos: Point::new(0, 0), size: Size::new(640, 480) };
+        let mut dock: LaunchDock<FakeBackend> =
+            LaunchDock::new(&mut backend, &theme, primary, 56, &[], wm_theme::FontState::new());
+        // This test owns no real session state. Pinning below should
+        // exercise reconciliation, not write the user's launcher file.
+        dock.state_path = None;
+
+        assert!(dock.running_refresh_needed(), "startup must reconcile persisted pins once");
+        dock.update_running(&mut backend, &theme, &[]);
+        assert!(!dock.running_refresh_needed());
+
+        assert!(dock.try_pin_at(&mut backend, &theme, Point::new(10, 10), &entry("org.example.App")));
+        assert!(
+            dock.running_refresh_needed(),
+            "the unchanged empty client cache cannot be allowed to leave a newly pinned app provisional"
+        );
     }
 }
