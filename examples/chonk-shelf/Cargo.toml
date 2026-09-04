@@ -20,5 +20,5 @@ chonk-dock-proto = { path = "../../crates/chonk-dock-proto" }
 # version `wm-theme` pins, so cargo unifies them into one crate and the
 # types line up; this is a public crates.io dependency, not an internal
 # API.
-cosmic-text = "0.12"
+cosmic-text = "0.19"
 tracing = "0.1"

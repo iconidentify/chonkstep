@@ -17,7 +17,7 @@ wm-core = { path = "../wm-core" }
 wm-theme = { path = "../wm-theme" }
 wm-theme-api = { path = "../wm-theme-api" }
 wm-config = { path = "../wm-config" }
-cosmic-text = "0.12"
+cosmic-text = "0.19"
 # `SIGTERM` for a dockapp whose socket died while its process did not
 # (`spawn::SpawnedChild::terminate`). std has no way to signal a process
 # it is not currently holding a `Child` for, and holding one would mean

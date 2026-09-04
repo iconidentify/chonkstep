@@ -7,6 +7,11 @@ crate and both session binaries carry the same number.
 
 ### Release hardening
 
+- **The text stack no longer depends on unmaintained `rustybuzz`.** All
+  consumers now use `cosmic-text` 0.19 and its `harfrust` shaper. This also
+  replaces two obsolete `ttf-parser` releases with one current dependency;
+  workspace tests and the full nested-desktop suite cover the resulting font
+  measurement and rendering changes.
 - **Disconnected Hyprland IPC clients no longer pin a CPU core.** Empty
   request probes and quiet event subscribers are removed as soon as their
   peer closes. Previously their permanently readable hangup fds survived

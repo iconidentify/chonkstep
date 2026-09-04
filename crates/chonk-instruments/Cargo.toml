@@ -25,7 +25,7 @@ license.workspace = true
 chonk-dock-widget = { path = "../chonk-dock-widget" }
 wm-theme = { path = "../wm-theme" }
 wm-theme-api = { path = "../wm-theme-api" }
-cosmic-text = "0.12"
+cosmic-text = "0.19"
 # The pixmap the theme kit's pure drawing functions paint into. The
 # audio panel's renderer lives in this crate (`audio_panel::render`)
 # rather than `wm-theme` because its input is this crate's own panel

@@ -7,5 +7,5 @@ description = "A tiny demo app built with chonk-ui, proving the SDK inherits cho
 
 [dependencies]
 chonk-ui = { path = "../chonk-ui" }
-cosmic-text = "0.12"
+cosmic-text = "0.19"
 tiny-skia = "0.11"

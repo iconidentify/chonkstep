@@ -264,7 +264,7 @@ pub fn text_width(font_system: &mut cosmic_text::FontSystem, font: &FontSpec, te
     let metrics = Metrics::new(font.size, font.size * 1.25);
     let mut buffer = Buffer::new(font_system, metrics);
     // No wrap box: measurement wants the single-line natural width.
-    buffer.set_size(font_system, None, None);
+    buffer.set_size(None, None);
     let weight = match font.weight {
         FontWeight::Bold => Weight::BOLD,
         FontWeight::Normal => Weight::NORMAL,
@@ -274,7 +274,7 @@ pub fn text_width(font_system: &mut cosmic_text::FontSystem, font: &FontSpec, te
         FontStyle::Normal => Style::Normal,
     };
     let attrs = Attrs::new().family(Family::Name(&font.family)).weight(weight).style(style);
-    buffer.set_text(font_system, text, attrs, Shaping::Advanced);
+    buffer.set_text(text, &attrs, Shaping::Advanced, None);
     buffer.shape_until_scroll(font_system, false);
     let mut width = 0f32;
     for run in buffer.layout_runs() {
@@ -312,7 +312,7 @@ pub fn draw_text(
 
     let metrics = Metrics::new(font.size, font.size * 1.25);
     let mut buffer = Buffer::new(font_system, metrics);
-    buffer.set_size(font_system, Some(w as f32), Some(h as f32));
+    buffer.set_size(Some(w as f32), Some(h as f32));
 
     let weight = match font.weight {
         FontWeight::Bold => Weight::BOLD,
@@ -323,7 +323,7 @@ pub fn draw_text(
         FontStyle::Normal => Style::Normal,
     };
     let attrs = Attrs::new().family(Family::Name(&font.family)).weight(weight).style(style);
-    buffer.set_text(font_system, text, attrs, Shaping::Advanced);
+    buffer.set_text(text, &attrs, Shaping::Advanced, None);
     buffer.shape_until_scroll(font_system, false);
 
     let mut text_width = 0f32;

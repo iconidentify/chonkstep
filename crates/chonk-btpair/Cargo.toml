@@ -24,7 +24,7 @@ wm-theme = { path = "../wm-theme" }
 # For `paint::draw_text`'s FontSystem/SwashCache parameters. The same
 # version `wm-theme` pins, so cargo unifies them into one crate and the
 # types line up; this is a public crates.io dependency, not an internal API.
-cosmic-text = "0.12"
+cosmic-text = "0.19"
 tiny-skia = "0.11"
 # The window and its event loop. `chonk_ui::App` is the house window,
 # and this crate deliberately does not use it — see `main.rs`'s "Why
