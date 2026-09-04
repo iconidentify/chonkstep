@@ -455,7 +455,7 @@ pub struct WaylandBackend {
     /// XWayland roots after their first associated commit. The object
     /// id includes its client/generation identity, so protocol id reuse
     /// cannot alias a dead surface. Kept in lockstep by
-    /// [`Self::remember_window`], [`Self::index_window_surface`],
+    /// [`Self::remember_window`], [`Self::ensure_window_surface_index`],
     /// [`Self::forget_surface`], and [`Self::forget_window`].
     surface_windows: HashMap<ObjectId, WlWindowId>,
     /// Per-application decoration overrides — see

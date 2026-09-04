@@ -26,7 +26,7 @@
 //! request left behind.
 //!
 //! A commit is also the principal source of compositor damage, but it
-//! is not automatically *visible* damage. [`Compositor::surface_affects_scene`]
+//! is not automatically *visible* damage. [`Compositor::resolved_surface_affects_scene`]
 //! mirrors the renderer's scene admission: a self-timed client parked on
 //! another workspace, an ordinary window behind the lock screen, or a hidden
 //! Omarchy layer keeps speaking Wayland without scheduling frames whose output
