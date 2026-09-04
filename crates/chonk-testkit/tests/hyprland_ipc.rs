@@ -319,6 +319,84 @@ fn foreign_toplevel_mapping_returns_the_same_live_ipc_address() {
     assert!(session.compositor_alive(), "stale foreign handles are cleaned rather than dereferenced");
 }
 
+/// Input-shaped activity is not a protocol invalidation. This observes
+/// work rather than only wire output: a full reconciliation that allocates
+/// and then finds an empty diff would otherwise look just as quiet as the
+/// optimized path from outside the compositor.
+#[test]
+#[ignore = "needs a Wayland session to nest inside"]
+fn focused_click_is_snapshot_free_and_drag_syncs_only_its_toplevel() {
+    let mut session = boot("hypr-protocol-invalidation");
+    let dir = socket_dir(&session);
+    let _events = Events::connect(&dir);
+
+    let observer = profile_binary("chonk-toplevel-mapping-probe").expect("mapping probe built");
+    session.launch(observer.to_str().unwrap(), &[]).expect("mapping probe launches");
+    poll_until(EVENT, "the foreign-toplevel manager to bind", || {
+        session
+            .client_log("chonk-toplevel-mapping-probe")
+            .contains("**mapping ready**")
+            .then_some(())
+    })
+    .expect("foreign-toplevel manager is available");
+
+    let probe = profile_binary("chonk-fullscreen-probe").expect("window probe built");
+    session
+        .launch(probe.to_str().unwrap(), &["protocol-invalidation"])
+        .expect("window probe launches");
+    let window = session
+        .wait_for_window("protocol-invalidation")
+        .expect("window maps and takes focus");
+    poll_until(EVENT, "the foreign-toplevel handle to settle", || {
+        session
+            .client_log("chonk-toplevel-mapping-probe")
+            .contains("**foreign done**")
+            .then_some(())
+    })
+    .expect("foreign-toplevel published the probe");
+    session.door().barrier().expect("initial protocol publications settle");
+
+    let before_click = session.door().protocol_publishes().expect("read publisher counters");
+    session
+        .door()
+        .click(
+            window.x as f64 + window.w as f64 / 2.0,
+            window.y as f64 + window.h as f64 / 2.0,
+        )
+        .expect("click the already-focused content");
+    let after_click = session.door().protocol_publishes().expect("read counters after click");
+    assert_eq!(
+        after_click, before_click,
+        "a focused content click must build neither protocol snapshot"
+    );
+
+    let world = session.door().windows().expect("read the decorated window");
+    let frame = world.frame_of(window.id).expect("the probe has server decorations");
+    let titlebar = (frame.x as f64 + frame.w as f64 / 2.0, frame.y as f64 + 8.0);
+    session
+        .door()
+        .drag_to(titlebar, (titlebar.0 + 96.0, titlebar.1 + 64.0))
+        .expect("drag the titlebar");
+    session.door().button("left", false).expect("release the drag");
+    session.door().barrier().expect("drag settles");
+
+    let after_drag = session.door().protocol_publishes().expect("read counters after drag");
+    assert_eq!(
+        after_drag.hyprland, after_click.hyprland,
+        "geometry-only drag has no Hyprland event snapshot"
+    );
+    assert_eq!(
+        after_drag.foreign_full, after_click.foreign_full,
+        "dragging one window must not rebuild the full toplevel view"
+    );
+    assert_eq!(
+        after_drag.foreign_drag - after_click.foreign_drag,
+        8,
+        "each of the eight settled drag steps must sync exactly one toplevel"
+    );
+    assert!(session.compositor_alive(), "optimized protocol paths keep the session alive");
+}
+
 #[test]
 #[ignore = "needs a Wayland session to nest inside"]
 fn window_geometry_plain_fields_and_monitor_eval_are_applied_before_ok() {

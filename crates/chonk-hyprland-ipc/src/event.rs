@@ -343,4 +343,26 @@ mod tests {
             "the event baseline must take ownership rather than clone the snapshot"
         );
     }
+
+    #[test]
+    fn bindings_are_request_data_not_event_state() {
+        let mut differ = Differ::new();
+        assert!(differ.diff_owned(Snapshot::default()).is_empty());
+
+        let mut snapshot = Snapshot::default();
+        snapshot.bindings.push(crate::state::Binding {
+            modifiers: 64,
+            key: "Return".into(),
+            description: "Terminal".into(),
+            dispatcher: "exec".into(),
+            argument: "alacritty".into(),
+            locked: false,
+            repeating: false,
+            release: false,
+        });
+        assert!(
+            differ.diff_owned(snapshot).is_empty(),
+            "changing the binding table must never create a Hyprland event"
+        );
+    }
 }

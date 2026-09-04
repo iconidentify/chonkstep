@@ -121,6 +121,16 @@ pub struct WlShellId(pub u64);
 /// surface.
 pub(crate) const ROOT_SHELL: WlShellId = WlShellId(0);
 
+/// Monotonic diagnostics for the two demand-driven protocol publishers.
+/// The opt-in E2E door exposes these so tests can prove an empty diff was
+/// cheap, rather than merely observing that it emitted no wire event.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct ProtocolPublishMetrics {
+    pub hyprland_event_snapshots: u64,
+    pub foreign_toplevel_full_syncs: u64,
+    pub foreign_toplevel_drag_syncs: u64,
+}
+
 /// One entry in the bottom-to-top stacking order. Frames and shell
 /// surfaces interleave in a single sequence because that is what the
 /// X11 server maintains for the X11 backend implicitly: the WM raises
@@ -1458,6 +1468,11 @@ pub struct Compositor {
     /// protocol can be disabled or have no clients without preventing
     /// the other from consuming its own invalidation edge.
     pub(crate) foreign_toplevel_dirty: bool,
+    /// Last wm-core semantic revision observed by the two publishers.
+    /// Comparing this once after mutation drains makes ordinary input
+    /// events allocation-free when they changed no published state.
+    observed_wm_protocol_revision: u64,
+    pub(crate) protocol_publish_metrics: ProtocolPublishMetrics,
 
     // Per-protocol smithay state. Constructed once in `run`; the
     // handler impls in `xdg.rs`/`input.rs`/`xwayland.rs` return these
@@ -1680,15 +1695,6 @@ impl Compositor {
         // any later non-motion event in the same burst.
         let mut pending_motion = None;
         while let Some(event) = self.wm.backend_mut().poll_event() {
-            // Every externally visible window-manager transition
-            // reaches this queue. Remember that fact for the IPC
-            // publisher; pointer motion is the sole exception because
-            // the event protocol has no cursor-position event (a
-            // direct `cursorpos` query still reads it fresh).
-            if !matches!(event, BackendEvent::PointerMotion { .. }) {
-                self.hyprland_state_dirty = true;
-                self.foreign_toplevel_dirty = true;
-            }
             if matches!(event, BackendEvent::ShutdownRequested) {
                 // The display is going away for good; nothing below
                 // can succeed.
@@ -1790,10 +1796,12 @@ impl Compositor {
         // drains `take_shell_motion` itself inside `on_motion`, which
         // every coalesced `PointerMotion` above passes through.
 
-        if self.shell.tick(&mut self.wm) {
-            self.hyprland_state_dirty = true;
-            self.foreign_toplevel_dirty = true;
-        }
+        self.shell.tick(&mut self.wm);
+
+        // State, not the shape of the event that reached it, drives
+        // protocol invalidation. A press/release inside the already-focused
+        // window leaves the revision still and pays no snapshot allocation.
+        self.notice_wm_protocol_changes();
 
         // Wayland-side housekeeping with no X11 counterpart: dead xdg
         // popups age out, and the focus intent a backend verb recorded
@@ -2234,12 +2242,9 @@ impl Compositor {
                 server.publish(&before);
                 first_event_baselined = true;
             }
-            let applied = server.service(&before, |action| crate::hyprland_ipc::apply(self, action));
-            publish |= applied;
-            // These actions call wm-core's public verbs directly; no
-            // BackendEvent follows them to provide the usual foreign-
-            // toplevel invalidation edge.
-            self.foreign_toplevel_dirty |= applied;
+            let _ = server.service(&before, |action| crate::hyprland_ipc::apply(self, action));
+            self.notice_wm_protocol_changes();
+            publish |= self.hyprland_state_dirty;
         } else if server.has_pending_output() {
             // A response or event which met socket backpressure still
             // gets a bounded retry on the housekeeping cadence, but a
@@ -2262,7 +2267,11 @@ impl Compositor {
                 server.reset_diff();
             }
             if publish {
-                let after = crate::hyprland_ipc::snapshot(
+                self.protocol_publish_metrics.hyprland_event_snapshots = self
+                    .protocol_publish_metrics
+                    .hyprland_event_snapshots
+                    .wrapping_add(1);
+                let after = crate::hyprland_ipc::event_snapshot(
                     &self.wm,
                     self.session_lock.machine.locked(),
                     self.shell.session_state(),
@@ -2283,6 +2292,19 @@ impl Compositor {
     /// transition which does not travel through wm-core's backend
     /// event queue (currently input hotplug and unlock).
     pub(crate) fn mark_hyprland_state_dirty(&mut self) {
+        self.hyprland_state_dirty = true;
+        self.foreign_toplevel_dirty = true;
+    }
+
+    /// Observes wm-core's semantic revision at a reconciliation boundary.
+    /// The revision may advance several times in one pass; publishers need
+    /// only know that it differs from the value they last consumed.
+    pub(crate) fn notice_wm_protocol_changes(&mut self) {
+        let revision = self.wm.protocol_state_revision();
+        if revision == self.observed_wm_protocol_revision {
+            return;
+        }
+        self.observed_wm_protocol_revision = revision;
         self.hyprland_state_dirty = true;
         self.foreign_toplevel_dirty = true;
     }
@@ -2349,16 +2371,14 @@ impl Compositor {
     /// `dispatch_motion`, and split out for the same two call sites
     /// (mid-burst before a non-motion event, and once after the burst).
     fn dispatch_motion(&mut self, event: BackendEvent<WlWindowId, WlFrameId>) {
-        // wlr-foreign-toplevel advertises every output a window
-        // overlaps. A real drag can therefore change protocol state,
-        // while ordinary cursor motion cannot. Sampling the core's
-        // narrow drag state preserves that correctness without putting
-        // an O(windows) snapshot back on every mouse report.
-        self.foreign_toplevel_dirty |= self.wm.interactive_drag_active();
+        let dragged = self.wm.interactive_drag_client();
         if let BackendEvent::PointerMotion { root, .. } = &event {
             self.shell.on_motion(&mut self.wm, *root);
         }
         self.wm.dispatch(event);
+        if let Some(client) = dragged {
+            crate::protocols::sync_dragged_toplevel_outputs(self, client);
+        }
     }
 
     /// Applies a [`ShellOutcome`] to the session. `Exit` and `Restart`
@@ -3129,6 +3149,8 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
         // baseline even before the desktop produces its first event.
         hyprland_state_dirty: true,
         foreign_toplevel_dirty: true,
+        observed_wm_protocol_revision: wm.protocol_state_revision(),
+        protocol_publish_metrics: ProtocolPublishMetrics::default(),
         wm,
         shell,
         display_handle,

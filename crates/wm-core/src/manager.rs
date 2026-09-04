@@ -191,6 +191,10 @@ pub struct WindowManager<B: Backend> {
     /// only after the shell has changed its baseline, instead of
     /// rebuilding the same geometry at client-commit rate.
     workarea_revision: u64,
+    /// Monotonic identity of protocol-visible window-manager state.
+    /// Adapters compare this at reconciliation boundaries instead of
+    /// assuming that every input-shaped event changed the desktop.
+    protocol_state_revision: u64,
     /// The last root-relative pointer position the core has seen.
     /// `None` until the first `PointerMotion` arrives — a session's
     /// first window can map before the mouse has moved at all — so
@@ -319,6 +323,7 @@ impl<B: Backend> WindowManager<B> {
             last_titlebar_press: None,
             workareas: Vec::new(),
             workarea_revision: 0,
+            protocol_state_revision: 0,
             last_pointer: None,
             placement_policy: PlacementPolicy::Smart,
             placements: 0,
@@ -519,6 +524,18 @@ impl<B: Backend> WindowManager<B> {
         self.workarea_revision
     }
 
+    /// Revision of state represented by taskbar and compatibility
+    /// protocols: client lifecycle/identity/state, focus and workspaces.
+    /// Geometry changes from an interactive drag are deliberately updated
+    /// through the dragged window's protocol handle directly.
+    pub fn protocol_state_revision(&self) -> u64 {
+        self.protocol_state_revision
+    }
+
+    fn bump_protocol_state_revision(&mut self) {
+        self.protocol_state_revision = self.protocol_state_revision.wrapping_add(1);
+    }
+
     /// Re-maximizes every window that is maximized along some axis
     /// into the current usable area of its own monitor. The fit keeps
     /// an already-saved restore geometry, so unmaximizing later
@@ -707,7 +724,11 @@ impl<B: Backend> WindowManager<B> {
         let Some(client) = self.clients.get_mut(id) else {
             return;
         };
+        if client.flags.contains(ClientFlags::URGENT) == urgent {
+            return;
+        }
         client.flags.set(ClientFlags::URGENT, urgent);
+        self.bump_protocol_state_revision();
         self.repaint_decoration(id);
     }
 
@@ -715,7 +736,11 @@ impl<B: Backend> WindowManager<B> {
     /// workspace and are kept above ordinary windows.
     pub fn set_client_pinned(&mut self, id: ClientId, pinned: bool) -> bool {
         let Some(client) = self.clients.get_mut(id) else { return false };
+        if client.flags.contains(ClientFlags::STICKY) == pinned {
+            return true;
+        }
         client.flags.set(ClientFlags::STICKY, pinned);
+        self.bump_protocol_state_revision();
         if pinned {
             self.show_client_surface(id);
             self.raise_client(id);
@@ -728,13 +753,16 @@ impl<B: Backend> WindowManager<B> {
     /// Add or remove a stable IPC tag from a managed client.
     pub fn set_client_tag(&mut self, id: ClientId, tag: &str, present: bool) -> bool {
         let Some(client) = self.clients.get_mut(id) else { return false };
+        let had = client.tags.iter().any(|held| held == tag);
+        if had == present {
+            return true;
+        }
         if present {
-            if !client.tags.iter().any(|held| held == tag) {
-                client.tags.push(tag.to_string());
-            }
+            client.tags.push(tag.to_string());
         } else {
             client.tags.retain(|held| held != tag);
         }
+        self.bump_protocol_state_revision();
         true
     }
 
@@ -754,7 +782,12 @@ impl<B: Backend> WindowManager<B> {
         let frame_y = area.pos.y + (i32::try_from(area.size.h).unwrap_or(i32::MAX)
             - i32::try_from(frame_size.h).unwrap_or(i32::MAX)) / 2;
         let Some(client) = self.clients.get_mut(id) else { return false };
-        client.geometry.pos = Point::new(frame_x + offset.x, frame_y + offset.y);
+        let position = Point::new(frame_x + offset.x, frame_y + offset.y);
+        if client.geometry.pos == position {
+            return true;
+        }
+        client.geometry.pos = position;
+        self.bump_protocol_state_revision();
         self.reflow_frame(id);
         true
     }
@@ -840,6 +873,7 @@ impl<B: Backend> WindowManager<B> {
         }
         self.workspace_count = self.workspace_count.max(workspace + 1);
         self.current_workspace = workspace;
+        self.bump_protocol_state_revision();
         self.backend.publish_workspaces(self.workspace_count, self.current_workspace);
 
         let ids: Vec<ClientId> = self.clients.keys().collect();
@@ -889,6 +923,7 @@ impl<B: Backend> WindowManager<B> {
     pub fn move_client_to_workspace(&mut self, id: ClientId, workspace: usize) {
         if workspace + 1 > self.workspace_count {
             self.workspace_count = workspace + 1;
+            self.bump_protocol_state_revision();
             // Growth is a count change even though `current` stayed put
             // — a pager showing the workspace row needs to hear it.
             self.backend.publish_workspaces(self.workspace_count, self.current_workspace);
@@ -919,11 +954,13 @@ impl<B: Backend> WindowManager<B> {
         };
         client.workspace = workspace;
         let window = client.window;
+        let should_hide = workspace != self.current_workspace && !client.flags.contains(ClientFlags::STICKY);
+        self.bump_protocol_state_revision();
         // A move is precisely when a window's `_NET_WM_DESKTOP`
         // changes — pagers track membership from this property, not by
         // guessing from map/unmap traffic.
         self.backend.publish_window_desktop(window, workspace);
-        if workspace != self.current_workspace && !client.flags.contains(ClientFlags::STICKY) {
+        if should_hide {
             self.hide_client_surface(id);
             if self.focused == Some(id) {
                 if let Some(c) = self.clients.get_mut(id) {
@@ -1017,6 +1054,16 @@ impl<B: Backend> WindowManager<B> {
     /// have used it.
     pub fn interactive_drag_active(&self) -> bool {
         self.active_move.is_some() || self.active_resize.is_some()
+    }
+
+    /// Client whose geometry is currently following pointer motion.
+    /// Protocol adapters use this narrow identity to update only that
+    /// window's output membership during a drag.
+    pub fn interactive_drag_client(&self) -> Option<ClientId> {
+        self.active_move
+            .as_ref()
+            .map(|drag| drag.client)
+            .or_else(|| self.active_resize.as_ref().map(|drag| drag.client))
     }
 
     /// The event loop's sole entry point: drain `Backend::poll_event`
@@ -1287,6 +1334,7 @@ impl<B: Backend> WindowManager<B> {
         client.layout = layout;
 
         let id = self.clients.insert(client);
+        self.bump_protocol_state_revision();
         if self.clients[id].flags.contains(ClientFlags::IDLE_INHIBIT) {
             self.idle_inhibit_clients.insert(id);
         }
@@ -1348,7 +1396,11 @@ impl<B: Backend> WindowManager<B> {
         let Some(client) = self.clients.get_mut(id) else {
             return;
         };
+        if client.geometry.size == size {
+            return;
+        }
         client.geometry.size = size;
+        self.bump_protocol_state_revision();
         self.reflow_frame(id);
     }
 
@@ -1367,7 +1419,11 @@ impl<B: Backend> WindowManager<B> {
         let Some(client) = self.clients.get_mut(id) else {
             return;
         };
+        if client.geometry == geometry {
+            return;
+        }
         client.geometry = geometry;
+        self.bump_protocol_state_revision();
         self.reflow_frame(id);
     }
 
@@ -1425,6 +1481,7 @@ impl<B: Backend> WindowManager<B> {
             }
         }
         self.notifications.push_back(Notification::Removed(id));
+        self.bump_protocol_state_revision();
         true
     }
 
@@ -1443,6 +1500,7 @@ impl<B: Backend> WindowManager<B> {
             return;
         }
         client.title = title;
+        self.bump_protocol_state_revision();
         self.repaint_decoration(id);
     }
 
@@ -1495,7 +1553,11 @@ impl<B: Backend> WindowManager<B> {
             maximized_v,
             "configure request from a managed client — applying"
         );
+        if client.geometry.size == size {
+            return;
+        }
         client.geometry.size = size;
+        self.bump_protocol_state_revision();
         self.reflow_frame(id);
     }
 
@@ -2080,6 +2142,8 @@ impl<B: Backend> WindowManager<B> {
         let Some(client) = self.clients.get_mut(id) else {
             return;
         };
+        let before_geometry = client.geometry;
+        let before_flags = client.flags;
 
         if client.restore_geometry.is_none() {
             client.restore_geometry = Some(client.geometry);
@@ -2103,6 +2167,10 @@ impl<B: Backend> WindowManager<B> {
             client.flags.insert(ClientFlags::MAXIMIZED_V);
         }
 
+        let changed = client.geometry != before_geometry || client.flags != before_flags;
+        if changed {
+            self.bump_protocol_state_revision();
+        }
         self.reflow_frame(id);
         self.publish_client_net_state(id);
     }
@@ -2118,6 +2186,7 @@ impl<B: Backend> WindowManager<B> {
         };
         client.geometry = restore;
         client.flags.remove(ClientFlags::MAXIMIZED_H | ClientFlags::MAXIMIZED_V);
+        self.bump_protocol_state_revision();
         self.reflow_frame(id);
         self.publish_client_net_state(id);
         tracing::info!(?id, "unmaximized");
@@ -2197,6 +2266,7 @@ impl<B: Backend> WindowManager<B> {
         }
         client.flags.insert(ClientFlags::SHADED);
         let window = client.window;
+        self.bump_protocol_state_revision();
         self.backend.set_client_mapped(window, false);
         self.reflow_frame(id);
         self.publish_client_net_state(id);
@@ -2214,6 +2284,7 @@ impl<B: Backend> WindowManager<B> {
         client.flags.remove(ClientFlags::SHADED);
         let window = client.window;
         let content_size = client.geometry.size;
+        self.bump_protocol_state_revision();
         self.backend.set_client_mapped(window, true);
         self.reflow_frame(id);
         // Nudge the client to repaint everything: X preserves no pixels
@@ -2269,6 +2340,7 @@ impl<B: Backend> WindowManager<B> {
         }
         self.fullscreen_restore.insert(id, client.geometry);
         client.flags.insert(ClientFlags::FULLSCREEN);
+        self.bump_protocol_state_revision();
         self.reflow_frame(id);
         // Raise on entering: fullscreen is a "take over the screen"
         // request — a video player going fullscreen *behind* other
@@ -2294,6 +2366,7 @@ impl<B: Backend> WindowManager<B> {
                 client.geometry = saved;
             }
         }
+        self.bump_protocol_state_revision();
         self.reflow_frame(id);
         self.publish_client_net_state(id);
         tracing::info!(?id, "left fullscreen");
@@ -2332,6 +2405,7 @@ impl<B: Backend> WindowManager<B> {
             return;
         };
         client.lifecycle = Lifecycle::Miniaturized;
+        self.bump_protocol_state_revision();
         self.hide_client_surface(id);
         if self.focused == Some(id) {
             self.focused = None;
@@ -2352,6 +2426,7 @@ impl<B: Backend> WindowManager<B> {
         client.lifecycle = Lifecycle::Normal;
         let window = client.window;
         let content_size = client.geometry.size;
+        self.bump_protocol_state_revision();
         // A window restores onto the workspace the user is looking at,
         // not the one it was miniaturized on. Icon tiles are visible on
         // every workspace, so restoring from a different one is a
@@ -2660,6 +2735,7 @@ impl<B: Backend> WindowManager<B> {
         }
         client.flags.remove(ClientFlags::MAXIMIZED_H | ClientFlags::MAXIMIZED_V);
         client.restore_geometry = None;
+        self.bump_protocol_state_revision();
         self.publish_client_net_state(id);
         tracing::debug!(?id, "drag broke the maximized state");
     }
@@ -2707,6 +2783,7 @@ impl<B: Backend> WindowManager<B> {
         client.flags.insert(ClientFlags::FOCUSED);
         let window = client.window;
         self.focused = Some(id);
+        self.bump_protocol_state_revision();
         // Ungrab: a focused client's own clicks (placing a text cursor,
         // clicking a button inside it, ...) should reach it directly,
         // not detour through the WM on every single click the way an
@@ -2875,6 +2952,10 @@ impl<B: Backend> WindowManager<B> {
             }
         }
         tracing::info!(?window, ?wants, "client changed its decoration preference");
+        // Chrome itself is not represented by either compatibility
+        // protocol, but adding a frame can clamp the content onto-screen
+        // and therefore change its output membership.
+        self.bump_protocol_state_revision();
         self.reflow_frame(id);
         // Whichever direction it went, the window's visibility has to be
         // restated. Taking a frame away removes the only mapped surface
@@ -5807,6 +5888,76 @@ mod tests {
         assert_eq!(wm.workarea_revision(), 1);
         wm.set_workarea(area);
         assert_eq!(wm.workarea_revision(), 2, "an equal baseline publication is still an invalidation edge");
+    }
+
+    #[test]
+    fn protocol_revision_ignores_an_ordinary_click_on_the_focused_client() {
+        let mut backend = FakeBackend::new();
+        let window = backend.create_window();
+        let mut wm = wm(backend);
+        wm.dispatch(BackendEvent::MapRequest(window));
+        let after_map = wm.protocol_state_revision();
+        assert!(after_map > 0, "mapping and initial focus are publishable transitions");
+
+        for pressed in [true, false] {
+            wm.dispatch(BackendEvent::PointerButton {
+                surface: SurfaceRef::Client(window),
+                local: Point::new(20, 20),
+                button: MouseButton::Left,
+                pressed,
+                time_ms: 100,
+                mods: Modifiers::empty(),
+            });
+        }
+
+        assert_eq!(
+            wm.protocol_state_revision(),
+            after_map,
+            "input shape alone must not invalidate protocol snapshots"
+        );
+    }
+
+    #[test]
+    fn protocol_revision_tracks_semantic_changes_and_ignores_no_ops() {
+        let mut backend = FakeBackend::new();
+        let window = backend.create_window();
+        backend.set_title(window, "before");
+        let mut wm = wm(backend);
+        wm.dispatch(BackendEvent::MapRequest(window));
+        let id = wm.client_for_window(window).unwrap();
+
+        let mut revision = wm.protocol_state_revision();
+        wm.set_urgent(id, true);
+        assert_ne!(wm.protocol_state_revision(), revision);
+        revision = wm.protocol_state_revision();
+        wm.set_urgent(id, true);
+        assert_eq!(wm.protocol_state_revision(), revision, "setting an equal flag is silent");
+        assert!(wm.set_client_pinned(id, false), "an already-satisfied valid request still succeeds");
+        assert!(wm.set_client_tag(id, "absent", false), "an already-satisfied valid request still succeeds");
+        assert_eq!(wm.protocol_state_revision(), revision, "satisfied flag and tag requests are silent");
+
+        let geometry = wm.client(id).unwrap().geometry;
+        wm.set_client_content_geometry(id, geometry);
+        assert_eq!(wm.protocol_state_revision(), revision, "setting equal geometry is silent");
+        wm.set_client_content_geometry(
+            id,
+            Rect { pos: Point::new(geometry.pos.x + 1, geometry.pos.y), ..geometry },
+        );
+        assert_ne!(wm.protocol_state_revision(), revision);
+        revision = wm.protocol_state_revision();
+
+        wm.switch_workspace(0);
+        assert_eq!(wm.protocol_state_revision(), revision, "selecting the active workspace is silent");
+        wm.switch_workspace(1);
+        assert_ne!(wm.protocol_state_revision(), revision);
+        revision = wm.protocol_state_revision();
+
+        wm.backend_mut().set_title(window, "after");
+        wm.dispatch(BackendEvent::TitleChanged(window));
+        assert_ne!(wm.protocol_state_revision(), revision);
+        revision = wm.protocol_state_revision();
+        wm.dispatch(BackendEvent::TitleChanged(window));
+        assert_eq!(wm.protocol_state_revision(), revision, "an unchanged property notification is silent");
     }
 
     #[test]

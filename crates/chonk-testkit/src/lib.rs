@@ -1031,6 +1031,14 @@ pub struct Door {
     stream: Option<BufReader<UnixStream>>,
 }
 
+/// Work performed by demand-driven desktop protocol publishers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ProtocolPublishes {
+    pub hyprland: u64,
+    pub foreign_full: u64,
+    pub foreign_drag: u64,
+}
+
 impl Door {
     fn unconnected() -> Door {
         Door { stream: None }
@@ -1147,6 +1155,25 @@ impl Door {
         line.strip_prefix("activation-tokens ")
             .and_then(|value| value.parse().ok())
             .ok_or_else(|| format!("unexpected activation-token reply: {line}"))
+    }
+
+    /// Number of protocol snapshots/synchronizations attempted so far.
+    /// Unlike counting output events, this detects an expensive full diff
+    /// that rebuilt state only to discover that nothing changed.
+    pub fn protocol_publishes(&mut self) -> Result<ProtocolPublishes, String> {
+        self.send("protocol-publishes")?;
+        let line = self.read_line()?;
+        if !line.starts_with("protocol-publishes ") {
+            return Err(format!("unexpected protocol-publishes reply: {line}"));
+        }
+        Ok(ProtocolPublishes {
+            hyprland: field(&line, "hyprland=")
+                .ok_or_else(|| format!("protocol-publishes reply has no Hyprland count: {line}"))?,
+            foreign_full: field(&line, "foreign_full=")
+                .ok_or_else(|| format!("protocol-publishes reply has no full-sync count: {line}"))?,
+            foreign_drag: field(&line, "foreign_drag=")
+                .ok_or_else(|| format!("protocol-publishes reply has no drag-sync count: {line}"))?,
+        })
     }
 
     /// The production scene hit-test's coarse target class at one

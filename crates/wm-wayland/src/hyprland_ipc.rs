@@ -102,6 +102,26 @@ pub(crate) fn snapshot(
     locked: bool,
     session: &chonk_shell::startup::SessionState,
 ) -> Snapshot {
+    build_snapshot(wm, locked, session, true)
+}
+
+/// Snapshot retained only by the event differ. Bindings are request-only:
+/// no Hyprland event compares them, so allocating hundreds of strings here
+/// on every genuine state publication cannot affect one wire byte.
+pub(crate) fn event_snapshot(
+    wm: &WindowManager<WaylandBackend>,
+    locked: bool,
+    session: &chonk_shell::startup::SessionState,
+) -> Snapshot {
+    build_snapshot(wm, locked, session, false)
+}
+
+fn build_snapshot(
+    wm: &WindowManager<WaylandBackend>,
+    locked: bool,
+    session: &chonk_shell::startup::SessionState,
+    include_bindings: bool,
+) -> Snapshot {
     tracing::trace!("constructing Hyprland IPC snapshot");
     let monitors_info = wm.monitors();
     let current = wm.current_workspace();
@@ -223,7 +243,11 @@ pub(crate) fn snapshot(
             }
         })
         .collect();
-    let bindings = session.bindings.iter().map(|binding| ipc_binding(binding, session)).collect();
+    let bindings = if include_bindings {
+        session.bindings.iter().map(|binding| ipc_binding(binding, session)).collect()
+    } else {
+        Vec::new()
+    };
     let layout = session.input.layout.clone().unwrap_or_else(|| "us".to_string());
     let mut devices = Devices::default();
     for device in &wm.backend().input_devices {
@@ -315,8 +339,9 @@ fn focused_monitor_index(wm: &WindowManager<WaylandBackend>, monitors: &[wm_core
 
 /// Apply one decoded action to the window manager.
 ///
-/// Returns `true` when something changed, so the caller knows to
-/// publish a fresh snapshot in the same tick.
+/// Returns `true` when the request was valid and could be honoured. State
+/// publication is deliberately independent: wm-core's semantic revision
+/// says whether an accepted request actually changed the desktop.
 pub(crate) fn apply(comp: &mut Compositor, action: Action) -> bool {
     let wm = &mut comp.wm;
     match action {

@@ -1538,8 +1538,8 @@ impl XdgShellHandler for Compositor {
                 .get::<XdgToplevelSurfaceData>()
                 .and_then(|data| data.lock().unwrap().app_id.clone())
         });
-        let backend = self.wm.backend_mut();
-        if let Some(id) = backend.window_for_surface(surface.wl_surface()) {
+        let changed = if let Some(id) = self.wm.backend().window_for_surface(surface.wl_surface()) {
+            let backend = self.wm.backend_mut();
             let changed = backend
                 .windows
                 .get(&id)
@@ -1558,6 +1558,15 @@ impl XdgShellHandler for Compositor {
             if changed {
                 backend.queue(WmEvent::ChromeChanged(id));
             }
+            changed
+        } else {
+            false
+        };
+        if changed {
+            // app_id lives in the backend record rather than wm-core's
+            // client, so its semantic revision cannot observe this exact
+            // identity transition.
+            self.mark_hyprland_state_dirty();
         }
     }
 

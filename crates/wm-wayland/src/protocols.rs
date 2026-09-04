@@ -388,9 +388,8 @@ pub(crate) fn init(display_handle: &DisplayHandle) -> ProtocolState {
 /// still serviced on every pass. See the module's integration contract
 /// for why this position matters.
 pub(crate) fn refresh(comp: &mut Compositor) {
-    if apply_minimize_requests(comp) {
-        comp.foreign_toplevel_dirty = true;
-    }
+    apply_minimize_requests(comp);
+    comp.notice_wm_protocol_changes();
     let new_manager = comp.protocols.managers.iter().any(|manager| !manager.announced);
     if comp.foreign_toplevel_dirty || new_manager {
         sync_toplevels(comp);
@@ -420,23 +419,73 @@ pub(crate) fn refresh(comp: &mut Compositor) {
 /// `Notification::Miniaturized`, and the shell's drain has already run
 /// by the time this does, so the icon tile appears on the next frame
 /// rather than the one where the window vanished.
-fn apply_minimize_requests(comp: &mut Compositor) -> bool {
+fn apply_minimize_requests(comp: &mut Compositor) {
     if comp.protocols.minimize_requests.is_empty() {
-        return false;
+        return;
     }
-    let mut applied = false;
     for (window, minimize) in std::mem::take(&mut comp.protocols.minimize_requests) {
         let Some(id) = comp.wm.client_for_window(window) else {
             continue;
         };
-        applied = true;
         if minimize {
             comp.wm.miniaturize(id);
         } else {
             comp.wm.deminiaturize(id);
         }
     }
-    applied
+}
+
+/// Updates only the output membership of the one toplevel moving under
+/// the pointer. Drag motion cannot change its title, parent or state, so a
+/// full O(windows) snapshot here would be pure churn.
+pub(crate) fn sync_dragged_toplevel_outputs(comp: &mut Compositor, client: wm_core::ClientId) {
+    let Some(client) = comp.wm.client(client) else {
+        return;
+    };
+    if !comp.protocols.toplevels.contains_key(&client.window) {
+        // A newly bound manager or newly mapped window is caught by the
+        // ordinary full reconciliation later in this pass.
+        return;
+    }
+    comp.protocol_publish_metrics.foreign_toplevel_drag_syncs = comp
+        .protocol_publish_metrics
+        .foreign_toplevel_drag_syncs
+        .wrapping_add(1);
+    let Some(entry) = comp.protocols.toplevels.get_mut(&client.window) else {
+        // Kept defensive even though the membership check above and this
+        // lookup run synchronously in the compositor thread.
+        return;
+    };
+
+    let screens: Vec<(String, &Output)> = comp
+        .outputs
+        .iter()
+        .map(|setup| (setup.output.name(), &setup.output))
+        .collect();
+    let current: Vec<String> = comp
+        .outputs
+        .iter()
+        .filter(|setup| overlaps(client.geometry, Rect::new(setup.position, setup.size)))
+        .map(|setup| setup.output.name())
+        .collect();
+    if entry.outputs == current {
+        return;
+    }
+
+    for name in entry.outputs.iter().filter(|name| !current.contains(name)) {
+        for handle in &entry.handles {
+            send_output(handle, name, &screens, false);
+        }
+    }
+    for name in current.iter().filter(|name| !entry.outputs.contains(name)) {
+        for handle in &entry.handles {
+            send_output(handle, name, &screens, true);
+        }
+    }
+    entry.outputs = current;
+    for handle in &entry.handles {
+        handle.done();
+    }
 }
 
 /// What one window looks like right now, gathered before anything is
@@ -458,8 +507,7 @@ struct ToplevelSnapshot {
 /// carries another *handle*, which must therefore already exist — and a
 /// dialog and its parent commonly appear in the same pass.
 fn sync_toplevels(comp: &mut Compositor) {
-    let Compositor { wm, protocols, outputs, display_handle, .. } = comp;
-    if protocols.managers.is_empty() && protocols.toplevels.is_empty() {
+    if comp.protocols.managers.is_empty() && comp.protocols.toplevels.is_empty() {
         // Nobody to publish to and nothing published: the overwhelmingly
         // common case on a desktop with no bar running, and the reason
         // this call is affordable at dispatch rate. A later bind lands
@@ -467,6 +515,11 @@ fn sync_toplevels(comp: &mut Compositor) {
         // because every window is then "new".
         return;
     }
+    comp.protocol_publish_metrics.foreign_toplevel_full_syncs = comp
+        .protocol_publish_metrics
+        .foreign_toplevel_full_syncs
+        .wrapping_add(1);
+    let Compositor { wm, protocols, outputs, display_handle, .. } = comp;
     let ProtocolState { managers, toplevels, .. } = protocols;
 
     // Output identity, resolved once: `output_enter`/`output_leave`

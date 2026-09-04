@@ -2674,12 +2674,11 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
     /// drain a click on the indicator into a real switch, then mirror
     /// the authoritative state into the shared cell so the widget tick
     /// repaints the tile exactly when it changed.
-    /// Returns whether this pass directly changed window-manager state.
-    /// Backends with an external event publisher use that bit to avoid
-    /// manufacturing snapshots on housekeeping-only passes.
-    pub fn tick(&mut self, wm: &mut WindowManager<B>) -> bool {
+    /// Protocol publishers observe `WindowManager`'s semantic revision;
+    /// this routine therefore does not approximate state change with an
+    /// action-shaped boolean.
+    pub fn tick(&mut self, wm: &mut WindowManager<B>) {
         let now = Instant::now();
-        let mut wm_changed = false;
         // The appearance-request file, consumed the way the binaries
         // consume reload/restart markers: one cached path at a bounded
         // cadence, never one failed read per client frame. Consumed then
@@ -2745,9 +2744,8 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         }
         if let Some(target) = self.desktop.take_workspace_request() {
             wm.switch_workspace(target);
-            wm_changed = true;
         }
-        wm_changed |= self.service_control(wm);
+        self.service_control(wm);
         // The transient UI's parked Escape (see `keymap_action`) is
         // consumed here, still inside the key event's loop iteration.
         if std::mem::take(&mut self.transient_escape) {
@@ -2790,7 +2788,6 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         } else {
             self.layout.service(layout_snapshot(wm, &self.apps), now);
         }
-        wm_changed
     }
 
     /// How long a backend may block when no display/socket activity is
@@ -2845,16 +2842,15 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
     /// A `focus-workspace` a client asked for is applied here and the
     /// result published in the same pass, so the client's answer is
     /// the `workspaces` event the switch produced, not one a tick late.
-    fn service_control(&mut self, wm: &mut WindowManager<B>) -> bool {
+    fn service_control(&mut self, wm: &mut WindowManager<B>) {
         self.control.accept();
         if !self.control.has_clients() {
-            return false;
+            return;
         }
         let commands = self.control.service(&self.control_snapshot(wm));
         if commands.is_empty() {
-            return false;
+            return;
         }
-        let mut changed = false;
         for command in commands {
             match command {
                 // A switch, never a create — `docs/control-socket.md`
@@ -2871,7 +2867,6 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
                 control::Command::FocusWorkspace(index) => {
                     if index < wm.workspace_count() {
                         wm.switch_workspace(index);
-                        changed = true;
                     } else {
                         tracing::debug!(index, "control client asked for a workspace that does not exist; ignoring");
                     }
@@ -2879,7 +2874,6 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
             }
         }
         self.control.publish(&self.control_snapshot(wm));
-        changed
     }
 
     fn control_snapshot(&self, wm: &WindowManager<B>) -> control::Snapshot {

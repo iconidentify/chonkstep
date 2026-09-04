@@ -628,10 +628,10 @@ impl Server {
 
     /// Read requests, apply mutations, and answer them.
     ///
-    /// The caller applies the actions and then calls [`Server::publish`]
-    /// with a *fresh* snapshot, so that the events a request causes
-    /// describe the state it produced — the same two-snapshot discipline
-    /// `Shell::service_control` uses.
+    /// The caller applies the actions, observes its own semantic state
+    /// revision, and calls [`Server::publish`] with a fresh snapshot only
+    /// if that revision changed. An accepted no-op remains a successful
+    /// request without forcing an empty event diff.
     ///
     /// Returns whether at least one decoded action was applied.
     #[must_use]
@@ -639,7 +639,7 @@ impl Server {
     where
         F: FnMut(Action) -> bool,
     {
-        let mut changed = false;
+        let mut applied_any = false;
         for client in &mut self.request_clients {
             if client.answered {
                 client.flush();
@@ -703,7 +703,7 @@ impl Server {
 
             let response = answer_payload_applying(&client.inbound, snapshot, |action| {
                 let applied = apply(action);
-                changed |= applied;
+                applied_any |= applied;
                 applied
             });
             for line in response.lines().filter(|line| {
@@ -720,7 +720,7 @@ impl Server {
         // whose answer has left is done with, and `hyprctl` reads to
         // EOF, so the close IS the framing.
         self.request_clients.retain(|client| !(client.doomed || client.answered && client.outbound.is_empty()));
-        changed
+        applied_any
     }
 
     /// Flush already-produced output and prune disconnected peers
@@ -1040,12 +1040,12 @@ mod enabled_tests {
             refusals: 0,
         };
 
-        let changed = server.service(&Snapshot::default(), |action| {
+        let applied = server.service(&Snapshot::default(), |action| {
             assert!(matches!(action, Action::FocusWorkspace(1)));
             true
         });
 
-        assert!(changed, "the event publisher needs to know that its retained baseline is stale");
+        assert!(applied, "the caller needs to know that the requested action was accepted");
     }
 
     #[test]

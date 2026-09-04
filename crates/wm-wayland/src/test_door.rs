@@ -64,6 +64,7 @@
 //! | `key CODE press\|release` | keyboard key by *evdev* keycode (`KEY_*` from input-event-codes.h; the xkb +8 offset is applied here) |
 //! | `repeat` | replies with the held compositor-binding repeat count and interval, or `repeat none` |
 //! | `activation-tokens` | replies with the number of retained xdg-activation tokens |
+//! | `protocol-publishes` | replies with Hyprland event-snapshot, foreign full-sync and foreign dragged-window-sync counters |
 //! | `hit X Y` | replies with `hit root\|shell\|frame\|content\|layer\|ime` from the production scene hit-test |
 //! | `barrier` | replies `ok` once every command before it has been dispatched **and** a frame has been rendered with no damage left over |
 //! | `windows` | replies one line per ledger entry (see below), then `done` |
@@ -488,6 +489,18 @@ fn handle_command(line: &str, stream: &mut UnixStream, comp: &mut Compositor) {
         Some("activation-tokens") => {
             let count = comp.core_protocols.activation.tokens().count();
             let _ = stream.write_all(format!("activation-tokens {count}\n").as_bytes());
+        }
+        Some("protocol-publishes") => {
+            let metrics = comp.protocol_publish_metrics;
+            let _ = stream.write_all(
+                format!(
+                    "protocol-publishes hyprland={} foreign_full={} foreign_drag={}\n",
+                    metrics.hyprland_event_snapshots,
+                    metrics.foreign_toplevel_full_syncs,
+                    metrics.foreign_toplevel_drag_syncs,
+                )
+                .as_bytes(),
+            );
         }
         Some("hit") => {
             let (Some(Ok(x)), Some(Ok(y))) =
