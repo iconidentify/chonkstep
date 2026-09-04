@@ -63,19 +63,17 @@
 //!
 //! # Feedback (protocol version 4)
 //!
-//! Advertised whenever the render node can be identified, which on a
-//! single-GPU machine it always can: one main device, one main
-//! tranche, no preference tranches. Preference tranches exist to steer
-//! clients toward buffers a *plane* can scan out directly, and the
-//! session composites every frame through the GLES renderer instead
-//! (`session.rs`'s `FRAME_FLAGS` allows only the cursor plane, which
-//! never scans out a client buffer directly) — so there is no scanout
-//! tranche to declare, and one advertising formats the main device
-//! cannot render would be actively wrong. That ordering is deliberate:
-//! this global is the prerequisite for direct scan-out, so scan-out is
-//! now a `session.rs` question, and a scanout tranche belongs in the
-//! same change that answers it. Multi-GPU is feedback's other reason
-//! to exist, and it waits on multi-GPU support generally.
+//! Advertised whenever the render node can be identified. Every backend
+//! has a main tranche containing the formats GLES can import. A DRM
+//! session puts the exact swapchain-format/modifier pairs shared by all
+//! active outputs into an earlier `Scanout` preference tranche, steering
+//! clients toward buffers the conservative primary-plane path can use
+//! without composition. The intersection is intentional: feedback is
+//! global until per-surface output tracking exists, so an output-specific
+//! promise would become false as soon as a window moved monitors.
+//! Nested sessions have no KMS planes and therefore advertise only the
+//! main tranche. Multi-GPU remains out of scope with multi-GPU support
+//! generally.
 //!
 //! The DRM session does not depend on EGL's optional device-query extension
 //! to find that node: it derives the render node paired with the KMS fd it
@@ -99,6 +97,7 @@ use smithay::backend::egl::EGLDevice;
 use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::backend::renderer::ImportDma;
 use smithay::delegate_dmabuf;
+use smithay::reexports::wayland_protocols::wp::linux_dmabuf::zv1::server::zwp_linux_dmabuf_feedback_v1::TrancheFlags;
 use smithay::reexports::wayland_server::DisplayHandle;
 use smithay::wayland::dmabuf::{
     DmabufFeedback, DmabufFeedbackBuilder, DmabufGlobal, DmabufHandler, DmabufState, ImportNotifier,
@@ -134,11 +133,11 @@ impl DmabufSupport {
 /// out of whichever graphics stack this session ended up with and
 /// defers to [`init`].
 pub(crate) fn init_for_graphics(display_handle: &DisplayHandle, graphics: &mut Graphics) -> DmabufSupport {
-    let session_render_node = match graphics {
-        Graphics::Session(session) => session.render_node(),
-        Graphics::Winit(_) => None,
+    let (session_render_node, scanout_formats) = match graphics {
+        Graphics::Session(session) => (session.render_node(), session.direct_scanout_formats()),
+        Graphics::Winit(_) => (None, FormatSet::default()),
     };
-    init(display_handle, graphics_renderer(graphics), session_render_node)
+    init(display_handle, graphics_renderer(graphics), session_render_node, scanout_formats)
 }
 
 /// Registers the linux-dmabuf global for `renderer`'s formats.
@@ -157,6 +156,7 @@ pub(crate) fn init(
     display_handle: &DisplayHandle,
     renderer: &mut GlesRenderer,
     session_render_node: Option<DrmNode>,
+    scanout_formats: FormatSet,
 ) -> DmabufSupport {
     let formats = renderer.dmabuf_formats();
     if formats.indexset().is_empty() {
@@ -170,11 +170,24 @@ pub(crate) fn init(
     }
 
     let mut state = DmabufState::new();
-    match default_feedback(renderer, &formats, session_render_node) {
+    // Direct scanout must always be able to fall back to GLES when an
+    // atomic test rejects a plane assignment. Keep only formats both
+    // the selected swapchains and the renderer understand.
+    let scanout_formats: FormatSet = scanout_formats
+        .indexset()
+        .iter()
+        .filter(|format| formats.indexset().contains(*format))
+        .copied()
+        .collect();
+    match default_feedback(renderer, &formats, session_render_node, &scanout_formats) {
         Some(feedback) => {
             let _global =
                 state.create_global_with_default_feedback::<Compositor>(display_handle, &feedback);
-            tracing::info!(formats = formats.indexset().len(), "linux-dmabuf with default feedback advertised");
+            tracing::info!(
+                formats = formats.indexset().len(),
+                scanout_formats = scanout_formats.indexset().len(),
+                "linux-dmabuf with default feedback advertised"
+            );
         }
         None => {
             tracing::warn!(
@@ -198,6 +211,7 @@ fn default_feedback(
     renderer: &GlesRenderer,
     formats: &FormatSet,
     session_render_node: Option<DrmNode>,
+    scanout_formats: &FormatSet,
 ) -> Option<DmabufFeedback> {
     let node = match session_render_node {
         Some(node) => node,
@@ -216,9 +230,15 @@ fn default_feedback(
         },
     };
 
-    // One tranche, the main one — the single-GPU, always-composite
-    // case argued in the module docs.
-    match DmabufFeedbackBuilder::new(node.dev_id(), formats.clone()).build() {
+    let mut builder = DmabufFeedbackBuilder::new(node.dev_id(), formats.clone());
+    if !scanout_formats.indexset().is_empty() {
+        builder = builder.add_preference_tranche(
+            node.dev_id(),
+            Some(TrancheFlags::Scanout),
+            scanout_formats.clone(),
+        );
+    }
+    match builder.build() {
         Ok(feedback) => Some(feedback),
         Err(error) => {
             tracing::warn!(?error, "could not build dmabuf feedback; linux-dmabuf is unavailable");
@@ -332,9 +352,10 @@ delegate_dmabuf!(Compositor);
 // Both mechanisms above are the ACQUIRE half — "do not read before the
 // client finished writing". The RELEASE half — "do not tell the client
 // we finished reading before the GPU actually has" — lives in
-// `session.rs` (`SessionOutput::sampled_scene` and
+// `session.rs` (`SessionOutput::pending_scene`, `scanout_scene`, and
 // `strict_release_configured`), because only the page-flip machinery
-// knows when the sampling commands provably retired.
+// knows when composition retired or a directly scanned buffer stopped
+// being the crtc's current source.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;

@@ -73,14 +73,22 @@ compositor's GPU is still reading. The faster the client recommits, the
 tighter its buffer pool cycles and the likelier the race: rapid small
 repaints, i.e. exactly hover effects.
 
-The fix: each session output now keeps the render elements of the frame
-whose page flip is in flight (`SessionOutput::sampled_scene`, `session.rs`)
-and drops them when the flip completes. The atomic commit carries the render
-fence as its in-fence (`EGL_ANDROID_native_fence_sync` is present on this
-driver — verified in the live log's EGL extension list), so a completed flip
-proves the sampling retired; where the fence cannot be exported the render
-path already waited on the CPU before queueing. Release timing therefore
-becomes: no earlier than the flip of the last frame that sampled the buffer.
+The fix: each session output keeps the render elements of a composited frame
+while its page flip is in flight (`SessionOutput::pending_scene`,
+`session.rs`) and drops them when the flip completes. The atomic commit
+carries the render fence as its in-fence (`EGL_ANDROID_native_fence_sync` is
+present on this driver — verified in the live log's EGL extension list), so a
+completed flip proves the sampling retired; where the fence cannot be
+exported the render path already waited on the CPU before queueing. Release
+timing therefore becomes: no earlier than the flip of the last composited
+frame that sampled the buffer.
+
+Direct scanout has a stronger lifetime. The vblank completing an atomic
+commit makes the client's buffer the primary plane's *current* source; the
+display engine keeps reading it after that event. Such a scene moves from
+`pending_scene` to `scanout_scene` at vblank and is released only after a
+later flip replaces it, or after the crtc is disabled/reset. This is not
+NVIDIA-specific and is always enforced when direct scanout is selected.
 
 - **Gate**: `CHONKSTEP_STRICT_BUFFER_RELEASE=1` forces it on, `=0` off.
 - **Default**: on when the DRM driver name contains `nvidia`, off

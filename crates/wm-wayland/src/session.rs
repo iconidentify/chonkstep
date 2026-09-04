@@ -49,13 +49,15 @@
 //!   they know about, re-laying out every existing output, and telling
 //!   `wm-core` its screen just changed shape — a session restart picks
 //!   the new monitor up today.
-//! - The pointer *is* on the hardware cursor plane (see
-//!   [`FRAME_FLAGS`]); the nested backend composites it instead,
-//!   because a window on someone else's desktop has no planes to ask
-//!   for.
-//! - **No direct scan-out.** Every frame is composited through the
-//!   GLES renderer and page-flipped from the swapchain, the same path
-//!   the nested backend takes. See [`FRAME_FLAGS`].
+//! - The pointer uses the hardware cursor plane when the driver offers
+//!   one (see [`FRAME_FLAGS`]); the nested backend composites it
+//!   instead, because a window on someone else's desktop has no planes
+//!   to ask for.
+//! - An eligible fullscreen dmabuf can use the primary plane directly,
+//!   bypassing the GLES composition pass. Smithay requires it to be the
+//!   final visible element, format-compatible, and accepted by an
+//!   atomic KMS test; every other frame falls back to the swapchain.
+//!   See [`FRAME_FLAGS`].
 //! - **No DRM leasing.** A crtc is never handed to another process,
 //!   so a VR headset cannot take one over.
 
@@ -191,10 +193,12 @@ fn plane_kind(drm: &DrmDeviceFd, plane: plane::Handle) -> Option<PlaneType> {
     None
 }
 
-/// The cursor goes on the hardware cursor plane; everything else is
-/// composited into the swapchain buffer and page-flipped from there —
-/// unless `CHONKSTEP_NO_CURSOR_PLANE=1` says otherwise; see
-/// [`frame_flags`].
+/// The cursor may use the hardware cursor plane, and a lone eligible
+/// fullscreen client may use the primary plane directly. Everything
+/// else is composited into the swapchain and page-flipped from there.
+/// `CHONKSTEP_NO_CURSOR_PLANE=1` and
+/// `CHONKSTEP_NO_DIRECT_SCANOUT=1` independently disable those paths;
+/// see [`frame_flags`].
 ///
 /// The cursor plane is not an optimization here, it is the expected
 /// behavior of a Wayland compositor: the display controller scans the
@@ -207,24 +211,25 @@ fn plane_kind(drm: &DrmDeviceFd, plane: plane::Handle) -> Option<PlaneType> {
 /// [`attach_output`] hands the `DrmCompositor` a GBM device to
 /// allocate cursor buffers from, so this flag is the whole switch.
 ///
-/// The *other* scan-out flags stay off. Direct scan-out would let a
-/// fullscreen client's own buffer become the scanout buffer, skipping
-/// the GLES pass entirely - a real win for video and games - but it
-/// cannot pay yet: this backend repaints the whole output every frame
-/// on purpose (see [`render_frame_session`]), which is precisely the
-/// case where composition costs the same either way, and it adds a
-/// second, hardware-dependent path through the frame that the nested
-/// backend has no counterpart for, so a scan-out-only bug would be
-/// invisible until someone logged in from a TTY. Enable those together
-/// with per-element damage, and with an import node on the framebuffer
-/// exporter (see [`init`]), not before.
+/// Primary-plane scanout skips both the GLES draw and the swapchain
+/// memory traffic for a fullscreen video or game. It is deliberately
+/// the conservative variant: the client's format must match the
+/// swapchain, its buffer must come from this GPU, it must be the last
+/// visible scene element, and the driver's atomic test must accept it.
+/// A Dock, bar, menu, composited cursor, non-opaque surface, mismatched
+/// modifier, or failed test leaves the ordinary composition path in
+/// place. Overlay scanout and the format-agnostic primary variant stay
+/// off; either would multiply the hardware-dependent state space for a
+/// smaller win.
 ///
 /// `SKIP_CURSOR_ONLY_UPDATES` is deliberately absent: it suppresses the
 /// commit when nothing but the cursor moved, which is the one update
 /// this compositor most wants to deliver.
-const FRAME_FLAGS: FrameFlags = FrameFlags::ALLOW_CURSOR_PLANE_SCANOUT;
+const FRAME_FLAGS: FrameFlags =
+    FrameFlags::ALLOW_CURSOR_PLANE_SCANOUT.union(FrameFlags::ALLOW_PRIMARY_PLANE_SCANOUT);
 
-/// The frame flags actually used, honoring `CHONKSTEP_NO_CURSOR_PLANE`.
+/// The frame flags actually used, honoring the two independent plane
+/// opt-outs.
 ///
 /// The variable exists as a live diagnostic for cursor-related flicker
 /// on NVIDIA: smithay re-renders the cursor plane's buffer on every
@@ -243,29 +248,46 @@ const FRAME_FLAGS: FrameFlags = FrameFlags::ALLOW_CURSOR_PLANE_SCANOUT;
 pub(crate) fn frame_flags() -> FrameFlags {
     static FLAGS: std::sync::OnceLock<FrameFlags> = std::sync::OnceLock::new();
     *FLAGS.get_or_init(|| {
-        let flags = cursor_plane_flags(std::env::var_os("CHONKSTEP_NO_CURSOR_PLANE"));
-        if flags.is_empty() {
+        let flags = configured_frame_flags(
+            std::env::var_os("CHONKSTEP_NO_CURSOR_PLANE"),
+            std::env::var_os("CHONKSTEP_NO_DIRECT_SCANOUT"),
+        );
+        if !flags.contains(FrameFlags::ALLOW_CURSOR_PLANE_SCANOUT) {
             tracing::info!(
                 "CHONKSTEP_NO_CURSOR_PLANE is set; compositing the pointer instead of using \
                  the DRM cursor plane"
+            );
+        }
+        if !flags.contains(FrameFlags::ALLOW_PRIMARY_PLANE_SCANOUT) {
+            tracing::info!(
+                "CHONKSTEP_NO_DIRECT_SCANOUT is set; compositing fullscreen clients through GLES"
             );
         }
         flags
     })
 }
 
-/// The pure half of [`frame_flags`], split out so the parse is
-/// testable without mutating process environment: unset or `0` keeps
-/// the default flags, anything else empties them (no cursor plane).
-fn cursor_plane_flags(env: Option<std::ffi::OsString>) -> FrameFlags {
-    match env {
-        Some(value) if value != "0" => FrameFlags::empty(),
-        _ => FRAME_FLAGS,
+/// The pure half of [`frame_flags`], split out so both environment
+/// switches are testable without mutating process-global state. Unset
+/// or `0` keeps that plane; anything else removes only its own flag.
+fn configured_frame_flags(
+    no_cursor: Option<std::ffi::OsString>,
+    no_direct_scanout: Option<std::ffi::OsString>,
+) -> FrameFlags {
+    let mut flags = FRAME_FLAGS;
+    if no_cursor.is_some_and(|value| value != "0") {
+        flags.remove(FrameFlags::ALLOW_CURSOR_PLANE_SCANOUT);
     }
+    if no_direct_scanout.is_some_and(|value| value != "0") {
+        flags.remove(FrameFlags::ALLOW_PRIMARY_PLANE_SCANOUT);
+    }
+    flags
 }
 
-/// Whether a client buffer's release is deferred to the completion of
-/// the page flip that sampled it (`SessionOutput::sampled_scene`).
+/// Whether a composited client buffer's release is deferred to the
+/// completion of the page flip that sampled it
+/// (`SessionOutput::pending_scene`). Direct-scanout buffers are always
+/// held for as long as the display engine can still read them.
 ///
 /// The race this closes: smithay signals a buffer's explicit-sync
 /// release point (and sends `wl_buffer.release`) from the CPU the
@@ -515,8 +537,10 @@ struct SessionOutput {
     /// into the many, and [`redraw_pending`] is what keeps the dispatch
     /// loop coming back until every output has caught up.
     dirty: bool,
-    /// The render elements of the frame whose page flip is in flight,
-    /// held only while [`SessionGraphics::strict_release`] is on.
+    /// The render elements of the frame whose page flip is in flight.
+    /// Held for composited frames only while
+    /// [`SessionGraphics::strict_release`] is on, and unconditionally
+    /// when the frame directly scans out a client buffer.
     ///
     /// Each `WaylandSurfaceRenderElement` in here owns a clone of
     /// smithay's `Buffer` handle for the client buffer it sampled, and
@@ -529,11 +553,22 @@ struct SessionOutput {
     /// client that trusts the release (which explicit sync entitles it
     /// to) rewrites a buffer the compositor is still reading. See
     /// [`strict_release_configured`] for why only NVIDIA users see
-    /// that race. Cleared by the vblank handler once the flip
-    /// completes, which is the moment the commit's in-fence (the
-    /// render fence covering those sampling commands) has provably
-    /// signalled.
-    sampled_scene: Vec<crate::renderer::SceneElement<GlesRenderer>>,
+    /// that race on the composition path. Cleared by the vblank
+    /// handler once a composited flip completes; moved into
+    /// `scanout_scene` instead when this commit makes a client buffer
+    /// the display's continuing source.
+    pending_scene: Vec<crate::renderer::SceneElement<GlesRenderer>>,
+    /// The elements backing the primary plane currently being scanned
+    /// out directly. A vblank makes an atomic commit *current*, not
+    /// finished: the display engine keeps reading that buffer until a
+    /// later flip replaces it. Keeping this scene separate from
+    /// [`SessionOutput::pending_scene`] prevents `wl_buffer.release`
+    /// (and explicit-sync release signaling) while the pixels are
+    /// still physically on screen.
+    scanout_scene: Vec<crate::renderer::SceneElement<GlesRenderer>>,
+    /// Cached solely for transition telemetry; unlike inspecting the
+    /// scene, this costs no walk in the vblank callback.
+    direct_scanout_active: bool,
     /// Presentation requests drained for the page flip in flight.
     /// They are completed with the kernel's vblank timestamp, never
     /// merely when rendering finished.
@@ -544,10 +579,42 @@ struct SessionOutput {
 /// A page flip the kernel has accepted and not yet reported back.
 struct PendingFlip {
     queued_at: Instant,
+    /// Whether this commit put a client buffer, rather than a
+    /// compositor swapchain buffer, on the primary plane.
+    direct_scanout: bool,
     /// Whether this flip has already been named in the log as stalled,
     /// so [`FLIP_STALL_WARNING`] produces one line per stuck frame
     /// rather than one per event-loop wakeup.
     stall_reported: bool,
+}
+
+/// Advances client-buffer ownership at a completed page flip.
+///
+/// `pending` belongs to the commit that just became current. A direct
+/// primary-plane buffer moves into `scanout` because the display keeps
+/// reading it after vblank; a composited commit replaces any previous
+/// direct buffer with the compositor's swapchain and can release both
+/// scene holds. Returns whether direct scanout changed state, for one
+/// transition log rather than one line per frame.
+fn complete_scene_flip<T>(pending: &mut Vec<T>, scanout: &mut Vec<T>, active: &mut bool, direct: bool) -> bool {
+    if direct {
+        *scanout = std::mem::take(pending);
+    } else {
+        pending.clear();
+        scanout.clear();
+    }
+    let changed = *active != direct;
+    *active = direct;
+    changed
+}
+
+/// Releases every scene retained on behalf of a device whose planes
+/// were disabled or reset. Once no crtc can read the buffers, keeping
+/// either the in-flight or current scene would only delay clients.
+fn clear_scene_holds<T>(pending: &mut Vec<T>, scanout: &mut Vec<T>, active: &mut bool) {
+    pending.clear();
+    scanout.clear();
+    *active = false;
 }
 
 impl SessionGraphics {
@@ -573,9 +640,53 @@ impl SessionGraphics {
     /// needs a stable `dev_t`. The DRM fd is authoritative and lets us find
     /// that node without guessing which `/dev/dri/renderD*` belongs to it.
     pub(crate) fn render_node(&self) -> Option<DrmNode> {
-        let primary = DrmNode::from_file(self.drm.device_fd()).ok()?;
-        primary.node_with_type(NodeType::Render).and_then(Result::ok).or(Some(primary))
+        render_node_for_fd(self.drm.device_fd())
     }
+
+    /// Formats a client can allocate for the conservative primary-plane
+    /// direct-scanout path on *every* active output. The default feedback
+    /// is global rather than per-surface, so advertising the intersection
+    /// is the only claim that stays true when a window moves monitors.
+    pub(crate) fn direct_scanout_formats(&self) -> FormatSet {
+        if !frame_flags().contains(FrameFlags::ALLOW_PRIMARY_PLANE_SCANOUT) {
+            return FormatSet::default();
+        }
+        common_scanout_formats(
+            self.outputs
+                .iter()
+                .map(|output| (output.drm_compositor.format(), output.drm_compositor.modifiers())),
+        )
+    }
+}
+
+/// Intersects exact format/modifier pairs across outputs for global
+/// linux-dmabuf feedback. Kept pure both for tests and to make the
+/// deliberately conservative multi-monitor promise unmistakable.
+fn common_scanout_formats<'a>(
+    mut outputs: impl Iterator<Item = (Fourcc, &'a [Modifier])>,
+) -> FormatSet {
+    let Some((first_code, first_modifiers)) = outputs.next() else {
+        return FormatSet::default();
+    };
+    let mut common: Vec<Format> = first_modifiers
+        .iter()
+        .copied()
+        .map(|modifier| Format { code: first_code, modifier })
+        .collect();
+    for (code, modifiers) in outputs {
+        common.retain(|format| format.code == code && modifiers.contains(&format.modifier));
+    }
+    common.into_iter().collect()
+}
+
+/// Resolves the render node paired with a KMS fd, falling back to the
+/// primary node when the driver exposes no separate render node. The
+/// same identity filters direct-scanout imports and keys linux-dmabuf
+/// feedback, so keeping it in one helper prevents those claims from
+/// disagreeing.
+fn render_node_for_fd(fd: &DrmDeviceFd) -> Option<DrmNode> {
+    let primary = DrmNode::from_file(fd).ok()?;
+    primary.node_with_type(NodeType::Render).and_then(Result::ok).or(Some(primary))
 }
 
 /// What [`init`] hands back to `run`: the graphics stack plus every
@@ -716,7 +827,7 @@ pub(crate) fn init(
                         tracing::debug!(?crtc, "page flip completed on a crtc we do not drive");
                         return;
                     };
-                    output.frame_pending = None;
+                    let pending = output.frame_pending.take();
                     if let Some(mut feedback) = output.presentation.take() {
                         let flags = smithay::reexports::wayland_protocols::wp::presentation_time::server::wp_presentation_feedback::Kind::Vsync
                             | smithay::reexports::wayland_protocols::wp::presentation_time::server::wp_presentation_feedback::Kind::HwClock
@@ -734,12 +845,26 @@ pub(crate) fn init(
                             _ => crate::renderer::present_now(&mut feedback, output.refresh, flags),
                         }
                     }
-                    // The flip that just completed carried the render
-                    // fence as its in-fence, so every client buffer this
-                    // frame sampled is provably done being read — the
-                    // one moment their releases become honest. See
-                    // `SessionOutput::sampled_scene`.
-                    output.sampled_scene.clear();
+                    // A composited frame can release its sampled
+                    // buffers now. A direct-scanout frame cannot: this
+                    // vblank made its client buffer current, and the
+                    // display engine continues reading it until a later
+                    // flip replaces it. See `complete_scene_flip`.
+                    if let Some(pending) = pending {
+                        let changed = complete_scene_flip(
+                            &mut output.pending_scene,
+                            &mut output.scanout_scene,
+                            &mut output.direct_scanout_active,
+                            pending.direct_scanout,
+                        );
+                        if changed {
+                            tracing::info!(
+                                output = %output.name,
+                                active = pending.direct_scanout,
+                                "DRM primary-plane direct scanout changed"
+                            );
+                        }
+                    }
                     if let Err(error) = output.drm_compositor.frame_submitted() {
                         // The swapchain slot could not be recycled.
                         // Rendering continues; if this repeats the next
@@ -815,7 +940,11 @@ pub(crate) fn init(
                     // preempted whatever sampling was still queued.
                     for output in session.outputs.iter_mut() {
                         output.frame_pending = None;
-                        output.sampled_scene.clear();
+                        clear_scene_holds(
+                            &mut output.pending_scene,
+                            &mut output.scanout_scene,
+                            &mut output.direct_scanout_active,
+                        );
                     }
                 }
                 SessionEvent::ActivateSession => {
@@ -853,7 +982,11 @@ pub(crate) fn init(
                         // session painted over the screen.
                         output.drm_compositor.reset_buffers();
                         output.frame_pending = None;
-                        output.sampled_scene.clear();
+                        clear_scene_holds(
+                            &mut output.pending_scene,
+                            &mut output.scanout_scene,
+                            &mut output.direct_scanout_active,
+                        );
                     }
                     // Marks every output dirty on the next render pass
                     // (see `render_frame_session`), which is what
@@ -973,10 +1106,11 @@ fn attach_output(
         // other.
         GbmBufferFlags::RENDERING | GbmBufferFlags::SCANOUT,
     );
-    // `None` for the import node: that argument only enables direct
-    // scan-out of *client* buffers, which cannot happen here (see
-    // [`FRAME_FLAGS`]).
-    let framebuffer_exporter = GbmFramebufferExporter::new(gbm.clone(), None);
+    // Filter client buffers against this exact GPU before even trying
+    // direct scanout. Passing no import node disables that path in
+    // Smithay; deriving it from the already-open KMS fd avoids both an
+    // EGL-extension dependency and a multi-device guess.
+    let framebuffer_exporter = GbmFramebufferExporter::new(gbm.clone(), render_node_for_fd(drm.device_fd()));
     // A *static* mode source, deliberately not the `Output`: the
     // output advertises the session's UI scale to clients
     // (`state.rs`'s `advertise_scale`), and an auto-tracking source
@@ -1046,8 +1180,8 @@ fn attach_output(
         // Explicit planes: Smithay's own discovery, with any cursor
         // plane it wrongly dropped put back (see
         // `rediscover_cursor_planes`). Which of them may actually be
-        // used is decided per frame by `FRAME_FLAGS` - today that is
-        // the cursor plane only.
+        // used is decided per frame by `frame_flags`: cursor and the
+        // conservative, exact-format primary path by default.
         Some(planes),
         allocator,
         framebuffer_exporter,
@@ -1071,7 +1205,9 @@ fn attach_output(
             frame_pending: None,
             // Nothing has ever been drawn on it.
             dirty: true,
-            sampled_scene: Vec::new(),
+            pending_scene: Vec::new(),
+            scanout_scene: Vec::new(),
+            direct_scanout_active: false,
             presentation: None,
             refresh: if wl_mode.refresh > 0 {
                 Refresh::fixed(Duration::from_nanos(1_000_000_000_000 / wl_mode.refresh as u64))
@@ -1227,10 +1363,14 @@ fn service_pending_flips(session: &mut SessionGraphics) -> bool {
         // pending, which smithay answers `Ok(None)`. Harmless, and the
         // same shape the pause/resume path has always had.
         output.frame_pending = None;
-        // The abandoned flip's scene goes too: its vblank will never
-        // clear it, and a device being reset out from under a stuck
-        // flip has bigger problems than one racy release.
-        output.sampled_scene.clear();
+        // The abandoned pending scene and the buffer that was current
+        // before the reset both go: reset_state disabled the planes,
+        // so the display engine can no longer read either.
+        clear_scene_holds(
+            &mut output.pending_scene,
+            &mut output.scanout_scene,
+            &mut output.direct_scanout_active,
+        );
         if let Some(mut feedback) = output.presentation.take() {
             feedback.discarded();
         }
@@ -1542,8 +1682,10 @@ pub(crate) fn render_frame_session(comp: &mut Compositor) {
             output.position,
         );
 
-        let rendered = match output.drm_compositor.render_frame(renderer, &elements, clear_color, frame_flags()) {
+        let (rendered, direct_scanout) =
+            match output.drm_compositor.render_frame(renderer, &elements, clear_color, frame_flags()) {
             Ok(result) => {
+                let direct_scanout = matches!(&result.primary_element, PrimaryPlaneElement::Element(_));
                 // The GPU may still be drawing into the buffer we are
                 // about to hand the scanout engine. Where the driver
                 // supports fencing the DRM compositor passes the fence
@@ -1557,7 +1699,7 @@ pub(crate) fn render_frame_session(comp: &mut Compositor) {
                         }
                     }
                 }
-                !result.is_empty
+                (!result.is_empty, direct_scanout)
             }
             Err(error) => {
                 // Includes the atomic test failures a returning VT
@@ -1571,10 +1713,16 @@ pub(crate) fn render_frame_session(comp: &mut Compositor) {
             }
         };
 
+        let mut frame_queued = false;
         if rendered {
             match output.drm_compositor.queue_frame(()) {
                 Ok(()) => {
-                    output.frame_pending = Some(PendingFlip { queued_at: Instant::now(), stall_reported: false });
+                    output.frame_pending = Some(PendingFlip {
+                        queued_at: Instant::now(),
+                        direct_scanout,
+                        stall_reported: false,
+                    });
+                    frame_queued = true;
                     if let (Some(entry), Some(monitor)) =
                         (outputs.get(output_index), wm.backend().monitors.get(output_index))
                     {
@@ -1621,20 +1769,17 @@ pub(crate) fn render_frame_session(comp: &mut Compositor) {
                     continue;
                 }
             }
-            // Keep this frame's elements — and through them the client
-            // buffers it sampled — alive until the flip completes, so
-            // no release (implicit `wl_buffer.release` or explicit
-            // syncobj release point, both fired by the buffer handle's
-            // last drop) can precede the GPU's reads. The slot being
-            // replaced here was cleared by the previous flip's vblank —
-            // rendering only happens with no flip in flight — so this
-            // replacement never drops a buffer whose reads are still
-            // queued. The `EmptyFrame` case keeps its scene too: with
-            // no vblank coming, deferring those releases to the next
-            // real flip errs on the side the whole mechanism exists
-            // for. See `SessionOutput::sampled_scene`.
-            if strict_release {
-                output.sampled_scene = elements;
+            // Keep this frame's elements — and through them its client
+            // buffers — alive until the ownership point appropriate to
+            // the path. Strict compositing waits through this flip so
+            // no release precedes the GPU's reads. Direct scanout then
+            // moves the scene into `scanout_scene` at vblank and holds
+            // it until a later flip replaces the primary plane. The
+            // strict `EmptyFrame` case keeps its scene too: with no
+            // vblank coming, deferring those releases to the next real
+            // flip errs on the side the mechanism exists for.
+            if strict_release || (direct_scanout && frame_queued) {
+                output.pending_scene = elements;
             }
         }
         output.dirty = false;
@@ -1958,14 +2103,76 @@ mod tests {
         assert!(strict_release_configured(Some("yes".into()), false));
     }
 
-    /// The cursor-plane switch: unset and `0` keep the hardware
-    /// cursor, anything else composites the pointer — the live A/B
-    /// lever for NVIDIA cursor-plane flicker.
+    /// Each plane switch removes only its own capability: debugging a
+    /// cursor-plane issue must not silently turn off fullscreen direct
+    /// scanout, and vice versa.
     #[test]
-    fn the_cursor_plane_is_on_unless_explicitly_disabled() {
-        assert_eq!(cursor_plane_flags(None), FRAME_FLAGS);
-        assert_eq!(cursor_plane_flags(Some("0".into())), FRAME_FLAGS);
-        assert_eq!(cursor_plane_flags(Some("1".into())), FrameFlags::empty());
-        assert_eq!(cursor_plane_flags(Some("true".into())), FrameFlags::empty());
+    fn plane_switches_are_on_by_default_and_independent() {
+        let cursor = FrameFlags::ALLOW_CURSOR_PLANE_SCANOUT;
+        let primary = FrameFlags::ALLOW_PRIMARY_PLANE_SCANOUT;
+        assert_eq!(configured_frame_flags(None, None), FRAME_FLAGS);
+        assert_eq!(configured_frame_flags(Some("0".into()), Some("0".into())), FRAME_FLAGS);
+        assert_eq!(configured_frame_flags(Some("1".into()), None), primary);
+        assert_eq!(configured_frame_flags(None, Some("yes".into())), cursor);
+        assert_eq!(configured_frame_flags(Some("true".into()), Some("1".into())), FrameFlags::empty());
+    }
+
+    /// A direct buffer remains owned after the vblank that activates it
+    /// and throughout the next flip. Only completion of that replacing
+    /// flip may release it; returning to a compositor buffer releases
+    /// both direct scenes.
+    #[test]
+    fn direct_scanout_scene_lives_until_its_replacement_is_current() {
+        let mut pending = vec![1];
+        let mut scanout = Vec::new();
+        let mut active = false;
+
+        assert!(complete_scene_flip(&mut pending, &mut scanout, &mut active, true));
+        assert!(pending.is_empty());
+        assert_eq!(scanout, vec![1]);
+        assert!(active);
+
+        // Buffer 2 is queued, but buffer 1 is still physically being
+        // scanned while that commit is in flight.
+        pending.push(2);
+        assert_eq!(scanout, vec![1]);
+        assert!(!complete_scene_flip(&mut pending, &mut scanout, &mut active, true));
+        assert_eq!(scanout, vec![2]);
+
+        pending.push(3);
+        assert!(complete_scene_flip(&mut pending, &mut scanout, &mut active, false));
+        assert!(pending.is_empty());
+        assert!(scanout.is_empty());
+        assert!(!active);
+    }
+
+    #[test]
+    fn disabling_the_crtc_releases_all_scene_holds() {
+        let mut pending = vec![1];
+        let mut scanout = vec![2];
+        let mut active = true;
+        clear_scene_holds(&mut pending, &mut scanout, &mut active);
+        assert!(pending.is_empty());
+        assert!(scanout.is_empty());
+        assert!(!active);
+    }
+
+    #[test]
+    fn scanout_feedback_promises_only_pairs_shared_by_every_output() {
+        let first = [Modifier::Linear, Modifier::Invalid];
+        let second = [Modifier::Invalid];
+        let formats = common_scanout_formats(
+            [(Fourcc::Argb8888, first.as_slice()), (Fourcc::Argb8888, second.as_slice())].into_iter(),
+        );
+        assert_eq!(
+            formats.indexset().iter().copied().collect::<Vec<_>>(),
+            vec![Format { code: Fourcc::Argb8888, modifier: Modifier::Invalid }]
+        );
+
+        let mismatched = common_scanout_formats(
+            [(Fourcc::Argb8888, first.as_slice()), (Fourcc::Abgr8888, first.as_slice())].into_iter(),
+        );
+        assert!(mismatched.indexset().is_empty());
+        assert!(common_scanout_formats(std::iter::empty()).indexset().is_empty());
     }
 }

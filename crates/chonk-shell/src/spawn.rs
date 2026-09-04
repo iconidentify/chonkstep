@@ -60,7 +60,7 @@ pub const CONTROL_SOCKET_ENV: &str = "CHONKSTEP_CONTROL_SOCKET";
 /// `CHONKSTEP_APPEARANCE`, and `CHONKSTEP_CONTROL_SOCKET` are public
 /// child-facing integration variables.  Dock socket/token variables
 /// are passed only to their designated dockapp.
-const INTERNAL_ENV: [&str; 21] = [
+const INTERNAL_ENV: [&str; 22] = [
     "CHONKSTEP_BACKEND",
     "CHONKSTEP_DAMAGE_LOG",
     "CHONKSTEP_DRM_DEVICE",
@@ -69,6 +69,7 @@ const INTERNAL_ENV: [&str; 21] = [
     "CHONKSTEP_HYPRLAND_IPC",
     "CHONKSTEP_NO_APPEARANCE_PROPAGATION",
     "CHONKSTEP_NO_CURSOR_PLANE",
+    "CHONKSTEP_NO_DIRECT_SCANOUT",
     "CHONKSTEP_OWNS_XCURSOR_SIZE",
     "CHONKSTEP_SESSION_BIN",
     "CHONKSTEP_SESSION_CONTINUES",

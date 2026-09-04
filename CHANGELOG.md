@@ -7,6 +7,21 @@ crate and both session binaries carry the same number.
 
 ### Performance
 
+- **Eligible fullscreen clients can bypass composition on real hardware.**
+  The DRM session now offers Smithay's conservative primary-plane direct
+  scanout path: same GPU, exact swapchain format/modifier, fullscreen opaque
+  topmost element, and a successful atomic KMS test, with automatic GLES
+  fallback for everything else. linux-dmabuf feedback advertises only the
+  scanout pairs common to every attached output, and client buffers stay held
+  until a later page flip has actually replaced them. At 2560x1600x60, a
+  continuously changing fullscreen client otherwise produces 245.8 million
+  composited output pixels and 937.5 MiB of swapchain writes per second; this
+  path can eliminate that pass. The exact hardware saving is workload- and
+  driver-dependent and cannot be measured under the nested backend, so state
+  transitions are logged and `CHONKSTEP_NO_DIRECT_SCANOUT=1` is an immediate
+  A/B/escape switch. Unit tests cover buffer lifetime, independent plane
+  gates, and honest multi-output format intersection; the full nested suite
+  covers the unchanged composition fallback.
 - **Held compositor bindings no longer allocate on every repeat tick.**
   The Wayland repeat scheduler batches its bounded catch-up count in scalar
   state instead of constructing a temporary vector. At Omarchy's default

@@ -510,6 +510,16 @@ compositing manager, unlike the X11 script: the compositor composites
 itself, so the themes' translucent terminals are true alpha in the same
 GLES scene that draws the chrome.
 
+An opaque fullscreen dmabuf can bypass that GLES scene and become the DRM
+primary plane directly. The path is intentionally conservative: the buffer
+must come from the session GPU, exactly match the output swapchain format,
+cover the output, sit above every visible element, and pass the driver's
+atomic KMS test. A visible dock, bar, menu, software cursor, or unsupported
+buffer simply keeps the normal compositor path; there is no separate mode a
+user has to manage. `CHONKSTEP_NO_DIRECT_SCANOUT=1` disables the optimization
+for the next session as a hardware-debug escape hatch. Transitions are named
+in the session log as `DRM primary-plane direct scanout changed`.
+
 What the session backend does not do yet, stated plainly:
 
 - **One GPU, every connector on it.** The session drives every display
