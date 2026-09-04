@@ -1842,14 +1842,6 @@ impl Compositor {
         // happened at all this pass, happened just above.
         crate::lock::confirm_after_frame(self);
 
-        // The outputs remember every surface that entered them (the
-        // `wl_surface.enter` in `xdg.rs`'s commit handler) so they can
-        // dedup; smithay asks that the dead ones be pruned "at best
-        // before every wayland socket flush", which is here.
-        for entry in &self.outputs {
-            entry.output.cleanup();
-        }
-
         // Protocol replies queued by everything above (configures,
         // frame callbacks, focus enter/leave) only reach clients on a
         // flush.

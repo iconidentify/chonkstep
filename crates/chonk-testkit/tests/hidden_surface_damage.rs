@@ -7,6 +7,11 @@
 //! 60 Hz and reports its own progress. Damage telemetry then proves
 //! the same commits draw while visible and schedule zero frames after
 //! Omarchy's silent-send chord parks the window.
+//!
+//! For repeatable profiling, `CHONKSTEP_DAMAGE_SAMPLE_COMMITS` lengthens the
+//! hidden interval (in multiples of 30) and
+//! `CHONKSTEP_DAMAGE_STATIC_CLIENTS` plants additional idle surfaces. Both
+//! default to the smallest regression test.
 
 use std::time::Duration;
 
@@ -29,6 +34,42 @@ fn wait_for_animation(session: &Session, program: &str, target: u64) {
 
 fn rendered_frames(session: &Session) -> usize {
     session.log().lines().filter(|line| line.contains("frame damage")).count()
+}
+
+/// User + system CPU ticks from Linux's process accounting. This is
+/// intentionally a counter rather than elapsed time: an A/B run may
+/// share the host with anything, but only work done by the compositor
+/// is charged here.
+fn process_cpu_ticks(pid: u32) -> Option<u64> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    parse_process_cpu_ticks(&stat)
+}
+
+fn parse_process_cpu_ticks(stat: &str) -> Option<u64> {
+    // `comm` may contain spaces and parentheses. Its final `)` is the
+    // only safe landmark; fields after it begin with field 3 (`state`),
+    // making `utime` and `stime` offsets 11 and 12 in this iterator.
+    let (_, rest) = stat.rsplit_once(") ")?;
+    let mut fields = rest.split_whitespace();
+    let user = fields.nth(11)?.parse::<u64>().ok()?;
+    let system = fields.next()?.parse::<u64>().ok()?;
+    Some(user + system)
+}
+
+fn hidden_sample_commits() -> u64 {
+    std::env::var("CHONKSTEP_DAMAGE_SAMPLE_COMMITS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .filter(|commits: &u64| *commits >= 30 && commits.is_multiple_of(30))
+        .unwrap_or(60)
+}
+
+fn static_client_count() -> usize {
+    std::env::var("CHONKSTEP_DAMAGE_STATIC_CLIENTS")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .filter(|clients: &usize| *clients <= 200)
+        .unwrap_or(0)
 }
 
 /// Omarchy's `super+shift+alt+2`: send the focused window to workspace
@@ -58,6 +99,19 @@ fn a_self_timed_client_on_a_parked_workspace_schedules_no_frames() {
     let mut session = Session::boot("hidden-surface-damage", options).expect("session boots");
     let probe = profile_binary("chonk-fullscreen-probe").expect("probe is built");
     let program = probe.display().to_string();
+    let static_clients = static_client_count();
+    for index in 0..static_clients {
+        let title = format!("DamageIdle{index}");
+        session.launch(&program, &[&title, &title]).expect("static probe launches");
+    }
+    if static_clients > 0 {
+        poll_until(SETTLE, &format!("all {static_clients} static surfaces to map"), || {
+            let world = session.world().ok()?;
+            (world.windows.iter().filter(|window| window.title.starts_with("DamageIdle")).count() == static_clients)
+                .then_some(())
+        })
+        .unwrap();
+    }
     session
         .launch(&program, &["HiddenPulse", "hidden-pulse", "animate"])
         .expect("self-timed probe launches");
@@ -78,16 +132,28 @@ fn a_self_timed_client_on_a_parked_workspace_schedules_no_frames() {
 
     send_to_workspace_two(&mut session);
     let hidden_start = rendered_frames(&session);
-    let hidden_target = animation_frame(&session.client_log(&program)).unwrap() + 60;
-    wait_for_animation(&session, &program, hidden_target);
+    let sample_commits = hidden_sample_commits();
+    let cpu_start = process_cpu_ticks(session.compositor_pid()).expect("Linux process accounting is readable");
+    let hidden_target = animation_frame(&session.client_log(&program)).unwrap() + sample_commits;
+    let sample_timeout = Duration::from_millis(sample_commits.saturating_mul(20).saturating_add(10_000));
+    poll_until(sample_timeout, &format!("the hidden client to commit {sample_commits} frames"), || {
+        animation_frame(&session.client_log(&program)).filter(|frame| *frame >= hidden_target)
+    })
+    .unwrap_or_else(|error| panic!("{error}; client log:\n{}", session.client_log(&program)));
+    let cpu_ticks = process_cpu_ticks(session.compositor_pid())
+        .expect("Linux process accounting remains readable")
+        .saturating_sub(cpu_start);
     let hidden_frames = rendered_frames(&session) - hidden_start;
     eprintln!(
-        "self-timed damage sample: {visible_frames} visible render submissions, {hidden_frames} while parked"
+        "self-timed damage sample: {visible_frames} visible render submissions; \
+         {hidden_frames} renders and {cpu_ticks} compositor CPU ticks across {sample_commits} parked commits \
+         with {static_clients} additional surfaces"
     );
-    assert_eq!(
-        hidden_frames,
-        0,
-        "a parked client's 60-frame burst scheduled {hidden_frames} invisible renders; compositor log:\n{}",
+    let allowed_background_frames = usize::from(static_clients > 0);
+    assert!(
+        hidden_frames <= allowed_background_frames,
+        "a parked client's {sample_commits}-commit burst scheduled {hidden_frames} invisible renders \
+         (allowance {allowed_background_frames} with {static_clients} profiling surfaces); compositor log:\n{}",
         session.log()
     );
 }
@@ -96,4 +162,10 @@ fn a_self_timed_client_on_a_parked_workspace_schedules_no_frames() {
 fn animation_progress_uses_the_latest_complete_marker() {
     assert_eq!(animation_frame("noise\nanimation frame=30\nanimation frame=60\n"), Some(60));
     assert_eq!(animation_frame("animation frame=not-a-number\n"), None);
+}
+
+#[test]
+fn linux_process_ticks_are_parsed_after_a_hostile_comm_field() {
+    let stat = "123 (a name ) with spaces) S 1 2 3 4 5 6 7 8 9 10 17 19";
+    assert_eq!(parse_process_cpu_ticks(stat), Some(36));
 }

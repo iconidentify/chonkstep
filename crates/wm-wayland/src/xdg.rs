@@ -368,6 +368,20 @@ impl CompositorHandler for Compositor {
     }
 
     fn new_surface(&mut self, surface: &WlSurface) {
+        // This compositor deliberately advertises every surface on
+        // every output: all outputs share the session scale, and true
+        // overlap tracking would add complexity without changing what
+        // a client renders (see the commit handler's scale doctrine).
+        // Membership is a surface-lifecycle fact, so establish it
+        // here exactly once. `Output::enter` takes a mutex and probes
+        // a weak-surface HashSet; doing that for every output on every
+        // buffer commit used to put pure deduplication in the hottest
+        // protocol path. A wl_output bound later is still correct:
+        // Smithay replays `enter` to that client's already-known
+        // surfaces when the output resource is created.
+        for entry in &self.outputs {
+            entry.output.enter(surface);
+        }
         // Every surface gets the buffer-readiness pre-commit hook: a
         // commit whose dmabuf the client's GPU is still drawing into
         // must not land until it is finished (explicit syncobj acquire
@@ -392,36 +406,23 @@ impl CompositorHandler for Compositor {
         crate::lock::install_defunct_lock_role_guard(surface);
     }
 
+    fn destroyed(&mut self, _surface: &WlSurface) {
+        // `Output` retains weak surface handles so it can replay
+        // `enter` to wl_output objects a client binds later. The
+        // destruction callback is the exact moment one can turn dead;
+        // sweep here instead of scanning every output's full surface
+        // set before every socket flush. Client disconnects destroy
+        // their surfaces through this same callback.
+        for entry in &self.outputs {
+            entry.output.cleanup();
+        }
+    }
+
     fn commit(&mut self, surface: &WlSurface) {
         // Buffer bookkeeping first — everything below (and the
         // renderer, and the hit-test's subsurface walk) reads the
         // RendererSurfaceState this maintains.
         on_commit_buffer_handler::<Self>(surface);
-        // Tell the surface where it is and how to draw for it. Both
-        // are how a client hears the session's scale, and a toolkit
-        // may honor either: `wl_surface.enter` names the outputs
-        // whose advertised scale (see `state.rs`'s `advertise_scale`)
-        // the client takes its maximum from, and
-        // `preferred_buffer_scale` states the number outright for
-        // clients binding `wl_surface` v6. Without the enter a GTK
-        // client never consults the output at all and stays at 1x.
-        // Every output, not the ones the surface overlaps: a window
-        // can be dragged across a boundary between two commits, and
-        // per-output enter/leave tracking buys nothing on a desktop
-        // whose outputs all advertise one session-wide scale. Both
-        // calls dedup internally (a set in smithay's `Output`, a
-        // per-surface cache in `send_surface_state`), so a commit —
-        // the hottest path in the protocol — sends nothing after the
-        // first time. Xwayland's own surfaces are exempt from the
-        // preferred-scale half: that server is told the scale through
-        // XSETTINGS and `XCURSOR_SIZE` and must keep committing 1x
-        // buffers over the ledger's 1x rectangles, so it is the one
-        // client this compositor deliberately never invites to scale
-        // itself. (Same reasoning as the Xdg-only filter in
-        // `dispatch_pending`'s rescale drain.)
-        for entry in &self.outputs {
-            entry.output.enter(surface);
-        }
         // Role logic (and the scale lookup below) runs against the
         // tree's root: a subsurface commit must not re-trigger toplevel
         // lifecycle, and a subsurface's scale is its window's.
@@ -437,12 +438,15 @@ impl CompositorHandler for Compositor {
         }
         let xwayland = surface.client().is_some_and(|client| client.get_data::<XWaylandClientData>().is_some());
         if !xwayland {
-            // Which output's scale this surface should draw for. The
-            // integer is the ceiling fallback (`advertised_output_scale`
-            // rounds up on purpose); the exact fraction goes to any
-            // fractional-scale object the client created. Both dedup
-            // per surface inside smithay, so the hot path sends nothing
-            // after the first commit at a given scale.
+            // Tell the surface how densely it should draw. The
+            // `wl_surface.enter` half of scale discovery was settled
+            // once at surface creation; this is the changing half. The
+            // integer is the ceiling fallback
+            // (`advertised_output_scale` rounds up on purpose); the
+            // exact fraction goes to any fractional-scale object the
+            // client created. Both dedup per surface inside smithay,
+            // so the hot path sends nothing after the first commit at
+            // a given scale.
             let preferred = self.preferred_scale_for(&root);
             let advertised = crate::state::advertised_output_scale(preferred as f32).integer_scale();
             with_states(surface, |states| {

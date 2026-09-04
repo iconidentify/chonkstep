@@ -7,6 +7,19 @@ crate and both session binaries carry the same number.
 
 ### Performance
 
+- **Output membership follows surface lifetime instead of commit rate.**
+  Each Wayland surface now enters the session's outputs once when it is
+  created, and dead weak handles are pruned from Smithay's output sets at the
+  matching destruction callback. The steady commit path no longer locks and
+  probes one output hash set per output, and the end of every dispatch no
+  longer locks each output and sweeps every known surface. At 60 Hz that turns
+  60 membership probes and 60 full-set sweeps per output per second into zero;
+  late `wl_output` bindings remain correct because Smithay replays entry for
+  known live surfaces. Reversed release-build A/B runs over 1,800 hidden
+  commits averaged 64.5 to 62.0 compositor CPU ticks with 101 surfaces (3.9%)
+  and 107 to 103 ticks with 201 surfaces (3.7%). The dedicated workload reads
+  Linux process accounting, uses the client commit counter as its duration,
+  and verifies the parked client still causes no render stream.
 - **Invisible Wayland commits no longer schedule compositor frames.**
   Surface commits now enter the damage pipeline only when their toplevel,
   popup, layer, lock, cursor, or input-method surface is present in the scene
