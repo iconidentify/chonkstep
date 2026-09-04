@@ -89,12 +89,14 @@
 //! `miniaturize`, `focus_client`, the EWMH request handlers, the
 //! titlebar buttons, the switcher), none of which this crate owns, and
 //! adding a callback to each would put taskbar bookkeeping into the
-//! policy brain. So [`refresh`] diffs instead: it compares the ledger
-//! against what was last sent and emits only the differences. One
-//! integration point, no hook can be forgotten, and a window that
-//! changes twice in a pass costs one event rather than two. The cost is
-//! a walk over the client table per dispatch pass, which is the same
-//! walk the renderer already does per frame.
+//! policy brain. So [`refresh`] diffs instead: the compositor marks the
+//! retained view dirty at the few event-loop boundaries through which
+//! those transitions converge, then compares the settled ledger with
+//! what was last sent. One integration point, a window that changes
+//! twice in a pass costs one event rather than two, and an unchanged
+//! client commit costs no table walk or string cloning. A newly bound
+//! manager forces a snapshot independently, so skipping idle passes
+//! can never withhold its initial state.
 //!
 //! # Screencopy: the same capture path as everything else
 //!
@@ -380,12 +382,20 @@ pub(crate) fn init(display_handle: &DisplayHandle) -> ProtocolState {
     }
 }
 
-/// Reconciles both protocols with the current session, once per
-/// dispatch pass. See the module's integration contract for where this
-/// is called and why the position matters.
+/// Reconciles protocol work with the current session once per dispatch
+/// pass. Foreign-toplevel state is snapshotted only after an
+/// invalidation (or for a newly bound manager); screencopy requests are
+/// still serviced on every pass. See the module's integration contract
+/// for why this position matters.
 pub(crate) fn refresh(comp: &mut Compositor) {
-    apply_minimize_requests(comp);
-    sync_toplevels(comp);
+    if apply_minimize_requests(comp) {
+        comp.foreign_toplevel_dirty = true;
+    }
+    let new_manager = comp.protocols.managers.iter().any(|manager| !manager.announced);
+    if comp.foreign_toplevel_dirty || new_manager {
+        sync_toplevels(comp);
+        comp.foreign_toplevel_dirty = false;
+    }
     service_captures(comp);
 }
 
@@ -410,20 +420,23 @@ pub(crate) fn refresh(comp: &mut Compositor) {
 /// `Notification::Miniaturized`, and the shell's drain has already run
 /// by the time this does, so the icon tile appears on the next frame
 /// rather than the one where the window vanished.
-fn apply_minimize_requests(comp: &mut Compositor) {
+fn apply_minimize_requests(comp: &mut Compositor) -> bool {
     if comp.protocols.minimize_requests.is_empty() {
-        return;
+        return false;
     }
+    let mut applied = false;
     for (window, minimize) in std::mem::take(&mut comp.protocols.minimize_requests) {
         let Some(id) = comp.wm.client_for_window(window) else {
             continue;
         };
+        applied = true;
         if minimize {
             comp.wm.miniaturize(id);
         } else {
             comp.wm.deminiaturize(id);
         }
     }
+    applied
 }
 
 /// What one window looks like right now, gathered before anything is

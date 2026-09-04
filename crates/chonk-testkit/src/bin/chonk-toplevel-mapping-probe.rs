@@ -97,11 +97,15 @@ impl Dispatch<ZwlrForeignToplevelHandleV1, ()> for Probe {
     fn event(
         _: &mut Self,
         _: &ZwlrForeignToplevelHandleV1,
-        _: zwlr_foreign_toplevel_handle_v1::Event,
+        event: zwlr_foreign_toplevel_handle_v1::Event,
         _: &(),
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
+        if matches!(event, zwlr_foreign_toplevel_handle_v1::Event::Done) {
+            println!("**foreign done**");
+            let _ = std::io::stdout().flush();
+        }
     }
 }
 

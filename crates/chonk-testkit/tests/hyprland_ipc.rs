@@ -295,6 +295,25 @@ fn foreign_toplevel_mapping_returns_the_same_live_ipc_address() {
         .expect("the same window appears in IPC");
     assert_eq!(mapped, ipc, "the protocol is a join, so both surfaces must return one identity");
 
+    // The subscriber must hear later state changes too. This is the
+    // invalidation edge the demand-driven publisher relies on: an
+    // unchanged client commit sends nothing, while a real WM mutation
+    // closes one new atomic foreign-toplevel batch with `done`.
+    let done_before = session.client_log("chonk-toplevel-mapping-probe").matches("**foreign done**").count();
+    assert_eq!(request(&dir, "dispatch fullscreen 1").trim(), "ok");
+    poll_until(EVENT, "the foreign-toplevel handle to publish fullscreen", || {
+        (session.client_log("chonk-toplevel-mapping-probe").matches("**foreign done**").count() > done_before)
+            .then_some(())
+    })
+    .expect("the foreign-toplevel stream follows WM state changes");
+    let fullscreen = json(&dir, "j/clients")
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|client| client["title"].as_str().is_some_and(|title| title.contains("mapping-probe")))
+        .and_then(|client| client["fullscreen"].as_i64());
+    assert_eq!(fullscreen, Some(1), "Hyprland IPC and foreign-toplevel observe the same fullscreen transition");
+
     session.kill_client("zenity");
     session.wait_for_window_gone("mapping-probe").expect("window unmaps cleanly");
     assert!(session.compositor_alive(), "stale foreign handles are cleaned rather than dereferenced");

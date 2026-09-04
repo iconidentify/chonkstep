@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use slotmap::SlotMap;
 use wm_theme_api::{
@@ -146,6 +146,11 @@ pub struct WindowManager<B: Backend> {
     clients: SlotMap<ClientId, Client<B>>,
     window_index: HashMap<B::WindowId, ClientId>,
     frame_index: HashMap<B::FrameId, ClientId>,
+    /// The sparse subset carrying an `idle_inhibit` window rule.
+    /// Idle protocol reconciliation walks this set rather than every
+    /// managed client on every Wayland dispatch pass; most desktops
+    /// keep it empty for the entire session.
+    idle_inhibit_clients: HashSet<ClientId>,
     focused: Option<ClientId>,
     active_move: Option<ActiveMove>,
     /// The pointer grab held for the duration of an interactive drag.
@@ -281,6 +286,7 @@ impl<B: Backend> WindowManager<B> {
             clients: SlotMap::with_key(),
             window_index: HashMap::new(),
             frame_index: HashMap::new(),
+            idle_inhibit_clients: HashSet::new(),
             focused: None,
             active_move: None,
             drag_grab: None,
@@ -660,12 +666,15 @@ impl<B: Backend> WindowManager<B> {
     ///
     /// Chonkstep chooses the mapped/visible interpretation of
     /// Hyprland's rule: it remains active while the game or stream is
-    /// showing, without requiring it to hold keyboard focus.
+    /// showing, without requiring it to hold keyboard focus. The query
+    /// walks a sparse index populated only by matching windows, rather
+    /// than revisiting the entire client table every dispatch pass.
     pub fn rule_idle_inhibited(&self) -> bool {
-        self.clients.values().any(|client| {
-            client.lifecycle == Lifecycle::Normal
-                && client.flags.contains(ClientFlags::IDLE_INHIBIT)
-                && (client.workspace == self.current_workspace || client.flags.contains(ClientFlags::STICKY))
+        self.idle_inhibit_clients.iter().any(|id| {
+            self.clients.get(*id).is_some_and(|client| {
+                client.lifecycle == Lifecycle::Normal
+                    && (client.workspace == self.current_workspace || client.flags.contains(ClientFlags::STICKY))
+            })
         })
     }
 
@@ -975,6 +984,17 @@ impl<B: Backend> WindowManager<B> {
         self.focused
     }
 
+    /// Whether a pointer-driven window move or resize is in progress.
+    ///
+    /// Backends use this narrow signal to invalidate geometry-derived
+    /// protocols while coalescing pointer motion. Keeping the detail in
+    /// `wm-core` avoids making every idle pointer event look like a
+    /// desktop mutation merely because an interactive drag *could*
+    /// have used it.
+    pub fn interactive_drag_active(&self) -> bool {
+        self.active_move.is_some() || self.active_resize.is_some()
+    }
+
     /// The event loop's sole entry point: drain `Backend::poll_event`
     /// into this on every wakeup.
     pub fn dispatch(&mut self, event: BackendEvent<B::WindowId, B::FrameId>) {
@@ -1242,6 +1262,9 @@ impl<B: Backend> WindowManager<B> {
         client.layout = layout;
 
         let id = self.clients.insert(client);
+        if self.clients[id].flags.contains(ClientFlags::IDLE_INHIBIT) {
+            self.idle_inhibit_clients.insert(id);
+        }
         self.window_index.insert(window, id);
         if let Some(frame) = frame {
             self.frame_index.insert(frame, id);
@@ -1353,6 +1376,7 @@ impl<B: Backend> WindowManager<B> {
             self.end_active_drag();
         }
         self.fullscreen_restore.remove(&id);
+        self.idle_inhibit_clients.remove(&id);
         if let Some(client) = self.clients.remove(id) {
             if let Some(frame) = client.frame {
                 self.frame_index.remove(&frame);
@@ -3357,6 +3381,19 @@ mod tests {
 
     fn wm(backend: FakeBackend) -> WindowManager<FakeBackend> {
         WindowManager::new(backend, Box::new(FakeTheme))
+    }
+
+    #[derive(Debug)]
+    struct InhibitsIdle;
+
+    impl FloatPolicy for InhibitsIdle {
+        fn decision_for(&self, _class: &str, _title: &str) -> Option<crate::placement::FloatDecision> {
+            None
+        }
+
+        fn window_decision_for(&self, _class: &str, _title: &str) -> crate::placement::WindowRuleDecision {
+            crate::placement::WindowRuleDecision { idle_inhibit: true, ..Default::default() }
+        }
     }
 
     fn alt_tab() -> BackendEvent<FakeWindowId, FakeFrameId> {
@@ -5707,6 +5744,27 @@ mod tests {
         assert_eq!(wm.workarea_revision(), 1);
         wm.set_workarea(area);
         assert_eq!(wm.workarea_revision(), 2, "an equal baseline publication is still an invalidation edge");
+    }
+
+    #[test]
+    fn idle_rule_index_follows_visibility_and_window_lifetime() {
+        let mut backend = FakeBackend::new();
+        let window = backend.create_window();
+        let mut wm = wm(backend);
+        wm.set_float_policy(Some(std::sync::Arc::new(InhibitsIdle)));
+
+        assert!(!wm.rule_idle_inhibited());
+        wm.dispatch(BackendEvent::MapRequest(window));
+        let id = wm.client_for_window(window).unwrap();
+        assert!(wm.rule_idle_inhibited(), "the mapped rule holder inhibits");
+
+        wm.miniaturize(id);
+        assert!(!wm.rule_idle_inhibited(), "a miniaturized rule holder is not visible");
+        wm.deminiaturize(id);
+        assert!(wm.rule_idle_inhibited(), "restoring it restores inhibition");
+
+        wm.dispatch(BackendEvent::Destroyed(window));
+        assert!(!wm.rule_idle_inhibited(), "destroying it removes the sparse index entry");
     }
 
     #[test]

@@ -14,6 +14,8 @@
 //! default to the smallest regression test. `CHONKSTEP_DAMAGE_LAYER_BAR=1`
 //! keeps a real exclusive-zone layer surface mapped during the sample, which
 //! isolates per-dispatch layer/workarea overhead.
+//! `CHONKSTEP_DAMAGE_FOREIGN_TOPLEVEL=1` keeps a real wlr foreign-toplevel
+//! subscriber connected to isolate publication overhead.
 
 use std::time::Duration;
 
@@ -78,6 +80,10 @@ fn profile_layer_bar() -> bool {
     matches!(std::env::var("CHONKSTEP_DAMAGE_LAYER_BAR").as_deref(), Ok("1"))
 }
 
+fn profile_foreign_toplevel() -> bool {
+    matches!(std::env::var("CHONKSTEP_DAMAGE_FOREIGN_TOPLEVEL").as_deref(), Ok("1"))
+}
+
 /// Omarchy's `super+shift+alt+2`: send the focused window to workspace
 /// two without following it. The barriers make the before/after frame
 /// counters strict boundaries rather than timer-dependent samples.
@@ -98,6 +104,7 @@ fn send_to_workspace_two(session: &mut Session) {
 #[ignore = "needs a live Wayland session to nest in: scripts/e2e.sh, or cargo test -p chonk-testkit -- --ignored --test-threads=1"]
 fn a_self_timed_client_on_a_parked_workspace_schedules_no_frames() {
     let layer_bar = profile_layer_bar();
+    let foreign_toplevel = profile_foreign_toplevel();
     let options = SessionOptions {
         config_extra: "desktop = \"omarchy\"\nomarchy_bar = false\nshow_dock = false\n".into(),
         env: vec![("CHONKSTEP_DAMAGE_LOG".into(), "1".into())],
@@ -127,6 +134,15 @@ fn a_self_timed_client_on_a_parked_workspace_schedules_no_frames() {
                 .then_some(())
         })
         .unwrap();
+    }
+    if foreign_toplevel {
+        let observer = profile_binary("chonk-toplevel-mapping-probe").expect("foreign-toplevel probe is built");
+        let observer = observer.display().to_string();
+        session.launch(&observer, &[]).expect("foreign-toplevel observer launches");
+        poll_until(SETTLE, "the foreign-toplevel observer to bind", || {
+            session.client_log(&observer).contains("**mapping ready**").then_some(())
+        })
+        .expect("foreign-toplevel observer binds");
     }
     session
         .launch(&program, &["HiddenPulse", "hidden-pulse", "animate"])
@@ -163,7 +179,8 @@ fn a_self_timed_client_on_a_parked_workspace_schedules_no_frames() {
     eprintln!(
         "self-timed damage sample: {visible_frames} visible render submissions; \
          {hidden_frames} renders and {cpu_ticks} compositor CPU ticks across {sample_commits} parked commits \
-         with {static_clients} additional surfaces and layer_bar={layer_bar}"
+         with {static_clients} additional surfaces, layer_bar={layer_bar}, \
+         and foreign_toplevel={foreign_toplevel}"
     );
     let allowed_background_frames = usize::from(static_clients > 0 || layer_bar);
     assert!(

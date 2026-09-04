@@ -7,6 +7,21 @@ crate and both session binaries carry the same number.
 
 ### Performance
 
+- **Omarchy taskbar protocol publication is demand-driven.** The wlr
+  foreign-toplevel snapshot/diff now runs only after a real window-manager
+  invalidation or a new manager bind, while output management returns before
+  allocating when no manager is bound. Idle inhibition likewise checks a
+  sparse rule index and resolves explicit inhibitor ownership through the
+  surface index. With a real foreign-toplevel subscriber, 201 windows, and
+  1,800 unchanged hidden-surface commits, deterministic toplevel snapshots
+  fell from 1,800 to zero, eliminating roughly 361,800 window-record
+  clone/diff operations; three alternating release samples reduced median
+  compositor CPU from 130 to 100 Linux process ticks (23.1%). In the matching
+  no-subscriber scene, 361,800 idle-policy checks and 1,800 output snapshot
+  allocations also fall to zero; timing was neutral at scheduler-tick
+  precision, so only the operation reduction is claimed there. Live coverage
+  proves a post-bind fullscreen transition still emits a completed protocol
+  batch and agrees with Hyprland IPC.
 - **Layer layout follows protocol changes instead of unrelated client
   traffic.** Layer commits/destruction, output geometry/scale, and Omarchy's
   namespace visibility policy explicitly invalidate placement; a monotonic

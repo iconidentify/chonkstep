@@ -1395,6 +1395,11 @@ pub struct Compositor {
     /// socket readiness: a desktop mutation must be published even
     /// when the subscriber itself has said nothing.
     hyprland_state_dirty: bool,
+    /// Whether the wlr foreign-toplevel snapshot can differ from its
+    /// last publication. Separate from Hyprland IPC because either
+    /// protocol can be disabled or have no clients without preventing
+    /// the other from consuming its own invalidation edge.
+    pub(crate) foreign_toplevel_dirty: bool,
 
     // Per-protocol smithay state. Constructed once in `run`; the
     // handler impls in `xdg.rs`/`input.rs`/`xwayland.rs` return these
@@ -1624,6 +1629,7 @@ impl Compositor {
             // direct `cursorpos` query still reads it fresh).
             if !matches!(event, BackendEvent::PointerMotion { .. }) {
                 self.hyprland_state_dirty = true;
+                self.foreign_toplevel_dirty = true;
             }
             if matches!(event, BackendEvent::ShutdownRequested) {
                 // The display is going away for good; nothing below
@@ -1678,6 +1684,7 @@ impl Compositor {
 
         if let Some(new_size) = self.wm.backend_mut().take_screen_resize() {
             self.hyprland_state_dirty = true;
+            self.foreign_toplevel_dirty = true;
             tracing::info!(width = new_size.w, height = new_size.h, "output resized");
             self.shell.on_screen_resize(&mut self.wm, new_size);
             self.wm.set_workarea(self.shell.workarea(new_size));
@@ -1727,6 +1734,7 @@ impl Compositor {
 
         if self.shell.tick(&mut self.wm) {
             self.hyprland_state_dirty = true;
+            self.foreign_toplevel_dirty = true;
         }
 
         // Wayland-side housekeeping with no X11 counterpart: dead xdg
@@ -2164,7 +2172,12 @@ impl Compositor {
                 server.publish(&before);
                 first_event_baselined = true;
             }
-            publish |= server.service(&before, |action| crate::hyprland_ipc::apply(self, action));
+            let applied = server.service(&before, |action| crate::hyprland_ipc::apply(self, action));
+            publish |= applied;
+            // These actions call wm-core's public verbs directly; no
+            // BackendEvent follows them to provide the usual foreign-
+            // toplevel invalidation edge.
+            self.foreign_toplevel_dirty |= applied;
         } else if server.has_pending_output() {
             // A response or event which met socket backpressure still
             // gets a bounded retry on the housekeeping cadence, but a
@@ -2209,6 +2222,7 @@ impl Compositor {
     /// event queue (currently input hotplug and unlock).
     pub(crate) fn mark_hyprland_state_dirty(&mut self) {
         self.hyprland_state_dirty = true;
+        self.foreign_toplevel_dirty = true;
     }
 
     fn sync_dock_sources(&mut self) {
@@ -2273,6 +2287,12 @@ impl Compositor {
     /// `dispatch_motion`, and split out for the same two call sites
     /// (mid-burst before a non-motion event, and once after the burst).
     fn dispatch_motion(&mut self, event: BackendEvent<WlWindowId, WlFrameId>) {
+        // wlr-foreign-toplevel advertises every output a window
+        // overlaps. A real drag can therefore change protocol state,
+        // while ordinary cursor motion cannot. Sampling the core's
+        // narrow drag state preserves that correctness without putting
+        // an O(windows) snapshot back on every mouse report.
+        self.foreign_toplevel_dirty |= self.wm.interactive_drag_active();
         if let BackendEvent::PointerMotion { root, .. } = &event {
             self.shell.on_motion(&mut self.wm, *root);
         }
@@ -3042,6 +3062,7 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
         // A subscriber present on the first pass must receive a
         // baseline even before the desktop produces its first event.
         hyprland_state_dirty: true,
+        foreign_toplevel_dirty: true,
         wm,
         shell,
         display_handle,
@@ -3158,6 +3179,7 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
             // the key silently skipped it.
             comp.shell.reload_config(&mut comp.wm);
             comp.hyprland_state_dirty = true;
+            comp.foreign_toplevel_dirty = true;
         }
         if requests.restart {
             tracing::info!("restart requested — re-executing in place");

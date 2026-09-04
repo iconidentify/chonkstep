@@ -14,8 +14,8 @@
 //! idle-inhibit rides along because smithay's delegate makes it two
 //! callbacks: a client showing a video creates an inhibitor on its
 //! surface, and while that surface is visible the idle timers pause.
-//! "Visible" is judged from the ledger each pass ([`refresh`]): the
-//! inhibiting surface's window (or layer surface) is mapped and the
+//! "Visible" is judged from indexed ownership each pass ([`refresh`]):
+//! the inhibiting surface's window (or layer surface) is mapped and the
 //! session is not locked — an inhibitor must not keep the screen awake
 //! from behind a lock screen, and a dead or unmapped surface's
 //! inhibition ends whether or not its client remembered to destroy the
@@ -77,8 +77,9 @@ pub(crate) fn note_activity(comp: &mut Compositor) {
 }
 
 /// Recomputes whether idling is inhibited, once per dispatch pass.
-/// `set_is_inhibited` is a no-op on an unchanged answer, so the steady
-/// state costs one walk over a nearly-always-empty vec.
+/// `set_is_inhibited` is a no-op on an unchanged answer. The steady
+/// state walks only two sparse sets: windows whose rules explicitly
+/// inhibit idle, and protocol inhibitor surfaces.
 pub(crate) fn refresh(comp: &mut Compositor) {
     comp.idle.inhibitors.retain(IsAlive::alive);
     let inhibited = !comp.wm.backend().locked && {
@@ -97,8 +98,10 @@ fn surface_visible(backend: &WaylandBackend, surface: &WlSurface) -> bool {
     while let Some(parent) = get_parent(&root) {
         root = parent;
     }
-    let window_mapped =
-        backend.windows.values().any(|record| record.mapped && record.surface.wl_surface().as_ref() == Some(&root));
+    let window_mapped = backend
+        .window_for_surface(&root)
+        .and_then(|window| backend.windows.get(&window))
+        .is_some_and(|record| record.mapped);
     let layer_mapped =
         backend.layers.iter().any(|record| backend.layer_presented(record) && *record.surface.wl_surface() == root);
     window_mapped || layer_mapped

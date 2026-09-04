@@ -37,6 +37,11 @@
 //!   non-`Normal`/`Flipped180` transform in the compositor. Both are
 //!   real work, and a truthful `failed` beats a lying `succeeded`.
 //!
+//! When no output manager is bound, publication is a zero-allocation
+//! fast path. Once one binds, retained snapshots keep unchanged passes
+//! event-free while every new manager still receives a complete
+//! initial listing.
+//!
 //! # Timing
 //!
 //! Requests land mid-dispatch, where a modeset and a shell restyle have
@@ -203,6 +208,9 @@ pub(crate) fn refresh(comp: &mut Compositor) {
 /// one `done(serial)` closes each batch. Nothing at all on the passes
 /// where nothing changed and nobody new bound, which is all of them.
 fn publish(comp: &mut Compositor) {
+    if comp.output_mgmt.managers.is_empty() {
+        return;
+    }
     let snapshot: Vec<HeadSnapshot> = comp
         .outputs
         .iter()
