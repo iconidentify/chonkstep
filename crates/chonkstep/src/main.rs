@@ -21,27 +21,26 @@ use chonk_shell::spawn;
 use chonk_shell::startup::{ensure_xcursor_size, SessionRequestPoller, SessionState};
 use chonk_xsettings::{DesktopAppearance, XSettingsManager};
 
-/// Answers `--version` and `-V` before anything else starts, and
-/// nothing else — these binaries take no other arguments.
+/// Answers `--version` and `-V` before anything else starts.
 ///
 /// It exists so a bug report can name its build. The version was
 /// previously reachable only through `pacman -Qi`, which is one more
 /// thing a user has to know to produce a report the crash itself
 /// cannot produce for them.
 ///
-/// The ELF build id, which is what actually matches a coredump to a
-/// symbol package, is deliberately NOT embedded here: `coredumpctl
-/// info` already prints it for the core, and `readelf -n` prints it
-/// for the binary, so embedding a copy would add a build script and a
-/// note parser to restate something both ends already know. The line
-/// below says where to get it instead.
 fn print_version_and_exit_if_asked() {
-    let asked = std::env::args().skip(1).any(|arg| arg == "--version" || arg == "-V");
+    let asked = std::env::args()
+        .skip(1)
+        .any(|arg| arg == "--version" || arg == "-V");
     if !asked {
         return;
     }
     println!("{} {}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
-    println!("build id: run `readelf -n \"$(command -v {})\"` (coredumpctl prints the core's own)", env!("CARGO_PKG_NAME"));
+    println!("source: {}", chonk_build_info::SOURCE_ID);
+    match chonk_build_info::current_elf_build_id() {
+        Ok(build_id) => println!("build id: {build_id}"),
+        Err(error) => println!("build id: unavailable ({error})"),
+    }
     std::process::exit(0);
 }
 

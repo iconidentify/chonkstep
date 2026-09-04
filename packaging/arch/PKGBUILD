@@ -21,18 +21,19 @@
 # carries only official packages, so it cannot fill that gap for a
 # package installed from a GitHub release or the AUR.
 #
-# `!strip` keeps `makepkg` from stripping blindly; `debug` makes it do
-# the split properly instead — `objcopy --only-keep-debug` into a
-# separate `%s-debug` package, then strip the shipped binary. Measured
-# on aarch64: the shipped executable comes out at ~33 MB, SMALLER than
-# the ~44 MB it was before the release profile existed, because a full
-# strip also drops the `.symtab` the old build kept. The debug package
-# carries the ~101 MB nobody downloads unless they are reading a core.
+# `strip` and `debug` must both be enabled: together they run
+# `objcopy --only-keep-debug` into a separate `%s-debug` package, then
+# strip the shipped binary. (`!strip debug` silently produces no debug
+# package at all.) Measured on aarch64: the shipped executable comes out
+# at ~33 MB, SMALLER than the ~44 MB it was before the release profile
+# existed, because a full strip also drops the `.symtab` the old build
+# kept. The debug package carries the ~101 MB nobody downloads unless
+# they are reading a core.
 #
 # `.eh_frame` survives the strip, so stack unwinding from a coredump
 # works off the shipped binary alone; the debug package is what turns
 # those frames into `file:line`.
-options=(!strip debug)
+options=(strip debug)
 pkgname=chonkstep-git
 pkgver=0.2.0.r76.ge1b4e54
 pkgrel=1
@@ -102,6 +103,8 @@ build() {
   cd chonkstep
   export RUSTUP_TOOLCHAIN=stable
   export CARGO_TARGET_DIR=target
+  # Record the exact checkout, not only the workspace package version.
+  export CHONKSTEP_GIT_DESCRIBE="$(git describe --tags --always --dirty)"
   cargo build --release --frozen --workspace
 }
 
@@ -109,6 +112,7 @@ check() {
   cd chonkstep
   export RUSTUP_TOOLCHAIN=stable
   export CARGO_TARGET_DIR=target
+  export CHONKSTEP_GIT_DESCRIBE="$(git describe --tags --always --dirty)"
   cargo test --frozen --workspace
 }
 

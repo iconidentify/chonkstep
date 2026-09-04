@@ -41,6 +41,7 @@ jobs:
           set -euo pipefail
           version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n1)
           package_release=$(sed -n 's/^pkgrel=//p' packaging/arch/PKGBUILD-release | head -n1)
+          source_id=$(git describe --tags --always --dirty)
           if [[ $GITHUB_REF == refs/tags/preview-v* ]]; then
             tag_version=${GITHUB_REF_NAME#preview-v}
             if [[ $tag_version =~ ^(.+)-r([1-9][0-9]*)$ ]]; then
@@ -66,7 +67,7 @@ jobs:
           install -m644 packaging/arch/PKGBUILD-release "$build_dir/PKGBUILD"
 
           package_name="chonkstep-$version-$package_release-${{ matrix.arch }}.pkg.tar.zst"
-          # `options=(!strip debug)` in the PKGBUILD makes makepkg emit
+          # `options=(strip debug)` in the PKGBUILD makes makepkg emit
           # this beside the main package: the symbols a coredump needs
           # to be more than a list of addresses. Shipped as its own
           # asset so the main package stays small and only someone
@@ -76,6 +77,7 @@ jobs:
           echo "package_release=$package_release" >> "$GITHUB_OUTPUT"
           echo "package_name=$package_name" >> "$GITHUB_OUTPUT"
           echo "debug_package_name=$debug_package_name" >> "$GITHUB_OUTPUT"
+          echo "source_id=$source_id" >> "$GITHUB_OUTPUT"
 
       - name: Build the native Arch package environment
         run: |
@@ -93,6 +95,7 @@ jobs:
             --env CARGO_INCREMENTAL=0 \
             --env CARGO_PROFILE_DEV_DEBUG=0 \
             --env CARGO_PROFILE_TEST_DEBUG=0 \
+            --env "CHONKSTEP_GIT_DESCRIBE=${{ steps.metadata.outputs.source_id }}" \
             --volume "$RUNNER_TEMP/chonkstep-package:/build" \
             --volume "$GITHUB_WORKSPACE:/source:ro" \
             "chonkstep-arch-builder:${{ matrix.arch }}" \
@@ -103,7 +106,8 @@ jobs:
               /source/scripts/verify-release-package.sh \
                 "$package" \
                 "${{ matrix.arch }}" \
-                "${{ steps.metadata.outputs.version }}-${{ steps.metadata.outputs.package_release }}"
+                "${{ steps.metadata.outputs.version }}-${{ steps.metadata.outputs.package_release }}" \
+                "${{ steps.metadata.outputs.source_id }}"
               install -d /build/dist
               install -m644 "$package" /build/dist/
               # The verifier above already failed the build if this was

@@ -269,6 +269,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "chonk-build-info"
+version = "0.2.0"
+dependencies = [
+ "object",
+]
+
+[[package]]
 name = "chonk-dock-proto"
 version = "0.2.0"
 dependencies = [
@@ -416,6 +423,7 @@ dependencies = [
 name = "chonkstep"
 version = "0.2.0"
 dependencies = [
+ "chonk-build-info",
  "chonk-shell",
  "chonk-xsettings",
  "libc",
@@ -432,6 +440,7 @@ dependencies = [
 name = "chonkstep-wayland"
 version = "0.2.0"
 dependencies = [
+ "chonk-build-info",
  "tracing",
  "tracing-subscriber",
  "wm-config",
@@ -1503,6 +1512,15 @@ dependencies = [
  "objc2",
  "objc2-core-location",
  "objc2-foundation",
+]
+
+[[package]]
+name = "object"
+version = "0.37.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ff76201f031d8863c38aa7f905eca4f53abbfa15f609db4277d44cd8938f33fe"
+dependencies = [
+ "memchr",
 ]
 
 [[package]]

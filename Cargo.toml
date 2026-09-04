@@ -55,7 +55,7 @@ license = "GPL-3.0-only"
 #
 # "shipped" is after the `objcopy --only-keep-debug` + `strip` that
 # `makepkg`'s own `debug` option performs, which is why the packaging
-# recipes now set `options=(!strip debug)`: the split belongs to the
+# recipes now set `options=(strip debug)`: the split belongs to the
 # packager, and the shipped binary comes out SMALLER than it was
 # before this section existed (34 MB against 44 MB, because a full
 # strip also drops the `.symtab` the old build kept).
@@ -73,14 +73,12 @@ license = "GPL-3.0-only"
 # option needs to extract — so it fights the packaging step rather
 # than helping it. Sidecar splitting here is the packager's job.
 #
-# `codegen-units = 1` and `lto = "thin"` are kept for two reasons that
-# can be demonstrated and one that cannot. They make the shipped
-# binary and the debug package smaller than any other row above
-# (33.5 MB and 100.8 MB), and one codegen unit makes the build
-# deterministic, which is what the release workflow's provenance
-# attestation is worth having. They cost +21s (+19%) on a full release
-# build. They are NOT claimed to make the desktop faster: nothing in
-# this tree times a frame yet, so no such claim could be honest.
+# `codegen-units = 1` and `lto = "thin"` make the shipped binary and
+# the debug package smaller than any other measured row above (33.5 MB
+# and 100.8 MB). They cost +21s (+19%) on a full release build. Neither
+# deterministic output nor a faster desktop is claimed: this profile
+# alone cannot guarantee reproducibility, and nothing in this tree
+# times a frame yet.
 [profile.release]
 debug = "line-tables-only"
 codegen-units = 1
