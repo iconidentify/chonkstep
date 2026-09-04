@@ -3452,7 +3452,9 @@ impl<B: Backend> Desktop<B> {
         if let Some(panel) = self.switcher.as_mut() {
             if let Some(window) = panel.window {
                 backend.unmap_shell_surface(window);
+                backend.release_shell_buffer(window);
             }
+            panel.entries.clear();
             panel.visible = false;
         }
     }

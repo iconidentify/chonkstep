@@ -398,6 +398,11 @@ pub(crate) struct FrameRecord {
 pub(crate) struct ShellRecord {
     pub geometry: Rect,
     pub buffer: Option<MemoryRenderBuffer>,
+    /// Exact CPU-side pixel allocation represented by `buffer`. Kept
+    /// separately because Smithay intentionally exposes no raw-memory
+    /// accessor on `MemoryRenderBuffer`; diagnostics still need to prove a
+    /// hidden monitor-sized panel released its storage.
+    pub buffer_bytes: usize,
     pub background: (u8, u8, u8),
     pub above: bool,
     pub mapped: bool,

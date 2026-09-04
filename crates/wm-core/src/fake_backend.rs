@@ -125,6 +125,9 @@ pub struct FakeBackend {
     /// (rather than a set of the mapped) so an unmap is distinguishable
     /// from a surface nobody has mapped yet.
     pub shell_mapped: HashMap<u32, bool>,
+    /// Bytes in the last buffer painted into each shell surface. Absence
+    /// means the backing was never painted or has been explicitly released.
+    pub shell_buffer_bytes: HashMap<u32, usize>,
     /// Scroll events waiting for `Backend::take_shell_scroll`, oldest
     /// first. The fake has no input hardware, so tests stage them with
     /// `queue_shell_scroll` — the same shape a real backend's input
@@ -306,12 +309,18 @@ impl Backend for FakeBackend {
     fn destroy_shell_surface(&mut self, id: Self::ShellId) {
         self.shell_geometries.remove(&id);
         self.shell_mapped.remove(&id);
+        self.shell_buffer_bytes.remove(&id);
     }
     fn raise_shell_surface(&mut self, _id: Self::ShellId) {}
     fn configure_shell_surface(&mut self, id: Self::ShellId, geometry: wm_theme_api::Rect) {
         self.shell_geometries.insert(id, geometry);
     }
-    fn paint_shell_surface(&mut self, _id: Self::ShellId, _buffer: &DecorationBuffer) {}
+    fn paint_shell_surface(&mut self, id: Self::ShellId, buffer: &DecorationBuffer) {
+        self.shell_buffer_bytes.insert(id, buffer.pixels.len());
+    }
+    fn release_shell_buffer(&mut self, id: Self::ShellId) {
+        self.shell_buffer_bytes.remove(&id);
+    }
     fn take_shell_scroll(&mut self) -> Option<(Self::ShellId, Point, ScrollDelta)> {
         self.queued_shell_scrolls.pop_front()
     }

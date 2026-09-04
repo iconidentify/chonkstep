@@ -40,8 +40,8 @@
 //! recreated when the monitor geometry changes — the switcher panel's
 //! rule, adopted for its reason (destroy/recreate churn wedged a
 //! session compositor once; see `SwitcherPanel`'s doc) plus a new one:
-//! the panel's backing buffer is large, and reallocating it on every
-//! entry is the most expensive way to obtain the buffer we just had.
+//! the surface identity is cheap to preserve. Its monitor-sized pixels are
+//! released while hidden and rebuilt before the surface is mapped again.
 
 use wm_core::{Backend, ClientId};
 use wm_theme::overview::{self as ov, OverviewEntry, OverviewLayout};
@@ -408,9 +408,11 @@ impl<B: Backend> OverviewPanel<B> {
     pub fn hide(&mut self, backend: &mut B) {
         if let Some(window) = self.window {
             backend.unmap_shell_surface(window);
+            backend.release_shell_buffer(window);
         }
         if let Some(selection) = self.selection {
             backend.unmap_shell_surface(selection);
+            backend.release_shell_buffer(selection);
         }
         backend.set_preview_edge(None);
         self.visible = false;

@@ -66,6 +66,12 @@ pub trait Backend {
     fn configure_shell_surface(&mut self, id: Self::ShellId, geometry: Rect);
     /// Blits `buffer` onto the surface — the shell's one drawing verb.
     fn paint_shell_surface(&mut self, id: Self::ShellId, buffer: &DecorationBuffer);
+    /// Releases pixels retained for an unmapped shell surface without
+    /// destroying the surface itself. Long-lived transient panels use this
+    /// between appearances: their stable identity avoids display-server
+    /// churn, while their potentially monitor-sized backing has no value
+    /// until the next repaint.
+    fn release_shell_buffer(&mut self, id: Self::ShellId);
 
     /// Paints the desktop background — solid color or a wallpaper
     /// image. On X11 this is the root window (plus the root-pixmap

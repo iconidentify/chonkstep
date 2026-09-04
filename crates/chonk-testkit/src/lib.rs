@@ -861,6 +861,9 @@ pub struct ShellInfo {
     pub h: u32,
     pub mapped: bool,
     pub above: bool,
+    /// CPU-side bytes retained by the compositor for this surface's
+    /// current pixels. Zero after a hidden transient releases its backing.
+    pub buffer_bytes: usize,
 }
 
 /// The shell's own account of its dress, from the `theme` line.
@@ -1288,6 +1291,7 @@ fn parse_shell_line(line: &str) -> Option<ShellInfo> {
         h: field(line, "h=")?,
         mapped: field(line, "mapped=")?,
         above: field(line, "above=")?,
+        buffer_bytes: field(line, "buffer_bytes=").unwrap_or(0),
     })
 }
 

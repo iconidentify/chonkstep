@@ -76,7 +76,7 @@
 //! theme id="nextstep-classic" name="NeXTSTEP Classic" appearance=dark following=""
 //! window id=3 x=100 y=80 w=400 h=300 offset_x=12 offset_y=12 mapped=true app="org.gnome.zenity" title="Question"
 //! frame id=4 window=3 x=96 y=52 w=408 h=332 mapped=true
-//! shell id=1 x=1216 y=0 w=64 h=320 mapped=true above=true
+//! shell id=1 x=1216 y=0 w=64 h=320 mapped=true above=true buffer_bytes=81920
 //! done
 //! ```
 //!
@@ -550,7 +550,7 @@ fn handle_command(line: &str, stream: &mut UnixStream, comp: &mut Compositor) {
             // and the pixel half from a screenshot.
             for (id, record) in &backend.shells {
                 reply.push_str(&format!(
-                    "shell id={} x={} y={} w={} h={} mapped={} above={}\n",
+                    "shell id={} x={} y={} w={} h={} mapped={} above={} buffer_bytes={}\n",
                     id.0,
                     record.geometry.pos.x,
                     record.geometry.pos.y,
@@ -558,6 +558,7 @@ fn handle_command(line: &str, stream: &mut UnixStream, comp: &mut Compositor) {
                     record.geometry.size.h,
                     record.mapped,
                     record.above,
+                    record.buffer_bytes,
                 ));
             }
             reply.push_str("done\n");

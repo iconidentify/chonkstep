@@ -2143,6 +2143,11 @@ impl Backend for X11Backend {
         self.blit(id, buffer);
     }
 
+    fn release_shell_buffer(&mut self, _id: Self::ShellId) {
+        // X11 owns the unmapped window's storage; this backend retains no
+        // client-side pixel buffer or imported texture after `blit` returns.
+    }
+
     fn paint_root_color(&mut self, rgb: (u8, u8, u8)) {
         if let Err(error) = self.paint_background(rgb) {
             tracing::warn!(?error, "failed to paint the desktop background");

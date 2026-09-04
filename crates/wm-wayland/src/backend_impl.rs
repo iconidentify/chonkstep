@@ -199,6 +199,7 @@ impl Backend for WaylandBackend {
             ShellRecord {
                 geometry,
                 buffer: None,
+                buffer_bytes: 0,
                 background,
                 above,
                 mapped: false,
@@ -248,6 +249,16 @@ impl Backend for WaylandBackend {
         if let Some(shell) = self.shells.get_mut(&id) {
             if let Some(imported) = import_buffer(buffer) {
                 shell.buffer = Some(imported);
+                shell.buffer_bytes = buffer.pixels.len();
+                self.damage = true;
+            }
+        }
+    }
+
+    fn release_shell_buffer(&mut self, id: Self::ShellId) {
+        if let Some(shell) = self.shells.get_mut(&id) {
+            if shell.buffer.take().is_some() {
+                shell.buffer_bytes = 0;
                 self.damage = true;
             }
         }

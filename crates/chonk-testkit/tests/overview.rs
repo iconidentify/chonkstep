@@ -134,6 +134,18 @@ fn assert_overview_closed(session: &mut Session, why: &str) {
     .unwrap_or_else(|e| panic!("the Overview should have closed after {why}: {e}"));
 }
 
+fn assert_overview_storage_released(session: &mut Session, surface_id: u64) {
+    let world = session.world().unwrap();
+    let shell = world.shells.iter().find(|shell| shell.id == surface_id).expect(
+        "hiding Overview keeps its shell surface alive to avoid display-server churn",
+    );
+    assert!(!shell.mapped, "the hidden Overview surface remains unmapped");
+    assert_eq!(
+        shell.buffer_bytes, 0,
+        "the hidden Overview surface must not retain monitor-sized pixels"
+    );
+}
+
 /// The whole modal lifecycle in one boot (boots are the expensive
 /// part): open with the real binding, arrow the selection, commit with
 /// Return and watch focus actually move (titlebar pixels), reopen and
@@ -158,6 +170,16 @@ fn overview_opens_navigates_and_commits() {
     // -- open, and look at it -------------------------------------------
     open_overview(&mut session);
     session.door().barrier().unwrap();
+    let first_overview = {
+        let world = session.world().unwrap();
+        let shell = overview_shell(&world).expect("Overview surface is mapped");
+        assert_eq!(
+            shell.buffer_bytes,
+            world.output_w as usize * world.output_h as usize * 4,
+            "the diagnostic accounts for the live monitor-sized RGBA buffer"
+        );
+        shell.id
+    };
     session.screenshot("overview-open").unwrap();
 
     // -- arrows move, Return commits ------------------------------------
@@ -174,6 +196,7 @@ fn overview_opens_navigates_and_commits() {
     session.screenshot("overview-selection-moved").unwrap();
     session.door().tap_key(keys::ENTER).unwrap();
     assert_overview_closed(&mut session, "Return committed the selection");
+    assert_overview_storage_released(&mut session, first_overview);
     let after = focused_of_two(&mut session, "OverviewA", "OverviewB");
     assert_ne!(
         after, before,
@@ -182,8 +205,15 @@ fn overview_opens_navigates_and_commits() {
 
     // -- Escape dismisses without committing ----------------------------
     open_overview(&mut session);
+    let reopened = session.world().unwrap();
+    assert_eq!(
+        overview_shell(&reopened).expect("reopened Overview").id,
+        first_overview,
+        "reopening must reuse the surface whose pixels were released"
+    );
     session.door().tap_key(keys::ESC).unwrap();
     assert_overview_closed(&mut session, "Escape");
+    assert_overview_storage_released(&mut session, first_overview);
     let unchanged = focused_of_two(&mut session, "OverviewA", "OverviewB");
     assert_eq!(unchanged, after, "Escape must not move focus");
 
