@@ -11,7 +11,9 @@
 //! For repeatable profiling, `CHONKSTEP_DAMAGE_SAMPLE_COMMITS` lengthens the
 //! hidden interval (in multiples of 30) and
 //! `CHONKSTEP_DAMAGE_STATIC_CLIENTS` plants additional idle surfaces. Both
-//! default to the smallest regression test.
+//! default to the smallest regression test. `CHONKSTEP_DAMAGE_LAYER_BAR=1`
+//! keeps a real exclusive-zone layer surface mapped during the sample, which
+//! isolates per-dispatch layer/workarea overhead.
 
 use std::time::Duration;
 
@@ -72,6 +74,10 @@ fn static_client_count() -> usize {
         .unwrap_or(0)
 }
 
+fn profile_layer_bar() -> bool {
+    matches!(std::env::var("CHONKSTEP_DAMAGE_LAYER_BAR").as_deref(), Ok("1"))
+}
+
 /// Omarchy's `super+shift+alt+2`: send the focused window to workspace
 /// two without following it. The barriers make the before/after frame
 /// counters strict boundaries rather than timer-dependent samples.
@@ -91,12 +97,22 @@ fn send_to_workspace_two(session: &mut Session) {
 #[test]
 #[ignore = "needs a live Wayland session to nest in: scripts/e2e.sh, or cargo test -p chonk-testkit -- --ignored --test-threads=1"]
 fn a_self_timed_client_on_a_parked_workspace_schedules_no_frames() {
+    let layer_bar = profile_layer_bar();
     let options = SessionOptions {
         config_extra: "desktop = \"omarchy\"\nomarchy_bar = false\nshow_dock = false\n".into(),
         env: vec![("CHONKSTEP_DAMAGE_LOG".into(), "1".into())],
         ..Default::default()
     };
     let mut session = Session::boot("hidden-surface-damage", options).expect("session boots");
+    if layer_bar {
+        let bar = profile_binary("chonk-fake-bar").expect("fake layer bar is built");
+        let bar = bar.display().to_string();
+        session.launch(&bar, &["48"]).expect("profiling layer bar launches");
+        poll_until(SETTLE, "the profiling layer bar to map", || {
+            session.client_log(&bar).contains("mapped ").then_some(())
+        })
+        .expect("profiling layer bar maps");
+    }
     let probe = profile_binary("chonk-fullscreen-probe").expect("probe is built");
     let program = probe.display().to_string();
     let static_clients = static_client_count();
@@ -147,9 +163,9 @@ fn a_self_timed_client_on_a_parked_workspace_schedules_no_frames() {
     eprintln!(
         "self-timed damage sample: {visible_frames} visible render submissions; \
          {hidden_frames} renders and {cpu_ticks} compositor CPU ticks across {sample_commits} parked commits \
-         with {static_clients} additional surfaces"
+         with {static_clients} additional surfaces and layer_bar={layer_bar}"
     );
-    let allowed_background_frames = usize::from(static_clients > 0);
+    let allowed_background_frames = usize::from(static_clients > 0 || layer_bar);
     assert!(
         hidden_frames <= allowed_background_frames,
         "a parked client's {sample_commits}-commit burst scheduled {hidden_frames} invisible renders \

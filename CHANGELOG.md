@@ -7,6 +7,17 @@ crate and both session binaries carry the same number.
 
 ### Performance
 
+- **Layer layout follows protocol changes instead of unrelated client
+  traffic.** Layer commits/destruction, output geometry/scale, and Omarchy's
+  namespace visibility policy explicitly invalidate placement; a monotonic
+  core workarea revision makes Dock, reload, and screen-layout baselines
+  recompose exactly once. Ordinary app commits no longer lock every layer's
+  cached state, allocate three layout vectors, rebuild workareas, or revisit
+  EWMH publication. A real exclusive-zone layer bar plus 1,800 hidden app
+  commits retained zero hidden renders and reduced median compositor CPU from
+  22 to 20 Linux process ticks across three alternating release pairs (9.1%).
+  Without a layer, timing was neutral at one-tick precision while the same
+  sample deterministically eliminated 5,400 transient allocations.
 - **Surface ownership lookup is constant-time.** Native Wayland toplevels are
   indexed when their role is created; XWayland surfaces add the same edge on
   their first associated commit, and both destruction paths remove it at the

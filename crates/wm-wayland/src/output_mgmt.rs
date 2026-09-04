@@ -477,6 +477,7 @@ fn perform_pending_apply(comp: &mut Compositor) {
     if scaled_any || moved_any {
         comp.sync_monitor_scales();
         relayout_ledger(comp);
+        comp.layer_shell.needs_arrange = true;
     }
     pending.resource.succeeded();
 }

@@ -268,6 +268,7 @@ impl Backend for WaylandBackend {
             // The next dispatch pass re-arranges the layers (so a bar's
             // strip is reserved or released) and renders; nothing else
             // to poke.
+            self.layer_layout_dirty = true;
             self.damage = true;
             tracing::info!(namespace, hidden, "layer surface visibility changed");
         }

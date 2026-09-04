@@ -664,6 +664,11 @@ pub struct WaylandBackend {
     /// neither drawn, hit-tested, nor allowed to reserve an edge. See
     /// [`WaylandBackend::layer_presented`].
     pub(crate) hidden_layer_namespaces: std::collections::BTreeSet<String>,
+    /// Whether layer placement must be recomputed before the next
+    /// frame. Visibility policy lives on the backend because it is a
+    /// [`Backend`] verb; this edge carries that change to the protocol
+    /// owner without making `wm-core` know about Wayland layer state.
+    pub(crate) layer_layout_dirty: bool,
     /// Whether an ext-session-lock holds the session. THE flag the
     /// renderer and the input path branch on: while set, only
     /// [`WaylandBackend::lock_surfaces`] render and receive input —
@@ -775,6 +780,7 @@ impl WaylandBackend {
             frame_cursors: HashMap::new(),
             layers: Vec::new(),
             hidden_layer_namespaces: std::collections::BTreeSet::new(),
+            layer_layout_dirty: true,
             locked: false,
             lock_surfaces: Vec::new(),
             ewmh: crate::xewmh::EwmhLedger::default(),
@@ -1830,6 +1836,7 @@ impl Compositor {
             // exactly as it does around any client resize.
             advertise_scale(&mut self.outputs, scale);
             self.sync_monitor_scales();
+            self.layer_shell.needs_arrange = true;
             let advertised = advertised_output_scale(scale).integer_scale();
             let surfaces: Vec<WlSurface> = self
                 .wm
@@ -2336,6 +2343,7 @@ impl Compositor {
         backend.output_size = union_size(&backend.monitors);
         backend.pending_resize = Some(backend.output_size);
         backend.damage = true;
+        self.layer_shell.needs_arrange = true;
     }
 
     /// Copies each output's fractional scale onto the ledger
@@ -2363,6 +2371,7 @@ impl Compositor {
         entry.scale = scale;
         entry.output.change_current_state(None, None, Some(advertised_output_scale(scale as f32)), None);
         self.sync_monitor_scales();
+        self.layer_shell.needs_arrange = true;
         if index == 0 {
             let mut state = self.shell.session_state().clone();
             state.scale = scale as f32;

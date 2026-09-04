@@ -181,6 +181,11 @@ pub struct WindowManager<B: Backend> {
     /// reserves anything on and what makes a single-rect
     /// `set_workarea` call meaningful on a multi-head session.
     workareas: Vec<Rect>,
+    /// Monotonic identity of the most recent workarea publication.
+    /// Protocol adapters use this to compose their own reservations
+    /// only after the shell has changed its baseline, instead of
+    /// rebuilding the same geometry at client-commit rate.
+    workarea_revision: u64,
     /// The last root-relative pointer position the core has seen.
     /// `None` until the first `PointerMotion` arrives — a session's
     /// first window can map before the mouse has moved at all — so
@@ -283,6 +288,7 @@ impl<B: Backend> WindowManager<B> {
             active_button_press: None,
             last_titlebar_press: None,
             workareas: Vec::new(),
+            workarea_revision: 0,
             last_pointer: None,
             placement_policy: PlacementPolicy::Smart,
             placements: 0,
@@ -459,13 +465,28 @@ impl<B: Backend> WindowManager<B> {
     /// exits hands the strip back. Fullscreen windows never followed
     /// the workarea and are left alone; a shaded one keeps its rolled-
     /// up geometry and catches up when it is unshaded.
+    ///
+    /// Every call advances [`Self::workarea_revision`], even when the
+    /// rectangles compare equal. A caller is publishing its baseline;
+    /// an adapter may have composed another reservation over the same
+    /// numeric value and still needs to observe that ownership edge.
     pub fn set_workareas(&mut self, areas: Vec<Rect>) {
         let before = self.effective_workareas();
         self.workareas = areas;
+        self.workarea_revision = self.workarea_revision.wrapping_add(1);
         self.publish_workarea_union();
         if self.effective_workareas() != before {
             self.refit_maximized();
         }
+    }
+
+    /// Revision of the most recent [`Self::set_workareas`] call.
+    ///
+    /// This is an invalidation edge, not a clock: wrapping is allowed,
+    /// and consumers compare only for inequality before recording the
+    /// value they just reconciled.
+    pub fn workarea_revision(&self) -> u64 {
+        self.workarea_revision
     }
 
     /// Re-maximizes every window that is maximized along some axis
@@ -5674,6 +5695,18 @@ mod tests {
             Rect { pos: Point::new(0, 0), size: Size::new(800, 600) },
             "frame should fill the monitor edge-to-edge"
         );
+    }
+
+    #[test]
+    fn every_workarea_publication_advances_its_revision() {
+        let mut wm = wm(FakeBackend::new());
+        let area = Rect { pos: Point::new(0, 40), size: Size::new(800, 560) };
+
+        assert_eq!(wm.workarea_revision(), 0);
+        wm.set_workarea(area);
+        assert_eq!(wm.workarea_revision(), 1);
+        wm.set_workarea(area);
+        assert_eq!(wm.workarea_revision(), 2, "an equal baseline publication is still an invalidation edge");
     }
 
     #[test]

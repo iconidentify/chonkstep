@@ -176,11 +176,27 @@ pub(crate) struct LayerShell {
     /// once, or the strip a departed bar reserved stays reserved
     /// forever.
     pub reserved_last_pass: bool,
+    /// Layer geometry is event-driven. Ordinary toplevel traffic must
+    /// not repeatedly allocate layout scratch space and re-lock every
+    /// layer's cached protocol state when no layer fact changed.
+    pub needs_arrange: bool,
+    /// The shell/workspace baseline onto which `reserved` was last
+    /// composed. A Dock toggle or reload changes the core's revision;
+    /// the next pass then reapplies layer reservations exactly once.
+    pub applied_workarea_revision: u64,
 }
 
 impl LayerShell {
     pub(crate) fn new(state: WlrLayerShellState) -> Self {
-        Self { state, exclusive_focus: None, on_demand_focus: None, reserved: Vec::new(), reserved_last_pass: false }
+        Self {
+            state,
+            exclusive_focus: None,
+            on_demand_focus: None,
+            reserved: Vec::new(),
+            reserved_last_pass: false,
+            needs_arrange: true,
+            applied_workarea_revision: 0,
+        }
     }
 }
 
@@ -404,9 +420,18 @@ fn physical_margins(margin: Margins, factor: f64) -> EdgeInsets {
 /// change renders this frame) and from the commit handler for the
 /// initial-configure case, where a client is blocked waiting on it.
 pub(crate) fn refresh(comp: &mut Compositor) {
-    arrange(comp);
-    sync_keyboard(comp);
-    apply_workareas(comp);
+    let backend_dirty = std::mem::take(&mut comp.wm.backend_mut().layer_layout_dirty);
+    let layout_changed = comp.layer_shell.needs_arrange || backend_dirty;
+    let baseline_changed = comp.layer_shell.applied_workarea_revision != comp.wm.workarea_revision();
+    if layout_changed {
+        comp.layer_shell.needs_arrange = false;
+        arrange(comp);
+        sync_keyboard(comp);
+    }
+    if layout_changed || baseline_changed {
+        apply_workareas(comp);
+        comp.layer_shell.applied_workarea_revision = comp.wm.workarea_revision();
+    }
 }
 
 /// Lays out every layer surface and records the reserved insets.
@@ -759,6 +784,7 @@ pub(crate) fn handle_commit(comp: &mut Compositor, root: &WlSurface) -> bool {
     // is deduped, so nothing extra travels otherwise), the geometry
     // absorbs whatever size the client actually committed, exclusive
     // zones re-reserve, and keyboard focus settles.
+    comp.layer_shell.needs_arrange = true;
     refresh(comp);
     true
 }
@@ -975,6 +1001,7 @@ impl WlrLayerShellHandler for Compositor {
         let backend = self.wm.backend_mut();
         backend.layers.retain(|record| record.surface != surface);
         backend.mark_damaged();
+        self.layer_shell.needs_arrange = true;
         // Focus, exclusive zones and workareas settle on the pass this
         // destroy was dispatched in — `refresh` runs before the damage
         // test either way.
