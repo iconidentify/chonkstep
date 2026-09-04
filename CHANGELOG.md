@@ -16,8 +16,10 @@ crate and both session binaries carry the same number.
 - **Explicit, reversible installation.** The release package provides
   `omarchy install desktop-chonkstep` and its matching remove command. The
   installer preserves Omarchy's autologin user, selects the managed ChonkStep
-  session, and enables an Omarchy-native SDDM theme with a session picker; it
-  never patches Omarchy-owned files. A tag-driven workflow publishes the
+  session, enables an Omarchy-native SDDM theme with a session picker, and
+  selects the `desktop = "omarchy"` posture in a new config or one without an
+  explicit desktop choice while preserving an explicit user choice; it never patches
+  Omarchy-owned files. A tag-driven workflow publishes the
   release PKGBUILD and `.SRCINFO` to the AUR, making the intended entry path
   `omarchy pkg aur add chonkstep` followed by the install command.
 - **Native GitHub packages while AUR registration is unavailable.** A preview

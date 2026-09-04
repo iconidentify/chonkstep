@@ -26,6 +26,7 @@ stage_package() {
         "$root/usr/share/wayland-sessions" \
         "$root/usr/share/sddm/themes/chonkstep" \
         "$root/usr/share/chonkstep/sddm" \
+        "$root/usr/share/doc/chonkstep" \
         "$root/usr/share/xdg-desktop-portal" \
         "$root/usr/lib/chonkstep" \
         "$root/usr/bin"
@@ -37,6 +38,7 @@ stage_package() {
     install -m644 packaging/portal/chonkstep-portals.conf \
         "$root/usr/share/xdg-desktop-portal/chonkstep-portals.conf"
     install -m755 scripts/verify-install.sh "$root/usr/lib/chonkstep/verify-install.sh"
+    install -m644 docs/config.example.toml "$root/usr/share/doc/chonkstep/config.example.toml"
 
     for executable in xsession.sh chonkstep-session; do
         printf '#!/bin/sh\nexit 0\n' > "$root/usr/lib/chonkstep/$executable"
@@ -113,7 +115,11 @@ printf '%s\n' \
 cp "$encrypted/etc/sddm.conf.d/99-omarchy-login.conf" "$work/99.expected"
 cp "$encrypted/etc/sddm.conf.d/autologin.conf" "$work/autologin.expected"
 
-scripts/omarchy-install-desktop-chonkstep --root "$encrypted"
+config_home="$work/config-home"
+install -Dm644 /dev/null "$config_home/chonkstep/config.toml"
+printf '%s\n' 'scale = 2.0' '[keybindings]' > "$config_home/chonkstep/config.toml"
+
+CHONKSTEP_TEST_CONFIG_HOME="$config_home" scripts/omarchy-install-desktop-chonkstep --root "$encrypted"
 assert_file "$encrypted/etc/sddm.conf.d/zz-chonkstep-theme.conf"
 assert_file "$encrypted/etc/sddm.conf.d/zz-chonkstep-autologin.conf"
 grep -qx 'Session=chonkstep-uwsm.desktop' \
@@ -125,12 +131,32 @@ cmp -s "$work/autologin.expected" "$encrypted/etc/sddm.conf.d/autologin.conf" \
     || fail "integration modified Omarchy's autologin configuration"
 cmp -s "$work/99.expected" "$encrypted/etc/sddm.conf.d/99-omarchy-login.conf" \
     || fail "integration modified Omarchy configuration on rerun"
+head -n 1 "$config_home/chonkstep/config.toml" | grep -qx 'desktop = "omarchy"' \
+    || fail "integration did not select the Omarchy desktop posture"
+grep -qx 'scale = 2.0' "$config_home/chonkstep/config.toml" \
+    || fail "integration damaged an existing ChonkStep setting"
 
 # A rerun must be a no-op in effect and must not create backup snippets that
 # SDDM would parse as additional configuration.
-scripts/omarchy-install-desktop-chonkstep --root "$encrypted"
+CHONKSTEP_TEST_CONFIG_HOME="$config_home" scripts/omarchy-install-desktop-chonkstep --root "$encrypted"
 [ "$(find "$encrypted/etc/sddm.conf.d" -maxdepth 1 -type f | wc -l)" -eq 4 ] \
     || fail "idempotent rerun changed the SDDM snippet set"
+[ "$(grep -c '^desktop[[:space:]]*=' "$config_home/chonkstep/config.toml")" -eq 1 ] \
+    || fail "idempotent rerun duplicated the desktop posture"
+
+explicit_home="$work/explicit-config-home"
+install -Dm644 /dev/null "$explicit_home/chonkstep/config.toml"
+printf '%s\n' 'desktop = "chonkstep"' > "$explicit_home/chonkstep/config.toml"
+CHONKSTEP_TEST_CONFIG_HOME="$explicit_home" scripts/omarchy-install-desktop-chonkstep --root "$encrypted"
+grep -qx 'desktop = "chonkstep"' "$explicit_home/chonkstep/config.toml" \
+    || fail "integration overwrote an explicit desktop posture"
+
+fresh_home="$work/fresh-config-home"
+CHONKSTEP_TEST_CONFIG_HOME="$fresh_home" scripts/omarchy-install-desktop-chonkstep --root "$encrypted"
+grep -qx 'desktop = "omarchy"' "$fresh_home/chonkstep/config.toml" \
+    || fail "fresh integration did not enable the documented Omarchy preset"
+grep -q '^# Focus policy' "$fresh_home/chonkstep/config.toml" \
+    || fail "fresh integration did not seed the documented config template"
 
 scripts/omarchy-remove-desktop-chonkstep --root "$encrypted"
 assert_absent "$encrypted/etc/sddm.conf.d/zz-chonkstep-theme.conf"

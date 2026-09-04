@@ -20,6 +20,15 @@ elif [ "$#" -ne 0 ]; then
     exit 2
 fi
 
+# A package fixture has no invoking user's home beneath it. Tests may point
+# this one user-scoped part of the integration at disposable state; the live
+# command always uses the caller's ordinary XDG config directory.
+if [ -n "$root" ]; then
+    config_home="${CHONKSTEP_TEST_CONFIG_HOME:-}"
+else
+    config_home="${XDG_CONFIG_HOME:-$HOME/.config}"
+fi
+
 system_path() {
     printf '%s%s\n' "$root" "$1"
 }
@@ -39,6 +48,40 @@ remove_system_file() {
         rm -f "$(system_path "$destination")"
     else
         sudo rm -f "$destination"
+    fi
+}
+
+enable_omarchy_posture() {
+    [ -n "$config_home" ] || return 0
+
+    local config="$config_home/chonkstep/config.toml"
+    local example
+    example="$(system_path /usr/share/doc/chonkstep/config.example.toml)"
+
+    if [ ! -e "$config" ]; then
+        [ -r "$example" ] || {
+            echo "chonkstep installation is incomplete; missing $example" >&2
+            exit 1
+        }
+        install -Dm644 "$example" "$config"
+    fi
+
+    # This command names the user's intent: Omarchy's desktop, with ChonkStep
+    # replacing Hyprland underneath it. Preserve an explicit top-level choice
+    # if they already made one. Otherwise uncomment the documented preset (or
+    # insert it before every TOML table in a hand-written config).
+    if awk '
+        /^[[:space:]]*\[/ { exit }
+        /^[[:space:]]*desktop[[:space:]]*=/ { found=1 }
+        END { exit found ? 0 : 1 }
+    ' "$config"; then
+        echo "Preserving the existing desktop posture in $config."
+    elif grep -q '^[[:space:]]*#desktop[[:space:]]*=[[:space:]]*"omarchy"' "$config"; then
+        sed -i '0,/^[[:space:]]*#desktop[[:space:]]*=[[:space:]]*"omarchy"/s//desktop = "omarchy"/' "$config"
+        echo "Configured desktop = \"omarchy\" in $config."
+    else
+        sed -i '1idesktop = "omarchy"' "$config"
+        echo "Configured desktop = \"omarchy\" in $config."
     fi
 }
 
@@ -112,6 +155,7 @@ done
 
 echo "Enabling chonkstep's SDDM login integration..."
 install_system_file "$theme_template" /etc/sddm.conf.d/zz-chonkstep-theme.conf
+enable_omarchy_posture
 
 # Fresh encrypted Omarchy installs autologin through an Omarchy-owned snippet.
 # Override only its Session key, preserving its User and every other setting.

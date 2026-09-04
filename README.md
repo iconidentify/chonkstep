@@ -1,22 +1,73 @@
-# chonkstep
+# ChonkStep
 
-A NeXTSTEP-style desktop for Linux, written in Rust: one shell behind
-two real login sessions - an X11 window manager and a Wayland
-compositor - so a feature lands once and both stacks get it by
-construction. The chrome is chiseled and specified to the pixel, under
-a dock of crash-proof out-of-process instruments, real workspaces, a
-modal Overview, and eight themes - each in a hand-designed light and
-dark rendition - that apply live with nothing closed.
-Sessions survive: layout restore across logins and crashes, a
-supervised compositor that comes back locked, and hot restarts that
-keep your windows open on X11.
+**A traditional floating compositor for Omarchy, designed as a drop-in
+replacement for Hyprland.**
 
-![The chonkstep desktop on the NeXTSTEP Classic theme](site/shots/hero.png)
+ChonkStep replaces the compositor and window manager underneath Omarchy, not
+the desktop you already use. Omarchy's themes, bar, menu, applications,
+notifications, lock screen, session management, and familiar keybindings stay
+in place. ChonkStep translates the Hyprland IPC and `hyprctl` calls that
+Omarchy relies on into a classic stacking-window model with real minimize,
+maximize, shade, fullscreen, snapping, workspaces, Alt-Tab, and Overview.
 
-There is a longer illustrated tour in [site/index.html](site/index.html),
-a walkthrough from install to first hour in
-[docs/quickstart.md](docs/quickstart.md), and the release history in
-[CHANGELOG.md](CHANGELOG.md).
+Version 0.2.0 is an **alpha**. It is ready for adventurous users and bug
+reports, not machines where a compositor failure would be costly. Hyprland
+stays installed, so ChonkStep is easy to evaluate and easy to leave.
+
+![ChonkStep replacing Hyprland beneath the Ristretto Omarchy desktop](site/shots/omarchy-desktop.png)
+
+## Install ChonkStep 0.2.0 alpha
+
+Native packages are available for `x86_64` and `aarch64` (including M1 Macs
+running an Arch Linux ARM/Omarchy environment):
+
+```sh
+curl -fLO "https://github.com/iconidentify/chonkstep/releases/download/preview-v0.2.0/chonkstep-0.2.0-1-$(uname -m).pkg.tar.zst"
+sudo pacman -U "./chonkstep-0.2.0-1-$(uname -m).pkg.tar.zst"
+omarchy install desktop-chonkstep
+```
+
+Then reboot. On an Omarchy system with autologin, SDDM starts ChonkStep
+automatically; otherwise its session picker defaults to **chonkstep (uwsm)**.
+Hyprland remains installed. The integration command is reversible with
+`omarchy remove desktop-chonkstep`.
+
+For checksum verification, GitHub build-provenance attestations, source builds,
+and non-Omarchy sessions, see [Installing on Omarchy (or any Arch)](#installing-on-omarchy-or-any-arch).
+
+## The Hyprland replacement layer
+
+- **Hyprland-compatible IPC.** ChonkStep exposes the request and event sockets
+  Omarchy expects, and translates the supported `hyprctl` calls into ChonkStep
+  operations. The screenshot above is showing live `hyprctl` responses from
+  ChonkStep itself.
+- **Live Omarchy configuration.** It reads the machine's real
+  `~/.config/hypr/` bindings, window rules, startup applications, environment,
+  and monitor declarations, and follows supported edits without a logout.
+- **The real Omarchy shell.** Themes and backgrounds follow live; the bar,
+  menu, launcher, pickers, notifications, idle flow, lock screen, and ordinary
+  Omarchy applications run against ChonkStep rather than a replica.
+- **Traditional window management.** Windows float by default and can be
+  minimized, maximized, shaded, resized from every edge, snapped, stacked, and
+  moved between workspaces. Tiling-only Hyprland commands are deliberately left
+  unbound instead of being mapped to surprising approximations.
+- **A safe side-by-side install.** SDDM owns the choice of session. Installing
+  ChonkStep does not uninstall or patch Hyprland or modify Omarchy-owned files.
+
+![ChonkStep exposing Omarchy's own live menu tree](site/shots/omarchy-menu.png)
+
+## A complete desktop of its own
+
+ChonkStep can also run as a standalone NeXTSTEP-style desktop on X11 or
+Wayland: one Rust shell shared by both backends, chiseled chrome, a dock of
+crash-isolated instruments, session restore, a modal Overview, and eight
+themes with hand-designed light and dark renditions.
+
+![ChonkStep's standalone desktop on the NeXTSTEP Classic theme](site/shots/hero.png)
+
+There is a longer illustrated tour in [site/index.html](site/index.html), a
+walkthrough from install to first hour in [docs/quickstart.md](docs/quickstart.md),
+and the release history in [CHANGELOG.md](CHANGELOG.md).
 
 ## Features
 
