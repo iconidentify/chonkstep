@@ -861,27 +861,29 @@ impl<B: Backend> WindowManager<B> {
     /// that has never held focus appended in creation order.
     ///
     /// This is the order a user means by "the last window I was in".
-    /// Cycling used to read `self.clients.iter()` directly, which for a
-    /// `SlotMap` is ascending slot order — creation order, with slots
-    /// reused as windows die — so Alt-Tab was a fixed ring around the
-    /// order windows happened to open in, and pressing it twice
-    /// advanced two windows along that ring instead of returning you
-    /// to where you started.
+    /// Cycling used to read `self.clients.iter()` directly, so Alt-Tab
+    /// followed storage order rather than focus order. Pressing it
+    /// twice advanced two windows along that arbitrary ring instead of
+    /// returning to where the user started.
     ///
     /// Never-focused windows go last rather than being dropped: a
     /// window that has only just mapped is still somewhere the user can
     /// mean to go, and leaving it unreachable would be a worse bug than
     /// the one this fixes.
     fn focus_order(&self) -> Vec<ClientId> {
-        let mut order: Vec<ClientId> =
-            self.focus_history.iter().rev().copied().filter(|&id| self.is_focusable(id)).collect();
-        let never_focused: Vec<ClientId> = self
-            .clients
-            .iter()
-            .map(|(id, _)| id)
-            .filter(|&id| self.is_focusable(id) && !order.contains(&id))
-            .collect();
-        order.extend(never_focused);
+        let mut seen = HashSet::with_capacity(self.focus_history.len());
+        let mut order = Vec::with_capacity(self.clients.len());
+        for &id in self.focus_history.iter().rev() {
+            seen.insert(id);
+            if self.is_focusable(id) {
+                order.push(id);
+            }
+        }
+        for id in self.clients.keys() {
+            if seen.insert(id) && self.is_focusable(id) {
+                order.push(id);
+            }
+        }
         order
     }
 
@@ -931,8 +933,8 @@ impl<B: Backend> WindowManager<B> {
     }
 
     /// Every client that has held focus and still exists, oldest
-    /// first — so the last entry is the focused one and the one before
-    /// it is where "the previous window" points.
+    /// first. When a client currently holds focus it is the last entry,
+    /// and the one before it is where "the previous window" points.
     ///
     /// Exposed for the Hyprland compatibility wire's
     /// `focus_history_id`, which is documented as "Position in the
@@ -978,9 +980,7 @@ impl<B: Backend> WindowManager<B> {
             return false;
         };
         let target = self.clients.iter()
-            .filter(|(_, client)| client.lifecycle == Lifecycle::Normal
-                && (client.workspace == self.current_workspace || client.flags.contains(ClientFlags::STICKY))
-                && !client.flags.contains(ClientFlags::NO_FOCUS))
+            .filter(|(id, _)| self.is_focusable(*id))
             .filter_map(|(id, client)| {
                 let candidate = client_frame_rect(client);
                 directional_score(source, candidate, direction).map(|score| (id, score))
@@ -2798,22 +2798,20 @@ impl<B: Backend> WindowManager<B> {
     /// visible), every further Tab moves the selection, and nothing is
     /// focused or raised until the session commits —
     /// `Notification::CycleUpdated` tells the shell to draw its panel
-    /// in the meantime. Candidates are mapped, non-miniaturized clients
-    /// on the *current* workspace, in `SlotMap` iteration order, stable
-    /// for the session because the order is snapshotted (and pruned on
-    /// client destruction). The workspace restriction matters: a client
-    /// parked on another workspace is `Lifecycle::Normal` but its frame
-    /// is unmapped — cycling onto it set input focus on an invisible
-    /// window, and nothing visibly happened.
+    /// in the meantime. Candidates are focusable clients in
+    /// most-recently-used order, followed by any that have never held
+    /// focus. That order is stable for the session because it is
+    /// snapshotted (and pruned on client destruction). The workspace
+    /// restriction matters: a client parked on another workspace is
+    /// `Lifecycle::Normal` but its frame is unmapped — cycling onto it
+    /// set input focus on an invisible window, and nothing visibly
+    /// happened.
     fn cycle_step(&mut self, direction: i32) {
         if self.cycle.is_none() {
             // Most-recently-focused first, so index 0 is the window the
             // user is in and index 1 is the one they were in before it.
-            // This used to be `self.clients.iter()`, which for a
-            // `SlotMap` is creation order: Alt-Tab was a fixed ring
-            // around the order windows happened to open in, and
-            // pressing it twice advanced two windows along that ring
-            // rather than returning you to where you started.
+            // This used to be storage order: Alt-Tab was a fixed ring
+            // unrelated to which windows the user had just visited.
             let order = self.focus_order();
             if order.is_empty() {
                 return;
@@ -2822,9 +2820,10 @@ impl<B: Backend> WindowManager<B> {
             // single Tab is the flip-to-the-last-window gesture, which
             // is what the key is mostly for; without this the first
             // press selected the window already focused and committed
-            // to a no-op. `direction` is applied below, so opening
-            // backwards still lands on the far end of the ring.
-            let selected = if direction >= 0 { 0 } else { order.len() - 1 };
+            // to a no-op. `direction` is applied below, so starting at
+            // index 0 makes forward reach the previous window and
+            // backward wrap to the oldest candidate.
+            let selected = 0;
             self.backend.grab_keyboard();
             self.cycle = Some(CycleSession { order, selected });
         }
@@ -3678,6 +3677,19 @@ mod tests {
         }
     }
 
+    #[derive(Debug)]
+    struct NoInitialFocus;
+
+    impl FloatPolicy for NoInitialFocus {
+        fn decision_for(&self, _class: &str, _title: &str) -> Option<crate::placement::FloatDecision> {
+            None
+        }
+
+        fn window_decision_for(&self, _class: &str, _title: &str) -> crate::placement::WindowRuleDecision {
+            crate::placement::WindowRuleDecision { no_initial_focus: true, ..Default::default() }
+        }
+    }
+
     fn alt_tab() -> BackendEvent<FakeWindowId, FakeFrameId> {
         BackendEvent::KeyPress(KeyCombo { keysym: XK_TAB, modifiers: Modifiers::ALT })
     }
@@ -4246,21 +4258,44 @@ mod tests {
     }
 
     #[test]
+    fn one_initial_alt_shift_tab_moves_backward_through_three_windows() {
+        let (mut wm, a, _b, _c) = three_focused_in_order();
+
+        wm.dispatch(alt_shift_tab());
+        wm.dispatch(alt_release());
+
+        assert_eq!(wm.focused_client(), Some(a), "a fresh backward cycle wraps from current to oldest");
+    }
+
+    #[test]
     fn a_never_focused_window_is_still_reachable_by_cycling() {
         // Ordering by focus history must not make a window that has
         // never held focus unreachable — that would be a worse bug than
         // the one being fixed.
         let (mut wm, _a, _b, c) = three_focused_in_order();
+        wm.set_float_policy(Some(std::sync::Arc::new(NoInitialFocus)));
         let fresh = wm.backend_mut().create_window();
         wm.dispatch(BackendEvent::MapRequest(fresh));
         let fresh_id = wm.client_for_window(fresh).unwrap();
-        // Mapping focused it; put focus back on `c` without touching
-        // the newcomer again, leaving it in the history behind `c`.
-        wm.focus_client(c);
+        assert_eq!(wm.focused_client(), Some(c), "the rule leaves focus on the existing client");
+        assert!(
+            !wm.focus_history().contains(&fresh_id),
+            "the fallback is only tested if the fresh client truly never held focus"
+        );
 
         let order = wm.focus_order();
         assert!(order.contains(&fresh_id), "every focusable window is reachable: {order:?}");
         assert_eq!(order.first(), Some(&c), "and the focused one leads");
+
+        // The modal path snapshots that order. Walk past the two
+        // previously focused survivors and commit the never-focused
+        // tail, proving the fallback is reachable through the gesture
+        // rather than only present in a private helper's return value.
+        for _ in 0..3 {
+            wm.dispatch(alt_tab());
+        }
+        wm.dispatch(alt_release());
+        assert_eq!(wm.focused_client(), Some(fresh_id));
     }
 
     #[test]
