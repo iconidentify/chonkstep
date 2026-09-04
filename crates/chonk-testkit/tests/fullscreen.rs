@@ -41,7 +41,9 @@
 
 use std::time::Duration;
 
-use chonk_testkit::{poll_until, profile_binary, Session, SessionOptions, WindowInfo};
+use chonk_testkit::{
+    near, poll_until, profile_binary, Session, SessionOptions, WindowInfo, FAKE_BAR_RGB,
+};
 
 /// evdev `KEY_F` / `KEY_M`: the probe's two controls. Declared here as
 /// the tests' own vocabulary, the way `dock_toggle.rs` declares its
@@ -49,6 +51,8 @@ use chonk_testkit::{poll_until, profile_binary, Session, SessionOptions, WindowI
 /// itself needs.
 const KEY_F: u32 = 33;
 const KEY_M: u32 = 50;
+const BAR: u32 = 48;
+const PROBE_RGB: [u8; 3] = [0x20, 0x40, 0x80];
 
 /// Boots a session with the probe mapped and focused, and hands back
 /// its windowed rect — the one an unfullscreen has to come back to.
@@ -93,6 +97,23 @@ fn fullscreen_transitions(session: &Session) -> (usize, usize) {
         log.lines().filter(|line| line.contains("entered fullscreen")).count(),
         log.lines().filter(|line| line.contains("left fullscreen")).count(),
     )
+}
+
+/// Waits for the real Top layer fixture to finish its first mapped
+/// commit. It is launched second in this module, after the probe.
+fn wait_for_bar(session: &Session) {
+    let log = session.dir.join("client-1-chonk-fake-bar.log");
+    poll_until(
+        Duration::from_secs(10),
+        "the Top layer fixture to map",
+        || {
+            std::fs::read_to_string(&log)
+                .ok()
+                .filter(|text| text.contains("mapped "))
+                .map(|_| ())
+        },
+    )
+    .expect("the Top layer fixture maps");
 }
 
 /// The load-bearing regression. Two presses of one control — enter,
@@ -179,6 +200,124 @@ fn a_clients_fullscreen_control_enters_and_leaves_in_one_press_each() {
         (1, 1),
         "an `entered fullscreen` with no `left fullscreen` is the stuck desktop itself"
     );
+}
+
+/// Fullscreen is an output plane, not merely a window resized to the
+/// output. The Omarchy bar (`Top`) and chonkstep dock (`shell above`)
+/// must disappear behind it in both rendering and hit-testing, while a
+/// key still reaches the focused application and lets it leave.
+#[test]
+#[ignore = "needs a live Wayland session to nest in: scripts/e2e.sh, or cargo test -p chonk-testkit -- --ignored --test-threads=1"]
+fn fullscreen_occludes_top_layers_and_dock_pixels_and_input() {
+    let (mut session, windowed) = probe_session("fullscreen-bands");
+    let bar =
+        profile_binary("chonk-fake-bar").expect("cargo build -p chonk-testkit builds the bar");
+    session
+        .launch(&bar.to_string_lossy(), &[&BAR.to_string()])
+        .expect("the Top layer fixture launches");
+    wait_for_bar(&session);
+
+    let world = session.world().expect("the scene ledger answers");
+    let top = (world.output_w as i32 / 2, BAR as i32 / 2);
+    let dock = world.dock().expect("the dock is mapped").clone();
+    let dock_point = (dock.x + dock.w as i32 / 2, dock.y + dock.h as i32 / 2);
+    assert_eq!(
+        session.door().hit(top.0, top.1).unwrap(),
+        "layer",
+        "the visible bar owns its input before fullscreen"
+    );
+    assert_eq!(
+        session.door().hit(dock_point.0, dock_point.1).unwrap(),
+        "shell",
+        "the visible dock owns its input before fullscreen"
+    );
+    let before = session
+        .screenshot("desktop-bands-before-fullscreen")
+        .unwrap();
+    assert!(
+        near(
+            before.mean_rgb(world.output_w / 2 - 20, 8, 40, 24),
+            FAKE_BAR_RGB
+        ),
+        "the Top fixture must visibly cover the pre-fullscreen strip"
+    );
+
+    // Mapping a non-interactive layer must not be assumed to preserve
+    // keyboard focus. Re-clicking the probe establishes the exact
+    // precondition Omarchy's screensaver relies on.
+    session
+        .door()
+        .click(
+            windowed.x as f64 + windowed.w as f64 / 2.0,
+            windowed.y as f64 + windowed.h as f64 / 2.0,
+        )
+        .expect("the probe regains keyboard focus");
+    press(&mut session, KEY_F);
+    poll_until(
+        Duration::from_secs(10),
+        "the probe to cover the output",
+        || {
+            let world = session.world().ok()?;
+            world
+                .window_matching("chonk-fullscreen-probe")
+                .filter(|window| {
+                    (window.x, window.y, window.w, window.h)
+                        == (0, 0, world.output_w, world.output_h)
+                })
+                .map(|_| ())
+        },
+    )
+    .expect("the probe enters fullscreen");
+
+    // The ledger changes as soon as the configure is sent; the client
+    // commits its newly sized buffer asynchronously afterward. Poll
+    // pixels so this asserts the committed scene, not the configure.
+    let full = poll_until(
+        Duration::from_secs(10),
+        "the fullscreen buffer to cover the bar strip",
+        || {
+            session.door().barrier().ok()?;
+            let shot = session.screenshot("desktop-bands-under-fullscreen").ok()?;
+            near(shot.mean_rgb(world.output_w / 2 - 20, 8, 40, 24), PROBE_RGB).then_some(shot)
+        },
+    )
+    .expect("fullscreen pixels replace the bar strip");
+
+    assert_eq!(
+        session.door().hit(top.0, top.1).unwrap(),
+        "content",
+        "the invisible Top layer must not retain input"
+    );
+    assert_eq!(
+        session.door().hit(dock_point.0, dock_point.1).unwrap(),
+        "content",
+        "the invisible dock must not retain input"
+    );
+    assert!(
+        near(
+            full.mean_rgb(dock_point.0 as u32 - 8, dock_point.1 as u32 - 8, 16, 16),
+            PROBE_RGB
+        ),
+        "fullscreen pixels must replace the dock: {:?}",
+        full.mean_rgb(dock_point.0 as u32 - 8, dock_point.1 as u32 - 8, 16, 16)
+    );
+
+    // The same key the screensaver's PTY waits for reaches the focused
+    // fullscreen client. This probe turns that byte into unset_fullscreen,
+    // giving us an observable dismissal instead of merely assuming focus.
+    press(&mut session, KEY_F);
+    poll_until(
+        Duration::from_secs(10),
+        "the focused fullscreen probe to dismiss",
+        || {
+            let world = session.world().ok()?;
+            world
+                .window_matching("chonk-fullscreen-probe")
+                .filter(|window| (window.w, window.h) == (windowed.w, windowed.h))
+                .map(|_| ())
+        },
+    )
+    .expect("a keypress exits the focused fullscreen client");
 }
 
 /// The same request/answer pair one interface up: `set_maximized` had

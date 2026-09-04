@@ -217,6 +217,15 @@ impl EwmhLedger {
         self.active_dirty = true;
     }
 
+    /// The focused managed window according to `wm-core`.
+    ///
+    /// Scene policy reads the retained value as well as publishing it
+    /// to XWayland: a focused fullscreen window must hide desktop
+    /// furniture on its output without hiding protocol `Overlay`s.
+    pub(crate) fn active_window(&self) -> Option<WlWindowId> {
+        self.active
+    }
+
     pub(crate) fn note_workspaces(&mut self, count: usize, current: usize) {
         if self.workspaces == (count, current) {
             return;

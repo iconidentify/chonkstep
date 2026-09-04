@@ -260,6 +260,12 @@ pub(crate) struct WindowRecord {
     /// (chrome vs. content hit-testing).
     pub content: Rect,
     pub mapped: bool,
+    /// `wm-core`'s authoritative fullscreen state. Protocol clients
+    /// receive the same bit through `Backend::publish_net_state`; the
+    /// renderer and hit-test retain it here so a focused fullscreen
+    /// window can occlude desktop-level `Top` and shell furniture on
+    /// only the output it occupies.
+    pub fullscreen: bool,
     /// Cached title (xdg `set_title` / XWayland property events keep
     /// it current and queue `BackendEvent::TitleChanged`).
     pub title: Option<String>,
@@ -359,6 +365,7 @@ impl WindowRecord {
             surface,
             content,
             mapped: false,
+            fullscreen: false,
             title: None,
             app_id: None,
             window_type: WindowType::Normal,

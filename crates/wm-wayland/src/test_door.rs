@@ -63,6 +63,7 @@
 //! | `button left\|middle\|right press\|release` | pointer button by name |
 //! | `key CODE press\|release` | keyboard key by *evdev* keycode (`KEY_*` from input-event-codes.h; the xkb +8 offset is applied here) |
 //! | `repeat` | replies with the held compositor-binding repeat count and interval, or `repeat none` |
+//! | `hit X Y` | replies with `hit root\|shell\|frame\|content\|layer\|ime` from the production scene hit-test |
 //! | `barrier` | replies `ok` once every command before it has been dispatched **and** a frame has been rendered with no damage left over |
 //! | `windows` | replies one line per ledger entry (see below), then `done` |
 //!
@@ -482,6 +483,17 @@ fn handle_command(line: &str, stream: &mut UnixStream, comp: &mut Compositor) {
                 None => "repeat none\n".to_string(),
             };
             let _ = stream.write_all(reply.as_bytes());
+        }
+        Some("hit") => {
+            let (Some(Ok(x)), Some(Ok(y))) =
+                (words.next().map(str::parse::<i32>), words.next().map(str::parse::<i32>))
+            else {
+                reply_err(stream, "hit wants: hit X Y");
+                return;
+            };
+            let kind =
+                crate::input::hit_kind_at(comp.wm.backend(), wm_theme_api::Point::new(x, y));
+            let _ = stream.write_all(format!("hit {kind}\n").as_bytes());
         }
         Some("windows") => {
             let mut reply = String::new();

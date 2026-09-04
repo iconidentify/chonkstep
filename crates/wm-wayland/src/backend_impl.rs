@@ -1256,9 +1256,11 @@ impl Backend for WaylandBackend {
         hidden: bool,
     ) {
         let _ = shaded;
-        let Some(record) = self.windows.get(&window) else {
+        let Some(record) = self.windows.get_mut(&window) else {
             return;
         };
+        let fullscreen_changed = record.fullscreen != fullscreen;
+        record.fullscreen = fullscreen;
         let maximized = both_axes_maximized(max_h, max_v);
         let mut configure_owed = false;
         match &record.surface {
@@ -1313,6 +1315,13 @@ impl Backend for WaylandBackend {
         }
         if configure_owed {
             self.note_configure(window);
+        }
+        if fullscreen_changed {
+            // The client geometry usually changes beside this state,
+            // but band occlusion is independently visible policy. Its
+            // own damage edge keeps a same-sized fullscreen transition
+            // (and its inverse) from waiting for unrelated damage.
+            self.damage = true;
         }
     }
 

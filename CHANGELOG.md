@@ -7,6 +7,14 @@ crate and both session binaries carry the same number.
 
 ### Fixed
 
+- **Fullscreen applications now own their output's desktop plane.** A
+  focused fullscreen window occludes the Omarchy `Top` bar and chonkstep's
+  above-shell dock/menu on only the output it occupies, while protocol
+  `Overlay` surfaces and the session lock remain above it. Rendering and
+  hit-testing share the same predicate, so hidden furniture cannot retain
+  clicks; a nested real-client test also proves keyboard focus remains with
+  the fullscreen application for screensaver dismissal
+  ([#33](https://github.com/iconidentify/chonkstep/issues/33)).
 - **Stopping SDDM can no longer turn a transient DRM/VT handoff race into
   a permanent black screen.** The managed UWSM supervisor performs no
   synchronous user-manager calls during teardown. Omarchy integration also

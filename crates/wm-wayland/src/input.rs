@@ -1889,14 +1889,13 @@ fn route_shell_scroll<I: InputBackend>(state: &mut Compositor, event: &I::Pointe
 // -- hit-testing ---------------------------------------------------------
 
 /// The scene's input authority: what sits under a point, walking the
-/// SAME z-order the renderer paints — unmanaged override-redirect X11
-/// windows (menus, tooltips) on top, then `above` shells, the frame
-/// band (each frame's xdg popups floating over its chrome, and the
-/// client-decorated windows that have no frame taking their turn in the
-/// same order), and `below` shells; the desktop background catches the
-/// rest. Any disagreement between this walk and the renderer's makes
-/// clicks land on things the user cannot see, so both sides cite
-/// `backend_impl.rs`'s stacking-band contract.
+/// SAME z-order the renderer paints — Overlay, `above` shells, Top,
+/// unmanaged override-redirect X11 windows, the frame band (each
+/// frame's xdg popups floating over its chrome, and client-decorated
+/// windows taking their own turn), Bottom, `below` shells, Background.
+/// The desktop catches the rest. Any disagreement between this walk
+/// and the renderer's makes clicks land on things the user cannot see,
+/// so both sides cite `backend_impl.rs`'s stacking-band contract.
 fn hit_at(backend: &WaylandBackend, at: Point, position: LogicalPoint<f64, Logical>) -> Hit {
     // Candidate windows are rendered above every layer and therefore
     // get the first chance at pointer input.
@@ -1933,19 +1932,48 @@ fn hit_at(backend: &WaylandBackend, at: Point, position: LogicalPoint<f64, Logic
         return hit;
     }
 
-    // Unmanaged override-redirect X11 windows first: they self-position
-    // over everything (an open menu overlapping the dock must win the
-    // click), and being frameless they live outside `stacking`.
+    let desktop_bands_occluded = backend
+        .monitors
+        .iter()
+        .find(|monitor| monitor.geometry.contains(at))
+        .is_some_and(|monitor| {
+            crate::renderer::fullscreen_occludes_desktop_bands(backend, monitor.geometry)
+        });
+
+    if !desktop_bands_occluded {
+        // `above` shell band (dock, shell menus), topmost stacking
+        // entry first.
+        for entry in backend.stacking.iter().rev() {
+            let StackEntry::Shell(shell) = entry else {
+                continue;
+            };
+            if let Some(record) = backend.shells.get(shell) {
+                if record.above && record.mapped && record.geometry.contains(at) {
+                    return Hit::Shell {
+                        shell: *shell,
+                        local: local_to(at, record.geometry.pos),
+                    };
+                }
+            }
+        }
+
+        // `Top` layer surfaces: over every managed window, under the
+        // dock and the shell's menus — where the renderer draws them.
+        if let Some(hit) = layer_band_hit(backend, wlr_layer::Layer::Top, at, position) {
+            return hit;
+        }
+    }
+
+    // Unmanaged override-redirect X11 windows self-position above the
+    // managed window band, and being frameless live outside `stacking`.
     //
     // Selected by window TYPE, not by "owns no frame". Those were the
     // same test until managed windows could be frameless too, and the
     // cheaper one now catches the wrong windows: a client-decorated
     // browser has no frame either, and answering for it here would give
-    // it the always-on-top treatment a menu gets — clicks landing on it
-    // through the dock, and through every window drawn over it. It is
-    // walked with the frames below instead, where its stacking slot
-    // decides. `renderer.rs`'s override-redirect pass reads this same
-    // field, which is the agreement that keeps the two walks honest.
+    // it the always-on-top treatment a menu gets. It is walked with the
+    // frames below instead, where its stacking slot decides.
+    // `renderer.rs`'s override-redirect pass reads this same field.
     for (&window, record) in backend.windows.iter() {
         if record.window_type != WindowType::Unmanaged {
             continue;
@@ -1956,25 +1984,6 @@ fn hit_at(backend: &WaylandBackend, at: Point, position: LogicalPoint<f64, Logic
         if let Some(hit) = content_hit(backend, None, window, position) {
             return hit;
         }
-    }
-
-    // `above` shell band (dock, shell menus), topmost stacking entry
-    // first.
-    for entry in backend.stacking.iter().rev() {
-        let StackEntry::Shell(shell) = entry else {
-            continue;
-        };
-        if let Some(record) = backend.shells.get(shell) {
-            if record.above && record.mapped && record.geometry.contains(at) {
-                return Hit::Shell { shell: *shell, local: local_to(at, record.geometry.pos) };
-            }
-        }
-    }
-
-    // `Top` layer surfaces: over every managed window, under the
-    // dock and the shell's menus — where the renderer draws them.
-    if let Some(hit) = layer_band_hit(backend, wlr_layer::Layer::Top, at, position) {
-        return hit;
     }
 
     // Frame band.
@@ -2059,6 +2068,22 @@ fn hit_at(backend: &WaylandBackend, at: Point, position: LogicalPoint<f64, Logic
     }
 
     Hit::Root
+}
+
+/// Names the production hit-test result at a global point for the
+/// opt-in end-to-end test door. Keeping this adapter beside [`hit_at`]
+/// means tests can prove pixels and clicks share the same band policy
+/// without exposing protocol object handles on the wire.
+pub(crate) fn hit_kind_at(backend: &WaylandBackend, at: Point) -> &'static str {
+    let position: LogicalPoint<f64, Logical> = (at.x as f64, at.y as f64).into();
+    match hit_at(backend, at, position) {
+        Hit::Shell { .. } => "shell",
+        Hit::FrameChrome { .. } => "frame",
+        Hit::Content { .. } => "content",
+        Hit::Layer { .. } => "layer",
+        Hit::Ime { .. } => "ime",
+        Hit::Root => "root",
+    }
 }
 
 /// Tests one layer band, topmost (newest) record first — the same

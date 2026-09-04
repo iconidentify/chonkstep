@@ -232,23 +232,33 @@ pub(crate) fn build_scene_into(
     // annotations) — including the desktop's own dock and menus.
     push_layer_band(elements, renderer, backend, WlrLayer::Overlay, viewport);
 
-    for entry in backend.stacking.iter().rev() {
-        if let StackEntry::Shell(id) = entry {
-            let Some(record) = backend.shells.get(id) else {
-                continue;
-            };
-            if record.above && record.mapped {
-                push_shell_elements(elements, renderer, record, viewport);
+    // A fullscreen application owns its output's desktop plane. Keep
+    // protocol Overlay (OSDs and lock-adjacent surfaces) above it, but
+    // suppress ordinary desktop furniture: the shell's dock/menus and
+    // layer-shell Top bars. This answer is computed once for this
+    // output and shared with the input walk below through the same
+    // predicate, so invisible furniture can never keep a click target.
+    let desktop_bands_occluded = fullscreen_occludes_desktop_bands(backend, viewport);
+    if !desktop_bands_occluded {
+        for entry in backend.stacking.iter().rev() {
+            if let StackEntry::Shell(id) = entry {
+                let Some(record) = backend.shells.get(id) else {
+                    continue;
+                };
+                if record.above && record.mapped {
+                    push_shell_elements(elements, renderer, record, viewport);
+                }
             }
         }
-    }
 
-    // `Top` layer surfaces (bars, notification daemons) sit below the
-    // shell's `above` band on purpose: a mako notification must not
-    // cover the menu the user just opened or the dock's tiles, while
-    // still floating over every managed window. The input walk in
-    // `input.rs::hit_at` slots the band identically.
-    push_layer_band(elements, renderer, backend, WlrLayer::Top, viewport);
+        // `Top` layer surfaces (bars, notification daemons) sit below
+        // the shell's `above` band on purpose: a mako notification
+        // must not cover the menu the user just opened or the dock's
+        // tiles, while still floating over ordinary managed windows.
+        // The input walk in `input.rs::hit_at` slots the band
+        // identically.
+        push_layer_band(elements, renderer, backend, WlrLayer::Top, viewport);
+    }
 
     // XWayland override-redirect windows (menus, tooltips —
     // `WindowType::Unmanaged`, so they own no frame and no
@@ -549,6 +559,31 @@ fn overlap_area(a: Rect, b: Rect) -> u64 {
     let bottom = (i64::from(a.pos.y) + i64::from(a.size.h))
         .min(i64::from(b.pos.y) + i64::from(b.size.h));
     (right - left).max(0) as u64 * (bottom - top).max(0) as u64
+}
+
+/// Whether desktop-level bands must stay behind the focused fullscreen
+/// window on `viewport`.
+///
+/// `viewport` is one output's global rectangle. Testing the active
+/// window's content against it makes the policy output-local without a
+/// second fullscreen/output ledger: on a two-monitor desktop the other
+/// output keeps its own bar and dock. The focused window is the same
+/// authoritative value `hyprctl activewindow` reports, and `mapped`
+/// excludes minimized, shaded, and parked-workspace content.
+pub(crate) fn fullscreen_occludes_desktop_bands(backend: &WaylandBackend, viewport: Rect) -> bool {
+    let Some(window) = backend.ewmh.active_window() else {
+        return false;
+    };
+    backend.windows.get(&window).is_some_and(|record| {
+        record.fullscreen
+            && record.mapped
+            && record.surface.alive()
+            && fullscreen_rect_occludes_viewport(record.content, viewport)
+    })
+}
+
+fn fullscreen_rect_occludes_viewport(content: Rect, viewport: Rect) -> bool {
+    overlap_area(content, viewport) > 0
 }
 
 fn is_primary_rect(backend: &WaylandBackend, surface: Rect, candidate: Rect) -> bool {
@@ -1305,6 +1340,15 @@ mod tests {
             ),
             4,
         );
+    }
+
+    #[test]
+    fn fullscreen_occlusion_is_confined_to_the_intersected_output() {
+        let left = Rect::new(Point::new(0, 0), Size::new(1920, 1080));
+        let right = Rect::new(Point::new(1920, 0), Size::new(1920, 1080));
+        let fullscreen = Rect::new(Point::new(0, 0), Size::new(1920, 1080));
+        assert!(fullscreen_rect_occludes_viewport(fullscreen, left));
+        assert!(!fullscreen_rect_occludes_viewport(fullscreen, right));
     }
 
     #[test]
