@@ -7,6 +7,9 @@ crate and both session binaries carry the same number.
 
 ### Release hardening
 
+- **Release automation now trusts immutable action revisions.** CI, native
+  package attestation, artifact assembly, and the future AUR publisher pin
+  every third-party GitHub Action to a full commit instead of a mutable tag.
 - **The text stack no longer depends on unmaintained `rustybuzz`.** All
   consumers now use `cosmic-text` 0.19 and its `harfrust` shaper. This also
   replaces two obsolete `ttf-parser` releases with one current dependency;
