@@ -32,7 +32,7 @@ pub use backend::Backend;
 pub use client::{Client, ClientFlags, ClientId, Lifecycle, MaximizeDirections, MonitorId, MonitorInfo};
 pub use focus::{FocusDirection, FocusPolicy};
 pub use hittest::{hit_test, HitTarget};
-pub use manager::{Notification, WindowManager, DEFAULT_DRAG_MODIFIER};
+pub use manager::{Notification, WindowManager, DEFAULT_DRAG_MODIFIER, MAX_WORKSPACES};
 pub use motif::{hints_say_client_decorates, MIN_HINT_WORDS};
 pub use placement::{place_frame, FloatDecision, FloatPolicy, PlacementPolicy, WindowRuleDecision};
 // `FloatDecision` carries a `Size`, so a crate that implements

@@ -292,18 +292,23 @@ fn action_from_name(name: &str) -> Option<Action> {
     }
 }
 
-/// The largest workspace number a binding may name.
+/// The largest one-based workspace number a binding may name.
 ///
-/// A ceiling exists because the workspace row grows to whatever it is
-/// told and never shrinks: `"workspace 90000000"` — a typo, not a
-/// wish — would leave the window menu's `Move To` submenu ninety
-/// million rows long, the control socket's `workspaces` event ninety
-/// million entries wide, and `_NET_NUMBER_OF_DESKTOPS` a number no
-/// pager can draw. Two digits is more workspaces than any keyboard can
-/// reach and far more than anyone has ever wanted; a number past it is
-/// a mistake, and a mistake is better refused at parse time with a
-/// warning naming the line than honoured at the first keypress.
+/// The workspace row grows to any admitted index and never shrinks, so
+/// the core imposes a ceiling before workspace-sized publications and
+/// allocations can be amplified without bound. Two digits is more
+/// workspaces than any keyboard can reach and far more than anyone has
+/// ever wanted; a number past it is a mistake, and a mistake is better
+/// refused at parse time with a warning naming the line than deferred
+/// to the core guard at the first keypress.
+///
+/// This public config spelling is deliberately restated by value from
+/// [`wm_core::MAX_WORKSPACES`], the authoritative core ceiling. Keep
+/// the literal synchronized so config documentation remains explicit;
+/// the assertion below makes any drift a compile error.
 pub const MAX_WORKSPACE: usize = 99;
+
+const _: () = assert!(MAX_WORKSPACE == wm_core::MAX_WORKSPACES);
 
 /// Reads the workspace number a `workspace` / `workspace-carry`
 /// binding names, as the 0-based index `wm_core` speaks.

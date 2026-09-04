@@ -313,7 +313,7 @@ fn workspace_target(arg: &str) -> WorkspaceTarget {
 ///
 /// `None` for a number past [`crate::MAX_WORKSPACE`], which reads as
 /// [`Unbound::NoVerb`] — the honest answer for a chord that would
-/// otherwise grow the workspace row to a size no pager can draw.
+/// otherwise ask for a workspace beyond the core's fixed ceiling.
 fn workspace_index_action(index: u32) -> Option<Action> {
     zero_based(index).map(Action::Workspace)
 }

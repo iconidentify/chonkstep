@@ -4,6 +4,7 @@ use std::collections::{BinaryHeap, HashMap, HashSet, VecDeque};
 use wm_core::{
     Backend, BackendEvent, DragHandle, KeyCombo, Modifiers, MonitorInfo, MouseButton, NetState,
     NetStateAction, ScrollDelta, SizeHints, SurfaceRef, WindowType, WmClass, WmProtocol,
+    MAX_WORKSPACES,
 };
 use wm_theme_api::{DecorationBuffer, DecorationLayout, Point, Rect, ResizeEdge, Size};
 
@@ -1343,9 +1344,15 @@ impl X11Backend {
         }
         if e.type_ == self.ewmh.net_current_desktop {
             // EWMH "_NET_CURRENT_DESKTOP": data.l[0] is the desktop a
-            // pager wants switched to. The core clamps/grows as it sees
-            // fit — the backend just reports the ask.
-            return Some(BackendEvent::DesktopSwitchRequested(e.data.as_data32()[0] as usize));
+            // pager wants switched to. Refuse an untrusted index before
+            // it reaches the event queue; the core repeats this guard as
+            // the final defence for every other caller.
+            let requested = e.data.as_data32()[0];
+            let Some(desktop) = workspace_index_from_ewmh(requested) else {
+                tracing::warn!(desktop = requested, maximum = MAX_WORKSPACES - 1, "ignoring out-of-range _NET_CURRENT_DESKTOP request");
+                return None;
+            };
+            return Some(BackendEvent::DesktopSwitchRequested(desktop));
         }
         if e.type_ == self.ewmh.net_wm_desktop {
             // EWMH "_NET_WM_DESKTOP": data.l[0] is the desktop a pager
@@ -1357,7 +1364,11 @@ impl X11Backend {
             if desktop == 0xFFFF_FFFF {
                 return None;
             }
-            return Some(BackendEvent::WindowDesktopRequested { window: XWindow(e.window), desktop: desktop as usize });
+            let Some(desktop) = workspace_index_from_ewmh(desktop) else {
+                tracing::warn!(desktop, maximum = MAX_WORKSPACES - 1, "ignoring out-of-range _NET_WM_DESKTOP request");
+                return None;
+            };
+            return Some(BackendEvent::WindowDesktopRequested { window: XWindow(e.window), desktop });
         }
         if e.type_ == self.ewmh.net_wm_state {
             // EWMH "_NET_WM_STATE" client message layout:
@@ -1397,6 +1408,13 @@ impl X11Backend {
         }
         None
     }
+}
+
+/// Converts the untrusted CARDINAL carried by an EWMH desktop request
+/// only when it names a workspace the core permits.
+fn workspace_index_from_ewmh(desktop: u32) -> Option<usize> {
+    let desktop = usize::try_from(desktop).ok()?;
+    (desktop < MAX_WORKSPACES).then_some(desktop)
 }
 
 /// The EWMH atoms this backend implements, interned in one place at
@@ -3175,6 +3193,14 @@ mod tests {
 
     fn monitor(name: &str, x: i32, y: i32, w: u32, h: u32, primary: bool) -> MonitorInfo {
         MonitorInfo { geometry: Rect { pos: Point::new(x, y), size: Size::new(w, h) }, name: name.to_string(), primary }
+    }
+
+    #[test]
+    fn ewmh_workspace_indices_stop_at_the_core_ceiling() {
+        assert_eq!(workspace_index_from_ewmh(0), Some(0));
+        assert_eq!(workspace_index_from_ewmh((MAX_WORKSPACES - 1) as u32), Some(MAX_WORKSPACES - 1));
+        assert_eq!(workspace_index_from_ewmh(MAX_WORKSPACES as u32), None);
+        assert_eq!(workspace_index_from_ewmh(u32::MAX), None);
     }
 
     /// The sign convention, spelled out against the physical gesture,

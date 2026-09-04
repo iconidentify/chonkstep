@@ -73,6 +73,7 @@ use x11rb::rust_connection::RustConnection;
 // both are needed, hence the alias.
 use x11rb::wrapper::ConnectionExt as WrapperConnectionExt;
 
+use wm_core::MAX_WORKSPACES;
 use wm_theme_api::Rect;
 
 use crate::state::{Compositor, ManagedSurface, WaylandBackend, WindowRecord, WlWindowId};
@@ -610,8 +611,12 @@ fn drain_inbound(comp: &mut Compositor) {
                     requests.push(WmEvent::ActivateRequested(id));
                 }
             } else if message.type_ == xewmh.atoms.net_current_desktop {
-                let desktop = message.data.as_data32()[0] as usize;
-                requests.push(WmEvent::DesktopSwitchRequested(desktop));
+                let requested = message.data.as_data32()[0];
+                if let Some(desktop) = workspace_index_from_ewmh(requested) {
+                    requests.push(WmEvent::DesktopSwitchRequested(desktop));
+                } else {
+                    tracing::warn!(desktop = requested, maximum = MAX_WORKSPACES - 1, "ignoring out-of-range XWayland _NET_CURRENT_DESKTOP request");
+                }
             }
         }
     }
@@ -621,6 +626,13 @@ fn drain_inbound(comp: &mut Compositor) {
     }
 }
 
+/// Converts the untrusted CARDINAL carried by an XWayland pager only
+/// when it names a workspace the core permits.
+fn workspace_index_from_ewmh(desktop: u32) -> Option<usize> {
+    let desktop = usize::try_from(desktop).ok()?;
+    (desktop < MAX_WORKSPACES).then_some(desktop)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -628,6 +640,14 @@ mod tests {
 
     fn rect(x: i32, y: i32, w: u32, h: u32) -> Rect {
         Rect::new(Point { x, y }, Size { w, h })
+    }
+
+    #[test]
+    fn xwayland_workspace_indices_stop_at_the_core_ceiling() {
+        assert_eq!(workspace_index_from_ewmh(0), Some(0));
+        assert_eq!(workspace_index_from_ewmh((MAX_WORKSPACES - 1) as u32), Some(MAX_WORKSPACES - 1));
+        assert_eq!(workspace_index_from_ewmh(MAX_WORKSPACES as u32), None);
+        assert_eq!(workspace_index_from_ewmh(u32::MAX), None);
     }
 
     /// Re-asserting the same workarea must not queue another write.

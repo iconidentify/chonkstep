@@ -54,6 +54,13 @@ const NO_MONITOR_FALLBACK: Rect = Rect { pos: Point::new(0, 0), size: Size::new(
 /// the same constant for the parser's default.
 pub const DEFAULT_DRAG_MODIFIER: Modifiers = Modifiers::ALT;
 
+/// Maximum number of workspaces the core will create. Public input
+/// names them from 1 through 99; internally their indices are 0 through
+/// 98. The row grows on demand and never shrinks, so leaving this
+/// unbounded lets one malformed protocol request permanently amplify
+/// every workspace-sized publication and allocation.
+pub const MAX_WORKSPACES: usize = 99;
+
 /// An in-progress move. `grab_offset` is the frame-local point that was
 /// grabbed — since that's constant relative to the frame regardless of
 /// where the frame currently sits, the new frame position is simply
@@ -248,10 +255,10 @@ pub struct WindowManager<B: Backend> {
     float_policy: Option<std::sync::Arc<dyn FloatPolicy>>,
     notifications: VecDeque<Notification>,
     focus_policy: FocusPolicy,
-    /// 0-based, matching `Client::workspace`. Grows on demand the first
-    /// time something switches to or moves a client onto an index past
-    /// the current row's end — there is no fixed count and no way to
-    /// destroy a workspace once created, the classic behavior.
+    /// 0-based, matching `Client::workspace`. Grows on demand up to
+    /// [`MAX_WORKSPACES`] the first time something switches to or moves
+    /// a client onto an index past the current row's end. There is no
+    /// way to destroy a workspace once created, the classic behavior.
     current_workspace: usize,
     workspace_count: usize,
     /// An in-progress Alt-Tab switcher session: the snapshot of cycle
@@ -857,17 +864,20 @@ impl<B: Backend> WindowManager<B> {
         self.workspace_count
     }
 
-    /// Switches to `workspace`, growing the workspace row on demand if
-    /// it's past the current end (there is no fixed count and no way to
-    /// destroy a workspace once created). Every *mapped* client not on
+    /// Switches to `workspace`, growing the workspace row on demand up
+    /// to [`MAX_WORKSPACES`] (there is no way to destroy a workspace
+    /// once created). Every *mapped* client not on
     /// the target workspace gets its frame unmapped; every mapped
     /// client that IS on it gets remapped. Miniaturized/withdrawn
     /// clients are left alone entirely — their icon tile (a
     /// desktop-shell concern, not `wm-core`'s) stays visible regardless
     /// of workspace, a deliberately simpler choice than the classic
     /// opt-out-able per-workspace icon hiding. A no-op if already on
-    /// `workspace`.
+    /// `workspace` or if the index is out of range.
     pub fn switch_workspace(&mut self, workspace: usize) {
+        if workspace >= MAX_WORKSPACES {
+            return;
+        }
         if workspace == self.current_workspace {
             return;
         }
@@ -916,11 +926,15 @@ impl<B: Backend> WindowManager<B> {
         tracing::info!(workspace, "switched workspace");
     }
 
-    /// Moves `id` onto `workspace` (growing the row if needed) and
-    /// hides its frame immediately if that isn't the active workspace —
-    /// the classic "move to next/previous workspace" window actions.
-    /// A no-op if `id` is already on `workspace`.
+    /// Moves `id` onto `workspace` (growing the row up to
+    /// [`MAX_WORKSPACES`] if needed) and hides its frame immediately if
+    /// that isn't the active workspace — the classic "move to
+    /// next/previous workspace" window actions. A no-op if `id` is
+    /// already on `workspace` or if the index is out of range.
     pub fn move_client_to_workspace(&mut self, id: ClientId, workspace: usize) {
+        if workspace >= MAX_WORKSPACES {
+            return;
+        }
         if workspace + 1 > self.workspace_count {
             self.workspace_count = workspace + 1;
             self.bump_protocol_state_revision();
@@ -4415,6 +4429,36 @@ mod tests {
 
         assert_eq!(wm.current_workspace(), 2);
         assert_eq!(wm.workspace_count(), 3, "switching to index 2 means 3 workspaces (0..=2) now exist");
+    }
+
+    #[test]
+    fn out_of_range_switch_leaves_workspace_state_unchanged() {
+        let mut backend = FakeBackend::new();
+        let window = backend.create_window();
+        let mut wm = wm(backend);
+        wm.dispatch(BackendEvent::MapRequest(window));
+        let id = wm.client_for_window(window).unwrap();
+
+        wm.dispatch(BackendEvent::DesktopSwitchRequested(MAX_WORKSPACES));
+
+        assert_eq!(wm.current_workspace(), 0);
+        assert_eq!(wm.client(id).unwrap().workspace, 0);
+        assert_eq!(wm.workspace_count(), 1);
+    }
+
+    #[test]
+    fn out_of_range_move_leaves_workspace_state_unchanged() {
+        let mut backend = FakeBackend::new();
+        let window = backend.create_window();
+        let mut wm = wm(backend);
+        wm.dispatch(BackendEvent::MapRequest(window));
+        let id = wm.client_for_window(window).unwrap();
+
+        wm.move_client_to_workspace(id, usize::MAX);
+
+        assert_eq!(wm.current_workspace(), 0);
+        assert_eq!(wm.client(id).unwrap().workspace, 0);
+        assert_eq!(wm.workspace_count(), 1);
     }
 
     #[test]

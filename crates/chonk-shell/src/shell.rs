@@ -1679,9 +1679,9 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
     /// focused client and are silent no-ops when nothing is focused —
     /// pressing "close" over an empty desktop should do exactly
     /// nothing, not warn. Workspace moves guard the left edge
-    /// (workspace 0, matching the Clip's rewind arrow); the right edge
-    /// needs no guard because `switch_workspace` grows the workspace
-    /// row on demand. The match is deliberately exhaustive: a new
+    /// (workspace 0, matching the Clip's rewind arrow); the core's
+    /// workspace ceiling guards the right edge while the row grows on
+    /// demand below it. The match is deliberately exhaustive: a new
     /// `Action` variant in `wm-config` fails compilation here instead
     /// of silently binding to nothing.
     pub fn run_action(&mut self, wm: &mut WindowManager<B>, action: &Action) -> ShellOutcome {

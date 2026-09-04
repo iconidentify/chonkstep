@@ -578,9 +578,10 @@ fn classic_exec(rest: &str) -> Outcome {
 
 /// The workspaces a switch may name.
 ///
-/// `wm-core`'s `switch_workspace` grows the workspace row on demand, so
-/// mechanically any index is reachable. The question is which ones this
-/// socket *should* reach, and the answer comes from the security
+/// `wm-core`'s `switch_workspace` grows the workspace row on demand up
+/// to its fixed ceiling, so mechanically any index below that ceiling
+/// is reachable. The question is which ones this socket *should* reach,
+/// and the answer comes from the security
 /// argument in [`crate::server`]: this socket is unauthenticated
 /// because it grants nothing the user's own keyboard already grants.
 /// That argument only holds if the two grant the same thing — so the
@@ -599,11 +600,13 @@ fn classic_exec(rest: &str) -> Outcome {
 /// keyboard worked — which is not a compositor that Omarchy's
 /// unmodified shell runs on, and running on it is the point.
 ///
-/// Mirrors `wm_config::MAX_WORKSPACE`, deliberately by value rather than
-/// by dependency: this crate stays free of chonkstep's own crates so
-/// that every promise it makes to somebody else's binary can be tested
-/// without booting a window manager (see the crate doc). If that
-/// constant moves, this one follows.
+/// Mirrors `wm_core::MAX_WORKSPACES`, the authoritative core ceiling,
+/// deliberately by value rather than by dependency: this crate stays
+/// free of chonkstep's own crates so that every promise it makes to
+/// somebody else's binary can be tested without booting a window
+/// manager (see the crate doc). `wm_config::MAX_WORKSPACE` restates the
+/// same one-based limit and checks it against the core at compile time.
+/// If the core constant moves, this one follows.
 const MAX_WORKSPACE: usize = 99;
 
 /// Reject a workspace index the keyboard could not reach either.
