@@ -3361,6 +3361,10 @@ fn restart_in_place(nested: bool) -> ! {
 pub(crate) struct CursorSprite {
     pub(crate) buffer: MemoryRenderBuffer,
     pub(crate) hotspot: (i32, i32),
+    /// Physical pixels, retained alongside Smithay's opaque memory
+    /// buffer so the renderer can reject a cursor outside an output
+    /// before asking GLES to import it.
+    pub(crate) size: Size,
 }
 
 /// Every cursor this compositor draws itself, pre-rendered once per UI
@@ -3380,7 +3384,7 @@ impl CursorSet {
     pub(crate) fn build(scale: f32) -> Self {
         let right_angle = 90.0_f32.to_radians();
         Self {
-            arrow: CursorSprite { buffer: build_default_cursor(scale), hotspot: (0, 0) },
+            arrow: build_default_cursor(scale),
             resize_vertical: build_resize_cursor(scale, 0.0),
             // East/West: the same double-arrow turned to horizontal;
             // the diagonals are the 45° rotations between them — the
@@ -3430,14 +3434,22 @@ fn import_cursor(pixels: &[u8], width: i32, height: i32) -> MemoryRenderBuffer {
     MemoryRenderBuffer::from_slice(pixels, Fourcc::Abgr8888, (width, height), 1, Transform::Normal, None)
 }
 
-fn build_default_cursor(scale: f32) -> MemoryRenderBuffer {
+fn build_default_cursor(scale: f32) -> CursorSprite {
     let (pixels, width, height) = default_cursor_pixels(scale);
-    import_cursor(&pixels, width, height)
+    CursorSprite {
+        buffer: import_cursor(&pixels, width, height),
+        hotspot: (0, 0),
+        size: Size::new(width.max(0) as u32, height.max(0) as u32),
+    }
 }
 
 fn build_resize_cursor(scale: f32, angle_rad: f32) -> CursorSprite {
     let (pixels, width, height, hotspot) = resize_cursor_pixels(scale, angle_rad);
-    CursorSprite { buffer: import_cursor(&pixels, width, height), hotspot }
+    CursorSprite {
+        buffer: import_cursor(&pixels, width, height),
+        hotspot,
+        size: Size::new(width.max(0) as u32, height.max(0) as u32),
+    }
 }
 
 /// The arrow's premultiplied RGBA8 pixels at `scale`, with its width

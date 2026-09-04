@@ -42,14 +42,14 @@
 //! element placed at a global coordinate would be clipped away on every
 //! output but the first.
 //!
-//! [`build_scene`] therefore takes a viewport offset — the output's
-//! top-left corner in global space — and subtracts it from every
-//! element it produces. Drawing a second monitor is then the same scene
-//! built again with a different offset, which is why nothing else in
-//! this module (or in `wm-core`, or in the shell) has to learn that
-//! more than one screen exists. The nested backend passes a zero
-//! offset, so its single output is the case where the subtraction does
-//! nothing.
+//! [`build_scene`] therefore takes the output's global viewport,
+//! subtracts its origin from every element it produces, and omits
+//! objects whose pixels cannot reach its extent. Ledger rectangles
+//! answer the common case in constant time; a surface tree outside one
+//! falls back to its exact subsurface bounds so a shadow or popup can
+//! still cross a monitor edge. A two-output desktop no longer imports
+//! and instantiates every element twice merely to have each damage
+//! tracker clip half of them away.
 //!
 //! # Physical pixels everywhere, whatever the outputs advertise
 //!
@@ -91,7 +91,8 @@ use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::backend::renderer::utils::{CommitCounter, RendererSurfaceStateUserData};
 use smithay::backend::renderer::{Color32F, ImportAll, ImportMem};
 use smithay::desktop::utils::{
-    send_frames_surface_tree, take_presentation_feedback_surface_tree, OutputPresentationFeedback,
+    bbox_from_surface_tree, send_frames_surface_tree, take_presentation_feedback_surface_tree,
+    OutputPresentationFeedback,
 };
 use smithay::desktop::PopupManager;
 use smithay::input::pointer::{CursorImageAttributes, CursorImageStatus};
@@ -130,17 +131,18 @@ render_elements! {
 /// implementations were kept in agreement. Returns the elements plus
 /// the clear color the root background asks for.
 ///
-/// `viewport` is the top-left corner, in global space, of the output
-/// being drawn — subtracted from every element so the result is in that
-/// output's framebuffer coordinates (see the module docs). Called once
-/// per output per frame; the nested backend passes `(0, 0)`.
+/// `viewport` is the output or capture region in global space. Its
+/// origin is subtracted from every element so the result is in that
+/// target's framebuffer coordinates; its extent lets scene assembly
+/// omit objects wholly owned by another output (see the module docs).
+/// Called once per output per frame.
 pub(crate) fn build_scene(
     backend: &WaylandBackend,
     renderer: &mut GlesRenderer,
     pointer_location: SPoint<f64, smithay::utils::Logical>,
     cursor_status: &CursorImageStatus,
     cursors: &crate::state::CursorSet,
-    viewport: Point,
+    viewport: Rect,
 ) -> (Vec<SceneElement<GlesRenderer>>, Color32F) {
     let mut elements = Vec::new();
     let clear_color = build_scene_into(
@@ -165,7 +167,7 @@ pub(crate) fn build_scene_into(
     pointer_location: SPoint<f64, smithay::utils::Logical>,
     cursor_status: &CursorImageStatus,
     cursors: &crate::state::CursorSet,
-    viewport: Point,
+    viewport: Rect,
 ) -> Color32F {
     // Elements are assembled FRONT to BACK — the damage tracker's
     // convention (first element occludes later ones) — so this walk is
@@ -199,9 +201,12 @@ pub(crate) fn build_scene_into(
             let Some(monitor) = backend.monitors.get(entry.output) else {
                 continue;
             };
+            if overlap_area(monitor.geometry, viewport) == 0 {
+                continue;
+            }
             let origin = SPoint::<i32, Physical>::from((
-                monitor.geometry.pos.x - viewport.x,
-                monitor.geometry.pos.y - viewport.y,
+                monitor.geometry.pos.x - viewport.pos.x,
+                monitor.geometry.pos.y - viewport.pos.y,
             ));
             // A locker commits at whatever scale its output told it —
             // the same effective-factor rule as every other client.
@@ -292,9 +297,12 @@ pub(crate) fn build_scene_into(
                 }
             }
             if let Some(buffer) = &frame.buffer {
+                if overlap_area(frame.geometry, viewport) == 0 {
+                    continue;
+                }
                 let location = SPoint::<f64, Physical>::from((
-                    (frame.geometry.pos.x - viewport.x) as f64,
-                    (frame.geometry.pos.y - viewport.y) as f64,
+                    (frame.geometry.pos.x - viewport.pos.x) as f64,
+                    (frame.geometry.pos.y - viewport.pos.y) as f64,
                 ));
                 match MemoryRenderBufferRenderElement::from_buffer(
                     renderer,
@@ -342,9 +350,12 @@ pub(crate) fn build_scene_into(
     let clear_color = match &backend.root_background {
         RootBackground::Color((r, g, b)) => Color32F::new(*r as f32 / 255.0, *g as f32 / 255.0, *b as f32 / 255.0, 1.0),
         RootBackground::Image(buffer) => {
+            if overlap_area(Rect::new(Point::new(0, 0), backend.output_size), viewport) == 0 {
+                return Color32F::new(0.0, 0.0, 0.0, 1.0);
+            }
             match MemoryRenderBufferRenderElement::from_buffer(
                 renderer,
-                SPoint::<f64, Physical>::from((-viewport.x as f64, -viewport.y as f64)),
+                SPoint::<f64, Physical>::from((-viewport.pos.x as f64, -viewport.pos.y as f64)),
                 buffer,
                 None,
                 None,
@@ -531,11 +542,13 @@ fn for_each_presented_window(backend: &WaylandBackend, mut visit: impl FnMut(&Wi
 }
 
 fn overlap_area(a: Rect, b: Rect) -> u64 {
-    let left = a.pos.x.max(b.pos.x);
-    let top = a.pos.y.max(b.pos.y);
-    let right = (a.pos.x + a.size.w as i32).min(b.pos.x + b.size.w as i32);
-    let bottom = (a.pos.y + a.size.h as i32).min(b.pos.y + b.size.h as i32);
-    right.saturating_sub(left) as u64 * bottom.saturating_sub(top) as u64
+    let left = i64::from(a.pos.x.max(b.pos.x));
+    let top = i64::from(a.pos.y.max(b.pos.y));
+    let right = (i64::from(a.pos.x) + i64::from(a.size.w))
+        .min(i64::from(b.pos.x) + i64::from(b.size.w));
+    let bottom = (i64::from(a.pos.y) + i64::from(a.size.h))
+        .min(i64::from(b.pos.y) + i64::from(b.size.h));
+    (right - left).max(0) as u64 * (bottom - top).max(0) as u64
 }
 
 fn is_primary_rect(backend: &WaylandBackend, surface: Rect, candidate: Rect) -> bool {
@@ -663,7 +676,7 @@ fn render_frame_winit(comp: &mut Compositor) {
             *pointer_location,
             cursor_status,
             cursors,
-            Point::new(0, 0),
+            Rect::new(Point::new(0, 0), entry.size),
         );
 
         match damage_tracker.render_output(renderer, &mut framebuffer, age, scene_scratch, clear_color) {
@@ -751,7 +764,7 @@ fn push_ime_popups(
     elements: &mut Vec<SceneElement<GlesRenderer>>,
     renderer: &mut GlesRenderer,
     backend: &WaylandBackend,
-    viewport: Point,
+    viewport: Rect,
 ) {
     for popup in backend.ime_popups.iter().rev() {
         if !popup.alive() {
@@ -769,11 +782,20 @@ fn push_ime_popups(
             crate::xdg::committed_surface_scale(root),
             backend.scale_at(parent_rect),
         );
+        if !surface_tree_reaches_viewport(
+            root,
+            global,
+            Rect::new(global, wm_theme_api::Size::default()),
+            factor,
+            viewport,
+        ) {
+            continue;
+        }
         push_surface_tree(
             elements,
             renderer,
             root,
-            SPoint::<i32, Physical>::from((global.x - viewport.x, global.y - viewport.y)),
+            SPoint::<i32, Physical>::from((global.x - viewport.pos.x, global.y - viewport.pos.y)),
             factor,
             1.0,
             Kind::Unspecified,
@@ -786,15 +808,17 @@ fn push_layer_band(
     renderer: &mut GlesRenderer,
     backend: &WaylandBackend,
     band: WlrLayer,
-    viewport: Point,
+    viewport: Rect,
 ) {
     for record in backend.layers.iter().rev() {
         if record.layer != band || !backend.layer_presented(record) {
             continue;
         }
         let surface = record.surface.wl_surface();
-        let origin =
-            SPoint::<i32, Physical>::from((record.geometry.pos.x - viewport.x, record.geometry.pos.y - viewport.y));
+        let origin = SPoint::<i32, Physical>::from((
+            record.geometry.pos.x - viewport.pos.x,
+            record.geometry.pos.y - viewport.pos.y,
+        ));
         // Popups above their parent, offsets converted by the parent's
         // committed factor — the identical arithmetic
         // `push_window_content` uses, for the identical reason.
@@ -808,14 +832,28 @@ fn push_layer_band(
                 crate::xdg::committed_surface_scale(popup_surface),
                 backend.scale_at(record.geometry),
             );
-            let location = origin
-                + SPoint::<i32, Physical>::from((
-                    crate::xdg::scale_length(offset.x, factor),
-                    crate::xdg::scale_length(offset.y, factor),
-                ));
+            let global = Point::new(
+                record.geometry.pos.x.saturating_add(crate::xdg::scale_length(offset.x, factor)),
+                record.geometry.pos.y.saturating_add(crate::xdg::scale_length(offset.y, factor)),
+            );
+            if !surface_tree_reaches_viewport(
+                popup_surface,
+                global,
+                Rect::new(global, wm_theme_api::Size::default()),
+                popup_factor,
+                viewport,
+            ) {
+                continue;
+            }
+            let location = SPoint::<i32, Physical>::from((
+                global.x - viewport.pos.x,
+                global.y - viewport.pos.y,
+            ));
             push_surface_tree(elements, renderer, popup_surface, location, popup_factor, 1.0, Kind::Unspecified);
         }
-        push_surface_tree(elements, renderer, surface, origin, factor, 1.0, Kind::Unspecified);
+        if surface_tree_reaches_viewport(surface, record.geometry.pos, record.geometry, factor, viewport) {
+            push_surface_tree(elements, renderer, surface, origin, factor, 1.0, Kind::Unspecified);
+        }
     }
 }
 
@@ -827,13 +865,16 @@ fn push_shell_elements(
     elements: &mut Vec<SceneElement<GlesRenderer>>,
     renderer: &mut GlesRenderer,
     record: &crate::state::ShellRecord,
-    viewport: Point,
+    viewport: Rect,
 ) {
+    if overlap_area(record.geometry, viewport) == 0 {
+        return;
+    }
     match &record.buffer {
         Some(buffer) => {
             let location = SPoint::<f64, Physical>::from((
-                (record.geometry.pos.x - viewport.x) as f64,
-                (record.geometry.pos.y - viewport.y) as f64,
+                (record.geometry.pos.x - viewport.pos.x) as f64,
+                (record.geometry.pos.y - viewport.pos.y) as f64,
             ));
             match MemoryRenderBufferRenderElement::from_buffer(
                 renderer,
@@ -851,7 +892,11 @@ fn push_shell_elements(
         None => {
             let (r, g, b) = record.background;
             let geometry = SRect::<i32, Physical>::new(
-                (record.geometry.pos.x - viewport.x, record.geometry.pos.y - viewport.y).into(),
+                (
+                    record.geometry.pos.x - viewport.pos.x,
+                    record.geometry.pos.y - viewport.pos.y,
+                )
+                    .into(),
                 (record.geometry.size.w as i32, record.geometry.size.h as i32).into(),
             );
             // The record's own stable id: the damage tracker keys
@@ -891,7 +936,7 @@ fn push_window_content(
     backend: &WaylandBackend,
     content: Rect,
     record: &crate::state::WindowRecord,
-    viewport: Point,
+    viewport: Rect,
 ) {
     if !record.surface.alive() {
         return;
@@ -905,9 +950,13 @@ fn push_window_content(
     // client that declares no geometry this is zero and the expression
     // is the plain one it used to be. See `WindowRecord::content_offset`.
     let origin = SPoint::<i32, Physical>::from((
-        content.pos.x - viewport.x - record.content_offset.x,
-        content.pos.y - viewport.y - record.content_offset.y,
+        content.pos.x - viewport.pos.x - record.content_offset.x,
+        content.pos.y - viewport.pos.y - record.content_offset.y,
     ));
+    let global_origin = Point::new(
+        content.pos.x.saturating_sub(record.content_offset.x),
+        content.pos.y.saturating_sub(record.content_offset.y),
+    );
     // Each surface is drawn at the buffer scale it itself committed,
     // which is not the same thing as a scale for the session — see
     // `push_surface_tree` for how that lands 1 buffer pixel on 1
@@ -935,14 +984,58 @@ fn push_window_content(
             crate::xdg::committed_surface_scale(popup_surface),
             backend.scale_at(content),
         );
-        let location = origin
-            + SPoint::<i32, Physical>::from((
-                crate::xdg::scale_length(offset.x, factor),
-                crate::xdg::scale_length(offset.y, factor),
-            ));
+        let global = Point::new(
+            global_origin.x.saturating_add(crate::xdg::scale_length(offset.x, factor)),
+            global_origin.y.saturating_add(crate::xdg::scale_length(offset.y, factor)),
+        );
+        if !surface_tree_reaches_viewport(
+            popup_surface,
+            global,
+            Rect::new(global, wm_theme_api::Size::default()),
+            popup_factor,
+            viewport,
+        ) {
+            continue;
+        }
+        let location = SPoint::<i32, Physical>::from((
+            global.x - viewport.pos.x,
+            global.y - viewport.pos.y,
+        ));
         push_surface_tree(elements, renderer, popup_surface, location, popup_factor, 1.0, Kind::Unspecified);
     }
-    push_surface_tree(elements, renderer, &surface, origin, factor, 1.0, Kind::Unspecified);
+    if surface_tree_reaches_viewport(&surface, global_origin, content, factor, viewport) {
+        push_surface_tree(elements, renderer, &surface, origin, factor, 1.0, Kind::Unspecified);
+    }
+}
+
+/// Whether a surface tree contributes pixels to this output/capture.
+///
+/// The ledger rectangle is a cheap answer for the ordinary case. A
+/// tree can legally draw beyond it through a drop shadow or subsurface,
+/// so a miss falls back to smithay's exact tree bounds rather than
+/// incorrectly clipping overflow at an output boundary. The expensive
+/// import/element construction then runs only for outputs the tree can
+/// actually reach.
+fn surface_tree_reaches_viewport(
+    surface: &WlSurface,
+    global_origin: Point,
+    ledger_rect: Rect,
+    factor: f64,
+    viewport: Rect,
+) -> bool {
+    if overlap_area(ledger_rect, viewport) > 0 {
+        return true;
+    }
+    let logical = bbox_from_surface_tree(surface, (0, 0));
+    let x = global_origin
+        .x
+        .saturating_add(crate::xdg::scale_length(logical.loc.x, factor));
+    let y = global_origin
+        .y
+        .saturating_add(crate::xdg::scale_length(logical.loc.y, factor));
+    let width = crate::xdg::scale_length(logical.size.w, factor).max(0) as u32;
+    let height = crate::xdg::scale_length(logical.size.h, factor).max(0) as u32;
+    overlap_area(Rect::new(Point::new(x, y), wm_theme_api::Size::new(width, height)), viewport) > 0
 }
 
 /// Pushes one wayland surface tree (front to back), drawn so that each
@@ -1062,14 +1155,16 @@ fn push_cursor_elements(
     location: SPoint<f64, smithay::utils::Logical>,
     status: &CursorImageStatus,
     cursors: &crate::state::CursorSet,
-    viewport: Point,
+    viewport: Rect,
 ) {
-    // The pointer has one position in global space and is pushed into
-    // every output's scene; the ones it is not over clip it away. That
-    // is the same treatment every other element gets, and it is what
-    // makes the cursor cross a monitor boundary without anything
-    // tracking which screen it is on.
-    let offset = SPoint::<f64, smithay::utils::Logical>::from((viewport.x as f64, viewport.y as f64));
+    // The pointer has one position in global space. Build it in each
+    // output's local coordinates, then retain it only where its pixels
+    // intersect; including an off-screen cursor could otherwise defeat
+    // direct scanout on a monitor the pointer is nowhere near.
+    let offset = SPoint::<f64, smithay::utils::Logical>::from((
+        viewport.pos.x as f64,
+        viewport.pos.y as f64,
+    ));
     let global = location;
     let location = location - offset;
     // `Hidden` stays absolute, over every subject: screencopy relies on
@@ -1094,10 +1189,14 @@ fn push_cursor_elements(
         let position = SPoint::<f64, smithay::utils::Logical>::from((
             location.x - sprite.hotspot.0 as f64,
             location.y - sprite.hotspot.1 as f64,
-        ));
+        ))
+        .to_physical(1.0);
+        if !memory_element_reaches_viewport(position.to_i32_round(), sprite.size, viewport.size) {
+            return;
+        }
         match MemoryRenderBufferRenderElement::from_buffer(
             renderer,
-            position.to_physical(1.0),
+            position,
             &sprite.buffer,
             None,
             None,
@@ -1134,8 +1233,18 @@ fn push_cursor_elements(
             let cursor_scale = crate::xdg::committed_surface_scale(surface);
             let hotspot_physical =
                 SPoint::<f64, Physical>::from((hotspot.x as f64 * cursor_scale, hotspot.y as f64 * cursor_scale));
-            let position = (location.to_physical(1.0) - hotspot_physical).to_i32_round();
-            push_surface_tree(elements, renderer, surface, position, cursor_scale, 1.0, Kind::Cursor);
+            let global_position = (global.to_physical(1.0) - hotspot_physical).to_i32_round();
+            if surface_tree_reaches_viewport(
+                surface,
+                Point::new(global_position.x, global_position.y),
+                Rect::new(Point::new(global_position.x, global_position.y), wm_theme_api::Size::default()),
+                cursor_scale,
+                viewport,
+            ) {
+                let position = global_position
+                    - SPoint::<i32, Physical>::from((viewport.pos.x, viewport.pos.y));
+                push_surface_tree(elements, renderer, surface, position, cursor_scale, 1.0, Kind::Cursor);
+            }
         }
         _ => {
             // A client that never set a cursor (or set a `Named` shape)
@@ -1146,10 +1255,15 @@ fn push_cursor_elements(
             // every scale. Sizing the element here instead would ask
             // the GLES renderer to filter a 1-bit shape up, blurring
             // the halo the arrow reads against dark windows by.
+            let position = location.to_physical(1.0);
+            let arrow = cursors.arrow();
+            if !memory_element_reaches_viewport(position.to_i32_round(), arrow.size, viewport.size) {
+                return;
+            }
             match MemoryRenderBufferRenderElement::from_buffer(
                 renderer,
-                location.to_physical(1.0),
-                &cursors.arrow().buffer,
+                position,
+                &arrow.buffer,
                 None,
                 None,
                 None,
@@ -1159,5 +1273,54 @@ fn push_cursor_elements(
                 Err(error) => tracing::warn!(?error, "failed to import the default cursor"),
             }
         }
+    }
+}
+
+fn memory_element_reaches_viewport(
+    location: SPoint<i32, Physical>,
+    size: wm_theme_api::Size,
+    viewport: wm_theme_api::Size,
+) -> bool {
+    let rect = Rect::new(
+        Point::new(location.x, location.y),
+        size,
+    );
+    overlap_area(rect, Rect::new(Point::new(0, 0), viewport)) > 0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wm_theme_api::Size;
+
+    #[test]
+    fn viewport_overlap_is_half_open_and_overflow_safe() {
+        let output = Rect::new(Point::new(100, 50), Size::new(1920, 1080));
+        assert_eq!(overlap_area(output, Rect::new(Point::new(2020, 50), Size::new(20, 20))), 0);
+        assert_eq!(overlap_area(output, Rect::new(Point::new(2019, 1129), Size::new(20, 20))), 1);
+        assert_eq!(
+            overlap_area(
+                Rect::new(Point::new(i32::MAX - 4, i32::MAX - 4), Size::new(u32::MAX, u32::MAX)),
+                Rect::new(Point::new(i32::MAX - 2, i32::MAX - 2), Size::new(2, 2)),
+            ),
+            4,
+        );
+    }
+
+    #[test]
+    fn disjoint_output_admission_removes_cross_output_duplicates() {
+        let outputs = [
+            Rect::new(Point::new(0, 0), Size::new(1920, 1080)),
+            Rect::new(Point::new(1920, 0), Size::new(1920, 1080)),
+        ];
+        let objects = [
+            Rect::new(Point::new(100, 100), Size::new(800, 600)),
+            Rect::new(Point::new(2200, 100), Size::new(800, 600)),
+        ];
+        let admitted = outputs
+            .iter()
+            .flat_map(|output| objects.iter().filter(move |object| overlap_area(**object, *output) > 0))
+            .count();
+        assert_eq!(admitted, objects.len(), "each disjoint object belongs to one output, not both");
     }
 }

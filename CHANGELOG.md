@@ -7,6 +7,23 @@ crate and both session binaries carry the same number.
 
 ### Performance
 
+- **Multi-output visibility math is now genuinely disjoint.** The old
+  overlap helper used signed `saturating_sub`, which preserves a negative
+  distance; casting that miss to `u64` made a non-overlapping monitor look
+  enormous, could overflow and panic in debug builds, and could select the
+  wrong output for frame callbacks in release builds. Intersections now use
+  widened edge arithmetic and clamp misses to zero. Tests cover flush edges,
+  opposite-monitor objects, and adversarial `i32`/`u32` extents.
+- **Each output now assembles only the scene that can reach it.** Ledger
+  rectangles admit the common case in constant time, while an object outside
+  them falls back to Smithay's exact surface-tree bounds so subsurfaces,
+  shadows, and popups still cross monitor edges correctly. Disjoint windows,
+  shell furniture, layers, frames, lock surfaces, and cursors are omitted
+  before import/element construction; notably, a cursor on one display can no
+  longer disqualify direct scanout on another. For N outputs with non-spanning
+  content, surface-element construction falls from N copies per tree to one—a
+  50% reduction on two displays and 75% on four—while whole-desktop and region
+  captures use the same bounded scene path.
 - **Steady scene and protocol assembly no longer hide nested vector
   allocations.** Wayland surface trees now stream render elements directly
   into each output's retained scene instead of allocating one temporary vector

@@ -89,7 +89,7 @@ use smithay::utils::{DeviceFd, Transform};
 use smithay::wayland::presentation::Refresh;
 use smithay::desktop::utils::OutputPresentationFeedback;
 
-use wm_theme_api::{Point, Size};
+use wm_theme_api::{Point, Rect, Size};
 
 use crate::state::{Compositor, Graphics, OutputSetup};
 
@@ -1606,7 +1606,16 @@ pub(crate) fn render_frame_session(comp: &mut Compositor) {
     // Disjoint field borrows: the graphics stack mutates while the
     // ledger is read. Both live on `Compositor`, so destructure rather
     // than going through `&mut self` methods.
-    let Compositor { wm, graphics, outputs, pointer_location, cursor_status, cursors, start_time, .. } = comp;
+    let Compositor {
+        wm,
+        graphics,
+        outputs: output_entries,
+        pointer_location,
+        cursor_status,
+        cursors,
+        start_time,
+        ..
+    } = comp;
     let Graphics::Session(session) = graphics else {
         return;
     };
@@ -1682,10 +1691,21 @@ pub(crate) fn render_frame_session(comp: &mut Compositor) {
             output.drm_compositor.reset_buffer_ages();
         }
 
-        // One scene build per output: the elements are the same objects
-        // in different places, since `render_frame` intersects them
-        // against a rectangle anchored at this output's own origin and
-        // knows nothing of where the output sits globally.
+        // One scene build per output: shared objects are translated
+        // into this framebuffer's coordinates, while objects wholly
+        // outside its global viewport are omitted before import and
+        // element construction. `render_frame` sees a compact local
+        // scene rather than discovering the other displays by clipping.
+        let viewport = output_entries
+            .get(output_index)
+            .map(|entry| Rect::new(entry.position, entry.size))
+            .unwrap_or_else(|| {
+                wm.backend()
+                    .monitors
+                    .get(output_index)
+                    .map(|monitor| monitor.geometry)
+                    .unwrap_or_else(|| Rect::new(output.position, wm.backend().output_size))
+            });
         let clear_color = crate::renderer::build_scene_into(
             &mut output.scene_scratch,
             wm.backend(),
@@ -1693,7 +1713,7 @@ pub(crate) fn render_frame_session(comp: &mut Compositor) {
             *pointer_location,
             cursor_status,
             cursors,
-            output.position,
+            viewport,
         );
 
         let (rendered, direct_scanout) =
@@ -1739,7 +1759,7 @@ pub(crate) fn render_frame_session(comp: &mut Compositor) {
                     });
                     frame_queued = true;
                     if let (Some(entry), Some(monitor)) =
-                        (outputs.get(output_index), wm.backend().monitors.get(output_index))
+                        (output_entries.get(output_index), wm.backend().monitors.get(output_index))
                     {
                         output.presentation = Some(crate::renderer::take_presentation_feedback(
                             wm.backend(),
@@ -1753,7 +1773,7 @@ pub(crate) fn render_frame_session(comp: &mut Compositor) {
                 Err(FrameError::EmptyFrame) => {
                     tracing::trace!(output = %output.name, "frame produced no crtc changes; no page flip queued");
                     if let (Some(entry), Some(monitor)) =
-                        (outputs.get(output_index), wm.backend().monitors.get(output_index))
+                        (output_entries.get(output_index), wm.backend().monitors.get(output_index))
                     {
                         let mut feedback = crate::renderer::take_presentation_feedback(
                             wm.backend(),
@@ -1823,7 +1843,7 @@ pub(crate) fn render_frame_session(comp: &mut Compositor) {
         // A frame reached the hardware, so the failure streak that
         // throttles the warnings above is over.
         crate::renderer::note_frame_success();
-        if let Some(primary) = outputs.first() {
+        if let Some(primary) = output_entries.first() {
             crate::renderer::send_frame_callbacks(wm.backend(), &primary.output, cursor_status, start_time.elapsed());
         }
     }

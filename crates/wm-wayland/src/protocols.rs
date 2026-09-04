@@ -1205,7 +1205,7 @@ fn capture_region(
     let renderer = graphics_renderer(graphics);
     let hidden = CursorImageStatus::Hidden;
     let status = if overlay_cursor { &*cursor_status } else { &hidden };
-    let (elements, clear_color) = build_scene(wm.backend(), renderer, *pointer_location, status, cursors, region.pos);
+    let (elements, clear_color) = build_scene(wm.backend(), renderer, *pointer_location, status, cursors, region);
     render_offscreen(renderer, &elements, region.size, transform, clear_color)
 }
 

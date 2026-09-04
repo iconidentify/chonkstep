@@ -72,7 +72,7 @@ use smithay::utils::{Buffer as BufferCoords, Physical, Point as SPoint, Rectangl
 use smithay::utils::{Size as SSize, Transform};
 
 use wm_core::WindowType;
-use wm_theme_api::{DecorationBuffer, Point, Size};
+use wm_theme_api::{DecorationBuffer, Point, Rect, Size};
 
 use crate::renderer::{build_scene, SceneElement};
 use crate::state::{Compositor, Graphics, WlWindowId};
@@ -249,7 +249,7 @@ pub(crate) fn capture_output_png(comp: &mut Compositor, path: &Path) -> Result<(
         cursors,
         // No viewport offset: the capture *is* the global space, so
         // every element stays at the coordinate the ledger holds it at.
-        Point::new(0, 0),
+        Rect::new(Point::new(0, 0), size),
     );
     let buffer = render_offscreen(renderer, &elements, size, 1.0, clear_color)
         .ok_or_else(|| "offscreen render of the desktop failed".to_string())?;
