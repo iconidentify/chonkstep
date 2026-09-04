@@ -12,9 +12,34 @@ use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use chonk_testkit::{poll_until, Session, SessionOptions};
+use chonk_testkit::{poll_until, Session, SessionOptions, WindowInfo};
 
 const EVENT: Duration = Duration::from_secs(15);
+const BROWSER_STARTUP: Duration = Duration::from_secs(90);
+
+fn wait_for_chromium(session: &mut Session) -> WindowInfo {
+    let browser = poll_until(BROWSER_STARTUP, "Chromium to map its first window", || {
+        if let Ok(world) = session.world() {
+            if let Some(window) = world.window_matching("hromium") {
+                return Some(Ok(window.clone()));
+            }
+        }
+        match session.client_status("chromium") {
+            Ok(Some(status)) => Some(Err(format!("Chromium exited before mapping: {status}"))),
+            Ok(None) => None,
+            Err(error) => Some(Err(error)),
+        }
+    })
+    .and_then(|result| result);
+    browser.unwrap_or_else(|error| {
+        let client_log = std::fs::read_to_string(session.dir.join("client-0-chromium.log"))
+            .unwrap_or_else(|read_error| format!("<could not read Chromium log: {read_error}>"));
+        panic!(
+            "{error}\n--- Chromium log ---\n{client_log}\n--- compositor log ---\n{}",
+            session.log()
+        );
+    })
+}
 
 fn hyprland_request(session: &Session, payload: &str) -> String {
     let signature = poll_until(EVENT, "the Hyprland compatibility socket", || {
@@ -69,21 +94,35 @@ fn chromium_popup_without_a_new_anchor_is_dismissed_on_parent_resize() {
     )
     .unwrap();
     let profile = session.dir.join("chromium-data");
+    std::fs::create_dir_all(&profile).unwrap();
     let data = format!("--user-data-dir={}", profile.display());
+    let mut chromium_args = vec![
+        "--ozone-platform=wayland",
+        data.as_str(),
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--window-size=900,600",
+        "--disable-background-networking",
+        "--disable-component-update",
+        "--disable-default-apps",
+        "--disable-extensions",
+        "--disable-sync",
+        "--metrics-recording-only",
+        "--password-store=basic",
+        "about:blank",
+    ];
+    if std::env::var_os("CI").is_some() {
+        // Hosted runners deny Chromium's user namespace and expose no
+        // DRM device. Match the established real-browser scale test:
+        // an isolated about:blank profile plus SwANGLE keeps the actual
+        // browser compositor path while making startup deterministic.
+        chromium_args.push("--no-sandbox");
+        chromium_args.extend(["--use-gl=angle", "--use-angle=swiftshader"]);
+    }
     session
-        .launch(
-            "chromium",
-            &[
-                "--ozone-platform=wayland",
-                data.as_str(),
-                "--no-first-run",
-                "--no-default-browser-check",
-                "--window-size=900,600",
-                "about:blank",
-            ],
-        )
+        .launch("chromium", &chromium_args)
         .unwrap();
-    let window = session.wait_for_window("hromium").unwrap();
+    let window = wait_for_chromium(&mut session);
     session.door().barrier().unwrap();
     session
         .door()
