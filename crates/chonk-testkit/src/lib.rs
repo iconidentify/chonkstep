@@ -1178,8 +1178,8 @@ impl Door {
 
     /// The production scene hit-test's coarse target class at one
     /// output-global point (`root`, `shell`, `frame`, `content`,
-    /// `layer`, or `ime`). This observes input policy directly instead
-    /// of inferring it from an application's side effects.
+    /// `layer`, `ime`, or `lock`). This observes input policy directly
+    /// instead of inferring it from an application's side effects.
     pub fn hit(&mut self, x: i32, y: i32) -> Result<String, String> {
         self.send(&format!("hit {x} {y}"))?;
         let line = self.read_line()?;

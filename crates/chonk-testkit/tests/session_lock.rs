@@ -175,6 +175,16 @@ fn a_client_that_does_not_hold_the_lock_cannot_unlock_the_session() {
     checkpoint(&session, "locked ");
     checkpoint(&session, "holding the lock");
 
+    // Input and rendering must describe the same security domain. The
+    // production hit-test is also what tablet motion now uses, so an
+    // answer of `lock` here proves a point visibly covered by the lock
+    // can resolve neither a normal window nor a layer/shell surface
+    // behind it.
+    assert_eq!(
+        session.door().hit(640, 400).expect("the locked hit-test answers"),
+        "lock"
+    );
+
     // What a locked session looks like from outside: the locker's navy
     // fills the output, because `renderer::build_scene` returns before
     // it can reach a single non-lock surface — including for `grim`,

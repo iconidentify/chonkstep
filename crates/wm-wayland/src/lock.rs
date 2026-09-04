@@ -312,6 +312,14 @@ impl SessionLockHandler for Compositor {
                 backend.mark_damaged();
                 let seat = self.seat.clone();
                 crate::input::clear_implicit_grab(&seat);
+                // Smithay also owns a client click grab and each
+                // tablet tool owns an independent proximity focus.
+                // End both and make the pointer leave the pre-lock
+                // desktop now, before a physical event can reuse
+                // either focus. There is no lock surface yet, so this
+                // first sync deliberately focuses nothing; new_surface
+                // below moves it onto the correct lock surface.
+                crate::input::reset_client_input_focus(self);
                 // Focus leaves whatever window held it *now*: the very
                 // next key must not reach a client behind the lock,
                 // and the lock surface (which does not exist yet)
@@ -344,6 +352,11 @@ impl SessionLockHandler for Compositor {
         // where it is actually read, in [`prime_reused_lock_surface`].
         backend.lock_surfaces.clear();
         backend.mark_damaged();
+        // The locker's pointer/tablet focus is no more valid on the
+        // restored desktop than desktop focus was when the lock
+        // landed. Break any lock-surface click/tip grab and recompute
+        // the client under the saved pointer position immediately.
+        crate::input::reset_client_input_focus(self);
         // The keyboard goes home — to whoever would be holding it had
         // the lock never happened, which is not always a window. A
         // layer surface with exclusive interactivity (Omarchy's
@@ -396,6 +409,12 @@ impl SessionLockHandler for Compositor {
         self.wm.backend_mut().lock_surfaces.push(LockSurfaceEntry { output: index, surface: surface.clone() });
         self.session_lock.mark_dirty();
         self.wm.backend_mut().mark_damaged();
+        // Pointer focus was cleared as soon as the lock was accepted,
+        // before this surface existed. Put it on the newly available
+        // lock surface immediately rather than waiting for motion; on
+        // a multi-output lock each arrival re-evaluates the pointer's
+        // output and only that matching surface can win.
+        crate::input::sync_pointer_focus(self);
         if focus_target {
             if let Some(keyboard) = self.seat.get_keyboard() {
                 keyboard.set_focus(self, Some(surface.wl_surface().clone()), SERIAL_COUNTER.next_serial());

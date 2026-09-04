@@ -65,7 +65,7 @@
 //! | `repeat` | replies with the held compositor-binding repeat count and interval, or `repeat none` |
 //! | `activation-tokens` | replies with the number of retained xdg-activation tokens |
 //! | `protocol-publishes` | replies with Hyprland event-snapshot, foreign full-sync and foreign dragged-window-sync counters |
-//! | `hit X Y` | replies with `hit root\|shell\|frame\|content\|layer\|ime` from the production scene hit-test |
+//! | `hit X Y` | replies with `hit root\|shell\|frame\|content\|layer\|ime\|lock` from the production scene hit-test |
 //! | `barrier` | replies `ok` once every command before it has been dispatched **and** a frame has been rendered with no damage left over |
 //! | `windows` | replies one line per ledger entry (see below), then `done` |
 //!

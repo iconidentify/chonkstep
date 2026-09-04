@@ -58,13 +58,15 @@
 //! it.
 
 use std::cell::RefCell;
+use std::collections::HashSet;
 
 use smithay::backend::input::{
     AbsolutePositionEvent, Axis, AxisSource, ButtonState, Event, GestureBeginEvent, GestureEndEvent,
     GesturePinchUpdateEvent as BackendPinchUpdateEvent, GestureSwipeUpdateEvent as BackendSwipeUpdateEvent,
     Device, DeviceCapability, InputBackend, InputEvent, KeyState, KeyboardKeyEvent, MouseButton as InputMouseButton, PointerAxisEvent,
     PointerButtonEvent, PointerMotionEvent, ProximityState, TabletToolButtonEvent,
-    TabletToolEvent, TabletToolProximityEvent, TabletToolTipEvent, TabletToolTipState,
+    TabletToolDescriptor, TabletToolEvent, TabletToolProximityEvent, TabletToolTipEvent,
+    TabletToolTipState,
 };
 use smithay::desktop::utils::under_from_surface_tree;
 use smithay::desktop::WindowSurfaceType;
@@ -142,6 +144,13 @@ struct InputState {
     /// Leftover fractions of a wheel notch, for the shell's discrete
     /// scroll channel — see [`ScrollAccumulator`].
     scroll: ScrollAccumulator,
+    /// Tablet tools currently in proximity. Smithay keeps the handles
+    /// internally but exposes no iterator over them, so this bounded
+    /// set is the compositor's way to send every focused tool a
+    /// `proximity_out` when the session lock changes the entire input
+    /// domain underneath it. Entries leave on the matching physical
+    /// proximity-out and the whole set is drained on lock/unlock.
+    active_tablet_tools: HashSet<TabletToolDescriptor>,
 }
 
 #[derive(Clone, Copy)]
@@ -320,6 +329,64 @@ pub(crate) fn clear_implicit_grab(seat: &Seat<Compositor>) {
     });
 }
 
+/// Re-homes client input when the lock boundary changes.
+///
+/// Smithay's pointer has its own click grab in addition to the routing
+/// grab above. A button held as the lock lands would otherwise pin the
+/// seat to the pre-lock client even after a motion naming `None`, so
+/// that grab is explicitly broken before focus is recomputed. Tablet
+/// tools need the equivalent `proximity_out`; Smithay exposes lookup
+/// by descriptor but not iteration, hence the active set in
+/// [`InputState`]. This is called on both lock and unlock so neither
+/// domain inherits focus or a held tip from the other.
+pub(crate) fn reset_client_input_focus(state: &mut Compositor) {
+    let seat = state.seat.clone();
+    let time = state.start_time.elapsed().as_millis() as u32;
+    let tools = with_input(&seat, |input| std::mem::take(&mut input.active_tablet_tools));
+    let tablet_seat = seat.tablet_seat();
+    for descriptor in tools {
+        if let Some(tool) = tablet_seat.get_tool(&descriptor) {
+            tool.proximity_out(time);
+        }
+    }
+    if let Some(pointer) = seat.get_pointer() {
+        pointer.unset_grab(state, SERIAL_COUNTER.next_serial(), time);
+    }
+    sync_pointer_focus(state);
+}
+
+/// Makes the seat's pointer focus agree with the current scene domain
+/// without waiting for physical motion. While locked, `hit_at` can
+/// return only a lock surface or the root; while unlocked it returns
+/// the ordinary scene beneath the saved pointer location.
+pub(crate) fn sync_pointer_focus(state: &mut Compositor) {
+    let Some(pointer) = state.seat.get_pointer() else {
+        return;
+    };
+    let position = state.pointer_location;
+    let at = Point::new(position.x.floor() as i32, position.y.floor() as i32);
+    let focus = client_focus(&hit_at(state.wm.backend(), at, position));
+    let event = MotionEvent {
+        location: position,
+        serial: SERIAL_COUNTER.next_serial(),
+        time: state.start_time.elapsed().as_millis() as u32,
+    };
+    pointer.motion(state, focus, &event);
+    pointer.frame(state);
+}
+
+fn remember_tablet_tool(seat: &Seat<Compositor>, descriptor: TabletToolDescriptor) {
+    with_input(seat, |input| {
+        input.active_tablet_tools.insert(descriptor);
+    });
+}
+
+fn forget_tablet_tool(seat: &Seat<Compositor>, descriptor: &TabletToolDescriptor) {
+    with_input(seat, |input| {
+        input.active_tablet_tools.remove(descriptor);
+    });
+}
+
 /// Runs `f` against the seat's [`InputState`], creating it on first
 /// use. Callers keep each access short — never across a seat call that
 /// re-enters the `Compositor` handlers — which the closure shape makes
@@ -427,11 +494,111 @@ pub(crate) fn apply_pointer_grab_change(state: &mut Compositor) {
             // window unable to report so much as a hover.
             let at = Point::new(location.x.floor() as i32, location.y.floor() as i32);
             let focus = match hit_at(state.wm.backend(), at, location) {
-                Hit::Content { surface: Some(surface), origin, .. } => Some((surface, origin)),
+                Hit::Content { surface: Some(surface), origin, .. }
+                | Hit::Lock { surface, origin } => Some((surface, origin)),
                 _ => None,
             };
             pointer.motion(state, focus, &MotionEvent { location, serial, time });
             pointer.frame(state);
+        }
+    }
+}
+
+/// The policy-relevant family of one Smithay input event.
+///
+/// [`InputEvent`] is matched exhaustively here rather than through a
+/// wildcard at each policy site. When Smithay grows another event
+/// variant, this function stops compiling until its idle and lock
+/// behavior are stated alongside every family already handled.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum InputFamily {
+    DeviceLifecycle,
+    Keyboard,
+    PointerMotion,
+    PointerButton,
+    PointerAxis,
+    Gesture,
+    Touch,
+    TabletTool,
+    Switch,
+    Special,
+}
+
+/// How a family is kept on the safe side of the session-lock boundary.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LockedInputRoute {
+    /// This family is lifecycle data or is not delivered to clients.
+    NoClientDelivery,
+    /// The keyboard handler filters bindings and uses only its explicit
+    /// lock-surface focus.
+    KeyboardFilter,
+    /// Motion has a dedicated early branch that calls `lock_hit`.
+    PointerMotionHandler,
+    /// Buttons, axes and gestures use the seat's pointer focus, so it
+    /// must be re-asserted against `lock_hit` before delivery.
+    PointerFocus,
+    /// Tablet motion resolves through the lock-aware scene hit-test;
+    /// buttons use the tool focus that motion established or no focus.
+    TabletHitTest,
+}
+
+impl InputFamily {
+    fn of<B: InputBackend>(event: &InputEvent<B>) -> Self {
+        match event {
+            InputEvent::DeviceAdded { .. } | InputEvent::DeviceRemoved { .. } => {
+                Self::DeviceLifecycle
+            }
+            InputEvent::Keyboard { .. } => Self::Keyboard,
+            InputEvent::PointerMotion { .. } | InputEvent::PointerMotionAbsolute { .. } => {
+                Self::PointerMotion
+            }
+            InputEvent::PointerButton { .. } => Self::PointerButton,
+            InputEvent::PointerAxis { .. } => Self::PointerAxis,
+            InputEvent::GestureSwipeBegin { .. }
+            | InputEvent::GestureSwipeUpdate { .. }
+            | InputEvent::GestureSwipeEnd { .. }
+            | InputEvent::GesturePinchBegin { .. }
+            | InputEvent::GesturePinchUpdate { .. }
+            | InputEvent::GesturePinchEnd { .. }
+            | InputEvent::GestureHoldBegin { .. }
+            | InputEvent::GestureHoldEnd { .. } => Self::Gesture,
+            InputEvent::TouchDown { .. }
+            | InputEvent::TouchMotion { .. }
+            | InputEvent::TouchUp { .. }
+            | InputEvent::TouchCancel { .. }
+            | InputEvent::TouchFrame { .. } => Self::Touch,
+            InputEvent::TabletToolAxis { .. }
+            | InputEvent::TabletToolProximity { .. }
+            | InputEvent::TabletToolTip { .. }
+            | InputEvent::TabletToolButton { .. } => Self::TabletTool,
+            InputEvent::SwitchToggle { .. } => Self::Switch,
+            InputEvent::Special(_) => Self::Special,
+        }
+    }
+
+    fn resets_idle(self) -> bool {
+        matches!(
+            self,
+            Self::Keyboard
+                | Self::PointerMotion
+                | Self::PointerButton
+                | Self::PointerAxis
+                | Self::Gesture
+                | Self::TabletTool
+        )
+    }
+
+    fn locked_route(self) -> LockedInputRoute {
+        match self {
+            Self::DeviceLifecycle | Self::Touch | Self::Switch | Self::Special => {
+                LockedInputRoute::NoClientDelivery
+            }
+            Self::Keyboard => LockedInputRoute::KeyboardFilter,
+            Self::PointerMotion => LockedInputRoute::PointerMotionHandler,
+            Self::PointerButton | Self::PointerAxis | Self::Gesture => {
+                LockedInputRoute::PointerFocus
+            }
+            Self::TabletTool => LockedInputRoute::TabletHitTest,
         }
     }
 }
@@ -441,27 +608,20 @@ pub(crate) fn apply_pointer_grab_change(state: &mut Compositor) {
 /// winit dev loop and a future libinput session share every line of
 /// routing policy — only the raw event types differ.
 pub(crate) fn process_input_event<I: InputBackend>(state: &mut Compositor, event: InputEvent<I>) {
-    // Every real input event is user activity to the idle timers,
-    // decided here — at the one funnel both backends' raw events pass
-    // through — rather than per handler, where a new event kind would
-    // silently not reset the screen locker's countdown.
-    if matches!(
-        event,
-        InputEvent::Keyboard { .. }
-            | InputEvent::PointerMotionAbsolute { .. }
-            | InputEvent::PointerMotion { .. }
-            | InputEvent::PointerButton { .. }
-            | InputEvent::PointerAxis { .. }
-            | InputEvent::GestureSwipeBegin { .. }
-            | InputEvent::GestureSwipeUpdate { .. }
-            | InputEvent::GestureSwipeEnd { .. }
-            | InputEvent::GesturePinchBegin { .. }
-            | InputEvent::GesturePinchUpdate { .. }
-            | InputEvent::GesturePinchEnd { .. }
-            | InputEvent::GestureHoldBegin { .. }
-            | InputEvent::GestureHoldEnd { .. }
-    ) {
+    let family = InputFamily::of(&event);
+    // Every input event this compositor routes is user activity to the
+    // idle timers, decided here at the one funnel both backends share.
+    // The exhaustive family classifier and its table-driven test make
+    // a newly routed family state that policy before it can compile.
+    if family.resets_idle() {
         crate::idle::note_activity(state);
+    }
+    // Buttons, scroll and gestures are delivered against the seat's
+    // existing pointer focus. Re-assert the locked domain before any
+    // of them can use it: this covers the instant a lock lands and
+    // also a lock surface being replaced without physical motion.
+    if state.wm.backend().locked && family.locked_route() == LockedInputRoute::PointerFocus {
+        sync_pointer_focus(state);
     }
     match event {
         InputEvent::DeviceAdded { device } => {
@@ -597,7 +757,13 @@ pub(crate) fn process_input_event<I: InputBackend>(state: &mut Compositor, event
         InputEvent::TabletToolButton { event } => on_tablet_button::<I>(state, event),
         // Touch and switch devices remain represented in the device
         // registry above; their protocol/event policy is independent.
-        _ => {}
+        InputEvent::TouchDown { .. }
+        | InputEvent::TouchMotion { .. }
+        | InputEvent::TouchUp { .. }
+        | InputEvent::TouchCancel { .. }
+        | InputEvent::TouchFrame { .. }
+        | InputEvent::SwitchToggle { .. }
+        | InputEvent::Special(_) => {}
     }
 }
 
@@ -606,6 +772,7 @@ pub(crate) fn process_input_event<I: InputBackend>(state: &mut Compositor, event
 fn tablet_handles<I: InputBackend, E: TabletToolEvent<I>>(
     state: &mut Compositor,
     event: &E,
+    descriptor: &TabletToolDescriptor,
 ) -> (
     smithay::wayland::tablet_manager::TabletHandle,
     smithay::wayland::tablet_manager::TabletToolHandle,
@@ -618,7 +785,7 @@ fn tablet_handles<I: InputBackend, E: TabletToolEvent<I>>(
     let tablet = tablet_seat
         .get_tablet(&tablet_desc)
         .unwrap_or_else(|| tablet_seat.add_tablet::<Compositor>(&display, &tablet_desc));
-    let tool = tablet_seat.add_tool::<Compositor>(state, &display, &event.tool());
+    let tool = tablet_seat.add_tool::<Compositor>(state, &display, descriptor);
     (tablet, tool)
 }
 
@@ -632,10 +799,18 @@ fn tablet_focus(
     position: LogicalPoint<f64, Logical>,
 ) -> Option<(WlSurface, LogicalPoint<f64, Logical>)> {
     let at = Point::new(position.x.floor() as i32, position.y.floor() as i32);
-    match hit_at(backend, at, position) {
+    client_focus(&hit_at(backend, at, position))
+}
+
+/// The seat focus represented by a scene hit. Kept as one adapter so
+/// pointer re-synchronisation and tablet motion cannot disagree about
+/// which client-owned surface a `Hit` names.
+fn client_focus(hit: &Hit) -> Option<(WlSurface, LogicalPoint<f64, Logical>)> {
+    match hit {
         Hit::Content { surface: Some(surface), origin, .. }
         | Hit::Layer { surface, origin, .. }
-        | Hit::Ime { surface, origin } => Some((surface, origin)),
+        | Hit::Ime { surface, origin }
+        | Hit::Lock { surface, origin } => Some((surface.clone(), *origin)),
         _ => None,
     }
 }
@@ -666,7 +841,9 @@ fn queue_tablet_axes<I: InputBackend, E: TabletToolEvent<I>>(
 
 fn on_tablet_axis<I: InputBackend>(state: &mut Compositor, event: I::TabletToolAxisEvent) {
     let position = tablet_position::<I, _>(state, &event);
-    let (tablet, tool) = tablet_handles::<I, _>(state, &event);
+    let descriptor = event.tool();
+    let (tablet, tool) = tablet_handles::<I, _>(state, &event, &descriptor);
+    remember_tablet_tool(&state.seat, descriptor);
     queue_tablet_axes::<I, _>(&tool, &event);
     let focus = tablet_focus(state.wm.backend(), position);
     tool.motion(position, focus, &tablet, SERIAL_COUNTER.next_serial(), event.time_msec());
@@ -675,21 +852,28 @@ fn on_tablet_axis<I: InputBackend>(state: &mut Compositor, event: I::TabletToolA
 
 fn on_tablet_proximity<I: InputBackend>(state: &mut Compositor, event: I::TabletToolProximityEvent) {
     let position = tablet_position::<I, _>(state, &event);
-    let (tablet, tool) = tablet_handles::<I, _>(state, &event);
+    let descriptor = event.tool();
+    let (tablet, tool) = tablet_handles::<I, _>(state, &event, &descriptor);
     queue_tablet_axes::<I, _>(&tool, &event);
     match event.state() {
         ProximityState::In => {
+            remember_tablet_tool(&state.seat, descriptor);
             let focus = tablet_focus(state.wm.backend(), position);
             tool.motion(position, focus, &tablet, SERIAL_COUNTER.next_serial(), event.time_msec());
         }
-        ProximityState::Out => tool.proximity_out(event.time_msec()),
+        ProximityState::Out => {
+            tool.proximity_out(event.time_msec());
+            forget_tablet_tool(&state.seat, &descriptor);
+        }
     }
     state.wm.backend_mut().mark_damaged();
 }
 
 fn on_tablet_tip<I: InputBackend>(state: &mut Compositor, event: I::TabletToolTipEvent) {
     let position = tablet_position::<I, _>(state, &event);
-    let (tablet, tool) = tablet_handles::<I, _>(state, &event);
+    let descriptor = event.tool();
+    let (tablet, tool) = tablet_handles::<I, _>(state, &event, &descriptor);
+    remember_tablet_tool(&state.seat, descriptor);
     queue_tablet_axes::<I, _>(&tool, &event);
     let focus = tablet_focus(state.wm.backend(), position);
     let serial = SERIAL_COUNTER.next_serial();
@@ -702,7 +886,9 @@ fn on_tablet_tip<I: InputBackend>(state: &mut Compositor, event: I::TabletToolTi
 }
 
 fn on_tablet_button<I: InputBackend>(state: &mut Compositor, event: I::TabletToolButtonEvent) {
-    let (_, tool) = tablet_handles::<I, _>(state, &event);
+    let descriptor = event.tool();
+    let (_, tool) = tablet_handles::<I, _>(state, &event, &descriptor);
+    remember_tablet_tool(&state.seat, descriptor);
     tool.button(event.button(), event.button_state(), SERIAL_COUNTER.next_serial(), event.time_msec());
 }
 
@@ -1016,6 +1202,7 @@ fn surface_focus_at(
         Hit::Content { surface: Some(surface), origin, .. }
         | Hit::Layer { surface, origin, .. }
         | Hit::Ime { surface, origin }
+        | Hit::Lock { surface, origin }
             if &surface == wanted => Some((surface, origin)),
         _ => None,
     }
@@ -1247,6 +1434,9 @@ fn pointer_moved(
                 focus = Some((surface.clone(), *origin));
             }
             Hit::Ime { surface, origin } => {
+                focus = Some((surface.clone(), *origin));
+            }
+            Hit::Lock { surface, origin } => {
                 focus = Some((surface.clone(), *origin));
             }
             Hit::Root => {
@@ -1611,6 +1801,7 @@ fn grab_excludes(state: &Compositor, hit: &Hit) -> bool {
             (surface.clone(), root)
         }
         Hit::Ime { surface, .. } => (Some(surface.clone()), Some(surface.clone())),
+        Hit::Lock { surface, .. } => (Some(surface.clone()), Some(surface.clone())),
         // Our own chrome around a client's window. The client owns no
         // pixel of it, so only the whole window being whitelisted keeps
         // a titlebar click from dismissing.
@@ -1644,6 +1835,10 @@ fn press_target(hit: &Hit) -> PressTarget {
         Hit::Content { window, .. } => PressTarget::Content(*window),
         Hit::Layer { layer, .. } => PressTarget::Layer(*layer),
         Hit::Ime { .. } => PressTarget::Ime,
+        // Locked pointer handlers return before route/press-target
+        // selection. Root is the fail-closed fallback if that contract
+        // is ever refactored: no desktop client can receive the event.
+        Hit::Lock { .. } => PressTarget::Root,
         Hit::Root => PressTarget::Root,
     }
 }
@@ -1895,6 +2090,17 @@ fn route_shell_scroll<I: InputBackend>(state: &mut Compositor, event: &I::Pointe
 /// and the renderer's makes clicks land on things the user cannot see,
 /// so both sides cite `backend_impl.rs`'s stacking-band contract.
 fn hit_at(backend: &WaylandBackend, at: Point, position: LogicalPoint<f64, Logical>) -> Hit {
+    // The lock is a scene domain, not one more band in the desktop's
+    // z-order. Put its boundary on the shared hit-test itself so a new
+    // input caller cannot accidentally see a window, layer, shell or
+    // IME behind it. Existing pointer handlers keep their cheaper
+    // dedicated branch; tablet focus reaches this authority directly.
+    if backend.locked {
+        return lock_hit(backend, position)
+            .map(|(surface, origin)| Hit::Lock { surface, origin })
+            .unwrap_or(Hit::Root);
+    }
+
     // Candidate windows are rendered above every layer and therefore
     // get the first chance at pointer input.
     for popup in backend.ime_popups.iter().rev() {
@@ -2075,6 +2281,7 @@ pub(crate) fn hit_kind_at(backend: &WaylandBackend, at: Point) -> &'static str {
         Hit::Content { .. } => "content",
         Hit::Layer { .. } => "layer",
         Hit::Ime { .. } => "ime",
+        Hit::Lock { .. } => "lock",
         Hit::Root => "root",
     }
 }
@@ -2234,7 +2441,9 @@ pub(crate) fn pointer_subject(backend: &WaylandBackend, position: LogicalPoint<f
     match hit_at(backend, at, position) {
         // A layer surface is client territory like any window content:
         // its `set_cursor` choice applies while the pointer is on it.
-        Hit::Content { .. } | Hit::Layer { .. } | Hit::Ime { .. } => PointerSubject::Client,
+        Hit::Content { .. } | Hit::Layer { .. } | Hit::Ime { .. } | Hit::Lock { .. } => {
+            PointerSubject::Client
+        }
         Hit::FrameChrome { frame, .. } => PointerSubject::Frame(backend.frame_cursors.get(&frame).copied()),
         Hit::Shell { .. } | Hit::Root => PointerSubject::Desktop,
     }
@@ -2281,6 +2490,10 @@ enum Hit {
     Layer { layer: crate::layers::LayerId, surface: WlSurface, origin: LogicalPoint<f64, Logical> },
     /// An input-method candidate popup, above every normal layer.
     Ime { surface: WlSurface, origin: LogicalPoint<f64, Logical> },
+    /// The lock surface under the pointer. This variant can exist only
+    /// while `backend.locked`; the early return in `hit_at` makes every
+    /// ordinary desktop hit structurally unreachable in that state.
+    Lock { surface: WlSurface, origin: LogicalPoint<f64, Logical> },
     /// The desktop background.
     Root,
 }
@@ -2481,6 +2694,34 @@ fn local_to(at: Point, origin: Point) -> Point {
 mod tests {
     use super::*;
     use wm_theme_api::{Rect, Size};
+
+    /// The lock boundary and idle policy are stated once per input
+    /// family, including every family the compositor currently drops.
+    /// `InputFamily::of` is an exhaustive match over Smithay's event
+    /// enum, so a future family first fails to compile there; this
+    /// table then makes its required policy visible in one assertion.
+    #[test]
+    fn every_input_family_has_an_explicit_lock_route_and_idle_policy() {
+        use InputFamily::*;
+        use LockedInputRoute::*;
+
+        let cases = [
+            (DeviceLifecycle, false, NoClientDelivery),
+            (Keyboard, true, KeyboardFilter),
+            (PointerMotion, true, PointerMotionHandler),
+            (PointerButton, true, PointerFocus),
+            (PointerAxis, true, PointerFocus),
+            (Gesture, true, PointerFocus),
+            (Touch, false, NoClientDelivery),
+            (TabletTool, true, TabletHitTest),
+            (Switch, false, NoClientDelivery),
+            (Special, false, NoClientDelivery),
+        ];
+        for (family, resets_idle, locked_route) in cases {
+            assert_eq!(family.resets_idle(), resets_idle, "idle policy for {family:?}");
+            assert_eq!(family.locked_route(), locked_route, "lock route for {family:?}");
+        }
+    }
 
     // Routing and hit-testing need a live seat, a wayland display and a
     // ledger full of surfaces, so they are exercised by running the
