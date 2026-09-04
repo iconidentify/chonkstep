@@ -40,6 +40,12 @@ use chonk_testkit::{is_dark, poll_until, Session, SessionOptions, WindowInfo};
 /// events (crossing a drag threshold, re-committing at a new scale).
 const ACT: Duration = Duration::from_secs(10);
 
+/// Cold Chromium startup on a contended hosted runner includes process,
+/// profile, accessibility, and desktop-service initialization. This remains
+/// a bounded poll, so the longer ceiling costs nothing when the browser is
+/// healthy and prevents runner load from masquerading as a compositor bug.
+const BROWSER_STARTUP: Duration = Duration::from_secs(90);
+
 /// Session options for the CSD tests below: zenity pinned to
 /// client-side decorations by rule.
 ///
@@ -877,13 +883,13 @@ fn chromium_resize_at_scale_2_keeps_its_scale() {
     // Local runs retain Chromium's normal sandbox.
     if std::env::var_os("CI").is_some() {
         chromium_args.push("--no-sandbox");
-        // Hosted runners expose neither a DRM render node nor a usable
-        // Vulkan device. Let Chromium use its software compositor
-        // immediately instead of spending repeated 15-second GPU-process
-        // attempts probing hardware that is not there. It still commits a
-        // 2x buffer through wp_viewport, so this keeps the integration path
-        // whose scale handling the regression asserts.
-        chromium_args.push("--disable-gpu");
+        // Chromium documents SwANGLE (ANGLE + SwiftShader) as its software
+        // OpenGL ES driver for exercising GPU code paths on GPU-less bots.
+        // Unlike `--disable-gpu`, this keeps the browser's compositor path
+        // active while avoiding a dependency on a hosted runner's absent DRM
+        // device. It still commits a 2x buffer through wp_viewport, which is
+        // the integration path whose scale handling this regression asserts.
+        chromium_args.extend(["--use-gl=angle", "--use-angle=swiftshader"]);
     }
     session
         .launch("chromium", &chromium_args)
@@ -894,15 +900,23 @@ fn chromium_resize_at_scale_2_keeps_its_scale() {
     // ten-second ACT deadline; only this heavyweight process startup
     // gets the longer allowance.
     let browser = {
-        let door = session.door();
         poll_until(
-            Duration::from_secs(30),
+            BROWSER_STARTUP,
             "Chromium to map its first window",
             || {
-                let world = door.windows().ok()?;
-                world.window_matching("hromium").cloned()
+                if let Ok(world) = session.world() {
+                    if let Some(window) = world.window_matching("hromium") {
+                        return Some(Ok(window.clone()));
+                    }
+                }
+                match session.client_status("chromium") {
+                    Ok(Some(status)) => Some(Err(format!("Chromium exited before mapping: {status}"))),
+                    Ok(None) => None,
+                    Err(error) => Some(Err(error)),
+                }
             },
         )
+        .and_then(|result| result)
     };
     if let Err(error) = browser {
         let client_log = std::fs::read_to_string(session.dir.join("client-0-chromium.log"))

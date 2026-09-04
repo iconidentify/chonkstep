@@ -66,7 +66,7 @@
 use std::io::{BufRead, BufReader, ErrorKind, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
 /// How long [`Session::boot`] waits for the compositor to open its
@@ -520,6 +520,22 @@ impl Session {
             let world = door.windows().ok()?;
             world.window_matching(needle).cloned()
         })
+    }
+
+    /// Returns the exit status of the most recently launched instance of
+    /// `program`, or `None` while it is still running. This is intentionally
+    /// non-blocking: heavyweight-client startup tests can distinguish a slow
+    /// live process from one that has already failed without weakening their
+    /// bounded-poll contract.
+    pub fn client_status(&mut self, program: &str) -> Result<Option<ExitStatus>, String> {
+        let short = Path::new(program).file_name().and_then(|name| name.to_str()).unwrap_or(program);
+        let (_, child) = self
+            .clients
+            .iter_mut()
+            .rev()
+            .find(|(name, _)| name == short)
+            .ok_or_else(|| format!("no launched client named {short:?}"))?;
+        child.try_wait().map_err(|error| format!("could not query {short:?}: {error}"))
     }
 
     /// Waits for the window matching `needle` to be *gone* from the
