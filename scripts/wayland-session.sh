@@ -31,8 +31,13 @@ set -u
 # it to test the checkout. CHONKSTEP_SESSION_BIN is the supervisor
 # test's seam (see crates/chonk-testkit/tests/supervisor.rs): the
 # watchdog loop below is exercised against a crashing stub instead of
-# the real compositor.
-BIN="${CHONKSTEP_SESSION_BIN:-}"
+# the real compositor. It is honored only with the paired testing
+# marker, so a stale or malicious variable imported into systemd's
+# persistent user environment cannot replace the login compositor.
+BIN=""
+if [ "${CHONKSTEP_SESSION_TESTING:-}" = 1 ]; then
+    BIN="${CHONKSTEP_SESSION_BIN:-}"
+fi
 if [ -z "$BIN" ]; then
     checkout_bin="$(cd "$(dirname "$0")/.." && pwd)/target/release/chonkstep-wayland"
     if [ -x "$checkout_bin" ]; then
@@ -93,7 +98,6 @@ elif [ -r /proc/self/cgroup ] \
     # `activating`, not `active`.
     _CHONKSTEP_UWSM=1
 fi
-export _CHONKSTEP_UWSM
 
 # Deliberately NO CHONKSTEP_BACKEND override. The compositor decides for
 # itself which half of its dual backend to run: an existing
@@ -112,11 +116,37 @@ export _CHONKSTEP_UWSM
 # This includes CHONKSTEP_BACKEND because a prior nested development run
 # may have imported `winit` into the persistent systemd user environment;
 # uwsm intentionally carries arbitrary environment variables forward.
-# The
-# compositor exports its own values — the socket it allocates, and
-# DISPLAY from the XWayland server it starts — to everything it
-# spawns.
-unset DISPLAY WAYLAND_DISPLAY CHONKSTEP_BACKEND
+#
+# The rest are process-private test/restart/session controls. A shell
+# hosted inside a nested compositor can legitimately publish its whole
+# environment to the systemd user manager. None of these may then
+# alter a real SDDM login. CHONKSTEP_OWNS_XCURSOR_SIZE is paired with a
+# value ChonkStep generated itself, so clear that value too; an
+# XCURSOR_SIZE with no ownership marker remains a user's preference.
+_CHONKSTEP_STALE_ENV=(
+    DISPLAY
+    WAYLAND_DISPLAY
+    HYPRLAND_INSTANCE_SIGNATURE
+    CHONKSTEP_BACKEND
+    CHONKSTEP_CONTROL_SOCKET
+    CHONKSTEP_NO_APPEARANCE_PROPAGATION
+    CHONKSTEP_OWNS_XCURSOR_SIZE
+    CHONKSTEP_SESSION_BIN
+    CHONKSTEP_SESSION_CONTINUES
+    CHONKSTEP_SESSION_TESTING
+    CHONKSTEP_TEST_CONFIG_HOME
+    CHONKSTEP_TEST_GAMMA_SIZE
+    CHONKSTEP_TEST_PANEL_TILE
+    CHONKSTEP_TEST_RUST_LOG
+    CHONKSTEP_TEST_SOCKET
+    CHONKSTEP_WAYLAND_BIN
+)
+_CHONKSTEP_STALE_OWNED_CURSOR=0
+if [ -n "${CHONKSTEP_OWNS_XCURSOR_SIZE:-}" ]; then
+    _CHONKSTEP_STALE_OWNED_CURSOR=1
+    unset XCURSOR_SIZE
+fi
+unset "${_CHONKSTEP_STALE_ENV[@]}"
 
 # Keyboard layout. libxkbcommon's XKB_DEFAULT_* convention is what the
 # compositor reads to build the seat's keymap (see state.rs), because a
@@ -221,6 +251,30 @@ if [ "$_CHONKSTEP_UWSM" -eq 0 ] && [ -z "${DBUS_SESSION_BUS_ADDRESS:-}" ] && [ -
     export _CHONKSTEP_BUS_WRAPPED=1
     exec dbus-run-session -- "$0" "$@"
 fi
+unset _CHONKSTEP_BUS_WRAPPED
+
+# Removing the variables from this process protects the compositor and
+# its direct children. Remove the same stale values from systemd's user
+# activation environment as well: its services do not descend from
+# this process, and without this repair a poisoned value would survive
+# this login and be offered to the next one. Omarchy's D-Bus broker
+# activates through that manager. A direct/TTY session instead starts
+# a fresh private bus *after* the local scrub above. There is
+# deliberately no `dbus-update-activation-environment --unset` here:
+# that option does not exist in dbus-update-activation-environment.
+# The current session's real Wayland socket and Hyprland-compatible
+# signature are republished by the watcher below after the compositor
+# creates them.
+scrub_stale_activation_env() {
+    local names=("${_CHONKSTEP_STALE_ENV[@]}")
+    if [ "$_CHONKSTEP_STALE_OWNED_CURSOR" -eq 1 ]; then
+        names+=(XCURSOR_SIZE)
+    fi
+    if command -v systemctl >/dev/null 2>&1; then
+        systemctl --user unset-environment "${names[@]}" >>"$LOG" 2>&1 || true
+    fi
+}
+scrub_stale_activation_env
 
 # ---------------------------------------------------------------------
 # Publish the session's environment to D-Bus activation and the systemd
@@ -245,9 +299,11 @@ fi
 # supervisor test's scratch environment, where the stub compositor
 # never logs a socket line).
 publish_portal_env() {
-    # A nested test compositor must never acquire the real login
-    # session's bus and mutate its activation environment.
-    [ -z "${CHONKSTEP_TEST_SOCKET:-}" ] || return 0
+    # The integration harness launches the compositor binary directly
+    # inside a scratch runtime and never enters this login-session
+    # wrapper. A CHONKSTEP_TEST_SOCKET found here is therefore stale
+    # contamination, not a reason to leave the real session's portal
+    # environment unpublished; it was scrubbed above.
     command -v dbus-update-activation-environment >/dev/null 2>&1 || return 0
     local published="" sock
     while :; do
@@ -306,18 +362,17 @@ _session_stopping=0
 _compositor_pid=""
 cleanup_session() {
     kill "$_env_watcher" 2>/dev/null || true
+    # UWSM cleans the variables it owns, but it cannot know about
+    # ChonkStep's private/test controls. Scrub those in both session
+    # modes; doing this again is harmless and closes the window in
+    # which a child could have imported one after startup.
+    scrub_stale_activation_env
     if [ "$_CHONKSTEP_UWSM" -eq 0 ]; then
         if command -v systemctl >/dev/null 2>&1; then
             systemctl --user stop xdg-desktop-autostart.target graphical-session.target \
                 >>"$LOG" 2>&1 || true
             systemctl --user unset-environment WAYLAND_DISPLAY HYPRLAND_INSTANCE_SIGNATURE \
                 XDG_CURRENT_DESKTOP XDG_SESSION_DESKTOP XDG_SESSION_TYPE XDG_MENU_PREFIX XDG_BACKEND \
-                >>"$LOG" 2>&1 || true
-        fi
-        if command -v dbus-update-activation-environment >/dev/null 2>&1; then
-            dbus-update-activation-environment --systemd --unset \
-                WAYLAND_DISPLAY HYPRLAND_INSTANCE_SIGNATURE XDG_CURRENT_DESKTOP \
-                XDG_SESSION_DESKTOP XDG_SESSION_TYPE XDG_MENU_PREFIX XDG_BACKEND \
                 >>"$LOG" 2>&1 || true
         fi
     fi

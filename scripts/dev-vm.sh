@@ -58,6 +58,7 @@ do_shot() {
     sleep 2
     # SDDM hands the session a random per-boot xauth file; lift it from the
     # running WM's environment rather than guessing.
+    # shellcheck disable=SC2016 # Expansion is intentionally on the remote VM.
     vm 'XAUTHORITY=$(tr "\0" "\n" < /proc/$(pgrep -x chonkstep)/environ | sed -n "s/^XAUTHORITY=//p") DISPLAY=:0 import -window root /tmp/chonkshot.png'
     scp -q -i "$KEY" "omarchy@$ip:/tmp/chonkshot.png" "$SHOT_DIR/latest.png"
     echo "$SHOT_DIR/latest.png"

@@ -58,6 +58,7 @@ fn launch(scratch: &Scratch) -> Child {
         .env("XDG_STATE_HOME", scratch.dir.join("state"))
         .env("XDG_RUNTIME_DIR", scratch.dir.join("run"))
         .env("CHONKSTEP_SESSION_BIN", &scratch.stub)
+        .env("CHONKSTEP_SESSION_TESTING", "1")
         .env("DBUS_SESSION_BUS_ADDRESS", "unix:path=/nonexistent-but-present")
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -192,7 +193,7 @@ fn direct_session_owns_graphical_targets_and_publishes_only_curated_environment(
     std::fs::write(
         &stub,
         format!(
-            "#!/bin/sh\nprintf 'backend=%s\\n' \"${{CHONKSTEP_BACKEND-unset}}\" >> '{}'\nprintf '%s\\n' 'wayland socket listening socket=\"{socket_name}\"'\nprintf '%s\\n' 'hyprland ipc listening signature=\"session-test\"'\ntrap 'exit 0' TERM HUP INT\nwhile :; do sleep 1; done\n",
+            "#!/bin/sh\nprintf 'private=%s|%s|%s|%s|%s|%s|%s|%s|%s\\n' \\\n \"${{CHONKSTEP_BACKEND-unset}}\" \\\n \"${{CHONKSTEP_CONTROL_SOCKET-unset}}\" \\\n \"${{CHONKSTEP_NO_APPEARANCE_PROPAGATION-unset}}\" \\\n \"${{CHONKSTEP_OWNS_XCURSOR_SIZE-unset}}\" \\\n \"${{CHONKSTEP_SESSION_CONTINUES-unset}}\" \\\n \"${{CHONKSTEP_SESSION_BIN-unset}}\" \\\n \"${{CHONKSTEP_SESSION_TESTING-unset}}\" \\\n \"${{CHONKSTEP_TEST_SOCKET-unset}}\" \\\n \"${{XCURSOR_SIZE-unset}}\" >> '{}'\nprintf '%s\\n' 'wayland socket listening socket=\"{socket_name}\"'\nprintf '%s\\n' 'hyprland ipc listening signature=\"session-test\"'\ntrap 'exit 0' TERM HUP INT\nwhile :; do sleep 1; done\n",
             calls.display()
         ),
     )
@@ -208,8 +209,15 @@ fn direct_session_owns_graphical_targets_and_publishes_only_curated_environment(
         .env("XDG_STATE_HOME", dir.join("state"))
         .env("XDG_RUNTIME_DIR", dir.join("run"))
         .env("CHONKSTEP_SESSION_BIN", &stub)
+        .env("CHONKSTEP_SESSION_TESTING", "1")
         .env("DBUS_SESSION_BUS_ADDRESS", "unix:path=/isolated")
         .env("CHONKSTEP_BACKEND", "winit")
+        .env("CHONKSTEP_CONTROL_SOCKET", "/run/user/1000/chonkstep/stale.sock")
+        .env("CHONKSTEP_NO_APPEARANCE_PROPAGATION", "1")
+        .env("CHONKSTEP_OWNS_XCURSOR_SIZE", "1")
+        .env("CHONKSTEP_SESSION_CONTINUES", "1")
+        .env("CHONKSTEP_TEST_SOCKET", "/tmp/stale-test-door.sock")
+        .env("XCURSOR_SIZE", "96")
         .env("CARGO_POISON", "must-not-be-published")
         .env("LD_LIBRARY_PATH", "/also/not/published")
         .stdout(Stdio::null())
@@ -225,7 +233,14 @@ fn direct_session_owns_graphical_targets_and_publishes_only_curated_environment(
     assert!(started.contains("WAYLAND_DISPLAY=wayland-session-test"));
     assert!(started.contains("XDG_MENU_PREFIX=chonkstep-"));
     assert!(started.contains("XDG_BACKEND=wayland"));
-    assert!(started.contains("backend=unset"), "a login session must discard a stale nested-backend override");
+    assert!(
+        started.contains("private=unset|unset|unset|unset|unset|unset|unset|unset|unset"),
+        "a login session must discard every stale private/test control before launching the compositor; calls were:\n{started}"
+    );
+    assert!(
+        started.contains("--user unset-environment DISPLAY WAYLAND_DISPLAY HYPRLAND_INSTANCE_SIGNATURE CHONKSTEP_BACKEND"),
+        "the persistent activation environment must be scrubbed before the compositor starts; calls were:\n{started}"
+    );
     assert!(!started.contains("CARGO_POISON"));
     assert!(!started.contains("LD_LIBRARY_PATH"));
 
@@ -234,6 +249,10 @@ fn direct_session_owns_graphical_targets_and_publishes_only_curated_environment(
     let stopped = std::fs::read_to_string(&calls).unwrap();
     assert!(stopped.contains("--user stop xdg-desktop-autostart.target graphical-session.target"));
     assert!(stopped.contains("--user unset-environment WAYLAND_DISPLAY HYPRLAND_INSTANCE_SIGNATURE"));
+    assert!(
+        !stopped.contains("dbus --systemd --unset"),
+        "dbus-update-activation-environment has no --unset operation; systemd owns deletion on Omarchy"
+    );
 }
 
 #[test]

@@ -334,7 +334,15 @@ impl Session {
             .env("XDG_STATE_HOME", &state_home)
             .env("CHONKSTEP_BACKEND", "winit")
             .env("CHONKSTEP_TEST_SOCKET", &door_path)
-            .env("RUST_LOG", "info")
+            // Keep ordinary runs readable, but let a failing live test
+            // turn on one subsystem without patching the harness.  The
+            // compositor is a child rather than the test process itself,
+            // so inheriting RUST_LOG implicitly is too easy to do by
+            // accident; this deliberately named knob is test-only.
+            .env(
+                "RUST_LOG",
+                std::env::var("CHONKSTEP_TEST_RUST_LOG").unwrap_or_else(|_| "info".to_string()),
+            )
             // GSettings is per-user, not per-scratch-dir: without this,
             // a posed session switching its appearance would run
             // `gsettings set` against the developer's real preferences.

@@ -22,8 +22,8 @@ Native packages are available for `x86_64` and `aarch64` (including M1 Macs
 running an Arch Linux ARM/Omarchy environment):
 
 ```sh
-curl -fLO "https://github.com/iconidentify/chonkstep/releases/download/preview-v0.2.0/chonkstep-0.2.0-1-$(uname -m).pkg.tar.zst"
-sudo pacman -U "./chonkstep-0.2.0-1-$(uname -m).pkg.tar.zst"
+curl -fLO "https://github.com/iconidentify/chonkstep/releases/download/preview-v0.2.0-r2/chonkstep-0.2.0-2-$(uname -m).pkg.tar.zst"
+sudo pacman -U "./chonkstep-0.2.0-2-$(uname -m).pkg.tar.zst"
 omarchy install desktop-chonkstep
 ```
 
@@ -222,11 +222,11 @@ the local file to pacman:
 ```sh
 chonkstep_dir="$(mktemp -d)"
 chonkstep_arch="$(uname -m)"
-chonkstep_pkg="chonkstep-0.2.0-1-$chonkstep_arch.pkg.tar.zst"
+chonkstep_pkg="chonkstep-0.2.0-2-$chonkstep_arch.pkg.tar.zst"
 curl -fL -o "$chonkstep_dir/$chonkstep_pkg" \
-  "https://github.com/iconidentify/chonkstep/releases/download/preview-v0.2.0/$chonkstep_pkg"
+  "https://github.com/iconidentify/chonkstep/releases/download/preview-v0.2.0-r2/$chonkstep_pkg"
 curl -fL -o "$chonkstep_dir/SHA256SUMS" \
-  "https://github.com/iconidentify/chonkstep/releases/download/preview-v0.2.0/SHA256SUMS"
+  "https://github.com/iconidentify/chonkstep/releases/download/preview-v0.2.0-r2/SHA256SUMS"
 (cd "$chonkstep_dir" && sha256sum --ignore-missing --check SHA256SUMS)
 sudo pacman -U "$chonkstep_dir/$chonkstep_pkg"
 omarchy install desktop-chonkstep
@@ -696,6 +696,10 @@ always available; it is not rebindable from the config file.
   is pure Rust (tiny-skia + cosmic-text, no X server needed), so most
   of the visual pipeline is unit-testable, including pixel-level
   regression tests for the relief recipes.
+- `scripts/e2e.sh --headless` starts an isolated Weston host and runs the
+  complete Wayland integration suite one compositor at a time. It exercises
+  real clients and captured pixels without touching the logged-in desktop;
+  omit `--headless` to nest visibly in the current graphical session.
 
 The workspace splits along seams that keep the core testable: `wm-core`
 (window management logic, no display server), `wm-theme` (decoration

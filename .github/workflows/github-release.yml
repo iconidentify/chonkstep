@@ -40,8 +40,17 @@ jobs:
         run: |
           set -euo pipefail
           version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n1)
+          package_release=$(sed -n 's/^pkgrel=//p' packaging/arch/PKGBUILD-release | head -n1)
           if [[ $GITHUB_REF == refs/tags/preview-v* ]]; then
             tag_version=${GITHUB_REF_NAME#preview-v}
+            if [[ $tag_version =~ ^(.+)-r([1-9][0-9]*)$ ]]; then
+              tag_version=${BASH_REMATCH[1]}
+              tag_release=${BASH_REMATCH[2]}
+              test "$tag_release" = "$package_release" || {
+                echo "tag package release r$tag_release does not match PKGBUILD pkgrel=$package_release" >&2
+                exit 1
+              }
+            fi
             test "$tag_version" = "$version" || {
               echo "tag version $tag_version does not match workspace version $version" >&2
               exit 1
@@ -56,8 +65,9 @@ jobs:
             HEAD
           install -m644 packaging/arch/PKGBUILD-release "$build_dir/PKGBUILD"
 
-          package_name="chonkstep-$version-1-${{ matrix.arch }}.pkg.tar.zst"
+          package_name="chonkstep-$version-$package_release-${{ matrix.arch }}.pkg.tar.zst"
           echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "package_release=$package_release" >> "$GITHUB_OUTPUT"
           echo "package_name=$package_name" >> "$GITHUB_OUTPUT"
 
       - name: Build the native Arch package environment
@@ -86,7 +96,7 @@ jobs:
               /source/scripts/verify-release-package.sh \
                 "$package" \
                 "${{ matrix.arch }}" \
-                "${{ steps.metadata.outputs.version }}-1"
+                "${{ steps.metadata.outputs.version }}-${{ steps.metadata.outputs.package_release }}"
               install -d /build/dist
               install -m644 "$package" /build/dist/
             '
@@ -115,6 +125,8 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v7
+
       - uses: actions/download-artifact@v8
         with:
           pattern: chonkstep-package-*
@@ -126,10 +138,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          version=${GITHUB_REF_NAME#preview-v}
+          version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n1)
+          package_release=$(sed -n 's/^pkgrel=//p' packaging/arch/PKGBUILD-release | head -n1)
           cd dist
-          test -f "chonkstep-$version-1-x86_64.pkg.tar.zst"
-          test -f "chonkstep-$version-1-aarch64.pkg.tar.zst"
+          test -f "chonkstep-$version-$package_release-x86_64.pkg.tar.zst"
+          test -f "chonkstep-$version-$package_release-aarch64.pkg.tar.zst"
           LC_ALL=C sha256sum chonkstep-*.pkg.tar.zst | sort -k2 > SHA256SUMS
 
           cat > "$RUNNER_TEMP/release-notes.md" <<EOF
@@ -140,7 +153,7 @@ jobs:
           \`\`\`sh
           chonkstep_dir="\$(mktemp -d)"
           chonkstep_arch="\$(uname -m)"
-          chonkstep_pkg="chonkstep-$version-1-\$chonkstep_arch.pkg.tar.zst"
+          chonkstep_pkg="chonkstep-$version-$package_release-\$chonkstep_arch.pkg.tar.zst"
           curl -fL -o "\$chonkstep_dir/\$chonkstep_pkg" \
             "https://github.com/$GITHUB_REPOSITORY/releases/download/$GITHUB_REF_NAME/\$chonkstep_pkg"
           curl -fL -o "\$chonkstep_dir/SHA256SUMS" \
@@ -175,14 +188,14 @@ jobs:
               --repo "$GITHUB_REPOSITORY" --clobber
             gh release edit "$GITHUB_REF_NAME" \
               --repo "$GITHUB_REPOSITORY" \
-              --title "ChonkStep $version preview packages" \
+              --title "ChonkStep $version preview packages (r$package_release)" \
               --notes-file "$RUNNER_TEMP/release-notes.md" \
               --prerelease
           else
             gh release create "$GITHUB_REF_NAME" "${assets[@]}" \
               --repo "$GITHUB_REPOSITORY" \
               --verify-tag \
-              --title "ChonkStep $version preview packages" \
+              --title "ChonkStep $version preview packages (r$package_release)" \
               --notes-file "$RUNNER_TEMP/release-notes.md" \
               --prerelease
           fi

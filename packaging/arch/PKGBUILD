@@ -14,7 +14,7 @@
 pkgname=chonkstep-git
 pkgver=0.2.0.r76.ge1b4e54
 pkgrel=1
-pkgdesc="A NeXTSTEP-style desktop for Linux: one shell, two real login sessions (X11 window manager and Wayland compositor)"
+pkgdesc="A traditional floating compositor for Omarchy, compatible with Hyprland workflows"
 arch=('x86_64' 'aarch64')
 url="https://github.com/iconidentify/chonkstep"
 license=('GPL-3.0-only')

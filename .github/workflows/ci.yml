@@ -18,6 +18,26 @@ on:
   pull_request:
 
 jobs:
+  sdk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.13'
+
+      - name: Run the Python SDK tests
+        run: python3 -m unittest discover bindings/python/tests
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: bindings/go/chonkdock/go.mod
+
+      - name: Run the Go SDK tests
+        working-directory: bindings/go/chonkdock
+        run: go test ./...
+
   omarchy-install:
     runs-on: ubuntu-latest
     steps:
@@ -309,17 +329,14 @@ jobs:
           echo "smoke test passed: WM handshake present, both clients managed, framing follows _MOTIF_WM_HINTS"
           kill "$PROBE_PID" "$XTERM_PID" "$WM_PID" "$XVFB_PID" || true
 
-  # The Wayland half of the dual architecture. There is no Xvfb
-  # equivalent to smoke-test a compositor on a headless runner (the
-  # nested backend needs a host display, and the session backend needs
-  # a DRM device and a seat), so this job's gate is the strictest
-  # thing CI can still do: build the compositor backend and its binary
-  # against the real system libraries, then run the backend's unit
-  # tests. The build step is the load-bearing one — every -sys crate
-  # under the Smithay features this compositor pins resolves and links
-  # at build time, so a plain `cargo build` on Linux already proves
-  # what the macOS dev host, where this crate is cfg-empty,
-  # structurally cannot.
+  # The Wayland half of the dual architecture. Weston headless is the
+  # host display for the nested backend, so this job does considerably
+  # more than compile: after the backend's unit tests it boots a fresh
+  # real compositor per scenario, launches real clients, injects input,
+  # and checks the protocol ledger and captured pixels. The hardware
+  # session backend still needs a DRM device and a seat a hosted runner
+  # cannot provide; compiling it against the real system libraries is
+  # the gate for that half.
   #
   # Both backends are compiled in unconditionally (there is no cargo
   # feature gating the session half — see wm-wayland/Cargo.toml), so
@@ -346,7 +363,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             libxkbcommon-dev libegl-dev libgles-dev libwayland-dev \
-            libdrm-dev libgbm-dev libinput-dev libudev-dev libseat-dev
+            libdrm-dev libgbm-dev libinput-dev libudev-dev libseat-dev \
+            weston xwayland foot alacritty zenity grim wayland-utils
 
       # --locked: the compositor pins Smithay 0.7.0, and a silent
       # re-resolution here would test a different dependency tree than
@@ -356,6 +374,13 @@ jobs:
 
       - name: Run the wm-wayland test suite
         run: cargo test -p wm-wayland
+
+      # Weston provides the host display a nested compositor needs,
+      # with Mesa's software renderer on runners that expose no GPU.
+      # The Chromium-specific regression skips when Chromium is absent;
+      # all protocol probes and the Foot/Alacritty/Zenity paths run.
+      - name: Run the nested compositor end-to-end suite
+        run: scripts/e2e.sh --headless
 
   # Lint. This job exists because of one specific incident and one
   # specific class of bug.

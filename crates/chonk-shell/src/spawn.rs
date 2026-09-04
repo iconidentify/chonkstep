@@ -41,6 +41,49 @@ pub const DISPLAY_SERVER_ENV: [&str; 2] = ["WAYLAND_DISPLAY", "DISPLAY"];
 /// socket (`docs/control-socket.md` §1.1) under.
 pub const CONTROL_SOCKET_ENV: &str = "CHONKSTEP_CONTROL_SOCKET";
 
+/// Process-private compositor controls that must stop at the
+/// application boundary.
+///
+/// These are backend/debug selectors, restart/session markers, and
+/// test seams.  They are meaningful to the compositor (or its session
+/// wrapper), but never to an application it launches.  More
+/// importantly, a desktop shell may legitimately run
+/// `dbus-update-activation-environment --all`; letting one of these
+/// through would copy it into the persistent systemd/D-Bus activation
+/// environment and poison the next login.  A nested test did exactly
+/// that with `CHONKSTEP_BACKEND=winit` and
+/// `CHONKSTEP_NO_APPEARANCE_PROPAGATION=1`, after which an SDDM session
+/// inherited test behavior.
+///
+/// This is deliberately an allow-by-purpose list rather than every
+/// `CHONKSTEP_*` variable.  `CHONKSTEP_SCALE`, `CHONKSTEP_THEME`,
+/// `CHONKSTEP_APPEARANCE`, and `CHONKSTEP_CONTROL_SOCKET` are public
+/// child-facing integration variables.  Dock socket/token variables
+/// are passed only to their designated dockapp.
+const INTERNAL_ENV: [&str; 21] = [
+    "CHONKSTEP_BACKEND",
+    "CHONKSTEP_DAMAGE_LOG",
+    "CHONKSTEP_DRM_DEVICE",
+    "CHONKSTEP_FOCUS_FOLLOWS_MOUSE",
+    "CHONKSTEP_FULL_DAMAGE",
+    "CHONKSTEP_HYPRLAND_IPC",
+    "CHONKSTEP_NO_APPEARANCE_PROPAGATION",
+    "CHONKSTEP_NO_CURSOR_PLANE",
+    "CHONKSTEP_OWNS_XCURSOR_SIZE",
+    "CHONKSTEP_SESSION_BIN",
+    "CHONKSTEP_SESSION_CONTINUES",
+    "CHONKSTEP_SESSION_TESTING",
+    "CHONKSTEP_STRICT_BUFFER_RELEASE",
+    "CHONKSTEP_TEST_CONFIG_HOME",
+    "CHONKSTEP_TEST_GAMMA_SIZE",
+    "CHONKSTEP_TEST_PANEL_TILE",
+    "CHONKSTEP_TEST_RUST_LOG",
+    "CHONKSTEP_TEST_SOCKET",
+    "CHONKSTEP_WAYLAND_BIN",
+    "_CHONKSTEP_BUS_WRAPPED",
+    "_CHONKSTEP_UWSM",
+];
+
 /// What a dockapp is launched *without*: the display servers, and the
 /// control socket. The socket is not a display connection, but it
 /// answers "which windows exist, what is focused" and switches
@@ -86,11 +129,12 @@ pub fn declare_control_socket(path: std::path::PathBuf) {
 /// about the desktop's scale through whatever convention its own
 /// toolkit understands, since it has no way to ask chonkstep for one.
 ///
-/// `unset` names variables to *remove* from the child's environment.
-/// It exists for dockapps, which must be launched with
+/// Compositor-private variables are always removed at this boundary.
+/// `unset` names any additional variables to *remove* from the child's
+/// environment. It exists for dockapps, which must be launched with
 /// [`DOCKAPP_WITHHELD_ENV`] cleared — see [`DISPLAY_SERVER_ENV`] for
 /// why that is a requirement of the design rather than a precaution.
-/// Pass `&[]` when there is nothing to remove.
+/// Pass `&[]` when there are no additional removals.
 pub fn spawn_detached_with_env(
     program: &str,
     args: &[&str],
@@ -309,8 +353,8 @@ pub fn spawn_supervised(program: &str, args: &[&str], env: &[(String, String)], 
 ///
 /// Removals are applied after additions on purpose: if a caller ever
 /// passes the same key in both lists, "remove it" is the safer reading
-/// of an ambiguous instruction, and for [`DISPLAY_SERVER_ENV`] it is
-/// the only acceptable one.
+/// of an ambiguous instruction, and for [`DISPLAY_SERVER_ENV`] and
+/// [`INTERNAL_ENV`] it is the only acceptable one.
 fn apply_env(command: &mut Command, env: &[(String, String)], unset: &[&str]) {
     // First, so a caller's own `env` can override it and a caller's
     // `unset` can withhold it (as a dockapp's does).
@@ -319,6 +363,9 @@ fn apply_env(command: &mut Command, env: &[(String, String)], unset: &[&str]) {
     }
     for (key, value) in env {
         command.env(key, value);
+    }
+    for key in INTERNAL_ENV {
+        command.env_remove(key);
     }
     for key in unset {
         command.env_remove(key);
@@ -659,15 +706,21 @@ mod tests {
     }
 
     #[test]
-    fn an_empty_unset_list_leaves_the_inherited_environment_alone() {
-        // `spawn_detached_with_env`'s existing callers must be
-        // unaffected: they pass no removals and inherit everything.
+    fn ordinary_launches_keep_public_environment_but_drop_internal_controls() {
+        // The public toolkit values supplied by a caller still win,
+        // while private controls are removals even with no
+        // caller-specific `unset` list.
         let mut command = Command::new("/bin/true");
         apply_env(&mut command, &gtk_qt_scale_env(2.0), &[]);
-        assert!(
-            command.get_envs().all(|(_, value)| value.is_some()),
-            "nothing should be marked for removal"
-        );
+        let envs: Vec<_> = command.get_envs().collect();
+        for variable in ["QT_SCALE_FACTOR", "QT_AUTO_SCREEN_SCALE_FACTOR"] {
+            let entry = envs.iter().find(|(key, _)| *key == std::ffi::OsStr::new(variable));
+            assert!(entry.is_some_and(|(_, value)| value.is_some()), "{variable} must still be supplied");
+        }
+        for variable in INTERNAL_ENV {
+            let entry = envs.iter().find(|(key, _)| *key == std::ffi::OsStr::new(variable));
+            assert_eq!(entry.map(|(_, value)| *value), Some(None), "{variable} must be removed from every child");
+        }
     }
 
     #[test]

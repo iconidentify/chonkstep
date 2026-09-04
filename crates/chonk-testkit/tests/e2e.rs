@@ -811,12 +811,16 @@ fn chromium_resize_at_scale_2_keeps_its_scale() {
     // margin — a framed window would put a resize bar there instead
     // and turn this into a test of the frame. The bug lived in how a
     // client's own resize commits are measured, which the frame does
-    // not change, so the frameless shape is kept.
+    // not change, so the frameless shape is kept. Hide the dock as
+    // well: Chromium's initial size reaches the right-side strip on a
+    // 1280x800 nested output, and that shell surface correctly wins
+    // the hit-test over the client's shadow. This test is about a
+    // client resize, not about clicking through an always-on-top dock.
     let mut session = Session::boot(
         "chromium-resize-scale2",
         SessionOptions {
             scale: Some(2.0),
-            config_extra: "[decorations]\nclient_side = [\"chromium\"]\n".to_string(),
+            config_extra: "show_dock = false\n[decorations]\nclient_side = [\"chromium\"]\n".to_string(),
             ..SessionOptions::default()
         },
     )

@@ -30,9 +30,76 @@
 # Missing ones are reported together up front rather than one at a
 # time as each test in turn fails to map a window.
 #
-# Usage: scripts/e2e.sh [extra cargo-test args, e.g. a test name]
+# `--headless` starts an isolated Weston host first.  It is useful on a
+# CI runner, over SSH, or while the real desktop is locked: a hidden
+# nested host window cannot complete presentation, which starves the
+# barrier the harness intentionally waits on and produces misleading
+# client-map timeouts.
+#
+# Usage: scripts/e2e.sh [--headless] [extra cargo-test args, e.g. a test name]
 set -euo pipefail
 cd "$(dirname "$0")/.."
+
+headless=false
+if [ "${1:-}" = "--headless" ]; then
+    headless=true
+    shift
+fi
+
+if "$headless"; then
+    if ! command -v weston >/dev/null 2>&1; then
+        echo "e2e.sh: --headless needs weston on PATH" >&2
+        exit 1
+    fi
+
+    host_runtime=$(mktemp -d "${TMPDIR:-/tmp}/chonkstep-e2e-host.XXXXXX")
+    chmod 700 "$host_runtime"
+    host_log="$host_runtime/weston.log"
+    host_socket=wayland-chonkstep-e2e
+    XDG_RUNTIME_DIR="$host_runtime" weston \
+        --backend=headless-backend.so \
+        --socket="$host_socket" \
+        --idle-time=0 \
+        --width=2560 \
+        --height=1600 \
+        >"$host_log" 2>&1 &
+    host_pid=$!
+
+    cleanup_headless_host() {
+        status=$?
+        trap - EXIT
+        kill "$host_pid" 2>/dev/null || true
+        wait "$host_pid" 2>/dev/null || true
+        if [ "$status" -ne 0 ]; then
+            echo "--- headless Weston log ---" >&2
+            tail -200 "$host_log" >&2 || true
+        fi
+        rm -rf -- "$host_runtime"
+        exit "$status"
+    }
+    trap cleanup_headless_host EXIT
+
+    ready=false
+    for _ in $(seq 1 200); do
+        if [ -S "$host_runtime/$host_socket" ]; then
+            ready=true
+            break
+        fi
+        if ! kill -0 "$host_pid" 2>/dev/null; then
+            break
+        fi
+        sleep 0.05
+    done
+    if ! "$ready"; then
+        echo "e2e.sh: headless Weston did not create $host_socket" >&2
+        exit 1
+    fi
+
+    export XDG_RUNTIME_DIR="$host_runtime"
+    export WAYLAND_DISPLAY="$host_socket"
+    export WINIT_UNIX_BACKEND=wayland
+    unset DISPLAY
+fi
 
 if [ -z "${WAYLAND_DISPLAY:-}" ] && [ -z "${DISPLAY:-}" ]; then
     echo "e2e.sh: no Wayland (or X) session to nest inside — run this from a graphical session" >&2

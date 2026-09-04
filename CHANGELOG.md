@@ -5,6 +5,30 @@ crate and both session binaries carry the same number.
 
 ## [Unreleased]
 
+### Release hardening
+
+- **Full desktop behavior now runs in CI.** The Wayland job boots an isolated
+  Weston headless host and runs ChonkStep's complete real-client integration
+  suite: Chromium and native terminals, window input/geometry, Omarchy's
+  themes/menu/bar, lock, gamma and `hyprsunset`, Hyprland IPC, protocols,
+  workspaces, session restore, and crash supervision. Python and Go SDK tests
+  are now first-class CI jobs as well.
+- **Test controls cannot poison a later login.** Application launches now
+  remove compositor-private backend, debug, restart, and test variables while
+  preserving the documented child API. The Wayland session also scrubs stale
+  selectors from both its process and systemd's user activation environment
+  before startup, including a compositor-owned cursor size as one atomic pair.
+  Its supervisor test begins with a deliberately poisoned environment and
+  proves none of it reaches the compositor. The old cleanup attempt using the
+  nonexistent `dbus-update-activation-environment --unset` option is gone;
+  Omarchy's systemd user manager now performs the deletion through its real
+  API.
+- **The browser scale regression has a faithful test.** The Chromium scale-2
+  scenario no longer clicks through the always-on-top dock while intending to
+  grab Chromium's client-side resize edge. It runs dockless, exercises the
+  actual browser surface, and passes against current Chromium under the same
+  headless compositor path CI uses.
+
 ### Omarchy-compatible session and install path
 
 - **A real managed login.** ChonkStep now ships a dedicated UWSM session,
