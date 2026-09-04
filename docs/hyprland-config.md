@@ -201,7 +201,7 @@ specific directive, not a count. Turn on `RUST_LOG=debug` to see them.
 | Anything commanding Hyprland — `hyprctl`, `omarchy-hyprland-*` | It talks to a compositor that is not running, so the binding could only fail. The same filter chonkstep's Omarchy menu already applies to menu rows. `hyprpicker`, `hyprlock` and `hypridle` are *not* caught by it: they are ordinary Wayland clients and work here. |
 | Gaps, borders, rounding, blur, shadows, animations, layouts (`hl.config`, `general { … }`, `decoration { … }`) | Hyprland's look. This desktop has its own — a theme, a titlebar, a decoration policy. Following them would mean drawing a NeXTSTEP frame in Hyprland's border colour. |
 | Layer rules (`layerrule`, `hl.layer_rule`) | They configure Hyprland's layer-shell implementation. This compositor has its own. |
-| Unsupported input settings (touchpad device policy, sensitivity, gestures) | Keyboard xkb/repeat and `follow_mouse` are supported; device-specific policy is logged. |
+| Whole-desktop and device input policy (`follow_mouse`, touchpad policy, sensitivity, gestures) | The live read carries hardware-facing keyboard xkb/repeat values only. Chonkstep owns interaction policy: use its `focus_follows_mouse` key explicitly. Every declined value is logged. |
 | Unsupported window-rule properties | `opacity`, `no_blur`, `suppress_event`, `workspace`, `move`, `keep_aspect_ratio`, … are each logged with their matcher. Tags used to select another supported rule are resolved. |
 | Window rules carrying a matcher not implemented here (`match:xwayland 1`, `match:workspace 5`, `match:fullscreen 0`) | Refused **whole**. Applying a rule on the matchers that *were* understood turns "float this one XWayland window" into "float every window of this class". |
 | A `size` given as a Hyprland layout expression (`(monitor_h*4/25)`) | It needs a monitor to evaluate against, and a config reader has a file, not an output. |
@@ -249,11 +249,15 @@ do is not what you are asking for:
 
 `kb_rules`, `kb_model`, `kb_layout`, `kb_variant`, and `kb_options`
 build the seat's xkb keymap. `repeat_rate` and `repeat_delay` configure
-both client key repeat and `binde` actions; `follow_mouse` selects the
-existing focus policy. Environment `XKB_DEFAULT_*` values remain more
-specific and win. If libxkbcommon rejects a configured map, the error
-is logged and the session falls back to the default usable keymap
-instead of aborting the login.
+both client key repeat and `binde` actions. These hardware-facing values
+transfer; whole-desktop interaction policy does not. In particular,
+Hyprland's `follow_mouse` is logged and ignored—even when it is `1` in
+Omarchy's shipped defaults—so a stock Omarchy install retains
+chonkstep's click-to-focus default. Set `focus_follows_mouse = true` in
+chonkstep's own `config.toml` to opt in. Environment `XKB_DEFAULT_*`
+values remain more specific and win. If libxkbcommon rejects a
+configured map, the error is logged and the session falls back to the
+default usable keymap instead of aborting the login.
 
 Binding flags retain their behavior: `bindl`/`locked` actions may run
 on the lock screen, `binde`/`repeating` actions repeat after the
@@ -419,7 +423,7 @@ One `info` line per read, and one `debug` line per thing skipped:
 ```
 INFO  hyprland-config: read the desktop's live Hyprland configuration
       files=42 bindings=153 commands=113 env=8 autostart=4
-      float_rules=45 monitors=1 skipped=174
+      float_rules=45 monitors=1 skipped=175
 DEBUG hyprland-config: not carried over kind=bind what="SUPER + J (Toggle window split)"
       why="tiling-only: no meaning on a stacking desk"
 ```

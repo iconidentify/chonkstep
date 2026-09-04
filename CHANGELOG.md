@@ -5,6 +5,16 @@ crate and both session binaries carry the same number.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A stock Omarchy configuration no longer silently changes the
+  desktop to focus-follows-mouse.** The live Hyprland bridge now imports
+  hardware-facing keyboard and repeat settings but deliberately leaves
+  focus policy to chonkstep's own `focus_follows_mouse` setting. Omarchy's
+  shipped `follow_mouse = 1` is declined by name and the documented
+  click-to-focus default remains true in practice
+  ([#30](https://github.com/iconidentify/chonkstep/issues/30)).
+
 ### Performance
 
 - **Omarchy focus grabs no longer scale with every inert popup object.**

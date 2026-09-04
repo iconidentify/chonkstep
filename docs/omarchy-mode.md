@@ -90,6 +90,13 @@ the menu is not undone the next time you log in.
   drag modifier.** These are how chonkstep manages windows, which is
   the half of the desktop the mode is *keeping*. An Omarchy user
   adopting chonkstep is adopting these.
+
+  In particular, Omarchy's shipped Hyprland input table contains
+  `follow_mouse = 1`. Chonkstep deliberately does not import it: a stock
+  Omarchy session remains click-to-focus, matching chonkstep's documented
+  default and traditional window-management model. Opt in explicitly
+  with `focus_follows_mouse = true` in `config.toml` (or
+  `CHONKSTEP_FOCUS_FOLLOWS_MOUSE=1`).
 - **Omarchy's `background` shell plugin**, which chonkstep declines in
   every posture: it would paint over chonkstep's wallpaper and eat every
   click on the desk, right-click included. The desk stays chonkstep's

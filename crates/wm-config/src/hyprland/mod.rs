@@ -92,9 +92,9 @@
 //!   drawing a NeXTSTEP frame with Hyprland's border colour on it.
 //! - **Layer rules.** They configure Hyprland's layer-shell
 //!   implementation; this compositor has its own.
-//! - **Unsupported input settings.** Keyboard xkb/repeat values and
-//!   `follow_mouse` are carried; touchpad policy and gestures are named
-//!   and skipped.
+//! - **Unsupported input settings.** Keyboard xkb/repeat values are
+//!   carried. Whole-desktop behavior such as `follow_mouse`, touchpad
+//!   policy, and gestures belongs to chonkstep and is named and skipped.
 //! - **Unsupported `monitor =` lines.** Preferred mode, position and
 //!   scale are applied once outputs exist. Disable, mirror, transform,
 //!   extras and explicit modes refuse their whole line.
@@ -272,7 +272,6 @@ pub struct Reading {
     /// `monitor =` lines, parsed and reported. See [`Monitors`].
     pub monitors: Monitors,
     pub input: crate::InputConfig,
-    pub follow_mouse: Option<bool>,
     /// Every file actually read, in order. The [`Watch`]'s signature is
     /// taken over exactly this list.
     pub files: Vec<PathBuf>,
@@ -481,9 +480,6 @@ pub fn apply(config: &mut crate::Config, reading: Option<&Reading>) {
     config.session_env = reading.env.clone();
     config.input = reading.input.clone();
     config.monitor_rules = reading.monitors.lines.clone();
-    if let Some(follow) = reading.follow_mouse {
-        config.focus_follows_mouse = follow;
-    }
     config.autostart = reading.autostart.clone();
     config.float_policy = reading.float_rules.clone().policy();
 }
@@ -965,15 +961,11 @@ fn input(reading: &mut Reading, name: &str, value: &str) {
                 why: "repeat delay must be an integer from 1 through 5000 milliseconds".into(),
             }),
         },
-        "follow_mouse" => match value.to_ascii_lowercase().as_str() {
-            "1" | "true" | "on" => reading.follow_mouse = Some(true),
-            "0" | "false" | "off" => reading.follow_mouse = Some(false),
-            _ => reading.skipped.push(Skipped {
-                kind: "input".into(),
-                what: format!("follow_mouse = {value}"),
-                why: "follow_mouse must be 0/1 or false/true".into(),
-            }),
-        },
+        "follow_mouse" => reading.skipped.push(Skipped {
+            kind: "input".into(),
+            what: format!("follow_mouse = {value}"),
+            why: "focus policy belongs to chonkstep; use focus_follows_mouse in config.toml".into(),
+        }),
         other => reading.skipped.push(Skipped {
             kind: "input".into(),
             what: format!("{other} = {value}"),

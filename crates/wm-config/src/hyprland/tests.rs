@@ -468,7 +468,7 @@ o.bind("XF86AudioRaiseVolume", "Volume up", "volume up", { locked = true, repeat
 }
 
 #[test]
-fn input_tables_and_missing_hardware_keysyms_are_carried() {
+fn keyboard_input_is_carried_but_hyprlands_focus_policy_is_not() {
     let root = scratch("input-table");
     write(
         &root.join(".config/hypr/hyprland.lua"),
@@ -491,7 +491,19 @@ o.bind("SUPER + SHIFT + code:201", "Menu", "omarchy-menu")
     assert_eq!(reading.input.options.as_deref(), Some("compose:caps"));
     assert_eq!(reading.input.repeat_rate, Some(40));
     assert_eq!(reading.input.repeat_delay, Some(250));
-    assert_eq!(reading.follow_mouse, Some(true));
+    assert!(
+        skipped_why(&reading, "follow_mouse")
+            .is_some_and(|why| why.contains("focus policy belongs to chonkstep")),
+        "Hyprland's whole-desktop pointer policy must be declined by name"
+    );
+    let config = crate::parse_with("desktop = \"omarchy\"", &|| {
+        Some(read(&Roots::under(&root)))
+    })
+    .unwrap();
+    assert!(
+        !config.focus_follows_mouse,
+        "stock Omarchy's follow_mouse = 1 must not override chonkstep's click-to-focus default"
+    );
     for spec in [
         "touchpadtoggle",
         "touchpadon",
@@ -1794,7 +1806,7 @@ fn the_numbers_the_documents_quote_are_the_numbers_this_machine_produces() {
     // number there is the normal case rather than a fault.
     assert_eq!(
         reading.skipped.len(),
-        174,
+        175,
         "directives this desktop has its own answer for"
     );
     const GUIDE: &str = include_str!("../../../../docs/hyprland-config.md");
@@ -1804,7 +1816,7 @@ fn the_numbers_the_documents_quote_are_the_numbers_this_machine_produces() {
     );
     assert!(
         GUIDE.contains("files=42 bindings=153 commands=113 env=8 autostart=4")
-            && GUIDE.contains("float_rules=45 monitors=1 skipped=174"),
+            && GUIDE.contains("float_rules=45 monitors=1 skipped=175"),
         "the guide's sample log line no longer matches what this machine reports"
     );
 }
