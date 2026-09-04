@@ -121,6 +121,13 @@ pub fn strip_ansi(text: &str) -> String {
     out
 }
 
+fn error_with_log_tail(error: &str, log: &str) -> String {
+    let mut lines: Vec<_> = log.lines().rev().take(80).collect();
+    lines.reverse();
+    let tail = if lines.is_empty() { "<empty>".to_string() } else { lines.join("\n") };
+    format!("{error}\n--- compositor log tail ---\n{tail}")
+}
+
 /// Runs `condition` until it yields `Some`, at most until `timeout`
 /// has elapsed. The only wait primitive in this crate — every use
 /// names the observable condition it polls, which is the whole
@@ -389,7 +396,7 @@ impl Session {
         // names the wayland socket, then the door accepts a connect.
         // Both bounded; a compositor that died meanwhile fails fast
         // with its log tail instead of timing out mutely.
-        session.wayland_display = {
+        let announced_display = {
             let log_path = session.log_path.clone();
             let compositor = &mut session.compositor;
             poll_until(BOOT_TIMEOUT, "the compositor to announce its wayland socket", || {
@@ -406,10 +413,15 @@ impl Session {
                     .and_then(|line| line.split("\"wayland-").nth(1))
                     .and_then(|rest| rest.split('"').next())
                     .map(|number| Ok(format!("wayland-{number}")))
-            })??
+            })
         };
-        session.door =
-            poll_until(BOOT_TIMEOUT, "the test door to accept a connection", || Door::connect(&door_path).ok())?;
+        session.wayland_display = match announced_display {
+            Ok(Ok(display)) => display,
+            Ok(Err(error)) | Err(error) => return Err(session.boot_error(error)),
+        };
+        let door = poll_until(BOOT_TIMEOUT, "the test door to accept a connection", || Door::connect(&door_path).ok())
+            .map_err(|error| session.boot_error(error))?;
+        session.door = door;
         // Connecting only proves the listener is bound (that happens
         // before the event loop starts). A session is booted when it
         // *answers*: one barrier round-trip, bounded by the door's own
@@ -421,8 +433,18 @@ impl Session {
         // workspace `[profile.dev.package.*]` opt-levels — but the
         // barrier stays, because "booted" should mean "answers", not
         // "probably fast now".)
-        session.door.barrier().map_err(|e| format!("the compositor never answered its first barrier: {e}"))?;
+        if let Err(error) = session.door.barrier() {
+            return Err(session.boot_error(format!("the compositor never answered its first barrier: {error}")));
+        }
         Ok(session)
+    }
+
+    /// Adds the useful end of the compositor log to a boot failure. Boot is
+    /// the one point at which callers do not yet own a `Session`, so without
+    /// doing this here the persistent artifact exists but the CI failure says
+    /// only "timed out" and gives no clue what the child was doing.
+    fn boot_error(&self, error: String) -> String {
+        error_with_log_tail(&error, &self.log())
     }
 
     /// The injection door for this session.
@@ -1324,6 +1346,16 @@ pub fn near(actual: [f64; 3], expected: [u8; 3]) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn boot_errors_include_only_the_useful_end_of_the_compositor_log() {
+        let log = (0..100).map(|n| format!("line-{n:03}")).collect::<Vec<_>>().join("\n");
+        let report = error_with_log_tail("boot timed out", &log);
+        assert!(report.starts_with("boot timed out\n--- compositor log tail ---\nline-020\n"));
+        assert!(report.ends_with("line-099"));
+        assert!(!report.lines().any(|line| line == "line-019"));
+        assert!(error_with_log_tail("boot failed", "").ends_with("<empty>"));
+    }
 
     #[test]
     fn window_lines_parse_including_quoted_tails() {

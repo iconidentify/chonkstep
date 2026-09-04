@@ -7,6 +7,10 @@ crate and both session binaries carry the same number.
 
 ### Release hardening
 
+- **A slow nested boot now explains itself.** If the compositor exits, fails
+  to publish its Wayland socket, or never answers the test door, the harness
+  includes the final 80 compositor log lines in the failure instead of a bare
+  timeout while preserving the existing performance deadline.
 - **Release automation now trusts immutable action revisions.** CI, native
   package attestation, artifact assembly, and the future AUR publisher pin
   every third-party GitHub Action to a full commit instead of a mutable tag.
