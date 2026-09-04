@@ -27,9 +27,11 @@
 //! running them concurrently would have them fail each other on purpose.
 
 use std::process::Command;
+use std::time::{Duration, Instant};
 
 use x11rb::COPY_DEPTH_FROM_PARENT;
 use x11rb::connection::Connection as _;
+use x11rb::errors::ConnectError;
 use x11rb::protocol::Event;
 use x11rb::protocol::xproto::{
     AtomEnum, ConnectionExt as _, CreateWindowAux, PropMode, WindowClass,
@@ -41,6 +43,37 @@ use chonk_xsettings::{
     AcquisitionPolicy, DesktopAppearance, ManagerState, Settings, XSettingsError, XSettingsManager,
     keys,
 };
+
+const X_SERVER_SETTLE: Duration = Duration::from_secs(1);
+
+/// Xvfb can reset a just-accepted connection while it is still
+/// finishing an earlier client's teardown. That is transport churn,
+/// not a failed XSETTINGS assertion, so retry only those transient
+/// handshake errors within a small, explicit budget.
+fn connect_to_display(role: &str) -> (RustConnection, usize) {
+    let deadline = Instant::now() + X_SERVER_SETTLE;
+    loop {
+        match RustConnection::connect(None) {
+            Ok(connection) => return connection,
+            Err(ConnectError::IoError(error))
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::ConnectionReset
+                        | std::io::ErrorKind::ConnectionAborted
+                        | std::io::ErrorKind::Interrupted
+                ) && Instant::now() < deadline =>
+            {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            Err(error) => panic!("{role}: {error:?}"),
+        }
+    }
+}
+
+fn acquire_manager(policy: AcquisitionPolicy) -> Result<XSettingsManager, XSettingsError> {
+    let (connection, screen) = connect_to_display("a display for the XSETTINGS manager");
+    XSettingsManager::acquire_with_connection_and_policy(connection, screen, policy)
+}
 
 /// An observer connection, standing in for an X client that wants to
 /// know what the settings manager is publishing. Separate from the
@@ -55,7 +88,7 @@ struct Observer {
 
 impl Observer {
     fn new() -> Self {
-        let (conn, screen) = RustConnection::connect(None).expect("a display to observe");
+        let (conn, screen) = connect_to_display("a display to observe");
         let selection = conn
             .intern_atom(false, format!("_XSETTINGS_S{screen}").as_bytes())
             .unwrap()
@@ -82,6 +115,21 @@ impl Observer {
             .reply()
             .unwrap()
             .owner
+    }
+
+    fn await_owner(&self, expected: u32, reason: &str) {
+        let deadline = Instant::now() + X_SERVER_SETTLE;
+        loop {
+            let actual = self.owner();
+            if actual == expected {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "{reason}: expected owner {expected}, got {actual}"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
     }
 
     /// The raw `_XSETTINGS_SETTINGS` property, as a client reads it:
@@ -122,7 +170,7 @@ impl FakeOwner {
     /// Takes the selection and publishes `property` on the owner
     /// window; `None` owns the selection with no property at all.
     fn claiming(property: Option<&[u8]>) -> Self {
-        let (conn, screen_num) = RustConnection::connect(None).expect("a display to squat on");
+        let (conn, screen_num) = connect_to_display("a display to squat on");
         let screen = &conn.setup().roots[screen_num];
         let selection = conn
             .intern_atom(false, format!("_XSETTINGS_S{screen_num}").as_bytes())
@@ -206,7 +254,7 @@ fn acquiring_puts_a_readable_property_behind_the_selection() {
     let observer = Observer::new();
     assert_eq!(observer.owner(), 0, "the display must start with no manager");
 
-    let mut manager = XSettingsManager::acquire(None).expect("to acquire the selection");
+    let mut manager = acquire_manager(AcquisitionPolicy::default()).expect("to acquire the selection");
     assert_eq!(
         observer.owner(),
         manager.window(),
@@ -244,7 +292,7 @@ fn acquiring_puts_a_readable_property_behind_the_selection() {
 // asserted.
 #[allow(clippy::disallowed_methods)]
 fn gtk_consumes_the_fractional_dpi_pair_and_the_physical_cursor_size() {
-    let mut manager = XSettingsManager::acquire(None).expect("to acquire the selection");
+    let mut manager = acquire_manager(AcquisitionPolicy::default()).expect("to acquire the selection");
     assert!(manager.publish_appearance(&DesktopAppearance::new(1.5, "NeXT")).unwrap());
 
     let output = Command::new("gtk-query-settings").output().expect("gtk-query-settings is installed");
@@ -266,9 +314,9 @@ fn gtk_consumes_the_fractional_dpi_pair_and_the_physical_cursor_size() {
 #[test]
 #[ignore = "needs an X server; see the module documentation"]
 fn a_second_manager_declines_rather_than_fights() {
-    let first = XSettingsManager::acquire(None).expect("the first manager to win");
+    let first = acquire_manager(AcquisitionPolicy::default()).expect("the first manager to win");
 
-    match XSettingsManager::acquire(None) {
+    match acquire_manager(AcquisitionPolicy::default()) {
         Err(XSettingsError::AlreadyOwned { selection, owner }) => {
             assert_eq!(selection, "_XSETTINGS_S0");
             assert_ne!(owner, 0, "the error must name the manager that won");
@@ -286,7 +334,7 @@ fn a_second_manager_declines_rather_than_fights() {
 #[test]
 #[ignore = "needs an X server; see the module documentation"]
 fn a_republish_only_happens_when_something_actually_changed() {
-    let mut manager = XSettingsManager::acquire(None).unwrap();
+    let mut manager = acquire_manager(AcquisitionPolicy::default()).unwrap();
     let observer = Observer::new();
     let appearance = DesktopAppearance::new(1.0, "NeXT");
 
@@ -315,7 +363,7 @@ fn a_republish_only_happens_when_something_actually_changed() {
 #[test]
 #[ignore = "needs an X server; see the module documentation"]
 fn releasing_gives_the_selection_back() {
-    let manager = XSettingsManager::acquire(None).unwrap();
+    let manager = acquire_manager(AcquisitionPolicy::default()).unwrap();
     let observer = Observer::new();
     assert_eq!(observer.owner(), manager.window());
 
@@ -328,7 +376,7 @@ fn releasing_gives_the_selection_back() {
 
     // And the display is usable by the next manager, including this one
     // restarting.
-    let again = XSettingsManager::acquire(None).expect("to re-acquire after a release");
+    let again = acquire_manager(AcquisitionPolicy::default()).expect("to re-acquire after a release");
     assert_eq!(observer.owner(), again.window());
 }
 
@@ -337,13 +385,16 @@ fn releasing_gives_the_selection_back() {
 fn dropping_the_manager_releases_the_selection_too() {
     let observer = Observer::new();
     {
-        let manager = XSettingsManager::acquire(None).unwrap();
+        let manager = acquire_manager(AcquisitionPolicy::default()).unwrap();
         assert_eq!(observer.owner(), manager.window());
     }
-    assert_eq!(
-        observer.owner(),
+    // Drop can only flush its best-effort destroy request; this
+    // observer is a different connection and may win the scheduling
+    // race to the server. Require the release, but allow that one
+    // cross-connection round trip to settle.
+    observer.await_owner(
         0,
-        "a dropped manager must not leave a stale property behind the selection"
+        "a dropped manager must not leave a stale property behind the selection",
     );
 }
 
@@ -357,9 +408,8 @@ fn a_placeholder_owner_is_taken_over_when_the_caller_opts_in() {
     let observer = Observer::new();
     assert_eq!(observer.owner(), squatter.window);
 
-    let mut manager =
-        XSettingsManager::acquire_with_policy(None, AcquisitionPolicy::TakeOverPlaceholder)
-            .expect("a placeholder owner must be taken over");
+    let mut manager = acquire_manager(AcquisitionPolicy::TakeOverPlaceholder)
+        .expect("a placeholder owner must be taken over");
     assert_eq!(
         observer.owner(),
         manager.window(),
@@ -391,7 +441,7 @@ fn a_real_owner_is_refused_even_when_takeover_is_asked_for() {
     assert!(published.set("Xft/DPI", 98304));
     let incumbent = FakeOwner::claiming(Some(&published.serialize()));
 
-    match XSettingsManager::acquire_with_policy(None, AcquisitionPolicy::TakeOverPlaceholder) {
+    match acquire_manager(AcquisitionPolicy::TakeOverPlaceholder) {
         Err(XSettingsError::AlreadyOwned { selection, owner }) => {
             assert_eq!(selection, "_XSETTINGS_S0");
             assert_eq!(owner, incumbent.window, "the error must name the manager that was respected");
@@ -417,7 +467,7 @@ fn the_default_policy_refuses_even_a_placeholder() {
     // way any owner always was.
     let squatter = FakeOwner::claiming(Some(&Settings::new().serialize()));
 
-    match XSettingsManager::acquire(None) {
+    match acquire_manager(AcquisitionPolicy::default()) {
         Err(XSettingsError::AlreadyOwned { selection, owner }) => {
             assert_eq!(selection, "_XSETTINGS_S0");
             assert_eq!(owner, squatter.window);
@@ -433,7 +483,7 @@ fn the_default_policy_refuses_even_a_placeholder() {
 #[test]
 #[ignore = "needs an X server; see the module documentation"]
 fn polling_an_undisturbed_manager_reports_it_still_owns_the_selection() {
-    let mut manager = XSettingsManager::acquire(None).unwrap();
+    let mut manager = acquire_manager(AcquisitionPolicy::default()).unwrap();
     manager
         .publish_appearance(&DesktopAppearance::new(1.5, "NeXT"))
         .unwrap();

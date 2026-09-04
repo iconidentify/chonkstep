@@ -218,11 +218,20 @@ fn a_connection_storm_is_capped_before_it_can_grow_the_source_set() {
     let mut events = connect(&mut session, &dir, ".socket2.sock", MAX_EVENT_CLIENTS + 32);
 
     let retained_bound = baseline + MAX_REQUEST_CLIENTS + MAX_EVENT_CLIENTS + 4;
-    assert!(
-        fd_count() <= retained_bound,
-        "excess clients grew the compositor past its two caps: baseline={baseline}, now={}, bound={retained_bound}",
-        fd_count()
-    );
+    // The barrier's own native-control connection and a render fence
+    // can still be disappearing while /proc enumerates the process.
+    // Keep the strict bound, but measure the settled retained set: a
+    // genuinely retained 65th IPC client never satisfies this poll.
+    poll_until(EVENT, "the storm descriptor set to settle within both caps", || {
+        let current = fd_count();
+        (current <= retained_bound).then_some(current)
+    })
+    .unwrap_or_else(|error| {
+        panic!(
+            "{error}; excess clients grew the compositor past its two caps: baseline={baseline}, now={}, bound={retained_bound}",
+            fd_count()
+        )
+    });
     for excess in [requests.last_mut().unwrap(), events.last_mut().unwrap()] {
         excess.set_read_timeout(Some(EVENT)).unwrap();
         let mut byte = [0_u8; 1];
