@@ -18,13 +18,19 @@
 //!   delivery against the lock surface, plus VT switching, which the
 //!   spec explicitly leaves to the compositor and which is the user's
 //!   only escape hatch on real hardware.
-//! - **Only `unlock_and_destroy` unlocks.** The lock *state* lives in
-//!   this compositor ([`LockMachine`]), not in the locker process: a
-//!   locker that crashes takes its surfaces with it and leaves the
-//!   state `Locked`, so the session blanks and stays blanked until a
-//!   new locker binds the manager and takes over — the spec's
-//!   recovery path, and the difference between a lock screen and a
-//!   screensaver.
+//! - **Only the holder's `unlock_and_destroy` unlocks.** The lock
+//!   *state* lives in this compositor ([`LockMachine`]), not in the
+//!   locker process: a locker that crashes takes its surfaces with it
+//!   and leaves the state `Locked`, so the session blanks and stays
+//!   blanked until a new locker binds the manager and takes over —
+//!   the spec's recovery path, and the difference between a lock
+//!   screen and a screensaver. And the request is authenticated
+//!   against the recorded holder before it is honoured: the manager
+//!   global is advertised to every client, so "a client asked to
+//!   unlock" and "the client holding the lock asked to unlock" are
+//!   different sentences, and only the second one is an unlock.
+//!   smithay 0.7.0 conflates them, which is a complete lock-screen
+//!   bypass; see the `ext_session_lock_v1` dispatch guard below.
 //!
 //! The `locked` event is only sent after a locked frame has actually
 //! been *presented* (`confirm_after_frame`, called from the dispatch
@@ -59,16 +65,20 @@
 //! `layers::keyboard_target` is where both this module and the layer
 //! shell ask who it belongs to.
 
-use smithay::delegate_session_lock;
 use smithay::output::Output;
-use smithay::reexports::wayland_protocols::ext::session_lock::v1::server::ext_session_lock_v1::ExtSessionLockV1;
+use smithay::reexports::wayland_protocols::ext::session_lock::v1::server::{
+    ext_session_lock_manager_v1::ExtSessionLockManagerV1,
+    ext_session_lock_surface_v1::ExtSessionLockSurfaceV1,
+    ext_session_lock_v1::{self, ExtSessionLockV1},
+};
 use smithay::reexports::wayland_server::protocol::wl_output::WlOutput;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
-use smithay::reexports::wayland_server::Resource;
+use smithay::reexports::wayland_server::{Client, DataInit, DisplayHandle, Resource};
 use smithay::utils::SERIAL_COUNTER;
 use smithay::wayland::compositor::{add_pre_commit_hook, with_states, BufferAssignment, SurfaceAttributes};
 use smithay::wayland::session_lock::{
-    LockSurface, SessionLockHandler, SessionLockManagerState, SessionLocker,
+    ExtLockSurfaceUserData, LockSurface, SessionLockHandler, SessionLockManagerGlobalData,
+    SessionLockManagerState, SessionLockState, SessionLocker,
 };
 
 use wm_core::BackendEvent;
@@ -195,6 +205,69 @@ impl LockMachine {
     /// The protocol's `unlock_and_destroy` — the one and only way out.
     pub(crate) fn unlocked(&mut self) {
         *self = LockMachine::Unlocked;
+    }
+
+    /// Answers a client's `unlock_and_destroy`. `caller_is_holder` is
+    /// whether the `ext_session_lock_v1` the request arrived on is the
+    /// very object this compositor recorded as the holder — object
+    /// identity, not client identity, because a client may hold more
+    /// than one and only one of them took the lock.
+    ///
+    /// The lock is the compositor's single security boundary, so this
+    /// is a whitelist: everything that is not provably the holder
+    /// finishing a confirmed lock is refused, and refusals are named
+    /// so the caller can log which one happened.
+    pub(crate) fn request_unlock(&self, caller_is_holder: bool) -> UnlockRequest {
+        match self {
+            // The whole point. `Locked` is the state in which the
+            // `locked` event has gone out, which is the state the spec
+            // makes `unlock_and_destroy` legal in.
+            LockMachine::Locked if caller_is_holder => UnlockRequest::Accept,
+            LockMachine::Locked | LockMachine::Locking => {
+                if caller_is_holder {
+                    // The holder, but too early: `locked` has not been
+                    // sent, so the spec's own name for this request is
+                    // `invalid_unlock`. Upstream posts that error and
+                    // then unlocks anyway; refusing keeps the blank up,
+                    // and since the error kills the locker's connection
+                    // the holder goes dead and the recovery path admits
+                    // a replacement. Fail-secure, and recoverable.
+                    UnlockRequest::DenyUnconfirmed
+                } else {
+                    UnlockRequest::DenyNotHolder
+                }
+            }
+            // Nothing is locked; there is nothing to unlock. Harmless
+            // in itself, but it is still a caller asking for the one
+            // transition that matters, so it is refused by the same
+            // rule rather than by luck.
+            LockMachine::Unlocked => UnlockRequest::DenyNotHolder,
+        }
+    }
+}
+
+/// What an `unlock_and_destroy` request is answered with — the exit
+/// half of [`LockMachine::request_lock`]'s entry decision.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum UnlockRequest {
+    /// The holder is ending a confirmed lock: let it through.
+    Accept,
+    /// The caller is not the object holding the lock. This is the
+    /// lock-screen bypass, and a security event.
+    DenyNotHolder,
+    /// The holder asked before its `locked` event went out.
+    DenyUnconfirmed,
+}
+
+impl UnlockRequest {
+    /// The message that goes out with the protocol error, and into the
+    /// log beside it.
+    fn refusal(self) -> &'static str {
+        match self {
+            UnlockRequest::Accept => "",
+            UnlockRequest::DenyNotHolder => "This object does not hold the session lock.",
+            UnlockRequest::DenyUnconfirmed => "Session is not locked.",
+        }
     }
 }
 
@@ -331,7 +404,133 @@ impl SessionLockHandler for Compositor {
     }
 }
 
-delegate_session_lock!(Compositor);
+// ---------------------------------------------------------------------
+// Workaround: smithay's `unlock_and_destroy` unlocks for anyone.
+// ---------------------------------------------------------------------
+
+// `delegate_session_lock!(Compositor)` would emit all four of the
+// delegations below. Three of them are taken verbatim; the fourth —
+// `ext_session_lock_v1` itself — is written out by hand underneath so
+// that `unlock_and_destroy` can be authenticated before upstream sees
+// it. Keep this list in step with the macro
+// (`smithay-0.7.0/src/wayland/session_lock/mod.rs:227-244`) if smithay
+// ever adds an interface to it.
+smithay::reexports::wayland_server::delegate_global_dispatch!(Compositor: [
+    ExtSessionLockManagerV1: SessionLockManagerGlobalData
+] => SessionLockManagerState);
+smithay::reexports::wayland_server::delegate_dispatch!(Compositor: [
+    ExtSessionLockManagerV1: ()
+] => SessionLockManagerState);
+smithay::reexports::wayland_server::delegate_dispatch!(Compositor: [
+    ExtSessionLockSurfaceV1: ExtLockSurfaceUserData
+] => SessionLockManagerState);
+
+/// Authenticates `unlock_and_destroy` against the recorded holder, then
+/// hands every request on to smithay's implementation.
+///
+/// # The upstream bug
+///
+/// [`SessionLockHandler::unlock`] takes no argument, so the identity of
+/// the caller cannot reach a compositor through the handler at all —
+/// and smithay does not check it either.
+/// `smithay-0.7.0/src/wayland/session_lock/lock.rs:181-189`:
+///
+/// ```text
+/// Request::UnlockAndDestroy => {
+///     // Ensure session is locked.
+///     if !data.lock_status.load(Ordering::Relaxed) {
+///         lock.post_error(Error::InvalidUnlock, "Session is not locked.");
+///     }
+///
+///     state.lock_state().locked_outputs.clear();
+///     state.unlock();
+/// }
+/// ```
+///
+/// There is no `return` after the `post_error`, and `lock_status` is a
+/// **per-object** flag minted false for every `lock` request and set
+/// true only when the compositor confirms
+/// (`session_lock/mod.rs:143-152` and `:217-222`). So a client whose
+/// lock request this compositor *denied* holds a live
+/// `ext_session_lock_v1` with `lock_status == false` — the deny branch
+/// answers by dropping the confirmation, which sends `finished` but
+/// cannot destroy an object only the client may destroy — and sending
+/// `unlock_and_destroy` on it posts a protocol error that kills the
+/// *attacker's* connection and then falls through to `state.unlock()`,
+/// which is this module's. Three requests from any process that can
+/// open the Wayland socket — bind the manager, `lock`, then
+/// `unlock_and_destroy` on the object the denial left behind — and the
+/// screen in front of an unattended machine is the user's desktop
+/// again, keyboard and all.
+///
+/// # What this does instead
+///
+/// Every request is forwarded unchanged except `unlock_and_destroy`,
+/// which is put to [`LockMachine::request_unlock`] first. The identity
+/// compared is the protocol object: `session_lock.holder` is written
+/// only in `lock()`'s accept branch, from the confirmation's own
+/// `ext_session_lock_v1`, so equality here means "the object that took
+/// the lock now in force". `ObjectId` equality covers the client and
+/// the object's generation as well as its numeric id, so a destroyed
+/// object's id being handed out again cannot be mistaken for the
+/// holder.
+///
+/// A refused request is answered with the protocol's own
+/// `invalid_unlock`, which is accurate on both refusal paths — neither
+/// caller ever received `locked` on the object it is asking with — and
+/// which disconnects it. The compositor's lock state is not touched, so
+/// upstream's `unlock()` is never reached and the blank stays up.
+///
+/// # Removing this
+///
+/// When smithay returns after that `post_error` *and* passes the
+/// `&ExtSessionLockV1` to `SessionLockHandler::unlock`, this whole
+/// section collapses back to `delegate_session_lock!(Compositor)` plus
+/// a holder comparison at the top of [`Compositor::unlock`]. Until it
+/// does both, the delegation has to be split, because the handler
+/// signature is where the caller's identity is lost.
+impl smithay::reexports::wayland_server::Dispatch<ExtSessionLockV1, SessionLockState> for Compositor {
+    fn request(
+        state: &mut Self,
+        client: &Client,
+        lock: &ExtSessionLockV1,
+        request: ext_session_lock_v1::Request,
+        data: &SessionLockState,
+        dhandle: &DisplayHandle,
+        data_init: &mut DataInit<'_, Self>,
+    ) {
+        // Matching binds nothing, so the request is not moved and is
+        // still available to forward below.
+        if matches!(request, ext_session_lock_v1::Request::UnlockAndDestroy) {
+            let caller_is_holder =
+                state.session_lock.holder.as_ref().is_some_and(|holder| holder == lock);
+            let verdict = state.session_lock.machine.request_unlock(caller_is_holder);
+            if verdict != UnlockRequest::Accept {
+                // A refused unlock is an attempt on the session's one
+                // security boundary, not a routine protocol denial, so
+                // it is logged at `error` with enough to identify the
+                // process behind it. The pid is the only durable
+                // handle a user has on "which program did this"; a
+                // client that has already gone is not worth a failure
+                // here, hence the `ok()`.
+                let pid = client.get_credentials(dhandle).ok().map(|credentials| credentials.pid);
+                tracing::error!(
+                    ?verdict,
+                    pid,
+                    object = lock.id().protocol_id(),
+                    "refusing unlock_and_destroy: the session stays locked"
+                );
+                lock.post_error(ext_session_lock_v1::Error::InvalidUnlock, verdict.refusal());
+                return;
+            }
+        }
+        <SessionLockManagerState as smithay::reexports::wayland_server::Dispatch<
+            ExtSessionLockV1,
+            SessionLockState,
+            Compositor,
+        >>::request(state, client, lock, request, data, dhandle, data_init);
+    }
+}
 
 /// Sends the owed `locked` confirmation once a locked frame has been
 /// presented. Called from `dispatch_pending` after the render: a
@@ -700,6 +899,64 @@ mod tests {
         machine.frame_presented();
         machine.unlocked();
         assert!(!machine.locked());
+    }
+
+    #[test]
+    fn a_client_that_does_not_hold_the_lock_cannot_unlock() {
+        // The bypass, in the state machine: the real locker holds a
+        // confirmed lock, and a second client asks to unlock with an
+        // object that is not the holder's. smithay's dispatch would
+        // reach `unlock()` here; the guard is what stops it.
+        let mut machine = LockMachine::default();
+        machine.request_lock(false);
+        machine.frame_presented();
+        assert_eq!(machine.request_unlock(false), UnlockRequest::DenyNotHolder);
+        assert!(machine.locked(), "a refused unlock must not disturb the lock");
+    }
+
+    #[test]
+    fn the_holder_may_unlock_a_confirmed_lock() {
+        let mut machine = LockMachine::default();
+        machine.request_lock(false);
+        machine.frame_presented();
+        assert_eq!(machine.request_unlock(true), UnlockRequest::Accept);
+    }
+
+    #[test]
+    fn even_the_holder_may_not_unlock_before_its_locked_event() {
+        // `Locking` is the window between accepting the lock and
+        // presenting the first blanked frame. The spec's own name for
+        // an unlock here is `invalid_unlock` — "unlock requested but
+        // locked event was never sent" — so it is refused, and the
+        // blank holds rather than lifting on a client that is by
+        // definition not yet showing a lock screen.
+        let mut machine = LockMachine::default();
+        machine.request_lock(false);
+        assert_eq!(machine.request_unlock(true), UnlockRequest::DenyUnconfirmed);
+        assert_eq!(machine.request_unlock(false), UnlockRequest::DenyNotHolder);
+        assert!(machine.locked());
+    }
+
+    #[test]
+    fn an_unlock_on_an_unlocked_session_is_refused_rather_than_ignored() {
+        let machine = LockMachine::default();
+        assert_eq!(machine.request_unlock(true), UnlockRequest::DenyNotHolder);
+        assert_eq!(machine.request_unlock(false), UnlockRequest::DenyNotHolder);
+    }
+
+    #[test]
+    fn a_recovering_locker_may_unlock_the_session_it_took_over() {
+        // Refusing impostors must not cost the recovery path its exit:
+        // a locker that took over a dead one's session is the holder
+        // from the moment it is accepted, and unlocks like any other
+        // once its own frame is on screen.
+        let mut machine = LockMachine::default();
+        machine.request_lock(false);
+        machine.frame_presented();
+        // The holder dies; a replacement takes over and confirms.
+        assert_eq!(machine.request_lock(false), LockRequest::Accept);
+        assert!(machine.frame_presented());
+        assert_eq!(machine.request_unlock(true), UnlockRequest::Accept);
     }
 
     #[test]
