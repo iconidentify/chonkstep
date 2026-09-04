@@ -431,18 +431,40 @@ impl CompositorHandler for Compositor {
         while let Some(parent) = get_parent(&root) {
             root = parent;
         }
-        let backend = self.wm.backend_mut();
-        if let Some(window) = backend.window_for_surface(&root) {
-            // Native roots were indexed at toplevel creation. An
-            // XWayland record predates its wl_surface association, so
-            // its first commit discovers the edge by fallback scan
-            // and makes every later lookup constant-time here.
-            backend.index_window_surface(&root, window);
-            if let Some(record) = backend.windows.get_mut(&window) {
-                record.snapshot_dirty = true;
-            }
-        }
         let xwayland = surface.client().is_some_and(|client| client.get_data::<XWaylandClientData>().is_some());
+        let owner = {
+            let backend = self.wm.backend_mut();
+            let owner = if xwayland {
+                backend.ensure_window_surface_index(&root)
+            } else {
+                backend.window_for_surface(&root)
+            };
+            if let Some(window) = owner {
+                // Native roots were indexed at toplevel creation. An
+                // XWayland record predates its wl_surface association,
+                // so its first commit discovers the edge by fallback
+                // scan and makes every later lookup constant-time here.
+                if let Some(record) = backend.windows.get_mut(&window) {
+                    record.snapshot_dirty = true;
+                }
+            }
+            owner
+        };
+        self.popups.commit(surface);
+        // Resolve popup ancestry once for every downstream decision in
+        // this commit. A toplevel takes the indexed owner above; an xdg
+        // popup inherits its toplevel (or layer) root for output scale
+        // and visibility.
+        let popup = self.popups.find_popup(&root);
+        let scene_root = popup
+            .as_ref()
+            .and_then(|popup| smithay::desktop::find_popup_root_surface(popup).ok())
+            .unwrap_or_else(|| root.clone());
+        let scene_owner = if scene_root == root {
+            owner
+        } else {
+            self.wm.backend().window_for_surface(&scene_root)
+        };
         if !xwayland {
             // Tell the surface how densely it should draw. The
             // `wl_surface.enter` half of scale discovery was settled
@@ -453,7 +475,7 @@ impl CompositorHandler for Compositor {
             // client created. Both dedup per surface inside smithay,
             // so the hot path sends nothing after the first commit at
             // a given scale.
-            let preferred = self.preferred_scale_for(&root);
+            let preferred = self.preferred_scale_for_resolved(&scene_root, scene_owner);
             let advertised = crate::state::advertised_output_scale(preferred as f32).integer_scale();
             with_states(surface, |states| {
                 smithay::wayland::compositor::send_surface_state(
@@ -467,8 +489,6 @@ impl CompositorHandler for Compositor {
                 });
             });
         }
-        self.popups.commit(surface);
-
         // Layer surfaces first: their commit lifecycle (initial
         // configure, map/unmap edges, re-arrangement around the
         // committed size) lives in `layers.rs`, and a surface wearing
@@ -482,17 +502,21 @@ impl CompositorHandler for Compositor {
             // compositor's scene. The layer lifecycle itself damages
             // map/layout transitions; steady hidden commits need no
             // otherwise-empty frame.
-            if self.surface_affects_scene(&root) {
+            if self.resolved_surface_affects_scene(&scene_root, scene_owner) {
                 self.wm.backend_mut().mark_damaged();
             }
             return;
         }
 
-        let toplevel =
-            self.xdg_shell_state.toplevel_surfaces().iter().find(|toplevel| *toplevel.wl_surface() == root).cloned();
-        if let Some(toplevel) = toplevel {
-            self.toplevel_committed(&toplevel);
-        } else if let Some(PopupKind::Xdg(popup)) = self.popups.find_popup(&root) {
+        let toplevel = owner.and_then(|window| {
+            self.wm.backend().windows.get(&window).and_then(|record| match &record.surface {
+                ManagedSurface::Xdg(toplevel) => Some((window, toplevel.clone())),
+                ManagedSurface::X11(_) => None,
+            })
+        });
+        if let Some((window, toplevel)) = toplevel {
+            self.toplevel_committed(window, &toplevel);
+        } else if let Some(PopupKind::Xdg(popup)) = popup {
             // A popup's first commit must be answered with its initial
             // configure or the client waits forever.
             if !popup.is_initial_configure_sent() {
@@ -512,15 +536,15 @@ impl CompositorHandler for Compositor {
         // Map/unmap/layout transitions damage through their own backend
         // verbs, so rejecting a hidden steady-state commit cannot leave
         // stale pixels behind.
-        if self.surface_affects_scene(&root) {
+        if self.resolved_surface_affects_scene(&scene_root, scene_owner) {
             self.wm.backend_mut().mark_damaged();
         }
     }
 }
 
 impl Compositor {
-    /// Whether a commit to `root` can change the scene being rendered
-    /// right now.
+    /// Whether a commit whose popup-resolved root and indexed owner are
+    /// supplied can change the scene being rendered right now.
     ///
     /// This mirrors `renderer::build_scene`, including its less-obvious
     /// cases: a framed window is visible only when its *frame* is in the
@@ -528,64 +552,70 @@ impl Compositor {
     /// slot, popups inherit their toplevel's visibility, hidden/declined
     /// layer surfaces do not paint, and a locked session contains only
     /// lock, cursor, and input-method surfaces. Keeping the predicate
-    /// beside the commit handler makes it the admission gate for the
-    /// hottest damage source without teaching the renderer about
-    /// protocol callbacks.
-    fn surface_affects_scene(&self, root: &WlSurface) -> bool {
+    /// The commit handler resolves both arguments once and reuses them
+    /// for scale and role handling too; keeping the predicate beside it
+    /// makes this the admission gate for the hottest damage source
+    /// without teaching the renderer about protocol callbacks.
+    fn resolved_surface_affects_scene(&self, scene_root: &WlSurface, owner: Option<WlWindowId>) -> bool {
         let backend = self.wm.backend();
 
         // Cursor and input-method surfaces are assembled before the
         // lock-screen branch, so they remain scene elements on either
         // side of it.
-        if matches!(&self.cursor_status, CursorImageStatus::Surface(surface) if surface == root)
-            || backend.ime_popups.iter().any(|popup| popup.wl_surface() == root)
+        if matches!(&self.cursor_status, CursorImageStatus::Surface(surface) if surface == scene_root)
+            || backend.ime_popups.iter().any(|popup| popup.wl_surface() == scene_root)
         {
             return true;
         }
-
-        // An xdg popup is rendered as part of its toplevel/layer root,
-        // not as an independent ledger record. Resolve the chain once
-        // so a popup on a parked workspace is rejected with its owner.
-        let scene_root = self
-            .popups
-            .find_popup(root)
-            .and_then(|popup| smithay::desktop::find_popup_root_surface(&popup).ok())
-            .unwrap_or_else(|| root.clone());
 
         if backend.locked {
             return backend
                 .lock_surfaces
                 .iter()
-                .any(|entry| entry.surface.alive() && entry.surface.wl_surface() == &scene_root);
+                .any(|entry| entry.surface.alive() && entry.surface.wl_surface() == scene_root);
         }
 
-        if let Some(window) = backend.window_for_surface(&scene_root) {
+        if let Some(window) = owner {
             return window_is_in_scene(backend, window);
         }
         backend
             .layers
             .iter()
-            .find(|record| record.surface.wl_surface() == &scene_root)
+            .find(|record| record.surface.wl_surface() == scene_root)
             .is_some_and(|record| backend.layer_presented(record))
     }
 
     /// The fractional scale a surface should render for: the scale of
-    /// the output its window (or layer surface, or lock surface) lives
-    /// on, falling back to the primary output's for a surface not yet
-    /// anchored anywhere — which is every surface's state at its first
-    /// commit, when the primary is the only honest guess.
+    /// the output its window (or popup parent, layer surface, or lock
+    /// surface) lives on, falling back to the primary output's for a
+    /// surface not yet anchored anywhere — which is every surface's
+    /// state at its first commit, when the primary is the only honest
+    /// guess.
     pub(crate) fn preferred_scale_for(&self, root: &WlSurface) -> f64 {
+        let popup = self.popups.find_popup(root);
+        let scene_root = popup
+            .as_ref()
+            .and_then(|popup| smithay::desktop::find_popup_root_surface(popup).ok())
+            .unwrap_or_else(|| root.clone());
         let backend = self.wm.backend();
-        if let Some(id) = backend.window_for_surface(root) {
+        let owner = backend.window_for_surface(&scene_root);
+        self.preferred_scale_for_resolved(&scene_root, owner)
+    }
+
+    /// The scale lookup once popup ancestry and window ownership have
+    /// already been resolved by the commit path.
+    fn preferred_scale_for_resolved(&self, scene_root: &WlSurface, owner: Option<WlWindowId>) -> f64 {
+        let backend = self.wm.backend();
+        if let Some(id) = owner {
             if let Some(record) = backend.windows.get(&id) {
                 return backend.scale_at(record.content);
             }
         }
-        if let Some(record) = backend.layers.iter().find(|record| record.surface.wl_surface() == root) {
+        if let Some(record) = backend.layers.iter().find(|record| record.surface.wl_surface() == scene_root) {
             return backend.scale_at(record.geometry);
         }
         for entry in &backend.lock_surfaces {
-            if entry.surface.wl_surface() == root {
+            if entry.surface.wl_surface() == scene_root {
                 if let Some(monitor) = backend.monitors.get(entry.output) {
                     return backend.scale_at(monitor.geometry);
                 }
@@ -598,7 +628,7 @@ impl Compositor {
     /// doc): initial configure, then buffer-presence edges into
     /// MapRequest/Unmapped, then client-side resize drift into
     /// ConfigureRequest.
-    fn toplevel_committed(&mut self, toplevel: &ToplevelSurface) {
+    fn toplevel_committed(&mut self, id: WlWindowId, toplevel: &ToplevelSurface) {
         let root = toplevel.wl_surface().clone();
         let initial_configure_sent = with_states(&root, |states| {
             states.data_map.get::<XdgToplevelSurfaceData>().map(|data| data.lock().unwrap().initial_configure_sent)
@@ -616,9 +646,6 @@ impl Compositor {
         let has_buffer = with_renderer_surface_state(&root, |state| state.buffer().is_some()).unwrap_or(false);
         let was_mapped = mapped_marker(&root);
         let backend = self.wm.backend_mut();
-        let Some(id) = backend.window_for_surface(&root) else {
-            return;
-        };
         // The factor everything below measures by: the client's own
         // committed statement (viewport ratio or integer buffer scale),
         // corrected for the integral-fallback case on this window's

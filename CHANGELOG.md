@@ -7,6 +7,20 @@ crate and both session binaries carry the same number.
 
 ### Performance
 
+- **Surface commits carry one resolved identity through their whole
+  lifecycle.** A commit now performs one read-only owner-index probe and
+  reuses the result for snapshot invalidation, scale selection, xdg lifecycle,
+  and damage admission; only the first late XWayland association scans and
+  extends the index. Ordinary non-window surfaces now receive a constant-time
+  miss instead of a client-table fallback scan. Popup ancestry is likewise
+  resolved once and inherited by scale and visibility, which also fixes popups
+  on a secondary output being told the primary output's scale. In the
+  1,800-commit/201-window release
+  workload this removes roughly 361,800 xdg-role comparisons, 5,400 redundant
+  owner hash probes, 1,800 unchanged hash-map writes, and 1,800 duplicate popup
+  lookups. Three alternating samples were scheduler-noise neutral (median 100
+  CPU ticks both before and after), so the deterministic operation reduction,
+  not a timing percentage, is the performance claim.
 - **Omarchy taskbar protocol publication is demand-driven.** The wlr
   foreign-toplevel snapshot/diff now runs only after a real window-manager
   invalidation or a new manager bind, while output management returns before

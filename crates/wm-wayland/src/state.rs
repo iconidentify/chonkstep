@@ -889,13 +889,22 @@ impl WaylandBackend {
         }
     }
 
-    /// Indexes a root learned after record creation. That is the X11
-    /// lifecycle: the X window exists before XWayland associates its
-    /// `wl_surface`; the first surface commit pays one fallback scan
-    /// and every lookup after it is constant-time.
-    pub(crate) fn index_window_surface(&mut self, surface: &WlSurface, window: WlWindowId) {
-        debug_assert!(self.windows.contains_key(&window));
+    /// Resolves and, only when necessary, indexes a root learned after
+    /// record creation. That is the X11 lifecycle: the X window exists
+    /// before XWayland associates its `wl_surface`; the first surface
+    /// commit pays one fallback scan and insertion, while native and
+    /// subsequent X11 commits perform one read-only hash probe.
+    pub(crate) fn ensure_window_surface_index(&mut self, surface: &WlSurface) -> Option<WlWindowId> {
+        if let Some(window) = self.surface_windows.get(&surface.id()) {
+            return Some(*window);
+        }
+        let window = self
+            .windows
+            .iter()
+            .find(|(_, record)| record.surface.wl_surface().as_ref() == Some(surface))
+            .map(|(id, _)| *id)?;
         self.surface_windows.insert(surface.id(), window);
+        Some(window)
     }
 
     /// Drops the index edge at the protocol object's exact lifetime
@@ -906,15 +915,12 @@ impl WaylandBackend {
     }
 
     /// Resolves a `wl_surface` back to the managed window it belongs
-    /// to. Native roots are indexed at toplevel creation. The linear
-    /// fallback is solely for an X11 record whose `wl_surface`
-    /// association appeared after that record; its first commit adds
-    /// the missing edge through [`Self::index_window_surface`].
+    /// to with one read-only hash probe. Native roots are indexed at
+    /// toplevel creation; the XWayland commit path explicitly calls
+    /// [`Self::ensure_window_surface_index`] for its one late-binding
+    /// lifecycle, so an ordinary miss never needs to scan the ledger.
     pub(crate) fn window_for_surface(&self, surface: &WlSurface) -> Option<WlWindowId> {
-        if let Some(window) = self.surface_windows.get(&surface.id()) {
-            return Some(*window);
-        }
-        self.windows.iter().find(|(_, record)| record.surface.wl_surface().as_ref() == Some(surface)).map(|(id, _)| *id)
+        self.surface_windows.get(&surface.id()).copied()
     }
 
     /// Drops a window's ledger entry *and* the stacking slot a
