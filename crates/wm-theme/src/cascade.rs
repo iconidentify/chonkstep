@@ -103,6 +103,7 @@ impl<Id: Copy + Eq + std::fmt::Debug> CascadeMenu<Id> {
     /// and grabs the pointer for the whole session. `bounds` is the
     /// host's screen/window extent, used to keep later cascades on
     /// screen.
+    #[allow(clippy::too_many_arguments)] // Popup geometry and rendering state form one atomic host operation.
     pub fn open<H: PopupHost<PopupId = Id>>(
         &mut self,
         host: &mut H,
@@ -261,6 +262,7 @@ impl<Id: Copy + Eq + std::fmt::Debug> CascadeMenu<Id> {
         self.open_submenu(host, theme, font_system, level, item_index);
     }
 
+    #[allow(clippy::too_many_arguments)] // Mirrors `open`; wrapping these transient values would obscure the cascade flow.
     fn open_level<H: PopupHost<PopupId = Id>>(
         &mut self,
         host: &mut H,

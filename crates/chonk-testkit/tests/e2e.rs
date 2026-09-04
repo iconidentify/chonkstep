@@ -850,8 +850,24 @@ fn chromium_resize_at_scale_2_keeps_its_scale() {
     let mut chromium_args = vec![
         "--ozone-platform=wayland",
         data.as_str(),
+        // Chromium otherwise asks the compositor for almost the whole
+        // output on some cold profiles, leaving no room for a synthetic
+        // pointer drag to grow it before hitting the output clamp. A
+        // fixed ordinary window is still large enough to exercise its
+        // over-allocated, viewport-cropped buffers.
+        "--window-size=800,600",
         "--no-first-run",
         "--no-default-browser-check",
+        // A blank local page needs none of Chromium's background
+        // services. Disabling them keeps a cold hosted runner focused
+        // on the Wayland interaction this test measures.
+        "--disable-background-networking",
+        "--disable-component-update",
+        "--disable-default-apps",
+        "--disable-extensions",
+        "--disable-sync",
+        "--metrics-recording-only",
+        "--password-store=basic",
         "about:blank",
     ];
     // GitHub's hosted Ubuntu runner denies the unprivileged user
@@ -890,23 +906,39 @@ fn chromium_resize_at_scale_2_keeps_its_scale() {
         );
     }
     session.door().barrier().unwrap();
-    let window = session
-        .world()
-        .unwrap()
-        .window_matching("hromium")
-        .cloned()
-        .unwrap();
+    // The first map precedes Chromium's first fully drawn commit on a
+    // cold profile. Wait for its declared window geometry to expose
+    // the CSD shadow instead of racing that commit and clicking two
+    // pixels outside a zero-offset surface, which correctly belongs
+    // to the desktop.
+    let window = {
+        let door = session.door();
+        poll_until(ACT, "Chromium to publish its CSD resize margin", || {
+            let world = door.windows().ok()?;
+            let window = world.window_matching("hromium")?;
+            (window.offset_x > 0 && window.offset_y > 0).then(|| window.clone())
+        })
+    }
+    .unwrap_or_else(|error| {
+        let world = session.world().ok();
+        panic!("{error}; final ledger: {world:?}")
+    });
 
-    // Corner drag, frameless CSD style: grip just outside the content
-    // rect (the shadow margin), cross the drag threshold in small
-    // steps, then cruise.
+    // Use the desktop's Alt+right-button anywhere-resize gesture from
+    // the bottom-right content pixel. Chromium's own CSD input region
+    // is deliberately toolkit-owned and has changed across releases;
+    // the compositor gesture deterministically drives the same stream
+    // of interactive xdg configures and viewport-cropped Chromium
+    // commits that this scale regression is about.
     let grip = (
-        window.x as f64 + window.w as f64 + 2.0,
-        window.y as f64 + window.h as f64 + 2.0,
+        window.x as f64 + window.w as f64 - 2.0,
+        window.y as f64 + window.h as f64 - 2.0,
     );
     session.door().motion(grip.0, grip.1).unwrap();
     session.door().barrier().unwrap();
-    session.door().button("left", true).unwrap();
+    session.door().key(chonk_testkit::keys::LEFTALT, true).unwrap();
+    session.door().barrier().unwrap();
+    session.door().button("right", true).unwrap();
     session.door().barrier().unwrap();
     for d in [2.0, 5.0, 9.0] {
         session.door().motion(grip.0 + d, grip.1 + d).unwrap();
@@ -919,7 +951,11 @@ fn chromium_resize_at_scale_2_keeps_its_scale() {
             let now = world.window_matching("hromium")?;
             (now.w != window.w || now.h != window.h).then_some(())
         })
-        .expect("the corner drag never engaged a resize");
+        .unwrap_or_else(|error| {
+            panic!(
+                "{error}; the corner drag never engaged a resize from {window:?}"
+            )
+        });
     }
     for step in 1..=16 {
         let d = 9.0 + step as f64 * 20.0;
@@ -946,7 +982,8 @@ fn chromium_resize_at_scale_2_keeps_its_scale() {
             window.h
         );
     }
-    session.door().button("left", false).unwrap();
+    session.door().button("right", false).unwrap();
+    session.door().key(chonk_testkit::keys::LEFTALT, false).unwrap();
     session.door().barrier().unwrap();
 
     let released = session

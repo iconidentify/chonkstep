@@ -343,10 +343,7 @@ impl Ramps {
             return Err(RampError::Length { expected, got: bytes.len() });
         }
         let channel = |offset: usize| -> Vec<u16> {
-            bytes[offset..offset + size * 2]
-                .chunks_exact(2)
-                .map(|pair| u16::from_le_bytes([pair[0], pair[1]]))
-                .collect()
+            bytes[offset..offset + size * 2].as_chunks::<2>().0.iter().copied().map(u16::from_le_bytes).collect()
         };
         Ok(Self { red: channel(0), green: channel(size * 2), blue: channel(size * 4) })
     }

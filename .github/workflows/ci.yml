@@ -440,12 +440,11 @@ jobs:
             libxkbcommon-dev libegl-dev libgles-dev libwayland-dev \
             libdrm-dev libgbm-dev libinput-dev libudev-dev libseat-dev
 
-      # Gate one: the incident's own lint plus documented safety contracts,
-      # denied across every crate in the workspace with no exemptions and no
-      # ratchet. `--no-deps`
-      # keeps clippy off crates.io dependencies, whose source nobody
-      # here can fix; `--workspace` makes every member a primary package
-      # so all of them are still linted.
+      # Every warning, the incident's blocking-call lints, and documented
+      # safety contracts are denied across every crate with no exemptions.
+      # `--no-deps` keeps clippy off crates.io dependencies, whose source
+      # nobody here can fix; `--workspace` makes every member a primary
+      # package so all of them are still linted.
       #
       # `disallowed_types` joined `disallowed_methods` here when
       # `crates/chonk-instruments` gained a `clippy.toml` of its own.
@@ -464,75 +463,8 @@ jobs:
       # why `chonk-instruments/clippy.toml` repeats the workspace's
       # three bans verbatim; if you add a ban to the root file, add it
       # there too or that crate quietly loses it.
-      - name: Ban blocking child-process calls workspace-wide
-        run: cargo clippy --workspace --all-targets --no-deps -- -D clippy::disallowed_methods -D clippy::disallowed_types -D clippy::undocumented_unsafe_blocks
-
-      # Gate two: everything else clippy has to say, denied — but only
-      # on the nine crates that are clean today. This is a ratchet, not
-      # a compromise: `wm-theme` (9 warnings, mostly `too_many_arguments`
-      # on renderer signatures that take theme + font system + swash
-      # cache + geometry, plus a `div_ceil` and a redundant cast) and
-      # `wm-wayland` (6, including a genuine `large_enum_variant` on
-      # `Graphics`) were left out because they were dirty before this job
-      # existed and fixing them is a change to those crates' code, not to
-      # CI. Both are gated by gate one regardless.
-      #
-      # Adding a crate to this list is how the debt gets paid; removing
-      # one is how it gets hidden. The list is deliberately explicit
-      # rather than an `--exclude` of the dirty two, so a *new* crate
-      # arrives ungated and someone has to make the choice out loud
-      # rather than inheriting whatever state it was born in.
-      #
-      # `chonk-dock-widget` and `chonk-instruments` were added the day
-      # they were split out of `chonk-shell`, which was already on the
-      # list — the choice made out loud is that a crate carved out of a
-      # clean one starts clean and stays that way. `chonk-dock-proto`
-      # is not here yet.
-      #
-      # `chonk-xsettings` was added the day it was written, which is the
-      # choice this list exists to make out loud: it arrived clean under
-      # `-D warnings` and under `#![deny(missing_docs)]`, and a crate
-      # that publishes a binary wire format to every X client on the
-      # session is not one to let drift.
-      #
-      # `chonk-toplevel` was added the day it was written for the same
-      # reason: it is a ~500-line Wayland client with no dependency on
-      # anything else here, it arrived clean, and it is a small public
-      # client of the foreign-toplevel protocol.
-      #
-      # `chonk-hyprland-ipc` was added the day it was written, and it is
-      # the strongest case on this list. Every JSON field name, every
-      # event payload and every parser in it is a promise made to
-      # somebody else's binary — the real `hyprctl` and Quickshell's IPC
-      # client — which means a regression there does not look like a
-      # regression here: it looks like Omarchy's bar going quietly
-      # blank, or a script taking a branch its author never tested. It
-      # arrived clean, it depends only on `serde` and
-      # `chonk-dock-proto`, and it carries the conformance tests that
-      # pin those promises down. A crate whose whole job is to be
-      # trusted by software we do not control is not one to let drift.
-      - name: Deny clippy warnings on the crates that are clean
-        run: |
-          cargo clippy --all-targets --no-deps \
-            -p chonk-hyprland-ipc \
-            -p chonk-about \
-            -p chonk-btpair \
-            -p chonk-dock-widget \
-            -p chonk-netjoin \
-            -p chonk-testkit \
-            -p chonk-toplevel \
-            -p chonk-xsettings \
-            -p chonk-instruments \
-            -p chonk-shell \
-            -p chonk-ui \
-            -p chonkstep \
-            -p chonkstep-wayland \
-            -p chonk-shelf \
-            -p wm-config \
-            -p wm-core \
-            -p wm-theme-api \
-            -p wm-x11 \
-            -- -D warnings
+      - name: Deny clippy warnings workspace-wide
+        run: cargo clippy --workspace --all-targets --no-deps -- -D warnings -D clippy::disallowed_methods -D clippy::disallowed_types -D clippy::undocumented_unsafe_blocks
 
       - name: Deny broken links and warnings in public Rust documentation
         env:

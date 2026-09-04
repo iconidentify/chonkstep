@@ -956,7 +956,7 @@ const HOUSEKEEPING_INTERVAL: Duration = Duration::from_millis(16);
 /// scene they draw is one function, [`crate::renderer::build_scene`],
 /// so the choice never reaches anything visual.
 pub(crate) enum Graphics {
-    Winit(WinitGraphicsBackend<GlesRenderer>),
+    Winit(Box<WinitGraphicsBackend<GlesRenderer>>),
     // Constructed by `session::init` once the DRM backend lands; the
     // allow keeps the staged build warning-free until then.
     #[allow(dead_code)]
@@ -2539,7 +2539,7 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
         // clamp — then takes the degenerate single-monitor case of the
         // multi-monitor path rather than a path of its own.
         (
-            Graphics::Winit(winit_backend),
+            Graphics::Winit(Box::new(winit_backend)),
             vec![OutputSetup { output, position: Point::new(0, 0), size, modes: vec![mode] }],
         )
     } else {

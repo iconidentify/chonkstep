@@ -143,6 +143,7 @@ fn draw_alert_frame(pixmap: &mut Pixmap, x: i32, y: i32, w: i32, h: i32, glass: 
 /// the history graph, `MEM` right-aligned under the bar — each mark
 /// sits under the readout it names, so the strip doubles as the
 /// legend without any pointer chrome.
+#[allow(clippy::too_many_arguments)] // Explicit raster bounds keep this leaf renderer allocation-free.
 fn draw_label_strip(
     pixmap: &mut Pixmap,
     theme: &Theme,
@@ -203,7 +204,7 @@ mod tests {
     }
 
     fn count_color(buffer: &DecorationBuffer, c: Color) -> usize {
-        buffer.pixels.chunks_exact(4).filter(|p| (p[0], p[1], p[2]) == (c.r, c.g, c.b)).count()
+        buffer.pixels.as_chunks::<4>().0.iter().filter(|p| (p[0], p[1], p[2]) == (c.r, c.g, c.b)).count()
     }
 
     #[test]

@@ -79,7 +79,7 @@ pub const METER_SEGMENTS: u32 = 10;
 /// least one cell — a meter showing zero while the machine still runs
 /// would be lying in the alarming direction.
 fn meter_lit(capacity: u8) -> u32 {
-    (capacity.min(100) as u32 + 9) / 10
+    (capacity.min(100) as u32).div_ceil(10)
 }
 
 /// The three digit positions, leading zeros blanked to ghosts exactly
@@ -227,6 +227,7 @@ fn frame_rect(pixmap: &mut Pixmap, x: i32, y: i32, w: u32, h: u32, color: Color)
     paint::fill_rect(pixmap, x + w as i32 - 1, y, 1, h, color);
 }
 
+#[allow(clippy::too_many_arguments)] // The glass is a leaf raster operation over one explicit rectangle and reading.
 fn draw_battery_glass(
     pixmap: &mut Pixmap,
     pal: &PanelPalette,

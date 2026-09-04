@@ -803,6 +803,12 @@ pub struct WindowInfo {
     pub y: i32,
     pub w: u32,
     pub h: u32,
+    /// Buffer pixels to the left of the declared window geometry. A
+    /// client-decorated window uses this transparent band for shadows
+    /// and resize grips.
+    pub offset_x: i32,
+    /// Buffer pixels above the declared window geometry.
+    pub offset_y: i32,
     pub mapped: bool,
     pub app: String,
     pub title: String,
@@ -1200,6 +1206,10 @@ fn parse_window_line(line: &str) -> Option<WindowInfo> {
         y: field(line, "y=")?,
         w: field(line, "w=")?,
         h: field(line, "h=")?,
+        // Optional so a newer harness can still inspect a compositor
+        // binary built before the test-door diagnostic was extended.
+        offset_x: field(line, "offset_x=").unwrap_or(0),
+        offset_y: field(line, "offset_y=").unwrap_or(0),
         mapped: field(line, "mapped=")?,
         app: quoted_field(line, "app"),
         title: quoted_field(line, "title"),
@@ -1358,18 +1368,22 @@ mod tests {
     }
 
     #[test]
-    fn window_lines_parse_including_quoted_tails() {
-        let line =
-            r#"window id=3 x=100 y=-8 w=400 h=300 mapped=true app="org.gnome.zenity" title="Question two words""#;
+    fn window_lines_parse_including_offsets_and_quoted_tails() {
+        let line = r#"window id=3 x=100 y=-8 w=400 h=300 offset_x=12 offset_y=9 mapped=true app="org.gnome.zenity" title="Question two words""#;
         let window = parse_window_line(line).unwrap();
         assert_eq!(window.id, 3);
         assert_eq!(window.x, 100);
         assert_eq!(window.y, -8);
         assert_eq!(window.w, 400);
         assert_eq!(window.h, 300);
+        assert_eq!(window.offset_x, 12);
+        assert_eq!(window.offset_y, 9);
         assert!(window.mapped);
         assert_eq!(window.app, "org.gnome.zenity");
         assert_eq!(window.title, "Question two words");
+
+        let old = parse_window_line(r#"window id=4 x=0 y=0 w=1 h=1 mapped=true app="old" title="door""#).unwrap();
+        assert_eq!((old.offset_x, old.offset_y), (0, 0), "new harnesses still read the old door shape");
     }
 
     #[test]

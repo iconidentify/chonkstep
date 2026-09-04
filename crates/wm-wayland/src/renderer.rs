@@ -528,7 +528,7 @@ static CONSECUTIVE_FRAME_FAILURES: AtomicU32 = AtomicU32::new(0);
 /// logged.
 pub(crate) fn note_frame_failure() -> bool {
     let previous = CONSECUTIVE_FRAME_FAILURES.fetch_add(1, Ordering::Relaxed);
-    previous < FRAME_FAILURES_BEFORE_THROTTLE || previous % 100 == 0
+    previous < FRAME_FAILURES_BEFORE_THROTTLE || previous.is_multiple_of(100)
 }
 
 /// Clears the failure streak after a frame reaches the screen.

@@ -343,7 +343,7 @@ mod tests {
     }
 
     fn count_exact(buffer: &DecorationBuffer, color: Color) -> usize {
-        buffer.pixels.chunks_exact(4).filter(|p| (p[0], p[1], p[2]) == (color.r, color.g, color.b)).count()
+        buffer.pixels.as_chunks::<4>().0.iter().filter(|p| (p[0], p[1], p[2]) == (color.r, color.g, color.b)).count()
     }
 
     #[test]

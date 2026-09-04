@@ -344,7 +344,9 @@ mod tests {
         // is clearly a panel, not an artifact.
         let glass = buffer
             .pixels
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .filter(|p| (p[0], p[1], p[2]) == (PANEL.r, PANEL.g, PANEL.b))
             .count();
         assert!(glass > 200, "expected a substantial LCD glass area, found {glass} PANEL pixels");

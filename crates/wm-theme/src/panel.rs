@@ -227,6 +227,7 @@ pub fn draw_led_digits(pixmap: &mut Pixmap, x: i32, y: i32, w: u32, h: u32, pal:
 /// of them in ink, the rest as ghosts. `vertical` fills bottom-up
 /// (levels rise), horizontal fills left-to-right. The classic LED VU
 /// strip — volume, battery capacity, signal strength.
+#[allow(clippy::too_many_arguments)] // Raster bounds plus meter state are the natural drawing primitive.
 pub fn draw_led_bar(pixmap: &mut Pixmap, x: i32, y: i32, w: u32, h: u32, pal: &PanelPalette, segments: u32, lit: u32, vertical: bool) {
     if segments == 0 || w == 0 || h == 0 {
         return;
@@ -253,6 +254,7 @@ pub fn draw_led_bar(pixmap: &mut Pixmap, x: i32, y: i32, w: u32, h: u32, pal: &P
 /// A one-sided column history: `levels` (oldest first, one per column,
 /// each `0..=rows`) as columns of dots filling upward from the bottom
 /// edge, unlit rows as ghosts. Load-over-time, in LED form.
+#[allow(clippy::too_many_arguments)] // Raster bounds plus meter state are the natural drawing primitive.
 pub fn draw_led_columns(pixmap: &mut Pixmap, x: i32, y: i32, w: u32, h: u32, pal: &PanelPalette, rows: u32, levels: &[u32]) {
     if levels.is_empty() || rows == 0 || w == 0 || h == 0 {
         return;
@@ -299,6 +301,7 @@ pub(crate) fn mirrored_row_edges(y: i32, h: u32, half_rows: u32, k: u32, element
 /// slices, oldest first. Rows sit on the private `mirrored_row_edges` integer
 /// grid, so the two halves reflect each other exactly at any band
 /// height.
+#[allow(clippy::too_many_arguments)] // Raster bounds plus both histories are the natural drawing primitive.
 pub fn draw_led_matrix(
     pixmap: &mut Pixmap,
     x: i32,
@@ -492,7 +495,9 @@ mod tests {
         let pal = panel_palette(&theme);
         let glass = tile
             .pixels
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .filter(|p| (p[0], p[1], p[2]) == (pal.glass.r, pal.glass.g, pal.glass.b))
             .count();
         assert!(glass > 500, "expected a substantial glass area, found {glass} pixels");

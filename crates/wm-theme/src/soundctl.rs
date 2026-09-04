@@ -376,7 +376,9 @@ mod tests {
         let mut lit = |vol: f32| {
             render_soundctl_tile(&theme, &mut fs, &mut sc, 112, vol, false)
                 .pixels
-                .chunks_exact(4)
+                .as_chunks::<4>()
+                .0
+                .iter()
                 .filter(|p| (p[0], p[1], p[2]) == (pal.ink.r, pal.ink.g, pal.ink.b))
                 .count()
         };
@@ -393,7 +395,9 @@ mod tests {
             let buf = render_soundctl_tile(&theme, &mut fs, &mut sc, 56, 0.55, false);
             let glass = buf
                 .pixels
-                .chunks_exact(4)
+                .as_chunks::<4>()
+                .0
+                .iter()
                 .filter(|p| (p[0], p[1], p[2]) == (pal.glass.r, pal.glass.g, pal.glass.b))
                 .count();
             assert!(glass > 200, "theme {}: expected a substantial glass area, found {glass} px", theme.id);

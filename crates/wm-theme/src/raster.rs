@@ -625,7 +625,10 @@ mod tests {
         // pipeline actually drew something rather than leaving a flat or
         // empty buffer.
         let first = &buffer.pixels[0..4];
-        assert!(buffer.pixels.chunks_exact(4).any(|px| px != first), "decoration should not be a single flat color");
+        assert!(
+            buffer.pixels.as_chunks::<4>().0.iter().any(|px| px.as_slice() != first),
+            "decoration should not be a single flat color"
+        );
     }
 
     /// Regression test: the resize-corner grip marks (the visual half

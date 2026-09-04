@@ -71,7 +71,7 @@
 //! scale 2
 //! output 1280 800
 //! theme id="nextstep-classic" name="NeXTSTEP Classic" appearance=dark following=""
-//! window id=3 x=100 y=80 w=400 h=300 mapped=true app="org.gnome.zenity" title="Question"
+//! window id=3 x=100 y=80 w=400 h=300 offset_x=12 offset_y=12 mapped=true app="org.gnome.zenity" title="Question"
 //! frame id=4 window=3 x=96 y=52 w=408 h=332 mapped=true
 //! shell id=1 x=1216 y=0 w=64 h=320 mapped=true above=true
 //! done
@@ -491,12 +491,14 @@ fn handle_command(line: &str, stream: &mut UnixStream, comp: &mut Compositor) {
             ));
             for (id, record) in &backend.windows {
                 reply.push_str(&format!(
-                    "window id={} x={} y={} w={} h={} mapped={} app={:?} title={:?}\n",
+                    "window id={} x={} y={} w={} h={} offset_x={} offset_y={} mapped={} app={:?} title={:?}\n",
                     id.0,
                     record.content.pos.x,
                     record.content.pos.y,
                     record.content.size.w,
                     record.content.size.h,
+                    record.content_offset.x,
+                    record.content_offset.y,
                     record.mapped,
                     record.app_id.as_deref().unwrap_or(""),
                     record.title.as_deref().unwrap_or(""),

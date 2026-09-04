@@ -26,7 +26,7 @@ fn clip_metrics(size: u32) -> (i32, i32, i32) {
     let s = size as i32;
     let pt = (23 * s) / 64;
     let tp = s - 1 - pt;
-    let arrow = ((pt - (15 * s) / 64).max(3)) as i32;
+    let arrow = (pt - (15 * s) / 64).max(3);
     (pt, tp, arrow)
 }
 
@@ -197,7 +197,7 @@ mod tests {
             let tile = render(0, 2, size);
             assert_eq!((tile.width, tile.height), (size, size));
             let first = &tile.pixels[0..4];
-            assert!(tile.pixels.chunks_exact(4).any(|px| px != first), "size {size} should not be flat");
+            assert!(tile.pixels.as_chunks::<4>().0.iter().any(|px| px.as_slice() != first), "size {size} should not be flat");
         }
     }
 

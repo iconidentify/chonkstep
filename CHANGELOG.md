@@ -14,6 +14,12 @@ crate and both session binaries carry the same number.
 - **Public Rust documentation is a CI gate.** Broken API links and rustdoc
   warnings now fail the build; the existing stale/private links have been
   corrected, while all executable examples continue to pass as doctests.
+- **Clippy is strict across the entire workspace.** The last theme and Wayland
+  warning backlog is resolved, including a 6.4 KiB graphics enum imbalance and
+  avoidable per-pixel slice chunking; every warning now fails CI for every crate.
+- **Headless browser tests get a real private D-Bus session.** Chromium no
+  longer burns its startup deadline retrying the hosted runner's invalid bus
+  address, eliminating the intermittent scale-and-resize test failure.
 - **Release automation now trusts immutable action revisions.** CI, native
   package attestation, artifact assembly, and the future AUR publisher pin
   every third-party GitHub Action to a full commit instead of a mutable tag.

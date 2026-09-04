@@ -773,20 +773,16 @@ impl Dispatch<ZwlrForeignToplevelManagerV1, ()> for Compositor {
         _dhandle: &DisplayHandle,
         _data_init: &mut DataInit<'_, Self>,
     ) {
-        match request {
-            zwlr_foreign_toplevel_manager_v1::Request::Stop => {
-                // "No further toplevels", not "no further events": the
-                // handles this manager already owns stay live and keep
-                // updating until the client destroys them.
-                state.protocols.managers.retain(|manager| &manager.resource != resource);
-                resource.finished();
-            }
-            // The enum is `#[non_exhaustive]`; a request from a future
-            // version we did not advertise cannot reach us, and
-            // panicking in a login session's dispatch is never the
-            // right answer.
-            _ => {}
+        if let zwlr_foreign_toplevel_manager_v1::Request::Stop = request {
+            // "No further toplevels", not "no further events": the
+            // handles this manager already owns stay live and keep
+            // updating until the client destroys them.
+            state.protocols.managers.retain(|manager| &manager.resource != resource);
+            resource.finished();
         }
+        // The enum is `#[non_exhaustive]`; a request from a future
+        // version we did not advertise cannot reach us, and panicking
+        // in a login session's dispatch is never the right answer.
     }
 
     fn destroyed(
@@ -867,19 +863,18 @@ impl Dispatch<ZwlrForeignToplevelHandleV1, WlWindowId> for Compositor {
             Request::Close => backend.queue(WmEvent::CloseRequested(window)),
             Request::SetMinimized => state.protocols.minimize_requests.push((window, true)),
             Request::UnsetMinimized => state.protocols.minimize_requests.push((window, false)),
-            Request::SetRectangle { width, height, .. } => {
+            Request::SetRectangle { width, height, .. } if width < 0 || height < 0 => {
                 // Where the taskbar draws this window, offered as a hint
                 // for a minimize animation. chonkstep miniaturizes to an
                 // icon tile the shell places itself, so there is nothing
                 // to aim — but the validity check is still owed, since
                 // the protocol declares an error for it.
-                if width < 0 || height < 0 {
-                    resource.post_error(
-                        zwlr_foreign_toplevel_handle_v1::Error::InvalidRectangle,
-                        "set_rectangle with a negative width or height",
-                    );
-                }
+                resource.post_error(
+                    zwlr_foreign_toplevel_handle_v1::Error::InvalidRectangle,
+                    "set_rectangle with a negative width or height",
+                );
             }
+            Request::SetRectangle { .. } => {}
             _ => {}
         }
     }
@@ -1362,14 +1357,15 @@ fn write_capture(buffer: &WlBuffer, capture: &DecorationBuffer) -> Result<(), St
             // slice is dropped before the next iteration, so no two
             // live slices ever alias.
             let destination = unsafe { std::slice::from_raw_parts_mut(ptr.add(offset + y * stride), row_bytes) };
-            for (source, destination) in
-                source.chunks_exact(BYTES_PER_PIXEL).zip(destination.chunks_exact_mut(BYTES_PER_PIXEL))
-            {
+            let (source_pixels, source_remainder) = source.as_chunks::<BYTES_PER_PIXEL>();
+            let (destination_pixels, destination_remainder) = destination.as_chunks_mut::<BYTES_PER_PIXEL>();
+            debug_assert!(source_remainder.is_empty() && destination_remainder.is_empty());
+            for (source, destination) in source_pixels.iter().zip(destination_pixels) {
                 let alpha = if opaque { 0xFF } else { source[3] };
                 if swap_rb {
-                    destination.copy_from_slice(&[source[2], source[1], source[0], alpha]);
+                    *destination = [source[2], source[1], source[0], alpha];
                 } else {
-                    destination.copy_from_slice(&[source[0], source[1], source[2], alpha]);
+                    *destination = [source[0], source[1], source[2], alpha];
                 }
             }
         }

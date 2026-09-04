@@ -7,9 +7,9 @@
 # Why this is a script and not just `cargo test`: the suite needs the
 # compositor *binary* built first (the harness launches it as a
 # process, so cargo's own dependency tracking never learns about it),
-# and it needs a live Wayland session, which is also why these tests
-# are #[ignore]d and absent from CI (see ci.yml's wayland job for why
-# a headless runner cannot boot a compositor at all).
+# and it needs a live Wayland session, which is why these tests are
+# #[ignore]d during an ordinary `cargo test`. CI's Wayland job calls
+# this script with `--headless` to supply that session explicitly.
 #
 # Debug build on purpose — the whole point is to test the binary a
 # developer is iterating on, and the harness's waits are all bounded
@@ -49,6 +49,10 @@ fi
 if "$headless"; then
     if ! command -v weston >/dev/null 2>&1; then
         echo "e2e.sh: --headless needs weston on PATH" >&2
+        exit 1
+    fi
+    if ! command -v dbus-run-session >/dev/null 2>&1; then
+        echo "e2e.sh: --headless needs dbus-run-session on PATH" >&2
         exit 1
     fi
 
@@ -129,7 +133,17 @@ cargo build -p chonkstep-wayland -p chonk-testkit --quiet
 # desktop; serial keeps them from fighting for focus and keeps the
 # host from tiling five of them into shapes nobody asserted on.
 echo "Running the end-to-end suite (one nested compositor at a time)..."
-cargo test -p chonk-testkit --tests -- --ignored --test-threads=1 "$@"
+if "$headless"; then
+    # GitHub's runner exports a nonfunctional D-Bus address. Chromium
+    # retries that address for tens of seconds before mapping, which
+    # made the real-browser resize test randomly miss its bounded
+    # startup deadline. A private session bus gives every nested test a
+    # syntactically valid, responsive endpoint and is reaped
+    # automatically with the cargo process.
+    dbus-run-session -- cargo test -p chonk-testkit --tests -- --ignored --test-threads=1 "$@"
+else
+    cargo test -p chonk-testkit --tests -- --ignored --test-threads=1 "$@"
+fi
 
 # The unit tests that read the Omarchy installed on this machine
 # (`#[ignore]`d for the same no-such-thing-in-CI reason; they skip
