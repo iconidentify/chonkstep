@@ -9,7 +9,7 @@
 //! same `Shell`, which is what keeps the two desktops identical by
 //! construction rather than by porting discipline.
 
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use wm_core::{Backend, BackendEvent, WindowManager};
 use wm_theme::{FontState, RasterThemeEngine};
@@ -18,7 +18,7 @@ use wm_x11::X11Backend;
 use chonk_shell::dockapp::Farewell;
 use chonk_shell::shell::{Shell, ShellOutcome};
 use chonk_shell::spawn;
-use chonk_shell::startup::{ensure_xcursor_size, reload_requested, restart_requested, SessionState};
+use chonk_shell::startup::{ensure_xcursor_size, SessionRequestPoller, SessionState};
 use chonk_xsettings::{DesktopAppearance, XSettingsManager};
 
 fn main() {
@@ -159,6 +159,7 @@ fn main() {
     // and a few pushes rather than an allocation on every wake — see
     // `wait_for_activity`.
     let mut wait_fds: Vec<std::os::unix::io::RawFd> = Vec::new();
+    let mut request_poller = SessionRequestPoller::new(Instant::now());
     loop {
         // The cheap request first. A reload keeps every window, every
         // client connection and every dockapp; a restart keeps the
@@ -166,7 +167,8 @@ fn main() {
         // reload first means that when both markers somehow exist, the
         // session applies the config it was asked to apply before
         // throwing itself away — the restart then starts from it.
-        if reload_requested() {
+        let requests = request_poller.poll(Instant::now());
+        if requests.reload {
             tracing::info!("reload requested — re-reading the config and applying it in place");
             let next = SessionState::resolve(&wm_config::load());
             // Before the shell, so that any application relaunched as a
@@ -178,7 +180,7 @@ fn main() {
             shell.apply_session_state(&mut wm, next);
         }
 
-        if restart_requested() {
+        if requests.restart {
             tracing::info!("restart requested — re-executing in place");
             // Dockapps first: `restart_in_place` never returns, and the
             // replacement process has to be told which of them are still
@@ -369,7 +371,11 @@ fn main() {
         wait_fds.clear();
         wait_fds.push(wm.backend().connection_fd());
         wait_fds.extend(shell.extra_poll_fds());
-        wait_for_activity(&wait_fds, shell.next_housekeeping_in(std::time::Instant::now()));
+        let now = Instant::now();
+        let wait = shell
+            .next_housekeeping_in(now)
+            .min(request_poller.next_deadline().saturating_duration_since(now));
+        wait_for_activity(&wait_fds, wait);
     }
 
     // Whatever ended the loop — the root menu's Exit, a lost display —

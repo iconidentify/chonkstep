@@ -58,10 +58,11 @@
 //! what waits for its next launch.
 
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 pub use wm_theme::Appearance;
 
-use crate::startup::state_dir;
+use crate::startup::{state_dir, SESSION_REQUEST_POLL_INTERVAL};
 
 /// File the current mode is published to, relative to the state dir.
 pub const PUBLISHED_FILE: &str = "appearance";
@@ -145,14 +146,42 @@ pub fn publish(mode: Appearance) {
 /// unparsable request is still consumed (leaving it would warn on
 /// every housekeeping pass forever) and answered with a warning naming the text.
 pub fn take_request() -> Option<Request> {
-    let path = state_dir().join(REQUEST_FILE);
-    let text = std::fs::read_to_string(&path).ok()?;
-    let _ = std::fs::remove_file(&path);
+    take_request_from(&state_dir().join(REQUEST_FILE))
+}
+
+fn take_request_from(path: &Path) -> Option<Request> {
+    let text = std::fs::read_to_string(path).ok()?;
+    let _ = std::fs::remove_file(path);
     let parsed = Request::parse(&text);
     if parsed.is_none() {
         tracing::warn!(text = %text.trim(), "appearance-request must say \"light\", \"dark\" or \"toggle\"; dropping it");
     }
     parsed
+}
+
+/// Cached-path, deadline-aware appearance-request reader used by the
+/// shell's event-loop hot path.
+pub(crate) struct RequestPoller {
+    path: PathBuf,
+    next_poll: Instant,
+}
+
+impl RequestPoller {
+    pub(crate) fn new(now: Instant) -> Self {
+        Self { path: state_dir().join(REQUEST_FILE), next_poll: now }
+    }
+
+    pub(crate) fn take(&mut self, now: Instant) -> Option<Request> {
+        if now < self.next_poll {
+            return None;
+        }
+        self.next_poll = now + SESSION_REQUEST_POLL_INTERVAL;
+        take_request_from(&self.path)
+    }
+
+    pub(crate) fn next_deadline(&self) -> Instant {
+        self.next_poll
+    }
 }
 
 /// Resolves the session's appearance: published state, else the
@@ -332,6 +361,28 @@ pub fn propagate_to_applications(mode: Appearance) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn appearance_requests_wait_for_their_poll_deadline_without_being_lost() {
+        let dir = std::env::temp_dir().join(format!("chonk-appearance-poller-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(REQUEST_FILE);
+        let start = Instant::now();
+        let mut poller = RequestPoller { path: path.clone(), next_poll: start };
+
+        std::fs::write(&path, "dark").unwrap();
+        assert_eq!(poller.take(start), Some(Request::Set(Appearance::Dark)));
+        assert!(!path.exists(), "a delivered request is consumed exactly once");
+
+        std::fs::write(&path, "toggle").unwrap();
+        assert_eq!(poller.take(start + SESSION_REQUEST_POLL_INTERVAL / 2), None);
+        assert!(path.exists(), "an early check leaves the request for its deadline");
+        assert_eq!(poller.take(start + SESSION_REQUEST_POLL_INTERVAL), Some(Request::Toggle));
+        assert!(!path.exists());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn requests_parse_the_three_verbs_and_nothing_else() {

@@ -7,6 +7,13 @@ crate and both session binaries carry the same number.
 
 ### Performance
 
+- **Client traffic no longer amplifies filesystem marker polling.** Restart,
+  reload, and appearance requests now own cached paths and a shared 100 ms
+  deadline; display/input/IPC events remain immediate but cannot turn absent
+  marker files into one failed syscall per frame. Under identical release
+  builds with ten seconds of continuous `weston-simple-shm` commits, `unlink`
+  attempts fell from 1,325 to 313 (76.4%), failed file syscalls from 3,752 to
+  2,245 (40.2%), and all file-related syscalls from 11,141 to 9,637 (13.5%).
 - **Housekeeping sleeps until real deadlines instead of polling at 60 Hz.**
   Display/input/IPC/dockapp descriptors still wake both backends immediately;
   submenu dwell, metered dockapp frames and panels, supervision, and Wayland

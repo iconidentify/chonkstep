@@ -79,7 +79,7 @@ use crate::input::DragGrab;
 use chonk_shell::dockapp::Farewell;
 use chonk_shell::shell::{Shell, ShellOutcome};
 use chonk_shell::startup::{
-    ensure_xcursor_size, recovering_from_crash, reload_requested, restart_requested, SessionState,
+    ensure_xcursor_size, recovering_from_crash, SessionRequestPoller, SessionState,
 };
 use chonk_xsettings::{DesktopAppearance, ManagerState, XSettingsError, XSettingsManager};
 
@@ -2963,23 +2963,21 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
     }
 
     tracing::info!("entering compositor loop");
+    let mut request_poller = SessionRequestPoller::new(Instant::now());
     while comp.running {
-        // Hot-restart marker from `scripts/restart.sh`, polled once
-        // per wakeup exactly as the X11 loop polls it.
-        if restart_requested() {
-            tracing::info!("restart requested — re-executing in place");
-            comp.restart = true;
-            break;
-        }
-        // Its cheaper sibling, polled beside it, and on this stack
-        // almost always the one a user wants: a reload re-reads the
+        // Read both process markers together, on the same bounded
+        // cadence as the X11 loop. Apply reload first if both exist:
+        // it preserves the shared ordering and leaves no requested
+        // state unapplied before the replacement image starts.
+        let requests = request_poller.poll(Instant::now());
+        // Reload is almost always the one a user wants: it re-reads the
         // config and moves the running session onto it, where a restart
         // here costs every client on the screen (there is no SaveSet to
         // hand them forward — see `restart_in_place`). `wm_config::load`
         // cannot fail, so the worst a mistyped edit does to a live
         // session is move it to the defaults, which is exactly what a
         // restart with the same file would have done.
-        if reload_requested() {
+        if requests.reload {
             tracing::info!("reload requested — re-reading the config and applying it in place");
             // Everything this reload touches — decoration rules and
             // the drag modifier included — travels through
@@ -2988,6 +2986,11 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
             // decoration policy was assigned here and nowhere else, so
             // the key silently skipped it.
             comp.shell.reload_config(&mut comp.wm);
+        }
+        if requests.restart {
+            tracing::info!("restart requested — re-executing in place");
+            comp.restart = true;
+            break;
         }
         // Blocks on every source at once (Wayland clients, input,
         // XWayland and dockapps). Time-only work contributes its exact
@@ -2998,6 +3001,7 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
         // the seat, not to the backend-generic shell.
         let now = std::time::Instant::now();
         let mut wait = comp.shell.next_housekeeping_in(now);
+        wait = wait.min(request_poller.next_deadline().saturating_duration_since(now));
         if let Some(deadline) = crate::input::repeating_binding_deadline(&comp) {
             wait = wait.min(deadline.saturating_duration_since(now));
         }

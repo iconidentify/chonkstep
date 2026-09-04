@@ -895,7 +895,7 @@ fn layout_matches_clients<B: Backend>(wm: &WindowManager<B>, records: &[WindowRe
 /// backend loops immediately. Menu, dockapp and Wayland key-repeat
 /// deadlines shorten this bound independently, so 100 ms is not input
 /// or animation latency.
-const MAX_IDLE_HOUSEKEEPING: Duration = Duration::from_millis(100);
+const MAX_IDLE_HOUSEKEEPING: Duration = crate::startup::SESSION_REQUEST_POLL_INTERVAL;
 
 fn bounded_housekeeping_wait(now: Instant, deadline: Option<Instant>) -> Duration {
     deadline.map(|at| at.saturating_duration_since(now)).unwrap_or(MAX_IDLE_HOUSEKEEPING).min(MAX_IDLE_HOUSEKEEPING)
@@ -1025,6 +1025,10 @@ pub struct Shell<B: Backend + PopupHost<PopupId = B::ShellId>> {
     /// (`docs/control-socket.md`). Serviced in [`Shell::tick`]; costs
     /// nothing while no bar is connected.
     control: ControlSocket,
+    /// Cached-path, cadence-bounded reader for the public
+    /// `appearance-request` marker. Client traffic may wake the shell
+    /// far faster than a human-visible control needs filesystem probes.
+    appearance_requests: crate::appearance::RequestPoller,
     /// Set by [`Shell::keymap_action`] when a transient-dismiss Escape
     /// lands, consumed by [`Shell::tick`]. Parked rather than acted on
     /// inline because `keymap_action` has no `WindowManager` to close
@@ -1146,8 +1150,9 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         // gets the same scale/platform fixups a hand-launched one
         // would; the windows are then matched and re-placed as they
         // map, in `on_notification`.
+        let now = Instant::now();
         let restore = state.restore_session && !crate::startup::session_continues();
-        let (layout, relaunch) = SessionLayout::start(restore, &apps, std::time::Instant::now());
+        let (layout, relaunch) = SessionLayout::start(restore, &apps, now);
         let mut terminals = Vec::new();
         for plan in relaunch {
             let terminal = match plan {
@@ -1245,6 +1250,7 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
             fonts,
             pointer_root: Point::new(0, 0),
             control,
+            appearance_requests: crate::appearance::RequestPoller::new(now),
             transient_escape: false,
             config_reloaded: false,
             omarchy: crate::omarchy_follow::Watch::new(),
@@ -2653,15 +2659,13 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
     /// the authoritative state into the shared cell so the widget tick
     /// repaints the tile exactly when it changed.
     pub fn tick(&mut self, wm: &mut WindowManager<B>) {
+        let now = Instant::now();
         // The appearance-request file, consumed the way the binaries
-        // consume the reload/restart markers and on the same cadence:
-        // this method runs once per event-loop wakeup (at most 100 ms
-        // apart when entirely idle), and the
-        // check costs one failed read on a path that is almost never
-        // there. Consumed-then-acted so a request is honored exactly
-        // once; a request naming the mode the session is already in is
-        // consumed and does nothing (`set_appearance`'s no-op arm).
-        if let Some(request) = crate::appearance::take_request() {
+        // consume reload/restart markers: one cached path at a bounded
+        // cadence, never one failed read per client frame. Consumed then
+        // acted so a request is honored exactly once; a request naming
+        // the current mode is consumed and does nothing.
+        if let Some(request) = self.appearance_requests.take(now) {
             let mode = request.resolve(self.state.appearance);
             tracing::info!(requested = ?request, resolved = mode.name(), "appearance-request received");
             self.set_appearance(wm, mode);
@@ -2676,7 +2680,7 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         let armed = self.omarchy_adoption_armed.is_some_and(|since| since.elapsed() < ADOPTION_ARM_WINDOW);
         if self.state.following.is_none() && !armed {
             self.omarchy_adoption_armed = None;
-        } else if self.omarchy.changed(std::time::Instant::now()) {
+        } else if self.omarchy.changed(now) {
             if self.state.following.is_some() {
                 tracing::info!("Omarchy's current theme or background changed; re-dressing");
                 self.reresolve(wm);
@@ -2760,7 +2764,6 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         // debounce without allocating, cloning every class, or
         // rescanning the application index. A real change still builds
         // the full owned snapshot once and resets the settle clock.
-        let now = std::time::Instant::now();
         if layout_matches_clients(wm, self.layout.current()) {
             self.layout.service_current(now);
         } else {
@@ -2772,7 +2775,13 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
     /// ready. Exact transient deadlines win; otherwise the bounded idle
     /// poll services filesystem markers and worker-thread samples.
     pub fn next_housekeeping_in(&self, now: Instant) -> Duration {
-        bounded_housekeeping_wait(now, self.desktop.next_housekeeping_deadline(now))
+        let deadline = self
+            .desktop
+            .next_housekeeping_deadline(now)
+            .into_iter()
+            .chain(Some(self.appearance_requests.next_deadline()))
+            .min();
+        bounded_housekeeping_wait(now, deadline)
     }
 
     /// Winds the session down, in the way the binary says it is ending.

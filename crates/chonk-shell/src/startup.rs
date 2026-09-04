@@ -20,6 +20,8 @@
 //! parallel threads of one process cannot use safely.
 
 use std::collections::BTreeMap;
+use std::path::PathBuf;
+use std::time::{Duration, Instant};
 use wm_config::{Action, Config};
 use wm_core::{DecorationRules, FocusPolicy, KeyCombo, Modifiers, PlacementPolicy};
 use wm_theme::{Appearance, Theme};
@@ -426,14 +428,79 @@ pub(crate) fn autostart_runs(session_continues: bool, stack: crate::spawn::Displ
     !(session_continues && stack == crate::spawn::DisplayStack::X11)
 }
 
+/// Maximum time a filesystem session request waits to be noticed.
+///
+/// Display and socket activity can wake a compositor hundreds of times
+/// per second. The restart/reload files do not need to be probed on
+/// every one of those wakes: 100 ms is still effectively immediate for
+/// a human-triggered control, and gives the hot event path a firm upper
+/// bound of twenty failed filesystem calls per second.
+pub const SESSION_REQUEST_POLL_INTERVAL: Duration = Duration::from_millis(100);
+
+/// The process-level requests consumed in one polling pass.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SessionRequests {
+    pub reload: bool,
+    pub restart: bool,
+}
+
+/// Deadline-aware reader for the restart and reload marker files.
+///
+/// Both backend loops own one instance. Besides enforcing the request
+/// cadence, it resolves and owns the two paths once instead of
+/// rebuilding `$XDG_STATE_HOME/chonkstep/...` on every event.
+#[derive(Debug)]
+pub struct SessionRequestPoller {
+    reload: PathBuf,
+    restart: PathBuf,
+    next_poll: Instant,
+}
+
+impl SessionRequestPoller {
+    /// Creates a poller whose first pass is due at `now`.
+    pub fn new(now: Instant) -> Self {
+        Self::in_dir(state_dir(), now)
+    }
+
+    fn in_dir(dir: PathBuf, now: Instant) -> Self {
+        Self { reload: dir.join("reload"), restart: dir.join("restart"), next_poll: now }
+    }
+
+    /// Consumes both marker files when the cadence is due. Between
+    /// deadlines this is an integer comparison with no filesystem work.
+    pub fn poll(&mut self, now: Instant) -> SessionRequests {
+        if !self.due(now) {
+            return SessionRequests::default();
+        }
+        SessionRequests {
+            // Preserve the loops' established order when both exist:
+            // apply the cheaper live reload before honoring restart.
+            reload: std::fs::remove_file(&self.reload).is_ok(),
+            restart: std::fs::remove_file(&self.restart).is_ok(),
+        }
+    }
+
+    /// Exact next point at which [`Self::poll`] can touch the files.
+    pub fn next_deadline(&self) -> Instant {
+        self.next_poll
+    }
+
+    fn due(&mut self, now: Instant) -> bool {
+        if now < self.next_poll {
+            return false;
+        }
+        self.next_poll = now + SESSION_REQUEST_POLL_INTERVAL;
+        true
+    }
+}
+
 /// Whether something has asked this session to re-exec its on-disk
 /// binary since the last call (`scripts/restart.sh` writes the marker).
 ///
 /// A destructive read: the marker is consumed by observing it, so a
-/// request is honored exactly once. Lives here, shared, because both
-/// binaries poll it once per wakeup and had grown their own copy of
-/// this function — one of which had already drifted to inlining the
-/// path the other had factored out.
+/// request is honored exactly once. [`SessionRequestPoller`] is the
+/// cadence-bounded event-loop interface; this remains the immediate
+/// one-shot primitive for callers which explicitly need one.
 pub fn restart_requested() -> bool {
     std::fs::remove_file(state_dir().join("restart")).is_ok()
 }
@@ -732,6 +799,46 @@ pub fn apply_session_env(env: &[(String, String)]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn session_markers_are_probed_only_when_their_deadline_is_due() {
+        let start = Instant::now();
+        let mut poller = SessionRequestPoller::in_dir(PathBuf::from("/path/that/does/not/exist"), start);
+
+        assert!(poller.due(start), "the first pass must notice a marker planted before startup");
+        assert_eq!(poller.next_deadline(), start + SESSION_REQUEST_POLL_INTERVAL);
+        assert!(!poller.due(start + SESSION_REQUEST_POLL_INTERVAL / 2));
+        assert_eq!(poller.next_deadline(), start + SESSION_REQUEST_POLL_INTERVAL);
+        assert!(poller.due(start + SESSION_REQUEST_POLL_INTERVAL), "the exact deadline is inclusive");
+        assert_eq!(poller.next_deadline(), start + SESSION_REQUEST_POLL_INTERVAL * 2);
+    }
+
+    #[test]
+    fn session_marker_polling_consumes_both_requests_once_and_never_early() {
+        let dir = std::env::temp_dir().join(format!("chonk-session-request-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let reload = dir.join("reload");
+        let restart = dir.join("restart");
+        let start = Instant::now();
+        let mut poller = SessionRequestPoller::in_dir(dir.clone(), start);
+
+        std::fs::write(&reload, []).unwrap();
+        std::fs::write(&restart, []).unwrap();
+        assert_eq!(poller.poll(start), SessionRequests { reload: true, restart: true });
+        assert!(!reload.exists() && !restart.exists(), "delivered markers are consumed exactly once");
+
+        std::fs::write(&reload, []).unwrap();
+        assert_eq!(poller.poll(start + SESSION_REQUEST_POLL_INTERVAL / 2), SessionRequests::default());
+        assert!(reload.exists(), "an early event leaves the marker waiting for its deadline");
+        assert_eq!(
+            poller.poll(start + SESSION_REQUEST_POLL_INTERVAL),
+            SessionRequests { reload: true, restart: false }
+        );
+        assert!(!reload.exists());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn the_xcursor_size_tracks_the_scale_from_the_conventional_base() {
