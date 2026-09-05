@@ -103,6 +103,10 @@ impl GlobalDispatch<HyprlandGlobalShortcutsManagerV1, ()> for Compositor {
     ) {
         data_init.init(resource, ());
     }
+
+    fn can_view(client: Client, _global_data: &()) -> bool {
+        crate::state::privileged_global_visible(&client)
+    }
 }
 
 impl Dispatch<HyprlandGlobalShortcutsManagerV1, ()> for Compositor {

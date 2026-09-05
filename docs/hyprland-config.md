@@ -201,7 +201,7 @@ specific directive, not a count. Turn on `RUST_LOG=debug` to see them.
 | Anything commanding Hyprland — `hyprctl`, `omarchy-hyprland-*` | It talks to a compositor that is not running, so the binding could only fail. The same filter chonkstep's Omarchy menu already applies to menu rows. `hyprpicker`, `hyprlock` and `hypridle` are *not* caught by it: they are ordinary Wayland clients and work here. |
 | Gaps, borders, rounding, blur, shadows, animations, layouts (`hl.config`, `general { … }`, `decoration { … }`) | Hyprland's look. This desktop has its own — a theme, a titlebar, a decoration policy. Following them would mean drawing a NeXTSTEP frame in Hyprland's border colour. |
 | Layer rules (`layerrule`, `hl.layer_rule`) | They configure Hyprland's layer-shell implementation. This compositor has its own. |
-| Whole-desktop and device input policy (`follow_mouse`, touchpad policy, sensitivity, gestures) | The live read carries hardware-facing keyboard xkb/repeat values only. Chonkstep owns interaction policy: use its `focus_follows_mouse` key explicitly. Every declined value is logged. |
+| Whole-desktop interaction policy (`follow_mouse`, gestures) | Chonkstep owns focus and gesture policy: use its `focus_follows_mouse` key explicitly. Device properties listed below are applied; remaining declined values are logged. |
 | Unsupported window-rule properties | `opacity`, `no_blur`, `suppress_event`, `workspace`, `move`, `keep_aspect_ratio`, … are each logged with their matcher. Tags used to select another supported rule are resolved. |
 | Window rules carrying a matcher not implemented here (`match:xwayland 1`, `match:workspace 5`, `match:fullscreen 0`) | Refused **whole**. Applying a rule on the matchers that *were* understood turns "float this one XWayland window" into "float every window of this class". |
 | A `size` given as a Hyprland layout expression (`(monitor_h*4/25)`) | It needs a monitor to evaluate against, and a config reader has a file, not an output. |
@@ -260,6 +260,15 @@ front merely because the pointer crossed it; a click still raises. Environment `
 values remain more specific and win. If libxkbcommon rejects a
 configured map, the error is logged and the session falls back to the
 default usable keymap instead of aborting the login.
+
+Pointer configuration is also carried from both classic `input {}` /
+`touchpad {}` blocks and Omarchy's Lua tables. `sensitivity` and
+`accel_profile` configure libinput acceleration; `natural_scroll`,
+`tap_to_click`, `clickfinger_behavior`, and `left_handed` are applied
+where the device advertises them. `scroll_factor` multiplies continuous
+and wheel-axis motion after libinput so the configured speed also works
+on the nested backend. Unsupported capabilities are named per device
+without rejecting the rest of the configuration.
 
 Binding flags retain their behavior: `bindl`/`locked` actions may run
 on the lock screen, `binde`/`repeating` actions repeat after the
@@ -451,7 +460,7 @@ One `info` line per read, and one `debug` line per thing skipped:
 ```
 INFO  hyprland-config: read the desktop's live Hyprland configuration
       files=42 bindings=153 commands=113 env=8 autostart=4
-      float_rules=45 monitors=1 skipped=175
+      float_rules=45 monitors=1 skipped=173
 DEBUG hyprland-config: not carried over kind=bind what="SUPER + J (Toggle window split)"
       why="tiling-only: no meaning on a stacking desk"
 ```

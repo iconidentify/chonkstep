@@ -165,7 +165,7 @@ fn main() {
     // replacements around the same one on every later restyle — see
     // `wm_theme::FontState`.
     let fonts = FontState::new();
-    let engine = RasterThemeEngine::with_fonts(theme, fonts.clone());
+    let engine = RasterThemeEngine::with_fonts_at_scale(theme, fonts.clone(), state.scale);
 
     // The entire desktop shell — dock, Clip, launcher strip, menus,
     // wallpaper, the `.desktop` application index — is built here in
@@ -428,6 +428,9 @@ fn main() {
         // launcher running-state — everything the shell refreshes per
         // tick rather than per event.
         shell.tick(&mut wm);
+        // Interactive resize/move invalidations are coalesced across this
+        // entire input burst and rasterized once at its display boundary.
+        wm.flush_decorations();
 
         // The tick above may have consumed an appearance-request and
         // switched the session's mode; XSETTINGS is the binary's to

@@ -43,6 +43,7 @@ pub use placement::{place_frame, FloatDecision, FloatPolicy, PlacementPolicy, Wi
 pub use snap::snap_position;
 pub use types::{
     BackendEvent, ClientChrome, DecorationRules, DragHandle, KeyCombo, KeyboardConfig, Modifiers, MouseButton, NetState,
+    PointerConfig,
     NetStateAction, NetStateSnapshot, ScrollDelta, SizeHints, SurfaceRef, WindowType, WmClass, WmProtocol,
 };
 pub use wm_theme_api::{Point, Rect, Size};

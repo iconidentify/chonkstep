@@ -100,27 +100,25 @@
 //!
 //! # Screencopy: the same capture path as everything else
 //!
-//! Capture goes through [`crate::capture`]'s approach — build the scene
-//! with [`build_scene`], draw it into an offscreen GLES texture, read
-//! the pixels back with `ExportMem` — and inherits its three hard-won
+//! Capture builds the scene into retained scratch storage, draws it into
+//! a cached offscreen GLES texture, and reads the pixels with `ExportMem`.
+//! It inherits [`crate::capture`]'s three hard-won
 //! facts verbatim: no vertical flip is needed (the renderer's baked-in
 //! 180° projection and `glReadPixels`' bottom-up order cancel, which is
 //! why the `y_invert` flag below is never set), `Fourcc::Abgr8888` is
 //! the RGBA byte order, and the pixels come out premultiplied. Read
-//! that module's header before touching [`render_offscreen`] here.
+//! that module's header before touching [`capture_region_into`] here.
 //!
 //! It differs from `capture.rs` in exactly one thing, and that one
 //! thing matters: this applies the source output's transform (see
-//! [`capture_region`]), because a screencopy client is handed the
+//! [`capture_region_into`]), because a screencopy client is handed the
 //! output's *buffer* and un-transforms it itself, whereas a screenshot
 //! PNG is looked at directly and wants logical orientation.
 //!
-//! The other reason it does not simply *call* `capture.rs` is reach:
-//! that module's offscreen renderer is a private helper and this file
-//! cannot widen it. The duplication should collapse the moment someone
-//! owns both files — lift `capture::render_offscreen` to `pub(crate)`,
-//! give it the transform argument [`render_offscreen`] here takes, and
-//! delete this copy.
+//! The mapped readback remains borrowed while it is copied into each client
+//! buffer. The cached texture and its damage tracker therefore stay together:
+//! retained pixels make incremental damage valid, while no frame-sized CPU
+//! `Vec` is allocated between GLES and the Wayland buffer.
 //!
 //! Only `wl_shm` buffers are offered. The `linux_dmabuf` event that
 //! protocol version 3 also allows is deliberately never sent, which
@@ -135,7 +133,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use smithay::backend::allocator::Fourcc;
 use smithay::backend::renderer::damage::OutputDamageTracker;
 use smithay::backend::renderer::gles::{GlesRenderer, GlesTexture};
-use smithay::backend::renderer::{Bind, Color32F, ExportMem, Offscreen};
+use smithay::backend::renderer::{Bind, ExportMem, Offscreen};
 use smithay::input::pointer::CursorImageStatus;
 use smithay::output::Output;
 use smithay::reexports::wayland_protocols_wlr::foreign_toplevel::v1::server::zwlr_foreign_toplevel_handle_v1::{
@@ -161,10 +159,10 @@ use smithay::reexports::wayland_server::{Client, DataInit, Dispatch, DisplayHand
 use smithay::utils::{Buffer as BufferCoords, Physical, Rectangle as SRect, Size as SSize, Transform};
 use smithay::wayland::shm::{with_buffer_contents, with_buffer_contents_mut, BufferData};
 
-use wm_core::{BackendEvent, ClientFlags, Lifecycle, NetState, NetStateAction};
+use wm_core::{Backend, BackendEvent, ClientFlags, Lifecycle, NetState, NetStateAction};
 use wm_theme_api::{DecorationBuffer, Point, Rect, Size};
 
-use crate::renderer::{build_scene, SceneElement};
+use crate::renderer::{build_scene_into, SceneElement};
 use crate::state::{Compositor, Graphics, ManagedSurface, WaylandBackend, WlFrameId, WlWindowId};
 
 type WmEvent = BackendEvent<WlWindowId, WlFrameId>;
@@ -231,6 +229,21 @@ pub(crate) struct ProtocolState {
     minimize_requests: Vec<(WlWindowId, bool)>,
     /// Capture requests waiting for a frame to answer them.
     captures: Vec<PendingCapture>,
+    /// A small retained pool keyed by capture geometry. A recorder normally
+    /// uses one entry for its entire life; the bound prevents a hostile stream
+    /// of odd sizes from retaining unbounded GPU memory.
+    capture_targets: Vec<CaptureTarget>,
+}
+
+struct CaptureTarget {
+    region: Rect,
+    size: Size,
+    transform: Transform,
+    overlay_cursor: bool,
+    texture: GlesTexture,
+    damage_tracker: OutputDamageTracker,
+    scene_scratch: Vec<SceneElement<GlesRenderer>>,
+    rendered: bool,
 }
 
 /// Resolve an ext foreign-toplevel resource back to its managed window.
@@ -345,7 +358,7 @@ impl ToplevelStates {
 /// Held rather than serviced inline because a `copy` arrives in the
 /// middle of protocol dispatch, where the renderer is not ours to
 /// borrow and — for `copy_with_damage` — the answer is "not yet"
-/// anyway. [`refresh`] drains this once per pass.
+/// anyway. The presentation-paced drain coalesces matching requests.
 #[derive(Clone)]
 struct PendingCapture {
     frame: ZwlrScreencopyFrameV1,
@@ -353,7 +366,7 @@ struct PendingCapture {
     /// Source rectangle in compositor-global logical coordinates,
     /// already clipped to its output.
     region: Rect,
-    /// Its output's transform — see [`capture_region`].
+    /// Its output's transform — see [`capture_region_into`].
     transform: Transform,
     overlay_cursor: bool,
     /// `copy_with_damage` rather than `copy`: answer only on a pass
@@ -371,7 +384,7 @@ pub(crate) struct ScreencopyFrameData {
     /// it.
     region: Rect,
     /// The transform of the output this region belongs to. See
-    /// [`capture_region`]: the buffer a screencopy client is handed is
+    /// [`capture_region_into`]: the buffer a screencopy client is handed is
     /// in the output's *buffer* space, not its logical one.
     transform: Transform,
     overlay_cursor: bool,
@@ -385,11 +398,11 @@ pub(crate) struct ScreencopyFrameData {
 /// Registers both globals. Called once from `run` — see the module's
 /// integration contract for where.
 ///
-/// Never fails, and neither global is gated: a screenshot tool and a
-/// bar are ordinary desktop software, and chonkstep runs one user's
-/// session rather than a multi-tenant kiosk. A `wp_security_context`
-/// filter (Smithay supports one through `GlobalDispatch::can_view`) is
-/// the hook to add if sandboxed clients ever need to be told "no".
+/// Never fails. Both globals consult the shared security-context-aware
+/// predicate. That predicate remains permissive today because chonkstep
+/// runs one user's session rather than a multi-tenant kiosk, but clients
+/// admitted through `wp_security_context_v1` are now identifiable when
+/// that policy changes.
 pub(crate) fn init(display_handle: &DisplayHandle) -> ProtocolState {
     // The `GlobalId`s are dropped deliberately: dropping one does not
     // withdraw the global (that takes `DisplayHandle::remove_global`),
@@ -410,6 +423,7 @@ pub(crate) fn init(display_handle: &DisplayHandle) -> ProtocolState {
         toplevels: HashMap::new(),
         minimize_requests: Vec::new(),
         captures: Vec::new(),
+        capture_targets: Vec::new(),
     }
 }
 
@@ -427,7 +441,6 @@ pub(crate) fn refresh(comp: &mut Compositor) {
         sync_toplevels(comp);
         comp.foreign_toplevel_dirty = false;
     }
-    service_captures(comp);
 }
 
 /// Keeps ext-foreign-toplevel-list in step with the same authoritative
@@ -914,6 +927,10 @@ impl GlobalDispatch<ZwlrForeignToplevelManagerV1, ()> for Compositor {
         // the next `refresh` is the only place handles are minted.
         state.protocols.managers.push(ManagerInstance { resource, announced: false });
     }
+
+    fn can_view(client: Client, _global_data: &()) -> bool {
+        crate::state::privileged_global_visible(&client)
+    }
 }
 
 impl Dispatch<ZwlrForeignToplevelManagerV1, ()> for Compositor {
@@ -1059,6 +1076,10 @@ impl GlobalDispatch<ZwlrScreencopyManagerV1, ()> for Compositor {
     ) {
         data_init.init(resource, ());
     }
+
+    fn can_view(client: Client, _global_data: &()) -> bool {
+        crate::state::privileged_global_visible(&client)
+    }
 }
 
 impl Dispatch<ZwlrScreencopyManagerV1, ()> for Compositor {
@@ -1195,6 +1216,11 @@ impl Dispatch<ZwlrScreencopyFrameV1, ScreencopyFrameData> for Compositor {
             overlay_cursor: data.overlay_cursor,
             with_damage,
         });
+        // A plain copy is paced by presenting one compositor frame. Damage-
+        // aware copies deliberately wait for a real scene change instead.
+        if !with_damage {
+            state.wm.backend_mut().damage = true;
+        }
     }
 
     fn destroyed(
@@ -1207,61 +1233,207 @@ impl Dispatch<ZwlrScreencopyFrameV1, ScreencopyFrameData> for Compositor {
     }
 }
 
-/// Answers every capture that is due this pass.
-///
-/// `copy` is answered on the next pass regardless; `copy_with_damage`
-/// waits for a pass where the scene actually changed, which is what
-/// stops a recorder from spinning at dispatch rate over a still
-/// desktop. `WaylandBackend::damage` is the compositor's single
-/// scene-changed flag, and this runs before `render_frame` clears it.
-fn service_captures(comp: &mut Compositor) {
-    if comp.protocols.captures.is_empty() {
+/// Called once after the compositor submitted a visible frame. This is the
+/// screencopy pacing clock: protocol dispatch can run many times between
+/// presentations, but it cannot trigger extra readbacks.
+pub(crate) fn frame_presented(comp: &mut Compositor, presented: bool) {
+    if !presented || comp.protocols.captures.is_empty() {
         return;
     }
-    let damaged = comp.wm.backend().damage;
+
+    // Pick at most one distinct capture geometry per output this frame. All
+    // consumers asking for that exact geometry share the render/readback.
+    let monitors = comp.wm.backend().monitors();
+    let mut selected: HashMap<usize, (Rect, Transform, bool)> = HashMap::new();
     let mut due: Vec<PendingCapture> = Vec::new();
     comp.protocols.captures.retain(|capture| {
         if !capture.frame.is_alive() {
             return false;
         }
-        if capture.with_damage && !damaged {
-            return true;
+        let output = monitors
+            .iter()
+            .enumerate()
+            .max_by_key(|(_, monitor)| overlap_area(capture.region, monitor.geometry))
+            .map(|(index, _)| index)
+            .unwrap_or(usize::MAX);
+        let key = (capture.region, capture.transform, capture.overlay_cursor);
+        match selected.get(&output) {
+            Some(existing) if existing != &key => true,
+            Some(_) => {
+                due.push(capture.clone());
+                false
+            }
+            None => {
+                selected.insert(output, key);
+                due.push(capture.clone());
+                false
+            }
         }
-        due.push(capture.clone());
-        false
     });
 
-    for capture in due {
-        let Some(pixels) = capture_region(comp, capture.region, capture.transform, capture.overlay_cursor) else {
-            capture.frame.failed();
-            continue;
-        };
-        if let Err(error) = write_capture(&capture.buffer, &pixels) {
-            tracing::warn!(%error, "screencopy could not write into the client's buffer");
-            capture.frame.failed();
-            continue;
+    while let Some(first) = due.pop() {
+        let mut group = vec![first.clone()];
+        let mut index = 0;
+        while index < due.len() {
+            if due[index].region == first.region
+                && due[index].transform == first.transform
+                && due[index].overlay_cursor == first.overlay_cursor
+            {
+                group.push(due.swap_remove(index));
+            } else {
+                index += 1;
+            }
         }
-        // Never y-inverted: `capture.rs` explains why the renderer's
-        // baked-in flip and `glReadPixels`' bottom-up order cancel.
-        capture.frame.flags(zwlr_screencopy_frame_v1::Flags::empty());
-        if capture.with_damage {
-            // The whole region, because that is the truth: this
-            // compositor repaints the full scene every frame on purpose
-            // (see `renderer`'s module docs), so there is no smaller
-            // damage rectangle to report.
-            capture.frame.damage(0, 0, pixels.width, pixels.height);
-        }
-        // Monotonic since session start. The protocol allows "an
-        // arbitrary offset at start" precisely so a compositor can use
-        // its own presentation clock, and this is the one every other
-        // timestamp in this process is measured against.
-        let stamp = comp.start_time.elapsed();
-        capture.frame.ready(
-            (stamp.as_secs() >> 32) as u32,
-            (stamp.as_secs() & 0xFFFF_FFFF) as u32,
-            stamp.subsec_nanos(),
-        );
+        service_capture_group(comp, &group);
     }
+
+    // A client may have queued different regions for the same output. Keep
+    // them paced: book one more presentation rather than draining them in the
+    // same dispatch turn.
+    if comp.protocols.captures.iter().any(|capture| !capture.with_damage) {
+        comp.wm.backend_mut().damage = true;
+    }
+}
+
+/// Whether a one-shot screencopy is waiting for the presentation it was
+/// promised when `copy` arrived.
+///
+/// Merely setting the compositor's coarse damage bit is not enough to make
+/// that presentation happen: the output damage tracker can quite correctly
+/// decide that an otherwise-idle scene has no changed pixels and skip the
+/// submit. The renderer uses this predicate to force one full output repaint,
+/// after which [`frame_presented`] drains the request. Damage-aware streams do
+/// not force frames; they continue to sleep until the scene really changes.
+pub(crate) fn plain_capture_pending(state: &ProtocolState) -> bool {
+    state.captures.iter().any(|capture| !capture.with_damage && capture.frame.is_alive())
+}
+
+fn overlap_area(a: Rect, b: Rect) -> u64 {
+    intersection(a, b)
+        .map(|rect| rect.size.w as u64 * rect.size.h as u64)
+        .unwrap_or(0)
+}
+
+fn service_capture_group(comp: &mut Compositor, captures: &[PendingCapture]) {
+    let Some(first) = captures.first() else { return };
+    let target_size = buffer_size(first.region.size, first.transform);
+    if target_size.w == 0 || target_size.h == 0 {
+        for capture in captures {
+            capture.frame.failed();
+        }
+        return;
+    }
+
+    let Compositor { wm, graphics, pointer_location, cursor_status, cursors, protocols, start_time, .. } = comp;
+    let cache_index = protocols
+        .capture_targets
+        .iter()
+        .position(|target| {
+            target.region == first.region
+                && target.size == target_size
+                && target.transform == first.transform
+                && target.overlay_cursor == first.overlay_cursor
+        });
+    let renderer = graphics_renderer(graphics);
+    let mut target = match cache_index {
+        Some(index) => protocols.capture_targets.swap_remove(index),
+        None => {
+            let width = target_size.w as i32;
+            let height = target_size.h as i32;
+            let texture = match renderer.create_buffer(
+                Fourcc::Abgr8888,
+                SSize::<i32, BufferCoords>::from((width, height)),
+            ) {
+                Ok(texture) => texture,
+                Err(error) => {
+                    tracing::warn!(?error, width, height, "could not allocate a screencopy buffer");
+                    for capture in captures { capture.frame.failed(); }
+                    return;
+                }
+            };
+            CaptureTarget {
+                region: first.region,
+                size: target_size,
+                transform: first.transform,
+                overlay_cursor: first.overlay_cursor,
+                texture,
+                damage_tracker: OutputDamageTracker::new(
+                    SSize::<i32, Physical>::from((width, height)),
+                    1.0,
+                    first.transform,
+                ),
+                scene_scratch: Vec::new(),
+                rendered: false,
+            }
+        }
+    };
+
+    let hidden = CursorImageStatus::Hidden;
+    let status = if first.overlay_cursor { &*cursor_status } else { &hidden };
+    let clear_color = build_scene_into(
+        &mut target.scene_scratch,
+        wm.backend(),
+        renderer,
+        *pointer_location,
+        status,
+        cursors,
+        first.region,
+    );
+    let width = target_size.w as i32;
+    let height = target_size.h as i32;
+    let success = (|| {
+        let mut framebuffer = renderer.bind(&mut target.texture).map_err(|error| format!("bind: {error:?}"))?;
+        // A plain `copy` is an independent snapshot, often from a new
+        // one-shot client such as grim. Redraw it in full: unlike an output
+        // swapchain, an offscreen pool has no externally supplied buffer-age
+        // contract, and carrying an incremental state across independent
+        // clients can preserve the image captured between a layer mapping and
+        // its first pixels. A `copy_with_damage` stream is explicitly paced
+        // across scene changes and may safely reuse the retained target.
+        let incremental = captures.iter().all(|capture| capture.with_damage);
+        let age = capture_buffer_age(target.rendered, incremental);
+        target
+            .damage_tracker
+            .render_output(renderer, &mut framebuffer, age, &target.scene_scratch, clear_color)
+            .map_err(|error| format!("render: {error:?}"))?;
+        target.rendered = true;
+        let region = SRect::from_size(SSize::<i32, BufferCoords>::from((width, height)));
+        let mapping = renderer
+            .copy_framebuffer(&framebuffer, region, Fourcc::Abgr8888)
+            .map_err(|error| format!("readback: {error:?}"))?;
+        let pixels = renderer.map_texture(&mapping).map_err(|error| format!("map: {error:?}"))?;
+        for capture in captures {
+            match write_capture_bytes(&capture.buffer, target_size, pixels) {
+                Ok(()) => finish_capture(start_time.elapsed(), capture, target_size),
+                Err(error) => {
+                    tracing::warn!(%error, "screencopy could not write into the client's buffer");
+                    capture.frame.failed();
+                }
+            }
+        }
+        Ok::<(), String>(())
+    })();
+    target.scene_scratch.clear();
+    if let Err(error) = success {
+        tracing::warn!(%error, "screencopy render failed");
+        for capture in captures { capture.frame.failed(); }
+    }
+    protocols.capture_targets.push(target);
+    if protocols.capture_targets.len() > 8 {
+        protocols.capture_targets.remove(0);
+    }
+}
+
+fn finish_capture(stamp: std::time::Duration, capture: &PendingCapture, size: Size) {
+    capture.frame.flags(zwlr_screencopy_frame_v1::Flags::empty());
+    if capture.with_damage {
+        capture.frame.damage(0, 0, size.w, size.h);
+    }
+    capture.frame.ready(
+        (stamp.as_secs() >> 32) as u32,
+        (stamp.as_secs() & 0xFFFF_FFFF) as u32,
+        stamp.subsec_nanos(),
+    );
 }
 
 /// The region of the compositor-global scene this output covers and
@@ -1316,7 +1488,7 @@ fn intersection(a: Rect, b: Rect) -> Option<Rect> {
 /// Draws the scene as it stands into an RGBA buffer covering `region`.
 ///
 /// The cursor is composited only when the client asked for it:
-/// `CursorImageStatus::Hidden` is the one status [`build_scene`] draws
+/// `CursorImageStatus::Hidden` is the one status [`build_scene_into`] draws
 /// nothing for, so suppressing the pointer needs no special case in the
 /// shared scene builder.
 ///
@@ -1335,18 +1507,91 @@ fn intersection(a: Rect, b: Rect) -> Option<Rect> {
 /// wrong in the preview" failure mode `capture.rs` warns about, arrived
 /// at from the other direction, and it was observed before it was
 /// argued: `grim` against a nested session came back upside down.
-pub(crate) fn capture_region(
+pub(crate) fn capture_region_into(
     comp: &mut Compositor,
     region: Rect,
     transform: Transform,
     overlay_cursor: bool,
-) -> Option<DecorationBuffer> {
-    let Compositor { wm, graphics, pointer_location, cursor_status, cursors, .. } = comp;
+    buffer: &WlBuffer,
+) -> Result<Size, String> {
+    let target_size = buffer_size(region.size, transform);
+    if target_size.w == 0 || target_size.h == 0 {
+        return Err("capture region is empty".to_string());
+    }
+
+    let Compositor { wm, graphics, pointer_location, cursor_status, cursors, protocols, .. } = comp;
+    let cache_index = protocols
+        .capture_targets
+        .iter()
+        .position(|target| {
+            target.region == region
+                && target.size == target_size
+                && target.transform == transform
+                && target.overlay_cursor == overlay_cursor
+        });
     let renderer = graphics_renderer(graphics);
+    let mut target = match cache_index {
+        Some(index) => protocols.capture_targets.swap_remove(index),
+        None => {
+            let width = target_size.w as i32;
+            let height = target_size.h as i32;
+            let texture = renderer
+                .create_buffer(Fourcc::Abgr8888, SSize::<i32, BufferCoords>::from((width, height)))
+                .map_err(|error| format!("allocate: {error:?}"))?;
+            CaptureTarget {
+                region,
+                size: target_size,
+                transform,
+                overlay_cursor,
+                texture,
+                damage_tracker: OutputDamageTracker::new(
+                    SSize::<i32, Physical>::from((width, height)),
+                    1.0,
+                    transform,
+                ),
+                scene_scratch: Vec::new(),
+                rendered: false,
+            }
+        }
+    };
+
     let hidden = CursorImageStatus::Hidden;
     let status = if overlay_cursor { &*cursor_status } else { &hidden };
-    let (elements, clear_color) = build_scene(wm.backend(), renderer, *pointer_location, status, cursors, region);
-    render_offscreen(renderer, &elements, region.size, transform, clear_color)
+    let clear_color = build_scene_into(
+        &mut target.scene_scratch,
+        wm.backend(),
+        renderer,
+        *pointer_location,
+        status,
+        cursors,
+        region,
+    );
+    let width = target_size.w as i32;
+    let height = target_size.h as i32;
+    let result = (|| {
+        let mut framebuffer = renderer.bind(&mut target.texture).map_err(|error| format!("bind: {error:?}"))?;
+        // Ext-image-copy captures are independent snapshots too; retain the
+        // expensive storage, but make every returned image authoritative.
+        let age = capture_buffer_age(target.rendered, false);
+        target
+            .damage_tracker
+            .render_output(renderer, &mut framebuffer, age, &target.scene_scratch, clear_color)
+            .map_err(|error| format!("render: {error:?}"))?;
+        target.rendered = true;
+        let readback = SRect::from_size(SSize::<i32, BufferCoords>::from((width, height)));
+        let mapping = renderer
+            .copy_framebuffer(&framebuffer, readback, Fourcc::Abgr8888)
+            .map_err(|error| format!("readback: {error:?}"))?;
+        let pixels = renderer.map_texture(&mapping).map_err(|error| format!("map: {error:?}"))?;
+        write_capture_bytes(buffer, target_size, pixels)
+    })();
+
+    target.scene_scratch.clear();
+    protocols.capture_targets.push(target);
+    if protocols.capture_targets.len() > 8 {
+        protocols.capture_targets.remove(0);
+    }
+    result.map(|()| target_size)
 }
 
 /// The session's `GlesRenderer`, whichever graphics stack is running.
@@ -1361,75 +1606,8 @@ fn graphics_renderer(graphics: &mut Graphics) -> &mut GlesRenderer {
     }
 }
 
-/// Draws `elements` into a fresh offscreen texture and downloads the
-/// result, at scale 1 — the scale every element in this compositor's
-/// scene is built at.
-///
-/// `size` is the region in *logical* coordinates, which is the space
-/// `elements` are in; the texture is allocated at the transformed size,
-/// and [`OutputDamageTracker`] applies `transform` while drawing
-/// (it inverts the output transform internally, exactly as a real
-/// output's frame does).
-///
-/// Otherwise a near-duplicate of `capture::render_offscreen`, for reach
-/// rather than for difference: see the module docs for the change that
-/// lets this be deleted. The fresh tracker per call, at age 0, is
-/// deliberate for the same reason it is there — the target texture is
-/// new and entirely stale, and a carried tracker would compute
-/// incremental damage against a buffer that no longer exists and skip
-/// drawing outright.
-fn render_offscreen(
-    renderer: &mut GlesRenderer,
-    elements: &[SceneElement<GlesRenderer>],
-    size: Size,
-    transform: Transform,
-    clear_color: Color32F,
-) -> Option<DecorationBuffer> {
-    let target = buffer_size(size, transform);
-    if target.w == 0 || target.h == 0 {
-        return None;
-    }
-    let width = target.w as i32;
-    let height = target.h as i32;
-
-    let mut texture: GlesTexture =
-        match renderer.create_buffer(Fourcc::Abgr8888, SSize::<i32, BufferCoords>::from((width, height))) {
-            Ok(texture) => texture,
-            Err(error) => {
-                tracing::warn!(?error, width, height, "could not allocate a screencopy buffer");
-                return None;
-            }
-        };
-    let mut framebuffer = match renderer.bind(&mut texture) {
-        Ok(framebuffer) => framebuffer,
-        Err(error) => {
-            tracing::warn!(?error, "could not bind the screencopy buffer");
-            return None;
-        }
-    };
-
-    let mut damage_tracker = OutputDamageTracker::new(SSize::<i32, Physical>::from((width, height)), 1.0, transform);
-    if let Err(error) = damage_tracker.render_output(renderer, &mut framebuffer, 0, elements, clear_color) {
-        tracing::warn!(?error, "screencopy render failed");
-        return None;
-    }
-
-    let region = SRect::from_size(SSize::<i32, BufferCoords>::from((width, height)));
-    let mapping = match renderer.copy_framebuffer(&framebuffer, region, Fourcc::Abgr8888) {
-        Ok(mapping) => mapping,
-        Err(error) => {
-            tracing::warn!(?error, "could not read back the screencopy buffer");
-            return None;
-        }
-    };
-    let pixels = match renderer.map_texture(&mapping) {
-        Ok(pixels) => pixels.to_vec(),
-        Err(error) => {
-            tracing::warn!(?error, "could not map the captured pixels");
-            return None;
-        }
-    };
-    Some(DecorationBuffer { width: target.w, height: target.h, pixels })
+fn capture_buffer_age(rendered: bool, incremental: bool) -> usize {
+    usize::from(rendered && incremental)
 }
 
 /// Validates a client buffer against what this frame advertised and
@@ -1484,11 +1662,18 @@ fn pixel_layout(format: wl_shm::Format) -> Option<(bool, bool)> {
 /// `argb8888` is defined premultiplied — so nothing but the channel
 /// order changes.
 pub(crate) fn write_capture(buffer: &WlBuffer, capture: &DecorationBuffer) -> Result<(), String> {
-    let data = shm_layout(buffer, Size::new(capture.width, capture.height))?;
+    write_capture_bytes(buffer, Size::new(capture.width, capture.height), &capture.pixels)
+}
+
+fn write_capture_bytes(buffer: &WlBuffer, size: Size, pixels: &[u8]) -> Result<(), String> {
+    let data = shm_layout(buffer, size)?;
     let (swap_rb, opaque) = pixel_layout(data.format).ok_or("unsupported buffer format")?;
-    let width = capture.width as usize;
-    let height = capture.height as usize;
+    let width = size.w as usize;
+    let height = size.h as usize;
     let row_bytes = width * BYTES_PER_PIXEL;
+    if pixels.len() < row_bytes.saturating_mul(height) {
+        return Err("captured pixel mapping is shorter than its dimensions".to_string());
+    }
     let stride = data.stride as usize;
     let offset = data.offset.max(0) as usize;
 
@@ -1501,7 +1686,7 @@ pub(crate) fn write_capture(buffer: &WlBuffer, capture: &DecorationBuffer) -> Re
             return Err(format!("buffer holds {len} bytes, the capture needs {needed}"));
         }
         for y in 0..height {
-            let source = &capture.pixels[y * row_bytes..y * row_bytes + row_bytes];
+            let source = &pixels[y * row_bytes..y * row_bytes + row_bytes];
             // SAFETY: `ptr`/`len` describe the client's mapped pool for
             // the duration of this closure (that is the contract of
             // `with_buffer_contents_mut`, which also traps SIGBUS on a
@@ -1618,5 +1803,13 @@ mod tests {
         assert_eq!(pixel_layout(wl_shm::Format::Xbgr8888), Some((false, true)));
         // Anything else is refused rather than written wrong.
         assert_eq!(pixel_layout(wl_shm::Format::Rgb565), None);
+    }
+
+    #[test]
+    fn only_a_continuing_damage_stream_uses_retained_capture_pixels() {
+        assert_eq!(capture_buffer_age(false, false), 0);
+        assert_eq!(capture_buffer_age(false, true), 0);
+        assert_eq!(capture_buffer_age(true, false), 0);
+        assert_eq!(capture_buffer_age(true, true), 1);
     }
 }

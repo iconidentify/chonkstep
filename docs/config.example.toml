@@ -146,6 +146,26 @@
 # false for sloppy focus that leaves the stack alone.
 #autoraise = true
 
+# Pointer and touchpad hardware configuration. These values are applied to
+# each real libinput device when it appears and re-applied after a live config
+# reload. Unsupported settings are skipped per device instead of preventing
+# the remaining settings from taking effect.
+#
+# Sensitivity is -1.0 through 1.0. The acceleration profile is "adaptive" or
+# "flat". `scroll_factor` is a positive multiplier applied to both smooth and
+# wheel scrolling. `[input.touchpad]` is an optional nested spelling for the
+# touchpad-oriented controls; it overrides the corresponding flat key.
+#[input]
+#sensitivity = 0.0
+#accel_profile = "adaptive"
+#left_handed = false
+#
+#[input.touchpad]
+#natural_scroll = true
+#tap_to_click = false
+#clickfinger_behavior = true
+#scroll_factor = 0.4
+
 # UI scale factor for HiDPI displays: multiplies every pixel dimension
 # in the window chrome, dock, cursors, and terminal font as one system.
 # The CHONKSTEP_SCALE environment variable, when set to a valid value,

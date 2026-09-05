@@ -26,6 +26,15 @@ pub struct XWindow(pub Window);
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct XFrame(pub Window);
 
+#[derive(Clone)]
+struct PaintedPart {
+    x: i16,
+    y: i16,
+    w: u16,
+    h: u16,
+    data: Vec<u8>,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum X11BackendError {
     #[error("failed to connect to the X server: {0}")]
@@ -124,7 +133,7 @@ pub struct X11Backend {
     /// Cached server-format pixels per painted window (frame or shell
     /// window), replayed on `Expose` without re-touching the theme
     /// engine or re-converting byte order.
-    painted: HashMap<Window, (u16, u16, Vec<u8>)>,
+    painted: HashMap<Window, Vec<PaintedPart>>,
     /// Button press/release events on windows we don't recognize as a
     /// client/frame (root, dock, menu popups...) — the desktop shell in
     /// `chonkstep` drains these separately from `poll_event`, since
@@ -809,7 +818,7 @@ impl X11Backend {
             tracing::warn!(?e, window = win, "put_image failed");
         }
         let _ = self.conn.flush();
-        self.painted.insert(win, (w, h, data));
+        self.painted.insert(win, vec![PaintedPart { x: 0, y: 0, w, h, data }]);
     }
 
     /// Sends `data` (a `w`x`h` `ZPixmap` buffer, top row first) to
@@ -823,6 +832,18 @@ impl X11Backend {
     /// silently truncating it, so without chunking the whole image simply
     /// never reaches the server.
     fn put_image_rows(&mut self, drawable: Drawable, w: u16, h: u16, data: &[u8]) -> Result<(), ConnectionError> {
+        self.put_image_rows_at(drawable, w, h, data, 0, 0)
+    }
+
+    fn put_image_rows_at(
+        &mut self,
+        drawable: Drawable,
+        w: u16,
+        h: u16,
+        data: &[u8],
+        x: i16,
+        y: i16,
+    ) -> Result<(), ConnectionError> {
         let stride = w as usize * 4;
         if stride == 0 || h == 0 {
             return Ok(());
@@ -841,9 +862,9 @@ impl X11Backend {
         let budget = self.conn.maximum_request_bytes().saturating_sub(REQUEST_OVERHEAD_BYTES);
         let rows_per_chunk = (budget / stride).max(1);
         for (chunk_index, chunk) in data.chunks(rows_per_chunk * stride).enumerate() {
-            let y = (chunk_index * rows_per_chunk) as i16;
+            let y = y.saturating_add((chunk_index * rows_per_chunk) as i16);
             let chunk_h = (chunk.len() / stride) as u16;
-            self.conn.put_image(ImageFormat::Z_PIXMAP, drawable, gc, w, chunk_h, 0, y, 0, depth, chunk)?;
+            self.conn.put_image(ImageFormat::Z_PIXMAP, drawable, gc, w, chunk_h, x, y, 0, depth, chunk)?;
         }
         Ok(())
     }
@@ -1192,8 +1213,10 @@ impl X11Backend {
             }
             Event::Expose(e) => {
                 if e.count == 0 {
-                    if let Some((w, h, data)) = self.painted.get(&e.window).cloned() {
-                        let _ = self.put_image_rows(e.window, w, h, &data);
+                    if let Some(parts) = self.painted.get(&e.window).cloned() {
+                        for part in parts {
+                            let _ = self.put_image_rows_at(e.window, part.w, part.h, &part.data, part.x, part.y);
+                        }
                         let _ = self.conn.flush();
                     }
                 }
@@ -2346,6 +2369,10 @@ impl Backend for X11Backend {
         &self.monitors
     }
 
+    fn decoration_scale(&self, _frame: Rect) -> f32 {
+        self.cursors.scale
+    }
+
     fn poll_event(&mut self) -> Option<BackendEvent<Self::WindowId, Self::FrameId>> {
         loop {
             let event = match self.conn.poll_for_event() {
@@ -2779,8 +2806,24 @@ impl Backend for X11Backend {
         let _ = self.conn.flush();
     }
 
-    fn paint_decoration(&mut self, frame: Self::FrameId, buffer: &DecorationBuffer) {
-        self.blit(frame.0, buffer);
+    fn paint_decoration(&mut self, frame: Self::FrameId, surface: &wm_theme_api::DecorationSurface) {
+        let mut painted = Vec::with_capacity(surface.parts.len());
+        for part in &surface.parts {
+            if part.buffer.width == 0 || part.buffer.height == 0 {
+                continue;
+            }
+            let w = part.buffer.width.min(u16::MAX as u32) as u16;
+            let h = part.buffer.height.min(u16::MAX as u32) as u16;
+            let x = part.offset.x.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+            let y = part.offset.y.clamp(i16::MIN as i32, i16::MAX as i32) as i16;
+            let data = to_server_bytes(&part.buffer, self.image_byte_order);
+            if let Err(error) = self.put_image_rows_at(frame.0, w, h, &data, x, y) {
+                tracing::warn!(?error, ?frame, "put_image decoration part failed");
+            }
+            painted.push(PaintedPart { x, y, w, h, data });
+        }
+        self.painted.insert(frame.0, painted);
+        let _ = self.conn.flush();
     }
 
     fn set_frame_cursor(&mut self, frame: Self::FrameId, edge: Option<ResizeEdge>) {

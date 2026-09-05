@@ -476,7 +476,11 @@ fn keyboard_input_is_carried_but_hyprlands_focus_policy_is_not() {
 hl.config({ input = {
   kb_layout = "de", kb_variant = "nodeadkeys", kb_model = "pc105",
   kb_options = "compose:caps", repeat_rate = 40, repeat_delay = 250,
-  follow_mouse = 1,
+  follow_mouse = 1, sensitivity = -0.25, accel_profile = "flat",
+  touchpad = {
+    natural_scroll = true, tap_to_click = false,
+    clickfinger_behavior = true, scroll_factor = 0.4,
+  },
 } })
 o.bind("XF86TouchpadToggle", "Touchpad", "touchpad toggle")
 o.bind("XF86TouchpadOn", "Touchpad on", "touchpad on")
@@ -491,6 +495,12 @@ o.bind("SUPER + SHIFT + code:201", "Menu", "omarchy-menu")
     assert_eq!(reading.input.options.as_deref(), Some("compose:caps"));
     assert_eq!(reading.input.repeat_rate, Some(40));
     assert_eq!(reading.input.repeat_delay, Some(250));
+    assert_eq!(reading.input.sensitivity, Some(-0.25));
+    assert_eq!(reading.input.accel_profile.as_deref(), Some("flat"));
+    assert_eq!(reading.input.natural_scroll, Some(true));
+    assert_eq!(reading.input.tap_to_click, Some(false));
+    assert_eq!(reading.input.clickfinger_behavior, Some(true));
+    assert_eq!(reading.input.scroll_factor, Some(0.4));
     assert!(
         skipped_why(&reading, "follow_mouse")
             .is_some_and(|why| why.contains("focus policy belongs to chonkstep")),
@@ -2014,7 +2024,7 @@ fn the_numbers_the_documents_quote_are_the_numbers_this_machine_produces() {
     // number there is the normal case rather than a fault.
     assert_eq!(
         reading.skipped.len(),
-        175,
+        173,
         "directives this desktop has its own answer for"
     );
     const GUIDE: &str = include_str!("../../../../docs/hyprland-config.md");
@@ -2024,7 +2034,7 @@ fn the_numbers_the_documents_quote_are_the_numbers_this_machine_produces() {
     );
     assert!(
         GUIDE.contains("files=42 bindings=153 commands=113 env=8 autostart=4")
-            && GUIDE.contains("float_rules=45 monitors=1 skipped=175"),
+            && GUIDE.contains("float_rules=45 monitors=1 skipped=173"),
         "the guide's sample log line no longer matches what this machine reports"
     );
 }

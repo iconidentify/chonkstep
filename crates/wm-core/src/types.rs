@@ -427,6 +427,17 @@ pub struct KeyboardConfig {
     pub repeat_delay: Option<i32>,
 }
 
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct PointerConfig {
+    pub sensitivity: Option<f64>,
+    pub natural_scroll: Option<bool>,
+    pub tap_to_click: Option<bool>,
+    pub clickfinger_behavior: Option<bool>,
+    pub scroll_factor: Option<f64>,
+    pub left_handed: Option<bool>,
+    pub accel_profile: Option<String>,
+}
+
 
 impl DecorationRules {
     /// The override for `identity`, if any: `Some(true)` to force this

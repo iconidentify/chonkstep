@@ -65,11 +65,15 @@ use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use smithay::backend::allocator::format::FormatSet;
+use smithay::backend::input::InputEvent;
 use smithay::backend::allocator::gbm::{GbmAllocator, GbmBufferFlags, GbmDevice};
 use smithay::backend::allocator::{Format, Fourcc, Modifier};
 use smithay::backend::drm::compositor::{DrmCompositor, FrameError, FrameFlags, PrimaryPlaneElement};
 use smithay::backend::drm::exporter::gbm::GbmFramebufferExporter;
-use smithay::backend::drm::{DrmDevice, DrmDeviceFd, DrmDeviceNotifier, DrmEvent, DrmEventTime, DrmNode, NodeType, PlaneInfo};
+use smithay::backend::drm::{
+    DrmDevice, DrmDeviceFd, DrmDeviceNotifier, DrmEvent, DrmEventTime, DrmNode, NodeType,
+    PlaneInfo, VrrSupport,
+};
 use smithay::backend::egl::{EGLContext, EGLDisplay};
 use smithay::backend::libinput::{LibinputInputBackend, LibinputSessionInterface};
 use smithay::backend::renderer::gles::GlesRenderer;
@@ -82,7 +86,7 @@ use smithay::reexports::drm::control::{
     connector, crtc, plane, Device as ControlDevice, Mode as DrmMode, ModeFlags, ModeTypeFlags,
     PlaneType, ResourceHandles,
 };
-use smithay::reexports::input::Libinput;
+use smithay::reexports::input::{self as libinput_crate, Libinput};
 use smithay::reexports::rustix::fs::OFlags;
 use smithay::reexports::wayland_server::DisplayHandle;
 use smithay::utils::{Clock, DeviceFd, Monotonic, Transform};
@@ -617,6 +621,9 @@ pub(crate) struct SessionGraphics {
     /// and resume it. The `LibinputInputBackend` calloop owns holds its
     /// own clone of the same underlying context.
     libinput: Libinput,
+    /// Live libinput device handles retained so config reloads can
+    /// update already-connected hardware, not only future hotplug.
+    input_devices: Vec<libinput_crate::Device>,
     /// When [`service_pending_flips`] last ran. The gap between
     /// consecutive visits is how long the main thread was away, which
     /// is time no flip should be charged for — see [`LOOP_BLOCK_GRACE`].
@@ -682,6 +689,8 @@ struct SessionOutput {
     /// into the many, and [`redraw_pending`] is what keeps the dispatch
     /// loop coming back until every output has caught up.
     dirty: bool,
+    /// False after DPMS off; the head remains in the logical layout.
+    powered: bool,
     /// Reusable scene-construction storage. Draining this into
     /// `pending_scene` preserves the allocation for the next frame
     /// while the latter owns any client buffers until vblank.
@@ -718,6 +727,11 @@ struct SessionOutput {
     /// Cached solely for transition telemetry; unlike inspecting the
     /// scene, this costs no walk in the vblank callback.
     direct_scanout_active: bool,
+    /// Connector capability and the user's policy are separate from the live
+    /// DRM property. The latter is enabled only for a frame the renderer has
+    /// proved will directly scan out.
+    vrr_supported: bool,
+    vrr_requested: bool,
     /// Presentation requests drained for the page flip in flight.
     /// They are completed with the kernel's vblank timestamp, never
     /// merely when rendering finished.
@@ -1332,6 +1346,7 @@ pub(crate) fn init(
         .map_err(|()| format!("libinput could not take seat {seat_name}; no keyboard or mouse would work"))?;
     loop_handle
         .insert_source(LibinputInputBackend::new(libinput.clone()), |event, _, comp: &mut Compositor| {
+            note_libinput_device(comp, &event);
             crate::input::process_input_event(comp, event);
         })
         .map_err(|error| format!("failed to register the libinput event source: {error}"))?;
@@ -1412,6 +1427,19 @@ pub(crate) fn init(
                         // the switch but mean nothing now: the foreign
                         // session painted over the screen.
                         output.drm_compositor.reset_buffers();
+                        // `activate(true)` resets connector state, including
+                        // DPMS. Reassert logical sleep before the render loop
+                        // can touch this output; powered-off outputs are
+                        // intentionally skipped below.
+                        if !output.powered {
+                            if let Err(error) = output.drm_compositor.clear() {
+                                tracing::warn!(
+                                    ?error,
+                                    output = %output.name,
+                                    "could not restore powered-off state after VT resume"
+                                );
+                            }
+                        }
                         output.frame_pending = None;
                         output.last_vblank = None;
                         clear_scene_holds(
@@ -1471,6 +1499,7 @@ pub(crate) fn init(
             render_formats,
             outputs: session_outputs,
             libinput,
+            input_devices: Vec::new(),
             last_service: Instant::now(),
             strict_release,
             hotplug_due: None,
@@ -1615,7 +1644,7 @@ fn attach_output(
         "DRM planes available to this crtc"
     );
 
-    let drm_compositor = SessionDrmCompositor::new(
+    let mut drm_compositor = SessionDrmCompositor::new(
         OutputModeSource::Static {
             size: wl_mode.size,
             scale: smithay::utils::Scale::from(1.0),
@@ -1639,6 +1668,28 @@ fn attach_output(
         Some(gbm.clone()),
     )
     .map_err(|error| format!("could not set up scanout: {error}"))?;
+    let vrr_supported = match drm_compositor.vrr_supported(info.handle()) {
+        Ok(VrrSupport::Supported) => true,
+        // Runtime desktop toggles must never silently modeset/flicker an HDMI
+        // output. Smithay distinguishes this case precisely for that reason.
+        Ok(VrrSupport::RequiresModeset) => {
+            tracing::info!(output = %name, "adaptive sync requires a modeset; runtime VRR disabled");
+            false
+        }
+        Ok(VrrSupport::NotSupported) => false,
+        Err(error) => {
+            tracing::warn!(?error, output = %name, "could not query adaptive-sync capability");
+            false
+        }
+    };
+    let vrr_requested = vrr_supported && !crate::diagnostics::enabled("no-vrr");
+    let mut vrr_enabled = drm_compositor.vrr_enabled();
+    if vrr_enabled {
+        match drm_compositor.use_vrr(false) {
+            Ok(()) => vrr_enabled = false,
+            Err(error) => tracing::warn!(?error, output = %name, "could not disable inherited adaptive-sync state"),
+        }
+    }
 
     Ok((
         SessionOutput {
@@ -1653,10 +1704,13 @@ fn attach_output(
             frame_pending: None,
             // Nothing has ever been drawn on it.
             dirty: true,
+            powered: true,
             scene_scratch: Vec::new(),
             pending_scene: Vec::new(),
             scanout_scene: Vec::new(),
             direct_scanout_active: false,
+            vrr_supported,
+            vrr_requested,
             presentation: None,
             last_vblank: None,
             refresh: if wl_mode.refresh > 0 {
@@ -1675,6 +1729,10 @@ fn attach_output(
             transform: Transform::Normal,
             requested_mode: None,
             modes,
+            powered: true,
+            vrr_supported,
+            vrr_requested,
+            vrr_enabled,
         },
     ))
 }
@@ -1706,7 +1764,10 @@ pub(crate) fn redraw_pending(graphics: &Graphics) -> bool {
     match graphics {
         Graphics::Winit(_) => false,
         Graphics::Session(session) => {
-            session.outputs.iter().any(|output| output.dirty || output.frame_pending.is_some())
+            session
+                .outputs
+                .iter()
+                .any(|output| output.powered && (output.dirty || output.frame_pending.is_some()))
         }
     }
 }
@@ -2090,6 +2151,164 @@ pub(crate) fn apply_output_setups(graphics: &mut Graphics, setups: &mut [OutputS
     }
 }
 
+/// Switch one connector's DPMS state while retaining its output,
+/// geometry, workspaces and protocol globals. Smithay re-enables a
+/// cleared DRM surface when the next frame is queued.
+pub(crate) fn set_output_power(graphics: &mut Graphics, index: usize, powered: bool) -> Result<(), String> {
+    let Graphics::Session(session) = graphics else {
+        return Err("the nested backend has no physical output power control".to_string());
+    };
+    let output = session
+        .outputs
+        .get_mut(index)
+        .ok_or_else(|| format!("output index {index} does not exist"))?;
+    if output.powered == powered {
+        return Ok(());
+    }
+    if powered {
+        output.powered = true;
+        output.dirty = true;
+        output.drm_compositor.reset_buffer_ages();
+        output.frame_clock.disarm();
+    } else {
+        if output.drm_compositor.vrr_enabled() {
+            if let Err(error) = output.drm_compositor.use_vrr(false) {
+                tracing::warn!(?error, output = %output.name, "could not disable adaptive sync before DPMS off");
+            }
+        }
+        output
+            .drm_compositor
+            .clear()
+            .map_err(|error| format!("DPMS off failed: {error}"))?;
+        output.powered = false;
+        output.dirty = false;
+        output.frame_pending = None;
+        output.last_vblank = None;
+        output.frame_clock.disarm();
+        clear_scene_holds(
+            &mut output.pending_scene,
+            &mut output.scanout_scene,
+            &mut output.direct_scanout_active,
+        );
+        if let Some(mut feedback) = output.presentation.take() {
+            feedback.discarded();
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn has_physical_outputs(graphics: &Graphics) -> bool {
+    matches!(graphics, Graphics::Session(session) if !session.outputs.is_empty())
+}
+
+fn note_libinput_device(comp: &mut Compositor, event: &InputEvent<LibinputInputBackend>) {
+    match event {
+        InputEvent::DeviceAdded { device } => {
+            let config = comp.wm.backend().pointer_config.clone();
+            let mut device = device.clone();
+            configure_libinput_device(&mut device, &config);
+            if let Graphics::Session(session) = &mut comp.graphics {
+                if !session.input_devices.iter().any(|held| held.sysname() == device.sysname()) {
+                    session.input_devices.push(device);
+                }
+            }
+        }
+        InputEvent::DeviceRemoved { device } => {
+            if let Graphics::Session(session) = &mut comp.graphics {
+                session.input_devices.retain(|held| held.sysname() != device.sysname());
+            }
+        }
+        _ => {}
+    }
+}
+
+pub(crate) fn apply_pointer_config(graphics: &mut Graphics, config: &wm_core::PointerConfig) {
+    let Graphics::Session(session) = graphics else {
+        return;
+    };
+    for device in &mut session.input_devices {
+        configure_libinput_device(device, config);
+    }
+}
+
+fn configure_libinput_device(device: &mut libinput_crate::Device, config: &wm_core::PointerConfig) {
+    use libinput_crate::{AccelProfile, ClickMethod};
+
+    let mut rejected = Vec::new();
+    if let Some(speed) = config.sensitivity {
+        if !device.config_accel_is_available() {
+            rejected.push("sensitivity: unsupported".to_string());
+        } else if let Err(error) = device.config_accel_set_speed(speed) {
+            rejected.push(format!("sensitivity: {error:?}"));
+        }
+    }
+    if let Some(profile) = config.accel_profile.as_deref() {
+        let profile = if profile.eq_ignore_ascii_case("flat") {
+            AccelProfile::Flat
+        } else {
+            AccelProfile::Adaptive
+        };
+        if !device.config_accel_profiles().contains(&profile) {
+            rejected.push("accel_profile: unsupported".to_string());
+        } else if let Err(error) = device.config_accel_set_profile(profile) {
+            rejected.push(format!("accel_profile: {error:?}"));
+        }
+    }
+    if let Some(enabled) = config.natural_scroll {
+        if !device.config_scroll_has_natural_scroll() {
+            rejected.push("natural_scroll: unsupported".to_string());
+        } else if let Err(error) = device.config_scroll_set_natural_scroll_enabled(enabled) {
+            rejected.push(format!("natural_scroll: {error:?}"));
+        }
+    }
+    if let Some(enabled) = config.tap_to_click {
+        if device.config_tap_finger_count() == 0 {
+            rejected.push("tap_to_click: unsupported".to_string());
+        } else if let Err(error) = device.config_tap_set_enabled(enabled) {
+            rejected.push(format!("tap_to_click: {error:?}"));
+        }
+    }
+    if let Some(clickfinger) = config.clickfinger_behavior {
+        let method = if clickfinger { ClickMethod::Clickfinger } else { ClickMethod::ButtonAreas };
+        if !device.config_click_methods().contains(&method) {
+            rejected.push("clickfinger_behavior: unsupported".to_string());
+        } else if let Err(error) = device.config_click_set_method(method) {
+            rejected.push(format!("clickfinger_behavior: {error:?}"));
+        }
+    }
+    if let Some(enabled) = config.left_handed {
+        if !device.config_left_handed_is_available() {
+            rejected.push("left_handed: unsupported".to_string());
+        } else if let Err(error) = device.config_left_handed_set(enabled) {
+            rejected.push(format!("left_handed: {error:?}"));
+        }
+    }
+    if rejected.is_empty() {
+        tracing::info!(device = device.name(), "libinput configuration applied");
+    } else {
+        tracing::debug!(device = device.name(), rejected = ?rejected, "some libinput settings are unsupported by this device");
+    }
+}
+
+pub(crate) fn set_adaptive_sync(graphics: &mut Graphics, index: usize, enabled: bool) -> Result<(), String> {
+    let Graphics::Session(session) = graphics else {
+        return Err("the nested backend has no adaptive-sync output".to_string());
+    };
+    let output = session
+        .outputs
+        .get_mut(index)
+        .ok_or_else(|| format!("output index {index} does not exist"))?;
+    if enabled && !output.vrr_supported {
+        return Err(format!("{} does not support runtime adaptive sync", output.name));
+    }
+    if enabled && crate::diagnostics::enabled("no-vrr") {
+        return Err("adaptive sync is disabled by CHONKSTEP_NO_VRR".to_string());
+    }
+    output.vrr_requested = enabled;
+    output.dirty = true;
+    Ok(())
+}
+
 /// The gamma ramp length each output's hardware wants, index-aligned
 /// with `Compositor::outputs` — the number `zwlr_gamma_control_v1`
 /// advertises as `gamma_size`, and the number of entries a client's
@@ -2250,7 +2469,7 @@ pub(crate) fn change_vt(comp: &mut Compositor, vt: i32) -> bool {
 /// sets dirty, dirty clears on a successful submit, and a blocked or
 /// failed frame is retried on the next wakeup.
 #[cfg_attr(feature = "profile", profiling::function)]
-pub(crate) fn render_frame_session(comp: &mut Compositor) -> bool {
+pub(crate) fn render_frame_session(comp: &mut Compositor, plain_capture_pending: bool) -> bool {
     // Disjoint field borrows: the graphics stack mutates while the
     // ledger is read. Both live on `Compositor`, so destructure rather
     // than going through `&mut self` methods.
@@ -2258,6 +2477,8 @@ pub(crate) fn render_frame_session(comp: &mut Compositor) -> bool {
         wm,
         graphics,
         outputs: output_entries,
+        output_mgmt,
+        hyprland_state_dirty,
         pointer_location,
         cursor_status,
         cursors,
@@ -2291,6 +2512,9 @@ pub(crate) fn render_frame_session(comp: &mut Compositor) -> bool {
     let strict_release = *strict_release;
     let mut drew_any = false;
     for (output_index, output) in session_outputs.iter_mut().enumerate() {
+        if !output.powered {
+            continue;
+        }
         if output.frame_pending.is_some() {
             // A page flip is in flight on this crtc. Rendering now would
             // burn a swapchain slot on a frame the display cannot show
@@ -2340,7 +2564,7 @@ pub(crate) fn render_frame_session(comp: &mut Compositor) -> bool {
         // stale rectangles rather than a crash — the kind of bug a user
         // hits before a developer does, and one that would otherwise
         // require a rebuild to escape.
-        if full_damage_forced() {
+        if full_damage_forced() || plain_capture_pending {
             output.drm_compositor.reset_buffer_ages();
         }
 
@@ -2401,6 +2625,46 @@ pub(crate) fn render_frame_session(comp: &mut Compositor) -> bool {
                 continue;
             }
         };
+
+        // VRR is deliberately narrower than "the connector can do it". A
+        // composited desktop has independent cursor, bar and notification
+        // clocks; varying that output's refresh makes their pacing erratic.
+        // Smithay's actual primary-plane decision is the authoritative gate:
+        // enable only for a direct-scanout frame, disable before any
+        // composited frame is queued, and never runtime-modeset an output.
+        let desired_vrr = runtime_vrr_enabled(
+            output.vrr_supported,
+            output.vrr_requested,
+            direct_scanout,
+            crate::diagnostics::enabled("no-vrr"),
+        );
+        let live_vrr = output.drm_compositor.vrr_enabled();
+        if desired_vrr != live_vrr {
+            match output.drm_compositor.use_vrr(desired_vrr) {
+                Ok(()) => {
+                    if let Some(entry) = output_entries.get_mut(output_index) {
+                        entry.vrr_enabled = desired_vrr;
+                    }
+                    if let Some(monitor) = wm.backend_mut().monitor_outputs.get_mut(output_index) {
+                        monitor.vrr_enabled = desired_vrr;
+                    }
+                    output_mgmt.mark_dirty();
+                    *hyprland_state_dirty = true;
+                    tracing::info!(
+                        output = %output.name,
+                        enabled = desired_vrr,
+                        direct_scanout,
+                        "adaptive sync runtime state changed"
+                    );
+                }
+                Err(error) => tracing::warn!(
+                    ?error,
+                    output = %output.name,
+                    enabled = desired_vrr,
+                    "adaptive sync runtime transition failed"
+                ),
+            }
+        }
 
         let mut frame_queued = false;
         if rendered {
@@ -2503,6 +2767,15 @@ pub(crate) fn render_frame_session(comp: &mut Compositor) -> bool {
         crate::renderer::note_frame_success();
     }
     drew_any
+}
+
+fn runtime_vrr_enabled(
+    supported: bool,
+    requested: bool,
+    direct_scanout: bool,
+    forced_off: bool,
+) -> bool {
+    supported && requested && direct_scanout && !forced_off
 }
 
 /// One opened, mode-set-capable DRM device together with every output
@@ -2901,6 +3174,15 @@ mod tests {
         assert_eq!(configured_frame_flags(Some("1".into()), None), primary);
         assert_eq!(configured_frame_flags(None, Some("yes".into())), cursor);
         assert_eq!(configured_frame_flags(Some("true".into()), Some("1".into())), FrameFlags::empty());
+    }
+
+    #[test]
+    fn vrr_runs_only_for_requested_direct_scanout() {
+        assert!(runtime_vrr_enabled(true, true, true, false));
+        assert!(!runtime_vrr_enabled(false, true, true, false));
+        assert!(!runtime_vrr_enabled(true, false, true, false));
+        assert!(!runtime_vrr_enabled(true, true, false, false));
+        assert!(!runtime_vrr_enabled(true, true, true, true));
     }
 
     /// A direct buffer remains owned after the vblank that activates it

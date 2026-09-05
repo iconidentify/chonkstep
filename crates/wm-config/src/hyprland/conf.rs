@@ -81,6 +81,7 @@ pub fn read(
             } else if block
                 .first()
                 .is_some_and(|root| root.eq_ignore_ascii_case("input"))
+                && !name.eq_ignore_ascii_case("touchpad")
             {
                 out.push(Directive::Ignored {
                     kind: "input",
@@ -91,10 +92,14 @@ pub fn read(
             continue;
         }
         if !block.is_empty() {
-            if block.len() == 1 && block[0].eq_ignore_ascii_case("input") {
+            if !block.is_empty() && block[0].eq_ignore_ascii_case("input") {
                 match line.split_once('=') {
                     Some((name, value)) => out.push(Directive::Input {
-                        name: name.trim().to_ascii_lowercase(),
+                        name: if block.len() == 2 && block[1].eq_ignore_ascii_case("touchpad") {
+                            format!("touchpad:{}", name.trim().to_ascii_lowercase())
+                        } else {
+                            name.trim().to_ascii_lowercase()
+                        },
                         value: substitute(value.trim(), vars),
                     }),
                     None => out.push(Directive::Ignored {

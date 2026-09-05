@@ -83,8 +83,8 @@ pub(crate) fn init(display_handle: &DisplayHandle) -> VirtualPointerState {
     VirtualPointerState { _global: global }
 }
 
-fn may_create_virtual_pointer(_client: &Client) -> bool {
-    true
+fn may_create_virtual_pointer(client: &Client) -> bool {
+    crate::state::privileged_global_visible(client)
 }
 
 fn map_absolute_axis(value: u32, extent: u32, size: u32) -> f64 {

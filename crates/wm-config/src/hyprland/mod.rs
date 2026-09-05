@@ -963,6 +963,46 @@ fn input(reading: &mut Reading, name: &str, value: &str) {
                 why: "repeat delay must be an integer from 1 through 5000 milliseconds".into(),
             }),
         },
+        "sensitivity" => match value.parse::<f64>() {
+            Ok(speed) if speed.is_finite() && (-1.0..=1.0).contains(&speed) => {
+                reading.input.sensitivity = Some(speed)
+            }
+            _ => reading.skipped.push(Skipped {
+                kind: "input".into(),
+                what: format!("sensitivity = {value}"),
+                why: "pointer sensitivity must be between -1 and 1".into(),
+            }),
+        },
+        "natural_scroll" | "touchpad:natural_scroll" => {
+            parse_input_bool(reading, name, &value, |input, enabled| input.natural_scroll = Some(enabled))
+        }
+        "tap_to_click" | "touchpad:tap_to_click" => {
+            parse_input_bool(reading, name, &value, |input, enabled| input.tap_to_click = Some(enabled))
+        }
+        "clickfinger_behavior" | "touchpad:clickfinger_behavior" => {
+            parse_input_bool(reading, name, &value, |input, enabled| input.clickfinger_behavior = Some(enabled))
+        }
+        "left_handed" | "touchpad:left_handed" => {
+            parse_input_bool(reading, name, &value, |input, enabled| input.left_handed = Some(enabled))
+        }
+        "scroll_factor" | "touchpad:scroll_factor" => match value.parse::<f64>() {
+            Ok(factor) if factor.is_finite() && (0.01..=10.0).contains(&factor) => {
+                reading.input.scroll_factor = Some(factor)
+            }
+            _ => reading.skipped.push(Skipped {
+                kind: "input".into(),
+                what: format!("{name} = {value}"),
+                why: "scroll factor must be between 0.01 and 10".into(),
+            }),
+        },
+        "accel_profile" => match value.to_ascii_lowercase().as_str() {
+            "flat" | "adaptive" => reading.input.accel_profile = Some(value.to_ascii_lowercase()),
+            _ => reading.skipped.push(Skipped {
+                kind: "input".into(),
+                what: format!("accel_profile = {value}"),
+                why: "acceleration profile must be flat or adaptive".into(),
+            }),
+        },
         "follow_mouse" => reading.skipped.push(Skipped {
             kind: "input".into(),
             what: format!("follow_mouse = {value}"),
@@ -972,6 +1012,27 @@ fn input(reading: &mut Reading, name: &str, value: &str) {
             kind: "input".into(),
             what: format!("{other} = {value}"),
             why: "input setting is not implemented".into(),
+        }),
+    }
+}
+
+fn parse_input_bool(
+    reading: &mut Reading,
+    name: &str,
+    value: &str,
+    assign: impl FnOnce(&mut crate::InputConfig, bool),
+) {
+    let enabled = match value.trim().to_ascii_lowercase().as_str() {
+        "1" | "true" | "yes" | "on" => Some(true),
+        "0" | "false" | "no" | "off" => Some(false),
+        _ => None,
+    };
+    match enabled {
+        Some(enabled) => assign(&mut reading.input, enabled),
+        None => reading.skipped.push(Skipped {
+            kind: "input".into(),
+            what: format!("{name} = {value}"),
+            why: "input toggle must be true or false".into(),
         }),
     }
 }

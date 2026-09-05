@@ -305,18 +305,18 @@ pub(crate) fn build_scene_into(
                     push_window_content(elements, renderer, backend, record.content, record, viewport);
                 }
             }
-            if let Some(buffer) = &frame.buffer {
-                if overlap_area(frame.geometry, viewport) == 0 {
-                    continue;
-                }
+            if overlap_area(frame.geometry, viewport) == 0 {
+                continue;
+            }
+            for part in &frame.parts {
                 let location = SPoint::<f64, Physical>::from((
-                    (frame.geometry.pos.x - viewport.pos.x) as f64,
-                    (frame.geometry.pos.y - viewport.pos.y) as f64,
+                    (frame.geometry.pos.x + part.offset.x - viewport.pos.x) as f64,
+                    (frame.geometry.pos.y + part.offset.y - viewport.pos.y) as f64,
                 ));
                 match MemoryRenderBufferRenderElement::from_buffer(
                     renderer,
                     location,
-                    buffer,
+                    &part.buffer,
                     None,
                     None,
                     None,
@@ -326,6 +326,28 @@ pub(crate) fn build_scene_into(
                     Err(error) => tracing::warn!(?error, "failed to import a decoration buffer"),
                 }
             }
+            // Preserve the opaque mid-resize/unshade gap that the former
+            // window-sized pixel buffer supplied, but as four floats plus a
+            // stable id instead of frame-width * frame-height * 4 retained
+            // bytes. It is behind both the client content and sparse chrome.
+            let geometry = SRect::<i32, Physical>::new(
+                (
+                    frame.geometry.pos.x - viewport.pos.x,
+                    frame.geometry.pos.y - viewport.pos.y,
+                )
+                    .into(),
+                (frame.geometry.size.w as i32, frame.geometry.size.h as i32).into(),
+            );
+            elements.push(
+                SolidColorRenderElement::new(
+                    frame.fill_id.clone(),
+                    geometry,
+                    CommitCounter::default(),
+                    Color32F::new(0.0, 0.0, 0.0, 1.0),
+                    Kind::Unspecified,
+                )
+                .into(),
+            );
         }
     }
 
@@ -397,6 +419,7 @@ pub(crate) fn send_frame_callbacks(
 ) {
     let throttle = frame_interval(output);
     let send_tree = |surface: &WlSurface| {
+        signal_pacing_barriers(surface);
         send_frames_surface_tree(surface, output, elapsed, throttle, |_, _| Some(output.clone()));
     };
     // While locked, ONLY lock surfaces hear about frames: withholding
@@ -470,6 +493,30 @@ pub(crate) fn send_frame_callbacks(
             send_tree(popup.wl_surface());
         }
     }
+}
+
+/// Release a FIFO barrier only once its surface tree has actually appeared at
+/// a presentation boundary. Commit timing is clock-driven instead and is
+/// serviced by `Compositor::service_surface_pacing`; coupling it to a frame
+/// would deadlock the commit whose pixels are waiting behind that timer.
+fn signal_pacing_barriers(surface: &WlSurface) {
+    compositor::with_surface_tree_downward(
+        surface,
+        (),
+        |_, _, &()| TraversalAction::DoChildren(()),
+        |_, states, &()| {
+            if let Some(barrier) = states
+                .cached_state
+                .get::<smithay::wayland::fifo::FifoBarrierCachedState>()
+                .current()
+                .barrier
+                .take()
+            {
+                barrier.signal();
+            }
+        },
+        |_, _, &()| true,
+    );
 }
 
 /// Drain presentation requests for the surfaces whose primary output
@@ -676,13 +723,17 @@ pub(crate) fn note_frame_success() {
 /// flip) and live with their backends; everything visible above them
 /// is [`build_scene`].
 pub(crate) fn render_frame(comp: &mut Compositor) -> bool {
+    // A plain screencopy must complete even when it lands on an idle desktop.
+    // The coarse damage bit gets us here; forcing age zero below makes the
+    // output damage tracker produce the actual presentation that paces it.
+    let plain_capture_pending = crate::protocols::plain_capture_pending(&comp.protocols);
     match comp.graphics {
         Graphics::Session(_) => {
             // Snapshot readback is deliberately outside the deadline
             // path. It is synchronous on some drivers; doing it after
             // the flip is queued spends post-submit slack rather than
             // making fresh input miss the vblank we just scheduled for.
-            let drew = crate::session::render_frame_session(comp);
+            let drew = crate::session::render_frame_session(comp, plain_capture_pending);
             if drew {
                 crate::capture::refresh_snapshots(comp);
             }
@@ -692,12 +743,12 @@ pub(crate) fn render_frame(comp: &mut Compositor) -> bool {
             // The nested backend has no vblank clock of its own; keep
             // its existing immediate ordering under the host compositor.
             crate::capture::refresh_snapshots(comp);
-            render_frame_winit(comp)
+            render_frame_winit(comp, plain_capture_pending)
         }
     }
 }
 
-fn render_frame_winit(comp: &mut Compositor) -> bool {
+fn render_frame_winit(comp: &mut Compositor, plain_capture_pending: bool) -> bool {
     // Disjoint field borrows: the winit backend (renderer +
     // framebuffer) mutates while the ledger is read — both live on
     // `Compositor`, so destructure instead of going through `&mut
@@ -736,7 +787,11 @@ fn render_frame_winit(comp: &mut Compositor) -> bool {
     // old always-full-frame behaviour, honestly forced rather than
     // silently assumed. `CHONKSTEP_FULL_DAMAGE=1` forces 0 for the same
     // escape-hatch reason `session.rs` documents.
-    let age = if crate::session::full_damage_forced() { 0 } else { winit_backend.buffer_age().unwrap_or(0) };
+    let age = if crate::session::full_damage_forced() || plain_capture_pending {
+        0
+    } else {
+        winit_backend.buffer_age().unwrap_or(0)
+    };
     let render_states = {
         let (renderer, mut framebuffer) = match winit_backend.bind() {
             Ok(bound) => bound,

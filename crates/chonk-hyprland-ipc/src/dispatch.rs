@@ -80,6 +80,11 @@ pub enum Action {
     /// Scale in protocol units (120 == 1.0), avoiding floating-point
     /// equality in an action that is compared in conformance tests.
     SetMonitorScale { output: String, scale_120: u32 },
+    /// Power one named output, or every output when `output` is `None`.
+    SetDpms { output: Option<String>, powered: bool },
+    /// Select a group from the seat keymap. Hyprland accepts next,
+    /// previous, or a zero-based numeric group.
+    SwitchKeyboardLayout { device: String, target: LayoutTarget },
     /// Hide or restore the compositor-owned pointer image. This is a
     /// live session property used by Omarchy's screensaver, not a
     /// persisted Hyprland configuration mutation.
@@ -107,6 +112,13 @@ pub enum Direction {
     Right,
     Up,
     Down,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LayoutTarget {
+    Next,
+    Previous,
+    Index(u32),
 }
 
 /// The result of parsing one dispatch request.
@@ -163,7 +175,6 @@ const TILING_ONLY: &[(&str, &str)] = &[
     ("lockgroups", "chonkstep has no window groups"),
     ("togglespecialworkspace", "chonkstep has no special (scratchpad) workspaces"),
     ("workspaceopt", "chonkstep has no per-workspace layout options"),
-    ("dpms", "chonkstep does not control output power from IPC; dpmsStatus remains the real powered-on state"),
     ("submap", "chonkstep's keybindings do not have submaps"),
 ];
 
@@ -298,6 +309,7 @@ fn parse_classic(verb: &str, rest: &str, snapshot: &Snapshot) -> Outcome {
             .map(|window| Outcome::Run(Action::ConfirmFloating(window.id)))
             .unwrap_or_else(|| Outcome::Unsupported(format!("no window matches {rest:?}"))),
         "tagwindow" => classic_tag(rest, snapshot),
+        "dpms" => parse_dpms(rest, snapshot),
         "focusmonitor" | "movecurrentworkspacetomonitor" | "focuswindowbyclass" => {
             Outcome::Unsupported(format!("{verb} is not implemented yet"))
         }
@@ -373,7 +385,7 @@ fn parse_lua(rest: &str, snapshot: &Snapshot) -> Outcome {
         }
         "window.set_prop" => Outcome::Unsupported("window opacity and other dynamic properties are not modeled".to_string()),
         "cursor.move" => Outcome::Unsupported("chonkstep does not warp the pointer from IPC".to_string()),
-        "dpms" => Outcome::Unsupported("chonkstep does not control output power from IPC".to_string()),
+        "dpms" => parse_dpms_lua(body, snapshot),
         other => Outcome::Unknown(format!("unknown Lua dispatcher hl.dsp.{other}")),
     }
 }
@@ -428,6 +440,17 @@ pub fn parse_eval(source: &str, snapshot: &Snapshot) -> Outcome {
 /// supports. The broad namespace remains a refusal; this exception is
 /// the exact fallback shipped by Omarchy's screensaver.
 pub fn parse_keyword(source: &str) -> Outcome {
+    let source = source.trim();
+    if let Some(spec) = source.strip_prefix("monitor ") {
+        if let Some((name, operation)) = spec.split_once(',') {
+            if operation.trim().eq_ignore_ascii_case("disable") {
+                return Outcome::Unsupported(format!(
+                    "output {:?} cannot be disabled: chonkstep keeps every connected output in the desktop layout; configure persistent layout in ~/.config/hypr with hl.monitor, or use `hyprctl dispatch dpms off {}` for temporary power-off",
+                    name.trim(), name.trim()
+                ));
+            }
+        }
+    }
     let mut fields = source.split_whitespace();
     match (fields.next(), fields.next(), fields.next()) {
         (Some("cursor:invisible"), Some(value), None) => match parse_bool(value) {
@@ -445,6 +468,77 @@ pub fn parse_keyword(source: &str) -> Outcome {
                 .to_string(),
         ),
     }
+}
+
+/// Parse `switchxkblayout DEVICE next|prev|N` after the request table
+/// has separated the command name from its arguments.
+pub fn parse_switch_keyboard_layout(source: &str, snapshot: &Snapshot) -> Outcome {
+    let mut fields = source.split_whitespace();
+    let Some(device) = fields.next() else {
+        return Outcome::Unsupported("switchxkblayout requires a device and layout".to_string());
+    };
+    let Some(target) = fields.next() else {
+        return Outcome::Unsupported("switchxkblayout requires next, prev, or a layout index".to_string());
+    };
+    if fields.next().is_some() {
+        return Outcome::Unsupported("switchxkblayout accepts exactly one device and one layout".to_string());
+    }
+    if device != "all" && !snapshot.devices.keyboards.iter().any(|keyboard| keyboard.name == device) {
+        return Outcome::Unsupported(format!("switchxkblayout names unknown keyboard {device:?}"));
+    }
+    let target = match target.to_ascii_lowercase().as_str() {
+        "next" => LayoutTarget::Next,
+        "prev" | "previous" => LayoutTarget::Previous,
+        value => match value.parse::<u32>() {
+            Ok(index) => LayoutTarget::Index(index),
+            Err(_) => return Outcome::Unsupported("layout must be next, prev, or a zero-based index".to_string()),
+        },
+    };
+    Outcome::Run(Action::SwitchKeyboardLayout { device: device.to_string(), target })
+}
+
+fn parse_dpms(source: &str, snapshot: &Snapshot) -> Outcome {
+    let mut fields = source.split_whitespace();
+    let Some(state) = fields.next() else {
+        return Outcome::Unsupported("dpms requires on, off, or toggle".to_string());
+    };
+    let output = fields.next().map(str::to_string);
+    if fields.next().is_some() {
+        return Outcome::Unsupported("dpms accepts one optional output name".to_string());
+    }
+    if output.as_deref().is_some_and(|name| !snapshot.monitors.iter().any(|monitor| monitor.name == name)) {
+        return Outcome::Unsupported(format!("dpms names unknown output {:?}", output.as_deref().unwrap_or_default()));
+    }
+    let powered = match state.to_ascii_lowercase().as_str() {
+        "on" => true,
+        "off" => false,
+        "toggle" => {
+            let current = output.as_deref()
+                .and_then(|name| snapshot.monitors.iter().find(|monitor| monitor.name == name))
+                .or_else(|| snapshot.focused_monitor())
+                .is_none_or(|monitor| monitor.powered);
+            !current
+        }
+        _ => return Outcome::Unsupported("dpms state must be on, off, or toggle".to_string()),
+    };
+    Outcome::Run(Action::SetDpms { output, powered })
+}
+
+fn parse_dpms_lua(body: &str, snapshot: &Snapshot) -> Outcome {
+    let state = lua_field(body, "state")
+        .or_else(|| lua_field(body, "enabled"))
+        .or_else(|| lua_field(body, "action"))
+        .or_else(|| lua_string(body));
+    let Some(state) = state else {
+        return Outcome::Unsupported("hl.dsp.dpms requires state=on or state=off".to_string());
+    };
+    let state = match state.to_ascii_lowercase().as_str() {
+        "enable" | "enabled" => "on",
+        "disable" | "disabled" => "off",
+        _ => state.as_str(),
+    };
+    let output = lua_field(body, "output").or_else(|| lua_field(body, "monitor"));
+    parse_dpms(&format!("{}{}", state, output.map_or_else(String::new, |name| format!(" {name}"))), snapshot)
 }
 
 fn selected_window<'a>(selector: &str, snapshot: &'a Snapshot) -> Option<&'a Window> {

@@ -37,7 +37,7 @@
 //! which was not previously tracked." So the emission order below is
 //! creations, then moves, then destructions:
 //!
-//! 1. `monitoraddedv2`, `createworkspacev2` — things others will refer to
+//! 1. `monitoradded`, `monitoraddedv2`, `createworkspacev2` — things others will refer to
 //! 2. `openwindow` — needs its workspace to exist
 //! 3. `movewindowv2`, `windowtitlev2`, `urgent` — need their window to exist
 //! 4. `workspacev2`, `focusedmon`, `activewindowv2`, `fullscreen` — focus
@@ -140,6 +140,10 @@ impl Differ {
         // --- 1. additions others will refer to -------------------------
         for monitor in &now.monitors {
             if !previous.monitors.iter().any(|old| old.id == monitor.id) {
+                // Legacy consumers subscribe to `monitoradded`; newer
+                // Hyprland clients prefer the richer v2 payload. Send
+                // both, legacy first, as Hyprland does.
+                events.push(Event::new("monitoradded", monitor.name.clone()));
                 events.push(Event::new(
                     "monitoraddedv2",
                     format!("{},{},{}", monitor.id, monitor.name, monitor.description),

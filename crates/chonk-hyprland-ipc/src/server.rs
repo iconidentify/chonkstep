@@ -247,6 +247,14 @@ pub fn answer(request: &Request, snapshot: &Snapshot) -> (String, Option<Action>
                 _ => (response, None),
             }
         }
+        "switchxkblayout" => {
+            let outcome = dispatch::parse_switch_keyboard_layout(&request.args, snapshot);
+            let response = outcome.response();
+            match outcome {
+                Outcome::Run(action) => (response, Some(action)),
+                _ => (response, None),
+            }
+        }
         "eval" => {
             let outcome = dispatch::parse_eval(&request.args, snapshot);
             let response = outcome.response();
@@ -268,13 +276,12 @@ pub fn answer(request: &Request, snapshot: &Snapshot) -> (String, Option<Action>
         //  - `binds` and `devices` below report chonkstep's real seat.
         "getoption" => (
             if json {
-                // This is the complete Hyprland option shape. The
-                // value is explicitly unset rather than a fabricated
-                // compositor setting, so callers can use their own
-                // fallback without receiving `undefined` fields.
+                // Value fields are deliberately absent. QML's
+                // `Number(undefined)` is NaN and `undefined || fallback`
+                // selects the fallback; JSON null would coerce to zero
+                // and recreate the bug this shape prevents.
                 serde_json::json!({
-                    "option": request.args, "int": 0, "float": 0.0,
-                    "str": "", "data": "0", "css": "0px", "set": false
+                    "option": request.args, "set": false
                 }).to_string()
             } else {
                 "no such option".to_string()

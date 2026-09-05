@@ -737,6 +737,7 @@ pub(crate) fn process_input_event<I: InputBackend>(state: &mut Compositor, event
     // The exhaustive family classifier and its table-driven test make
     // a newly routed family state that policy before it can compile.
     if family.resets_idle() {
+        crate::output_power::wake_all(state);
         crate::idle::note_activity(state);
     }
     // Buttons, scroll and gestures are delivered against the seat's
@@ -1227,6 +1228,7 @@ fn on_keyboard_key<I: InputBackend>(state: &mut Compositor, event: I::KeyboardKe
     let Some(keyboard) = state.seat.get_keyboard() else {
         return;
     };
+    let active_layout_before = state.wm.backend().active_keyboard_layout;
     let seat = state.seat.clone();
     let shortcuts_inhibited = seat.keyboard_shortcuts_inhibited();
     keyboard.input::<(), _>(state, keycode, key_state, serial, time, |data, mods, handle| {
@@ -1362,6 +1364,14 @@ fn on_keyboard_key<I: InputBackend>(state: &mut Compositor, event: I::KeyboardKe
             }
         }
     });
+    // XKB options such as `grp:alt_shift_toggle` change the active group
+    // inside `KeyboardHandle::input`, without going through the IPC action.
+    // Mirror that state after every physical key transition so the next
+    // snapshot emits `activelayout` for both switching paths.
+    crate::hyprland_ipc::refresh_keyboard_layout(state);
+    if state.wm.backend().active_keyboard_layout != active_layout_before {
+        state.mark_hyprland_state_dirty();
+    }
 }
 
 /// Queues due compositor-side repeats. Called once per event-loop
@@ -2431,25 +2441,28 @@ fn on_pointer_axis<I: InputBackend>(state: &mut Compositor, event: I::PointerAxi
     if route_shell_scroll::<I>(state, &event) {
         return;
     }
+    let factor = state.wm.backend().scroll_factor;
     let horizontal = event
         .amount(Axis::Horizontal)
-        .unwrap_or_else(|| event.amount_v120(Axis::Horizontal).unwrap_or(0.0) * 15.0 / 120.0);
+        .unwrap_or_else(|| event.amount_v120(Axis::Horizontal).unwrap_or(0.0) * 15.0 / 120.0)
+        * factor;
     let vertical =
-        event.amount(Axis::Vertical).unwrap_or_else(|| event.amount_v120(Axis::Vertical).unwrap_or(0.0) * 15.0 / 120.0);
+        event.amount(Axis::Vertical).unwrap_or_else(|| event.amount_v120(Axis::Vertical).unwrap_or(0.0) * 15.0 / 120.0)
+            * factor;
 
     let mut frame = AxisFrame::new(event.time_msec()).source(event.source());
     if horizontal != 0.0 {
         frame = frame.relative_direction(Axis::Horizontal, event.relative_direction(Axis::Horizontal));
         frame = frame.value(Axis::Horizontal, horizontal);
         if let Some(discrete) = event.amount_v120(Axis::Horizontal) {
-            frame = frame.v120(Axis::Horizontal, discrete as i32);
+            frame = frame.v120(Axis::Horizontal, (discrete * factor).round() as i32);
         }
     }
     if vertical != 0.0 {
         frame = frame.relative_direction(Axis::Vertical, event.relative_direction(Axis::Vertical));
         frame = frame.value(Axis::Vertical, vertical);
         if let Some(discrete) = event.amount_v120(Axis::Vertical) {
-            frame = frame.v120(Axis::Vertical, discrete as i32);
+            frame = frame.v120(Axis::Vertical, (discrete * factor).round() as i32);
         }
     }
     // A finger lifting off a touchpad ends kinetic scroll with an
@@ -2572,12 +2585,13 @@ fn route_shell_scroll<I: InputBackend>(
     state: &mut Compositor,
     event: &I::PointerAxisEvent,
 ) -> bool {
+    let factor = state.wm.backend().scroll_factor;
     route_shell_scroll_values(
         state,
-        event.amount(Axis::Horizontal),
-        event.amount_v120(Axis::Horizontal),
-        event.amount(Axis::Vertical),
-        event.amount_v120(Axis::Vertical),
+        event.amount(Axis::Horizontal).map(|value| value * factor),
+        event.amount_v120(Axis::Horizontal).map(|value| value * factor),
+        event.amount(Axis::Vertical).map(|value| value * factor),
+        event.amount_v120(Axis::Vertical).map(|value| value * factor),
         event.source(),
     )
 }

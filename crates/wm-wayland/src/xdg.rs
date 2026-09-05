@@ -37,6 +37,7 @@
 use std::collections::HashMap;
 use std::os::fd::OwnedFd;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::time::{Duration, Instant};
 
 use smithay::backend::renderer::utils::{on_commit_buffer_handler, with_renderer_surface_state};
 use smithay::desktop::{find_popup_root_surface, PopupKind};
@@ -587,6 +588,7 @@ impl CompositorHandler for Compositor {
     }
 
     fn new_surface(&mut self, surface: &WlSurface) {
+        self.pacing_surfaces.insert(surface.id(), surface.clone());
         // This compositor deliberately advertises every surface on
         // every output: all outputs share the session scale, and true
         // overlap tracking would add complexity without changing what
@@ -700,6 +702,8 @@ impl CompositorHandler for Compositor {
     }
 
     fn destroyed(&mut self, surface: &WlSurface) {
+        self.pacing_surfaces.remove(&surface.id());
+        self.pacing_fifo_deadlines.remove(&surface.id());
         // `Output` retains weak surface handles so it can replay
         // `enter` to wl_output objects a client binds later. The
         // destruction callback is the exact moment one can turn dead;
@@ -871,6 +875,142 @@ impl CompositorHandler for Compositor {
 }
 
 impl Compositor {
+    /// Release due commit-timing transactions and FIFO transactions that can
+    /// no longer wait for presentation. Called after visibility settles and
+    /// again after rendering, where it observes presentation-signalled FIFO
+    /// barriers and polls Smithay's per-client transaction queues.
+    pub(crate) fn service_surface_pacing(&mut self) {
+        const FIFO_DEADLINE: Duration = Duration::from_secs(1);
+
+        let now = Instant::now();
+        let clock_now = smithay::utils::Clock::<smithay::utils::Monotonic>::new().now();
+        let surfaces: Vec<_> = self.pacing_surfaces.values().cloned().collect();
+        for surface in &surfaces {
+            let visible = self.surface_affects_scene(surface);
+            let object = surface.id();
+            with_states(surface, |states| {
+                let fifo = states
+                    .cached_state
+                    .get::<smithay::wayland::fifo::FifoBarrierCachedState>()
+                    .current()
+                    .barrier
+                    .as_ref()
+                    .filter(|barrier| !barrier.is_signaled())
+                    .cloned();
+                match fifo {
+                    Some(barrier) if !visible => {
+                        barrier.signal();
+                        states
+                            .cached_state
+                            .get::<smithay::wayland::fifo::FifoBarrierCachedState>()
+                            .current()
+                            .barrier
+                            .take();
+                        self.pacing_fifo_deadlines.remove(&object);
+                    }
+                    Some(barrier) => {
+                        let deadline = self
+                            .pacing_fifo_deadlines
+                            .entry(object.clone())
+                            .and_modify(|(tracked, deadline)| {
+                                if *tracked != barrier {
+                                    *tracked = barrier.clone();
+                                    *deadline = now + FIFO_DEADLINE;
+                                }
+                            })
+                            .or_insert_with(|| (barrier.clone(), now + FIFO_DEADLINE))
+                            .1;
+                        if deadline <= now {
+                            tracing::warn!(surface = ?object, "FIFO presentation barrier expired; releasing the client commit");
+                            barrier.signal();
+                            states
+                                .cached_state
+                                .get::<smithay::wayland::fifo::FifoBarrierCachedState>()
+                                .current()
+                                .barrier
+                                .take();
+                            self.pacing_fifo_deadlines.remove(&object);
+                        }
+                    }
+                    None => {
+                        self.pacing_fifo_deadlines.remove(&object);
+                    }
+                }
+
+                if let Some(timers) = states
+                    .data_map
+                    .get::<smithay::wayland::commit_timing::CommitTimerBarrierStateUserData>()
+                {
+                    timers
+                        .lock()
+                        .expect("commit-timing mutex poisoned")
+                        .signal_until(clock_now);
+                }
+            });
+        }
+
+        // Signalling a Smithay barrier changes its state but deliberately does
+        // not poll the transaction queue. One no-op-safe call per client also
+        // covers FIFO barriers taken by the renderer at presentation.
+        let mut clients = std::collections::HashMap::new();
+        for surface in surfaces {
+            if let Some(client) = surface.client() {
+                clients.entry(client.id()).or_insert(client);
+            }
+        }
+        let display = self.display_handle.clone();
+        for client in clients.into_values() {
+            self.client_compositor_state(&client).blocker_cleared(self, &display);
+        }
+    }
+
+    /// Nearest wakeup required by a future commit timestamp or the bounded
+    /// FIFO fallback, suitable for capping calloop's blocking dispatch.
+    pub(crate) fn next_surface_pacing_in(&self) -> Option<Duration> {
+        let now = Instant::now();
+        let clock_now = smithay::utils::Clock::<smithay::utils::Monotonic>::new().now();
+        let mut next = self
+            .pacing_fifo_deadlines
+            .values()
+            .map(|(_, deadline)| deadline.saturating_duration_since(now))
+            .min();
+        for surface in self.pacing_surfaces.values() {
+            with_states(surface, |states| {
+                let Some(timers) = states
+                    .data_map
+                    .get::<smithay::wayland::commit_timing::CommitTimerBarrierStateUserData>()
+                else {
+                    return;
+                };
+                let Some(deadline) = timers
+                    .lock()
+                    .expect("commit-timing mutex poisoned")
+                    .next_deadline()
+                else {
+                    return;
+                };
+                let deadline: smithay::utils::Time<smithay::utils::Monotonic> = deadline.into();
+                let wait = smithay::utils::Time::elapsed(&clock_now, deadline);
+                next = Some(next.map_or(wait, |current| current.min(wait)));
+            });
+        }
+        next
+    }
+
+    fn surface_affects_scene(&self, surface: &WlSurface) -> bool {
+        let mut root = surface.clone();
+        while let Some(parent) = get_parent(&root) {
+            root = parent;
+        }
+        let popup = self.popups.find_popup(&root);
+        let scene_root = popup
+            .as_ref()
+            .and_then(|popup| find_popup_root_surface(popup).ok())
+            .unwrap_or(root);
+        let owner = self.wm.backend().window_for_surface(&scene_root);
+        self.resolved_surface_affects_scene(&scene_root, owner)
+    }
+
     /// Whether a commit whose popup-resolved root and indexed owner are
     /// supplied can change the scene being rendered right now.
     ///
@@ -2078,7 +2218,8 @@ mod tests {
                 FrameRecord {
                     window,
                     geometry: Rect::default(),
-                    buffer: None,
+                    parts: Vec::new(),
+                    fill_id: smithay::backend::renderer::element::Id::new(),
                     mapped: true,
                 },
             ),
@@ -2087,7 +2228,8 @@ mod tests {
                 FrameRecord {
                     window: other,
                     geometry: Rect::default(),
-                    buffer: None,
+                    parts: Vec::new(),
+                    fill_id: smithay::backend::renderer::element::Id::new(),
                     mapped: true,
                 },
             ),
@@ -2125,7 +2267,8 @@ mod tests {
             FrameRecord {
                 window,
                 geometry: Rect::default(),
-                buffer: None,
+                parts: Vec::new(),
+                fill_id: smithay::backend::renderer::element::Id::new(),
                 mapped: false,
             },
         )]);

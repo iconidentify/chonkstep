@@ -51,12 +51,13 @@ use wm_core::{
     Backend, BackendEvent, DragHandle, KeyCombo, MonitorInfo, MouseButton, ScrollDelta, SizeHints, WindowType, WmClass,
     WmProtocol,
 };
-use wm_theme_api::{DecorationBuffer, DecorationLayout, Point, Rect, ResizeEdge, Size};
+use wm_theme_api::{DecorationBuffer, DecorationLayout, DecorationSurface, Point, Rect, ResizeEdge, Size};
 
 use crate::input::DragGrab;
 use crate::state::{
-    ensure_stack_entry, raise_stack_entry, replace_stack_entry, FrameRecord, ManagedSurface, PointerGrabChange,
-    RootBackground, ShellRecord, StackEntry, WaylandBackend, WlFrameId, WlShellId, WlWindowId,
+    ensure_stack_entry, raise_stack_entry, replace_stack_entry, FramePart, FrameRecord, ManagedSurface,
+    PointerGrabChange, RootBackground, ShellRecord, StackEntry, WaylandBackend, WlFrameId, WlShellId,
+    WlWindowId,
 };
 
 /// `wm-theme` rect -> smithay logical rect. The theme side is
@@ -225,6 +226,10 @@ impl Backend for WaylandBackend {
 
     fn monitors_ref(&self) -> &[MonitorInfo] {
         &self.monitors
+    }
+
+    fn decoration_scale(&self, frame: Rect) -> f32 {
+        self.scale_at(frame) as f32
     }
 
     fn diagnostic_snapshot(&self) -> String {
@@ -802,7 +807,16 @@ impl Backend for WaylandBackend {
             record.content.pos = Point::new(layout.client_offset.x, layout.client_offset.y);
             record.mapped = true;
         }
-        self.frames.insert(frame, FrameRecord { window, geometry, buffer: None, mapped: false });
+        self.frames.insert(
+            frame,
+            FrameRecord {
+                window,
+                geometry,
+                parts: Vec::new(),
+                fill_id: smithay::backend::renderer::element::Id::new(),
+                mapped: false,
+            },
+        );
         // A window arriving here with a `StackEntry::Window` slot is one
         // that changed its mind: it mapped client-decorated, and a
         // `_MOTIF_WM_HINTS` rewrite has since made `wm-core` decide it
@@ -867,12 +881,40 @@ impl Backend for WaylandBackend {
         self.mark_damaged();
     }
 
-    fn paint_decoration(&mut self, frame: Self::FrameId, buffer: &DecorationBuffer) {
+    fn paint_decoration(&mut self, frame: Self::FrameId, surface: &DecorationSurface) {
         if let Some(record) = self.frames.get_mut(&frame) {
-            if let Some(imported) = import_buffer(buffer, true) {
-                record.buffer = Some(imported);
-                self.mark_damaged();
+            let mut previous = std::mem::take(&mut record.parts).into_iter();
+            let mut imported = Vec::with_capacity(surface.parts.len());
+            for part in &surface.parts {
+                let size = Size::new(part.buffer.width, part.buffer.height);
+                if size.w == 0 || size.h == 0 {
+                    continue;
+                }
+                let old = previous.next();
+                let buffer = match old {
+                    Some(mut old) if old.offset == part.offset && old.size == size => {
+                        let pixels = &part.buffer.pixels;
+                        let mut render = old.buffer.render();
+                        let _ = render.draw(|memory| {
+                            if memory.len() == pixels.len() {
+                                memory.copy_from_slice(pixels);
+                            }
+                            Ok::<_, std::convert::Infallible>(vec![SmithayRect::<i32, Buffer>::from_size(
+                                (size.w as i32, size.h as i32).into(),
+                            )])
+                        });
+                        drop(render);
+                        old.buffer
+                    }
+                    _ => match import_buffer(&part.buffer, true) {
+                        Some(buffer) => buffer,
+                        None => continue,
+                    },
+                };
+                imported.push(FramePart { offset: part.offset, size, buffer });
             }
+            record.parts = imported;
+            self.mark_damaged();
         }
     }
 
@@ -1666,6 +1708,11 @@ impl Backend for WaylandBackend {
         // verb only ever sees the ledger. `apply_pending_keyboard`
         // installs it at the top of the next dispatch pass.
         self.pending_keyboard = Some(config);
+    }
+
+    fn set_pointer_config(&mut self, config: wm_core::PointerConfig) {
+        self.pointer_config = config.clone();
+        self.pending_pointer = Some(config);
     }
 
     fn set_decoration_rules(&mut self, rules: wm_core::DecorationRules) {

@@ -310,6 +310,9 @@ pub struct WindowManager<B: Backend> {
     /// back to the *maximized* rect, and reusing maximize's slot would
     /// either clobber its own pre-maximize snapshot or restore too far.
     fullscreen_restore: HashMap<ClientId, Rect>,
+    /// Chrome invalidated by an interactive drag. Drains once at the render
+    /// boundary, not once per input event.
+    pending_decorations: HashSet<ClientId>,
 }
 
 struct CycleSession {
@@ -380,6 +383,7 @@ impl<B: Backend> WindowManager<B> {
             managed_order: Vec::new(),
             focus_history: Vec::new(),
             fullscreen_restore: HashMap::new(),
+            pending_decorations: HashSet::new(),
         }
     }
 
@@ -496,6 +500,9 @@ impl<B: Backend> WindowManager<B> {
     /// scan) and this crate only knows it has a new source of layouts.
     pub fn set_theme_engine(&mut self, theme: Box<dyn ThemeEngine>) {
         self.theme = theme;
+        for client in self.clients.values_mut() {
+            client.last_decoration_request = None;
+        }
         self.relayout_all_clients();
     }
 
@@ -1494,8 +1501,9 @@ impl<B: Backend> WindowManager<B> {
         // A client-decorated window is laid out as though the frame were
         // exactly its content, so every placement and geometry
         // calculation below reads the same for both kinds.
+        let mut decoration_scale = self.backend.decoration_scale(content);
         let mut layout = match chrome {
-            ClientChrome::ServerDrawn => self.theme.layout(&request),
+            ClientChrome::ServerDrawn => self.theme.layout_at(&request, decoration_scale),
             ClientChrome::ClientDrawn => frameless_layout(content.size),
         };
         // The one rule that keys on *who* the window is: Omarchy's own
@@ -1529,7 +1537,7 @@ impl<B: Backend> WindowManager<B> {
             // one it got is a frame with a seam in it.
             request = Self::decoration_request(&client, None);
             layout = match chrome {
-                ClientChrome::ServerDrawn => self.theme.layout(&request),
+                ClientChrome::ServerDrawn => self.theme.layout_at(&request, decoration_scale),
                 ClientChrome::ClientDrawn => frameless_layout(size),
             };
         }
@@ -1597,6 +1605,12 @@ impl<B: Backend> WindowManager<B> {
             self.placements += 1;
             pos
         };
+        let provisional_frame = Rect { pos: frame_pos, size: layout.frame_size };
+        let target_scale = self.backend.decoration_scale(provisional_frame);
+        if chrome == ClientChrome::ServerDrawn && target_scale.to_bits() != decoration_scale.to_bits() {
+            decoration_scale = target_scale;
+            layout = self.theme.layout_at(&request, decoration_scale);
+        }
         let frame_geom = Rect { pos: frame_pos, size: layout.frame_size };
         client.geometry.pos =
             Point::new(frame_geom.pos.x + layout.client_offset.x, frame_geom.pos.y + layout.client_offset.y);
@@ -1616,8 +1630,11 @@ impl<B: Backend> WindowManager<B> {
                     // accompanies them").
                     self.backend.resize_client(window, client.geometry.size);
                 }
-                let buffer = self.theme.render(&request, &layout);
-                self.backend.paint_decoration(frame, &buffer);
+                let surface = self.theme.render_surface_at(&request, &layout, decoration_scale);
+                self.backend.paint_decoration(frame, &surface);
+                client.last_decoration_request = Some(request.clone());
+                client.last_decoration_frame_size = surface.frame_size;
+                client.last_decoration_scale_bits = decoration_scale.to_bits();
                 self.backend.map_frame(frame);
                 Some(frame)
             }
@@ -2266,6 +2283,14 @@ impl<B: Backend> WindowManager<B> {
         } else {
             client.layout.frame_size
         };
+        let old_frame = Rect {
+            pos: Point::new(
+                client.geometry.pos.x - client.layout.client_offset.x,
+                client.geometry.pos.y - client.layout.client_offset.y,
+            ),
+            size: frame_size,
+        };
+        let old_scale = self.backend.decoration_scale(old_frame);
         let (surface_frame, surface_window) = (client.frame, client.window);
         let raw_pos = Point::new(root.x - grab_offset.x, root.y - grab_offset.y);
 
@@ -2303,6 +2328,10 @@ impl<B: Backend> WindowManager<B> {
             new_frame_pos.x + client.layout.client_offset.x,
             new_frame_pos.y + client.layout.client_offset.y,
         );
+        let new_scale = self.backend.decoration_scale(Rect { pos: new_frame_pos, size: frame_size });
+        if old_scale.to_bits() != new_scale.to_bits() {
+            self.reflow_frame(client_id);
+        }
     }
 
     /// Recomputes content size/position fresh from `start_frame` and
@@ -2483,7 +2512,9 @@ impl<B: Backend> WindowManager<B> {
             return;
         }
         let request = Self::decoration_request(client, None);
-        let layout = self.theme.layout(&request);
+        let current_frame = client_frame_rect(client);
+        let scale = self.backend.decoration_scale(current_frame);
+        let layout = self.theme.layout_at(&request, scale);
         // Shaded windows show only the titlebar — the frame's *visible*
         // height is overridden to `shaded_frame_height`, but the client's
         // own content geometry (and everything the theme computed from
@@ -2499,19 +2530,10 @@ impl<B: Backend> WindowManager<B> {
         };
         let window = client.window;
         let content_size = client.geometry.size;
+        let frame = client.frame;
 
-        if let Some(frame) = client.frame {
+        if let Some(frame) = frame {
             self.backend.set_frame_geometry(frame, frame_geom);
-            // Painted from the shade's *own* inputs, never the unshaded
-            // `layout` — see `shaded_paint_inputs` for why the frame
-            // rect alone is not enough.
-            let buffer = if shaded {
-                let (shaded_request, shaded_layout) = shaded_paint_inputs(&request, &layout);
-                self.theme.render(&shaded_request, &shaded_layout)
-            } else {
-                self.theme.render(&request, &layout)
-            };
-            self.backend.paint_decoration(frame, &buffer);
         }
         self.backend.position_client(window, layout.client_offset);
         self.backend.resize_client(window, content_size);
@@ -2520,6 +2542,13 @@ impl<B: Backend> WindowManager<B> {
             client.layout = layout;
         }
         self.publish_frame_extents(id);
+        if frame.is_some() {
+            if self.interactive_drag_client() == Some(id) {
+                self.pending_decorations.insert(id);
+            } else {
+                self.paint_decoration_now(id);
+            }
+        }
     }
 
     /// Grows `id` to fill the usable screen area along `directions`,
@@ -3513,7 +3542,8 @@ impl<B: Backend> WindowManager<B> {
                     .get(id)
                     .map(|client| Self::decoration_request(client, None))
                     .unwrap_or_else(|| Self::decoration_request(&Client::new(window, String::new()), None));
-                let layout = self.theme.layout(&request);
+                let scale = self.backend.decoration_scale(content);
+                let layout = self.theme.layout_at(&request, scale);
                 let frame = self.backend.create_decoration(window, &layout);
                 // Anchor the *content* where it already is; the frame is
                 // built around it, extending up and left by the chrome's
@@ -3545,14 +3575,17 @@ impl<B: Backend> WindowManager<B> {
                     tracing::debug!(?window, ?shift, "moved a window so the frame it just gained is on screen");
                 }
                 self.backend.set_frame_geometry(frame, frame_geom);
-                let buffer = self.theme.render(&request, &layout);
-                self.backend.paint_decoration(frame, &buffer);
+                let surface = self.theme.render_surface_at(&request, &layout, scale);
+                self.backend.paint_decoration(frame, &surface);
                 self.backend.map_frame(frame);
                 self.frame_index.insert(frame, id);
                 if let Some(client) = self.clients.get_mut(id) {
                     client.frame = Some(frame);
                     client.chrome = ClientChrome::ServerDrawn;
                     client.layout = layout;
+                    client.last_decoration_request = Some(request);
+                    client.last_decoration_frame_size = surface.frame_size;
+                    client.last_decoration_scale_bits = scale.to_bits();
                 }
             }
         }
@@ -3812,10 +3845,16 @@ impl<B: Backend> WindowManager<B> {
     /// that "the drag is over" and "the pointer is free" cannot come
     /// apart. Safe to call when nothing is dragging.
     fn end_active_drag(&mut self) {
+        let client = self.interactive_drag_client();
         self.active_move = None;
         self.active_resize = None;
         if let Some(handle) = self.drag_grab.take() {
             self.backend.ungrab_pointer(handle);
+        }
+        // Settle per-output scale and the last constrained size once, after
+        // dropping the drag flag so this final paint is immediate.
+        if let Some(client) = client {
+            self.reflow_frame(client);
         }
     }
 
@@ -3857,6 +3896,25 @@ impl<B: Backend> WindowManager<B> {
     }
 
     fn repaint_decoration(&mut self, id: ClientId) {
+        if self.interactive_drag_client() == Some(id) {
+            self.pending_decorations.insert(id);
+        } else {
+            self.paint_decoration_now(id);
+        }
+    }
+
+    /// Realizes all chrome invalidated during this event-loop pass. Backends
+    /// call this immediately before rendering/presenting, which caps an input
+    /// burst at one raster per client per frame.
+    pub fn flush_decorations(&mut self) {
+        let pending: Vec<_> = self.pending_decorations.drain().collect();
+        for id in pending {
+            self.paint_decoration_now(id);
+        }
+    }
+
+    fn paint_decoration_now(&mut self, id: ClientId) {
+        self.pending_decorations.remove(&id);
         let Some(client) = self.clients.get(id) else {
             return;
         };
@@ -3878,13 +3936,33 @@ impl<B: Backend> WindowManager<B> {
         // update, the button release that immediately follows the
         // shading double-click itself — has to re-derive the shade's
         // paint inputs rather than hand the theme that layout.
-        let buffer = if client.flags.contains(ClientFlags::SHADED) {
+        let (paint_request, paint_layout) = if client.flags.contains(ClientFlags::SHADED) {
             let (shaded_request, shaded_layout) = shaded_paint_inputs(&request, &client.layout);
-            self.theme.render(&shaded_request, &shaded_layout)
+            (shaded_request, shaded_layout)
         } else {
-            self.theme.render(&request, &client.layout)
+            (request, client.layout.clone())
         };
-        self.backend.paint_decoration(frame, &buffer);
+        let frame_rect = Rect {
+            pos: Point::new(
+                client.geometry.pos.x - client.layout.client_offset.x,
+                client.geometry.pos.y - client.layout.client_offset.y,
+            ),
+            size: paint_layout.frame_size,
+        };
+        let scale = self.backend.decoration_scale(frame_rect);
+        if client.last_decoration_request.as_ref() == Some(&paint_request)
+            && client.last_decoration_frame_size == paint_layout.frame_size
+            && client.last_decoration_scale_bits == scale.to_bits()
+        {
+            return;
+        }
+        let surface = self.theme.render_surface_at(&paint_request, &paint_layout, scale);
+        self.backend.paint_decoration(frame, &surface);
+        if let Some(client) = self.clients.get_mut(id) {
+            client.last_decoration_request = Some(paint_request);
+            client.last_decoration_frame_size = surface.frame_size;
+            client.last_decoration_scale_bits = scale.to_bits();
+        }
     }
 
     fn decoration_request(client: &Client<B>, pressed_button: Option<ButtonKind>) -> DecorationRequest {
@@ -6877,6 +6955,50 @@ mod tests {
         let client = wm.client(id).unwrap();
         assert_eq!(client.geometry.size, Size::new(150, 150));
         assert_eq!(client.geometry.pos, Point::new(50, 70), "growing from the SE corner must not move the frame");
+    }
+
+    #[test]
+    fn resize_chrome_is_rasterized_once_at_the_frame_boundary_and_identical_work_is_skipped() {
+        let (mut wm, _id, frame) = client_for_resize(FakeBackend::new());
+        let initial = wm.backend().paint_count.get(&frame).copied().unwrap_or(0);
+        wm.dispatch(frame_press(frame, Point::new(95, 115)));
+        for point in [Point::new(160, 170), Point::new(180, 190), Point::new(200, 220)] {
+            wm.dispatch(BackendEvent::PointerMotion { root: point, surface_local: None });
+        }
+        assert_eq!(
+            wm.backend().paint_count.get(&frame).copied().unwrap_or(0),
+            initial,
+            "input events only invalidate chrome"
+        );
+        wm.flush_decorations();
+        assert_eq!(wm.backend().paint_count.get(&frame).copied().unwrap_or(0), initial + 1);
+
+        wm.dispatch(BackendEvent::PointerMotion { root: Point::new(200, 220), surface_local: None });
+        wm.flush_decorations();
+        assert_eq!(wm.backend().paint_count.get(&frame).copied().unwrap_or(0), initial + 1);
+    }
+
+    #[test]
+    fn synthetic_125_hz_resize_tracks_sixty_hz_frame_boundaries_not_input_rate() {
+        let (mut wm, _id, frame) = client_for_resize(FakeBackend::new());
+        let initial = wm.backend().paint_count.get(&frame).copied().unwrap_or(0);
+        wm.dispatch(frame_press(frame, Point::new(95, 115)));
+
+        // 125 distinct samples over a synthetic second, flushed on the
+        // nearest integer approximation of sixty presentation boundaries.
+        for sample in 0..125 {
+            wm.dispatch(BackendEvent::PointerMotion {
+                root: Point::new(150 + sample, 170 + sample),
+                surface_local: None,
+            });
+            if (sample + 1) * 60 / 125 != sample * 60 / 125 {
+                wm.flush_decorations();
+            }
+        }
+        wm.flush_decorations();
+
+        let rasters = wm.backend().paint_count.get(&frame).copied().unwrap_or(0) - initial;
+        assert_eq!(rasters, 60, "one raster per synthetic frame, never one per input sample");
     }
 
     #[test]

@@ -274,7 +274,13 @@ pub trait Backend {
         let _ = window;
         self.destroy_decoration(frame);
     }
-    fn paint_decoration(&mut self, frame: Self::FrameId, buffer: &DecorationBuffer);
+    fn paint_decoration(&mut self, frame: Self::FrameId, surface: &wm_theme_api::DecorationSurface);
+    /// Physical scale of the output containing most of `frame`. Backends with
+    /// one global pixel scale keep the default.
+    fn decoration_scale(&self, frame: Rect) -> f32 {
+        let _ = frame;
+        1.0
+    }
     /// Sets the frame's cursor to indicate a resize is available along
     /// `edge` — `None` for the plain default cursor. Called on hover
     /// (see `WindowManager`'s handling of `BackendEvent::PointerMotion`'s
@@ -473,6 +479,9 @@ pub trait Backend {
     /// this verb existed the reload path answered `ok` and changed
     /// nothing.
     fn set_keyboard_config(&mut self, _config: KeyboardConfig) {}
+    /// Applies libinput-owned pointer settings where the backend owns
+    /// those devices. X11 leaves them to its display server.
+    fn set_pointer_config(&mut self, _config: crate::PointerConfig) {}
     /// Whether the client has already drawn its own window chrome, and
     /// so must not be framed. See [`crate::ClientChrome`] for why this is not
     /// derivable from [`Self::window_type`].

@@ -1357,6 +1357,15 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
             repeat_rate: next.input.repeat_rate,
             repeat_delay: next.input.repeat_delay,
         });
+        wm.backend_mut().set_pointer_config(wm_core::PointerConfig {
+            sensitivity: next.input.sensitivity,
+            natural_scroll: next.input.natural_scroll,
+            tap_to_click: next.input.tap_to_click,
+            clickfinger_behavior: next.input.clickfinger_behavior,
+            scroll_factor: next.input.scroll_factor,
+            left_handed: next.input.left_handed,
+            accel_profile: next.input.accel_profile.clone(),
+        });
         // ...and then re-ask for every window already on the desk. A
         // rule that only reached windows opened after it was written
         // would mean closing and reopening the very window whose chrome
@@ -1431,7 +1440,11 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         );
 
         // 3. The decoration engine, and with it every client's chrome.
-        wm.set_theme_engine(Box::new(RasterThemeEngine::with_fonts(self.theme.clone(), self.fonts.clone())));
+        wm.set_theme_engine(Box::new(RasterThemeEngine::with_fonts_at_scale(
+            self.theme.clone(),
+            self.fonts.clone(),
+            self.state.scale,
+        )));
         if scale_changed {
             // The only pixels in the session the theme engine does not
             // produce: the backend's own pointer cursors.

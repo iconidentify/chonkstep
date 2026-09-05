@@ -56,6 +56,15 @@
 //! server_side = ["bare.kde.app"]     # frame a client whose own chrome never shows up
 //! client_side = ["borderless-game"]  # let an xdg client stay bare
 //!
+//! [input]                            # optional; live libinput configuration
+//! sensitivity = 0.0                 # -1.0 through 1.0
+//! accel_profile = "adaptive"         # or "flat"
+//! left_handed = false
+//!
+//! [input.touchpad]
+//! natural_scroll = true
+//! scroll_factor = 0.4
+//!
 //! [keybindings]
 //! "alt+shift+return" = "spawn-terminal"
 //! "super+t" = "spawn-terminal"       # extra binding for the same action
@@ -222,7 +231,7 @@ pub struct Binding {
 }
 
 /// Keyboard settings imported from Hyprland's `input {}` table.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct InputConfig {
     pub rules: Option<String>,
     pub model: Option<String>,
@@ -231,6 +240,15 @@ pub struct InputConfig {
     pub options: Option<String>,
     pub repeat_rate: Option<i32>,
     pub repeat_delay: Option<i32>,
+    /// Libinput pointer/touchpad settings. `scroll_factor` is applied
+    /// after libinput so it scales both continuous and v120 axes.
+    pub sensitivity: Option<f64>,
+    pub natural_scroll: Option<bool>,
+    pub tap_to_click: Option<bool>,
+    pub clickfinger_behavior: Option<bool>,
+    pub scroll_factor: Option<f64>,
+    pub left_handed: Option<bool>,
+    pub accel_profile: Option<String>,
 }
 
 /// Maps a kebab-case action name from a config file to its [`Action`].
@@ -1019,6 +1037,71 @@ fn edge_resistance_from_value(value: &toml::Value) -> Option<u32> {
     u32::try_from(*px).ok()
 }
 
+fn input_number(value: &toml::Value) -> Option<f64> {
+    match value {
+        toml::Value::Float(number) if number.is_finite() => Some(*number),
+        toml::Value::Integer(number) => Some(*number as f64),
+        _ => None,
+    }
+}
+
+/// Apply chonkstep's native `[input]` spelling over whichever pointer
+/// defaults came from a preset or the Hyprland compatibility reader.
+///
+/// `touchpad` is accepted as a nested table because that is the shape
+/// Omarchy users already know. Until per-device matching lands, both the
+/// flat and nested spellings describe the libinput pointer fallback; the
+/// nested table is applied last so an explicitly touchpad-shaped value wins.
+fn apply_input_table(config: &mut InputConfig, entries: &toml::Table, prefix: &str) {
+    for (key, value) in entries {
+        let setting = if prefix.is_empty() {
+            key.to_string()
+        } else {
+            format!("{prefix}.{key}")
+        };
+        match key.as_str() {
+            "sensitivity" => match input_number(value) {
+                Some(speed) if (-1.0..=1.0).contains(&speed) => config.sensitivity = Some(speed),
+                _ => tracing::warn!(key = %setting, value = ?value, "config: input sensitivity must be a number from -1 to 1, ignoring it"),
+            },
+            "natural_scroll" => match value.as_bool() {
+                Some(enabled) => config.natural_scroll = Some(enabled),
+                None => tracing::warn!(key = %setting, value = ?value, "config: input setting must be a boolean, ignoring it"),
+            },
+            "tap_to_click" => match value.as_bool() {
+                Some(enabled) => config.tap_to_click = Some(enabled),
+                None => tracing::warn!(key = %setting, value = ?value, "config: input setting must be a boolean, ignoring it"),
+            },
+            "clickfinger_behavior" => match value.as_bool() {
+                Some(enabled) => config.clickfinger_behavior = Some(enabled),
+                None => tracing::warn!(key = %setting, value = ?value, "config: input setting must be a boolean, ignoring it"),
+            },
+            "left_handed" => match value.as_bool() {
+                Some(enabled) => config.left_handed = Some(enabled),
+                None => tracing::warn!(key = %setting, value = ?value, "config: input setting must be a boolean, ignoring it"),
+            },
+            "scroll_factor" => match input_number(value) {
+                Some(factor) if factor > 0.0 => config.scroll_factor = Some(factor),
+                _ => tracing::warn!(key = %setting, value = ?value, "config: input scroll_factor must be a positive number, ignoring it"),
+            },
+            "accel_profile" => match value.as_str().map(str::trim) {
+                Some(profile) if profile.eq_ignore_ascii_case("flat") => {
+                    config.accel_profile = Some("flat".into())
+                }
+                Some(profile) if profile.eq_ignore_ascii_case("adaptive") => {
+                    config.accel_profile = Some("adaptive".into())
+                }
+                _ => tracing::warn!(key = %setting, value = ?value, "config: input accel_profile must be \"flat\" or \"adaptive\", ignoring it"),
+            },
+            "touchpad" if prefix.is_empty() => match value.as_table() {
+                Some(touchpad) => apply_input_table(config, touchpad, "touchpad"),
+                None => tracing::warn!(value = ?value, "config: [input.touchpad] must be a table, ignoring it"),
+            },
+            unknown => tracing::warn!(key = %setting, name = %unknown, "config: unknown input setting, ignoring it"),
+        }
+    }
+}
+
 /// The pure core [`load`] wraps: parses config-file text into a
 /// [`Config`], merging over [`Config::default_config`].
 ///
@@ -1307,6 +1390,13 @@ pub fn parse_with(
                     "config: [decorations] must be a table, ignoring it"
                 ),
             },
+            "input" => match value {
+                toml::Value::Table(entries) => apply_input_table(&mut config.input, entries, ""),
+                other => tracing::warn!(
+                    value = ?other,
+                    "config: [input] must be a table, ignoring it"
+                ),
+            },
             "commands" => match value {
                 toml::Value::Table(entries) => {
                     for (name, value) in entries {
@@ -1422,6 +1512,7 @@ pub fn parse_with(
             "terminal" if argv_from_value(value, "terminal").is_some() => Some("terminal"),
             "self_decorating_apps" if value.is_array() => Some("decorations"),
             "decorations" if value.is_table() => Some("decorations"),
+            "input" if value.is_table() => Some("input"),
             "commands" if value.is_table() => Some("commands"),
             "autostart" if value.is_array() => Some("autostart"),
             "keybindings" if value.is_table() => Some("keybindings"),
@@ -1946,6 +2037,34 @@ mod tests {
         // the whole point: the lists are exceptions, not the policy.
         assert_eq!(config.decorations.decision_for(Some("foot")), None);
         assert_eq!(config.decorations.decision_for(None), None);
+    }
+
+    #[test]
+    fn native_input_table_overrides_imported_pointer_defaults() {
+        let config = parse(
+            r#"
+[input]
+sensitivity = -0.35
+accel_profile = "FLAT"
+left_handed = true
+
+[input.touchpad]
+natural_scroll = true
+tap_to_click = true
+clickfinger_behavior = true
+scroll_factor = 0.4
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(config.input.sensitivity, Some(-0.35));
+        assert_eq!(config.input.accel_profile.as_deref(), Some("flat"));
+        assert_eq!(config.input.left_handed, Some(true));
+        assert_eq!(config.input.natural_scroll, Some(true));
+        assert_eq!(config.input.tap_to_click, Some(true));
+        assert_eq!(config.input.clickfinger_behavior, Some(true));
+        assert_eq!(config.input.scroll_factor, Some(0.4));
+        assert_eq!(config.provenance.get("input").map(String::as_str), Some("config file"));
     }
 
     #[test]

@@ -5,12 +5,13 @@
 //! doc comment in `lib.rs`.
 
 use std::cell::RefCell;
+use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;
 
 use tiny_skia::Pixmap;
 use wm_theme_api::{
-    ButtonKind, DecorationBuffer, DecorationLayout, DecorationRequest, Point, Rect, ResizeEdge,
-    Size, ThemeEngine,
+    ButtonKind, DecorationBuffer, DecorationLayout, DecorationPart, DecorationRequest,
+    DecorationSurface, Point, Rect, ResizeEdge, Size, ThemeEngine,
 };
 
 use crate::model::Theme;
@@ -109,6 +110,9 @@ impl Default for FontState {
 pub struct RasterThemeEngine {
     theme: Theme,
     fonts: FontState,
+    base_scale: f32,
+    scaled_themes: RefCell<HashMap<u32, Theme>>,
+    title_cache: RefCell<VecDeque<(u32, DecorationRequest, DecorationBuffer)>>,
 }
 
 impl RasterThemeEngine {
@@ -124,13 +128,27 @@ impl RasterThemeEngine {
     /// the engine it swaps in. See [`FontState`] for why this is not
     /// simply another [`Self::new`].
     pub fn with_fonts(theme: Theme, fonts: FontState) -> Self {
+        Self::with_fonts_at_scale(theme, fonts, 1.0)
+    }
+
+    /// Builds an engine whose supplied theme has already been scaled by
+    /// `base_scale`. Other output scales are derived relative to that base and
+    /// cached, so a mixed-DPI desk does not rescan fonts or mutate one global
+    /// theme as windows cross outputs.
+    pub fn with_fonts_at_scale(theme: Theme, fonts: FontState, base_scale: f32) -> Self {
         if !fonts.has_family(&theme.titlebar.font.family) {
             tracing::warn!(
                 family = %theme.titlebar.font.family,
                 "configured theme font not found on the system; text will render with whatever fallback sans font fontdb picks"
             );
         }
-        Self { theme, fonts }
+        Self {
+            theme,
+            fonts,
+            base_scale: base_scale.max(0.125),
+            scaled_themes: RefCell::new(HashMap::new()),
+            title_cache: RefCell::new(VecDeque::new()),
+        }
     }
 
     /// Convenience constructor wrapping the flagship built-in theme.
@@ -163,6 +181,60 @@ impl ThemeEngine for RasterThemeEngine {
             layout,
         )
     }
+
+    fn layout_at(&self, request: &DecorationRequest, scale: f32) -> DecorationLayout {
+        if same_scale(scale, self.base_scale) {
+            return layout_decoration(&self.theme, request);
+        }
+        let key = normalized_scale(scale).to_bits();
+        let mut themes = self.scaled_themes.borrow_mut();
+        let theme = themes.entry(key).or_insert_with(|| self.theme.scaled(scale / self.base_scale));
+        layout_decoration(theme, request)
+    }
+
+    fn render_surface(&self, request: &DecorationRequest, layout: &DecorationLayout) -> DecorationSurface {
+        render_sparse_decoration(
+            &self.theme,
+            &mut self.fonts.font_system.borrow_mut(),
+            &mut self.fonts.swash_cache.borrow_mut(),
+            &mut self.title_cache.borrow_mut(),
+            self.base_scale.to_bits(),
+            request,
+            layout,
+        )
+    }
+
+    fn render_surface_at(
+        &self,
+        request: &DecorationRequest,
+        layout: &DecorationLayout,
+        scale: f32,
+    ) -> DecorationSurface {
+        if same_scale(scale, self.base_scale) {
+            return self.render_surface(request, layout);
+        }
+        let scale = normalized_scale(scale);
+        let key = scale.to_bits();
+        let mut themes = self.scaled_themes.borrow_mut();
+        let theme = themes.entry(key).or_insert_with(|| self.theme.scaled(scale / self.base_scale));
+        render_sparse_decoration(
+            theme,
+            &mut self.fonts.font_system.borrow_mut(),
+            &mut self.fonts.swash_cache.borrow_mut(),
+            &mut self.title_cache.borrow_mut(),
+            key,
+            request,
+            layout,
+        )
+    }
+}
+
+fn normalized_scale(scale: f32) -> f32 {
+    if scale.is_finite() { scale.max(0.125) } else { 1.0 }
+}
+
+fn same_scale(a: f32, b: f32) -> bool {
+    (normalized_scale(a) - normalized_scale(b)).abs() < 0.001
 }
 
 /// Pure arithmetic — no rasterization. Miniaturize sits at the
@@ -283,6 +355,121 @@ fn layout_decoration(theme: &Theme, request: &DecorationRequest) -> DecorationLa
         resize_hitboxes,
         shaded_frame_height: titlebar_height + border * 2,
     }
+}
+
+/// Paints only the four visible chrome bands. The frame interior is filled by
+/// each backend with a cheap solid element/window background, preserving the
+/// old mid-resize gap behavior without retaining a client-sized RGBA image.
+fn render_sparse_decoration(
+    theme: &Theme,
+    font_system: &mut cosmic_text::FontSystem,
+    swash_cache: &mut cosmic_text::SwashCache,
+    title_cache: &mut VecDeque<(u32, DecorationRequest, DecorationBuffer)>,
+    scale_key: u32,
+    request: &DecorationRequest,
+    layout: &DecorationLayout,
+) -> DecorationSurface {
+    let frame = layout.frame_size;
+    let border = theme.border.width as u32;
+    let top_h = layout.client_offset.y.max(0) as u32;
+    let bottom_h = frame
+        .h
+        .saturating_sub(top_h)
+        .saturating_sub(request.content_size.h);
+    let mut parts = Vec::with_capacity(4);
+
+    if frame.w > 0 && top_h > 0 {
+        // Height does not affect title shaping. Normalizing it gives repeated
+        // focus/title repaints and constrained resize passes a small bounded
+        // cache keyed by the visible inputs: title/font scale/frame width.
+        let mut title_key = request.clone();
+        title_key.content_size.h = 0;
+        let cached = title_cache
+            .iter()
+            .find(|(cached_scale, cached_request, _)| {
+                *cached_scale == scale_key && cached_request == &title_key
+            })
+            .map(|(_, _, buffer)| buffer.clone());
+        let was_cached = cached.is_some();
+        let top = cached.unwrap_or_else(|| {
+            // Give the existing whole-frame painter one disposable bottom
+            // border row-band and crop it away. This keeps its exact classic
+            // bevel/button output while allocating only titlebar-sized memory.
+            let mut top_layout = layout.clone();
+            top_layout.frame_size = Size::new(frame.w, top_h.saturating_add(border));
+            let mut top_request = request.clone();
+            top_request.content_size.h = 0;
+            top_request.resizable = false;
+            let rendered = render_decoration(theme, font_system, swash_cache, &top_request, &top_layout);
+            crop_rows(&rendered, 0, top_h)
+        });
+        if !was_cached {
+            title_cache.push_back((scale_key, title_key, top.clone()));
+            while title_cache.len() > 16 {
+                title_cache.pop_front();
+            }
+        }
+        parts.push(DecorationPart { offset: Point::new(0, 0), buffer: top });
+    }
+
+    if frame.w > 0 && bottom_h > 0 {
+        // The full painter puts the resize bar immediately above its bottom
+        // border. Add a disposable top border and crop it off.
+        let mut bottom_layout = DecorationLayout {
+            frame_size: Size::new(frame.w, bottom_h.saturating_add(border)),
+            client_offset: Point::new(border as i32, border as i32),
+            titlebar_height: 0,
+            button_hitboxes: Vec::new(),
+            resize_hitboxes: Vec::new(),
+            shaded_frame_height: 0,
+        };
+        // `render_decoration` only consults this field for geometry already
+        // represented above; keep it explicit for future theme additions.
+        bottom_layout.client_offset.y = border as i32;
+        let mut bottom_request = request.clone();
+        bottom_request.content_size = Size::new(frame.w.saturating_sub(border * 2), 0);
+        bottom_request.title.clear();
+        bottom_request.buttons.clear();
+        let rendered = render_decoration(theme, font_system, swash_cache, &bottom_request, &bottom_layout);
+        let bottom = crop_rows(&rendered, border, bottom_h);
+        parts.push(DecorationPart {
+            offset: Point::new(0, frame.h.saturating_sub(bottom_h) as i32),
+            buffer: bottom,
+        });
+    }
+
+    if border > 0 && request.content_size.h > 0 {
+        let color = if request.focused { theme.border.color_active } else { theme.border.color_inactive };
+        let strip = solid_buffer(border, request.content_size.h, color);
+        parts.push(DecorationPart { offset: Point::new(0, top_h as i32), buffer: strip.clone() });
+        parts.push(DecorationPart {
+            offset: Point::new(frame.w.saturating_sub(border) as i32, top_h as i32),
+            buffer: strip,
+        });
+    }
+
+    DecorationSurface { frame_size: frame, parts }
+}
+
+fn crop_rows(buffer: &DecorationBuffer, first: u32, height: u32) -> DecorationBuffer {
+    let first = first.min(buffer.height);
+    let height = height.min(buffer.height.saturating_sub(first));
+    let stride = buffer.width as usize * 4;
+    let start = first as usize * stride;
+    let end = start + height as usize * stride;
+    DecorationBuffer {
+        width: buffer.width,
+        height,
+        pixels: buffer.pixels.get(start..end).unwrap_or_default().to_vec(),
+    }
+}
+
+fn solid_buffer(width: u32, height: u32, color: crate::model::Color) -> DecorationBuffer {
+    let mut pixels = vec![0; width as usize * height as usize * 4];
+    for rgba in pixels.as_chunks_mut::<4>().0 {
+        rgba.copy_from_slice(&[color.r, color.g, color.b, 0xff]);
+    }
+    DecorationBuffer { width, height, pixels }
 }
 
 fn render_decoration(
@@ -651,6 +838,64 @@ mod tests {
                 .iter()
                 .all(|pixel| pixel[3] == 255),
             "server decorations are an opaque plane and may be submitted as one"
+        );
+    }
+
+    #[test]
+    fn sparse_storage_follows_the_chrome_perimeter_not_the_client_area() {
+        let engine = RasterThemeEngine::nextstep_classic();
+        let mut request = sample_request("large terminal", true);
+        request.content_size = Size::new(1600, 1000);
+        let layout = engine.layout(&request);
+        let surface = engine.render_surface(&request, &layout);
+        let full_bytes = layout.frame_size.w as usize * layout.frame_size.h as usize * 4;
+
+        assert_eq!(surface.frame_size, layout.frame_size);
+        assert_eq!(surface.parts.len(), 4, "top, bottom, left and right chrome bands");
+        assert!(
+            surface.retained_bytes() < full_bytes / 8,
+            "{} sparse bytes should be perimeter-sized, not {} full-frame bytes",
+            surface.retained_bytes(),
+            full_bytes
+        );
+        for part in &surface.parts {
+            assert_eq!(
+                part.buffer.pixels.len(),
+                part.buffer.width as usize * part.buffer.height as usize * 4
+            );
+        }
+    }
+
+    #[test]
+    fn one_engine_selects_the_output_scale_without_rescanning_fonts() {
+        let base = crate::default_theme::nextstep_classic();
+        let fonts = FontState::new();
+        let engine = RasterThemeEngine::with_fonts_at_scale(base.scaled(2.0), fonts, 2.0);
+        let request = sample_request("mixed dpi", true);
+        let one_x = engine.layout_at(&request, 1.0);
+        let two_x = engine.layout_at(&request, 2.0);
+
+        assert!(two_x.titlebar_height > one_x.titlebar_height);
+        assert!(two_x.client_offset.y > one_x.client_offset.y);
+        assert_eq!(engine.layout_at(&request, 1.0), one_x, "cached scale variants are stable");
+    }
+
+    #[test]
+    fn changing_only_content_height_reuses_the_shaped_title_band() {
+        let engine = RasterThemeEngine::nextstep_classic();
+        let request = sample_request("shape me once", true);
+        let layout = engine.layout(&request);
+        let _ = engine.render_surface(&request, &layout);
+        assert_eq!(engine.title_cache.borrow().len(), 1);
+
+        let mut taller = request.clone();
+        taller.content_size.h += 400;
+        let taller_layout = engine.layout(&taller);
+        let _ = engine.render_surface(&taller, &taller_layout);
+        assert_eq!(
+            engine.title_cache.borrow().len(),
+            1,
+            "title, font scale and available width are unchanged"
         );
     }
 
