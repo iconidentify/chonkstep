@@ -11,10 +11,8 @@
 # #[ignore]d during an ordinary `cargo test`. CI's Wayland job calls
 # this script with `--headless` to supply that session explicitly.
 #
-# Debug build on purpose — the whole point is to test the binary a
-# developer is iterating on, and the harness's waits are all bounded
-# polls on observable conditions, so debug-build slowness costs
-# latency, never correctness.
+# Debug by default; --release tests the optimized shipping binary.
+# The harness's waits are bounded polls on observable conditions.
 #
 # Artifacts (compositor logs, screenshots) land under
 # $TMPDIR/chonk-testkit/<test-name>/ and are left in place for
@@ -45,15 +43,29 @@
 # barrier the harness intentionally waits on and produces misleading
 # client-map timeouts.
 #
-# Usage: scripts/e2e.sh [--headless] [extra cargo-test args, e.g. a test name]
+# Usage: scripts/e2e.sh [--headless] [--release] [--test TARGET] [extra test args]
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 headless=false
-if [ "${1:-}" = "--headless" ]; then
-    headless=true
-    shift
-fi
+cargo_profile=()
+cargo_tests=(--tests)
+profile_name=debug
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        --headless) headless=true; shift ;;
+        --release) cargo_profile=(--release); profile_name=release; shift ;;
+        --test)
+            if [ "$#" -lt 2 ]; then
+                echo "e2e.sh: --test needs an integration-test target" >&2
+                exit 2
+            fi
+            cargo_tests=(--test "$2")
+            shift 2
+            ;;
+        *) break ;;
+    esac
+done
 
 if "$headless"; then
     if ! command -v weston >/dev/null 2>&1; then
@@ -71,6 +83,7 @@ if "$headless"; then
     host_socket=wayland-chonkstep-e2e
     XDG_RUNTIME_DIR="$host_runtime" weston \
         --backend=headless-backend.so \
+        --no-config \
         --socket="$host_socket" \
         --idle-time=0 \
         --width=2560 \
@@ -128,8 +141,18 @@ if [ "${#missing[@]}" -gt 0 ]; then
     exit 1
 fi
 
-echo "Building the compositor and the harness (debug)..."
-cargo build -p chonkstep-wayland -p chonk-testkit --quiet
+echo "Building the compositor and the harness ($profile_name)..."
+build_packages=(-p chonk-testkit)
+if [ -n "${CHONKSTEP_WAYLAND_BIN:-}" ]; then
+    if [ ! -x "$CHONKSTEP_WAYLAND_BIN" ]; then
+        echo "e2e.sh: CHONKSTEP_WAYLAND_BIN is not executable: $CHONKSTEP_WAYLAND_BIN" >&2
+        exit 2
+    fi
+    echo "Using preserved compositor: $CHONKSTEP_WAYLAND_BIN"
+else
+    build_packages+=(-p chonkstep-wayland)
+fi
+cargo build "${cargo_profile[@]}" "${build_packages[@]}" --quiet
 
 # Every integration-test target in the harness crate, in one run:
 # `--ignored` selects exactly the nesting tests (the crash supervisor's
@@ -156,9 +179,9 @@ if "$headless"; then
     # startup deadline. A private session bus gives every nested test a
     # syntactically valid, responsive endpoint and is reaped
     # automatically with the cargo process.
-    dbus-run-session -- cargo test -p chonk-testkit --tests -- --ignored --test-threads=1 "$@"
+    dbus-run-session -- cargo test "${cargo_profile[@]}" -p chonk-testkit "${cargo_tests[@]}" -- --ignored --test-threads=1 "$@"
 else
-    cargo test -p chonk-testkit --tests -- --ignored --test-threads=1 "$@"
+    cargo test "${cargo_profile[@]}" -p chonk-testkit "${cargo_tests[@]}" -- --ignored --test-threads=1 "$@"
 fi
 
 # The unit tests that read the Omarchy installed on this machine are
@@ -199,7 +222,7 @@ elif [ -n "$omarchy_themes" ]; then
 else
     echo "  wm-theme theme fixture: unresolved because OMARCHY_PATH and HOME are unset — its installed test returns early"
 fi
-cargo test -p chonk-shell -p wm-theme --lib -- --ignored installed
+cargo test "${cargo_profile[@]}" -p chonk-shell -p wm-theme --lib -- --ignored installed
 
 echo
 if [ -s "$skip_log" ]; then
