@@ -79,6 +79,7 @@
 //! is the size the ledger recorded for it
 //! (`xdg::committed_content_size`) and the frame was drawn around.
 
+use std::cell::RefCell;
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -96,6 +97,7 @@ use smithay::desktop::utils::{
 };
 use smithay::input::pointer::{CursorImageAttributes, CursorImageStatus};
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
+use smithay::reexports::wayland_server::Resource;
 use smithay::render_elements;
 use smithay::utils::{IsAlive, Physical, Point as SPoint, Rectangle as SRect, Scale};
 use smithay::wayland::compositor::{self, with_states, TraversalAction};
@@ -1113,48 +1115,132 @@ pub(crate) fn push_surface_tree(
     // storage became reusable. Pushing the same elements straight into
     // the retained scene keeps ordering and import semantics identical
     // while removing the hidden inner allocation.
+    //
+    // It is also driven from an explicit stack rather than by recursing
+    // on itself, so this walk's stack cost is a constant that does not
+    // depend on how deep a client chose to nest its subsurfaces. Depth
+    // is bounded at the protocol edge now (`xdg::Compositor::new_subsurface`
+    // and `MAX_SUBSURFACE_DEPTH`), which is what protects the recursions
+    // inside smithay that cannot be rewritten from here — but the walk
+    // this compositor owns should not need that bound to be safe, and
+    // does not.
     let tree_origin = location;
-    let location = tree_origin.to_f64();
     let scale: Scale<f64> = render_scale.into();
-    compositor::with_surface_tree_downward(
-        surface,
-        location,
-        |_, states, location| {
-            let mut location = *location;
-            let data = states.data_map.get::<RendererSurfaceStateUserData>();
-            if let Some(data) = data {
-                if let Some(view) = data.lock().unwrap().view() {
-                    location += view.offset.to_f64().to_physical(scale);
-                    TraversalAction::DoChildren(location)
-                } else {
-                    TraversalAction::SkipChildren
+    let mut pending = take_walk_stack();
+    // The root is carried in hand rather than pushed, so a tree with no
+    // subsurfaces at all — nearly every window — touches the stack zero
+    // times and its scratch capacity stays at whatever the frame before
+    // needed.
+    let mut next = Some(TreeStep::Descend(surface.clone(), tree_origin.to_f64()));
+    while let Some(step) = next.take().or_else(|| pending.pop()) {
+        match step {
+            TreeStep::Descend(node, location) => {
+                // One level, and one level only: the filter answers for
+                // `node` and refuses children to everything else, so
+                // upstream's recursion turns around after a single step
+                // no matter what the tree looks like below. What comes
+                // back is the exact order upstream would have walked in,
+                // including `node`'s own place among its children — a
+                // subsurface may sit below its parent, and that position
+                // lives in a child list this crate cannot read directly.
+                let mark = pending.len();
+                compositor::with_surface_tree_downward(
+                    &node,
+                    location,
+                    |visited, states, location| {
+                        if visited.id() != node.id() {
+                            return TraversalAction::SkipChildren;
+                        }
+                        let mut location = *location;
+                        let data = states.data_map.get::<RendererSurfaceStateUserData>();
+                        if let Some(data) = data {
+                            if let Some(view) = data.lock().unwrap().view() {
+                                location += view.offset.to_f64().to_physical(scale);
+                                TraversalAction::DoChildren(location)
+                            } else {
+                                TraversalAction::SkipChildren
+                            }
+                        } else {
+                            TraversalAction::SkipChildren
+                        }
+                    },
+                    |visited, _, location| {
+                        pending.push(if visited.id() == node.id() {
+                            TreeStep::Draw(node.clone(), *location)
+                        } else {
+                            TreeStep::Descend(visited.clone(), *location)
+                        });
+                    },
+                    |_, _, _| true,
+                );
+                // A stack pops backwards; the level was collected
+                // forwards. Reversing the segment this level just added
+                // makes the pops come out in display order, and leaves
+                // the siblings still queued below it untouched.
+                pending[mark..].reverse();
+            }
+            TreeStep::Draw(node, location) => {
+                let drawn = with_states(&node, |states| {
+                    let mut location = location;
+                    let data = states.data_map.get::<RendererSurfaceStateUserData>();
+                    let has_view = data
+                        .and_then(|data| data.lock().unwrap().view())
+                        .map(|view| {
+                            location += view.offset.to_f64().to_physical(scale);
+                        })
+                        .is_some();
+                    if !has_view {
+                        return None;
+                    }
+                    Some(WaylandSurfaceRenderElement::from_surface(
+                        renderer, &node, states, location, 1.0, kind,
+                    ))
+                });
+                match drawn {
+                    Some(Ok(Some(element))) => elements.push(
+                        RescaleRenderElement::from_element(element, tree_origin, factor).into(),
+                    ),
+                    Some(Ok(None)) | None => {}
+                    Some(Err(error)) => tracing::warn!(%error, "failed to import a Wayland surface"),
                 }
-            } else {
-                TraversalAction::SkipChildren
             }
-        },
-        |surface, states, location| {
-            let mut location = *location;
-            let data = states.data_map.get::<RendererSurfaceStateUserData>();
-            let has_view = data
-                .and_then(|data| data.lock().unwrap().view())
-                .map(|view| {
-                    location += view.offset.to_f64().to_physical(scale);
-                })
-                .is_some();
-            if !has_view {
-                return;
-            }
-            match WaylandSurfaceRenderElement::from_surface(renderer, surface, states, location, 1.0, kind) {
-                Ok(Some(element)) => elements.push(
-                    RescaleRenderElement::from_element(element, tree_origin, factor).into(),
-                ),
-                Ok(None) => {}
-                Err(error) => tracing::warn!(%error, "failed to import a Wayland surface"),
-            }
-        },
-        |_, _, _| true,
-    );
+        }
+    }
+    return_walk_stack(pending);
+}
+
+/// One entry of [`push_surface_tree`]'s explicit walk.
+enum TreeStep {
+    /// Expand this surface's own level: its children, and its own
+    /// position among them.
+    Descend(WlSurface, SPoint<f64, Physical>),
+    /// Emit this surface's element, at the location the walk resolved
+    /// for it.
+    Draw(WlSurface, SPoint<f64, Physical>),
+}
+
+thread_local! {
+    /// Scratch for the walk above, so replacing a recursion with a
+    /// stack does not reintroduce the per-tree allocation the function
+    /// was written to remove. Only the capacity is retained: the stack
+    /// is emptied before it is parked, so no `WlSurface` outlives the
+    /// frame that walked it.
+    ///
+    /// Taken rather than borrowed across the walk. `push_surface_tree`
+    /// is not reentrant and runs on the repaint thread, but a `take`
+    /// costs a pointer swap and makes that a fact about performance
+    /// instead of a `RefCell` panic waiting for the day it stops being
+    /// true.
+    static WALK_STACK: RefCell<Vec<TreeStep>> = const { RefCell::new(Vec::new()) };
+}
+
+fn take_walk_stack() -> Vec<TreeStep> {
+    WALK_STACK.with(|stack| std::mem::take(&mut *stack.borrow_mut()))
+}
+
+fn return_walk_stack(mut stack: Vec<TreeStep>) {
+    stack.clear();
+    WALK_STACK.with(|slot| *slot.borrow_mut() = stack);
 }
 
 /// Pushes the pointer's elements, picking the image by what the
