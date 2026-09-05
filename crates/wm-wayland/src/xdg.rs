@@ -739,6 +739,7 @@ impl CompositorHandler for Compositor {
         backend.mark_idle_policy_dirty();
     }
 
+    #[tracing::instrument(name = "surface_commit", skip_all)]
     fn commit(&mut self, surface: &WlSurface) {
         // Buffer bookkeeping first — everything below (and the
         // renderer, and the hit-test's subsurface walk) reads the

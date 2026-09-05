@@ -121,6 +121,8 @@ actions. Supported families include:
   source, including `[[...]]` and `[=[...]=]` strings;
 - `eval hl.dispatch(hl.dsp....)`;
 - `eval hl.monitor({ output=..., scale=... })` for a live output;
+- `eval hl.config({ cursor = { invisible = BOOL } })`, the live
+  cursor-visibility property used by Omarchy's screensaver;
 - `reload`, which re-reads chonkstep/Hyprland configuration and emits
   `configreloaded` only after it has applied.
 
@@ -130,7 +132,11 @@ not reported as unknown syntax. Monitor scaling validates the output
 and range before changing anything, so an Omarchy script cannot record
 a scale that the compositor said it applied but did not.
 
-`keyword` is refused, and the refusal names what does work instead:
+`keyword` is refused except for the named
+`keyword cursor:invisible BOOL` screensaver fallback, which reaches the
+same live cursor flag as `hl.config`. If the focused client that hid
+the cursor disconnects without restoring it, chonkstep restores the
+cursor automatically. Every other refusal names what does work instead:
 chonkstep re-reads `~/.config/hypr` within a second of an edit, and
 `hyprctl eval hl.monitor({ output=..., scale=... })` changes a live
 scale. The one shipped Omarchy caller is the monitor panel's row toggle
@@ -147,14 +153,13 @@ refusal and the string is the only diagnostic a user gets.
 The monitor object reports measured values, not conventional ones.
 `refreshRate` is the driven mode's rate, `availableModes` is the
 connector's mode list in `WIDTHxHEIGHT@RATEHz` with the current mode
-first, and `make`/`model` come from the same properties the matching
-`wl_output` advertises—so IPC and `zwlr_output_management` cannot
-describe one panel two ways. Two fields stay empty on purpose: `serial`,
-because no connector serial reaches this compositor, and a duplicated
-model would be a wrong answer where an empty string is a readable "not
-known"; and `vrr`, which is covered by the adaptive-sync work. A backend
-driving no real mode reports 60 Hz rather than 0, because a bar divides
-this into a frame budget.
+first, and `make`/`model`/`serial` are read from the connector EDID. The
+same `make model serial` description backs `monitor = desc:…`,
+`wl_output`, IPC, and `zwlr_output_management`, so those interfaces
+cannot describe one panel two ways. `serial` stays empty only when the
+EDID itself supplies none; `vrr` remains covered by the adaptive-sync
+work. A backend driving no real mode reports 60 Hz rather than 0,
+because a bar divides this into a frame budget.
 
 Tiling vocabulary—`layoutmsg`, `togglesplit`, `swapwindow`, `pseudo`,
 groups, special workspaces, tiled workspace options—has no faithful

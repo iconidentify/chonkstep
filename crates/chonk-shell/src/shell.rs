@@ -30,7 +30,7 @@ use crate::desktop::{
 use crate::dockapp::Farewell;
 use crate::launchdock::{LaunchDock, LaunchDockAction};
 use crate::overview::{OverviewHit, OverviewItem};
-use crate::session_layout::{RelaunchPlan, SessionLayout, WindowRecord};
+use crate::session_layout::{relative_to_monitor, restored_geometry, RelaunchPlan, SessionLayout, WindowRecord};
 use crate::startup::SessionState;
 use crate::widgets::DockInput;
 use crate::{spawn, theme_select, wallpaper};
@@ -842,10 +842,13 @@ fn layout_snapshot<B: Backend>(wm: &WindowManager<B>, apps: &[AppEntry]) -> Vec<
         .filter(|(_, client)| !client.class.is_empty())
         .map(|(_, client)| {
             let maximized = client.flags.intersects(ClientFlags::MAXIMIZED_H | ClientFlags::MAXIMIZED_V);
+            let root_geometry = if maximized { client.restore_geometry.unwrap_or(client.geometry) } else { client.geometry };
+            let (geometry, monitor_identity) = layout_record_geometry(wm, root_geometry);
             WindowRecord {
                 class: client.class.clone(),
                 app: apps::match_window_class(apps, &client.class).map(|index| apps[index].id.clone()),
-                geometry: if maximized { client.restore_geometry.unwrap_or(client.geometry) } else { client.geometry },
+                geometry,
+                monitor_identity: monitor_identity.map(str::to_owned),
                 workspace: client.workspace,
                 maximized,
                 shaded: client.flags.contains(ClientFlags::SHADED),
@@ -853,6 +856,17 @@ fn layout_snapshot<B: Backend>(wm: &WindowManager<B>, apps: &[AppEntry]) -> Vec<
             }
         })
         .collect()
+}
+
+fn layout_record_geometry<B: Backend>(wm: &WindowManager<B>, geometry: Rect) -> (Rect, Option<&str>) {
+    let half_width = (geometry.size.w / 2).min(i32::MAX as u32) as i32;
+    let half_height = (geometry.size.h / 2).min(i32::MAX as u32) as i32;
+    let center = Point::new(
+        geometry.pos.x.saturating_add(half_width),
+        geometry.pos.y.saturating_add(half_height),
+    );
+    let monitor = wm.monitors_ref().get(wm.monitor_index_at(center));
+    relative_to_monitor(monitor, geometry)
 }
 
 /// Whether `records` still describe the live client set exactly,
@@ -875,9 +889,11 @@ fn layout_matches_clients<B: Backend>(wm: &WindowManager<B>, records: &[WindowRe
             return false;
         };
         let maximized = client.flags.intersects(ClientFlags::MAXIMIZED_H | ClientFlags::MAXIMIZED_V);
-        let geometry = if maximized { client.restore_geometry.unwrap_or(client.geometry) } else { client.geometry };
+        let root_geometry = if maximized { client.restore_geometry.unwrap_or(client.geometry) } else { client.geometry };
+        let (geometry, monitor_identity) = layout_record_geometry(wm, root_geometry);
         if record.class != client.class
             || record.geometry != geometry
+            || record.monitor_identity.as_deref() != monitor_identity
             || record.workspace != client.workspace
             || record.maximized != maximized
             || record.shaded != client.flags.contains(ClientFlags::SHADED)
@@ -2695,8 +2711,15 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
                 let Some(record) = self.layout.claim(&class, std::time::Instant::now()) else {
                     return;
                 };
-                tracing::info!(class = %record.class, ?record.geometry, workspace = record.workspace, "restoring a recorded window");
-                wm.set_client_content_geometry(id, record.geometry);
+                let geometry = restored_geometry(wm.monitors_ref(), &record);
+                tracing::info!(
+                    class = %record.class,
+                    ?geometry,
+                    monitor = ?record.monitor_identity,
+                    workspace = record.workspace,
+                    "restoring a recorded window"
+                );
+                wm.set_client_content_geometry(id, geometry);
                 if record.workspace != wm.current_workspace() {
                     wm.move_client_to_workspace(id, record.workspace);
                 }
@@ -2957,7 +2980,7 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         }
         let snapshot = self.control_snapshot(wm);
         let commands = self.control.service(&snapshot);
-        let publish_after_command = !commands.is_empty();
+        let mut publish_after_command = false;
         for command in commands {
             match command {
                 // A switch, never a create — `docs/control-socket.md`
@@ -2972,14 +2995,28 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
                 // on that. Two protocols, two audiences, each honest
                 // to its own contract.)
                 control::Command::FocusWorkspace(index) => {
+                    publish_after_command = true;
                     if index < wm.workspace_count() {
                         wm.switch_workspace(index);
                     } else {
                         tracing::debug!(index, "control client asked for a workspace that does not exist; ignoring");
                     }
                 }
+                control::Command::Debug { client, topic } => {
+                    let data = format!(
+                        "workspace={} focused_window={:?} clients={}\n{}",
+                        wm.current_workspace(),
+                        wm.focused_client().map(|id| id.as_u64()),
+                        wm.iter_clients()
+                            .filter(|(_, client)| client.lifecycle != Lifecycle::Withdrawn)
+                            .count(),
+                        wm.backend().diagnostic_snapshot(),
+                    );
+                    self.control.answer_debug(client, topic, data);
+                }
             }
         }
+        self.control.flush_pending();
         // A command is always a workspace request and is owed a
         // post-command workspaces event even when it selected the already
         // active workspace. `service` leaves that acknowledgement parked;
@@ -3181,7 +3218,7 @@ mod tests {
     }
 
     fn monitor(geometry: Rect, primary: bool) -> MonitorInfo {
-        MonitorInfo { geometry, name: "test".to_string(), primary }
+        MonitorInfo { geometry, name: "test".to_string(), identity: None, primary }
     }
 
     #[test]

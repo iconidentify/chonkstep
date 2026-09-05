@@ -67,6 +67,9 @@ pub struct Monitor {
     /// period; the conversion to Hyprland's float belongs at the wire,
     /// not here.
     pub refresh_millihertz: u32,
+    /// wl_output transform number. ChonkStep currently exposes the
+    /// four rotations (0 through 3).
+    pub transform: i32,
     /// Every mode this output can drive, current first — the same list
     /// `zwlr_output_management` enumerates for the same head.
     pub modes: Vec<MonitorMode>,
@@ -215,6 +218,9 @@ pub struct Snapshot {
     /// Effective configuration refusals, one actionable message each.
     pub config_errors: Vec<String>,
     pub devices: Devices,
+    /// Human-readable live compositor/build summary served by
+    /// `hyprctl systeminfo`.
+    pub system_info: String,
 }
 
 /// One keybinding in the subset `hyprctl binds` exposes to menus.
@@ -450,7 +456,7 @@ impl Snapshot {
                     special_workspace: WorkspaceRef { id: 0, name: String::new() },
                     reserved: [0, 0, 0, 0],
                     scale: monitor.scale,
-                    transform: 0,
+                    transform: monitor.transform,
                     focused: monitor.focused,
                     dpms_status: true,
                     vrr: false,

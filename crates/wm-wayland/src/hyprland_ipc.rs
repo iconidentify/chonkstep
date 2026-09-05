@@ -134,7 +134,7 @@ fn build_snapshot(
         .map(|(index, info)| Monitor {
             id: i32::try_from(index).unwrap_or(i32::MAX),
             name: info.name.clone(),
-            description: info.name.clone(),
+            description: info.identity.clone().unwrap_or_else(|| info.name.clone()),
             x: info.geometry.pos.x,
             y: info.geometry.pos.y,
             width: i32::try_from(info.geometry.size.w).unwrap_or(i32::MAX),
@@ -156,6 +156,7 @@ fn build_snapshot(
             model: hardware(wm, index).map(|out| out.model.clone()).unwrap_or_default(),
             serial: hardware(wm, index).map(|out| out.serial.clone()).unwrap_or_default(),
             refresh_millihertz: hardware(wm, index).map_or(0, |out| out.refresh_millihertz),
+            transform: hardware(wm, index).map_or(0, |out| out.transform),
             modes: hardware(wm, index).map(|out| out.modes.clone()).unwrap_or_default(),
         })
         .collect();
@@ -333,6 +334,23 @@ fn build_snapshot(
         bindings,
         config_errors: session.config_diagnostics.clone(),
         devices,
+        system_info: if include_bindings {
+            format!(
+                "ChonkStep {}\nsource: {}\nconfig: {}\nworkspace: {}\noutputs: {}\n{}",
+                env!("CARGO_PKG_VERSION"),
+                chonk_build_info::SOURCE_ID,
+                wm_config::config_path()
+                    .map_or_else(|| "defaults (HOME unavailable)".to_string(), |path| path.display().to_string()),
+                wm.current_workspace() + 1,
+                monitors_info.len(),
+                wm.backend().system_snapshot(),
+            )
+        } else {
+            // Event clients never receive this request-only field.
+            // Leaving it empty keeps /proc and protocol-object walks
+            // off ordinary state publication.
+            String::new()
+        },
     }
 }
 
@@ -563,10 +581,45 @@ pub(crate) fn apply(comp: &mut Compositor, action: Action) -> bool {
         Action::SetTag { window, tag, present } => client_of(wm, window).is_some_and(|id| wm.set_client_tag(id, &tag, present)),
         Action::ConfirmFloating(window) => client_of(wm, window).is_some(),
         Action::SetMonitorScale { output, scale_120 } => comp.set_output_scale(&output, scale_120 as f64 / 120.0),
+        Action::SetCursorHidden(hidden) => {
+            let owner = hidden.then(|| {
+                comp.seat
+                    .get_keyboard()
+                    .and_then(|keyboard| keyboard.current_focus())
+                    .or_else(|| comp.seat.get_pointer().and_then(|pointer| pointer.current_focus()))
+            });
+            let owner = owner.flatten();
+            let backend = comp.wm.backend_mut();
+            let changed = backend.cursor_hidden != hidden;
+            backend.cursor_hidden = hidden;
+            backend.cursor_hidden_owner = if hidden {
+                owner.or_else(|| backend.cursor_hidden_owner.clone())
+            } else {
+                None
+            };
+            if changed {
+                backend.mark_damaged();
+            }
+            true
+        }
         Action::ReloadConfig => {
             comp.shell.reload_config(&mut comp.wm);
             true
         }
+        Action::SetDiagnostic { name, enabled } => match wm.backend_mut().set_diagnostic(&name, enabled) {
+            Ok(()) => true,
+            Err(error) => {
+                tracing::warn!(%error, diagnostic = name, "live diagnostic request refused");
+                false
+            }
+        },
+        Action::SetLogFilter(directive) => match wm.backend_mut().set_log_filter(&directive) {
+            Ok(()) => true,
+            Err(error) => {
+                tracing::warn!(%error, filter = directive, "live log-filter request refused");
+                false
+            }
+        },
         Action::ExecShell(command) => chonk_shell::spawn::spawn_detached("sh", &["-c", &command]).is_some(),
         Action::ExecArgv(argv) => {
             let Some((program, args)) = argv.split_first() else {

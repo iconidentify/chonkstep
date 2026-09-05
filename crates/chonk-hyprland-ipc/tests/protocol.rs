@@ -29,11 +29,12 @@ fn monitor(id: i32, name: &str, focused: bool, active_workspace: usize) -> Monit
         active_workspace,
         make: "Sharp".to_string(),
         model: name.to_string(),
-        serial: String::new(),
+        serial: "0x01020304".to_string(),
         // 120 Hz on purpose: the value this used to report was a
         // conventional 60 for every panel, so a fixture that is also
         // 60 would pass either way.
         refresh_millihertz: 120_000,
+        transform: 0,
         modes: vec![
             MonitorMode { width: 2560, height: 1600, refresh_millihertz: 120_000 },
             MonitorMode { width: 2560, height: 1600, refresh_millihertz: 60_000 },
@@ -81,6 +82,7 @@ fn desktop() -> Snapshot {
         bindings: Vec::new(),
         config_errors: Vec::new(),
         devices: Devices::default(),
+        system_info: "test system".into(),
     }
 }
 
@@ -372,6 +374,26 @@ fn cursorpos_is_plain_text_with_comma_space() {
     assert!(response.contains(", "), "got {response:?}");
     let (x, y) = response.split_once(", ").expect("comma-space separated");
     assert!(x.parse::<i32>().is_ok() && y.parse::<i32>().is_ok(), "got {response:?}");
+}
+
+#[test]
+fn live_diagnostic_commands_have_truthful_wire_shapes() {
+    assert_eq!(ask("/systeminfo", &desktop()), "test system");
+
+    let (response, actions) = answer_payload(b"/debug-set damage-log on", &desktop());
+    assert_eq!(response, "ok");
+    assert_eq!(
+        actions,
+        vec![Action::SetDiagnostic { name: "damage-log".into(), enabled: true }]
+    );
+
+    let (response, actions) = answer_payload(b"/log-filter info,wm_wayland::session=debug", &desktop());
+    assert_eq!(response, "ok");
+    assert_eq!(actions, vec![Action::SetLogFilter("info,wm_wayland::session=debug".into())]);
+
+    let (response, actions) = answer_payload(b"/debug-set damage-log perhaps", &desktop());
+    assert!(response.starts_with("Invalid dispatcher"));
+    assert!(actions.is_empty());
 }
 
 // ---------------------------------------------------------------------
@@ -853,7 +875,7 @@ fn a_monitors_mode_list_is_the_connectors_modes_in_hyprlands_spelling() {
     );
     assert_eq!(monitors[0]["make"], "Sharp", "make comes from the same EDID wl_output advertises");
     assert_eq!(monitors[0]["model"], "eDP-1");
-    assert_eq!(monitors[0]["serial"], "", "no serial reaches this compositor; empty beats invented");
+    assert_eq!(monitors[0]["serial"], "0x01020304", "serial is the connector EDID value, not an invention");
 }
 
 /// The refusal is the only diagnostic `keyword` has — `hyprctl` exits
@@ -874,4 +896,29 @@ fn the_keyword_refusal_is_true_and_names_the_routes_that_work() {
         answer.contains("disable"),
         "the one shipped caller toggles a monitor off; say why that cannot work: {answer}"
     );
+}
+
+#[test]
+fn the_two_screensaver_spellings_reach_one_cursor_visibility_action() {
+    for (request, hidden) in [
+        ("eval hl.config({ cursor = { invisible = true } })", true),
+        ("eval hl.config({ cursor = { invisible = false } })", false),
+        ("keyword cursor:invisible true", true),
+        ("keyword cursor:invisible false", false),
+    ] {
+        let (response, actions) = answer_payload(request.as_bytes(), &desktop());
+        assert_eq!(response.trim(), "ok", "{request}");
+        assert_eq!(actions, vec![Action::SetCursorHidden(hidden)], "{request}");
+    }
+}
+
+#[test]
+fn cursor_visibility_does_not_turn_keyword_into_a_general_config_backdoor() {
+    let (response, actions) = answer_payload(b"keyword general:border_size 99", &desktop());
+    assert!(response.starts_with("Invalid dispatcher:"), "got {response:?}");
+    assert!(actions.is_empty());
+
+    let (response, actions) = answer_payload(b"eval hl.config({ cursor = { invisible = maybe } })", &desktop());
+    assert!(response.contains("requires true or false"), "got {response:?}");
+    assert!(actions.is_empty());
 }

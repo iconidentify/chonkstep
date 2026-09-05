@@ -37,8 +37,10 @@
 
 use smithay::backend::allocator::Fourcc;
 use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
+use smithay::backend::renderer::utils::with_renderer_surface_state;
 use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::State as XdgToplevelState;
 use smithay::reexports::wayland_server::backend::protocol::ProtocolError;
+use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::reexports::wayland_server::Resource;
 use smithay::utils::{Buffer, Logical, Rectangle as SmithayRect, Transform};
 use smithay::wayland::compositor::with_states;
@@ -165,6 +167,35 @@ fn set_combo_membership(combos: &mut Vec<KeyCombo>, combo: KeyCombo, enabled: bo
     }
 }
 
+impl WaylandBackend {
+    /// Cheap build/hardware half of `hyprctl systeminfo`. Kept apart
+    /// from the full diagnostic dump so routine compatibility queries
+    /// never walk every protocol object or `/proc` entry.
+    pub(crate) fn system_snapshot(&self) -> String {
+        use std::fmt::Write as _;
+
+        let mut report = format!("graphics {}\n", self.graphics_diagnostics);
+        for (index, monitor) in self.monitors.iter().enumerate() {
+            let scale = self.monitor_scales.get(index).copied().unwrap_or(1.0);
+            let hardware = self.monitor_outputs.get(index);
+            let _ = writeln!(
+                report,
+                "output index={} name={:?} x={} y={} w={} h={} scale={} refresh_millihertz={} transform={}",
+                index,
+                monitor.name,
+                monitor.geometry.pos.x,
+                monitor.geometry.pos.y,
+                monitor.geometry.size.w,
+                monitor.geometry.size.h,
+                scale,
+                hardware.map_or(0, |output| output.refresh_millihertz),
+                hardware.map_or(0, |output| output.transform),
+            );
+        }
+        report
+    }
+}
+
 impl Backend for WaylandBackend {
     type WindowId = WlWindowId;
     type FrameId = WlFrameId;
@@ -196,6 +227,173 @@ impl Backend for WaylandBackend {
         &self.monitors
     }
 
+    fn diagnostic_snapshot(&self) -> String {
+        use std::fmt::Write as _;
+
+        let mut report = String::new();
+        let last_damage = self
+            .last_damage_source
+            .map_or_else(|| "startup".to_string(), |location| format!("{}:{}", location.file(), location.line()));
+        let _ = writeln!(
+            report,
+            "state locked={} damage={} last_damage={} monitors={} windows={} frames={} layers={} shells={} ime_popups={}",
+            self.locked,
+            self.damage,
+            last_damage,
+            self.monitors.len(),
+            self.windows.len(),
+            self.frames.len(),
+            self.layers.len(),
+            self.shells.len(),
+            self.ime_popups.len(),
+        );
+        report.push_str(&self.system_snapshot());
+        let _ = writeln!(
+            report,
+            "focus pending={:?} pointer={:?} keyboard_grab={} pointer_grab={} pending_pointer_grab={}",
+            self.pending_focus,
+            self.pointer,
+            self.keyboard_grabbed,
+            self.pointer_grab.is_some(),
+            self.pending_pointer_grab.is_some(),
+        );
+        let _ = writeln!(report, "diagnostics {}", crate::diagnostics::describe());
+
+        report.push_str("scene bottom-to-top\n");
+        for entry in &self.stacking {
+            match entry {
+                StackEntry::Frame(id) => {
+                    let Some(frame) = self.frames.get(id) else { continue };
+                    let window = self.windows.get(&frame.window);
+                    let _ = writeln!(
+                        report,
+                        " frame id={} window={} x={} y={} w={} h={} mapped={} app={:?} title={:?}",
+                        id.0,
+                        frame.window.0,
+                        frame.geometry.pos.x,
+                        frame.geometry.pos.y,
+                        frame.geometry.size.w,
+                        frame.geometry.size.h,
+                        frame.mapped,
+                        window.and_then(|record| record.app_id.as_deref()).unwrap_or(""),
+                        window.and_then(|record| record.title.as_deref()).unwrap_or(""),
+                    );
+                }
+                StackEntry::Window(id) => {
+                    let Some(window) = self.windows.get(id) else { continue };
+                    let _ = writeln!(
+                        report,
+                        " window id={} x={} y={} w={} h={} mapped={} app={:?} title={:?}",
+                        id.0,
+                        window.content.pos.x,
+                        window.content.pos.y,
+                        window.content.size.w,
+                        window.content.size.h,
+                        window.mapped,
+                        window.app_id.as_deref().unwrap_or(""),
+                        window.title.as_deref().unwrap_or(""),
+                    );
+                }
+            }
+        }
+        for layer in &self.layers {
+            let _ = writeln!(
+                report,
+                " layer id={} output={} kind={:?} namespace={:?} x={} y={} w={} h={} mapped={} visible={}",
+                layer.id.0,
+                layer.output,
+                layer.layer,
+                layer.namespace,
+                layer.geometry.pos.x,
+                layer.geometry.pos.y,
+                layer.geometry.size.w,
+                layer.geometry.size.h,
+                layer.mapped,
+                self.layer_presented(layer),
+            );
+        }
+        for id in &self.shell_stacking {
+            let Some(shell) = self.shells.get(id) else { continue };
+            let _ = writeln!(
+                report,
+                " shell id={} x={} y={} w={} h={} mapped={} above={} buffer_bytes={}",
+                id.0,
+                shell.geometry.pos.x,
+                shell.geometry.pos.y,
+                shell.geometry.size.w,
+                shell.geometry.size.h,
+                shell.mapped,
+                shell.above,
+                shell.buffer_bytes,
+            );
+        }
+
+        let handle = self.display_handle.backend_handle();
+        let mut clients = Vec::new();
+        handle.with_all_clients(|client| clients.push(client));
+        clients.sort_by_key(|client| format!("{client:?}"));
+        report.push_str("clients\n");
+        for client_id in clients {
+            let credentials = handle.get_client_credentials(client_id.clone()).ok();
+            let pid = credentials.map(|credentials| credentials.pid);
+            let executable = pid
+                .and_then(|pid| std::fs::read_link(format!("/proc/{pid}/exe")).ok())
+                .and_then(|path| path.file_name().map(|name| name.to_string_lossy().into_owned()))
+                .unwrap_or_else(|| "unknown".to_string());
+            let mut objects = Vec::new();
+            let _ = handle.with_all_objects_for(client_id.clone(), |object| objects.push(object));
+            let mut surfaces = 0usize;
+            let mut buffer_bytes = 0usize;
+            for object in objects {
+                if object.interface().name != "wl_surface" {
+                    continue;
+                }
+                surfaces = surfaces.saturating_add(1);
+                let Ok(surface) = WlSurface::from_id(&self.display_handle, object) else {
+                    continue;
+                };
+                let bytes = with_renderer_surface_state(&surface, |state| {
+                    if state.buffer().is_none() {
+                        return 0;
+                    }
+                    let Some(size) = state.buffer_size() else { return 0 };
+                    let scale = usize::try_from(state.buffer_scale()).unwrap_or(0);
+                    usize::try_from(size.w)
+                        .unwrap_or(0)
+                        .saturating_mul(usize::try_from(size.h).unwrap_or(0))
+                        .saturating_mul(scale)
+                        .saturating_mul(scale)
+                        .saturating_mul(4)
+                })
+                .unwrap_or(0);
+                buffer_bytes = buffer_bytes.saturating_add(bytes);
+            }
+            let _ = writeln!(
+                report,
+                " client id={:?} pid={} uid={} executable={:?} surfaces={} buffer_bytes_estimate={}",
+                client_id,
+                pid.map_or_else(|| "unknown".to_string(), |pid| pid.to_string()),
+                credentials.map_or_else(|| "unknown".to_string(), |credentials| credentials.uid.to_string()),
+                executable,
+                surfaces,
+                buffer_bytes,
+            );
+        }
+        report
+    }
+
+    fn set_diagnostic(&mut self, name: &str, enabled: bool) -> Result<(), String> {
+        crate::diagnostics::set(name, enabled)?;
+        // Plane-path and full-damage changes need one frame to take
+        // effect even when the desktop was otherwise idle.
+        self.mark_damaged();
+        Ok(())
+    }
+
+    fn set_log_filter(&mut self, directive: &str) -> Result<(), String> {
+        crate::diagnostics::set_log_filter(directive)
+    }
+
     // -- shell surfaces ---------------------------------------------------
     // On X11 these were override-redirect windows; here they are pure
     // scene records the renderer draws directly — creation cannot fail,
@@ -223,21 +421,21 @@ impl Backend for WaylandBackend {
     fn map_shell_surface(&mut self, id: Self::ShellId) {
         if let Some(shell) = self.shells.get_mut(&id) {
             shell.mapped = true;
-            self.damage = true;
+            self.mark_damaged();
         }
     }
 
     fn unmap_shell_surface(&mut self, id: Self::ShellId) {
         if let Some(shell) = self.shells.get_mut(&id) {
             shell.mapped = false;
-            self.damage = true;
+            self.mark_damaged();
         }
     }
 
     fn destroy_shell_surface(&mut self, id: Self::ShellId) {
         if self.shells.remove(&id).is_some() {
             self.shell_stacking.retain(|shell| *shell != id);
-            self.damage = true;
+            self.mark_damaged();
         }
     }
 
@@ -247,13 +445,13 @@ impl Backend for WaylandBackend {
         };
         let shell = self.shell_stacking.remove(index);
         self.shell_stacking.push(shell);
-        self.damage = true;
+        self.mark_damaged();
     }
 
     fn configure_shell_surface(&mut self, id: Self::ShellId, geometry: Rect) {
         if let Some(shell) = self.shells.get_mut(&id) {
             shell.geometry = geometry;
-            self.damage = true;
+            self.mark_damaged();
         }
     }
 
@@ -262,7 +460,7 @@ impl Backend for WaylandBackend {
             if let Some(imported) = import_buffer(buffer, false) {
                 shell.buffer = Some(imported);
                 shell.buffer_bytes = buffer.pixels.len();
-                self.damage = true;
+                self.mark_damaged();
             }
         }
     }
@@ -271,14 +469,14 @@ impl Backend for WaylandBackend {
         if let Some(shell) = self.shells.get_mut(&id) {
             if shell.buffer.take().is_some() {
                 shell.buffer_bytes = 0;
-                self.damage = true;
+                self.mark_damaged();
             }
         }
     }
 
     fn paint_root_color(&mut self, rgb: (u8, u8, u8)) {
         self.root_background = RootBackground::Color(rgb);
-        self.damage = true;
+        self.mark_damaged();
     }
 
     fn set_layer_surface_hidden(&mut self, namespace: &str, hidden: bool) {
@@ -293,7 +491,7 @@ impl Backend for WaylandBackend {
             // to poke.
             self.layer_layout_dirty = true;
             self.idle_policy_dirty = true;
-            self.damage = true;
+            self.mark_damaged();
             tracing::info!(namespace, hidden, "layer surface visibility changed");
         }
     }
@@ -303,7 +501,7 @@ impl Backend for WaylandBackend {
         // installing a zero-sized image nothing can render.
         if let Some(imported) = import_buffer(buffer, true) {
             self.root_background = RootBackground::Image(imported);
-            self.damage = true;
+            self.mark_damaged();
         }
     }
 
@@ -627,7 +825,7 @@ impl Backend for WaylandBackend {
         if let Some(record) = self.frames.remove(&frame) {
             self.stacking.retain(|entry| !matches!(entry, StackEntry::Frame(f) if *f == frame));
             self.sync_managed_scene_index(record.window);
-            self.damage = true;
+            self.mark_damaged();
         }
     }
 
@@ -666,14 +864,14 @@ impl Backend for WaylandBackend {
             }
         }
         self.sync_managed_scene_index(window);
-        self.damage = true;
+        self.mark_damaged();
     }
 
     fn paint_decoration(&mut self, frame: Self::FrameId, buffer: &DecorationBuffer) {
         if let Some(record) = self.frames.get_mut(&frame) {
             if let Some(imported) = import_buffer(buffer, true) {
                 record.buffer = Some(imported);
-                self.damage = true;
+                self.mark_damaged();
             }
         }
     }
@@ -700,7 +898,7 @@ impl Backend for WaylandBackend {
         // still (a keybinding resize ending under it), and without the
         // flag the old cursor would linger until something else moved.
         if changed {
-            self.damage = true;
+            self.mark_damaged();
         }
     }
 
@@ -746,7 +944,7 @@ impl Backend for WaylandBackend {
                 }
             }
         }
-        self.damage = true;
+        self.mark_damaged();
     }
 
     fn resize_client(&mut self, window: Self::WindowId, size: Size) {
@@ -844,7 +1042,7 @@ impl Backend for WaylandBackend {
             // allocator churn after the first resize.
             self.note_popup_parent_resize(root);
         }
-        self.damage = true;
+        self.mark_damaged();
     }
 
     fn configure_unmanaged(&mut self, window: Self::WindowId, geometry: Rect) {
@@ -892,7 +1090,7 @@ impl Backend for WaylandBackend {
             self.note_configure(window);
         }
         if mapped {
-            self.damage = true;
+            self.mark_damaged();
         }
     }
 
@@ -906,7 +1104,7 @@ impl Backend for WaylandBackend {
             self.sync_managed_scene_index(window);
             if changed {
                 self.idle_policy_dirty = true;
-                self.damage = true;
+                self.mark_damaged();
             }
         }
     }
@@ -921,7 +1119,7 @@ impl Backend for WaylandBackend {
             self.sync_managed_scene_index(window);
             if changed {
                 self.idle_policy_dirty = true;
-                self.damage = true;
+                self.mark_damaged();
             }
         }
     }
@@ -954,7 +1152,7 @@ impl Backend for WaylandBackend {
         self.sync_managed_scene_index(window);
         if changed {
             self.idle_policy_dirty = true;
-            self.damage = true;
+            self.mark_damaged();
         }
     }
 
@@ -971,7 +1169,7 @@ impl Backend for WaylandBackend {
             self.sync_managed_scene_index(window);
             if changed {
                 self.idle_policy_dirty = true;
-                self.damage = true;
+                self.mark_damaged();
             }
         }
     }
@@ -989,7 +1187,7 @@ impl Backend for WaylandBackend {
         self.sync_managed_scene_index(window);
         if changed {
             self.idle_policy_dirty = true;
-            self.damage = true;
+            self.mark_damaged();
         }
     }
 
@@ -997,7 +1195,7 @@ impl Backend for WaylandBackend {
 
     fn raise(&mut self, frame: Self::FrameId) {
         if raise_stack_entry(&mut self.stacking, StackEntry::Frame(frame)) {
-            self.damage = true;
+            self.mark_damaged();
             self.stacking_dirty = true;
         }
     }
@@ -1017,7 +1215,7 @@ impl Backend for WaylandBackend {
     /// for the whole life of the window.
     fn raise_frameless(&mut self, window: Self::WindowId) {
         if raise_stack_entry(&mut self.stacking, StackEntry::Window(window)) {
-            self.damage = true;
+            self.mark_damaged();
             self.stacking_dirty = true;
         }
     }
@@ -1039,7 +1237,7 @@ impl Backend for WaylandBackend {
         let before = self.stacking.clone();
         self.stacking.retain(|entry| !matches!(entry, StackEntry::Frame(f) if order_back_to_front.contains(f)));
         self.stacking.extend(listed);
-        self.damage = true;
+        self.mark_damaged();
         // Compared rather than assumed: `restack` is called from the
         // workspace-switch and Alt-Tab paths on every pass they run,
         // and a "dirty" that meant "mentioned" would grab the X server
@@ -1213,7 +1411,7 @@ impl Backend for WaylandBackend {
         // discards content the way an unmapped X11 window loses its
         // pixels, so there is nothing to ask the client to repaint;
         // redrawing our own scene from the retained buffers suffices.
-        self.damage = true;
+        self.mark_damaged();
     }
 
     // -- EWMH-shaped policy reads/acts ------------------------------------
@@ -1404,7 +1602,7 @@ impl Backend for WaylandBackend {
             // but band occlusion is independently visible policy. Its
             // own damage edge keeps a same-sized fullscreen transition
             // (and its inverse) from waiting for unrelated damage.
-            self.damage = true;
+            self.mark_damaged();
         }
     }
 
@@ -1561,7 +1759,7 @@ impl Backend for WaylandBackend {
                 }
             }
         }
-        self.damage = true;
+        self.mark_damaged();
         if kind == WindowType::Unmanaged {
             self.scene_index.mark_unmanaged(window);
         } else {
@@ -1601,7 +1799,7 @@ impl Backend for WaylandBackend {
                 }
             }
         }
-        self.damage = true;
+        self.mark_damaged();
     }
 
     // A compositor sees every click before any client does, so there is

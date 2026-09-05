@@ -48,6 +48,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use wm_core::MonitorInfo;
 use wm_theme_api::{Point, Rect, Size};
 
 use crate::apps::{match_window_class, AppEntry};
@@ -77,11 +78,17 @@ pub struct WindowRecord {
     /// index changing shape between sessions — the id is looked up
     /// again at restore and falls back to a fresh class match.
     pub app: Option<String>,
-    /// Root-relative *content* geometry. For a maximized window this
-    /// is the pre-maximize geometry (the one worth restoring — the
+    /// Monitor-relative *content* geometry when `monitor_identity` is
+    /// present, root-relative geometry for legacy records or backends
+    /// without stable output identity. For a maximized window this is
+    /// the pre-maximize geometry (the one worth restoring — the
     /// maximize itself is re-derived from the flag against whatever
     /// workarea the new session has).
     pub geometry: Rect,
+    /// EDID `make model serial` of the physical monitor containing the
+    /// window. Unlike a connector name, this follows the display when
+    /// it is plugged into a different dock port.
+    pub monitor_identity: Option<String>,
     pub workspace: usize,
     pub maximized: bool,
     pub shaded: bool,
@@ -102,6 +109,42 @@ pub enum RelaunchPlan {
     /// An ordinary `.desktop` application, through the shell's launch
     /// fixups (scale env, platform args) like any menu launch.
     App(AppEntry),
+}
+
+/// Converts global geometry to a stable monitor-relative record. The
+/// caller supplies the monitor selected by the window manager's normal
+/// nearest-monitor policy so persistence cannot invent a second idea
+/// of monitor ownership.
+pub(crate) fn relative_to_monitor(monitor: Option<&MonitorInfo>, mut geometry: Rect) -> (Rect, Option<&str>) {
+    let identity = monitor.and_then(|monitor| monitor.identity.as_deref());
+    if let (Some(monitor), Some(_)) = (monitor, identity) {
+        geometry.pos.x = geometry.pos.x.saturating_sub(monitor.geometry.pos.x);
+        geometry.pos.y = geometry.pos.y.saturating_sub(monitor.geometry.pos.y);
+    }
+    (geometry, identity)
+}
+
+/// Resolves a remembered monitor-relative record against the current
+/// output order. If that physical monitor is absent, keep the window
+/// visible by using the current primary (or first) output while
+/// preserving its within-monitor offset. Eight-field legacy records
+/// have no identity and remain absolute exactly as before.
+pub(crate) fn restored_geometry(monitors: &[MonitorInfo], record: &WindowRecord) -> Rect {
+    let Some(identity) = record.monitor_identity.as_deref() else {
+        return record.geometry;
+    };
+    let target = monitors
+        .iter()
+        .find(|monitor| monitor.identity.as_deref() == Some(identity))
+        .or_else(|| monitors.iter().find(|monitor| monitor.primary))
+        .or_else(|| monitors.first());
+    let Some(target) = target else {
+        return record.geometry;
+    };
+    let mut geometry = record.geometry;
+    geometry.pos.x = geometry.pos.x.saturating_add(target.geometry.pos.x);
+    geometry.pos.y = geometry.pos.y.saturating_add(target.geometry.pos.y);
+    geometry
 }
 
 /// The store: what has been recorded, what is waiting to be restored,
@@ -307,7 +350,7 @@ fn relaunch_plan(record: &WindowRecord, apps: &[AppEntry]) -> Option<RelaunchPla
 /// theme/wallpaper/dock files beside it:
 ///
 /// ```text
-/// class \t app-or-'-' \t x \t y \t w \t h \t workspace \t flags-or-'-'
+/// class \t app-or-'-' \t x \t y \t w \t h \t workspace \t flags-or-'-' \t monitor-or-'-'
 /// ```
 ///
 /// Tabs because a class is free text that may contain spaces; flags
@@ -329,7 +372,7 @@ fn serialize(records: &[WindowRecord]) -> String {
         }
         let flags = if flags.is_empty() { "-".to_string() } else { flags.join(",") };
         text.push_str(&format!(
-            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
             record.class,
             record.app.as_deref().unwrap_or("-"),
             record.geometry.pos.x,
@@ -338,6 +381,7 @@ fn serialize(records: &[WindowRecord]) -> String {
             record.geometry.size.h,
             record.workspace,
             flags,
+            record.monitor_identity.as_deref().unwrap_or("-"),
         ));
     }
     text
@@ -350,9 +394,12 @@ fn parse(text: &str) -> Vec<WindowRecord> {
 fn parse_line(line: &str) -> Option<WindowRecord> {
     let fields: Vec<&str> = line.split('\t').collect();
     let parsed = (|| -> Option<WindowRecord> {
-        let [class, app, x, y, w, h, workspace, flags] = fields.as_slice() else {
+        let [class, app, x, y, w, h, workspace, flags, monitor @ ..] = fields.as_slice() else {
             return None;
         };
+        if monitor.len() > 1 {
+            return None;
+        }
         if class.is_empty() {
             return None;
         }
@@ -370,6 +417,9 @@ fn parse_line(line: &str) -> Option<WindowRecord> {
                 pos: Point::new(x.parse().ok()?, y.parse().ok()?),
                 size: Size::new(w, h),
             },
+            monitor_identity: monitor
+                .first()
+                .and_then(|identity| (!identity.is_empty() && *identity != "-").then(|| (*identity).to_string())),
             workspace: workspace.parse().ok()?,
             maximized: flags.split(',').any(|f| f == "maximized"),
             shaded: flags.split(',').any(|f| f == "shaded"),
@@ -405,6 +455,7 @@ mod tests {
             class: class.to_string(),
             app: None,
             geometry: Rect { pos: Point::new(x, 40), size: Size::new(500, 400) },
+            monitor_identity: None,
             workspace: 0,
             maximized: false,
             shaded: false,
@@ -434,6 +485,7 @@ mod tests {
                 class: "Navigator".to_string(),
                 app: Some("org.mozilla.firefox".to_string()),
                 geometry: Rect { pos: Point::new(-40, 12), size: Size::new(1280, 900) },
+                monitor_identity: Some("Dell Inc. DELL U2720Q ABC123".to_string()),
                 workspace: 2,
                 maximized: true,
                 shaded: false,
@@ -442,6 +494,58 @@ mod tests {
             record("foot", 100),
         ];
         assert_eq!(parse(&serialize(&records)), records);
+    }
+
+    #[test]
+    fn old_absolute_records_still_parse_without_a_monitor_field() {
+        let parsed = parse("foot\t-\t100\t40\t500\t400\t0\t-\n");
+        assert_eq!(parsed, vec![record("foot", 100)]);
+    }
+
+    #[test]
+    fn monitor_relative_geometry_survives_connector_and_output_reorder() {
+        let dell = "Dell Inc. DELL U2720Q ABC123";
+        let first_layout = MonitorInfo {
+            geometry: Rect::new(Point::new(1920, 0), Size::new(3840, 2160)),
+            name: "DP-3".to_string(),
+            identity: Some(dell.to_string()),
+            primary: false,
+        };
+        let root_geometry = Rect::new(Point::new(2040, 80), Size::new(900, 700));
+        let (relative, identity) = relative_to_monitor(Some(&first_layout), root_geometry);
+        assert_eq!(relative.pos, Point::new(120, 80));
+
+        let mut remembered = record("foot", relative.pos.x);
+        remembered.geometry = relative;
+        remembered.monitor_identity = identity.map(str::to_owned);
+        let reordered = [
+            MonitorInfo {
+                geometry: Rect::new(Point::new(3840, 0), Size::new(1920, 1080)),
+                name: "eDP-1".to_string(),
+                identity: Some("BOE CQ NE135FBM-N41 0x00000000".to_string()),
+                primary: false,
+            },
+            MonitorInfo {
+                geometry: Rect::new(Point::new(0, 0), Size::new(3840, 2160)),
+                name: "DP-1".to_string(),
+                identity: Some(dell.to_string()),
+                primary: true,
+            },
+        ];
+        assert_eq!(restored_geometry(&reordered, &remembered).pos, Point::new(120, 80));
+    }
+
+    #[test]
+    fn absent_remembered_monitor_falls_back_to_the_current_primary() {
+        let mut remembered = record("foot", 120);
+        remembered.monitor_identity = Some("missing display".to_string());
+        let primary = MonitorInfo {
+            geometry: Rect::new(Point::new(700, 200), Size::new(1920, 1080)),
+            name: "eDP-1".to_string(),
+            identity: Some("present display".to_string()),
+            primary: true,
+        };
+        assert_eq!(restored_geometry(&[primary], &remembered).pos, Point::new(820, 240));
     }
 
     #[test]

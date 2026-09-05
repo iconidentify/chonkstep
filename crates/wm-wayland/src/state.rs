@@ -774,6 +774,19 @@ pub struct WaylandBackend {
     /// the renderer clears it after drawing. This is the whole
     /// redraw-scheduling protocol: no damage, no render.
     pub(crate) damage: bool,
+    /// Call site that most recently invalidated the scene. A static
+    /// `Location` costs no allocation on the hot path and makes a live
+    /// diagnostic dump answer why the compositor last chose to draw.
+    pub(crate) last_damage_source: Option<&'static std::panic::Location<'static>>,
+    /// Compositor-wide cursor suppression requested through the
+    /// Hyprland compatibility socket. The owner is the focused client
+    /// at the moment it hides the cursor, so killing a screensaver
+    /// cannot strand the rest of the session without a pointer.
+    pub(crate) cursor_hidden: bool,
+    pub(crate) cursor_hidden_owner: Option<WlSurface>,
+    /// Selected graphics stack and hardware identity for live system
+    /// information (`nested-winit` or the KMS/driver/render-node set).
+    pub(crate) graphics_diagnostics: String,
     /// Handle to the wayland display, for verbs that must touch
     /// protocol state directly (client credentials for `window_pid`,
     /// disconnecting a client for `kill_client`).
@@ -999,6 +1012,10 @@ impl WaylandBackend {
             ime_popups: Vec::new(),
             output_size,
             damage: true,
+            last_damage_source: None,
+            cursor_hidden: false,
+            cursor_hidden_owner: None,
+            graphics_diagnostics: "backend=uninitialized".to_string(),
             display_handle,
             pending_focus: None,
             preview_edge: None,
@@ -1082,8 +1099,10 @@ impl WaylandBackend {
     /// Marks the scene dirty. Every mutating verb and every handler
     /// that changes anything visible must call this (or set the field)
     /// or its change waits for the next unrelated damage to appear.
+    #[track_caller]
     pub(crate) fn mark_damaged(&mut self) {
         self.damage = true;
+        self.last_damage_source = Some(std::panic::Location::caller());
     }
 
     /// Records that the answer to "may the session idle?" can have
@@ -1397,8 +1416,22 @@ pub(crate) enum Graphics {
 /// produces exactly one, at the origin.
 pub(crate) struct OutputSetup {
     pub output: Output,
+    /// Stable EDID description (`make model serial`) for matching
+    /// `monitor = desc:...` and persisting placement independently of
+    /// the connector port. `None` for nested/virtual outputs and
+    /// hardware whose EDID could not be read.
+    pub identity: Option<String>,
+    /// EDID serial kept separately because Smithay's
+    /// `PhysicalProperties` carries only make and model.
+    pub serial: String,
     pub position: Point,
     pub size: Size,
+    /// User-visible orientation. Kept separate from the nested
+    /// backend's `Flipped180` EGL correction.
+    pub transform: Transform,
+    /// Mode selected by a startup monitor rule, to be applied to KMS
+    /// before the `wl_output` global is published.
+    pub requested_mode: Option<usize>,
     /// Every mode this output can drive, current/preferred first. One
     /// entry on the nested backend (the host window has no modes to
     /// offer); the connector's full EDID mode list on the session
@@ -1457,6 +1490,9 @@ pub(crate) struct MonitorOutput {
     /// Current mode's refresh in millihertz; 0 when no real mode is
     /// driven, which is what the wire layer turns into its fallback.
     pub refresh_millihertz: u32,
+    /// wl_output transform number (0/1/2/3 for the rotations we
+    /// support), mirrored into the Hyprland compatibility snapshot.
+    pub transform: i32,
     pub modes: Vec<MonitorMode>,
 }
 
@@ -1470,11 +1506,14 @@ pub(crate) struct MonitorOutput {
 /// has to agree on one.
 pub(crate) struct OutputEntry {
     pub output: Output,
+    pub identity: Option<String>,
+    pub serial: String,
     /// Top-left corner in global compositor space. Every rect in the
     /// ledger is global, so this is what the renderer subtracts to put
     /// the one shared scene into this output's framebuffer.
     pub position: Point,
     pub size: Size,
+    pub transform: Transform,
     /// This output's fractional UI scale — what fractional-scale-v1
     /// tells clients on it, what `wl_output.scale` advertises the
     /// ceiling of, and what `WaylandBackend::monitor_scales` mirrors
@@ -1509,8 +1548,11 @@ impl OutputEntry {
         let damage_tracker = physical_damage_tracker(&setup.output, setup.size);
         Self {
             output: setup.output,
+            identity: setup.identity,
+            serial: setup.serial,
             position: setup.position,
             size: setup.size,
+            transform: setup.transform,
             scale: 1.0,
             modes: setup.modes,
             damage_tracker,
@@ -1557,9 +1599,18 @@ impl OutputEntry {
 /// putting their scaled buffers back at 1 buffer pixel : 1 screen
 /// pixel. The session backend pins its `DrmCompositor`s the same way
 /// (`session::attach_output`); the two must never disagree.
-pub(crate) fn physical_damage_tracker(output: &Output, size: Size) -> OutputDamageTracker {
+pub(crate) fn physical_damage_tracker(output: &Output, fallback_size: Size) -> OutputDamageTracker {
+    // `OutputDamageTracker` wants the untransformed framebuffer size;
+    // its transform turns that into the logical output rectangle for
+    // intersection. `OutputEntry::size` is already transformed for
+    // desktop layout, so feeding it here would swap portrait outputs a
+    // second time and render against the wrong framebuffer dimensions.
+    let size = output.current_mode().map_or_else(
+        || SSize::<i32, Physical>::from((fallback_size.w as i32, fallback_size.h as i32)),
+        |mode| mode.size,
+    );
     OutputDamageTracker::new(
-        SSize::<i32, Physical>::from((size.w as i32, size.h as i32)),
+        size,
         1.0,
         output.current_transform(),
     )
@@ -1621,8 +1672,8 @@ fn advertise_scales(outputs: &mut [OutputEntry], scales: &[f64]) {
 
 /// Applies the supported, whole `monitor =` lines while real outputs
 /// and their EDID facts are available. Unsupported fields refuse their
-/// entire line so a rotated/disabled/mirrored request is never partly
-/// honored as only a scale or position change.
+/// entire line so a disabled/mirrored request is never partly honored
+/// as only a scale, orientation, mode, or position change.
 pub(crate) fn apply_monitor_rules(
     setups: &mut [OutputSetup],
     rules: &[wm_config::hyprland::directive::Monitor],
@@ -1632,16 +1683,28 @@ pub(crate) fn apply_monitor_rules(
     let mut auto_x = 0i32;
     let mut changed_position = false;
     for (index, setup) in setups.iter_mut().enumerate() {
-        let exact = rules.iter().rev().find(|rule| rule.output == setup.output.name());
+        let exact = rules.iter().rev().find(|rule| monitor_rule_matches(setup, &rule.output));
         let catch_all = rules.iter().rev().find(|rule| rule.output.trim().is_empty());
         let Some(rule) = exact.or(catch_all) else {
             auto_x = auto_x.max(setup.position.x.saturating_add(setup.size.w as i32));
             continue;
         };
-        let unsupported = rule.extra.first().map(String::as_str).or_else(|| {
+        let transform = match monitor_transform(&rule.extra) {
+            Ok(transform) => transform,
+            Err(field) => {
+                tracing::warn!(
+                    output = %setup.output.name(),
+                    field,
+                    "hyprland-config: monitor line refused whole because this field is unsupported"
+                );
+                auto_x = auto_x.max(setup.position.x.saturating_add(setup.size.w as i32));
+                continue;
+            }
+        };
+        let unsupported = {
             let mode = rule.mode.trim().to_ascii_lowercase();
             (mode == "disable" || mode.starts_with("mirror")).then_some(rule.mode.as_str())
-        });
+        };
         if let Some(field) = unsupported {
             tracing::warn!(
                 output = %setup.output.name(),
@@ -1653,19 +1716,25 @@ pub(crate) fn apply_monitor_rules(
         }
 
         let mode = rule.mode.trim();
-        let new_size = if mode.is_empty() || mode.eq_ignore_ascii_case("preferred") {
-            setup.output.preferred_mode().map_or(setup.size, |preferred| {
-                Size::new(preferred.size.w.max(0) as u32, preferred.size.h.max(0) as u32)
-            })
-        } else {
+        let Some(mode_index) = resolve_monitor_mode(&setup.output, &setup.modes, mode) else {
+            let advertised = setup
+                .modes
+                .iter()
+                .map(|mode| format!("{}x{}@{:.3}", mode.size.w, mode.size.h, f64::from(mode.refresh) / 1000.0))
+                .collect::<Vec<_>>()
+                .join(", ");
             tracing::warn!(
                 output = %setup.output.name(),
                 mode,
-                "hyprland-config: monitor line refused whole; explicit modes are not applied during output bootstrap"
+                advertised,
+                "hyprland-config: monitor line refused whole; requested mode is not advertised"
             );
             auto_x = auto_x.max(setup.position.x.saturating_add(setup.size.w as i32));
             continue;
         };
+        let selected_mode = setup.modes[mode_index];
+        let transformed = transform.transform_size(selected_mode.size);
+        let new_size = Size::new(transformed.w.max(0) as u32, transformed.h.max(0) as u32);
 
         let position = rule.position.trim();
         let new_position = if position.is_empty() || position.eq_ignore_ascii_case("auto") {
@@ -1702,6 +1771,8 @@ pub(crate) fn apply_monitor_rules(
         };
         setup.size = new_size;
         setup.position = new_position;
+        setup.transform = transform;
+        setup.requested_mode = Some(mode_index);
         changed_position = true;
         auto_x = auto_x.max(setup.position.x.saturating_add(setup.size.w as i32));
         scales[index] = scale;
@@ -1710,8 +1781,36 @@ pub(crate) fn apply_monitor_rules(
             x = setup.position.x,
             y = setup.position.y,
             scale,
+            transform = transform_number(transform),
+            mode = %format!("{}x{}@{:.3}", selected_mode.size.w, selected_mode.size.h, f64::from(selected_mode.refresh) / 1000.0),
             "hyprland-config: monitor line applied"
         );
+    }
+    let connectors = setups.iter().map(|setup| setup.output.name()).collect::<Vec<_>>().join(", ");
+    let descriptions = setups
+        .iter()
+        .filter_map(|setup| setup.identity.as_deref())
+        .collect::<Vec<_>>()
+        .join(", ");
+    for rule in rules {
+        let selector = rule.output.trim();
+        if selector.is_empty() || setups.iter().any(|setup| monitor_rule_matches(setup, selector)) {
+            continue;
+        }
+        if selector.starts_with("desc:") {
+            tracing::warn!(
+                monitor = selector,
+                connected = %connectors,
+                descriptions = %if descriptions.is_empty() { "none (EDID unavailable)" } else { &descriptions },
+                "hyprland-config: monitor description matched no connected output"
+            );
+        } else {
+            tracing::warn!(
+                monitor = selector,
+                connected = %connectors,
+                "hyprland-config: monitor name matched no connected output"
+            );
+        }
     }
     if changed_position {
         let min_x = setups.iter().map(|setup| setup.position.x).min().unwrap_or(0);
@@ -1722,6 +1821,117 @@ pub(crate) fn apply_monitor_rules(
         }
     }
     scales
+}
+
+/// Hyprland's stable selector is the exact human-readable EDID
+/// description printed by `hyprctl monitors`: `make model serial`.
+/// Connector matching remains available for configs that intentionally
+/// target a particular port.
+fn monitor_rule_matches(setup: &OutputSetup, selector: &str) -> bool {
+    let selector = selector.trim();
+    if let Some(description) = selector.strip_prefix("desc:") {
+        let description = description.trim();
+        return !description.is_empty() && setup.identity.as_deref() == Some(description);
+    }
+    selector == setup.output.name()
+}
+
+const MODE_REFRESH_TOLERANCE_MHZ: i32 = 1_000;
+
+/// EDID refresh values are measured millihertz and routinely differ
+/// from their marketing integer by one or two millihertz. Match the
+/// nearest advertised timing, but never round a request to a visibly
+/// different refresh rate.
+pub(crate) fn refresh_matches(advertised: i32, requested: i32) -> bool {
+    requested == 0 || advertised.abs_diff(requested) <= MODE_REFRESH_TOLERANCE_MHZ as u32
+}
+
+fn resolve_monitor_mode(output: &Output, modes: &[Mode], request: &str) -> Option<usize> {
+    if modes.is_empty() {
+        return None;
+    }
+    let request = request.trim().to_ascii_lowercase();
+    let preferred = output.preferred_mode().unwrap_or(modes[0]);
+    let preferred_index = || {
+        modes
+            .iter()
+            .position(|mode| mode.size == preferred.size && mode.refresh == preferred.refresh)
+            .unwrap_or(0)
+    };
+    if request.is_empty() || request == "preferred" {
+        return Some(preferred_index());
+    }
+    if request == "highrr" {
+        return modes
+            .iter()
+            .enumerate()
+            .filter(|(_, mode)| mode.size == preferred.size)
+            .max_by_key(|(_, mode)| mode.refresh)
+            .map(|(index, _)| index);
+    }
+    if request == "highres" {
+        return modes
+            .iter()
+            .enumerate()
+            .max_by_key(|(_, mode)| (i64::from(mode.size.w) * i64::from(mode.size.h), mode.refresh))
+            .map(|(index, _)| index);
+    }
+
+    let (size_part, refresh_part) = request.split_once('@').map_or((request.as_str(), None), |(size, rate)| {
+        (size, Some(rate))
+    });
+    let (width, height) = if size_part == "preferred" {
+        (preferred.size.w, preferred.size.h)
+    } else {
+        let (width, height) = size_part.split_once('x')?;
+        (width.parse::<i32>().ok()?, height.parse::<i32>().ok()?)
+    };
+    let requested_refresh = refresh_part.and_then(|rate| rate.parse::<f64>().ok()).and_then(|rate| {
+        (rate.is_finite() && rate > 0.0 && rate <= f64::from(i32::MAX) / 1000.0)
+            .then_some((rate * 1000.0).round() as i32)
+    });
+    if refresh_part.is_some() && requested_refresh.is_none() {
+        return None;
+    }
+    let candidate = modes
+        .iter()
+        .enumerate()
+        .filter(|(_, mode)| mode.size.w == width && mode.size.h == height)
+        .min_by_key(|(_, mode)| requested_refresh.map_or(i32::MAX - mode.refresh, |rate| mode.refresh.abs_diff(rate) as i32));
+    match (candidate, requested_refresh) {
+        (Some((index, mode)), Some(rate)) if refresh_matches(mode.refresh, rate) => Some(index),
+        (Some((index, _)), None) => Some(index),
+        _ => None,
+    }
+}
+
+fn monitor_transform(extra: &[String]) -> Result<Transform, &str> {
+    if extra.is_empty() {
+        return Ok(Transform::Normal);
+    }
+    if extra.len() != 2 || !extra[0].eq_ignore_ascii_case("transform") {
+        return Err(extra.first().map(String::as_str).unwrap_or("extra field"));
+    }
+    match extra[1].trim() {
+        "0" => Ok(Transform::Normal),
+        "1" => Ok(Transform::_90),
+        "2" => Ok(Transform::_180),
+        "3" => Ok(Transform::_270),
+        _ => Err(extra[1].as_str()),
+    }
+}
+
+pub(crate) fn transform_number(transform: Transform) -> i32 {
+    match transform {
+        Transform::Normal => 0,
+        Transform::_90 => 1,
+        Transform::_180 => 2,
+        Transform::_270 => 3,
+        Transform::Flipped => 4,
+        Transform::Flipped90 => 5,
+        Transform::Flipped180 => 6,
+        Transform::Flipped270 => 7,
+    }
 }
 
 /// Mirrors a DRM connector delta into every positional output ledger.
@@ -1773,18 +1983,25 @@ pub(crate) fn apply_connector_hotplug(
         .iter()
         .map(|entry| OutputSetup {
             output: entry.output.clone(),
+            identity: entry.identity.clone(),
+            serial: entry.serial.clone(),
             position: entry.position,
             size: entry.size,
+            transform: entry.transform,
+            requested_mode: None,
             modes: entry.modes.clone(),
         })
         .collect();
     let scales = apply_monitor_rules(&mut setups, &session.monitor_rules, comp.ui_scale as f64);
+    crate::session::apply_output_setups(&mut comp.graphics, &mut setups);
     for ((entry, setup), scale) in comp.outputs.iter_mut().zip(setups).zip(scales) {
         entry.position = setup.position;
+        entry.size = setup.size;
+        entry.transform = setup.transform;
         entry.scale = scale;
         entry.output.change_current_state(
             None,
-            None,
+            matches!(comp.graphics, Graphics::Session(_)).then_some(entry.transform),
             Some(advertised_output_scale(scale as f32)),
             Some((entry.position.x, entry.position.y).into()),
         );
@@ -1799,6 +2016,7 @@ pub(crate) fn apply_connector_hotplug(
         .map(|(index, entry)| MonitorInfo {
             geometry: Rect::new(entry.position, entry.size),
             name: entry.output.name(),
+            identity: entry.identity.clone(),
             primary: index == 0,
         })
         .collect();
@@ -1809,7 +2027,7 @@ pub(crate) fn apply_connector_hotplug(
         backend.monitor_scales = monitor_scales;
         backend.output_size = union_size(&backend.monitors);
         backend.pending_resize = Some(backend.output_size);
-        backend.damage = true;
+        backend.mark_damaged();
         backend.layer_layout_dirty = true;
         backend.idle_policy_dirty = true;
     }
@@ -2238,11 +2456,15 @@ impl Compositor {
     }
 
     pub(crate) fn dispatch_pending(&mut self) {
+        let dispatch_span = tracing::info_span!("dispatch_pass");
+        let _dispatch_guard = dispatch_span.enter();
         let dispatch_started = Instant::now();
         self.apply_pending_keyboard();
-        crate::session::service_connector_hotplug(self);
+        tracing::debug_span!("dispatch_phase", phase = "connector_hotplug")
+            .in_scope(|| crate::session::service_connector_hotplug(self));
         let phase_started = Instant::now();
-        crate::input::tick_repeating_binding(self);
+        tracing::debug_span!("dispatch_phase", phase = "input")
+            .in_scope(|| crate::input::tick_repeating_binding(self));
         // Consecutive `PointerMotion` events coalesce to the most
         // recent one — same rationale as the X11 loop: during a fast
         // drag every intermediate position is stale by the time it
@@ -2397,6 +2619,7 @@ impl Compositor {
         self.dismiss_popups_after_parent_resize();
         self.popups.cleanup();
         self.wm.backend_mut().reconcile_popup_roots();
+        self.reconcile_cursor_visibility();
         self.core_protocols.sweep_activation_tokens(Instant::now());
         self.apply_pending_focus();
         // Beside the focus intent and for the same reason: a drag that
@@ -2604,6 +2827,26 @@ impl Compositor {
         // door never opens without CHONKSTEP_TEST_SOCKET).
         crate::test_door::after_frame(self);
         self.frame_stats.record_dispatch(dispatch_started.elapsed());
+    }
+
+    /// Restores a cursor hidden on behalf of a client that has gone
+    /// away without running its cleanup command. The compatibility
+    /// socket is one-shot, so ownership follows the focused Wayland
+    /// surface rather than the short-lived `hyprctl` process.
+    fn reconcile_cursor_visibility(&mut self) {
+        let owner_died = self
+            .wm
+            .backend()
+            .cursor_hidden_owner
+            .as_ref()
+            .is_some_and(|owner| !owner.is_alive());
+        if owner_died {
+            let backend = self.wm.backend_mut();
+            backend.cursor_hidden = false;
+            backend.cursor_hidden_owner = None;
+            backend.mark_damaged();
+            tracing::info!("restored cursor after the client that hid it disconnected");
+        }
     }
 
     /// Dismiss popup trees whose native parent changed size.
@@ -3167,7 +3410,7 @@ impl Compositor {
         // even while only a single output can resize.
         backend.output_size = union_size(&backend.monitors);
         backend.pending_resize = Some(backend.output_size);
-        backend.damage = true;
+        backend.mark_damaged();
         self.layer_shell.needs_arrange = true;
     }
 
@@ -3199,16 +3442,13 @@ impl Compositor {
                 MonitorOutput {
                     make: properties.make,
                     model: properties.model,
-                    // No connector serial reaches this compositor. Left
-                    // empty rather than filled with the model again:
-                    // an empty string is a readable "not known", a
-                    // duplicated model is a wrong answer.
-                    serial: String::new(),
+                    serial: entry.serial.clone(),
                     refresh_millihertz: entry
                         .output
                         .current_mode()
                         .and_then(|mode| u32::try_from(mode.refresh).ok())
                         .unwrap_or(0),
+                    transform: transform_number(entry.transform),
                     modes: entry
                         .modes
                         .iter()
@@ -3720,7 +3960,16 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
         // multi-monitor path rather than a path of its own.
         (
             Graphics::Winit(Box::new(winit_backend)),
-            vec![OutputSetup { output, position: Point::new(0, 0), size, modes: vec![mode] }],
+            vec![OutputSetup {
+                output,
+                identity: None,
+                serial: String::new(),
+                position: Point::new(0, 0),
+                size,
+                transform: Transform::Normal,
+                requested_mode: None,
+                modes: vec![mode],
+            }],
         )
     } else {
         tracing::info!("session backend: taking over the DRM device and input");
@@ -3729,6 +3978,7 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
     };
     let configured_scale = chonk_shell::startup::read_scale_factor(config.scale) as f64;
     let monitor_scales = apply_monitor_rules(&mut output_setups, &config.monitor_rules, configured_scale);
+    crate::session::apply_output_setups(&mut graphics, &mut output_setups);
     let initial_layout: Vec<(Point, Size)> = output_setups.iter().map(|setup| (setup.position, setup.size)).collect();
     crate::session::sync_positions(&mut graphics, &initial_layout);
     let mut outputs: Vec<OutputEntry> =
@@ -3746,6 +3996,7 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
         .map(|(index, entry)| MonitorInfo {
             geometry: Rect { pos: entry.position, size: entry.size },
             name: entry.output.name(),
+            identity: entry.identity.clone(),
             primary: index == 0,
         })
         .collect();
@@ -3950,6 +4201,7 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
     // `WindowManager::new` takes ownership — the exact construction
     // order the X11 binary uses, for the exact same borrow reason.
     let mut backend = WaylandBackend::new(display_handle.clone(), monitors, scale);
+    backend.graphics_diagnostics = crate::session::graphics_diagnostics(&graphics);
     backend.monitor_scales = effective_monitor_scales;
     backend.repeat_delay = std::time::Duration::from_millis(repeat_delay as u64);
     backend.repeat_rate = repeat_rate as u32;
@@ -4629,6 +4881,7 @@ mod tests {
         MonitorInfo {
             geometry: Rect { pos: Point::new(x, y), size: Size::new(w, h) },
             name: format!("test-{x}x{y}"),
+            identity: None,
             primary: x == 0 && y == 0,
         }
     }
@@ -4739,7 +4992,16 @@ mod tests {
         let mode = Mode { size: smithay::utils::Size::from((size.w as i32, size.h as i32)), refresh: 60_000 };
         output.change_current_state(Some(mode), None, None, Some((0, 0).into()));
         output.set_preferred(mode);
-        OutputSetup { output, position, size, modes: vec![mode] }
+        OutputSetup {
+            output,
+            identity: None,
+            serial: String::new(),
+            position,
+            size,
+            transform: Transform::Normal,
+            requested_mode: None,
+            modes: vec![mode],
+        }
     }
 
     fn monitor_rule(
@@ -4775,14 +5037,70 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_monitor_fields_refuse_the_whole_line() {
+    fn monitor_description_rule_follows_the_panel_instead_of_the_port() {
+        let description = "Dell Inc. DELL U2720Q ABC123";
+        let mut panel = output_setup("DP-7", (600, 340), Size::new(3840, 2160), Point::new(1920, 0));
+        panel.identity = Some(description.to_string());
+        panel.serial = "ABC123".to_string();
+        let mut setups = vec![
+            output_setup("eDP-1", (280, 160), Size::new(1920, 1080), Point::new(0, 0)),
+            panel,
+        ];
+        let rules = vec![
+            monitor_rule("", "preferred", "auto", "1", &[]),
+            monitor_rule(&format!("desc:{description}"), "preferred", "0x0", "2", &[]),
+        ];
+
+        let scales = apply_monitor_rules(&mut setups, &rules, 1.0);
+        assert_eq!(scales, vec![1.0, 2.0]);
+        assert_eq!(setups[1].position, Point::new(0, 0));
+    }
+
+    #[test]
+    fn monitor_rotation_is_applied_as_part_of_the_whole_line() {
+        let mut setups = vec![output_setup("DP-1", (600, 340), Size::new(1920, 1080), Point::new(77, 88))];
+        let rules = vec![monitor_rule("DP-1", "preferred", "0x0", "2", &["transform", "1"])];
+        let scales = apply_monitor_rules(&mut setups, &rules, 1.25);
+        assert_eq!(scales, vec![2.0]);
+        assert_eq!(setups[0].position, Point::new(0, 0));
+        assert_eq!(setups[0].size, Size::new(1080, 1920));
+        assert_eq!(setups[0].transform, Transform::_90);
+        assert_eq!(setups[0].requested_mode, Some(0));
+    }
+
+    #[test]
+    fn unsupported_monitor_fields_still_refuse_the_whole_line() {
         let original = Point::new(77, 88);
         let mut setups = vec![output_setup("DP-1", (600, 340), Size::new(1920, 1080), original)];
-        let rules = vec![monitor_rule("DP-1", "preferred", "0x0", "2", &["transform", "1"])];
+        let rules = vec![monitor_rule("DP-1", "preferred", "0x0", "2", &["cm", "srgb"])];
         let scales = apply_monitor_rules(&mut setups, &rules, 1.25);
         assert_eq!(scales, vec![1.25]);
         assert_eq!(setups[0].position, original, "position was not partially applied");
         assert_eq!(setups[0].size, Size::new(1920, 1080));
+        assert_eq!(setups[0].transform, Transform::Normal);
+        assert_eq!(setups[0].requested_mode, None);
+    }
+
+    #[test]
+    fn explicit_monitor_modes_select_the_nearest_advertised_timing() {
+        use smithay::output::Mode;
+
+        let mut setup = output_setup("DP-1", (600, 340), Size::new(1920, 1080), Point::new(0, 0));
+        setup.modes.extend([
+            Mode { size: (2560, 1440).into(), refresh: 60_000 },
+            Mode { size: (2560, 1440).into(), refresh: 143_999 },
+            Mode { size: (3840, 2160).into(), refresh: 59_940 },
+        ]);
+        let mut setups = vec![setup];
+        let rules = vec![monitor_rule("DP-1", "2560x1440@144", "auto", "1", &[])];
+        assert_eq!(apply_monitor_rules(&mut setups, &rules, 1.0), vec![1.0]);
+        assert_eq!(setups[0].size, Size::new(2560, 1440));
+        assert_eq!(setups[0].requested_mode, Some(2));
+
+        let rules = vec![monitor_rule("DP-1", "highres", "auto", "1", &[])];
+        apply_monitor_rules(&mut setups, &rules, 1.0);
+        assert_eq!(setups[0].size, Size::new(3840, 2160));
+        assert_eq!(setups[0].requested_mode, Some(3));
     }
 
     #[test]

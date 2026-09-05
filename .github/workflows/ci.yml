@@ -60,6 +60,7 @@ jobs:
             packaging/arch/PKGBUILD \
             packaging/arch/PKGBUILD-release \
             scripts/install.sh \
+            scripts/chonkstep-bugreport \
             scripts/omarchy-install-desktop-chonkstep \
             scripts/omarchy-remove-desktop-chonkstep \
             scripts/test-omarchy-install.sh \
@@ -67,6 +68,7 @@ jobs:
             scripts/verify-install.sh \
             scripts/wayland-session.sh
           shellcheck \
+            scripts/chonkstep-bugreport \
             scripts/omarchy-install-desktop-chonkstep \
             scripts/omarchy-remove-desktop-chonkstep \
             scripts/test-omarchy-install.sh \

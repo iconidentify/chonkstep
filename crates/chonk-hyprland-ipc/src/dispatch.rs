@@ -80,7 +80,13 @@ pub enum Action {
     /// Scale in protocol units (120 == 1.0), avoiding floating-point
     /// equality in an action that is compared in conformance tests.
     SetMonitorScale { output: String, scale_120: u32 },
+    /// Hide or restore the compositor-owned pointer image. This is a
+    /// live session property used by Omarchy's screensaver, not a
+    /// persisted Hyprland configuration mutation.
+    SetCursorHidden(bool),
     ReloadConfig,
+    SetDiagnostic { name: String, enabled: bool },
+    SetLogFilter(String),
     /// The requested window is already floating; applying this still
     /// validates that the target survived until the action ran.
     ConfirmFloating(u64),
@@ -396,7 +402,17 @@ pub fn parse_eval(source: &str, snapshot: &Snapshot) -> Outcome {
         }
         return Outcome::Run(Action::SetMonitorScale { output, scale_120: (scale * 120.0).round() as u32 });
     }
-    if source.starts_with("hl.config(") {
+    if let Some(body) = source.strip_prefix("hl.config(").and_then(|value| value.strip_suffix(')')) {
+        if let Some(cursor) = lua_table_field(body, "cursor") {
+            if let Some(value) = lua_field(cursor, "invisible") {
+                return match parse_bool(&value) {
+                    Some(hidden) => Outcome::Run(Action::SetCursorHidden(hidden)),
+                    None => Outcome::Unsupported(
+                        "hl.config cursor.invisible requires true or false".to_string(),
+                    ),
+                };
+            }
+        }
         return Outcome::Unsupported("hl.config property mutation is not supported by chonkstep".to_string());
     }
     if source.starts_with("hl.device(") {
@@ -406,6 +422,29 @@ pub fn parse_eval(source: &str, snapshot: &Snapshot) -> Outcome {
         return Outcome::Unsupported("chonkstep is floating-only and cannot apply a tiled workspace layout".to_string());
     }
     Outcome::Unknown(format!("unknown eval expression {source:?}"))
+}
+
+/// Parse the one live `keyword` mutation chonkstep deliberately
+/// supports. The broad namespace remains a refusal; this exception is
+/// the exact fallback shipped by Omarchy's screensaver.
+pub fn parse_keyword(source: &str) -> Outcome {
+    let mut fields = source.split_whitespace();
+    match (fields.next(), fields.next(), fields.next()) {
+        (Some("cursor:invisible"), Some(value), None) => match parse_bool(value) {
+            Some(hidden) => Outcome::Run(Action::SetCursorHidden(hidden)),
+            None => Outcome::Unsupported(
+                "keyword cursor:invisible requires true or false".to_string(),
+            ),
+        },
+        _ => Outcome::Unsupported(
+            "keyword does not mutate chonkstep's configuration. \
+             chonkstep reads ~/.config/hypr and re-reads it within a second of an edit, \
+             so edit the file instead, or use `hyprctl eval hl.monitor({...})` for a live \
+             scale change. `keyword monitor NAME,disable` cannot work at all: chonkstep \
+             drives every connected output and has no disable path."
+                .to_string(),
+        ),
+    }
 }
 
 fn selected_window<'a>(selector: &str, snapshot: &'a Snapshot) -> Option<&'a Window> {
@@ -506,6 +545,53 @@ fn lua_field(body: &str, key: &str) -> Option<String> {
         });
     }
     None
+}
+
+/// Pull the contents of `key = { ... }` out of a Lua table literal.
+/// Only balanced braces are recognized; malformed or non-table fields
+/// are left to the caller's named refusal.
+fn lua_table_field<'a>(body: &'a str, key: &str) -> Option<&'a str> {
+    for (at, _) in body.match_indices(key) {
+        if at > 0 {
+            let before = body[..at].chars().next_back().unwrap_or(' ');
+            if before.is_alphanumeric() || before == '_' || before == '.' {
+                continue;
+            }
+        }
+        let after_key = &body[at + key.len()..];
+        if after_key.chars().next().is_some_and(|after| after.is_alphanumeric() || after == '_') {
+            continue;
+        }
+        let Some(rest) = after_key.trim_start().strip_prefix('=') else {
+            continue;
+        };
+        let rest = rest.trim_start();
+        let Some(table) = rest.strip_prefix('{') else {
+            continue;
+        };
+        let mut depth = 1_u32;
+        for (index, character) in table.char_indices() {
+            match character {
+                '{' => depth = depth.saturating_add(1),
+                '}' => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        return Some(&table[..index]);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    None
+}
+
+fn parse_bool(value: &str) -> Option<bool> {
+    match value.trim() {
+        "true" | "1" | "on" | "yes" => Some(true),
+        "false" | "0" | "off" | "no" => Some(false),
+        _ => None,
+    }
 }
 
 /// The first bare string literal in a Lua argument list.

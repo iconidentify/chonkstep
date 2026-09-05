@@ -90,7 +90,8 @@ echo "Installing dependencies (sudo)..."
 # The last two lines are the Wayland half's build and runtime needs,
 # and they are not optional even for an X11-only user: the workspace
 # build below compiles wm-wayland on any Linux host, and that links
-# against every one of them.
+# against every one of them. hwdata supplies the PNP manufacturer names
+# used to make EDID descriptions match Hyprland's `desc:` selectors.
 #
 # Nested and session backends alike: libxkbcommon (keyboard layouts),
 # libglvnd/mesa (EGL/GLES for the compositor's renderer, and libgbm for
@@ -133,7 +134,7 @@ sudo pacman -S --needed --noconfirm \
     foot picom wireplumber \
     ttf-dejavu gsfonts $jb_font noto-fonts \
     libxkbcommon libglvnd mesa xorg-xwayland \
-    libdrm libinput systemd-libs seatd \
+    libdrm libinput systemd-libs seatd hwdata \
     pipewire xdg-desktop-portal xdg-desktop-portal-wlr xdg-desktop-portal-gtk \
     uwsm
 
@@ -278,7 +279,7 @@ if [ ! -e "$config" ]; then
     echo "Seeded ${config} (all defaults, fully commented)."
 fi
 
-# The two tools a user reaches for by name, put on PATH the same way
+# The tools a user reaches for by name, put on PATH the same way
 # the session entries were: as links back into this checkout, so
 # scripts/update.sh keeps them current with nothing else to do.
 # chonk-get is a script and lives in scripts/; omarchy-export-themes is
@@ -290,6 +291,7 @@ fi
 bin="$HOME/.local/bin"
 install -d "$bin"
 ln -sfn "${repo}/scripts/chonk-get" "$bin/chonk-get"
+ln -sfn "${repo}/scripts/chonkstep-bugreport" "$bin/chonkstep-bugreport"
 ln -sfn "${repo}/target/release/omarchy-export-themes" "$bin/omarchy-export-themes"
 # chonk-netjoin is the odd one out here: nobody types it. It is the
 # wifi passphrase dialog the LNK panel spawns when someone clicks a

@@ -52,6 +52,7 @@ depends=(
   'libinput'
   'seatd'
   'systemd-libs'
+  'hwdata'           # PNP manufacturer names for stable EDID descriptions
   'wayland'
   'xorg-xwayland'
   'foot'
@@ -141,6 +142,7 @@ package() {
   install -Dm755 scripts/reload.sh "$pkgdir/usr/lib/chonkstep/reload.sh"
   install -Dm755 scripts/restart.sh "$pkgdir/usr/lib/chonkstep/restart.sh"
   install -Dm755 scripts/verify-install.sh "$pkgdir/usr/lib/chonkstep/verify-install.sh"
+  install -Dm755 scripts/chonkstep-bugreport "$pkgdir/usr/bin/chonkstep-bugreport"
 
   # Session entries, one per stack, so a login manager offers both.
   # TryExec is deliberate and package-only: greeters that verify it
@@ -222,6 +224,7 @@ DESKTOP
   install -Dm644 docs/appearance.md -t "$pkgdir/usr/share/doc/$pkgname"
   install -Dm644 docs/control-socket.md -t "$pkgdir/usr/share/doc/$pkgname"
   install -Dm644 docs/memory.md -t "$pkgdir/usr/share/doc/$pkgname"
+  install -Dm644 docs/logging.md -t "$pkgdir/usr/share/doc/$pkgname"
   install -Dm644 README.md CHANGELOG.md -t "$pkgdir/usr/share/doc/$pkgname"
 
   for plugin in omarchy/plugins/*/; do

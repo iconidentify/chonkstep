@@ -32,6 +32,10 @@ use wayland_protocols::xdg::shell::client::{
     xdg_toplevel::XdgToplevel,
     xdg_wm_base::{self, XdgWmBase},
 };
+use wayland_protocols_wlr::layer_shell::v1::client::{
+    zwlr_layer_shell_v1::{Layer, ZwlrLayerShellV1},
+    zwlr_layer_surface_v1::ZwlrLayerSurfaceV1,
+};
 
 fn fatal(message: &str) -> ! {
     eprintln!("chonk-protocol-torture: {message}");
@@ -49,6 +53,7 @@ struct Probe {
     subcompositor: Option<WlSubcompositor>,
     shm: Option<wl_shm::WlShm>,
     wm_base: Option<XdgWmBase>,
+    layer_shell: Option<ZwlrLayerShellV1>,
     configured: bool,
 }
 
@@ -69,6 +74,9 @@ impl Dispatch<wl_registry::WlRegistry, ()> for Probe {
                 }
                 "wl_shm" => probe.shm = Some(registry.bind(name, version.min(1), qh, ())),
                 "xdg_wm_base" => probe.wm_base = Some(registry.bind(name, version.min(3), qh, ())),
+                "zwlr_layer_shell_v1" => {
+                    probe.layer_shell = Some(registry.bind(name, version.min(4), qh, ()))
+                }
                 _ => {}
             }
         }
@@ -132,6 +140,8 @@ ignore_events!(
     wl_shm::WlShm,
     wl_shm_pool::WlShmPool,
     wl_buffer::WlBuffer,
+    ZwlrLayerShellV1,
+    ZwlrLayerSurfaceV1,
 );
 
 /// One opaque buffer, the honest part of every strategy.
@@ -257,6 +267,23 @@ fn main() {
                 surface.commit();
                 surface.destroy();
             }
+        }
+        // The protocol size is unsigned while Smithay's internal
+        // geometry is signed. This exact request used to wrap through
+        // a lossy cast and panic the compositor in a debug build.
+        "layer-size-overflow" => {
+            let layer_shell = probe.layer_shell.clone().unwrap_or_else(|| fatal("no zwlr_layer_shell_v1"));
+            let surface = compositor.create_surface(&qh, ());
+            let layer = layer_shell.get_layer_surface(
+                &surface,
+                None,
+                Layer::Top,
+                "torture-layer-size".to_string(),
+                &qh,
+                (),
+            );
+            layer.set_size(u32::MAX, u32::MAX);
+            surface.commit();
         }
         other => fatal(&format!("unknown strategy {other:?}")),
     }

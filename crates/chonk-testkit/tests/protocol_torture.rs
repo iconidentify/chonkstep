@@ -34,6 +34,7 @@ const STRATEGIES: &[(&str, &str)] = &[
     // The ledgers, and the role lifecycle that outlives its hooks.
     ("object-flood", "8192"),
     ("role-churn", "256"),
+    ("layer-size-overflow", "1"),
 ];
 
 /// The same strategies at a tenth of the size, for the soak.
@@ -50,6 +51,7 @@ const SOAK_STRATEGIES: &[(&str, &str)] = &[
     ("deep-subsurface", "256"),
     ("object-flood", "512"),
     ("role-churn", "64"),
+    ("layer-size-overflow", "1"),
 ];
 
 /// The compositor's resident set in kB, read the way `memory.rs` reads

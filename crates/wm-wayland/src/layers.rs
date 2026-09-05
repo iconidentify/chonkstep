@@ -76,15 +76,22 @@
 
 use smithay::backend::renderer::utils::with_renderer_surface_state;
 use smithay::desktop::{find_popup_root_surface, PopupKind};
-use smithay::delegate_layer_shell;
 use smithay::output::Output;
+use smithay::reexports::wayland_protocols_wlr::layer_shell::v1::server::{
+    zwlr_layer_shell_v1::ZwlrLayerShellV1,
+    zwlr_layer_surface_v1::{self, ZwlrLayerSurfaceV1},
+};
+use smithay::reexports::wayland_server::{
+    backend::ClientId, Client, DataInit, Dispatch, DisplayHandle, Resource,
+};
 use smithay::reexports::wayland_server::protocol::wl_output::WlOutput;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::utils::SERIAL_COUNTER;
 use smithay::wayland::compositor::{add_pre_commit_hook, with_states};
 use smithay::wayland::shell::wlr_layer::{
     Anchor, ExclusiveZone, KeyboardInteractivity, Layer, LayerSurface, LayerSurfaceCachedState, Margins,
-    WlrLayerShellHandler, WlrLayerShellState, LAYER_SURFACE_ROLE,
+    WlrLayerShellGlobalData, WlrLayerShellHandler, WlrLayerShellState,
+    WlrLayerSurfaceUserData, LAYER_SURFACE_ROLE,
 };
 use smithay::wayland::shell::xdg::PopupSurface;
 
@@ -249,10 +256,19 @@ pub(crate) fn exclusive_edge(anchor: Anchor) -> Option<Anchor> {
 pub(crate) fn shrink(area: Rect, insets: EdgeInsets) -> Rect {
     let left = insets.left.max(0);
     let top = insets.top.max(0);
-    let width = (area.size.w as i32 - left - insets.right.max(0)).max(0);
-    let height = (area.size.h as i32 - top - insets.bottom.max(0)).max(0);
+    let width = (area.size.w as i32)
+        .saturating_sub(left)
+        .saturating_sub(insets.right.max(0))
+        .max(0);
+    let height = (area.size.h as i32)
+        .saturating_sub(top)
+        .saturating_sub(insets.bottom.max(0))
+        .max(0);
     Rect::new(
-        Point::new(area.pos.x + left.min(area.size.w as i32), area.pos.y + top.min(area.size.h as i32)),
+        Point::new(
+            area.pos.x.saturating_add(left.min(area.size.w as i32)),
+            area.pos.y.saturating_add(top.min(area.size.h as i32)),
+        ),
         Size::new(width as u32, height as u32),
     )
 }
@@ -273,9 +289,12 @@ fn axis_place(
     margin_far: i32,
 ) -> i32 {
     match (near, far) {
-        (true, false) => area_start + margin_near,
-        (false, true) => area_start + area_len - margin_far - len,
-        _ => area_start + (area_len - len) / 2,
+        (true, false) => area_start.saturating_add(margin_near),
+        (false, true) => area_start
+            .saturating_add(area_len)
+            .saturating_sub(margin_far)
+            .saturating_sub(len),
+        _ => area_start.saturating_add(area_len.saturating_sub(len) / 2),
     }
 }
 
@@ -288,7 +307,10 @@ fn axis_size(requested: i32, area_len: i32, margin_near: i32, margin_far: i32) -
     if requested > 0 {
         requested
     } else {
-        (area_len - margin_near - margin_far).max(1)
+        area_len
+            .saturating_sub(margin_near)
+            .saturating_sub(margin_far)
+            .max(1)
     }
 }
 
@@ -296,10 +318,12 @@ fn axis_size(requested: i32, area_len: i32, margin_near: i32, margin_far: i32) -
 /// size (stretch axes filled from the area), then anchors it. `size`
 /// and `margins` are already physical.
 pub(crate) fn anchored_rect(area: Rect, size: Size, anchor: Anchor, margins: EdgeInsets) -> Rect {
+    let width = i32::try_from(size.w).unwrap_or(i32::MAX);
+    let height = i32::try_from(size.h).unwrap_or(i32::MAX);
     let x = axis_place(
         area.pos.x,
         area.size.w as i32,
-        size.w as i32,
+        width,
         anchor.contains(Anchor::LEFT),
         anchor.contains(Anchor::RIGHT),
         margins.left,
@@ -308,7 +332,7 @@ pub(crate) fn anchored_rect(area: Rect, size: Size, anchor: Anchor, margins: Edg
     let y = axis_place(
         area.pos.y,
         area.size.h as i32,
-        size.h as i32,
+        height,
         anchor.contains(Anchor::TOP),
         anchor.contains(Anchor::BOTTOM),
         margins.top,
@@ -335,10 +359,14 @@ pub(crate) fn resolved_size(requested: Size, area: Rect, margins: EdgeInsets) ->
 pub(crate) fn reserve(insets: &mut EdgeInsets, edge: Anchor, zone: i32, margins: EdgeInsets) {
     let zone = zone.max(0);
     match edge {
-        Anchor::TOP => insets.top += zone + margins.top.max(0),
-        Anchor::BOTTOM => insets.bottom += zone + margins.bottom.max(0),
-        Anchor::LEFT => insets.left += zone + margins.left.max(0),
-        Anchor::RIGHT => insets.right += zone + margins.right.max(0),
+        Anchor::TOP => insets.top = insets.top.saturating_add(zone.saturating_add(margins.top.max(0))),
+        Anchor::BOTTOM => {
+            insets.bottom = insets.bottom.saturating_add(zone.saturating_add(margins.bottom.max(0)))
+        }
+        Anchor::LEFT => insets.left = insets.left.saturating_add(zone.saturating_add(margins.left.max(0))),
+        Anchor::RIGHT => {
+            insets.right = insets.right.saturating_add(zone.saturating_add(margins.right.max(0)))
+        }
         _ => {}
     }
 }
@@ -350,8 +378,16 @@ pub(crate) fn reserve(insets: &mut EdgeInsets, edge: Anchor, zone: i32, margins:
 fn intersect(a: Rect, b: Rect) -> Option<Rect> {
     let left = a.pos.x.max(b.pos.x);
     let top = a.pos.y.max(b.pos.y);
-    let right = (a.pos.x + a.size.w as i32).min(b.pos.x + b.size.w as i32);
-    let bottom = (a.pos.y + a.size.h as i32).min(b.pos.y + b.size.h as i32);
+    let right = a
+        .pos
+        .x
+        .saturating_add(a.size.w as i32)
+        .min(b.pos.x.saturating_add(b.size.w as i32));
+    let bottom = a
+        .pos
+        .y
+        .saturating_add(a.size.h as i32)
+        .min(b.pos.y.saturating_add(b.size.h as i32));
     if right <= left || bottom <= top {
         return None;
     }
@@ -575,7 +611,7 @@ fn plan_surface(
     record.interactivity = cached.keyboard_interactivity;
     if record.geometry != geometry {
         record.geometry = geometry;
-        backend.damage = true;
+        backend.mark_damaged();
     }
     if layer_changed {
         // `declined` is a function of layer + namespace, so a client
@@ -954,6 +990,7 @@ impl WlrLayerShellHandler for Compositor {
         &mut self.layer_shell.state
     }
 
+    #[tracing::instrument(name = "new_layer_surface", skip_all)]
     fn new_layer_surface(
         &mut self,
         surface: LayerSurface,
@@ -1022,7 +1059,59 @@ impl WlrLayerShellHandler for Compositor {
     }
 }
 
-delegate_layer_shell!(Compositor);
+// Smithay 0.7 casts the protocol's unsigned size directly to `i32`
+// before constructing its geometry type. Values above `i32::MAX`
+// therefore become negative and trip a compositor-side debug assert.
+// Keep Smithay's implementation for the complete protocol, but guard
+// that one lossy conversion at the wire boundary and kill only the
+// offending client with the protocol's own `invalid_size` error.
+impl Dispatch<ZwlrLayerSurfaceV1, WlrLayerSurfaceUserData> for Compositor {
+    fn request(
+        state: &mut Self,
+        client: &Client,
+        resource: &ZwlrLayerSurfaceV1,
+        request: zwlr_layer_surface_v1::Request,
+        data: &WlrLayerSurfaceUserData,
+        display_handle: &DisplayHandle,
+        data_init: &mut DataInit<'_, Self>,
+    ) {
+        match request {
+            zwlr_layer_surface_v1::Request::SetSize { width, height }
+                if width > i32::MAX as u32 || height > i32::MAX as u32 =>
+            {
+                resource.post_error(
+                    zwlr_layer_surface_v1::Error::InvalidSize,
+                    format!("layer surface size {width}x{height} exceeds the compositor geometry limit"),
+                );
+            }
+            request => <WlrLayerShellState as Dispatch<
+                ZwlrLayerSurfaceV1,
+                WlrLayerSurfaceUserData,
+                Compositor,
+            >>::request(state, client, resource, request, data, display_handle, data_init),
+        }
+    }
+
+    fn destroyed(
+        state: &mut Self,
+        client_id: ClientId,
+        resource: &ZwlrLayerSurfaceV1,
+        data: &WlrLayerSurfaceUserData,
+    ) {
+        <WlrLayerShellState as Dispatch<
+            ZwlrLayerSurfaceV1,
+            WlrLayerSurfaceUserData,
+            Compositor,
+        >>::destroyed(state, client_id, resource, data);
+    }
+}
+
+smithay::reexports::wayland_server::delegate_dispatch!(Compositor: [
+    ZwlrLayerShellV1: ()
+] => WlrLayerShellState);
+smithay::reexports::wayland_server::delegate_global_dispatch!(Compositor: [
+    ZwlrLayerShellV1: WlrLayerShellGlobalData
+] => WlrLayerShellState);
 
 #[cfg(test)]
 mod tests {
