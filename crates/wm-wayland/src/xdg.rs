@@ -36,7 +36,7 @@
 #[cfg(test)]
 use std::collections::HashMap;
 use std::os::fd::OwnedFd;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use smithay::backend::renderer::utils::{on_commit_buffer_handler, with_renderer_surface_state};
 use smithay::desktop::{find_popup_root_surface, PopupKind};
@@ -50,6 +50,7 @@ use smithay::reexports::wayland_protocols::xdg::xdg_output::zv1::server::{
 use smithay::reexports::wayland_server::protocol::wl_buffer::WlBuffer;
 use smithay::reexports::wayland_server::protocol::wl_output;
 use smithay::reexports::wayland_server::protocol::wl_seat::WlSeat;
+use smithay::reexports::wayland_server::protocol::wl_subcompositor;
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::reexports::wayland_server::{
     Client, DataInit, DisplayHandle, GlobalDispatch, New, Resource,
@@ -84,7 +85,10 @@ use smithay::{
 };
 
 use wm_core::{BackendEvent, NetState, NetStateAction};
-use wm_theme_api::{clamp_client_size, client_size_limit, Point, Rect, ResizeEdge, Size};
+use wm_theme_api::{
+    clamp_client_size, client_size_limit, subsurface_link_exceeds_depth, Point, Rect, ResizeEdge, Size,
+    MAX_SUBSURFACE_DEPTH,
+};
 
 use crate::state::{ClientState, Compositor, ManagedSurface, WaylandBackend, WindowRecord, WlFrameId, WlWindowId};
 #[cfg(test)]
@@ -138,6 +142,111 @@ fn warn_geometry_offset_clamped(surface: &WlSurface, requested: Point, accepted:
             ?requested,
             ?accepted,
             "client-declared xdg window-geometry origin exceeded the desktop coordinate limit; clamping"
+        );
+    }
+}
+
+/// How many `wl_subsurface` links separate this surface from the
+/// deepest leaf *below* it. A surface with no subsurfaces of its own
+/// is 0. Parked in the surface's own data map, so its lifetime is
+/// exactly the surface's, the same discipline as [`MappedMarker`].
+///
+/// This is the half of the depth bound that a check written only
+/// against the parent's distance-to-root cannot see. `wl_subcompositor`
+/// happily builds a chain leaf-first — `get_subsurface(child = S1,
+/// parent = S2)`, then `get_subsurface(child = S2, parent = S3)` — and
+/// on every one of those calls the parent is a fresh root. Recording
+/// what hangs *below* each surface is what makes the check O(1) in the
+/// subtree while still seeing that construction coming.
+///
+/// It is a high-water mark, not a live measurement. Destroying a
+/// `wl_subsurface` unparents its surface, and smithay offers no hook on
+/// that edge, so a former ancestor keeps the height its deepest child
+/// once gave it. The error is always in the safe direction — an
+/// overestimate refuses a link the real tree could have taken — and
+/// reaching it needs a client that repeatedly builds and tears down
+/// chains on the *same* surfaces, at increasing depth, which is not a
+/// shape any toolkit produces.
+#[derive(Default)]
+struct SubsurfaceHeight(AtomicU32);
+
+/// One warning bit per parent surface for a refused subsurface link,
+/// the same shape as [`GeometryClampMarker`]. The refusal is fatal to
+/// the connection, so in practice a client gets exactly one; the bit
+/// keeps that true independently of when smithay decides to call the
+/// hook.
+#[derive(Default)]
+struct SubsurfaceDepthMarker(AtomicBool);
+
+fn subsurface_height(surface: &WlSurface) -> u32 {
+    with_states(surface, |states| {
+        states
+            .data_map
+            .insert_if_missing_threadsafe(SubsurfaceHeight::default);
+        states
+            .data_map
+            .get::<SubsurfaceHeight>()
+            .unwrap()
+            .0
+            .load(Ordering::Relaxed)
+    })
+}
+
+/// Raises a surface's recorded subtree height to at least `height`.
+fn raise_subsurface_height(surface: &WlSurface, height: u32) {
+    with_states(surface, |states| {
+        states
+            .data_map
+            .insert_if_missing_threadsafe(SubsurfaceHeight::default);
+        states
+            .data_map
+            .get::<SubsurfaceHeight>()
+            .unwrap()
+            .0
+            .fetch_max(height, Ordering::Relaxed);
+    });
+}
+
+/// The ancestors of `surface`, nearest first.
+///
+/// Iterative on purpose: this list exists to defend the recursive tree
+/// walks, and reading it with a recursion of its own would be the same
+/// bug one level up. The hard stop is not redundant either — it is what
+/// makes the very first call safe on a tree that predates the bound, and
+/// it errs long: a chain that hits it reports a depth past the ceiling,
+/// so the caller refuses the link rather than accepting an undercount.
+fn ancestor_chain(surface: &WlSurface) -> Vec<WlSurface> {
+    let mut chain = Vec::new();
+    let mut next = get_parent(surface);
+    while let Some(current) = next {
+        next = get_parent(&current);
+        chain.push(current);
+        if chain.len() > MAX_SUBSURFACE_DEPTH as usize {
+            break;
+        }
+    }
+    chain
+}
+
+fn warn_subsurface_depth_refused(surface: &WlSurface, parent_depth: u32, child_height: u32) {
+    let first = with_states(surface, |states| {
+        states
+            .data_map
+            .insert_if_missing_threadsafe(SubsurfaceDepthMarker::default);
+        !states
+            .data_map
+            .get::<SubsurfaceDepthMarker>()
+            .unwrap()
+            .0
+            .swap(true, Ordering::Relaxed)
+    });
+    if first {
+        tracing::warn!(
+            surface = ?surface.id(),
+            parent_depth,
+            child_height,
+            limit = MAX_SUBSURFACE_DEPTH,
+            "client subsurface tree exceeded the compositor's depth limit; refusing the link and disconnecting the client"
         );
     }
 }
@@ -514,6 +623,80 @@ impl CompositorHandler for Compositor {
         // for Omarchy's Quickshell that connection is also the bar and
         // the OSDs. See `lock::install_defunct_lock_role_guard`.
         crate::lock::install_defunct_lock_role_guard(surface);
+    }
+
+    /// The one hook the protocol gives before a subsurface tree can
+    /// grow, and this compositor's only bound on its depth.
+    ///
+    /// smithay calls this from `wl_subcompositor.get_subsurface` after
+    /// `set_parent` has already linked the pair, and `set_parent`
+    /// rejects only self-parenting and cycles. So depth is whatever the
+    /// client says it is, and *every* traversal of the resulting tree
+    /// is recursive — `commit_sync_surface_tree` and
+    /// `is_effectively_sync` on the commit path, `PrivateSurfaceData::map`
+    /// under every helper the renderer, the bounding box, the frame
+    /// callbacks and the presentation feedback use. One commit on a deep
+    /// chain's root walks the whole thing. Running out of stack there is
+    /// a `SIGSEGV` against the guard page: the panic hook in
+    /// `chonkstep-wayland`'s `main` never runs, the teardown in
+    /// `state.rs` never runs, and the supervisor is left with a status
+    /// code and no account of which client did it.
+    ///
+    /// # Why the check is what it is
+    ///
+    /// The link is already made when this runs, so the ceiling is
+    /// enforced by refusing the *client*, not the link — one link past
+    /// the bound is harmless, tens of thousands are not. A protocol
+    /// error is fatal to the connection, and wayland-server stops
+    /// dispatching a killed client's remaining requests (its
+    /// `next_request` returns `EPIPE` on the killed flag), so the rest
+    /// of a flood that arrived in the same read never reaches the tree.
+    /// Nothing else on the desktop notices: one connection dies, the
+    /// session and every other client keep running.
+    ///
+    /// The measured quantity is the longest root-to-leaf path *through
+    /// this link* — the parent's distance to its own root, plus one, plus
+    /// what already hangs below the child ([`SubsurfaceHeight`]). Both
+    /// halves are load-bearing: the cheap way to build a deep chain is
+    /// leaf-first, and a check that counted only the parent's depth
+    /// would read zero on every link of it. That sum is the same number
+    /// for the parent and for every ancestor above it, so this single
+    /// check keeps the invariant "distance-to-root + height ≤
+    /// [`MAX_SUBSURFACE_DEPTH`]" true for every surface in the tree,
+    /// which is what makes the walk up bounded in turn.
+    ///
+    /// # The error object
+    ///
+    /// The request that broke the rule is `wl_subcompositor.get_subsurface`
+    /// and the fitting error is its `bad_parent` — the parent really is
+    /// unusable, because attaching to it would put the tree past the
+    /// ceiling. smithay's hook hands over the two surfaces and not the
+    /// `wl_subcompositor` resource, so the error travels on the child
+    /// surface, the only object of the offending request in reach.
+    /// `wl_display.error` kills the connection whichever object carries
+    /// it, and the message is what a client developer reads.
+    fn new_subsurface(&mut self, surface: &WlSurface, parent: &WlSurface) {
+        let child_height = subsurface_height(surface);
+        let ancestors = ancestor_chain(parent);
+        let parent_depth = ancestors.len() as u32;
+        if subsurface_link_exceeds_depth(parent_depth, child_height) {
+            warn_subsurface_depth_refused(parent, parent_depth, child_height);
+            surface.post_error(
+                wl_subcompositor::Error::BadParent,
+                format!(
+                    "subsurface tree would be {} links deep; this compositor allows {MAX_SUBSURFACE_DEPTH}",
+                    parent_depth.saturating_add(1).saturating_add(child_height)
+                ),
+            );
+            return;
+        }
+        // The child's subtree now hangs one link lower under the parent,
+        // two under its grandparent, and so on. Bounded by the ceiling
+        // this walk just enforced, so it is a handful of steps.
+        raise_subsurface_height(parent, child_height + 1);
+        for (above, ancestor) in ancestors.iter().enumerate() {
+            raise_subsurface_height(ancestor, child_height + 2 + above as u32);
+        }
     }
 
     fn destroyed(&mut self, surface: &WlSurface) {
