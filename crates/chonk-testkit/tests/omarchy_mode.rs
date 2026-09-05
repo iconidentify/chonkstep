@@ -85,7 +85,7 @@ bright_magenta = "#bb9af7"
 /// The root menu the posture produces: a hosted shell, so the
 /// `Omarchy Bar` row is there, and the scratch Omarchy root below
 /// carries no menu definition, so the `Omarchy` submenu is not.
-const HOSTED: RootMenu = RootMenu { omarchy_bar: true, omarchy: false };
+const HOSTED: RootMenu = RootMenu { omarchy_bar: true, omarchy_rows: &[] };
 
 /// The Omarchy root the compositor will find: the QML file the launcher
 /// would hand Quickshell (never read), and a launcher that runs the

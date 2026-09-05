@@ -416,7 +416,15 @@ const ACTION_OMARCHY_BASE: u32 = 1_000_000;
 
 /// The root menu's fixed title — also what a fresh `ShellMenu` is
 /// titled before any session opens.
-const ROOT_MENU_TITLE: &str = "chonkstep";
+///
+/// "Omarchy", not "chonkstep", because that is what this desktop *is*
+/// to the person using it: a replacement desktop environment for
+/// Omarchy, wearing different chrome. The name a user reads on screen
+/// is the desktop they installed. Nothing below the surface is
+/// renamed — crates, log lines, config paths and the session
+/// signature all stay `chonkstep`, because renaming those breaks
+/// existing installs and buys nothing anybody sees.
+const ROOT_MENU_TITLE: &str = "Omarchy";
 
 /// The shared current-choice marker: a leading bullet on the selected
 /// row, matching spaces on every other row so all labels in the column
@@ -438,7 +446,7 @@ pub(crate) fn bullet_label(selected: bool, label: &str) -> String {
 /// category list to drift out of sync with the enum). Within a
 /// cascade, apps keep their index order: `scan_applications` delivers
 /// the flat vec sorted by name, and filtering by category preserves
-/// that, so each cascade is alphabetical for free. "About chonkstep"
+/// that, so each cascade is alphabetical for free. "About"
 /// closes the submenu after every cascade — with an empty index it is
 /// the whole submenu, so Applications never opens onto nothing.
 fn applications_items(apps: &[crate::apps::AppEntry]) -> Vec<MenuItem> {
@@ -455,7 +463,7 @@ fn applications_items(apps: &[crate::apps::AppEntry]) -> Vec<MenuItem> {
     by_category
         .into_iter()
         .map(|(category, entries)| MenuItem::Submenu { label: category.label().to_string(), items: entries })
-        .chain(std::iter::once(MenuItem::Action { label: "About chonkstep".to_string(), action: ACTION_LAUNCH_ABOUT }))
+        .chain(std::iter::once(MenuItem::Action { label: "About".to_string(), action: ACTION_LAUNCH_ABOUT }))
         .collect()
 }
 
@@ -521,35 +529,64 @@ fn root_menu_items(
         }))
         .collect();
 
+    // Two shapes, chosen by whether Omarchy's menu is readable.
+    //
+    // With Omarchy present the root menu *is* Omarchy's menu: its rows
+    // sit at the top level rather than inside a submenu, because this
+    // desktop is a replacement for Omarchy and not a different desktop
+    // hosting it. A user right-clicking the desk should find the menu
+    // they already know.
+    //
+    // Two of this desk's own rows are folded in rather than wrapped.
+    // `Applications` goes first, in the position Omarchy's own `Apps`
+    // row occupies — and it has to, because that row is provider-backed
+    // and `MenuModel::build` skips it (`Skip::Provider`), so promoting
+    // Omarchy's tree alone would leave the desktop with no application
+    // launcher in its menu at all. `Dock` and `Omarchy Bar` go last,
+    // before `Exit`: they are choices about this desk's furniture, and
+    // they have no counterpart in Omarchy's tree.
+    //
+    // What is deliberately *not* carried over is `Theme` and
+    // `Wallpaper`. Omarchy's `style.theme` and `style.background` rows
+    // do survive the filter, they drive `omarchy-theme-set`, and this
+    // compositor already follows the symlink that writes — so offering
+    // a second list beside them is the split theme system this desktop
+    // is trying not to have. chonkstep's own themes reach that one list
+    // by being exported into `~/.config/omarchy/themes` (see
+    // `crate::omarchy_export`), not by getting a menu of their own.
+    if !omarchy.is_empty() {
+        let mut items = vec![
+            MenuItem::Submenu { label: "Applications".to_string(), items: applications_items(apps) },
+            MenuItem::Action { label: "Terminal".to_string(), action: ACTION_LAUNCH_TERMINAL },
+        ];
+        items.extend(omarchy);
+        items.push(MenuItem::Action { label: bullet_label(!dock.is_hidden(), "Dock"), action: ACTION_DOCK });
+        if let Some(bar) = omarchy_bar {
+            items.push(MenuItem::Action {
+                label: bullet_label(!bar.is_hidden(), "Omarchy Bar"),
+                action: ACTION_OMARCHY_BAR,
+            });
+        }
+        items.push(MenuItem::Action { label: "Exit".to_string(), action: ACTION_EXIT });
+        return items;
+    }
+
+    // No Omarchy to read: this desk's own tree, unchanged. A session on
+    // a machine without Omarchy installed still needs a way to pick a
+    // theme, a wallpaper and an application, so the rows the branch
+    // above drops are exactly the rows that must survive here.
     let mut items = vec![
         MenuItem::Action { label: "Terminal".to_string(), action: ACTION_LAUNCH_TERMINAL },
         MenuItem::Submenu { label: "Applications".to_string(), items: applications_items(apps) },
         MenuItem::Submenu { label: "Theme".to_string(), items: theme_items },
         MenuItem::Submenu { label: "Wallpaper".to_string(), items: wallpaper_items },
     ];
-    // The Dock's own row, immediately above the bar's: two rows about
-    // which chrome this desk wears, in the section that already holds
-    // the wallpaper and the theme, bulleted the same way so a glance
-    // at the menu says which of the two columns are on. This desk's
-    // own furniture is listed first and the guest's second, the same
-    // order the Omarchy submenu takes below.
     items.push(MenuItem::Action { label: bullet_label(!dock.is_hidden(), "Dock"), action: ACTION_DOCK });
-    // The bar toggle sits with chonkstep's own look-and-feel rows —
-    // it is a choice about *this* desk's furniture, like the wallpaper
-    // — and is marked the way the Theme and Wallpaper rows mark the
-    // current choice, so a glance at the menu says whether the bar is
-    // on.
     if let Some(bar) = omarchy_bar {
         items.push(MenuItem::Action {
             label: bullet_label(!bar.is_hidden(), "Omarchy Bar"),
             action: ACTION_OMARCHY_BAR,
         });
-    }
-    // After chonkstep's own choices and before Exit: it is a guest's
-    // menu inside the host's, so it sits below the host's rows and
-    // above the one row that ends the session.
-    if !omarchy.is_empty() {
-        items.push(MenuItem::Submenu { label: "Omarchy".to_string(), items: omarchy });
     }
     items.push(MenuItem::Action { label: "Exit".to_string(), action: ACTION_EXIT });
     items
@@ -4430,7 +4467,10 @@ mod tests {
         assert!(labels(None).iter().all(|label| !label.contains("Omarchy Bar")), "no shell, no row");
         let hidden = labels(Some(BarVisibility::Hidden));
         let row = hidden.iter().position(|label| label == "  Omarchy Bar").expect("an unmarked row for a hidden bar");
-        assert_eq!(hidden[row + 1], "Omarchy", "chonkstep's row, then the guest's submenu");
+        // This desk's own furniture sits after Omarchy's rows and
+        // before the one row that ends the session.
+        assert_eq!(hidden[row - 1], "\u{2022} Dock", "the two furniture toggles are adjacent");
+        assert_eq!(hidden[row + 1], "Exit", "and Exit closes the menu");
         assert_eq!(hidden.last().unwrap(), "Exit");
         assert!(labels(Some(BarVisibility::Shown)).contains(&"\u{2022} Omarchy Bar".to_string()), "marked when shown");
         assert!(matches!(
@@ -4875,7 +4915,7 @@ mod tests {
         // first category encountered in the index, with About closing
         // the submenu after every cascade.
         let labels: Vec<&str> = applications.iter().map(|item| item.label()).collect();
-        assert_eq!(labels, ["Development", "Graphics", "Internet", "About chonkstep"]);
+        assert_eq!(labels, ["Development", "Graphics", "Internet", "About"]);
 
         // A multi-app category lists its apps in index order — which
         // is alphabetical, since the index arrives name-sorted — and
@@ -4964,7 +5004,10 @@ mod tests {
     }
 
     #[test]
-    fn the_omarchy_submenu_sits_between_wallpaper_and_exit_only_when_it_has_rows() {
+    fn the_root_menu_is_omarchys_tree_when_there_is_one_and_this_desks_own_when_there_is_not() {
+        // No Omarchy to read: this desk's own tree, and it must still
+        // carry the rows a user needs to dress the desktop, because
+        // nothing else on the machine offers them.
         let without = root_menu_items(
             Wallpaper::TealBlueprint,
             "nextstep-classic",
@@ -4977,18 +5020,38 @@ mod tests {
         let labels: Vec<&str> = without.iter().map(MenuItem::label).collect();
         assert_eq!(labels, ["Terminal", "Applications", "Theme", "Wallpaper", "\u{2022} Dock", "Exit"]);
 
-        let rows = vec![MenuItem::Action { label: "About".to_string(), action: ACTION_OMARCHY_BASE }];
+        // With Omarchy present its rows are the menu, at the top level
+        // rather than behind an `Omarchy` cascade.
+        let rows = vec![
+            MenuItem::Submenu { label: "Style".to_string(), items: Vec::new() },
+            MenuItem::Submenu { label: "System".to_string(), items: Vec::new() },
+        ];
         let with =
             root_menu_items(Wallpaper::TealBlueprint, "nextstep-classic", &[], None, rows, None, DockVisibility::Shown);
         let labels: Vec<&str> = with.iter().map(MenuItem::label).collect();
-        assert_eq!(labels, ["Terminal", "Applications", "Theme", "Wallpaper", "\u{2022} Dock", "Omarchy", "Exit"]);
+        assert_eq!(
+            labels,
+            ["Applications", "Terminal", "Style", "System", "\u{2022} Dock", "Exit"],
+            "Omarchy's rows are the menu; this desk folds Applications in ahead of them and its own toggles after"
+        );
+        assert!(
+            !labels.contains(&"Omarchy"),
+            "no `Omarchy` wrapper: the menu is Omarchy's, it does not contain one"
+        );
+        // The second theme list is gone. `style.theme` survives the
+        // model's filter and drives `omarchy-theme-set`, which this
+        // compositor already follows.
+        assert!(
+            !labels.contains(&"Theme") && !labels.contains(&"Wallpaper"),
+            "one theme system: chonkstep's built-ins reach Omarchy's picker by export, not by a menu of their own"
+        );
     }
 
     #[test]
     fn an_empty_app_index_leaves_applications_as_just_about() {
         let applications = applications_submenu(&[]);
         let labels: Vec<&str> = applications.iter().map(|item| item.label()).collect();
-        assert_eq!(labels, ["About chonkstep"], "no empty category cascades, About still reachable");
+        assert_eq!(labels, ["About"], "no empty category cascades, About still reachable");
         assert!(
             applications.iter().all(|item| matches!(item, MenuItem::Action { .. })),
             "an empty index must produce no cascade at all, not empty ones"

@@ -24,7 +24,11 @@ use std::time::Duration;
 /// (the scratch tree) and the shell is not hosted (the harness
 /// default), so the Omarchy submenu is listed and the bar toggle is
 /// not.
-const WITH_OMARCHY: RootMenu = RootMenu { omarchy_bar: false, omarchy: true };
+/// With a definition present, Omarchy's own top-level rows *are* the
+/// root menu — the scratch tree's `Test` cascade and its `Marked`
+/// action — with `Applications` and `Terminal` ahead of them and this
+/// desk's `Dock` toggle and `Exit` after.
+const WITH_OMARCHY: RootMenu = RootMenu { omarchy_bar: false, omarchy_rows: &["Test", "Marked"] };
 
 /// Writes a scratch `OMARCHY_PATH` tree whose menu has three rows under
 /// one `Omarchy` submenu — `Plain`, `Guarded` (shown, because the flag
@@ -97,12 +101,15 @@ fn wait_for_conditions(session: &mut Session) {
     .expect("the shell should evaluate the scratch menu's conditions");
 }
 
-/// The whole path a user takes: right-click, Omarchy, a row, and the
-/// row's command running — with the condition model visible in the
-/// row count along the way.
+/// The whole path a user takes: right-click, a row of Omarchy's own
+/// menu, and the row's command running — with the condition model
+/// visible in the row count along the way.
+///
+/// Omarchy's rows sit at the top level rather than behind a cascade,
+/// because this desktop presents *as* Omarchy rather than hosting it.
 #[test]
 #[ignore = "needs a live Wayland session to nest in: scripts/e2e.sh, or cargo test -p chonk-testkit --test omarchy_menu -- --ignored"]
-fn omarchy_submenu_lists_the_conditioned_rows_and_runs_a_picked_action() {
+fn omarchys_rows_are_the_root_menu_and_a_picked_action_runs() {
     let (mut session, markers) = boot("omarchy-menu", "");
     let metrics = MenuMetrics::at_scale_1();
     poll_until(Duration::from_secs(30), "the scratch menu to load (log line)", || {
@@ -111,21 +118,16 @@ fn omarchy_submenu_lists_the_conditioned_rows_and_runs_a_picked_action() {
     .expect("the shell should find the scratch OMARCHY_PATH");
     wait_for_conditions(&mut session);
 
-    // -- root menu carries the Omarchy row --------------------------------
+    // -- the root menu is Omarchy's own -----------------------------------
     let root = session
         .open_root_menu(&metrics, WITH_OMARCHY.row_count())
-        .expect("a right-click on the desktop should open the root menu with an Omarchy row");
+        .expect("a right-click on the desktop should open the root menu carrying Omarchy's rows");
     session.screenshot("root-menu").unwrap();
 
-    // -- Omarchy cascades to the scratch definition's top level ----------
-    // Two top-level rows: the `Test` submenu and the `Marked` action.
-    // `Test`'s three children are one level further in.
-    let omarchy = cascade_from(&mut session, &metrics, &root, WITH_OMARCHY.row_of("Omarchy").unwrap());
-    assert_eq!(metrics.rows_in(omarchy.h), Some(2), "Omarchy submenu should list Test and Marked (surface {omarchy:?})");
-    session.screenshot("omarchy-submenu").unwrap();
-
-    // -- Test cascades to exactly the two rows whose `when` allows -------
-    let test = cascade_from(&mut session, &metrics, &omarchy, 0);
+    // -- `Test` cascades straight from the root, with no wrapper ---------
+    // Its three children are one level in; exactly the two whose `when`
+    // allows are listed.
+    let test = cascade_from(&mut session, &metrics, &root, WITH_OMARCHY.row_of("Test").unwrap());
     assert_eq!(
         metrics.rows_in(test.h),
         Some(2),
@@ -170,9 +172,12 @@ fn escape_closes_the_root_menu_and_every_open_submenu_without_running_an_action(
     let root = session
         .open_root_menu(&metrics, WITH_OMARCHY.row_count())
         .expect("a right-click should open the root menu");
-    let omarchy = cascade_from(&mut session, &metrics, &root, WITH_OMARCHY.row_of("Omarchy").unwrap());
-    let _test = cascade_from(&mut session, &metrics, &omarchy, 0);
-    assert_eq!(session.world().unwrap().menus().len(), 3, "the root and both cascades are mapped before Escape");
+    // `Test` opens straight from the root now, so the deepest stack is
+    // two surfaces rather than three — Escape still has to close all of
+    // them, which is what this test is about.
+    let test = cascade_from(&mut session, &metrics, &root, WITH_OMARCHY.row_of("Test").unwrap());
+    let _ = &test;
+    assert_eq!(session.world().unwrap().menus().len(), 2, "the root and its cascade are mapped before Escape");
 
     session.door().tap_key(keys::ESC).expect("the test door should deliver Escape");
     let mut last = Vec::new();

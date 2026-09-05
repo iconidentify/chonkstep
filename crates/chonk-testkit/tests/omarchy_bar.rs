@@ -34,7 +34,7 @@ const BAR: u32 = 48;
 /// The root menu on a desk with a hosted shell and no Omarchy menu
 /// definition (the scratch root below carries none): the bar toggle is
 /// listed, the Omarchy submenu is not.
-const HOSTED: RootMenu = RootMenu { omarchy_bar: true, omarchy: false };
+const HOSTED: RootMenu = RootMenu { omarchy_bar: true, omarchy_rows: &[] };
 
 /// Writes the Omarchy root the compositor will find: the QML file the
 /// launcher would hand Quickshell (never read here) and a launcher that

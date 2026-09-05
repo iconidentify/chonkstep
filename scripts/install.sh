@@ -293,6 +293,23 @@ install -d "$bin"
 ln -sfn "${repo}/scripts/chonk-get" "$bin/chonk-get"
 ln -sfn "${repo}/scripts/chonkstep-bugreport" "$bin/chonkstep-bugreport"
 ln -sfn "${repo}/target/release/omarchy-export-themes" "$bin/omarchy-export-themes"
+# ...and run it once, so this desktop's themes are in Omarchy's own
+# picker from the first login rather than after the user finds a
+# command they were never told about. This is the whole of "one theme
+# system": chonkstep offers no theme list of its own when Omarchy is
+# present (see the root menu in `chonk-shell`'s `desktop.rs`), so if the
+# built-ins are not exported they are not reachable at all.
+#
+# Writing into the user's config on install is a real intrusion, so it
+# is bounded: the exporter only ever touches `<target>/<theme id>/`
+# for ids this desktop ships, it writes nothing that runs code, and a
+# rerun refreshes those directories rather than adding more. A failure
+# is not fatal to the install — a machine without Omarchy has nowhere
+# to put them and does not need them.
+if [ -x "${repo}/target/release/omarchy-export-themes" ]; then
+    "${repo}/target/release/omarchy-export-themes" >/dev/null 2>&1 ||
+        echo "note: could not export themes into ~/.config/omarchy/themes; run omarchy-export-themes by hand" >&2
+fi
 # chonk-netjoin is the odd one out here: nobody types it. It is the
 # wifi passphrase dialog the LNK panel spawns when someone clicks a
 # secured network it has no saved profile for, and the dock launches it

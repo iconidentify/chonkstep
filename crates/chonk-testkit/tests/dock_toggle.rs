@@ -29,7 +29,7 @@ use std::time::Duration;
 /// The root menu on the harness's default session: no hosted shell, so
 /// no `Omarchy Bar` row, and an empty `OMARCHY_PATH` so no `Omarchy`
 /// submenu either. The `Dock` row is unconditional.
-const PLAIN: RootMenu = RootMenu { omarchy_bar: false, omarchy: false };
+const PLAIN: RootMenu = RootMenu { omarchy_bar: false, omarchy_rows: &[] };
 
 /// Toggles maximize on the focused window with the default binding.
 /// Two modifiers, so the door's single-modifier `chord` does not fit.
