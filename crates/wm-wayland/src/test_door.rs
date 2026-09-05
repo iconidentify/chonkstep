@@ -423,6 +423,23 @@ fn handle_command(line: &str, stream: &mut UnixStream, comp: &mut Compositor) {
                 InputEvent::PointerMotionAbsolute { event: TestMotionEvent { x, y, time } },
             );
         }
+        // Relative motion, which no other route on this backend can
+        // produce: winit's `PointerMotionEvent` is `UnusedEvent`, so a
+        // nested session emits absolute events only. Pointer
+        // constraints and the relative-pointer protocol are decided on
+        // the relative path, and without this they were unreachable
+        // from a test. Routed through the same function the virtual
+        // pointer uses, so what a test drives and what a client drives
+        // are the same code.
+        Some("motion-relative") => {
+            let (Some(Ok(dx)), Some(Ok(dy))) =
+                (words.next().map(str::parse::<f64>), words.next().map(str::parse::<f64>))
+            else {
+                reply_err(stream, "motion-relative wants: motion-relative DX DY");
+                return;
+            };
+            crate::input::inject_pointer_motion(comp, dx, dy, time as u32);
+        }
         Some("button") => {
             // input-event-codes.h values, the same ones a mouse sends.
             let code = match words.next() {

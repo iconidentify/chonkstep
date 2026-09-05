@@ -407,6 +407,27 @@ pub struct DecorationRules {
     pub client_side: Vec<String>,
 }
 
+/// The keyboard half of the config's `input` block, as the shell reads
+/// it, on its way to a backend that can install it.
+///
+/// Deliberately the *unresolved* values: which of them a backend
+/// actually uses is the backend's business — the Wayland session lets
+/// `XKB_DEFAULT_*` win over the file, because a login session's
+/// environment is more specific than a config a user may have copied
+/// between machines, and that precedence has to be identical at startup
+/// and at reload or a reload would silently change the keymap.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct KeyboardConfig {
+    pub rules: Option<String>,
+    pub model: Option<String>,
+    pub layout: Option<String>,
+    pub variant: Option<String>,
+    pub options: Option<String>,
+    pub repeat_rate: Option<i32>,
+    pub repeat_delay: Option<i32>,
+}
+
+
 impl DecorationRules {
     /// The override for `identity`, if any: `Some(true)` to force this
     /// desktop's chrome, `Some(false)` to suppress it, `None` to leave

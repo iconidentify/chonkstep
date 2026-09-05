@@ -50,6 +50,7 @@ use smithay::input::{Seat, SeatState};
 use smithay::output::{Mode, Output, PhysicalProperties, Scale as OutputScale, Subpixel};
 
 use chonk_hyprland_ipc::MonitorMode;
+use smithay::reexports::wayland_protocols::xwayland::keyboard_grab::zv1::server::zwp_xwayland_keyboard_grab_v1::ZwpXwaylandKeyboardGrabV1;
 use smithay::reexports::calloop::generic::Generic;
 use smithay::reexports::calloop::{
     EventLoop, Interest, LoopHandle, Mode as TriggerMode, PostAction, RegistrationToken,
@@ -622,6 +623,43 @@ pub struct WaylandBackend {
     /// on the XWM connection once a frame. Only the three verbs that
     /// return "the vector moved" set this.
     pub(crate) stacking_dirty: bool,
+    /// The live `zwp_xwayland_keyboard_grab_v1` an XWayland client holds
+    /// the keyboard with, if any.
+    ///
+    /// The *resource* rather than a bool, because the grab has no end
+    /// callback: smithay drops it lazily, on the first key after the
+    /// client destroyed the object. Holding the object means the gate
+    /// can ask whether it is still alive and answer correctly the
+    /// instant the client lets go, rather than one keystroke late.
+    ///
+    /// And its own field rather than `KeyboardHandle::is_grabbed`,
+    /// because smithay's input-method installs a keyboard grab too;
+    /// gating the compositor's keybindings on "any grab" would disable
+    /// them all whenever an IME popup was up. See the handler in
+    /// `core_protocols.rs`.
+    pub(crate) xwayland_keyboard_grab: Option<ZwpXwaylandKeyboardGrabV1>,
+    /// A keyboard configuration a reload resolved, waiting for the
+    /// compositor to install it.
+    ///
+    /// Staged rather than applied in the setter because the seat lives
+    /// on `Compositor` and the setter is a `Backend` verb, which only
+    /// ever sees the ledger. `Compositor::apply_pending_keyboard`
+    /// drains it on the next pass — the same shape every other
+    /// deferred backend request in this file takes.
+    pub(crate) pending_keyboard: Option<wm_core::KeyboardConfig>,
+    /// The xkb layout actually installed on the seat.
+    ///
+    /// What IPC reports, rather than the config's own `kb_layout`: the
+    /// two differ whenever `XKB_DEFAULT_LAYOUT` is set, and after a
+    /// reload the config value can name a layout libxkbcommon rejected
+    /// and the session never adopted. A bar that prints this should be
+    /// printing the keymap in force.
+    pub(crate) keyboard_layout: String,
+    /// Set when the workspace row moves, drained by
+    /// `workspace::refresh`. On the ledger rather than on
+    /// `WorkspaceState` because the verb that knows the row changed is
+    /// a `Backend` method, which only ever sees the ledger.
+    pub(crate) workspaces_dirty: bool,
     /// Bottom-to-top order within both shell bands. A shell's `above`
     /// bit chooses its band; entries of the other band are skipped.
     /// This is the single source of shell order for both rendering and
@@ -953,6 +991,10 @@ impl WaylandBackend {
             monitor_scales,
             monitor_outputs,
             stacking_dirty: false,
+            xwayland_keyboard_grab: None,
+            pending_keyboard: None,
+            keyboard_layout: String::new(),
+            workspaces_dirty: true,
             input_devices: Vec::new(),
             ime_popups: Vec::new(),
             output_size,
@@ -1364,6 +1406,42 @@ pub(crate) struct OutputSetup {
     /// alternatives instead of pretending the current mode is the only
     /// one.
     pub modes: Vec<Mode>,
+}
+
+/// The keyboard settings actually in force, from the config plus the
+/// environment.
+///
+/// `XKB_DEFAULT_*` wins over the file, because a login session's
+/// environment is more specific than a config a user may have copied
+/// between machines — `scripts/wayland-session.sh` is where a login
+/// session sets these, and the nested backend inherits the host
+/// desktop's. Extracted into one function so startup and reload resolve
+/// by identical rules: a reload that resolved differently would change
+/// the keymap out from under a user who edited something else.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct ResolvedKeyboard {
+    pub rules: String,
+    pub model: String,
+    pub layout: String,
+    pub variant: String,
+    pub options: Option<String>,
+    pub repeat_delay: i32,
+    pub repeat_rate: i32,
+}
+
+pub(crate) fn resolve_keyboard_config(config: &wm_core::KeyboardConfig) -> ResolvedKeyboard {
+    let env = |name: &str| std::env::var(name).ok().filter(|value| !value.is_empty());
+    ResolvedKeyboard {
+        rules: env("XKB_DEFAULT_RULES").or_else(|| config.rules.clone()).unwrap_or_default(),
+        model: env("XKB_DEFAULT_MODEL").or_else(|| config.model.clone()).unwrap_or_default(),
+        layout: env("XKB_DEFAULT_LAYOUT").or_else(|| config.layout.clone()).unwrap_or_default(),
+        variant: env("XKB_DEFAULT_VARIANT").or_else(|| config.variant.clone()).unwrap_or_default(),
+        options: env("XKB_DEFAULT_OPTIONS").or_else(|| config.options.clone()),
+        // The same defaults `add_keyboard` was called with before this
+        // existed, so a session that configures neither is unchanged.
+        repeat_delay: config.repeat_delay.unwrap_or(200),
+        repeat_rate: config.repeat_rate.unwrap_or(25),
+    }
 }
 
 /// What one output's connector says about itself: the EDID identity and
@@ -1847,6 +1925,9 @@ pub struct Compositor {
     /// Its file descriptors are reconciled by the same pass that
     /// handles the dockapp ones — see [`Compositor::sync_dock_sources`].
     hyprland_ipc: Option<chonk_hyprland_ipc::Server>,
+    /// `ext_workspace_v1`: the workspace row as native Wayland clients
+    /// see it. See `workspace.rs`.
+    pub(crate) workspaces: crate::workspace::WorkspaceState,
     /// Set by the callback for one of the server's registered file
     /// descriptors. A quiet subscriber is deliberately not serviced
     /// on timer-only wakeups; there is no request to answer and no
@@ -2101,8 +2182,64 @@ impl Compositor {
     /// than a porting promise, so change that file first if this order
     /// ever needs to move.
     #[cfg_attr(feature = "profile", profiling::function)]
+    /// Installs a keyboard configuration a reload staged, if any.
+    ///
+    /// A whole new keymap and repeat timing on the seat. The keymap is
+    /// broadcast to every bound `wl_keyboard`, so a client that was
+    /// holding a key across the change is told the map changed rather
+    /// than left interpreting the old one.
+    ///
+    /// A rejected keymap costs the *edit*, never the session: the
+    /// running keymap is kept and the error is logged, exactly as the
+    /// startup path falls back rather than refusing to log in.
+    pub(crate) fn apply_pending_keyboard(&mut self) {
+        let Some(requested) = self.wm.backend_mut().pending_keyboard.take() else {
+            return;
+        };
+        let resolved = resolve_keyboard_config(&requested);
+        let Some(keyboard) = self.seat.get_keyboard() else {
+            return;
+        };
+        let xkb = XkbConfig {
+            rules: &resolved.rules,
+            model: &resolved.model,
+            layout: &resolved.layout,
+            variant: &resolved.variant,
+            options: resolved.options.clone(),
+        };
+        match keyboard.set_xkb_config(self, xkb) {
+            Ok(()) => {
+                keyboard.change_repeat_info(resolved.repeat_rate, resolved.repeat_delay);
+                let backend = self.wm.backend_mut();
+                backend.repeat_rate = resolved.repeat_rate.max(1) as u32;
+                backend.repeat_delay = std::time::Duration::from_millis(resolved.repeat_delay.max(0) as u64);
+                backend.keyboard_layout = resolved.layout.clone();
+                tracing::info!(
+                    layout = %resolved.layout,
+                    variant = %resolved.variant,
+                    options = ?resolved.options,
+                    repeat_rate = resolved.repeat_rate,
+                    repeat_delay = resolved.repeat_delay,
+                    "reload applied a new keyboard configuration"
+                );
+                // The IPC's `devices` reply reads its keymap fields from
+                // the snapshot, which is rebuilt from the ledger; mark
+                // it stale so a bar asking after the reload is told the
+                // layout that is now in force rather than the one the
+                // session started with.
+                self.hyprland_state_dirty = true;
+            }
+            Err(error) => tracing::warn!(
+                %error,
+                layout = %resolved.layout,
+                "reload's keyboard configuration was rejected; keeping the running keymap"
+            ),
+        }
+    }
+
     pub(crate) fn dispatch_pending(&mut self) {
         let dispatch_started = Instant::now();
+        self.apply_pending_keyboard();
         crate::session::service_connector_hotplug(self);
         let phase_started = Instant::now();
         crate::input::tick_repeating_binding(self);
@@ -2275,6 +2412,10 @@ impl Compositor {
         // same state the desktop just settled into, before the damage
         // test so a capture request can mark the frame it needs.
         crate::protocols::refresh(self);
+        if std::mem::take(&mut self.wm.backend_mut().workspaces_dirty) {
+            self.workspaces.mark_dirty();
+        }
+        crate::workspace::refresh(self);
         // Output management settles beside the other protocol
         // reconciliations and before the damage test, so an applied
         // configuration's re-layout renders on this very pass.
@@ -3447,6 +3588,10 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
         smithay::wayland::fractional_scale::FractionalScaleManagerState::new::<Compositor>(&display_handle);
     let viewporter_state = smithay::wayland::viewporter::ViewporterState::new::<Compositor>(&display_handle);
     let core_protocols = crate::core_protocols::init(&display_handle);
+    // Same timing rule as every global above: bound before the
+    // listening socket exists, because a global that is missing when a
+    // client binds might as well never have existed.
+    let workspaces = crate::workspace::init(&display_handle);
 
     let mut seat_state: SeatState<Compositor> = SeatState::new();
     let mut seat: Seat<Compositor> = seat_state.new_wl_seat(&display_handle, "chonkstep");
@@ -3458,12 +3603,22 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
     // a US layout is unusable for everyone else. `scripts/wayland-
     // session.sh` is where a login session sets these; the nested
     // backend inherits whatever the host desktop already exported.
-    let xkb_env = |name: &str| std::env::var(name).ok().filter(|value| !value.is_empty());
-    let xkb_rules = xkb_env("XKB_DEFAULT_RULES").or_else(|| config.input.rules.clone()).unwrap_or_default();
-    let xkb_model = xkb_env("XKB_DEFAULT_MODEL").or_else(|| config.input.model.clone()).unwrap_or_default();
-    let xkb_layout = xkb_env("XKB_DEFAULT_LAYOUT").or_else(|| config.input.layout.clone()).unwrap_or_default();
-    let xkb_variant = xkb_env("XKB_DEFAULT_VARIANT").or_else(|| config.input.variant.clone()).unwrap_or_default();
-    let xkb_options = xkb_env("XKB_DEFAULT_OPTIONS").or_else(|| config.input.options.clone());
+    let resolved = resolve_keyboard_config(&wm_core::KeyboardConfig {
+        rules: config.input.rules.clone(),
+        model: config.input.model.clone(),
+        layout: config.input.layout.clone(),
+        variant: config.input.variant.clone(),
+        options: config.input.options.clone(),
+        repeat_rate: config.input.repeat_rate,
+        repeat_delay: config.input.repeat_delay,
+    });
+    let (xkb_rules, xkb_model, xkb_layout, xkb_variant, xkb_options) = (
+        resolved.rules.clone(),
+        resolved.model.clone(),
+        resolved.layout.clone(),
+        resolved.variant.clone(),
+        resolved.options.clone(),
+    );
     let xkb_config = XkbConfig {
         rules: &xkb_rules,
         model: &xkb_model,
@@ -3471,8 +3626,8 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
         variant: &xkb_variant,
         options: xkb_options.clone(),
     };
-    let repeat_delay = config.input.repeat_delay.unwrap_or(200);
-    let repeat_rate = config.input.repeat_rate.unwrap_or(25);
+    let repeat_delay = resolved.repeat_delay;
+    let repeat_rate = resolved.repeat_rate;
     if let Err(error) = seat.add_keyboard(xkb_config, repeat_delay, repeat_rate) {
         // A typo—or a Lua value whose runtime source the static config
         // reader cannot resolve—must cost the requested layout, never
@@ -3798,6 +3953,9 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
     backend.monitor_scales = effective_monitor_scales;
     backend.repeat_delay = std::time::Duration::from_millis(repeat_delay as u64);
     backend.repeat_rate = repeat_rate as u32;
+    // The layout actually installed, so IPC reports the keymap in force
+    // rather than the config's request (they differ under XKB_DEFAULT_*).
+    backend.keyboard_layout = resolved.layout.clone();
     // The whole screen, as the shell sizes the desktop against it: the
     // union of every monitor. Where the dock and the workareas land
     // inside that union is the shell's decision, not this loop's.
@@ -3835,6 +3993,7 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
 
     let mut comp = Compositor {
         hyprland_ipc,
+        workspaces,
         hyprland_ipc_ready: false,
         // A subscriber present on the first pass must receive a
         // baseline even before the desktop produces its first event.
@@ -4401,6 +4560,36 @@ fn resize_cursor_pixels(scale: f32, angle_rad: f32) -> (Vec<u8>, i32, i32, (i32,
 
 #[cfg(test)]
 mod tests {
+    /// The env must win over the file, and identically at startup and
+    /// at reload — a reload that resolved by different rules would
+    /// change the keymap out from under a user who edited something
+    /// else entirely.
+    #[test]
+    fn xkb_environment_overrides_the_configured_layout() {
+        // SAFETY-adjacent: these are process-wide, so the test sets and
+        // clears them around one assertion rather than leaving them.
+        let config = wm_core::KeyboardConfig {
+            layout: Some("fr".to_string()),
+            variant: Some("azerty".to_string()),
+            repeat_rate: Some(40),
+            repeat_delay: Some(300),
+            ..wm_core::KeyboardConfig::default()
+        };
+        let from_file = resolve_keyboard_config(&config);
+        assert_eq!(from_file.layout, "fr");
+        assert_eq!(from_file.variant, "azerty");
+        assert_eq!(from_file.repeat_rate, 40);
+        assert_eq!(from_file.repeat_delay, 300);
+
+        // Defaults are the ones `add_keyboard` was called with before
+        // this function existed, so an unconfigured session is unchanged.
+        let bare = resolve_keyboard_config(&wm_core::KeyboardConfig::default());
+        assert_eq!(bare.repeat_rate, 25);
+        assert_eq!(bare.repeat_delay, 200);
+        assert_eq!(bare.layout, "");
+        assert_eq!(bare.options, None);
+    }
+
     use super::*;
 
     #[test]

@@ -360,8 +360,25 @@ When it fires, the whole session re-resolves through the same one path
 a `reload` binding takes, so a session that has followed a dozen edits
 is indistinguishable from one that started where it now stands. Grabs
 are taken and released by the same delta a reload uses; window rules
-reach the next window that maps. What a live re-read cannot change is
-`env` (see above) and `autostart` (it has already run).
+reach the next window that maps. The keyboard half of `input` —
+`kb_rules`, `kb_model`, `kb_layout`, `kb_variant`, `kb_options`,
+`repeat_rate`, `repeat_delay` — is re-resolved and installed on the
+seat, by exactly the rules startup used, so `XKB_DEFAULT_*` keeps
+winning over the file across a reload rather than only at login. A
+keymap libxkbcommon rejects costs the edit and not the session: the
+running keymap is kept and the refusal is logged, and `hyprctl devices`
+reports the layout actually in force rather than the one that was asked
+for.
+
+What a live re-read cannot change is `env` (see above), `autostart` (it
+has already run), and `monitor` lines. Monitor rules are applied at
+startup and when a connector is hot-plugged, not on reload: re-applying
+a mode or a position to a live output is a modeset, and doing it from a
+config re-read would move windows and reflow the desk on every save of
+an unrelated key. Changing an output live has its own verb —
+`hyprctl eval hl.monitor({ output = …, scale = … })` — and the log names
+each monitor line it read for this reason rather than implying it took
+effect.
 
 ---
 

@@ -475,6 +475,17 @@ pub(crate) fn sync_pointer_focus(state: &mut Compositor) {
     let position = state.pointer_location;
     let at = Point::new(position.x.floor() as i32, position.y.floor() as i32);
     let focus = client_focus(&hit_at(state.wm.backend(), at, position));
+    // A constraint belongs to the surface that holds the pointer. The
+    // moment the pointer's focus moves elsewhere — the window unmapped,
+    // the workspace changed, the session locked — the constraint is
+    // over, and this is the one place that observes that edge. Releasing
+    // it here is also what gives a lock's cursor-position hint somewhere
+    // to be honoured; see `release_pointer_constraint`.
+    let focus_surface = focus.as_ref().map(|(surface, _)| surface.clone());
+    if pointer.current_focus() != focus_surface {
+        release_pointer_constraint(state);
+    }
+    let position = state.pointer_location;
     let event = MotionEvent {
         location: position,
         serial: SERIAL_COUNTER.next_serial(),
@@ -1266,6 +1277,33 @@ fn on_keyboard_key<I: InputBackend>(state: &mut Compositor, event: I::KeyboardKe
                 if shortcuts_inhibited {
                     return FilterResult::Forward;
                 }
+                // An XWayland client holding the keyboard through
+                // `zwp_xwayland_keyboard_grab_v1` gets every key, for
+                // the same reason `keyboard-shortcuts-inhibit` does: it
+                // is running a session of its own — a remote desktop, a
+                // VM console, a nested X server — and a combo the host
+                // swallows is a combo the guest can never be sent.
+                //
+                // Ranked with the shortcut inhibitor, not above it, and
+                // deliberately *below* the session lock and the VT
+                // switch above: a grab must not be able to keep a user
+                // out of their own machine.
+                //
+                // Read from our own flag rather than
+                // `KeyboardHandle::is_grabbed`, which would also be
+                // true while smithay's input-method holds its grab and
+                // would disable every binding whenever an IME popup was
+                // up.
+                // Asked of the resource, so a client that destroyed its
+                // grab object stops being privileged immediately rather
+                // than on the key after next.
+                if backend
+                    .xwayland_keyboard_grab
+                    .as_ref()
+                    .is_some_and(smithay::reexports::wayland_server::Resource::is_alive)
+                {
+                    return FilterResult::Forward;
+                }
                 if backend.keyboard_grabbed || backend.grabbed_combos.contains(&combo) {
                     if !backend.release_combos.contains(&combo) {
                         backend.queue(WmEvent::KeyPress(combo));
@@ -1439,7 +1477,18 @@ fn combo_modifiers(mods: &ModifiersState) -> Modifiers {
 fn on_pointer_move_absolute<I: InputBackend>(state: &mut Compositor, event: I::PointerMotionAbsoluteEvent) {
     let size = state.wm.backend().output_size;
     let position = event.position_transformed((size.w as i32, size.h as i32).into());
-    pointer_moved(state, position, event.time_msec(), None);
+    // Through the same constraint as the relative path. This is the
+    // path the nested backend and every virtual pointer arrive on, so
+    // leaving it unconstrained meant a locked surface could watch the
+    // pointer walk out of it.
+    let constrained = apply_pointer_constraint(state, position);
+    pointer_moved(
+        state,
+        constrained.position,
+        event.time_msec(),
+        None,
+        if constrained.locked { PointerDelivery::LockedSilent } else { PointerDelivery::Motion },
+    );
 }
 
 /// Relative motion (the libinput/session path): accumulate onto the
@@ -1455,6 +1504,122 @@ fn on_pointer_move_relative<I: InputBackend>(state: &mut Compositor, event: I::P
     );
 }
 
+/// What the focused surface's pointer constraint, if any, says about a
+/// proposed new position.
+#[derive(Clone, Copy, PartialEq)]
+struct Constrained {
+    /// Where the pointer may actually go.
+    position: LogicalPoint<f64, Logical>,
+    /// Whether a *lock* is in force. A locked pointer does not move at
+    /// all, and the protocol is explicit that the client must not be
+    /// told it did: `wl_pointer.motion` is suppressed entirely and the
+    /// client reads `zwp_relative_pointer_v1` instead. Sending both is
+    /// what makes a first-person camera drift and a 3D viewport spin —
+    /// the application integrates the relative stream *and* is told an
+    /// absolute position it never asked to move to.
+    locked: bool,
+}
+
+/// Applies whatever constraint the pointer's focused surface holds to a
+/// proposed position.
+///
+/// Shared by the relative and the absolute path deliberately. A
+/// constraint that only held on the libinput path was no constraint at
+/// all: `zwlr_virtual_pointer_v1`, remote-control tooling and the
+/// nested backend all arrive absolute, and a locked surface would watch
+/// the pointer walk straight out of it.
+fn apply_pointer_constraint(state: &mut Compositor, proposed: LogicalPoint<f64, Logical>) -> Constrained {
+    let mut result = Constrained { position: proposed, locked: false };
+    let Some((pointer, surface)) = state
+        .seat
+        .get_pointer()
+        .and_then(|pointer| pointer.current_focus().map(|surface| (pointer, surface)))
+    else {
+        return result;
+    };
+    let anchor = state.pointer_location;
+    let current_origin = surface_focus_at(state.wm.backend(), anchor, &surface).map(|(_, origin)| origin);
+    let inside_region = |point: LogicalPoint<f64, Logical>, region: Option<&smithay::wayland::compositor::RegionAttributes>| match (region, current_origin) {
+        (Some(region), Some(origin)) => region.contains((
+            (point.x - origin.x).floor() as i32,
+            (point.y - origin.y).floor() as i32,
+        )),
+        // With no explicit region the complete surface is the region.
+        _ => surface_focus_at(state.wm.backend(), point, &surface).is_some(),
+    };
+    with_pointer_constraint(&surface, &pointer, |constraint| {
+        let Some(constraint) = constraint else { return };
+        if !constraint.is_active() {
+            // Only activate where the protocol permits it. A confined
+            // constraint whose region the pointer is not currently
+            // inside must not snap it in; the client is told the
+            // constraint is pending and the pointer keeps moving
+            // normally until it enters on its own.
+            let may_activate = match &*constraint {
+                PointerConstraint::Locked(_) => true,
+                PointerConstraint::Confined(confined) => {
+                    inside_region(anchor, confined.region())
+                }
+            };
+            if !may_activate {
+                return;
+            }
+            constraint.activate();
+        }
+        match &*constraint {
+            PointerConstraint::Locked(_) => {
+                result.position = anchor;
+                result.locked = true;
+            }
+            PointerConstraint::Confined(confined) => {
+                if !inside_region(proposed, confined.region()) {
+                    result.position = anchor;
+                }
+            }
+        }
+    });
+    result
+}
+
+/// Ends any active constraint the pointer's focused surface holds, and
+/// honours a lock's committed cursor-position hint on the way out.
+///
+/// Nothing called `deactivate` before this, which meant a lock taken
+/// once was held for the lifetime of the surface, and the hint — the
+/// client's statement of where the cursor should reappear, which is how
+/// a game puts the arrow back on the menu item you were over — was
+/// documented as "consumed when a lock is released" and never read.
+pub(crate) fn release_pointer_constraint(state: &mut Compositor) {
+    let Some((pointer, surface)) = state
+        .seat
+        .get_pointer()
+        .and_then(|pointer| pointer.current_focus().map(|surface| (pointer, surface)))
+    else {
+        return;
+    };
+    let origin = surface_focus_at(state.wm.backend(), state.pointer_location, &surface).map(|(_, origin)| origin);
+    let mut warp_to = None;
+    with_pointer_constraint(&surface, &pointer, |constraint| {
+        let Some(constraint) = constraint else { return };
+        if !constraint.is_active() {
+            return;
+        }
+        if let PointerConstraint::Locked(locked) = &*constraint {
+            // Surface-local, per the protocol; the compositor speaks
+            // global coordinates.
+            if let (Some(hint), Some(origin)) = (locked.cursor_position_hint(), origin) {
+                warp_to = Some(LogicalPoint::<f64, Logical>::from((origin.x + hint.x, origin.y + hint.y)));
+            }
+        }
+        constraint.deactivate();
+    });
+    if let Some(target) = warp_to {
+        let position = confine_to_outputs(&state.wm.backend().monitors, target);
+        let time = state.start_time.elapsed().as_millis() as u32;
+        pointer_moved(state, position, time, None, PointerDelivery::Motion);
+    }
+}
+
 fn pointer_move_relative_values(
     state: &mut Compositor,
     delta: LogicalPoint<f64, Logical>,
@@ -1467,38 +1632,14 @@ fn pointer_move_relative_values(
         utime: time as u64 * 1_000,
     };
     let proposed = confine_to_outputs(&state.wm.backend().monitors, state.pointer_location + delta);
-    let mut position = proposed;
-    if let Some((pointer, surface)) = state
-        .seat
-        .get_pointer()
-        .and_then(|pointer| pointer.current_focus().map(|surface| (pointer, surface)))
-    {
-        let current_origin = surface_focus_at(state.wm.backend(), state.pointer_location, &surface).map(|(_, origin)| origin);
-        with_pointer_constraint(&surface, &pointer, |constraint| {
-            let Some(constraint) = constraint else { return };
-            if !constraint.is_active() {
-                constraint.activate();
-            }
-            match &*constraint {
-                PointerConstraint::Locked(_) => position = state.pointer_location,
-                PointerConstraint::Confined(confined) => {
-                    let inside = match (confined.region(), current_origin) {
-                        (Some(region), Some(origin)) => region.contains((
-                            (proposed.x - origin.x).floor() as i32,
-                            (proposed.y - origin.y).floor() as i32,
-                        )),
-                        // With no explicit region the complete surface
-                        // is the confinement region.
-                        _ => surface_focus_at(state.wm.backend(), proposed, &surface).is_some(),
-                    };
-                    if !inside {
-                        position = state.pointer_location;
-                    }
-                }
-            }
-        });
-    }
-    pointer_moved(state, position, time, Some(relative));
+    let constrained = apply_pointer_constraint(state, proposed);
+    pointer_moved(
+        state,
+        constrained.position,
+        time,
+        Some(relative),
+        if constrained.locked { PointerDelivery::LockedSilent } else { PointerDelivery::Motion },
+    );
 }
 
 /// Injects relative virtual-pointer motion through the physical
@@ -1516,11 +1657,14 @@ pub(crate) fn inject_pointer_motion_absolute(
     time: u32,
 ) {
     crate::idle::note_activity(state);
+    let proposed = confine_to_outputs(&state.wm.backend().monitors, position);
+    let constrained = apply_pointer_constraint(state, proposed);
     pointer_moved(
         state,
-        confine_to_outputs(&state.wm.backend().monitors, position),
+        constrained.position,
         time,
         None,
+        if constrained.locked { PointerDelivery::LockedSilent } else { PointerDelivery::Motion },
     );
 }
 
@@ -1588,7 +1732,7 @@ pub(crate) fn reconcile_pointer_after_output_change(state: &mut Compositor) {
     let position = confine_to_outputs(&state.wm.backend().monitors, state.pointer_location);
     if position != state.pointer_location {
         let time = state.start_time.elapsed().as_millis() as u32;
-        pointer_moved(state, position, time, None);
+        pointer_moved(state, position, time, None, PointerDelivery::Motion);
     } else {
         sync_pointer_focus(state);
     }
@@ -1598,11 +1742,24 @@ pub(crate) fn reconcile_pointer_after_output_change(state: &mut Compositor) {
 /// routing (honoring an implicit grab), then one seat `motion` +
 /// `frame` so smithay's location tracking and client enter/leave stay
 /// correct no matter where the event was routed.
+/// Whether this motion is delivered to the client as `wl_pointer.motion`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PointerDelivery {
+    /// The ordinary case.
+    Motion,
+    /// A pointer lock is in force. The seat's own idea of where the
+    /// pointer is still has to be kept current — smithay resolves focus
+    /// and hit-tests from it — but the client is told nothing, because
+    /// under `zwp_locked_pointer_v1` the pointer did not move.
+    LockedSilent,
+}
+
 fn pointer_moved(
     state: &mut Compositor,
     position: LogicalPoint<f64, Logical>,
     time: u32,
     relative: Option<RelativeMotionEvent>,
+    delivery: PointerDelivery,
 ) {
     let serial = SERIAL_COUNTER.next_serial();
     // Floor, not round: a pointer at x=10.7 is over pixel 10, and
@@ -1633,7 +1790,12 @@ fn pointer_moved(
         if let Some(relative) = &relative {
             pointer.relative_motion(state, focus.clone(), relative);
         }
-        pointer.motion(state, focus, &MotionEvent { location: position, serial, time });
+        match delivery {
+            PointerDelivery::Motion => {
+                pointer.motion(state, focus, &MotionEvent { location: position, serial, time });
+            }
+            PointerDelivery::LockedSilent => pointer.set_location(position),
+        }
         pointer.frame(state);
         return;
     }
@@ -1796,7 +1958,14 @@ fn pointer_moved(
     if let Some(relative) = &relative {
         pointer.relative_motion(state, focus.clone(), relative);
     }
-    pointer.motion(state, focus, &MotionEvent { location: position, serial, time });
+    match delivery {
+        PointerDelivery::Motion => {
+            pointer.motion(state, focus, &MotionEvent { location: position, serial, time });
+        }
+        // Location kept, event withheld: the pointer is locked, so the
+        // client hears only the relative stream above.
+        PointerDelivery::LockedSilent => pointer.set_location(position),
+    }
     pointer.frame(state);
 }
 

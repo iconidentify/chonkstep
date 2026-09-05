@@ -58,6 +58,47 @@ const MAX_IME_POPUPS_GLOBAL: usize = 256;
 
 impl smithay::wayland::tablet_manager::TabletSeatHandler for Compositor {}
 
+/// `zwp_xwayland_keyboard_grab_v1`: an XWayland client asking to keep
+/// every key, because the X client behind it called `XGrabKeyboard`.
+///
+/// The default `grab` body is what we want — install smithay's grab on
+/// the seat — but it is overridden here for one reason: the compositor
+/// needs to *know* an XWayland grab is live, and there is no way to ask
+/// the seat which kind of grab it is holding. `keyboard_grab_active` is
+/// that answer, and the binding gate in `input.rs` reads it.
+///
+/// Deliberately not `KeyboardHandle::is_grabbed`, which is the obvious
+/// spelling and is wrong: smithay's own input-method installs a
+/// keyboard grab (`input_method_handle.rs`'s `set_grab`), so gating on
+/// `is_grabbed` would silently disable every compositor keybinding for
+/// as long as an IME popup was up.
+impl smithay::wayland::xwayland_keyboard_grab::XWaylandKeyboardGrabHandler for Compositor {
+    fn grab(
+        &mut self,
+        surface: WlSurface,
+        seat: smithay::input::Seat<Self>,
+        grab: smithay::wayland::xwayland_keyboard_grab::XWaylandKeyboardGrab<Self>,
+    ) {
+        let Some(keyboard) = seat.get_keyboard() else {
+            return;
+        };
+        let resource = grab.grab().clone();
+        keyboard.set_grab(self, grab, smithay::utils::SERIAL_COUNTER.next_serial());
+        self.wm.backend_mut().xwayland_keyboard_grab = Some(resource);
+        tracing::info!(surface = ?surface.id(), "an XWayland client took the keyboard grab; its combos stop reaching the desktop");
+    }
+
+    /// Which surface the grab focuses. Only a surface this compositor is
+    /// actually managing as an X11 window qualifies; returning `None`
+    /// for anything else means no grab is created, which is the honest
+    /// answer for a surface that has no X window behind it.
+    fn keyboard_focus_for_xsurface(&self, surface: &WlSurface) -> Option<Self::KeyboardFocus> {
+        self.wm.backend().window_for_surface(surface).map(|_| surface.clone())
+    }
+}
+
+smithay::delegate_xwayland_keyboard_grab!(Compositor);
+
 /// State retained for the globals whose helpers need a getter or whose
 /// `GlobalId` lifetime is tied to the state value.
 pub(crate) struct CoreProtocols {
@@ -80,6 +121,7 @@ pub(crate) struct CoreProtocols {
     pub _xdg_dialog: smithay::wayland::shell::xdg::dialog::XdgDialogState,
     pub _system_bell: smithay::wayland::xdg_system_bell::XdgSystemBellState,
     pub _toplevel_tag: smithay::wayland::xdg_toplevel_tag::XdgToplevelTagManager,
+    pub _xwayland_keyboard_grab: smithay::wayland::xwayland_keyboard_grab::XWaylandKeyboardGrabState,
 }
 
 pub(crate) fn init(display: &DisplayHandle) -> CoreProtocols {
@@ -105,6 +147,14 @@ pub(crate) fn init(display: &DisplayHandle) -> CoreProtocols {
         _xdg_dialog: smithay::wayland::shell::xdg::dialog::XdgDialogState::new::<Compositor>(display),
         _system_bell: smithay::wayland::xdg_system_bell::XdgSystemBellState::new::<Compositor>(display),
         _toplevel_tag: smithay::wayland::xdg_toplevel_tag::XdgToplevelTagManager::new::<Compositor>(display),
+        // The protocol an XWayland client's own `XGrabKeyboard` arrives
+        // through. Without it a client that grabbed the keyboard from
+        // the X server still lost every bound combo to the compositor —
+        // a remote-desktop viewer or a VM console could not send its
+        // guest the very combos the host binds.
+        _xwayland_keyboard_grab: smithay::wayland::xwayland_keyboard_grab::XWaylandKeyboardGrabState::new::<
+            Compositor,
+        >(display),
     }
 }
 
@@ -225,15 +275,29 @@ impl PointerConstraintsHandler for Compositor {
         }
     }
 
+    /// The client's statement of where the cursor should reappear when
+    /// its lock ends — how a game puts the arrow back on the menu item
+    /// the player was over, instead of wherever the lock happened to
+    /// start.
+    ///
+    /// Nothing is done *here* on purpose: the protocol says the hint
+    /// takes effect when the lock is released, not when it is set, and
+    /// smithay keeps the committed value on the constraint for us. The
+    /// place it is read is [`crate::input::release_pointer_constraint`].
+    /// Before that existed this body was empty under a comment claiming
+    /// the hint was consumed on release, which nothing did.
     fn cursor_position_hint(
         &mut self,
-        _surface: &WlSurface,
+        surface: &WlSurface,
         _pointer: &PointerHandle<Self>,
-        _location: LogicalPoint<f64, Logical>,
+        location: LogicalPoint<f64, Logical>,
     ) {
-        // The hint is consumed when a lock is released. Smithay keeps
-        // the committed hint on the constraint; no cursor warp occurs
-        // merely because a client updates it while still locked.
+        tracing::debug!(
+            surface = ?surface.id(),
+            x = location.x,
+            y = location.y,
+            "client set a cursor-position hint for when its pointer lock ends"
+        );
     }
 }
 

@@ -2,7 +2,8 @@ use wm_theme_api::{DecorationBuffer, DecorationLayout, Point, Rect, ResizeEdge, 
 
 use crate::client::MonitorInfo;
 use crate::types::{
-    BackendEvent, DecorationRules, DragHandle, KeyCombo, Modifiers, MouseButton, NetStateSnapshot, ScrollDelta,
+    BackendEvent, DecorationRules, DragHandle, KeyCombo, KeyboardConfig, Modifiers, MouseButton, NetStateSnapshot,
+    ScrollDelta,
     SizeHints, WindowType, WmClass, WmProtocol,
 };
 
@@ -441,6 +442,16 @@ pub trait Backend {
     /// Defaulted to a no-op for a backend with no decoration protocol
     /// to override.
     fn set_decoration_rules(&mut self, _rules: DecorationRules) {}
+    /// Installs the keyboard configuration a reload just resolved.
+    ///
+    /// Defaulted to a no-op: a backend with no keymap of its own (the
+    /// X11 session, where the X server owns the layout) has nothing to
+    /// do here. The Wayland session rebuilds the seat's keymap and
+    /// repeat timing from it, which is what makes `hyprctl reload`
+    /// after an `input { kb_layout = … }` edit mean something. Before
+    /// this verb existed the reload path answered `ok` and changed
+    /// nothing.
+    fn set_keyboard_config(&mut self, _config: KeyboardConfig) {}
     /// Whether the client has already drawn its own window chrome, and
     /// so must not be framed. See [`crate::ClientChrome`] for why this is not
     /// derivable from [`Self::window_type`].

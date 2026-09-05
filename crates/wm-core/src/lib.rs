@@ -42,7 +42,7 @@ pub use placement::{place_frame, FloatDecision, FloatPolicy, PlacementPolicy, Wi
 // one of its public types contains it.
 pub use snap::snap_position;
 pub use types::{
-    BackendEvent, ClientChrome, DecorationRules, DragHandle, KeyCombo, Modifiers, MouseButton, NetState,
+    BackendEvent, ClientChrome, DecorationRules, DragHandle, KeyCombo, KeyboardConfig, Modifiers, MouseButton, NetState,
     NetStateAction, NetStateSnapshot, ScrollDelta, SizeHints, SurfaceRef, WindowType, WmClass, WmProtocol,
 };
 pub use wm_theme_api::{Point, Rect, Size};

@@ -1256,6 +1256,12 @@ impl Backend for WaylandBackend {
 
     fn publish_workspaces(&mut self, count: usize, current: usize) {
         self.ewmh.note_workspaces(count, current);
+        // The same row, for native Wayland clients. `note_workspaces`
+        // is already a "changed, not mentioned" ledger; this flag rides
+        // the same call so the two protocols cannot describe different
+        // desktops, and `workspace::refresh` does its own comparison
+        // before sending anything.
+        self.workspaces_dirty = true;
     }
 
     fn publish_workarea(&mut self, area: Rect, workspace_count: usize) {
@@ -1455,6 +1461,13 @@ impl Backend for WaylandBackend {
 
     fn window_is_modal(&self, window: Self::WindowId) -> bool {
         self.windows.get(&window).is_some_and(|record| record.modal)
+    }
+
+    fn set_keyboard_config(&mut self, config: wm_core::KeyboardConfig) {
+        // Staged, not applied: the seat lives on `Compositor` and this
+        // verb only ever sees the ledger. `apply_pending_keyboard`
+        // installs it at the top of the next dispatch pass.
+        self.pending_keyboard = Some(config);
     }
 
     fn set_decoration_rules(&mut self, rules: wm_core::DecorationRules) {
