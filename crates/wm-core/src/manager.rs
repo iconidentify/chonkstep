@@ -2426,6 +2426,28 @@ impl<B: Backend> WindowManager<B> {
             );
             return;
         }
+        // Same refusal, same reason, one state over: a fullscreen
+        // window has no titlebar either. `reflow_frame`'s fullscreen
+        // branch runs before the shaded one and sets
+        // `titlebar_height: 0` with empty hitboxes, so shading here
+        // would unmap the content and leave the full-screen rectangle
+        // exactly where it was — the window's contents gone, no chrome
+        // to click, and no way back that is visible on screen.
+        //
+        // Fullscreen wins because a *client* can ask for it
+        // (`xdg_toplevel.set_fullscreen`, `_NET_WM_STATE_FULLSCREEN`)
+        // while shade is purely compositor-side presentation; the
+        // reverse guard is in `fullscreen`. Between them they keep the
+        // invariant the rest of the shade code assumes: SHADED implies
+        // a visible titlebar, and SHADED and FULLSCREEN are never both
+        // set.
+        if client.flags.contains(ClientFlags::FULLSCREEN) {
+            tracing::debug!(
+                ?id,
+                "shade refused: a fullscreen window has no titlebar to roll up into"
+            );
+            return;
+        }
         client.flags.insert(ClientFlags::SHADED);
         let window = client.window;
         self.bump_protocol_state_revision();
@@ -2500,6 +2522,25 @@ impl<B: Backend> WindowManager<B> {
         if client.flags.contains(ClientFlags::FULLSCREEN) {
             return;
         }
+        // A shaded window unshades on the way in, exactly as
+        // `handle_activate_request` does and for the same reason: the
+        // state being entered has no titlebar to roll up into, so the
+        // two flags cannot both stand. Fullscreen wins over shade here
+        // rather than being refused, because this path is reachable
+        // from a client request and refusing a client's
+        // `set_fullscreen` would be the worse answer.
+        //
+        // Unshade before entering fullscreen so its remap, refresh, and
+        // SHADED state publication all happen before the fullscreen
+        // reflow. Shading changes only the backend frame geometry, not
+        // `client.geometry`, so this ordering does not affect the restore
+        // rect stored below; it keeps the state transition itself clear.
+        if client.flags.contains(ClientFlags::SHADED) {
+            self.unshade(id);
+        }
+        let Some(client) = self.clients.get_mut(id) else {
+            return;
+        };
         self.fullscreen_restore.insert(id, client.geometry);
         client.flags.insert(ClientFlags::FULLSCREEN);
         self.bump_protocol_state_revision();
@@ -6671,6 +6712,130 @@ mod tests {
             Some(&false),
             "content window must be unmapped while shaded"
         );
+    }
+
+    /// A window mapped on an 800x600 monitor, ready to have its states
+    /// combined. Shared by the two orderings below so the assertions,
+    /// not the setup, are what differ between them.
+    fn shadeable_window() -> (WindowManager<FakeBackend>, ClientId, FakeWindowId) {
+        let mut backend = FakeBackend::new();
+        let window = backend.create_window();
+        backend.set_geometry(window, Rect { pos: Point::new(50, 50), size: Size::new(100, 100) });
+        backend.set_monitor(Rect { pos: Point::new(0, 0), size: Size::new(800, 600) });
+        let mut wm = wm(backend);
+        wm.dispatch(BackendEvent::MapRequest(window));
+        let id = wm.client_for_window(window).unwrap();
+        (wm, id, window)
+    }
+
+    #[test]
+    fn fullscreening_a_shaded_window_unshades_it_rather_than_emptying_the_frame() {
+        // Before the guard this produced a monitor-sized frame with no
+        // content in it: `reflow_frame`'s fullscreen branch runs first,
+        // so the shaded branch never ran, and nothing re-mapped the
+        // content that `shade` had unmapped.
+        //
+        // Fullscreen wins because a client can ask for it and shade is
+        // ours alone, so the shade is undone rather than the fullscreen
+        // refused.
+        let (mut wm, id, window) = shadeable_window();
+        let unshaded_geometry = wm.client(id).unwrap().geometry;
+
+        wm.shade(id);
+        assert!(wm.client(id).unwrap().flags.contains(ClientFlags::SHADED));
+        wm.fullscreen(id);
+
+        let client = wm.client(id).unwrap();
+        assert!(client.flags.contains(ClientFlags::FULLSCREEN), "the fullscreen request is honoured");
+        assert!(!client.flags.contains(ClientFlags::SHADED), "and the shade is undone, not left standing");
+        assert_eq!(
+            wm.backend().client_mapped.get(&window),
+            Some(&true),
+            "a fullscreen window must have its content mapped, or the frame is an empty rectangle"
+        );
+
+        // Leaving fullscreen still round-trips the ordinary client
+        // geometry and does not resurrect the shade. (Shading changes
+        // only the backend frame geometry, so this is a round-trip
+        // assertion rather than a snapshot-order assertion.)
+        wm.unfullscreen(id);
+        let client = wm.client(id).unwrap();
+        assert!(!client.flags.contains(ClientFlags::FULLSCREEN));
+        assert!(!client.flags.contains(ClientFlags::SHADED), "leaving fullscreen must not resurrect the shade");
+        assert_eq!(client.geometry, unshaded_geometry, "and restores the geometry it had before either state");
+        assert_eq!(wm.backend().client_mapped.get(&window), Some(&true));
+    }
+
+    #[test]
+    fn shading_a_fullscreen_window_is_refused_rather_than_blanking_the_screen() {
+        // The other ordering, and the worse one: before the guard the
+        // content was unmapped while the full-screen rectangle stayed
+        // exactly where it was, leaving no titlebar to click and no
+        // contents to identify the window by.
+        //
+        // Refused rather than unfullscreened, matching the
+        // `ClientChrome::ClientDrawn` refusal a few lines above it:
+        // there is no titlebar to roll up into, and shade is the
+        // request that came from us rather than from the client.
+        let (mut wm, id, window) = shadeable_window();
+        wm.fullscreen(id);
+        let fullscreen_frame = *wm
+            .backend()
+            .last_frame_geometry
+            .get(&wm.client(id).unwrap().frame.unwrap())
+            .unwrap();
+
+        wm.shade(id);
+
+        let client = wm.client(id).unwrap();
+        assert!(!client.flags.contains(ClientFlags::SHADED), "shade must be refused while fullscreen");
+        assert!(client.flags.contains(ClientFlags::FULLSCREEN), "and must not disturb the fullscreen state");
+        // `None` here is the strongest possible answer: the backend was
+        // never told to unmap at all, because the refusal returns before
+        // `set_client_mapped`. `Some(false)` is the bug.
+        assert_eq!(
+            wm.backend().client_mapped.get(&window),
+            None,
+            "a refused shade must not call set_client_mapped at all"
+        );
+        assert_eq!(
+            wm.backend().last_frame_geometry.get(&client.frame.unwrap()),
+            Some(&fullscreen_frame),
+            "and the frame is untouched"
+        );
+
+        // `toggle_shade` goes through the same refusal, so the
+        // double-click and window-menu gestures cannot get around it.
+        wm.toggle_shade(id);
+        assert!(!wm.client(id).unwrap().flags.contains(ClientFlags::SHADED));
+
+        // Leaving fullscreen leaves an ordinary window that still shades.
+        wm.unfullscreen(id);
+        wm.shade(id);
+        assert!(wm.client(id).unwrap().flags.contains(ClientFlags::SHADED), "shade works again once fullscreen is gone");
+    }
+
+    #[test]
+    fn shaded_and_fullscreen_are_never_both_set_by_any_ordering() {
+        // The invariant the two guards exist to hold, stated once and
+        // driven through every entry point that can reach either flag —
+        // including the toggles, which is what a bound key and a
+        // client's `_NET_WM_STATE` message both land on.
+        for order in 0..2 {
+            let (mut wm, id, _) = shadeable_window();
+            if order == 0 {
+                wm.toggle_shade(id);
+                wm.toggle_fullscreen(id);
+            } else {
+                wm.toggle_fullscreen(id);
+                wm.toggle_shade(id);
+            }
+            let flags = wm.client(id).unwrap().flags;
+            assert!(
+                !(flags.contains(ClientFlags::SHADED) && flags.contains(ClientFlags::FULLSCREEN)),
+                "ordering {order} left both SHADED and FULLSCREEN set"
+            );
+        }
     }
 
     #[test]
