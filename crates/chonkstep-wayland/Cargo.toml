@@ -11,9 +11,11 @@ license.workspace = true
 # on purpose — `wm_wayland::run` owns the compositor, the shell, and
 # the event loop, so this binary reaches `chonk-shell`/`wm-core`
 # through `wm-wayland` rather than naming them itself; only the config
-# loader and the compositor crate appear here.
+# loader, the shared startup policy, and the compositor crate appear
+# here.
 [target.'cfg(target_os = "linux")'.dependencies]
 chonk-build-info = { path = "../chonk-build-info" }
+chonk-shell = { path = "../chonk-shell" }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 wm-config = { path = "../wm-config" }

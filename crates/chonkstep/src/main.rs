@@ -18,7 +18,9 @@ use wm_x11::X11Backend;
 use chonk_shell::dockapp::Farewell;
 use chonk_shell::shell::{Shell, ShellOutcome};
 use chonk_shell::spawn;
-use chonk_shell::startup::{ensure_xcursor_size, SessionRequestPoller, SessionState};
+use chonk_shell::startup::{
+    ensure_xcursor_size, pin_glibc_large_allocation_policy, SessionRequestPoller, SessionState,
+};
 use chonk_xsettings::{DesktopAppearance, XSettingsManager};
 
 /// Answers `--version` and `-V` before anything else starts.
@@ -50,7 +52,11 @@ fn main() {
     // Also before `restart_in_place`'s re-exec can ever matter: that
     // path passes no arguments, so a restarted session never sees one.
     print_version_and_exit_if_asked();
+    let allocator_policy_pinned = pin_glibc_large_allocation_policy();
     tracing_subscriber::fmt().with_env_filter(tracing_subscriber::EnvFilter::from_default_env()).init();
+    if !allocator_policy_pinned {
+        tracing::warn!("glibc rejected the fixed mmap/trim thresholds; transient buffers may raise the heap high-water mark");
+    }
     tracing::info!(
         version = env!("CARGO_PKG_VERSION"),
         "chonkstep starting \u{2014} a modern window manager in the classic NeXTSTEP style"

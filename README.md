@@ -710,6 +710,8 @@ always available; it is not rebindable from the config file.
   complete Wayland integration suite one compositor at a time. It exercises
   real clients and captured pixels without touching the logged-in desktop;
   omit `--headless` to nest visibly in the current graphical session.
+- [docs/memory.md](docs/memory.md) explains the compositor's glibc
+  allocation policy and gives a reproducible `/proc` heap measurement.
 
 The workspace splits along seams that keep the core testable: `wm-core`
 (window management logic, no display server), `wm-theme` (decoration

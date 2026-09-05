@@ -28,6 +28,43 @@ use wm_theme::{Appearance, Theme};
 
 use crate::theme_select;
 
+/// Keeps large, short-lived render buffers out of glibc's persistent
+/// heap arena.
+///
+/// glibc normally raises its mmap threshold after freeing a large
+/// allocation. A later allocation just below that new threshold then
+/// comes from the arena, and freeing it can leave the compositor's
+/// `[heap]` mapping at that high-water mark indefinitely. Overview,
+/// theme changes, and screenshots all create buffers with exactly
+/// that lifetime. Setting both thresholds disables the adaptive rule:
+/// allocations of at least 128 KiB use their own mappings, while idle
+/// arena space becomes eligible for trimming at 256 KiB.
+///
+/// Call this at the very beginning of each session binary, before
+/// logging setup or any worker thread. On targets without glibc there
+/// is no matching allocator policy to change, so this is a successful
+/// no-op.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+pub fn pin_glibc_large_allocation_policy() -> bool {
+    const MMAP_THRESHOLD_BYTES: libc::c_int = 128 * 1024;
+    const TRIM_THRESHOLD_BYTES: libc::c_int = 256 * 1024;
+
+    // SAFETY: `mallopt` changes process-global allocator policy and
+    // accepts these documented integer parameters. Both session
+    // binaries call this while startup is still single-threaded.
+    unsafe {
+        let mmap_set = libc::mallopt(libc::M_MMAP_THRESHOLD, MMAP_THRESHOLD_BYTES) != 0;
+        let trim_set = libc::mallopt(libc::M_TRIM_THRESHOLD, TRIM_THRESHOLD_BYTES) != 0;
+        mmap_set && trim_set
+    }
+}
+
+/// Non-glibc counterpart to [`pin_glibc_large_allocation_policy`].
+#[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+pub fn pin_glibc_large_allocation_policy() -> bool {
+    true
+}
+
 /// Everything about a running session that a user can change without
 /// restarting it: the look (theme and UI scale) and the policy the
 /// config file sets.
@@ -983,6 +1020,77 @@ mod tests {
     #[test]
     fn absent_config_theme_is_not_an_error() {
         assert!(config_theme_fallback(None).is_none());
+    }
+}
+
+#[cfg(all(test, target_os = "linux", target_env = "gnu"))]
+mod allocator_tests {
+    use std::hint::black_box;
+    use std::process::Command;
+
+    const CHILD_ENV: &str = "CHONKSTEP_GLIBC_ARENA_TEST_CHILD";
+    const MAX_ARENA_GROWTH: usize = 2 * 1024 * 1024;
+
+    fn touched_buffer(bytes: usize) -> Vec<u8> {
+        let mut buffer = vec![0_u8; bytes];
+        for offset in (0..bytes).step_by(4096) {
+            buffer[offset] = 1;
+        }
+        black_box(&buffer);
+        buffer
+    }
+
+    fn arena_bytes() -> usize {
+        // SAFETY: `mallinfo2` takes no pointers and returns a snapshot
+        // of glibc's allocator counters by value.
+        unsafe { libc::mallinfo2().arena }
+    }
+
+    #[test]
+    fn glibc_large_transients_stay_out_of_the_arena() {
+        if std::env::var_os(CHILD_ENV).is_none() {
+            // Run alone in a fresh process: `mallopt` is process-global,
+            // so applying it in the parent test runner would silently
+            // change the allocator beneath unrelated parallel tests.
+            #[allow(clippy::disallowed_methods)]
+            let output = Command::new(std::env::current_exe().expect("current test executable"))
+                .args([
+                    "--exact",
+                    "startup::allocator_tests::glibc_large_transients_stay_out_of_the_arena",
+                    "--nocapture",
+                ])
+                .env(CHILD_ENV, "1")
+                .output()
+                .expect("spawn isolated allocator test");
+            assert!(
+                output.status.success(),
+                "isolated allocator test failed\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+
+        assert!(super::pin_glibc_large_allocation_policy(), "glibc accepted both fixed thresholds");
+        let before = arena_bytes();
+
+        // Without the startup policy, freeing the first transient
+        // raises glibc's adaptive mmap threshold above the second
+        // transient's size. That 15 MiB buffer then enters the arena
+        // and leaves its mapping behind. The small live buffer prevents
+        // a coincidental top-of-heap trim from masking that.
+        drop(touched_buffer(16 * 1024 * 1024));
+        let transient = touched_buffer(15 * 1024 * 1024);
+        let live = touched_buffer(64 * 1024);
+        drop(transient);
+        black_box(live);
+
+        let growth = arena_bytes().saturating_sub(before);
+        assert!(
+            growth < MAX_ARENA_GROWTH,
+            "large transients grew glibc's arena by {growth} bytes (before {before}, after {})",
+            arena_bytes()
+        );
     }
 }
 
