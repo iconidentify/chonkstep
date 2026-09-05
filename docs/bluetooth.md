@@ -307,10 +307,9 @@ The exception is also unavoidable. **Pairing requires an agent**: BlueZ
 will not pair without a process registering an `org.bluez.Agent1` object
 it can call back into to ask "is the passkey the same on both screens?".
 Registering a D-Bus *object* means serving a bus name, and `busctl` — a
-client tool — cannot do it. The alternatives were to implement `Agent1`
-against a D-Bus library (a dependency this workspace does not have and
-would acquire for one dialog) or to use the agent BlueZ already ships in
-its own control program. This takes the second.
+client tool — cannot do it. The alternatives were to implement and own a
+second D-Bus service lifecycle for one dialog or to use the agent BlueZ
+already ships in its own control program. This takes the second.
 
 ### The agent mode: `DisplayYesNo`
 

@@ -225,9 +225,10 @@ if the checkout moved), or install the chonkstep package"
 # environment.
 [ -n "${XDG_RUNTIME_DIR:-}" ] || fail "XDG_RUNTIME_DIR is not set - a Wayland compositor has nowhere to put its socket"
 
-# A session bus is not optional plumbing for a modern desktop —
-# chonkstep itself never touches D-Bus, but the applications its menus
-# launch expect $DBUS_SESSION_BUS_ADDRESS to exist. Unlike the X11
+# A session bus is not optional plumbing for a modern desktop — the
+# compositor owns its ScreenSaver and portal idle-inhibit bridges there,
+# and the applications its menus launch expect $DBUS_SESSION_BUS_ADDRESS
+# to exist. Unlike the X11
 # script this wraps conditionally: a display manager that starts
 # sessions through the systemd user instance has already given us a
 # bus, and starting a second one inside it would split the session in

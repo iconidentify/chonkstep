@@ -1,0 +1,4 @@
+[portal]
+DBusName=org.freedesktop.impl.portal.desktop.chonkstep
+Interfaces=org.freedesktop.impl.portal.Inhibit;
+UseIn=chonkstep

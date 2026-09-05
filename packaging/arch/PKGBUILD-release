@@ -202,10 +202,12 @@ DESKTOP
   install -Dm755 scripts/omarchy-remove-desktop-chonkstep \
     "$pkgdir/usr/bin/omarchy-remove-desktop-chonkstep"
 
-  # Portal backend map: ScreenCast/Screenshot to xdg-desktop-portal-wlr
-  # (chonkstep-wayland advertises zwlr_screencopy), the rest to the GTK
-  # backend. Matched by XDG_CURRENT_DESKTOP=chonkstep, which the session
-  # script exports and the .desktop entry's DesktopNames sets.
+  # Portal backend declaration and map: Inhibit to chonkstep-wayland,
+  # ScreenCast/Screenshot to xdg-desktop-portal-wlr, the rest to GTK.
+  # Matched by XDG_CURRENT_DESKTOP=chonkstep, which the session script
+  # exports and the .desktop entry's DesktopNames sets.
+  install -Dm644 packaging/portal/chonkstep.portal \
+    "$pkgdir/usr/share/xdg-desktop-portal/portals/chonkstep.portal"
   install -Dm644 packaging/portal/chonkstep-portals.conf \
     "$pkgdir/usr/share/xdg-desktop-portal/chonkstep-portals.conf"
 
@@ -219,6 +221,7 @@ DESKTOP
   install -Dm644 docs/dockapp-protocol.md -t "$pkgdir/usr/share/doc/$pkgname"
   install -Dm644 docs/xwayland-compatibility.md -t "$pkgdir/usr/share/doc/$pkgname"
   install -Dm644 docs/screen-sharing.md -t "$pkgdir/usr/share/doc/$pkgname"
+  install -Dm644 docs/idle-inhibition.md -t "$pkgdir/usr/share/doc/$pkgname"
   install -Dm644 docs/night-light.md -t "$pkgdir/usr/share/doc/$pkgname"
   install -Dm644 docs/hyprland-ipc.md -t "$pkgdir/usr/share/doc/$pkgname"
   install -Dm644 docs/hyprland-config.md -t "$pkgdir/usr/share/doc/$pkgname"
