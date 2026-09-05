@@ -70,13 +70,13 @@ use smithay::backend::input::{
 };
 use smithay::desktop::utils::under_from_surface_tree;
 use smithay::desktop::WindowSurfaceType;
-use smithay::input::keyboard::{keysyms, FilterResult, Keycode, Keysym, ModifiersState};
+use smithay::input::keyboard::{keysyms, FilterResult, KeyboardHandle, Keycode, Keysym, ModifiersState};
 use smithay::input::pointer::{
     AxisFrame, ButtonEvent, GestureHoldBeginEvent, GestureHoldEndEvent, GesturePinchBeginEvent, GesturePinchEndEvent,
     GesturePinchUpdateEvent, GestureSwipeBeginEvent, GestureSwipeEndEvent, GestureSwipeUpdateEvent, MotionEvent,
     RelativeMotionEvent,
 };
-use smithay::input::Seat;
+use smithay::input::{Seat, SeatHandler};
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::utils::{Logical, Point as LogicalPoint, SERIAL_COUNTER};
 use smithay::wayland::keyboard_shortcuts_inhibit::KeyboardShortcutsInhibitorSeat;
@@ -182,7 +182,8 @@ struct ImplicitGrab {
     /// above zero and route every later click to a stale target for
     /// the rest of the session. A repeated press of a button already
     /// in the set is now idempotent, and `session` clears the grab
-    /// outright when the seat comes back (see `clear_implicit_grab`).
+    /// outright when the seat comes back (see
+    /// [`resynchronise_input_after_resume`]).
     buttons: Vec<MouseButton>,
 }
 
@@ -327,6 +328,99 @@ pub(crate) fn clear_implicit_grab(seat: &Seat<Compositor>) {
         // the next release of that button in this session.
         input.grab_dismissals.clear();
     });
+}
+
+/// Reconciles every held-input state after the real session regains its
+/// seat.
+///
+/// Releases that happen while another VT owns the seat are deliberately
+/// not replayed by libinput. That leaves both our intercepted-key ledger
+/// and Smithay's xkb state believing keys are still down forever. Clear
+/// the compositor-owned state, release Smithay's pressed keys without
+/// running bindings, and synthesize releases only for presses that were
+/// originally forwarded to the focused client. A swallowed shortcut must
+/// not turn into a client-visible release merely because a VT switch
+/// interrupted it.
+pub(crate) fn resynchronise_input_after_resume(state: &mut Compositor) {
+    let seat = state.seat.clone();
+    let suppressed_keys = with_input(&seat, reset_resume_bookkeeping);
+
+    if let Some(keyboard) = seat.get_keyboard() {
+        let time = state.start_time.elapsed().as_millis() as u32;
+        release_stale_pressed_keys(state, &keyboard, &suppressed_keys, time);
+    }
+
+    // Alt-Tab takes an explicit modal grab and wm-core gives it back on
+    // Alt's release. If that release went to the other VT, neither side
+    // can otherwise recover: future keys stay swallowed and the cycle
+    // panel remains open. Drop exclusivity immediately, then give
+    // wm-core the same release its ordinary input path would have queued
+    // so it can commit and retire the cycle session on this dispatch.
+    reset_modal_keyboard_grab(state.wm.backend_mut());
+}
+
+fn reset_modal_keyboard_grab(backend: &mut WaylandBackend) {
+    if std::mem::take(&mut backend.keyboard_grabbed) {
+        backend.queue(WmEvent::KeyRelease(KeyCombo {
+            keysym: keysyms::KEY_Alt_L,
+            modifiers: Modifiers::empty(),
+        }));
+    }
+}
+
+fn reset_resume_bookkeeping(input: &mut InputState) -> Vec<Keycode> {
+    input.implicit_grab = None;
+    input.grab_dismissals.clear();
+    input.repeating = None;
+    std::mem::take(&mut input.suppressed_keys)
+}
+
+/// Clears Smithay's physical-key and xkb state, then balances only the
+/// client-visible presses.
+///
+/// `input_forward` alone is insufficient here: it sends protocol events
+/// and updates Smithay's forwarded set, but does not update the physical
+/// pressed-key set or xkb modifiers. The intercept pass does that without
+/// re-entering production binding logic. The final modifier assignment
+/// also drops latched/depressed state while preserving Caps Lock, Num
+/// Lock, and the active layout.
+fn release_stale_pressed_keys<D: SeatHandler + 'static>(
+    data: &mut D,
+    keyboard: &KeyboardHandle<D>,
+    suppressed_keys: &[Keycode],
+    time: u32,
+) {
+    let mut pressed_keys: Vec<_> = keyboard.pressed_keys().into_iter().collect();
+    pressed_keys.sort_unstable();
+
+    let mut modifiers_changed = false;
+    for keycode in &pressed_keys {
+        let ((), changed) = keyboard.input_intercept(data, *keycode, KeyState::Released, |_, _, _| ());
+        modifiers_changed |= changed;
+    }
+
+    let old_modifiers = keyboard.modifier_state();
+    let clean_modifiers = ModifiersState {
+        caps_lock: old_modifiers.caps_lock,
+        num_lock: old_modifiers.num_lock,
+        ..ModifiersState::default()
+    };
+    modifiers_changed |= keyboard.set_modifier_state(clean_modifiers) != 0;
+
+    for (index, keycode) in pressed_keys
+        .into_iter()
+        .filter(|keycode| !suppressed_keys.contains(keycode))
+        .enumerate()
+    {
+        keyboard.input_forward(
+            data,
+            keycode,
+            KeyState::Released,
+            SERIAL_COUNTER.next_serial(),
+            time,
+            modifiers_changed && index == 0,
+        );
+    }
 }
 
 /// Re-homes client input when the lock boundary changes.
@@ -2693,7 +2787,155 @@ fn local_to(at: Point, origin: Point) -> Point {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use smithay::input::keyboard::{KeyboardTarget, KeysymHandle, XkbConfig};
+    use smithay::input::SeatState;
+    use smithay::utils::{IsAlive, Serial};
     use wm_theme_api::{Rect, Size};
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    struct TestInputTarget;
+
+    impl IsAlive for TestInputTarget {
+        fn alive(&self) -> bool {
+            true
+        }
+    }
+
+    #[derive(Default)]
+    struct TestSeatState {
+        seat_state: SeatState<Self>,
+        keys: Vec<(Keycode, KeyState)>,
+        modifiers: Vec<ModifiersState>,
+    }
+
+    impl SeatHandler for TestSeatState {
+        type KeyboardFocus = TestInputTarget;
+        // This test never adds pointer or touch capabilities. Reusing a
+        // Smithay target that already implements both contracts keeps
+        // the fixture about the keyboard behavior under test.
+        type PointerFocus = smithay::xwayland::X11Surface;
+        type TouchFocus = smithay::xwayland::X11Surface;
+
+        fn seat_state(&mut self) -> &mut SeatState<Self> {
+            &mut self.seat_state
+        }
+    }
+
+    impl KeyboardTarget<TestSeatState> for TestInputTarget {
+        fn enter(
+            &self,
+            _seat: &Seat<TestSeatState>,
+            _data: &mut TestSeatState,
+            _keys: Vec<KeysymHandle<'_>>,
+            _serial: Serial,
+        ) {
+        }
+
+        fn leave(&self, _seat: &Seat<TestSeatState>, _data: &mut TestSeatState, _serial: Serial) {}
+
+        fn key(
+            &self,
+            _seat: &Seat<TestSeatState>,
+            data: &mut TestSeatState,
+            key: KeysymHandle<'_>,
+            state: KeyState,
+            _serial: Serial,
+            _time: u32,
+        ) {
+            data.keys.push((key.raw_code(), state));
+        }
+
+        fn modifiers(
+            &self,
+            _seat: &Seat<TestSeatState>,
+            data: &mut TestSeatState,
+            modifiers: ModifiersState,
+            _serial: Serial,
+        ) {
+            data.modifiers.push(modifiers);
+        }
+    }
+
+    fn send_test_key(
+        state: &mut TestSeatState,
+        keyboard: &KeyboardHandle<TestSeatState>,
+        keycode: Keycode,
+        key_state: KeyState,
+        forward: bool,
+    ) {
+        keyboard.input::<(), _>(state, keycode, key_state, SERIAL_COUNTER.next_serial(), 1, |_, _, _| {
+            if forward {
+                FilterResult::Forward
+            } else {
+                FilterResult::Intercept(())
+            }
+        });
+    }
+
+    #[test]
+    fn resume_clears_xkb_state_and_balances_only_forwarded_presses() {
+        const TAB: Keycode = Keycode::new(15 + 8);
+        const LEFT_ALT: Keycode = Keycode::new(56 + 8);
+        const CAPS_LOCK: Keycode = Keycode::new(58 + 8);
+        const NUM_LOCK: Keycode = Keycode::new(69 + 8);
+
+        let mut state = TestSeatState::default();
+        let mut seat = state.seat_state.new_seat("resume-test");
+        let keyboard = seat.add_keyboard(XkbConfig::default(), 200, 25).expect("default keymap");
+        keyboard.set_focus(&mut state, Some(TestInputTarget), SERIAL_COUNTER.next_serial());
+
+        for lock in [CAPS_LOCK, NUM_LOCK] {
+            send_test_key(&mut state, &keyboard, lock, KeyState::Pressed, true);
+            send_test_key(&mut state, &keyboard, lock, KeyState::Released, true);
+        }
+        assert!(keyboard.modifier_state().caps_lock);
+        assert!(keyboard.modifier_state().num_lock);
+
+        send_test_key(&mut state, &keyboard, LEFT_ALT, KeyState::Pressed, true);
+        send_test_key(&mut state, &keyboard, TAB, KeyState::Pressed, false);
+        assert!(keyboard.modifier_state().alt);
+        state.keys.clear();
+        state.modifiers.clear();
+
+        release_stale_pressed_keys(&mut state, &keyboard, &[TAB], 2);
+
+        assert!(keyboard.pressed_keys().is_empty());
+        assert_eq!(state.keys, vec![(LEFT_ALT, KeyState::Released)]);
+        let modifiers = keyboard.modifier_state();
+        assert!(!modifiers.alt);
+        assert!(!modifiers.ctrl);
+        assert!(!modifiers.shift);
+        assert!(!modifiers.logo);
+        assert!(modifiers.caps_lock);
+        assert!(modifiers.num_lock);
+        assert_eq!(modifiers.serialized.latched, 0);
+        assert_eq!(state.modifiers.last(), Some(&modifiers));
+    }
+
+    #[test]
+    fn resume_drops_every_compositor_owned_hold() {
+        let keycode = Keycode::new(23);
+        let combo = KeyCombo { keysym: keysyms::KEY_Tab, modifiers: Modifiers::ALT };
+        let mut input = InputState {
+            implicit_grab: Some(ImplicitGrab { target: PressTarget::Root, buttons: vec![MouseButton::Left] }),
+            grab_dismissals: vec![272],
+            suppressed_keys: vec![keycode],
+            repeating: Some(RepeatingKey {
+                keycode,
+                combo,
+                next: std::time::Instant::now(),
+                interval: std::time::Duration::from_millis(40),
+                emitted: 3,
+            }),
+            ..InputState::default()
+        };
+
+        assert_eq!(reset_resume_bookkeeping(&mut input), vec![keycode]);
+        assert!(input.implicit_grab.is_none());
+        assert!(input.grab_dismissals.is_empty());
+        assert!(input.suppressed_keys.is_empty());
+        assert!(input.repeating.is_none());
+    }
 
     /// The lock boundary and idle policy are stated once per input
     /// family, including every family the compositor currently drops.
@@ -2937,6 +3179,20 @@ mod tests {
         // Ledger scale 1 — the value every running session passes today
         // (see the note at `run`'s construction site).
         WaylandBackend::new(display.handle(), Vec::new(), 1.0)
+    }
+
+    #[test]
+    fn resume_releases_the_modal_keyboard_grab() {
+        let mut backend = ledger();
+        backend.keyboard_grabbed = true;
+
+        reset_modal_keyboard_grab(&mut backend);
+
+        assert!(!backend.keyboard_grabbed, "fresh input must not remain intercepted");
+        assert!(matches!(
+            backend.poll_event(),
+            Some(BackendEvent::KeyRelease(KeyCombo { keysym: keysyms::KEY_Alt_L, .. }))
+        ));
     }
 
     const FRAME: WlFrameId = WlFrameId(11);
