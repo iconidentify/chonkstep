@@ -852,6 +852,13 @@ impl<B: Backend> WindowManager<B> {
             return;
         }
         client.flags.set(ClientFlags::URGENT, urgent);
+        // Logged because it is a real, user-visible transition with two
+        // protocol sources (`xdg_system_bell`, and EWMH/ICCCM through
+        // XWayland) and one implicit clear (focus). A log line is also
+        // the only *level-triggered* account of it: the IPC event
+        // stream emits `urgent` on the false→true edge alone, so a
+        // dismissal is invisible there.
+        tracing::info!(?id, urgent, "window urgency changed");
         self.bump_protocol_state_revision();
         self.repaint_decoration(id);
     }
