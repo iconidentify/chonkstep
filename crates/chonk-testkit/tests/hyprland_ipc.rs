@@ -313,6 +313,60 @@ fn the_live_keyword_refusal_does_not_deny_reading_a_hyprland_config() {
     assert!(answer.contains("~/.config/hypr"), "point at the route that works: {answer}");
 }
 
+/// The mapping protocol has two requests, and both are a join: whether
+/// a caller holds the wlr manager's handle or the frozen
+/// `ext_foreign_toplevel_list_v1` handle, the address that comes back
+/// must be the one `hyprctl clients -j` prints for that window.
+///
+/// The ext arm answered `failed` unconditionally while the list went
+/// unadvertised, so half of a protocol this compositor chose to serve
+/// was inert. Deliberately driven with the harness's own probe rather
+/// than `zenity`, so it runs wherever the harness builds.
+#[test]
+#[ignore = "needs a Wayland session to nest inside"]
+fn both_mapping_arms_resolve_one_window_to_one_address() {
+    let mut session = boot("hypr-toplevel-mapping-ext");
+    let dir = socket_dir(&session);
+    let mapper = profile_binary("chonk-toplevel-mapping-probe").expect("mapping probe built");
+    session.launch(mapper.to_str().unwrap(), &[]).expect("mapping probe launches");
+    poll_until(EVENT, "the mapping probe to bind every global", || {
+        session.client_log("chonk-toplevel-mapping-probe").contains("**mapping ready**").then_some(())
+    })
+    .expect("the mapping probe binds the wlr manager, the ext list and the mapping manager");
+
+    let window = profile_binary("chonk-fullscreen-probe").expect("fullscreen probe built");
+    session
+        .launch(window.to_str().unwrap(), &["ext-mapping", "ext-mapping"])
+        .expect("the window under test launches");
+    session.wait_for_window("ext-mapping").expect("the window maps");
+
+    fn address_from(session: &Session, arm: &str) -> Option<String> {
+        let report = session.client_log("chonk-toplevel-mapping-probe");
+        let marker = format!("**{arm} address ");
+        Some(report.split(&marker).nth(1)?.split("**").next()?.to_string())
+    }
+
+    let wlr = poll_until(EVENT, "the wlr arm to answer", || address_from(&session, "wlr"))
+        .expect("the wlr arm answers with an address");
+    let ext = poll_until(EVENT, "the ext arm to answer", || address_from(&session, "ext"))
+        .expect("the ext arm must answer with an address, not `failed`");
+    assert_eq!(wlr, ext, "one window has one address whichever handle names it");
+
+    let clients = json(&dir, "j/clients");
+    let ipc = clients
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|client| client["title"].as_str().is_some_and(|title| title.contains("ext-mapping")))
+        .and_then(|client| client["address"].as_str())
+        .expect("the same window appears in IPC");
+    assert_eq!(ext, ipc, "the ext arm must join to the address hyprctl prints");
+    assert!(
+        !session.client_log("chonk-toplevel-mapping-probe").contains("**ext mapping failed**"),
+        "the ext arm answered `failed`, which is the defect this covers"
+    );
+}
+
 /// The four requests Quickshell makes on connect, in the shapes it
 /// parses. `j/status` is first because Quickshell will not even connect
 /// to the event socket until it is answered.

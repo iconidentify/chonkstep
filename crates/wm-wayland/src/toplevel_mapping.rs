@@ -66,13 +66,18 @@ impl Dispatch<HyprlandToplevelMappingManagerV1, ()> for Compositor {
                     .map(wm_core::ClientId::as_u64);
                 send_address(&response, address);
             }
-            // Chonkstep currently advertises the stateful wlr manager,
-            // not ext-foreign-toplevel-list. The request remains in the
-            // upstream protocol and is answered honestly if a client
-            // imports such an object through another future global.
-            hyprland_toplevel_mapping_manager_v1::Request::GetWindowForToplevel { handle, .. } => {
+            // The same join through the frozen protocol. Both arms
+            // resolve to one `ClientId`, so a caller holding either
+            // kind of handle gets the address `hyprctl clients -j`
+            // prints for that window — which is the whole contract of
+            // this protocol, and was half-inert while the ext list went
+            // unadvertised.
+            hyprland_toplevel_mapping_manager_v1::Request::GetWindowForToplevel { handle, toplevel } => {
                 let response = data_init.init(handle, ());
-                response.failed();
+                let address = crate::protocols::window_for_ext_toplevel(&state.protocols, &toplevel)
+                    .and_then(|window| state.wm.client_for_window(window))
+                    .map(wm_core::ClientId::as_u64);
+                send_address(&response, address);
             }
             hyprland_toplevel_mapping_manager_v1::Request::Destroy => {}
         }
