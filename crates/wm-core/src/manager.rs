@@ -2530,10 +2530,11 @@ impl<B: Backend> WindowManager<B> {
         // from a client request and refusing a client's
         // `set_fullscreen` would be the worse answer.
         //
-        // The order is load-bearing. `unshade` remaps the content and
-        // reflows, so the geometry snapshotted into `fullscreen_restore`
-        // below is the unshaded rect; doing it after the snapshot would
-        // make `unfullscreen` restore a rolled-up frame.
+        // Unshade before entering fullscreen so its remap, refresh, and
+        // SHADED state publication all happen before the fullscreen
+        // reflow. Shading changes only the backend frame geometry, not
+        // `client.geometry`, so this ordering does not affect the restore
+        // rect stored below; it keeps the state transition itself clear.
         if client.flags.contains(ClientFlags::SHADED) {
             self.unshade(id);
         }
@@ -6753,9 +6754,10 @@ mod tests {
             "a fullscreen window must have its content mapped, or the frame is an empty rectangle"
         );
 
-        // The restore slot holds the UNSHADED rect: unshading after the
-        // snapshot would make leaving fullscreen restore a rolled-up
-        // frame instead of a window.
+        // Leaving fullscreen still round-trips the ordinary client
+        // geometry and does not resurrect the shade. (Shading changes
+        // only the backend frame geometry, so this is a round-trip
+        // assertion rather than a snapshot-order assertion.)
         wm.unfullscreen(id);
         let client = wm.client(id).unwrap();
         assert!(!client.flags.contains(ClientFlags::FULLSCREEN));
@@ -6791,10 +6793,10 @@ mod tests {
         // `None` here is the strongest possible answer: the backend was
         // never told to unmap at all, because the refusal returns before
         // `set_client_mapped`. `Some(false)` is the bug.
-        assert_ne!(
+        assert_eq!(
             wm.backend().client_mapped.get(&window),
-            Some(&false),
-            "the content stays mapped: a refused shade must not unmap anything"
+            None,
+            "a refused shade must not call set_client_mapped at all"
         );
         assert_eq!(
             wm.backend().last_frame_geometry.get(&client.frame.unwrap()),
