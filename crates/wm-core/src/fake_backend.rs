@@ -81,6 +81,8 @@ pub struct FakeBackend {
     /// test assert a *fresh* repaint actually happened, not just that
     /// one happened at some point in the frame's history.
     pub paint_count: HashMap<FakeFrameId, u32>,
+    /// Root uploads / solid fills, including repeated identical paints.
+    pub root_paint_count: usize,
     /// Dimensions of the last `DecorationBuffer` painted into each
     /// frame. A backend that owns no frame window of its own (the
     /// Wayland one composites the buffer directly, at the buffer's own
@@ -345,8 +347,8 @@ impl Backend for FakeBackend {
     fn take_shell_scroll(&mut self) -> Option<(Self::ShellId, Point, ScrollDelta)> {
         self.queued_shell_scrolls.pop_front()
     }
-    fn paint_root_color(&mut self, _rgb: (u8, u8, u8)) {}
-    fn paint_root_image(&mut self, _buffer: &DecorationBuffer) {}
+    fn paint_root_color(&mut self, _rgb: (u8, u8, u8)) { self.root_paint_count += 1; }
+    fn paint_root_image(&mut self, _buffer: &DecorationBuffer) { self.root_paint_count += 1; }
     fn set_layer_surface_hidden(&mut self, namespace: &str, hidden: bool) {
         self.layer_visibility_calls.push((namespace.to_string(), hidden));
     }

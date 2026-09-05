@@ -169,7 +169,11 @@ impl Wallpaper {
             let link = wm_theme::omarchy::current_background_path();
             return Self::omarchy_background(link.as_deref(), screen, appearance);
         }
-        let source = Pixmap::decode_png(self.png(appearance)?).ok()?;
+        // The image codec is already linked for Omarchy backgrounds.
+        // Its newer PNG decoder and RGB-to-RGBA conversion avoid the
+        // older tiny-skia path's extra per-channel work at each boot.
+        let source = image::load_from_memory_with_format(self.png(appearance)?, image::ImageFormat::Png).ok()?;
+        let source = rgba_to_pixmap(source.into_rgba8())?;
         Some(cover(&source, screen))
     }
 
@@ -205,6 +209,10 @@ fn load_image(path: &Path) -> Option<Pixmap> {
         .map_err(|error| tracing::warn!(?error, path = %path.display(), "cannot decode the background image"))
         .ok()?
         .into_rgba8();
+    rgba_to_pixmap(image)
+}
+
+fn rgba_to_pixmap(image: image::RgbaImage) -> Option<Pixmap> {
     let size = IntSize::from_wh(image.width(), image.height())?;
     let mut pixels = image.into_raw();
     for [r, g, b, a] in pixels.as_chunks_mut::<4>().0 {
@@ -247,6 +255,19 @@ fn state_path() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_faster_embedded_png_path_preserves_every_bundled_pixel() {
+        for appearance in [Appearance::Light, Appearance::Dark] {
+            for wallpaper in Wallpaper::ALL {
+                let Some(bytes) = wallpaper.png(appearance) else { continue };
+                let original = Pixmap::decode_png(bytes).unwrap();
+                let decoded = image::load_from_memory_with_format(bytes, image::ImageFormat::Png).unwrap();
+                let replacement = rgba_to_pixmap(decoded.into_rgba8()).unwrap();
+                assert_eq!(replacement, original, "{} {appearance:?}", wallpaper.id());
+            }
+        }
+    }
 
     #[test]
     fn every_art_wallpaper_decodes_and_covers_the_requested_size_in_both_moods() {

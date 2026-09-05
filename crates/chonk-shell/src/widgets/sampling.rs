@@ -64,6 +64,7 @@ use chonk_dock_widget::{Reading, Samples, Slot, Source, SourceId, TreeEntry};
 /// Built-in only, on purpose — see the module docs.
 pub(crate) struct SamplerRegistry {
     samplers: Vec<Sampler>,
+    active: bool,
     /// Per source, the sampler generation already folded into
     /// `snapshot`. Parallel to `samplers`, as is `snapshot`; three
     /// vectors indexed by [`SourceId`] rather than one vector of
@@ -90,7 +91,24 @@ enum Sampler {
 
 impl SamplerRegistry {
     pub(crate) fn new() -> Self {
-        Self { samplers: Vec::new(), seen: Vec::new(), snapshot: Vec::new() }
+        Self { samplers: Vec::new(), active: true, seen: Vec::new(), snapshot: Vec::new() }
+    }
+
+    /// Hidden docks retain their readings but do no background sampling.
+    /// Workers registered while inactive do not even start a thread until
+    /// the first activation. Source ids and resample handles remain stable.
+    pub(crate) fn set_active(&mut self, active: bool) {
+        if self.active == active {
+            return;
+        }
+        self.active = active;
+        for sampler in &mut self.samplers {
+            match sampler {
+                Sampler::Text(worker) => worker.set_active(active),
+                Sampler::Tree(worker) => worker.set_active(active),
+                Sampler::Clock { .. } => {}
+            }
+        }
     }
 
     /// Starts a worker per source and hands back the ids to read them
@@ -101,9 +119,9 @@ impl SamplerRegistry {
             .into_iter()
             .map(|source| {
                 let sampler = match source {
-                    Source::Command { program, args, interval } => Sampler::Text(BackgroundCommand::spawn(program, args, interval).worker()),
-                    Source::File { path, interval } => Sampler::Text(spawn_file_worker(path, interval)),
-                    Source::Tree { root, files, dirs, interval } => Sampler::Tree(spawn_tree_worker(root, files, dirs, interval)),
+                    Source::Command { program, args, interval } => Sampler::Text(BackgroundCommand::spawn(program, args, interval, self.active).worker()),
+                    Source::File { path, interval } => Sampler::Text(spawn_file_worker(path, interval, self.active)),
+                    Source::Tree { root, files, dirs, interval } => Sampler::Tree(spawn_tree_worker(root, files, dirs, interval, self.active)),
                     // `max(1)` rather than an error: a widget asking for
                     // sub-second granularity from a tile that draws a
                     // second hand is asking for something the face
@@ -129,6 +147,12 @@ impl SamplerRegistry {
     /// own mutex, which its worker holds solely to swap in a finished
     /// result.
     pub(crate) fn refresh(&mut self) {
+        if !self.active {
+            for slot in &mut self.snapshot {
+                slot.fresh = false;
+            }
+            return;
+        }
         for (index, sampler) in self.samplers.iter().enumerate() {
             let seen = &mut self.seen[index];
             let slot = &mut self.snapshot[index];
@@ -227,12 +251,9 @@ fn wall_clock(granularity: u64) -> (u32, u32, u32) {
 pub(crate) struct BackgroundCommand(Worker<String>);
 
 impl BackgroundCommand {
-    /// Starts the worker. The thread is detached and runs for the life
-    /// of the process: widgets are created once at startup and live in
-    /// the dock until the session ends, so there is no teardown path to
-    /// serve and a join handle would only be something to drop.
-    pub(crate) fn spawn(program: &'static str, args: Vec<String>, interval: Duration) -> Self {
-        Self(Worker::spawn(format!("chonkstep-sample-{program}"), interval, move || {
+    /// Prepares the worker, starting its thread only when active.
+    pub(crate) fn spawn(program: &'static str, args: Vec<String>, interval: Duration, active: bool) -> Self {
+        Self(Worker::spawn(format!("chonkstep-sample-{program}"), interval, active, move || {
             // The one place in this crate where blocking on a child
             // process is the *point*: this closure is the body of the
             // sampler thread `Worker::spawn` started, so the only thing
@@ -301,8 +322,8 @@ impl BackgroundCommand {
 /// appears when a USB dongle is plugged in — so this keeps looking and
 /// reports `Missing` in between. The cost of being wrong in this
 /// direction is one `openat` per second that returns ENOENT.
-fn spawn_file_worker(path: PathBuf, interval: Duration) -> Worker<String> {
-    Worker::spawn("chonkstep-sample-file".to_string(), interval, move || {
+fn spawn_file_worker(path: PathBuf, interval: Duration, active: bool) -> Worker<String> {
+    Worker::spawn("chonkstep-sample-file".to_string(), interval, active, move || {
         // Blocking `read` on a procfs or sysfs file is the point here,
         // for the same reason `Command::output` is above: this closure
         // *is* the worker thread. `/proc` files are synthesized by the
@@ -322,8 +343,8 @@ fn spawn_file_worker(path: PathBuf, interval: Duration) -> Worker<String> {
 /// controller over I2C. Both are fine here — a slow run stretches this
 /// worker's interval and nothing else — and both were, until this
 /// landed, executed once a second on the thread that draws the screen.
-fn spawn_tree_worker(root: PathBuf, files: &'static [&'static str], dirs: &'static [&'static str], interval: Duration) -> Worker<Vec<TreeEntry>> {
-    Worker::spawn("chonkstep-sample-tree".to_string(), interval, move || Outcome::Sampled(Some(read_tree(&root, files, dirs))))
+fn spawn_tree_worker(root: PathBuf, files: &'static [&'static str], dirs: &'static [&'static str], interval: Duration, active: bool) -> Worker<Vec<TreeEntry>> {
+    Worker::spawn("chonkstep-sample-tree".to_string(), interval, active, move || Outcome::Sampled(Some(read_tree(&root, files, dirs))))
 }
 
 /// The whole of a [`Source::Tree`] walk, split out from its worker so
@@ -538,6 +559,7 @@ fn wait_with_deadline(mut child: std::process::Child, program: &str, deadline: D
 /// and there is exactly one copy of them.
 struct Worker<T> {
     shared: Arc<Shared<T>>,
+    start: Option<Box<dyn FnOnce() + Send>>,
 }
 
 struct Shared<T> {
@@ -560,6 +582,8 @@ struct SampleState<T> {
     /// Set by [`Resampler::resample_soon`], cleared by the worker when
     /// it acts on it.
     resample_now: bool,
+    active: bool,
+    stopping: bool,
 }
 
 /// What one run of a sampler produced.
@@ -581,25 +605,51 @@ struct FreshReading<T> {
 }
 
 impl<T: Clone + Send + 'static> Worker<T> {
-    /// Starts the worker. The thread is detached and runs for the life
-    /// of the process: widgets are created once at startup and live in
-    /// the dock until the session ends, so there is no teardown path to
-    /// serve and a join handle would only be something to drop.
-    fn spawn(thread_name: String, interval: Duration, sample: impl FnMut() -> Outcome<T> + Send + 'static) -> Self {
+    /// Preparing an inactive worker allocates its mailbox and closure,
+    /// but creates no thread or child process. Drop signals termination;
+    /// it never joins a possibly blocked sysfs read on the repaint thread.
+    fn spawn(thread_name: String, interval: Duration, active: bool, sample: impl FnMut() -> Outcome<T> + Send + 'static) -> Self {
         let shared = Arc::new(Shared {
-            state: Mutex::new(SampleState { reading: None, unusable: false, generation: 0, resample_now: false }),
+            state: Mutex::new(SampleState {
+                reading: None, unusable: false, generation: 0, resample_now: false,
+                active: false, stopping: false,
+            }),
             wake: Condvar::new(),
         });
         let worker = Arc::clone(&shared);
-        std::thread::Builder::new()
-            .name(thread_name.clone())
-            .spawn(move || sample_loop(worker, sample, interval))
-            // A system that cannot start a thread is not one this
-            // widget can improve on by panicking the compositor. The
-            // widget simply never sees a sample and shows its dead face.
-            .map_err(|error| tracing::warn!(?error, thread = %thread_name, "could not start the sampler thread"))
-            .ok();
-        Self { shared }
+        let start = Box::new(move || {
+            let failed = Arc::clone(&worker);
+            if let Err(error) = std::thread::Builder::new()
+                .name(thread_name.clone())
+                .spawn(move || sample_loop(worker, sample, interval))
+            {
+                tracing::warn!(?error, thread = %thread_name, "could not start the sampler thread");
+                if let Ok(mut state) = failed.state.lock() {
+                    state.unusable = true;
+                    state.generation = state.generation.wrapping_add(1);
+                }
+            }
+        });
+        let mut worker = Self { shared, start: Some(start) };
+        worker.set_active(active);
+        worker
+    }
+
+    fn set_active(&mut self, active: bool) {
+        if let Ok(mut state) = self.shared.state.lock() {
+            if state.active != active {
+                state.active = active;
+                if active {
+                    state.resample_now = true;
+                }
+                self.shared.wake.notify_all();
+            }
+        }
+        if active {
+            if let Some(start) = self.start.take() {
+                start();
+            }
+        }
     }
 
     /// The latest completed run, or `None` if none has completed since
@@ -623,6 +673,15 @@ impl<T: Clone + Send + 'static> Worker<T> {
 
     fn resampler(&self) -> Resampler {
         Resampler { shared: Arc::clone(&self.shared) as Arc<dyn Wake> }
+    }
+}
+
+impl<T> Drop for Worker<T> {
+    fn drop(&mut self) {
+        if let Ok(mut state) = self.shared.state.lock() {
+            state.stopping = true;
+            self.shared.wake.notify_all();
+        }
     }
 }
 
@@ -661,6 +720,21 @@ impl Resampler {
 
 fn sample_loop<T>(shared: Arc<Shared<T>>, mut sample: impl FnMut() -> Outcome<T>, interval: Duration) {
     loop {
+        {
+            let Ok(mut state) = shared.state.lock() else { return };
+            while !state.active && !state.stopping {
+                state = match shared.wake.wait(state) {
+                    Ok(state) => state,
+                    Err(_) => return,
+                };
+            }
+            if state.stopping {
+                return;
+            }
+            // Consume a nudge before sampling so an effect completed
+            // during this run still requests another, fresh reading.
+            state.resample_now = false;
+        }
         match sample() {
             Outcome::Sampled(reading) => {
                 if let Ok(mut state) = shared.state.lock() {
@@ -679,12 +753,15 @@ fn sample_loop<T>(shared: Arc<Shared<T>>, mut sample: impl FnMut() -> Outcome<T>
         }
 
         let Ok(mut state) = shared.state.lock() else { return };
-        state.resample_now = false;
-        // Condvar rather than a plain sleep so a click can shorten the
-        // wait. The timeout is the normal path; the notify is the
-        // exception.
-        while !state.resample_now {
-            let (next, timeout) = match shared.wake.wait_timeout(state, interval) {
+        let deadline = std::time::Instant::now() + interval;
+        // Pause and teardown wake this wait too. Reusing the deadline
+        // prevents spurious wakes from extending the sampling interval.
+        while state.active && !state.stopping && !state.resample_now {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            let (next, timeout) = match shared.wake.wait_timeout(state, remaining) {
                 Ok(pair) => pair,
                 Err(_) => return,
             };
@@ -693,12 +770,95 @@ fn sample_loop<T>(shared: Arc<Shared<T>>, mut sample: impl FnMut() -> Outcome<T>
                 break;
             }
         }
+        if state.stopping {
+            return;
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct NotifyDrop(std::sync::mpsc::Sender<()>);
+
+    impl Drop for NotifyDrop {
+        fn drop(&mut self) {
+            let _ = self.0.send(());
+        }
+    }
+
+    #[test]
+    fn inactive_worker_starts_on_show_and_pauses_between_samples() {
+        use std::sync::mpsc;
+
+        let (sampled, samples) = mpsc::channel();
+        let (release, proceed) = mpsc::channel();
+        let (exited, exit) = mpsc::channel();
+        let lifetime = NotifyDrop(exited);
+        let mut worker = Worker::spawn("test-visibility".into(), Duration::from_millis(1), false, move || {
+            let _ = &lifetime;
+            let _ = sampled.send(());
+            let _ = proceed.recv_timeout(Duration::from_secs(2));
+            Outcome::Sampled(Some("reading".to_string()))
+        });
+        // The same effect handle must work before and after first show.
+        let resample = worker.resampler();
+        resample.resample_soon();
+        assert_eq!(samples.recv_timeout(Duration::from_millis(30)), Err(mpsc::RecvTimeoutError::Timeout));
+        worker.set_active(true);
+        samples.recv_timeout(Duration::from_secs(2)).expect("first show samples");
+        // Hide while a read is in flight. It may finish, but must not
+        // poll again, including when an old effect asks for a resample.
+        worker.set_active(false);
+        release.send(()).unwrap();
+        resample.resample_soon();
+        assert_eq!(samples.recv_timeout(Duration::from_millis(30)), Err(mpsc::RecvTimeoutError::Timeout));
+        worker.set_active(true);
+        samples.recv_timeout(Duration::from_secs(2)).expect("show refreshes immediately");
+        worker.set_active(false);
+        release.send(()).unwrap();
+        drop(worker);
+        exit.recv_timeout(Duration::from_secs(2)).expect("dropping a hidden worker releases its closure");
+        // Keeping an effect handle must not keep the sampling thread alive.
+        resample.resample_soon();
+    }
+
+    #[test]
+    fn dropping_an_idle_worker_wakes_it_without_waiting_for_its_interval() {
+        use std::sync::mpsc;
+
+        let (sampled, samples) = mpsc::channel();
+        let (exited, exit) = mpsc::channel();
+        let lifetime = NotifyDrop(exited);
+        let worker = Worker::spawn("test-teardown".into(), Duration::from_secs(3600), true, move || {
+            let _ = &lifetime;
+            let _ = sampled.send(());
+            Outcome::Sampled(Some(1_u32))
+        });
+        samples.recv_timeout(Duration::from_secs(2)).expect("worker samples");
+        drop(worker);
+        exit.recv_timeout(Duration::from_secs(2)).expect("teardown wakes the hour-long wait");
+    }
+
+    #[test]
+    fn an_effect_completed_during_sampling_requests_a_fresh_reading() {
+        use std::sync::mpsc;
+
+        let (sampled, samples) = mpsc::channel();
+        let (release, proceed) = mpsc::channel();
+        let worker = Worker::spawn("test-resample".into(), Duration::from_secs(3600), true, move || {
+            let _ = sampled.send(());
+            let _ = proceed.recv_timeout(Duration::from_secs(2));
+            Outcome::Sampled(Some(1_u32))
+        });
+        samples.recv_timeout(Duration::from_secs(2)).expect("first read starts");
+        worker.resampler().resample_soon();
+        release.send(()).unwrap();
+        samples.recv_timeout(Duration::from_secs(2)).expect("in-flight nudge is not discarded");
+        drop(worker);
+        release.send(()).unwrap();
+    }
 
     /// The sysfs walk with holes in it, at its new home. This used to
     /// be `power.rs`'s `read_supplies_from` test; the walk moved onto a

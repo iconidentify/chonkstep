@@ -11,7 +11,7 @@
 //! platform (`wm_theme::tile`): one face, relief, and ink recipe shared
 //! with the Clip and every widget, so the dock reads as one family.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -1598,6 +1598,10 @@ pub struct Desktop<B: Backend> {
     icons: HashMap<B::ShellId, IconTile<B::ShellId>>,
     icon_drag: Option<IconDrag<B::ShellId>>,
     wallpaper: Wallpaper,
+    /// Identity of the pixels already owned by the backend, not a
+    /// second pixel cache. Embedded art is immutable; Omarchy's files
+    /// remain live and deliberately bypass this reuse check.
+    wallpaper_drawn: Cell<Option<(Wallpaper, Size, wm_theme::Appearance)>>,
     /// Which rendition of the wallpaper artwork (and dock ground) this
     /// desktop is composed in — see `crate::appearance`. Kept beside
     /// `wallpaper` because the pair is what `repaint_wallpaper` reads.
@@ -1722,6 +1726,10 @@ impl<B: Backend> Desktop<B> {
         let mut inherited = dockapps.handoff_path().map(|path| dockapp::handoff::take(&path)).unwrap_or_default();
 
         let mut samplers = SamplerRegistry::new();
+        // The shell resolves dock visibility before the first tick.
+        // Prepare source handles now, but defer worker threads and
+        // external commands until a visible dock actually needs them.
+        samplers.set_active(false);
         let mut builtins = builtin_items();
         // The built-in panel conformance probe, constructed only when
         // the e2e suite asks for it by environment — the same gate the
@@ -1807,6 +1815,7 @@ impl<B: Backend> Desktop<B> {
             icons: HashMap::new(),
             icon_drag: None,
             wallpaper,
+            wallpaper_drawn: Cell::new(None),
             appearance,
             switcher: None,
             overview: OverviewPanel::default(),
@@ -1901,11 +1910,9 @@ impl<B: Backend> Desktop<B> {
     ///   nor hit-tested and clicks in the corner reach whatever is
     ///   actually there. The surface is kept, not destroyed — showing
     ///   the Dock again is a map and a repaint, not a rebuild, and the
-    ///   instruments never stop running. (They keep sampling and keep
-    ///   their state while hidden, exactly as Omarchy's bar keeps its
-    ///   clock: `redraw_dock` skips the composite, so a hidden Dock
-    ///   costs the repaint thread nothing but the ticks it was already
-    ///   paying.)
+    ///   instruments keep their state while hidden. Built-in samplers
+    ///   pause and refresh when shown again; a dockless Omarchy session
+    ///   does not poll hardware or launch commands for invisible tiles.
     /// * The **reservation** goes with it — see `primary_workarea`.
     ///
     /// The **Clip** travels with it. It is a separate surface in a
@@ -1929,6 +1936,7 @@ impl<B: Backend> Desktop<B> {
             return false;
         }
         self.dock = dock;
+        self.samplers.set_active(!dock.is_hidden());
         if dock.is_hidden() {
             self.dismiss_instrument_panel(backend, PanelCloseReason::Dismissed);
             // Whoever the pointer was over gets its `Leave` now rather
@@ -2086,8 +2094,8 @@ impl<B: Backend> Desktop<B> {
         self.theme_id = id;
     }
 
-    /// Repaints every surface this desktop owns from the current theme
-    /// and the current metrics — the theme/scale twin of
+    /// Repaints this desktop's chrome from the current theme and
+    /// metrics, retaining an unchanged embedded wallpaper — the theme/scale twin of
     /// [`Desktop::resize_to_screen`], which does the same for a changed
     /// monitor arrangement.
     ///
@@ -2212,6 +2220,7 @@ impl<B: Backend> Desktop<B> {
     /// block on is the system — that moved to the sampler threads
     /// `samplers` owns.
     pub fn tick_items(&mut self, backend: &mut B, theme: &Theme) {
+        self.samplers.set_active(!self.dock.is_hidden());
         // Out-of-process tiles first, so a frame that arrived this pass
         // is folded by the same `update` sweep that folds a sampler
         // reading, and reaches the screen on the same repaint. Doing it
@@ -3187,12 +3196,10 @@ impl<B: Backend> Desktop<B> {
     }
 
     fn redraw_dock(&mut self, backend: &mut B, theme: &Theme) {
-        // A hidden Dock is not drawn. The instruments still tick — a
-        // sampler thread does not know about this, and a tile whose
-        // meter kept running is a tile that is *right* the moment the
-        // column comes back — but composing a column nobody can see,
-        // every time the clock's second hand moves, is work with no
-        // reader. `set_dock_visibility` calls straight back into here
+        // A hidden Dock is not drawn, and its built-in samplers are
+        // paused. Remote lifecycle work still runs while hidden, but
+        // composing a column nobody can see has no reader.
+        // `set_dock_visibility` calls straight back into here
         // on the way up, so the first frame after a show is composed
         // against the current geometry and palette rather than
         // whatever the column held when it went away.
@@ -3284,7 +3291,7 @@ impl<B: Backend> Desktop<B> {
             }
         }
 
-        backend.paint_shell_surface(self.dock_window, &pixmap_to_buffer(&pixmap));
+        backend.paint_shell_surface(self.dock_window, &pixmap_to_buffer(pixmap));
     }
 
     pub fn open_root_menu(&mut self, backend: &mut B, theme: &Theme, at: Point)
@@ -3424,6 +3431,10 @@ impl<B: Backend> Desktop<B> {
     }
 
     fn repaint_wallpaper(&self, backend: &mut B) {
+        let key = (self.wallpaper, self.screen_size(), self.appearance);
+        if self.wallpaper != Wallpaper::Omarchy && self.wallpaper_drawn.get() == Some(key) {
+            return;
+        }
         match self.wallpaper.render(self.screen_size(), self.appearance) {
             Some(buffer) => backend.paint_root_image(&buffer),
             // The solid-color artwork (and any artwork that fails to
@@ -3431,6 +3442,7 @@ impl<B: Backend> Desktop<B> {
             // mood, so even the fallback follows the axis.
             None => backend.paint_root_color(self.wallpaper.dock_color(self.appearance)),
         }
+        self.wallpaper_drawn.set(Some(key));
     }
 
     /// Shows (or updates) the Alt-Tab switch panel. `entries: Some`
@@ -3829,8 +3841,8 @@ fn resolve_drag_position(
     }
 }
 
-fn pixmap_to_buffer(pixmap: &Pixmap) -> DecorationBuffer {
-    DecorationBuffer { width: pixmap.width(), height: pixmap.height(), pixels: pixmap.data().to_vec() }
+fn pixmap_to_buffer(pixmap: Pixmap) -> DecorationBuffer {
+    DecorationBuffer { width: pixmap.width(), height: pixmap.height(), pixels: pixmap.take() }
 }
 
 /// `pub(crate)` because a remote tile composes its own dead face out
@@ -3889,6 +3901,40 @@ mod tests {
     fn test_theme() -> wm_theme::Theme {
         wm_theme::default_theme::theme_variant("nextstep-classic", wm_theme::Appearance::Dark)
             .expect("the flagship theme exists")
+    }
+
+    #[test]
+    fn unchanged_embedded_wallpaper_is_not_decoded_or_uploaded_on_restyle() {
+        use wm_core::fake_backend::FakeBackend;
+
+        let theme = test_theme();
+        let primary = Rect { pos: Point::new(0, 0), size: TEST_SCREEN };
+        let mut backend = FakeBackend::new();
+        let mut desktop = Desktop::new(&mut backend, TEST_SCREEN, primary, 1.0,
+            &theme, wm_theme::Appearance::Dark, Vec::new(), wm_theme::FontState::new());
+        // Independent of any wallpaper selected in this developer's
+        // state directory, which Desktop::new normally restores.
+        desktop.wallpaper = Wallpaper::LavenderGrid;
+        desktop.repaint_wallpaper(&mut backend);
+        let painted = backend.root_paint_count;
+        for _ in 0..5 {
+            desktop.relayout(&mut backend, &theme, &[]);
+        }
+        desktop.set_scale(2.0);
+        desktop.relayout(&mut backend, &theme.scaled(2.0), &[]);
+        assert_eq!(backend.root_paint_count, painted, "unchanged root pixels remain backend-owned");
+
+        desktop.set_appearance(wm_theme::Appearance::Light);
+        desktop.relayout(&mut backend, &theme, &[]);
+        assert_eq!(backend.root_paint_count, painted + 1, "appearance selects different pixels");
+        let larger = Size::new(TEST_SCREEN.w + 20, TEST_SCREEN.h);
+        desktop.resize_to_screen(&mut backend, &theme, larger, Rect { size: larger, ..primary });
+        assert_eq!(backend.root_paint_count, painted + 2, "output extent requires a new cover image");
+        desktop.wallpaper = Wallpaper::ClassicLavender;
+        desktop.repaint_wallpaper(&mut backend);
+        assert_eq!(backend.root_paint_count, painted + 3, "artwork selection is part of the identity");
+        desktop.repaint_wallpaper(&mut backend);
+        assert_eq!(backend.root_paint_count, painted + 3, "solid backgrounds are reusable too");
     }
 
     /// The invariant the whole live-scale path rests on: a session that

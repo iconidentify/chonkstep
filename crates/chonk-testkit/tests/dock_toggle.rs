@@ -31,6 +31,16 @@ use std::time::Duration;
 /// submenu either. The `Dock` row is unconditional.
 const PLAIN: RootMenu = RootMenu { omarchy_bar: false, omarchy_rows: &[] };
 
+fn sampler_threads(pid: u32) -> usize {
+    std::fs::read_dir(format!("/proc/{pid}/task"))
+        .expect("read compositor threads")
+        .flatten()
+        .filter_map(|task| std::fs::read_to_string(task.path().join("comm")).ok())
+        // Linux exposes at most 15 bytes of a task name here.
+        .filter(|name| name.starts_with("chonkstep-sampl"))
+        .count()
+}
+
 /// Toggles maximize on the focused window with the default binding.
 /// Two modifiers, so the door's single-modifier `chord` does not fit.
 fn toggle_maximize(session: &mut Session) {
@@ -235,6 +245,9 @@ fn a_session_configured_dockless_never_shows_the_dock_and_a_binding_brings_it_ba
     )
     .unwrap();
 
+    assert_eq!(sampler_threads(session.compositor_pid()), 0,
+        "a dockless session must not start workers or run sampler commands for hidden tiles");
+
     let world = session.world().unwrap();
     let output_w = world.output_w;
     let output_h = world.output_h;
@@ -274,6 +287,9 @@ fn a_session_configured_dockless_never_shows_the_dock_and_a_binding_brings_it_ba
     // what the menu row does, both halves included.
     session.door().chord(keys::LEFTMETA, KEY_D).unwrap();
     let dock = session.wait_for_dock_at(0, 0).expect("the binding maps the dock into its corner");
+    poll_until(Duration::from_secs(10), "the visible dock's samplers to start", || {
+        (sampler_threads(session.compositor_pid()) > 0).then_some(())
+    }).expect("first show activates the prepared sample sources");
     poll_until(Duration::from_secs(10), "the maximized frame to yield the column", || {
         let world = session.world().ok()?;
         world.frame_of(window.id).filter(|f| f.x + f.w as i32 == dock.x).cloned()

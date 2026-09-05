@@ -96,7 +96,7 @@ pub(crate) fn render(theme: &Theme, content: (u32, u32), frame: Option<&Decorati
             crate::desktop::blit_into(&mut pixmap, inset, inset, frame);
         }
     }
-    Some(DecorationBuffer { width: pixmap.width(), height: pixmap.height(), pixels: pixmap.data().to_vec() })
+    Some(DecorationBuffer { width: pixmap.width(), height: pixmap.height(), pixels: pixmap.take() })
 }
 
 /// The one open panel's surface and identity. Owned by `Desktop`.

@@ -1608,7 +1608,7 @@ fn dead_face(theme: &Theme, fonts: &mut cosmic_text::FontSystem, swash: &mut cos
     }
     let screen = panel::render_dead_tile(theme, fonts, swash, tile, label);
     crate::desktop::blit_into(&mut pixmap, 0, 0, &screen);
-    DecorationBuffer { width: pixmap.width(), height: pixmap.height(), pixels: pixmap.data().to_vec() }
+    DecorationBuffer { width: pixmap.width(), height: pixmap.height(), pixels: pixmap.take() }
 }
 
 /// Marks a dead face as *permanently* dead rather than merely

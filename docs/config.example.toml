@@ -300,14 +300,13 @@
 # unmapped and its strip goes back to the workarea in the same breath,
 # so windows use the full width of the screen.
 #
-# Everything else stays where it is. The Clip in the bottom-right
-# corner and the launcher strip down the left edge are their own
-# surfaces in their own corners and reserve nothing, so they are
-# unaffected; a miniaturized window's icon tile sits on the desk along
+# The Clip in the bottom-right corner hides with the Dock. The
+# launcher strip down the left edge reserves nothing and stays where
+# it is; a miniaturized window's icon tile sits on the desk along
 # the bottom edge, not in the Dock, so miniaturizing still works and
-# double-clicking a tile still restores. Instruments keep running while
-# hidden -- they simply are not drawn -- and a dockapp is told to stop
-# sampling and stop drawing until the column comes back.
+# double-clicking a tile still restores. Built-in instruments retain
+# their state but pause sampling while hidden, then refresh when shown.
+# A dockapp is told to stop sampling and drawing until the column returns.
 #
 # This is the starting point, not the last word: the root menu's "Dock"
 # row (right-click the desktop) and the "toggle-dock" action both
