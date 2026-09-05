@@ -837,11 +837,23 @@ fn emit_config(value: &Value, out: &mut Vec<Directive>) {
     if let Some(Value::Table(fields)) = input {
         for (key, value) in fields {
             let Some(key) = key else { continue };
-            if matches!(value, Value::Table(_)) {
-                out.push(Directive::Ignored {
-                    kind: "input",
-                    detail: format!("nested input setting {key} is not implemented"),
-                });
+            if let Value::Table(nested) = value {
+                if key == "touchpad" {
+                    for (nested_key, nested_value) in nested {
+                        let Some(nested_key) = nested_key else { continue };
+                        if !matches!(nested_value, Value::Table(_)) {
+                            out.push(Directive::Input {
+                                name: format!("touchpad:{nested_key}"),
+                                value: property_text(nested_value),
+                            });
+                        }
+                    }
+                } else {
+                    out.push(Directive::Ignored {
+                        kind: "input",
+                        detail: format!("nested input setting {key} is not implemented"),
+                    });
+                }
             } else {
                 out.push(Directive::Input {
                     name: key.clone(),

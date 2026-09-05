@@ -1,5 +1,5 @@
 use slotmap::new_key_type;
-use wm_theme_api::{DecorationLayout, Rect};
+use wm_theme_api::{DecorationLayout, DecorationRequest, Rect, Size};
 
 use crate::backend::Backend;
 use crate::types::ClientChrome;
@@ -171,6 +171,11 @@ pub struct Client<B: Backend> {
     /// Kept in core state so IPC queries and rule-driven behavior see
     /// the same lifetime as the managed window.
     pub tags: Vec<String>,
+    /// Last pixels handed to the backend. Together these fields make an
+    /// identical repaint a true no-op and preserve stable renderer element ids.
+    pub(crate) last_decoration_request: Option<DecorationRequest>,
+    pub(crate) last_decoration_frame_size: Size,
+    pub(crate) last_decoration_scale_bits: u32,
 }
 
 impl<B: Backend> Client<B> {
@@ -203,6 +208,9 @@ impl<B: Backend> Client<B> {
             // output is unplugged out from under it.
             monitor: MonitorId::default(),
             tags: Vec::new(),
+            last_decoration_request: None,
+            last_decoration_frame_size: Size::default(),
+            last_decoration_scale_bits: 0,
         }
     }
 }

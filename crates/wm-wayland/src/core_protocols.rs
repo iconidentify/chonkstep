@@ -31,15 +31,35 @@ use smithay::wayland::xdg_activation::{
 };
 use smithay::wayland::xdg_foreign::{XdgForeignHandler, XdgForeignState};
 use smithay::{
-    delegate_cursor_shape, delegate_keyboard_shortcuts_inhibit,
+    delegate_commit_timing, delegate_cursor_shape, delegate_fifo, delegate_keyboard_shortcuts_inhibit,
     delegate_pointer_constraints, delegate_pointer_gestures, delegate_presentation, delegate_relative_pointer,
     delegate_single_pixel_buffer, delegate_text_input_manager, delegate_xdg_activation, delegate_xdg_dialog,
-    delegate_tablet_manager, delegate_xdg_foreign, delegate_xdg_system_bell, delegate_xdg_toplevel_tag,
+    delegate_security_context, delegate_tablet_manager, delegate_xdg_foreign, delegate_xdg_system_bell, delegate_xdg_toplevel_tag,
 };
 
 use wm_core::BackendEvent;
 
 use crate::state::Compositor;
+
+impl smithay::wayland::security_context::SecurityContextHandler for Compositor {
+    fn context_created(
+        &mut self,
+        source: smithay::wayland::security_context::SecurityContextListenerSource,
+        context: smithay::wayland::security_context::SecurityContext,
+    ) {
+        let mut display = self.display_handle.clone();
+        if let Err(error) = self.loop_handle.insert_source(source, move |stream, _, _comp| {
+            if let Err(error) = display.insert_client(
+                stream,
+                std::sync::Arc::new(crate::state::ClientState::confined(context.clone())),
+            ) {
+                tracing::warn!(?error, "failed to admit a security-context client");
+            }
+        }) {
+            tracing::warn!(?error, "failed to register a security-context listener");
+        }
+    }
+}
 
 /// Activation tokens are launch hand-offs, not session-long capabilities.
 /// Five minutes leaves ample room for a cold application start without
@@ -112,6 +132,9 @@ pub(crate) struct CoreProtocols {
     pub _cursor_shape: smithay::wayland::cursor_shape::CursorShapeManagerState,
     pub _single_pixel: smithay::wayland::single_pixel_buffer::SinglePixelBufferState,
     pub _presentation: smithay::wayland::presentation::PresentationState,
+    pub _fifo: smithay::wayland::fifo::FifoManagerState,
+    pub _commit_timing: smithay::wayland::commit_timing::CommitTimingManagerState,
+    pub _security_context: smithay::wayland::security_context::SecurityContextState,
     pub _relative_pointer: smithay::wayland::relative_pointer::RelativePointerManagerState,
     pub _pointer_constraints: PointerConstraintsState,
     pub _pointer_gestures: smithay::wayland::pointer_gestures::PointerGesturesState,
@@ -138,12 +161,21 @@ pub(crate) fn init(display: &DisplayHandle) -> CoreProtocols {
         // Linux CLOCK_MONOTONIC. Presentation timestamps emitted by
         // the renderer use the same monotonic time base.
         _presentation: smithay::wayland::presentation::PresentationState::new::<Compositor>(display, 1),
+        _fifo: smithay::wayland::fifo::FifoManagerState::new::<Compositor>(display),
+        _commit_timing: smithay::wayland::commit_timing::CommitTimingManagerState::new::<Compositor>(display),
+        _security_context: smithay::wayland::security_context::SecurityContextState::new::<Compositor, _>(
+            display,
+            crate::state::security_context_global_visible,
+        ),
         _relative_pointer: smithay::wayland::relative_pointer::RelativePointerManagerState::new::<Compositor>(display),
         _pointer_constraints: PointerConstraintsState::new::<Compositor>(display),
         _pointer_gestures: smithay::wayland::pointer_gestures::PointerGesturesState::new::<Compositor>(display),
         _tablet: smithay::wayland::tablet_manager::TabletManagerState::new::<Compositor>(display),
         _text_input: smithay::wayland::text_input::TextInputManagerState::new::<Compositor>(display),
-        _input_method: InputMethodManagerState::new::<Compositor, _>(display, |_| true),
+        _input_method: InputMethodManagerState::new::<Compositor, _>(
+            display,
+            crate::state::privileged_global_visible,
+        ),
         _xdg_dialog: smithay::wayland::shell::xdg::dialog::XdgDialogState::new::<Compositor>(display),
         _system_bell: smithay::wayland::xdg_system_bell::XdgSystemBellState::new::<Compositor>(display),
         _toplevel_tag: smithay::wayland::xdg_toplevel_tag::XdgToplevelTagManager::new::<Compositor>(display),
@@ -402,6 +434,46 @@ delegate_xdg_activation!(Compositor);
 delegate_cursor_shape!(Compositor);
 delegate_single_pixel_buffer!(Compositor);
 delegate_presentation!(Compositor);
+delegate_fifo!(Compositor);
+delegate_commit_timing!(Compositor);
+delegate_security_context!(Compositor);
+
+#[cfg(test)]
+mod security_context_tests {
+    use super::*;
+    use smithay::reexports::wayland_server::Display;
+    use std::sync::Arc;
+
+    #[test]
+    fn confined_clients_cannot_nest_security_contexts_but_keep_current_policy() {
+        let display = Display::<Compositor>::new().expect("wayland display");
+        let mut handle = display.handle();
+        let (creator_socket, _creator_peer) =
+            std::os::unix::net::UnixStream::pair().expect("creator socketpair");
+        let creator = handle
+            .insert_client(creator_socket, Arc::new(crate::state::ClientState::default()))
+            .expect("admit creator");
+        let context = smithay::wayland::security_context::SecurityContext {
+            sandbox_engine: Some("test".into()),
+            app_id: Some("org.chonkstep.test".into()),
+            instance_id: None,
+            creator_client_id: creator.id(),
+        };
+        let (confined_socket, _confined_peer) =
+            std::os::unix::net::UnixStream::pair().expect("confined socketpair");
+        let confined = handle
+            .insert_client(
+                confined_socket,
+                Arc::new(crate::state::ClientState::confined(context)),
+            )
+            .expect("admit confined client");
+
+        assert!(crate::state::security_context_global_visible(&creator));
+        assert!(!crate::state::security_context_global_visible(&confined));
+        assert!(crate::state::privileged_global_visible(&creator));
+        assert!(crate::state::privileged_global_visible(&confined));
+    }
+}
 delegate_relative_pointer!(Compositor);
 delegate_pointer_constraints!(Compositor);
 delegate_pointer_gestures!(Compositor);

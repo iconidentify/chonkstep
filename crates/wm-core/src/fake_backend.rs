@@ -1,8 +1,8 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use wm_theme_api::{
-    ButtonKind, DecorationBuffer, DecorationLayout, DecorationRequest, Point, Rect, ResizeEdge,
-    Size, ThemeEngine,
+    ButtonKind, DecorationBuffer, DecorationLayout, DecorationRequest, DecorationSurface, Point,
+    Rect, ResizeEdge, Size, ThemeEngine,
 };
 
 use crate::backend::Backend;
@@ -88,6 +88,7 @@ pub struct FakeBackend {
     /// disagrees with `last_frame_geometry` is a visible bug there even
     /// though X11's server-side clipping would hide it.
     pub last_paint_size: HashMap<FakeFrameId, Size>,
+    pub last_paint_bytes: HashMap<FakeFrameId, usize>,
     pub last_frame_geometry: HashMap<FakeFrameId, Rect>,
     /// Where each client window was last positioned directly. For a
     /// framed window this is its offset inside its frame; for a
@@ -408,10 +409,11 @@ impl Backend for FakeBackend {
         self.destroyed_frames.insert(frame);
     }
 
-    fn paint_decoration(&mut self, frame: Self::FrameId, buffer: &DecorationBuffer) {
+    fn paint_decoration(&mut self, frame: Self::FrameId, surface: &DecorationSurface) {
         self.painted_frames.insert(frame);
         *self.paint_count.entry(frame).or_insert(0) += 1;
-        self.last_paint_size.insert(frame, Size::new(buffer.width, buffer.height));
+        self.last_paint_size.insert(frame, surface.frame_size);
+        self.last_paint_bytes.insert(frame, surface.retained_bytes());
     }
 
     fn set_frame_cursor(&mut self, frame: Self::FrameId, edge: Option<ResizeEdge>) {

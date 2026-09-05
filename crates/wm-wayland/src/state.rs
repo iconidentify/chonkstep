@@ -492,15 +492,22 @@ impl WindowRecord {
     }
 }
 
-/// Ledger entry for one decoration frame. `buffer` holds the imported
-/// decoration pixels (`None` until the first `paint_decoration`).
+pub(crate) struct FramePart {
+    pub offset: Point,
+    pub size: Size,
+    pub buffer: MemoryRenderBuffer,
+}
+
+/// Ledger entry for one decoration frame. `parts` holds only the imported
+/// chrome perimeter; the stable solid fill covers transient client gaps.
 /// No layout is cached here: chrome hit-testing happens in `wm-core`
 /// against the client's own theme-authoritative layout, so the
 /// backend only needs where the frame is, never what is drawn on it.
 pub(crate) struct FrameRecord {
     pub window: WlWindowId,
     pub geometry: Rect,
-    pub buffer: Option<MemoryRenderBuffer>,
+    pub parts: Vec<FramePart>,
+    pub fill_id: smithay::backend::renderer::element::Id,
     pub mapped: bool,
 }
 
@@ -647,6 +654,10 @@ pub struct WaylandBackend {
     /// drains it on the next pass — the same shape every other
     /// deferred backend request in this file takes.
     pub(crate) pending_keyboard: Option<wm_core::KeyboardConfig>,
+    pub(crate) pending_pointer: Option<wm_core::PointerConfig>,
+    pub(crate) pointer_config: wm_core::PointerConfig,
+    /// Post-libinput axis multiplier, also used by the nested backend.
+    pub(crate) scroll_factor: f64,
     /// The xkb layout actually installed on the seat.
     ///
     /// What IPC reports, rather than the config's own `kb_layout`: the
@@ -655,6 +666,10 @@ pub struct WaylandBackend {
     /// and the session never adopted. A bar that prints this should be
     /// printing the keymap in force.
     pub(crate) keyboard_layout: String,
+    /// Human-readable XKB group names and the active group selected on
+    /// the seat. Kept for immutable IPC snapshots.
+    pub(crate) keyboard_layouts: Vec<String>,
+    pub(crate) active_keyboard_layout: u32,
     /// Set when the workspace row moves, drained by
     /// `workspace::refresh`. On the ledger rather than on
     /// `WorkspaceState` because the verb that knows the row changed is
@@ -1006,7 +1021,12 @@ impl WaylandBackend {
             stacking_dirty: false,
             xwayland_keyboard_grab: None,
             pending_keyboard: None,
+            pending_pointer: None,
+            pointer_config: wm_core::PointerConfig::default(),
+            scroll_factor: 1.0,
             keyboard_layout: String::new(),
+            keyboard_layouts: Vec::new(),
+            active_keyboard_layout: 0,
             workspaces_dirty: true,
             input_devices: Vec::new(),
             ime_popups: Vec::new(),
@@ -1352,6 +1372,49 @@ pub struct ClientState {
     /// ever spoke this protocol. Atomic because the bind handler holds
     /// only `&ClientState`.
     pub kde_decoration_bound: std::sync::atomic::AtomicBool,
+    /// Present only for connections admitted by
+    /// `wp_security_context_v1`. Mutex-backed because Wayland global
+    /// filters receive only a shared client-data reference.
+    pub security_context: std::sync::Mutex<
+        Option<smithay::wayland::security_context::SecurityContext>,
+    >,
+}
+
+impl ClientState {
+    pub(crate) fn confined(
+        context: smithay::wayland::security_context::SecurityContext,
+    ) -> Self {
+        Self {
+            security_context: std::sync::Mutex::new(Some(context)),
+            ..Self::default()
+        }
+    }
+}
+
+pub(crate) fn client_is_confined(client: &smithay::reexports::wayland_server::Client) -> bool {
+    client
+        .get_data::<ClientState>()
+        .is_some_and(|data| data.security_context.lock().is_ok_and(|context| context.is_some()))
+}
+
+/// One gate for capabilities that affect other clients. The current
+/// policy remains permissive for both ordinary and confined clients;
+/// centralizing the decision makes confinement a policy choice instead
+/// of information the compositor cannot represent.
+pub(crate) fn privileged_global_visible(
+    client: &smithay::reexports::wayland_server::Client,
+) -> bool {
+    let _confined = client_is_confined(client);
+    true
+}
+
+/// The security-context protocol's own recursively-confined-listener guard.
+/// Smithay requires this global to be hidden from clients created through a
+/// context, independently of the policy for every other privileged global.
+pub(crate) fn security_context_global_visible(
+    client: &smithay::reexports::wayland_server::Client,
+) -> bool {
+    !client_is_confined(client)
 }
 
 impl ClientData for ClientState {
@@ -1439,6 +1502,13 @@ pub(crate) struct OutputSetup {
     /// alternatives instead of pretending the current mode is the only
     /// one.
     pub modes: Vec<Mode>,
+    pub powered: bool,
+    pub vrr_supported: bool,
+    /// Whether adaptive sync is allowed when the renderer proves this frame
+    /// is a direct-scanout fullscreen client.
+    pub vrr_requested: bool,
+    /// The DRM property's live value for the next commit.
+    pub vrr_enabled: bool,
 }
 
 /// The keyboard settings actually in force, from the config plus the
@@ -1494,6 +1564,9 @@ pub(crate) struct MonitorOutput {
     /// support), mirrored into the Hyprland compatibility snapshot.
     pub transform: i32,
     pub modes: Vec<MonitorMode>,
+    pub powered: bool,
+    pub vrr_supported: bool,
+    pub vrr_enabled: bool,
 }
 
 /// One output the compositor drives, everything the session needs to
@@ -1523,6 +1596,12 @@ pub(crate) struct OutputEntry {
     pub scale: f64,
     /// The modes this output can drive — see [`OutputSetup::modes`].
     pub modes: Vec<Mode>,
+    pub powered: bool,
+    pub vrr_supported: bool,
+    /// User/configuration policy; the renderer gates the live property further
+    /// to direct-scanout frames.
+    pub vrr_requested: bool,
+    pub vrr_enabled: bool,
     /// Only the nested backend renders through this: the session
     /// backend's `DrmCompositor` owns damage tracking per crtc itself.
     /// It is built from the `Output`, so a resize of that output
@@ -1555,6 +1634,10 @@ impl OutputEntry {
             transform: setup.transform,
             scale: 1.0,
             modes: setup.modes,
+            powered: setup.powered,
+            vrr_supported: setup.vrr_supported,
+            vrr_requested: setup.vrr_requested,
+            vrr_enabled: setup.vrr_enabled,
             damage_tracker,
             scene_scratch: Vec::new(),
             global,
@@ -1990,6 +2073,10 @@ pub(crate) fn apply_connector_hotplug(
             transform: entry.transform,
             requested_mode: None,
             modes: entry.modes.clone(),
+            powered: entry.powered,
+            vrr_supported: entry.vrr_supported,
+            vrr_requested: entry.vrr_requested,
+            vrr_enabled: entry.vrr_enabled,
         })
         .collect();
     let scales = apply_monitor_rules(&mut setups, &session.monitor_rules, comp.ui_scale as f64);
@@ -2155,7 +2242,7 @@ pub struct Compositor {
     /// represented by the Hyprland event stream. Kept separate from
     /// socket readiness: a desktop mutation must be published even
     /// when the subscriber itself has said nothing.
-    hyprland_state_dirty: bool,
+    pub(crate) hyprland_state_dirty: bool,
     /// Whether the wlr foreign-toplevel snapshot can differ from its
     /// last publication. Separate from Hyprland IPC because either
     /// protocol can be disabled or have no clients without preventing
@@ -2228,6 +2315,14 @@ pub struct Compositor {
     /// order binds together. Startup requires one, though DRM hot-unplug
     /// may leave this briefly empty until a connector returns.
     pub(crate) outputs: Vec<OutputEntry>,
+    /// Every live `wl_surface`, including role-less surfaces and hidden
+    /// subsurfaces. Commit-timing blockers can be installed before a role is
+    /// assigned, so the ordinary scene ledgers are not a complete registry.
+    pub(crate) pacing_surfaces: HashMap<ObjectId, WlSurface>,
+    /// Bounded escape for a FIFO barrier whose presentation never completes.
+    /// Retaining the barrier identity gives each replacement a fresh deadline.
+    pub(crate) pacing_fifo_deadlines:
+        HashMap<ObjectId, (smithay::wayland::compositor::Barrier, Instant)>,
 
     /// The X11 window-manager connection into XWayland, once
     /// `XWaylandEvent::Ready` has arrived (`None` before that, or if
@@ -2298,6 +2393,8 @@ pub struct Compositor {
     /// wlr-output-management: what `wlr-randr` and `kanshi` list and
     /// configure outputs through — see `output_mgmt.rs`.
     pub(crate) output_mgmt: crate::output_mgmt::OutputManagement,
+    /// Exclusive DPMS controls plus observers for each output.
+    pub(crate) output_power: crate::output_power::OutputPower,
     /// wlr-gamma-control: the per-output gamma ramps `wlsunset`,
     /// `gammastep` and `redshift` warm the screen through, with the
     /// exclusivity that stops two of them fighting and the captured
@@ -2446,6 +2543,7 @@ impl Compositor {
                 // layout that is now in force rather than the one the
                 // session started with.
                 self.hyprland_state_dirty = true;
+                crate::hyprland_ipc::refresh_keyboard_layout(self);
             }
             Err(error) => tracing::warn!(
                 %error,
@@ -2460,6 +2558,10 @@ impl Compositor {
         let _dispatch_guard = dispatch_span.enter();
         let dispatch_started = Instant::now();
         self.apply_pending_keyboard();
+        if let Some(config) = self.wm.backend_mut().pending_pointer.take() {
+            self.wm.backend_mut().scroll_factor = config.scroll_factor.unwrap_or(1.0);
+            crate::session::apply_pointer_config(&mut self.graphics, &config);
+        }
         tracing::debug_span!("dispatch_phase", phase = "connector_hotplug")
             .in_scope(|| crate::session::service_connector_hotplug(self));
         let phase_started = Instant::now();
@@ -2769,6 +2871,15 @@ impl Compositor {
         // output change, or surface death this returns immediately.
         crate::lock::refresh(self);
 
+        // Timed commits are independent of presentation, and an invisible
+        // surface cannot ever satisfy a FIFO presentation barrier. Visibility
+        // has settled at this point, so release both before the scene build.
+        self.service_surface_pacing();
+
+        // Chrome dirtied by a whole burst of pointer motion becomes pixels
+        // once, immediately before the scene is built.
+        self.wm.flush_decorations();
+
         // Everything above that changed a toplevel's size or state
         // staged it and booked a configure; this is where those go out,
         // one per toplevel, carrying the settled answer. It has to be
@@ -2791,12 +2902,19 @@ impl Compositor {
         // (a page flip was still in flight on one of them last pass).
         // The second condition only ever fires on the session backend
         // with more than one output — see `session::redraw_pending`.
+        let mut frame_presented = false;
         if self.wm.backend().damage || crate::session::redraw_pending(&self.graphics) {
             let render_started = Instant::now();
             if crate::renderer::render_frame(self) {
+                frame_presented = true;
                 self.frame_stats.record_render(render_started.elapsed());
             }
         }
+        crate::protocols::frame_presented(self, frame_presented);
+        // Visible FIFO barriers are signalled by the completed presentation
+        // path. Poll Smithay's client queues now so the next commit becomes
+        // current without waiting for another request from that client.
+        self.service_surface_pacing();
 
         // A locking client is owed its `locked` event only after a
         // frame built under the lock has been presented — which, if it
@@ -3458,6 +3576,9 @@ impl Compositor {
                             refresh_millihertz: u32::try_from(mode.refresh).unwrap_or(0),
                         })
                         .collect(),
+                    powered: entry.powered,
+                    vrr_supported: entry.vrr_supported,
+                    vrr_enabled: entry.vrr_enabled,
                 }
             })
             .collect();
@@ -3969,6 +4090,10 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
                 transform: Transform::Normal,
                 requested_mode: None,
                 modes: vec![mode],
+                powered: true,
+                vrr_supported: false,
+                vrr_requested: false,
+                vrr_enabled: false,
             }],
         )
     } else {
@@ -4027,6 +4152,7 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
     let image_capture = crate::image_capture::init(&display_handle);
     let toplevel_mapping = crate::toplevel_mapping::init(&display_handle);
     let output_mgmt = crate::output_mgmt::init(&display_handle);
+    let output_power = crate::output_power::init(&display_handle, &graphics);
     // Gamma control rides the same timing rule and additionally asks
     // the graphics stack what its hardware can do: an output with no
     // gamma LUT — every nested one, and some real crtcs — is refused
@@ -4042,17 +4168,19 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
     let global_shortcuts = crate::global_shortcuts::init(&display_handle);
     // The ecosystem protocols, under the same timing rule. Layer-shell
     // is what fuzzel/mako/waybar look for the moment they connect;
-    // session-lock is unfiltered (any client may lock — swaylock is
-    // just a client, and a filter would only be worth its complexity
-    // with a sandboxing story this desktop does not have); the idle
+    // layer-shell and session-lock both consult the shared
+    // security-context-aware policy (currently permissive); the idle
     // notifier's timers live on this very event loop.
-    let layer_shell = crate::layers::LayerShell::new(smithay::wayland::shell::wlr_layer::WlrLayerShellState::new::<
-        Compositor,
-    >(&display_handle));
+    let layer_shell = crate::layers::LayerShell::new(
+        smithay::wayland::shell::wlr_layer::WlrLayerShellState::new_with_filter::<Compositor, _>(
+            &display_handle,
+            crate::state::privileged_global_visible,
+        ),
+    );
     let session_lock = crate::lock::SessionLock::new(smithay::wayland::session_lock::SessionLockManagerState::new::<
         Compositor,
         _,
-    >(&display_handle, |_| true));
+    >(&display_handle, crate::state::privileged_global_visible));
     let mut idle = crate::idle::Idle::new(
         smithay::wayland::idle_notify::IdleNotifierState::<Compositor>::new(&display_handle, loop_handle.clone()),
         smithay::wayland::idle_inhibit::IdleInhibitManagerState::new::<Compositor>(&display_handle),
@@ -4170,7 +4298,7 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
     // the display server every client is waiting on. See
     // `wm_theme::FontState`.
     let fonts = FontState::new();
-    let engine = RasterThemeEngine::with_fonts(theme, fonts.clone());
+    let engine = RasterThemeEngine::with_fonts_at_scale(theme, fonts.clone(), state.scale);
 
     // The outputs advertise the session's scale from here on — the only
     // way a native Wayland client ever learns this desktop is scaled
@@ -4279,6 +4407,8 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
         hyprland_source_scratch: HashSet::new(),
         seat,
         outputs,
+        pacing_surfaces: HashMap::new(),
+        pacing_fifo_deadlines: HashMap::new(),
         xwm: None,
         xdisplay: None,
         xwayland_restart_available: true,
@@ -4293,6 +4423,7 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
         image_capture,
         _toplevel_mapping: toplevel_mapping,
         output_mgmt,
+        output_power,
         gamma,
         _ctm: ctm,
         layer_shell,
@@ -4309,6 +4440,7 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
         running: true,
         restart: false,
     };
+    crate::hyprland_ipc::refresh_keyboard_layout(&mut comp);
 
     // Cross into the lock domain before the first dispatch. Clients
     // may already have been spawned during shell construction, but no
@@ -4418,6 +4550,9 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
         }
         if let Some(deadline) = crate::session::next_hotplug_deadline(&comp.graphics) {
             wait = wait.min(deadline.saturating_duration_since(now));
+        }
+        if let Some(pacing) = comp.next_surface_pacing_in() {
+            wait = wait.min(pacing);
         }
         event_loop.dispatch(Some(wait), &mut comp)?;
         comp.dispatch_pending();
@@ -5001,6 +5136,10 @@ mod tests {
             transform: Transform::Normal,
             requested_mode: None,
             modes: vec![mode],
+            powered: true,
+            vrr_supported: false,
+            vrr_requested: false,
+            vrr_enabled: false,
         }
     }
 
@@ -5370,7 +5509,8 @@ mod tests {
                 FrameRecord {
                     window,
                     geometry: Rect::default(),
-                    buffer: None,
+                    parts: Vec::new(),
+                    fill_id: smithay::backend::renderer::element::Id::new(),
                     mapped: true,
                 },
             );

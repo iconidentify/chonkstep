@@ -9,10 +9,10 @@
 //! becomes a silent wrong answer downstream, which is the exact failure
 //! this whole crate is built to prevent.
 
-use chonk_hyprland_ipc::dispatch::{self, Action, Fullscreen};
+use chonk_hyprland_ipc::dispatch::{self, Action, Fullscreen, LayoutTarget};
 use chonk_hyprland_ipc::request::Request;
 use chonk_hyprland_ipc::server::answer_payload;
-use chonk_hyprland_ipc::state::{Devices, Monitor, MonitorMode, Snapshot, Window, Workspace};
+use chonk_hyprland_ipc::state::{Devices, Keyboard, Monitor, MonitorMode, Snapshot, Window, Workspace};
 use chonk_hyprland_ipc::{Differ, Outcome};
 
 fn monitor(id: i32, name: &str, focused: bool, active_workspace: usize) -> Monitor {
@@ -25,6 +25,9 @@ fn monitor(id: i32, name: &str, focused: bool, active_workspace: usize) -> Monit
         width: 2560,
         height: 1600,
         scale: 2.0,
+        powered: true,
+        vrr_supported: true,
+        vrr_enabled: false,
         focused,
         active_workspace,
         make: "Sharp".to_string(),
@@ -551,11 +554,17 @@ fn classic_geometry_distinguishes_relative_from_exact_for_every_target_form() {
 /// they are not running; the documented "unset" shape leaves Style.qml's
 /// `catch` to keep its previous value, which is the correct outcome.
 #[test]
-fn getoption_returns_a_complete_explicitly_unset_shape() {
+fn getoption_omits_values_that_javascript_would_coerce_to_zero() {
     let value = ask_json("j/getoption decoration:rounding", &desktop());
-    assert_eq!(value["int"], 0);
-    assert_eq!(value["css"], "0px");
+    assert!(value.get("int").is_none());
+    assert!(value.get("float").is_none());
+    assert!(value.get("css").is_none());
     assert_eq!(value["set"], serde_json::json!(false));
+    assert_eq!(
+        value.as_object().unwrap().keys().cloned().collect::<std::collections::BTreeSet<_>>(),
+        ["option".to_string(), "set".to_string()].into_iter().collect(),
+        "an unset reply must contain no value JavaScript can mistake for a configured zero"
+    );
 }
 
 /// `KeyboardLayout.qml` refuses to speak for the seat unless
@@ -565,6 +574,63 @@ fn getoption_returns_a_complete_explicitly_unset_shape() {
 fn devices_keeps_the_shape_the_keyboard_widget_tests_for() {
     let value = ask_json("j/devices", &desktop());
     assert!(value["keyboards"].is_array(), "keyboards must be an array");
+}
+
+#[test]
+fn dpms_dispatches_name_real_output_power_actions() {
+    for (request, output, powered) in [
+        ("/dispatch dpms off", None, false),
+        ("/dispatch dpms on eDP-1", Some("eDP-1"), true),
+        ("/dispatch dpms toggle eDP-1", Some("eDP-1"), false),
+    ] {
+        let (response, actions) = answer_payload(request.as_bytes(), &desktop());
+        assert_eq!(response.trim(), "ok", "{request}");
+        assert_eq!(
+            actions,
+            vec![Action::SetDpms { output: output.map(str::to_string), powered }],
+            "{request}"
+        );
+    }
+    let (response, actions) = answer_payload(b"/dispatch dpms off absent", &desktop());
+    assert!(response.contains("unknown output"));
+    assert!(actions.is_empty());
+
+    let (response, actions) = answer_payload(
+        br#"/dispatch hl.dsp.dpms({ action = "disable", monitor = "eDP-1" })"#,
+        &desktop(),
+    );
+    assert_eq!(response.trim(), "ok");
+    assert_eq!(
+        actions,
+        vec![Action::SetDpms { output: Some("eDP-1".into()), powered: false }]
+    );
+}
+
+#[test]
+fn switchxkblayout_is_a_named_group_action_not_an_unknown_request() {
+    let mut desk = desktop();
+    desk.devices.keyboards.push(Keyboard {
+        name: "at-translated-set-2-keyboard".into(),
+        layout: "English (US), German".into(),
+        active_keymap: "English (US)".into(),
+        active_layout_index: 0,
+    });
+    for (target, expected) in [
+        ("next", LayoutTarget::Next),
+        ("prev", LayoutTarget::Previous),
+        ("1", LayoutTarget::Index(1)),
+    ] {
+        let request = format!("/switchxkblayout at-translated-set-2-keyboard {target}");
+        let (response, actions) = answer_payload(request.as_bytes(), &desk);
+        assert_eq!(response.trim(), "ok", "{request}");
+        assert_eq!(
+            actions,
+            vec![Action::SwitchKeyboardLayout {
+                device: "at-translated-set-2-keyboard".into(),
+                target: expected,
+            }]
+        );
+    }
 }
 
 #[test]
@@ -600,6 +666,42 @@ fn workspace_switch_emits_workspacev2_with_the_hyprland_id() {
     let line = events.iter().find(|e| e.name() == "workspacev2").expect("workspacev2");
     assert_eq!(line.data(), "2,2", "chonkstep index 1 is Hyprland workspace 2");
     assert_eq!(line.line(), "workspacev2>>2,2\n");
+}
+
+#[test]
+fn adding_a_monitor_emits_legacy_then_v2_events() {
+    let mut differ = Differ::new();
+    let before = desktop();
+    differ.diff(&before);
+
+    let mut after = before;
+    after.monitors.push(monitor(1, "HDMI-A-1", false, 0));
+    let events = differ.diff(&after);
+    let names: Vec<_> = events.iter().map(chonk_hyprland_ipc::Event::name).collect();
+    let legacy = names.iter().position(|name| *name == "monitoradded").expect("monitoradded");
+    let v2 = names.iter().position(|name| *name == "monitoraddedv2").expect("monitoraddedv2");
+    assert!(legacy < v2, "legacy consumers must learn the monitor before richer events reference it");
+    assert_eq!(events[legacy].data(), "HDMI-A-1");
+}
+
+#[test]
+fn keyboard_group_change_emits_activelayout_with_the_human_name() {
+    let mut differ = Differ::new();
+    let mut before = desktop();
+    before.devices.keyboards.push(Keyboard {
+        name: "keyboard".into(),
+        layout: "English (US), German".into(),
+        active_keymap: "English (US)".into(),
+        active_layout_index: 0,
+    });
+    differ.diff(&before);
+    let mut after = before;
+    after.devices.keyboards[0].active_keymap = "German".into();
+    after.devices.keyboards[0].active_layout_index = 1;
+
+    let events = differ.diff(&after);
+    let event = events.iter().find(|event| event.name() == "activelayout").expect("activelayout");
+    assert_eq!(event.data(), "keyboard,German");
 }
 
 /// Quickshell's `openwindow` handler takes four comma-separated fields

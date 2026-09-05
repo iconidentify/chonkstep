@@ -118,13 +118,13 @@
 //! Made again, it lands in the same place, for a different reason:
 //! this session grants no client less than user privilege in the first
 //! place. Any client on this socket can already capture every pixel of
-//! every other client's window (`zwlr_screencopy_manager_v1`,
-//! unfiltered — see [`crate::protocols::init`]), enumerate every
+//! every other client's window (`zwlr_screencopy_manager_v1`, under
+//! the shared policy — see [`crate::protocols::init`]), enumerate every
 //! window and close or raise any of them
-//! (`zwlr_foreign_toplevel_manager_v1`, likewise unfiltered), and lock
-//! the session out from under the user (`ext_session_lock_v1`, whose
-//! filter `state::run` passes `|_| true`, with its own note as to
-//! why). Nearest of all: it can read every copy the user makes, at the
+//! (`zwlr_foreign_toplevel_manager_v1`, under the same shared policy),
+//! and lock the session out from under the user (`ext_session_lock_v1`,
+//! which consults that policy too). Nearest of all: it can read every
+//! copy the user makes, at the
 //! moment they make it and without ever holding focus, through
 //! data-control (see [`crate::data_control`], which grants that to
 //! every client for its own stated reasons). A protocol that hands out
@@ -139,17 +139,13 @@
 //! Omarchy features above — while moving nothing out of an attacker's
 //! reach.
 //!
-//! What would change the answer is a sandboxing story: a Flatpak-style
-//! client that is *not* fully the user, admitted through
-//! `wp_security_context_v1`, for which "can this client type into my
-//! bank tab" is a real question with a real answer. Smithay implements
-//! that protocol (`wayland::security_context`) and this compositor does
-//! not use it; nothing here tags a client as untrusted, so there is
-//! nothing for a filter to test. [`may_create_virtual_keyboard`] is
-//! deliberately a named function taking the `Client` rather than an
-//! inline `|_| true` so that the day a security context exists, the
-//! gate is a body to fill in and a test to extend rather than a design
-//! to invent.
+//! `wp_security_context_v1` now gives that future policy a real input:
+//! clients admitted through one are tagged in `ClientState`, cannot
+//! create nested security contexts, and every cross-client capability
+//! consults `state::privileged_global_visible`. The current single-user
+//! policy deliberately returns true for both tagged and ordinary
+//! clients, preserving the behavior above while making a later policy
+//! change one shared predicate instead of eleven unrelated filters.
 //!
 //! # Integration contract
 //!
@@ -233,13 +229,10 @@ fn seat_can_accept_virtual_keys(seat: &Seat<Compositor>) -> bool {
 /// denying it synthetic keystrokes breaks `wtype` without taking
 /// anything away from an attacker.
 ///
-/// This is a function and not `|_| true` on purpose: it is the exact
-/// place a `wp_security_context_v1` check belongs if this compositor
-/// ever admits clients that are less than the user, and having the
-/// `Client` already in hand makes that a body to write rather than a
-/// signature to thread.
-fn may_create_virtual_keyboard(_client: &Client) -> bool {
-    true
+/// This delegates to the shared security-context-aware policy rather than an
+/// inline allow-all closure, keeping every cross-client capability aligned.
+fn may_create_virtual_keyboard(client: &Client) -> bool {
+    crate::state::privileged_global_visible(client)
 }
 
 delegate_virtual_keyboard_manager!(Compositor);
@@ -278,10 +271,8 @@ mod tests {
         assert!(seat_can_accept_virtual_keys(&seat));
     }
 
-    /// The filter is unfiltered, deliberately. This test is here to
-    /// make that a decision with a paper trail: anyone narrowing it is
-    /// meant to arrive at the module's trust-model section by way of a
-    /// failing assertion.
+    /// The shared policy is currently permissive, deliberately. This test
+    /// preserves byte-for-byte behavior for an ordinary unconfined client.
     #[test]
     fn every_client_on_this_socket_may_create_a_virtual_keyboard() {
         let display = Display::<Compositor>::new().expect("wayland display");

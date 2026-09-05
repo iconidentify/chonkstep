@@ -83,14 +83,14 @@ start with `[[BATCH]]` and use `;` separators.
 | Request | Result |
 | --- | --- |
 | `status` | `configProvider="chonkstep"`; Quickshell uses classic dispatch while scripts may use the supported Lua forms |
-| `monitors` | Live output name, geometry, scale, focus, active workspace, transform and powered-on `dpmsStatus` |
+| `monitors` | Live output name, geometry, scale, focus, active workspace, transform, DPMS state, and measured VRR capability/runtime state. The optional `all` argument is accepted and ignored because connected outputs remain in the layout while powered down. |
 | `workspaces` | One-based ids; real per-workspace monitor assignment and fullscreen state |
 | `clients` / `activewindow` | Live pid, class/title, position, size, workspace, monitor, XWayland, floating, pinned, fullscreen, tags, focus history and idle inhibition |
 | `activeworkspace` | Exactly the active workspace, in JSON or one plain block |
 | `cursorpos` | The live pointer as plain `X, Y` |
 | `devices` | Seat keyboards and pointers; keyboards include `name`, `active_keymap`, `layout`, and `active_layout_index` |
 | `binds` | The live chonkstep keymap in Hyprland's plain bind-block format (or JSON) |
-| `getoption` | A complete, explicitly unset option shape; no fabricated Hyprland style value |
+| `getoption` | An explicitly unset `{ "option": ..., "set": false }` object. Value fields are absent so JavaScript keeps its own default instead of coercing `null` or zero. |
 | `version`, `splash` | Supported |
 | `configerrors` | Retained live-Hyprland refusals, one per line or as JSON `{"error": "…"}` objects |
 
@@ -99,9 +99,11 @@ logical keyboard and pointer. A hardware session reports its libinput
 devices. This prevents Omarchy's keyboard widget from polling forever
 without claiming nonexistent nested hardware.
 
-`dpmsStatus` is `true` because chonkstep currently keeps advertised
-outputs powered. `dispatch dpms` is refused; status and mutation cannot
-contradict one another.
+`dpmsStatus` follows the connector's live power state. `dispatch dpms
+on|off|toggle [OUTPUT]` uses the same hardware path as
+`zwlr_output_power_manager_v1`; real input wakes powered-down outputs.
+The nested backend refuses power control because its output is a host
+window, not a connector.
 
 Plain `clients` and `activewindow` use Hyprland's tab-indented field
 blocks. In particular, the real pid lets `omarchy-cmd-terminal-cwd`
@@ -121,6 +123,9 @@ actions. Supported families include:
   source, including `[[...]]` and `[=[...]=]` strings;
 - `eval hl.dispatch(hl.dsp....)`;
 - `eval hl.monitor({ output=..., scale=... })` for a live output;
+- `dispatch dpms on|off|toggle [OUTPUT]` for temporary connector power;
+- `switchxkblayout DEVICE next|prev|INDEX`, which changes the live XKB
+  group and emits `activelayout` with its human-readable name;
 - `eval hl.config({ cursor = { invisible = BOOL } })`, the live
   cursor-visibility property used by Omarchy's screensaver;
 - `reload`, which re-reads chonkstep/Hyprland configuration and emits
@@ -142,13 +147,13 @@ chonkstep re-reads `~/.config/hypr` within a second of an edit, and
 scale. The one shipped Omarchy caller is the monitor panel's row toggle
 (`hyprctl keyword monitor NAME,disable` / `NAME,preferred,auto,auto`),
 and that specific form is refused by name for a reason the user can act
-on: chonkstep drives every connected output and has no disable path, so
+on: chonkstep keeps every connected output in the layout and has no
+remove/disable path, so
 its `disabled` field is honestly `false` for every head and the panel's
-checkmark will not move. Growing an output-disable path—routing that
-form into the same validated apply `zwlr_output_management` already
-uses—is a real but separate piece of work; until it exists, saying so
-in the refusal is the honest answer, because `hyprctl` exits zero for a
-refusal and the string is the only diagnostic a user gets.
+checkmark will not move. The refusal names `dispatch dpms off OUTPUT`
+as the temporary blanking alternative. A powered-down head remains in
+`monitors` and in the workspace geometry by design; `monitors all`
+therefore returns the same set as `monitors`.
 
 The monitor object reports measured values, not conventional ones.
 `refreshRate` is the driven mode's rate, `availableModes` is the
@@ -157,8 +162,10 @@ first, and `make`/`model`/`serial` are read from the connector EDID. The
 same `make model serial` description backs `monitor = desc:…`,
 `wl_output`, IPC, and `zwlr_output_management`, so those interfaces
 cannot describe one panel two ways. `serial` stays empty only when the
-EDID itself supplies none; `vrr` remains covered by the adaptive-sync
-work. A backend driving no real mode reports 60 Hz rather than 0,
+EDID itself supplies none. `vrr` is true only while a capable output is
+actually using adaptive sync; wlr-output-management controls policy,
+and runtime activation is restricted to direct scanout. Set
+`CHONKSTEP_NO_VRR=1` to force it off. A backend driving no real mode reports 60 Hz rather than 0,
 because a bar divides this into a frame budget.
 
 Tiling vocabulary—`layoutmsg`, `togglesplit`, `swapwindow`, `pseudo`,
@@ -174,7 +181,7 @@ absent, so it cannot display a false “layout changed” notification.
 The event socket emits state diffs, plus the explicit post-reload
 event:
 
-`configreloaded`, `monitoraddedv2`, `monitorremoved`,
+`configreloaded`, `monitoradded`, `monitoraddedv2`, `monitorremoved`,
 `createworkspacev2`, `destroyworkspacev2`, `workspacev2`, `workspace`,
 `moveworkspacev2`, `focusedmon`, `fullscreen`, `openwindow`,
 `closewindow`, `movewindowv2`, `windowtitlev2`, `windowtitle`,
@@ -213,6 +220,9 @@ Ordinary applications also receive the Smithay-backed protocol set:
 | application activation | `xdg_activation_v1` v1 |
 | cursor shapes / solid-color buffers | `wp_cursor_shape_manager_v1` v2, `wp_single_pixel_buffer_manager_v1` v1 |
 | presentation timing | `wp_presentation` v2 |
+| explicit client pacing | `wp_fifo_manager_v1` v1, `wp_commit_timing_manager_v1` v1 |
+| sandbox context tagging | `wp_security_context_manager_v1` v1 |
+| physical output power | `zwlr_output_power_manager_v1` v1 (hardware sessions only) |
 | relative/locked/confined pointer | `zwp_relative_pointer_manager_v1` v1, `zwp_pointer_constraints_v1` v1 |
 | gestures / tablets | `zwp_pointer_gestures_v1` v3, `zwp_tablet_manager_v2` v1 |
 | foreign surface parenting | `zxdg_exporter_v2` and `zxdg_importer_v2` v1 |
@@ -223,6 +233,12 @@ Ordinary applications also receive the Smithay-backed protocol set:
 The IME popup participates in rendering and hit testing, activation
 focuses the target, pointer constraints follow focus and lifetime, and
 presentation feedback comes from winit presentation or DRM vblank.
+FIFO barriers release at that same presentation boundary; commit
+timestamps arm the event loop's monotonic-clock deadline, and invisible
+surfaces cannot remain wedged behind an unpresentable barrier. Security
+contexts tag admitted clients and every cross-client capability consults
+one shared policy predicate; the current single-user policy remains
+permissive, preserving ordinary and confined-client behavior.
 Tablet proximity, tip, buttons, pressure, distance, tilt, rotation,
 slider and wheel are forwarded from libinput.
 

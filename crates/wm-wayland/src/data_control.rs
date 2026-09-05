@@ -70,15 +70,13 @@
 //! to know that; it is a property of smithay dispatching every
 //! selection provider through one handler.
 //!
-//! # No filter
+//! # Shared security-context gate
 //!
-//! Both globals are visible to every client. Data control is a
-//! read-anything-on-the-clipboard capability and a sandboxing story
-//! would want it gated — `GlobalDispatch::can_view` (which is what the
-//! filter closures below feed) is the hook — but chonkstep runs one
-//! user's session, where a clipboard manager, a terminal and a browser
-//! are all equally that user's own programs. The same reasoning
-//! `state.rs` records for leaving session-lock unfiltered.
+//! Data control is a read-anything-on-the-clipboard capability, so both
+//! globals consult `state::privileged_global_visible`. Security-context
+//! clients are now tagged and can be distinguished there. The current
+//! single-user policy remains permissive, where a clipboard manager, a
+//! terminal and a browser are all equally that user's own programs.
 
 use smithay::reexports::wayland_server::DisplayHandle;
 use smithay::wayland::selection::ext_data_control::{
@@ -117,8 +115,16 @@ pub(crate) struct DataControl {
 /// `primary` is not optional on purpose — see the module docs for the
 /// silent half-working session that `None` produces.
 pub(crate) fn init(display_handle: &DisplayHandle, primary: &PrimarySelectionState) -> DataControl {
-    let wlr = WlrDataControlState::new::<Compositor, _>(display_handle, Some(primary), |_| true);
-    let ext = ExtDataControlState::new::<Compositor, _>(display_handle, Some(primary), |_| true);
+    let wlr = WlrDataControlState::new::<Compositor, _>(
+        display_handle,
+        Some(primary),
+        crate::state::privileged_global_visible,
+    );
+    let ext = ExtDataControlState::new::<Compositor, _>(
+        display_handle,
+        Some(primary),
+        crate::state::privileged_global_visible,
+    );
     tracing::info!("data-control advertised on both the wlr and ext interfaces");
     DataControl { wlr, ext }
 }

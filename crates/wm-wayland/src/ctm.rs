@@ -70,6 +70,10 @@ impl GlobalDispatch<HyprlandCtmControlManagerV1, ()> for Compositor {
             tracing::info!("CTM manager blocked: another color-control client owns the outputs");
         }
     }
+
+    fn can_view(client: Client, _global_data: &()) -> bool {
+        crate::state::privileged_global_visible(&client)
+    }
 }
 
 fn owns(state: &Compositor, resource: &HyprlandCtmControlManagerV1) -> bool {

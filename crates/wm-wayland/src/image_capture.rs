@@ -157,39 +157,50 @@ pub(crate) fn refresh(comp: &mut Compositor) {
             capture.frame.failed(FailureReason::Unknown);
             continue;
         }
-        let pixels = match capture.shared.target.as_ref() {
-            Some(CaptureTarget::Output(name)) => comp
-                .outputs
-                .iter()
-                .find(|entry| entry.output.name() == *name)
-                .map(|entry| Rect::new(entry.position, entry.size))
-                .and_then(|region| {
-                    crate::protocols::capture_region(
+        let size = match capture.shared.target.as_ref() {
+            Some(CaptureTarget::Output(name)) => {
+                let region = comp
+                    .outputs
+                    .iter()
+                    .find(|entry| entry.output.name() == *name)
+                    .map(|entry| Rect::new(entry.position, entry.size));
+                region.and_then(|region| {
+                    match crate::protocols::capture_region_into(
                         comp,
                         region,
                         Transform::Normal,
                         capture.shared.paint_cursors,
-                    )
-                }),
-            Some(CaptureTarget::Toplevel(window)) => {
-                crate::capture::capture_window_full(comp, *window, capture.shared.paint_cursors)
+                        &capture.buffer,
+                    ) {
+                        Ok(size) => Some(size),
+                        Err(error) => {
+                            tracing::warn!(%error, "ext image-copy-capture could not capture the output");
+                            None
+                        }
+                    }
+                })
             }
+            Some(CaptureTarget::Toplevel(window)) => crate::capture::capture_window_full(
+                    comp,
+                    *window,
+                    capture.shared.paint_cursors,
+                )
+                .and_then(|pixels| match crate::protocols::write_capture(&capture.buffer, &pixels) {
+                    Ok(()) => Some(Size::new(pixels.width, pixels.height)),
+                    Err(error) => {
+                        tracing::warn!(%error, "ext image-copy-capture could not write the client buffer");
+                        None
+                    }
+                }),
             None => None,
         };
-        let Some(pixels) = pixels else {
+        let Some(size) = size else {
             capture.frame.failed(FailureReason::Unknown);
             continue;
         };
-        if let Err(error) = crate::protocols::write_capture(&capture.buffer, &pixels) {
-            tracing::warn!(%error, "ext image-copy-capture could not write the client buffer");
-            capture.frame.failed(FailureReason::BufferConstraints);
-            continue;
-        }
 
         capture.frame.transform(wl_output::Transform::Normal);
-        capture
-            .frame
-            .damage(0, 0, pixels.width as i32, pixels.height as i32);
+        capture.frame.damage(0, 0, size.w as i32, size.h as i32);
         let stamp = Duration::from(Clock::<Monotonic>::new().now());
         capture.frame.presentation_time(
             (stamp.as_secs() >> 32) as u32,
@@ -295,6 +306,10 @@ impl GlobalDispatch<ExtOutputImageCaptureSourceManagerV1, ()> for Compositor {
     ) {
         data_init.init(resource, ());
     }
+
+    fn can_view(client: Client, _global_data: &()) -> bool {
+        crate::state::privileged_global_visible(&client)
+    }
 }
 
 impl Dispatch<ExtOutputImageCaptureSourceManagerV1, ()> for Compositor {
@@ -332,6 +347,10 @@ impl GlobalDispatch<ExtForeignToplevelImageCaptureSourceManagerV1, ()> for Compo
         data_init: &mut DataInit<'_, Self>,
     ) {
         data_init.init(resource, ());
+    }
+
+    fn can_view(client: Client, _global_data: &()) -> bool {
+        crate::state::privileged_global_visible(&client)
     }
 }
 
@@ -385,6 +404,10 @@ impl GlobalDispatch<ExtImageCopyCaptureManagerV1, ()> for Compositor {
         data_init: &mut DataInit<'_, Self>,
     ) {
         data_init.init(resource, ());
+    }
+
+    fn can_view(client: Client, _global_data: &()) -> bool {
+        crate::state::privileged_global_visible(&client)
     }
 }
 

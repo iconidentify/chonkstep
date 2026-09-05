@@ -46,6 +46,10 @@ impl GlobalDispatch<HyprlandToplevelMappingManagerV1, ()> for Compositor {
     ) {
         data_init.init(resource, ());
     }
+
+    fn can_view(client: Client, _global_data: &()) -> bool {
+        crate::state::privileged_global_visible(&client)
+    }
 }
 
 impl Dispatch<HyprlandToplevelMappingManagerV1, ()> for Compositor {

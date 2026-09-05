@@ -49,6 +49,7 @@ mod input;
 mod layers;
 mod lock;
 mod output_mgmt;
+mod output_power;
 mod protocols;
 mod renderer;
 mod session;

@@ -32,6 +32,8 @@
 //! in or leaving the ledger, a geometry becoming true. The only
 //! `sleep` anywhere is the poll cadence inside `poll_until`.
 
+use std::io::{Read, Write};
+use std::os::unix::net::UnixStream;
 use std::time::Duration;
 
 use chonk_testkit::{is_dark, poll_until, Session, SessionOptions, WindowInfo};
@@ -66,6 +68,69 @@ fn csd_options() -> SessionOptions {
         config_extra: "[decorations]\nclient_side = [\"zenity\"]\n".to_string(),
         ..SessionOptions::default()
     }
+}
+
+fn hyprland_request(session: &Session, request: &str) -> Result<String, String> {
+    let log = session.log();
+    let line = log
+        .lines()
+        .find(|line| line.contains("hyprland ipc listening"))
+        .ok_or("the compositor did not announce its Hyprland IPC directory")?;
+    let directory = line
+        .split("directory=\"")
+        .nth(1)
+        .and_then(|tail| tail.split('"').next())
+        .ok_or_else(|| format!("could not parse Hyprland IPC directory from {line:?}"))?;
+    let mut socket = UnixStream::connect(std::path::Path::new(directory).join(".socket.sock"))
+        .map_err(|error| format!("connect to Hyprland IPC: {error}"))?;
+    socket
+        .set_read_timeout(Some(ACT))
+        .map_err(|error| format!("set Hyprland IPC timeout: {error}"))?;
+    socket
+        .write_all(request.as_bytes())
+        .map_err(|error| format!("write Hyprland IPC request: {error}"))?;
+    socket
+        .shutdown(std::net::Shutdown::Write)
+        .map_err(|error| format!("finish Hyprland IPC request: {error}"))?;
+    let mut response = String::new();
+    socket
+        .read_to_string(&mut response)
+        .map_err(|error| format!("read Hyprland IPC response: {error}"))?;
+    Ok(response)
+}
+
+#[test]
+#[ignore = "needs a live Wayland session to nest in: scripts/e2e.sh, or cargo test -p chonk-testkit -- --ignored --test-threads=1"]
+fn keyboard_layout_ipc_switches_and_reports_the_active_group() {
+    let mut session = Session::boot(
+        "keyboard-layout-switch",
+        SessionOptions {
+            env: vec![("XKB_DEFAULT_LAYOUT".into(), "us,de".into())],
+            ..SessionOptions::default()
+        },
+    )
+    .unwrap();
+
+    let before: serde_json::Value =
+        serde_json::from_str(&hyprland_request(&session, "j/devices").unwrap()).unwrap();
+    let before = &before["keyboards"][0];
+    assert_eq!(before["active_layout_index"], 0);
+    assert_eq!(before["layout"], before["active_keymap"]);
+
+    assert_eq!(
+        hyprland_request(&session, "/switchxkblayout all next")
+            .unwrap()
+            .trim(),
+        "ok"
+    );
+    session.door().barrier().unwrap();
+
+    let after: serde_json::Value =
+        serde_json::from_str(&hyprland_request(&session, "j/devices").unwrap()).unwrap();
+    let after = &after["keyboards"][0];
+    assert_eq!(after["active_layout_index"], 1);
+    assert_eq!(after["layout"], after["active_keymap"]);
+    assert_ne!(after["active_keymap"], before["active_keymap"]);
 }
 
 /// Launches a zenity question dialog and waits for it to map. The

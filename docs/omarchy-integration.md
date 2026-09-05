@@ -121,6 +121,32 @@ to terminate that session and the terminal running the command.
 | themes, pickers, OSD, notifications, and the Omarchy menu | Work without compositor-specific translation |
 | session lock and IME | Work through standard Wayland lock, text-input, and input-method protocols |
 
+## Quickshell protocol boundary
+
+Chonkstep serves the Quickshell-facing interfaces Omarchy itself uses:
+Hyprland request/event sockets, `hyprland_focus_grab_manager_v1`,
+`hyprland_toplevel_mapping_manager_v1`,
+`hyprland_ctm_control_manager_v1`, wlr foreign-toplevel management,
+wlr screencopy, and ext image-copy capture. Both `monitoradded` and
+`monitoraddedv2` are emitted so legacy and current monitor listeners
+refresh together.
+
+Three optional visual-effect interfaces are intentionally not served:
+
+- `hyprland_toplevel_export_manager_v1`: plugins that require this
+  Hyprland-only thumbnail path render no preview; use ext image-copy
+  capture for supported window capture.
+- `hyprland_surface_manager_v1`: Hyprland-specific per-surface effects
+  are unavailable, so plugins must retain their plain-surface fallback.
+- `ext_background_effect_manager_v1`: behind-window blur is unavailable;
+  translucent panels render without blur rather than receiving a fake
+  effect acknowledgement.
+
+`renameworkspace` is unreachable by construction: Chonkstep workspaces
+have persistent one-based numeric wire names derived from their internal
+indices, with no independent mutable-name field. It is therefore an
+intentional model boundary, not an omitted command handler.
+
 The screensaver launcher can open its terminal clients because long-bracket
 Lua commands and `openwindow` events are supported. Chonkstep does not have
 Hyprland's independent per-monitor workspace/focus model, so requests that

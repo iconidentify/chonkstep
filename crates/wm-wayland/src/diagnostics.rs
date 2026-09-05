@@ -9,6 +9,7 @@ static IDLE_LOG: AtomicBool = AtomicBool::new(false);
 static FULL_DAMAGE: AtomicBool = AtomicBool::new(false);
 static NO_DIRECT_SCANOUT: AtomicBool = AtomicBool::new(false);
 static NO_CURSOR_PLANE: AtomicBool = AtomicBool::new(false);
+static NO_VRR: AtomicBool = AtomicBool::new(false);
 
 type ReloadFilter = dyn Fn(&str) -> Result<(), String> + Send + Sync;
 static LOG_FILTER: OnceLock<Box<ReloadFilter>> = OnceLock::new();
@@ -24,6 +25,7 @@ pub(crate) fn init() {
         FULL_DAMAGE.store(env_enabled("CHONKSTEP_FULL_DAMAGE"), Ordering::Relaxed);
         NO_DIRECT_SCANOUT.store(env_enabled("CHONKSTEP_NO_DIRECT_SCANOUT"), Ordering::Relaxed);
         NO_CURSOR_PLANE.store(env_enabled("CHONKSTEP_NO_CURSOR_PLANE"), Ordering::Relaxed);
+        NO_VRR.store(env_enabled("CHONKSTEP_NO_VRR"), Ordering::Relaxed);
     });
 }
 
@@ -35,6 +37,7 @@ fn value(name: &str) -> Option<&'static AtomicBool> {
         "full-damage" => Some(&FULL_DAMAGE),
         "no-direct-scanout" => Some(&NO_DIRECT_SCANOUT),
         "no-cursor-plane" => Some(&NO_CURSOR_PLANE),
+        "no-vrr" => Some(&NO_VRR),
         _ => None,
     }
 }
@@ -46,7 +49,7 @@ pub(crate) fn enabled(name: &str) -> bool {
 pub(crate) fn set(name: &str, enabled: bool) -> Result<(), String> {
     let value = value(name).ok_or_else(|| {
         format!(
-            "unknown diagnostic {name}; expected damage-log, idle-log, full-damage, no-direct-scanout or no-cursor-plane"
+            "unknown diagnostic {name}; expected damage-log, idle-log, full-damage, no-direct-scanout, no-cursor-plane or no-vrr"
         )
     })?;
     value.store(enabled, Ordering::Relaxed);
@@ -61,6 +64,7 @@ pub(crate) fn describe() -> String {
         "full-damage",
         "no-direct-scanout",
         "no-cursor-plane",
+        "no-vrr",
     ]
     .into_iter()
     .map(|name| format!("{name}={}", enabled(name)))

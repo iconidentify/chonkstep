@@ -50,6 +50,12 @@ pub struct Monitor {
     pub width: i32,
     pub height: i32,
     pub scale: f64,
+    /// Whether the connector is currently powered. A powered-off
+    /// output remains in the layout and keeps its workspaces.
+    pub powered: bool,
+    /// Whether adaptive sync is supported and currently enabled.
+    pub vrr_supported: bool,
+    pub vrr_enabled: bool,
     /// Whether this is the output the session considers focused.
     pub focused: bool,
     /// The 0-based chonkstep workspace index active on this output.
@@ -458,8 +464,8 @@ impl Snapshot {
                     scale: monitor.scale,
                     transform: monitor.transform,
                     focused: monitor.focused,
-                    dpms_status: true,
-                    vrr: false,
+                    dpms_status: monitor.powered,
+                    vrr: monitor.vrr_enabled,
                     solitary_blocked_by: self.locked.then(|| "LOCK".to_string()).into_iter().collect(),
                     actively_tearing: false,
                     direct_scanout_to: None,

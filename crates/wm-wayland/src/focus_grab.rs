@@ -687,6 +687,10 @@ impl GlobalDispatch<HyprlandFocusGrabManagerV1, ()> for Compositor {
         // record here — the grabs record themselves.
         data_init.init(resource, ());
     }
+
+    fn can_view(client: Client, _global_data: &()) -> bool {
+        crate::state::privileged_global_visible(&client)
+    }
 }
 
 impl Dispatch<HyprlandFocusGrabManagerV1, ()> for Compositor {

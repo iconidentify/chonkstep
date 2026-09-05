@@ -35,9 +35,9 @@
 //! the pattern `docs/control-socket.md` established and the one
 //! `clippy.toml`'s incident report exists to protect.
 
-use smithay::input::keyboard::{xkb, Keysym};
+use smithay::input::keyboard::{xkb, Keysym, Layout};
 
-use chonk_hyprland_ipc::dispatch::{Action, Fullscreen};
+use chonk_hyprland_ipc::dispatch::{Action, Fullscreen, LayoutTarget};
 use chonk_hyprland_ipc::state::{Binding, Devices, Keyboard, Monitor, PointerDevice, Snapshot, Window, Workspace};
 use chonk_hyprland_ipc::Server;
 use wm_core::{Backend, BackendEvent, Lifecycle, WindowManager};
@@ -140,6 +140,9 @@ fn build_snapshot(
             width: i32::try_from(info.geometry.size.w).unwrap_or(i32::MAX),
             height: i32::try_from(info.geometry.size.h).unwrap_or(i32::MAX),
             scale: wm.backend().monitor_scales.get(index).copied().unwrap_or(1.0),
+            powered: hardware(wm, index).is_none_or(|out| out.powered),
+            vrr_supported: hardware(wm, index).is_some_and(|out| out.vrr_supported),
+            vrr_enabled: hardware(wm, index).is_some_and(|out| out.vrr_enabled),
             // chonkstep has a single global current workspace rather
             // than one per output, so exactly one monitor is focused
             // and every monitor shows the same workspace. Saying
@@ -284,7 +287,7 @@ fn build_snapshot(
     // whose layout libxkbcommon rejected keeps the previous one. The
     // config value remains the fallback for a backend that installs no
     // keymap of its own.
-    let layout = {
+    let configured_layout = {
         let installed = wm.backend().keyboard_layout.clone();
         if installed.is_empty() {
             session.input.layout.clone().unwrap_or_else(|| "us".to_string())
@@ -292,11 +295,21 @@ fn build_snapshot(
             installed
         }
     };
+    let active_layout_index = wm.backend().active_keyboard_layout;
+    let active_keymap = wm
+        .backend()
+        .keyboard_layouts
+        .get(active_layout_index as usize)
+        .cloned()
+        .unwrap_or_else(|| configured_layout.clone());
     let mut devices = Devices::default();
     for device in &wm.backend().input_devices {
         if device.keyboard {
             devices.keyboards.push(Keyboard {
-                name: device.name.clone(), layout: layout.clone(), active_keymap: layout.clone(), active_layout_index: 0,
+                name: device.name.clone(),
+                layout: active_keymap.clone(),
+                active_keymap: active_keymap.clone(),
+                active_layout_index,
             });
         }
         let entry = PointerDevice { name: device.name.clone() };
@@ -313,9 +326,9 @@ fn build_snapshot(
     if devices.keyboards.is_empty() {
         devices.keyboards.push(Keyboard {
             name: "chonkstep-keyboard".into(),
-            layout: layout.clone(),
-            active_keymap: layout,
-            active_layout_index: 0,
+            layout: active_keymap.clone(),
+            active_keymap,
+            active_layout_index,
         });
     }
     if devices.mice.is_empty() {
@@ -581,6 +594,8 @@ pub(crate) fn apply(comp: &mut Compositor, action: Action) -> bool {
         Action::SetTag { window, tag, present } => client_of(wm, window).is_some_and(|id| wm.set_client_tag(id, &tag, present)),
         Action::ConfirmFloating(window) => client_of(wm, window).is_some(),
         Action::SetMonitorScale { output, scale_120 } => comp.set_output_scale(&output, scale_120 as f64 / 120.0),
+        Action::SetDpms { output, powered } => crate::output_power::set_from_ipc(comp, output.as_deref(), powered),
+        Action::SwitchKeyboardLayout { device, target } => switch_keyboard_layout(comp, &device, target),
         Action::SetCursorHidden(hidden) => {
             let owner = hidden.then(|| {
                 comp.seat
@@ -641,6 +656,60 @@ fn window_of(wm: &WindowManager<WaylandBackend>, id: u64) -> Option<<WaylandBack
     wm.iter_clients()
         .find(|(candidate, _): &(wm_core::ClientId, _)| candidate.as_u64() == id)
         .map(|(_, client)| client.window)
+}
+
+pub(crate) fn refresh_keyboard_layout(comp: &mut Compositor) {
+    let Some(keyboard) = comp.seat.get_keyboard() else {
+        return;
+    };
+    let (layouts, active) = keyboard.with_xkb_state(comp, |context| {
+        let xkb = context.xkb().lock().expect("keyboard XKB mutex poisoned");
+        let active = xkb.active_layout().0;
+        let layouts = xkb.layouts().map(|layout| xkb.layout_name(layout).to_string()).collect();
+        (layouts, active)
+    });
+    let backend = comp.wm.backend_mut();
+    backend.keyboard_layouts = layouts;
+    backend.active_keyboard_layout = active;
+}
+
+fn switch_keyboard_layout(comp: &mut Compositor, device: &str, target: LayoutTarget) -> bool {
+    if device != "all"
+        && !comp
+            .wm
+            .backend()
+            .input_devices
+            .iter()
+            .any(|input| input.keyboard && input.name == device)
+        && device != "chonkstep-keyboard"
+    {
+        return false;
+    }
+    let Some(keyboard) = comp.seat.get_keyboard() else {
+        return false;
+    };
+    let changed = keyboard.with_xkb_state(comp, |mut context| {
+        let (current, count) = {
+            let xkb = context.xkb().lock().expect("keyboard XKB mutex poisoned");
+            (xkb.active_layout().0, xkb.layouts().count() as u32)
+        };
+        if count == 0 {
+            return false;
+        }
+        let next = match target {
+            LayoutTarget::Next => (current + 1) % count,
+            LayoutTarget::Previous => (count + current - 1) % count,
+            LayoutTarget::Index(index) if index < count => index,
+            LayoutTarget::Index(_) => return false,
+        };
+        context.set_layout(Layout(next));
+        true
+    });
+    if changed {
+        refresh_keyboard_layout(comp);
+        comp.mark_hyprland_state_dirty();
+    }
+    changed
 }
 
 #[cfg(test)]

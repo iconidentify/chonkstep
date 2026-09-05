@@ -711,6 +711,10 @@ impl GlobalDispatch<ZwlrGammaControlManagerV1, ()> for Compositor {
         // tracks.
         data_init.init(resource, ());
     }
+
+    fn can_view(client: Client, _global_data: &()) -> bool {
+        crate::state::privileged_global_visible(&client)
+    }
 }
 
 impl Dispatch<ZwlrGammaControlManagerV1, ()> for Compositor {

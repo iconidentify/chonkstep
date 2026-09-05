@@ -32,12 +32,14 @@
 //! - **Transform** applies on the DRM session backend for the four
 //!   non-flipped rotations; the nested backend truthfully refuses it
 //!   because its one output is the host window.
-//! - **Disable and adaptive sync** are refused with `failed()` and a
-//!   log line naming the gap. Disabling means tearing an output
+//! - **Disable** is refused with `failed()` and a log line naming the
+//!   gap. Disabling means tearing an output
 //!   out of three index-aligned lists (`Compositor::outputs`, the
 //!   ledger's monitors, the session's crtcs) that the lock module and
 //!   the shell hold indices into. A truthful `failed` beats a lying
 //!   `succeeded`.
+//! - **Adaptive sync** is capability-checked and controls permission for
+//!   the renderer's conservative direct-scanout-only runtime gate.
 //!
 //! When no output manager is bound, publication is an immediate fast
 //! path. Once one binds, retained snapshots keep unchanged passes both
@@ -137,6 +139,7 @@ struct HeadSnapshot {
     scale: f64,
     current_mode: usize,
     transform: Transform,
+    adaptive_sync: bool,
 }
 
 /// What one configuration asked for on one head.
@@ -312,6 +315,7 @@ fn head_snapshot(entry: &crate::state::OutputEntry) -> HeadSnapshot {
         scale: entry.scale,
         current_mode: current_mode_index(entry),
         transform: entry.transform,
+        adaptive_sync: entry.vrr_requested,
     }
 }
 
@@ -439,7 +443,11 @@ fn announce_head(
     head.transform(protocol_transform(entry.transform));
     head.scale(entry.scale);
     if version >= 4 {
-        head.adaptive_sync(AdaptiveSyncState::Disabled);
+        head.adaptive_sync(if entry.vrr_requested {
+            AdaptiveSyncState::Enabled
+        } else {
+            AdaptiveSyncState::Disabled
+        });
     }
     manager.heads.push(HeadInstance { index, resource: head, modes });
 }
@@ -460,6 +468,13 @@ fn update_head(head: &HeadInstance, entry: &crate::state::OutputEntry, previous:
         if let Some(mode) = head.modes.get(current) {
             head.resource.current_mode(mode);
         }
+    }
+    if entry.vrr_requested != previous.adaptive_sync && head.resource.version() >= 4 {
+        head.resource.adaptive_sync(if entry.vrr_requested {
+            AdaptiveSyncState::Enabled
+        } else {
+            AdaptiveSyncState::Disabled
+        });
     }
 }
 
@@ -493,8 +508,13 @@ fn validate(comp: &Compositor, config: &ConfigState) -> Result<Vec<(usize, HeadC
                 return Err(format!("rotating {name}: the nested backend reserves its transform for the host surface"));
             }
         }
-        if head.adaptive_sync == Some(true) {
-            return Err(format!("adaptive sync on {name}: not supported"));
+        if head.adaptive_sync == Some(true) && !entry.vrr_supported {
+            return Err(format!(
+                "adaptive sync on {name}: the connector does not advertise VRR capability"
+            ));
+        }
+        if head.adaptive_sync == Some(true) && crate::diagnostics::enabled("no-vrr") {
+            return Err(format!("adaptive sync on {name}: disabled by CHONKSTEP_NO_VRR"));
         }
         if let Some(scale) = head.scale {
             if !(0.125..=8.0).contains(&scale) {
@@ -542,8 +562,32 @@ fn perform_pending_apply(comp: &mut Compositor) {
     };
     let mut scaled_any = false;
     let mut moved_any = false;
+    let mut adaptive_any = false;
     let mut first_error: Option<String> = None;
     for (index, head) in &pending.heads {
+        if let Some(enabled) = head.adaptive_sync {
+            if comp.outputs[*index].vrr_requested != enabled {
+                match crate::session::set_adaptive_sync(&mut comp.graphics, *index, enabled) {
+                    Ok(()) => {
+                        comp.outputs[*index].vrr_requested = enabled;
+                        adaptive_any = true;
+                        tracing::info!(
+                            output = %comp.outputs[*index].output.name(),
+                            enabled,
+                            "adaptive sync policy changed"
+                        );
+                    }
+                    Err(error) => {
+                        tracing::warn!(
+                            %error,
+                            output = %comp.outputs[*index].output.name(),
+                            "adaptive sync change failed"
+                        );
+                        first_error.get_or_insert(error);
+                    }
+                }
+            }
+        }
         if let Some(scale) = head.scale {
             let entry = &mut comp.outputs[*index];
             if (entry.scale - scale).abs() > f64::EPSILON {
@@ -597,7 +641,7 @@ fn perform_pending_apply(comp: &mut Compositor) {
     if moved_any {
         normalize_layout(comp);
     }
-    if scaled_any || moved_any {
+    if scaled_any || moved_any || adaptive_any {
         comp.output_mgmt.mark_dirty();
         comp.session_lock.mark_dirty();
         comp.sync_monitor_scales();
@@ -694,6 +738,10 @@ impl GlobalDispatch<ZwlrOutputManagerV1, ()> for Compositor {
         // Announced on the next `refresh`, exactly like a foreign-
         // toplevel manager: the bind callback runs mid-dispatch.
         state.output_mgmt.managers.push(Manager { resource, announced: false, heads: Vec::new() });
+    }
+
+    fn can_view(client: Client, _global_data: &()) -> bool {
+        crate::state::privileged_global_visible(&client)
     }
 }
 
