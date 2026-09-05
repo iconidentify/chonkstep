@@ -448,7 +448,7 @@
 #         bound bare: "volumeup" = "run volume-up"
 #   Numeric keypad:
 #         kp0 through kp9, kpenter, kpadd, kpsubtract, kpmultiply,
-#         kpdivide, kpdecimal, kpequal
+#         kpdivide, kpdecimal, kpseparator, kpequal
 #         kpenter is the keypad's own Enter, a different key from
 #         return. Each digit is also spellable by its NumLock-off
 #         name -- kp1/kpend, kp2/kpdown, kp3/kpnext, kp4/kpleft,

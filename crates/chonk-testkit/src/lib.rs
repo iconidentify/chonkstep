@@ -165,6 +165,10 @@ pub mod keys {
     pub const X: u32 = 45;
     pub const LEFTALT: u32 = 56;
     pub const SPACE: u32 = 57;
+    /// The lock key and keypad digit used together to prove keypad
+    /// bindings are independent of the active Num Lock level.
+    pub const NUMLOCK: u32 = 69;
+    pub const KP1: u32 = 79;
     pub const UP: u32 = 103;
     pub const LEFT: u32 = 105;
     pub const RIGHT: u32 = 106;
