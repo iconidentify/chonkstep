@@ -7,6 +7,7 @@
 //! describing three different rectangles. A raw x11rb client makes every
 //! side observable without depending on a toolkit's own scaling policy.
 
+use std::path::Path;
 use std::time::Duration;
 
 use chonk_testkit::{poll_until, Session, SessionOptions, WindowInfo};
@@ -450,4 +451,345 @@ fn xwayland_wm_change_state_minimizes_and_restores() {
             .then_some(())
     })
     .expect("NormalState restores and clears the published hidden state");
+}
+
+// ---------------------------------------------------------------------
+// EWMH/ICCCM requests an X11 client sends and a scripted desktop relies
+// on. Root client messages reach the compositor's own `xewmh`
+// connection; `WM_HINTS` reaches it through smithay's `X11Surface`.
+
+/// Maps a raw X11 window with a title and class, and waits for the
+/// compositor to have managed it.
+fn map_probe_window(
+    session: &mut Session,
+    conn: &x11rb::rust_connection::RustConnection,
+    screen_num: usize,
+    title: &str,
+    hints: Option<&[u32; 9]>,
+) -> (u32, u64) {
+    let existing = mapped_ids(session);
+    let screen = &conn.setup().roots[screen_num];
+    let xid = conn.generate_id().unwrap();
+    conn.create_window(
+        COPY_DEPTH_FROM_PARENT,
+        xid,
+        screen.root,
+        0,
+        0,
+        400,
+        300,
+        0,
+        WindowClass::INPUT_OUTPUT,
+        COPY_FROM_PARENT,
+        &CreateWindowAux::new()
+            .background_pixel(screen.black_pixel)
+            .event_mask(EventMask::STRUCTURE_NOTIFY),
+    )
+    .unwrap();
+    conn.change_property8(
+        x11rb::protocol::xproto::PropMode::REPLACE,
+        xid,
+        AtomEnum::WM_NAME,
+        AtomEnum::STRING,
+        title.as_bytes(),
+    )
+    .unwrap();
+    // `_NET_WM_NAME` as well as `WM_NAME`: the EWMH property is what
+    // smithay reads for `X11Surface::title`, and therefore what the
+    // ledger matches on.
+    let net_wm_name = intern(conn, b"_NET_WM_NAME");
+    let utf8 = intern(conn, b"UTF8_STRING");
+    conn.change_property8(
+        x11rb::protocol::xproto::PropMode::REPLACE,
+        xid,
+        net_wm_name,
+        utf8,
+        title.as_bytes(),
+    )
+    .unwrap();
+    // The ledger matches on app id or title, and an X11 window's title
+    // reaches the record only through a later `TitleChanged`; the class
+    // is read at map time. Naming the class after the window is what
+    // makes `wait_for_window` deterministic here.
+    let class = format!("{title}\0{title}\0");
+    conn.change_property8(
+        x11rb::protocol::xproto::PropMode::REPLACE,
+        xid,
+        AtomEnum::WM_CLASS,
+        AtomEnum::STRING,
+        class.as_bytes(),
+    )
+    .unwrap();
+    if let Some(hints) = hints {
+        // Written *before* the map, which is the ordinary case and the
+        // one that produces no PropertyNotify for a change handler to
+        // catch.
+        conn.change_property32(
+            x11rb::protocol::xproto::PropMode::REPLACE,
+            xid,
+            AtomEnum::WM_HINTS,
+            AtomEnum::WM_HINTS,
+            hints,
+        )
+        .unwrap();
+    }
+    conn.map_window(xid).unwrap();
+    conn.flush().unwrap();
+    // An X11 window's identity is not part of the test-door record (see
+    // the scale-two test's note), so the observable is a *new* mapped
+    // entry rather than a title match.
+    let id = poll_until(EVENT, "the probe window to finish mapping", || {
+        session
+            .world()
+            .ok()?
+            .windows
+            .into_iter()
+            .find(|window| window.mapped && !existing.contains(&window.id))
+            .map(|window| window.id)
+    })
+    .expect("the probe window maps");
+    (xid, id)
+}
+
+/// The ledger ids already mapped, so a later map can be told apart.
+fn mapped_ids(session: &mut Session) -> Vec<u64> {
+    session
+        .world()
+        .map(|world| world.windows.into_iter().filter(|w| w.mapped).map(|w| w.id).collect())
+        .unwrap_or_default()
+}
+
+/// The Hyprland IPC request socket for a nested session, and one
+/// request against it. Small local copies of `hyprland_ipc.rs`'s
+/// helpers: this file needs exactly two calls, and the harness does not
+/// export them.
+fn ipc_socket_dir(session: &Session) -> std::path::PathBuf {
+    let signature = poll_until(EVENT, "the hyprland ipc log line", || {
+        let log = session.log();
+        let at = log.find("hyprland ipc listening")?;
+        let rest = &log[at..];
+        let start = rest.find('"')? + 1;
+        let end = rest[start..].find('"')? + start;
+        Some(rest[start..end].to_string())
+    })
+    .expect("the compositor logs the signature it bound");
+    let runtime = std::env::var("XDG_RUNTIME_DIR").expect("XDG_RUNTIME_DIR");
+    std::path::PathBuf::from(runtime).join("hypr").join(signature)
+}
+
+/// The Hyprland event socket. A bar listens to exactly this, and
+/// `urgent` is the user-visible signal an attention request produces.
+///
+/// Held open across the whole test rather than reconnected per wait:
+/// the stream carries no history, so a listener that connects after the
+/// trigger has already missed it.
+struct IpcEvents(std::io::BufReader<std::os::unix::net::UnixStream>);
+
+impl IpcEvents {
+    fn connect(dir: &Path) -> IpcEvents {
+        let stream = std::os::unix::net::UnixStream::connect(dir.join(".socket2.sock"))
+            .expect("event socket");
+        stream.set_read_timeout(Some(EVENT)).expect("read timeout");
+        IpcEvents(std::io::BufReader::new(stream))
+    }
+
+    fn wait_for(&mut self, name: &str) -> String {
+        use std::io::BufRead as _;
+        let deadline = std::time::Instant::now() + EVENT;
+        let prefix = format!("{name}>>");
+        let mut seen = Vec::new();
+        while std::time::Instant::now() < deadline {
+            let mut line = String::new();
+            if self.0.read_line(&mut line).unwrap_or(0) == 0 {
+                break;
+            }
+            let line = line.trim_end().to_string();
+            if let Some(data) = line.strip_prefix(&prefix) {
+                return data.to_string();
+            }
+            seen.push(line);
+        }
+        panic!("never saw {name}; events seen: {seen:#?}");
+    }
+}
+
+fn ipc_request(dir: &Path, payload: &str) -> String {
+    use std::io::{Read as _, Write as _};
+    let mut stream = std::os::unix::net::UnixStream::connect(dir.join(".socket.sock"))
+        .unwrap_or_else(|e| panic!("connecting to the request socket: {e}"));
+    stream.set_read_timeout(Some(EVENT)).expect("read timeout");
+    stream.write_all(payload.as_bytes()).expect("write the request");
+    stream.flush().expect("flush");
+    let mut response = String::new();
+    stream.read_to_string(&mut response).expect("read the response");
+    response
+}
+
+/// `WM_HINTS` with only the urgency bit set. Flags is element 0; the
+/// urgency bit is `1 << 8`.
+const WM_HINTS_URGENT: [u32; 9] = [1 << 8, 0, 0, 0, 0, 0, 0, 0, 0];
+const WM_HINTS_CALM: [u32; 9] = [0, 0, 0, 0, 0, 0, 0, 0, 0];
+
+/// `wmctrl -c` and `xdotool windowclose` send this and nothing else.
+/// Under the Wayland session it used to land on the floor: the message
+/// reached the compositor's connection and `drain_inbound` dropped it,
+/// so the tool exited zero having done nothing at all.
+#[test]
+#[ignore = "needs a live Wayland session to nest in"]
+fn a_net_close_window_message_closes_an_xwayland_window() {
+    let mut session =
+        Session::boot("xwayland-ewmh-close", SessionOptions::default()).expect("nested compositor boots");
+    let display = xwayland_display(&session);
+    let _ = ewmh_display(&session);
+    let (conn, screen_num) =
+        x11rb::rust_connection::RustConnection::connect(Some(&format!(":{display}")))
+            .expect("connect to nested XWayland");
+    let root = conn.setup().roots[screen_num].root;
+    let (xid, id) = map_probe_window(&mut session, &conn, screen_num, "ewmh-close-me", None);
+
+    let close = intern(&conn, b"_NET_CLOSE_WINDOW");
+    conn.send_event(
+        false,
+        root,
+        EventMask::SUBSTRUCTURE_NOTIFY | EventMask::SUBSTRUCTURE_REDIRECT,
+        ClientMessageEvent::new(32, xid, close, [0u32, 2, 0, 0, 0]),
+    )
+    .unwrap();
+    conn.flush().unwrap();
+
+    // The backend's record outlives `wm-core`'s until the X11 surface
+    // is destroyed, so the observable is the mapped bit — "gone from
+    // the desktop", which is what the message asked for.
+    poll_until(EVENT, "the window named by _NET_CLOSE_WINDOW to go", || {
+        session
+            .world()
+            .ok()?
+            .windows
+            .iter()
+            .all(|window| window.id != id || !window.mapped)
+            .then_some(())
+    })
+    .expect("_NET_CLOSE_WINDOW must close the window it names");
+}
+
+/// The ICCCM half of the attention story — how IRC clients, terminal
+/// bells and mail notifiers actually ask, and the half smithay's XWM
+/// drops on the floor because `_NET_WM_STATE` is the only route it
+/// decodes.
+///
+/// The urgency is raised on a window that is *not* focused, which is
+/// both the realistic shape and the only one that can be observed: a
+/// window that asks for attention while the user is already in it has
+/// its request answered immediately, by the same dismissal this change
+/// adds.
+#[test]
+#[ignore = "needs a live Wayland session to nest in"]
+fn wm_hints_urgency_is_read_at_map_and_cleared_by_focus() {
+    let mut options = SessionOptions::default();
+    options.env.push(("CHONKSTEP_HYPRLAND_IPC".to_string(), "1".to_string()));
+    let mut session =
+        Session::boot("xwayland-ewmh-urgency", options).expect("nested compositor boots");
+    let display = xwayland_display(&session);
+    let _ = ewmh_display(&session);
+    let (conn, screen_num) =
+        x11rb::rust_connection::RustConnection::connect(Some(&format!(":{display}")))
+            .expect("connect to nested XWayland");
+    // A second window mapped after the noisy one, so the noisy one is
+    // genuinely in the background when it asks for attention.
+    let (noisy, _) = map_probe_window(&mut session, &conn, screen_num, "ewmh-noisy", Some(&WM_HINTS_CALM));
+    // Mapped second, so it holds focus and the noisy one is genuinely
+    // in the background when it rings.
+    let _calm = map_probe_window(&mut session, &conn, screen_num, "ewmh-calm", Some(&WM_HINTS_CALM));
+
+    // Observed on the Hyprland event socket, because that is where an
+    // attention request becomes visible to a bar: the differ emits
+    // `urgent>>` on the false→true edge of exactly the flag
+    // `xdg_system_bell` sets for a native client.
+    let dir = ipc_socket_dir(&session);
+    let address_of = |dir: &Path, class: &str| -> String {
+        let clients: serde_json::Value =
+            serde_json::from_str(&ipc_request(dir, "j/clients")).expect("clients is JSON");
+        clients
+            .as_array()
+            .expect("clients is an array")
+            .iter()
+            .find(|client| client["class"].as_str().is_some_and(|c| c.contains(class)))
+            .and_then(|client| client["address"].as_str())
+            .unwrap_or_else(|| panic!("no client with class {class}"))
+            .to_string()
+    };
+    // `j/clients` prints `0x`-prefixed; the event stream does not.
+    let noisy_address =
+        address_of(&dir, "ewmh-noisy").trim_start_matches("0x").to_string();
+    let mut events = IpcEvents::connect(&dir);
+
+    // The bell: the client raises the ICCCM urgency bit on a window the
+    // user is not looking at. Smithay parses `WM_HINTS` and reports the
+    // change; before this, `property_notify` discarded it.
+    conn.change_property32(
+        x11rb::protocol::xproto::PropMode::REPLACE,
+        noisy,
+        AtomEnum::WM_HINTS,
+        AtomEnum::WM_HINTS,
+        &WM_HINTS_URGENT,
+    )
+    .unwrap();
+    conn.flush().unwrap();
+
+    assert_eq!(
+        events.wait_for("urgent"),
+        noisy_address,
+        "a WM_HINTS urgency bit must raise the same flag xdg_system_bell does"
+    );
+
+    // And it must be dismissible. Nothing in the tree cleared this
+    // before, so a window that rang once stayed urgent forever.
+    let activate = intern(&conn, b"_NET_ACTIVE_WINDOW");
+    let root = conn.setup().roots[screen_num].root;
+    conn.send_event(
+        false,
+        root,
+        EventMask::SUBSTRUCTURE_NOTIFY | EventMask::SUBSTRUCTURE_REDIRECT,
+        ClientMessageEvent::new(32, noisy, activate, [2u32, 0, 0, 0, 0]),
+    )
+    .unwrap();
+    conn.flush().unwrap();
+
+    // Wait for the focus to actually land before ringing again. The
+    // differ compares successive snapshots, so the dismissal and the
+    // re-ring have to fall in different passes or there is no edge
+    // between them to see.
+    assert_eq!(
+        events.wait_for("activewindowv2"),
+        noisy_address,
+        "the activate must focus the window that rang"
+    );
+
+    // And the dismissal, observed the same way: the flag has to be
+    // *clearable*, so ringing again after the focus must produce a
+    // second `urgent` event rather than nothing. Before this change
+    // nothing ever cleared it, so the second edge could never happen.
+    conn.change_property32(
+        x11rb::protocol::xproto::PropMode::REPLACE,
+        noisy,
+        AtomEnum::WM_HINTS,
+        AtomEnum::WM_HINTS,
+        &WM_HINTS_CALM,
+    )
+    .unwrap();
+    conn.flush().unwrap();
+    conn.change_property32(
+        x11rb::protocol::xproto::PropMode::REPLACE,
+        noisy,
+        AtomEnum::WM_HINTS,
+        AtomEnum::WM_HINTS,
+        &WM_HINTS_URGENT,
+    )
+    .unwrap();
+    conn.flush().unwrap();
+    assert_eq!(
+        events.wait_for("urgent"),
+        noisy_address,
+        "urgency must be clearable, or a window that rings once can never ring again"
+    );
 }

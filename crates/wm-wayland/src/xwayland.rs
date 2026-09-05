@@ -147,6 +147,21 @@ impl XwmHandler for Compositor {
             record.content = geometry;
         }
         backend.queue(WmEvent::MapRequest(id));
+        // `WM_HINTS` read once here as well as on change: a client that
+        // sets urgency before its first map — the common case, since the
+        // property is normally written alongside the rest of the window's
+        // ICCCM setup — produces no `PropertyNotify` for the arm above to
+        // catch. Queued after the MapRequest so the client exists in the
+        // core by the time it lands.
+        tracing::info!(?id, hints = ?window.hints().map(|h| h.urgent), "XWDEBUG map-time hints");
+        if window.hints().is_some_and(|hints| hints.urgent) {
+            backend.queue(WmEvent::NetStateRequested {
+                window: id,
+                action: NetStateAction::Add,
+                first: NetState::DemandsAttention,
+                second: None,
+            });
+        }
     }
 
     fn mapped_override_redirect_window(&mut self, _xwm: XwmId, window: X11Surface) {
@@ -321,6 +336,28 @@ impl XwmHandler for Compositor {
             // borderless mode, and several do.
             WmWindowProperty::MotifHints => {
                 backend.queue(WmEvent::ChromeChanged(id));
+            }
+            // ICCCM `WM_HINTS`, whose urgency bit is how the great
+            // majority of X11 applications actually ask for attention —
+            // IRC and chat clients, terminal bells, mail notifiers.
+            // `_NET_WM_STATE_DEMANDS_ATTENTION` is the EWMH spelling of
+            // the same request and lands on the same core state through
+            // the same event; this is the half smithay parses for us.
+            //
+            // Both directions matter: a client sets the bit to ask and
+            // clears it when it has been read, so `Remove` is not
+            // decoration — it is how the flag goes away when the
+            // application, rather than the user, decides the moment
+            // has passed.
+            WmWindowProperty::Hints => {
+                let urgent = window.hints().is_some_and(|hints| hints.urgent);
+                tracing::info!(?id, urgent, "XWDEBUG hints property notify");
+                backend.queue(WmEvent::NetStateRequested {
+                    window: id,
+                    action: if urgent { NetStateAction::Add } else { NetStateAction::Remove },
+                    first: NetState::DemandsAttention,
+                    second: None,
+                });
             }
             _ => {}
         }
