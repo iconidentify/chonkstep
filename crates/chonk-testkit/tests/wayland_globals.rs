@@ -11,17 +11,8 @@ use chonk_testkit::{poll_until, Session, SessionOptions};
 
 #[test]
 #[ignore = "needs a live Wayland session and wayland-info"]
-// This ignored integration test runs on Cargo's test thread, never the
-// compositor repaint thread. The synchronous probe is only an
-// availability check before the real client is supervised by Session.
-#[allow(clippy::disallowed_methods)]
 fn ordinary_desktop_globals_bind_successfully() {
-    if std::process::Command::new("wayland-info")
-        .arg("--help")
-        .output()
-        .is_err()
-    {
-        eprintln!("SKIP: wayland-info is not installed");
+    if !chonk_testkit::require_client("wayland-info") {
         return;
     }
     let mut session = Session::boot("wayland-globals", SessionOptions::default()).unwrap();

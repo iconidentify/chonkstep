@@ -378,7 +378,7 @@ jobs:
           sudo apt-get install -y \
             libxkbcommon-dev libegl-dev libgles-dev libwayland-dev \
             libdrm-dev libgbm-dev libinput-dev libudev-dev libseat-dev \
-            weston xwayland foot alacritty zenity grim wayland-utils
+            weston xwayland foot alacritty zenity grim wayland-utils wlr-randr
 
       # --locked: the compositor pins Smithay 0.7.0, and a silent
       # re-resolution here would test a different dependency tree than
@@ -391,8 +391,17 @@ jobs:
 
       # Weston provides the host display a nested compositor needs,
       # with Mesa's software renderer on runners that expose no GPU.
-      # The Chromium-specific regression skips when Chromium is absent;
-      # all protocol probes and the Foot/Alacritty/Zenity paths run.
+      #
+      # Every client the suite drives is installed above, and a missing
+      # one is now a failure rather than a skip: `require_client`
+      # panics under `CI` for anything not on its documented
+      # `CI_CANNOT_INSTALL` list. `wlr-randr` is in the list above
+      # because it was NOT, and the only test exercising
+      # wlr-output-management against a real client had therefore been
+      # reporting `1 passed` in 0.00s without booting a compositor.
+      # Chromium comes with the runner image; the same guard is what
+      # turns the day it stops coming into a red build instead of a
+      # quietly smaller suite.
       - name: Run the nested compositor end-to-end suite
         run: scripts/e2e.sh --headless
 

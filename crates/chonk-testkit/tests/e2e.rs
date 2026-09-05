@@ -825,13 +825,11 @@ fn appearance_request_flips_the_desktop_live() {
 #[ignore = "needs a live Wayland session to nest in: scripts/e2e.sh, or cargo test -p chonk-testkit -- --ignored --test-threads=1"]
 fn chromium_resize_at_scale_2_keeps_its_scale() {
     // Chromium is the one client that exhibits the over-allocate+crop
-    // commit pattern; without it there is nothing to test against. A
-    // PATH scan rather than `Command::status` — the workspace bans the
-    // blocking wait, and existence is all that is being asked.
-    let chromium_on_path = std::env::var_os("PATH")
-        .is_some_and(|path| std::env::split_paths(&path).any(|dir| dir.join("chromium").is_file()));
-    if !chromium_on_path {
-        eprintln!("chromium not installed; skipping");
+    // commit pattern; without it there is nothing to test against.
+    // `require_client` is what stops that from becoming a silent pass
+    // the day the runner image drops the binary — the risk this
+    // comment used to only reason about.
+    if !chonk_testkit::require_client("chromium") {
         return;
     }
     // Frameless on purpose, like the zenity tests: the desktop now
