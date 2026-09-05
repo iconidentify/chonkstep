@@ -349,7 +349,7 @@ impl Reading {
                 mode = %line.mode,
                 position = %line.position,
                 scale = %line.scale,
-                "hyprland-config: monitor line read but not applied; use wlr-randr or kanshi (see docs/hyprland-config.md)"
+                "hyprland-config: monitor line applied at startup and on connector hotplug only; a reload does not re-apply it (see docs/hyprland-config.md)"
             );
         }
     }

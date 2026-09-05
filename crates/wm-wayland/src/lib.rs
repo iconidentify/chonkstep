@@ -59,6 +59,7 @@ mod toplevel_mapping;
 // virtual-keyboard-v1: `wtype` and everything Omarchy builds on it.
 mod virtual_keyboard;
 mod virtual_pointer;
+mod workspace;
 mod xdg;
 mod xewmh;
 mod xwayland;

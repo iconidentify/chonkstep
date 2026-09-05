@@ -1218,6 +1218,17 @@ impl Door {
     }
 
     /// Absolute pointer motion in output coordinates.
+    /// Relative pointer motion, as a mouse produces it.
+    ///
+    /// Distinct from [`Self::motion`] because the two reach different
+    /// code: pointer constraints and `zwp_relative_pointer_v1` are
+    /// decided on the relative path, and the nested backend emits no
+    /// relative events of its own (winit's are `UnusedEvent`), so this
+    /// is the only way a test can drive them.
+    pub fn motion_relative(&mut self, dx: f64, dy: f64) -> Result<(), String> {
+        self.send(&format!("motion-relative {dx} {dy}"))
+    }
+
     pub fn motion(&mut self, x: f64, y: f64) -> Result<(), String> {
         self.send(&format!("motion {x} {y}"))
     }

@@ -881,6 +881,11 @@ fn wm_hints_urgency_is_read_at_map_and_cleared_by_focus() {
         noisy_address,
         "the activate must focus the window that rang"
     );
+    // And settle a pass before ringing again. The differ compares
+    // successive snapshots, so under load the dismissal and the re-ring
+    // can otherwise land in the same one, leaving no false→true edge
+    // for the second `urgent` to be emitted from.
+    session.door().barrier().expect("the dismissal reaches a snapshot of its own");
 
     // And the dismissal, observed the same way: the flag has to be
     // *clearable*, so ringing again after the focus must produce a
@@ -984,4 +989,81 @@ fn an_x_raise_window_request_reaches_the_x_servers_stacking_order() {
             depth_of(upper)
         )
     });
+}
+
+// ---------------------------------------------------------------------
+// zwp_xwayland_keyboard_grab_v1: an X11 client that grabbed the keyboard
+// keeps its combos.
+
+/// A remote-desktop viewer, a VM console, a nested X server: an X client
+/// calls `XGrabKeyboard` because every key belongs to the session it is
+/// showing. XWayland asks the compositor for the same thing through
+/// `zwp_xwayland_keyboard_grab_v1` — a protocol this compositor did not
+/// serve, so a bound combo was swallowed by the desktop and the guest
+/// could never be sent it.
+///
+/// Two halves, and the first is what makes the second mean anything: the
+/// binding is proven to work *before* the grab, so "the command did not
+/// run" afterwards is the grab and not a broken fixture.
+#[test]
+#[ignore = "needs a live Wayland session to nest in"]
+fn an_x11_keyboard_grab_keeps_the_combos_the_desktop_binds() {
+    let dir = chonk_testkit::session_dir("xwayland-keyboard-grab");
+    let marker = dir.join("pressed");
+    let config = format!(
+        // `omarchy_menu = false`: this test needs a keybinding and an
+        // X11 client, not Omarchy's menu, and loading it makes the
+        // shell evaluate a few hundred shell conditions on the
+        // compositor thread before it can answer the first barrier.
+        "omarchy_menu = false\n[commands]\nmark = [\"sh\", \"-c\", \"echo ran >> {}\"]\n\n[keybindings]\n\"super+space\" = \"run mark\"\n",
+        marker.display()
+    );
+    let mut session = Session::boot(
+        "xwayland-keyboard-grab",
+        SessionOptions { config_extra: config, ..SessionOptions::default() },
+    )
+    .expect("nested compositor boots");
+    let display = xwayland_display(&session);
+    let (conn, screen_num) =
+        x11rb::rust_connection::RustConnection::connect(Some(&format!(":{display}")))
+            .expect("connect to nested XWayland");
+    let (xid, _) = map_probe_window(&mut session, &conn, screen_num, "grab-probe", None);
+
+    let ran = |wanted: usize| -> Option<()> {
+        let text = std::fs::read_to_string(&marker).ok()?;
+        (text.lines().count() >= wanted).then_some(())
+    };
+
+    // Control: with no grab, the desktop owns the combo.
+    session.door().chord(chonk_testkit::keys::LEFTMETA, chonk_testkit::keys::SPACE).expect("chord injects");
+    poll_until(Duration::from_secs(8), "the bound command to run", || ran(1))
+        .expect("without a grab the compositor must still own its own binding");
+
+    // The grab. XWayland turns an X client's `XGrabKeyboard` into the
+    // Wayland request; the compositor says so in its log.
+    conn.grab_keyboard(
+        true,
+        xid,
+        x11rb::CURRENT_TIME,
+        x11rb::protocol::xproto::GrabMode::ASYNC,
+        x11rb::protocol::xproto::GrabMode::ASYNC,
+    )
+    .unwrap()
+    .reply()
+    .expect("the X server grants the keyboard grab");
+    conn.flush().unwrap();
+
+    poll_until(EVENT, "the compositor to accept the XWayland keyboard grab", || {
+        session.log().contains("an XWayland client took the keyboard grab").then_some(())
+    })
+    .expect("XWayland must forward XGrabKeyboard as zwp_xwayland_keyboard_grab_v1");
+
+    // And now the same combo belongs to the guest, not the desktop.
+    session.door().chord(chonk_testkit::keys::LEFTMETA, chonk_testkit::keys::SPACE).expect("chord injects");
+    session.door().barrier().expect("the compositor settles");
+    std::thread::sleep(Duration::from_millis(600));
+    assert!(
+        ran(2).is_none(),
+        "a grabbing X11 client must receive the combo instead of the desktop running its binding"
+    );
 }

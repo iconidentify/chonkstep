@@ -1326,6 +1326,21 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         // Omarchy's menu reaches the next window that maps without a
         // restart — see `wm_config::hyprland`.
         wm.set_float_policy(next.float_policy.clone());
+        // The keyboard half of `input`. Staged on the backend and
+        // installed on its next pass; a backend whose keymap is not
+        // its own (the X11 session, where the server owns the layout)
+        // defaults this to a no-op. Before this, every reload path
+        // answered `ok` and left the keymap and repeat timing exactly
+        // as the session had started with.
+        wm.backend_mut().set_keyboard_config(wm_core::KeyboardConfig {
+            rules: next.input.rules.clone(),
+            model: next.input.model.clone(),
+            layout: next.input.layout.clone(),
+            variant: next.input.variant.clone(),
+            options: next.input.options.clone(),
+            repeat_rate: next.input.repeat_rate,
+            repeat_delay: next.input.repeat_delay,
+        });
         // ...and then re-ask for every window already on the desk. A
         // rule that only reached windows opened after it was written
         // would mean closing and reopening the very window whose chrome

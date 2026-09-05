@@ -278,7 +278,19 @@ fn build_snapshot(
     } else {
         Vec::new()
     };
-    let layout = session.input.layout.clone().unwrap_or_else(|| "us".to_string());
+    // The keymap the seat is actually running, not the one the config
+    // asked for: `XKB_DEFAULT_LAYOUT` overrides the file, and a reload
+    // whose layout libxkbcommon rejected keeps the previous one. The
+    // config value remains the fallback for a backend that installs no
+    // keymap of its own.
+    let layout = {
+        let installed = wm.backend().keyboard_layout.clone();
+        if installed.is_empty() {
+            session.input.layout.clone().unwrap_or_else(|| "us".to_string())
+        } else {
+            installed
+        }
+    };
     let mut devices = Devices::default();
     for device in &wm.backend().input_devices {
         if device.keyboard {
