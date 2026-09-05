@@ -5,6 +5,13 @@ crate and both session binaries carry the same number.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-09-05
+
+The release where ChonkStep became an Omarchy compositor rather than a
+parallel desktop, while its Wayland backend gained the compatibility,
+recovery, performance, and diagnostics needed for serious daily use.
+Everything below is on both sessions unless it names one.
+
 ### Fixed
 
 - **Transient dialogs now behave as a family on both Wayland and X11.**
@@ -804,8 +811,8 @@ through an unquoted `exec $@`).
   `--root` points it at a staged tree, e.g. a makepkg `$pkgdir`.
 - The Arch packaging's default recipe now builds: plain `makepkg -si`
   in `packaging/arch/` used to pick the release PKGBUILD, whose
-  source is the `v0.2.0` tag archive - and upstream has no tags yet,
-  so the download 404ed before anything was built. The branch-head
+  source was the nonexistent stable `v0.2.0` tag archive, so the
+  download 404ed before anything was built. The branch-head
   recipe is now the default `PKGBUILD`; the pinned-tag twin waits as
   `PKGBUILD-release`.
 - The `-git` package ships the portal backend map: `package()` had

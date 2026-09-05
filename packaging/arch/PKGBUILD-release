@@ -39,8 +39,8 @@
 # those frames into `file:line`.
 options=(strip debug)
 pkgname=chonkstep
-pkgver=0.2.0
-pkgrel=3
+pkgver=0.3.0
+pkgrel=1
 pkgdesc="A traditional floating compositor for Omarchy, compatible with Hyprland workflows"
 arch=('x86_64' 'aarch64')
 url="https://github.com/iconidentify/chonkstep"

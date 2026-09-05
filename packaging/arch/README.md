@@ -14,7 +14,7 @@ cross-build. A manual workflow dispatch performs both builds and attestations
 without creating a release, which is the pre-tag acceptance gate.
 
 Pushing a tag whose name matches the workspace version, for example
-`v0.2.0`, runs `.github/workflows/aur.yml`. The job copies the release
+`v0.3.0`, runs `.github/workflows/aur.yml`. The job copies the release
 recipe to `PKGBUILD`, replaces `SKIP` with the tag archive's real
 SHA-256 checksum, generates `.SRCINFO` with Arch's `makepkg`, and pushes
 both files to `ssh://aur@aur.archlinux.org/chonkstep.git`.

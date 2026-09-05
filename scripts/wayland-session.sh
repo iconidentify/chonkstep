@@ -89,13 +89,17 @@ export XDG_BACKEND=wayland
 _CHONKSTEP_UWSM=0
 if [ -n "${UWSM_FINALIZE_VARNAMES:-}${UWSM_WAIT_VARNAMES:-}${UWSM_ID:-}" ]; then
     _CHONKSTEP_UWSM=1
-elif [ -r /proc/self/cgroup ] \
+elif [ "${CHONKSTEP_SESSION_TESTING:-}" != 1 ] \
+        && [ -r /proc/self/cgroup ] \
         && grep -Eq '(^|/)wayland-wm@[^/]+\.service($|/)' /proc/self/cgroup; then
     # uwsm does not promise to export a UWSM_* marker to the compositor,
     # but its systemd unit name is part of our cgroup before the service
     # reaches active. Checking the cgroup also avoids the startup race in
     # `systemctl is-active`: while this script starts, the unit is still
-    # `activating`, not `active`.
+    # `activating`, not `active`. The supervisor harness deliberately skips
+    # this fallback: its child inherits the test runner's cgroup, which says
+    # where the runner lives rather than which session shape the isolated
+    # fixture is exercising.
     _CHONKSTEP_UWSM=1
 fi
 
