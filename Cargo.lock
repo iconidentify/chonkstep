@@ -441,6 +441,7 @@ name = "chonkstep-wayland"
 version = "0.2.0"
 dependencies = [
  "chonk-build-info",
+ "chonk-shell",
  "tracing",
  "tracing-subscriber",
  "wm-config",

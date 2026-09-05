@@ -225,6 +225,7 @@ DESKTOP
   install -Dm644 docs/omarchy-integration.md -t "$pkgdir/usr/share/doc/$pkgname"
   install -Dm644 docs/appearance.md -t "$pkgdir/usr/share/doc/$pkgname"
   install -Dm644 docs/control-socket.md -t "$pkgdir/usr/share/doc/$pkgname"
+  install -Dm644 docs/memory.md -t "$pkgdir/usr/share/doc/$pkgname"
   install -Dm644 README.md CHANGELOG.md -t "$pkgdir/usr/share/doc/$pkgname"
 
   # The Omarchy bar widgets that read the control socket, and the guide

@@ -39,7 +39,11 @@ fn main() {
     // Before the subscriber, so `--version` prints one clean line
     // rather than a line preceded by whatever RUST_LOG asked for.
     print_version_and_exit_if_asked();
+    let allocator_policy_pinned = chonk_shell::startup::pin_glibc_large_allocation_policy();
     tracing_subscriber::fmt().with_env_filter(tracing_subscriber::EnvFilter::from_default_env()).init();
+    if !allocator_policy_pinned {
+        tracing::warn!("glibc rejected the fixed mmap/trim thresholds; transient buffers may raise the heap high-water mark");
+    }
 
     // A panic anywhere in this process must become an abnormal *process
     // exit* — that is the entire signal the session watchdog
