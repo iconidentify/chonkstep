@@ -73,7 +73,7 @@ use x11rb::rust_connection::RustConnection;
 // both are needed, hence the alias.
 use x11rb::wrapper::ConnectionExt as WrapperConnectionExt;
 
-use wm_core::MAX_WORKSPACES;
+use wm_core::{NetState, NetStateAction, MAX_WORKSPACES};
 use wm_theme_api::Rect;
 
 use crate::state::{Compositor, ManagedSurface, WaylandBackend, WindowRecord, WlWindowId};
@@ -86,10 +86,19 @@ use crate::state::{Compositor, ManagedSurface, WaylandBackend, WindowRecord, WlW
 /// the pairing is by convention: change one, check the other
 /// (`crates/wm-x11/src/backend.rs`). The deliberate differences:
 ///
-/// * `_NET_CLOSE_WINDOW` is omitted — `wm-x11` handles that client
-///   message itself; on this stack root client messages land on
-///   smithay's XWM connection, which does not translate it, so
-///   advertising it would invite messages nobody handles.
+/// * `_NET_WM_STATE_ABOVE` and `_NET_WM_STATE_STICKY` are advertised
+///   for the *request* direction only. This desktop has one pinned
+///   concept covering both, and `drain_inbound` acts on either — but
+///   smithay's `X11Surface` owns `_NET_WM_STATE` on client windows and
+///   has no setter for these two, so the atom never appears in the
+///   property afterwards. Advertising the request without the
+///   reflection is the same trade `_NET_WM_STATE_SHADED` declines, and
+///   it is made differently here because a client sends these to *ask*
+///   and reads the property back only rarely, whereas shade has no
+///   request path at all.
+/// * `_NET_WM_STATE_DEMANDS_ATTENTION` is advertised on the same terms,
+///   and is the EWMH half of the urgency story whose ICCCM half is the
+///   `WM_HINTS` bit `xwayland.rs` reads.
 /// * `_NET_WM_STATE_SHADED` is omitted — `wm-core` shades, but
 ///   nothing on this stack can publish the atom onto a client window
 ///   (smithay's `X11Surface` owns `_NET_WM_STATE` and has no shaded
@@ -103,6 +112,11 @@ const SUPPORTED: &[&str] = &[
     "_NET_SUPPORTED",
     "_NET_SUPPORTING_WM_CHECK",
     "_NET_ACTIVE_WINDOW",
+    // `wmctrl -c`, `xdotool windowclose`, and every panel menu that
+    // closes a window the EWMH way. Root client messages reach this
+    // module's `SubstructureNotify` connection, which is the route the
+    // two messages below already arrive by.
+    "_NET_CLOSE_WINDOW",
     "_NET_CLIENT_LIST",
     "_NET_CLIENT_LIST_STACKING",
     // Advertised because a client checks this list before it will
@@ -114,6 +128,9 @@ const SUPPORTED: &[&str] = &[
     "_NET_WM_STATE_MAXIMIZED_HORZ",
     "_NET_WM_STATE_MAXIMIZED_VERT",
     "_NET_WM_STATE_HIDDEN",
+    "_NET_WM_STATE_ABOVE",
+    "_NET_WM_STATE_STICKY",
+    "_NET_WM_STATE_DEMANDS_ATTENTION",
     "_NET_WM_STATE_MODAL",
     "_NET_WM_STATE_FOCUSED",
     "_NET_WM_WINDOW_TYPE",
@@ -327,6 +344,13 @@ struct WriteAtoms {
     net_workarea: Atom,
     net_frame_extents: Atom,
     wm_state: Atom,
+    /// Inbound only — this connection never writes these. See
+    /// [`drain_inbound`].
+    net_close_window: Atom,
+    net_wm_state: Atom,
+    net_wm_state_above: Atom,
+    net_wm_state_sticky: Atom,
+    net_wm_state_demands_attention: Atom,
 }
 
 impl WriteAtoms {
@@ -344,6 +368,14 @@ impl WriteAtoms {
             net_workarea: conn.intern_atom(false, b"_NET_WORKAREA")?.reply()?.atom,
             net_frame_extents: conn.intern_atom(false, b"_NET_FRAME_EXTENTS")?.reply()?.atom,
             wm_state: conn.intern_atom(false, b"WM_STATE")?.reply()?.atom,
+            net_close_window: conn.intern_atom(false, b"_NET_CLOSE_WINDOW")?.reply()?.atom,
+            net_wm_state: conn.intern_atom(false, b"_NET_WM_STATE")?.reply()?.atom,
+            net_wm_state_above: conn.intern_atom(false, b"_NET_WM_STATE_ABOVE")?.reply()?.atom,
+            net_wm_state_sticky: conn.intern_atom(false, b"_NET_WM_STATE_STICKY")?.reply()?.atom,
+            net_wm_state_demands_attention: conn
+                .intern_atom(false, b"_NET_WM_STATE_DEMANDS_ATTENTION")?
+                .reply()?
+                .atom,
         })
     }
 }
@@ -627,22 +659,40 @@ fn drain_inbound(comp: &mut Compositor) {
                 continue;
             };
             if message.type_ == xewmh.atoms.net_active_window {
-                // The message names an X window; the ledger speaks
-                // WlWindowId. A window this compositor is not managing
-                // (already gone, or never mapped) is silently ignored,
-                // exactly as `wm-x11` ignores stale ids.
-                let target = comp
-                    .wm
-                    .backend()
-                    .windows
-                    .iter()
-                    .find(|(_, record)| match &record.surface {
-                        ManagedSurface::X11(surface) => surface.window_id() == message.window,
-                        ManagedSurface::Xdg(_) => false,
-                    })
-                    .map(|(&id, _)| id);
-                if let Some(id) = target {
+                if let Some(id) = managed_x11_window(comp, message.window) {
                     requests.push(WmEvent::ActivateRequested(id));
+                }
+            } else if message.type_ == xewmh.atoms.net_close_window {
+                // Exactly what the titlebar close button does. The X11
+                // backend has translated this message since it existed
+                // (`wm-x11`'s `translate_client_message`); under the
+                // Wayland session it fell on the floor, so `wmctrl -c`
+                // exited zero having done nothing.
+                if let Some(id) = managed_x11_window(comp, message.window) {
+                    requests.push(WmEvent::CloseRequested(id));
+                }
+            } else if message.type_ == xewmh.atoms.net_wm_state {
+                // Smithay's XWM decodes only the maximized pair and
+                // fullscreen from this message; every other atom falls
+                // out of its final catch-all and never reaches
+                // `XwmHandler`. These three do reach us, by the same
+                // route as the two messages above.
+                let data = message.data.as_data32();
+                let Some(action) = net_state_action(data[0]) else {
+                    continue;
+                };
+                let mut states = [data[1], data[2]]
+                    .into_iter()
+                    .filter(|atom| *atom != 0)
+                    .filter_map(|atom| net_state_from_atom(&xewmh.atoms, atom));
+                let (Some(first), second) = (states.next(), states.next()) else {
+                    // Every atom in the message was one this WM does not
+                    // model. EWMH wants unknown properties skipped, not
+                    // the message rejected.
+                    continue;
+                };
+                if let Some(id) = managed_x11_window(comp, message.window) {
+                    requests.push(WmEvent::NetStateRequested { window: id, action, first, second });
                 }
             } else if message.type_ == xewmh.atoms.net_current_desktop {
                 let requested = message.data.as_data32()[0];
@@ -657,6 +707,48 @@ fn drain_inbound(comp: &mut Compositor) {
     let backend = comp.wm.backend_mut();
     for request in requests {
         backend.queue(request);
+    }
+}
+
+/// The managed window an inbound client message names.
+///
+/// The message names an X window; the ledger speaks `WlWindowId`. A
+/// window this compositor is not managing (already gone, or never
+/// mapped) is silently ignored, exactly as `wm-x11` ignores stale ids.
+fn managed_x11_window(comp: &Compositor, window: XWindow) -> Option<WlWindowId> {
+    comp.wm
+        .backend()
+        .windows
+        .iter()
+        .find(|(_, record)| match &record.surface {
+            ManagedSurface::X11(surface) => surface.window_id() == window,
+            ManagedSurface::Xdg(_) => false,
+        })
+        .map(|(&id, _)| id)
+}
+
+/// `_NET_WM_STATE`'s `data[0]`: 0 remove, 1 add, 2 toggle. Anything
+/// else is a malformed message from an untrusted client.
+fn net_state_action(action: u32) -> Option<NetStateAction> {
+    match action {
+        0 => Some(NetStateAction::Remove),
+        1 => Some(NetStateAction::Add),
+        2 => Some(NetStateAction::Toggle),
+        _ => None,
+    }
+}
+
+/// The three `_NET_WM_STATE` atoms this module decodes. The maximized
+/// pair and fullscreen are deliberately absent: smithay's XWM already
+/// decodes those from its own connection, and decoding them here too
+/// would apply every such request twice.
+fn net_state_from_atom(atoms: &WriteAtoms, atom: Atom) -> Option<NetState> {
+    if atom == atoms.net_wm_state_above || atom == atoms.net_wm_state_sticky {
+        Some(NetState::Pinned)
+    } else if atom == atoms.net_wm_state_demands_attention {
+        Some(NetState::DemandsAttention)
+    } else {
+        None
     }
 }
 
@@ -778,14 +870,31 @@ mod tests {
             "_NET_WORKAREA",
             "_NET_FRAME_EXTENTS",
             "_NET_WM_DESKTOP",
+            // `drain_inbound` translates these into the core's own
+            // verbs, so a tool that checks the list before sending is
+            // told the truth.
+            "_NET_CLOSE_WINDOW",
+            "_NET_WM_STATE_ABOVE",
+            "_NET_WM_STATE_STICKY",
+            "_NET_WM_STATE_DEMANDS_ATTENTION",
         ] {
             assert!(SUPPORTED.contains(&name), "{name} missing from _NET_SUPPORTED");
         }
-        // Nothing on this stack handles a close message or can
-        // publish/accept the shaded atom (see SUPPORTED's doc) —
-        // advertising either would be a lie a client acts on.
-        assert!(!SUPPORTED.contains(&"_NET_CLOSE_WINDOW"));
+        // Still nothing on this stack can publish or accept the shaded
+        // atom (see SUPPORTED's doc) — advertising it would be a lie a
+        // client acts on.
         assert!(!SUPPORTED.contains(&"_NET_WM_STATE_SHADED"));
+    }
+
+    /// `data[0]` is untrusted: a client can put anything there, and
+    /// only three values mean anything.
+    #[test]
+    fn a_net_wm_state_action_outside_the_spec_is_refused() {
+        assert!(matches!(net_state_action(0), Some(NetStateAction::Remove)));
+        assert!(matches!(net_state_action(1), Some(NetStateAction::Add)));
+        assert!(matches!(net_state_action(2), Some(NetStateAction::Toggle)));
+        assert!(net_state_action(3).is_none());
+        assert!(net_state_action(u32::MAX).is_none());
     }
 
     #[test]

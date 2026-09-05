@@ -2849,11 +2849,47 @@ impl<B: Backend> WindowManager<B> {
                 NetState::Fullscreen => self.apply_fullscreen_action(id, action),
                 NetState::MaximizedHorz => maximize_directions |= MaximizeDirections::HORIZONTAL,
                 NetState::MaximizedVert => maximize_directions |= MaximizeDirections::VERTICAL,
+                NetState::Pinned => self.apply_pin_action(id, action),
+                NetState::DemandsAttention => self.apply_attention_action(id, action),
             }
         }
         if !maximize_directions.is_empty() {
             self.apply_maximize_action(id, action, maximize_directions);
         }
+    }
+
+    /// `_NET_WM_STATE_ABOVE` / `_NET_WM_STATE_STICKY` from a client.
+    ///
+    /// Gated on the same `NO_ACTIVATE` rule the activation path checks:
+    /// pinning is stacking-adjacent — a pinned window sits above
+    /// ordinary ones on every workspace — so a window a rule has
+    /// excused from grabbing attention must not be able to take the top
+    /// of every workspace by asking for it instead.
+    fn apply_pin_action(&mut self, id: ClientId, action: NetStateAction) {
+        if self.clients.get(id).is_some_and(|c| c.flags.contains(ClientFlags::NO_ACTIVATE)) {
+            tracing::debug!(?id, "window rule refused a client's pin request");
+            return;
+        }
+        let currently = self.clients.get(id).is_some_and(|c| c.flags.contains(ClientFlags::STICKY));
+        let target = match action {
+            NetStateAction::Add => true,
+            NetStateAction::Remove => false,
+            NetStateAction::Toggle => !currently,
+        };
+        self.set_client_pinned(id, target);
+    }
+
+    /// `_NET_WM_STATE_DEMANDS_ATTENTION`, and the `WM_HINTS` urgency
+    /// bit that reaches the same place. `set_urgent` is idempotent, so
+    /// Add/Remove need no guard of their own.
+    fn apply_attention_action(&mut self, id: ClientId, action: NetStateAction) {
+        let currently = self.clients.get(id).is_some_and(|c| c.flags.contains(ClientFlags::URGENT));
+        let target = match action {
+            NetStateAction::Add => true,
+            NetStateAction::Remove => false,
+            NetStateAction::Toggle => !currently,
+        };
+        self.set_urgent(id, target);
     }
 
     fn apply_fullscreen_action(&mut self, id: ClientId, action: NetStateAction) {
@@ -3126,6 +3162,21 @@ impl<B: Backend> WindowManager<B> {
         if raise {
             self.raise_client(id);
         }
+        // Attention asked for, attention given. Nothing else in the
+        // tree ever cleared this: the bell handler and both EWMH routes
+        // only ever *set* it, so before this a window that rang once
+        // stayed urgent for the rest of its life, including while the
+        // user sat in it. An urgency that cannot be dismissed is worse
+        // than none, so the dismissal lives here — beside the focus,
+        // where it applies to Wayland and X11 alike rather than in
+        // either protocol's handler.
+        //
+        // Through `set_urgent` rather than by clearing the flag inline:
+        // the state has to be *published*, or a bar keeps showing the
+        // window as urgent and the next ring is no longer an edge the
+        // event differ can see. It is idempotent, so the ordinary
+        // focus change pays only a flag comparison.
+        self.set_urgent(id, false);
         self.repaint_decoration(id);
     }
 
@@ -3840,6 +3891,24 @@ mod tests {
         }
     }
 
+    /// A rule that refuses activation — the shape `focus_on_activate =
+    /// false` produces.
+    #[derive(Debug)]
+    struct NoActivate;
+
+    impl FloatPolicy for NoActivate {
+        fn decision_for(&self, _class: &str, _title: &str) -> Option<crate::placement::FloatDecision> {
+            None
+        }
+
+        fn window_decision_for(&self, _class: &str, _title: &str) -> crate::placement::WindowRuleDecision {
+            crate::placement::WindowRuleDecision {
+                focus_on_activate: Some(false),
+                ..Default::default()
+            }
+        }
+    }
+
     #[derive(Debug)]
     struct NoInitialFocus;
 
@@ -4367,6 +4436,118 @@ mod tests {
         // `raise_client_to_top` refuses one.
         wm.dispatch(BackendEvent::Destroyed(palette));
         assert!(!wm.focus_client_without_raising(palette_id));
+    }
+
+    /// `_NET_WM_STATE_ABOVE` / `_NET_WM_STATE_STICKY` reach the one
+    /// pinned concept this desktop has. Both atoms arrive as
+    /// `NetState::Pinned`, so this covers either spelling.
+    #[test]
+    fn a_client_can_ask_to_be_pinned_and_unpinned() {
+        let mut backend = FakeBackend::new();
+        let window = backend.create_window();
+        let mut wm = wm(backend);
+        wm.dispatch(BackendEvent::MapRequest(window));
+        let id = wm.client_for_window(window).unwrap();
+
+        wm.dispatch(BackendEvent::NetStateRequested {
+            window,
+            action: NetStateAction::Add,
+            first: NetState::Pinned,
+            second: None,
+        });
+        assert!(wm.client(id).unwrap().flags.contains(ClientFlags::STICKY));
+
+        wm.dispatch(BackendEvent::NetStateRequested {
+            window,
+            action: NetStateAction::Toggle,
+            first: NetState::Pinned,
+            second: None,
+        });
+        assert!(!wm.client(id).unwrap().flags.contains(ClientFlags::STICKY), "toggle is not add");
+    }
+
+    /// Pinning puts a window above ordinary ones on every workspace, so
+    /// it is stacking-adjacent and answers to the same rule the
+    /// activation path does.
+    #[test]
+    fn a_no_activate_window_cannot_pin_itself() {
+        let mut backend = FakeBackend::new();
+        let window = backend.create_window();
+        let mut wm = wm(backend);
+        wm.set_float_policy(Some(std::sync::Arc::new(NoActivate)));
+        wm.dispatch(BackendEvent::MapRequest(window));
+        let id = wm.client_for_window(window).unwrap();
+        assert!(wm.client(id).unwrap().flags.contains(ClientFlags::NO_ACTIVATE));
+
+        wm.dispatch(BackendEvent::NetStateRequested {
+            window,
+            action: NetStateAction::Add,
+            first: NetState::Pinned,
+            second: None,
+        });
+
+        assert!(
+            !wm.client(id).unwrap().flags.contains(ClientFlags::STICKY),
+            "a rule that refuses activation must also refuse the top of every workspace"
+        );
+    }
+
+    /// The EWMH and ICCCM halves of the attention story both land here.
+    #[test]
+    fn a_client_can_demand_attention_and_withdraw_it() {
+        let mut backend = FakeBackend::new();
+        let window = backend.create_window();
+        let other = backend.create_window();
+        let mut wm = wm(backend);
+        wm.dispatch(BackendEvent::MapRequest(window));
+        wm.dispatch(BackendEvent::MapRequest(other));
+        let id = wm.client_for_window(window).unwrap();
+
+        wm.dispatch(BackendEvent::NetStateRequested {
+            window,
+            action: NetStateAction::Add,
+            first: NetState::DemandsAttention,
+            second: None,
+        });
+        assert!(wm.client(id).unwrap().flags.contains(ClientFlags::URGENT));
+
+        // A client that clears its own `WM_HINTS` urgency bit arrives
+        // as Remove, and the flag has to go.
+        wm.dispatch(BackendEvent::NetStateRequested {
+            window,
+            action: NetStateAction::Remove,
+            first: NetState::DemandsAttention,
+            second: None,
+        });
+        assert!(!wm.client(id).unwrap().flags.contains(ClientFlags::URGENT));
+    }
+
+    /// Before this, nothing in the tree ever called `set_urgent(_,
+    /// false)`: a window that rang once stayed urgent for the rest of
+    /// its life, including while the user sat in it.
+    #[test]
+    fn focusing_an_urgent_window_dismisses_the_urgency() {
+        let mut backend = FakeBackend::new();
+        let noisy = backend.create_window();
+        let other = backend.create_window();
+        let mut wm = wm(backend);
+        wm.dispatch(BackendEvent::MapRequest(noisy));
+        wm.dispatch(BackendEvent::MapRequest(other));
+        let noisy_id = wm.client_for_window(noisy).unwrap();
+        let other_id = wm.client_for_window(other).unwrap();
+        // `other` mapped last and holds focus, so `noisy` is genuinely
+        // in the background when it asks.
+        assert!(wm.client(other_id).unwrap().flags.contains(ClientFlags::FOCUSED));
+        wm.set_urgent(noisy_id, true);
+        assert!(wm.client(noisy_id).unwrap().flags.contains(ClientFlags::URGENT));
+
+        wm.dispatch(BackendEvent::ActivateRequested(noisy));
+
+        assert!(wm.client(noisy_id).unwrap().flags.contains(ClientFlags::FOCUSED));
+        assert!(
+            !wm.client(noisy_id).unwrap().flags.contains(ClientFlags::URGENT),
+            "attention was asked for and given; an urgency that cannot be dismissed is worse than none"
+        );
     }
 
     #[test]

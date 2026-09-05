@@ -141,6 +141,15 @@ pub enum NetState {
     Fullscreen,
     MaximizedHorz,
     MaximizedVert,
+    /// `_NET_WM_STATE_ABOVE` and `_NET_WM_STATE_STICKY` both land here.
+    /// This desktop has one concept — pinned, meaning "on every
+    /// workspace and above ordinary windows" — and the two atoms are
+    /// its two halves, so a client asking for either gets it. Reported
+    /// as one because `set_client_pinned` is one flag.
+    Pinned,
+    /// `_NET_WM_STATE_DEMANDS_ATTENTION`, and the ICCCM `WM_HINTS`
+    /// urgency bit, which is how most X11 applications actually ask.
+    DemandsAttention,
 }
 
 /// Coarse EWMH `_NET_WM_WINDOW_TYPE` classification — just enough to
