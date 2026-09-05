@@ -44,7 +44,7 @@ use wm_core::{BackendEvent, NetState, NetStateAction};
 use wm_theme_api::{clamp_client_size, Point, Rect, ResizeEdge, Size};
 
 use crate::state::{
-    Compositor, ManagedSurface, WaylandBackend, WindowRecord, WlFrameId, WlWindowId,
+    Compositor, ManagedSurface, StackEntry, WaylandBackend, WindowRecord, WlFrameId, WlWindowId,
 };
 
 type WmEvent = BackendEvent<WlWindowId, WlFrameId>;
@@ -64,6 +64,64 @@ delegate_xwayland_shell!(Compositor);
 /// wl_surface-based lookup in `state.rs` cannot serve here: an X11
 /// window exists — and needs configure/property routing — before its
 /// wl_surface association ever arrives.
+/// Tells the X server the stacking order the compositor just settled on.
+///
+/// Three of smithay's XWM entry points exist to connect the compositor's
+/// stacking vector to the server's, and none of them was called: an
+/// `XRaiseWindow` was dropped on the way in, and the desktop's own
+/// raises and restacks never reached the server on the way out, so
+/// `_NET_CLIENT_LIST_STACKING` — which smithay rewrites from that same
+/// internal list — described an order no window was actually in.
+///
+/// A whole-order update rather than `raise_window` per raise:
+/// `raise_window` only expresses "move to top", which would leave
+/// `restack` — the Alt-Tab and workspace-switch path — out of sync.
+///
+/// `update_stacking_order_upwards` is the variant that matches this
+/// compositor's bottom-to-top vector, which is worth stating because
+/// the pairing is not the one the names suggest: `_downwards` compares
+/// `last_pos < pos` and issues `StackMode::BELOW`, `_upwards` compares
+/// `last_pos > pos` and issues `ABOVE`, so it is `_upwards` that walks
+/// a bottom-to-top list and lifts each entry above the one before it.
+/// The `_downwards` spelling silently does nothing for this input —
+/// no error, no movement — which is how it was first written here and
+/// what the regression test caught.
+///
+/// Strictly gated on the dirty flag: the call puts a
+/// `grab_server`/`ungrab_server` pair on the XWM connection, and the
+/// stacking vector is re-derived on paths that run every pass.
+pub(crate) fn sync_stacking_order(comp: &mut Compositor) {
+    if !std::mem::take(&mut comp.wm.backend_mut().stacking_dirty) {
+        return;
+    }
+    let Some(mut xwm) = comp.xwm.take() else {
+        return;
+    };
+    // Bottom-to-top, X11 surfaces only — a Wayland window in the middle
+    // of the stack is simply not in the order the X server keeps, and
+    // smithay skips over what it does not know either way.
+    let order: Vec<X11Surface> = comp
+        .wm
+        .backend()
+        .stacking
+        .iter()
+        .filter_map(|entry| {
+            let window = match entry {
+                StackEntry::Frame(frame) => comp.wm.backend().frames.get(frame).map(|record| record.window)?,
+                StackEntry::Window(window) => *window,
+            };
+            match &comp.wm.backend().windows.get(&window)?.surface {
+                ManagedSurface::X11(surface) => Some(surface.clone()),
+                ManagedSurface::Xdg(_) => None,
+            }
+        })
+        .collect();
+    if let Err(error) = xwm.update_stacking_order_upwards(order.iter()) {
+        tracing::warn!(?error, "could not publish the stacking order to XWayland");
+    }
+    comp.xwm = Some(xwm);
+}
+
 fn x11_window_id(backend: &WaylandBackend, window: &X11Surface) -> Option<WlWindowId> {
     backend.windows.iter().find_map(|(id, record)| match &record.surface {
         ManagedSurface::X11(existing) if existing == window => Some(*id),
@@ -238,7 +296,7 @@ impl XwmHandler for Compositor {
         y: Option<i32>,
         w: Option<u32>,
         h: Option<u32>,
-        _reorder: Option<Reorder>,
+        reorder: Option<Reorder>,
     ) {
         // Merge the request over the current geometry — X11 configure
         // requests name only the fields the client cares about.
@@ -263,6 +321,21 @@ impl XwmHandler for Compositor {
             // everything verbatim pre-manage via `configure_unmanaged`).
             let requested = wm_rect(requested, backend.output_size);
             backend.queue(WmEvent::ConfigureRequest { window: id, requested });
+            // A ConfigureRequest carrying only a stack mode resolves to
+            // the window's *current* rectangle above, which `wm-core`
+            // reads as a no-op — so an `XRaiseWindow` used to vanish
+            // here with no log line. `Top` is the case that matters and
+            // the only one an ordinary client sends; the other three
+            // are named honestly rather than mistranslated.
+            match reorder {
+                Some(Reorder::Top) => backend.queue(WmEvent::RaiseRequest(id)),
+                Some(other) => tracing::debug!(
+                    ?other,
+                    ?id,
+                    "ignoring an X11 restack mode this desktop does not model"
+                ),
+                None => {}
+            }
         } else {
             // Never mapped, no record yet: honor directly — ICCCM
             // requires acknowledging pre-map configures or clients
