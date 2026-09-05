@@ -104,6 +104,16 @@ class WaylandReadinessTests(unittest.TestCase):
 
 
 class IsolationTests(unittest.TestCase):
+    def test_child_context_reaps_its_process_when_measurement_raises(self):
+        with tempfile.TemporaryDirectory(prefix="chonk-bench-test-") as temporary:
+            with self.assertRaisesRegex(ValueError, "fixture failure"):
+                with bench.child(
+                    [bench.sys.executable, "-c", "import time; time.sleep(60)"],
+                    os.environ.copy(), Path(temporary) / "child.log",
+                ) as process:
+                    raise ValueError("fixture failure")
+            self.assertIsNotNone(process.poll())
+
     def test_environment_keeps_caller_unchanged_and_removes_session_handles(self):
         source = {
             "PATH": "/usr/bin", "HOME": "/not-the-test-home", "DISPLAY": ":987",
