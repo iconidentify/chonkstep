@@ -29,13 +29,15 @@
 //!   (`session::apply_mode` re-programs the crtc); the nested backend's
 //!   one output is the host window and honestly refuses any mode but
 //!   the current one — a window cannot modeset its host desktop.
-//! - **Disable, transform, adaptive sync** are refused with `failed()`
-//!   and a log line naming the gap. Disabling means tearing an output
+//! - **Transform** applies on the DRM session backend for the four
+//!   non-flipped rotations; the nested backend truthfully refuses it
+//!   because its one output is the host window.
+//! - **Disable and adaptive sync** are refused with `failed()` and a
+//!   log line naming the gap. Disabling means tearing an output
 //!   out of three index-aligned lists (`Compositor::outputs`, the
 //!   ledger's monitors, the session's crtcs) that the lock module and
-//!   the shell hold indices into; transforms would be the first
-//!   non-`Normal`/`Flipped180` transform in the compositor. Both are
-//!   real work, and a truthful `failed` beats a lying `succeeded`.
+//!   the shell hold indices into. A truthful `failed` beats a lying
+//!   `succeeded`.
 //!
 //! When no output manager is bound, publication is an immediate fast
 //! path. Once one binds, retained snapshots keep unchanged passes both
@@ -74,6 +76,7 @@ use smithay::reexports::wayland_protocols_wlr::output_management::v1::server::zw
 use smithay::reexports::wayland_server::{
     Client, DataInit, Dispatch, DisplayHandle, GlobalDispatch, New, Resource, WEnum,
 };
+use smithay::utils::Transform;
 
 use wm_theme_api::{Point, Size};
 
@@ -133,6 +136,7 @@ struct HeadSnapshot {
     position: Point,
     scale: f64,
     current_mode: usize,
+    transform: Transform,
 }
 
 /// What one configuration asked for on one head.
@@ -307,6 +311,7 @@ fn head_snapshot(entry: &crate::state::OutputEntry) -> HeadSnapshot {
         position: entry.position,
         scale: entry.scale,
         current_mode: current_mode_index(entry),
+        transform: entry.transform,
     }
 }
 
@@ -322,6 +327,44 @@ fn current_mode_index(entry: &crate::state::OutputEntry) -> usize {
         .iter()
         .position(|mode| mode.size == current.size && mode.refresh == current.refresh)
         .unwrap_or(0)
+}
+
+fn protocol_transform(transform: Transform) -> smithay::reexports::wayland_server::protocol::wl_output::Transform {
+    use smithay::reexports::wayland_server::protocol::wl_output::Transform as WlTransform;
+    match transform {
+        Transform::Normal => WlTransform::Normal,
+        Transform::_90 => WlTransform::_90,
+        Transform::_180 => WlTransform::_180,
+        Transform::_270 => WlTransform::_270,
+        Transform::Flipped => WlTransform::Flipped,
+        Transform::Flipped90 => WlTransform::Flipped90,
+        Transform::Flipped180 => WlTransform::Flipped180,
+        Transform::Flipped270 => WlTransform::Flipped270,
+    }
+}
+
+fn requested_transform(value: i32) -> Option<Transform> {
+    match value {
+        0 => Some(Transform::Normal),
+        1 => Some(Transform::_90),
+        2 => Some(Transform::_180),
+        3 => Some(Transform::_270),
+        _ => None,
+    }
+}
+
+fn matching_mode_index(entry: &crate::state::OutputEntry, width: i32, height: i32, refresh: i32) -> Option<usize> {
+    entry
+        .modes
+        .iter()
+        .enumerate()
+        .filter(|(_, mode)| {
+            mode.size.w == width
+                && mode.size.h == height
+                && crate::state::refresh_matches(mode.refresh, refresh)
+        })
+        .min_by_key(|(_, mode)| if refresh == 0 { i32::MAX - mode.refresh } else { mode.refresh.abs_diff(refresh) as i32 })
+        .map(|(index, _)| index)
 }
 
 /// Creates one head (and its modes) on one manager and sends its
@@ -349,7 +392,9 @@ fn announce_head(
     };
     manager.resource.head(&head);
     head.name(entry.output.name());
-    head.description(format!("{} ({})", entry.output.name(), entry.output.physical_properties().model));
+    head.description(entry.identity.clone().unwrap_or_else(|| {
+        format!("{} ({})", entry.output.name(), entry.output.physical_properties().model)
+    }));
     let physical = entry.output.physical_properties().size;
     if physical.w > 0 && physical.h > 0 {
         head.physical_size(physical.w, physical.h);
@@ -391,11 +436,7 @@ fn announce_head(
         head.current_mode(mode);
     }
     head.position(entry.position.x, entry.position.y);
-    // Every output is composed un-transformed; the nested backend's
-    // Flipped180 is an EGL-surface correction, not a user-visible
-    // orientation, and reporting it would make wlr-randr claim the
-    // desktop is upside down.
-    head.transform(smithay::reexports::wayland_server::protocol::wl_output::Transform::Normal);
+    head.transform(protocol_transform(entry.transform));
     head.scale(entry.scale);
     if version >= 4 {
         head.adaptive_sync(AdaptiveSyncState::Disabled);
@@ -410,6 +451,9 @@ fn update_head(head: &HeadInstance, entry: &crate::state::OutputEntry, previous:
     }
     if (entry.scale - previous.scale).abs() > f64::EPSILON {
         head.resource.scale(entry.scale);
+    }
+    if entry.transform != previous.transform {
+        head.resource.transform(protocol_transform(entry.transform));
     }
     let current = current_mode_index(entry);
     if current != previous.current_mode {
@@ -442,9 +486,11 @@ fn validate(comp: &Compositor, config: &ConfigState) -> Result<Vec<(usize, HeadC
             ));
         }
         if let Some(transform) = head.transform {
-            // wl_output.transform normal = 0.
-            if transform != 0 {
-                return Err(format!("rotating {name}: output transforms are not supported yet"));
+            let Some(transform) = requested_transform(transform) else {
+                return Err(format!("transform {transform} on {name}: only rotations 0, 90, 180 and 270 are supported"));
+            };
+            if matches!(comp.graphics, crate::state::Graphics::Winit(_)) && transform != Transform::Normal {
+                return Err(format!("rotating {name}: the nested backend reserves its transform for the host surface"));
             }
         }
         if head.adaptive_sync == Some(true) {
@@ -470,11 +516,7 @@ fn validate(comp: &Compositor, config: &ConfigState) -> Result<Vec<(usize, HeadC
             // hardware actually advertises — a mode the display never
             // offered is a mode it will refuse, and the nested output
             // has no modes to set at all.
-            let matched = entry.modes.iter().position(|mode| {
-                mode.size.w == w
-                    && mode.size.h == h
-                    && (refresh == 0 || mode.refresh == refresh)
-            });
+            let matched = matching_mode_index(entry, w, h, refresh);
             match matched {
                 Some(mode) if crate::session::mode_is_applicable(&comp.graphics, index, mode) => {}
                 _ => {
@@ -500,6 +542,7 @@ fn perform_pending_apply(comp: &mut Compositor) {
     };
     let mut scaled_any = false;
     let mut moved_any = false;
+    let mut first_error: Option<String> = None;
     for (index, head) in &pending.heads {
         if let Some(scale) = head.scale {
             let entry = &mut comp.outputs[*index];
@@ -518,15 +561,29 @@ fn perform_pending_apply(comp: &mut Compositor) {
         }
         let mode = head.mode.or_else(|| {
             head.custom_mode.and_then(|(w, h, refresh)| {
-                comp.outputs[*index].modes.iter().position(|mode| {
-                    mode.size.w == w && mode.size.h == h && (refresh == 0 || mode.refresh == refresh)
-                })
+                matching_mode_index(&comp.outputs[*index], w, h, refresh)
             })
         });
         if let Some(mode_index) = mode {
             if mode_index != current_mode_index(&comp.outputs[*index]) {
-                apply_mode(comp, *index, mode_index);
-                moved_any = true; // sizes changed; re-layout below.
+                match apply_mode(comp, *index, mode_index) {
+                    Ok(()) => moved_any = true, // sizes changed; re-layout below.
+                    Err(error) => {
+                        tracing::warn!(%error, output = %comp.outputs[*index].output.name(), "modeset failed; publishing the unchanged real mode");
+                        first_error.get_or_insert(error);
+                    }
+                }
+            }
+        }
+        if let Some(transform) = head.transform.and_then(requested_transform) {
+            if transform != comp.outputs[*index].transform {
+                match apply_transform(comp, *index, transform) {
+                    Ok(()) => moved_any = true,
+                    Err(error) => {
+                        tracing::warn!(%error, output = %comp.outputs[*index].output.name(), "output rotation failed; publishing the unchanged real transform");
+                        first_error.get_or_insert(error);
+                    }
+                }
             }
         }
         if let Some((x, y)) = head.position {
@@ -547,27 +604,48 @@ fn perform_pending_apply(comp: &mut Compositor) {
         relayout_ledger(comp);
         comp.layer_shell.needs_arrange = true;
     }
-    pending.resource.succeeded();
+    if let Some(error) = first_error {
+        tracing::warn!(%error, "wlr-output-management configuration was only partially applied");
+        pending.resource.failed();
+    } else {
+        pending.resource.succeeded();
+    }
 }
 
 /// Applies one mode change to one output: the crtc (session backend),
 /// the advertised `wl_output` mode, the entry's size, and the damage
 /// tracker sized to it.
-fn apply_mode(comp: &mut Compositor, index: usize, mode_index: usize) {
+fn apply_mode(comp: &mut Compositor, index: usize, mode_index: usize) -> Result<(), String> {
     let mode = comp.outputs[index].modes[mode_index];
-    if let Err(error) = crate::session::apply_mode(&mut comp.graphics, index, mode_index) {
-        tracing::warn!(%error, output = %comp.outputs[index].output.name(), "modeset failed; the output keeps its mode");
-        return;
-    }
+    crate::session::apply_mode(&mut comp.graphics, index, mode_index)?;
     let entry = &mut comp.outputs[index];
     entry.output.change_current_state(Some(mode), None, None, None);
-    entry.size = Size::new(mode.size.w.max(0) as u32, mode.size.h.max(0) as u32);
+    let transformed = entry.transform.transform_size(mode.size);
+    entry.size = Size::new(transformed.w.max(0) as u32, transformed.h.max(0) as u32);
     entry.damage_tracker = crate::state::physical_damage_tracker(&entry.output, entry.size);
     tracing::info!(
         output = %entry.output.name(),
         mode = %format!("{}x{}@{}", mode.size.w, mode.size.h, mode.refresh),
         "mode set via wlr-output-management"
     );
+    Ok(())
+}
+
+fn apply_transform(comp: &mut Compositor, index: usize, transform: Transform) -> Result<(), String> {
+    crate::session::apply_transform(&mut comp.graphics, index, transform)?;
+    let entry = &mut comp.outputs[index];
+    let mode = entry.output.current_mode().ok_or_else(|| format!("{} has no current mode", entry.output.name()))?;
+    entry.transform = transform;
+    entry.output.change_current_state(None, Some(transform), None, None);
+    let transformed = transform.transform_size(mode.size);
+    entry.size = Size::new(transformed.w.max(0) as u32, transformed.h.max(0) as u32);
+    entry.damage_tracker = crate::state::physical_damage_tracker(&entry.output, entry.size);
+    tracing::info!(
+        output = %entry.output.name(),
+        transform = crate::state::transform_number(transform),
+        "output rotated via wlr-output-management"
+    );
+    Ok(())
 }
 
 /// Translates the whole layout so its bounding box starts at the global
@@ -917,7 +995,7 @@ fn relayout_ledger(comp: &mut Compositor) {
     }
     backend.output_size = crate::state::union_size(&backend.monitors);
     backend.pending_resize = Some(backend.output_size);
-    backend.damage = true;
+    backend.mark_damaged();
 }
 
 #[cfg(test)]

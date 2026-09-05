@@ -110,7 +110,7 @@ fn a_bar_sees_the_snapshot_the_windows_and_its_own_switches() {
     // §1.2 / §3: hello, then every facet in order, before anything else.
     let hello = bar.next();
     assert_eq!(hello["event"], "hello");
-    assert_eq!(hello["protocol"], 1);
+    assert_eq!(hello["protocol"], 2);
     assert_eq!(hello["session"], "wayland");
     assert!(hello["pid"].as_u64().unwrap() > 0);
     let workspaces = bar.next();

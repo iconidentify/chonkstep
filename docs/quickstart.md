@@ -223,6 +223,8 @@ Then turn on the two settings that make sessions durable:
 # crash the watchdog recovered from. Never resurrects a window you
 # deliberately closed. Off by default because a session that spawns
 # apps you did not just ask for is something to opt into.
+# On Wayland, windows are stored relative to the monitor's EDID identity,
+# so changing dock ports does not move them to a different display.
 restore_session = true
 
 # Wayland session only: when the compositor crashes, the session

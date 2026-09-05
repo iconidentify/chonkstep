@@ -58,8 +58,10 @@
 //! - **No DRM leasing.** A crtc is never handed to another process,
 //!   so a VR headset cannot take one over.
 
+use std::collections::BTreeMap;
 use std::error::Error;
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use smithay::backend::allocator::format::FormatSet;
@@ -191,6 +193,139 @@ fn plane_kind(drm: &DrmDeviceFd, plane: plane::Handle) -> Option<PlaneType> {
     None
 }
 
+/// Whether the kernel explicitly marks a connector as unsuitable for
+/// a desktop. HMDs commonly expose this property; consuming a crtc for
+/// one both creates an invisible desktop region and can evict a real
+/// monitor. Missing/unreadable properties retain the kernel's historic
+/// desktop default.
+fn connector_is_non_desktop(drm: &DrmDeviceFd, connector: connector::Handle) -> bool {
+    let Ok(props) = drm.get_properties(connector) else {
+        return false;
+    };
+    let (ids, values) = props.as_props_and_values();
+    ids.iter().zip(values.iter()).any(|(&id, &value)| {
+        value != 0
+            && drm
+                .get_property(id)
+                .ok()
+                .and_then(|property| property.name().to_str().ok().map(str::to_owned))
+                .as_deref()
+                == Some("non-desktop")
+    })
+}
+
+/// The stable, user-facing portion of a connector's EDID. This is the
+/// same three-part description Hyprland prints and accepts after a
+/// `desc:` monitor selector; the connector name is intentionally not
+/// part of it because that identifies the port rather than the panel.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct DisplayIdentity {
+    make: String,
+    model: String,
+    serial: String,
+}
+
+impl DisplayIdentity {
+    fn description(&self) -> String {
+        [&self.make, &self.model, &self.serial]
+            .into_iter()
+            .filter(|part| !part.is_empty())
+            .map(String::as_str)
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+}
+
+/// Reads just the EDID facts needed for output identity. A compact
+/// in-crate reader keeps the hardware build free of a new native
+/// libdisplay-info dependency while still using the kernel's canonical
+/// EDID property and the host's same `hwdata` PNP names as Hyprland.
+fn connector_identity(drm: &DrmDeviceFd, connector: connector::Handle) -> Option<DisplayIdentity> {
+    let props = drm.get_properties(connector).ok()?;
+    let (ids, values) = props.as_props_and_values();
+    let blob = ids.iter().zip(values.iter()).find_map(|(&id, &raw)| {
+        let property = drm.get_property(id).ok()?;
+        (property.name().to_str() == Ok("EDID"))
+            .then(|| property.value_type().convert_value(raw).as_blob())
+            .flatten()
+    })?;
+    let data = drm.get_property_blob(blob).ok()?;
+    parse_edid_identity(&data)
+}
+
+fn parse_edid_identity(data: &[u8]) -> Option<DisplayIdentity> {
+    const HEADER: [u8; 8] = [0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00];
+    if data.len() < 128 || data[..8] != HEADER {
+        return None;
+    }
+    let encoded_make = u16::from_be_bytes([data[8], data[9]]);
+    let mut pnp = String::with_capacity(3);
+    for shift in [10, 5, 0] {
+        let letter = ((encoded_make >> shift) & 0x1f) as u8;
+        if !(1..=26).contains(&letter) {
+            return None;
+        }
+        pnp.push(char::from(b'A' + letter - 1));
+    }
+
+    let product = u16::from_le_bytes([data[10], data[11]]);
+    let numeric_serial = u32::from_le_bytes([data[12], data[13], data[14], data[15]]);
+    let model = edid_descriptor_text(data, 0xfc).unwrap_or_else(|| format!("0x{product:04X}"));
+    let serial = edid_descriptor_text(data, 0xff).unwrap_or_else(|| {
+        if numeric_serial == 0 {
+            String::new()
+        } else {
+            format!("0x{numeric_serial:08X}")
+        }
+    });
+    Some(DisplayIdentity { make: pnp_name(&pnp), model, serial })
+}
+
+/// EDID base-block display descriptors occupy four fixed 18-byte
+/// slots. Product-name (0xfc) and serial-string (0xff) descriptors use
+/// bytes 5..18 as newline-padded ASCII.
+fn edid_descriptor_text(data: &[u8], tag: u8) -> Option<String> {
+    (54..126).step_by(18).find_map(|offset| {
+        let descriptor = data.get(offset..offset + 18)?;
+        if descriptor[..3] != [0, 0, 0] || descriptor[3] != tag {
+            return None;
+        }
+        let text: String = descriptor[5..]
+            .iter()
+            .copied()
+            .take_while(|byte| *byte != b'\n' && *byte != 0)
+            .filter(|byte| !byte.is_ascii_control())
+            .map(char::from)
+            .collect();
+        let text = text.trim().to_string();
+        (!text.is_empty()).then_some(text)
+    })
+}
+
+/// Aquamarine/Hyprland expands the three-letter PNP code through the
+/// system hwdata table. Use that same source when present and retain
+/// the true PNP code as the deterministic fallback.
+fn pnp_name(code: &str) -> String {
+    static NAMES: OnceLock<BTreeMap<String, String>> = OnceLock::new();
+    NAMES
+        .get_or_init(|| {
+            ["/usr/share/hwdata/pnp.ids", "/usr/share/misc/pnp.ids"]
+                .into_iter()
+                .find_map(|path| std::fs::read_to_string(path).ok())
+                .map(|contents| {
+                    contents
+                        .lines()
+                        .filter_map(|line| line.split_once('\t'))
+                        .map(|(id, name)| (id.to_string(), name.trim().to_string()))
+                        .collect()
+                })
+                .unwrap_or_default()
+        })
+        .get(code)
+        .cloned()
+        .unwrap_or_else(|| code.to_string())
+}
+
 /// The cursor may use the hardware cursor plane, and a lone eligible
 /// fullscreen client may use the primary plane directly. Everything
 /// else is composited into the swapchain and page-flipped from there.
@@ -244,30 +379,20 @@ const FRAME_FLAGS: FrameFlags =
 /// the culprit and the default deserves revisiting; if it stays, that
 /// hypothesis is dead and the switch cost one experiment.
 pub(crate) fn frame_flags() -> FrameFlags {
-    static FLAGS: std::sync::OnceLock<FrameFlags> = std::sync::OnceLock::new();
-    *FLAGS.get_or_init(|| {
-        let flags = configured_frame_flags(
-            std::env::var_os("CHONKSTEP_NO_CURSOR_PLANE"),
-            std::env::var_os("CHONKSTEP_NO_DIRECT_SCANOUT"),
-        );
-        if !flags.contains(FrameFlags::ALLOW_CURSOR_PLANE_SCANOUT) {
-            tracing::info!(
-                "CHONKSTEP_NO_CURSOR_PLANE is set; compositing the pointer instead of using \
-                 the DRM cursor plane"
-            );
-        }
-        if !flags.contains(FrameFlags::ALLOW_PRIMARY_PLANE_SCANOUT) {
-            tracing::info!(
-                "CHONKSTEP_NO_DIRECT_SCANOUT is set; compositing fullscreen clients through GLES"
-            );
-        }
-        flags
-    })
+    let mut flags = FRAME_FLAGS;
+    if crate::diagnostics::enabled("no-cursor-plane") {
+        flags.remove(FrameFlags::ALLOW_CURSOR_PLANE_SCANOUT);
+    }
+    if crate::diagnostics::enabled("no-direct-scanout") {
+        flags.remove(FrameFlags::ALLOW_PRIMARY_PLANE_SCANOUT);
+    }
+    flags
 }
 
 /// The pure half of [`frame_flags`], split out so both environment
 /// switches are testable without mutating process-global state. Unset
 /// or `0` keeps that plane; anything else removes only its own flag.
+#[cfg(test)]
 fn configured_frame_flags(
     no_cursor: Option<std::ffi::OsString>,
     no_direct_scanout: Option<std::ffi::OsString>,
@@ -430,14 +555,7 @@ const LOOP_BLOCK_GRACE: Duration = Duration::from_millis(250);
 /// per-frame environment lookup is exactly the kind of small syscall
 /// that this file has spent its recent history removing.
 pub(crate) fn full_damage_forced() -> bool {
-    static FORCED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *FORCED.get_or_init(|| {
-        let forced = std::env::var_os("CHONKSTEP_FULL_DAMAGE").is_some_and(|value| value != "0");
-        if forced {
-            tracing::info!("CHONKSTEP_FULL_DAMAGE is set; forcing full-output damage on every frame");
-        }
-        forced
-    })
+    crate::diagnostics::enabled("full-damage")
 }
 
 /// Everything the session backend owns while it runs: the seat, the
@@ -450,6 +568,12 @@ pub(crate) fn full_damage_forced() -> bool {
 /// hands every callback `&mut Compositor` and nothing else. That is
 /// also the path [`change_vt`] takes on behalf of `input.rs`.
 pub(crate) struct SessionGraphics {
+    /// Primary KMS node selected for this session, retained for live
+    /// system information instead of forcing a user to reconstruct it
+    /// from startup-only logs.
+    device_path: PathBuf,
+    /// Kernel DRM driver name for the selected node.
+    driver_name: String,
     /// Seat handle for opening devices and for [`change_vt`]. Cloned
     /// from the notifier that calloop owns; if that notifier were ever
     /// dropped this handle's inner `Weak` would go dangling and every
@@ -532,12 +656,17 @@ struct SessionOutput {
     /// viewport offset the renderer subtracts from every element to put
     /// the shared scene into this output's framebuffer.
     position: Point,
+    /// User-visible scanout orientation. The framebuffer remains at
+    /// the connector mode's physical pixel size.
+    transform: Transform,
     /// Swapchain, mode setting, and page flips for this output.
     drm_compositor: SessionDrmCompositor,
     /// The kernel modes behind the wayland modes this output advertises,
     /// index-aligned with `OutputEntry::modes` for the same output —
     /// what a wlr-output-management `set_mode` resolves against.
     drm_modes: Vec<DrmMode>,
+    /// Index of the mode currently programmed from `drm_modes`.
+    mode_index: usize,
     /// The page flip in flight, if any — set on a successful
     /// `queue_frame`, cleared by the completion event that answers it.
     /// While it is `Some`, [`render_frame_session`] refuses to draw this
@@ -593,6 +722,10 @@ struct SessionOutput {
     /// They are completed with the kernel's vblank timestamp, never
     /// merely when rendering finished.
     presentation: Option<OutputPresentationFeedback>,
+    /// Most recent kernel vblank metadata for this crtc. An atomic
+    /// commit that produces no flip can still complete presentation
+    /// requests against this boundary without inventing a sequence.
+    last_vblank: Option<(Duration, u64)>,
     refresh: Refresh,
     /// Predicts the next vblank and learns how much of the interval
     /// composition actually consumes. Rendering is armed late enough
@@ -871,6 +1004,24 @@ impl SessionGraphics {
     }
 }
 
+/// Stable, user-facing identity of the graphics backend currently
+/// driving the compositor. Renderer details that Smithay does not
+/// expose remain in its startup log; the KMS node, kernel driver and
+/// render node are retained here for live bug reports.
+pub(crate) fn graphics_diagnostics(graphics: &Graphics) -> String {
+    match graphics {
+        Graphics::Winit(_) => "backend=nested-winit renderer=GLES host_output=true".to_string(),
+        Graphics::Session(session) => format!(
+            "backend=drm-session kms_device={} drm_driver={} render_node={}",
+            session.device_path.display(),
+            session.driver_name,
+            session
+                .render_node
+                .map_or_else(|| "unknown".to_string(), |node| node.to_string()),
+        ),
+    }
+}
+
 /// Intersects exact format/modifier pairs across outputs for global
 /// linux-dmabuf feedback. Kept pure both for tests and to make the
 /// deliberately conservative multi-monitor promise unmistakable.
@@ -1042,7 +1193,16 @@ pub(crate) fn init(
     // the same rule — "damage, then draw".
     loop_handle
         .insert_source(drm_notifier, |event, metadata, comp: &mut Compositor| {
-            let Graphics::Session(session) = &mut comp.graphics else {
+            let Compositor {
+                graphics,
+                wm,
+                outputs,
+                cursor_status,
+                pointer_location,
+                start_time,
+                ..
+            } = comp;
+            let Graphics::Session(session) = graphics else {
                 return;
             };
             match event {
@@ -1050,60 +1210,86 @@ pub(crate) fn init(
                     // Per crtc: the device hands every output's flip
                     // completion through this one source, and only the
                     // output that owns that crtc is free to draw again.
-                    let Some(output) = session.outputs.iter_mut().find(|output| output.crtc == crtc)
+                    let Some(output_index) = session.outputs.iter().position(|output| output.crtc == crtc)
                     else {
                         tracing::debug!(?crtc, "page flip completed on a crtc we do not drive");
                         return;
                     };
-                    let vblank_at = match metadata.map(|meta| meta.time) {
-                        Some(DrmEventTime::Monotonic(time)) => drm_monotonic_instant(time),
-                        _ => Instant::now(),
-                    };
-                    output.frame_clock.note_vblank(vblank_at);
-                    let pending = output.frame_pending.take();
-                    if let Some(mut feedback) = output.presentation.take() {
-                        let flags = smithay::reexports::wayland_protocols::wp::presentation_time::server::wp_presentation_feedback::Kind::Vsync
-                            | smithay::reexports::wayland_protocols::wp::presentation_time::server::wp_presentation_feedback::Kind::HwClock
-                            | smithay::reexports::wayland_protocols::wp::presentation_time::server::wp_presentation_feedback::Kind::HwCompletion;
-                        match metadata {
-                            Some(meta) if matches!(meta.time, DrmEventTime::Monotonic(_)) => {
-                                let DrmEventTime::Monotonic(time) = meta.time else { unreachable!() };
-                                feedback.presented::<_, smithay::utils::Monotonic>(
-                                    time,
+                    let completed_frame = {
+                        let output = &mut session.outputs[output_index];
+                        let vblank_at = match metadata.map(|meta| meta.time) {
+                            Some(DrmEventTime::Monotonic(time)) => drm_monotonic_instant(time),
+                            _ => Instant::now(),
+                        };
+                        output.frame_clock.note_vblank(vblank_at);
+                        let pending = output.frame_pending.take();
+                        let completed_frame = pending.is_some();
+                        let monotonic_metadata = metadata.and_then(|meta| match meta.time {
+                            DrmEventTime::Monotonic(time) => Some((time, meta.sequence as u64)),
+                            _ => None,
+                        });
+                        if let Some(last_vblank) = monotonic_metadata {
+                            output.last_vblank = Some(last_vblank);
+                        }
+                        if let Some(mut feedback) = output.presentation.take() {
+                            let hw_flags = smithay::reexports::wayland_protocols::wp::presentation_time::server::wp_presentation_feedback::Kind::Vsync
+                                | smithay::reexports::wayland_protocols::wp::presentation_time::server::wp_presentation_feedback::Kind::HwClock
+                                | smithay::reexports::wayland_protocols::wp::presentation_time::server::wp_presentation_feedback::Kind::HwCompletion;
+                            match monotonic_metadata {
+                                Some((time, sequence)) => {
+                                    crate::renderer::present_at(
+                                        &mut feedback,
+                                        time,
+                                        output.refresh,
+                                        sequence,
+                                        hw_flags,
+                                    );
+                                }
+                                _ => crate::renderer::present_now(
+                                    &mut feedback,
                                     output.refresh,
-                                    meta.sequence as u64,
-                                    flags,
+                                    smithay::reexports::wayland_protocols::wp::presentation_time::server::wp_presentation_feedback::Kind::Vsync
+                                        | smithay::reexports::wayland_protocols::wp::presentation_time::server::wp_presentation_feedback::Kind::HwCompletion,
+                                ),
+                            }
+                        }
+                        // A composited frame can release its sampled
+                        // buffers now. A direct-scanout frame cannot:
+                        // this vblank made its client buffer current.
+                        if let Some(pending) = pending {
+                            let changed = complete_scene_flip(
+                                &mut output.pending_scene,
+                                &mut output.scanout_scene,
+                                &mut output.direct_scanout_active,
+                                pending.direct_scanout,
+                            );
+                            if changed {
+                                tracing::info!(
+                                    output = %output.name,
+                                    active = pending.direct_scanout,
+                                    "DRM primary-plane direct scanout changed"
                                 );
                             }
-                            _ => crate::renderer::present_now(&mut feedback, output.refresh, flags),
                         }
-                    }
-                    // A composited frame can release its sampled
-                    // buffers now. A direct-scanout frame cannot: this
-                    // vblank made its client buffer current, and the
-                    // display engine continues reading it until a later
-                    // flip replaces it. See `complete_scene_flip`.
-                    if let Some(pending) = pending {
-                        let changed = complete_scene_flip(
-                            &mut output.pending_scene,
-                            &mut output.scanout_scene,
-                            &mut output.direct_scanout_active,
-                            pending.direct_scanout,
-                        );
-                        if changed {
-                            tracing::info!(
-                                output = %output.name,
-                                active = pending.direct_scanout,
-                                "DRM primary-plane direct scanout changed"
+                        if let Err(error) = output.drm_compositor.frame_submitted() {
+                            tracing::warn!(?error, output = %output.name, "page-flip completion was rejected by the DRM compositor");
+                        }
+                        completed_frame
+                    };
+                    if completed_frame {
+                        crate::renderer::note_frame_success();
+                        if let (Some(entry), Some(monitor)) =
+                            (outputs.get(output_index), wm.backend().monitors.get(output_index))
+                        {
+                            crate::renderer::send_frame_callbacks(
+                                wm.backend(),
+                                &entry.output,
+                                monitor.geometry,
+                                cursor_status,
+                                *pointer_location,
+                                start_time.elapsed(),
                             );
                         }
-                    }
-                    if let Err(error) = output.drm_compositor.frame_submitted() {
-                        // The swapchain slot could not be recycled.
-                        // Rendering continues; if this repeats the next
-                        // frame will fail with `NoFreeSlotsError`, which
-                        // is the loud version of the same problem.
-                        tracing::warn!(?error, output = %output.name, "page-flip completion was rejected by the DRM compositor");
                     }
                 }
                 DrmEvent::Error(error) => {
@@ -1174,6 +1360,7 @@ pub(crate) fn init(
                     // preempted whatever sampling was still queued.
                     for output in session.outputs.iter_mut() {
                         output.frame_pending = None;
+                        output.last_vblank = None;
                         output.frame_clock.disarm();
                         clear_scene_holds(
                             &mut output.pending_scene,
@@ -1226,6 +1413,7 @@ pub(crate) fn init(
                         // session painted over the screen.
                         output.drm_compositor.reset_buffers();
                         output.frame_pending = None;
+                        output.last_vblank = None;
                         clear_scene_holds(
                             &mut output.pending_scene,
                             &mut output.scanout_scene,
@@ -1259,6 +1447,13 @@ pub(crate) fn init(
         std::env::var_os("CHONKSTEP_STRICT_BUFFER_RELEASE"),
         driver_is_nvidia(drm.device_fd()),
     );
+    let driver_name = {
+        use smithay::reexports::drm::Device as _;
+        drm.device_fd()
+            .get_driver()
+            .map(|driver| driver.name().to_string_lossy().into_owned())
+            .unwrap_or_else(|_| "unknown".to_string())
+    };
     tracing::info!(
         enabled = strict_release,
         "strict buffer release (hold client buffers until their page flip completes; \
@@ -1266,6 +1461,8 @@ pub(crate) fn init(
     );
     Ok(SessionInit {
         graphics: Graphics::Session(Box::new(SessionGraphics {
+            device_path,
+            driver_name,
             seat_session,
             drm,
             renderer,
@@ -1309,19 +1506,18 @@ fn attach_output(
     // screen's, so any transform here would visibly flip the desktop.
     let wl_mode = OutputMode::from(*mode);
     let (physical_w, physical_h) = info.size().unwrap_or((0, 0));
+    let identity = connector_identity(drm.device_fd(), info.handle());
+    let make = identity.as_ref().map(|identity| identity.make.clone()).unwrap_or_else(|| "Unknown".into());
+    let model = identity.as_ref().map(|identity| identity.model.clone()).unwrap_or_else(|| name.clone());
+    let serial = identity.as_ref().map(|identity| identity.serial.clone()).unwrap_or_default();
+    let description = identity.as_ref().map(DisplayIdentity::description);
     let output = Output::new(
         name.clone(),
         PhysicalProperties {
             size: (physical_w as i32, physical_h as i32).into(),
             subpixel: info.subpixel().into(),
-            // The manufacturer and model live in the connector's EDID
-            // blob, and parsing EDID means either a parser in this
-            // crate or the `smithay-drm-extras` dependency — neither
-            // worth it for two strings clients only ever show in an
-            // about box. The connector name is at least true and
-            // stable.
-            make: "Unknown".into(),
-            model: name.clone(),
+            make,
+            model,
         },
     );
     output.set_preferred(wl_mode);
@@ -1450,8 +1646,10 @@ fn attach_output(
             connector: info.handle(),
             crtc: *crtc,
             position,
+            transform: Transform::Normal,
             drm_compositor,
             drm_modes,
+            mode_index: 0,
             frame_pending: None,
             // Nothing has ever been drawn on it.
             dirty: true,
@@ -1460,6 +1658,7 @@ fn attach_output(
             scanout_scene: Vec::new(),
             direct_scanout_active: false,
             presentation: None,
+            last_vblank: None,
             refresh: if wl_mode.refresh > 0 {
                 Refresh::fixed(Duration::from_nanos(1_000_000_000_000 / wl_mode.refresh as u64))
             } else {
@@ -1467,7 +1666,16 @@ fn attach_output(
             },
             frame_clock: FrameClock::new(*mode),
         },
-        OutputSetup { output, position, size, modes },
+        OutputSetup {
+            output,
+            identity: description,
+            serial,
+            position,
+            size,
+            transform: Transform::Normal,
+            requested_mode: None,
+            modes,
+        },
     ))
 }
 
@@ -1745,6 +1953,7 @@ fn service_pending_flips(session: &mut SessionGraphics) -> bool {
         // pending, which smithay answers `Ok(None)`. Harmless, and the
         // same shape the pause/resume path has always had.
         output.frame_pending = None;
+        output.last_vblank = None;
         // The abandoned pending scene and the buffer that was current
         // before the reset both go: reset_state disabled the planes,
         // so the display engine can no longer read either.
@@ -1798,8 +2007,9 @@ pub(crate) fn apply_mode(graphics: &mut Graphics, index: usize, mode_index: usiz
             output.drm_compositor.set_output_mode_source(OutputModeSource::Static {
                 size,
                 scale: smithay::utils::Scale::from(1.0),
-                transform: Transform::Normal,
+                transform: output.transform,
             });
+            output.mode_index = mode_index;
             let millihertz = OutputMode::from(mode).refresh;
             output.refresh = if millihertz > 0 {
                 Refresh::fixed(Duration::from_nanos(1_000_000_000_000 / millihertz as u64))
@@ -1809,6 +2019,73 @@ pub(crate) fn apply_mode(graphics: &mut Graphics, index: usize, mode_index: usiz
             output.frame_clock.update_mode(mode);
             output.dirty = true;
             Ok(())
+        }
+    }
+}
+
+/// Changes one hardware output's user-visible rotation while keeping
+/// the KMS framebuffer at the connector mode's physical size. The
+/// renderer maps the transformed logical viewport into that buffer.
+pub(crate) fn apply_transform(graphics: &mut Graphics, index: usize, transform: Transform) -> Result<(), String> {
+    match graphics {
+        Graphics::Winit(_) => {
+            if transform == Transform::Normal {
+                Ok(())
+            } else {
+                Err("the nested output reserves its transform for the host EGL surface".into())
+            }
+        }
+        Graphics::Session(session) => {
+            let output = session.outputs.get_mut(index).ok_or_else(|| format!("no session output at index {index}"))?;
+            let mode = *output
+                .drm_modes
+                .get(output.mode_index)
+                .ok_or_else(|| format!("current mode is missing on {}", output.name))?;
+            let size = smithay::utils::Size::from((mode.size().0 as i32, mode.size().1 as i32));
+            output.drm_compositor.set_output_mode_source(OutputModeSource::Static {
+                size,
+                scale: smithay::utils::Scale::from(1.0),
+                transform,
+            });
+            output.transform = transform;
+            output.dirty = true;
+            Ok(())
+        }
+    }
+}
+
+/// Applies mode/rotation decisions made from startup monitor rules
+/// before the corresponding globals become visible to clients.
+pub(crate) fn apply_output_setups(graphics: &mut Graphics, setups: &mut [OutputSetup]) {
+    for (index, setup) in setups.iter_mut().enumerate() {
+        let requested_transform = setup.transform;
+        let result = setup
+            .requested_mode
+            .map_or(Ok(()), |mode_index| apply_mode(graphics, index, mode_index))
+            .and_then(|()| apply_transform(graphics, index, requested_transform));
+        if let Err(error) = result {
+            tracing::warn!(
+                %error,
+                output = %setup.output.name(),
+                "startup output configuration was refused; keeping the active mode and orientation"
+            );
+            setup.requested_mode = None;
+            setup.transform = Transform::Normal;
+            if let Some(mode) = setup.output.current_mode() {
+                setup.size = Size::new(mode.size.w.max(0) as u32, mode.size.h.max(0) as u32);
+            }
+            continue;
+        }
+        if matches!(graphics, Graphics::Session(_)) {
+            let mode = setup
+                .requested_mode
+                .and_then(|mode_index| setup.modes.get(mode_index).copied());
+            setup.output.change_current_state(
+                mode,
+                Some(requested_transform),
+                None,
+                Some((setup.position.x, setup.position.y).into()),
+            );
         }
     }
 }
@@ -1984,7 +2261,6 @@ pub(crate) fn render_frame_session(comp: &mut Compositor) -> bool {
         pointer_location,
         cursor_status,
         cursors,
-        start_time,
         ..
     } = comp;
     let Graphics::Session(session) = graphics else {
@@ -2093,7 +2369,7 @@ pub(crate) fn render_frame_session(comp: &mut Compositor) -> bool {
             viewport,
         );
 
-        let (rendered, direct_scanout) =
+        let (rendered, direct_scanout, render_states) =
             match output.drm_compositor.render_frame(renderer, &output.scene_scratch, clear_color, frame_flags()) {
             Ok(result) => {
                 let direct_scanout = matches!(&result.primary_element, PrimaryPlaneElement::Element(_));
@@ -2110,7 +2386,7 @@ pub(crate) fn render_frame_session(comp: &mut Compositor) -> bool {
                         }
                     }
                 }
-                (!result.is_empty, direct_scanout)
+                (!result.is_empty, direct_scanout, result.states)
             }
             Err(error) => {
                 // Includes the atomic test failures a returning VT
@@ -2143,6 +2419,7 @@ pub(crate) fn render_frame_session(comp: &mut Compositor) -> bool {
                             wm.backend(),
                             &entry.output,
                             monitor.geometry,
+                            Some(&render_states),
                         ));
                     }
                 }
@@ -2157,12 +2434,20 @@ pub(crate) fn render_frame_session(comp: &mut Compositor) -> bool {
                             wm.backend(),
                             &entry.output,
                             monitor.geometry,
+                            Some(&render_states),
                         );
-                        crate::renderer::present_now(
-                            &mut feedback,
-                            output.refresh,
-                            smithay::reexports::wayland_protocols::wp::presentation_time::server::wp_presentation_feedback::Kind::Vsync,
-                        );
+                        let flags = smithay::reexports::wayland_protocols::wp::presentation_time::server::wp_presentation_feedback::Kind::Vsync;
+                        if let Some((at, sequence)) = output.last_vblank {
+                            crate::renderer::present_at(
+                                &mut feedback,
+                                at,
+                                output.refresh,
+                                sequence,
+                                flags | smithay::reexports::wayland_protocols::wp::presentation_time::server::wp_presentation_feedback::Kind::HwClock,
+                            );
+                        } else {
+                            crate::renderer::present_now(&mut feedback, output.refresh, flags);
+                        }
                     }
                 }
                 Err(error) => {
@@ -2211,21 +2496,11 @@ pub(crate) fn render_frame_session(comp: &mut Compositor) -> bool {
         drew_any = true;
     }
 
+    // Empty and successfully prepared frames both prove the rendering
+    // path is healthy. Client callbacks wait for the vblank handler,
+    // which is the only place that knows a queued frame really landed.
     if drew_any {
-        // Frame callbacks are attributed to the primary output. They
-        // pace clients, and a client that hears from one output per
-        // frame draws at that output's rate — so on a mixed-refresh
-        // desktop everything is paced by the primary. Doing better means
-        // tracking which output each surface is actually on
-        // (`Output::enter`/`leave` and a per-surface primary scan-out
-        // choice), which is the same bookkeeping presentation feedback
-        // would need and neither exists yet.
-        // A frame reached the hardware, so the failure streak that
-        // throttles the warnings above is over.
         crate::renderer::note_frame_success();
-        if let Some(primary) = output_entries.first() {
-            crate::renderer::send_frame_callbacks(wm.backend(), &primary.output, cursor_status, start_time.elapsed());
-        }
     }
     drew_any
 }
@@ -2272,16 +2547,64 @@ fn open_first_usable_device(
     }
 
     let mut failures = Vec::new();
+    let mut selected: Option<(PathBuf, Device)> = None;
     for path in candidates {
-        match probe_device(seat_session, &path) {
-            Ok(device) => return Ok((path, device)),
-            Err(reason) => {
-                tracing::info!(device = %path.display(), %reason, "skipping DRM device");
-                failures.push(format!("{}: {reason}", path.display()));
+        if selected.is_none() {
+            match probe_device(seat_session, &path) {
+                Ok(device) => {
+                    selected = Some((path, device));
+                }
+                Err(reason) => {
+                    tracing::info!(device = %path.display(), %reason, "skipping DRM device");
+                    failures.push(format!("{}: {reason}", path.display()));
+                }
             }
+            continue;
+        }
+
+        match connected_desktop_connectors(seat_session, &path) {
+            Ok(connectors) if !connectors.is_empty() => {
+                let selected_path = selected.as_ref().map(|(path, _)| path.as_path()).unwrap();
+                tracing::warn!(
+                    device = %path.display(),
+                    connectors = %connectors.join(", "),
+                    selected = %selected_path.display(),
+                    override_variable = "CHONKSTEP_DRM_DEVICE",
+                    "connected outputs are omitted because this session drives one DRM device"
+                );
+            }
+            Ok(_) => {}
+            Err(reason) => tracing::debug!(device = %path.display(), %reason, "could not inspect unselected DRM device"),
         }
     }
-    Err(format!("no usable DRM device on seat {seat_name} ({})", failures.join("; ")).into())
+    if let Some(selected) = selected {
+        Ok(selected)
+    } else {
+        Err(format!("no usable DRM device on seat {seat_name} ({})", failures.join("; ")).into())
+    }
+}
+
+/// Connector-only probe for devices after the selected GPU. It avoids
+/// GBM/EGL creation and, crucially, does not construct a `DrmDevice`
+/// with connector-reset enabled; it observes other GPUs without
+/// disturbing whichever compositor currently owns their display state.
+fn connected_desktop_connectors(
+    seat_session: &mut LibSeatSession,
+    path: &Path,
+) -> Result<Vec<String>, String> {
+    let fd = seat_session.open(path, DEVICE_FLAGS).map_err(|error| format!("the seat would not open it: {error:?}"))?;
+    let fd = DrmDeviceFd::new(DeviceFd::from(fd));
+    let resources = fd.resource_handles().map_err(|error| format!("could not enumerate KMS resources: {error}"))?;
+    let mut names = Vec::new();
+    for handle in resources.connectors() {
+        let Ok(info) = fd.get_connector(*handle, true) else {
+            continue;
+        };
+        if info.state() == connector::State::Connected && !connector_is_non_desktop(&fd, *handle) {
+            names.push(connector_name(&info));
+        }
+    }
+    Ok(names)
 }
 
 /// Candidate DRM nodes, best first and deduplicated: an explicit
@@ -2424,6 +2747,10 @@ fn pick_outputs(drm: &DrmDevice) -> Result<Vec<ConnectorTarget>, String> {
             skipped.push(format!("{name} is {:?}", info.state()));
             continue;
         }
+        if connector_is_non_desktop(drm.device_fd(), *handle) {
+            skipped.push(format!("{name} is marked non-desktop (reserved for a lease/VR runtime)"));
+            continue;
+        }
         let Some(mode) = preferred_mode(&info) else {
             skipped.push(format!("{name} is connected but reports no modes"));
             continue;
@@ -2509,6 +2836,39 @@ fn connector_name(connector: &connector::Info) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_edid() -> [u8; 128] {
+        let mut edid = [0u8; 128];
+        edid[..8].copy_from_slice(&[0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00]);
+        // DEL: D=4, E=5, L=12 in EDID's packed five-bit alphabet.
+        edid[8..10].copy_from_slice(&((4u16 << 10) | (5u16 << 5) | 12).to_be_bytes());
+        edid[10..12].copy_from_slice(&0x1234u16.to_le_bytes());
+        edid[12..16].copy_from_slice(&0x01020304u32.to_le_bytes());
+        edid[54..59].copy_from_slice(&[0, 0, 0, 0xfc, 0]);
+        edid[59..72].copy_from_slice(b"DELL U2720Q\n ");
+        edid[72..77].copy_from_slice(&[0, 0, 0, 0xff, 0]);
+        edid[77..90].copy_from_slice(b"ABC123\n      ");
+        edid
+    }
+
+    #[test]
+    fn minimal_edid_reader_builds_hyprland_style_identity() {
+        let identity = parse_edid_identity(&test_edid()).unwrap();
+        assert!(identity.make == "Dell Inc." || identity.make == "DEL");
+        assert_eq!(identity.model, "DELL U2720Q");
+        assert_eq!(identity.serial, "ABC123");
+        assert_eq!(identity.description(), format!("{} DELL U2720Q ABC123", identity.make));
+    }
+
+    #[test]
+    fn edid_reader_uses_numeric_fallbacks_without_text_descriptors() {
+        let mut edid = test_edid();
+        edid[54..90].fill(0);
+        let identity = parse_edid_identity(&edid).unwrap();
+        assert_eq!(identity.model, "0x1234");
+        assert_eq!(identity.serial, "0x01020304");
+        assert!(parse_edid_identity(&edid[1..]).is_none());
+    }
 
     /// The strict-release default follows the driver: on for NVIDIA
     /// (no implicit dmabuf fencing to mask an early release), off

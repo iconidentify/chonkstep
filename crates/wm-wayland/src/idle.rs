@@ -247,8 +247,7 @@ pub(crate) fn refresh(comp: &mut Compositor) {
 }
 
 fn idle_log_enabled() -> bool {
-    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var_os("CHONKSTEP_IDLE_LOG").is_some_and(|value| value != "0"))
+    crate::diagnostics::enabled("idle-log")
 }
 
 /// Whether the window or layer surface owning `surface` is mapped.

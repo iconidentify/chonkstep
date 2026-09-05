@@ -21,6 +21,7 @@ wm-theme = { path = "../wm-theme" }
 wm-theme-api = { path = "../wm-theme-api" }
 wm-config = { path = "../wm-config" }
 chonk-shell = { path = "../chonk-shell" }
+chonk-build-info = { path = "../chonk-build-info" }
 # The Hyprland IPC protocol, so Omarchy's unmodified shell and the real
 # `hyprctl` binary work against chonkstep. Deliberately a separate crate
 # with no dependency on `wm-core`: every JSON shape and parser in it is

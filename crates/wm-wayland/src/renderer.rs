@@ -87,22 +87,22 @@ use smithay::backend::renderer::element::memory::MemoryRenderBufferRenderElement
 use smithay::backend::renderer::element::solid::SolidColorRenderElement;
 use smithay::backend::renderer::element::surface::WaylandSurfaceRenderElement;
 use smithay::backend::renderer::element::utils::RescaleRenderElement;
-use smithay::backend::renderer::element::Kind;
+use smithay::backend::renderer::element::{Kind, RenderElementStates};
 use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::backend::renderer::utils::{CommitCounter, RendererSurfaceStateUserData};
 use smithay::backend::renderer::{Color32F, ImportAll, ImportMem};
 use smithay::desktop::utils::{
     bbox_from_surface_tree, send_frames_surface_tree, take_presentation_feedback_surface_tree,
-    OutputPresentationFeedback,
+    surface_presentation_feedback_flags_from_states, OutputPresentationFeedback,
 };
 use smithay::input::pointer::{CursorImageAttributes, CursorImageStatus};
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::reexports::wayland_server::Resource;
 use smithay::render_elements;
-use smithay::utils::{IsAlive, Physical, Point as SPoint, Rectangle as SRect, Scale};
+use smithay::utils::{IsAlive, Logical, Physical, Point as SPoint, Rectangle as SRect, Scale};
 use smithay::wayland::compositor::{self, with_states, TraversalAction};
 use smithay::wayland::shell::wlr_layer::Layer as WlrLayer;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use wm_theme_api::{Point, Rect};
 
@@ -384,17 +384,21 @@ pub(crate) fn build_scene_into(
 /// surface must hear them while a parked window or policy-hidden layer
 /// should sleep. Shared by both backends for exactly that reason.
 ///
-/// Called once per frame with a single `output`, even when several were
-/// drawn: a surface is told about the frame, and which output's clock
-/// that frame belongs to is the pacing question `session.rs` answers
-/// (the primary's) rather than a per-surface one this could answer
-/// better without knowing which screens each window is actually on.
+/// Called from one output's completed presentation boundary. Only
+/// surfaces whose owning rectangle selects that output receive the
+/// callback, so mixed-refresh heads pace independently.
 pub(crate) fn send_frame_callbacks(
     backend: &WaylandBackend,
     output: &smithay::output::Output,
+    output_rect: Rect,
     cursor_status: &CursorImageStatus,
+    pointer_location: SPoint<f64, Logical>,
     elapsed: Duration,
 ) {
+    let throttle = frame_interval(output);
+    let send_tree = |surface: &WlSurface| {
+        send_frames_surface_tree(surface, output, elapsed, throttle, |_, _| Some(output.clone()));
+    };
     // While locked, ONLY lock surfaces hear about frames: withholding
     // callbacks from everything else freezes those clients for the
     // duration, which the spec explicitly sanctions and which stops a
@@ -403,10 +407,13 @@ pub(crate) fn send_frame_callbacks(
     // refused, only unanswered.)
     if backend.locked {
         for entry in &backend.lock_surfaces {
-            if entry.surface.alive() {
-                send_frames_surface_tree(entry.surface.wl_surface(), output, elapsed, Some(Duration::ZERO), |_, _| {
-                    Some(output.clone())
-                });
+            if entry.surface.alive()
+                && backend
+                    .monitors
+                    .get(entry.output)
+                    .is_some_and(|monitor| monitor.geometry == output_rect)
+            {
+                send_tree(entry.surface.wl_surface());
             }
         }
         return;
@@ -416,15 +423,15 @@ pub(crate) fn send_frame_callbacks(
     // namespace policy stay mapped but are absent from the scene, so
     // withholding callbacks is what makes them actually idle.
     for record in &backend.layers {
-        if !backend.layer_presented(record) {
+        if !backend.layer_presented(record)
+            || !is_primary_rect(backend, record.geometry, output_rect)
+        {
             continue;
         }
         let surface = record.surface.wl_surface();
-        send_frames_surface_tree(surface, output, elapsed, Some(Duration::ZERO), |_, _| Some(output.clone()));
+        send_tree(surface);
         for (popup, _) in backend.popups_for_surface(surface) {
-            send_frames_surface_tree(popup.wl_surface(), output, elapsed, Some(Duration::ZERO), |_, _| {
-                Some(output.clone())
-            });
+            send_tree(popup.wl_surface());
         }
     }
     // A window parked on another workspace is protocol-mapped but did
@@ -433,23 +440,34 @@ pub(crate) fn send_frame_callbacks(
     // client produced a frame. The workspace transition frame supplies
     // the first callback when it becomes exposed again.
     for_each_presented_window(backend, |record| {
-        if let Some(surface) = record.surface.wl_surface() {
-            send_frames_surface_tree(&surface, output, elapsed, Some(Duration::ZERO), |_, _| Some(output.clone()));
-            for (popup, _) in backend.popups_for_surface(&surface) {
-                send_frames_surface_tree(popup.wl_surface(), output, elapsed, Some(Duration::ZERO), |_, _| {
-                    Some(output.clone())
-                });
+        if is_primary_rect(backend, record.content, output_rect) {
+            if let Some(surface) = record.surface.wl_surface() {
+                send_tree(&surface);
+                for (popup, _) in backend.popups_for_surface(&surface) {
+                    send_tree(popup.wl_surface());
+                }
             }
         }
     });
-    if let CursorImageStatus::Surface(surface) = cursor_status {
-        send_frames_surface_tree(surface, output, elapsed, Some(Duration::ZERO), |_, _| Some(output.clone()));
+    let pointer_location = Point::new(pointer_location.x.floor() as i32, pointer_location.y.floor() as i32);
+    if output_rect.contains(pointer_location) {
+        if let CursorImageStatus::Surface(surface) = cursor_status {
+            send_tree(surface);
+        }
     }
     for popup in &backend.ime_popups {
-        if popup.alive() {
-            send_frames_surface_tree(popup.wl_surface(), output, elapsed, Some(Duration::ZERO), |_, _| {
-                Some(output.clone())
-            });
+        let Some(parent) = popup.get_parent() else {
+            continue;
+        };
+        let parent_rect = Rect::new(
+            Point::new(parent.location.loc.x, parent.location.loc.y),
+            wm_theme_api::Size::new(
+                parent.location.size.w.max(0) as u32,
+                parent.location.size.h.max(0) as u32,
+            ),
+        );
+        if popup.alive() && is_primary_rect(backend, parent_rect, output_rect) {
+            send_tree(popup.wl_surface());
         }
     }
 }
@@ -462,6 +480,7 @@ pub(crate) fn take_presentation_feedback(
     backend: &WaylandBackend,
     output: &smithay::output::Output,
     output_rect: Rect,
+    render_states: Option<&RenderElementStates>,
 ) -> OutputPresentationFeedback {
     let mut feedback = OutputPresentationFeedback::new(output);
     let mut take_tree = |surface: &WlSurface| {
@@ -469,7 +488,12 @@ pub(crate) fn take_presentation_feedback(
             surface,
             &mut feedback,
             |_, _| Some(output.clone()),
-            |_, _| smithay::reexports::wayland_protocols::wp::presentation_time::server::wp_presentation_feedback::Kind::empty(),
+            |surface, _| {
+                render_states.map_or_else(
+                    smithay::reexports::wayland_protocols::wp::presentation_time::server::wp_presentation_feedback::Kind::empty,
+                    |states| surface_presentation_feedback_flags_from_states(surface, states),
+                )
+            },
         );
     };
 
@@ -592,18 +616,35 @@ pub(crate) fn presentation_refresh(output: &smithay::output::Output) -> smithay:
     )
 }
 
+fn frame_interval(output: &smithay::output::Output) -> Option<Duration> {
+    output
+        .current_mode()
+        .and_then(|mode| u64::try_from(mode.refresh).ok())
+        .filter(|rate| *rate > 0)
+        .map(|millihertz| Duration::from_nanos(1_000_000_000_000 / millihertz))
+}
+
 pub(crate) fn present_now(
     feedback: &mut OutputPresentationFeedback,
     refresh: smithay::wayland::presentation::Refresh,
     flags: smithay::reexports::wayland_protocols::wp::presentation_time::server::wp_presentation_feedback::Kind,
 ) {
-    static SEQUENCE: AtomicU64 = AtomicU64::new(1);
     feedback.presented(
         smithay::utils::Clock::<smithay::utils::Monotonic>::new().now(),
         refresh,
-        SEQUENCE.fetch_add(1, Ordering::Relaxed),
+        0,
         flags,
     );
+}
+
+pub(crate) fn present_at(
+    feedback: &mut OutputPresentationFeedback,
+    at: Duration,
+    refresh: smithay::wayland::presentation::Refresh,
+    sequence: u64,
+    flags: smithay::reexports::wayland_protocols::wp::presentation_time::server::wp_presentation_feedback::Kind,
+) {
+    feedback.presented::<_, smithay::utils::Monotonic>(at, refresh, sequence, flags);
 }
 
 /// How many consecutive failed frames are reported before the warning
@@ -696,7 +737,7 @@ fn render_frame_winit(comp: &mut Compositor) -> bool {
     // silently assumed. `CHONKSTEP_FULL_DAMAGE=1` forces 0 for the same
     // escape-hatch reason `session.rs` documents.
     let age = if crate::session::full_damage_forced() { 0 } else { winit_backend.buffer_age().unwrap_or(0) };
-    let drew = {
+    let render_states = {
         let (renderer, mut framebuffer) = match winit_backend.bind() {
             Ok(bound) => bound,
             Err(error) => {
@@ -720,7 +761,7 @@ fn render_frame_winit(comp: &mut Compositor) -> bool {
         match damage_tracker.render_output(renderer, &mut framebuffer, age, scene_scratch, clear_color) {
             Ok(result) => {
                 log_damage(age, result.damage.map(Vec::as_slice));
-                result.damage.is_some()
+                result.damage.is_some().then_some(result.states)
             }
             Err(error) => {
                 if note_frame_failure() {
@@ -740,7 +781,7 @@ fn render_frame_winit(comp: &mut Compositor) -> bool {
     // the old per-frame vector was dropped.
     scene_scratch.clear();
 
-    if drew {
+    if render_states.is_some() {
         // The buffer holds a complete frame either way (the tracker
         // repainted every stale pixel for this buffer's age), so the
         // full-window swap rect is correct; the damage rects computed
@@ -759,15 +800,27 @@ fn render_frame_winit(comp: &mut Compositor) -> bool {
         }
     }
 
+    let Some(render_states) = render_states else {
+        wm.backend_mut().damage = false;
+        return false;
+    };
+
     note_frame_success();
     let output_rect = wm.backend().monitors.first().map(|monitor| monitor.geometry).unwrap_or_default();
-    let mut feedback = take_presentation_feedback(wm.backend(), output, output_rect);
+    let mut feedback = take_presentation_feedback(wm.backend(), output, output_rect, Some(&render_states));
     present_now(
         &mut feedback,
         presentation_refresh(output),
         smithay::reexports::wayland_protocols::wp::presentation_time::server::wp_presentation_feedback::Kind::Vsync,
     );
-    send_frame_callbacks(wm.backend(), output, cursor_status, start_time.elapsed());
+    send_frame_callbacks(
+        wm.backend(),
+        output,
+        output_rect,
+        cursor_status,
+        *pointer_location,
+        start_time.elapsed(),
+    );
     wm.backend_mut().damage = false;
     true
 }
@@ -779,9 +832,7 @@ fn render_frame_winit(comp: &mut Compositor) -> bool {
 /// must log nothing (no frame at all), a blinking cursor a few hundred
 /// square pixels, a fullscreen video the video's rectangle.
 pub(crate) fn log_damage(age: usize, damage: Option<&[SRect<i32, Physical>]>) {
-    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    let enabled = *ENABLED.get_or_init(|| std::env::var_os("CHONKSTEP_DAMAGE_LOG").is_some_and(|value| value != "0"));
-    if !enabled {
+    if !crate::diagnostics::enabled("damage-log") {
         return;
     }
     match damage {
@@ -1280,6 +1331,9 @@ pub(crate) fn push_cursor_elements(
     cursors: &crate::state::CursorSet,
     viewport: Rect,
 ) {
+    if backend.cursor_hidden {
+        return;
+    }
     // The pointer has one position in global space. Build it in each
     // output's local coordinates, then retain it only where its pixels
     // intersect; including an off-screen cursor could otherwise defeat

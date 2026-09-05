@@ -313,6 +313,75 @@ fn the_live_keyword_refusal_does_not_deny_reading_a_hyprland_config() {
     assert!(answer.contains("~/.config/hypr"), "point at the route that works: {answer}");
 }
 
+fn changed_cursor_pixels(left: &chonk_testkit::Screenshot, right: &chonk_testkit::Screenshot, x: u32, y: u32) -> usize {
+    (y..y + 40)
+        .flat_map(|py| (x..x + 40).map(move |px| (px, py)))
+        .filter(|&(px, py)| {
+            left.pixel(px, py)
+                .iter()
+                .zip(right.pixel(px, py))
+                .take(3)
+                .any(|(a, b)| a.abs_diff(b) > 12)
+        })
+        .count()
+}
+
+/// Omarchy's screensaver uses the eval spelling first and the keyword
+/// spelling as its fallback. Both must alter pixels, and a screensaver
+/// killed before its cleanup command must give the cursor back.
+#[test]
+#[ignore = "needs a Wayland session to nest inside"]
+fn screensaver_cursor_visibility_is_live_and_owned() {
+    let mut session = boot("hypr-ipc-cursor-visibility");
+    let dir = socket_dir(&session);
+
+    session
+        .launch("zenity", &["--question", "--title", "cursor-owner", "--text", "hold still"])
+        .expect("launch a focused owner window");
+    session.wait_for_window("cursor-owner").expect("the owner maps");
+
+    let (x, y) = (48_u32, 48_u32);
+    session.door().motion(f64::from(x), f64::from(y)).unwrap();
+    session.door().barrier().unwrap();
+    let visible = session.screenshot_with_cursor("cursor-visible").unwrap();
+
+    assert_eq!(
+        request(&dir, "/eval hl.config({ cursor = { invisible = true } })").trim(),
+        "ok"
+    );
+    session.door().barrier().unwrap();
+    let hidden = session.screenshot_with_cursor("cursor-hidden-by-eval").unwrap();
+    assert!(
+        changed_cursor_pixels(&visible, &hidden, x, y) > 16,
+        "the eval request must remove cursor pixels ({} vs {})",
+        visible.path.display(),
+        hidden.path.display()
+    );
+
+    assert_eq!(request(&dir, "/keyword cursor:invisible false").trim(), "ok");
+    session.door().barrier().unwrap();
+    let restored = session.screenshot_with_cursor("cursor-restored-by-keyword").unwrap();
+    assert!(
+        changed_cursor_pixels(&visible, &restored, x, y) <= 4,
+        "the keyword fallback must restore the same cursor pixels ({} vs {})",
+        visible.path.display(),
+        restored.path.display()
+    );
+
+    assert_eq!(request(&dir, "/keyword cursor:invisible true").trim(), "ok");
+    session.door().barrier().unwrap();
+    session.kill_client("zenity");
+    session.wait_for_window_gone("cursor-owner").expect("the owner exits");
+    session.door().barrier().unwrap();
+    let after_owner_death = session.screenshot_with_cursor("cursor-restored-after-owner-death").unwrap();
+    assert!(
+        changed_cursor_pixels(&hidden, &after_owner_death, x, y) > 16,
+        "a dead owner must not strand the session cursorless ({} vs {})",
+        hidden.path.display(),
+        after_owner_death.path.display()
+    );
+}
+
 /// The mapping protocol has two requests, and both are a join: whether
 /// a caller holds the wlr manager's handle or the frozen
 /// `ext_foreign_toplevel_list_v1` handle, the address that comes back

@@ -8269,8 +8269,8 @@ mod tests {
     /// arrangement every multi-monitor test below measures against.
     fn dual_monitors() -> Vec<MonitorInfo> {
         vec![
-            MonitorInfo { geometry: LEFT_HEAD, name: "left".to_string(), primary: true },
-            MonitorInfo { geometry: RIGHT_HEAD, name: "right".to_string(), primary: false },
+            MonitorInfo { geometry: LEFT_HEAD, name: "left".to_string(), identity: None, primary: true },
+            MonitorInfo { geometry: RIGHT_HEAD, name: "right".to_string(), identity: None, primary: false },
         ]
     }
 
@@ -8294,6 +8294,7 @@ mod tests {
         wm.backend_mut().set_monitors(vec![MonitorInfo {
             geometry: LEFT_HEAD,
             name: "left".to_string(),
+            identity: None,
             primary: true,
         }]);
         wm.rescue_clients_from_removed_monitor(RIGHT_HEAD);
@@ -8494,8 +8495,8 @@ mod tests {
         let bottom = Rect { pos: Point::new(0, 700), size: Size::new(800, 600) };
         let mut backend = FakeBackend::new();
         backend.set_monitors(vec![
-            MonitorInfo { geometry: top, name: "top".to_string(), primary: true },
-            MonitorInfo { geometry: bottom, name: "bottom".to_string(), primary: false },
+            MonitorInfo { geometry: top, name: "top".to_string(), identity: None, primary: true },
+            MonitorInfo { geometry: bottom, name: "bottom".to_string(), identity: None, primary: false },
         ]);
         let mut wm = wm(backend);
         let top_area = Rect { pos: Point::new(0, 0), size: Size::new(800, 560) };
@@ -8518,8 +8519,8 @@ mod tests {
         // assumption would reserve the dock strip on the wrong head.
         let mut backend = FakeBackend::new();
         backend.set_monitors(vec![
-            MonitorInfo { geometry: LEFT_HEAD, name: "aux".to_string(), primary: false },
-            MonitorInfo { geometry: RIGHT_HEAD, name: "main".to_string(), primary: true },
+            MonitorInfo { geometry: LEFT_HEAD, name: "aux".to_string(), identity: None, primary: false },
+            MonitorInfo { geometry: RIGHT_HEAD, name: "main".to_string(), identity: None, primary: true },
         ]);
         let mut wm = wm(backend);
         let reserved = Rect { pos: Point::new(800, 0), size: Size::new(800, 560) };

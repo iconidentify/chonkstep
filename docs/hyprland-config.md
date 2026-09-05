@@ -209,7 +209,7 @@ specific directive, not a count. Turn on `RUST_LOG=debug` to see them.
 | `exec` (as opposed to `exec-once`) | It re-runs on every config reload, which here would mean on every poll. Taking it as autostart would start a fresh copy each time you edited anything. |
 | `submap`, workspace rules, `plugin`, `bezier`, `animation` | Hyprland's own machinery. Every binding inside conf `submap = name … reset` or Lua `hl.define_submap` is skipped with its chord and submap; it is never promoted to a global grab. |
 | `hl.on("layer.opened")` selection bindings | Read as a namespace-scoped keymap. It is installed only while a matching layer-shell surface is mapped and removed after the last such surface closes. A handler with unknown side effects is refused whole. |
-| Unsupported `monitor =` lines | A line containing disable, mirror, transform/extra fields, or an explicit mode is refused whole. The supported subset is applied as described below. |
+| Unsupported `monitor =` lines | A line containing disable, mirror, or an extra field other than a 0/90/180/270-degree transform is refused whole. Explicit modes and those transforms are supported as described below. |
 
 ### Bindings this desktop has no verb for
 
@@ -278,17 +278,26 @@ Any additional side effect refuses the entire handler.
 
 Monitor rules are resolved only after the compositor has the connected
 outputs and their EDID facts. An exact output rule beats the last
-catch-all rule. The supported transaction is:
+catch-all rule. The selector may be a connector name such as `DP-2` or
+Hyprland's stable `desc:make model serial` form (copy the `description`
+from `hyprctl monitors`); the latter follows a physical display when it
+moves to another dock port. A selector that matches nothing is named in
+the log together with the connected connectors and EDID descriptions.
+The supported transaction is:
 
-- `preferred` mode (or omitted), resolved from that head's mode list;
+- `preferred` (or omitted), `highrr`, `highres`, `WIDTHxHEIGHT`,
+  `WIDTHxHEIGHT@RATE`, or `preferred@RATE`, resolved from that head's
+  advertised mode list (with measured-refresh tolerance);
 - `auto` position, laid out left-to-right, or an explicit `XxY`;
 - numeric scale from 0.5 through 4, or `auto` from physical DPI
-  (1.0/1.5/2.0 thresholds).
+  (1.0/1.5/2.0 thresholds);
+- `transform, 0` through `transform, 3` for 0/90/180/270-degree
+  clockwise output rotation.
 
 Negative positions are normalized together so the logical desktop
-starts at zero without changing relative placement. Any unsupported
-field, `disable`, `mirror`, malformed position/scale, or explicit mode
-refuses the whole line with the output and field in the log. The same
+starts at zero without changing relative placement. An unadvertised
+mode, unsupported field, `disable`, `mirror`, or malformed
+position/scale refuses the whole line with the output and field in the log. The same
 output state backs IPC and `zwlr_output_management`, so advertised
 scale, renderer scale, shell geometry, and application fractional scale
 cannot diverge.

@@ -202,6 +202,35 @@ pub fn answer(request: &Request, snapshot: &Snapshot) -> (String, Option<Action>
                 (format!("chonkstep {}\n", env!("CARGO_PKG_VERSION")), None)
             }
         }
+        "systeminfo" => (snapshot.system_info.clone(), None),
+        "rollinglog" => (
+            "ChonkStep writes the current Wayland session log under $XDG_STATE_HOME/chonkstep/wayland-session.log; use `hyprctl log-filter DIRECTIVE` to change live verbosity.\n".to_string(),
+            None,
+        ),
+        "debug-set" => {
+            let mut args = request.args.split_whitespace();
+            let name = args.next().unwrap_or_default();
+            let enabled = match args.next() {
+                Some("1" | "true" | "on" | "yes") => Some(true),
+                Some("0" | "false" | "off" | "no") => Some(false),
+                _ => None,
+            };
+            match (name.is_empty(), enabled, args.next()) {
+                (false, Some(enabled), None) => (
+                    "ok".to_string(),
+                    Some(Action::SetDiagnostic { name: name.to_string(), enabled }),
+                ),
+                _ => ("Invalid dispatcher: usage: debug-set KNOB BOOL".to_string(), None),
+            }
+        }
+        "log-filter" => {
+            let directive = request.args.trim();
+            if directive.is_empty() {
+                ("Invalid dispatcher: usage: log-filter DIRECTIVE".to_string(), None)
+            } else {
+                ("ok".to_string(), Some(Action::SetLogFilter(directive.to_string())))
+            }
+        }
         "cursorpos" => {
             // Plain text even under `-j`, matching Hyprland, and read by
             // `omarchy-capture-region` as `${pos%,*}` / `${pos#*, }` —
@@ -252,22 +281,19 @@ pub fn answer(request: &Request, snapshot: &Snapshot) -> (String, Option<Action>
             },
             None,
         ),
-        // A refusal, and it stays one: `keyword` is Hyprland's whole
-        // configuration namespace, and answering `ok` for all of it
-        // would be worse than saying no. But the refusal has to be
-        // *true* — chonkstep does read a Hyprland config, and the old
-        // sentence pointed a user reading it away from the one route
-        // that works. `hyprctl` exits zero either way (see the module
-        // docs), so this string is the only diagnostic there is.
-        "keyword" => (
-            "Invalid dispatcher: keyword does not mutate chonkstep's configuration. \
-             chonkstep reads ~/.config/hypr and re-reads it within a second of an edit, \
-             so edit the file instead, or use `hyprctl eval hl.monitor({...})` for a live \
-             scale change. `keyword monitor NAME,disable` cannot work at all: chonkstep \
-             drives every connected output and has no disable path."
-                .to_string(),
-            None,
-        ),
+        // `keyword` stays a refusal for Hyprland's broad configuration
+        // namespace. `cursor:invisible` is the one named exception:
+        // Omarchy's screensaver ships it as the fallback for the
+        // equivalent `hl.config` property, and the compositor can
+        // honour it exactly.
+        "keyword" => {
+            let outcome = dispatch::parse_keyword(&request.args);
+            let response = outcome.response();
+            match outcome {
+                Outcome::Run(action) => (response, Some(action)),
+                _ => (response, None),
+            }
+        }
         "reload" => ("ok".to_string(), Some(Action::ReloadConfig)),
         "binds" => (if json { json_bindings(snapshot) } else { plain_bindings(snapshot) }, None),
         "devices" => (json_devices(snapshot), None),

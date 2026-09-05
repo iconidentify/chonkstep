@@ -1,0 +1,66 @@
+#!/bin/sh
+# Collect a live ChonkStep report without restarting the compositor.
+set -u
+
+stamp="$(date +%Y%m%d-%H%M%S)"
+report="${1:-chonkstep-bugreport-$stamp.txt}"
+state_dir="${XDG_STATE_HOME:-$HOME/.local/state}/chonkstep"
+umask 077
+: > "$report" || exit 1
+
+section() {
+    printf '\n===== %s =====\n' "$1" >> "$report"
+}
+
+section "PRIVACY NOTICE"
+printf '%s\n' \
+    "This file contains process, display, window-title, log and configuration data." \
+    "Nothing is redacted automatically. Review it before sharing." >> "$report"
+
+section "SYSTEM INFO"
+if command -v hyprctl >/dev/null 2>&1; then
+    hyprctl systeminfo >> "$report" 2>&1 || true
+else
+    printf 'hyprctl is not installed\n' >> "$report"
+fi
+
+section "LIVE SCENE"
+if [ -n "${CHONKSTEP_CONTROL_SOCKET:-}" ] && [ -S "$CHONKSTEP_CONTROL_SOCKET" ] && command -v socat >/dev/null 2>&1; then
+    printf '{"request":"debug","topic":"scene"}\n' |
+        timeout 2 socat - "UNIX-CONNECT:$CHONKSTEP_CONTROL_SOCKET" >> "$report" 2>&1 || true
+else
+    printf 'control socket or socat unavailable\n' >> "$report"
+fi
+
+section "PACKAGE OR BUILD"
+if command -v pacman >/dev/null 2>&1; then
+    pacman -Qi chonkstep >> "$report" 2>&1 || true
+fi
+chonkstep-wayland --version >> "$report" 2>&1 || true
+
+section "RECOVERY"
+if [ -e "$state_dir/recovery" ]; then
+    printf 'recovery marker is present\n' >> "$report"
+else
+    printf 'recovery marker is absent\n' >> "$report"
+fi
+
+for log in "$state_dir/wayland-session.log.old" "$state_dir/wayland-session.log"; do
+    section "$log (last 400 lines)"
+    if [ -r "$log" ]; then
+        tail -n 400 "$log" >> "$report" 2>&1
+    else
+        printf 'not readable\n' >> "$report"
+    fi
+done
+
+for config in "$HOME/.config/chonkstep/config.toml" "$HOME/.config/hypr/hyprland.conf"; do
+    section "$config"
+    if [ -r "$config" ]; then
+        sed -n '1,2000p' "$config" >> "$report" 2>&1
+    else
+        printf 'not readable\n' >> "$report"
+    fi
+done
+
+printf 'Wrote %s; review it before sharing.\n' "$report"

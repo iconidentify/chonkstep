@@ -35,13 +35,18 @@ impl ClientId {
 /// `Client::monitor` already carries a `MonitorId` so per-client
 /// monitor ownership is additive later, not a rewrite.
 ///
-/// Identity is positional, not by name: `WindowManager::set_workareas`
-/// addresses monitors by their index in `Backend::monitors()`, which is
-/// why that method promises a stable order.
+/// The list position remains the live-layout address used by
+/// `WindowManager::set_workareas`, while `identity` is the stable
+/// hardware key a backend may provide for persistence across connector
+/// and enumeration-order changes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MonitorInfo {
     pub geometry: Rect,
     pub name: String,
+    /// Stable physical-display description (`make model serial`) when
+    /// the backend can read one. Connector names such as `DP-2` belong
+    /// to ports and deliberately do not stand in for this value.
+    pub identity: Option<String>,
     /// The output the desktop shell hangs its chrome on and that
     /// anything with no better anchor falls back to. At most one entry
     /// in a list may set this — see `Backend::monitors` for the full

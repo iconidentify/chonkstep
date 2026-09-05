@@ -1,4 +1,4 @@
-# The chonkstep control socket, version 1
+# The chonkstep control socket, version 2
 
 This is the wire contract between the chonkstep shell and anything that
 wants to *show* the desktop's state or *steer* it from outside — a bar
@@ -127,7 +127,7 @@ Move To submenu.
 Always first. Identifies the protocol and the session.
 
 ```json
-{"event":"hello","protocol":1,"session":"wayland","pid":1441097}
+{"event":"hello","protocol":2,"session":"wayland","pid":1441097}
 ```
 
 - `protocol` — the integer version of this document. Breaking changes
@@ -216,6 +216,17 @@ socket is not blind, and so it can correlate focus with a workspace.
   `null` if it could not be parsed at all.
 - `message` — for a human. Not stable; do not match on it.
 
+### 3.7 `debug`
+
+An explicit `debug` request receives one read-only live dump:
+
+```json
+{"event":"debug","topic":"scene","data":"locked=false damage=false ..."}
+```
+
+It is never broadcast as a changing facet. `data` is diagnostic text
+for people and bug reports, not a stable machine protocol.
+
 ## 4. Requests (client → shell)
 
 The verb set is deliberately closed and tiny: it covers what a bar
@@ -248,6 +259,17 @@ Naming the workspace that is already active changes nothing, so the
 shell has nothing to broadcast; the asking client — and only that
 client — is sent the current `workspaces` event again as its
 acknowledgement. Every request gets an answer, even a redundant one.
+
+### 4.3 `debug`
+
+```json
+{"request":"debug","topic":"scene"}
+```
+
+Returns one `debug` event. The valid topics are `scene`, `focus`, and
+`clients`; they currently share one correlated dump so counts,
+stacking, focus intent, damage state, and live diagnostic switches are
+captured from the same instant. An unknown topic receives `error`.
 
 ## 5. What is deliberately absent
 

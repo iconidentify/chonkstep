@@ -670,9 +670,26 @@ impl Session {
     /// pixels. The barrier the caller ran beforehand is what makes
     /// this a picture of a settled scene rather than a race.
     pub fn screenshot(&mut self, label: &str) -> Result<Screenshot, String> {
+        self.capture_screenshot(label, false)
+    }
+
+    /// The same real screencopy path as [`Self::screenshot`], with the
+    /// protocol's overlay-cursor flag set. Kept separate because most
+    /// scene assertions should not acquire pointer-position noise,
+    /// while cursor visibility cannot be tested through a cursorless
+    /// capture by definition.
+    pub fn screenshot_with_cursor(&mut self, label: &str) -> Result<Screenshot, String> {
+        self.capture_screenshot(label, true)
+    }
+
+    fn capture_screenshot(&mut self, label: &str, overlay_cursor: bool) -> Result<Screenshot, String> {
         self.screenshot_serial += 1;
         let path = self.dir.join(format!("{:02}-{label}.png", self.screenshot_serial));
-        let mut grim = Command::new("grim")
+        let mut command = Command::new("grim");
+        if overlay_cursor {
+            command.arg("-c");
+        }
+        let mut grim = command
             .arg(&path)
             .env("WAYLAND_DISPLAY", &self.wayland_display)
             .stdout(Stdio::null())

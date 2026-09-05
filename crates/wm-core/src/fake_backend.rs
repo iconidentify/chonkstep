@@ -201,7 +201,12 @@ pub struct FakeBackend {
 impl FakeBackend {
     pub fn new() -> Self {
         Self {
-            monitors: vec![MonitorInfo { geometry: FAKE_SCREEN, name: "test-screen".to_string(), primary: true }],
+            monitors: vec![MonitorInfo {
+                geometry: FAKE_SCREEN,
+                name: "test-screen".to_string(),
+                identity: None,
+                primary: true,
+            }],
             ..Self::default()
         }
     }
@@ -231,7 +236,12 @@ impl FakeBackend {
     /// — how a test states the one screen it wants to measure against
     /// instead of the stock `FAKE_SCREEN`.
     pub fn set_monitor(&mut self, geometry: Rect) {
-        self.set_monitors(vec![MonitorInfo { geometry, name: "test-screen".to_string(), primary: true }]);
+        self.set_monitors(vec![MonitorInfo {
+            geometry,
+            name: "test-screen".to_string(),
+            identity: None,
+            primary: true,
+        }]);
     }
 
     /// Sets the whole monitor list, in the stable order

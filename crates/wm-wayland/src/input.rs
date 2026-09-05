@@ -3530,6 +3530,7 @@ mod tests {
         MonitorInfo {
             geometry: Rect { pos: Point::new(x, y), size: Size::new(w, h) },
             name: format!("test-{x}x{y}"),
+            identity: None,
             primary: x == 0 && y == 0,
         }
     }

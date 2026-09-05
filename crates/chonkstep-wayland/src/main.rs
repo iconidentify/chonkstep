@@ -80,12 +80,24 @@ fn inspect_config_and_exit_if_asked() {
 
 #[cfg(target_os = "linux")]
 fn main() {
+    use tracing_subscriber::prelude::*;
     // Before the subscriber, so `--version` prints one clean line
     // rather than a line preceded by whatever RUST_LOG asked for.
     print_version_and_exit_if_asked();
     inspect_config_and_exit_if_asked();
     let allocator_policy_pinned = chonk_shell::startup::pin_glibc_large_allocation_policy();
-    tracing_subscriber::fmt().with_env_filter(tracing_subscriber::EnvFilter::from_default_env()).init();
+    let (filter, reload) = tracing_subscriber::reload::Layer::new(
+        tracing_subscriber::EnvFilter::from_default_env(),
+    );
+    tracing_subscriber::registry()
+        .with(filter)
+        .with(tracing_subscriber::fmt::layer())
+        .init();
+    let _ = wm_wayland::install_log_filter_reloader(move |directive| {
+        let filter = tracing_subscriber::EnvFilter::try_new(directive)
+            .map_err(|error| format!("invalid tracing filter: {error}"))?;
+        reload.reload(filter).map_err(|error| format!("could not reload tracing filter: {error}"))
+    });
     if !allocator_policy_pinned {
         tracing::warn!("glibc rejected the fixed mmap/trim thresholds; transient buffers may raise the heap high-water mark");
     }

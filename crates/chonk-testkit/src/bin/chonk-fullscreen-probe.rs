@@ -60,10 +60,11 @@
 //! answer granted: asked fullscreen=true, told fullscreen=true
 //! ```
 //!
-//! The optional `animate` mode independently damages and commits at about
-//! 60 Hz, without requesting a frame callback. It exists to test the other
-//! half of compositor pacing: a client on a parked workspace may continue on
-//! its own timer, but its invisible commits must not make the compositor draw.
+//! The optional `animate` mode independently reattaches, damages and commits
+//! its retained buffer at about 60 Hz, without requesting a frame callback. It
+//! exists to test the other half of compositor pacing: a client on a parked
+//! workspace may continue on its own timer, but its invisible commits must not
+//! make the compositor draw.
 //! Every thirtieth commit is reported as `animation frame=N`, giving the
 //! harness an observable clock that does not depend on compositor telemetry.
 //! The frame-driven mode reports every callback as `frame callback=N`, which
@@ -608,6 +609,7 @@ fn main() {
         .unwrap_or_else(|error| fatal(&format!("initial configure: {error}")));
 
     let mut attached = (0, 0);
+    let mut attached_buffer = None;
     let mut animation_frame = 0_u64;
     say(&format!("mapped title={title:?}"));
     while !probe.closed {
@@ -632,6 +634,7 @@ fn main() {
                 probe.frame_pending = true;
             }
             surface.commit();
+            attached_buffer = Some(buffer);
             if inhibit_idle && probe.idle_inhibitor.is_none() {
                 let manager = probe
                     .idle_inhibit_manager
@@ -677,12 +680,18 @@ fn main() {
         }
 
         if self_timed {
-            // A deliberately self-timed client: damage existing
-            // content and commit without a frame callback. A
-            // roundtrip makes each commit's server-side delivery
-            // observable before the next one, while the sleep is the
-            // producer's cadence (not a test wait).
+            // A deliberately self-timed client: reattach and damage
+            // its retained buffer, then commit without a frame
+            // callback. Reattaching is important here: a commit that
+            // carries only a frame request or surface damage but no
+            // new buffer may correctly produce no repaint, which is
+            // the empty-frame case this compositor must not turn into
+            // a presentation boundary. A roundtrip makes each real
+            // buffer commit's server-side delivery observable before
+            // the next one, while the sleep is the producer's cadence
+            // (not a test wait).
             let (width, height) = probe.size;
+            surface.attach(attached_buffer.as_ref(), 0, 0);
             surface.damage(0, 0, width.max(1), height.max(1));
             surface.commit();
             animation_frame += 1;
@@ -694,11 +703,13 @@ fn main() {
             }
             std::thread::sleep(Duration::from_millis(16));
         } else if frame_driven && probe.frame_ready {
-            // A conventional animation loop: one new buffer only when
-            // the compositor says the previous frame was presented,
-            // and one callback booked atomically with that commit.
+            // A conventional animation loop: one newly attached frame
+            // only when the compositor says the previous frame was
+            // presented, and one callback booked atomically with that
+            // commit.
             probe.frame_ready = false;
             let (width, height) = probe.size;
+            surface.attach(attached_buffer.as_ref(), 0, 0);
             surface.damage(0, 0, width.max(1), height.max(1));
             surface.frame(&qh, ());
             probe.frame_pending = true;

@@ -142,7 +142,8 @@ pub enum Matcher {
 /// preferred-mode, position, and scale subset transactionally.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Monitor {
-    /// The output name, or empty for Hyprland's catch-all `monitor=,…`.
+    /// The connector name, stable `desc:make model serial` selector, or
+    /// empty for Hyprland's catch-all `monitor=,…`.
     pub output: String,
     pub mode: String,
     pub position: String,

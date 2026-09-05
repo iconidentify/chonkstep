@@ -107,7 +107,10 @@ and the release history in [CHANGELOG.md](CHANGELOG.md).
   the Wayland session script supervises: abnormal exits restart the
   compositor with the recorded layout (a crash loop trips a brake
   instead), and with `lock_command` set the recovered session comes
-  back locked. Restore never resurrects a window you closed.
+  back locked. On Wayland, EDID identity plus monitor-relative geometry
+  keeps each window on the same physical display even if connector
+  names or plug order change. Restore never resurrects a window you
+  closed.
 - **The Instrument Platform.** Every dock tile is a separate process
   that pushes finished pixels over a private socket and gets theme,
   scale, input and supervision in return - so a widget that crashes,
@@ -525,17 +528,19 @@ What the session backend does not do yet, stated plainly:
 - **One GPU, every connector on it.** The session drives every display
   plugged into the primary DRM device, each with its own mode, page
   flips, and place in the desktop layout; a second GPU's outputs stay
-  dark. Nothing hot-plugs: a monitor or GPU that appears mid-session is
-  logged and ignored, so docking a laptop means restarting the session.
+  dark, but connected desktop outputs on those omitted devices are
+  named in the log with the `CHONKSTEP_DRM_DEVICE` override. Connectors
+  on the selected GPU hot-plug live; adding another GPU still requires
+  a new session because device selection is a startup decision.
   Arrangement is configurable now, not compiled in: the compositor
   speaks wlr-output-management, so `wlr-randr` and `kanshi` list and
-  configure outputs - position, mode, and per-output scale (fractional
-  included), applied live. What the backend cannot honor - disabling
-  an output, transforms - is refused with a named log line rather than
-  accepted and botched. Stated honestly: the multi-output plumbing has
-  been driven end to end on the nested backend and over the protocol,
-  but a many-monitor DRM session has not yet been proven on physical
-  hardware.
+  configure outputs - position, mode, rotation, and per-output scale
+  (fractional included), applied live. What the backend cannot honor -
+  disabling an output or adaptive sync - is refused with a named log
+  line rather than accepted and botched. Stated honestly: the
+  multi-output plumbing has been driven end to end on the nested
+  backend and over the protocol, but a many-monitor DRM session has
+  not yet been proven on physical hardware.
 - **The hardware cursor depends on your driver.** The pointer is asked
   for the display controller's cursor plane, which is what makes it
   track the hand instead of the frame rate. Whether it gets one is the

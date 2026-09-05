@@ -29,6 +29,7 @@ mod core_protocols;
 mod ctm;
 mod data_control;
 mod decoration;
+mod diagnostics;
 mod dmabuf;
 // hyprland-focus-grab-v1: click-outside-to-dismiss for shells that ask
 // for it (Omarchy's Quickshell asks on every popup). The one module
@@ -65,3 +66,4 @@ mod xewmh;
 mod xwayland;
 
 pub use state::{run, Compositor, WaylandBackend, WlFrameId, WlShellId, WlWindowId};
+pub use diagnostics::install_log_filter_reloader;

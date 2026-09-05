@@ -1662,7 +1662,12 @@ fn query_monitors(conn: &RustConnection, root: Window, randr: Option<(u32, u32)>
             _ => tracing::debug!("RandR reported no active CRTCs; falling back to one screen-sized monitor"),
         }
     }
-    vec![MonitorInfo { geometry: Rect { pos: Point::new(0, 0), size: screen }, name: "screen-0".to_string(), primary: true }]
+    vec![MonitorInfo {
+        geometry: Rect { pos: Point::new(0, 0), size: screen },
+        name: "screen-0".to_string(),
+        identity: None,
+        primary: true,
+    }]
 }
 
 /// RandR 1.5 `GetMonitors`. `get_active = true` on purpose: a monitor
@@ -1689,6 +1694,7 @@ fn monitors_via_get_monitors(conn: &RustConnection, root: Window) -> Option<Vec<
         monitors.push(MonitorInfo {
             geometry: monitor_rect(monitor.x, monitor.y, monitor.width, monitor.height),
             name,
+            identity: None,
             primary: monitor.primary,
         });
     }
@@ -1753,7 +1759,7 @@ fn monitors_via_crtcs(conn: &RustConnection, root: Window) -> Option<Vec<Monitor
                 .map(|reply| String::from_utf8_lossy(&reply.name).into_owned())
                 .filter(|name| !name.is_empty())
                 .unwrap_or_else(|| format!("output-{output}"));
-            MonitorInfo { geometry, name, primary }
+            MonitorInfo { geometry, name, identity: None, primary }
         })
         .collect();
     Some(monitors)
@@ -3317,7 +3323,12 @@ mod tests {
     use super::*;
 
     fn monitor(name: &str, x: i32, y: i32, w: u32, h: u32, primary: bool) -> MonitorInfo {
-        MonitorInfo { geometry: Rect { pos: Point::new(x, y), size: Size::new(w, h) }, name: name.to_string(), primary }
+        MonitorInfo {
+            geometry: Rect { pos: Point::new(x, y), size: Size::new(w, h) },
+            name: name.to_string(),
+            identity: None,
+            primary,
+        }
     }
 
     #[test]

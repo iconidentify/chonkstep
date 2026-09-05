@@ -95,9 +95,10 @@
 //! - **Unsupported input settings.** Keyboard xkb/repeat values are
 //!   carried. Whole-desktop behavior such as `follow_mouse`, touchpad
 //!   policy, and gestures belongs to chonkstep and is named and skipped.
-//! - **Unsupported `monitor =` lines.** Preferred mode, position and
-//!   scale are applied once outputs exist. Disable, mirror, transform,
-//!   extras and explicit modes refuse their whole line.
+//! - **Unsupported `monitor =` lines.** Preferred and explicit modes,
+//!   position, scale, and 0/90/180/270-degree transforms are applied
+//!   once outputs exist. Disable, mirror, and other extras refuse their
+//!   whole line.
 //! - **Anything that commands Hyprland.** `hyprctl` and the
 //!   `omarchy-hyprland-*` scripts talk to a compositor that is not
 //!   running; those bindings stay unbound, the same filter
@@ -298,8 +299,9 @@ pub struct Skipped {
 /// resolved after real outputs exist. `wm-wayland` consumes the list at
 /// output bootstrap, gives exact-name rules precedence over catch-all
 /// rules, and applies preferred mode, position, and scale as one
-/// transaction. A line containing disable, mirror, transform, another
-/// extra field, or an explicit mode is refused whole and logged.
+/// transaction. Explicit modes and 0/90/180/270-degree transforms are
+/// supported; a line containing disable, mirror, or another extra field
+/// is refused whole and logged.
 #[derive(Clone, Debug, Default)]
 pub struct Monitors {
     pub lines: Vec<directive::Monitor>,

@@ -82,7 +82,7 @@ use wm_theme_api::Point;
 use crate::spawn;
 
 /// The integer version of `docs/control-socket.md` this build speaks.
-pub(crate) const PROTOCOL: u32 = 1;
+pub(crate) const PROTOCOL: u32 = 2;
 
 /// The longest line a client may send, newline included (spec §1). A
 /// client whose pending bytes cross this without a newline is
@@ -124,7 +124,14 @@ pub(crate) enum Event {
     Outputs(OutputsEvent),
     Focus(FocusEvent),
     Theme(ThemeEvent),
+    Debug(DebugEvent),
     Error(ErrorEvent),
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub(crate) struct DebugEvent {
+    pub topic: String,
+    pub data: String,
 }
 
 /// §3.1. Always the first line a client reads.
@@ -219,6 +226,7 @@ pub(crate) struct ErrorEvent {
 pub(crate) enum Request {
     Snapshot,
     FocusWorkspace { index: usize },
+    Debug { topic: String },
 }
 
 /// Everything the shell publishes, as the four facet events it is
@@ -399,7 +407,7 @@ pub(crate) fn parse_request(bytes: &[u8]) -> Result<Request, ErrorEvent> {
 /// `WindowManager`, can do. Handed back from [`ControlSocket::service`]
 /// rather than done inside it because this module never holds a
 /// mutable window manager — it reads a snapshot and writes lines.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Command {
     /// `focus-workspace`, already validated against the workspace list
     /// in the snapshot the request was serviced with. The shell applies
@@ -407,6 +415,9 @@ pub(crate) enum Command {
     /// workspace at an index that already exists — so the validation
     /// here is what keeps the spec's "a switch, never a create".
     FocusWorkspace(usize),
+    /// A live inspection request, tagged with the one connection owed
+    /// the answer so diagnostics are never broadcast to every bar.
+    Debug { client: u64, topic: String },
 }
 
 // ---------------------------------------------------------------------
@@ -414,6 +425,7 @@ pub(crate) enum Command {
 // ---------------------------------------------------------------------
 
 struct ControlClient {
+    id: u64,
     stream: Stream,
     /// Bytes received and not yet terminated by a newline.
     inbound: Vec<u8>,
@@ -449,8 +461,9 @@ enum Farewell {
 }
 
 impl ControlClient {
-    fn new(stream: Stream) -> Self {
+    fn new(id: u64, stream: Stream) -> Self {
         Self {
+            id,
             stream,
             inbound: Vec::new(),
             outbound: Vec::new(),
@@ -604,6 +617,16 @@ impl ControlClient {
                     }));
                 }
             }
+            Ok(Request::Debug { topic }) => {
+                if matches!(topic.as_str(), "scene" | "focus" | "clients") {
+                    commands.push(Command::Debug { client: self.id, topic });
+                } else {
+                    self.queue(&Event::Error(ErrorEvent {
+                        request: Some("debug".to_string()),
+                        message: "topic must be scene, focus, or clients".to_string(),
+                    }));
+                }
+            }
             Err(error) => self.queue(&Event::Error(error)),
         }
     }
@@ -678,6 +701,7 @@ pub(crate) struct ControlSocket {
     /// slot opens so a later leak episode is visible again.
     cap_refusing: bool,
     capacity_refusals: u64,
+    next_client_id: u64,
 }
 
 impl ControlSocket {
@@ -718,6 +742,7 @@ impl ControlSocket {
                     read_cursor: 0,
                     cap_refusing: false,
                     capacity_refusals: 0,
+                    next_client_id: 1,
                 }
             }
             Err(error) => {
@@ -738,6 +763,7 @@ impl ControlSocket {
             read_cursor: 0,
             cap_refusing: false,
             capacity_refusals: 0,
+            next_client_id: 1,
         }
     }
 
@@ -837,7 +863,9 @@ impl ControlSocket {
                         // would make a well-behaved reconnect hang.
                         continue;
                     }
-                    let mut client = ControlClient::new(stream);
+                    let id = self.next_client_id;
+                    self.next_client_id = self.next_client_id.wrapping_add(1).max(1);
+                    let mut client = ControlClient::new(id, stream);
                     client.queue(&self.hello);
                     self.clients.push(client);
                 }
@@ -860,9 +888,21 @@ impl ControlSocket {
     /// second thread. Same treatment as an accepted one.
     #[cfg(test)]
     fn admit(&mut self, stream: Stream) {
-        let mut client = ControlClient::new(stream);
+        let id = self.next_client_id;
+        self.next_client_id = self.next_client_id.wrapping_add(1).max(1);
+        let mut client = ControlClient::new(id, stream);
         client.queue(&self.hello);
         self.clients.push(client);
+    }
+
+    /// Queues one diagnostic answer on the exact connection that
+    /// requested it. The shell builds `data` only after seeing this
+    /// command, keeping scene and client enumeration off ordinary bar
+    /// snapshot paths.
+    pub(crate) fn answer_debug(&mut self, client: u64, topic: String, data: String) {
+        if let Some(peer) = self.clients.iter_mut().find(|peer| peer.id == client) {
+            peer.queue(&Event::Debug(DebugEvent { topic, data }));
+        }
     }
 
     /// One full servicing pass against the current state. Per client,
@@ -1360,9 +1400,13 @@ mod tests {
     // -----------------------------------------------------------------
 
     #[test]
-    fn the_two_requests_parse_and_extra_keys_are_ignored() {
+    fn every_request_parses_and_extra_keys_are_ignored() {
         assert_eq!(parse_request(br#"{"request":"snapshot"}"#), Ok(Request::Snapshot));
         assert_eq!(parse_request(br#"{"request":"focus-workspace","index":2}"#), Ok(Request::FocusWorkspace { index: 2 }));
+        assert_eq!(
+            parse_request(br#"{"request":"debug","topic":"scene"}"#),
+            Ok(Request::Debug { topic: "scene".to_string() })
+        );
         assert_eq!(
             parse_request(br#"{"request":"snapshot","because":"a future client may say why"}"#),
             Ok(Request::Snapshot),
@@ -1403,7 +1447,7 @@ mod tests {
         let lines = bar.lines(5);
         let events: Vec<&str> = lines.iter().map(|l| l["event"].as_str().unwrap()).collect();
         assert_eq!(events, ["hello", "workspaces", "outputs", "focus", "theme"]);
-        assert_eq!(lines[0]["protocol"], 1);
+        assert_eq!(lines[0]["protocol"], 2);
         assert_eq!(lines[0]["pid"], std::process::id());
         assert!(matches!(lines[0]["session"].as_str(), Some("wayland" | "x11")));
     }
@@ -1450,6 +1494,24 @@ mod tests {
         assert!(service_after_request(&mut socket, &snapshot).is_empty());
         let events: Vec<String> = bar.lines(4).iter().map(|l| l["event"].as_str().unwrap().to_string()).collect();
         assert_eq!(events, ["workspaces", "outputs", "focus", "theme"]);
+    }
+
+    #[test]
+    fn a_debug_request_answers_only_the_asking_client() {
+        let snapshot = sample_snapshot();
+        let (_scratch, mut socket, mut bar) = connected(&snapshot);
+        bar.lines(5);
+        bar.send("{\"request\":\"debug\",\"topic\":\"scene\"}\n");
+        let commands = service_after_request(&mut socket, &snapshot);
+        let [Command::Debug { client, topic }] = commands.as_slice() else {
+            panic!("debug request was not returned to the shell")
+        };
+        socket.answer_debug(*client, topic.clone(), "scene=test".to_string());
+        socket.flush_pending();
+        let event = bar.lines(1).remove(0);
+        assert_eq!(event["event"], "debug");
+        assert_eq!(event["topic"], "scene");
+        assert_eq!(event["data"], "scene=test");
     }
 
     #[test]
@@ -1809,8 +1871,18 @@ mod tests {
     fn outputs_come_from_the_monitor_list_with_the_pointers_output_focused() {
         let mut backend = FakeBackend::new();
         backend.set_monitors(vec![
-            MonitorInfo { geometry: Rect::new(Point::new(0, 0), Size::new(2560, 1600)), name: "eDP-1".to_string(), primary: true },
-            MonitorInfo { geometry: Rect::new(Point::new(2560, 0), Size::new(1920, 1080)), name: "HDMI-A-1".to_string(), primary: false },
+            MonitorInfo {
+                geometry: Rect::new(Point::new(0, 0), Size::new(2560, 1600)),
+                name: "eDP-1".to_string(),
+                identity: None,
+                primary: true,
+            },
+            MonitorInfo {
+                geometry: Rect::new(Point::new(2560, 0), Size::new(1920, 1080)),
+                name: "HDMI-A-1".to_string(),
+                identity: None,
+                primary: false,
+            },
         ]);
         let wm = manager(backend);
         let theme = theme();
@@ -1877,7 +1949,9 @@ mod tests {
         bar.send("{\"request\":\"focus-workspace\",\"index\":1}\n");
         let commands = service_after_request(&mut socket, &first);
         for command in commands {
-            let Command::FocusWorkspace(index) = command;
+            let Command::FocusWorkspace(index) = command else {
+                panic!("workspace request returned a diagnostic command")
+            };
             wm.switch_workspace(index);
         }
         socket.publish(&snapshot(&wm, &surroundings(&theme)));

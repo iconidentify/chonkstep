@@ -46,6 +46,27 @@ pub trait Backend {
     /// an index or a rectangle.
     fn monitors_ref(&self) -> &[MonitorInfo];
 
+    /// Read-only backend-specific state for a live diagnostic request.
+    /// Kept textual so the protocol-agnostic core does not learn a
+    /// compositor's surface vocabulary.
+    fn diagnostic_snapshot(&self) -> String {
+        format!("monitors={} screen={}x{}", self.monitors_ref().len(), self.screen_size().w, self.screen_size().h)
+    }
+
+    /// Changes a safe live diagnostic switch. Backends with no live
+    /// controls refuse explicitly.
+    fn set_diagnostic(&mut self, name: &str, enabled: bool) -> Result<(), String> {
+        let _ = (name, enabled);
+        Err("this backend has no live diagnostic switches".into())
+    }
+
+    /// Replaces the process tracing filter without restarting the
+    /// desktop. The binary must have installed a reload handle.
+    fn set_log_filter(&mut self, directive: &str) -> Result<(), String> {
+        let _ = directive;
+        Err("this backend has no reloadable tracing filter".into())
+    }
+
     /// The identity of a shell-owned surface — the dock, the Clip, the
     /// launcher strip, icon tiles, menu popups. The same id space
     /// `wm_theme_api::PopupHost` uses on this backend, so the desktop

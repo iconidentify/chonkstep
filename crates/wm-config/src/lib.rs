@@ -1542,7 +1542,7 @@ fn drag_modifier_from_name(name: &str) -> Option<Option<Modifiers>> {
 /// than resolved against some accidental working directory. `None`
 /// only when `$HOME` is also missing — at which point there is nowhere
 /// sane to look and the defaults are the right answer.
-fn config_path() -> Option<PathBuf> {
+pub fn config_path() -> Option<PathBuf> {
     let base = match std::env::var_os("XDG_CONFIG_HOME") {
         Some(dir) if !dir.is_empty() && PathBuf::from(&dir).is_absolute() => PathBuf::from(dir),
         _ => PathBuf::from(std::env::var_os("HOME")?).join(".config"),
