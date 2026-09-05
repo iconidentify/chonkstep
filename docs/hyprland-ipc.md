@@ -129,6 +129,32 @@ not reported as unknown syntax. Monitor scaling validates the output
 and range before changing anything, so an Omarchy script cannot record
 a scale that the compositor said it applied but did not.
 
+`keyword` is refused, and the refusal names what does work instead:
+chonkstep re-reads `~/.config/hypr` within a second of an edit, and
+`hyprctl eval hl.monitor({ output=..., scale=... })` changes a live
+scale. The one shipped Omarchy caller is the monitor panel's row toggle
+(`hyprctl keyword monitor NAME,disable` / `NAME,preferred,auto,auto`),
+and that specific form is refused by name for a reason the user can act
+on: chonkstep drives every connected output and has no disable path, so
+its `disabled` field is honestly `false` for every head and the panel's
+checkmark will not move. Growing an output-disable path—routing that
+form into the same validated apply `zwlr_output_management` already
+uses—is a real but separate piece of work; until it exists, saying so
+in the refusal is the honest answer, because `hyprctl` exits zero for a
+refusal and the string is the only diagnostic a user gets.
+
+The monitor object reports measured values, not conventional ones.
+`refreshRate` is the driven mode's rate, `availableModes` is the
+connector's mode list in `WIDTHxHEIGHT@RATEHz` with the current mode
+first, and `make`/`model` come from the same properties the matching
+`wl_output` advertises—so IPC and `zwlr_output_management` cannot
+describe one panel two ways. Two fields stay empty on purpose: `serial`,
+because no connector serial reaches this compositor, and a duplicated
+model would be a wrong answer where an empty string is a readable "not
+known"; and `vrr`, which is covered by the adaptive-sync work. A backend
+driving no real mode reports 60 Hz rather than 0, because a bar divides
+this into a frame budget.
+
 Tiling vocabulary—`layoutmsg`, `togglesplit`, `swapwindow`, `pseudo`,
 groups, special workspaces, tiled workspace options—has no faithful
 meaning on this floating desktop and is refused. The mirrored Omarchy

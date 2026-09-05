@@ -256,6 +256,63 @@ fn a_connection_storm_is_capped_before_it_can_grow_the_source_set() {
     );
 }
 
+/// The monitor object a display panel reads, against a live session.
+///
+/// Three of its fields used to be fabricated while the same session
+/// published the truth on `wl_output` and `zwlr_output_management` at
+/// the same moment: `availableModes` was empty, and `make`/`model` were
+/// empty strings. The nested backend drives one mode, so this cannot
+/// prove the *rate* is measured (its host window is 60 Hz either way —
+/// that is what the unit tests in `chonk-hyprland-ipc` are for), but it
+/// can prove the list and the identity are no longer blank.
+#[test]
+#[ignore = "needs a Wayland session to nest inside"]
+fn a_live_monitor_reports_its_real_modes_and_identity() {
+    let session = boot("hypr-ipc-monitor-facts");
+    let dir = socket_dir(&session);
+
+    let monitors = json(&dir, "j/monitors");
+    let monitor = &monitors.as_array().expect("monitors is an array")[0];
+
+    let modes = monitor["availableModes"].as_array().expect("availableModes is a list");
+    assert!(
+        !modes.is_empty(),
+        "the session enumerates this connector's modes for wlr-output-management; \
+         IPC must not report none: {monitor}"
+    );
+    let current = modes[0].as_str().expect("a mode is a string");
+    assert!(
+        current.contains('x') && current.ends_with("Hz"),
+        "Hyprland's spelling is WIDTHxHEIGHT@RATEHz, got {current:?}"
+    );
+    assert!(
+        !monitor["model"].as_str().unwrap_or_default().is_empty(),
+        "model comes from the same properties wl_output advertises: {monitor}"
+    );
+    assert!(
+        monitor["refreshRate"].as_f64().unwrap_or(0.0) > 0.0,
+        "no caller may be handed a rate it will divide by: {monitor}"
+    );
+}
+
+/// `keyword` is refused, and the refusal is the only diagnostic there
+/// is: `hyprctl` exits zero for it. The old sentence denied the
+/// compositor's headline feature.
+#[test]
+#[ignore = "needs a Wayland session to nest inside"]
+fn the_live_keyword_refusal_does_not_deny_reading_a_hyprland_config() {
+    let session = boot("hypr-ipc-keyword");
+    let dir = socket_dir(&session);
+
+    let answer = request(&dir, "keyword monitor eDP-1,disable");
+    assert!(answer.starts_with("Invalid dispatcher:"), "still a refusal: {answer}");
+    assert!(
+        !answer.contains("does not read a Hyprland config"),
+        "chonkstep reads one; the refusal must not say otherwise: {answer}"
+    );
+    assert!(answer.contains("~/.config/hypr"), "point at the route that works: {answer}");
+}
+
 /// The four requests Quickshell makes on connect, in the shapes it
 /// parses. `j/status` is first because Quickshell will not even connect
 /// to the event socket until it is answered.

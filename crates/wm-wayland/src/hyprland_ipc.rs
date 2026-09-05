@@ -147,6 +147,16 @@ fn build_snapshot(
             // instance that no key can change.
             focused: index == focused_monitor_index(wm, &monitors_info),
             active_workspace: current,
+            // The connector's own account of itself, mirrored onto the
+            // backend from the same `Output` that answers `wl_output`
+            // and `zwlr_output_management` (see
+            // `Compositor::sync_monitor_outputs`). An index with no
+            // mirror yet reports nothing rather than a placeholder.
+            make: hardware(wm, index).map(|out| out.make.clone()).unwrap_or_default(),
+            model: hardware(wm, index).map(|out| out.model.clone()).unwrap_or_default(),
+            serial: hardware(wm, index).map(|out| out.serial.clone()).unwrap_or_default(),
+            refresh_millihertz: hardware(wm, index).map_or(0, |out| out.refresh_millihertz),
+            modes: hardware(wm, index).map(|out| out.modes.clone()).unwrap_or_default(),
         })
         .collect();
 
@@ -379,6 +389,12 @@ fn keysym_name(keysym: u32) -> String {
     } else {
         name
     }
+}
+
+/// The display-hardware mirror for the monitor at `index`, if the
+/// output layout has been synced since that monitor appeared.
+fn hardware(wm: &WindowManager<WaylandBackend>, index: usize) -> Option<&crate::state::MonitorOutput> {
+    wm.backend().monitor_outputs.get(index)
 }
 
 fn focused_monitor_index(wm: &WindowManager<WaylandBackend>, monitors: &[wm_core::MonitorInfo]) -> usize {

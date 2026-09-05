@@ -252,9 +252,22 @@ pub fn answer(request: &Request, snapshot: &Snapshot) -> (String, Option<Action>
             },
             None,
         ),
-        "keyword" => {
-            ("Invalid dispatcher: chonkstep does not read a Hyprland config; keyword changes nothing".to_string(), None)
-        }
+        // A refusal, and it stays one: `keyword` is Hyprland's whole
+        // configuration namespace, and answering `ok` for all of it
+        // would be worse than saying no. But the refusal has to be
+        // *true* — chonkstep does read a Hyprland config, and the old
+        // sentence pointed a user reading it away from the one route
+        // that works. `hyprctl` exits zero either way (see the module
+        // docs), so this string is the only diagnostic there is.
+        "keyword" => (
+            "Invalid dispatcher: keyword does not mutate chonkstep's configuration. \
+             chonkstep reads ~/.config/hypr and re-reads it within a second of an edit, \
+             so edit the file instead, or use `hyprctl eval hl.monitor({...})` for a live \
+             scale change. `keyword monitor NAME,disable` cannot work at all: chonkstep \
+             drives every connected output and has no disable path."
+                .to_string(),
+            None,
+        ),
         "reload" => ("ok".to_string(), Some(Action::ReloadConfig)),
         "binds" => (if json { json_bindings(snapshot) } else { plain_bindings(snapshot) }, None),
         "devices" => (json_devices(snapshot), None),

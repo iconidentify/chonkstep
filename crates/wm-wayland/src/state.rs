@@ -48,6 +48,8 @@ use smithay::input::keyboard::XkbConfig;
 use smithay::input::pointer::CursorImageStatus;
 use smithay::input::{Seat, SeatState};
 use smithay::output::{Mode, Output, PhysicalProperties, Scale as OutputScale, Subpixel};
+
+use chonk_hyprland_ipc::MonitorMode;
 use smithay::reexports::calloop::generic::Generic;
 use smithay::reexports::calloop::{
     EventLoop, Interest, LoopHandle, Mode as TriggerMode, PostAction, RegistrationToken,
@@ -691,6 +693,16 @@ pub struct WaylandBackend {
     /// scale has no meaning (the X session is scaled by rasterizing the
     /// theme larger, not by telling anyone a factor).
     pub(crate) monitor_scales: Vec<f64>,
+    /// Per-monitor display hardware facts, in the same index order as
+    /// `Backend::monitors` — what the connector's EDID and chosen mode
+    /// say, mirrored here for the callers that ask over IPC.
+    ///
+    /// Not on `MonitorInfo` for the same reason `monitor_scales` is
+    /// not (see above): that type is `wm-core`'s and is shared with the
+    /// X11 backend, and nothing in the core wants a mode list. The
+    /// Hyprland IPC snapshot and `zwlr_output_management` are the only
+    /// readers, and both live on this side of the boundary.
+    pub(crate) monitor_outputs: Vec<MonitorOutput>,
     /// Live input devices, maintained from backend hotplug events and
     /// served through Hyprland-compatible IPC.
     pub(crate) input_devices: Vec<InputDeviceRecord>,
@@ -892,6 +904,7 @@ impl WaylandBackend {
     pub(crate) fn new(display_handle: DisplayHandle, monitors: Vec<MonitorInfo>, scale: f32) -> Self {
         let output_size = union_size(&monitors);
         let monitor_scales = vec![scale.max(0.125) as f64; monitors.len()];
+        let monitor_outputs = vec![MonitorOutput::default(); monitors.len()];
         Self {
             next_id: 1,
             windows: HashMap::new(),
@@ -920,6 +933,7 @@ impl WaylandBackend {
             root_background: RootBackground::Color((0, 0, 0)),
             monitors,
             monitor_scales,
+            monitor_outputs,
             input_devices: Vec::new(),
             ime_popups: Vec::new(),
             output_size,
@@ -1331,6 +1345,22 @@ pub(crate) struct OutputSetup {
     /// alternatives instead of pretending the current mode is the only
     /// one.
     pub modes: Vec<Mode>,
+}
+
+/// What one output's connector says about itself: the EDID identity and
+/// the modes it can drive.
+///
+/// Mirrored onto [`WaylandBackend::monitor_outputs`] so the Hyprland IPC
+/// snapshot can report measured values instead of conventional ones.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct MonitorOutput {
+    pub make: String,
+    pub model: String,
+    pub serial: String,
+    /// Current mode's refresh in millihertz; 0 when no real mode is
+    /// driven, which is what the wire layer turns into its fallback.
+    pub refresh_millihertz: u32,
+    pub modes: Vec<MonitorMode>,
 }
 
 /// One output the compositor drives, everything the session needs to
@@ -2950,6 +2980,49 @@ impl Compositor {
     pub(crate) fn sync_monitor_scales(&mut self) {
         let scales: Vec<f64> = self.outputs.iter().map(|entry| entry.scale).collect();
         self.wm.backend_mut().monitor_scales = scales;
+        self.sync_monitor_outputs();
+    }
+
+    /// Mirrors each output's EDID identity and mode list onto the
+    /// backend, where the IPC snapshot can reach them.
+    ///
+    /// Read straight off the `Output` the compositor already drives, so
+    /// what IPC reports and what `wl_output` / `zwlr_output_management`
+    /// advertise for the same head come from one source and cannot
+    /// drift. Rides along with the scale sync because the two change
+    /// together: every event that reshapes the output layout moves both.
+    pub(crate) fn sync_monitor_outputs(&mut self) {
+        let outputs: Vec<MonitorOutput> = self
+            .outputs
+            .iter()
+            .map(|entry| {
+                let properties = entry.output.physical_properties();
+                MonitorOutput {
+                    make: properties.make,
+                    model: properties.model,
+                    // No connector serial reaches this compositor. Left
+                    // empty rather than filled with the model again:
+                    // an empty string is a readable "not known", a
+                    // duplicated model is a wrong answer.
+                    serial: String::new(),
+                    refresh_millihertz: entry
+                        .output
+                        .current_mode()
+                        .and_then(|mode| u32::try_from(mode.refresh).ok())
+                        .unwrap_or(0),
+                    modes: entry
+                        .modes
+                        .iter()
+                        .map(|mode| MonitorMode {
+                            width: mode.size.w,
+                            height: mode.size.h,
+                            refresh_millihertz: u32::try_from(mode.refresh).unwrap_or(0),
+                        })
+                        .collect(),
+                }
+            })
+            .collect();
+        self.wm.backend_mut().monitor_outputs = outputs;
     }
 
     /// Change one live output's advertised scale from IPC. The scale
@@ -3787,6 +3860,21 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
             .into());
         }
     }
+
+    // Seed the hardware mirror from the outputs just created. Every
+    // later reshape re-syncs it, but the first IPC query can arrive
+    // before any reshape does, and a monitor list that reports no modes
+    // until something happens to move a scale is the same fabricated
+    // answer this replaced.
+    //
+    // Deliberately not `sync_monitor_scales`, which would also be
+    // correct-looking here and is not: `OutputEntry::new` starts every
+    // entry at 1.0 and only `advertise_scale` — which no startup path
+    // reaches — writes the session's real factor into it. Syncing
+    // scales from the entries at this point would overwrite the ledger
+    // the backend was *constructed* with and flatten a 2x session to 1x
+    // until something happened to change a scale.
+    comp.sync_monitor_outputs();
 
     // The end-to-end test door: a control socket for injected input,
     // opened only when CHONKSTEP_TEST_SOCKET is set (a user session
