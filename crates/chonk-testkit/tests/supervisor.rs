@@ -120,14 +120,34 @@ fn a_signal_death_counts_as_a_crash() {
     // The panic hook aborts (SIGABRT) and a wedged compositor gets
     // SIGKILLed by hand; both surface to the supervisor as 128+sig,
     // which must take the recovery path, not the logout one. The stub
-    // kills itself to simulate it.
+    // kills itself to simulate it — with SIGKILL, for the reason below.
     let dir = std::env::temp_dir().join("chonk-testkit-supervisor").join("signal-death");
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(dir.join("run")).unwrap();
     std::fs::create_dir_all(dir.join("state")).unwrap();
     let runs = dir.join("runs");
     let stub = dir.join("stub-compositor.sh");
-    std::fs::write(&stub, format!("#!/bin/sh\necho run >> \"{}\"\nkill -ABRT $$\n", runs.display())).unwrap();
+    // SIGKILL rather than SIGABRT, and the choice is load-bearing.
+    //
+    // The supervisor classifies on `status != 0` alone (see the crash
+    // watchdog in `scripts/wayland-session.sh`), so every 128+signal
+    // death takes the identical path — this test's own comment names
+    // both spellings for that reason. What differs is the side effect:
+    // SIGABRT dumps core, the supervisor re-execs the stub three times,
+    // and every run of this test therefore handed `systemd-coredump`
+    // four cores from `/bin/sh`. On a desktop that watches for crashes
+    // — Omarchy runs `omarchy-crash-watch`, which starts a diagnosis
+    // agent per core — an ordinary `cargo test --workspace` looked like
+    // the machine crashing over and over, and the agents it started
+    // then competed with the nested sessions the rest of this suite
+    // needs to boot.
+    //
+    // `ulimit -c 0` in the stub does *not* fix it: when
+    // `kernel.core_pattern` pipes to a program, as it does under
+    // systemd, the kernel ignores `RLIMIT_CORE`. SIGKILL is the one
+    // that never dumps, and it is the wedged-compositor case this test
+    // already claims to cover.
+    std::fs::write(&stub, format!("#!/bin/sh\necho run >> \"{}\"\nkill -KILL $$\n", runs.display())).unwrap();
     std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
     let scratch = Scratch { dir, stub, runs };
 
