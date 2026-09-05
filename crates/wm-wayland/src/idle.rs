@@ -27,6 +27,8 @@
 //! is deliberately edge-oriented telemetry: a busy client that changes
 //! only pixels should produce no lines after the initial map.
 
+use std::sync::Arc;
+
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::utils::IsAlive;
 use smithay::wayland::compositor::get_parent;
@@ -117,8 +119,16 @@ pub(crate) struct Idle {
     /// Surfaces with a live `zwp_idle_inhibitor_v1`. Liveness and
     /// visibility are judged after invalidation in [`refresh`].
     inhibitors: BoundedRefCounts<WlSurface, MAX_IDLE_INHIBITOR_SURFACES>,
-    /// A protocol inhibitor was added or removed. Window/layer/lock
-    /// visibility edges carry their own flag on `WaylandBackend`.
+    /// Session-bus inhibitors have no surface whose visibility can be
+    /// judged. Their service owns the per-caller ledger and publishes
+    /// this bounded aggregate into the compositor loop.
+    external_inhibits: u32,
+    /// Shared with the session-bus service so `GetActive` can answer
+    /// without making its worker thread synchronously call into the
+    /// compositor loop.
+    screen_saver_status: Option<Arc<crate::inhibit_bus::ScreenSaverStatus>>,
+    /// An inhibitor source changed. Window/layer/lock visibility edges
+    /// carry their own flag on `WaylandBackend`.
     inhibitors_dirty: bool,
     rejected_inhibitor_surfaces: u64,
 }
@@ -129,6 +139,8 @@ impl Idle {
             notifier,
             _inhibit: inhibit,
             inhibitors: BoundedRefCounts::new(),
+            external_inhibits: 0,
+            screen_saver_status: None,
             inhibitors_dirty: true,
             rejected_inhibitor_surfaces: 0,
         }
@@ -140,6 +152,23 @@ impl Idle {
 
     pub(crate) fn inhibitor_count(&self) -> usize {
         self.inhibitors.object_count()
+    }
+
+    pub(crate) fn attach_screen_saver_status(&mut self, status: Arc<crate::inhibit_bus::ScreenSaverStatus>) {
+        self.screen_saver_status = Some(status);
+    }
+
+    pub(crate) fn set_external_inhibitors(&mut self, count: u32) {
+        if self.external_inhibits != count {
+            self.external_inhibits = count;
+            self.inhibitors_dirty = true;
+        }
+    }
+
+    pub(crate) fn set_screen_saver_active(&self, active: bool) {
+        if let Some(status) = &self.screen_saver_status {
+            status.set_active(active);
+        }
     }
 }
 
@@ -195,16 +224,23 @@ pub(crate) fn refresh(comp: &mut Compositor) {
         return;
     }
     comp.idle.inhibitors.retain(IsAlive::alive);
-    let inhibited = !comp.wm.backend().locked && {
+    let locked = comp.wm.backend().locked;
+    if let Some(status) = &comp.idle.screen_saver_status {
+        status.set_active(locked);
+    }
+    let inhibited = !locked && {
         let rule_inhibited = comp.wm.rule_idle_inhibited();
         let backend = comp.wm.backend();
-        rule_inhibited || comp.idle.inhibitors.iter().any(|surface| surface_visible(backend, surface))
+        comp.idle.external_inhibits > 0
+            || rule_inhibited
+            || comp.idle.inhibitors.iter().any(|surface| surface_visible(backend, surface))
     };
     comp.idle.notifier.set_is_inhibited(inhibited);
     if idle_log_enabled() {
         tracing::info!(
             inhibited,
             protocol_inhibitors = comp.idle.inhibitors.object_count(),
+            external_inhibitors = comp.idle.external_inhibits,
             "idle policy reconciled"
         );
     }

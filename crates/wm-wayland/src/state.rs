@@ -3230,10 +3230,13 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
         Compositor,
         _,
     >(&display_handle, |_| true));
-    let idle = crate::idle::Idle::new(
+    let mut idle = crate::idle::Idle::new(
         smithay::wayland::idle_notify::IdleNotifierState::<Compositor>::new(&display_handle, loop_handle.clone()),
         smithay::wayland::idle_inhibit::IdleInhibitManagerState::new::<Compositor>(&display_handle),
     );
+    if let Some(status) = crate::inhibit_bus::init(&loop_handle) {
+        idle.attach_screen_saver_status(status);
+    }
     tracing::info!("layer-shell, session-lock and idle-notify advertised");
     // Same timing rule again, plus one of its own: the seat this is
     // handed must already carry a keyboard, because smithay's handler

@@ -41,6 +41,7 @@ mod hyprland_ipc;
 // the honest nested answer.
 mod gamma;
 mod idle;
+mod inhibit_bus;
 mod input;
 mod layers;
 mod lock;

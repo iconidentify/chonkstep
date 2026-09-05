@@ -82,9 +82,9 @@ already has the KMS node.
 - **xdg-desktop-portal** is the D-Bus frontend, activated on demand
   into the systemd user session.
 - **xdg-desktop-portal-wlr** is the ScreenCast/Screenshot backend.
-- **xdg-desktop-portal-gtk** answers everything else — the file
-  chooser a browser opens for uploads, notifications, settings — so
-  the desktop is not left portal-less outside of capture.
+- **xdg-desktop-portal-gtk** answers the toolkit portals — the file
+  chooser a browser opens for uploads, notifications, settings — while
+  ChonkStep itself answers Inhibit because it owns the idle timers.
 
 ## How the pieces find each other
 
@@ -102,6 +102,7 @@ managers — both spellings installed by `scripts/install.sh`), and
 
     [preferred]
     default=gtk
+    org.freedesktop.impl.portal.Inhibit=chonkstep
     org.freedesktop.impl.portal.ScreenCast=wlr
     org.freedesktop.impl.portal.Screenshot=wlr
 
@@ -126,8 +127,8 @@ crash recovery re-execs the compositor):
         WAYLAND_DISPLAY=<socket> XDG_CURRENT_DESKTOP=chonkstep \
         XDG_SESSION_TYPE=wayland
 
-Nothing in the compositor itself touches D-Bus; the session script
-owns this, as it owns the rest of the session environment.
+The compositor's D-Bus use is deliberately limited to its idle-inhibit
+service. The session script still owns activation-environment publishing.
 
 ## Portal interface status
 
@@ -137,6 +138,7 @@ Checked against the frontend with the chonkstep config active:
 | --- | --- | --- |
 | ScreenCast | wlr | **Works** — verified end to end; node id returned, frames flowing, pixels correct |
 | Screenshot | wlr | **Works** — `Screenshot()` returned a real PNG of the session (xdg-desktop-portal-wlr shells out to `grim`, which is also installed) |
+| Inhibit | chonkstep | Idle requests feed the compositor's own timers and are released on request close or caller disconnect |
 | FileChooser, Notification, Settings, and the rest | gtk | **Backend activates and answers** (D-Bus ping + interface version 4 confirmed); the dialogs themselves are ordinary windows and were not driven headlessly |
 | Window/toplevel capture (`types=2` in SelectSources) | wlr | **Not available** — xdg-desktop-portal-wlr only captures outputs (`AvailableSourceTypes=1`); this is an upstream backend limitation, not a chonkstep gap. "Share entire screen" works; "share a single window" is not offered |
 

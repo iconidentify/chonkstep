@@ -39,6 +39,11 @@ chonk-xsettings = { path = "../chonk-xsettings" }
 # and `chonk-xsettings` use so the workspace resolves one copy.
 x11rb = "0.13"
 tracing = "0.1"
+# The session-bus bridge for the two ecosystem idle-inhibition APIs
+# that cannot reach a Wayland compositor directly.  zbus is pure Rust;
+# its blocking facade owns a small off-loop service thread and sends
+# only policy edges into calloop (see `inhibit_bus.rs`).
+zbus = "5.19"
 # Smithay reexports this same version; enabling its Linux signalfd
 # source lets TERM/HUP/INT enter the compositor event loop and receive
 # orderly logout teardown.

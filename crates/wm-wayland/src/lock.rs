@@ -279,6 +279,7 @@ impl UnlockRequest {
 fn enter_lock_domain(comp: &mut Compositor) {
     comp.mark_hyprland_state_dirty();
     comp.session_lock.mark_dirty();
+    comp.idle.set_screen_saver_active(true);
     let backend = comp.wm.backend_mut();
     backend.locked = true;
     backend.mark_idle_policy_dirty();
@@ -351,6 +352,7 @@ impl SessionLockHandler for Compositor {
     fn unlock(&mut self) {
         tracing::info!("session unlocked");
         self.mark_hyprland_state_dirty();
+        self.idle.set_screen_saver_active(false);
         self.session_lock.machine.unlocked();
         self.session_lock.pending_ack = None;
         self.session_lock.holder = None;

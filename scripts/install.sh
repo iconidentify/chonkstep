@@ -21,9 +21,10 @@
 #      (scripts/wayland-session.sh) - so a login manager offers
 #      chonkstep in either flavour, and a machine with no login manager
 #      can start either one from a TTY.
-#   4. Installs the portal backend map,
+#   4. Installs the portal backend declaration and map,
 #      /usr/share/xdg-desktop-portal/chonkstep-portals.conf, which
-#      routes screen sharing to xdg-desktop-portal-wlr.
+#      route idle inhibition to the compositor and screen sharing to
+#      xdg-desktop-portal-wlr.
 #   5. Seeds ~/.config/chonkstep/config.toml from the fully commented
 #      example, only if there is none.
 #   6. Links the two user-facing tools into ~/.local/bin: chonk-get (the
@@ -115,8 +116,9 @@ echo "Installing dependencies (sudo)..."
 # talks to. xdg-desktop-portal is the D-Bus frontend, xdg-desktop-
 # portal-wlr the ScreenCast/Screenshot backend that speaks the
 # zwlr_screencopy protocol chonkstep-wayland advertises, xdg-desktop-
-# portal-gtk the fallback for everything else (file chooser and
-# friends), and pipewire carries the frames from backend to browser.
+# portal-gtk the fallback for everything except idle inhibition (which
+# the compositor answers), and pipewire carries the frames from backend
+# to browser.
 # See docs/screen-sharing.md.
 # JetBrains Mono Nerd comes in two conflicting packages and stock
 # Omarchy ships the -basic variant; demanding the full one makes
@@ -256,10 +258,13 @@ fi
 sudo rm -f /etc/sddm.conf.d/20-chonkstep-theme.conf
 echo "Installed chonkstep's SDDM integration. Undo: sudo rm -f /etc/sddm.conf.d/zz-chonkstep-{theme,autologin}.conf /etc/systemd/system/sddm.service.d/90-chonkstep-resilience.conf"
 
-# The portal backend map: ScreenCast/Screenshot to the wlr backend
-# (screen sharing — see docs/screen-sharing.md), the rest to GTK. The
-# file is matched by the XDG_CURRENT_DESKTOP value set above, and a
-# user can override it in ~/.config/xdg-desktop-portal/.
+# The portal backend declaration and map: Inhibit to the compositor,
+# ScreenCast/Screenshot to the wlr backend (screen sharing — see
+# docs/screen-sharing.md), and the rest to GTK. The map is matched by
+# the XDG_CURRENT_DESKTOP value set above, and a user can override it
+# in ~/.config/xdg-desktop-portal/.
+sudo install -Dm644 packaging/portal/chonkstep.portal \
+    /usr/share/xdg-desktop-portal/portals/chonkstep.portal
 sudo install -Dm644 packaging/portal/chonkstep-portals.conf \
     /usr/share/xdg-desktop-portal/chonkstep-portals.conf
 
