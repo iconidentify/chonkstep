@@ -19,7 +19,7 @@ pub(crate) fn with_rgba_pixels<R>(
     size: Size<i32, Buffer>,
     consume: impl FnOnce(&[u8]) -> R,
 ) -> Result<R, String> {
-    let length = rgba_length(size).ok_or("invalid RGBA readback extent")?;
+    let length = rgba_length(size.w, size.h).ok_or("invalid RGBA readback extent")?;
     // In Smithay 0.7, Blit is a core-GLES-3-only capability. Unlike
     // re-querying GL_VERSION on every capture this is already cached.
     if renderer.capabilities().contains(&Capability::Blit) {
@@ -63,11 +63,14 @@ pub(crate) fn with_rgba_pixels<R>(
     Ok(consume(&pixels))
 }
 
-fn rgba_length(size: Size<i32, Buffer>) -> Option<usize> {
-    if size.w <= 0 || size.h <= 0 {
+// Validate raw dimensions: Smithay's Size constructor debug-asserts on
+// negative inputs before our allocation guard could inspect them. Keeping
+// this arithmetic independent of Size tests the same rejection in every profile.
+fn rgba_length(width: i32, height: i32) -> Option<usize> {
+    if width <= 0 || height <= 0 {
         return None;
     }
-    (size.w as usize).checked_mul(size.h as usize)?.checked_mul(4)
+    (width as usize).checked_mul(height as usize)?.checked_mul(4)
         .filter(|length| *length <= isize::MAX as usize)
 }
 
@@ -76,10 +79,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn readback_extents_are_checked_before_allocating_or_calling_gl() {
-        assert_eq!(rgba_length((1280, 800).into()), Some(4_096_000));
-        for size in [(0, 1), (1, 0), (-1, 1), (1, -1), (i32::MAX, i32::MAX)] {
-            assert_eq!(rgba_length(size.into()), None);
+    fn valid_readback_extents_count_four_bytes_per_pixel() {
+        assert_eq!(rgba_length(1, 1), Some(4));
+        assert_eq!(rgba_length(1280, 800), Some(4_096_000));
+    }
+
+    #[test]
+    fn empty_and_negative_readback_extents_are_rejected_without_constructing_geometry() {
+        for (width, height) in [(0, 0), (0, 1), (1, 0), (-1, 1), (1, -1), (-1, -1),
+            (i32::MIN, 1), (1, i32::MIN)] {
+            assert_eq!(rgba_length(width, height), None, "extent {width}x{height}");
         }
+    }
+
+    #[test]
+    fn oversized_readback_extents_are_rejected_before_allocating_or_calling_gl() {
+        // Exceeds isize::MAX on 64-bit targets and overflows usize on 32-bit targets.
+        assert_eq!(rgba_length(i32::MAX, i32::MAX), None);
     }
 }

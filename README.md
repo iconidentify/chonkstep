@@ -718,6 +718,12 @@ always available; it is not rebindable from the config file.
   is pure Rust (tiny-skia + cosmic-text, no X server needed), so most
   of the visual pipeline is unit-testable, including pixel-level
   regression tests for the relief recipes.
+- `scripts/check.sh` runs the same strict Clippy, documentation, debug-profile
+  unit, and benchmark-harness checks as CI. Individual gates are available as
+  `lint`, `docs`, `unit`, `wayland-unit`, and `harness`. Run this before pushing;
+  release-only tests miss debug assertions, and plain `clippy -D warnings`
+  does not enable the additional safety and blocking-call lints CI requires.
+  The Rust gates need the Wayland build dependencies installed locally.
 - `scripts/e2e.sh --headless` starts an isolated Weston host and runs the
   complete Wayland integration suite one compositor at a time. It exercises
   real clients and captured pixels without touching the logged-in desktop;
