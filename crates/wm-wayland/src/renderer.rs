@@ -898,7 +898,10 @@ fn make_winit_surface_current(
     // GL state, framebuffer contents, or resource ownership is changed.
     let result = unsafe { egl::MakeCurrent(**display, surface, surface, handle) };
     if result == egl::FALSE {
-        return Err(format!("make current: EGL error {:#x}", unsafe { egl::GetError() }));
+        // SAFETY: EGL's entry points are loaded for this live backend.
+        // GetError only reads/clears this thread's EGL error and needs no current context.
+        let error = unsafe { egl::GetError() };
+        return Err(format!("make current: EGL error {error:#x}"));
     }
     Ok(())
 }

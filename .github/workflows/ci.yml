@@ -34,6 +34,9 @@ jobs:
       - name: Run the Python SDK tests
         run: python3 -m unittest discover bindings/python/tests
 
+      - name: Run benchmark and preflight harness regression tests
+        run: scripts/check.sh harness
+
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7
         with:
           go-version-file: bindings/go/chonkdock/go.mod
@@ -59,6 +62,8 @@ jobs:
           bash -n \
             packaging/arch/PKGBUILD \
             packaging/arch/PKGBUILD-release \
+            scripts/check.sh \
+            scripts/e2e.sh \
             scripts/install.sh \
             scripts/chonkstep-bugreport \
             scripts/omarchy-install-desktop-chonkstep \
@@ -68,6 +73,8 @@ jobs:
             scripts/verify-install.sh \
             scripts/wayland-session.sh
           shellcheck \
+            scripts/check.sh \
+            scripts/e2e.sh \
             scripts/chonkstep-bugreport \
             scripts/omarchy-install-desktop-chonkstep \
             scripts/omarchy-remove-desktop-chonkstep \
@@ -90,7 +97,7 @@ jobs:
         # untested but because they are the wayland job's whole purpose
         # (which installs their system libraries and builds+tests them);
         # compiling Smithay twice per push buys nothing.
-        run: cargo test --workspace --exclude wm-wayland --exclude chonkstep-wayland
+        run: scripts/check.sh unit
 
       - name: Install X11 smoke test dependencies
         # libx11-dev is here for the undecorated-client probe built in
@@ -389,7 +396,7 @@ jobs:
         run: cargo build -p wm-wayland -p chonkstep-wayland --locked
 
       - name: Run the wm-wayland test suite
-        run: cargo test -p wm-wayland
+        run: scripts/check.sh wayland-unit
 
       # Weston provides the host display a nested compositor needs,
       # with Mesa's software renderer on runners that expose no GPU.
@@ -405,7 +412,22 @@ jobs:
       # turns the day it stops coming into a red build instead of a
       # quietly smaller suite.
       - name: Run the nested compositor end-to-end suite
+        env:
+          # This is the software-renderer gate, not hardware coverage.
+          # Avoid probing Zink or an incidental runner GPU before falling back.
+          LIBGL_ALWAYS_SOFTWARE: '1'
+          GALLIUM_DRIVER: llvmpipe
+          TMPDIR: ${{ runner.temp }}
         run: scripts/e2e.sh --headless
+
+      - name: Preserve failed nested-session logs and screenshots
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: wayland-failure-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/chonk-testkit/
+          if-no-files-found: ignore
+          retention-days: 7
 
   # Lint. This job exists because of one specific incident and one
   # specific class of bug.
@@ -476,9 +498,9 @@ jobs:
       # three bans verbatim; if you add a ban to the root file, add it
       # there too or that crate quietly loses it.
       - name: Deny clippy warnings workspace-wide
-        run: cargo clippy --workspace --all-targets --no-deps -- -D warnings -D clippy::disallowed_methods -D clippy::disallowed_types -D clippy::undocumented_unsafe_blocks
+        # Shared with local preflight: do not replace this with a weaker
+        # `-D warnings` invocation that omits the opt-in safety/blocking lints.
+        run: scripts/check.sh lint
 
       - name: Deny broken links and warnings in public Rust documentation
-        env:
-          RUSTDOCFLAGS: -D warnings -A rustdoc::private_intra_doc_links
-        run: cargo doc --workspace --no-deps --locked --document-private-items
+        run: scripts/check.sh docs

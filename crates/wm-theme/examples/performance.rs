@@ -31,6 +31,8 @@ fn allocated(bytes: usize) {
 // and layout. Accounting only touches atomics and cannot allocate recursively.
 unsafe impl GlobalAlloc for CountingAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
+        // SAFETY: GlobalAlloc's caller supplies a valid, nonzero layout;
+        // it is forwarded unchanged to the backing System allocator.
         let pointer = unsafe { System.alloc(layout) };
         if !pointer.is_null() {
             allocated(layout.size());
@@ -39,6 +41,8 @@ unsafe impl GlobalAlloc for CountingAllocator {
     }
 
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
+        // SAFETY: the caller's valid, nonzero layout is forwarded unchanged.
+        // System supplies the zero initialization required by this operation.
         let pointer = unsafe { System.alloc_zeroed(layout) };
         if !pointer.is_null() {
             allocated(layout.size());
@@ -47,11 +51,16 @@ unsafe impl GlobalAlloc for CountingAllocator {
     }
 
     unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
+        // SAFETY: every allocation comes from System, and the caller must
+        // supply a still-live pointer and the same layout used to allocate it.
         unsafe { System.dealloc(pointer, layout) };
         LIVE_BYTES.fetch_sub(layout.size(), Relaxed);
     }
 
     unsafe fn realloc(&self, pointer: *mut u8, layout: Layout, new_size: usize) -> *mut u8 {
+        // SAFETY: the caller supplies a live System allocation, its original
+        // layout, and a nonzero new size satisfying GlobalAlloc's size bound.
+        // Forward all three unchanged; a null result leaves the old allocation live.
         let result = unsafe { System.realloc(pointer, layout, new_size) };
         if !result.is_null() {
             LIVE_BYTES.fetch_sub(layout.size(), Relaxed);

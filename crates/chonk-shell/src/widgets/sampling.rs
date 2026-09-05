@@ -789,6 +789,81 @@ fn sample_loop<T>(shared: Arc<Shared<T>>, mut sample: impl FnMut() -> Outcome<T>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Write;
+
+    const TEST_DEADLINE: Duration = Duration::from_secs(10);
+
+    /// A real shell child announces entry, then blocks on a FIFO until
+    /// the test releases it. No scheduler-speed assumption or long-lived
+    /// sleep process is needed to prove that our caller remains runnable.
+    struct CommandGate {
+        root: PathBuf,
+        release: std::fs::File,
+    }
+
+    impl CommandGate {
+        fn new() -> Self {
+            use std::os::unix::{ffi::OsStrExt, fs::OpenOptionsExt};
+            use std::sync::atomic::{AtomicUsize, Ordering};
+            static NEXT: AtomicUsize = AtomicUsize::new(0);
+            let root = loop {
+                let root = std::env::temp_dir().join(format!("chonk-sampling-gate-{}-{}",
+                    std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
+                match std::fs::create_dir(&root) {
+                    Ok(()) => break root,
+                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                    Err(error) => panic!("create command fixture: {error}"),
+                }
+            };
+            let fifo = root.join("release");
+            let path = std::ffi::CString::new(fifo.as_os_str().as_bytes()).unwrap();
+            // SAFETY: path is a live NUL-terminated string naming a new file
+            // in our exclusively created fixture directory; mkfifo retains no pointer.
+            assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
+            // O_RDWR opens a Linux FIFO without waiting for the child's reader.
+            // O_NONBLOCK also keeps failure-path cleanup from blocking on a write.
+            let release = std::fs::OpenOptions::new().read(true).write(true)
+                .custom_flags(libc::O_NONBLOCK).open(fifo).unwrap();
+            Self { root, release }
+        }
+
+        fn args(&self) -> Vec<String> {
+            vec!["-c".into(),
+                "printf started > \"$1\"; IFS= read -r reply < \"$2\"; printf finished > \"$3\"".into(),
+                "chonk-test-command".into(), self.root.join("started").to_string_lossy().into_owned(),
+                self.root.join("release").to_string_lossy().into_owned(),
+                self.root.join("finished").to_string_lossy().into_owned()]
+        }
+
+        fn wait_started(&self) {
+            let deadline = std::time::Instant::now() + TEST_DEADLINE;
+            while !self.root.join("started").exists() {
+                assert!(std::time::Instant::now() < deadline, "child did not enter its gated command");
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        }
+
+        fn unblock(&mut self) {
+            writeln!(self.release, "release").unwrap();
+        }
+    }
+
+    impl Drop for CommandGate {
+        fn drop(&mut self) {
+            // Also release a child on assertion failure. If it has not opened
+            // the FIFO yet, removing the path makes its open fail instead of hang.
+            let _ = writeln!(self.release, "release");
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    struct NotifyWake(std::sync::mpsc::Sender<()>);
+
+    impl Wake for NotifyWake {
+        fn resample_soon(&self) {
+            let _ = self.0.send(());
+        }
+    }
 
     fn wait_for_generation<T>(worker: &Worker<T>, generation: u64) {
         let deadline = std::time::Instant::now() + Duration::from_secs(2);
@@ -817,7 +892,7 @@ mod tests {
             let mut worker = Worker::spawn("test-resume-counter".into(), Duration::from_secs(3600), true, move || {
                 count += 1;
                 let _ = started.send(count);
-                let _ = proceed.recv_timeout(Duration::from_secs(2));
+                let _ = proceed.recv(); // Release or sender drop, never a scheduler-driven sample.
                 Outcome::Sampled(Some(count))
             });
             assert_eq!(starts.recv_timeout(Duration::from_secs(2)).unwrap(), 1);
@@ -872,7 +947,7 @@ mod tests {
         let mut worker = Worker::spawn("test-visibility".into(), Duration::from_millis(1), false, move || {
             let _ = &lifetime;
             let _ = sampled.send(());
-            let _ = proceed.recv_timeout(Duration::from_secs(2));
+            let _ = proceed.recv();
             Outcome::Sampled(Some("reading".to_string()))
         });
         // The same effect handle must work before and after first show.
@@ -922,7 +997,7 @@ mod tests {
         let (release, proceed) = mpsc::channel();
         let worker = Worker::spawn("test-resample".into(), Duration::from_secs(3600), true, move || {
             let _ = sampled.send(());
-            let _ = proceed.recv_timeout(Duration::from_secs(2));
+            let _ = proceed.recv();
             Outcome::Sampled(Some(1_u32))
         });
         samples.recv_timeout(Duration::from_secs(2)).expect("first read starts");
@@ -1035,6 +1110,7 @@ mod tests {
             }
             std::thread::sleep(Duration::from_millis(1));
         }
+        assert!(registry.samples().fresh(id), "the missing-file worker must publish an actual reading attempt");
         assert_eq!(registry.samples().text(id), None);
         assert!(!registry.samples().unusable(id), "a file that is not there yet may be there later");
     }
@@ -1094,39 +1170,41 @@ mod tests {
     /// property rather than the symptom.
     ///
     /// `refresh` is what runs on the compositor's repaint thread. A
-    /// sampler parked in a child process that will not return for two
-    /// seconds must not cost that thread anything at all — which is the
+    /// sampler parked in a child process must not wait on that child — the
     /// exact opposite of what `nmcli dev wifi` did from `tick()` on
     /// 2026-08-29, when a ~3.6s scan became a ~3.6s freeze.
     ///
-    /// The bound is one 60 Hz display frame (16 ms) for
-    /// a *thousand* refreshes taken while the child is parked — chosen
-    /// loose enough that a debug build on a loaded runner cannot fail
-    /// it by accident, and still tighter than the failure it guards
-    /// against by more than two orders of magnitude.
+    /// Prove ordering, not a 16 ms microbenchmark: the child cannot exit
+    /// until all refreshes have returned. The timeout is only a deadlock
+    /// watchdog, so a descheduled test thread is not mistaken for blocking I/O.
     #[test]
-    fn a_sampler_blocked_in_a_child_process_costs_the_caller_nothing() {
+    fn a_sampler_blocked_in_a_child_process_does_not_block_refresh() {
+        let mut gate = CommandGate::new();
         let mut registry = SamplerRegistry::new();
         registry.register(vec![Source::Command {
-            program: "sleep",
-            args: vec!["2".to_string()],
-            interval: Duration::from_millis(1),
+            program: "sh", args: gate.args(), interval: Duration::from_secs(3600),
         }]);
-        // Let the worker actually reach the child before measuring, so
-        // this times refreshes taken *while* it is blocked.
-        std::thread::sleep(Duration::from_millis(50));
-
-        let start = std::time::Instant::now();
-        for _ in 0..1_000 {
-            registry.refresh();
-            let _ = registry.samples();
-        }
-        let elapsed = start.elapsed();
-        assert!(
-            elapsed < Duration::from_millis(16),
-            "1000 refreshes took {elapsed:?} while a sampler was parked in a 2s child; the whole point of \
-             this module is that the repaint thread never waits for one"
-        );
+        gate.wait_started();
+        let (done, returned) = std::sync::mpsc::channel();
+        let caller = std::thread::spawn(move || {
+            for _ in 0..1_000 {
+                registry.refresh();
+                let _ = registry.samples();
+            }
+            registry.set_active(false);
+            let Sampler::Text(worker) = &registry.samplers[0] else { unreachable!() };
+            let generation = worker.shared.state.lock().unwrap().generation;
+            let _ = done.send(generation);
+            registry
+        });
+        let result = returned.recv_timeout(TEST_DEADLINE);
+        assert!(!gate.root.join("finished").exists(), "the child must still be gated");
+        gate.unblock();
+        let registry = caller.join().unwrap();
+        assert_eq!(result.expect("refresh must return before the child is released"), 0,
+            "refresh must finish while sampling is still blocked, not after the command deadline kills it");
+        let Sampler::Text(worker) = &registry.samplers[0] else { unreachable!() };
+        wait_for_generation(worker, 1); // The child has exited and has been reaped.
     }
 
     /// The same claim for the click path: `Effect::Run` hands the
@@ -1138,14 +1216,34 @@ mod tests {
     /// the desktop waits for none of them.
     #[test]
     fn running_effects_returns_before_the_commands_do() {
-        let start = std::time::Instant::now();
-        run_detached(vec![("sleep", vec!["2".to_string()], None)], Vec::new());
-        assert!(start.elapsed() < Duration::from_millis(50), "run_detached must not wait on the child");
-
-        let start = std::time::Instant::now();
-        run_detached(vec![("sleep", vec!["2".to_string()], None), ("sleep", vec!["2".to_string()], None)], Vec::new());
-        assert!(start.elapsed() < Duration::from_millis(50), "a sequence must not wait on its children either");
-
+        for count in [1, 2] {
+            let mut gates: Vec<_> = (0..count).map(|_| CommandGate::new()).collect();
+            let (completed, completions) = std::sync::mpsc::channel();
+            let commands = gates.iter().map(|gate| {
+                ("sh", gate.args(), Some(Resampler { shared: Arc::new(NotifyWake(completed.clone())) }))
+            }).collect();
+            let (done, returned) = std::sync::mpsc::channel();
+            let caller = std::thread::spawn(move || {
+                run_detached(commands, Vec::new());
+                let _ = done.send(());
+            });
+            gates[0].wait_started();
+            let result = returned.recv_timeout(TEST_DEADLINE);
+            assert!(gates.iter().all(|gate| !gate.root.join("finished").exists()));
+            if count == 2 {
+                assert!(!gates[1].root.join("started").exists(), "commands must run in sequence");
+            }
+            // Always release/reap every command before asserting the result,
+            // including when a synchronous-execution regression is detected.
+            for gate in &mut gates {
+                gate.wait_started();
+                gate.unblock();
+                completions.recv_timeout(TEST_DEADLINE).expect("released effect is reaped and requests resampling");
+                assert!(gate.root.join("finished").exists());
+            }
+            caller.join().unwrap();
+            result.expect("run_detached must return before any child is released");
+        }
         run_detached(Vec::new(), Vec::new());
     }
 
