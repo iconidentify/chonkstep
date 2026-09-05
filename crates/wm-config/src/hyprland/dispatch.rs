@@ -249,12 +249,20 @@ fn compositor_verb(name: &str, arg: &str) -> Verb {
             Verb::Unbound(Unbound::NoVerb)
         }
         // Talking to the compositor about itself.
+        "global" => {
+            let target = arg.trim();
+            match target.split_once(':') {
+                Some((_, id)) if !id.is_empty() => {
+                    Verb::Action(Action::GlobalShortcut(target.to_string()))
+                }
+                _ => Verb::Unbound(Unbound::NoVerb),
+            }
+        }
         "exit"
         | "forcerendererreload"
         | "dpms"
         | "exec-shutdown"
         | "submap"
-        | "global"
         | "setprop"
         | "toggleopaque"
         | "renameworkspace" => Verb::Unbound(Unbound::HyprlandOnly),

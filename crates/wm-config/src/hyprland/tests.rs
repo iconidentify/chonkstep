@@ -835,6 +835,21 @@ fn a_doubled_hash_stays_a_hash_in_a_url() {
     assert_eq!(command, "launch-webapp \"https://x.com/#anchor\"");
 }
 
+#[test]
+fn a_global_dispatcher_becomes_a_portal_shortcut_target() {
+    let root = scratch("global-shortcut");
+    write(
+        &root.join(".config/hypr/hyprland.conf"),
+        "bind = SUPER, M, global, org.example.Player:mute\n",
+    );
+    let reading = read(&Roots::under(&root));
+    assert_eq!(
+        action_for(&reading, "super+m"),
+        Some(Action::GlobalShortcut("org.example.Player:mute".into()))
+    );
+    let _ = std::fs::remove_dir_all(root);
+}
+
 /// Hyprland's `$variables`, which every hand-written `hyprland.conf`
 /// from the upstream wiki uses for its modifier.
 #[test]

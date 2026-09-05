@@ -212,6 +212,8 @@ pub struct Snapshot {
     /// compositor has received its first pointer motion.
     pub cursor_position: Option<(i32, i32)>,
     pub bindings: Vec<Binding>,
+    /// Effective configuration refusals, one actionable message each.
+    pub config_errors: Vec<String>,
     pub devices: Devices,
 }
 

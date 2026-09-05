@@ -95,6 +95,10 @@ bitflags::bitflags! {
         const NO_FOCUS = 1 << 9;
         /// Client-originated activation requests may not steal focus.
         const NO_ACTIVATE = 1 << 10;
+        /// This toplevel is a modal transient. Its parent remains
+        /// visible, but focus, close and drag gestures are redirected
+        /// to the live modal child until the dialog is dismissed.
+        const MODAL = 1 << 11;
     }
 }
 
@@ -138,6 +142,10 @@ pub struct Client<B: Backend> {
     pub layout: DecorationLayout,
     pub lifecycle: Lifecycle,
     pub flags: ClientFlags,
+    /// Managed transient parent, resolved from `xdg_toplevel.set_parent`
+    /// or `WM_TRANSIENT_FOR`. Kept in core state so placement and every
+    /// lifecycle transition use the same relationship as stacking.
+    pub parent: Option<ClientId>,
     /// Whether this client's first over-limit geometry has already
     /// been logged. Client sizes cross several paths (initial map,
     /// later ConfigureRequest, session restore); one bit keeps a buggy
@@ -174,6 +182,7 @@ impl<B: Backend> Client<B> {
             layout: DecorationLayout::default(),
             lifecycle: Lifecycle::Normal,
             flags: ClientFlags::empty(),
+            parent: None,
             geometry_clamp_logged: false,
             restore_geometry: None,
             // `WindowManager::handle_map_request` overwrites this with

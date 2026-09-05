@@ -225,7 +225,13 @@ fn load_image(path: &Path) -> Option<Pixmap> {
 fn cover(source: &Pixmap, screen: Size) -> DecorationBuffer {
     let (screen_w, screen_h) = (screen.w.max(1), screen.h.max(1));
     let mut dest = Pixmap::new(screen_w, screen_h).expect("a non-zero pixmap");
-    let scale = (screen_w as f32 / source.width() as f32).max(screen_h as f32 / source.height() as f32);
+    // A wallpaper is the bottom of the scene, so transparent source
+    // pixels must resolve here rather than force every renderer to
+    // blend the full output forever. Black is the neutral fallback and
+    // keeps every pixel we publish honestly opaque.
+    dest.fill(tiny_skia::Color::from_rgba8(0, 0, 0, 255));
+    let scale =
+        (screen_w as f32 / source.width() as f32).max(screen_h as f32 / source.height() as f32);
     let offset_x = (screen_w as f32 - source.width() as f32 * scale) * 0.5;
     let offset_y = (screen_h as f32 - source.height() as f32 * scale) * 0.5;
     let image_paint = PixmapPaint { quality: FilterQuality::Bicubic, ..PixmapPaint::default() };
@@ -374,6 +380,19 @@ mod tests {
         // A degenerate screen never panics or divides by zero.
         let dot = cover(&source, Size::new(0, 0));
         assert_eq!((dot.width, dot.height), (1, 1));
+    }
+
+    #[test]
+    fn cover_resolves_transparency_to_an_opaque_wallpaper() {
+        let mut source = Pixmap::new(2, 2).unwrap();
+        source.fill(tiny_skia::Color::from_rgba8(255, 0, 0, 80));
+        let covered = cover(&source, Size::new(8, 8));
+        assert!(covered
+            .pixels
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .all(|pixel| pixel[3] == 255));
     }
 
     /// A decoded image arrives straight-alpha and leaves premultiplied,

@@ -7,7 +7,7 @@ use wm_theme_api::{
 
 use crate::backend::Backend;
 use crate::client::MonitorInfo;
-use crate::types::{BackendEvent, DragHandle, KeyCombo, MouseButton, ScrollDelta, SizeHints, WindowType, WmClass, WmProtocol};
+use crate::types::{BackendEvent, DragHandle, KeyCombo, MouseButton, NetStateSnapshot, ScrollDelta, SizeHints, WindowType, WmClass, WmProtocol};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct FakeWindowId(pub u64);
@@ -148,6 +148,8 @@ pub struct FakeBackend {
     /// `WM_TRANSIENT_FOR` report them — see
     /// [`Self::set_window_parent`].
     pub parents: std::collections::HashMap<FakeWindowId, FakeWindowId>,
+    /// Windows currently declaring modal transient state.
+    pub modal_windows: HashSet<FakeWindowId>,
     /// Whether each client's own content window is currently mapped —
     /// defaults to "mapped" (absent from the map) the moment a window is
     /// created, matching a real client that maps itself before the WM
@@ -180,9 +182,9 @@ pub struct FakeBackend {
     /// `(area, workspace_count)`.
     pub published_workareas: Vec<(Rect, usize)>,
     /// Every `publish_net_state` call in order, as
-    /// `(window, fullscreen, max_h, max_v, shaded, hidden)` — matching
+    /// `(window, fullscreen, max_h, max_v, shaded, hidden, modal)` — matching
     /// the trait method's parameter order exactly.
-    pub published_net_states: Vec<(FakeWindowId, bool, bool, bool, bool, bool)>,
+    pub published_net_states: Vec<(FakeWindowId, bool, bool, bool, bool, bool, bool)>,
     /// Every `publish_window_desktop` call in order, as
     /// `(window, desktop)` — a history, so a test can assert both the
     /// initial manage-time publish and a later move's re-publish, not
@@ -260,6 +262,14 @@ impl FakeBackend {
     /// `xdg_toplevel.set_parent` and `WM_TRANSIENT_FOR` do.
     pub fn set_window_parent(&mut self, child: FakeWindowId, parent: FakeWindowId) {
         self.parents.insert(child, parent);
+    }
+
+    pub fn set_window_modal(&mut self, window: FakeWindowId, modal: bool) {
+        if modal {
+            self.modal_windows.insert(window);
+        } else {
+            self.modal_windows.remove(&window);
+        }
     }
 
     /// Stages a scroll for the next `take_shell_scroll` drain, as a
@@ -424,6 +434,10 @@ impl Backend for FakeBackend {
         self.parents.get(&window).copied()
     }
 
+    fn window_is_modal(&self, window: Self::WindowId) -> bool {
+        self.modal_windows.contains(&window)
+    }
+
     fn raise(&mut self, frame: Self::FrameId) {
         self.raised_frames.push(frame);
     }
@@ -516,8 +530,17 @@ impl Backend for FakeBackend {
         self.published_workareas.push((area, workspace_count));
     }
 
-    fn publish_net_state(&mut self, window: Self::WindowId, fullscreen: bool, max_h: bool, max_v: bool, shaded: bool, hidden: bool) {
-        self.published_net_states.push((window, fullscreen, max_h, max_v, shaded, hidden));
+    fn publish_net_state(&mut self, window: Self::WindowId, state: NetStateSnapshot) {
+        self.published_net_states
+            .push((
+                window,
+                state.fullscreen,
+                state.maximized_horizontally,
+                state.maximized_vertically,
+                state.shaded,
+                state.hidden,
+                state.modal,
+            ));
     }
 
     fn publish_window_desktop(&mut self, window: Self::WindowId, desktop: usize) {

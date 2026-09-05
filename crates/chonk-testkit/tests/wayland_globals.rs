@@ -55,6 +55,8 @@ fn ordinary_desktop_globals_bind_successfully() {
         "ext_foreign_toplevel_image_capture_source_manager_v1",
         "hyprland_toplevel_mapping_manager_v1",
         "hyprland_focus_grab_manager_v1",
+        "hyprland_global_shortcuts_manager_v1",
+        "zwlr_virtual_pointer_manager_v1",
     ] {
         assert!(
             report.contains(&format!("interface: '{interface}'")),

@@ -91,7 +91,8 @@ start with `[[BATCH]]` and use `;` separators.
 | `devices` | Seat keyboards and pointers; keyboards include `name`, `active_keymap`, `layout`, and `active_layout_index` |
 | `binds` | The live chonkstep keymap in Hyprland's plain bind-block format (or JSON) |
 | `getoption` | A complete, explicitly unset option shape; no fabricated Hyprland style value |
-| `version`, `configerrors`, `splash` | Supported |
+| `version`, `splash` | Supported |
+| `configerrors` | Retained live-Hyprland refusals, one per line or as JSON `{"error": "…"}` objects |
 
 The nested backend has no libinput device records, so it reports one
 logical keyboard and pointer. A hardware session reports its libinput

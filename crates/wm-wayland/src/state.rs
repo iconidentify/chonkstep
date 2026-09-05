@@ -390,6 +390,12 @@ pub(crate) struct WindowRecord {
     /// layers by its own [`StackEntry::Window`] slot like any framed
     /// neighbour.
     pub window_type: WindowType,
+    /// Resolved managed parent. XDG updates this on commits and X11 on
+    /// `WM_TRANSIENT_FOR` property changes, allowing the backend query
+    /// to stay cheap and stable across lifecycle transitions.
+    pub parent: Option<WlWindowId>,
+    /// Protocol-declared modal state (`xdg_dialog_v1` or EWMH modal).
+    pub modal: bool,
     /// Most recent preview of this window's contents, refreshed by
     /// [`crate::capture`] while rendering and served back through
     /// `Backend::capture_window_image`. `None` until the first
@@ -473,6 +479,8 @@ impl WindowRecord {
             title: None,
             app_id: None,
             window_type: WindowType::Normal,
+            parent: None,
+            modal: false,
             snapshot: None,
             snapshot_dirty: true,
             snapshot_attempted_at: None,
@@ -1930,6 +1938,10 @@ pub struct Compositor {
     /// XWayland's display number, mirrored into `DISPLAY` so children
     /// the shell spawns find it.
     pub xdisplay: Option<u32>,
+    /// A crashed, previously-ready XWayland gets one clean restart.
+    /// Consumed before spawning so a repeatedly failing server cannot
+    /// become a tight supervisor loop inside the compositor.
+    xwayland_restart_available: bool,
     /// The XSETTINGS manager publishing this session's DPI, scaling
     /// factor and cursor size to every X client on the XWayland
     /// display, once XWayland is up.
@@ -2007,6 +2019,8 @@ pub struct Compositor {
     /// disables the feature and the popouts never close. See
     /// `focus_grab.rs`.
     pub(crate) focus_grab: crate::focus_grab::FocusGrab,
+    /// Registered portal shortcut objects keyed by `app_id:id`.
+    pub(crate) global_shortcuts: crate::global_shortcuts::GlobalShortcuts,
     /// ext-idle-notify + idle-inhibit: the timers `swayidle` runs on,
     /// reset from the input path — see `idle.rs`.
     pub(crate) idle: crate::idle::Idle,
@@ -2017,6 +2031,9 @@ pub struct Compositor {
     /// there is nothing here to reconcile per pass. Same shape as
     /// `Idle::_inhibit`. See `virtual_keyboard.rs`.
     pub(crate) _virtual_keyboard: smithay::wayland::virtual_keyboard::VirtualKeyboardManagerState,
+    /// wlr virtual pointer v2, lowering synthetic motion/buttons/axis
+    /// through the same funnel as physical input.
+    pub(crate) _virtual_pointer: crate::virtual_pointer::VirtualPointerState,
 
     /// Latest pointer position in compositor space, maintained by
     /// `input.rs` — the renderer draws the cursor here, and hit-tests
@@ -2117,10 +2134,25 @@ impl Compositor {
                     if let Some(motion) = pending_motion.take() {
                         self.dispatch_motion(motion);
                     }
-                    if let chonk_shell::shell::KeyResolution::Action(action) = resolution {
-                        let outcome = self.shell.run_action(&mut self.wm, &action);
-                        self.note_outcome(outcome);
-                    }
+                    let outcome = match resolution {
+                        chonk_shell::shell::KeyResolution::Action(
+                            wm_config::Action::GlobalShortcut(target),
+                        ) => {
+                            self.global_shortcuts
+                                .trigger(&target, true, self.start_time.elapsed());
+                            chonk_shell::shell::ShellOutcome::Continue
+                        }
+                        chonk_shell::shell::KeyResolution::Action(action) => {
+                            self.shell.run_action(&mut self.wm, &action)
+                        }
+                        chonk_shell::shell::KeyResolution::Menu(key) => {
+                            self.shell.run_menu_key(&mut self.wm, key)
+                        }
+                        chonk_shell::shell::KeyResolution::Consumed => {
+                            chonk_shell::shell::ShellOutcome::Continue
+                        }
+                    };
+                    self.note_outcome(outcome);
                     continue;
                 }
             }
@@ -2129,7 +2161,17 @@ impl Compositor {
                     if let Some(motion) = pending_motion.take() {
                         self.dispatch_motion(motion);
                     }
-                    let outcome = self.shell.run_action(&mut self.wm, &action);
+                    let outcome = match action {
+                        wm_config::Action::GlobalShortcut(target) => {
+                            self.global_shortcuts.trigger(
+                                &target,
+                                false,
+                                self.start_time.elapsed(),
+                            );
+                            chonk_shell::shell::ShellOutcome::Continue
+                        }
+                        action => self.shell.run_action(&mut self.wm, &action),
+                    };
                     self.note_outcome(outcome);
                     continue;
                 }
@@ -3240,6 +3282,95 @@ fn recovery_locker_argv<'a>(
     Some((program, parts.collect()))
 }
 
+fn register_xwayland_source(
+    display_handle: &DisplayHandle,
+    loop_handle: &LoopHandle<'static, Compositor>,
+) -> Result<(), String> {
+    let (xwayland, xwayland_client) = match XWayland::spawn(
+        display_handle,
+        None,
+        std::iter::empty::<(String, String)>(),
+        true,
+        Stdio::null(),
+        Stdio::null(),
+        |_| (),
+    ) {
+        Ok(pair) => pair,
+        Err(error) => {
+            tracing::warn!(?error, "could not spawn XWayland; X11 apps unavailable");
+            return Ok(());
+        }
+    };
+    loop_handle
+        .insert_source(xwayland, move |event, _, comp| match event {
+            XWaylandEvent::Ready {
+                x11_socket,
+                display_number,
+            } => {
+                match X11Wm::start_wm(
+                    comp.loop_handle.clone(),
+                    x11_socket,
+                    xwayland_client.clone(),
+                ) {
+                    Ok(xwm) => {
+                        comp.xwm = Some(xwm);
+                        comp.xdisplay = Some(display_number);
+                        std::env::set_var("DISPLAY", format!(":{display_number}"));
+                        tracing::info!(display = display_number, "XWayland ready");
+                        comp.start_xsettings(display_number);
+                        crate::xewmh::start(comp, display_number);
+                    }
+                    Err(error) => {
+                        tracing::error!(
+                            ?error,
+                            "failed to attach the X11 window manager to XWayland"
+                        );
+                    }
+                }
+            }
+            XWaylandEvent::Error => comp.handle_xwayland_loss("startup failure"),
+        })
+        .map(|_| ())
+        .map_err(|error| format!("failed to register the XWayland event source: {error}"))
+}
+
+impl Compositor {
+    /// Retires every piece of state owned by one XWayland generation.
+    /// Called by the startup source and, critically, by
+    /// `XwmHandler::disconnected` after a running X server dies.
+    pub(crate) fn handle_xwayland_loss(&mut self, reason: &'static str) {
+        let was_ready = self.xdisplay.is_some() || self.xwm.is_some();
+        tracing::warn!(reason, "XWayland exited; X11 apps temporarily unavailable");
+        self.xwm = None;
+        self.xdisplay = None;
+        self.xsettings = None;
+        self.xewmh = None;
+        std::env::remove_var("DISPLAY");
+
+        let backend = self.wm.backend_mut();
+        let orphaned: Vec<WlWindowId> = backend
+            .windows
+            .iter()
+            .filter(|(_, record)| matches!(record.surface, ManagedSurface::X11(_)))
+            .map(|(id, _)| *id)
+            .collect();
+        for id in orphaned {
+            backend.forget_window(id);
+            backend.queue(BackendEvent::Destroyed(id));
+        }
+        backend.mark_damaged();
+
+        if was_ready && std::mem::take(&mut self.xwayland_restart_available) {
+            tracing::info!("restarting XWayland once after disconnect");
+            let display_handle = self.display_handle.clone();
+            let loop_handle = self.loop_handle.clone();
+            if let Err(error) = register_xwayland_source(&display_handle, &loop_handle) {
+                tracing::warn!(%error, "could not register the XWayland restart");
+            }
+        }
+    }
+}
+
 pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> {
     // Consume the supervisor's one-shot marker before bringing up any
     // display machinery. A recovery with no resolved locker must fail
@@ -3502,6 +3633,7 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
     // and finding it absent is what makes every popout in that shell
     // impossible to dismiss by clicking away. See `focus_grab.rs`.
     let focus_grab = crate::focus_grab::init(&display_handle);
+    let global_shortcuts = crate::global_shortcuts::init(&display_handle);
     // The ecosystem protocols, under the same timing rule. Layer-shell
     // is what fuzzel/mako/waybar look for the moment they connect;
     // session-lock is unfiltered (any client may lock — swaylock is
@@ -3529,6 +3661,7 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
     // what guarantees that, and `virtual_keyboard::init` says so out
     // loud if it ever stops being true.
     let virtual_keyboard = crate::virtual_keyboard::init(&display_handle, &seat);
+    let virtual_pointer = crate::virtual_pointer::init(&display_handle);
 
     // The listening socket clients connect to, plus the display's own
     // fd so wayland-server processes client requests — both plain
@@ -3698,84 +3831,7 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
     // reports ready. Failure to start is a degraded session — X11
     // apps unavailable — not a dead one, so it logs instead of
     // erroring out.
-    match XWayland::spawn(
-        &display_handle,
-        None,
-        std::iter::empty::<(String, String)>(),
-        true,
-        Stdio::null(),
-        Stdio::null(),
-        |_| (),
-    ) {
-        Ok((xwayland, xwayland_client)) => {
-            loop_handle
-                .insert_source(xwayland, move |event, _, comp| match event {
-                    XWaylandEvent::Ready { x11_socket, display_number } => {
-                        match X11Wm::start_wm(comp.loop_handle.clone(), x11_socket, xwayland_client.clone()) {
-                            Ok(xwm) => {
-                                comp.xwm = Some(xwm);
-                                comp.xdisplay = Some(display_number);
-                                // Children the shell spawns (terminals,
-                                // X11 apps) inherit this, same as the
-                                // X11 session's DISPLAY inheritance.
-                                std::env::set_var("DISPLAY", format!(":{display_number}"));
-                                tracing::info!(display = display_number, "XWayland ready");
-                                // The earliest moment an X selection can
-                                // be taken, and the only one worth
-                                // taking it at: there is no display to
-                                // own before this, and every X client
-                                // that will ever run in this session
-                                // connects after it.
-                                comp.start_xsettings(display_number);
-                                // And the EWMH publisher, on its own
-                                // connection for the same two-readers
-                                // reason `start_xsettings` gives.
-                                crate::xewmh::start(comp, display_number);
-                            }
-                            Err(error) => {
-                                tracing::error!(?error, "failed to attach the X11 window manager to XWayland");
-                            }
-                        }
-                    }
-                    XWaylandEvent::Error => {
-                        tracing::warn!("XWayland exited or failed to start; X11 apps unavailable");
-                        // Every X11 window died with it. Nothing else
-                        // will ever report those surfaces destroyed -
-                        // the destroy notifications came through the
-                        // X11 WM connection that just went away - so
-                        // without this their ledger entries, frames and
-                        // stacking slots outlive them: chrome painted
-                        // around windows that no longer exist, and
-                        // clicks routed into them. Tearing them down
-                        // through the normal Destroyed path lets
-                        // `wm-core` retract focus and drop decorations
-                        // exactly as it would for one window closing.
-                        comp.xwm = None;
-                        comp.xdisplay = None;
-                        // The EWMH connection pointed at the display
-                        // that just died; its next write would only
-                        // fail noisily.
-                        comp.xewmh = None;
-                        let backend = comp.wm.backend_mut();
-                        let orphaned: Vec<WlWindowId> = backend
-                            .windows
-                            .iter()
-                            .filter(|(_, record)| matches!(record.surface, ManagedSurface::X11(_)))
-                            .map(|(id, _)| *id)
-                            .collect();
-                        for id in orphaned {
-                            backend.forget_window(id);
-                            backend.queue(BackendEvent::Destroyed(id));
-                        }
-                        backend.mark_damaged();
-                    }
-                })
-                .map_err(|error| format!("failed to register the XWayland event source: {error}"))?;
-        }
-        Err(error) => {
-            tracing::warn!(?error, "could not spawn XWayland; X11 apps unavailable");
-        }
-    }
+    register_xwayland_source(&display_handle, &loop_handle)?;
 
     let mut comp = Compositor {
         hyprland_ipc,
@@ -3814,6 +3870,7 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
         outputs,
         xwm: None,
         xdisplay: None,
+        xwayland_restart_available: true,
         xsettings: None,
         xewmh: None,
         ui_scale: scale,
@@ -3830,8 +3887,10 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
         layer_shell,
         session_lock,
         focus_grab,
+        global_shortcuts,
         idle,
         _virtual_keyboard: virtual_keyboard,
+        _virtual_pointer: virtual_pointer,
         pointer_location: (0.0, 0.0).into(),
         cursor_status: CursorImageStatus::default_named(),
         cursors: CursorSet::build(scale),

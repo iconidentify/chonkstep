@@ -150,6 +150,20 @@ pub enum NetState {
     /// `_NET_WM_STATE_DEMANDS_ATTENTION`, and the ICCCM `WM_HINTS`
     /// urgency bit, which is how most X11 applications actually ask.
     DemandsAttention,
+    Modal,
+}
+
+/// The complete `_NET_WM_STATE`-relevant truth published for one
+/// client. Keeping this as one value prevents a growing row of booleans
+/// from being transposed at backend boundaries.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct NetStateSnapshot {
+    pub fullscreen: bool,
+    pub maximized_horizontally: bool,
+    pub maximized_vertically: bool,
+    pub shaded: bool,
+    pub hidden: bool,
+    pub modal: bool,
 }
 
 /// Coarse EWMH `_NET_WM_WINDOW_TYPE` classification — just enough to
@@ -229,6 +243,14 @@ pub enum BackendEvent<Win, Frame> {
     ///
     /// [`Backend::client_draws_own_chrome`]: crate::Backend::client_draws_own_chrome
     ChromeChanged(Win),
+    /// The toplevel's transient parent changed. Backends emit this for
+    /// `xdg_toplevel.set_parent` and `WM_TRANSIENT_FOR` updates.
+    ParentChanged(Win),
+    /// The toplevel entered or left modal state.
+    ModalChanged {
+        window: Win,
+        modal: bool,
+    },
     /// The client asked the window manager to start moving it — X11's
     /// `_NET_WM_MOVERESIZE`, or a Wayland toplevel's `move` request.
     ///

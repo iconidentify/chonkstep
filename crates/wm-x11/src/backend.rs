@@ -1243,6 +1243,15 @@ impl X11Backend {
                 if e.atom == self.motif_wm_hints {
                     return Some(BackendEvent::ChromeChanged(XWindow(e.window)));
                 }
+                if e.atom == u32::from(AtomEnum::WM_TRANSIENT_FOR) {
+                    return Some(BackendEvent::ParentChanged(XWindow(e.window)));
+                }
+                if e.atom == self.ewmh.net_wm_state {
+                    return Some(BackendEvent::ModalChanged {
+                        window: XWindow(e.window),
+                        modal: self.window_is_modal(XWindow(e.window)),
+                    });
+                }
                 None
             }
             Event::RandrScreenChangeNotify(e) => {
@@ -1392,6 +1401,8 @@ impl X11Backend {
                     Some(NetState::MaximizedHorz)
                 } else if atom == self.ewmh.net_wm_state_maximized_vert {
                     Some(NetState::MaximizedVert)
+                } else if atom == self.ewmh.net_wm_state_modal {
+                    Some(NetState::Modal)
                 } else {
                     // Unrecognized property atoms are skipped, not
                     // rejected — EWMH wants the rest of the message
@@ -1434,6 +1445,7 @@ struct EwmhAtoms {
     net_wm_state_fullscreen: Atom,
     net_wm_state_maximized_horz: Atom,
     net_wm_state_maximized_vert: Atom,
+    net_wm_state_modal: Atom,
     net_wm_state_shaded: Atom,
     net_wm_state_hidden: Atom,
     net_wm_window_type: Atom,
@@ -1468,28 +1480,98 @@ impl EwmhAtoms {
             net_client_list: conn.intern_atom(false, b"_NET_CLIENT_LIST")?.reply()?.atom,
             net_close_window: conn.intern_atom(false, b"_NET_CLOSE_WINDOW")?.reply()?.atom,
             net_wm_state: conn.intern_atom(false, b"_NET_WM_STATE")?.reply()?.atom,
-            net_wm_state_fullscreen: conn.intern_atom(false, b"_NET_WM_STATE_FULLSCREEN")?.reply()?.atom,
-            net_wm_state_maximized_horz: conn.intern_atom(false, b"_NET_WM_STATE_MAXIMIZED_HORZ")?.reply()?.atom,
-            net_wm_state_maximized_vert: conn.intern_atom(false, b"_NET_WM_STATE_MAXIMIZED_VERT")?.reply()?.atom,
-            net_wm_state_shaded: conn.intern_atom(false, b"_NET_WM_STATE_SHADED")?.reply()?.atom,
-            net_wm_state_hidden: conn.intern_atom(false, b"_NET_WM_STATE_HIDDEN")?.reply()?.atom,
-            net_wm_window_type: conn.intern_atom(false, b"_NET_WM_WINDOW_TYPE")?.reply()?.atom,
-            net_wm_window_type_normal: conn.intern_atom(false, b"_NET_WM_WINDOW_TYPE_NORMAL")?.reply()?.atom,
-            net_wm_window_type_dialog: conn.intern_atom(false, b"_NET_WM_WINDOW_TYPE_DIALOG")?.reply()?.atom,
-            net_wm_window_type_desktop: conn.intern_atom(false, b"_NET_WM_WINDOW_TYPE_DESKTOP")?.reply()?.atom,
-            net_wm_window_type_dock: conn.intern_atom(false, b"_NET_WM_WINDOW_TYPE_DOCK")?.reply()?.atom,
-            net_wm_window_type_toolbar: conn.intern_atom(false, b"_NET_WM_WINDOW_TYPE_TOOLBAR")?.reply()?.atom,
-            net_wm_window_type_menu: conn.intern_atom(false, b"_NET_WM_WINDOW_TYPE_MENU")?.reply()?.atom,
-            net_wm_window_type_utility: conn.intern_atom(false, b"_NET_WM_WINDOW_TYPE_UTILITY")?.reply()?.atom,
-            net_wm_window_type_splash: conn.intern_atom(false, b"_NET_WM_WINDOW_TYPE_SPLASH")?.reply()?.atom,
-            net_wm_window_type_dropdown_menu: conn.intern_atom(false, b"_NET_WM_WINDOW_TYPE_DROPDOWN_MENU")?.reply()?.atom,
-            net_wm_window_type_popup_menu: conn.intern_atom(false, b"_NET_WM_WINDOW_TYPE_POPUP_MENU")?.reply()?.atom,
-            net_wm_window_type_tooltip: conn.intern_atom(false, b"_NET_WM_WINDOW_TYPE_TOOLTIP")?.reply()?.atom,
-            net_wm_window_type_notification: conn.intern_atom(false, b"_NET_WM_WINDOW_TYPE_NOTIFICATION")?.reply()?.atom,
-            net_wm_window_type_combo: conn.intern_atom(false, b"_NET_WM_WINDOW_TYPE_COMBO")?.reply()?.atom,
-            net_wm_window_type_dnd: conn.intern_atom(false, b"_NET_WM_WINDOW_TYPE_DND")?.reply()?.atom,
-            net_number_of_desktops: conn.intern_atom(false, b"_NET_NUMBER_OF_DESKTOPS")?.reply()?.atom,
-            net_current_desktop: conn.intern_atom(false, b"_NET_CURRENT_DESKTOP")?.reply()?.atom,
+            net_wm_state_fullscreen: conn
+                .intern_atom(false, b"_NET_WM_STATE_FULLSCREEN")?
+                .reply()?
+                .atom,
+            net_wm_state_maximized_horz: conn
+                .intern_atom(false, b"_NET_WM_STATE_MAXIMIZED_HORZ")?
+                .reply()?
+                .atom,
+            net_wm_state_maximized_vert: conn
+                .intern_atom(false, b"_NET_WM_STATE_MAXIMIZED_VERT")?
+                .reply()?
+                .atom,
+            net_wm_state_modal: conn
+                .intern_atom(false, b"_NET_WM_STATE_MODAL")?
+                .reply()?
+                .atom,
+            net_wm_state_shaded: conn
+                .intern_atom(false, b"_NET_WM_STATE_SHADED")?
+                .reply()?
+                .atom,
+            net_wm_state_hidden: conn
+                .intern_atom(false, b"_NET_WM_STATE_HIDDEN")?
+                .reply()?
+                .atom,
+            net_wm_window_type: conn
+                .intern_atom(false, b"_NET_WM_WINDOW_TYPE")?
+                .reply()?
+                .atom,
+            net_wm_window_type_normal: conn
+                .intern_atom(false, b"_NET_WM_WINDOW_TYPE_NORMAL")?
+                .reply()?
+                .atom,
+            net_wm_window_type_dialog: conn
+                .intern_atom(false, b"_NET_WM_WINDOW_TYPE_DIALOG")?
+                .reply()?
+                .atom,
+            net_wm_window_type_desktop: conn
+                .intern_atom(false, b"_NET_WM_WINDOW_TYPE_DESKTOP")?
+                .reply()?
+                .atom,
+            net_wm_window_type_dock: conn
+                .intern_atom(false, b"_NET_WM_WINDOW_TYPE_DOCK")?
+                .reply()?
+                .atom,
+            net_wm_window_type_toolbar: conn
+                .intern_atom(false, b"_NET_WM_WINDOW_TYPE_TOOLBAR")?
+                .reply()?
+                .atom,
+            net_wm_window_type_menu: conn
+                .intern_atom(false, b"_NET_WM_WINDOW_TYPE_MENU")?
+                .reply()?
+                .atom,
+            net_wm_window_type_utility: conn
+                .intern_atom(false, b"_NET_WM_WINDOW_TYPE_UTILITY")?
+                .reply()?
+                .atom,
+            net_wm_window_type_splash: conn
+                .intern_atom(false, b"_NET_WM_WINDOW_TYPE_SPLASH")?
+                .reply()?
+                .atom,
+            net_wm_window_type_dropdown_menu: conn
+                .intern_atom(false, b"_NET_WM_WINDOW_TYPE_DROPDOWN_MENU")?
+                .reply()?
+                .atom,
+            net_wm_window_type_popup_menu: conn
+                .intern_atom(false, b"_NET_WM_WINDOW_TYPE_POPUP_MENU")?
+                .reply()?
+                .atom,
+            net_wm_window_type_tooltip: conn
+                .intern_atom(false, b"_NET_WM_WINDOW_TYPE_TOOLTIP")?
+                .reply()?
+                .atom,
+            net_wm_window_type_notification: conn
+                .intern_atom(false, b"_NET_WM_WINDOW_TYPE_NOTIFICATION")?
+                .reply()?
+                .atom,
+            net_wm_window_type_combo: conn
+                .intern_atom(false, b"_NET_WM_WINDOW_TYPE_COMBO")?
+                .reply()?
+                .atom,
+            net_wm_window_type_dnd: conn
+                .intern_atom(false, b"_NET_WM_WINDOW_TYPE_DND")?
+                .reply()?
+                .atom,
+            net_number_of_desktops: conn
+                .intern_atom(false, b"_NET_NUMBER_OF_DESKTOPS")?
+                .reply()?
+                .atom,
+            net_current_desktop: conn
+                .intern_atom(false, b"_NET_CURRENT_DESKTOP")?
+                .reply()?
+                .atom,
             net_wm_desktop: conn.intern_atom(false, b"_NET_WM_DESKTOP")?.reply()?.atom,
             net_workarea: conn.intern_atom(false, b"_NET_WORKAREA")?.reply()?.atom,
             net_frame_extents: conn.intern_atom(false, b"_NET_FRAME_EXTENTS")?.reply()?.atom,
@@ -1515,6 +1597,7 @@ impl EwmhAtoms {
             self.net_wm_state_fullscreen,
             self.net_wm_state_maximized_horz,
             self.net_wm_state_maximized_vert,
+            self.net_wm_state_modal,
             self.net_wm_state_shaded,
             self.net_wm_state_hidden,
             self.net_wm_window_type,
@@ -2376,6 +2459,25 @@ impl Backend for X11Backend {
         Some(XWindow(parent))
     }
 
+    fn window_is_modal(&self, window: Self::WindowId) -> bool {
+        let Ok(cookie) = self.conn.get_property(
+            false,
+            window.0,
+            self.ewmh.net_wm_state,
+            AtomEnum::ATOM,
+            0,
+            u32::MAX,
+        ) else {
+            return false;
+        };
+        let Ok(reply) = cookie.reply() else {
+            return false;
+        };
+        reply
+            .value32()
+            .is_some_and(|mut atoms| atoms.any(|atom| atom == self.ewmh.net_wm_state_modal))
+    }
+
     fn set_decoration_rules(&mut self, rules: wm_core::DecorationRules) {
         self.decoration_rules = rules;
     }
@@ -3119,8 +3221,16 @@ impl Backend for X11Backend {
         let _ = self.conn.flush();
     }
 
-    fn publish_net_state(&mut self, window: Self::WindowId, fullscreen: bool, max_h: bool, max_v: bool, shaded: bool, hidden: bool) {
-        let mut atoms = Vec::with_capacity(5);
+    fn publish_net_state(&mut self, window: Self::WindowId, state: wm_core::NetStateSnapshot) {
+        let wm_core::NetStateSnapshot {
+            fullscreen,
+            maximized_horizontally: max_h,
+            maximized_vertically: max_v,
+            shaded,
+            hidden,
+            modal,
+        } = state;
+        let mut atoms = Vec::with_capacity(6);
         if fullscreen {
             atoms.push(self.ewmh.net_wm_state_fullscreen);
         }
@@ -3135,6 +3245,9 @@ impl Backend for X11Backend {
         }
         if hidden {
             atoms.push(self.ewmh.net_wm_state_hidden);
+        }
+        if modal {
+            atoms.push(self.ewmh.net_wm_state_modal);
         }
         // On the client's own window, not the frame: pagers/taskbars
         // look the state up by the client id they got from
@@ -3182,6 +3295,14 @@ impl wm_theme_api::PopupHost for X11Backend {
 
     fn ungrab_pointer(&mut self, grab: wm_theme_api::PopupGrab) {
         X11Backend::ungrab_pointer(self, DragHandle(grab.0));
+    }
+
+    fn grab_keyboard(&mut self) {
+        <Self as Backend>::grab_keyboard(self);
+    }
+
+    fn ungrab_keyboard(&mut self) {
+        <Self as Backend>::ungrab_keyboard(self);
     }
 }
 

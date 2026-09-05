@@ -63,6 +63,17 @@ pub enum MenuClick {
     Dismissed,
 }
 
+/// A keyboard gesture understood by an open cascade menu.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MenuKey {
+    Up,
+    Down,
+    Left,
+    Right,
+    Enter,
+    Space,
+}
+
 /// Owns zero or more cascaded popup windows for one open menu session.
 /// `Id` is the host's `PopupHost::PopupId`.
 pub struct CascadeMenu<Id> {
@@ -132,13 +143,83 @@ impl<Id: Copy + Eq + std::fmt::Debug> CascadeMenu<Id> {
             self.levels.push(level);
         }
         self.grab = Some(host.grab_pointer());
+        host.grab_keyboard();
     }
 
     pub fn close<H: PopupHost<PopupId = Id>>(&mut self, host: &mut H) {
         self.truncate(host, 0);
         if let Some(grab) = self.grab.take() {
             host.ungrab_pointer(grab);
+            host.ungrab_keyboard();
         }
+    }
+
+    /// Drives the same highlight and activation path as pointer input.
+    /// The deepest open level owns the selection; entering a submenu
+    /// selects its first row, and moving left restores its parent.
+    pub fn key<H: PopupHost<PopupId = Id>>(
+        &mut self,
+        host: &mut H,
+        theme: &Theme,
+        font_system: &mut cosmic_text::FontSystem,
+        key: MenuKey,
+    ) -> Option<MenuClick> {
+        let level = self.levels.len().checked_sub(1)?;
+        match key {
+            MenuKey::Up | MenuKey::Down => {
+                let len = self.levels[level].items.len();
+                if len == 0 {
+                    return None;
+                }
+                let selected = self.levels[level].highlighted.unwrap_or(0);
+                let next = if key == MenuKey::Down {
+                    (selected + 1) % len
+                } else {
+                    (selected + len - 1) % len
+                };
+                self.levels[level].highlighted = Some(next);
+                self.repaint_level(host, theme, font_system, level);
+                None
+            }
+            MenuKey::Left => {
+                if level > 0 {
+                    self.truncate(host, level);
+                    self.repaint_level(host, theme, font_system, level - 1);
+                }
+                None
+            }
+            MenuKey::Right => self.activate_selection(host, theme, font_system, level, false),
+            MenuKey::Enter | MenuKey::Space => {
+                self.activate_selection(host, theme, font_system, level, true)
+            }
+        }
+    }
+
+    fn activate_selection<H: PopupHost<PopupId = Id>>(
+        &mut self,
+        host: &mut H,
+        theme: &Theme,
+        font_system: &mut cosmic_text::FontSystem,
+        level: usize,
+        allow_action: bool,
+    ) -> Option<MenuClick> {
+        let selected = self.levels.get(level)?.highlighted?;
+        if self.levels[level].items[selected].is_submenu() {
+            self.open_submenu(host, theme, font_system, level, selected);
+            if let Some(child) = self.levels.get_mut(level + 1) {
+                child.highlighted = (!child.items.is_empty()).then_some(0);
+                self.repaint_level(host, theme, font_system, level + 1);
+            }
+            return Some(MenuClick::OpenedSubmenu);
+        }
+        if !allow_action {
+            return None;
+        }
+        let MenuItem::Action { action, .. } = self.levels[level].items[selected] else {
+            return None;
+        };
+        self.close(host);
+        Some(MenuClick::Action(action))
     }
 
     /// If `window` belongs to this menu's chain, resolves a click on it:
@@ -211,6 +292,25 @@ impl<Id: Copy + Eq + std::fmt::Debug> CascadeMenu<Id> {
         }
         let hovered = self.levels[level].item_rects.iter().position(|r| r.contains(local));
         if hovered == self.levels[level].highlighted {
+            let child_belongs_to = self.levels.get(level + 1).and_then(|c| c.opened_from_item);
+            let already_pending = self.pending_submenu.as_ref().is_some_and(|pending| {
+                pending.level == level && pending.item_index == hovered.unwrap_or(usize::MAX)
+            });
+            if !already_pending {
+                self.pending_submenu = match hovered {
+                    Some(i)
+                        if self.levels[level].items[i].is_submenu()
+                            && child_belongs_to != Some(i) =>
+                    {
+                        Some(PendingSubmenu {
+                            level,
+                            item_index: i,
+                            hovered_since: Instant::now(),
+                        })
+                    }
+                    _ => None,
+                };
+            }
             return true;
         }
         self.levels[level].highlighted = hovered;
@@ -288,7 +388,21 @@ impl<Id: Copy + Eq + std::fmt::Debug> CascadeMenu<Id> {
         let geom = Rect { pos: at, size: Size::new(render.buffer.width, render.buffer.height) };
         let window = host.create_popup(geom, self.background)?;
         host.paint_popup(window, &render.buffer);
-        Some(OpenLevel { window, title, items, item_rects: render.item_rects, highlighted: None, geom, opened_from_item })
+        let highlighted = (!items.is_empty()).then_some(0);
+        if highlighted.is_some() {
+            let render =
+                menu::render_menu(theme, font_system, &title, &items, highlighted, closable);
+            host.paint_popup(window, &render.buffer);
+        }
+        Some(OpenLevel {
+            window,
+            title,
+            items,
+            item_rects: render.item_rects,
+            highlighted,
+            geom,
+            opened_from_item,
+        })
     }
 
     /// Opens a submenu cascading from `item_index` in level
@@ -374,6 +488,8 @@ mod tests {
         destroyed_total: u32,
         grabs: u32,
         ungrabs: u32,
+        keyboard_grabs: u32,
+        keyboard_ungrabs: u32,
     }
 
     impl PopupHost for FakeHost {
@@ -401,6 +517,14 @@ mod tests {
 
         fn ungrab_pointer(&mut self, _grab: PopupGrab) {
             self.ungrabs += 1;
+        }
+
+        fn grab_keyboard(&mut self) {
+            self.keyboard_grabs += 1;
+        }
+
+        fn ungrab_keyboard(&mut self) {
+            self.keyboard_ungrabs += 1;
         }
     }
 
@@ -462,6 +586,11 @@ mod tests {
             self.cascade.tick(&mut self.host, &self.theme, &mut self.font_system);
         }
 
+        fn key(&mut self, key: MenuKey) -> Option<MenuClick> {
+            self.cascade
+                .key(&mut self.host, &self.theme, &mut self.font_system, key)
+        }
+
         fn only_open_window(&self) -> u32 {
             assert_eq!(self.host.open.len(), 1, "expected exactly one open popup");
             *self.host.open.iter().next().unwrap()
@@ -469,13 +598,49 @@ mod tests {
     }
 
     #[test]
-    fn opening_creates_exactly_one_popup_and_grabs_the_pointer() {
+    fn opening_creates_exactly_one_popup_and_grabs_input() {
         let mut f = Fixture::new();
         f.open(vec![action("Terminal", 1)]);
 
         assert_eq!(f.host.open.len(), 1);
         assert_eq!(f.host.grabs, 1);
+        assert_eq!(f.host.keyboard_grabs, 1);
         assert!(f.cascade.is_open());
+    }
+
+    #[test]
+    fn keyboard_reaches_actions_and_nested_submenus_without_a_pointer() {
+        let mut f = Fixture::new();
+        f.open(vec![
+            action("First", 1),
+            submenu(
+                "Applications",
+                vec![action("Editor", 20), action("Terminal", 21)],
+            ),
+            action("Exit", 3),
+        ]);
+
+        assert_eq!(f.key(MenuKey::Down), None);
+        assert_eq!(f.key(MenuKey::Right), Some(MenuClick::OpenedSubmenu));
+        assert_eq!(f.host.open.len(), 2);
+        assert_eq!(f.key(MenuKey::Down), None);
+        assert_eq!(f.key(MenuKey::Enter), Some(MenuClick::Action(21)));
+        assert!(!f.cascade.is_open());
+        assert_eq!(f.host.keyboard_ungrabs, 1);
+    }
+
+    #[test]
+    fn left_returns_to_the_parent_and_space_activates_its_selection() {
+        let mut f = Fixture::new();
+        f.open(vec![
+            submenu("Apps", vec![action("Editor", 7)]),
+            action("Exit", 9),
+        ]);
+        assert_eq!(f.key(MenuKey::Enter), Some(MenuClick::OpenedSubmenu));
+        assert_eq!(f.key(MenuKey::Left), None);
+        assert_eq!(f.host.open.len(), 1);
+        assert_eq!(f.key(MenuKey::Down), None);
+        assert_eq!(f.key(MenuKey::Space), Some(MenuClick::Action(9)));
     }
 
     #[test]
@@ -577,7 +742,14 @@ mod tests {
 
         let child = *f.host.open.iter().find(|w| **w != root).expect("submenu popup open");
         let painted = f.host.painted.get(&child).expect("submenu was painted").clone();
-        let expected = menu::render_menu(&f.theme, &mut f.font_system, "Applications", &sub_items, None, false);
+        let expected = menu::render_menu(
+            &f.theme,
+            &mut f.font_system,
+            "Applications",
+            &sub_items,
+            Some(0),
+            false,
+        );
         let wrong = menu::render_menu(&f.theme, &mut f.font_system, "chonkstep", &sub_items, None, false);
         assert_eq!(painted, expected.buffer, "cascade must be titled by its submenu label");
         assert_ne!(painted, wrong.buffer, "the two titles must actually render differently");

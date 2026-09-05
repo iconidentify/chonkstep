@@ -1447,12 +1447,26 @@ fn on_pointer_move_absolute<I: InputBackend>(state: &mut Compositor, event: I::P
 /// compositor equivalent of the X server keeping the pointer on the
 /// screen.
 fn on_pointer_move_relative<I: InputBackend>(state: &mut Compositor, event: I::PointerMotionEvent) {
+    pointer_move_relative_values(
+        state,
+        event.delta(),
+        event.delta_unaccel(),
+        event.time_msec(),
+    );
+}
+
+fn pointer_move_relative_values(
+    state: &mut Compositor,
+    delta: LogicalPoint<f64, Logical>,
+    delta_unaccel: LogicalPoint<f64, Logical>,
+    time: u32,
+) {
     let relative = RelativeMotionEvent {
-        delta: event.delta(),
-        delta_unaccel: event.delta_unaccel(),
-        utime: event.time_msec() as u64 * 1_000,
+        delta,
+        delta_unaccel,
+        utime: time as u64 * 1_000,
     };
-    let proposed = confine_to_outputs(&state.wm.backend().monitors, state.pointer_location + event.delta());
+    let proposed = confine_to_outputs(&state.wm.backend().monitors, state.pointer_location + delta);
     let mut position = proposed;
     if let Some((pointer, surface)) = state
         .seat
@@ -1484,7 +1498,30 @@ fn on_pointer_move_relative<I: InputBackend>(state: &mut Compositor, event: I::P
             }
         });
     }
-    pointer_moved(state, position, event.time_msec(), Some(relative));
+    pointer_moved(state, position, time, Some(relative));
+}
+
+/// Injects relative virtual-pointer motion through the physical
+/// pointer's confinement, focus, grab, shell and idle path.
+pub(crate) fn inject_pointer_motion(state: &mut Compositor, dx: f64, dy: f64, time: u32) {
+    crate::idle::note_activity(state);
+    let delta = LogicalPoint::<f64, Logical>::from((dx, dy));
+    pointer_move_relative_values(state, delta, delta, time);
+}
+
+/// Injects an already-mapped absolute virtual-pointer coordinate.
+pub(crate) fn inject_pointer_motion_absolute(
+    state: &mut Compositor,
+    position: LogicalPoint<f64, Logical>,
+    time: u32,
+) {
+    crate::idle::note_activity(state);
+    pointer_moved(
+        state,
+        confine_to_outputs(&state.wm.backend().monitors, position),
+        time,
+        None,
+    );
 }
 
 fn surface_focus_at(
@@ -1772,13 +1809,27 @@ fn pointer_moved(
 /// [`DragGrab`] outranks that target while one is held, and the release
 /// that ends the drag is the reason it exists.
 fn on_pointer_button<I: InputBackend>(state: &mut Compositor, event: I::PointerButtonEvent) {
+    pointer_button(
+        state,
+        event.time_msec(),
+        event.button_code(),
+        event.state(),
+        event.button().and_then(wm_button),
+    );
+}
+
+fn pointer_button(
+    state: &mut Compositor,
+    time: u32,
+    button_code: u32,
+    button_state: ButtonState,
+    button: Option<MouseButton>,
+) {
     let serial = SERIAL_COUNTER.next_serial();
-    let time = event.time_msec();
-    let pressed = event.state() == ButtonState::Pressed;
+    let pressed = button_state == ButtonState::Pressed;
     // L/M/R map onto the WM's vocabulary; anything else (side buttons,
     // wheel tilt) is client-only — `wm-x11` swallowed those outright,
     // here they at least still reach a client under the pointer.
-    let button = event.button().and_then(wm_button);
     let Some(pointer) = state.seat.get_pointer() else {
         return;
     };
@@ -1796,7 +1847,15 @@ fn on_pointer_button<I: InputBackend>(state: &mut Compositor, event: I::PointerB
     // queues, no WM events, no implicit-grab bookkeeping to inherit
     // after unlock.
     if state.wm.backend().locked {
-        pointer.button(state, &ButtonEvent { serial, time, button: event.button_code(), state: event.state() });
+        pointer.button(
+            state,
+            &ButtonEvent {
+                serial,
+                time,
+                button: button_code,
+                state: button_state,
+            },
+        );
         pointer.frame(state);
         return;
     }
@@ -1819,12 +1878,12 @@ fn on_pointer_button<I: InputBackend>(state: &mut Compositor, event: I::PointerB
     // means no implicit grab was recorded to route it by.
     if pressed && route.target.is_none() && grab_excludes(state, &hit) {
         crate::focus_grab::dismiss(state);
-        with_input(&seat, |input| input.grab_dismissals.push(event.button_code()));
+        with_input(&seat, |input| input.grab_dismissals.push(button_code));
         return;
     }
     if !pressed {
         let swallowed = with_input(&seat, |input| {
-            let code = event.button_code();
+            let code = button_code;
             let found = input.grab_dismissals.contains(&code);
             input.grab_dismissals.retain(|held| *held != code);
             found
@@ -2023,9 +2082,42 @@ fn on_pointer_button<I: InputBackend>(state: &mut Compositor, event: I::PointerB
     }
 
     if deliver_to_client {
-        pointer.button(state, &ButtonEvent { serial, time, button: event.button_code(), state: event.state() });
+        pointer.button(
+            state,
+            &ButtonEvent {
+                serial,
+                time,
+                button: button_code,
+                state: button_state,
+            },
+        );
         pointer.frame(state);
     }
+}
+
+/// Injects a Linux input button code through the physical button path.
+pub(crate) fn inject_pointer_button(state: &mut Compositor, time: u32, code: u32, pressed: bool) {
+    crate::idle::note_activity(state);
+    if state.wm.backend().locked {
+        sync_pointer_focus(state);
+    }
+    let button = match code {
+        0x110 => Some(MouseButton::Left),
+        0x111 => Some(MouseButton::Right),
+        0x112 => Some(MouseButton::Middle),
+        _ => None,
+    };
+    pointer_button(
+        state,
+        time,
+        code,
+        if pressed {
+            ButtonState::Pressed
+        } else {
+            ButtonState::Released
+        },
+        button,
+    );
 }
 
 /// Gives the keyboard to a clicked layer surface that declared
@@ -2307,7 +2399,28 @@ fn take_whole(residual: &mut f64) -> i32 {
 /// too, so a scroll during a drag reaches the same place on both
 /// backends. Without this, the two would disagree in precisely the
 /// situation nobody tests by hand.
-fn route_shell_scroll<I: InputBackend>(state: &mut Compositor, event: &I::PointerAxisEvent) -> bool {
+fn route_shell_scroll<I: InputBackend>(
+    state: &mut Compositor,
+    event: &I::PointerAxisEvent,
+) -> bool {
+    route_shell_scroll_values(
+        state,
+        event.amount(Axis::Horizontal),
+        event.amount_v120(Axis::Horizontal),
+        event.amount(Axis::Vertical),
+        event.amount_v120(Axis::Vertical),
+        event.source(),
+    )
+}
+
+fn route_shell_scroll_values(
+    state: &mut Compositor,
+    horizontal: Option<f64>,
+    horizontal_v120: Option<f64>,
+    vertical: Option<f64>,
+    vertical_v120: Option<f64>,
+    source: AxisSource,
+) -> bool {
     // Locked: nothing here is the shell's — the axis flows to the seat
     // and lands on the lock surface like every other locked input.
     if state.wm.backend().locked {
@@ -2328,8 +2441,8 @@ fn route_shell_scroll<I: InputBackend>(state: &mut Compositor, event: &I::Pointe
     // client can UNDO that inversion for content-following gestures
     // like pinch-zoom, and a dock tile's ±1 step wants the direction
     // the user configured, not the raw hardware one.
-    let up = -axis_notches(event.amount_v120(Axis::Vertical), event.amount(Axis::Vertical));
-    let right = axis_notches(event.amount_v120(Axis::Horizontal), event.amount(Axis::Horizontal));
+    let up = -axis_notches(vertical_v120, vertical);
+    let right = axis_notches(horizontal_v120, horizontal);
 
     let seat = state.seat.clone();
     let position = state.pointer_location;
@@ -2362,9 +2475,9 @@ fn route_shell_scroll<I: InputBackend>(state: &mut Compositor, event: &I::Pointe
     // was building belongs to that gesture and not to the next one.
     // (Checked before the fold so a stop event carrying zeros cannot
     // resurrect an old fraction.)
-    if event.source() == AxisSource::Finger
-        && event.amount(Axis::Vertical).unwrap_or(0.0) == 0.0
-        && event.amount(Axis::Horizontal).unwrap_or(0.0) == 0.0
+    if source == AxisSource::Finger
+        && vertical.unwrap_or(0.0) == 0.0
+        && horizontal.unwrap_or(0.0) == 0.0
     {
         with_input(&seat, |input| input.scroll.reset());
         return true;
@@ -2388,6 +2501,61 @@ fn route_shell_scroll<I: InputBackend>(state: &mut Compositor, event: &I::Pointe
     };
     backend.shell_scrolls.push_back((owner, local, delta));
     true
+}
+
+/// Injects one virtual-pointer axis frame through shell scroll routing
+/// and the focused client's wl_pointer stream.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn inject_pointer_axis(
+    state: &mut Compositor,
+    time: u32,
+    horizontal: Option<f64>,
+    vertical: Option<f64>,
+    horizontal_discrete: Option<i32>,
+    vertical_discrete: Option<i32>,
+    source: AxisSource,
+    stop_horizontal: bool,
+    stop_vertical: bool,
+) {
+    crate::idle::note_activity(state);
+    if state.wm.backend().locked {
+        sync_pointer_focus(state);
+    }
+    let horizontal_v120 = horizontal_discrete.map(|steps| f64::from(steps) * 120.0);
+    let vertical_v120 = vertical_discrete.map(|steps| f64::from(steps) * 120.0);
+    if route_shell_scroll_values(
+        state,
+        horizontal,
+        horizontal_v120,
+        vertical,
+        vertical_v120,
+        source,
+    ) {
+        return;
+    }
+    let mut frame = AxisFrame::new(time).source(source);
+    if let Some(value) = horizontal {
+        frame = frame.value(Axis::Horizontal, value);
+    }
+    if let Some(value) = vertical {
+        frame = frame.value(Axis::Vertical, value);
+    }
+    if let Some(steps) = horizontal_discrete {
+        frame = frame.v120(Axis::Horizontal, steps.saturating_mul(120));
+    }
+    if let Some(steps) = vertical_discrete {
+        frame = frame.v120(Axis::Vertical, steps.saturating_mul(120));
+    }
+    if stop_horizontal {
+        frame = frame.stop(Axis::Horizontal);
+    }
+    if stop_vertical {
+        frame = frame.stop(Axis::Vertical);
+    }
+    if let Some(pointer) = state.seat.get_pointer() {
+        pointer.axis(state, frame);
+        pointer.frame(state);
+    }
 }
 
 // -- hit-testing ---------------------------------------------------------

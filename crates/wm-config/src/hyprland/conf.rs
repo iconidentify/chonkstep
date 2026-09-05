@@ -220,9 +220,13 @@ fn directive(keyword: &str, value: &str, out: &mut Vec<Directive>) {
         // sourced file exactly where its line sat — which is what makes
         // "the user's file is read after the defaults" true.
         "source" => out.push(Directive::Include(Include::Path(value.to_string()))),
-        // Hyprland's own machinery: plugin loading, animation curves,
-        // the blur layer list, debug switches.
-        "plugin" | "bezier" | "animation" | "blurls" | "debug" => {}
+        // Hyprland's own machinery is unsupported here, but it must be
+        // reported like every other declined directive. Silence made a
+        // plugin or debug setting look successfully applied.
+        "plugin" | "bezier" | "animation" | "blurls" | "debug" => out.push(Directive::Ignored {
+            kind: "keyword",
+            detail: format!("{keyword} = {} (Hyprland-only machinery)", truncate(value)),
+        }),
         _ => out.push(Directive::Ignored {
             kind: "keyword",
             detail: format!("{keyword} = {}", truncate(value)),

@@ -40,6 +40,7 @@ mod hyprland_ipc;
 // Session backend only; see its module docs for the DRM mechanism and
 // the honest nested answer.
 mod gamma;
+mod global_shortcuts;
 mod idle;
 mod image_capture;
 mod inhibit_bus;
@@ -57,6 +58,7 @@ mod test_door;
 mod toplevel_mapping;
 // virtual-keyboard-v1: `wtype` and everything Omarchy builds on it.
 mod virtual_keyboard;
+mod virtual_pointer;
 mod xdg;
 mod xewmh;
 mod xwayland;

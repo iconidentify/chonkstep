@@ -33,4 +33,11 @@ pub trait PopupHost {
 
     fn grab_pointer(&mut self) -> PopupGrab;
     fn ungrab_pointer(&mut self, grab: PopupGrab);
+
+    /// Gives a modal popup the keyboard for its lifetime. Defaults are
+    /// deliberately inert for lightweight SDK hosts; desktop backends
+    /// override both halves so menu navigation cannot leak into the
+    /// focused client.
+    fn grab_keyboard(&mut self) {}
+    fn ungrab_keyboard(&mut self) {}
 }

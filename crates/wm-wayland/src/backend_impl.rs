@@ -40,7 +40,7 @@ use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
 use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::State as XdgToplevelState;
 use smithay::reexports::wayland_server::backend::protocol::ProtocolError;
 use smithay::reexports::wayland_server::Resource;
-use smithay::utils::{Logical, Rectangle as SmithayRect, Transform};
+use smithay::utils::{Buffer, Logical, Rectangle as SmithayRect, Transform};
 use smithay::wayland::compositor::with_states;
 use smithay::wayland::shell::xdg::{SurfaceCachedState, ToplevelSurface, XdgToplevelSurfaceData};
 use smithay::xwayland::xwm::WmWindowType;
@@ -86,17 +86,22 @@ fn smithay_rect(rect: Rect) -> SmithayRect<i32, Logical> {
 ///
 /// `None` for an empty buffer (nothing to show; callers keep whatever
 /// they had), mirroring `wm-x11`'s blit ignoring empty buffers.
-fn import_buffer(buffer: &DecorationBuffer) -> Option<MemoryRenderBuffer> {
+fn import_buffer(buffer: &DecorationBuffer, opaque: bool) -> Option<MemoryRenderBuffer> {
     if buffer.width == 0 || buffer.height == 0 {
         return None;
     }
+    let opaque_regions = opaque.then(|| {
+        vec![SmithayRect::<i32, Buffer>::from_size(
+            (buffer.width as i32, buffer.height as i32).into(),
+        )]
+    });
     Some(MemoryRenderBuffer::from_slice(
         &buffer.pixels,
         Fourcc::Abgr8888,
         (buffer.width as i32, buffer.height as i32),
         1,
         Transform::Normal,
-        None,
+        opaque_regions,
     ))
 }
 
@@ -254,7 +259,7 @@ impl Backend for WaylandBackend {
 
     fn paint_shell_surface(&mut self, id: Self::ShellId, buffer: &DecorationBuffer) {
         if let Some(shell) = self.shells.get_mut(&id) {
-            if let Some(imported) = import_buffer(buffer) {
+            if let Some(imported) = import_buffer(buffer, false) {
                 shell.buffer = Some(imported);
                 shell.buffer_bytes = buffer.pixels.len();
                 self.damage = true;
@@ -296,7 +301,7 @@ impl Backend for WaylandBackend {
     fn paint_root_image(&mut self, buffer: &DecorationBuffer) {
         // An empty buffer keeps the previous background rather than
         // installing a zero-sized image nothing can render.
-        if let Some(imported) = import_buffer(buffer) {
+        if let Some(imported) = import_buffer(buffer, true) {
             self.root_background = RootBackground::Image(imported);
             self.damage = true;
         }
@@ -666,7 +671,7 @@ impl Backend for WaylandBackend {
 
     fn paint_decoration(&mut self, frame: Self::FrameId, buffer: &DecorationBuffer) {
         if let Some(record) = self.frames.get_mut(&frame) {
-            if let Some(imported) = import_buffer(buffer) {
+            if let Some(imported) = import_buffer(buffer, true) {
                 record.buffer = Some(imported);
                 self.damage = true;
             }
@@ -1308,19 +1313,21 @@ impl Backend for WaylandBackend {
     ///   no xdg state) and is deliberately unpublished — which is why
     ///   `xewmh.rs` leaves `_NET_WM_STATE_SHADED` out of
     ///   `_NET_SUPPORTED`.
-    fn publish_net_state(
-        &mut self,
-        window: Self::WindowId,
-        fullscreen: bool,
-        max_h: bool,
-        max_v: bool,
-        shaded: bool,
-        hidden: bool,
-    ) {
+    fn publish_net_state(&mut self, window: Self::WindowId, state: wm_core::NetStateSnapshot) {
+        let wm_core::NetStateSnapshot {
+            fullscreen,
+            maximized_horizontally: max_h,
+            maximized_vertically: max_v,
+            shaded,
+            hidden,
+            modal,
+        } = state;
         let _ = shaded;
+        self.ewmh.note_window_modal(window, modal);
         let Some(record) = self.windows.get_mut(&window) else {
             return;
         };
+        record.modal = modal;
         let fullscreen_changed = record.fullscreen != fullscreen;
         record.fullscreen = fullscreen;
         let maximized = both_axes_maximized(max_h, max_v);
@@ -1427,8 +1434,8 @@ impl Backend for WaylandBackend {
         let record = self.windows.get(&window)?;
         match &record.surface {
             ManagedSurface::Xdg(toplevel) => {
-                let parent = toplevel.parent()?;
-                self.window_for_surface(&parent)
+                let _ = toplevel;
+                record.parent
             }
             ManagedSurface::X11(surface) => {
                 let parent = surface.is_transient_for()?;
@@ -1444,6 +1451,10 @@ impl Backend for WaylandBackend {
                     .map(|(id, _)| *id)
             }
         }
+    }
+
+    fn window_is_modal(&self, window: Self::WindowId) -> bool {
+        self.windows.get(&window).is_some_and(|record| record.modal)
     }
 
     fn set_decoration_rules(&mut self, rules: wm_core::DecorationRules) {
@@ -1625,6 +1636,14 @@ impl wm_theme_api::PopupHost for WaylandBackend {
     }
 
     fn ungrab_pointer(&mut self, _grab: wm_theme_api::PopupGrab) {}
+
+    fn grab_keyboard(&mut self) {
+        <Self as Backend>::grab_keyboard(self);
+    }
+
+    fn ungrab_keyboard(&mut self) {
+        <Self as Backend>::ungrab_keyboard(self);
+    }
 }
 
 #[cfg(test)]

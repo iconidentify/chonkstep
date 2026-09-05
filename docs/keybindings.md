@@ -39,6 +39,22 @@ Window-targeted actions (`close`, `toggle-maximize`, `toggle-shade`,
 `miniaturize`, `toggle-fullscreen`, `window-menu`) act on the focused
 window and do nothing when no window is focused.
 
+Every root, window, and dock-tile menu is keyboard-modal while open.
+Up/Down changes the highlighted row, Right or Enter opens a submenu,
+Left returns to its parent, Enter/Space activates an action, and Escape
+closes the chain. The root menu itself is bindable as `root-menu`; for
+example:
+
+```toml
+[keybindings]
+"control+space" = "root-menu"
+```
+
+The Dock remains intentionally a pointer affordance rather than a
+second keyboard launcher. Its application-launching function is fully
+available from the root menu's keyboard-operable Applications cascade;
+`toggle-dock` only controls whether the pointer strip is visible.
+
 Three more verbs exist and are unbound in this keymap, because the
 NeXTSTEP vocabulary reaches workspaces by stepping through them rather
 than by number: `workspace <n>` goes to workspace *n*, and

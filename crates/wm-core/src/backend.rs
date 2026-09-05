@@ -2,8 +2,8 @@ use wm_theme_api::{DecorationBuffer, DecorationLayout, Point, Rect, ResizeEdge, 
 
 use crate::client::MonitorInfo;
 use crate::types::{
-    BackendEvent, DecorationRules, DragHandle, KeyCombo, Modifiers, MouseButton, ScrollDelta, SizeHints, WindowType,
-    WmClass, WmProtocol,
+    BackendEvent, DecorationRules, DragHandle, KeyCombo, Modifiers, MouseButton, NetStateSnapshot, ScrollDelta,
+    SizeHints, WindowType, WmClass, WmProtocol,
 };
 
 /// Everything the protocol-agnostic core needs from a windowing backend
@@ -411,6 +411,11 @@ pub trait Backend {
     fn window_parent(&self, _window: Self::WindowId) -> Option<Self::WindowId> {
         None
     }
+    /// Whether this transient currently blocks interaction with its
+    /// parent (`xdg_dialog_v1.set_modal` / `_NET_WM_STATE_MODAL`).
+    fn window_is_modal(&self, _window: Self::WindowId) -> bool {
+        false
+    }
     /// Installs (or removes) the passive pointer grabs the move/resize
     /// modifier-drag needs on one managed client's own window.
     ///
@@ -475,15 +480,7 @@ pub trait Backend {
     fn publish_workarea(&mut self, _area: Rect, _workspace_count: usize) {}
     /// Publishes a client's `_NET_WM_STATE` property from the WM's own
     /// authoritative flags.
-    fn publish_net_state(
-        &mut self,
-        _window: Self::WindowId,
-        _fullscreen: bool,
-        _max_h: bool,
-        _max_v: bool,
-        _shaded: bool,
-        _hidden: bool,
-    ) {
+    fn publish_net_state(&mut self, _window: Self::WindowId, _state: NetStateSnapshot) {
     }
     /// Publishes a client's `_NET_WM_DESKTOP` property — which
     /// workspace the window lives on, for pagers and taskbars.

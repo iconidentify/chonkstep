@@ -114,6 +114,8 @@ managers — both spellings installed by `scripts/install.sh`), and
     org.freedesktop.impl.portal.Inhibit=chonkstep
     org.freedesktop.impl.portal.ScreenCast=wlr
     org.freedesktop.impl.portal.Screenshot=wlr
+    org.freedesktop.impl.portal.Secret=gnome-keyring;kwallet
+    org.freedesktop.impl.portal.GlobalShortcuts=hyprland
 
 A user override can live at
 `~/.config/xdg-desktop-portal/chonkstep-portals.conf`.
@@ -148,8 +150,13 @@ Checked against the frontend with the chonkstep config active:
 | ScreenCast | wlr | **Works** — verified end to end; node id returned, frames flowing, pixels correct |
 | Screenshot | wlr | **Works** — `Screenshot()` returned a real PNG of the session (xdg-desktop-portal-wlr shells out to `grim`, which is also installed) |
 | Inhibit | chonkstep | Idle requests feed the compositor's own timers and are released on request close or caller disconnect |
-| FileChooser, Notification, Settings, and the rest | gtk | **Backend activates and answers** (D-Bus ping + interface version 4 confirmed); the dialogs themselves are ordinary windows and were not driven headlessly |
+| Account, Camera, DynamicLauncher, Email, FileChooser, Location, Notification, OpenURI, Print, Settings | gtk | Toolkit portal surface; the backend activates and answers |
+| GameMode, MemoryMonitor, NetworkMonitor, PowerProfileMonitor, ProxyResolver, Realtime, Trash | frontend/fallback services | Exported by the portal frontend on the tested session |
+| Secret | gnome-keyring, then kwallet | Explicitly routed; the first installed secret provider answers sandboxed credential storage |
+| GlobalShortcuts | hyprland | The backend registers `hyprland_global_shortcuts_v1` objects; chords configured with Hyprland's `global, app:id` dispatcher send pressed/released events |
 | Window/toplevel capture (`types=2` in SelectSources) | wlr | **Supported** — ext image-copy-capture advertises both output and foreign-toplevel sources; compatible portal backends expose `AvailableSourceTypes=3` |
+| Background, Wallpaper | none installed | Not exported; no installed backend declares these interfaces |
+| RemoteDesktop, InputCapture, Clipboard | none installed | Not exported. The compositor now serves virtual keyboard and virtual pointer injection, but an implementation portal backend is still required |
 
 Backend matrix:
 

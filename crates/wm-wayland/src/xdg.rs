@@ -992,6 +992,19 @@ impl Compositor {
             with_renderer_surface_state(&root, |state| state.buffer().is_some()).unwrap_or(false);
         let was_mapped = mapped_marker(&root);
         let backend = self.wm.backend_mut();
+        let parent = toplevel
+            .parent()
+            .and_then(|surface| backend.window_for_surface(&surface));
+        let parent_changed = backend
+            .windows
+            .get(&id)
+            .is_some_and(|record| record.parent != parent);
+        if parent_changed {
+            if let Some(record) = backend.windows.get_mut(&id) {
+                record.parent = parent;
+            }
+            backend.queue(WmEvent::ParentChanged(id));
+        }
         // The factor everything below measures by: the client's own
         // committed statement (viewport ratio or integer buffer scale),
         // corrected for the integral-fallback case on this window's

@@ -179,6 +179,10 @@ impl XwmHandler for Compositor {
         self.xwm.as_mut().expect("XWM event before start_wm")
     }
 
+    fn disconnected(&mut self, _xwm: XwmId) {
+        self.handle_xwayland_loss("running XWM connection closed");
+    }
+
     fn new_window(&mut self, _xwm: XwmId, _window: X11Surface) {
         // Creation is not management — X11 clients create windows long
         // before mapping (some never map). The record is made at map
@@ -196,6 +200,11 @@ impl XwmHandler for Compositor {
         if let Err(error) = window.set_mapped(true) {
             tracing::warn!(?error, "X11 map_window_request set_mapped failed");
         }
+        let modal = window.is_popup()
+            || self
+                .xewmh
+                .as_ref()
+                .is_some_and(|xewmh| xewmh.window_is_modal(window.window_id()));
         let backend = self.wm.backend_mut();
         let id = ensure_x11_record(backend, &window);
         // Refresh the pre-map geometry — the client may have configured
@@ -203,6 +212,7 @@ impl XwmHandler for Compositor {
         let geometry = wm_rect(window.geometry(), backend.output_size);
         if let Some(record) = backend.windows.get_mut(&id) {
             record.content = geometry;
+            record.modal = modal;
         }
         backend.queue(WmEvent::MapRequest(id));
         // `WM_HINTS` read once here as well as on change: a client that
@@ -229,11 +239,17 @@ impl XwmHandler for Compositor {
         // backend reports override-redirect as such) and maps them
         // as-is with no frame — the exact path `wm-x11` takes for
         // these window types.
+        let modal = window.is_popup()
+            || self
+                .xewmh
+                .as_ref()
+                .is_some_and(|xewmh| xewmh.window_is_modal(window.window_id()));
         let backend = self.wm.backend_mut();
         let id = ensure_x11_record(backend, &window);
         let geometry = wm_rect(window.geometry(), backend.output_size);
         if let Some(record) = backend.windows.get_mut(&id) {
             record.content = geometry;
+            record.modal = modal;
         }
         backend.queue(WmEvent::MapRequest(id));
     }
@@ -431,6 +447,9 @@ impl XwmHandler for Compositor {
                     first: NetState::DemandsAttention,
                     second: None,
                 });
+            }
+            WmWindowProperty::TransientFor => {
+                backend.queue(WmEvent::ParentChanged(id));
             }
             _ => {}
         }

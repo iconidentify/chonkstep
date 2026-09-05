@@ -35,10 +35,55 @@ fn print_version_and_exit_if_asked() {
 }
 
 #[cfg(target_os = "linux")]
+fn inspect_config_and_exit_if_asked() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let Some((index, print)) =
+        args.iter()
+            .enumerate()
+            .find_map(|(index, arg)| match arg.as_str() {
+                "--check-config" => Some((index, false)),
+                "--print-config" => Some((index, true)),
+                _ => None,
+            })
+    else {
+        return;
+    };
+    let _ = tracing_subscriber::fmt()
+        .without_time()
+        .with_max_level(tracing::Level::WARN)
+        .try_init();
+    let path = args
+        .get(index + 1)
+        .filter(|arg| !arg.starts_with('-'))
+        .map(std::path::Path::new);
+    let config = match wm_config::inspect(path) {
+        Ok(config) => config,
+        Err(error) => {
+            eprintln!("config error: {error}");
+            std::process::exit(1);
+        }
+    };
+    if print {
+        print!("{}", wm_config::effective_config_report(&config));
+    } else {
+        for diagnostic in &config.diagnostics {
+            println!("{diagnostic}");
+        }
+        println!(
+            "resolved {} bindings; {} diagnostics",
+            config.keybindings.len(),
+            config.diagnostics.len()
+        );
+    }
+    std::process::exit(0);
+}
+
+#[cfg(target_os = "linux")]
 fn main() {
     // Before the subscriber, so `--version` prints one clean line
     // rather than a line preceded by whatever RUST_LOG asked for.
     print_version_and_exit_if_asked();
+    inspect_config_and_exit_if_asked();
     let allocator_policy_pinned = chonk_shell::startup::pin_glibc_large_allocation_policy();
     tracing_subscriber::fmt().with_env_filter(tracing_subscriber::EnvFilter::from_default_env()).init();
     if !allocator_policy_pinned {
