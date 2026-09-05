@@ -150,6 +150,7 @@ use smithay::reexports::wayland_protocols_wlr::screencopy::v1::server::zwlr_scre
 use smithay::reexports::wayland_protocols_wlr::screencopy::v1::server::zwlr_screencopy_manager_v1::{
     self, ZwlrScreencopyManagerV1,
 };
+use smithay::reexports::wayland_protocols::ext::foreign_toplevel_list::v1::server::ext_foreign_toplevel_handle_v1::ExtForeignToplevelHandleV1;
 use smithay::wayland::foreign_toplevel_list::{
     ForeignToplevelHandle, ForeignToplevelListHandler, ForeignToplevelListState,
 };
@@ -230,6 +231,26 @@ pub(crate) struct ProtocolState {
     minimize_requests: Vec<(WlWindowId, bool)>,
     /// Capture requests waiting for a frame to answer them.
     captures: Vec<PendingCapture>,
+}
+
+/// Resolve an ext foreign-toplevel resource back to its managed window.
+///
+/// The mirror of [`window_for_wlr_toplevel`] for the frozen protocol,
+/// and the join key `hyprland-toplevel-mapping-v1` hangs its ext
+/// request off. The window id rides in the handle's own user data,
+/// planted where the handle is minted ([`sync_ext_toplevels`]), so this
+/// is a map lookup rather than a scan — but the answer is still gated
+/// on the window being *currently* listed. A handle whose window has
+/// closed keeps its inner state alive for as long as a client holds the
+/// resource, and resolving one of those would hand out an address for a
+/// window that is gone; the wlr arm refuses that case by construction
+/// and this one refuses it explicitly.
+pub(crate) fn window_for_ext_toplevel(
+    state: &ProtocolState,
+    handle: &ExtForeignToplevelHandleV1,
+) -> Option<WlWindowId> {
+    let window = *ForeignToplevelHandle::from_resource(handle)?.user_data().get::<WlWindowId>()?;
+    state.ext_toplevels.contains_key(&window).then_some(window)
 }
 
 /// Resolve a wlr foreign-toplevel resource back to its managed window.
