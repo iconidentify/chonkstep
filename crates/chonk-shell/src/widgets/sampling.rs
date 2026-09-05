@@ -584,6 +584,11 @@ struct SampleState<T> {
     resample_now: bool,
     active: bool,
     stopping: bool,
+    /// A sample belongs to the visibility period in which it started,
+    /// not the one in which a slow command happened to finish. Old
+    /// counters must not be folded as new immediately after reopening.
+    visibility_epoch: u64,
+    reading_epoch: u64,
 }
 
 /// What one run of a sampler produced.
@@ -613,6 +618,7 @@ impl<T: Clone + Send + 'static> Worker<T> {
             state: Mutex::new(SampleState {
                 reading: None, unusable: false, generation: 0, resample_now: false,
                 active: false, stopping: false,
+                visibility_epoch: 0, reading_epoch: 0,
             }),
             wake: Condvar::new(),
         });
@@ -639,6 +645,7 @@ impl<T: Clone + Send + 'static> Worker<T> {
         if let Ok(mut state) = self.shared.state.lock() {
             if state.active != active {
                 state.active = active;
+                state.visibility_epoch = state.visibility_epoch.wrapping_add(1);
                 if active {
                     state.resample_now = true;
                 }
@@ -652,8 +659,9 @@ impl<T: Clone + Send + 'static> Worker<T> {
         }
     }
 
-    /// The latest completed run, or `None` if none has completed since
-    /// `seen`. Never blocks on the source; the only lock held is the
+    /// The latest completed run from the current visibility period, or
+    /// `None` if none is new since `seen`. Permanent source failures
+    /// remain reportable after showing. Never blocks on the source; the only lock held is the
     /// sampler's own mutex, and the worker holds it solely to swap in a
     /// finished result.
     fn take_if_new(&self, seen: &mut u64) -> Option<FreshReading<T>> {
@@ -664,7 +672,7 @@ impl<T: Clone + Send + 'static> Worker<T> {
             // that has not produced anything yet.
             Err(poisoned) => poisoned.into_inner(),
         };
-        if state.generation == *seen {
+        if state.generation == *seen || (!state.unusable && state.reading_epoch != state.visibility_epoch) {
             return None;
         }
         *seen = state.generation;
@@ -720,7 +728,7 @@ impl Resampler {
 
 fn sample_loop<T>(shared: Arc<Shared<T>>, mut sample: impl FnMut() -> Outcome<T>, interval: Duration) {
     loop {
-        {
+        let visibility_epoch = {
             let Ok(mut state) = shared.state.lock() else { return };
             while !state.active && !state.stopping {
                 state = match shared.wake.wait(state) {
@@ -734,11 +742,13 @@ fn sample_loop<T>(shared: Arc<Shared<T>>, mut sample: impl FnMut() -> Outcome<T>
             // Consume a nudge before sampling so an effect completed
             // during this run still requests another, fresh reading.
             state.resample_now = false;
-        }
+            state.visibility_epoch
+        };
         match sample() {
             Outcome::Sampled(reading) => {
                 if let Ok(mut state) = shared.state.lock() {
                     state.reading = reading;
+                    state.reading_epoch = visibility_epoch;
                     state.generation = state.generation.wrapping_add(1);
                 }
             }
@@ -779,6 +789,69 @@ fn sample_loop<T>(shared: Arc<Shared<T>>, mut sample: impl FnMut() -> Outcome<T>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn wait_for_generation<T>(worker: &Worker<T>, generation: u64) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            if worker.shared.state.lock().unwrap().generation >= generation {
+                return;
+            }
+            assert!(std::time::Instant::now() < deadline, "worker did not publish generation {generation}");
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    }
+
+    #[test]
+    fn showing_a_worker_never_folds_a_counter_from_an_earlier_visibility_period() {
+        use std::sync::mpsc;
+
+        // Cover an unread result completed before hide, during hide,
+        // and a read that spans both hide and show. Folding an old byte
+        // counter on show makes the following fresh counter's delta
+        // appear to have happened in milliseconds instead of the whole
+        // hidden interval, producing an artificial network-rate spike.
+        for completion in ["before hide", "while hidden", "after show"] {
+            let (started, starts) = mpsc::channel();
+            let (release, proceed) = mpsc::channel();
+            let mut count = 0;
+            let mut worker = Worker::spawn("test-resume-counter".into(), Duration::from_secs(3600), true, move || {
+                count += 1;
+                let _ = started.send(count);
+                let _ = proceed.recv_timeout(Duration::from_secs(2));
+                Outcome::Sampled(Some(count))
+            });
+            assert_eq!(starts.recv_timeout(Duration::from_secs(2)).unwrap(), 1);
+            if completion == "before hide" {
+                release.send(()).unwrap();
+                wait_for_generation(&worker, 1);
+            }
+            worker.set_active(false);
+            if completion == "while hidden" {
+                release.send(()).unwrap();
+                wait_for_generation(&worker, 1);
+            }
+            worker.set_active(true);
+            if completion == "after show" {
+                release.send(()).unwrap();
+            }
+            assert_eq!(starts.recv_timeout(Duration::from_secs(2)).unwrap(), 2);
+            let mut seen = 0;
+            assert!(worker.take_if_new(&mut seen).is_none(), "{completion}: old counter is not fresh after show");
+            release.send(()).unwrap();
+            wait_for_generation(&worker, 2);
+            assert_eq!(worker.take_if_new(&mut seen).unwrap().reading, Some(2));
+        }
+    }
+
+    #[test]
+    fn a_permanently_unusable_source_stays_reportable_across_visibility_changes() {
+        let mut worker = Worker::<u32>::spawn("test-unavailable-resume".into(), Duration::from_secs(1), true,
+            || Outcome::Unusable);
+        wait_for_generation(&worker, 1);
+        worker.set_active(false);
+        worker.set_active(true);
+        assert!(worker.take_if_new(&mut 0).unwrap().unusable);
+    }
 
     struct NotifyDrop(std::sync::mpsc::Sender<()>);
 

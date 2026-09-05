@@ -306,6 +306,8 @@
 # the bottom edge, not in the Dock, so miniaturizing still works and
 # double-clicking a tile still restores. Built-in instruments retain
 # their state but pause sampling while hidden, then refresh when shown.
+# History graphs do not collect hidden samples; the first fresh counter
+# rate after reopening covers the interval since its last visible reading.
 # A dockapp is told to stop sampling and drawing until the column returns.
 #
 # This is the starting point, not the last word: the root menu's "Dock"
