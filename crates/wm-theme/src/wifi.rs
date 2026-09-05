@@ -181,7 +181,7 @@ pub fn render_wifi_tile(
         wired_lit,
     );
 
-    DecorationBuffer { width: size, height: size, pixels: pixmap.data().to_vec() }
+    DecorationBuffer { width: size, height: size, pixels: pixmap.take() }
 }
 
 fn solid(color: crate::model::Color) -> Paint<'static> {
@@ -321,14 +321,12 @@ fn draw_label_strip(
     // recedes, one more cue before reading a single letter.
     let name_color = if wifi_lit || wired_lit { ink } else { dim };
     let name_w = w.saturating_sub(marks_w + cell_w / 4);
-    let mut label = name.to_uppercase();
+    let label = name.to_uppercase();
     let mut name_font = font;
     if paint::text_width(font_system, &name_font, &label) > name_w {
         name_font.size = (h as f32 * 0.50).max(6.0);
     }
-    while !label.is_empty() && paint::text_width(font_system, &name_font, &label) > name_w {
-        label.pop();
-    }
+    let label = paint::fit_text(font_system, &name_font, &label, name_w);
     paint::draw_text(pixmap, font_system, swash_cache, &label, &name_font, name_color, x, y, name_w, h, TextAlign::Left);
 }
 

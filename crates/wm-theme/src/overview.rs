@@ -339,7 +339,7 @@ pub fn render_overview(
     // the switcher's: the edge must read above the plates inside it.
     paint::draw_raised2_bevel(&mut pixmap, 0, 0, layout.panel.w, layout.panel.h, bevel_t);
 
-    DecorationBuffer { width: layout.panel.w, height: layout.panel.h, pixels: pixmap.data().to_vec() }
+    DecorationBuffer { width: layout.panel.w, height: layout.panel.h, pixels: pixmap.take() }
 }
 
 /// The switcher's selection treatment: a highlight-filled plate
@@ -376,7 +376,7 @@ pub fn render_selection(
     paint::draw_raised2_bevel(&mut pixmap, 0, 0, w, h, theme.menu.bevel.width.max(1) as u32);
     let card = Rect { pos: Point::new(ring as i32, ring as i32), size: cell };
     draw_card(&mut pixmap, theme, font_system, swash_cache, entry, card, true, pad);
-    DecorationBuffer { width: w, height: h, pixels: pixmap.data().to_vec() }
+    DecorationBuffer { width: w, height: h, pixels: pixmap.take() }
 }
 
 /// One window card: a miniature of real window chrome. Titlebar strip

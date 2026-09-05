@@ -212,7 +212,7 @@ pub fn render_bluetooth_tile(
     };
     draw_label_strip(&mut pixmap, theme, font_system, swash_cache, &family, margin, margin + well_h as i32, well_w, strip_h as u32, label, lit);
 
-    DecorationBuffer { width: size, height: size, pixels: pixmap.data().to_vec() }
+    DecorationBuffer { width: size, height: size, pixels: pixmap.take() }
 }
 
 /// The tile-face lettering under the well: the state word or device
@@ -238,13 +238,11 @@ fn draw_label_strip(
     let dim = tile::tile_ink_dim(theme);
     let color = if lit { ink } else { dim };
     let mut font = FontSpec { family: family.to_string(), size: (h as f32 * 0.68).max(6.0), weight: FontWeight::Bold, style: FontStyle::Normal };
-    let mut label = name.to_uppercase();
+    let label = name.to_uppercase();
     if paint::text_width(font_system, &font, &label) > w {
         font.size = (h as f32 * 0.50).max(6.0);
     }
-    while !label.is_empty() && paint::text_width(font_system, &font, &label) > w {
-        label.pop();
-    }
+    let label = paint::fit_text(font_system, &font, &label, w);
     paint::draw_text(pixmap, font_system, swash_cache, &label, &font, color, x, y, w, h, TextAlign::Left);
 }
 
@@ -336,7 +334,7 @@ pub fn render_bt_panel(
         }
     }
 
-    DecorationBuffer { width, height, pixels: pixmap.data().to_vec() }
+    DecorationBuffer { width, height, pixels: pixmap.take() }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -381,9 +379,7 @@ fn draw_panel_row(
             if *pending {
                 label.push_str("...");
             }
-            while !label.is_empty() && paint::text_width(font_system, &font, &label) > name_w {
-                label.pop();
-            }
+            let label = paint::fit_text(font_system, &font, &label, name_w);
             paint::draw_text(pixmap, font_system, swash_cache, &label, &font, color, text_x, y, name_w, row_h, TextAlign::Left);
             draw_forget_cell(pixmap, font_system, swash_cache, family, pal, (width - cell) as i32, y, cell, row_h, *armed);
         }

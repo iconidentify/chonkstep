@@ -209,7 +209,7 @@ pub fn render_soundctl_tile(
         muted,
     );
 
-    DecorationBuffer { width: size, height: size, pixels: pixmap.data().to_vec() }
+    DecorationBuffer { width: size, height: size, pixels: pixmap.take() }
 }
 
 /// The tile-face band under the well: instrument label on the left in

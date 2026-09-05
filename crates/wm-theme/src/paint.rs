@@ -283,6 +283,49 @@ pub fn text_width(font_system: &mut cosmic_text::FontSystem, font: &FontSpec, te
     width.ceil() as u32
 }
 
+/// Fits a prefix using logarithmically many shaping calls. Measuring every
+/// successively shorter string made long device names quadratic work on the
+/// compositor thread. Every accepted prefix is measured with its suffix, so
+/// font fallback and shaping remain authoritative. Kerning can make widths
+/// locally non-monotonic: the result fits, but need not be the longest possible
+/// prefix in such a font. A suffix wider than the box is left for draw clipping.
+pub(crate) fn fit_measured_prefix(
+    text: &str,
+    max_width: u32,
+    suffix: &str,
+    mut measure: impl FnMut(&str) -> u32,
+) -> String {
+    if measure(text) <= max_width {
+        return text.to_string();
+    }
+    let boundaries: Vec<usize> = text.char_indices().map(|(index, _)| index).collect();
+    let candidate = |count: usize| {
+        let prefix = &text[..boundaries.get(count).copied().unwrap_or(text.len())];
+        let prefix = if suffix.is_empty() { prefix } else { prefix.trim_end() };
+        let mut result = String::with_capacity(prefix.len() + suffix.len());
+        result.push_str(prefix);
+        result.push_str(suffix);
+        result
+    };
+    let mut low = 0;
+    let mut high = boundaries.len().saturating_sub(1);
+    while low < high {
+        let middle = low + (high - low).div_ceil(2);
+        if measure(&candidate(middle)) <= max_width {
+            low = middle;
+        } else {
+            high = middle - 1;
+        }
+    }
+    candidate(low)
+}
+
+/// Truncates a single-line label using the same bounded width search as
+/// instrument-panel elision, without adding an ellipsis to tiny tile labels.
+pub(crate) fn fit_text(font_system: &mut cosmic_text::FontSystem, font: &FontSpec, text: &str, width: u32) -> String {
+    fit_measured_prefix(text, width, "", |candidate| text_width(font_system, font, candidate))
+}
+
 /// Shortens a single-line label to roughly what fits in `width`,
 /// preserving both meaningful ends around a middle ellipsis. This is
 /// intentionally the one title-elision policy shared by real window
@@ -293,16 +336,24 @@ pub fn text_width(font_system: &mut cosmic_text::FontSystem, font: &FontSpec, te
 /// for unusually wide glyphs and fallback fonts.
 pub(crate) fn elide(title: &str, width: u32, font_size: f32) -> String {
     let fits = ((width as f32) / (font_size * 0.75)).max(4.0) as usize;
-    let chars: Vec<char> = title.chars().collect();
-    if chars.len() <= fits {
+    // Inspect only as many characters as the titlebar can display. A
+    // client's long title must not allocate a full Vec<char> every repaint.
+    if title.char_indices().nth(fits).is_none() {
         return title.to_string();
     }
     let keep = fits.saturating_sub(3);
     let head = keep / 2 + keep % 2;
     let tail = keep / 2;
-    let mut out: String = chars[..head].iter().collect();
+    let head_end = title.char_indices().nth(head).map_or(title.len(), |(index, _)| index);
+    let tail_start = if tail == 0 {
+        title.len()
+    } else {
+        title.char_indices().rev().nth(tail - 1).map_or(0, |(index, _)| index)
+    };
+    let mut out = String::with_capacity(head_end + 3 + title.len() - tail_start);
+    out.push_str(&title[..head_end]);
     out.push_str("...");
-    out.extend(&chars[chars.len() - tail..]);
+    out.push_str(&title[tail_start..]);
     out
 }
 
@@ -502,6 +553,44 @@ fn blend_pixel(pixmap: &mut Pixmap, x: i32, y: i32, r: u8, g: u8, b: u8, a: u8) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn long_labels_need_a_bounded_number_of_width_measurements() {
+        let text = "Peripheral ".repeat(400);
+        let mut measurements = 0;
+        let fitted = fit_measured_prefix(&text, 24, "…", |candidate| {
+            measurements += 1;
+            candidate.chars().count() as u32
+        });
+        assert!(fitted.ends_with('…'));
+        assert!(fitted.chars().count() <= 24);
+        assert!(measurements <= 15,
+            "a long label must not reshape thousands of successively shorter prefixes: {measurements}");
+    }
+
+    #[test]
+    fn prefix_fitting_preserves_unicode_and_handles_tiny_boxes() {
+        let measure = |text: &str| text.chars().count() as u32;
+        assert_eq!(fit_measured_prefix("αβγδε", 4, "…", measure), "αβγ…");
+        assert_eq!(fit_measured_prefix("αβγδε", 4, "", measure), "αβγδ");
+        assert_eq!(fit_measured_prefix("αβγδε", 0, "", measure), "");
+        assert_eq!(fit_measured_prefix("α", 0, "…", measure), "…");
+        assert_eq!(fit_measured_prefix("OK", 4, "…", measure), "OK");
+        assert_eq!(fit_measured_prefix("", 0, "…", measure), "");
+        assert_eq!(fit_measured_prefix("AB   CDEF", 6, "…", measure), "AB…");
+    }
+
+    #[test]
+    fn title_elision_preserves_both_unicode_ends_without_scanning_the_middle() {
+        assert_eq!(elide("abcdefghij", 90, 12.0), "abcdefghij");
+        assert_eq!(elide("abcdefghij", 63, 12.0), "ab...ij");
+        assert_eq!(elide("αβγδεζηθικ", 63, 12.0), "αβ...ικ");
+        assert_eq!(elide("αβγδεζηθικ", 0, 12.0), "α...");
+        assert_eq!(elide("", 0, 12.0), "");
+        assert_eq!(elide("title", u32::MAX, 0.0), "title");
+        let long = format!("αβ{}ικ", "長".repeat(100_000));
+        assert_eq!(elide(&long, 63, 12.0), "αβ...ικ");
+    }
     use crate::model::{FontStyle, FontWeight};
 
     /// Regression test for the NeXTSTEP light-source direction: a

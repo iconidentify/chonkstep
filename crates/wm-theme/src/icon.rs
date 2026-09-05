@@ -84,7 +84,7 @@ pub fn render_icon_tile(
         TextAlign::Center,
     );
 
-    DecorationBuffer { width: size, height: size, pixels: pixmap.data().to_vec() }
+    DecorationBuffer { width: size, height: size, pixels: pixmap.take() }
 }
 
 /// Scales `src` to fit entirely within `(x, y, w, h)` — never cropped,

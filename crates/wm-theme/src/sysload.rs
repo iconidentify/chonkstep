@@ -117,7 +117,7 @@ pub fn render_sysload_tile(
         strip_h as u32,
     );
 
-    DecorationBuffer { width: size, height: size, pixels: pixmap.data().to_vec() }
+    DecorationBuffer { width: size, height: size, pixels: pixmap.take() }
 }
 
 /// A hard-edged 1px rectangle outline in LED ink, intersected with the

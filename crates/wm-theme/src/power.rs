@@ -380,7 +380,7 @@ pub fn render_power_tile(
     };
     draw_label_strip(&mut pixmap, theme, font_system, swash_cache, strip, word, word_color);
 
-    DecorationBuffer { width: size, height: size, pixels: pixmap.data().to_vec() }
+    DecorationBuffer { width: size, height: size, pixels: pixmap.take() }
 }
 
 #[cfg(test)]

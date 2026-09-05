@@ -697,7 +697,7 @@ fn render_layout(
     // The pixmap's own size, not the layout's: a zero-sized grant is
     // clamped to 1px above, and a buffer whose header disagreed with
     // its payload is exactly what `PanelFrame::adopt` refuses.
-    DecorationBuffer { width: pixmap.width(), height: pixmap.height(), pixels: pixmap.data().to_vec() }
+    DecorationBuffer { width: pixmap.width(), height: pixmap.height(), pixels: pixmap.take() }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1545,7 +1545,7 @@ mod preview {
         paint::op_rect(&mut pixmap, wx, wy, ww, wh, -24);
         paint::draw_sunken_bevel(&mut pixmap, wx, wy, ww, wh, t);
         blit(&mut pixmap, inset as i32, inset as i32, content);
-        DecorationBuffer { width: w, height: h, pixels: pixmap.data().to_vec() }
+        DecorationBuffer { width: w, height: h, pixels: pixmap.take() }
     }
 
     /// One design-review plate: the desk, the dock down its right

@@ -228,7 +228,7 @@ pub fn render_nettraffic_tile(
     // Interface names differentiate at the front (enp0s31f6 versus
     // wlp0s20f3), so a clipped head stays identifiable where a wrapped
     // or overflowing one reads as a rendering bug.
-    let mut name = interface_name.to_uppercase();
+    let name = interface_name.to_uppercase();
     let mut name_font = FontSpec {
         family: label_family,
         size: (f.strip_h as f32 * 0.68).max(6.0),
@@ -239,9 +239,7 @@ pub fn render_nettraffic_tile(
     while paint::text_width(font_system, &name_font, &name) > f.well_w && name_font.size > floor {
         name_font.size = (name_font.size - 0.5).max(floor);
     }
-    while paint::text_width(font_system, &name_font, &name) > f.well_w && !name.is_empty() {
-        name.pop();
-    }
+    let name = paint::fit_text(font_system, &name_font, &name, f.well_w);
     paint::draw_text(
         &mut pixmap,
         font_system,
@@ -256,7 +254,7 @@ pub fn render_nettraffic_tile(
         TextAlign::Left,
     );
 
-    DecorationBuffer { width: size, height: size, pixels: pixmap.data().to_vec() }
+    DecorationBuffer { width: size, height: size, pixels: pixmap.take() }
 }
 
 /// A rectangular slice of the glass in device pixels. Every band

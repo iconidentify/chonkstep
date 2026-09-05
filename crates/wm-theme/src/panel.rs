@@ -368,7 +368,7 @@ pub fn render_dead_tile(
     };
     paint::draw_text(&mut pixmap, font_system, swash_cache, label, &font, pal.ink_dim, gx, gy, gw, gh, TextAlign::Center);
 
-    DecorationBuffer { width: size, height: size, pixels: pixmap.data().to_vec() }
+    DecorationBuffer { width: size, height: size, pixels: pixmap.take() }
 }
 
 #[cfg(test)]

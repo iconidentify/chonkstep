@@ -819,7 +819,7 @@ fn render_layout(
         }
     }
 
-    DecorationBuffer { width: pixmap.width(), height: pixmap.height(), pixels: pixmap.data().to_vec() }
+    DecorationBuffer { width: pixmap.width(), height: pixmap.height(), pixels: pixmap.take() }
 }
 
 /// The header: the instrument's own mark, its name, one line of status,

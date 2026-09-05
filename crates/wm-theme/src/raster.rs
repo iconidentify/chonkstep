@@ -40,7 +40,57 @@ use crate::paint;
 #[derive(Clone)]
 pub struct FontState {
     font_system: Rc<RefCell<cosmic_text::FontSystem>>,
-    swash_cache: Rc<RefCell<cosmic_text::SwashCache>>,
+    swash_cache: Rc<RefCell<GlyphCache>>,
+}
+
+// Glyph keys include font, size and subpixel position. Keeping every
+// title ever displayed at every scale made this session-long cache grow
+// without a limit. These are soft watermarks, checked between render
+// calls: one call can temporarily exceed them. Normal, warm rendering
+// only compares entry counts; it does not walk the cache every frame.
+const GLYPH_CACHE_BYTES: usize = 8 * 1024 * 1024;
+const GLYPH_CACHE_ENTRIES: usize = 16 * 1024;
+const GLYPH_CACHE_CHECK_STEP: usize = 128;
+
+struct GlyphCache {
+    swash: cosmic_text::SwashCache,
+    next_check: usize,
+    observed_entries: usize,
+}
+
+impl GlyphCache {
+    fn new() -> Self {
+        Self { swash: cosmic_text::SwashCache::new(), next_check: 1, observed_entries: 0 }
+    }
+
+    fn trim(&mut self) {
+        let entries = self.swash.image_cache.len() + self.swash.outline_command_cache.len();
+        if entries < self.observed_entries {
+            // Public callers can clear Swash's maps themselves.
+            self.next_check = 1;
+        }
+        self.observed_entries = entries;
+        if entries < self.next_check {
+            return;
+        }
+        let image_bytes: usize = self.swash.image_cache.values().flatten()
+            .map(|image| image.data.capacity()).sum();
+        let outline_bytes: usize = self.swash.outline_command_cache.values().flatten()
+            .map(|commands| std::mem::size_of_val(commands.as_ref())).sum();
+        if entries >= GLYPH_CACHE_ENTRIES || image_bytes.saturating_add(outline_bytes) >= GLYPH_CACHE_BYTES {
+            // Release the hash tables too. Font discovery and Swash's
+            // scaler context stay warm; only reproducible glyph data
+            // is evicted. No font or fallback behavior changes.
+            self.swash.image_cache = Default::default();
+            self.swash.outline_command_cache = Default::default();
+            self.next_check = 1;
+            self.observed_entries = 0;
+        } else {
+            // Check small caches on every addition, so even a single
+            // unusually large glyph is noticed on the next render.
+            self.next_check = entries + if entries < GLYPH_CACHE_CHECK_STEP { 1 } else { GLYPH_CACHE_CHECK_STEP };
+        }
+    }
 }
 
 impl FontState {
@@ -49,7 +99,7 @@ impl FontState {
     pub fn new() -> Self {
         Self {
             font_system: Rc::new(RefCell::new(cosmic_text::FontSystem::new())),
-            swash_cache: Rc::new(RefCell::new(cosmic_text::SwashCache::new())),
+            swash_cache: Rc::new(RefCell::new(GlyphCache::new())),
         }
     }
 
@@ -71,9 +121,14 @@ impl FontState {
     }
 
     /// The shared glyph raster cache, mutably — [`FontState::system`]'s
-    /// companion, under the same short-loan discipline.
+    /// companion, under the same short-loan discipline. Evicts glyph
+    /// images at soft 8 MiB / 16K-entry watermarks between render calls,
+    /// preserving the font database and scaler context. Repeated large
+    /// working sets may rasterize again instead of remaining resident.
     pub fn swash(&self) -> std::cell::RefMut<'_, cosmic_text::SwashCache> {
-        self.swash_cache.borrow_mut()
+        let mut cache = self.swash_cache.borrow_mut();
+        cache.trim();
+        std::cell::RefMut::map(cache, |cache| &mut cache.swash)
     }
 
     /// Whether the database holds a face for `family`. Used to warn
@@ -176,7 +231,7 @@ impl ThemeEngine for RasterThemeEngine {
         render_decoration(
             &self.theme,
             &mut self.fonts.font_system.borrow_mut(),
-            &mut self.fonts.swash_cache.borrow_mut(),
+            &mut self.fonts.swash(),
             request,
             layout,
         )
@@ -196,7 +251,7 @@ impl ThemeEngine for RasterThemeEngine {
         render_sparse_decoration(
             &self.theme,
             &mut self.fonts.font_system.borrow_mut(),
-            &mut self.fonts.swash_cache.borrow_mut(),
+            &mut self.fonts.swash(),
             &mut self.title_cache.borrow_mut(),
             self.base_scale.to_bits(),
             request,
@@ -220,7 +275,7 @@ impl ThemeEngine for RasterThemeEngine {
         render_sparse_decoration(
             theme,
             &mut self.fonts.font_system.borrow_mut(),
-            &mut self.fonts.swash_cache.borrow_mut(),
+            &mut self.fonts.swash(),
             &mut self.title_cache.borrow_mut(),
             key,
             request,
@@ -606,7 +661,7 @@ fn render_decoration(
         }
     }
 
-    DecorationBuffer { width: w, height: h, pixels: pixmap.data().to_vec() }
+    DecorationBuffer { width: w, height: h, pixels: pixmap.take() }
 }
 
 /// Close and Miniaturize are pixel-for-pixel recreations of the classic
@@ -748,6 +803,60 @@ fn draw_close_glyph_smooth(pixmap: &mut Pixmap, x0: i32, y0: i32, span: i32, col
 mod tests {
     use super::*;
     use wm_theme_api::ButtonRuntimeState;
+
+    fn glyph_key(glyph: u16) -> cosmic_text::CacheKey {
+        cosmic_text::CacheKey::new(
+            cosmic_text::fontdb::ID::dummy(), glyph, 16.0, (0.0, 0.0),
+            cosmic_text::fontdb::Weight::NORMAL, cosmic_text::CacheKeyFlags::empty(),
+        ).0
+    }
+
+    #[test]
+    fn glyph_cache_releases_large_images_and_hash_storage() {
+        let mut cache = GlyphCache::new();
+        let mut image = cosmic_text::SwashImage::new();
+        // Capacity, not length: cached allocations still cost memory
+        // when their logical payload is shorter.
+        image.data = Vec::with_capacity(GLYPH_CACHE_BYTES);
+        cache.swash.image_cache.insert(glyph_key(1), Some(image));
+        cache.trim();
+        assert_eq!(cache.swash.image_cache.capacity(), 0);
+        assert_eq!(cache.next_check, 1);
+    }
+
+    #[test]
+    fn glyph_cache_bounds_negative_entries_and_preserves_a_warm_small_cache() {
+        let mut cache = GlyphCache::new();
+        cache.swash.image_cache.insert(glyph_key(1), None);
+        cache.trim();
+        cache.trim();
+        assert_eq!(cache.swash.image_cache.len(), 1, "ordinary warm entries survive");
+        for glyph in 0..GLYPH_CACHE_ENTRIES {
+            cache.swash.image_cache.insert(glyph_key(glyph as u16), None);
+        }
+        cache.trim();
+        assert!(cache.swash.image_cache.is_empty(), "missing glyphs also need a bound");
+    }
+
+    #[test]
+    fn evicting_shared_glyphs_keeps_the_font_database_and_rendered_pixels() {
+        let engine = RasterThemeEngine::nextstep_classic();
+        let fonts = engine.fonts();
+        let request = sample_request("Terminal — 世界", true);
+        let layout = engine.layout(&request);
+        let before = engine.render(&request, &layout);
+        let faces = fonts.system().db().faces().count();
+        {
+            let mut cache = fonts.swash();
+            for glyph in 0..GLYPH_CACHE_ENTRIES {
+                cache.image_cache.insert(glyph_key(glyph as u16), None);
+            }
+        }
+        assert!(fonts.swash().image_cache.is_empty(), "a clone shares the eviction");
+        assert_eq!(fonts.system().db().faces().count(), faces);
+        assert_eq!(engine.render(&request, &layout), before, "eviction only discards reproducible data");
+        assert!(!fonts.swash().image_cache.is_empty(), "rendering repopulates the cache");
+    }
 
     fn sample_request(title: &str, focused: bool) -> DecorationRequest {
         DecorationRequest {

@@ -282,7 +282,7 @@ pub fn render_menu(
     paint::fill_rect(&mut pixmap, (width - bw) as i32, 0, bw, height, border);
 
     MenuRender {
-        buffer: DecorationBuffer { width, height, pixels: pixmap.data().to_vec() },
+        buffer: DecorationBuffer { width, height, pixels: pixmap.take() },
         item_rects,
         close_rect,
     }

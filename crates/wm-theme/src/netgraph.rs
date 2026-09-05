@@ -24,7 +24,7 @@ pub fn render_network_tile(theme: &Theme, size: u32, rx: &[f32], tx: &[f32]) -> 
     let (inset, face_w, face_h) = draw_frame(&mut pixmap, theme, size);
     draw_graph(&mut pixmap, inset, inset, face_w, face_h, rx, tx);
 
-    DecorationBuffer { width: size, height: size, pixels: pixmap.data().to_vec() }
+    DecorationBuffer { width: size, height: size, pixels: pixmap.take() }
 }
 
 /// Bevel frame + dark face. Returns `(inset, face_w, face_h)` — the

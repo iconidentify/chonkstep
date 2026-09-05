@@ -162,7 +162,7 @@ pub fn render_launcher_tile(
         draw_square_ring(&mut pixmap, lamp_x + ring, lamp_y + ring, (lamp - 2 * ring).max(1) as u32, ring as u32, rim);
     }
 
-    DecorationBuffer { width: size, height: size, pixels: pixmap.data().to_vec() }
+    DecorationBuffer { width: size, height: size, pixels: pixmap.take() }
 }
 
 /// A hard-edged square ring outline: `thickness`-thick sides of an

@@ -124,7 +124,7 @@ pub fn render_netload_tile(
         unit,
     );
 
-    DecorationBuffer { width: size, height: size, pixels: pixmap.data().to_vec() }
+    DecorationBuffer { width: size, height: size, pixels: pixmap.take() }
 }
 
 /// The three seven-segment digits, spread across the glass width. The

@@ -61,7 +61,7 @@ pub fn render_digital_clock(theme: &Theme, width: u32, height: u32, hour: u32, m
         }
     }
 
-    DecorationBuffer { width, height, pixels: pixmap.data().to_vec() }
+    DecorationBuffer { width, height, pixels: pixmap.take() }
 }
 
 /// The seven segment rects (a, b, c, d, e, f, g order) for a digit box

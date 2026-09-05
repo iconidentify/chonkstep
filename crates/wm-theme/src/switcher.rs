@@ -86,7 +86,7 @@ pub fn render_switcher(
         );
     }
 
-    DecorationBuffer { width, height, pixels: pixmap.data().to_vec() }
+    DecorationBuffer { width, height, pixels: pixmap.take() }
 }
 
 /// The panel's own window background color for the shell window that

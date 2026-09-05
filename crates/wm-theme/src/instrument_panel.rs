@@ -708,21 +708,10 @@ pub fn draw_type(
 }
 
 /// Ellipsizes `text` to fit `max_w` at the width this type actually
-/// shapes to — trimming characters until the trimmed form plus `…`
-/// fits. A label too long for its box loses characters, never its box.
+/// shapes to. The bounded prefix search avoids reshaping every successively
+/// shorter label; a long device name must not stall the compositor thread.
 pub fn fit_type(fonts: &mut cosmic_text::FontSystem, font: &PanelFont, text: &str, max_w: u32) -> String {
-    if type_width(fonts, font, text) <= max_w {
-        return text.to_string();
-    }
-    let mut kept: Vec<char> = text.chars().collect();
-    while kept.len() > 1 {
-        kept.pop();
-        let candidate: String = kept.iter().collect::<String>().trim_end().to_string() + "…";
-        if type_width(fonts, font, &candidate) <= max_w {
-            return candidate;
-        }
-    }
-    "…".to_string()
+    paint::fit_measured_prefix(text, max_w, "…", |candidate| type_width(fonts, font, candidate))
 }
 
 #[cfg(test)]

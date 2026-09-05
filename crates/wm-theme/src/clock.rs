@@ -63,7 +63,7 @@ pub fn render_clock_tile(theme: &Theme, size: u32, hour: u32, minute: u32, secon
     draw_line(&mut pixmap, cx, cy, cx + minute_angle.cos() * radius * 0.75, cy + minute_angle.sin() * radius * 0.75, ink, 1.4);
     draw_line(&mut pixmap, cx, cy, cx + second_angle.cos() * radius * 0.85, cy + second_angle.sin() * radius * 0.85, Color::rgb(0xB0, 0x30, 0x30), 0.8);
 
-    DecorationBuffer { width: size, height: size, pixels: pixmap.data().to_vec() }
+    DecorationBuffer { width: size, height: size, pixels: pixmap.take() }
 }
 
 /// Anti-aliased stroked line for the dial. Hands and ticks are angled

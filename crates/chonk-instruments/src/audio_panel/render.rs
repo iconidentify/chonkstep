@@ -98,7 +98,7 @@ pub fn render_audio_panel(
     if audio.sinks().is_empty() {
         let font = style.typeface(TypeRole::Row, m.row_h).receded(&style);
         ip::draw_type(&mut pixmap, fonts, swash, &font, "NO OUTPUTS", gx, m.rows_top(), gw, m.row_h, TextAlign::Center);
-        return DecorationBuffer { width: w, height: h, pixels: pixmap.data().to_vec() };
+        return DecorationBuffer { width: w, height: h, pixels: pixmap.take() };
     }
 
     let visible = m.visible_rows(audio.sinks().len());
@@ -113,7 +113,7 @@ pub fn render_audio_panel(
         draw_row(&mut pixmap, &style, fonts, swash, m, edge, band, y, sink, audio);
     }
 
-    DecorationBuffer { width: w, height: h, pixels: pixmap.data().to_vec() }
+    DecorationBuffer { width: w, height: h, pixels: pixmap.take() }
 }
 
 /// Whether `target` is this sink's control in the given zone.

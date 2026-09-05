@@ -163,7 +163,7 @@ pub fn render_clip_tile(
         TextAlign::Center,
     );
 
-    DecorationBuffer { width: size, height: size, pixels: pixmap.data().to_vec() }
+    DecorationBuffer { width: size, height: size, pixels: pixmap.take() }
 }
 
 fn fill_triangle(pixmap: &mut Pixmap, points: [(i32, i32); 3], color: Color) {
