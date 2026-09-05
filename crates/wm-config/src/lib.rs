@@ -31,6 +31,7 @@
 //! desktop = "omarchy"                # optional; a whole posture's defaults (see `preset`)
 //! keymap = "omarchy"                 # optional; which binding vocabulary (see `preset`)
 //! focus_follows_mouse = false        # optional; default false
+//! autoraise = true                   # optional; does taking focus also raise?
 //! scale = 2.0                        # optional; UI scale factor
 //! theme = "nextstep-classic"         # optional; theme name
 //! appearance = "dark"                # optional; "light" | "dark"
@@ -341,6 +342,15 @@ fn workspace_index(number: &str) -> Option<usize> {
 #[derive(Clone, Debug)]
 pub struct Config {
     pub focus_follows_mouse: bool,
+    /// Whether a window that takes focus is also brought to the front.
+    ///
+    /// Orthogonal to [`Self::focus_follows_mouse`], and only that
+    /// setting makes it interesting: a click always raises what it
+    /// lands on, so with click-to-focus this changes nothing. With
+    /// sloppy focus, `false` is what stops the pointer from reordering
+    /// every window it travels across. Defaults to `true`, which is the
+    /// behaviour every earlier release had.
+    pub autoraise: bool,
     pub scale: Option<f32>,
     pub theme: Option<String>,
     /// The session-wide light/dark appearance the desktop starts in:
@@ -562,6 +572,7 @@ impl Config {
         }
         Config {
             focus_follows_mouse: false,
+            autoraise: true,
             scale: None,
             theme: None,
             appearance: None,
@@ -1053,6 +1064,13 @@ pub fn parse_with(
                 other => tracing::warn!(
                     value = ?other,
                     "config: focus_follows_mouse must be a boolean, keeping default"
+                ),
+            },
+            "autoraise" => match value {
+                toml::Value::Boolean(b) => config.autoraise = *b,
+                other => tracing::warn!(
+                    value = ?other,
+                    "config: autoraise must be a boolean, keeping default"
                 ),
             },
             "scale" => match scale_from_value(value) {
@@ -1805,6 +1823,18 @@ mod tests {
         assert_eq!(config.placement, defaults.placement);
         assert_eq!(config.edge_resistance, defaults.edge_resistance);
         assert_eq!(config.keybindings, defaults.keybindings);
+    }
+
+    #[test]
+    fn autoraise_defaults_on_and_can_be_turned_off() {
+        // Every earlier release behaved as `true`, so the default is
+        // what keeps a session that sets nothing bit-identical.
+        assert!(parse("").unwrap().autoraise);
+        assert!(!parse("autoraise = false").unwrap().autoraise);
+        assert!(parse("autoraise = true").unwrap().autoraise);
+        // Wrong type keeps the default rather than breaking startup,
+        // the same contract `focus_follows_mouse` has.
+        assert!(parse("autoraise = \"no\"").unwrap().autoraise);
     }
 
     #[test]

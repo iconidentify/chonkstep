@@ -1302,6 +1302,7 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
     pub fn apply_session_state(&mut self, wm: &mut WindowManager<B>, next: SessionState) {
         // 1. Policy.
         wm.set_focus_policy(next.focus);
+        wm.set_raise_on_focus(next.autoraise);
         wm.set_placement_policy(next.placement);
         wm.set_snap_threshold(next.edge_resistance);
         wm.set_drag_modifier(next.drag_modifier);
