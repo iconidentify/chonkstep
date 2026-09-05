@@ -12,7 +12,7 @@
 use chonk_hyprland_ipc::dispatch::{self, Action, Fullscreen};
 use chonk_hyprland_ipc::request::Request;
 use chonk_hyprland_ipc::server::answer_payload;
-use chonk_hyprland_ipc::state::{Devices, Monitor, Snapshot, Window, Workspace};
+use chonk_hyprland_ipc::state::{Devices, Monitor, MonitorMode, Snapshot, Window, Workspace};
 use chonk_hyprland_ipc::{Differ, Outcome};
 
 fn monitor(id: i32, name: &str, focused: bool, active_workspace: usize) -> Monitor {
@@ -27,6 +27,17 @@ fn monitor(id: i32, name: &str, focused: bool, active_workspace: usize) -> Monit
         scale: 2.0,
         focused,
         active_workspace,
+        make: "Sharp".to_string(),
+        model: name.to_string(),
+        serial: String::new(),
+        // 120 Hz on purpose: the value this used to report was a
+        // conventional 60 for every panel, so a fixture that is also
+        // 60 would pass either way.
+        refresh_millihertz: 120_000,
+        modes: vec![
+            MonitorMode { width: 2560, height: 1600, refresh_millihertz: 120_000 },
+            MonitorMode { width: 2560, height: 1600, refresh_millihertz: 60_000 },
+        ],
     }
 }
 
@@ -795,5 +806,71 @@ fn an_unlocked_session_blocks_nothing_which_is_what_hyprland_reports() {
     assert!(
         parsed[0]["solitaryBlockedBy"] == serde_json::json!([]),
         "nothing is blocking a solitary client on an unlocked desk: {json}"
+    );
+}
+
+// ---------------------------------------------------------------------
+// The monitor object: values a caller acts on, and the refusal a user
+// reads when a control does nothing.
+
+/// A 120 Hz panel used to be reported as 60 Hz, because the rate was a
+/// constant rather than a measurement. A bar divides this into a frame
+/// budget; on the panel in the fixture the old answer was off by half.
+#[test]
+fn a_monitors_refresh_rate_is_the_modes_rate_not_a_convention() {
+    let monitors = ask_json("j/monitors", &desktop());
+    let first = &monitors[0];
+    assert_eq!(
+        first["refreshRate"], 120.0,
+        "the reported rate must come from the mode the session drives: {monitors}"
+    );
+}
+
+/// Zero is the one case a convention is still right for: no consumer
+/// may be handed a rate it will divide by.
+#[test]
+fn a_monitor_with_no_real_mode_falls_back_rather_than_reporting_zero() {
+    let mut desk = desktop();
+    desk.monitors[0].refresh_millihertz = 0;
+    let monitors = ask_json("j/monitors", &desk);
+    assert_eq!(monitors[0]["refreshRate"], 60.0, "0 must never reach a caller that divides by it");
+}
+
+/// `availableModes` was an empty list on a compositor that enumerates
+/// every connector mode for `zwlr_output_management` at the same moment.
+#[test]
+fn a_monitors_mode_list_is_the_connectors_modes_in_hyprlands_spelling() {
+    let monitors = ask_json("j/monitors", &desktop());
+    let modes = monitors[0]["availableModes"].as_array().expect("availableModes is a list").clone();
+    assert_eq!(
+        modes,
+        vec![
+            serde_json::json!("2560x1600@120.00Hz"),
+            serde_json::json!("2560x1600@60.00Hz")
+        ],
+        "current mode first, in WIDTHxHEIGHT@RATEHz"
+    );
+    assert_eq!(monitors[0]["make"], "Sharp", "make comes from the same EDID wl_output advertises");
+    assert_eq!(monitors[0]["model"], "eDP-1");
+    assert_eq!(monitors[0]["serial"], "", "no serial reaches this compositor; empty beats invented");
+}
+
+/// The refusal is the only diagnostic `keyword` has — `hyprctl` exits
+/// zero for it — so it must not be false. It used to claim chonkstep
+/// does not read a Hyprland config, which is this compositor's headline
+/// feature.
+#[test]
+fn the_keyword_refusal_is_true_and_names_the_routes_that_work() {
+    let answer = ask("keyword monitor eDP-1,disable", &desktop());
+    assert!(answer.starts_with("Invalid dispatcher:"), "keyword stays a refusal: {answer}");
+    assert!(
+        !answer.contains("does not read a Hyprland config"),
+        "the compositor does read one; saying otherwise sends a reader the wrong way: {answer}"
+    );
+    assert!(answer.contains("~/.config/hypr"), "name the file that does work: {answer}");
+    assert!(answer.contains("hl.monitor"), "name the live route that does work: {answer}");
+    assert!(
+        answer.contains("disable"),
+        "the one shipped caller toggles a monitor off; say why that cannot work: {answer}"
     );
 }

@@ -54,7 +54,44 @@ pub struct Monitor {
     pub focused: bool,
     /// The 0-based chonkstep workspace index active on this output.
     pub active_workspace: usize,
+    /// EDID make and model as the matching `wl_output` advertises them,
+    /// so the two protocols cannot describe the same panel differently.
+    /// `serial` has no source on this compositor and stays empty rather
+    /// than being invented.
+    pub make: String,
+    pub model: String,
+    pub serial: String,
+    /// The current mode's refresh rate in millihertz, or 0 when the
+    /// backend drives no real mode. Millihertz because that is what the
+    /// mode carries and what the session already divides into a frame
+    /// period; the conversion to Hyprland's float belongs at the wire,
+    /// not here.
+    pub refresh_millihertz: u32,
+    /// Every mode this output can drive, current first — the same list
+    /// `zwlr_output_management` enumerates for the same head.
+    pub modes: Vec<MonitorMode>,
 }
+
+/// One mode an output can drive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MonitorMode {
+    pub width: i32,
+    pub height: i32,
+    pub refresh_millihertz: u32,
+}
+
+impl MonitorMode {
+    /// Hyprland's `availableModes` spelling: `WIDTHxHEIGHT@RATEHz`.
+    fn to_hyprland(self) -> String {
+        format!("{}x{}@{:.2}Hz", self.width, self.height, f64::from(self.refresh_millihertz) / 1000.0)
+    }
+}
+
+/// The rate reported when an output drives no mode with a real refresh.
+///
+/// A bar divides by this to pace an animation, so 0 is not an option —
+/// this is the number to fall back to, not a number anybody measured.
+const FALLBACK_REFRESH_HZ: f64 = 60.0;
 
 /// One workspace.
 #[derive(Debug, Clone, PartialEq)]
@@ -382,17 +419,22 @@ impl Snapshot {
                     id: monitor.id,
                     name: monitor.name.clone(),
                     description: monitor.description.clone(),
-                    make: String::new(),
-                    model: String::new(),
-                    serial: String::new(),
+                    make: monitor.make.clone(),
+                    model: monitor.model.clone(),
+                    serial: monitor.serial.clone(),
                     width: monitor.width,
                     height: monitor.height,
-                    // Hyprland reports the mode's refresh rate. chonkstep
-                    // does not model modes, and a bar that divides by it
-                    // would divide by zero, so report the conventional
-                    // 60 rather than 0 and say so here rather than let a
-                    // reader infer we measured it.
-                    refresh_rate: 60.0,
+                    // Hyprland reports the mode's refresh rate, and so
+                    // does this: the session picks a mode per connector
+                    // and already divides its millihertz into a frame
+                    // period. Only a backend driving no real mode falls
+                    // back to [`FALLBACK_REFRESH_HZ`], which exists so a
+                    // bar pacing an animation never divides by zero.
+                    refresh_rate: if monitor.refresh_millihertz == 0 {
+                        FALLBACK_REFRESH_HZ
+                    } else {
+                        f64::from(monitor.refresh_millihertz) / 1000.0
+                    },
                     x: monitor.x,
                     y: monitor.y,
                     active_workspace: WorkspaceRef {
@@ -416,7 +458,7 @@ impl Snapshot {
                     disabled: false,
                     current_format: "XRGB8888".to_string(),
                     mirror_of: "none".to_string(),
-                    available_modes: Vec::new(),
+                    available_modes: monitor.modes.iter().map(|mode| mode.to_hyprland()).collect(),
                 }
             })
             .collect()
