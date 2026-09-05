@@ -422,6 +422,59 @@ fn snapshot_window(
     render_offscreen(renderer, &elements, size, scale, Color32F::new(0.0, 0.0, 0.0, 0.0))
 }
 
+/// Captures one managed toplevel at its full compositor size for
+/// ext-image-copy-capture. This deliberately shares the preview path's
+/// surface-tree construction and offscreen readback while removing only
+/// its thumbnail downscale.
+pub(crate) fn capture_window_full(
+    comp: &mut Compositor,
+    window: WlWindowId,
+    paint_cursor: bool,
+) -> Option<DecorationBuffer> {
+    let (surface, viewport, factor) = {
+        let backend = comp.wm.backend();
+        let record = backend.windows.get(&window)?;
+        if !record.mapped || !record.surface.alive() {
+            return None;
+        }
+        (record.surface.wl_surface()?, record.content, backend.window_surface_scale(record))
+    };
+    let Compositor { wm, graphics, pointer_location, cursor_status, cursors, .. } = comp;
+    let renderer = graphics_renderer(graphics);
+    let mut elements = Vec::new();
+    if paint_cursor {
+        crate::renderer::push_cursor_elements(
+            &mut elements,
+            renderer,
+            wm.backend(),
+            *pointer_location,
+            cursor_status,
+            cursors,
+            viewport,
+        );
+    }
+    let surface_element_start = elements.len();
+    crate::renderer::push_surface_tree(
+        &mut elements,
+        renderer,
+        &surface,
+        SPoint::<i32, Physical>::from((0, 0)),
+        factor,
+        1.0,
+        Kind::Unspecified,
+    );
+    if elements.len() == surface_element_start {
+        return None;
+    }
+    render_offscreen(
+        renderer,
+        &elements,
+        viewport.size,
+        1.0,
+        Color32F::new(0.0, 0.0, 0.0, 0.0),
+    )
+}
+
 /// Draws `elements` into a fresh offscreen texture and downloads the
 /// result. `scale` must be the scale the elements were built at - the
 /// damage tracker re-derives each element's on-target geometry from

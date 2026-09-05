@@ -49,6 +49,10 @@ fn ordinary_desktop_globals_bind_successfully() {
         "xdg_system_bell_v1",
         "xdg_toplevel_tag_manager_v1",
         "zxdg_output_manager_v1",
+        "ext_foreign_toplevel_list_v1",
+        "ext_image_copy_capture_manager_v1",
+        "ext_output_image_capture_source_manager_v1",
+        "ext_foreign_toplevel_image_capture_source_manager_v1",
         "hyprland_toplevel_mapping_manager_v1",
         "hyprland_focus_grab_manager_v1",
     ] {

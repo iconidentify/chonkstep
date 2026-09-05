@@ -7,6 +7,25 @@ crate and both session binaries carry the same number.
 
 ### Fixed
 
+- **Monitor hot-plug now reconciles the live desktop instead of leaving
+  dark or phantom outputs.** Debounced DRM probes adopt new connectors,
+  withdraw unplugged output globals, rebuild output-management and gamma
+  state, reapply monitor rules, and rescue windows stranded on a removed
+  screen without restarting the session
+  ([#47](https://github.com/iconidentify/chonkstep/issues/47)).
+- **Touchscreens now reach native clients and compositor chrome.** The
+  Wayland seat advertises `wl_touch`, libinput touch slots keep their
+  down-time focus through motion/up, and taps or drags on titlebars, the
+  desktop, and shell furniture use the existing click machinery. Lid and
+  tablet-mode switch events are now named in the log instead of discarded
+  ([#48](https://github.com/iconidentify/chonkstep/issues/48)).
+- **Single-window screen sharing is now a compositor capability.** The
+  standard foreign-toplevel list and all three ext image-capture globals
+  expose output and toplevel sources, long-lived shm capture sessions
+  refresh constraints after geometry/scale changes and stop on source
+  removal, and window capture shares the existing offscreen pixel path
+  without bypassing the lock screen. Legacy wlr screencopy remains as a
+  fallback ([#51](https://github.com/iconidentify/chonkstep/issues/51)).
 - **Local socket connection storms can no longer grow compositor work
   without bound.** The Hyprland request/event sockets and native control
   socket retain at most 64 clients apiece, accept-and-close overflow with
@@ -78,6 +97,18 @@ crate and both session binaries carry the same number.
 
 ### Performance
 
+- **DRM composition is deadline-scheduled against predicted vblank.** A
+  per-output, time-based asymmetric render estimator delays steady-cadence
+  composition for fresher input, grows its safety margin after misses, and
+  keeps first/post-idle frames immediate. Synchronous preview readback now
+  runs after submission instead of widening the deadline path
+  ([#46](https://github.com/iconidentify/chonkstep/issues/46)).
+- **Frame performance is measurable in live and CI sessions.** Fixed-size
+  per-phase totals, maxima, and power-of-two dispatch/render histograms are
+  readable and resettable through the opt-in test door; the E2E harness
+  brackets visible and hidden workloads with them. An off-by-default
+  `profile` feature also enables ChonkStep and Smithay tracing spans
+  ([#49](https://github.com/iconidentify/chonkstep/issues/49)).
 - **The native control socket now builds desktop snapshots only on a
   semantic edge or readable request.** A cheap stamp covers window-manager
   state, output/workarea changes, the monitor under the pointer, and shell

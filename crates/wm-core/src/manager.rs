@@ -685,6 +685,67 @@ impl<B: Backend> WindowManager<B> {
             .unwrap_or(NO_MONITOR_FALLBACK)
     }
 
+    /// Re-homes windows whose physical monitor disappeared. The
+    /// backend updates its monitor list first, then calls this once per
+    /// departed rect; keeping the policy here makes X11 and Wayland
+    /// geometry obey the same rules if the X backend grows RandR
+    /// hotplug later.
+    pub fn rescue_clients_from_removed_monitor(&mut self, departed: Rect) {
+        let monitors = self.backend.monitors();
+        if monitors.is_empty() {
+            return;
+        }
+        let affected: Vec<ClientId> = self
+            .clients
+            .iter()
+            .filter_map(|(id, client)| {
+                let frame = client_frame_rect(client);
+                let center = Point::new(
+                    frame.pos.x + frame.size.w as i32 / 2,
+                    frame.pos.y + frame.size.h as i32 / 2,
+                );
+                let visible_somewhere = monitors.iter().any(|monitor| {
+                    let other = monitor.geometry;
+                    frame.pos.x < other.pos.x.saturating_add(other.size.w as i32)
+                        && other.pos.x < frame.pos.x.saturating_add(frame.size.w as i32)
+                        && frame.pos.y < other.pos.y.saturating_add(other.size.h as i32)
+                        && other.pos.y < frame.pos.y.saturating_add(frame.size.h as i32)
+                });
+                (departed.contains(center) || !visible_somewhere).then_some(id)
+            })
+            .collect();
+
+        for id in affected {
+            if self.clients.get(id).is_some_and(|client| client.flags.contains(ClientFlags::FULLSCREEN)) {
+                self.unfullscreen(id);
+            }
+            if self.clients.get(id).is_some_and(|client| {
+                client.flags.intersects(ClientFlags::MAXIMIZED_H | ClientFlags::MAXIMIZED_V)
+            }) {
+                self.unmaximize(id);
+            }
+            let Some(client) = self.clients.get(id) else { continue };
+            let frame = client_frame_rect(client);
+            let center = Point::new(
+                frame.pos.x + frame.size.w as i32 / 2,
+                frame.pos.y + frame.size.h as i32 / 2,
+            );
+            let target = monitors
+                .iter()
+                .min_by_key(|monitor| squared_distance_to(monitor.geometry, center))
+                .map(|monitor| monitor.geometry)
+                .unwrap_or(NO_MONITOR_FALLBACK);
+            let frame_pos = placement::clamp_to(target, frame.size, frame.pos);
+            let Some(client) = self.clients.get_mut(id) else { continue };
+            client.geometry.pos = Point::new(
+                frame_pos.x + client.layout.client_offset.x,
+                frame_pos.y + client.layout.client_offset.y,
+            );
+            self.reflow_frame(id);
+            tracing::info!(?id, ?departed, ?target, "rescued window from a removed monitor");
+        }
+    }
+
     /// That monitor's workarea: the shell-reserved area if one was set
     /// for it, else its full geometry. The per-monitor twin of
     /// `usable_area`, and what maximize actually measures against.
@@ -7427,6 +7488,36 @@ mod tests {
     const RIGHT_HEAD: Rect = Rect { pos: Point { x: 800, y: 0 }, size: Size { w: 800, h: 600 } };
     /// The left head with a 40px dock strip carved off its bottom.
     const LEFT_WORKAREA: Rect = Rect { pos: Point { x: 0, y: 0 }, size: Size { w: 800, h: 560 } };
+
+    #[test]
+    fn removing_a_monitor_rescues_and_unmaximizes_its_windows() {
+        let mut backend = FakeBackend::new();
+        backend.set_monitors(dual_monitors());
+        let window = backend.create_window();
+        backend.set_geometry(window, Rect { pos: Point::new(1000, 100), size: Size::new(240, 180) });
+        let mut wm = wm(backend);
+        wm.dispatch(BackendEvent::MapRequest(window));
+        let id = wm.client_for_window(window).unwrap();
+        wm.maximize(id, MaximizeDirections::FULL);
+        wm.fullscreen(id);
+
+        wm.backend_mut().set_monitors(vec![MonitorInfo {
+            geometry: LEFT_HEAD,
+            name: "left".to_string(),
+            primary: true,
+        }]);
+        wm.rescue_clients_from_removed_monitor(RIGHT_HEAD);
+
+        let client = wm.client(id).unwrap();
+        assert!(!client.flags.intersects(
+            ClientFlags::FULLSCREEN | ClientFlags::MAXIMIZED_H | ClientFlags::MAXIMIZED_V
+        ));
+        let frame = client_frame_rect(client);
+        assert!(LEFT_HEAD.contains(Point::new(
+            frame.pos.x + frame.size.w as i32 / 2,
+            frame.pos.y + frame.size.h as i32 / 2,
+        )));
+    }
 
     #[test]
     fn maximize_fills_the_workarea_of_the_monitor_holding_the_window() {

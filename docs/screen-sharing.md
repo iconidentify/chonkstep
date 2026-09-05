@@ -20,7 +20,9 @@ windows. What it talks to instead is a chain of brokers:
     browser (WebRTC getDisplayMedia)
       → xdg-desktop-portal            org.freedesktop.portal.ScreenCast, D-Bus
         → xdg-desktop-portal-wlr      the backend chonkstep-portals.conf selects
-          → chonkstep-wayland         zwlr_screencopy_manager_v1 (v3)
+          → chonkstep-wayland         ext_image_copy_capture_manager_v1
+                                      + output/toplevel capture sources
+                                      (zwlr_screencopy_manager_v1 v3 fallback)
             → PipeWire                the video stream the browser consumes
 
 `xdg-desktop-portal` is the frontend every sandboxed-or-not app talks
@@ -28,19 +30,26 @@ to. It picks a *backend* per portal interface, and
 `xdg-desktop-portal-wlr` is the one that captures wlroots-style
 compositors. It never checks whether the compositor actually is
 wlroots — it speaks protocols, and the ones it needs for capture are
-ones chonkstep-wayland advertises: `zwlr_screencopy_manager_v1`
-version 3, `zxdg_output_manager_v1` version 3, and a feedback-capable
-`zwp_linux_dmabuf_v1` global (see
-`crates/wm-wayland/src/protocols.rs` and `dmabuf.rs`). Frames captured
-over screencopy are pushed into a PipeWire stream, and the node id of
-that stream is what the portal hands back to the browser.
+ones chonkstep-wayland advertises. Its preferred path is
+`ext_image_copy_capture_manager_v1`, with
+`ext_output_image_capture_source_manager_v1` for monitors and
+`ext_foreign_toplevel_image_capture_source_manager_v1` plus
+`ext_foreign_toplevel_list_v1` for individual windows. The legacy
+`zwlr_screencopy_manager_v1` version 3 remains advertised as a fallback,
+alongside `zxdg_output_manager_v1` version 3 and a feedback-capable
+`zwp_linux_dmabuf_v1` global (see `crates/wm-wayland/src/image_capture.rs`,
+`protocols.rs`, and `dmabuf.rs`). Captured frames are pushed into a
+PipeWire stream, and the node id of that stream is what the portal hands
+back to the browser.
 
 ### linux-dmabuf feedback
 
-Screen capture itself uses `zwlr_screencopy`; `zwp_linux_dmabuf_v1`
-is the separate path GPU clients use to submit their own buffers.
-xdg-desktop-portal-wlr 0.8.2 nevertheless requires both globals and
-installs linux-dmabuf feedback listeners before capture starts.
+The preferred ext capture path currently negotiates writable `wl_shm`
+buffers; the retained `zwlr_screencopy` fallback does the same.
+`zwp_linux_dmabuf_v1` is the separate path GPU clients use to submit
+their own buffers. xdg-desktop-portal-wlr 0.8.2 nevertheless requires
+the dmabuf global and installs linux-dmabuf feedback listeners before
+capture starts.
 
 For a hardware login, ChonkStep asks EGL for the node of the GPU that
 actually renders. That distinction matters on split hardware such as
@@ -140,17 +149,17 @@ Checked against the frontend with the chonkstep config active:
 | Screenshot | wlr | **Works** — `Screenshot()` returned a real PNG of the session (xdg-desktop-portal-wlr shells out to `grim`, which is also installed) |
 | Inhibit | chonkstep | Idle requests feed the compositor's own timers and are released on request close or caller disconnect |
 | FileChooser, Notification, Settings, and the rest | gtk | **Backend activates and answers** (D-Bus ping + interface version 4 confirmed); the dialogs themselves are ordinary windows and were not driven headlessly |
-| Window/toplevel capture (`types=2` in SelectSources) | wlr | **Not available** — xdg-desktop-portal-wlr only captures outputs (`AvailableSourceTypes=1`); this is an upstream backend limitation, not a chonkstep gap. "Share entire screen" works; "share a single window" is not offered |
+| Window/toplevel capture (`types=2` in SelectSources) | wlr | **Supported** — ext image-copy-capture advertises both output and foreign-toplevel sources; compatible portal backends expose `AvailableSourceTypes=3` |
 
 Backend matrix:
 
-| Chonkstep graphics path | Screencopy | linux-dmabuf | ScreenCast |
+| Chonkstep graphics path | Capture globals | linux-dmabuf | ScreenCast |
 | --- | --- | --- | --- |
-| DRM login (physical or virtual GPU) | v3 | v5 with default feedback | **Supported; clean Omarchy VM verified** |
-| DRM login with separate KMS/render devices | v3 | v5 when EGL identifies the actual render node; otherwise absent | Supported when the driver exposes its renderer identity; otherwise fails cleanly |
-| Nested GPU with EGL render-node discovery | v3 | v5 with default feedback | Supported |
-| Nested EGL with formats but no discoverable node | v3 | absent | Unsupported, but the portal fails cleanly instead of crashing |
-| Renderer without dmabuf import formats | v3 | absent | Unsupported by the current wlr portal backend |
+| DRM login (physical or virtual GPU) | ext v1 + wlr v3 fallback | v5 with default feedback | **Supported; clean Omarchy VM verified** |
+| DRM login with separate KMS/render devices | ext v1 + wlr v3 fallback | v5 when EGL identifies the actual render node; otherwise absent | Supported when the driver exposes its renderer identity; otherwise fails cleanly |
+| Nested GPU with EGL render-node discovery | ext v1 + wlr v3 fallback | v5 with default feedback | Supported |
+| Nested EGL with formats but no discoverable node | ext v1 + wlr v3 fallback | absent | Unsupported, but the portal fails cleanly instead of crashing |
+| Renderer without dmabuf import formats | ext v1 + wlr v3 fallback | absent | Unsupported by the current wlr portal backend |
 
 ## Troubleshooting
 
@@ -213,7 +222,8 @@ restart the frontend, and run it from the ChonkStep session:
 It does `CreateSession`, `SelectSources` (one monitor), `Start`, and
 `OpenPipeWireRemote` through `org.freedesktop.portal.ScreenCast`, then
 uses `pipewiresrc` to consume the returned node. The clean Omarchy VM
-run reported:
+run below predates ext image-copy-capture support and records the former
+monitor-only baseline:
 
     ScreenCast portal version=4 AvailableSourceTypes=1
     <- Response(CreateSession): code=0

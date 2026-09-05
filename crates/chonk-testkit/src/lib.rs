@@ -1148,6 +1148,26 @@ pub struct ProtocolPublishes {
     pub foreign_drag: u64,
 }
 
+/// Per-phase compositor timings returned by the opt-in test door. A read
+/// consumes the current bracket so callers can measure one interaction.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FrameStats {
+    pub dispatch_calls: u64,
+    pub dispatch_us: u128,
+    pub dispatch_max_us: u128,
+    pub input_us: u128,
+    pub shell_us: u128,
+    pub protocol_us: u128,
+    pub layout_us: u128,
+    pub render_calls: u64,
+    pub render_us: u128,
+    pub render_max_us: u128,
+    pub flush_us: u128,
+    pub ipc_us: u128,
+    pub dispatch_histogram: [u64; 16],
+    pub render_histogram: [u64; 16],
+}
+
 /// Entries retained by compositor protocol ledgers that participate in
 /// rendering, hit-testing, or idle-policy walks.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1322,6 +1342,38 @@ impl Door {
         })
     }
 
+    /// Reads and resets compositor frame/pass timings. Histogram buckets
+    /// use power-of-two microsecond ceilings and always contain 16 entries.
+    pub fn frame_stats(&mut self) -> Result<FrameStats, String> {
+        self.send("frame-stats")?;
+        let line = self.read_line()?;
+        if !line.starts_with("frame-stats ") {
+            return Err(format!("unexpected frame-stats reply: {line}"));
+        }
+        macro_rules! required {
+            ($name:literal) => {
+                field(&line, $name)
+                    .ok_or_else(|| format!("frame-stats reply has no {} field: {line}", $name))?
+            };
+        }
+        Ok(FrameStats {
+            dispatch_calls: required!("dispatch_calls="),
+            dispatch_us: required!("dispatch_us="),
+            dispatch_max_us: required!("dispatch_max_us="),
+            input_us: required!("input_us="),
+            shell_us: required!("shell_us="),
+            protocol_us: required!("protocol_us="),
+            layout_us: required!("layout_us="),
+            render_calls: required!("render_calls="),
+            render_us: required!("render_us="),
+            render_max_us: required!("render_max_us="),
+            flush_us: required!("flush_us="),
+            ipc_us: required!("ipc_us="),
+            dispatch_histogram: histogram_field(&line, "dispatch_hist=")?,
+            render_histogram: histogram_field(&line, "render_hist=")?,
+        })
+    }
+
     /// Exact Hyprland IPC source population from inside the
     /// compositor. Unlike `/proc/<pid>/fd`, this excludes independent
     /// render, D-Bus, XWayland, and child-process descriptor churn.
@@ -1440,6 +1492,21 @@ impl Door {
             }
         }
     }
+}
+
+fn histogram_field(line: &str, name: &str) -> Result<[u64; 16], String> {
+    let value = line
+        .split_whitespace()
+        .find_map(|part| part.strip_prefix(name))
+        .ok_or_else(|| format!("frame-stats reply has no {name} field: {line}"))?;
+    let values = value
+        .split(',')
+        .map(str::parse)
+        .collect::<Result<Vec<u64>, _>>()
+        .map_err(|error| format!("invalid {name} histogram in {line}: {error}"))?;
+    values
+        .try_into()
+        .map_err(|values: Vec<u64>| format!("{name} histogram has {} buckets instead of 16", values.len()))
 }
 
 /// Value of `key=` in a `key=value` word list, numerics only.
@@ -1649,6 +1716,16 @@ mod tests {
         let frame = parse_frame_line(line).unwrap();
         assert_eq!(frame.window, 3);
         assert!(!frame.mapped);
+    }
+
+    #[test]
+    fn frame_histograms_require_all_sixteen_buckets() {
+        let line = "frame-stats dispatch_hist=0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15";
+        assert_eq!(
+            histogram_field(line, "dispatch_hist=").unwrap(),
+            [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+        );
+        assert!(histogram_field("frame-stats dispatch_hist=1,2", "dispatch_hist=").is_err());
     }
 
     /// The optional rows drop out without disturbing the order of the

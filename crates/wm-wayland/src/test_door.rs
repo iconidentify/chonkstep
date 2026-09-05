@@ -511,6 +511,33 @@ fn handle_command(line: &str, stream: &mut UnixStream, comp: &mut Compositor) {
                 .as_bytes(),
             );
         }
+        Some("frame-stats") => {
+            let stats = std::mem::take(&mut comp.frame_stats);
+            let micros = |duration: std::time::Duration| duration.as_micros();
+            let buckets = |values: &[u64; 16]| {
+                values.iter().map(u64::to_string).collect::<Vec<_>>().join(",")
+            };
+            let _ = stream.write_all(
+                format!(
+                    "frame-stats dispatch_calls={} dispatch_us={} dispatch_max_us={} input_us={} shell_us={} protocol_us={} layout_us={} render_calls={} render_us={} render_max_us={} flush_us={} ipc_us={} dispatch_hist={} render_hist={}\n",
+                    stats.dispatch.calls,
+                    micros(stats.dispatch.total),
+                    micros(stats.dispatch.max),
+                    micros(stats.input.total),
+                    micros(stats.shell.total),
+                    micros(stats.protocols.total),
+                    micros(stats.layout.total),
+                    stats.render.calls,
+                    micros(stats.render.total),
+                    micros(stats.render.max),
+                    micros(stats.flush.total),
+                    micros(stats.ipc.total),
+                    buckets(&stats.dispatch_histogram),
+                    buckets(&stats.render_histogram),
+                )
+                .as_bytes(),
+            );
+        }
         Some("hyprland-sources") => {
             let (desired, registered) = comp.hyprland_ipc_source_counts();
             let _ = stream.write_all(

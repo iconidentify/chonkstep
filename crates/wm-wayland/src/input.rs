@@ -58,15 +58,15 @@
 //! it.
 
 use std::cell::RefCell;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use smithay::backend::input::{
     AbsolutePositionEvent, Axis, AxisSource, ButtonState, Event, GestureBeginEvent, GestureEndEvent,
     GesturePinchUpdateEvent as BackendPinchUpdateEvent, GestureSwipeUpdateEvent as BackendSwipeUpdateEvent,
-    Device, DeviceCapability, InputBackend, InputEvent, KeyState, KeyboardKeyEvent, MouseButton as InputMouseButton, PointerAxisEvent,
-    PointerButtonEvent, PointerMotionEvent, ProximityState, TabletToolButtonEvent,
-    TabletToolDescriptor, TabletToolEvent, TabletToolProximityEvent, TabletToolTipEvent,
-    TabletToolTipState,
+    Device, DeviceCapability, InputBackend, InputEvent, KeyState, KeyboardKeyEvent, MouseButton as InputMouseButton,
+    PointerAxisEvent, PointerButtonEvent, PointerMotionEvent, ProximityState, SwitchToggleEvent,
+    TabletToolButtonEvent, TabletToolDescriptor, TabletToolEvent, TabletToolProximityEvent,
+    TabletToolTipEvent, TabletToolTipState, TouchEvent,
 };
 use smithay::desktop::utils::under_from_surface_tree;
 use smithay::desktop::WindowSurfaceType;
@@ -76,6 +76,7 @@ use smithay::input::pointer::{
     GesturePinchUpdateEvent, GestureSwipeBeginEvent, GestureSwipeEndEvent, GestureSwipeUpdateEvent, MotionEvent,
     RelativeMotionEvent,
 };
+use smithay::input::touch::{DownEvent as TouchDown, MotionEvent as TouchMotion, UpEvent as TouchUp};
 use smithay::input::{Seat, SeatHandler};
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::utils::{Logical, Point as LogicalPoint, SERIAL_COUNTER};
@@ -151,6 +152,18 @@ struct InputState {
     /// domain underneath it. Entries leave on the matching physical
     /// proximity-out and the whole set is drained on lock/unlock.
     active_tablet_tools: HashSet<TabletToolDescriptor>,
+    /// Compositor-owned touch targets, latched per slot from down until
+    /// up just like wl_touch's implicit grab. Client surfaces are
+    /// latched by Smithay itself; this parallel map exists only so a
+    /// finger dragging titlebar or shell chrome keeps reaching the
+    /// object it landed on after it moves outside that object's rect.
+    active_touches: HashMap<smithay::backend::input::TouchSlot, TouchRoute>,
+}
+
+#[derive(Clone, Copy)]
+struct TouchRoute {
+    target: PressTarget,
+    position: Point,
 }
 
 #[derive(Clone, Copy)]
@@ -343,6 +356,7 @@ pub(crate) fn clear_implicit_grab(seat: &Seat<Compositor>) {
 /// interrupted it.
 pub(crate) fn resynchronise_input_after_resume(state: &mut Compositor) {
     let seat = state.seat.clone();
+    cancel_active_touches(state);
     let suppressed_keys = with_input(&seat, reset_resume_bookkeeping);
 
     if let Some(keyboard) = seat.get_keyboard() {
@@ -436,6 +450,7 @@ fn release_stale_pressed_keys<D: SeatHandler + 'static>(
 pub(crate) fn reset_client_input_focus(state: &mut Compositor) {
     let seat = state.seat.clone();
     let time = state.start_time.elapsed().as_millis() as u32;
+    cancel_active_touches(state);
     let tools = with_input(&seat, |input| std::mem::take(&mut input.active_tablet_tools));
     let tablet_seat = seat.tablet_seat();
     for descriptor in tools {
@@ -634,6 +649,9 @@ enum LockedInputRoute {
     /// Tablet motion resolves through the lock-aware scene hit-test;
     /// buttons use the tool focus that motion established or no focus.
     TabletHitTest,
+    /// Touch down resolves through the same lock-aware scene hit-test;
+    /// Smithay then latches that surface for the life of the slot.
+    TouchHitTest,
 }
 
 impl InputFamily {
@@ -678,21 +696,21 @@ impl InputFamily {
                 | Self::PointerButton
                 | Self::PointerAxis
                 | Self::Gesture
+                | Self::Touch
                 | Self::TabletTool
         )
     }
 
     fn locked_route(self) -> LockedInputRoute {
         match self {
-            Self::DeviceLifecycle | Self::Touch | Self::Switch | Self::Special => {
-                LockedInputRoute::NoClientDelivery
-            }
+            Self::DeviceLifecycle | Self::Switch | Self::Special => LockedInputRoute::NoClientDelivery,
             Self::Keyboard => LockedInputRoute::KeyboardFilter,
             Self::PointerMotion => LockedInputRoute::PointerMotionHandler,
             Self::PointerButton | Self::PointerAxis | Self::Gesture => {
                 LockedInputRoute::PointerFocus
             }
             Self::TabletTool => LockedInputRoute::TabletHitTest,
+            Self::Touch => LockedInputRoute::TouchHitTest,
         }
     }
 }
@@ -849,15 +867,198 @@ pub(crate) fn process_input_event<I: InputBackend>(state: &mut Compositor, event
         InputEvent::TabletToolProximity { event } => on_tablet_proximity::<I>(state, event),
         InputEvent::TabletToolTip { event } => on_tablet_tip::<I>(state, event),
         InputEvent::TabletToolButton { event } => on_tablet_button::<I>(state, event),
-        // Touch and switch devices remain represented in the device
-        // registry above; their protocol/event policy is independent.
-        InputEvent::TouchDown { .. }
-        | InputEvent::TouchMotion { .. }
-        | InputEvent::TouchUp { .. }
-        | InputEvent::TouchCancel { .. }
-        | InputEvent::TouchFrame { .. }
-        | InputEvent::SwitchToggle { .. }
-        | InputEvent::Special(_) => {}
+        InputEvent::TouchDown { event } => on_touch_down::<I>(state, event),
+        InputEvent::TouchMotion { event } => on_touch_motion::<I>(state, event),
+        InputEvent::TouchUp { event } => on_touch_up::<I>(state, event),
+        InputEvent::TouchCancel { event: _ } => on_touch_cancel(state),
+        InputEvent::TouchFrame { event: _ } => on_touch_frame(state),
+        InputEvent::SwitchToggle { event } => {
+            tracing::info!(switch = ?event.switch(), state = ?event.state(), "input switch toggled");
+        }
+        InputEvent::Special(_) => {}
+    }
+}
+
+// -- touch --------------------------------------------------------------
+
+fn touch_position<I: InputBackend, E: AbsolutePositionEvent<I>>(
+    state: &Compositor,
+    event: &E,
+) -> LogicalPoint<f64, Logical> {
+    let size = state.wm.backend().output_size;
+    event.position_transformed((size.w as i32, size.h as i32).into())
+}
+
+fn on_touch_down<I: InputBackend>(state: &mut Compositor, event: I::TouchDownEvent) {
+    let Some(touch) = state.seat.get_touch() else {
+        return;
+    };
+    let position = touch_position::<I, _>(state, &event);
+    let at = Point::new(position.x.floor() as i32, position.y.floor() as i32);
+    let hit = hit_at(state.wm.backend(), at, position);
+    let focus = client_focus(&hit);
+    let serial = SERIAL_COUNTER.next_serial();
+    let slot = event.slot();
+    touch.down(
+        state,
+        focus,
+        &TouchDown { slot, location: position, serial, time: event.time_msec() },
+    );
+
+    if !state.wm.backend().locked {
+        let target = press_target(&hit);
+        with_input(&state.seat.clone(), |input| {
+            input.active_touches.insert(slot, TouchRoute { target, position: at });
+        });
+        route_touch_button(state, target, at, event.time_msec(), serial, true);
+    }
+    state.wm.backend_mut().mark_damaged();
+}
+
+fn on_touch_motion<I: InputBackend>(state: &mut Compositor, event: I::TouchMotionEvent) {
+    let Some(touch) = state.seat.get_touch() else {
+        return;
+    };
+    let position = touch_position::<I, _>(state, &event);
+    let at = Point::new(position.x.floor() as i32, position.y.floor() as i32);
+    let focus = client_focus(&hit_at(state.wm.backend(), at, position));
+    let slot = event.slot();
+    touch.motion(state, focus, &TouchMotion { slot, location: position, time: event.time_msec() });
+
+    let route = with_input(&state.seat.clone(), |input| {
+        input.active_touches.get_mut(&slot).map(|route| {
+            route.position = at;
+            *route
+        })
+    });
+    if let Some(route) = route {
+        route_touch_motion(state, route.target, at);
+    }
+    state.wm.backend_mut().mark_damaged();
+}
+
+fn on_touch_up<I: InputBackend>(state: &mut Compositor, event: I::TouchUpEvent) {
+    let Some(touch) = state.seat.get_touch() else {
+        return;
+    };
+    let serial = SERIAL_COUNTER.next_serial();
+    let slot = event.slot();
+    touch.up(state, &TouchUp { slot, serial, time: event.time_msec() });
+    let route = with_input(&state.seat.clone(), |input| input.active_touches.remove(&slot));
+    if let Some(route) = route {
+        route_touch_button(state, route.target, route.position, event.time_msec(), serial, false);
+    }
+    state.wm.backend_mut().mark_damaged();
+}
+
+fn on_touch_cancel(state: &mut Compositor) {
+    cancel_active_touches(state);
+}
+
+fn on_touch_frame(state: &mut Compositor) {
+    if let Some(touch) = state.seat.get_touch() {
+        touch.frame(state);
+    }
+}
+
+fn cancel_active_touches(state: &mut Compositor) {
+    if let Some(touch) = state.seat.get_touch() {
+        touch.cancel(state);
+    }
+    let routes = with_input(&state.seat.clone(), |input| {
+        std::mem::take(&mut input.active_touches).into_values().collect::<Vec<_>>()
+    });
+    let time = state.start_time.elapsed().as_millis() as u32;
+    for route in routes {
+        route_touch_button(
+            state,
+            route.target,
+            route.position,
+            time,
+            SERIAL_COUNTER.next_serial(),
+            false,
+        );
+    }
+}
+
+/// Mirrors the compositor-owned half of a left pointer button without
+/// synthesising wl_pointer events. Native clients receive the real
+/// wl_touch stream above; wm-core still needs the press to focus a
+/// managed client, and frame/shell/root chrome needs its ordinary click
+/// machinery to keep buttons and titlebar drags usable by touch.
+fn route_touch_button(
+    state: &mut Compositor,
+    target: PressTarget,
+    at: Point,
+    time_ms: u32,
+    serial: smithay::utils::Serial,
+    pressed: bool,
+) {
+    let mods = state
+        .seat
+        .get_keyboard()
+        .map(|keyboard| combo_modifiers(&keyboard.modifier_state()))
+        .unwrap_or_else(Modifiers::empty);
+    let backend = state.wm.backend_mut();
+    match target {
+        PressTarget::Shell(shell) => {
+            if let Some(record) = backend.shells.get(&shell) {
+                backend.shell_clicks.push_back((shell, local_to(at, record.geometry.pos), MouseButton::Left, pressed));
+            }
+        }
+        PressTarget::Frame(frame) => {
+            if let Some(record) = backend.frames.get(&frame) {
+                backend.queue(WmEvent::PointerButton {
+                    surface: SurfaceRef::Frame(frame),
+                    local: local_to(at, record.geometry.pos),
+                    button: MouseButton::Left,
+                    pressed,
+                    time_ms,
+                    mods,
+                });
+            }
+        }
+        PressTarget::Content(window) => {
+            let local = backend.windows.get(&window).map(|record| local_to(at, record.content.pos)).unwrap_or(at);
+            backend.queue(WmEvent::PointerButton {
+                surface: SurfaceRef::Client(window),
+                local,
+                button: MouseButton::Left,
+                pressed,
+                time_ms,
+                mods,
+            });
+        }
+        PressTarget::Layer(_) | PressTarget::Ime => {}
+        PressTarget::Root => backend.shell_clicks.push_back((ROOT_SHELL, at, MouseButton::Left, pressed)),
+    }
+    if pressed && !state.focus_grab.is_active() {
+        match target {
+            PressTarget::Layer(layer) => claim_on_demand_focus(state, layer, serial),
+            PressTarget::Ime => {}
+            _ => release_on_demand_focus(state, serial),
+        }
+    }
+}
+
+fn route_touch_motion(state: &mut Compositor, target: PressTarget, at: Point) {
+    let backend = state.wm.backend_mut();
+    match target {
+        PressTarget::Shell(shell) => {
+            if let Some(record) = backend.shells.get(&shell) {
+                backend.shell_motions.push_back((shell, local_to(at, record.geometry.pos)));
+            }
+            backend.queue(WmEvent::PointerMotion { root: at, surface_local: None });
+        }
+        PressTarget::Frame(frame) => {
+            let local = backend.frames.get(&frame).map(|record| local_to(at, record.geometry.pos));
+            backend.queue(WmEvent::PointerMotion {
+                root: at,
+                surface_local: local.map(|point| (SurfaceRef::Frame(frame), point)),
+            });
+        }
+        PressTarget::Root => backend.queue(WmEvent::PointerMotion { root: at, surface_local: None }),
+        PressTarget::Content(_) | PressTarget::Layer(_) | PressTarget::Ime => {}
     }
 }
 
@@ -1338,6 +1539,22 @@ fn confine_to_outputs(monitors: &[MonitorInfo], position: LogicalPoint<f64, Logi
     // `Compositor::outputs`); leaving the position untouched is still
     // better than snapping it to the origin.
     best.map(|(_, point)| point).unwrap_or(position)
+}
+
+/// Moves a saved pointer off a departed monitor before the next input
+/// event. Without this, keyboard-driven actions continue targeting a
+/// coordinate that no output can display until the mouse is moved.
+pub(crate) fn reconcile_pointer_after_output_change(state: &mut Compositor) {
+    if state.wm.backend().monitors.is_empty() {
+        return;
+    }
+    let position = confine_to_outputs(&state.wm.backend().monitors, state.pointer_location);
+    if position != state.pointer_location {
+        let time = state.start_time.elapsed().as_millis() as u32;
+        pointer_moved(state, position, time, None);
+    } else {
+        sync_pointer_focus(state);
+    }
 }
 
 /// The shared motion path: hover/crossing bookkeeping, WM/shell queue
@@ -2954,7 +3171,7 @@ mod tests {
             (PointerButton, true, PointerFocus),
             (PointerAxis, true, PointerFocus),
             (Gesture, true, PointerFocus),
-            (Touch, false, NoClientDelivery),
+            (Touch, true, TouchHitTest),
             (TabletTool, true, TabletHitTest),
             (Switch, false, NoClientDelivery),
             (Special, false, NoClientDelivery),

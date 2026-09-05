@@ -596,6 +596,38 @@ pub(crate) fn note_session_resumed(gamma: &mut GammaControl) {
     }
 }
 
+/// Rebuilds the index-aligned hardware slots after connector hotplug.
+/// Existing controls become inert (their recorded object id owns no
+/// new slot), preventing a stale handle from programming a different
+/// CRTC that happened to inherit its old index.
+pub(crate) fn outputs_changed(
+    gamma: &mut GammaControl,
+    graphics: &crate::state::Graphics,
+    display_handle: &DisplayHandle,
+) {
+    let sizes = crate::session::gamma_ramp_sizes(graphics);
+    gamma.outputs = sizes
+        .into_iter()
+        .map(|size| OutputGamma {
+            size: size as usize,
+            owner: None,
+            original: None,
+            live: None,
+            pending: None,
+        })
+        .collect();
+    gamma.ctm_manager = None;
+    gamma.reprogram_after_vt_switch = false;
+    if gamma._global.is_none() && gamma.outputs.iter().any(|output| output.size > 0) {
+        gamma._global = Some(
+            display_handle.create_global::<Compositor, ZwlrGammaControlManagerV1, ()>(
+                GAMMA_CONTROL_VERSION,
+                (),
+            ),
+        );
+    }
+}
+
 /// Which entry of `Compositor::outputs` a `wl_output` names, or `None`
 /// for a resource that is not one of ours. Same derivation as
 /// `lock.rs` and `protocols.rs` use — the client named a specific
