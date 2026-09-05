@@ -768,13 +768,11 @@ fn render_frame_winit(comp: &mut Compositor, plain_capture_pending: bool) -> boo
     let damage_tracker = &mut entry.damage_tracker;
     let scene_scratch = &mut entry.scene_scratch;
 
-    // Make the EGL surface current before asking its buffer age:
-    // `EGL_BUFFER_AGE_EXT` is defined only for the current surface, and
-    // asked without this the driver answers `BAD_SURFACE` once per
-    // frame. The first bind's borrow ends on this line; the render bind
-    // below re-binds, which is a cheap make-current of an
-    // already-current context.
-    if let Err(error) = winit_backend.bind() {
+    // Smithay 0.7's bind prepares a target and handles resize, but
+    // does not make the surface current until Renderer::render. That
+    // is too late for buffer_age: captures may have left a surfaceless
+    // context current, making this query fail and force full damage.
+    if let Err(error) = make_winit_surface_current(winit_backend) {
         if note_frame_failure() {
             tracing::warn!(?error, "could not bind the winit framebuffer; skipping frame");
         }
@@ -878,6 +876,31 @@ fn render_frame_winit(comp: &mut Compositor, plain_capture_pending: bool) -> boo
     );
     wm.backend_mut().damage = false;
     true
+}
+
+fn make_winit_surface_current(
+    backend: &mut smithay::backend::winit::WinitGraphicsBackend<GlesRenderer>,
+) -> Result<(), String> {
+    use smithay::backend::egl::ffi::egl;
+
+    // Perform Smithay's resize bookkeeping before latching the back
+    // buffer. Keep ownership in the backend; only copy its raw handles
+    // to avoid overlapping renderer/surface accessor borrows.
+    drop(backend.bind().map_err(|error| format!("bind: {error:?}"))?);
+    let context = backend.renderer().egl_context();
+    let handle = context.get_context_handle();
+    let display = context.display().get_display_handle();
+    let surface = backend.egl_surface().get_surface_handle();
+    // SAFETY: all three handles belong to this live backend. Rendering
+    // and capture use its context only on the compositor thread. The
+    // backend cannot resize/drop the surface during this call. This is
+    // the same operation as EGLContext::make_current_with_surface; no
+    // GL state, framebuffer contents, or resource ownership is changed.
+    let result = unsafe { egl::MakeCurrent(**display, surface, surface, handle) };
+    if result == egl::FALSE {
+        return Err(format!("make current: EGL error {:#x}", unsafe { egl::GetError() }));
+    }
+    Ok(())
 }
 
 /// Damage-rect telemetry, on when `CHONKSTEP_DAMAGE_LOG` is set: one

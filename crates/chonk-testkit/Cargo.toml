@@ -60,6 +60,9 @@ wayland-scanner = "0.31"
 # shares one copy of that arithmetic, which is why the theme crate is
 # a dependency of the harness itself and not only of its tests.
 wm-theme = { path = "../wm-theme" }
+# The autostart probe is an independent X11 executable; the EWMH and
+# input tests also use this same client library. Already in the workspace.
+x11rb = "0.13"
 
 [dev-dependencies]
 # The Hyprland IPC connection-storm e2e uses the server's public caps
@@ -69,11 +72,6 @@ chonk-hyprland-ipc = { path = "../chonk-hyprland-ipc" }
 # The Overview e2e test lays out its expected tiles through the theme
 # API's geometry types.
 wm-theme-api = { path = "../wm-theme-api" }
-# The EWMH e2e test plays the part of an X11 pager against the nested
-# session's XWayland: it sends the control ClientMessages and reads the
-# root properties back. Same version requirement as every other x11rb
-# user in the workspace.
-x11rb = "0.13"
 # The control-socket e2e is a bar written the way a third party would
 # write one: a `UnixStream` and `serde_json`, nothing from the shell.
 # Already in the graph through `chonk-shell`.

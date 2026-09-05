@@ -31,7 +31,7 @@ const APP_ID: &str = "org.omarchy.terminal";
 /// no decorations of its own.
 fn launch_omarchy_terminal(session: &mut Session) -> WindowInfo {
     session
-        .launch("alacritty", &["--class", APP_ID, "--title", "Omarchy", "-o", "window.decorations=None"])
+        .launch("alacritty", &["--config-file", "/dev/null", "--class", APP_ID, "--title", "Omarchy", "-o", "window.decorations=\"None\""])
         .expect("alacritty launches");
     session.wait_for_window(APP_ID).expect("Omarchy's terminal maps")
 }

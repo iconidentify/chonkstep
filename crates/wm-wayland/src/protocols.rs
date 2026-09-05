@@ -133,7 +133,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use smithay::backend::allocator::Fourcc;
 use smithay::backend::renderer::damage::OutputDamageTracker;
 use smithay::backend::renderer::gles::{GlesRenderer, GlesTexture};
-use smithay::backend::renderer::{Bind, ExportMem, Offscreen};
+use smithay::backend::renderer::{Bind, Offscreen};
 use smithay::input::pointer::CursorImageStatus;
 use smithay::output::Output;
 use smithay::reexports::wayland_protocols_wlr::foreign_toplevel::v1::server::zwlr_foreign_toplevel_handle_v1::{
@@ -156,7 +156,7 @@ use smithay::reexports::wayland_server::protocol::wl_buffer::WlBuffer;
 use smithay::reexports::wayland_server::protocol::wl_output::WlOutput;
 use smithay::reexports::wayland_server::protocol::wl_shm;
 use smithay::reexports::wayland_server::{Client, DataInit, Dispatch, DisplayHandle, GlobalDispatch, New, Resource};
-use smithay::utils::{Buffer as BufferCoords, Physical, Rectangle as SRect, Size as SSize, Transform};
+use smithay::utils::{Buffer as BufferCoords, Physical, Size as SSize, Transform};
 use smithay::wayland::shm::{with_buffer_contents, with_buffer_contents_mut, BufferData};
 
 use wm_core::{Backend, BackendEvent, ClientFlags, Lifecycle, NetState, NetStateAction};
@@ -1397,20 +1397,17 @@ fn service_capture_group(comp: &mut Compositor, captures: &[PendingCapture]) {
             .render_output(renderer, &mut framebuffer, age, &target.scene_scratch, clear_color)
             .map_err(|error| format!("render: {error:?}"))?;
         target.rendered = true;
-        let region = SRect::from_size(SSize::<i32, BufferCoords>::from((width, height)));
-        let mapping = renderer
-            .copy_framebuffer(&framebuffer, region, Fourcc::Abgr8888)
-            .map_err(|error| format!("readback: {error:?}"))?;
-        let pixels = renderer.map_texture(&mapping).map_err(|error| format!("map: {error:?}"))?;
-        for capture in captures {
-            match write_capture_bytes(&capture.buffer, target_size, pixels) {
-                Ok(()) => finish_capture(start_time.elapsed(), capture, target_size),
-                Err(error) => {
-                    tracing::warn!(%error, "screencopy could not write into the client's buffer");
-                    capture.frame.failed();
+        crate::readback::with_rgba_pixels(renderer, &mut framebuffer, (width, height).into(), |pixels| {
+            for capture in captures {
+                match write_capture_bytes(&capture.buffer, target_size, pixels) {
+                    Ok(()) => finish_capture(start_time.elapsed(), capture, target_size),
+                    Err(error) => {
+                        tracing::warn!(%error, "screencopy could not write into the client's buffer");
+                        capture.frame.failed();
+                    }
                 }
             }
-        }
+        })?;
         Ok::<(), String>(())
     })();
     target.scene_scratch.clear();
@@ -1578,12 +1575,9 @@ pub(crate) fn capture_region_into(
             .render_output(renderer, &mut framebuffer, age, &target.scene_scratch, clear_color)
             .map_err(|error| format!("render: {error:?}"))?;
         target.rendered = true;
-        let readback = SRect::from_size(SSize::<i32, BufferCoords>::from((width, height)));
-        let mapping = renderer
-            .copy_framebuffer(&framebuffer, readback, Fourcc::Abgr8888)
-            .map_err(|error| format!("readback: {error:?}"))?;
-        let pixels = renderer.map_texture(&mapping).map_err(|error| format!("map: {error:?}"))?;
-        write_capture_bytes(buffer, target_size, pixels)
+        crate::readback::with_rgba_pixels(renderer, &mut framebuffer, (width, height).into(), |pixels| {
+            write_capture_bytes(buffer, target_size, pixels)
+        })?
     })();
 
     target.scene_scratch.clear();

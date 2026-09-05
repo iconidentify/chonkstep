@@ -51,6 +51,7 @@ mod lock;
 mod output_mgmt;
 mod output_power;
 mod protocols;
+mod readback;
 mod renderer;
 mod session;
 mod state;

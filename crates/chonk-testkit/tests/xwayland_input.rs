@@ -9,7 +9,7 @@
 
 use std::time::Duration;
 
-use chonk_testkit::{poll_until, Session, SessionOptions, WindowInfo};
+use chonk_testkit::{poll_until, profile_binary, session_dir, Session, SessionOptions, WindowInfo};
 use x11rb::connection::Connection as _;
 use x11rb::protocol::xproto::{
     Atom, AtomEnum, ClientMessageEvent, ConnectionExt as _, CreateWindowAux, EventMask,
@@ -21,6 +21,30 @@ use x11rb::{COPY_DEPTH_FROM_PARENT, COPY_FROM_PARENT};
 
 const EVENT: Duration = Duration::from_secs(10);
 const TITLE: &str = "xwayland-input-probe";
+
+#[test]
+#[ignore = "needs a nested Wayland session: scripts/e2e.sh --headless --release"]
+fn x11_autostart_connects_to_the_nested_display_before_the_first_dispatch() {
+    let probe = profile_binary("chonk-x11-autostart-probe").expect("probe is built");
+    let marker = session_dir("x11-autostart").join("inherited-display");
+    let mut session = Session::boot("x11-autostart", SessionOptions {
+        config_extra: format!("autostart = [[{:?}, {:?}]]\n", probe, marker),
+        // A nested compositor must replace even a stale inherited X11
+        // display. Using an invalid number also keeps the regression
+        // incapable of opening its window on the real desktop.
+        env: vec![("DISPLAY".into(), ":65534".into())],
+        ..Default::default()
+    }).expect("nested session boots");
+    let expected = format!("DISPLAY=:{}\n", xwayland_display(&session));
+    poll_until(EVENT, "the X11 autostart client to report its inherited display", || {
+        std::fs::read_to_string(&marker).ok().filter(|value| *value == expected)
+    }).unwrap_or_else(|error| panic!("{error}; compositor log:\n{}", session.log()));
+    // X11's map-time identity currently lives on its Smithay surface,
+    // not the test-door record. This isolated session starts one client.
+    poll_until(EVENT, "the autostart window to map inside this compositor", || {
+        session.world().ok()?.windows.into_iter().find(|window| window.mapped)
+    }).expect("the autostart window maps inside this compositor");
+}
 
 fn xwayland_display(session: &Session) -> u32 {
     poll_until(EVENT, "XWayland to announce its display", || {

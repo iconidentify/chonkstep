@@ -66,9 +66,9 @@ use smithay::backend::allocator::Fourcc;
 use smithay::backend::renderer::damage::OutputDamageTracker;
 use smithay::backend::renderer::element::Kind;
 use smithay::backend::renderer::gles::{GlesRenderer, GlesTexture};
-use smithay::backend::renderer::{Bind, Color32F, ExportMem, Offscreen};
+use smithay::backend::renderer::{Bind, Color32F, Offscreen};
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
-use smithay::utils::{Buffer as BufferCoords, Physical, Point as SPoint, Rectangle as SRect};
+use smithay::utils::{Buffer as BufferCoords, Physical, Point as SPoint};
 use smithay::utils::{Size as SSize, Transform};
 
 use wm_core::WindowType;
@@ -526,18 +526,12 @@ fn render_offscreen(
         return None;
     }
 
-    let region = SRect::from_size(SSize::<i32, BufferCoords>::from((width, height)));
-    let mapping = match renderer.copy_framebuffer(&framebuffer, region, Fourcc::Abgr8888) {
-        Ok(mapping) => mapping,
+    let pixels = match crate::readback::with_rgba_pixels(
+        renderer, &mut framebuffer, (width, height).into(), <[u8]>::to_vec,
+    ) {
+        Ok(pixels) => pixels,
         Err(error) => {
             tracing::warn!(?error, "could not read back the offscreen capture buffer");
-            return None;
-        }
-    };
-    let pixels = match renderer.map_texture(&mapping) {
-        Ok(pixels) => pixels.to_vec(),
-        Err(error) => {
-            tracing::warn!(?error, "could not map the captured pixels");
             return None;
         }
     };

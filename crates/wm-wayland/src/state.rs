@@ -3803,6 +3803,7 @@ fn register_xwayland_source(
             return Ok(());
         }
     };
+    let display_number = xwayland.display_number();
     loop_handle
         .insert_source(xwayland, move |event, _, comp| match event {
             XWaylandEvent::Ready {
@@ -3817,12 +3818,12 @@ fn register_xwayland_source(
                     Ok(xwm) => {
                         comp.xwm = Some(xwm);
                         comp.xdisplay = Some(display_number);
-                        std::env::set_var("DISPLAY", format!(":{display_number}"));
                         tracing::info!(display = display_number, "XWayland ready");
                         comp.start_xsettings(display_number);
                         crate::xewmh::start(comp, display_number);
                     }
                     Err(error) => {
+                        std::env::remove_var("DISPLAY");
                         tracing::error!(
                             ?error,
                             "failed to attach the X11 window manager to XWayland"
@@ -3832,8 +3833,14 @@ fn register_xwayland_source(
             }
             XWaylandEvent::Error => comp.handle_xwayland_loss("startup failure"),
         })
-        .map(|_| ())
-        .map_err(|error| format!("failed to register the XWayland event source: {error}"))
+        .map_err(|error| format!("failed to register the XWayland event source: {error}"))?;
+    // Smithay has already reserved the display and bound its listening
+    // sockets. X11 clients can connect now and wait for startup to finish;
+    // publishing only at Ready made autostart inherit the host's DISPLAY
+    // (or no DISPLAY at all) before our first event-loop dispatch.
+    std::env::set_var("DISPLAY", format!(":{display_number}"));
+    tracing::info!(display = display_number, "XWayland listening; display exported for autostart");
+    Ok(())
 }
 
 impl Compositor {
@@ -4033,8 +4040,21 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
 
     let (mut graphics, mut output_setups) = if nested {
         tracing::info!("nested backend: rendering into a window on the host desktop");
-        let (winit_backend, winit_source) =
-            winit::init::<GlesRenderer>().map_err(|error| format!("winit backend init failed: {error}"))?;
+        // Match the native EGLContext's GLES 2 minimum. Smithay's winit
+        // convenience initializer requests GLES 3 unconditionally and
+        // rejects otherwise usable older/software contexts before its
+        // GLES 2-capable renderer can inspect their extensions. Drivers
+        // may provide a newer compatible context; renderer capabilities
+        // continue to come from that actual context, not this minimum.
+        let (winit_backend, winit_source) = winit::init_from_attributes_with_gl_attr::<GlesRenderer>(
+            smithay::reexports::winit::window::Window::default_attributes()
+                .with_inner_size(smithay::reexports::winit::dpi::LogicalSize::new(1280.0, 800.0))
+                .with_title("Smithay")
+                .with_visible(true),
+            smithay::backend::egl::context::GlAttributes {
+                version: (2, 0), profile: None, debug: cfg!(debug_assertions), vsync: false,
+            },
+        ).map_err(|error| format!("winit backend init failed: {error}"))?;
         let window_size = winit_backend.window_size();
 
         // Flipped180 is deliberately copied from Smithay's own winit
@@ -4238,10 +4258,17 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
     chonk_shell::startup::consume_session_continuation();
     // Children the shell spawns find the session through the
     // environment, so it must be set before `Shell::new` (which may
-    // autostart things) and before XWayland comes up. `DISPLAY`
-    // follows once XWayland reports ready.
+    // autostart things). Replace the host's X11 display too: even if
+    // our XWayland cannot start, children must not escape to the host.
     std::env::set_var("WAYLAND_DISPLAY", &socket_name);
+    std::env::remove_var("DISPLAY");
     tracing::info!(socket = ?socket_name, "wayland socket listening");
+
+    // Bind and publish the X11 display before shell construction can
+    // autostart X11 applications. Server initialization overlaps theme
+    // and shell setup; its Ready callback is serviced once comp exists.
+    // Failure to spawn still degrades only X11 compatibility.
+    register_xwayland_source(&display_handle, &loop_handle)?;
 
     // Hyprland IPC, for Omarchy's unmodified shell and the real
     // `hyprctl`. Bound here, beside `WAYLAND_DISPLAY`, for the same two
@@ -4364,12 +4391,6 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
     shell.apply_session_state(&mut wm, state);
     wm.set_workarea(shell.workarea(output_size));
     wm.bind_default_keys();
-
-    // XWayland: spawned here, attached (X11Wm::start_wm) when it
-    // reports ready. Failure to start is a degraded session — X11
-    // apps unavailable — not a dead one, so it logs instead of
-    // erroring out.
-    register_xwayland_source(&display_handle, &loop_handle)?;
 
     let mut comp = Compositor {
         hyprland_ipc,
