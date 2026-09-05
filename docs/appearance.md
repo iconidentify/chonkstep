@@ -102,12 +102,24 @@ Background` whenever Omarchy has a current theme to read (a readable
 row to the Theme submenu), so a built-in theme can wear Omarchy's
 picture too.
 
-The bridge runs the other way too: `omarchy-export-themes` writes each
-built-in theme as an Omarchy theme -- `colors.toml` derived from the
-theme itself plus its wallpaper under `backgrounds/` -- into
+The bridge runs the other way too, and on a machine with Omarchy it is
+the *only* theme list there is: chonkstep offers no theme menu of its
+own when Omarchy's is readable, because two lists that disagree about
+which themes exist is the split system this desktop is trying not to
+have. `omarchy-export-themes` writes each built-in theme as an Omarchy
+theme -- `colors.toml` derived from the theme itself, its wallpaper
+under `backgrounds/`, and a `preview.png` for Omarchy's picker -- into
 `~/.config/omarchy/themes/` (or a directory you name), after which
 `omarchy-theme-set amber-phosphor` dresses the rest of the machine to
-match. It is built with the shell (`cargo build -p chonk-shell`) and
+match. `scripts/install.sh` runs it once so the themes are in the
+picker from the first login.
+
+The preview is *rendered*, not photographed: the theme's background
+with two of its own window frames on it, drawn through the same
+`ThemeEngine` the compositor decorates live windows with. A screenshot
+would be truer, and needs a running compositor on a real display --
+which an exporter that has to work over ssh, in a package build and in
+CI does not have. It is built with the shell (`cargo build -p chonk-shell`) and
 lives at `target/release/omarchy-export-themes` in a checkout, at
 `~/.local/bin/omarchy-export-themes` after `scripts/install.sh`, and at
 `/usr/bin/omarchy-export-themes` from the Arch package; the whole

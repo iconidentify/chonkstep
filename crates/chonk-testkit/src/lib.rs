@@ -1068,32 +1068,50 @@ impl World {
 /// "Dock" is unconditional — the Dock is chonkstep's own furniture, so
 /// every session has one to show or hide — which is why it is not one
 /// of [`RootMenu`]'s fields.
+/// The root menu on a machine with no Omarchy menu definition to read:
+/// this desk's own tree, which is the only place its theme and
+/// wallpaper rows appear.
 pub const ROOT_MENU_ROWS: &[&str] =
-    &["Terminal", "Applications", "Theme", "Wallpaper", "Dock", "Omarchy Bar", "Omarchy", "Exit"];
+    &["Terminal", "Applications", "Theme", "Wallpaper", "Dock", "Omarchy Bar", "Exit"];
 
-/// Which of the root menu's optional rows a session carries. The
-/// default — neither — is the menu the harness's own default session
-/// shows on a machine with no Omarchy menu definition.
+/// Which rows a session's root menu carries.
+///
+/// The menu has two shapes. With an Omarchy menu definition to read,
+/// *its* rows are the menu — at the top level, not behind a cascade —
+/// with `Applications` folded in ahead of them (Omarchy's own `Apps`
+/// row is provider-backed and skipped, so nothing else offers a
+/// launcher) and this desk's furniture toggles after. Without one, the
+/// desk falls back to its own tree, [`ROOT_MENU_ROWS`].
+///
+/// The default — no Omarchy rows, no bar — is what the harness's own
+/// default session shows.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct RootMenu {
     /// The session hosts Omarchy's shell, so the bar toggle is listed.
     pub omarchy_bar: bool,
-    /// An Omarchy menu definition was found, so its submenu is listed.
-    pub omarchy: bool,
+    /// The Omarchy menu's own top-level row labels, in order. Empty
+    /// when no definition was found, which selects the fallback tree.
+    pub omarchy_rows: &'static [&'static str],
 }
 
 impl RootMenu {
     /// The rows this menu shows, in order.
     pub fn rows(self) -> Vec<&'static str> {
-        ROOT_MENU_ROWS
-            .iter()
-            .copied()
-            .filter(|row| match *row {
-                "Omarchy Bar" => self.omarchy_bar,
-                "Omarchy" => self.omarchy,
-                _ => true,
-            })
-            .collect()
+        if self.omarchy_rows.is_empty() {
+            return ROOT_MENU_ROWS
+                .iter()
+                .copied()
+                .filter(|row| *row != "Omarchy Bar" || self.omarchy_bar)
+                .collect();
+        }
+        let mut rows = vec!["Applications", "Terminal"];
+        rows.extend_from_slice(self.omarchy_rows);
+        rows.push("Dock");
+        if self.omarchy_bar {
+            rows.push("Omarchy Bar");
+        }
+        rows.push("Exit");
+        rows
     }
 
     /// How many rows this menu shows — what [`Session::open_root_menu`]
@@ -1762,20 +1780,30 @@ mod tests {
     /// them: the Dock is chonkstep's own furniture, so there is no
     /// session with no Dock to offer.
     #[test]
-    fn root_menu_rows_keep_their_order_with_and_without_the_optional_ones() {
+    fn root_menu_rows_keep_their_order_in_both_shapes() {
+        // No Omarchy definition: this desk's own tree, which is the
+        // only place Theme and Wallpaper appear.
         let plain = RootMenu::default();
         assert_eq!(plain.rows(), ["Terminal", "Applications", "Theme", "Wallpaper", "Dock", "Exit"]);
         assert_eq!(plain.row_of("Dock"), Some(4));
         assert_eq!(plain.row_of("Exit"), Some(5));
         assert_eq!(plain.row_of("Omarchy Bar"), None);
-        let hosted = RootMenu { omarchy_bar: true, omarchy: false };
+        let hosted = RootMenu { omarchy_bar: true, omarchy_rows: &[] };
         assert_eq!(hosted.row_count(), 7);
         assert_eq!(hosted.row_of("Dock"), Some(4), "this desk's own column, then the guest's bar");
         assert_eq!(hosted.row_of("Omarchy Bar"), Some(5));
-        let full = RootMenu { omarchy_bar: true, omarchy: true };
-        assert_eq!(full.rows(), ROOT_MENU_ROWS);
-        assert_eq!(full.row_of("Omarchy"), Some(6));
-        assert_eq!(full.row_of("Exit"), Some(7));
+
+        // With one, Omarchy's rows *are* the menu: Applications ahead
+        // of them because Omarchy's own launcher row is skipped, this
+        // desk's toggles after, and no `Omarchy` cascade anywhere.
+        let full = RootMenu { omarchy_bar: true, omarchy_rows: &["Style", "System"] };
+        assert_eq!(
+            full.rows(),
+            ["Applications", "Terminal", "Style", "System", "Dock", "Omarchy Bar", "Exit"]
+        );
+        assert_eq!(full.row_of("Omarchy"), None, "the menu is Omarchy's; it does not contain one");
+        assert_eq!(full.row_of("Theme"), None, "one theme system: Omarchy's Style row owns it");
+        assert_eq!(full.row_of("Exit"), Some(6));
     }
 
     #[test]
