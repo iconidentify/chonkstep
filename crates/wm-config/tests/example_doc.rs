@@ -106,3 +106,44 @@ fn every_documented_media_key_name_parses() {
         assert!(wm_config::parse_key(&format!("super+{name}")).is_some(), "super+{name}");
     }
 }
+
+/// The keypad names the reference documents, in both spellings, and
+/// the promise it makes about them: the two spellings of a digit are
+/// the same key, and the numpad's Enter is not the main one.
+#[test]
+fn every_documented_keypad_key_name_parses() {
+    for name in [
+        "kp0", "kp1", "kp2", "kp3", "kp4", "kp5", "kp6", "kp7", "kp8", "kp9", "kpenter",
+        "kpadd", "kpsubtract", "kpmultiply", "kpdivide", "kpdecimal", "kpequal", "kpinsert",
+        "kpend", "kpdown", "kpnext", "kpleft", "kpbegin", "kpright", "kphome", "kpup",
+        "kpprior", "kpdelete", "kppageup", "kppagedown", "kpseparator",
+    ] {
+        assert!(
+            wm_config::parse_key(name).is_some(),
+            "the docs list {name} as a key token, but the parser does not know it"
+        );
+        assert!(wm_config::parse_key(&format!("super+{name}")).is_some(), "super+{name}");
+    }
+    // "kp1 is also kpend", as the reference puts it.
+    for (digit, cursor) in [
+        ("kp0", "kpinsert"),
+        ("kp1", "kpend"),
+        ("kp2", "kpdown"),
+        ("kp3", "kpnext"),
+        ("kp4", "kpleft"),
+        ("kp5", "kpbegin"),
+        ("kp6", "kpright"),
+        ("kp7", "kphome"),
+        ("kp8", "kpup"),
+        ("kp9", "kpprior"),
+        ("kpdecimal", "kpdelete"),
+    ] {
+        assert_eq!(
+            wm_config::parse_key(digit),
+            wm_config::parse_key(cursor),
+            "the docs say {digit} and {cursor} are the same key"
+        );
+    }
+    // "a different key from return", which is the whole point.
+    assert_ne!(wm_config::parse_key("kpenter"), wm_config::parse_key("return"));
+}

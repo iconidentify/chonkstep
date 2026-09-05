@@ -364,6 +364,15 @@ are usually bound bare: `volumeup`, `volumedown`, `volumemute` (or
 `brightnessdown`, `kbdbrightnessup`, `kbdbrightnessdown`, `poweroff`,
 `search`.
 
+The numeric keypad: `kp0`–`kp9`, `kpenter`, `kpadd`, `kpsubtract`,
+`kpmultiply`, `kpdivide`, `kpdecimal`, `kpseparator`, `kpequal`.
+`kpenter` is the numpad's own Enter and is a different key from
+`return` — binding one does not touch the other. Each digit can also be
+spelled by the name X gives it with NumLock off (`kp1` is also `kpend`,
+`kp5` is also `kpbegin`, `kp0` is also `kpinsert`, `kpdecimal` is also `kpdelete`,
+and so on); the two spellings are the same key, and a keypad binding
+fires whichever way NumLock is set.
+
 A typo'd combo or unknown action is warned about and skipped; every
 other line still applies.
 

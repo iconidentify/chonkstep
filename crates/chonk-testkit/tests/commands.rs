@@ -42,6 +42,16 @@ fn marker(dir: &Path, name: &str) -> Option<()> {
     dir.join(name).exists().then_some(())
 }
 
+/// The number of completed command writes, once at least `wanted`
+/// have landed. A bound key can run a process asynchronously, so the
+/// filesystem is the observable completion boundary rather than a
+/// sleep after input injection.
+fn marker_lines(dir: &Path, name: &str, wanted: usize) -> Option<usize> {
+    let text = std::fs::read_to_string(dir.join(name)).ok()?;
+    let lines = text.lines().count();
+    (lines >= wanted).then_some(lines)
+}
+
 /// The whole point of the seam: a bound key runs the command it names.
 ///
 /// Before this existed there was no way to bind a key to anything the
@@ -89,6 +99,47 @@ fn a_bare_media_key_runs_a_command() {
     session.door().tap_key(keys::VOLUMEUP).expect("key injects");
     poll_until(SPAWNED, "the marker written by the command `louder`", || marker(&dir, "louder"))
         .expect("a bare volumeup press should have run the command named `louder`");
+}
+
+/// A named keypad binding reaches the compositor's real keyboard path
+/// at both levels of the keypad keymap.
+///
+/// The config parser intentionally resolves `kp1` to the physical
+/// key's level-0 cursor symbol. This test is the integration proof for
+/// that policy: unlike table assertions, these evdev events update the
+/// seat's real xkb state and pass through production binding matching.
+#[test]
+#[ignore = "needs a live Wayland session to nest inside"]
+fn a_keypad_binding_fires_with_num_lock_off_and_on() {
+    let dir = session_dir("commands-keypad-numlock");
+    let presses = dir.join("presses");
+    let config = format!(
+        "[commands]\nmark = [\"sh\", \"-c\", \"echo ran >> {}\"]\n\n[keybindings]\n\"kp1\" = \"run mark\"\n",
+        presses.display()
+    );
+    let mut session = Session::boot(
+        "commands-keypad-numlock",
+        SessionOptions { config_extra: config, ..Default::default() },
+    )
+    .expect("session boots with a named keypad binding");
+
+    // A fresh default keymap starts with Num Lock off. KEY_KP1 must
+    // match its level-0 KP_End symbol through the real input path.
+    session.door().tap_key(keys::KP1).expect("keypad 1 injects with Num Lock off");
+    poll_until(SPAWNED, "the first keypad command write", || marker_lines(&dir, "presses", 1))
+        .expect("kp1 should run its command with Num Lock off");
+
+    // Toggle the seat's real xkb modifier state, then inject the same
+    // physical key. Binding lookup must remain on the stable raw symbol
+    // even though client delivery would now see the Num Lock level.
+    session.door().tap_key(keys::NUMLOCK).expect("Num Lock toggles on");
+    session.door().tap_key(keys::KP1).expect("keypad 1 injects with Num Lock on");
+    let writes = poll_until(SPAWNED, "the second keypad command write", || {
+        marker_lines(&dir, "presses", 2)
+    })
+    .expect("kp1 should run its command with Num Lock on");
+
+    assert_eq!(writes, 2, "one physical press in each Num Lock state must run exactly once");
 }
 
 /// Autostart runs on a genuinely new session, in file order.

@@ -1289,6 +1289,199 @@ fn a_keycode_resolves_through_the_layout_the_numbers_were_chosen_against() {
 }
 
 #[test]
+fn underscore_separates_modifiers_without_splitting_a_key_name() {
+    // `_` is one of the three separators Hyprland puts between
+    // modifiers, and it is also inside the name of every key on the
+    // numeric keypad. The splitter used to assume the first and take
+    // the whole chunk apart, so `KP_Enter` arrived as `KP` + `Enter`
+    // and the line was refused for a modifier nobody wrote.
+    assert_eq!(keys::spec_for("SUPER_SHIFT RETURN").as_deref(), Ok("super+shift+return"));
+    assert_eq!(keys::spec_for("SUPER, KP_Enter").as_deref(), Ok("super+kpenter"));
+    // Modifiers and an underscored key name in one chunk: the leading
+    // run of modifiers comes off and the rest stays whole.
+    assert_eq!(keys::spec_for("SUPER_KP_Enter").as_deref(), Ok("super+kpenter"));
+    assert_eq!(keys::spec_for("SUPER_SHIFT_KP_Add").as_deref(), Ok("super+shift+kpadd"));
+    // A genuinely unknown key still reports itself, and reports the
+    // whole name rather than the fragment after the last underscore.
+    assert_eq!(
+        keys::spec_for("SUPER, KP_Nonsense"),
+        Err(keys::KeyTrouble::UnknownKey("KP_Nonsense".into()))
+    );
+    // The pointer bindings that also contain `_` are still refused as
+    // pointer bindings, ahead of any of this.
+    assert!(matches!(keys::spec_for("SUPER, mouse_up"), Err(keys::KeyTrouble::NotAKey(_))));
+}
+
+#[test]
+fn kp_enter_is_its_own_key_and_does_not_steal_the_main_enter_binding() {
+    // Two failures at once, which is why this asserts both halves.
+    // On main `KP_Enter` did not resolve at all — the chunk splitter
+    // tore it into `KP` + `Enter` and the line was refused as
+    // `UnknownModifier("KP")`. Behind that stood a dead
+    // `("kp_enter", "return")` alias, so fixing only the splitter
+    // would have turned a refused binding into a silent collision:
+    // `bind()` de-duplicates by combo, and a config binding both
+    // `SUPER, Return` and `SUPER, KP_Enter` would have kept just the
+    // second action, on the main Enter key. On an Omarchy machine the
+    // binding that would have removed is the terminal's.
+    assert_eq!(keys::spec_for("SUPER, Return").as_deref(), Ok("super+return"));
+    assert_eq!(keys::spec_for("SUPER, KP_Enter").as_deref(), Ok("super+kpenter"));
+    assert_ne!(
+        keys::spec_for("SUPER, KP_Enter"),
+        keys::spec_for("SUPER, Return"),
+        "the numpad's Enter and the main Enter are different keys"
+    );
+    // And they really are two distinct keysyms downstream, not two
+    // spellings the parser folds back together.
+    let numpad = crate::parse_key("super+kpenter").expect("kpenter parses");
+    let main = crate::parse_key("super+return").expect("return parses");
+    assert_eq!(numpad.keysym, 0xff8d, "XK_KP_Enter");
+    assert_eq!(main.keysym, 0xff0d, "XK_Return");
+    assert_ne!(numpad, main);
+}
+
+#[test]
+fn binding_both_enters_leaves_two_bindings_rather_than_one() {
+    // The collision end-to-end, through the reader that de-duplicates
+    // by combo: the shape of an Omarchy config that also binds the
+    // numpad. On main the second line was refused outright, so the
+    // numpad did nothing; with the splitter fixed but the `kp_enter`
+    // alias left pointing at `return` both lines would collide on
+    // `super+return` and the terminal binding would vanish. Only both
+    // fixes together give the two bindings this asserts.
+    let root = scratch("kp-enter-collision");
+    write(
+        &root.join(".config/hypr/hyprland.conf"),
+        "bind = SUPER, Return, exec, my-terminal\nbind = SUPER, KP_Enter, exec, my-calculator\n",
+    );
+    let reading = read(&Roots::under(&root));
+    assert_eq!(
+        argv_for(&reading, "super+return"),
+        Some(vec!["my-terminal".into()]),
+        "the main Enter must keep its own action"
+    );
+    assert_eq!(
+        argv_for(&reading, "super+kpenter"),
+        Some(vec!["my-calculator".into()]),
+        "the numpad Enter must get its own binding"
+    );
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn the_keypad_is_bindable_by_name_in_both_spellings() {
+    // Every keypad key Hyprland can name, resolved. The digits and the
+    // cursor-mode names are two spellings of one key, so they must
+    // produce the same keysym — see `keysym_for`'s keypad block.
+    for (hypr, spec) in [
+        ("KP_1", "kp1"),
+        ("KP_5", "kp5"),
+        ("KP_0", "kp0"),
+        ("KP_Add", "kpadd"),
+        ("KP_Subtract", "kpsubtract"),
+        ("KP_Multiply", "kpmultiply"),
+        ("KP_Divide", "kpdivide"),
+        ("KP_Decimal", "kpdecimal"),
+        ("KP_End", "kpend"),
+        ("KP_Begin", "kpbegin"),
+        ("KP_Insert", "kpinsert"),
+    ] {
+        assert_eq!(
+            keys::spec_for(&format!("SUPER, {hypr}")).as_deref(),
+            Ok(format!("super+{spec}").as_str()),
+            "{hypr}"
+        );
+    }
+    for (digit, cursor) in
+        [("kp1", "kpend"), ("kp5", "kpbegin"), ("kp0", "kpinsert"), ("kpdecimal", "kpdelete")]
+    {
+        assert_eq!(
+            crate::parse_key(digit).map(|combo| combo.keysym),
+            crate::parse_key(cursor).map(|combo| combo.keysym),
+            "{digit} and {cursor} are the same key"
+        );
+    }
+}
+
+#[test]
+fn a_keypad_binding_names_the_keysym_the_compositor_will_actually_see() {
+    // The correction that makes this fix work rather than merely
+    // parse. Bindings are matched against the keycode's LEVEL-0
+    // keysym (`wm-wayland`'s `input.rs`), and on the stock US map the
+    // keypad's digits are all at level 2, behind NumLock:
+    //
+    //   $ xkbcli how-to-type --keysym KP_1
+    //   KEYCODE 87  KP1  LEVEL# 2  MODIFIERS [ Mod2 NumLock ]
+    //   $ xkbcli how-to-type --keysym KP_End
+    //   KEYCODE 87  KP1  LEVEL# 1  MODIFIERS [ ]
+    //
+    // So XK_KP_1 (0xffb1) is a keysym this compositor can never be
+    // handed for a binding. Naming `kp1` after it would produce a
+    // binding that parses, warns about nothing and never fires. Each
+    // digit therefore resolves to its key's level-0 keysym, which also
+    // makes the binding independent of how NumLock happens to be set.
+    for (spec, keysym) in [
+        ("kp7", 0xff95),
+        ("kp4", 0xff96),
+        ("kp8", 0xff97),
+        ("kp6", 0xff98),
+        ("kp2", 0xff99),
+        ("kp9", 0xff9a),
+        ("kp3", 0xff9b),
+        ("kp1", 0xff9c),
+        ("kp5", 0xff9d),
+        ("kp0", 0xff9e),
+        ("kpdecimal", 0xff9f),
+    ] {
+        let combo = crate::parse_key(spec).unwrap_or_else(|| panic!("{spec} parses"));
+        assert_eq!(combo.keysym, keysym, "{spec}");
+        assert!(
+            !(0xffb0..=0xffb9).contains(&combo.keysym),
+            "{spec} resolved to a NumLock-only keysym, which can never match"
+        );
+    }
+    // The operators have no second level to hide behind and keep their
+    // own keysyms.
+    for (spec, keysym) in [
+        ("kpenter", 0xff8d),
+        ("kpmultiply", 0xffaa),
+        ("kpadd", 0xffab),
+        ("kpsubtract", 0xffad),
+        ("kpdivide", 0xffaf),
+        ("kpequal", 0xffbd),
+    ] {
+        assert_eq!(crate::parse_key(spec).map(|combo| combo.keysym), Some(keysym), "{spec}");
+    }
+}
+
+#[test]
+fn the_keypads_keycodes_resolve_too() {
+    // `code:N` and the name must land on the same key, or a config
+    // that mixes the two spellings gets two bindings where it meant
+    // one. Note 63 and 125 sit outside the 79..=91 run the rest of the
+    // keypad forms.
+    for (code, spec) in [
+        (63, "kpmultiply"),
+        (79, "kp7"),
+        (82, "kpsubtract"),
+        (84, "kp5"),
+        (86, "kpadd"),
+        (87, "kp1"),
+        (90, "kp0"),
+        (91, "kpdecimal"),
+        (104, "kpenter"),
+        (106, "kpdivide"),
+        (125, "kpequal"),
+    ] {
+        assert_eq!(
+            keys::spec_for(&format!("SUPER + code:{code}")).as_deref(),
+            Ok(format!("super+{spec}").as_str()),
+            "code:{code}"
+        );
+    }
+}
+
+#[test]
 fn a_chord_of_nothing_but_modifiers_is_not_a_binding() {
     assert_eq!(
         keys::spec_for("SUPER + SHIFT"),

@@ -26,8 +26,8 @@
 //! available at config-read time is the standard US mapping the
 //! numbers were chosen against. [`KEYCODES`] is that mapping, and it
 //! covers exactly the range Omarchy actually uses plus the rest of the
-//! main block; a keycode outside it is refused by name rather than
-//! guessed at.
+//! main block and the numeric keypad; a keycode outside it is refused
+//! by name rather than guessed at.
 //!
 //! This is a real limitation and it is written down rather than
 //! papered over: on a non-US layout `code:20` is whatever key sits
@@ -105,15 +105,29 @@ pub fn spec_for(keys: &str) -> Result<String, KeyTrouble> {
         if chunk.is_empty() {
             continue;
         }
-        // `SUPER_SHIFT` is one chunk holding two modifiers; a key name
-        // never contains `_`, so splitting here is unambiguous.
+        // `SUPER_SHIFT` is one chunk holding two modifiers, so `_`
+        // has to be split on — but only as far as the modifiers go.
+        // This used to split the whole chunk on the premise that "a
+        // key name never contains `_`", which is false for every key
+        // on the numeric keypad: `KP_Enter` became the two tokens
+        // `KP` and `Enter`, and the line was refused with
+        // `UnknownModifier("KP")` — the real reason a numpad binding
+        // from a Hyprland config never worked, and a reason that
+        // named the wrong thing.
+        //
+        // So the leading run of modifiers is peeled off and whatever
+        // follows is one key token, underscores intact. The first
+        // part that is not a modifier begins the key, which keeps
+        // `SUPER_SHIFT` and `SUPER_KP_Enter` both reading correctly
+        // and needs no list of which key names contain `_`.
         if chunk.contains('_') && !chunk.to_ascii_lowercase().starts_with("code:") {
-            tokens.extend(
-                chunk
-                    .split('_')
-                    .filter(|p| !p.is_empty())
-                    .map(str::to_string),
-            );
+            let parts: Vec<&str> = chunk.split('_').filter(|part| !part.is_empty()).collect();
+            let leading_modifiers =
+                parts.iter().take_while(|part| modifier_name(part).is_some()).count();
+            tokens.extend(parts[..leading_modifiers].iter().map(|part| (*part).to_string()));
+            if leading_modifiers < parts.len() {
+                tokens.push(parts[leading_modifiers..].join("_"));
+            }
         } else {
             tokens.push(chunk.to_string());
         }
@@ -265,6 +279,30 @@ pub fn keycode_name(code: u32) -> Option<&'static str> {
         117 => "pagedown",
         118 => "insert",
         119 => "delete",
+        // The numeric keypad, in the evdev map's own order — note 63
+        // and 125 sit well outside the 79..=91 run the other keypad
+        // keys form, which is why this is a list and not a range.
+        // Names are `parse_key`'s, so a `code:` binding and a named
+        // one resolve to the same keysym; see `crate::keysym_for`'s
+        // keypad block for why the digits are named by the key rather
+        // than by their NumLock-on keysym.
+        63 => "kpmultiply",
+        79 => "kp7",
+        80 => "kp8",
+        81 => "kp9",
+        82 => "kpsubtract",
+        83 => "kp4",
+        84 => "kp5",
+        85 => "kp6",
+        86 => "kpadd",
+        87 => "kp1",
+        88 => "kp2",
+        89 => "kp3",
+        90 => "kp0",
+        91 => "kpdecimal",
+        104 => "kpenter",
+        106 => "kpdivide",
+        125 => "kpequal",
         // Omarchy binds this Apple-keyboard position as its menu key;
         // the evdev map aliases X keycode 201 to F23.
         201 => "f23",
@@ -312,5 +350,51 @@ const XKEYSYM_ALIASES: &[(&str, &str)] = &[
     // short ones.
     ("prior", "pageup"),
     ("next", "pagedown"),
-    ("kp_enter", "return"),
+    // The keypad, in X's underscored spelling — Hyprland's configs use
+    // these names verbatim.
+    //
+    // `kp_enter` used to map to `return`, which is not a normalisation
+    // but a substitution of one key for another. It never fired: the
+    // chunk splitter above tore `KP_Enter` into `KP` + `Enter` before
+    // `key_name` — and therefore this table — was ever consulted, so
+    // the entry was dead and the line was refused as
+    // `UnknownModifier("KP")` instead. That makes it a trap rather
+    // than a live bug, and one that fixing the splitter alone would
+    // have sprung: `bind()` de-duplicates by combo, so a config
+    // binding both `SUPER, Return` and `SUPER, KP_Enter` would have
+    // kept only the second action, on the MAIN Enter key, silently.
+    // The two had to be fixed together.
+    ("kp_enter", "kpenter"),
+    ("kp_add", "kpadd"),
+    ("kp_subtract", "kpsubtract"),
+    ("kp_multiply", "kpmultiply"),
+    ("kp_divide", "kpdivide"),
+    ("kp_decimal", "kpdecimal"),
+    ("kp_separator", "kpseparator"),
+    ("kp_equal", "kpequal"),
+    ("kp_0", "kp0"),
+    ("kp_1", "kp1"),
+    ("kp_2", "kp2"),
+    ("kp_3", "kp3"),
+    ("kp_4", "kp4"),
+    ("kp_5", "kp5"),
+    ("kp_6", "kp6"),
+    ("kp_7", "kp7"),
+    ("kp_8", "kp8"),
+    ("kp_9", "kp9"),
+    // The same keys under their NumLock-off names, which is what a
+    // config written against the cursor-mode symbols spells.
+    ("kp_home", "kphome"),
+    ("kp_end", "kpend"),
+    ("kp_up", "kpup"),
+    ("kp_down", "kpdown"),
+    ("kp_left", "kpleft"),
+    ("kp_right", "kpright"),
+    ("kp_prior", "kpprior"),
+    ("kp_page_up", "kppageup"),
+    ("kp_next", "kpnext"),
+    ("kp_page_down", "kppagedown"),
+    ("kp_begin", "kpbegin"),
+    ("kp_insert", "kpinsert"),
+    ("kp_delete", "kpdelete"),
 ];
