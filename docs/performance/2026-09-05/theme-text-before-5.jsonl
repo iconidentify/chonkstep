@@ -1,0 +1,7 @@
+{"workload":"decoration-1600x1000","iterations":100,"ns_per_iteration":1862916,"allocations_per_iteration":38,"allocated_bytes_per_iteration":13259451,"peak_live_growth_bytes":13238963,"checksum":"efec242d0c004a7b"}
+{"workload":"sparse-decoration-1600x1000","iterations":1000,"ns_per_iteration":19777,"allocations_per_iteration":9,"allocated_bytes_per_iteration":347854,"peak_live_growth_bytes":282147,"checksum":"d46411c75eb67f9e"}
+{"workload":"clock-224","iterations":1000,"ns_per_iteration":392681,"allocations_per_iteration":53,"allocated_bytes_per_iteration":413442,"peak_live_growth_bytes":401408,"checksum":"a3d3b4f703256a6c"}
+{"workload":"overview-empty-1920x1080","iterations":50,"ns_per_iteration":1258284,"allocations_per_iteration":309,"allocated_bytes_per_iteration":16793473,"peak_live_growth_bytes":16588800,"checksum":"d0a60824b7b4bab9"}
+{"workload":"panel-label-64","iterations":100,"ns_per_iteration":606709,"allocations_per_iteration":1433,"allocated_bytes_per_iteration":882440,"peak_live_growth_bytes":19760,"checksum":"57fd8a0f0ff9e5a9"}
+{"workload":"panel-label-1024","iterations":5,"ns_per_iteration":124004627,"allocations_per_iteration":128221,"allocated_bytes_per_iteration":232467112,"peak_live_growth_bytes":289461,"checksum":"57fd8a0f0ff9e5a9"}
+{"workload":"panel-label-4096","iterations":1,"ns_per_iteration":1847660242,"allocations_per_iteration":1674709,"allocated_bytes_per_iteration":3693458056,"peak_live_growth_bytes":1153616,"checksum":"57fd8a0f0ff9e5a9"}

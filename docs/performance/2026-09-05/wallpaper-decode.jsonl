@@ -1,0 +1,10 @@
+{"decoder":"tiny-skia-png","iterations":25,"ns_per_decode":20279708,"checksum":"671a459bb892b3ed"}
+{"decoder":"image-png","iterations":25,"ns_per_decode":14445261,"checksum":"671a459bb892b3ed"}
+{"decoder":"image-png","iterations":25,"ns_per_decode":15779249,"checksum":"671a459bb892b3ed"}
+{"decoder":"tiny-skia-png","iterations":25,"ns_per_decode":20060016,"checksum":"671a459bb892b3ed"}
+{"decoder":"tiny-skia-png","iterations":25,"ns_per_decode":20422737,"checksum":"671a459bb892b3ed"}
+{"decoder":"image-png","iterations":25,"ns_per_decode":14421849,"checksum":"671a459bb892b3ed"}
+{"decoder":"image-png","iterations":25,"ns_per_decode":14183909,"checksum":"671a459bb892b3ed"}
+{"decoder":"tiny-skia-png","iterations":25,"ns_per_decode":22433007,"checksum":"671a459bb892b3ed"}
+{"decoder":"tiny-skia-png","iterations":25,"ns_per_decode":20211305,"checksum":"671a459bb892b3ed"}
+{"decoder":"image-png","iterations":25,"ns_per_decode":15160144,"checksum":"671a459bb892b3ed"}

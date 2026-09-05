@@ -1,0 +1,58 @@
+{
+  "date_utc": "2026-09-05T20:43:10Z",
+  "harness_sha256": "81dcb9e1cbfa56a9937afc19ec6bb2c3c314642b84d56788c2651b17cc599223",
+  "uname": {
+    "system": "Linux",
+    "node": "i9beef",
+    "release": "6.18.46-1-lts",
+    "version": "#1 SMP PREEMPT_DYNAMIC Sun, 23 Aug 2026 14:20:15 +0000",
+    "machine": "x86_64",
+    "processor": ""
+  },
+  "cpu": "Architecture:                            x86_64\nCPU op-mode(s):                          32-bit, 64-bit\nAddress sizes:                           39 bits physical, 48 bits virtual\nByte Order:                              Little Endian\nCPU(s):                                  16\nOn-line CPU(s) list:                     0-15\nVendor ID:                               GenuineIntel\nModel name:                              Intel(R) Core(TM) i9-9900K CPU @ 3.60GHz\nCPU family:                              6\nModel:                                   158\nThread(s) per core:                      2\nCore(s) per socket:                      8\nSocket(s):                               1\nStepping:                                13\nMicrocode version:                       0x104\nCPU(s) scaling MHz:                      89%\nCPU max MHz:                             5000.0000\nCPU min MHz:                             800.0000\nBogoMIPS:                                7202.00\nFlags:                                   fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush dts acpi mmx fxsr sse sse2 ss ht tm pbe syscall nx pdpe1gb rdtscp lm constant_tsc art arch_perfmon pebs bts rep_good nopl xtopology nonstop_tsc cpuid aperfmperf pni pclmulqdq dtes64 monitor ds_cpl smx est tm2 ssse3 sdbg fma cx16 xtpr pdcm pcid sse4_1 sse4_2 x2apic movbe popcnt tsc_deadline_timer aes xsave avx f16c rdrand lahf_lm abm 3dnowprefetch cpuid_fault epb ssbd ibrs ibpb stibp ibrs_enhanced fsgsbase tsc_adjust bmi1 avx2 smep bmi2 erms invpcid mpx rdseed adx smap clflushopt intel_pt xsaveopt xsavec xgetbv1 xsaves dtherm ida arat pln pts hwp hwp_notify hwp_act_window hwp_epp md_clear flush_l1d arch_capabilities\nL1d cache:                               256 KiB (8 instances)\nL1i cache:                               256 KiB (8 instances)\nL2 cache:                                2 MiB (8 instances)\nL3 cache:                                16 MiB (1 instance)\nNUMA node(s):                            1\nNUMA node0 CPU(s):                       0-15\nVulnerability Gather data sampling:      Mitigation; Microcode\nVulnerability Ghostwrite:                Not affected\nVulnerability Indirect target selection: Mitigation; Aligned branch/return thunks\nVulnerability Itlb multihit:             KVM: Mitigation: VMX unsupported\nVulnerability L1tf:                      Not affected\nVulnerability Mds:                       Not affected\nVulnerability Meltdown:                  Not affected\nVulnerability Mmio stale data:           Mitigation; Clear CPU buffers; SMT vulnerable\nVulnerability Old microcode:             Not affected\nVulnerability Reg file data sampling:    Not affected\nVulnerability Retbleed:                  Mitigation; Enhanced IBRS\nVulnerability Spec rstack overflow:      Not affected\nVulnerability Spec store bypass:         Mitigation; Speculative Store Bypass disabled via prctl\nVulnerability Spectre v1:                Mitigation; usercopy/swapgs barriers and __user pointer sanitization\nVulnerability Spectre v2:                Mitigation; Enhanced / Automatic IBRS; IBPB conditional; PBRSB-eIBRS SW sequence; BHI SW loop, KVM SW loop\nVulnerability Srbds:                     Mitigation; Microcode\nVulnerability Tsa:                       Not affected\nVulnerability Tsx async abort:           Mitigation; TSX disabled\nVulnerability Vmscape:                   Mitigation; IBPB before exit to userspace",
+  "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)\nbinary: rustc\ncommit-hash: 48a229ceaefd4985c50990b14116b6d856af0985\ncommit-date: 2026-09-01\nhost: x86_64-unknown-linux-gnu\nrelease: 1.98.1\nLLVM version: 22.1.8",
+  "weston": "weston 15.0.1",
+  "backend": "nested-winit-on-headless-weston",
+  "renderer": "llvmpipe",
+  "host_renderer": "pixman",
+  "host_shader_cache": "private per experiment; reused by that experiment's host",
+  "page_cache": "warm/uncontrolled; no system cache dropping",
+  "dock": true,
+  "runs_per_binary": 7,
+  "cpu_affinity": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14,
+    15
+  ],
+  "load_average_at_start": [
+    0.42626953125,
+    0.81298828125,
+    1.82275390625
+  ],
+  "renderer_environment": {},
+  "binary": {
+    "before": {
+      "path": "/tmp/chonk-perf-20260905/binaries/baseline",
+      "version": "chonkstep-wayland 0.3.0\nsource: preview-v0.3.0\nbuild id: de8cc16ef9fb35cbb3e5a604109112113824c3fa",
+      "sha256": "012e5f13ba3cd13d9247730386dacf28762fecce21242c5eb5385cfcb766ffb2"
+    },
+    "after": {
+      "path": "/tmp/chonk-perf-20260905/binaries/combined-7",
+      "version": "chonkstep-wayland 0.3.0\nsource: preview-v0.3.0-6-g848aa39-dirty\nbuild id: f486eda6ec2b8e964799748fb2c748609c59c4a0",
+      "sha256": "52c6354aad10c6270779b34b1ab71d3bc68b033031fb040579a6f6b39285755e"
+    }
+  }
+}
