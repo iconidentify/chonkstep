@@ -111,7 +111,7 @@ impl SamplerRegistry {
         }
     }
 
-    /// Starts a worker per source and hands back the ids to read them
+    /// Registers each source and hands back the ids to read them
     /// by, positionally matching `sources`. Called once per widget, at
     /// the one place widgets enter the dock.
     pub(crate) fn register(&mut self, sources: Vec<Source>) -> Vec<SourceId> {
@@ -909,8 +909,11 @@ mod tests {
         assert!(registry.samples().fresh(id), "the first pass is always news");
         let first = registry.samples().hms(id);
         registry.refresh();
-        assert!(!registry.samples().fresh(id), "a second pass in the same second is not");
-        assert_eq!(registry.samples().hms(id), first, "and the value is retained across it");
+        // Two adjacent calls can straddle a real second boundary (or
+        // the test thread can be descheduled). Freshness follows the
+        // observed value, not an assumption about scheduler timing.
+        let second = registry.samples().hms(id);
+        assert_eq!(registry.samples().fresh(id), second != first);
     }
 
     #[test]

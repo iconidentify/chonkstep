@@ -279,6 +279,8 @@ def main():
     parser.add_argument("--settle-seconds", type=float, default=3)
     parser.add_argument("--dock", action="store_true")
     parser.add_argument("--hardware", action="store_true", help="Use the host's default GPU driver")
+    parser.add_argument("--host-renderer", choices=("pixman", "gl"), default="pixman",
+                        help="Weston's headless renderer; gl permits hardware-nested EGL clients")
     args = parser.parse_args()
     if (args.runs < 1 or not math.isfinite(args.idle_seconds) or args.idle_seconds <= 0
             or not math.isfinite(args.settle_seconds) or args.settle_seconds < 0):
@@ -314,11 +316,14 @@ def main():
     args.output.mkdir(parents=True, exist_ok=False)
     metadata = {
         "date_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "harness_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
         "uname": platform.uname()._asdict(), "cpu": command_output(["lscpu"]),
         "rustc": command_output(["rustc", "-Vv"]),
         "weston": command_output(["weston", "--version"]),
         "backend": "nested-winit-on-headless-weston",
         "renderer": "default-GPU" if args.hardware else "llvmpipe",
+        "host_renderer": args.host_renderer,
+        "host_shader_cache": "private per experiment; reused by that experiment's host",
         "page_cache": "warm/uncontrolled; no system cache dropping",
         "dock": args.dock, "runs_per_binary": args.runs,
         "cpu_affinity": sorted(os.sched_getaffinity(0)),
@@ -335,8 +340,16 @@ def main():
         runtime = Path(temporary)
         host_socket = runtime / "wayland-bench"
         host_env = os.environ | {"XDG_RUNTIME_DIR": str(runtime)}
+        # The host is private too, including its GL shader cache when
+        # --host-renderer=gl is used. Only process-independent kernel
+        # filesystem caches remain uncontrolled.
+        for key, name in (("XDG_CONFIG_HOME", "config"), ("XDG_STATE_HOME", "state"),
+                          ("XDG_CACHE_HOME", "cache"), ("XDG_DATA_HOME", "data")):
+            directory = runtime / name
+            directory.mkdir(mode=0o700)
+            host_env[key] = str(directory)
         with child(["weston", "--backend=headless-backend.so", "--socket=wayland-bench",
-                    "--idle-time=0", "--width=2560", "--height=1600", "--renderer=pixman",
+                    "--idle-time=0", "--width=2560", "--height=1600", f"--renderer={args.host_renderer}",
                     "--no-config"], host_env, args.output / "weston.log") as host:
             wait_for_socket(runtime, host)
             for run in range(args.runs):
