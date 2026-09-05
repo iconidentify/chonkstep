@@ -137,6 +137,15 @@
 # forces it on, anything else forces it off).
 #focus_follows_mouse = false
 
+# Whether taking focus also brings the window to the front. This is a
+# separate axis from the focus policy above, not a third focus mode: a
+# click always raises what it lands on, so with click-to-focus this
+# changes nothing. It is focus-follows-mouse that needs it — with the
+# default `true`, the pointer raises every window it merely crosses on
+# its way somewhere else, burying whatever it started from. Set it to
+# false for sloppy focus that leaves the stack alone.
+#autoraise = true
+
 # UI scale factor for HiDPI displays: multiplies every pixel dimension
 # in the window chrome, dock, cursors, and terminal font as one system.
 # The CHONKSTEP_SCALE environment variable, when set to a valid value,

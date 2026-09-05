@@ -254,7 +254,9 @@ transfer; whole-desktop interaction policy does not. In particular,
 Hyprland's `follow_mouse` is logged and ignored—even when it is `1` in
 Omarchy's shipped defaults—so a stock Omarchy install retains
 chonkstep's click-to-focus default. Set `focus_follows_mouse = true` in
-chonkstep's own `config.toml` to opt in. Environment `XKB_DEFAULT_*`
+chonkstep's own `config.toml` to opt in. Focus-follows-mouse pairs with
+`autoraise = false`, which stops a window from being brought to the
+front merely because the pointer crossed it; a click still raises. Environment `XKB_DEFAULT_*`
 values remain more specific and win. If libxkbcommon rejects a
 configured map, the error is logged and the session falls back to the
 default usable keymap instead of aborting the login.

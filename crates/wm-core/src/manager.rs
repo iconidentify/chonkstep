@@ -274,6 +274,20 @@ pub struct WindowManager<B: Backend> {
     float_policy: Option<std::sync::Arc<dyn FloatPolicy>>,
     notifications: VecDeque<Notification>,
     focus_policy: FocusPolicy,
+    /// Whether taking focus also takes the top of the stack.
+    ///
+    /// Orthogonal to [`Self::focus_policy`] on purpose. Focus and
+    /// stacking are two things on a floating desktop, and the pair a
+    /// user wants is not a third focus mode: under click-to-focus the
+    /// raise belongs to the *click* and must survive whatever this
+    /// says, while under focus-follows-mouse an unconditional raise
+    /// reorders every window the pointer merely travels across on its
+    /// way somewhere else. Installed by the shell through
+    /// [`Self::set_raise_on_focus`], from the config's `autoraise`.
+    ///
+    /// `true` by default, so a session that sets nothing behaves
+    /// exactly as it did before this existed.
+    raise_on_focus: bool,
     /// 0-based, matching `Client::workspace`. Grows on demand up to
     /// [`MAX_WORKSPACES`] the first time something switches to or moves
     /// a client onto an index past the current row's end. There is no
@@ -359,6 +373,7 @@ impl<B: Backend> WindowManager<B> {
             float_policy: None,
             notifications: VecDeque::new(),
             focus_policy: FocusPolicy::default(),
+            raise_on_focus: true,
             current_workspace: 0,
             workspace_count: 1,
             cycle: None,
@@ -375,6 +390,17 @@ impl<B: Backend> WindowManager<B> {
     /// path needing to know the other exists.
     pub fn set_focus_policy(&mut self, policy: FocusPolicy) {
         self.focus_policy = policy;
+    }
+
+    /// Whether a window that *takes* focus is also brought to the front
+    /// — the config's `autoraise`, and the axis that makes sloppy focus
+    /// usable on an overlapping desktop.
+    ///
+    /// Only the focus a pointer crossing hands out is governed by this.
+    /// A click still raises what it lands on, because that raise is the
+    /// click's, not the focus's; see [`Self::focus_client_with`].
+    pub fn set_raise_on_focus(&mut self, raise: bool) {
+        self.raise_on_focus = raise;
     }
 
     /// Selects the initial-placement policy for windows that request no
@@ -835,6 +861,21 @@ impl<B: Backend> WindowManager<B> {
             return false;
         }
         self.raise_client(id);
+        true
+    }
+
+    /// The other half of [`Self::raise_client_to_top`]: give a window
+    /// the keyboard and leave the stack exactly as it is.
+    ///
+    /// What a stacking desktop needs to type into a half-visible window
+    /// without covering the reference material in front of it. Unlike
+    /// the pointer-crossing path this ignores `autoraise` — a caller
+    /// asking for this by name has already decided.
+    pub fn focus_client_without_raising(&mut self, id: ClientId) -> bool {
+        if !self.clients.contains_key(id) {
+            return false;
+        }
+        self.focus_client_with(id, false);
         true
     }
 
@@ -1770,7 +1811,10 @@ impl<B: Backend> WindowManager<B> {
             SurfaceRef::Client(window) => self.window_index.get(&window).copied(),
         };
         if let Some(id) = id {
-            self.focus_client(id);
+            // The one focus in the crate that is not a click. `autoraise`
+            // exists for exactly this call: crossing a window on the way
+            // to somewhere else should not bury what the pointer left.
+            self.focus_client_with(id, self.raise_on_focus);
         }
     }
 
@@ -2947,7 +2991,20 @@ impl<B: Backend> WindowManager<B> {
         tracing::debug!(?id, "drag broke the maximized state");
     }
 
+    /// Focus `id` and bring it to the front — what a click means, and
+    /// what every caller that is not a bare pointer crossing wants.
     fn focus_client(&mut self, id: ClientId) {
+        self.focus_client_with(id, true);
+    }
+
+    /// Focus `id`, raising it only if `raise`.
+    ///
+    /// The raise used to be welded in here, which made "focus this
+    /// window" and "put this window on top" the same verb and left
+    /// focus-follows-mouse restacking the desktop as the pointer merely
+    /// crossed it. Splitting them costs one parameter and leaves every
+    /// existing caller bit-identical through [`Self::focus_client`].
+    fn focus_client_with(&mut self, id: ClientId, raise: bool) {
         if self.clients.get(id).is_some_and(|client| client.flags.contains(ClientFlags::NO_FOCUS)) {
             tracing::debug!(?id, "window rule refused focus");
             return;
@@ -2964,7 +3021,9 @@ impl<B: Backend> WindowManager<B> {
             // free whenever they already agree.
             if let Some(window) = self.clients.get(id).map(|client| client.window) {
                 self.backend.set_input_focus(window);
-                self.raise_client(id);
+                if raise {
+                    self.raise_client(id);
+                }
             }
             return;
         }
@@ -3003,7 +3062,9 @@ impl<B: Backend> WindowManager<B> {
         self.backend.ungrab_button_passive(window, MouseButton::Left);
         self.backend.set_input_focus(window);
         self.backend.publish_active_window(Some(window));
-        self.raise_client(id);
+        if raise {
+            self.raise_client(id);
+        }
         self.repaint_decoration(id);
     }
 
@@ -4124,6 +4185,127 @@ mod tests {
 
         assert!(wm.client(id1).unwrap().flags.contains(ClientFlags::FOCUSED));
         assert!(!wm.client(id2).unwrap().flags.contains(ClientFlags::FOCUSED));
+    }
+
+    /// The incident, in three windows: a palette on top of an editor,
+    /// and a pointer travelling past the editor on its way elsewhere.
+    /// With `autoraise` off the crossing must move the keyboard and
+    /// nothing else — the stack the user arranged stays arranged.
+    #[test]
+    fn sloppy_focus_without_autoraise_moves_focus_without_restacking() {
+        let mut backend = FakeBackend::new();
+        let editor = backend.create_window();
+        let palette = backend.create_window();
+        let mut wm = wm(backend);
+        wm.set_focus_policy(FocusPolicy::FocusFollowsMouse);
+        wm.set_raise_on_focus(false);
+        wm.dispatch(BackendEvent::MapRequest(editor));
+        wm.dispatch(BackendEvent::MapRequest(palette));
+        let editor_id = wm.client_for_window(editor).unwrap();
+        let editor_frame = wm.client(editor_id).unwrap().frame.unwrap();
+        let palette_id = wm.client_for_window(palette).unwrap();
+        let palette_frame = wm.client(palette_id).unwrap().frame.unwrap();
+        wm.backend_mut().raised_frames.clear();
+
+        wm.dispatch(BackendEvent::PointerEnter { surface: SurfaceRef::Frame(editor_frame) });
+
+        assert!(
+            wm.client(editor_id).unwrap().flags.contains(ClientFlags::FOCUSED),
+            "the crossing must still hand over the keyboard"
+        );
+        assert!(
+            wm.backend().raised_frames.is_empty(),
+            "no window may be restacked by a pointer merely crossing it: {:?}",
+            wm.backend().raised_frames
+        );
+        // And the palette is still the front window, which is the whole
+        // point: it is what the user would otherwise have to fish out.
+        assert_ne!(editor_frame, palette_frame);
+    }
+
+    /// The default is unchanged, so a session that sets nothing behaves
+    /// exactly as every release before this one did.
+    #[test]
+    fn sloppy_focus_raises_on_crossing_by_default() {
+        let mut backend = FakeBackend::new();
+        let editor = backend.create_window();
+        let palette = backend.create_window();
+        let mut wm = wm(backend);
+        wm.set_focus_policy(FocusPolicy::FocusFollowsMouse);
+        wm.dispatch(BackendEvent::MapRequest(editor));
+        wm.dispatch(BackendEvent::MapRequest(palette));
+        let editor_id = wm.client_for_window(editor).unwrap();
+        let editor_frame = wm.client(editor_id).unwrap().frame.unwrap();
+        wm.backend_mut().raised_frames.clear();
+
+        wm.dispatch(BackendEvent::PointerEnter { surface: SurfaceRef::Frame(editor_frame) });
+
+        assert_eq!(
+            wm.backend().raised_frames,
+            vec![editor_frame],
+            "autoraise defaults to on, and on means the crossing raises"
+        );
+    }
+
+    /// The raise belongs to the click, not to the focus. `autoraise`
+    /// governs pointer crossings only, and must not disarm a click.
+    #[test]
+    fn a_click_still_raises_with_autoraise_off() {
+        let mut backend = FakeBackend::new();
+        let editor = backend.create_window();
+        let palette = backend.create_window();
+        let mut wm = wm(backend);
+        wm.set_focus_policy(FocusPolicy::FocusFollowsMouse);
+        wm.set_raise_on_focus(false);
+        wm.dispatch(BackendEvent::MapRequest(editor));
+        wm.dispatch(BackendEvent::MapRequest(palette));
+        let editor_id = wm.client_for_window(editor).unwrap();
+        let editor_frame = wm.client(editor_id).unwrap().frame.unwrap();
+        wm.backend_mut().raised_frames.clear();
+
+        wm.dispatch(BackendEvent::PointerButton {
+            surface: SurfaceRef::Client(editor),
+            local: Point::new(20, 20),
+            button: MouseButton::Left,
+            pressed: true,
+            time_ms: 100,
+            mods: Modifiers::empty(),
+        });
+
+        assert_eq!(
+            wm.backend().raised_frames,
+            vec![editor_frame],
+            "a click raises what it lands on whatever autoraise says"
+        );
+    }
+
+    /// The counterpart to `raise_client_to_top`, which had no opposite
+    /// number before: keyboard without stack.
+    #[test]
+    fn focus_client_without_raising_is_focus_without_stack() {
+        let mut backend = FakeBackend::new();
+        let editor = backend.create_window();
+        let palette = backend.create_window();
+        let mut wm = wm(backend);
+        wm.dispatch(BackendEvent::MapRequest(editor));
+        wm.dispatch(BackendEvent::MapRequest(palette));
+        let editor_id = wm.client_for_window(editor).unwrap();
+        let palette_id = wm.client_for_window(palette).unwrap();
+        wm.backend_mut().raised_frames.clear();
+
+        assert!(wm.focus_client_without_raising(editor_id));
+
+        assert!(wm.client(editor_id).unwrap().flags.contains(ClientFlags::FOCUSED));
+        assert!(!wm.client(palette_id).unwrap().flags.contains(ClientFlags::FOCUSED));
+        assert!(
+            wm.backend().raised_frames.is_empty(),
+            "asking for focus by name must not move the stack: {:?}",
+            wm.backend().raised_frames
+        );
+        // A dead id is refused rather than panicking, exactly as
+        // `raise_client_to_top` refuses one.
+        wm.dispatch(BackendEvent::Destroyed(palette));
+        assert!(!wm.focus_client_without_raising(palette_id));
     }
 
     #[test]

@@ -106,6 +106,9 @@ pub struct SessionState {
     /// [`resolve_scale`]).
     pub scale: f32,
     pub focus: FocusPolicy,
+    /// Whether focus also raises. Only the focus a pointer crossing
+    /// hands out consults this; a click raises regardless.
+    pub autoraise: bool,
     pub placement: PlacementPolicy,
     pub edge_resistance: u32,
     pub terminal_font_px: f32,
@@ -243,6 +246,7 @@ impl SessionState {
             } else {
                 FocusPolicy::ClickToFocus
             },
+            autoraise: config.autoraise,
             placement: config.placement,
             edge_resistance: config.edge_resistance,
             terminal_font_px: config.terminal_font_px,
@@ -896,6 +900,7 @@ mod tests {
             following: None,
             scale: 2.0,
             focus: FocusPolicy::ClickToFocus,
+            autoraise: true,
             placement: PlacementPolicy::Smart,
             edge_resistance: 10,
             terminal_font_px: 20.0,
