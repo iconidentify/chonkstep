@@ -7,7 +7,6 @@
 //! describing three different rectangles. A raw x11rb client makes every
 //! side observable without depending on a toolkit's own scaling policy.
 
-use std::path::Path;
 use std::time::Duration;
 
 use chonk_testkit::{poll_until, Session, SessionOptions, WindowInfo};
@@ -676,71 +675,6 @@ fn mapped_ids(session: &mut Session) -> Vec<u64> {
         .unwrap_or_default()
 }
 
-/// The Hyprland IPC request socket for a nested session, and one
-/// request against it. Small local copies of `hyprland_ipc.rs`'s
-/// helpers: this file needs exactly two calls, and the harness does not
-/// export them.
-fn ipc_socket_dir(session: &Session) -> std::path::PathBuf {
-    let signature = poll_until(EVENT, "the hyprland ipc log line", || {
-        let log = session.log();
-        let at = log.find("hyprland ipc listening")?;
-        let rest = &log[at..];
-        let start = rest.find('"')? + 1;
-        let end = rest[start..].find('"')? + start;
-        Some(rest[start..end].to_string())
-    })
-    .expect("the compositor logs the signature it bound");
-    let runtime = std::env::var("XDG_RUNTIME_DIR").expect("XDG_RUNTIME_DIR");
-    std::path::PathBuf::from(runtime).join("hypr").join(signature)
-}
-
-/// The Hyprland event socket. A bar listens to exactly this, and
-/// `urgent` is the user-visible signal an attention request produces.
-///
-/// Held open across the whole test rather than reconnected per wait:
-/// the stream carries no history, so a listener that connects after the
-/// trigger has already missed it.
-struct IpcEvents(std::io::BufReader<std::os::unix::net::UnixStream>);
-
-impl IpcEvents {
-    fn connect(dir: &Path) -> IpcEvents {
-        let stream = std::os::unix::net::UnixStream::connect(dir.join(".socket2.sock"))
-            .expect("event socket");
-        stream.set_read_timeout(Some(EVENT)).expect("read timeout");
-        IpcEvents(std::io::BufReader::new(stream))
-    }
-
-    fn wait_for(&mut self, name: &str) -> String {
-        use std::io::BufRead as _;
-        let deadline = std::time::Instant::now() + EVENT;
-        let prefix = format!("{name}>>");
-        let mut seen = Vec::new();
-        while std::time::Instant::now() < deadline {
-            let mut line = String::new();
-            if self.0.read_line(&mut line).unwrap_or(0) == 0 {
-                break;
-            }
-            let line = line.trim_end().to_string();
-            if let Some(data) = line.strip_prefix(&prefix) {
-                return data.to_string();
-            }
-            seen.push(line);
-        }
-        panic!("never saw {name}; events seen: {seen:#?}");
-    }
-}
-
-fn ipc_request(dir: &Path, payload: &str) -> String {
-    use std::io::{Read as _, Write as _};
-    let mut stream = std::os::unix::net::UnixStream::connect(dir.join(".socket.sock"))
-        .unwrap_or_else(|e| panic!("connecting to the request socket: {e}"));
-    stream.set_read_timeout(Some(EVENT)).expect("read timeout");
-    stream.write_all(payload.as_bytes()).expect("write the request");
-    stream.flush().expect("flush");
-    let mut response = String::new();
-    stream.read_to_string(&mut response).expect("read the response");
-    response
-}
 
 /// `WM_HINTS` with only the urgency bit set. Flags is element 0; the
 /// urgency bit is `1 << 8`.
@@ -818,27 +752,24 @@ fn wm_hints_urgency_is_read_at_map_and_cleared_by_focus() {
     // in the background when it rings.
     let _calm = map_probe_window(&mut session, &conn, screen_num, "ewmh-calm", Some(&WM_HINTS_CALM));
 
-    // Observed on the Hyprland event socket, because that is where an
-    // attention request becomes visible to a bar: the differ emits
-    // `urgent>>` on the false→true edge of exactly the flag
-    // `xdg_system_bell` sets for a native client.
-    let dir = ipc_socket_dir(&session);
-    let address_of = |dir: &Path, class: &str| -> String {
-        let clients: serde_json::Value =
-            serde_json::from_str(&ipc_request(dir, "j/clients")).expect("clients is JSON");
-        clients
-            .as_array()
-            .expect("clients is an array")
-            .iter()
-            .find(|client| client["class"].as_str().is_some_and(|c| c.contains(class)))
-            .and_then(|client| client["address"].as_str())
-            .unwrap_or_else(|| panic!("no client with class {class}"))
-            .to_string()
-    };
-    // `j/clients` prints `0x`-prefixed; the event stream does not.
-    let noisy_address =
-        address_of(&dir, "ewmh-noisy").trim_start_matches("0x").to_string();
-    let mut events = IpcEvents::connect(&dir);
+    // Observed through the compositor's own log rather than the IPC
+    // event stream. The stream is edge-triggered and carries no
+    // history, so a listener that connects a moment late has already
+    // missed the transition and waits ten seconds for a second one that
+    // never comes — which is exactly how this test flaked in CI
+    // (`never saw urgent; events seen: []`). The log is level-triggered:
+    // the transition is still there whenever the assertion gets around
+    // to reading it. It also records the *dismissal*, which the event
+    // stream cannot express at all, since `urgent` is emitted on the
+    // false→true edge alone.
+    fn urgency_transitions(session: &Session, urgent: bool) -> usize {
+        let wanted = format!("urgent={urgent}");
+        session
+            .log()
+            .lines()
+            .filter(|line| line.contains("window urgency changed") && line.contains(&wanted))
+            .count()
+    }
 
     // The bell: the client raises the ICCCM urgency bit on a window the
     // user is not looking at. Smithay parses `WM_HINTS` and reports the
@@ -853,11 +784,10 @@ fn wm_hints_urgency_is_read_at_map_and_cleared_by_focus() {
     .unwrap();
     conn.flush().unwrap();
 
-    assert_eq!(
-        events.wait_for("urgent"),
-        noisy_address,
-        "a WM_HINTS urgency bit must raise the same flag xdg_system_bell does"
-    );
+    poll_until(EVENT, "the urgency bit to reach the compositor", || {
+        (urgency_transitions(&session, true) >= 1).then_some(())
+    })
+    .expect("a WM_HINTS urgency bit must raise the same flag xdg_system_bell does");
 
     // And it must be dismissible. Nothing in the tree cleared this
     // before, so a window that rang once stayed urgent forever.
@@ -876,16 +806,12 @@ fn wm_hints_urgency_is_read_at_map_and_cleared_by_focus() {
     // differ compares successive snapshots, so the dismissal and the
     // re-ring have to fall in different passes or there is no edge
     // between them to see.
-    assert_eq!(
-        events.wait_for("activewindowv2"),
-        noisy_address,
-        "the activate must focus the window that rang"
-    );
-    // And settle a pass before ringing again. The differ compares
-    // successive snapshots, so under load the dismissal and the re-ring
-    // can otherwise land in the same one, leaving no false→true edge
-    // for the second `urgent` to be emitted from.
-    session.door().barrier().expect("the dismissal reaches a snapshot of its own");
+    // The dismissal itself — the piece this change adds, and the one
+    // the event stream could never show.
+    poll_until(EVENT, "focus to dismiss the urgency", || {
+        (urgency_transitions(&session, false) >= 1).then_some(())
+    })
+    .expect("focusing an urgent window must clear the flag");
 
     // And the dismissal, observed the same way: the flag has to be
     // *clearable*, so ringing again after the focus must produce a
@@ -909,11 +835,10 @@ fn wm_hints_urgency_is_read_at_map_and_cleared_by_focus() {
     )
     .unwrap();
     conn.flush().unwrap();
-    assert_eq!(
-        events.wait_for("urgent"),
-        noisy_address,
-        "urgency must be clearable, or a window that rings once can never ring again"
-    );
+    poll_until(EVENT, "the second ring to raise the flag again", || {
+        (urgency_transitions(&session, true) >= 2).then_some(())
+    })
+    .expect("urgency must be clearable, or a window that rings once can never ring again");
 }
 
 /// `XRaiseWindow` — what Java AWT's `Window.toFront`, Tk's `raise` and
