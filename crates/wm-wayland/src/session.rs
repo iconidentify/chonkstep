@@ -952,12 +952,11 @@ pub(crate) fn init(
     // revokes it, then rebuild our idea of the crtc when it comes back.
     loop_handle
         .insert_source(notifier, |event, &mut (), comp: &mut Compositor| {
-            let Compositor { graphics, wm, seat, gamma, .. } = comp;
-            let Graphics::Session(session) = graphics else {
-                return;
-            };
             match event {
                 SessionEvent::PauseSession => {
+                    let Graphics::Session(session) = &mut comp.graphics else {
+                        return;
+                    };
                     tracing::info!("session paused: releasing the DRM device and input");
                     session.libinput.suspend();
                     session.drm.pause();
@@ -980,11 +979,16 @@ pub(crate) fn init(
                 }
                 SessionEvent::ActivateSession => {
                     tracing::info!("session resumed: reclaiming the DRM device and input");
-                    // Any button held when the seat was taken away
-                    // released into whichever session owned it, so the
-                    // grab those presses built can never be completed
-                    // here.
-                    crate::input::clear_implicit_grab(seat);
+                    // Any button or key held when the seat was taken
+                    // away may have released into the other session.
+                    // Reconcile routing, xkb modifiers, client-visible
+                    // presses, binding repeat and the Alt-Tab modal grab
+                    // before accepting fresh libinput events.
+                    crate::input::resynchronise_input_after_resume(comp);
+                    let Compositor { graphics, wm, gamma, .. } = comp;
+                    let Graphics::Session(session) = graphics else {
+                        return;
+                    };
                     // libinput reports failure as a bare `()`; there is
                     // nothing to log but the fact.
                     if session.libinput.resume().is_err() {
