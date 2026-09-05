@@ -128,6 +128,9 @@ package() {
   # with no saved profile, so it has to be on PATH or that row silently
   # does nothing. See docs/link-panel.md.
   install -Dm755 target/release/chonk-netjoin "$pkgdir/usr/bin/chonk-netjoin"
+  # The SDK showcase launched by both desktop About menu entries. It
+  # must be a sibling of the installed compositor or available on PATH.
+  install -Dm755 target/release/chonk-about "$pkgdir/usr/bin/chonk-about"
   # The Omarchy bridge: writes chonkstep's built-in themes out as
   # Omarchy themes, so `omarchy-theme-set` can dress the rest of the
   # machine to match (see README, "Installing on Omarchy").

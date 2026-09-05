@@ -68,12 +68,16 @@ bsdtar -xf "$package" -C "$stage"
 
 "$stage/usr/lib/chonkstep/verify-install.sh" --root "$stage"
 
-for binary in \
-    chonkstep \
-    chonkstep-wayland \
-    chonk-netjoin \
+# Keep every packaged ELF in one list so presence, architecture,
+# dependencies, unwindability, and split debug symbols cannot drift apart.
+release_binaries=(
+    chonkstep
+    chonkstep-wayland
+    chonk-about
+    chonk-netjoin
     omarchy-export-themes
-do
+)
+for binary in "${release_binaries[@]}"; do
     path="$stage/usr/bin/$binary"
     [ -x "$path" ] || { echo "missing executable: $path" >&2; exit 1; }
     case "$expected_arch" in
@@ -150,7 +154,7 @@ if [ -z "$debug_package" ]; then
     echo "  check that the PKGBUILD still sets options=(strip debug)" >&2
     exit 1
 fi
-for binary in chonkstep chonkstep-wayland; do
+for binary in "${release_binaries[@]}"; do
     bsdtar -tf "$debug_package" | grep -q "usr/lib/debug/usr/bin/$binary" || {
         echo "the debug package carries no symbols for $binary" >&2
         exit 1
