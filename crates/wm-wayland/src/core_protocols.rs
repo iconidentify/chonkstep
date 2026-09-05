@@ -299,7 +299,25 @@ impl InputMethodHandler for Compositor {
     }
 }
 
-impl smithay::wayland::shell::xdg::dialog::XdgDialogHandler for Compositor {}
+impl smithay::wayland::shell::xdg::dialog::XdgDialogHandler for Compositor {
+    fn modal_changed(
+        &mut self,
+        toplevel: smithay::wayland::shell::xdg::ToplevelSurface,
+        is_modal: bool,
+    ) {
+        let backend = self.wm.backend_mut();
+        let Some(window) = backend.window_for_surface(toplevel.wl_surface()) else {
+            return;
+        };
+        if let Some(record) = backend.windows.get_mut(&window) {
+            record.modal = is_modal;
+        }
+        backend.queue(BackendEvent::ModalChanged {
+            window,
+            modal: is_modal,
+        });
+    }
+}
 
 impl smithay::wayland::xdg_toplevel_tag::XdgToplevelTagHandler for Compositor {}
 

@@ -643,6 +643,15 @@ mod tests {
             buffer.pixels.as_chunks::<4>().0.iter().any(|px| px.as_slice() != first),
             "decoration should not be a single flat color"
         );
+        assert!(
+            buffer
+                .pixels
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .all(|pixel| pixel[3] == 255),
+            "server decorations are an opaque plane and may be submitted as one"
+        );
     }
 
     /// Regression test: the resize-corner grip marks (the visual half

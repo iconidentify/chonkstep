@@ -14,8 +14,8 @@ use crate::placement::{self, FloatPolicy, PlacementPolicy};
 use crate::resize;
 use crate::snap;
 use crate::types::{
-    BackendEvent, ClientChrome, DragHandle, KeyCombo, Modifiers, MouseButton, NetState, NetStateAction, SurfaceRef,
-    WindowType,
+    BackendEvent, ClientChrome, DragHandle, KeyCombo, Modifiers, MouseButton, NetState, NetStateAction,
+    NetStateSnapshot, SurfaceRef, WindowType,
 };
 
 /// How close together (in ms) two presses on the same titlebar must land
@@ -1170,6 +1170,12 @@ impl<B: Backend> WindowManager<B> {
     /// next/previous workspace" window actions. A no-op if `id` is
     /// already on `workspace` or if the index is out of range.
     pub fn move_client_to_workspace(&mut self, id: ClientId, workspace: usize) {
+        for member in self.transient_family(id) {
+            self.move_one_client_to_workspace(member, workspace);
+        }
+    }
+
+    fn move_one_client_to_workspace(&mut self, id: ClientId, workspace: usize) {
         if workspace >= MAX_WORKSPACES {
             return;
         }
@@ -1344,6 +1350,10 @@ impl<B: Backend> WindowManager<B> {
             }
             BackendEvent::TitleChanged(window) => self.handle_title_changed(window),
             BackendEvent::ChromeChanged(window) => self.handle_chrome_changed(window),
+            BackendEvent::ParentChanged(window) => self.handle_parent_changed(window),
+            BackendEvent::ModalChanged { window, modal } => {
+                self.handle_modal_changed(window, modal)
+            }
             BackendEvent::MoveRequest(window) => self.handle_move_request(window),
             BackendEvent::DragEnded => self.end_active_drag(),
             BackendEvent::ResizeRequest { window, edge } => self.handle_resize_request(window, edge),
@@ -1443,7 +1453,17 @@ impl<B: Backend> WindowManager<B> {
         client.class = self.backend.window_class(window).map(|c| c.class).unwrap_or_default();
         client.geometry = content;
         Self::clamp_geometry(&mut client, self.backend.screen_size());
-        client.workspace = self.current_workspace;
+        client.parent = self
+            .backend
+            .window_parent(window)
+            .and_then(|parent| self.window_index.get(&parent).copied());
+        client.workspace = client
+            .parent
+            .and_then(|parent| self.clients.get(parent).map(|parent| parent.workspace))
+            .unwrap_or(self.current_workspace);
+        client
+            .flags
+            .set(ClientFlags::MODAL, self.backend.window_is_modal(window));
 
         let window_rule = self
             .float_policy
@@ -1523,7 +1543,24 @@ impl<B: Backend> WindowManager<B> {
         // position the client asked for: the whole rule is "this window
         // appears in the middle at this size", and honoring a
         // placeholder origin would put half of it under the dock.
-        let frame_pos = if floated.is_none() && content.pos != Point::new(0, 0) {
+        let transient_pos = client.parent.and_then(|parent| {
+            let parent = self.clients.get(parent)?;
+            (parent.lifecycle == Lifecycle::Normal).then(|| {
+                let parent_frame = client_frame_rect(parent);
+                let center = Point::new(
+                    parent_frame.pos.x + parent_frame.size.w as i32 / 2,
+                    parent_frame.pos.y + parent_frame.size.h as i32 / 2,
+                );
+                let desired = Point::new(
+                    center.x - layout.frame_size.w as i32 / 2,
+                    center.y - layout.frame_size.h as i32 / 2,
+                );
+                placement::clamp_to(self.usable_area_at(center), layout.frame_size, desired)
+            })
+        });
+        let frame_pos = if let Some(pos) = transient_pos {
+            pos
+        } else if floated.is_none() && content.pos != Point::new(0, 0) {
             content.pos
         } else {
             let workarea = self.placement_area();
@@ -1725,6 +1762,11 @@ impl<B: Backend> WindowManager<B> {
                 self.backend.destroy_decoration(frame);
             }
         }
+        for (_, child) in &mut self.clients {
+            if child.parent == Some(id) {
+                child.parent = None;
+            }
+        }
         self.managed_order.retain(|&other| other != window);
         self.backend.publish_client_list(&self.managed_order);
         // After `clients.remove`, so the dying window can never be
@@ -1774,6 +1816,80 @@ impl<B: Backend> WindowManager<B> {
         client.title = title;
         self.bump_protocol_state_revision();
         self.repaint_decoration(id);
+    }
+
+    /// Refreshes the transient edge after a client reparents itself.
+    /// Late parenting is common (LibreOffice does it after map), so the
+    /// relationship cannot be a map-time-only hint.
+    fn handle_parent_changed(&mut self, window: B::WindowId) {
+        let Some(&id) = self.window_index.get(&window) else {
+            return;
+        };
+        let parent = self
+            .backend
+            .window_parent(window)
+            .and_then(|parent| self.window_index.get(&parent).copied())
+            .filter(|parent| *parent != id);
+        if self
+            .clients
+            .get(id)
+            .is_some_and(|client| client.parent == parent)
+        {
+            return;
+        }
+        if let Some(client) = self.clients.get_mut(id) {
+            client.parent = parent;
+        }
+        let Some(parent) = parent else {
+            return;
+        };
+        let Some(parent_client) = self.clients.get(parent) else {
+            return;
+        };
+        let workspace = parent_client.workspace;
+        let parent_frame = client_frame_rect(parent_client);
+        let center = Point::new(
+            parent_frame.pos.x + parent_frame.size.w as i32 / 2,
+            parent_frame.pos.y + parent_frame.size.h as i32 / 2,
+        );
+        self.move_client_to_workspace(id, workspace);
+        if let Some(child) = self.clients.get(id) {
+            let desired = Point::new(
+                center.x - child.layout.frame_size.w as i32 / 2,
+                center.y - child.layout.frame_size.h as i32 / 2,
+            );
+            let frame_pos = placement::clamp_to(
+                self.usable_area_at(center),
+                child.layout.frame_size,
+                desired,
+            );
+            if let Some(child) = self.clients.get_mut(id) {
+                child.geometry.pos = Point::new(
+                    frame_pos.x + child.layout.client_offset.x,
+                    frame_pos.y + child.layout.client_offset.y,
+                );
+            }
+            self.reflow_frame(id);
+        }
+        self.raise_client(parent);
+    }
+
+    fn handle_modal_changed(&mut self, window: B::WindowId, modal: bool) {
+        let Some(&id) = self.window_index.get(&window) else {
+            return;
+        };
+        let Some(client) = self.clients.get_mut(id) else {
+            return;
+        };
+        if client.flags.contains(ClientFlags::MODAL) == modal {
+            return;
+        }
+        client.flags.set(ClientFlags::MODAL, modal);
+        self.bump_protocol_state_revision();
+        self.publish_client_net_state(id);
+        if modal {
+            self.focus_client(id);
+        }
     }
 
     fn handle_configure_request(&mut self, window: B::WindowId, requested: Rect) {
@@ -1898,6 +2014,14 @@ impl<B: Backend> WindowManager<B> {
         if !pressed {
             return;
         }
+        let Some(&id) = self.window_index.get(&window) else {
+            self.backend.replay_pointer();
+            return;
+        };
+        if let Some(modal) = self.modal_blocker(id) {
+            self.focus_client(modal);
+            return;
+        }
         // The modifier-drag: a move or a resize begun over a window's
         // own content, reaching windows a titlebar cannot.
         //
@@ -1908,16 +2032,12 @@ impl<B: Backend> WindowManager<B> {
         // move or a resize that exists, and the reason this desktop can
         // honor a client's request to decorate itself without risking a
         // window nobody can shift off the corner it opened in.
-        if let Some(&id) = self.window_index.get(&window) {
-            if self.is_drag_gesture(mods) && matches!(button, MouseButton::Left | MouseButton::Right) {
-                self.focus_client(id);
-                self.begin_modifier_drag(id, local, button);
-                return;
-            }
-        }
-        if let Some(&id) = self.window_index.get(&window) {
+        if self.is_drag_gesture(mods) && matches!(button, MouseButton::Left | MouseButton::Right) {
             self.focus_client(id);
+            self.begin_modifier_drag(id, local, button);
+            return;
         }
+        self.focus_client(id);
         // A click on a client's own content only ever reaches this
         // handler at all via the passive grab `focus_client` maintains
         // on unfocused clients (an already-focused client isn't
@@ -1944,6 +2064,12 @@ impl<B: Backend> WindowManager<B> {
 
         if !pressed {
             self.handle_frame_button_release(id, local, button);
+            return;
+        }
+
+        if let Some(modal) = self.modal_blocker(id) {
+            self.active_button_press = None;
+            self.focus_client(modal);
             return;
         }
 
@@ -2061,9 +2187,7 @@ impl<B: Backend> WindowManager<B> {
         if still_over {
             match active.kind {
                 ButtonKind::Close => {
-                    if let Some(client) = self.clients.get(id) {
-                        self.backend.send_close(client.window);
-                    }
+                    self.close_client(id);
                 }
                 ButtonKind::Miniaturize => self.miniaturize(id),
                 ButtonKind::Maximize => self.toggle_maximize(id, MaximizeDirections::FULL),
@@ -2707,6 +2831,12 @@ impl<B: Backend> WindowManager<B> {
     /// once unmapped, there's nothing left to capture (see
     /// `Backend::capture_window_image`).
     pub fn miniaturize(&mut self, id: ClientId) {
+        for member in self.transient_family(id) {
+            self.miniaturize_one(member);
+        }
+    }
+
+    fn miniaturize_one(&mut self, id: ClientId) {
         let Some(client) = self.clients.get(id) else {
             return;
         };
@@ -2733,6 +2863,12 @@ impl<B: Backend> WindowManager<B> {
     }
 
     pub fn deminiaturize(&mut self, id: ClientId) {
+        for member in self.transient_family(id) {
+            self.deminiaturize_one(member);
+        }
+    }
+
+    fn deminiaturize_one(&mut self, id: ClientId) {
         let Some(client) = self.clients.get_mut(id) else {
             return;
         };
@@ -2755,7 +2891,7 @@ impl<B: Backend> WindowManager<B> {
         // below doesn't matter; it's pure assignment plus the
         // `_NET_WM_DESKTOP` republish pagers need.)
         let current = self.current_workspace;
-        self.move_client_to_workspace(id, current);
+        self.move_one_client_to_workspace(id, current);
         self.show_client_surface(id);
         // Same nudge unshade needs (see there): the client's own pixels
         // weren't retained while unmapped either.
@@ -2805,7 +2941,8 @@ impl<B: Backend> WindowManager<B> {
     /// disagree with the other two entry points about how a window
     /// dies. A no-op for an unknown/stale `id`.
     pub fn close_client(&mut self, id: ClientId) {
-        let Some(client) = self.clients.get(id) else {
+        let target = self.modal_blocker(id).unwrap_or(id);
+        let Some(client) = self.clients.get(target) else {
             return;
         };
         self.backend.send_close(client.window);
@@ -2828,10 +2965,9 @@ impl<B: Backend> WindowManager<B> {
     /// (`WM_DELETE_WINDOW` when supported, force-kill otherwise), so
     /// both paths can never disagree about how a window dies.
     fn handle_close_request(&mut self, window: B::WindowId) {
-        if !self.window_index.contains_key(&window) {
-            return;
+        if let Some(&id) = self.window_index.get(&window) {
+            self.close_client(id);
         }
-        self.backend.send_close(window);
     }
 
     /// `_NET_WM_STATE`: applies `action` to the (up to two) states in
@@ -2859,6 +2995,7 @@ impl<B: Backend> WindowManager<B> {
                 NetState::MaximizedVert => maximize_directions |= MaximizeDirections::VERTICAL,
                 NetState::Pinned => self.apply_pin_action(id, action),
                 NetState::DemandsAttention => self.apply_attention_action(id, action),
+                NetState::Modal => self.apply_modal_action(id, action),
             }
         }
         if !maximize_directions.is_empty() {
@@ -2898,6 +3035,22 @@ impl<B: Backend> WindowManager<B> {
             NetStateAction::Toggle => !currently,
         };
         self.set_urgent(id, target);
+    }
+
+    fn apply_modal_action(&mut self, id: ClientId, action: NetStateAction) {
+        let currently = self
+            .clients
+            .get(id)
+            .is_some_and(|client| client.flags.contains(ClientFlags::MODAL));
+        let target = match action {
+            NetStateAction::Add => true,
+            NetStateAction::Remove => false,
+            NetStateAction::Toggle => !currently,
+        };
+        let Some(window) = self.clients.get(id).map(|client| client.window) else {
+            return;
+        };
+        self.handle_modal_changed(window, target);
     }
 
     fn apply_fullscreen_action(&mut self, id: ClientId, action: NetStateAction) {
@@ -3096,6 +3249,53 @@ impl<B: Backend> WindowManager<B> {
         tracing::debug!(?id, "drag broke the maximized state");
     }
 
+    /// Root followed by its transient descendants, parent before child.
+    /// Both depth and membership are bounded so hostile parent cycles
+    /// cannot turn a lifecycle gesture into an unbounded walk.
+    fn transient_family(&self, root: ClientId) -> Vec<ClientId> {
+        const MAX_TRANSIENT_DEPTH: usize = 8;
+        let mut children_by_parent: HashMap<ClientId, Vec<ClientId>> = HashMap::new();
+        for (id, client) in &self.clients {
+            if let Some(parent) = client.parent {
+                children_by_parent.entry(parent).or_default().push(id);
+            }
+        }
+        let mut family = vec![root];
+        let mut seen = HashSet::from([root]);
+        let mut level = vec![root];
+        for _ in 0..MAX_TRANSIENT_DEPTH {
+            let mut next = Vec::new();
+            for parent in level {
+                for &id in children_by_parent.get(&parent).into_iter().flatten() {
+                    if seen.insert(id) {
+                        family.push(id);
+                        next.push(id);
+                    }
+                }
+            }
+            if next.is_empty() {
+                break;
+            }
+            level = next;
+        }
+        family
+    }
+
+    /// Topmost live modal descendant that blocks `id`, if any.
+    fn modal_blocker(&self, id: ClientId) -> Option<ClientId> {
+        let family = self.transient_family(id);
+        self.managed_order.iter().rev().find_map(|window| {
+            let candidate = self.window_index.get(window).copied()?;
+            (candidate != id
+                && family.contains(&candidate)
+                && self.clients.get(candidate).is_some_and(|client| {
+                    client.lifecycle == Lifecycle::Normal
+                        && client.flags.contains(ClientFlags::MODAL)
+                }))
+            .then_some(candidate)
+        })
+    }
+
     /// Focus `id` and bring it to the front — what a click means, and
     /// what every caller that is not a bare pointer crossing wants.
     fn focus_client(&mut self, id: ClientId) {
@@ -3110,7 +3310,12 @@ impl<B: Backend> WindowManager<B> {
     /// crossed it. Splitting them costs one parameter and leaves every
     /// existing caller bit-identical through [`Self::focus_client`].
     fn focus_client_with(&mut self, id: ClientId, raise: bool) {
-        if self.clients.get(id).is_some_and(|client| client.flags.contains(ClientFlags::NO_FOCUS)) {
+        let id = self.modal_blocker(id).unwrap_or(id);
+        if self
+            .clients
+            .get(id)
+            .is_some_and(|client| client.flags.contains(ClientFlags::NO_FOCUS))
+        {
             tracing::debug!(?id, "window rule refused focus");
             return;
         }
@@ -3197,17 +3402,17 @@ impl<B: Backend> WindowManager<B> {
         let Some(client) = self.clients.get(id) else {
             return;
         };
-        self.backend.publish_net_state(
-            client.window,
-            client.flags.contains(ClientFlags::FULLSCREEN),
-            client.flags.contains(ClientFlags::MAXIMIZED_H),
-            client.flags.contains(ClientFlags::MAXIMIZED_V),
-            client.flags.contains(ClientFlags::SHADED),
+        self.backend.publish_net_state(client.window, NetStateSnapshot {
+            fullscreen: client.flags.contains(ClientFlags::FULLSCREEN),
+            maximized_horizontally: client.flags.contains(ClientFlags::MAXIMIZED_H),
+            maximized_vertically: client.flags.contains(ClientFlags::MAXIMIZED_V),
+            shaded: client.flags.contains(ClientFlags::SHADED),
             // EWMH `_NET_WM_STATE_HIDDEN` means "would be shown by a
             // pager's activate request" — exactly this WM's
             // miniaturized state, and nothing else here qualifies.
-            client.lifecycle == Lifecycle::Miniaturized,
-        );
+            hidden: client.lifecycle == Lifecycle::Miniaturized,
+            modal: client.flags.contains(ClientFlags::MODAL),
+        });
     }
 
     /// Put a managed client on screen, whichever way it is realized.
@@ -3396,7 +3601,7 @@ impl<B: Backend> WindowManager<B> {
     /// reason no raise site in this file names a frame directly any
     /// more.
     fn raise_client(&mut self, id: ClientId) {
-        self.raise_client_and_children(id, 0);
+        self.raise_transient_family(id);
         // `pin` means both sticky and above ordinary windows. Reassert
         // that invariant after every normal raise, including focus.
         let pinned: Vec<ClientId> = self
@@ -3408,7 +3613,7 @@ impl<B: Backend> WindowManager<B> {
             .map(|(other, _)| other)
             .collect();
         for pinned in pinned {
-            self.raise_client_and_children(pinned, 0);
+            self.raise_transient_family(pinned);
         }
     }
 
@@ -3424,43 +3629,21 @@ impl<B: Backend> WindowManager<B> {
     /// to do nothing — the request is sent, and the application is
     /// right to refuse it.
     ///
-    /// Depth-capped rather than cycle-checked: a client is free to
-    /// declare nonsense (a parent chain that loops), and the honest
-    /// response is to stop, not to hang the compositor. Real chains are
-    /// two or three deep — a document, its dialog, that dialog's own
-    /// confirmation.
-    fn raise_client_and_children(&mut self, id: ClientId, depth: usize) {
-        /// Deep enough for any real dialog chain; shallow enough that a
-        /// malicious or confused client cannot cost anything.
-        const MAX_TRANSIENT_DEPTH: usize = 8;
-
-        let Some(client) = self.clients.get(id) else {
-            return;
-        };
-        let window = client.window;
-        match (client.frame, window) {
-            (Some(frame), _) => self.backend.raise(frame),
-            (None, window) => self.backend.raise_frameless(window),
-        }
-        if depth >= MAX_TRANSIENT_DEPTH {
-            return;
-        }
-        // Asked of the backend per raise rather than cached at map
-        // time: a client may parent a dialog after mapping it, and
-        // LibreOffice does — its "Welcome" dialog maps first and is
-        // parented to the document window a moment later.
-        let children: Vec<ClientId> = self
-            .clients
-            .iter()
-            .filter(|(other_id, other)| {
-                *other_id != id
-                    && other.lifecycle == Lifecycle::Normal
-                    && self.backend.window_parent(other.window) == Some(window)
-            })
-            .map(|(other_id, _)| other_id)
-            .collect();
-        for child in children {
-            self.raise_client_and_children(child, depth + 1);
+    /// The stored parent graph is indexed once for the walk, so a deep
+    /// dialog chain does not re-query the backend or rescan every client
+    /// at each level.
+    fn raise_transient_family(&mut self, id: ClientId) {
+        for member in self.transient_family(id) {
+            let Some(client) = self.clients.get(member) else {
+                continue;
+            };
+            if client.lifecycle != Lifecycle::Normal {
+                continue;
+            }
+            match (client.frame, client.window) {
+                (Some(frame), _) => self.backend.raise(frame),
+                (None, window) => self.backend.raise_frameless(window),
+            }
         }
     }
 
@@ -5570,7 +5753,12 @@ mod tests {
         // Parented after mapping, which is what LibreOffice does.
         let parent_id = wm.client_for_window(parent).unwrap();
         wm.backend_mut().set_window_parent(dialog, parent);
-        let dialog_frame = wm.client(wm.client_for_window(dialog).unwrap()).unwrap().frame.unwrap();
+        wm.dispatch(BackendEvent::ParentChanged(dialog));
+        let dialog_frame = wm
+            .client(wm.client_for_window(dialog).unwrap())
+            .unwrap()
+            .frame
+            .unwrap();
         let parent_frame = wm.client(parent_id).unwrap().frame.unwrap();
 
         wm.backend_mut().raised_frames.clear();
@@ -5580,6 +5768,119 @@ mod tests {
         let parent_at = raises.iter().position(|f| *f == parent_frame).expect("the parent was raised");
         let dialog_at = raises.iter().position(|f| *f == dialog_frame).expect("its dialog was raised too");
         assert!(dialog_at > parent_at, "the dialog must be raised after — and so above — its parent: {raises:?}");
+    }
+
+    #[test]
+    fn a_transient_is_centered_on_its_parent_and_follows_its_lifecycle() {
+        let mut backend = FakeBackend::new();
+        let parent = backend.create_window();
+        let dialog = backend.create_window();
+        backend.set_geometry(
+            parent,
+            Rect {
+                pos: Point::new(500, 300),
+                size: Size::new(600, 400),
+            },
+        );
+        backend.set_geometry(
+            dialog,
+            Rect {
+                pos: Point::new(0, 0),
+                size: Size::new(260, 140),
+            },
+        );
+        backend.set_window_parent(dialog, parent);
+        let mut wm = wm(backend);
+        wm.dispatch(BackendEvent::MapRequest(parent));
+        wm.dispatch(BackendEvent::MapRequest(dialog));
+        let parent_id = wm.client_for_window(parent).unwrap();
+        let dialog_id = wm.client_for_window(dialog).unwrap();
+
+        let parent_frame = client_frame_rect(wm.client(parent_id).unwrap());
+        let dialog_frame = client_frame_rect(wm.client(dialog_id).unwrap());
+        assert_eq!(
+            Point::new(
+                dialog_frame.pos.x + dialog_frame.size.w as i32 / 2,
+                dialog_frame.pos.y + dialog_frame.size.h as i32 / 2,
+            ),
+            Point::new(
+                parent_frame.pos.x + parent_frame.size.w as i32 / 2,
+                parent_frame.pos.y + parent_frame.size.h as i32 / 2,
+            ),
+            "a transient belongs visually to the parent, not the pointer's output"
+        );
+
+        wm.move_client_to_workspace(parent_id, 2);
+        assert_eq!(wm.client(parent_id).unwrap().workspace, 2);
+        assert_eq!(wm.client(dialog_id).unwrap().workspace, 2);
+        wm.miniaturize(parent_id);
+        assert_eq!(
+            wm.client(parent_id).unwrap().lifecycle,
+            Lifecycle::Miniaturized
+        );
+        assert_eq!(
+            wm.client(dialog_id).unwrap().lifecycle,
+            Lifecycle::Miniaturized
+        );
+        wm.deminiaturize(parent_id);
+        assert_eq!(wm.client(parent_id).unwrap().lifecycle, Lifecycle::Normal);
+        assert_eq!(wm.client(dialog_id).unwrap().lifecycle, Lifecycle::Normal);
+    }
+
+    #[test]
+    fn a_modal_child_redirects_parent_focus_drag_and_close() {
+        let mut backend = FakeBackend::new();
+        let parent = backend.create_window();
+        let dialog = backend.create_window();
+        backend.set_geometry(
+            parent,
+            Rect {
+                pos: Point::new(100, 100),
+                size: Size::new(500, 350),
+            },
+        );
+        backend.set_geometry(
+            dialog,
+            Rect {
+                pos: Point::new(0, 0),
+                size: Size::new(240, 120),
+            },
+        );
+        backend.set_window_parent(dialog, parent);
+        backend.set_window_modal(dialog, true);
+        let mut wm = wm(backend);
+        wm.dispatch(BackendEvent::MapRequest(parent));
+        wm.dispatch(BackendEvent::MapRequest(dialog));
+        let parent_id = wm.client_for_window(parent).unwrap();
+        let dialog_id = wm.client_for_window(dialog).unwrap();
+        let before = wm.client(parent_id).unwrap().geometry;
+
+        wm.dispatch(BackendEvent::PointerButton {
+            surface: SurfaceRef::Client(parent),
+            local: Point::new(30, 30),
+            button: MouseButton::Left,
+            pressed: true,
+            time_ms: 1,
+            mods: DEFAULT_DRAG_MODIFIER,
+        });
+        wm.dispatch(BackendEvent::PointerMotion {
+            root: Point::new(700, 500),
+            surface_local: None,
+        });
+        assert_eq!(
+            wm.client(parent_id).unwrap().geometry,
+            before,
+            "a modal parent cannot be dragged"
+        );
+        assert!(wm
+            .client(dialog_id)
+            .unwrap()
+            .flags
+            .contains(ClientFlags::FOCUSED));
+
+        wm.close_client(parent_id);
+        assert!(wm.backend().close_requests.contains(&dialog));
+        assert!(!wm.backend().close_requests.contains(&parent));
     }
 
     /// A client is free to declare a parent chain that loops. The
@@ -5596,6 +5897,8 @@ mod tests {
         wm.dispatch(BackendEvent::MapRequest(b));
         wm.backend_mut().set_window_parent(a, b);
         wm.backend_mut().set_window_parent(b, a);
+        wm.dispatch(BackendEvent::ParentChanged(a));
+        wm.dispatch(BackendEvent::ParentChanged(b));
 
         // Terminating at all is the assertion.
         let a_id = wm.client_for_window(a).unwrap();
@@ -7564,7 +7867,7 @@ mod tests {
         assert_eq!(wm.client(id).unwrap().lifecycle, Lifecycle::Miniaturized);
         assert_eq!(
             wm.backend().published_net_states.last(),
-            Some(&(window, false, false, false, false, true)),
+            Some(&(window, false, false, false, false, true, false)),
             "miniaturizing must publish the client as hidden"
         );
 
@@ -7581,7 +7884,7 @@ mod tests {
         );
         assert_eq!(
             wm.backend().published_net_states.last(),
-            Some(&(window, false, false, false, false, false)),
+            Some(&(window, false, false, false, false, false, false)),
             "the restored client must be re-published as not hidden"
         );
     }
@@ -7672,15 +7975,27 @@ mod tests {
             Some(&monitor),
             "the frame must be exactly the monitor rect"
         );
-        assert!(wm.backend().raised_frames.contains(&frame), "entering fullscreen must raise");
-        assert_eq!(wm.backend().published_net_states.last(), Some(&(window, true, false, false, false, false)));
+        assert!(
+            wm.backend().raised_frames.contains(&frame),
+            "entering fullscreen must raise"
+        );
+        assert_eq!(
+            wm.backend().published_net_states.last(),
+            Some(&(window, true, false, false, false, false, false))
+        );
 
         wm.dispatch(toggle);
 
         let client = wm.client(id).unwrap();
         assert!(!client.flags.contains(ClientFlags::FULLSCREEN));
-        assert_eq!(client.geometry, original_geometry, "a second toggle must restore the prior geometry exactly");
-        assert_eq!(wm.backend().published_net_states.last(), Some(&(window, false, false, false, false, false)));
+        assert_eq!(
+            client.geometry, original_geometry,
+            "a second toggle must restore the prior geometry exactly"
+        );
+        assert_eq!(
+            wm.backend().published_net_states.last(),
+            Some(&(window, false, false, false, false, false, false))
+        );
     }
 
     /// Mirror of `fullscreen_toggle_covers_the_monitor_and_a_second_
@@ -7711,15 +8026,27 @@ mod tests {
             Some(&monitor),
             "the frame must be exactly the monitor rect"
         );
-        assert!(wm.backend().raised_frames.contains(&frame), "entering fullscreen must raise");
-        assert_eq!(wm.backend().published_net_states.last(), Some(&(window, true, false, false, false, false)));
+        assert!(
+            wm.backend().raised_frames.contains(&frame),
+            "entering fullscreen must raise"
+        );
+        assert_eq!(
+            wm.backend().published_net_states.last(),
+            Some(&(window, true, false, false, false, false, false))
+        );
 
         wm.toggle_fullscreen(id);
 
         let client = wm.client(id).unwrap();
         assert!(!client.flags.contains(ClientFlags::FULLSCREEN));
-        assert_eq!(client.geometry, original_geometry, "the second toggle must restore the prior geometry exactly");
-        assert_eq!(wm.backend().published_net_states.last(), Some(&(window, false, false, false, false, false)));
+        assert_eq!(
+            client.geometry, original_geometry,
+            "the second toggle must restore the prior geometry exactly"
+        );
+        assert_eq!(
+            wm.backend().published_net_states.last(),
+            Some(&(window, false, false, false, false, false, false))
+        );
     }
 
     /// The reason `fullscreen_restore` is its own slot and not
@@ -7781,8 +8108,13 @@ mod tests {
         });
 
         let client = wm.client(id).unwrap();
-        assert!(client.flags.contains(ClientFlags::MAXIMIZED_H | ClientFlags::MAXIMIZED_V));
-        assert_eq!(wm.backend().published_net_states.last(), Some(&(window, false, true, true, false, false)));
+        assert!(client
+            .flags
+            .contains(ClientFlags::MAXIMIZED_H | ClientFlags::MAXIMIZED_V));
+        assert_eq!(
+            wm.backend().published_net_states.last(),
+            Some(&(window, false, true, true, false, false, false))
+        );
 
         wm.dispatch(BackendEvent::NetStateRequested {
             window,
@@ -7794,6 +8126,39 @@ mod tests {
         let client = wm.client(id).unwrap();
         assert!(!client.flags.intersects(ClientFlags::MAXIMIZED_H | ClientFlags::MAXIMIZED_V));
         assert_eq!(client.geometry, original_geometry, "removing both axes must restore the pre-maximize geometry");
+    }
+
+    #[test]
+    fn net_state_modal_uses_the_same_flag_as_xdg_dialog_modality() {
+        let mut backend = FakeBackend::new();
+        let window = backend.create_window();
+        let mut wm = wm(backend);
+        wm.dispatch(BackendEvent::MapRequest(window));
+        let id = wm.client_for_window(window).unwrap();
+
+        wm.dispatch(BackendEvent::NetStateRequested {
+            window,
+            action: NetStateAction::Add,
+            first: NetState::Modal,
+            second: None,
+        });
+        assert!(wm.client(id).unwrap().flags.contains(ClientFlags::MODAL));
+        assert_eq!(
+            wm.backend().published_net_states.last(),
+            Some(&(window, false, false, false, false, false, true))
+        );
+
+        wm.dispatch(BackendEvent::NetStateRequested {
+            window,
+            action: NetStateAction::Toggle,
+            first: NetState::Modal,
+            second: None,
+        });
+        assert!(!wm.client(id).unwrap().flags.contains(ClientFlags::MODAL));
+        assert_eq!(
+            wm.backend().published_net_states.last(),
+            Some(&(window, false, false, false, false, false, false))
+        );
     }
 
     #[test]

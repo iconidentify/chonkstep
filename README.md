@@ -641,6 +641,13 @@ about and skipped, and a completely unreadable file just means the
 defaults. See [docs/config.example.toml](docs/config.example.toml) for
 a fully commented example of every option.
 
+Validate the same four-layer configuration the session will resolve before
+logging out with `chonkstep --check-config [PATH]`; a fatal TOML error exits
+non-zero, while declined live Hyprland directives and the binding count are
+printed in full. `chonkstep --print-config [PATH]` prints the effective values
+with the layer that last wrote each one. The commands are identical on
+`chonkstep-wayland`.
+
 The settings, each documented in full in that file: `focus_follows_mouse`
 (click-to-focus by default), `scale` (HiDPI UI scaling; the
 `CHONKSTEP_SCALE` environment variable overrides it), `theme` (a theme

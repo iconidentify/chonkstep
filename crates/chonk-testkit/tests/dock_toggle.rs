@@ -67,7 +67,8 @@ fn hiding_the_dock_from_the_root_menu_gives_a_maximized_window_its_strip() {
         "dock-toggle",
         SessionOptions {
             scale: Some(1.0),
-            config_extra: "[keybindings]\n\"super+d\" = \"toggle-dock\"\n".to_string(),
+            config_extra: "[keybindings]\n\"super+d\" = \"toggle-dock\"\n\"super+r\" = \"root-menu\"\n"
+                .to_string(),
             env: vec![("OMARCHY_PATH".to_string(), no_omarchy.to_string_lossy().into_owned())],
             ..SessionOptions::default()
         },
@@ -84,14 +85,6 @@ fn hiding_the_dock_from_the_root_menu_gives_a_maximized_window_its_strip() {
     assert_eq!(home.x + home.w as i32, output_w as i32, "flush against the right edge");
     assert!(!session.state_file("dock-visibility").exists(), "no choice made yet, so none is stored");
 
-    // Open the root menu while there is still bare desktop to click.
-    // Once the window below is maximized there is intentionally no
-    // background under the pointer, so asking a later right-click to
-    // open the root menu would send that click to the client instead.
-    let menu = session
-        .open_root_menu(&metrics, PLAIN.row_count())
-        .expect("a right-click on bare desk should open the root menu with a Dock row");
-
     session.launch("foot", &[]).unwrap();
     let window = session.wait_for_window("foot").unwrap();
     toggle_maximize(&mut session);
@@ -101,6 +94,19 @@ fn hiding_the_dock_from_the_root_menu_gives_a_maximized_window_its_strip() {
     })
     .expect("a maximized window must stop where the dock column begins");
     assert_eq!(short.x, 0, "and start at the left edge");
+
+    // A menu owns a modal keyboard grab, so keeping it open while
+    // asking the window to maximize would correctly consume that chord.
+    // Open it after maximizing through the keyboard entry point instead;
+    // this also proves a maximized client does not make the root menu
+    // unreachable merely because there is no bare desk left to click.
+    session.door().chord(keys::LEFTMETA, KEY_R).unwrap();
+    let wanted = metrics.height_for(PLAIN.row_count());
+    let menu = poll_until(Duration::from_secs(10), "the keyboard-opened root menu to map", || {
+        let world = session.world().ok()?;
+        world.menus().into_iter().find(|menu| menu.h == wanted)
+    })
+    .expect("the root-menu binding should open a menu with a Dock row");
 
     // -- the menu hides it: the surface goes, the strip is released ----
     hide_dock_from_menu(&mut session, &metrics, &menu);
@@ -276,6 +282,6 @@ fn a_session_configured_dockless_never_shows_the_dock_and_a_binding_brings_it_ba
     assert_eq!(std::fs::read_to_string(session.state_file("dock-visibility")).unwrap().trim(), "shown");
 }
 
-/// `KEY_D` from input-event-codes.h — the one keycode this test needs
-/// that `chonk_testkit::keys` has no reason to carry.
+/// Keycodes from input-event-codes.h used only by this test.
+const KEY_R: u32 = 19;
 const KEY_D: u32 = 32;

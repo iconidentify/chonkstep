@@ -79,6 +79,7 @@ fn desktop() -> Snapshot {
         locked: false,
         cursor_position: Some((321, 654)),
         bindings: Vec::new(),
+        config_errors: Vec::new(),
         devices: Devices::default(),
     }
 }

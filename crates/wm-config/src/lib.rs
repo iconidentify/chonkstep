@@ -76,7 +76,7 @@ pub mod hyprland;
 pub mod preset;
 
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub use wm_core::DecorationRules;
 pub use wm_core::{FocusDirection, FocusPolicy};
@@ -151,6 +151,11 @@ pub enum Action {
     /// are modal machinery like the Alt-Tab switcher's, not
     /// per-binding config.
     Overview,
+    /// Open the desktop's root menu from a configured keybinding.
+    RootMenu,
+    /// Trigger a portal-registered global shortcut identified by the
+    /// Hyprland protocol's `app_id:id` key.
+    GlobalShortcut(String),
     /// Open the window commands menu for the focused window, at the
     /// keyboard rather than by right-clicking a titlebar.
     ///
@@ -234,7 +239,15 @@ pub struct InputConfig {
 /// for unknown names — including `"none"`, which the caller must treat
 /// as unbinding *before* asking here.
 fn action_from_name(name: &str) -> Option<Action> {
-    match name.trim().to_ascii_lowercase().as_str() {
+    let name = name.trim();
+    let normalized = name.to_ascii_lowercase();
+    if normalized.starts_with("global-shortcut ") {
+        let target = name.get("global-shortcut ".len()..)?.trim();
+        let (app_id, id) = target.split_once(':')?;
+        return (!app_id.is_empty() && !id.is_empty())
+            .then(|| Action::GlobalShortcut(target.to_string()));
+    }
+    match normalized.as_str() {
         "spawn-terminal" => Some(Action::SpawnTerminal),
         "close" => Some(Action::Close),
         "toggle-maximize" => Some(Action::ToggleMaximize),
@@ -250,6 +263,7 @@ fn action_from_name(name: &str) -> Option<Action> {
         "workspace-carry-next" => Some(Action::WorkspaceCarryNext),
         "workspace-carry-prev" => Some(Action::WorkspaceCarryPrev),
         "overview" => Some(Action::Overview),
+        "root-menu" => Some(Action::RootMenu),
         "window-menu" => Some(Action::WindowMenu),
         "toggle-dock" => Some(Action::ToggleDock),
         "reload" => Some(Action::Reload),
@@ -524,6 +538,12 @@ pub struct Config {
     pub bindings: Vec<Binding>,
     pub layer_bindings: BTreeMap<String, Vec<Binding>>,
     pub keybindings: Vec<(KeyCombo, Action)>,
+    /// Human-readable refusals retained for `hyprctl configerrors` and
+    /// the offline inspection commands.
+    pub diagnostics: Vec<String>,
+    /// Last writer of each effective setting: built-in, preset, live
+    /// Hyprland configuration, or the chonkstep config file.
+    pub provenance: BTreeMap<String, String>,
 }
 
 /// The `hyprland_config` key, read out of the raw table before the
@@ -570,7 +590,7 @@ impl Config {
                 .expect("default keybinding specs are constants and must always parse");
             (combo, action)
         }
-        Config {
+        let mut config = Config {
             focus_follows_mouse: false,
             autoraise: true,
             scale: None,
@@ -641,7 +661,40 @@ impl Config {
                 // decorate itself a safe policy rather than a gamble.
                 bind("control+escape", Action::WindowMenu),
             ],
+            diagnostics: Vec::new(),
+            provenance: BTreeMap::new(),
+        };
+        for key in [
+            "focus_follows_mouse",
+            "scale",
+            "theme",
+            "appearance",
+            "placement",
+            "edge_resistance",
+            "terminal_font_px",
+            "decorations",
+            "drag_modifier",
+            "restore_session",
+            "lock_command",
+            "commands",
+            "terminal",
+            "autostart",
+            "omarchy_menu",
+            "omarchy_shell",
+            "show_dock",
+            "omarchy_bar",
+            "desktop",
+            "keymap",
+            "hyprland_config",
+            "input",
+            "monitor_rules",
+            "keybindings",
+        ] {
+            config
+                .provenance
+                .insert(key.to_string(), "built-in".to_string());
         }
+        config
     }
 }
 
@@ -1049,7 +1102,27 @@ pub fn parse_with(
     // *place* in the order is the preset's, which is what matters.
     config.hyprland_config = hyprland_switch(&table);
     if hyprland::wanted(&config) {
-        hyprland::apply(&mut config, live().as_ref());
+        let reading = live();
+        if let Some(reading) = &reading {
+            config.diagnostics.extend(
+                reading
+                    .skipped
+                    .iter()
+                    .map(|skip| format!("{}: {} — {}", skip.kind, skip.what, skip.why)),
+            );
+            for key in [
+                "keybindings",
+                "commands",
+                "autostart",
+                "input",
+                "monitor_rules",
+            ] {
+                config
+                    .provenance
+                    .insert(key.into(), "live Hyprland config".into());
+            }
+        }
+        hyprland::apply(&mut config, reading.as_ref());
     }
     if let Some((keybindings, bindings, layer_bindings, commands)) = preserve_keymap {
         config.keybindings = keybindings;
@@ -1303,6 +1376,63 @@ pub fn parse_with(
             ),
         }
     }
+    for (key, value) in &table {
+        // Provenance describes the setting that actually won, not just
+        // the last layer that mentioned its name. Reuse the same
+        // validators as the application pass above so a rejected typo
+        // continues to point at the inherited source.
+        let provenance_key = match key.as_str() {
+            "focus_follows_mouse"
+            | "restore_session"
+            | "omarchy_menu"
+            | "omarchy_shell"
+            | "omarchy_bar"
+            | "show_dock"
+            | "hyprland_config"
+                if value.is_bool() =>
+            {
+                Some(key.as_str())
+            }
+            "scale" if scale_from_value(value).is_some() => Some("scale"),
+            "theme" if value.is_str() => Some("theme"),
+            "appearance"
+                if value.as_str().is_some_and(|name| {
+                    matches!(name.trim().to_ascii_lowercase().as_str(), "light" | "dark")
+                }) =>
+            {
+                Some("appearance")
+            }
+            "placement" if placement_from_value(value).is_some() => Some("placement"),
+            "edge_resistance" if edge_resistance_from_value(value).is_some() => {
+                Some("edge_resistance")
+            }
+            "terminal_font_px" if terminal_font_px_from_value(value).is_some() => {
+                Some("terminal_font_px")
+            }
+            "lock_command"
+                if value
+                    .as_str()
+                    .is_some_and(|command| !command.trim().is_empty()) =>
+            {
+                Some("lock_command")
+            }
+            "drag_modifier" if value.as_str().and_then(drag_modifier_from_name).is_some() => {
+                Some("drag_modifier")
+            }
+            "terminal" if argv_from_value(value, "terminal").is_some() => Some("terminal"),
+            "self_decorating_apps" if value.is_array() => Some("decorations"),
+            "decorations" if value.is_table() => Some("decorations"),
+            "commands" if value.is_table() => Some("commands"),
+            "autostart" if value.is_array() => Some("autostart"),
+            "keybindings" if value.is_table() => Some("keybindings"),
+            _ => None,
+        };
+        if let Some(key) = provenance_key {
+            config
+                .provenance
+                .insert(key.to_string(), "config file".to_string());
+        }
+    }
     // `run <name>` is checked here, after the whole file has been read,
     // rather than inside `apply_keybindings`. TOML tables reach us in
     // an order we do not control, so a binding may well be parsed
@@ -1430,29 +1560,69 @@ fn config_path() -> Option<PathBuf> {
 ///   error, then the defaults.
 /// - File fine but individual entries bad: [`parse`] warns and skips
 ///   those entries, keeping the rest.
-pub fn load() -> Config {
-    let Some(path) = config_path() else {
-        return Config::default_config();
+pub fn inspect(path: Option<&Path>) -> Result<Config, String> {
+    let path = match path {
+        Some(path) => path.to_path_buf(),
+        None => match config_path() {
+            Some(path) => path,
+            None => return Ok(Config::default_config()),
+        },
     };
     let text = match std::fs::read_to_string(&path) {
         Ok(text) => text,
         Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-            return Config::default_config();
+            return Ok(Config::default_config());
         }
-        Err(err) => {
-            tracing::warn!(path = %path.display(), %err, "config: unreadable, using defaults");
-            return Config::default_config();
-        }
+        Err(err) => return Err(format!("{}: {err}", path.display())),
     };
-    // The one call site with a machine in front of it, and so the one
-    // that reads the user's live Hyprland configuration — see
-    // `parse_with` for why that is a parameter rather than something
-    // `parse` does for itself.
-    match parse_with(&text, &hyprland::load) {
+    parse_with(&text, &hyprland::load).map_err(|error| format!("{}: {error}", path.display()))
+}
+
+/// Stable, line-oriented effective configuration with the last writer
+/// beside every setting. Intended for `--print-config`, not as a second
+/// configuration format.
+pub fn effective_config_report(config: &Config) -> String {
+    let mut out = String::new();
+    let mut line = |key: &str, value: String| {
+        let source = config
+            .provenance
+            .get(key)
+            .map(String::as_str)
+            .unwrap_or("resolved");
+        out.push_str(&format!("{key} = {value}\t# {source}\n"));
+    };
+    line("desktop", config.desktop.id().into());
+    line("keymap", config.keymap.id().into());
+    line(
+        "focus_follows_mouse",
+        config.focus_follows_mouse.to_string(),
+    );
+    line("scale", format!("{:?}", config.scale));
+    line("theme", format!("{:?}", config.theme));
+    line("appearance", format!("{:?}", config.appearance));
+    line("placement", format!("{:?}", config.placement));
+    line("edge_resistance", config.edge_resistance.to_string());
+    line("terminal_font_px", config.terminal_font_px.to_string());
+    line("drag_modifier", format!("{:?}", config.drag_modifier));
+    line("restore_session", config.restore_session.to_string());
+    line("show_dock", config.show_dock.to_string());
+    line("omarchy_bar", format!("{:?}", config.omarchy_bar));
+    line("input", format!("{:?}", config.input));
+    line("monitor_rules", config.monitor_rules.len().to_string());
+    line("keybindings", config.keybindings.len().to_string());
+    line("commands", config.commands.len().to_string());
+    line("autostart", config.autostart.len().to_string());
+    out
+}
+
+pub fn load() -> Config {
+    match inspect(None) {
         Ok(config) => config,
         Err(err) => {
-            tracing::warn!(path = %path.display(), %err, "config: using defaults");
-            Config::default_config()
+            tracing::warn!(%err, "config: using defaults");
+            let mut config = Config::default_config();
+            config.diagnostics.push(err);
+            config
         }
     }
 }
@@ -2051,8 +2221,14 @@ mod tests {
             ("workspace-send 4", Action::WorkspaceSend(3)),
             ("workspace-carry 4", Action::WorkspaceCarry(3)),
             ("overview", Action::Overview),
+            ("root-menu", Action::RootMenu),
             ("window-menu", Action::WindowMenu),
             ("toggle-dock", Action::ToggleDock),
+            (
+                "global-shortcut org.example.App:mute",
+                Action::GlobalShortcut("org.example.App:mute".into()),
+            ),
+            ("reload", Action::Reload),
             ("restart", Action::Restart),
         ];
         // One letter per action rather than one function key: the list
@@ -2080,6 +2256,40 @@ mod tests {
         let config = parse(text).unwrap();
         assert_eq!(action_for(&config, "super+a"), Some(Action::Close));
         assert_eq!(action_for(&config, "super+b"), Some(Action::SpawnTerminal));
+    }
+
+    #[test]
+    fn inspection_retains_hyprland_refusals_and_reports_provenance() {
+        let config = parse_with(
+            "hyprland_config = true\nfocus_follows_mouse = true\n",
+            &|| {
+                let mut reading = hyprland::Reading::default();
+                reading.skipped.push(hyprland::Skipped {
+                    kind: "bind".into(),
+                    what: "SUPER J".into(),
+                    why: "tiling-only".into(),
+                });
+                Some(reading)
+            },
+        )
+        .unwrap();
+        assert_eq!(config.diagnostics, vec!["bind: SUPER J — tiling-only"]);
+        let report = effective_config_report(&config);
+        assert!(report.contains("focus_follows_mouse = true\t# config file"));
+        assert!(report.contains("keybindings = 12\t# live Hyprland config"));
+    }
+
+    #[test]
+    fn inspection_rejects_fatally_invalid_toml_with_the_path() {
+        let path = std::env::temp_dir().join(format!(
+            "chonkstep-config-{}-invalid.toml",
+            std::process::id()
+        ));
+        std::fs::write(&path, "[broken").unwrap();
+        let error = inspect(Some(&path)).unwrap_err();
+        assert!(error.contains(&path.display().to_string()));
+        assert!(error.contains("invalid TOML"));
+        let _ = std::fs::remove_file(path);
     }
 
     // ---- parse: merge semantics ---------------------------------------

@@ -199,6 +199,11 @@ pub(crate) struct EwmhLedger {
     /// X connection publishes the protocol state without destroying
     /// the restorable window.
     window_iconic: HashMap<WlWindowId, bool>,
+    /// Pending `_NET_WM_STATE_MODAL` truth for XWayland windows. Smithay
+    /// exposes the initial bit but has no public modal setter, so the
+    /// auxiliary EWMH connection changes only this atom while preserving
+    /// the rest of the state property.
+    window_modal: HashMap<WlWindowId, bool>,
 }
 
 impl EwmhLedger {
@@ -287,6 +292,10 @@ impl EwmhLedger {
         self.window_iconic.insert(window, iconic);
     }
 
+    pub(crate) fn note_window_modal(&mut self, window: WlWindowId, modal: bool) {
+        self.window_modal.insert(window, modal);
+    }
+
     /// Re-flags the client list without new content — the fix for the
     /// one interleaving with smithay's XWM that does NOT converge on
     /// its own. Smithay APPENDs every freshly mapped window to
@@ -310,6 +319,7 @@ impl EwmhLedger {
         self.window_desktops.remove(&window);
         self.frame_extents.remove(&window);
         self.window_iconic.remove(&window);
+        self.window_modal.remove(&window);
     }
 
     /// Re-dirties every root property, so a connection arriving late
@@ -343,11 +353,12 @@ struct WriteAtoms {
     net_wm_desktop: Atom,
     net_workarea: Atom,
     net_frame_extents: Atom,
+    net_wm_state: Atom,
+    net_wm_state_modal: Atom,
     wm_state: Atom,
     /// Inbound only — this connection never writes these. See
     /// [`drain_inbound`].
     net_close_window: Atom,
-    net_wm_state: Atom,
     net_wm_state_above: Atom,
     net_wm_state_sticky: Atom,
     net_wm_state_demands_attention: Atom,
@@ -366,10 +377,17 @@ impl WriteAtoms {
             net_current_desktop: conn.intern_atom(false, b"_NET_CURRENT_DESKTOP")?.reply()?.atom,
             net_wm_desktop: conn.intern_atom(false, b"_NET_WM_DESKTOP")?.reply()?.atom,
             net_workarea: conn.intern_atom(false, b"_NET_WORKAREA")?.reply()?.atom,
-            net_frame_extents: conn.intern_atom(false, b"_NET_FRAME_EXTENTS")?.reply()?.atom,
+            net_frame_extents: conn
+                .intern_atom(false, b"_NET_FRAME_EXTENTS")?
+                .reply()?
+                .atom,
+            net_wm_state: conn.intern_atom(false, b"_NET_WM_STATE")?.reply()?.atom,
+            net_wm_state_modal: conn
+                .intern_atom(false, b"_NET_WM_STATE_MODAL")?
+                .reply()?
+                .atom,
             wm_state: conn.intern_atom(false, b"WM_STATE")?.reply()?.atom,
             net_close_window: conn.intern_atom(false, b"_NET_CLOSE_WINDOW")?.reply()?.atom,
-            net_wm_state: conn.intern_atom(false, b"_NET_WM_STATE")?.reply()?.atom,
             net_wm_state_above: conn.intern_atom(false, b"_NET_WM_STATE_ABOVE")?.reply()?.atom,
             net_wm_state_sticky: conn.intern_atom(false, b"_NET_WM_STATE_STICKY")?.reply()?.atom,
             net_wm_state_demands_attention: conn
@@ -475,8 +493,56 @@ impl XEwmh {
             // (None because this WM uses its own shell tile).
             self.conn.change_property32(PropMode::REPLACE, window, self.atoms.wm_state, self.atoms.wm_state, &[state, 0])?;
         }
+        for &(window, modal) in &writes.window_modal {
+            let reply = self
+                .conn
+                .get_property(
+                    false,
+                    window,
+                    self.atoms.net_wm_state,
+                    AtomEnum::ATOM,
+                    0,
+                    u32::MAX,
+                )?
+                .reply()?;
+            let mut states: Vec<_> = reply
+                .value32()
+                .into_iter()
+                .flatten()
+                .filter(|&atom| atom != self.atoms.net_wm_state_modal)
+                .collect();
+            if modal {
+                states.push(self.atoms.net_wm_state_modal);
+            }
+            self.conn.change_property32(
+                PropMode::REPLACE,
+                window,
+                self.atoms.net_wm_state,
+                AtomEnum::ATOM,
+                &states,
+            )?;
+        }
         self.conn.flush()?;
         Ok(())
+    }
+
+    pub(crate) fn window_is_modal(&self, window: XWindow) -> bool {
+        let Ok(cookie) = self.conn.get_property(
+            false,
+            window,
+            self.atoms.net_wm_state,
+            AtomEnum::ATOM,
+            0,
+            u32::MAX,
+        ) else {
+            return false;
+        };
+        let Ok(reply) = cookie.reply() else {
+            return false;
+        };
+        reply
+            .value32()
+            .is_some_and(|mut states| states.any(|atom| atom == self.atoms.net_wm_state_modal))
     }
 }
 
@@ -492,6 +558,7 @@ struct Writes {
     window_desktops: Vec<(XWindow, u32)>,
     frame_extents: Vec<(XWindow, [u32; 4])>,
     window_states: Vec<(XWindow, u32)>,
+    window_modal: Vec<(XWindow, bool)>,
 }
 
 impl Writes {
@@ -503,6 +570,7 @@ impl Writes {
             && self.window_desktops.is_empty()
             && self.frame_extents.is_empty()
             && self.window_states.is_empty()
+            && self.window_modal.is_empty()
     }
 }
 
@@ -580,6 +648,11 @@ fn take_writes(backend: &mut WaylandBackend) -> Writes {
             .drain()
             .filter_map(|(id, iconic)| Some((x11_id(windows, id)?, icccm_wm_state(iconic))))
             .collect(),
+        window_modal: ledger
+            .window_modal
+            .drain()
+            .filter_map(|(id, modal)| Some((x11_id(windows, id)?, modal)))
+            .collect(),
     }
 }
 
@@ -638,8 +711,8 @@ pub(crate) fn flush(comp: &mut Compositor) {
 }
 
 /// Drains this connection's event queue (non-blocking) and translates
-/// the two control messages a pager sends — activate this window,
-/// switch to this desktop — into the same `BackendEvent`s the
+/// control messages a pager or X11 client sends — activate this window,
+/// switch to this desktop, or change modality — into the same `BackendEvent`s the
 /// Wayland-native request paths queue, so both kinds of tool drive
 /// one `wm-core` behavior. Every other event SubstructureNotify
 /// delivers is dropped here; this connection redirects nothing and
@@ -738,7 +811,7 @@ fn net_state_action(action: u32) -> Option<NetStateAction> {
     }
 }
 
-/// The three `_NET_WM_STATE` atoms this module decodes. The maximized
+/// The four `_NET_WM_STATE` atoms this module decodes. The maximized
 /// pair and fullscreen are deliberately absent: smithay's XWM already
 /// decodes those from its own connection, and decoding them here too
 /// would apply every such request twice.
@@ -747,6 +820,8 @@ fn net_state_from_atom(atoms: &WriteAtoms, atom: Atom) -> Option<NetState> {
         Some(NetState::Pinned)
     } else if atom == atoms.net_wm_state_demands_attention {
         Some(NetState::DemandsAttention)
+    } else if atom == atoms.net_wm_state_modal {
+        Some(NetState::Modal)
     } else {
         None
     }
@@ -947,9 +1022,11 @@ mod tests {
         ledger.note_window_desktop(WlWindowId(7), 1);
         ledger.note_frame_extents(WlWindowId(7), 1, 1, 24, 1);
         ledger.note_window_iconic(WlWindowId(7), true);
+        ledger.note_window_modal(WlWindowId(7), true);
         ledger.prune_window(WlWindowId(7));
         assert!(ledger.window_desktops.is_empty());
         assert!(ledger.frame_extents.is_empty());
         assert!(ledger.window_iconic.is_empty());
+        assert!(ledger.window_modal.is_empty());
     }
 }

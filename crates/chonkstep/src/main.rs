@@ -46,12 +46,59 @@ fn print_version_and_exit_if_asked() {
     std::process::exit(0);
 }
 
+fn inspect_config_and_exit_if_asked() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let Some((index, print)) =
+        args.iter()
+            .enumerate()
+            .find_map(|(index, arg)| match arg.as_str() {
+                "--check-config" => Some((index, false)),
+                "--print-config" => Some((index, true)),
+                _ => None,
+            })
+    else {
+        return;
+    };
+    // Offline inspection still needs the parser's per-entry warnings;
+    // the normal subscriber is intentionally installed only after
+    // this early-exit path.
+    let _ = tracing_subscriber::fmt()
+        .without_time()
+        .with_max_level(tracing::Level::WARN)
+        .try_init();
+    let path = args
+        .get(index + 1)
+        .filter(|arg| !arg.starts_with('-'))
+        .map(std::path::Path::new);
+    let config = match wm_config::inspect(path) {
+        Ok(config) => config,
+        Err(error) => {
+            eprintln!("config error: {error}");
+            std::process::exit(1);
+        }
+    };
+    if print {
+        print!("{}", wm_config::effective_config_report(&config));
+    } else {
+        for diagnostic in &config.diagnostics {
+            println!("{diagnostic}");
+        }
+        println!(
+            "resolved {} bindings; {} diagnostics",
+            config.keybindings.len(),
+            config.diagnostics.len()
+        );
+    }
+    std::process::exit(0);
+}
+
 fn main() {
     // Before the subscriber, so `--version` prints one clean line
     // rather than a line preceded by whatever RUST_LOG asked for.
     // Also before `restart_in_place`'s re-exec can ever matter: that
     // path passes no arguments, so a restarted session never sees one.
     print_version_and_exit_if_asked();
+    inspect_config_and_exit_if_asked();
     let allocator_policy_pinned = pin_glibc_large_allocation_policy();
     tracing_subscriber::fmt().with_env_filter(tracing_subscriber::EnvFilter::from_default_env()).init();
     if !allocator_policy_pinned {
@@ -277,11 +324,19 @@ fn main() {
                     if let Some(motion) = pending_motion.take() {
                         dispatch_motion(&mut wm, &mut shell, motion);
                     }
-                    if let chonk_shell::shell::KeyResolution::Action(action) = resolution {
-                        let outcome = shell.run_action(&mut wm, &action);
-                        if exit_requested(&mut shell, outcome) {
-                            should_exit = true;
+                    let outcome = match resolution {
+                        chonk_shell::shell::KeyResolution::Action(action) => {
+                            shell.run_action(&mut wm, &action)
                         }
+                        chonk_shell::shell::KeyResolution::Menu(key) => {
+                            shell.run_menu_key(&mut wm, key)
+                        }
+                        chonk_shell::shell::KeyResolution::Consumed => {
+                            chonk_shell::shell::ShellOutcome::Continue
+                        }
+                    };
+                    if exit_requested(&mut shell, outcome) {
+                        should_exit = true;
                     }
                     continue;
                 }

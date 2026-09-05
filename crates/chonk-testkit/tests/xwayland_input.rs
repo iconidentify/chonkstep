@@ -162,6 +162,58 @@ fn assert_clicks_match(
     }
 }
 
+fn xwayland_child_pid(session: &Session) -> u32 {
+    poll_until(EVENT, "the compositor's Xwayland child process", || {
+        let children = std::fs::read_to_string(format!(
+            "/proc/{}/task/{}/children",
+            session.compositor_pid(),
+            session.compositor_pid()
+        ))
+        .ok()?;
+        children.split_whitespace().find_map(|pid| {
+            let comm = std::fs::read_to_string(format!("/proc/{pid}/comm")).ok()?;
+            comm.trim()
+                .eq_ignore_ascii_case("xwayland")
+                .then(|| pid.parse().ok())
+                .flatten()
+        })
+    })
+    .expect("Xwayland is a child of the nested compositor")
+}
+
+fn map_plain_x11_window(display: u32, title: &str) -> x11rb::rust_connection::RustConnection {
+    let (conn, screen_num) =
+        x11rb::rust_connection::RustConnection::connect(Some(&format!(":{display}")))
+            .expect("connect to nested XWayland");
+    let screen = &conn.setup().roots[screen_num];
+    let xid = conn.generate_id().unwrap();
+    conn.create_window(
+        COPY_DEPTH_FROM_PARENT,
+        xid,
+        screen.root,
+        0,
+        0,
+        320,
+        200,
+        0,
+        WindowClass::INPUT_OUTPUT,
+        COPY_FROM_PARENT,
+        &CreateWindowAux::new().background_pixel(screen.black_pixel),
+    )
+    .unwrap();
+    conn.change_property8(
+        x11rb::protocol::xproto::PropMode::REPLACE,
+        xid,
+        AtomEnum::WM_NAME,
+        AtomEnum::STRING,
+        title.as_bytes(),
+    )
+    .unwrap();
+    conn.map_window(xid).unwrap();
+    conn.flush().unwrap();
+    conn
+}
+
 #[test]
 #[ignore = "needs a Wayland session to nest inside"]
 fn xwayland_geometry_and_clicks_match_at_scale_two_from_first_map() {
@@ -273,6 +325,71 @@ fn xwayland_geometry_and_clicks_match_at_scale_two_from_first_map() {
     assert_x11_rect(&conn, root, xid, &moved);
     while conn.poll_for_event().unwrap().is_some() {}
     assert_clicks_match(&mut session, &conn, &moved);
+}
+
+#[test]
+#[ignore = "needs a Wayland session to nest inside"]
+fn an_xwayland_crash_retires_ghosts_and_restarts_exactly_once() {
+    let mut session = Session::boot("xwayland-restart", SessionOptions::default())
+        .expect("nested compositor boots");
+    let display = xwayland_display(&session);
+    let first_client = map_plain_x11_window(display, "before-xwayland-crash");
+    poll_until(EVENT, "the first X11 window to map", || {
+        session
+            .world()
+            .ok()?
+            .windows
+            .iter()
+            .any(|window| window.mapped)
+            .then_some(())
+    })
+    .expect("first X11 generation is usable");
+
+    let first_pid = xwayland_child_pid(&session);
+    // This is the failure the compositor must survive: Xwayland gets no
+    // teardown opportunity and its XWM channel simply closes.
+    // SAFETY: the pid was resolved from this live session's direct child
+    // list and is used only to deliver a signal; no Rust memory is touched.
+    unsafe { libc::kill(first_pid as i32, libc::SIGKILL) };
+    drop(first_client);
+
+    poll_until(
+        EVENT,
+        "the dead generation's X11 records to disappear",
+        || session.world().ok()?.windows.is_empty().then_some(()),
+    )
+    .expect("no X11 ghost frames survive the disconnect");
+    let restarted_display = poll_until(EVENT, "one replacement XWayland generation", || {
+        let displays: Vec<u32> = session
+            .log()
+            .lines()
+            .filter(|line| line.contains("XWayland ready"))
+            .filter_map(|line| line.split("display=").nth(1)?.trim().parse().ok())
+            .collect();
+        (displays.len() == 2).then(|| *displays.last().unwrap())
+    })
+    .expect("the bounded restart becomes ready");
+    assert_ne!(xwayland_child_pid(&session), first_pid);
+
+    let _second_client = map_plain_x11_window(restarted_display, "after-xwayland-crash");
+    poll_until(
+        EVENT,
+        "an X11 window to map through the replacement",
+        || {
+            session
+                .world()
+                .ok()?
+                .windows
+                .iter()
+                .any(|window| window.mapped)
+                .then_some(())
+        },
+    )
+    .expect("the replacement XWayland accepts applications");
+    assert!(
+        session.compositor_alive(),
+        "the Wayland session survives the X server crash"
+    );
 }
 
 /// XSETTINGS does not reach Java, Electron's X11 backend or Xcursor.

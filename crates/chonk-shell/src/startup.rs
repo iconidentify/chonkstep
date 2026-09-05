@@ -223,6 +223,9 @@ pub struct SessionState {
     pub input: wm_config::InputConfig,
     pub monitor_rules: Vec<wm_config::hyprland::directive::Monitor>,
     pub keybindings: Vec<(KeyCombo, Action)>,
+    /// Retained configuration refusals for the Hyprland-compatible
+    /// `configerrors` query.
+    pub config_diagnostics: Vec<String>,
 }
 
 impl SessionState {
@@ -283,6 +286,7 @@ impl SessionState {
             input: config.input.clone(),
             monitor_rules: config.monitor_rules.clone(),
             keybindings: config.keybindings.clone(),
+            config_diagnostics: config.diagnostics.clone(),
         }
     }
 
@@ -922,6 +926,7 @@ mod tests {
             input: wm_config::InputConfig::default(),
             monitor_rules: Vec::new(),
             keybindings: Vec::new(),
+            config_diagnostics: Vec::new(),
         };
         assert_eq!(state.theme(), base.scaled(2.0));
         // The load-bearing half: the state still holds the *unscaled*

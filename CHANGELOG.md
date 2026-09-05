@@ -7,6 +7,37 @@ crate and both session binaries carry the same number.
 
 ### Fixed
 
+- **Transient dialogs now behave as a family on both Wayland and X11.**
+  Toplevel children are centred on their parent, modal children redirect
+  parent focus/drag/close gestures, and minimize, restore, and workspace
+  moves carry the bounded transient tree. Runtime parent and modal changes
+  are tracked through xdg-dialog, `WM_TRANSIENT_FOR`, and
+  `_NET_WM_STATE_MODAL` ([#55](https://github.com/iconidentify/chonkstep/issues/55)).
+- **A mid-session XWayland crash no longer leaves ghost frames or a stale
+  `DISPLAY`.** The live XWM disconnect path retires every X11 window and its
+  auxiliary state, then makes one bounded restart attempt; an end-to-end
+  test kills the real server and maps a window through its replacement
+  ([#58](https://github.com/iconidentify/chonkstep/issues/58)).
+- **Configuration decisions are inspectable.** Both binaries support
+  `--check-config [PATH]` and `--print-config [PATH]`, effective values name
+  their winning layer, Hyprland parser refusals are retained by
+  `hyprctl configerrors`, and formerly silent plugin/animation directives
+  are reported ([#60](https://github.com/iconidentify/chonkstep/issues/60)).
+- **Secret storage and portal global shortcuts are routed explicitly.** The
+  compositor serves Hyprland's global-shortcuts protocol with bounded,
+  duplicate-safe registrations and maps configured `global, app:id`
+  bindings to press/release events; the portal documentation now inventories
+  exported and missing interfaces honestly
+  ([#61](https://github.com/iconidentify/chonkstep/issues/61)).
+- **Desktop menus are keyboard-operable.** Up/Down wrap through enabled
+  rows, Left/Right traverse cascades, Enter/Space activate the highlighted
+  item, menus hold the modal keyboard grab while open, and `root-menu` is a
+  bindable action ([#62](https://github.com/iconidentify/chonkstep/issues/62)).
+- **Assistive and automation clients can inject a pointer.** The compositor
+  serves `zwlr_virtual_pointer_manager_v1` v2, maps absolute input to an
+  optional output, batches protocol frames, and routes motion, buttons, and
+  axes through the same focus, grab, confinement, shell, and idle path as
+  physical devices ([#63](https://github.com/iconidentify/chonkstep/issues/63)).
 - **Monitor hot-plug now reconciles the live desktop instead of leaving
   dark or phantom outputs.** Debounced DRM probes adopt new connectors,
   withdraw unplugged output globals, rebuild output-management and gamma
@@ -97,6 +128,11 @@ crate and both session binaries carry the same number.
 
 ### Performance
 
+- **Opaque compositor-owned buffers now participate in occlusion.** Theme
+  chrome and the black-backed cover wallpaper declare their full opaque
+  region at import, avoiding needless blending and allowing lower scene
+  elements to be culled; arbitrary client shell buffers remain conservative
+  ([#64](https://github.com/iconidentify/chonkstep/issues/64)).
 - **DRM composition is deadline-scheduled against predicted vblank.** A
   per-output, time-based asymmetric render estimator delays steady-cadence
   composition for fresher input, grows its safety margin after misses, and

@@ -18,7 +18,7 @@ use std::rc::Rc;
 
 use tiny_skia::{FilterQuality, Pixmap, PixmapPaint, Transform};
 use wm_core::{Backend, ClientId, DragHandle};
-use wm_theme::cascade::{CascadeMenu, MenuClick};
+use wm_theme::cascade::{CascadeMenu, MenuClick, MenuKey};
 use wm_theme::menu::MenuItem;
 use wm_theme::switcher::{self, SwitcherEntry};
 use wm_theme::workspace;
@@ -930,6 +930,19 @@ impl<Id: Copy + Eq + std::fmt::Debug> ShellMenu<Id> {
         local: Point,
     ) -> Option<MenuAction> {
         match self.menu.click(host, theme, font_system, window, local)? {
+            MenuClick::Action(action) => resolve_session_action(&self.session, action),
+            MenuClick::OpenedSubmenu | MenuClick::Dismissed => None,
+        }
+    }
+
+    fn key<H: wm_theme_api::PopupHost<PopupId = Id>>(
+        &mut self,
+        host: &mut H,
+        theme: &Theme,
+        font_system: &mut cosmic_text::FontSystem,
+        key: MenuKey,
+    ) -> Option<MenuAction> {
+        match self.menu.key(host, theme, font_system, key)? {
             MenuClick::Action(action) => resolve_session_action(&self.session, action),
             MenuClick::OpenedSubmenu | MenuClick::Dismissed => None,
         }
@@ -3587,6 +3600,17 @@ impl<B: Backend> Desktop<B> {
         B: wm_theme_api::PopupHost<PopupId = B::ShellId>,
     {
         let action = self.menu.click(backend, theme, &mut self.fonts.system(), window, local);
+        self.sync_escape_key_grab(backend);
+        action
+    }
+
+    /// Resolves one keyboard gesture against the deepest open menu
+    /// level through the same session/action mapping pointer clicks use.
+    pub fn key_menu(&mut self, backend: &mut B, theme: &Theme, key: MenuKey) -> Option<MenuAction>
+    where
+        B: wm_theme_api::PopupHost<PopupId = B::ShellId>,
+    {
+        let action = self.menu.key(backend, theme, &mut self.fonts.system(), key);
         self.sync_escape_key_grab(backend);
         action
     }

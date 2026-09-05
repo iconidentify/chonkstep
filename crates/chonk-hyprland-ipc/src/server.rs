@@ -271,7 +271,16 @@ pub fn answer(request: &Request, snapshot: &Snapshot) -> (String, Option<Action>
         "reload" => ("ok".to_string(), Some(Action::ReloadConfig)),
         "binds" => (if json { json_bindings(snapshot) } else { plain_bindings(snapshot) }, None),
         "devices" => (json_devices(snapshot), None),
-        "configerrors" => (if json { "[]".to_string() } else { String::new() }, None),
+        "configerrors" => (
+            if json {
+                serde_json::Value::Array(
+                    snapshot.config_errors.iter().map(|error| serde_json::json!({ "error": error })).collect()
+                ).to_string()
+            } else {
+                snapshot.config_errors.join("\n")
+            },
+            None,
+        ),
         "splash" => ("chonkstep".to_string(), None),
         // Hyprland's literal reply for a verb it does not have, and the
         // exact string Quickshell tests for when probing `j/status`.
@@ -1072,6 +1081,21 @@ mod enabled_tests {
     #[test]
     fn the_common_case_is_an_unset_variable_and_it_means_yes() {
         with_value(None, || assert!(Server::enabled()));
+    }
+
+    #[test]
+    fn configerrors_reports_the_retained_diagnostics_in_both_forms() {
+        let snapshot = Snapshot {
+            config_errors: vec!["bind: SUPER J — tiling-only".into(), "keyword: plugin — Hyprland-only".into()],
+            ..Snapshot::default()
+        };
+        let plain = Request::parse(b"/configerrors").unwrap();
+        assert_eq!(answer(&plain, &snapshot).0, snapshot.config_errors.join("\n"));
+
+        let json = Request::parse(b"j/configerrors").unwrap();
+        let value: serde_json::Value = serde_json::from_str(&answer(&json, &snapshot).0).unwrap();
+        assert_eq!(value[0]["error"], snapshot.config_errors[0]);
+        assert_eq!(value[1]["error"], snapshot.config_errors[1]);
     }
 
     #[test]

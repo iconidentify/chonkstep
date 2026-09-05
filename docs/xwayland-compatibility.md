@@ -75,6 +75,15 @@ desktop-switch events every other input path queues (proven by an
 x11rb pager round-tripping a workspace switch in the end-to-end
 suite), so `wmctrl -l` reads and `wmctrl -a` / `wmctrl -s` command.
 
+XWayland is supervised after it becomes ready. If its live XWM connection
+closes, chonkstep removes every X11 window, frame, stacking slot, XSETTINGS
+handle and EWMH connection from that generation, withdraws the dead `DISPLAY`
+from future launches, and attempts one restart. A replacement that reaches
+ready republishes all session settings; a second crash stands down instead of
+looping. The nested end-to-end suite SIGKILLs the real Xwayland process,
+asserts the old window leaves the compositor ledger, and maps a new window
+through the replacement ([#58](https://github.com/iconidentify/chonkstep/issues/58)).
+
 ## Decorations
 
 The rule is one sentence: a client that says it draws its own titlebar is

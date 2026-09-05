@@ -309,8 +309,18 @@ fn build_snapshot(
         devices.mice.push(PointerDevice { name: "chonkstep-pointer".into() });
     }
     Snapshot {
-        monitors, workspaces, windows, focused: focused.map(wm_core::ClientId::as_u64), locked,
-        cursor_position: wm.backend().pointer_position().map(|point| (point.x, point.y)), bindings, devices,
+        monitors,
+        workspaces,
+        windows,
+        focused: focused.map(wm_core::ClientId::as_u64),
+        locked,
+        cursor_position: wm
+            .backend()
+            .pointer_position()
+            .map(|point| (point.x, point.y)),
+        bindings,
+        config_errors: session.config_diagnostics.clone(),
+        devices,
     }
 }
 

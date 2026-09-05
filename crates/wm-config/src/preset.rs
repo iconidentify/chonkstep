@@ -191,6 +191,32 @@ pub fn base(table: &toml::Table) -> Config {
     config.keymap = keymap;
     apply_desktop(&mut config, desktop);
     apply_keymap(&mut config, keymap);
+    if desktop == Desktop::Omarchy {
+        for key in ["show_dock", "omarchy_bar", "theme"] {
+            config
+                .provenance
+                .insert(key.into(), "desktop preset (omarchy)".into());
+        }
+    }
+    if keymap == Keymap::Omarchy {
+        for key in ["keybindings", "commands"] {
+            config
+                .provenance
+                .insert(key.into(), "keymap preset (omarchy)".into());
+        }
+    }
+    if matches!(table.get("desktop"), Some(toml::Value::String(name)) if Desktop::from_name(name).is_some())
+    {
+        config
+            .provenance
+            .insert("desktop".into(), "config file".into());
+    }
+    if matches!(table.get("keymap"), Some(toml::Value::String(name)) if Keymap::from_name(name).is_some())
+    {
+        config
+            .provenance
+            .insert("keymap".into(), "config file".into());
+    }
     config
 }
 

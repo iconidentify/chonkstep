@@ -18,6 +18,7 @@ use wm_core::{
     Backend, BackendEvent, ClientFlags, ClientId, KeyCombo, Lifecycle, MaximizeDirections, MonitorInfo, MouseButton,
     Notification, ScrollDelta, WindowManager,
 };
+use wm_theme::cascade::MenuKey;
 use wm_theme::{FontState, RasterThemeEngine, Theme};
 use wm_theme_api::{DecorationBuffer, Point, PopupHost, Rect, Size};
 
@@ -707,7 +708,7 @@ fn bindings_for_grabs(state: &SessionState) -> Vec<(KeyCombo, Action)> {
 
 fn apply_binding_behaviors<B: Backend>(backend: &mut B, previous: &[wm_config::Binding], next: &[wm_config::Binding]) {
     for binding in previous {
-        if binding.release {
+        if binding.release || matches!(&binding.action, Action::GlobalShortcut(_)) {
             backend.set_key_release(binding.combo, false);
         }
         if binding.locked {
@@ -718,7 +719,7 @@ fn apply_binding_behaviors<B: Backend>(backend: &mut B, previous: &[wm_config::B
         }
     }
     for binding in next {
-        if binding.release {
+        if binding.release || matches!(&binding.action, Action::GlobalShortcut(_)) {
             backend.set_key_release(binding.combo, true);
         }
         if binding.locked {
@@ -942,6 +943,7 @@ fn primary_rect(monitors: &[MonitorInfo], screen: Size) -> Rect {
 /// action, so the event does not leak through to the focused client.
 pub enum KeyResolution {
     Action(Action),
+    Menu(MenuKey),
     Consumed,
 }
 
@@ -1244,7 +1246,9 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
             release_keymap: state
                 .bindings
                 .iter()
-                .filter(|binding| binding.release)
+                .filter(|binding| {
+                    binding.release || matches!(&binding.action, Action::GlobalShortcut(_))
+                })
                 .map(|binding| (binding.combo, binding.action.clone()))
                 .collect(),
             layer_keymap: HashMap::new(),
@@ -1331,7 +1335,9 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         self.release_keymap = next
             .bindings
             .iter()
-            .filter(|binding| binding.release)
+            .filter(|binding| {
+                binding.release || matches!(&binding.action, Action::GlobalShortcut(_))
+            })
             .map(|binding| (binding.combo, binding.action.clone()))
             .collect();
         let grab_bindings = bindings_for_grabs(&next);
@@ -1636,6 +1642,29 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
             self.overview_key = Some(*combo);
             return Some(KeyResolution::Action(Action::Overview));
         }
+        // An open menu owns the keyboard as completely as Overview.
+        // Recognized navigation is returned for immediate dispatch;
+        // every other key is still consumed so typing cannot leak into
+        // the client behind a modal menu.
+        if self.desktop.menu_visible() {
+            if combo.modifiers.is_empty() {
+                let key = match combo.keysym {
+                    XK_UP => Some(MenuKey::Up),
+                    XK_DOWN => Some(MenuKey::Down),
+                    XK_LEFT => Some(MenuKey::Left),
+                    XK_RIGHT => Some(MenuKey::Right),
+                    XK_RETURN | XK_KP_ENTER => Some(MenuKey::Enter),
+                    0x20 => Some(MenuKey::Space),
+                    crate::desktop::PANEL_DISMISS_KEYSYM => {
+                        self.transient_escape = true;
+                        None
+                    }
+                    _ => None,
+                };
+                return Some(key.map_or(KeyResolution::Consumed, KeyResolution::Menu));
+            }
+            return Some(KeyResolution::Consumed);
+        }
         // Escape belongs to the open transient before it belongs to a
         // configured binding or the focused client. The shared grab is
         // held only while a menu or instrument panel is visible, and
@@ -1755,6 +1784,26 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
             // right-click raises, so the menu, its items and its
             // dispatch are shared verbatim.
             Action::WindowMenu => wm.request_window_menu_for_focused(),
+            Action::RootMenu => {
+                let at = wm
+                    .focused_client()
+                    .and_then(|id| wm.client(id))
+                    .map(|client| client.geometry.pos)
+                    .or_else(|| {
+                        wm.monitors()
+                            .into_iter()
+                            .find(|monitor| monitor.primary)
+                            .map(|monitor| monitor.geometry.pos)
+                    })
+                    .unwrap_or(Point::new(0, 0));
+                self.desktop
+                    .open_root_menu(wm.backend_mut(), &self.theme, at);
+            }
+            // The Wayland compositor intercepts this variant and sends
+            // the matching protocol object. The X11 frontend has no
+            // such registry; keeping it a quiet no-op lets one shared
+            // Hyprland config remain usable on both backends.
+            Action::GlobalShortcut(_) => {}
             Action::WorkspaceNext => wm.switch_workspace(wm.current_workspace() + 1),
             Action::WorkspacePrev => {
                 if wm.current_workspace() > 0 {
@@ -1852,6 +1901,44 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         ShellOutcome::Continue
     }
 
+    /// Drives an open root/window/dock menu and executes a fired row
+    /// through the exact same dispatch used by a pointer release.
+    pub fn run_menu_key(&mut self, wm: &mut WindowManager<B>, key: MenuKey) -> ShellOutcome {
+        match self.desktop.key_menu(wm.backend_mut(), &self.theme, key) {
+            Some(action) => self.run_menu_action(wm, action),
+            None => ShellOutcome::Continue,
+        }
+    }
+
+    fn run_menu_action(&mut self, wm: &mut WindowManager<B>, action: MenuAction) -> ShellOutcome {
+        match action {
+            MenuAction::Root(action) => {
+                let outcome = root_action_outcome(&action);
+                self.run_root_menu_action(wm, action);
+                outcome
+            }
+            MenuAction::DockItem(id, action) => {
+                self.desktop
+                    .dock_item_menu_action(wm.backend_mut(), &self.theme, &id, action);
+                ShellOutcome::Continue
+            }
+            MenuAction::Window(client, action) => {
+                match action {
+                    WindowMenuAction::ToggleMaximize => wm.toggle_maximize_full(client),
+                    WindowMenuAction::Miniaturize => wm.miniaturize(client),
+                    WindowMenuAction::ToggleShade => wm.toggle_shade(client),
+                    WindowMenuAction::ToggleFullscreen => wm.toggle_fullscreen(client),
+                    WindowMenuAction::MoveToWorkspace(ws) => {
+                        wm.move_client_to_workspace(client, ws)
+                    }
+                    WindowMenuAction::Close => wm.close_client(client),
+                    WindowMenuAction::Kill => wm.kill_client(client),
+                }
+                ShellOutcome::Continue
+            }
+        }
+    }
+
     /// Opens the Overview and takes the modal keyboard grab — the same
     /// `Backend::grab_keyboard` the Alt-Tab cycle uses, taken from the
     /// shell layer because this modality lives here. Grabbed only if
@@ -1867,7 +1954,7 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         }
         self.populate_overview(wm);
         if self.desktop.overview_visible() {
-            wm.backend_mut().grab_keyboard();
+            Backend::grab_keyboard(wm.backend_mut());
         }
     }
 
@@ -1923,7 +2010,7 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
     /// bare desktop after an Escape, commanding a card that no longer
     /// exists on screen. A no-op when no menu is open.
     fn close_overview(&mut self, wm: &mut WindowManager<B>) {
-        wm.backend_mut().ungrab_keyboard();
+        Backend::ungrab_keyboard(wm.backend_mut());
         self.desktop.close_menu(wm.backend_mut());
         self.desktop.hide_overview(wm.backend_mut());
     }
@@ -2241,37 +2328,11 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
             return ShellOutcome::Continue;
         }
 
-        if let Some(action) = self.desktop.click_menu(wm.backend_mut(), &self.theme, surface, local) {
-            match action {
-                MenuAction::Root(action) => {
-                    let outcome = root_action_outcome(&action);
-                    self.run_root_menu_action(wm, action);
-                    return outcome;
-                }
-                // A window-menu pick carries the client it was opened
-                // for. Every call below is a stale-id-safe no-op by
-                // `wm-core` contract — the client may well have
-                // vanished while the menu sat open — so no
-                // re-validation is needed here.
-                // A dock tile's own menu. The pick carries the tile's
-                // persistence id rather than its slot, so a reorder or
-                // a crash while the menu sat open cannot make it
-                // command a different tile than the one right-clicked;
-                // a stale id is silently nothing, like every other
-                // stale target here.
-                MenuAction::DockItem(id, action) => {
-                    self.desktop.dock_item_menu_action(wm.backend_mut(), &self.theme, &id, action);
-                }
-                MenuAction::Window(client, action) => match action {
-                    WindowMenuAction::ToggleMaximize => wm.toggle_maximize_full(client),
-                    WindowMenuAction::Miniaturize => wm.miniaturize(client),
-                    WindowMenuAction::ToggleShade => wm.toggle_shade(client),
-                    WindowMenuAction::ToggleFullscreen => wm.toggle_fullscreen(client),
-                    WindowMenuAction::MoveToWorkspace(ws) => wm.move_client_to_workspace(client, ws),
-                    WindowMenuAction::Close => wm.close_client(client),
-                    WindowMenuAction::Kill => wm.kill_client(client),
-                },
-            }
+        if let Some(action) = self
+            .desktop
+            .click_menu(wm.backend_mut(), &self.theme, surface, local)
+        {
+            return self.run_menu_action(wm, action);
         }
 
         ShellOutcome::Continue
