@@ -276,6 +276,18 @@ pub enum BackendEvent<Win, Frame> {
     /// miniaturization is a WM gesture) left the button dead in every
     /// client-decorated application — reported live from LibreOffice.
     MinimizeRequest(Win),
+    /// An X11 `ConfigureRequest` carrying a stack mode of `Above` with
+    /// no sibling — `XRaiseWindow`, which is what Java AWT's
+    /// `Window.toFront`, Tk's `raise` and any raw-Xlib application
+    /// compile to.
+    ///
+    /// Distinct from [`Self::ActivateRequested`] because it asks for
+    /// strictly less: a raise, not a raise *and* the keyboard. A
+    /// toolkit that checked `_NET_SUPPORTED` would have sent
+    /// `_NET_ACTIVE_WINDOW` instead; everything below that layer sends
+    /// this, and answering it with an activation would move focus the
+    /// client never asked for.
+    RaiseRequest(Win),
     PointerButton {
         surface: SurfaceRef<Win, Frame>,
         local: Point,

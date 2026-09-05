@@ -993,6 +993,7 @@ impl Backend for WaylandBackend {
     fn raise(&mut self, frame: Self::FrameId) {
         if raise_stack_entry(&mut self.stacking, StackEntry::Frame(frame)) {
             self.damage = true;
+            self.stacking_dirty = true;
         }
     }
 
@@ -1012,6 +1013,7 @@ impl Backend for WaylandBackend {
     fn raise_frameless(&mut self, window: Self::WindowId) {
         if raise_stack_entry(&mut self.stacking, StackEntry::Window(window)) {
             self.damage = true;
+            self.stacking_dirty = true;
         }
     }
 
@@ -1029,9 +1031,17 @@ impl Backend for WaylandBackend {
             .filter(|frame| self.frames.contains_key(frame))
             .map(|&frame| StackEntry::Frame(frame))
             .collect();
+        let before = self.stacking.clone();
         self.stacking.retain(|entry| !matches!(entry, StackEntry::Frame(f) if order_back_to_front.contains(f)));
         self.stacking.extend(listed);
         self.damage = true;
+        // Compared rather than assumed: `restack` is called from the
+        // workspace-switch and Alt-Tab paths on every pass they run,
+        // and a "dirty" that meant "mentioned" would grab the X server
+        // once a frame (see `WaylandBackend::stacking_dirty`).
+        if self.stacking != before {
+            self.stacking_dirty = true;
+        }
     }
 
     // -- focus / close ----------------------------------------------------

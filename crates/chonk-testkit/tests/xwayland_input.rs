@@ -793,3 +793,78 @@ fn wm_hints_urgency_is_read_at_map_and_cleared_by_focus() {
         "urgency must be clearable, or a window that rings once can never ring again"
     );
 }
+
+/// `XRaiseWindow` — what Java AWT's `Window.toFront`, Tk's `raise` and
+/// any raw-Xlib application compile to. It arrives as a
+/// `ConfigureRequest` carrying only a stack mode, which used to resolve
+/// to the window's current rectangle and therefore to nothing at all.
+///
+/// Asserted against the X server's own stacking rather than the
+/// compositor's, because the two are what this connects: `QueryTree`
+/// returns the server's children bottom-to-top, and the compositor now
+/// publishes its order into exactly that list. The first poll is a real
+/// assertion in its own right — it is the outbound half, which no call
+/// in this repository made before.
+#[test]
+#[ignore = "needs a live Wayland session to nest in"]
+fn an_x_raise_window_request_reaches_the_x_servers_stacking_order() {
+    let mut session =
+        Session::boot("xwayland-raise", SessionOptions::default()).expect("nested compositor boots");
+    let display = xwayland_display(&session);
+    let _ = ewmh_display(&session);
+    let (conn, screen_num) =
+        x11rb::rust_connection::RustConnection::connect(Some(&format!(":{display}")))
+            .expect("connect to nested XWayland");
+    let root = conn.setup().roots[screen_num].root;
+
+    let (lower, _) = map_probe_window(&mut session, &conn, screen_num, "raise-lower", None);
+    let (upper, _) = map_probe_window(&mut session, &conn, screen_num, "raise-upper", None);
+
+    // Where each window sits in the server's bottom-to-top child list. A
+    // managed X11 window is reparented into a frame, so the entry to
+    // look for is whichever ancestor is a child of root.
+    let depth_of = |target: u32| -> usize {
+        let children = conn.query_tree(root).unwrap().reply().unwrap().children;
+        let mut ancestors = vec![target];
+        let mut node = target;
+        while let Ok(reply) = conn.query_tree(node).unwrap().reply() {
+            if reply.parent == root || reply.parent == 0 {
+                ancestors.push(node);
+                break;
+            }
+            node = reply.parent;
+            ancestors.push(node);
+        }
+        children
+            .iter()
+            .position(|child| ancestors.contains(child))
+            .unwrap_or_else(|| panic!("window {target:#x} is not in the server's tree"))
+    };
+
+    poll_until(EVENT, "the compositor to publish its order to the server", || {
+        (depth_of(upper) > depth_of(lower)).then_some(())
+    })
+    .expect("the window mapped last must be on top on the server too");
+
+    // The bare Xlib raise: a ConfigureRequest with a stack mode and no
+    // geometry.
+    conn.configure_window(
+        lower,
+        &x11rb::protocol::xproto::ConfigureWindowAux::new()
+            .stack_mode(x11rb::protocol::xproto::StackMode::ABOVE),
+    )
+    .unwrap();
+    conn.flush().unwrap();
+
+    poll_until(EVENT, "XRaiseWindow to move the server's stacking order", || {
+        (depth_of(lower) > depth_of(upper)).then_some(())
+    })
+    .unwrap_or_else(|e| {
+        let children = conn.query_tree(root).unwrap().reply().unwrap().children;
+        panic!(
+            "{e}\nlower={lower:#x} at {} upper={upper:#x} at {}\nroot children: {children:#x?}",
+            depth_of(lower),
+            depth_of(upper)
+        )
+    });
+}

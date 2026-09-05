@@ -604,6 +604,16 @@ pub struct WaylandBackend {
     pub(crate) shells: HashMap<WlShellId, ShellRecord>,
     /// Bottom-to-top managed application order — see [`StackEntry`].
     pub(crate) stacking: Vec<StackEntry>,
+    /// Whether [`Self::stacking`] has actually moved since the X server
+    /// was last told about it.
+    ///
+    /// "Dirty means changed, not mentioned", the same discipline
+    /// `EwmhLedger`'s `note_*` methods keep: the stacking vector is
+    /// re-derived on paths that run every pass, and telling XWayland
+    /// unconditionally would put a `grab_server`/`ungrab_server` pair
+    /// on the XWM connection once a frame. Only the three verbs that
+    /// return "the vector moved" set this.
+    pub(crate) stacking_dirty: bool,
     /// Bottom-to-top order within both shell bands. A shell's `above`
     /// bit chooses its band; entries of the other band are skipped.
     /// This is the single source of shell order for both rendering and
@@ -934,6 +944,7 @@ impl WaylandBackend {
             monitors,
             monitor_scales,
             monitor_outputs,
+            stacking_dirty: false,
             input_devices: Vec::new(),
             ime_popups: Vec::new(),
             output_size,
@@ -2241,6 +2252,11 @@ impl Compositor {
         // XWayland root after the drains, so `xprop`/`wmctrl` read the
         // state the desktop just settled into, never a half-applied
         // pass. A no-op until XWayland is ready (see `xewmh::flush`).
+        // The X server's own stacking, before the EWMH publish that
+        // rewrites `_NET_CLIENT_LIST_STACKING` from it — so the list a
+        // pager reads and the order the server holds are settled in
+        // that order and cannot disagree within a pass.
+        crate::xwayland::sync_stacking_order(self);
         crate::xewmh::flush(self);
         // Layer surfaces settle beside them and before the damage test
         // for the same reason: a bar that just changed its exclusive

@@ -1356,6 +1356,14 @@ impl<B: Backend> WindowManager<B> {
                     self.miniaturize(id);
                 }
             }
+            // `XRaiseWindow`. The same raise a click performs, and
+            // nothing more: the client asked for the front, not for the
+            // keyboard, and `raise_client_to_top` is exactly that verb.
+            BackendEvent::RaiseRequest(window) => {
+                if let Some(&id) = self.window_index.get(&window) {
+                    self.raise_client_to_top(id);
+                }
+            }
             BackendEvent::KeyPress(combo) => self.handle_key_press(combo),
             BackendEvent::KeyRelease(combo) => self.handle_key_release(combo),
             BackendEvent::PointerEnter { surface } => self.handle_pointer_enter(surface),
@@ -4548,6 +4556,53 @@ mod tests {
             !wm.client(noisy_id).unwrap().flags.contains(ClientFlags::URGENT),
             "attention was asked for and given; an urgency that cannot be dismissed is worse than none"
         );
+    }
+
+    /// `XRaiseWindow` asks for the front and nothing else. Answering
+    /// it with an activation would hand over the keyboard the client
+    /// never asked for.
+    #[test]
+    fn a_raise_request_raises_without_taking_focus() {
+        let mut backend = FakeBackend::new();
+        let lower = backend.create_window();
+        let upper = backend.create_window();
+        let mut wm = wm(backend);
+        wm.dispatch(BackendEvent::MapRequest(lower));
+        wm.dispatch(BackendEvent::MapRequest(upper));
+        let lower_id = wm.client_for_window(lower).unwrap();
+        let lower_frame = wm.client(lower_id).unwrap().frame.unwrap();
+        let upper_id = wm.client_for_window(upper).unwrap();
+        assert!(wm.client(upper_id).unwrap().flags.contains(ClientFlags::FOCUSED));
+        wm.backend_mut().raised_frames.clear();
+
+        wm.dispatch(BackendEvent::RaiseRequest(lower));
+
+        assert_eq!(
+            wm.backend().raised_frames,
+            vec![lower_frame],
+            "the window that asked must come to the front"
+        );
+        assert!(
+            wm.client(upper_id).unwrap().flags.contains(ClientFlags::FOCUSED),
+            "a raise is not an activation; the keyboard must not move"
+        );
+        assert!(!wm.client(lower_id).unwrap().flags.contains(ClientFlags::FOCUSED));
+    }
+
+    /// A stale id is ignored rather than panicking, the same way every
+    /// other backend-request arm treats one.
+    #[test]
+    fn a_raise_request_for_an_unknown_window_is_ignored() {
+        let mut backend = FakeBackend::new();
+        let window = backend.create_window();
+        let mut wm = wm(backend);
+        wm.dispatch(BackendEvent::MapRequest(window));
+        wm.dispatch(BackendEvent::Destroyed(window));
+        wm.backend_mut().raised_frames.clear();
+
+        wm.dispatch(BackendEvent::RaiseRequest(window));
+
+        assert!(wm.backend().raised_frames.is_empty());
     }
 
     #[test]
