@@ -42,13 +42,10 @@
 //!   means re-running every step of [`init`] against it while the old
 //!   one is still scanning out; a laptop being docked is a session
 //!   restart today.
-//! - **No connector hot-plug.** Connectors are enumerated once, at
-//!   startup. Plugging a monitor in mid-session logs a udev `Changed`
-//!   event and nothing else: adopting it means minting an `Output` and
-//!   a `wl_output` global after clients have already bound the ones
-//!   they know about, re-laying out every existing output, and telling
-//!   `wm-core` its screen just changed shape — a session restart picks
-//!   the new monitor up today.
+//! - **Connector hot-plug on the active GPU.** Udev changes are
+//!   debounced, the connector set is re-probed, and outputs, protocol
+//!   globals, layout state, gamma slots, and stranded windows are
+//!   reconciled together. GPU hot-plug remains separate and unsupported.
 //! - The pointer uses the hardware cursor plane when the driver offers
 //!   one (see [`FRAME_FLAGS`]); the nested backend composites it
 //!   instead, because a window on someone else's desktop has no planes
@@ -80,12 +77,13 @@ use smithay::backend::udev::{all_gpus, primary_gpu, UdevBackend, UdevEvent};
 use smithay::output::{Mode as OutputMode, Output, OutputModeSource, PhysicalProperties};
 use smithay::reexports::calloop::LoopHandle;
 use smithay::reexports::drm::control::{
-    connector, crtc, plane, Device as ControlDevice, Mode as DrmMode, ModeTypeFlags, PlaneType, ResourceHandles,
+    connector, crtc, plane, Device as ControlDevice, Mode as DrmMode, ModeFlags, ModeTypeFlags,
+    PlaneType, ResourceHandles,
 };
 use smithay::reexports::input::Libinput;
 use smithay::reexports::rustix::fs::OFlags;
 use smithay::reexports::wayland_server::DisplayHandle;
-use smithay::utils::{DeviceFd, Transform};
+use smithay::utils::{Clock, DeviceFd, Monotonic, Transform};
 use smithay::wayland::presentation::Refresh;
 use smithay::desktop::utils::OutputPresentationFeedback;
 
@@ -480,6 +478,11 @@ pub(crate) struct SessionGraphics {
     /// publishing that primary node as a render device crashes clients
     /// such as xdg-desktop-portal-wlr. See [`render_node_for_fd`].
     render_node: Option<DrmNode>,
+    /// Retained because a connector appearing after startup needs the
+    /// same allocator and renderer-format intersection as the outputs
+    /// built during `init`.
+    gbm: GbmDevice<DrmDeviceFd>,
+    render_formats: Vec<Format>,
     /// One per connected connector, in the order [`init`] enumerated
     /// them. That order is load-bearing: it is the order
     /// `Compositor::outputs` holds the matching `Output`s in, which is
@@ -498,6 +501,10 @@ pub(crate) struct SessionGraphics {
     /// them completes — see [`strict_release_configured`] for the
     /// mechanism and the NVIDIA-shaped reason it exists.
     strict_release: bool,
+    /// Debounced connector rescan deadline. A physical plug produces a
+    /// burst of udev changes and every forced connector probe may block;
+    /// one absolute deadline coalesces that burst into one walk.
+    hotplug_due: Option<Instant>,
 }
 
 /// One output being scanned out: its crtc, its place in the global
@@ -514,6 +521,9 @@ struct SessionOutput {
     /// Connector name (`eDP-1`, `HDMI-A-2`), for log lines that have to
     /// name which screen is misbehaving.
     name: String,
+    /// Stable KMS identity used to diff a fresh connector enumeration
+    /// without relying on vector positions that change on unplug.
+    connector: connector::Handle,
     /// The scanout engine driving it. Always equal to
     /// `drm_compositor.crtc()`; kept alongside so the page-flip handler
     /// can find the right output without reaching into the compositor.
@@ -584,6 +594,193 @@ struct SessionOutput {
     /// merely when rendering finished.
     presentation: Option<OutputPresentationFeedback>,
     refresh: Refresh,
+    /// Predicts the next vblank and learns how much of the interval
+    /// composition actually consumes. Rendering is armed late enough
+    /// to sample fresh input while retaining a measured safety budget.
+    frame_clock: FrameClock,
+}
+
+const INITIAL_RENDER_MEAN: Duration = Duration::from_millis(2);
+const INITIAL_RENDER_DEVIATION: Duration = Duration::from_millis(1);
+const BASE_RENDER_MARGIN: Duration = Duration::from_micros(1_500);
+const MAX_RENDER_MARGIN: Duration = Duration::from_millis(8);
+
+/// Per-output deadline estimator. All filtering is elapsed-time based,
+/// so it behaves the same at 60 Hz and 144 Hz and naturally forgets a
+/// stale sample after an idle gap.
+#[derive(Clone, Copy, Debug)]
+struct FrameClock {
+    last_vblank: Option<Instant>,
+    period: Option<Duration>,
+    vblank_duration: Duration,
+    mean: Duration,
+    deviation: Duration,
+    margin: Duration,
+    last_sample: Option<Instant>,
+    deadline: Option<Instant>,
+    target_vblank: Option<Instant>,
+}
+
+impl FrameClock {
+    fn new(mode: DrmMode) -> Self {
+        Self {
+            last_vblank: None,
+            period: mode_period(mode),
+            vblank_duration: mode_vblank_duration(mode),
+            mean: INITIAL_RENDER_MEAN,
+            deviation: INITIAL_RENDER_DEVIATION,
+            margin: BASE_RENDER_MARGIN,
+            last_sample: None,
+            deadline: None,
+            target_vblank: None,
+        }
+    }
+
+    #[cfg(test)]
+    fn for_period(period: Duration) -> Self {
+        Self {
+            last_vblank: None,
+            period: Some(period),
+            vblank_duration: Duration::ZERO,
+            mean: INITIAL_RENDER_MEAN,
+            deviation: INITIAL_RENDER_DEVIATION,
+            margin: BASE_RENDER_MARGIN,
+            last_sample: None,
+            deadline: None,
+            target_vblank: None,
+        }
+    }
+
+    fn update_mode(&mut self, mode: DrmMode) {
+        self.period = mode_period(mode);
+        self.vblank_duration = mode_vblank_duration(mode);
+        self.last_vblank = None;
+        self.deadline = None;
+        self.target_vblank = None;
+    }
+
+    fn note_vblank(&mut self, at: Instant) {
+        self.last_vblank = Some(at);
+        self.deadline = None;
+        self.target_vblank = None;
+    }
+
+    fn disarm(&mut self) {
+        self.last_vblank = None;
+        self.deadline = None;
+        self.target_vblank = None;
+    }
+
+    fn pessimistic_budget(&self) -> Duration {
+        self.mean
+            .saturating_add(self.deviation.saturating_mul(2))
+            .saturating_add(self.margin)
+            .saturating_add(self.vblank_duration)
+    }
+
+    fn optimistic_budget(&self) -> Duration {
+        self.mean.saturating_add(self.margin).saturating_add(self.vblank_duration)
+    }
+
+    /// Arms this frame once and returns its absolute deadline. The
+    /// first frame and the first frame after an idle gap remain
+    /// immediate; deadline scheduling is only useful on a live cadence.
+    fn arm(&mut self, now: Instant) -> Instant {
+        if let Some(deadline) = self.deadline {
+            return deadline;
+        }
+        let Some(period) = self.period.filter(|period| !period.is_zero()) else {
+            self.deadline = Some(now);
+            return now;
+        };
+        let Some(last) = self.last_vblank else {
+            self.deadline = Some(now);
+            return now;
+        };
+        if now.saturating_duration_since(last) > period.saturating_mul(3) {
+            self.deadline = Some(now);
+            return now;
+        }
+
+        let mut target = last + period;
+        while target <= now {
+            target += period;
+        }
+        let pessimistic = target.checked_sub(self.pessimistic_budget()).unwrap_or(now);
+        let optimistic = target.checked_sub(self.optimistic_budget()).unwrap_or(now);
+        let deadline = if pessimistic > now {
+            pessimistic
+        } else if optimistic > now {
+            optimistic
+        } else {
+            target += period;
+            target.checked_sub(self.pessimistic_budget()).unwrap_or(now)
+        };
+        self.target_vblank = Some(target);
+        self.deadline = Some(deadline);
+        deadline
+    }
+
+    fn observe_render(&mut self, sample: Duration, finished: Instant) {
+        let elapsed = self
+            .last_sample
+            .map(|previous| finished.saturating_duration_since(previous))
+            .unwrap_or(Duration::from_millis(250));
+        self.last_sample = Some(finished);
+
+        let seconds = elapsed.as_secs_f64();
+        let mean_alpha = 1.0 - (-seconds / 0.35).exp();
+        let decay_alpha = 1.0 - (-seconds / 3.0).exp();
+        let mean = self.mean.as_secs_f64();
+        let sample_secs = sample.as_secs_f64();
+        self.mean = Duration::from_secs_f64((mean + (sample_secs - mean) * mean_alpha).max(0.000_001));
+        let overshoot = sample.saturating_sub(self.mean);
+        if !overshoot.is_zero() {
+            self.deviation = self.deviation.max(overshoot);
+        } else {
+            self.deviation = Duration::from_secs_f64(
+                self.deviation.as_secs_f64() * (1.0 - decay_alpha),
+            );
+        }
+
+        if self.target_vblank.is_some_and(|target| finished > target) {
+            let overrun = self.target_vblank.map(|target| finished.duration_since(target)).unwrap_or_default();
+            self.margin = self.margin.saturating_add(overrun.max(Duration::from_micros(250))).min(MAX_RENDER_MARGIN);
+        } else {
+            let margin = self.margin.as_secs_f64();
+            let base = BASE_RENDER_MARGIN.as_secs_f64();
+            self.margin = Duration::from_secs_f64((margin + (base - margin) * decay_alpha).max(base));
+        }
+        self.deadline = None;
+        self.target_vblank = None;
+    }
+}
+
+fn mode_period(mode: DrmMode) -> Option<Duration> {
+    let millihertz = OutputMode::from(mode).refresh;
+    (millihertz > 0).then(|| Duration::from_nanos(1_000_000_000_000 / millihertz as u64))
+}
+
+fn mode_vblank_duration(mode: DrmMode) -> Duration {
+    let (_, vdisplay) = mode.size();
+    let (_, _, htotal) = mode.hsync();
+    let (_, _, vtotal) = mode.vsync();
+    let clock_khz = u64::from(mode.clock());
+    if clock_khz == 0 || vtotal <= vdisplay || htotal == 0 {
+        return Duration::ZERO;
+    }
+    let mut micros = (u64::from(vtotal - vdisplay) * u64::from(htotal) * 1_000)
+        .div_ceil(clock_khz);
+    if mode.flags().contains(ModeFlags::DBLSCAN) {
+        micros = micros.saturating_mul(2);
+    }
+    Duration::from_micros(micros)
+}
+
+fn drm_monotonic_instant(timestamp: Duration) -> Instant {
+    let now = Instant::now();
+    let clock_now = Duration::from_micros(Clock::<Monotonic>::new().now().as_micros());
+    now.checked_sub(clock_now.saturating_sub(timestamp)).unwrap_or(now)
 }
 
 /// A page flip the kernel has accepted and not yet reported back.
@@ -858,6 +1055,11 @@ pub(crate) fn init(
                         tracing::debug!(?crtc, "page flip completed on a crtc we do not drive");
                         return;
                     };
+                    let vblank_at = match metadata.map(|meta| meta.time) {
+                        Some(DrmEventTime::Monotonic(time)) => drm_monotonic_instant(time),
+                        _ => Instant::now(),
+                    };
+                    output.frame_clock.note_vblank(vblank_at);
                     let pending = output.frame_pending.take();
                     if let Some(mut feedback) = output.presentation.take() {
                         let flags = smithay::reexports::wayland_protocols::wp::presentation_time::server::wp_presentation_feedback::Kind::Vsync
@@ -911,19 +1113,21 @@ pub(crate) fn init(
         })
         .map_err(|error| format!("failed to register the DRM event source: {error}"))?;
 
-    // udev. Watched but not acted on: see the module docs on GPU and
-    // connector hot-plug. Logging it is still worth the source, because
-    // "the screen went black" and "the kernel took your GPU away" look
-    // identical over SSH otherwise.
+    // udev. Connector changes on the device we own arm one debounced
+    // rescan; GPU add/remove remains outside this single-device backend.
     let udev_backend =
         UdevBackend::new(&seat_name).map_err(|error| format!("could not watch udev for seat {seat_name}: {error}"))?;
     loop_handle
-        .insert_source(udev_backend, |event, _, _comp: &mut Compositor| match event {
+        .insert_source(udev_backend, |event, _, comp: &mut Compositor| match event {
             UdevEvent::Added { device_id, path } => {
                 tracing::info!(?device_id, path = %path.display(), "a DRM device appeared; chonkstep drives a single GPU and will not adopt it");
             }
             UdevEvent::Changed { device_id } => {
-                tracing::info!(?device_id, "a DRM device changed (connector hot-plug?); the session keeps the outputs it started with");
+                let Graphics::Session(session) = &mut comp.graphics else { return };
+                if session.drm.device_id() == device_id {
+                    session.hotplug_due = Some(Instant::now() + Duration::from_millis(120));
+                    tracing::debug!(?device_id, "connector change noticed; debounced rescan armed");
+                }
             }
             UdevEvent::Removed { device_id } => {
                 tracing::warn!(?device_id, "a DRM device went away; if it is ours the session will stop painting");
@@ -970,6 +1174,7 @@ pub(crate) fn init(
                     // preempted whatever sampling was still queued.
                     for output in session.outputs.iter_mut() {
                         output.frame_pending = None;
+                        output.frame_clock.disarm();
                         clear_scene_holds(
                             &mut output.pending_scene,
                             &mut output.scanout_scene,
@@ -1004,6 +1209,10 @@ pub(crate) fn init(
                     if let Err(error) = session.drm.activate(true) {
                         tracing::error!(?error, "could not reactivate the DRM device; the screen will stay dark");
                     }
+                    // The connector set may have changed while udev and the
+                    // DRM fd were suspended. Reconcile once the fd is usable
+                    // again even if no hotplug event survived the VT switch.
+                    session.hotplug_due = Some(Instant::now() + Duration::from_millis(120));
                     for output in session.outputs.iter_mut() {
                         if let Err(error) = output.drm_compositor.reset_state() {
                             tracing::error!(
@@ -1061,10 +1270,13 @@ pub(crate) fn init(
             drm,
             renderer,
             render_node,
+            gbm,
+            render_formats,
             outputs: session_outputs,
             libinput,
             last_service: Instant::now(),
             strict_release,
+            hotplug_due: None,
         })),
         outputs: setups,
     })
@@ -1235,6 +1447,7 @@ fn attach_output(
     Ok((
         SessionOutput {
             name,
+            connector: info.handle(),
             crtc: *crtc,
             position,
             drm_compositor,
@@ -1252,6 +1465,7 @@ fn attach_output(
             } else {
                 Refresh::Unknown
             },
+            frame_clock: FrameClock::new(*mode),
         },
         OutputSetup { output, position, size, modes },
     ))
@@ -1287,6 +1501,136 @@ pub(crate) fn redraw_pending(graphics: &Graphics) -> bool {
             session.outputs.iter().any(|output| output.dirty || output.frame_pending.is_some())
         }
     }
+}
+
+/// Earliest armed render deadline, folded into the event loop's wait.
+/// An output first acquires a deadline when `render_frame_session`
+/// consumes damage; after that this wakes calloop at the exact absolute
+/// instant instead of depending on the shell's housekeeping cadence.
+pub(crate) fn next_render_deadline(graphics: &Graphics) -> Option<Instant> {
+    let Graphics::Session(session) = graphics else {
+        return None;
+    };
+    if !session.drm.is_active() {
+        return None;
+    }
+    session
+        .outputs
+        .iter()
+        .filter(|output| output.dirty && output.frame_pending.is_none())
+        .filter_map(|output| output.frame_clock.deadline)
+        .min()
+}
+
+/// Deadline of a pending connector rescan, for the event-loop wait.
+pub(crate) fn next_hotplug_deadline(graphics: &Graphics) -> Option<Instant> {
+    let Graphics::Session(session) = graphics else {
+        return None;
+    };
+    session.hotplug_due
+}
+
+/// Performs one due connector rescan and hands the structural delta to
+/// the compositor ledger. The forced KMS probes stay off the udev
+/// callback itself, so a burst is coalesced before any potentially slow
+/// connector query runs.
+pub(crate) fn service_connector_hotplug(comp: &mut Compositor) {
+    let now = Instant::now();
+    let Graphics::Session(session) = &mut comp.graphics else {
+        return;
+    };
+    if !session.hotplug_due.is_some_and(|deadline| deadline <= now) {
+        return;
+    }
+    session.hotplug_due = None;
+    if !session.drm.is_active() {
+        // Resume re-arms a scan below; probing a revoked fd only creates
+        // noise and can block in the session implementation.
+        session.hotplug_due = Some(now + Duration::from_millis(120));
+        return;
+    }
+
+    match rescan_session_outputs(session) {
+        Ok((removed, added)) if removed.is_empty() && added.is_empty() => {
+            tracing::debug!("connector rescan found no output changes");
+        }
+        Ok((removed, added)) => crate::state::apply_connector_hotplug(comp, &removed, added),
+        Err(error) => tracing::warn!(%error, "connector rescan failed; keeping the current output set"),
+    }
+}
+
+fn rescan_session_outputs(session: &mut SessionGraphics) -> Result<(Vec<usize>, Vec<OutputSetup>), String> {
+    let resources = session
+        .drm
+        .resource_handles()
+        .map_err(|error| format!("could not enumerate KMS resources: {error}"))?;
+    let mut connected = Vec::new();
+    for handle in resources.connectors() {
+        match session.drm.get_connector(*handle, true) {
+            Ok(info) if info.state() == connector::State::Connected && !info.modes().is_empty() => {
+                connected.push(info);
+            }
+            Ok(_) => {}
+            Err(error) => tracing::debug!(?handle, ?error, "connector probe failed during hotplug rescan"),
+        }
+    }
+
+    let connected_handles: Vec<connector::Handle> = connected.iter().map(connector::Info::handle).collect();
+    let mut removed: Vec<usize> = session
+        .outputs
+        .iter()
+        .enumerate()
+        .filter_map(|(index, output)| (!connected_handles.contains(&output.connector)).then_some(index))
+        .collect();
+    removed.sort_unstable_by(|a, b| b.cmp(a));
+    for index in &removed {
+        let mut output = session.outputs.remove(*index);
+        if let Some(mut feedback) = output.presentation.take() {
+            feedback.discarded();
+        }
+        tracing::info!(output = %output.name, "connector unplugged; output removed from scanout");
+    }
+
+    let mut next_x = session
+        .outputs
+        .iter()
+        .map(|output| {
+            let width = output.drm_modes.first().map(|mode| mode.size().0 as i32).unwrap_or(0);
+            output.position.x.saturating_add(width)
+        })
+        .max()
+        .unwrap_or(0);
+    let mut added = Vec::new();
+    for info in connected {
+        if session.outputs.iter().any(|output| output.connector == info.handle()) {
+            continue;
+        }
+        let Some(mode) = preferred_mode(&info) else { continue };
+        let taken: Vec<crtc::Handle> = session.outputs.iter().map(|output| output.crtc).collect();
+        let Some(crtc) = crtc_for(&session.drm, &resources, &info, &taken) else {
+            tracing::warn!(output = %connector_name(&info), "hot-plugged connector has no free crtc");
+            continue;
+        };
+        let target = ConnectorTarget { info, crtc, mode };
+        let position = Point::new(next_x, 0);
+        match attach_output(
+            &mut session.drm,
+            &session.gbm,
+            session.render_node,
+            &session.render_formats,
+            &target,
+            position,
+        ) {
+            Ok((output, setup)) => {
+                next_x = next_x.saturating_add(setup.size.w as i32);
+                tracing::info!(output = %output.name, x = position.x, "hot-plugged connector adopted");
+                session.outputs.push(output);
+                added.push(setup);
+            }
+            Err(error) => tracing::warn!(output = %connector_name(&target.info), %error, "could not adopt hot-plugged connector"),
+        }
+    }
+    Ok((removed, added))
 }
 
 /// Services every page flip in flight: names the ones that have overrun
@@ -1462,6 +1806,7 @@ pub(crate) fn apply_mode(graphics: &mut Graphics, index: usize, mode_index: usiz
             } else {
                 Refresh::Unknown
             };
+            output.frame_clock.update_mode(mode);
             output.dirty = true;
             Ok(())
         }
@@ -1627,7 +1972,8 @@ pub(crate) fn change_vt(comp: &mut Compositor, vt: i32) -> bool {
 /// single output the two collapse into exactly the old behavior: damage
 /// sets dirty, dirty clears on a successful submit, and a blocked or
 /// failed frame is retried on the next wakeup.
-pub(crate) fn render_frame_session(comp: &mut Compositor) {
+#[cfg_attr(feature = "profile", profiling::function)]
+pub(crate) fn render_frame_session(comp: &mut Compositor) -> bool {
     // Disjoint field borrows: the graphics stack mutates while the
     // ledger is read. Both live on `Compositor`, so destructure rather
     // than going through `&mut self` methods.
@@ -1642,7 +1988,7 @@ pub(crate) fn render_frame_session(comp: &mut Compositor) {
         ..
     } = comp;
     let Graphics::Session(session) = graphics else {
-        return;
+        return false;
     };
 
     if wm.backend().damage {
@@ -1685,6 +2031,12 @@ pub(crate) fn render_frame_session(comp: &mut Compositor) {
         if !device_active {
             continue;
         }
+        let now = Instant::now();
+        if output.frame_clock.arm(now) > now {
+            continue;
+        }
+
+        let render_started = Instant::now();
 
         // Resetting every buffer age makes the internal damage tracker
         // treat the whole output as stale, forcing a full-frame submit —
@@ -1768,6 +2120,7 @@ pub(crate) fn render_frame_session(comp: &mut Compositor) {
                 if crate::renderer::note_frame_failure() {
                     tracing::warn!(?error, output = %output.name, "DRM render failed; keeping this output dirty for a retry");
                 }
+                output.frame_clock.observe_render(render_started.elapsed(), Instant::now());
                 output.scene_scratch.clear();
                 continue;
             }
@@ -1826,6 +2179,7 @@ pub(crate) fn render_frame_session(comp: &mut Compositor) {
                     // retry a full-frame render and a real flip.
                     output.drm_compositor.reset_buffer_ages();
                     tracing::warn!(?error, output = %output.name, "queueing the page flip failed; keeping this output dirty for a retry");
+                    output.frame_clock.observe_render(render_started.elapsed(), Instant::now());
                     output.scene_scratch.clear();
                     continue;
                 }
@@ -1852,6 +2206,7 @@ pub(crate) fn render_frame_session(comp: &mut Compositor) {
         // they were appended above this is an empty, allocation-
         // preserving no-op.
         output.scene_scratch.clear();
+        output.frame_clock.observe_render(render_started.elapsed(), Instant::now());
         output.dirty = false;
         drew_any = true;
     }
@@ -1872,6 +2227,7 @@ pub(crate) fn render_frame_session(comp: &mut Compositor) {
             crate::renderer::send_frame_callbacks(wm.backend(), &primary.output, cursor_status, start_time.elapsed());
         }
     }
+    drew_any
 }
 
 /// One opened, mode-set-capable DRM device together with every output
@@ -2250,5 +2606,57 @@ mod tests {
         );
         assert!(mismatched.indexset().is_empty());
         assert!(common_scanout_formats(std::iter::empty()).indexset().is_empty());
+    }
+
+    #[test]
+    fn first_and_post_idle_frames_are_never_delayed() {
+        let period = Duration::from_millis(16);
+        let now = Instant::now();
+        let mut clock = FrameClock::for_period(period);
+        assert_eq!(clock.arm(now), now);
+
+        clock.deadline = None;
+        clock.last_vblank = Some(now - period.saturating_mul(4));
+        assert_eq!(clock.arm(now), now);
+    }
+
+    #[test]
+    fn active_cadence_arms_before_the_predicted_vblank() {
+        let period = Duration::from_millis(16);
+        let vblank = Instant::now();
+        let now = vblank + Duration::from_millis(1);
+        let mut clock = FrameClock::for_period(period);
+        clock.note_vblank(vblank);
+        let deadline = clock.arm(now);
+        assert!(deadline > now);
+        assert!(deadline < vblank + period);
+        assert_eq!(clock.target_vblank, Some(vblank + period));
+    }
+
+    #[test]
+    fn pausing_disarms_the_deadline_and_forgets_the_old_cadence() {
+        let period = Duration::from_millis(16);
+        let vblank = Instant::now();
+        let mut clock = FrameClock::for_period(period);
+        clock.note_vblank(vblank);
+        assert!(clock.arm(vblank + Duration::from_millis(1)) > vblank);
+
+        clock.disarm();
+        let resumed = vblank + Duration::from_secs(1);
+        assert_eq!(clock.arm(resumed), resumed);
+        assert!(clock.target_vblank.is_none());
+    }
+
+    #[test]
+    fn render_estimate_rises_fast_and_decays_slowly() {
+        let mut clock = FrameClock::for_period(Duration::from_millis(16));
+        let start = Instant::now();
+        clock.observe_render(Duration::from_millis(9), start);
+        let raised = clock.pessimistic_budget();
+        assert!(raised > Duration::from_millis(6));
+
+        clock.observe_render(Duration::from_millis(1), start + Duration::from_millis(16));
+        assert!(clock.pessimistic_budget() > Duration::from_millis(5));
+        assert!(clock.pessimistic_budget() <= raised);
     }
 }

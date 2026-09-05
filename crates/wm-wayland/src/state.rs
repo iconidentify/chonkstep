@@ -35,7 +35,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::os::fd::{BorrowedFd, RawFd};
 use std::process::Stdio;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use calloop::signals::{Signal, Signals};
 use smithay::backend::allocator::Fourcc;
@@ -129,6 +129,64 @@ pub(crate) struct ProtocolPublishMetrics {
     pub hyprland_event_snapshots: u64,
     pub foreign_toplevel_full_syncs: u64,
     pub foreign_toplevel_drag_syncs: u64,
+}
+
+/// Aggregated cost of a named section of the compositor's event-loop
+/// pass. Durations are cumulative so the test door can bracket any
+/// interaction; `max` keeps a single hitch visible instead of averaging
+/// it into a long quiet sample.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct PhaseTiming {
+    pub calls: u64,
+    pub total: Duration,
+    pub max: Duration,
+}
+
+impl PhaseTiming {
+    fn record(&mut self, elapsed: Duration) {
+        self.calls = self.calls.saturating_add(1);
+        self.total = self.total.saturating_add(elapsed);
+        self.max = self.max.max(elapsed);
+    }
+}
+
+/// Live frame/pass instrumentation. It is always cheap and available:
+/// a handful of monotonic clock reads and fixed-size counters, with no
+/// allocation or logging in the frame path. The optional `profile`
+/// Cargo feature complements these counters by enabling the profiling
+/// spans already embedded throughout Smithay.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct FrameStats {
+    pub dispatch: PhaseTiming,
+    pub input: PhaseTiming,
+    pub shell: PhaseTiming,
+    pub protocols: PhaseTiming,
+    pub layout: PhaseTiming,
+    pub render: PhaseTiming,
+    pub flush: PhaseTiming,
+    pub ipc: PhaseTiming,
+    /// Power-of-two microsecond ceilings, from <=1 us through >16384 us.
+    pub dispatch_histogram: [u64; 16],
+    pub render_histogram: [u64; 16],
+}
+
+impl FrameStats {
+    fn histogram_bucket(elapsed: Duration) -> usize {
+        let micros = elapsed.as_micros().max(1);
+        (u128::BITS - (micros - 1).leading_zeros()).min(15) as usize
+    }
+
+    fn record_dispatch(&mut self, elapsed: Duration) {
+        self.dispatch.record(elapsed);
+        let bucket = Self::histogram_bucket(elapsed);
+        self.dispatch_histogram[bucket] = self.dispatch_histogram[bucket].saturating_add(1);
+    }
+
+    fn record_render(&mut self, elapsed: Duration) {
+        self.render.record(elapsed);
+        let bucket = Self::histogram_bucket(elapsed);
+        self.render_histogram[bucket] = self.render_histogram[bucket].saturating_add(1);
+    }
 }
 
 /// One entry in the bottom-to-top managed-window stacking order.
@@ -1311,16 +1369,16 @@ pub(crate) struct OutputEntry {
     pub scene_scratch: Vec<crate::renderer::SceneElement<GlesRenderer>>,
     /// The `wl_output` global clients bind to. Dropping the id does not
     /// take the global down — that needs
-    /// `DisplayHandle::remove_global` — so this is held for the one
-    /// caller that would ever pass it there: a connector-hot-unplug
-    /// path taking an output back off the wire.
-    _global: GlobalId,
+    /// `DisplayHandle::disable_global` — so this is held for the one
+    /// caller that passes it there: connector hot-unplug taking an
+    /// output safely back off the wire.
+    pub(crate) global: GlobalId,
 }
 
 impl OutputEntry {
     /// Advertises one output to clients and prepares it for rendering.
-    fn new(setup: OutputSetup, display_handle: &DisplayHandle) -> Self {
-        let _global = setup.output.create_global::<Compositor>(display_handle);
+    pub(crate) fn new(setup: OutputSetup, display_handle: &DisplayHandle) -> Self {
+        let global = setup.output.create_global::<Compositor>(display_handle);
         let damage_tracker = physical_damage_tracker(&setup.output, setup.size);
         Self {
             output: setup.output,
@@ -1330,7 +1388,7 @@ impl OutputEntry {
             modes: setup.modes,
             damage_tracker,
             scene_scratch: Vec::new(),
-            _global,
+            global,
         }
     }
 }
@@ -1438,7 +1496,7 @@ fn advertise_scales(outputs: &mut [OutputEntry], scales: &[f64]) {
 /// and their EDID facts are available. Unsupported fields refuse their
 /// entire line so a rotated/disabled/mirrored request is never partly
 /// honored as only a scale or position change.
-fn apply_monitor_rules(
+pub(crate) fn apply_monitor_rules(
     setups: &mut [OutputSetup],
     rules: &[wm_config::hyprland::directive::Monitor],
     fallback_scale: f64,
@@ -1537,6 +1595,108 @@ fn apply_monitor_rules(
         }
     }
     scales
+}
+
+/// Mirrors a DRM connector delta into every positional output ledger.
+/// Session outputs have already been inserted/removed when this is
+/// called; this half owns protocol globals, monitor policy, shell
+/// resize, and the index-bearing layer/lock records.
+pub(crate) fn apply_connector_hotplug(
+    comp: &mut Compositor,
+    removed: &[usize],
+    added: Vec<OutputSetup>,
+) {
+    let mut departed = Vec::new();
+    for &index in removed {
+        if index >= comp.outputs.len() {
+            continue;
+        }
+        let entry = comp.outputs.remove(index);
+        departed.push(Rect::new(entry.position, entry.size));
+        // Registry clients see global_remove immediately. Keep the disabled
+        // server-side record rather than freeing it in the same dispatch,
+        // which avoids the bind-vs-removal race documented by wayland-server.
+        comp.display_handle.disable_global::<Compositor>(entry.global);
+
+        let backend = comp.wm.backend_mut();
+        backend.layers.iter_mut().for_each(|layer| {
+            if layer.output == index {
+                layer.output = 0;
+            } else if layer.output > index {
+                layer.output -= 1;
+            }
+        });
+        backend.lock_surfaces.retain(|surface| surface.output != index);
+        for surface in &mut backend.lock_surfaces {
+            if surface.output > index {
+                surface.output -= 1;
+            }
+        }
+    }
+
+    for setup in added {
+        comp.outputs.push(OutputEntry::new(setup, &comp.display_handle));
+    }
+
+    // Re-read monitor rules on the rare structural change so a docked
+    // connector lands at its configured position/scale immediately.
+    let session = chonk_shell::startup::SessionState::resolve(&wm_config::load());
+    let mut setups: Vec<OutputSetup> = comp
+        .outputs
+        .iter()
+        .map(|entry| OutputSetup {
+            output: entry.output.clone(),
+            position: entry.position,
+            size: entry.size,
+            modes: entry.modes.clone(),
+        })
+        .collect();
+    let scales = apply_monitor_rules(&mut setups, &session.monitor_rules, comp.ui_scale as f64);
+    for ((entry, setup), scale) in comp.outputs.iter_mut().zip(setups).zip(scales) {
+        entry.position = setup.position;
+        entry.scale = scale;
+        entry.output.change_current_state(
+            None,
+            None,
+            Some(advertised_output_scale(scale as f32)),
+            Some((entry.position.x, entry.position.y).into()),
+        );
+    }
+
+    let layout: Vec<(Point, Size)> = comp.outputs.iter().map(|entry| (entry.position, entry.size)).collect();
+    crate::session::sync_positions(&mut comp.graphics, &layout);
+    let monitors: Vec<MonitorInfo> = comp
+        .outputs
+        .iter()
+        .enumerate()
+        .map(|(index, entry)| MonitorInfo {
+            geometry: Rect::new(entry.position, entry.size),
+            name: entry.output.name(),
+            primary: index == 0,
+        })
+        .collect();
+    let monitor_scales: Vec<f64> = comp.outputs.iter().map(|entry| entry.scale).collect();
+    {
+        let backend = comp.wm.backend_mut();
+        backend.monitors = monitors;
+        backend.monitor_scales = monitor_scales;
+        backend.output_size = union_size(&backend.monitors);
+        backend.pending_resize = Some(backend.output_size);
+        backend.damage = true;
+        backend.layer_layout_dirty = true;
+        backend.idle_policy_dirty = true;
+    }
+    for rect in departed {
+        comp.wm.rescue_clients_from_removed_monitor(rect);
+    }
+    crate::input::reconcile_pointer_after_output_change(comp);
+    crate::gamma::outputs_changed(&mut comp.gamma, &comp.graphics, &comp.display_handle);
+    comp.output_mgmt.mark_dirty();
+    comp.session_lock.mark_dirty();
+    comp.layer_shell.needs_arrange = true;
+    comp.hyprland_state_dirty = true;
+    comp.foreign_toplevel_dirty = true;
+    tracing::info!(outputs = comp.outputs.len(), "connector hotplug reconciled across the desktop");
 }
 
 fn parse_monitor_position(value: &str) -> Option<Point> {
@@ -1658,6 +1818,10 @@ pub struct Compositor {
     /// events allocation-free when they changed no published state.
     observed_wm_protocol_revision: u64,
     pub(crate) protocol_publish_metrics: ProtocolPublishMetrics,
+    /// Fixed-size timing counters exposed through the opt-in test door.
+    /// Reading them resets the bracket, so a harness can measure one
+    /// interaction without parsing tracing output or wall-clock sleeps.
+    pub(crate) frame_stats: FrameStats,
 
     // Per-protocol smithay state. Constructed once in `run`; the
     // handler impls in `xdg.rs`/`input.rs`/`xwayland.rs` return these
@@ -1713,9 +1877,8 @@ pub struct Compositor {
 
     pub seat: Seat<Compositor>,
     /// Every output, primary first — see [`OutputEntry`] for what that
-    /// order binds together. Never empty: a session with no output
-    /// never gets built (`session::init` fails, and the nested backend
-    /// always has its host window).
+    /// order binds together. Startup requires one, though DRM hot-unplug
+    /// may leave this briefly empty until a connector returns.
     pub(crate) outputs: Vec<OutputEntry>,
 
     /// The X11 window-manager connection into XWayland, once
@@ -1775,6 +1938,10 @@ pub struct Compositor {
     /// foreign-toplevel window list and screencopy capture. The
     /// Wayland counterpart to the X11 session's EWMH properties.
     pub(crate) protocols: crate::protocols::ProtocolState,
+    /// ext-image-copy-capture sessions and their output/toplevel source
+    /// factories. Kept beside the legacy wlr protocol state because both
+    /// intentionally share its shm pixel writer.
+    pub(crate) image_capture: crate::image_capture::ImageCapture,
     pub(crate) _toplevel_mapping: crate::toplevel_mapping::ToplevelMapping,
     /// wlr-output-management: what `wlr-randr` and `kanshi` list and
     /// configure outputs through — see `output_mgmt.rs`.
@@ -1875,7 +2042,11 @@ impl Compositor {
     /// "the desktop behaves identically" a structural property rather
     /// than a porting promise, so change that file first if this order
     /// ever needs to move.
+    #[cfg_attr(feature = "profile", profiling::function)]
     pub(crate) fn dispatch_pending(&mut self) {
+        let dispatch_started = Instant::now();
+        crate::session::service_connector_hotplug(self);
+        let phase_started = Instant::now();
         crate::input::tick_repeating_binding(self);
         // Consecutive `PointerMotion` events coalesce to the most
         // recent one — same rationale as the X11 loop: during a fast
@@ -1930,6 +2101,9 @@ impl Compositor {
         if let Some(motion) = pending_motion.take() {
             self.dispatch_motion(motion);
         }
+
+        self.frame_stats.input.record(phase_started.elapsed());
+        let phase_started = Instant::now();
 
         while let Some(notification) = self.wm.take_notification() {
             self.shell.on_notification(&mut self.wm, notification);
@@ -1986,6 +2160,8 @@ impl Compositor {
         // every coalesced `PointerMotion` above passes through.
 
         self.shell.tick(&mut self.wm);
+        self.frame_stats.shell.record(phase_started.elapsed());
+        let phase_started = Instant::now();
 
         // State, not the shape of the event that reached it, drives
         // protocol invalidation. A press/release inside the already-focused
@@ -2020,6 +2196,10 @@ impl Compositor {
         // reconciliations and before the damage test, so an applied
         // configuration's re-layout renders on this very pass.
         crate::output_mgmt::refresh(self);
+        // Long-lived ext capture sessions observe the settled toplevel and
+        // output geometry above, re-advertise changed constraints, and answer
+        // frame requests through the shared offscreen path.
+        crate::image_capture::refresh(self);
         // Gamma ramps settle beside the other protocol reconciliations
         // and for a reason of their own: this is the only place the
         // blocking legacy-gamma ioctl is called from, so a client
@@ -2051,6 +2231,8 @@ impl Compositor {
         // Idle inhibition follows visibility, which everything above
         // may have changed.
         crate::idle::refresh(self);
+        self.frame_stats.protocols.record(phase_started.elapsed());
+        let phase_started = Instant::now();
 
         // The UI scale moved: rebuild the built-in pointer, the one
         // thing this session draws that is sized from that scale and
@@ -2150,6 +2332,7 @@ impl Compositor {
         // damage. Poll before the render decision so an idle desktop
         // can answer one without waiting for unrelated client pixels.
         crate::capture::poll_screenshot_marker(self);
+        self.frame_stats.layout.record(phase_started.elapsed());
 
         // Damage means the scene changed; `redraw_pending` means a
         // change already accounted for has not reached every screen yet
@@ -2157,7 +2340,10 @@ impl Compositor {
         // The second condition only ever fires on the session backend
         // with more than one output — see `session::redraw_pending`.
         if self.wm.backend().damage || crate::session::redraw_pending(&self.graphics) {
-            crate::renderer::render_frame(self);
+            let render_started = Instant::now();
+            if crate::renderer::render_frame(self) {
+                self.frame_stats.record_render(render_started.elapsed());
+            }
         }
 
         // A locking client is owed its `locked` event only after a
@@ -2168,22 +2354,27 @@ impl Compositor {
         // Protocol replies queued by everything above (configures,
         // frame callbacks, focus enter/leave) only reach clients on a
         // flush.
+        let phase_started = Instant::now();
         let _ = self.display_handle.flush_clients();
+        self.frame_stats.flush.record(phase_started.elapsed());
 
         // Hyprland IPC, before the source reconciliation below so that
         // a connection accepted or dropped in this pass is registered
         // or unregistered in the same one.
+        let phase_started = Instant::now();
         self.service_hyprland_ipc();
 
         // Last, after every socket this pass was going to close has
         // been closed. See `sync_dock_sources` for why that ordering is
         // the safety argument and not a tidiness one.
         self.sync_dock_sources();
+        self.frame_stats.ipc.record(phase_started.elapsed());
 
         // Test-door barriers ack only after the frame above has landed
         // and the flush has gone out — a no-op in a user session (the
         // door never opens without CHONKSTEP_TEST_SOCKET).
         crate::test_door::after_frame(self);
+        self.frame_stats.record_dispatch(dispatch_started.elapsed());
     }
 
     /// Dismiss popup trees whose native parent changed size.
@@ -3080,6 +3271,10 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
             .map_err(|fallback| format!("failed to initialize even the default seat keyboard: {fallback}"))?;
     }
     seat.add_pointer();
+    // wl_touch is a seat capability, not a per-device global. Keeping
+    // it present lets hot-plugged touchscreens work without changing
+    // the wl_seat capability set underneath already-bound clients.
+    seat.add_touch();
 
     // Which kind of session this process is. Owning the hardware and
     // living in a window on somebody else's desktop are the same
@@ -3203,6 +3398,7 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
     let syncobj = crate::dmabuf::init_syncobj(&display_handle, &graphics);
     // Same timing rule as dmabuf: bound before any client can connect.
     let protocols = crate::protocols::init(&display_handle);
+    let image_capture = crate::image_capture::init(&display_handle);
     let toplevel_mapping = crate::toplevel_mapping::init(&display_handle);
     let output_mgmt = crate::output_mgmt::init(&display_handle);
     // Gamma control rides the same timing rule and additionally asks
@@ -3501,6 +3697,7 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
         foreign_toplevel_dirty: true,
         observed_wm_protocol_revision: wm.protocol_state_revision(),
         protocol_publish_metrics: ProtocolPublishMetrics::default(),
+        frame_stats: FrameStats::default(),
         wm,
         shell,
         display_handle,
@@ -3536,6 +3733,7 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
         dmabuf,
         syncobj,
         protocols,
+        image_capture,
         _toplevel_mapping: toplevel_mapping,
         output_mgmt,
         gamma,
@@ -3639,6 +3837,12 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
         wait = wait.min(request_poller.next_deadline().saturating_duration_since(now));
         wait = wait.min(comp.screenshot_poller.next_deadline().saturating_duration_since(now));
         if let Some(deadline) = crate::input::repeating_binding_deadline(&comp) {
+            wait = wait.min(deadline.saturating_duration_since(now));
+        }
+        if let Some(deadline) = crate::session::next_render_deadline(&comp.graphics) {
+            wait = wait.min(deadline.saturating_duration_since(now));
+        }
+        if let Some(deadline) = crate::session::next_hotplug_deadline(&comp.graphics) {
             wait = wait.min(deadline.saturating_duration_since(now));
         }
         event_loop.dispatch(Some(wait), &mut comp)?;
@@ -4035,6 +4239,21 @@ fn resize_cursor_pixels(scale: f32, angle_rad: f32) -> (Vec<u8>, i32, i32, (i32,
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn frame_stats_use_bounded_power_of_two_buckets_and_saturating_counts() {
+        let mut stats = FrameStats::default();
+        stats.record_dispatch(Duration::from_micros(1));
+        stats.record_dispatch(Duration::from_micros(8));
+        stats.record_render(Duration::from_millis(40));
+
+        assert_eq!(stats.dispatch.calls, 2);
+        assert_eq!(stats.dispatch_histogram[0], 1);
+        assert_eq!(stats.dispatch_histogram[3], 1);
+        assert_eq!(stats.render.calls, 1);
+        assert_eq!(stats.render_histogram[15], 1, "large frames stay in the final bucket");
+        assert_eq!(stats.dispatch.max, Duration::from_micros(8));
+    }
 
     #[test]
     fn omarchys_recovery_locker_waits_for_its_relaunched_shell() {

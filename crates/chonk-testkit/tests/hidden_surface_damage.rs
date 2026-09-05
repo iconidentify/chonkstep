@@ -230,18 +230,31 @@ fn a_self_timed_client_on_a_parked_workspace_schedules_no_frames() {
 
     wait_for_animation(&session, &program, 30);
     session.door().barrier().expect("visible sample starts at a rendered boundary");
+    let _ = session.door().frame_stats().expect("visible timing bracket resets");
     let visible_start = rendered_frames(&session);
     let visible_target = animation_frame(&session.client_log(&program)).unwrap() + 60;
     wait_for_animation(&session, &program, visible_target);
     session.door().barrier().expect("visible sample ends at a rendered boundary");
+    let visible_stats = session.door().frame_stats().expect("visible timing bracket is readable");
     let visible_frames = rendered_frames(&session) - visible_start;
     assert!(
         visible_frames >= 50,
         "60 independently committed visible frames produced only {visible_frames} renders; compositor log:\n{}",
         session.log()
     );
+    assert!(
+        visible_stats.render_calls >= 50,
+        "the timing bracket counted only {} renders across 60 visible commits",
+        visible_stats.render_calls
+    );
+    assert_eq!(
+        visible_stats.render_histogram.iter().sum::<u64>(),
+        visible_stats.render_calls,
+        "every timed render belongs to exactly one histogram bucket"
+    );
 
     send_to_workspace_two(&mut session);
+    let _ = session.door().frame_stats().expect("hidden timing bracket resets");
     let hidden_start = rendered_frames(&session);
     let sample_commits = hidden_sample_commits();
     let cpu_start = process_cpu_ticks(session.compositor_pid()).expect("Linux process accounting is readable");
@@ -251,6 +264,10 @@ fn a_self_timed_client_on_a_parked_workspace_schedules_no_frames() {
         animation_frame(&session.client_log(&program)).filter(|frame| *frame >= hidden_target)
     })
     .unwrap_or_else(|error| panic!("{error}; client log:\n{}", session.client_log(&program)));
+    // `frame-stats` is itself an ordered test-door command. Do not use the
+    // rendering barrier here: barriers deliberately damage the backend, which
+    // would manufacture exactly one frame inside an otherwise idle sample.
+    let hidden_stats = session.door().frame_stats().expect("hidden timing bracket is readable");
     let cpu_ticks = process_cpu_ticks(session.compositor_pid())
         .expect("Linux process accounting remains readable")
         .saturating_sub(cpu_start);
@@ -267,6 +284,11 @@ fn a_self_timed_client_on_a_parked_workspace_schedules_no_frames() {
         "a parked client's {sample_commits}-commit burst scheduled {hidden_frames} invisible renders \
          (allowance {allowed_background_frames} with {static_clients} profiling surfaces); compositor log:\n{}",
         session.log()
+    );
+    assert!(
+        hidden_stats.render_calls <= allowed_background_frames as u64,
+        "frame-stats observed {} renders for a parked client (allowance {allowed_background_frames})",
+        hidden_stats.render_calls
     );
 }
 

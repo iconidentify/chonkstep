@@ -116,8 +116,9 @@ struct Manager {
 }
 
 /// One `zwlr_output_head_v1` belonging to one manager, for one entry of
-/// `Compositor::outputs` (same index — outputs are never removed, so
-/// the index is stable for the life of the session).
+/// `Compositor::outputs`. A connector-set change retires every existing
+/// head before rebuilding this index-aligned list, so an index is stable
+/// only until the next structural update.
 struct HeadInstance {
     index: usize,
     resource: ZwlrOutputHeadV1,
@@ -128,6 +129,7 @@ struct HeadInstance {
 /// The publishable state of one output, for change detection.
 #[derive(Clone, PartialEq)]
 struct HeadSnapshot {
+    name: String,
     position: Point,
     scale: f64,
     current_mode: usize,
@@ -233,8 +235,15 @@ fn publish(comp: &mut Compositor) {
     // Vec here made a persistent `kanshi`/`wlr-randr` connection pay
     // one allocation and free for every unrelated client commit. The
     // baseline is rewritten in place only on the rare changed path.
-    let changed = comp.output_mgmt.dirty
+    let structural = comp.output_mgmt.dirty
         && (comp.outputs.len() != comp.output_mgmt.published.len()
+            || comp
+                .outputs
+                .iter()
+                .zip(&comp.output_mgmt.published)
+                .any(|(entry, previous)| entry.output.name() != previous.name));
+    let changed = comp.output_mgmt.dirty
+        && (structural
             || comp
                 .outputs
                 .iter()
@@ -261,7 +270,23 @@ fn publish(comp: &mut Compositor) {
             manager.resource.done(serial);
             continue;
         }
-        if changed {
+        if structural {
+            // Head resource data carries the output index. Once a connector
+            // disappears, all later indices shift, so retire the complete
+            // advertised set and mint a fresh, correctly indexed one. The
+            // serial bump above cancels configurations made against the old
+            // set.
+            for head in manager.heads.drain(..) {
+                for mode in head.modes {
+                    mode.finished();
+                }
+                head.resource.finished();
+            }
+            for (index, entry) in outputs.iter().enumerate() {
+                announce_head(&display_handle, manager, index, entry);
+            }
+            manager.resource.done(serial);
+        } else if changed {
             for head in &manager.heads {
                 let Some(entry) = outputs.get(head.index) else { continue };
                 let Some(previous) = output_mgmt.published.get(head.index) else { continue };
@@ -278,6 +303,7 @@ fn publish(comp: &mut Compositor) {
 
 fn head_snapshot(entry: &crate::state::OutputEntry) -> HeadSnapshot {
     HeadSnapshot {
+        name: entry.output.name(),
         position: entry.position,
         scale: entry.scale,
         current_mode: current_mode_index(entry),

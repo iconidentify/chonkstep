@@ -150,6 +150,9 @@ use smithay::reexports::wayland_protocols_wlr::screencopy::v1::server::zwlr_scre
 use smithay::reexports::wayland_protocols_wlr::screencopy::v1::server::zwlr_screencopy_manager_v1::{
     self, ZwlrScreencopyManagerV1,
 };
+use smithay::wayland::foreign_toplevel_list::{
+    ForeignToplevelHandle, ForeignToplevelListHandler, ForeignToplevelListState,
+};
 use smithay::reexports::wayland_server::protocol::wl_buffer::WlBuffer;
 use smithay::reexports::wayland_server::protocol::wl_output::WlOutput;
 use smithay::reexports::wayland_server::protocol::wl_shm;
@@ -206,6 +209,11 @@ const BYTES_PER_PIXEL: usize = 4;
 /// login session's protocol dispatch has no unreachable panic in it —
 /// the same call `dmabuf.rs` makes for the same reason.
 pub(crate) struct ProtocolState {
+    /// Standard, read-only toplevel list used by the ext capture-source
+    /// factory. The wlr management protocol below remains available for
+    /// taskbars which also need window-control requests.
+    ext_list: ForeignToplevelListState,
+    ext_toplevels: HashMap<WlWindowId, ForeignToplevelHandle>,
     /// Live `zwlr_foreign_toplevel_manager_v1` instances. A manager that
     /// sent `stop` is dropped from here (it wants no further *new*
     /// toplevels) while the handles it already owns keep updating,
@@ -375,6 +383,8 @@ pub(crate) fn init(display_handle: &DisplayHandle) -> ProtocolState {
         "wlr protocols advertised"
     );
     ProtocolState {
+        ext_list: ForeignToplevelListState::new::<Compositor>(display_handle),
+        ext_toplevels: HashMap::new(),
         managers: Vec::new(),
         toplevels: HashMap::new(),
         minimize_requests: Vec::new(),
@@ -392,11 +402,67 @@ pub(crate) fn refresh(comp: &mut Compositor) {
     comp.notice_wm_protocol_changes();
     let new_manager = comp.protocols.managers.iter().any(|manager| !manager.announced);
     if comp.foreign_toplevel_dirty || new_manager {
+        sync_ext_toplevels(comp);
         sync_toplevels(comp);
         comp.foreign_toplevel_dirty = false;
     }
     service_captures(comp);
 }
+
+/// Keeps ext-foreign-toplevel-list in step with the same authoritative
+/// window ledger as the older wlr management protocol. Capture-source
+/// objects recover the compositor window id from each handle's user data.
+fn sync_ext_toplevels(comp: &mut Compositor) {
+    let snapshots: Vec<(WlWindowId, String, String)> = comp
+        .wm
+        .clients()
+        .map(|(_, client)| {
+            let app_id = comp
+                .wm
+                .backend()
+                .windows
+                .get(&client.window)
+                .and_then(|record| record.app_id.clone())
+                .unwrap_or_else(|| client.class.clone());
+            (client.window, client.title.clone(), app_id)
+        })
+        .collect();
+    let live: HashSet<WlWindowId> = snapshots.iter().map(|(window, _, _)| *window).collect();
+
+    let ProtocolState { ext_list, ext_toplevels, .. } = &mut comp.protocols;
+    ext_toplevels.retain(|window, handle| {
+        if live.contains(window) {
+            true
+        } else {
+            handle.send_closed();
+            false
+        }
+    });
+    ext_list.cleanup_closed_handles();
+
+    for (window, title, app_id) in snapshots {
+        if let Some(handle) = ext_toplevels.get(&window) {
+            let changed = handle.title() != title || handle.app_id() != app_id;
+            handle.send_title(&title);
+            handle.send_app_id(&app_id);
+            if changed {
+                handle.send_done();
+            }
+            continue;
+        }
+        let handle = ext_list.new_toplevel::<Compositor>(title, app_id);
+        handle.user_data().insert_if_missing(|| window);
+        ext_toplevels.insert(window, handle);
+    }
+}
+
+impl ForeignToplevelListHandler for Compositor {
+    fn foreign_toplevel_list_state(&mut self) -> &mut ForeignToplevelListState {
+        &mut self.protocols.ext_list
+    }
+}
+
+smithay::delegate_foreign_toplevel_list!(Compositor);
 
 // ---------------------------------------------------------------------
 // wlr-foreign-toplevel-management
@@ -1248,7 +1314,7 @@ fn intersection(a: Rect, b: Rect) -> Option<Rect> {
 /// wrong in the preview" failure mode `capture.rs` warns about, arrived
 /// at from the other direction, and it was observed before it was
 /// argued: `grim` against a nested session came back upside down.
-fn capture_region(
+pub(crate) fn capture_region(
     comp: &mut Compositor,
     region: Rect,
     transform: Transform,
@@ -1396,7 +1462,7 @@ fn pixel_layout(format: wl_shm::Format) -> Option<(bool, bool)> {
 /// `ONE, ONE_MINUS_SRC_ALPHA` over a cleared buffer, and `wl_shm`'s
 /// `argb8888` is defined premultiplied — so nothing but the channel
 /// order changes.
-fn write_capture(buffer: &WlBuffer, capture: &DecorationBuffer) -> Result<(), String> {
+pub(crate) fn write_capture(buffer: &WlBuffer, capture: &DecorationBuffer) -> Result<(), String> {
     let data = shm_layout(buffer, Size::new(capture.width, capture.height))?;
     let (swap_rb, opaque) = pixel_layout(data.format).ok_or("unsupported buffer format")?;
     let width = capture.width as usize;

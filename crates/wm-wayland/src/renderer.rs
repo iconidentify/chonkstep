@@ -634,31 +634,43 @@ pub(crate) fn note_frame_success() {
 /// on. The submission halves differ (a winit swap versus a DRM page
 /// flip) and live with their backends; everything visible above them
 /// is [`build_scene`].
-pub(crate) fn render_frame(comp: &mut Compositor) {
-    // Window previews for the switcher and icon tiles, refreshed off
-    // the same cadence as drawing and throttled internally.
-    crate::capture::refresh_snapshots(comp);
+pub(crate) fn render_frame(comp: &mut Compositor) -> bool {
     match comp.graphics {
-        Graphics::Session(_) => crate::session::render_frame_session(comp),
-        Graphics::Winit(_) => render_frame_winit(comp),
+        Graphics::Session(_) => {
+            // Snapshot readback is deliberately outside the deadline
+            // path. It is synchronous on some drivers; doing it after
+            // the flip is queued spends post-submit slack rather than
+            // making fresh input miss the vblank we just scheduled for.
+            let drew = crate::session::render_frame_session(comp);
+            if drew {
+                crate::capture::refresh_snapshots(comp);
+            }
+            drew
+        }
+        Graphics::Winit(_) => {
+            // The nested backend has no vblank clock of its own; keep
+            // its existing immediate ordering under the host compositor.
+            crate::capture::refresh_snapshots(comp);
+            render_frame_winit(comp)
+        }
     }
 }
 
-fn render_frame_winit(comp: &mut Compositor) {
+fn render_frame_winit(comp: &mut Compositor) -> bool {
     // Disjoint field borrows: the winit backend (renderer +
     // framebuffer) mutates while the ledger is read — both live on
     // `Compositor`, so destructure instead of going through `&mut
     // self` methods.
     let Compositor { wm, graphics, outputs, pointer_location, cursor_status, cursors, start_time, .. } = comp;
     let Graphics::Winit(winit_backend) = graphics else {
-        return;
+        return false;
     };
     // The host window is the one and only output (see `state.rs`'s
     // `run`), so there is nothing to iterate and no viewport to offset
     // by — this arm is the multi-output path's degenerate case, not a
     // second implementation of it.
     let Some(entry) = outputs.first_mut() else {
-        return;
+        return false;
     };
     let output = &entry.output;
     let damage_tracker = &mut entry.damage_tracker;
@@ -674,7 +686,7 @@ fn render_frame_winit(comp: &mut Compositor) {
         if note_frame_failure() {
             tracing::warn!(?error, "could not bind the winit framebuffer; skipping frame");
         }
-        return;
+        return false;
     }
     // Real buffer age — the whole point of damage tracking. The age
     // says how many frames old this buffer's contents are, and the
@@ -691,7 +703,7 @@ fn render_frame_winit(comp: &mut Compositor) {
                 if note_frame_failure() {
                     tracing::warn!(?error, "could not bind the winit framebuffer; skipping frame");
                 }
-                return;
+                return false;
             }
         };
 
@@ -718,7 +730,7 @@ fn render_frame_winit(comp: &mut Compositor) {
                 // boundary the former temporary vector did, while
                 // retaining only its allocation for the retry.
                 scene_scratch.clear();
-                return;
+                return false;
             }
         }
     };
@@ -743,7 +755,7 @@ fn render_frame_winit(comp: &mut Compositor) {
             if note_frame_failure() {
                 tracing::warn!(?error, "swap failed; keeping damage for a retry");
             }
-            return;
+            return false;
         }
     }
 
@@ -757,6 +769,7 @@ fn render_frame_winit(comp: &mut Compositor) {
     );
     send_frame_callbacks(wm.backend(), output, cursor_status, start_time.elapsed());
     wm.backend_mut().damage = false;
+    true
 }
 
 /// Damage-rect telemetry, on when `CHONKSTEP_DAMAGE_LOG` is set: one
@@ -1258,7 +1271,7 @@ fn return_walk_stack(mut stack: Vec<TreeStep>) {
 /// fall back to the arrow — shipping an Xcursor theme loader is not
 /// worth it for a nested dev backend, and clients that care set
 /// surface cursors.
-fn push_cursor_elements(
+pub(crate) fn push_cursor_elements(
     elements: &mut Vec<SceneElement<GlesRenderer>>,
     renderer: &mut GlesRenderer,
     backend: &WaylandBackend,

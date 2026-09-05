@@ -5,6 +5,13 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+default = []
+# Enables Smithay's existing `profiling` annotations and the matching
+# spans on ChonkStep's frame path. Off by default; fixed-size frame
+# counters remain available through the opt-in E2E door in every build.
+profile = ["dep:profiling", "profiling/profile-with-tracing"]
+
 # Linux-only by nature: on other hosts this crate compiles to an empty
 # library (see lib.rs's cfg gate) so the whole workspace still builds
 # and tests on a macOS dev machine.
@@ -39,6 +46,7 @@ chonk-xsettings = { path = "../chonk-xsettings" }
 # and `chonk-xsettings` use so the workspace resolves one copy.
 x11rb = "0.13"
 tracing = "0.1"
+profiling = { version = "1.0", default-features = false, optional = true }
 # The session-bus bridge for the two ecosystem idle-inhibition APIs
 # that cannot reach a Wayland compositor directly.  zbus is pure Rust;
 # its blocking facade owns a small off-loop service thread and sends
