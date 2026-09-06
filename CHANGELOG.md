@@ -52,6 +52,11 @@ regressions instead of retries or timing sleeps.
 - X11 autostart receives ChonkStep's reserved XWayland display, GLES 2 capture
   uses a compatible readback path, and offscreen capture restores the correct
   nested EGL surface and buffer-age state.
+- Native release-package validation no longer combines `pipefail` with
+  early-exiting `grep -q` consumers, which could report a present ELF unwind
+  section as missing depending on architecture and process scheduling. Archive,
+  ELF architecture, dependency, exact `.eh_frame`, build-ID and split-debug
+  checks now consume stable snapshots of their producers' complete output.
 - Omarchy menu generations reject stale actions, the initial menu is loaded
   once rather than twice, and panel results are no longer discarded merely
   because an unrelated tile refreshed.
@@ -93,7 +98,8 @@ regressions instead of retries or timing sleeps.
   Chromium and isolated Chonkcraft matrices, plus 16 consecutive live
   Omarchy-theme transitions at a retained 2x scale. Release qualification also
   ran the formerly intermittent XWayland minimize/restore round trip through
-  100 fresh optimized compositor processes without a failure.
+  100 fresh optimized compositor processes without a failure and the forced
+  release-verifier SIGPIPE regression through 50 consecutive clean runs.
 - These results do not claim a matched Hyprland victory, native DRM/KMS frame
   timing, game FPS improvement or universal hardware coverage. Full commands,
   raw samples, hashes and limitations are in `docs/engineering/2026-09-05/`.

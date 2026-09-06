@@ -41,7 +41,13 @@ done
 
 pkginfo="$(bsdtar -xOf "$package" .PKGINFO)"
 metadata_value() {
-    sed -n "s/^$1 = //p" <<<"$pkginfo" | head -n 1
+    local prefix="$1 = "
+    awk -v prefix="$prefix" '
+        index($0, prefix) == 1 {
+            print substr($0, length(prefix) + 1)
+            exit
+        }
+    ' <<<"$pkginfo"
 }
 
 [ "$(metadata_value pkgname)" = chonkstep ] || {
@@ -57,7 +63,8 @@ metadata_value() {
     exit 1
 }
 
-if bsdtar -tf "$package" | grep -Eq '(^/|(^|/)\.\.(/|$))'; then
+package_entries="$(bsdtar -tf "$package")"
+if grep -Eq '(^/|(^|/)\.\.(/|$))' <<<"$package_entries"; then
     echo "release archive contains a path outside its install root" >&2
     exit 1
 fi
@@ -80,13 +87,23 @@ release_binaries=(
 for binary in "${release_binaries[@]}"; do
     path="$stage/usr/bin/$binary"
     [ -x "$path" ] || { echo "missing executable: $path" >&2; exit 1; }
+    file_description="$(file "$path")"
     case "$expected_arch" in
-        x86_64) file "$path" | grep -q 'x86-64' ;;
-        aarch64) file "$path" | grep -q 'ARM aarch64' ;;
-    esac || { echo "$binary is not an $expected_arch ELF" >&2; exit 1; }
-    if ldd "$path" 2>&1 | grep -q 'not found'; then
+        x86_64) architecture_marker='x86-64' ;;
+        aarch64) architecture_marker='ARM aarch64' ;;
+    esac
+    if [[ $file_description != *"$architecture_marker"* ]]; then
+        echo "$binary is not an $expected_arch ELF: $file_description" >&2
+        exit 1
+    fi
+    if ! ldd_output="$(ldd "$path" 2>&1)"; then
+        echo "ldd could not inspect $binary:" >&2
+        printf '%s\n' "$ldd_output" >&2
+        exit 1
+    fi
+    if [[ $ldd_output == *'not found'* ]]; then
         echo "$binary has an unresolved runtime library:" >&2
-        ldd "$path" >&2
+        printf '%s\n' "$ldd_output" >&2
         exit 1
     fi
     # A shipped binary must still be unwindable from a coredump. The
@@ -96,7 +113,14 @@ for binary in "${release_binaries[@]}"; do
     # `.eh_frame` survived the packaging strip. It does survive
     # `--strip-all`; this check protects that independent unwind
     # contract while the debug-package checks below protect symbols.
-    if ! readelf -S "$path" | grep -q '\.eh_frame'; then
+    # Do not use `readelf | grep -q` here. With `pipefail`, grep's successful
+    # early exit can SIGPIPE readelf and turn a present section into an
+    # architecture/scheduling-dependent false failure. Read the complete
+    # output and require the exact section name (`.eh_frame_hdr` is not it).
+    section_headers="$(readelf -SW "$path")"
+    if ! awk '{ for (field = 1; field <= NF; field++) if ($field == ".eh_frame") found = 1 }
+        END { exit(found ? 0 : 1) }' \
+        <<<"$section_headers"; then
         echo "$binary has no .eh_frame: a coredump from it cannot be unwound" >&2
         exit 1
     fi
@@ -114,16 +138,18 @@ for binary in chonkstep chonkstep-wayland; do
         echo "$binary -V and --version disagree" >&2
         exit 1
     }
-    printf '%s\n' "$long_version" | grep -Fxq "$binary $package_version" || {
+    grep -Fxq -- "$binary $package_version" <<<"$long_version" || {
         echo "$binary reports the wrong package version: $long_version" >&2
         exit 1
     }
-    printf '%s\n' "$long_version" | grep -Fxq "source: $expected_source_id" || {
+    grep -Fxq -- "source: $expected_source_id" <<<"$long_version" || {
         echo "$binary reports the wrong source identity: $long_version" >&2
         exit 1
     }
-    reported_build_id="$(printf '%s\n' "$long_version" | sed -n 's/^build id: //p')"
-    elf_build_id="$(readelf -n "$path" | sed -n 's/.*Build ID: //p' | head -n 1)"
+    reported_build_id="$(awk -F ': ' '$1 == "build id" { print $2; exit }' \
+        <<<"$long_version")"
+    elf_notes="$(readelf -n "$path")"
+    elf_build_id="$(awk '/Build ID:/ { print $3; exit }' <<<"$elf_notes")"
     if [ -z "$elf_build_id" ] || [ "$reported_build_id" != "$elf_build_id" ]; then
         echo "$binary reports build ID $reported_build_id, readelf reports $elf_build_id" >&2
         exit 1
@@ -154,8 +180,9 @@ if [ -z "$debug_package" ]; then
     echo "  check that the PKGBUILD still sets options=(strip debug)" >&2
     exit 1
 fi
+debug_entries="$(bsdtar -tf "$debug_package")"
 for binary in "${release_binaries[@]}"; do
-    bsdtar -tf "$debug_package" | grep -q "usr/lib/debug/usr/bin/$binary" || {
+    grep -Fq -- "usr/lib/debug/usr/bin/$binary" <<<"$debug_entries" || {
         echo "the debug package carries no symbols for $binary" >&2
         exit 1
     }
