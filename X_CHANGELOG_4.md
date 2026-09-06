@@ -1,4 +1,4 @@
-# ChonkStep 0.3.0 performance + compatibility update
+# ChonkStep 0.3.1 performance + compatibility update
 
 We just completed a deep pass over input, clipboard, gaming, memory, startup
 work and the Rust architecture behind ChonkStep:
@@ -59,6 +59,12 @@ work and the Rust architecture behind ChonkStep:
   an observable frame fence instead of sleeps, retries or weaker assertions.
 - The frozen optimized binary finishes a final 199-case nested release suite
   plus all three installed-Omarchy checks with no skipped clients.
+
+How we tested: matched 7,202-second baseline/candidate lifecycle soaks, 59,089
+combined churn cycles, paired 60-second startup/idle samples, 14 byte-verified
+clipboard trials, a 306-second allocation-profile pair, and a final 202-case
+nested/installed-Omarchy release gate. Raw samples, screenshots, executable
+hashes and known limitations are preserved.
 
 The complete raw logs, immutable binary hashes, before/after tables and known
 limits are preserved in the repository. These results come from controlled

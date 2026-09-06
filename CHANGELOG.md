@@ -5,6 +5,83 @@ crate and both session binaries carry the same number.
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-09-06
+
+This patch release concentrates on input correctness, resilient selection
+transfer, sustained resource ownership, and measurable compositor efficiency.
+It also turns the bugs found during release qualification into deterministic
+regressions instead of retries or timing sleeps.
+
+### Fixed
+
+- Microsoft Edge and Chromium text selection now lands on the intended caret
+  at 1x, 1.5x and 2x output scale in both windowed and fullscreen modes.
+- Native Wayland and X11 held-key repeat now survives focus transitions,
+  runtime repeat changes, layout reloads, input-method ownership and modal UI;
+  a zero repeat rate reliably disables timers.
+- Clipboard and primary selection now handle UTF-8, binary data, large INCR
+  transfers, backpressure, cancellation, slow consumers, owner death and
+  XWayland restart across 19 real-session cases.
+- Selection protocol objects are retired when clients disconnect or are killed
+  without issuing explicit release requests, preventing dead data-device,
+  primary-selection and data-control records from accumulating.
+- Pointer lock and confinement honor regions immediately, survive their full
+  focus lifecycle and no longer deadlock on first confined motion.
+- Client-requested xdg move and resize operations require the exact live
+  pointer serial, seat and client; stale, cross-client and drag-and-drop serials
+  can no longer initiate window-management grabs.
+- A Chromium configure-order race no longer loses the first requested resize.
+  CI now separately observes requested geometry and the buffer the client has
+  actually presented before taking screenshots.
+- X11 window identity and input focus survive withdraw/remap cycles; destroyed
+  clients no longer leave stale window records, selection transfers or repeat
+  state behind.
+- X11 autostart receives ChonkStep's reserved XWayland display, GLES 2 capture
+  uses a compatible readback path, and offscreen capture restores the correct
+  nested EGL surface and buffer-age state.
+- Omarchy menu generations reject stale actions, the initial menu is loaded
+  once rather than twice, and panel results are no longer discarded merely
+  because an unrelated tile refreshed.
+
+### Performance
+
+- A stalled 8 MiB clipboard transfer previously added 8,196 KiB of compositor
+  anonymous PSS in every trial; bounded staging reduced the measured addition
+  to 0 KiB in all seven matched trials while preserving every payload byte.
+- The controlled 8 MiB X11-to-Wayland partial-write path went from 8,192
+  temporary allocations requesting 272,629,760 bytes cumulatively to zero.
+- Matched two-hour lifecycle runs reduced requested-live Rust growth by 61.2%,
+  peak live allocation by 9,999,644 bytes, and anonymous-plus-swap growth by
+  56.4%, while non-pipe descriptors and thread counts remained flat.
+- Locked relative-pointer reports no longer request invisible renders: 128
+  observed reports went from 128 render attempts to zero, and an 8,192-report
+  burst delivered every raw delta with zero render attempts or submissions.
+- Hidden Dock instruments start sampling on demand and suspend while hidden.
+  In the published seven-pair fixture, idle CPU fell from 0.233% to 0.0833% of
+  one core, context switches from 45.92 to 12.10 per second, and startup used
+  18 fewer threads.
+- Glyph retention is budgeted, long-label fitting avoids quadratic reraster
+  work, unchanged backgrounds skip decoding/upload, and redundant owned-pixel
+  copies were removed from compositor chrome.
+- Ignored NetworkManager virtual-device/profile rows allocate nothing in the
+  parser, and the normal 56px clock render uses 32 allocator requests instead
+  of 52 with byte-identical output across sizes 8 through 128.
+
+### Validation
+
+- The principal before/after comparison used two matched 7,202-second nested
+  software-rendered lifecycle soaks totaling 59,089 churn cycles. A separate
+  306-second heaptrack pair isolated the retained protocol allocation stacks.
+- Startup and idle guardrails use seven alternating samples per executable and
+  60-second measurement windows. Clipboard backpressure uses seven alternating
+  before/after pairs, resumes every consumer and validates every payload byte.
+- The frozen release executable passed 199 nested end-to-end cases plus all
+  three installed-Omarchy checks with no skipped clients, including real Edge,
+  Chromium and isolated Chonkcraft matrices.
+- These results do not claim a matched Hyprland victory, native DRM/KMS frame
+  timing, game FPS improvement or universal hardware coverage. Full commands,
+  raw samples, hashes and limitations are in `docs/engineering/2026-09-05/`.
+
 ## [0.3.0] - 2026-09-05
 
 The release where ChonkStep became an Omarchy compositor rather than a
