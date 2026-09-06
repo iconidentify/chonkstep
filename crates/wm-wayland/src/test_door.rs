@@ -82,7 +82,7 @@
 //! scale 2
 //! output 1280 800
 //! theme id="nextstep-classic" name="NeXTSTEP Classic" appearance=dark following=""
-//! window id=3 x=100 y=80 w=400 h=300 offset_x=12 offset_y=12 mapped=true app="org.gnome.zenity" title="Question"
+//! window id=3 x=100 y=80 w=400 h=300 offset_x=12 offset_y=12 presented_w=424 presented_h=324 mapped=true app="org.gnome.zenity" title="Question"
 //! frame id=4 window=3 x=96 y=52 w=408 h=332 mapped=true
 //! shell id=1 x=1216 y=0 w=64 h=320 mapped=true above=true buffer_bytes=81920
 //! done
@@ -128,6 +128,7 @@ use smithay::backend::input::{
     KeyState, KeyboardKeyEvent, PointerButtonEvent, PointerMotionAbsoluteEvent, TouchCancelEvent,
     TouchDownEvent, TouchEvent, TouchFrameEvent, TouchMotionEvent, TouchSlot, TouchUpEvent, UnusedEvent,
 };
+use smithay::backend::renderer::utils::with_renderer_surface_state;
 use smithay::input::keyboard::Keycode;
 use smithay::reexports::calloop::generic::Generic;
 use smithay::reexports::calloop::{Interest, LoopHandle, Mode, PostAction};
@@ -699,8 +700,28 @@ fn handle_command(line: &str, stream: &mut UnixStream, comp: &mut Compositor) {
                 comp.shell.following().unwrap_or(""),
             ));
             for (id, record) in &backend.windows {
+                // The ledger rectangle changes when the compositor sends a
+                // configure. The presented extent changes only after the
+                // client commits the corresponding buffer. Keeping both in
+                // the same reply gives resize/fullscreen tests an observable
+                // client-presentation fence instead of a timing guess.
+                let presented = record
+                    .surface
+                    .wl_surface()
+                    .and_then(|surface| {
+                        with_renderer_surface_state(&surface, |state| state.surface_size())
+                            .flatten()
+                    })
+                    .map(|size| {
+                        let factor = backend.window_surface_scale(record);
+                        (
+                            crate::xdg::scale_length(size.w, factor).max(0) as u32,
+                            crate::xdg::scale_length(size.h, factor).max(0) as u32,
+                        )
+                    })
+                    .unwrap_or_default();
                 reply.push_str(&format!(
-                    "window id={} x={} y={} w={} h={} offset_x={} offset_y={} mapped={} app={:?} title={:?}\n",
+                    "window id={} x={} y={} w={} h={} offset_x={} offset_y={} presented_w={} presented_h={} mapped={} app={:?} title={:?}\n",
                     id.0,
                     record.content.pos.x,
                     record.content.pos.y,
@@ -708,6 +729,8 @@ fn handle_command(line: &str, stream: &mut UnixStream, comp: &mut Compositor) {
                     record.content.size.h,
                     record.content_offset.x,
                     record.content_offset.y,
+                    presented.0,
+                    presented.1,
                     record.mapped,
                     record.app_id.as_deref().unwrap_or(""),
                     record.title.as_deref().unwrap_or(""),

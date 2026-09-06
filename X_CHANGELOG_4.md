@@ -54,6 +54,9 @@ work and the Rust architecture behind ChonkStep:
 - Large Wayland backend modules were split along input, selection, XWayland and
   state ownership boundaries, and the new allocation meter remains dev-only so
   none of the measurement machinery enters the shipping dependency graph.
+- CI now distinguishes requested fullscreen geometry from the pixels a client
+  has actually committed, eliminating a real Chromium presentation race with
+  an observable frame fence instead of sleeps, retries or weaker assertions.
 - The frozen optimized binary finishes a final 199-case nested release suite
   plus all three installed-Omarchy checks with no skipped clients.
 

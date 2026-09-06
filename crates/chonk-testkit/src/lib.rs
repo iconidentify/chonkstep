@@ -1039,6 +1039,12 @@ pub struct WindowInfo {
     pub offset_x: i32,
     /// Buffer pixels above the declared window geometry.
     pub offset_y: i32,
+    /// Physical width of the root surface's currently presented pixels.
+    /// Unlike `w`, this changes only after the client commits the buffer
+    /// answering a resize configure, so tests can fence client presentation.
+    pub presented_w: u32,
+    /// Physical height of the root surface's currently presented pixels.
+    pub presented_h: u32,
     pub mapped: bool,
     pub app: String,
     pub title: String,
@@ -1728,6 +1734,8 @@ fn parse_window_line(line: &str) -> Option<WindowInfo> {
         // binary built before the test-door diagnostic was extended.
         offset_x: field(line, "offset_x=").unwrap_or(0),
         offset_y: field(line, "offset_y=").unwrap_or(0),
+        presented_w: field(line, "presented_w=").unwrap_or(0),
+        presented_h: field(line, "presented_h=").unwrap_or(0),
         mapped: field(line, "mapped=")?,
         app: quoted_field(line, "app"),
         title: quoted_field(line, "title"),
@@ -1888,7 +1896,7 @@ mod tests {
 
     #[test]
     fn window_lines_parse_including_offsets_and_quoted_tails() {
-        let line = r#"window id=3 x=100 y=-8 w=400 h=300 offset_x=12 offset_y=9 mapped=true app="org.gnome.zenity" title="Question two words""#;
+        let line = r#"window id=3 x=100 y=-8 w=400 h=300 offset_x=12 offset_y=9 presented_w=424 presented_h=324 mapped=true app="org.gnome.zenity" title="Question two words""#;
         let window = parse_window_line(line).unwrap();
         assert_eq!(window.id, 3);
         assert_eq!(window.x, 100);
@@ -1897,12 +1905,17 @@ mod tests {
         assert_eq!(window.h, 300);
         assert_eq!(window.offset_x, 12);
         assert_eq!(window.offset_y, 9);
+        assert_eq!((window.presented_w, window.presented_h), (424, 324));
         assert!(window.mapped);
         assert_eq!(window.app, "org.gnome.zenity");
         assert_eq!(window.title, "Question two words");
 
         let old = parse_window_line(r#"window id=4 x=0 y=0 w=1 h=1 mapped=true app="old" title="door""#).unwrap();
-        assert_eq!((old.offset_x, old.offset_y), (0, 0), "new harnesses still read the old door shape");
+        assert_eq!(
+            (old.offset_x, old.offset_y, old.presented_w, old.presented_h),
+            (0, 0, 0, 0),
+            "new harnesses still read the old door shape"
+        );
     }
 
     #[test]

@@ -44,6 +44,24 @@ fn has_event(value: &Value, kind: &str) -> bool {
         .any(|event| event["type"] == kind)
 }
 
+fn wait_for_presented_extent(session: &mut Session, phase: &str) {
+    poll_until(
+        EVENT,
+        &format!("the browser to commit its {phase} buffer"),
+        || {
+            let world = session.world().ok()?;
+            let client = world.window_matching("ChonkStep Selection Probe")?;
+            (client.presented_w >= client.w && client.presented_h >= client.h).then_some(())
+        },
+    )
+    .unwrap_or_else(|error| {
+        panic!(
+            "{error}: compositor geometry can precede the client's matching commit: {:?}",
+            session.world()
+        )
+    });
+}
+
 fn selection(session: &mut Session, browser: &mut Browser, phase: &str, id: &str) {
     let start = browser
         .evaluate(&format!("window.chonkProbe.point('{id}', 8)"))
@@ -329,6 +347,13 @@ fn run(name: &str, scale: f32) {
             )
             .unwrap();
         }
+        // A configure updates compositor and DOM geometry before Chromium's
+        // newly sized Wayland buffer necessarily reaches the scene. Fence the
+        // client's actual commit, then fence the compositor frame that draws
+        // it. This prevents screenshots from racing a correctly asynchronous
+        // fullscreen transition while preserving the old buffer as evidence
+        // on a real timeout.
+        wait_for_presented_extent(&mut session, phase);
         session.door().barrier().unwrap();
         for id in ["plain", "editor"] {
             selection(&mut session, &mut browser, phase, id);

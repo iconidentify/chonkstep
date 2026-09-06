@@ -877,6 +877,27 @@ Source observations, not yet fixed or attributed to the reported symptom:
   log. It includes real Edge at three scales and the isolated real Chonkcraft
   matrix. The log and 151 MiB raw fixture evidence are under `final-release/`.
 
+### CI client-presentation fence (around 06:35 UTC)
+
+- The first pushed campaign commit passes lint, dependency audit, workspace,
+  release, X11, SDK and Omarchy-install jobs. Its Wayland job catches one real
+  ordering gap in the fractional-scale Chromium fixture: DOM selection and
+  input coordinates are exact, but the screenshot still contains Chromium's
+  old 780x510 presented buffer inside the new 1280x800 fullscreen geometry.
+  The remaining right and bottom bands are black. Preserve the job artifact
+  and screenshot under `ci-failure-34016434023/`; do not rerun it as a flake.
+- Extend the private test-door ledger with the root surface's currently
+  presented physical width and height, distinct from the compositor's requested
+  window geometry. The browser regression now waits for that client commit and
+  then uses the existing compositor frame barrier before taking its unchanged
+  pixel assertion. This is an observable protocol-state fence, with no sleep,
+  retry or relaxed expectation.
+- The exact GitHub-style debug setup (Chromium, SwiftShader, no sandbox,
+  llvmpipe and headless Weston) passes the fractional case, then the complete
+  1x/1.5x/2x browser matrix. `scripts/check.sh all` also passes after the fix:
+  strict all-target Clippy, private-item rustdoc, workspace tests, 236 Wayland
+  unit tests (one benchmark ignored), and all 24 Python harness tests.
+
 ### Initial audit (historical starting state)
 
 - No open GitHub issues were returned; the reported Edge/repeat/game symptoms
