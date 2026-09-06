@@ -11,6 +11,11 @@ crate and both session binaries carry the same number.
 - Swiping past an empty final desktop no longer creates more empty desktops.
 - Native workspace clients receive removal events; stale activation requests
   cannot recreate a removed desktop.
+- Browser input regressions now exercise Chromium over both Wayland and
+  XWayland at 1x, 1.5x and 2x: exact text selection, held arrow/letter/backspace
+  behavior, release, Omarchy reloads, and Overview focus recovery. The same
+  matrix was also verified with Microsoft Edge; see the
+  [browser input report](docs/engineering/2026-09-06-browser-input.md).
 
 ## [0.3.2] - 2026-09-06
 
