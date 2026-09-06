@@ -387,7 +387,7 @@ jobs:
           sudo apt-get install -y \
             libxkbcommon-dev libegl-dev libgles-dev libwayland-dev \
             libdrm-dev libgbm-dev libinput-dev libudev-dev libseat-dev \
-            weston xwayland foot alacritty zenity grim wayland-utils wlr-randr
+            weston xwayland foot alacritty zenity grim wayland-utils wlr-randr wtype
 
       # --locked: the compositor pins Smithay 0.7.0, and a silent
       # re-resolution here would test a different dependency tree than
@@ -404,10 +404,9 @@ jobs:
       # Every client the suite drives is installed above, and a missing
       # one is now a failure rather than a skip: `require_client`
       # panics under `CI` for anything not on its documented
-      # `CI_CANNOT_INSTALL` list. `wlr-randr` is in the list above
-      # because it was NOT, and the only test exercising
-      # wlr-output-management against a real client had therefore been
-      # reporting `1 passed` in 0.00s without booting a compositor.
+      # `CI_CANNOT_INSTALL` list. `wlr-randr` and `wtype` are in the list
+      # above because each owns a unique real-client protocol regression;
+      # leaving either out would make that coverage disappear.
       # Chromium comes with the runner image; the same guard is what
       # turns the day it stops coming into a red build instead of a
       # quietly smaller suite.

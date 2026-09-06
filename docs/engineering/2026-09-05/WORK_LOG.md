@@ -897,6 +897,12 @@ Source observations, not yet fixed or attributed to the reported symptom:
   1x/1.5x/2x browser matrix. `scripts/check.sh all` also passes after the fix:
   strict all-target Clippy, private-item rustdoc, workspace tests, 236 Wayland
   unit tests (one benchmark ignored), and all 24 Python harness tests.
+- GitHub run 34017081568 confirms all three Chromium cases green, then reaches
+  a previously masked deterministic manifest error: the virtual-keyboard
+  restoration test requires `wtype`, but the runner image does not include it.
+  Ubuntu packages `wtype`; install it explicitly and make it a fail-fast local
+  E2E prerequisite beside `wlr-randr`. Extend the script regression fixture so
+  future edits cannot drop that prerequisite without failing the harness gate.
 
 ### Initial audit (historical starting state)
 

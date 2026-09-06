@@ -10,6 +10,26 @@ import unittest
 
 
 E2E = Path(__file__).resolve().parents[1] / "e2e.sh"
+ROOT = E2E.parent.parent
+CI = ROOT / ".github" / "workflows" / "ci.yml"
+INSTALLABLE_PROTOCOL_CLIENTS = ("wlr-randr", "wtype")
+
+
+class ManifestTests(unittest.TestCase):
+    def test_installable_protocol_clients_are_preflighted_and_installed(self):
+        preflight = next(
+            line.strip() for line in E2E.read_text().splitlines()
+            if line.strip().startswith("for client in ")
+        )
+        preflight_clients = preflight.removeprefix("for client in ").removesuffix("; do").split()
+        workflow = CI.read_text()
+        dependency_step = workflow.split(
+            "      - name: Install Wayland build dependencies", 1
+        )[1].split("      - name:", 1)[0]
+        installed = dependency_step.replace("\\", " ").split()
+        for client in INSTALLABLE_PROTOCOL_CLIENTS:
+            self.assertIn(client, preflight_clients)
+            self.assertIn(client, installed)
 
 
 class HeadlessRuntimeTests(unittest.TestCase):
@@ -49,7 +69,10 @@ Path(os.environ["CHONK_RUNTIME_TEST_LOG"]).write_text(json.dumps({
 raise SystemExit(42)
 ''')
             cargo.chmod(0o755)
-            for command in ("foot", "alacritty", "zenity", "grim", "wlr-randr", "dbus-run-session"):
+            for command in (
+                "foot", "alacritty", "zenity", "grim",
+                *INSTALLABLE_PROTOCOL_CLIENTS, "dbus-run-session",
+            ):
                 (commands / command).symlink_to(cargo)
             env = {**os.environ, "PATH": f"{commands}{os.pathsep}{os.environ['PATH']}",
                    "TMPDIR": str(artifacts), "CHONK_RUNTIME_TEST_LOG": str(log)}

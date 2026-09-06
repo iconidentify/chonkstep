@@ -26,6 +26,7 @@
 #   zenity     GTK dialogs, for the drag/resize/miniaturize regressions
 #   grim       every screenshot, via the compositor's own screencopy
 #   wlr-randr  the only client exercising wlr-output-management
+#   wtype      virtual-keyboard keymap handoff and physical-seat restoration
 # Missing ones are reported together up front rather than one at a
 # time as each test in turn fails to map a window.
 #
@@ -137,7 +138,7 @@ if [ -z "${WAYLAND_DISPLAY:-}" ] && [ -z "${DISPLAY:-}" ]; then
 fi
 
 missing=()
-for client in foot alacritty zenity grim wlr-randr; do
+for client in foot alacritty zenity grim wlr-randr wtype; do
     command -v "$client" >/dev/null 2>&1 || missing+=("$client")
 done
 if [ "${#missing[@]}" -gt 0 ]; then
