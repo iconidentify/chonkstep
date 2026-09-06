@@ -92,22 +92,38 @@ fn wait_for_presented_extent(session: &mut Session, phase: &str) {
 }
 
 fn selection(session: &mut Session, browser: &mut Browser, phase: &str, id: &str) {
-    let start = browser
-        .evaluate(&format!("window.chonkProbe.point('{id}', 8)"))
-        .unwrap();
-    let end = browser
-        .evaluate(&format!("window.chonkProbe.point('{id}', 24)"))
-        .unwrap();
-    for (point, expected) in [(&start, 8), (&end, 24)] {
+    // Read points and viewport in one renderer turn. A fullscreen resize can
+    // otherwise land between separate CDP reads and combine a new compositor
+    // rectangle with old DOM coordinates (particularly under SwiftShader).
+    let (geometry, client) = poll_until(EVENT, "coherent selection geometry", || {
+        let geometry = browser.evaluate(&format!(
+            "new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(() => resolve({{\
+             viewport:window.chonkProbe.snapshot(), start:window.chonkProbe.point('{id}',8), \
+             end:window.chonkProbe.point('{id}',24)}}))))"
+        )).ok()?;
+        let viewport = &geometry["viewport"];
+        let world = session.world().ok()?;
+        let client = world.window_matching("ChonkStep Selection Probe")?;
+        let dpr = coordinate(viewport, "dpr");
+        if phase == "fullscreen" && (viewport["fullscreen"] != true
+            || client.w != world.output_w || client.h != world.output_h
+            || (coordinate(viewport, "width") * dpr - f64::from(client.w)).abs() > dpr
+            || (coordinate(viewport, "height") * dpr - f64::from(client.h)).abs() > dpr) {
+            return None;
+        }
+        Some((geometry, client.clone()))
+    }).unwrap();
+    let start = &geometry["start"];
+    let end = &geometry["end"];
+    for (point, expected) in [(start, 8), (end, 24)] {
         assert_eq!(
             point["offset"], expected,
             "DOM geometry must name the intended caret"
         );
         assert_eq!(point["sameNode"], true);
     }
-    let viewport = value(browser);
+    let viewport = geometry["viewport"].clone();
     let dpr = coordinate(&viewport, "dpr");
-    let client = window(session);
     // The page viewport is bottom/right aligned inside this app window. This
     // accounts for the browser's own titlebar without confusing it with the
     // compositor's server-side frame, which is outside `client` already.
@@ -121,8 +137,8 @@ fn selection(session: &mut Session, browser: &mut Browser, phase: &str, id: &str
             (origin.1 + coordinate(point, "y") * dpr).ceil(),
         )
     };
-    let from = global(&start);
-    let to = global(&end);
+    let from = global(start);
+    let to = global(end);
     browser.evaluate("window.chonkProbe.reset()").unwrap();
     // Edge shows a native mini menu after selecting plain text. Like a user,
     // dismiss it with an outside click before beginning a new selection. DOM
@@ -141,7 +157,7 @@ fn selection(session: &mut Session, browser: &mut Browser, phase: &str, id: &str
             .find(|event| event["type"] == "mousemove")?;
         ["x", "y"]
             .into_iter()
-            .all(|axis| (coordinate(motion, axis) - coordinate(&start, axis)).abs() < 0.75)
+            .all(|axis| (coordinate(motion, axis) - coordinate(start, axis)).abs() < 0.75)
             .then_some(observed)
     })
     .unwrap_or_else(|error| {
@@ -159,7 +175,7 @@ fn selection(session: &mut Session, browser: &mut Browser, phase: &str, id: &str
         .find(|event| event["type"] == "mousemove")
         .unwrap();
     for axis in ["x", "y"] {
-        assert!((coordinate(motion, axis) - coordinate(&start, axis)).abs() < 0.75,
+        assert!((coordinate(motion, axis) - coordinate(start, axis)).abs() < 0.75,
             "viewport calibration failed before pressing: {phase}, {id}, {client:?}, {start}, {hover}");
     }
     // Do not confuse the popup-dismissal click with the drag's release.
@@ -192,22 +208,22 @@ fn selection(session: &mut Session, browser: &mut Browser, phase: &str, id: &str
         serde_json::to_vec_pretty(&report).unwrap(),
     )
     .unwrap();
-    let screenshot = session
-        .screenshot(&format!("selection-{phase}-{id}"))
-        .unwrap();
-    let background = screenshot.mean_rgb(
-        (origin.0 + 32.0 * dpr) as u32,
-        // Keep clear of the browser's temporary fullscreen-exit banner.
-        (origin.1 + (coordinate(&viewport, "height") - 24.0) * dpr) as u32,
-        12,
-        12,
-    );
-    for (actual, expected) in background.into_iter().zip([246.0, 244.0, 232.0]) {
-        assert!(
-            (actual - expected).abs() < 3.0,
-            "DOM selection is insufficient if the browser did not render: {background:?}"
+    // SwiftShader can commit an initially black buffer at the correct extent
+    // before the page's first painted frame. DOM input and buffer size alone
+    // cannot fence that asynchronous paint; require the real pixels as well.
+    let mut background = [0.0; 3];
+    poll_until(EVENT, "the browser to paint the selected page", || {
+        let screenshot = session.screenshot(&format!("selection-{phase}-{id}")).ok()?;
+        background = screenshot.mean_rgb(
+            (origin.0 + 32.0 * dpr) as u32,
+            // Keep clear of the browser's temporary fullscreen-exit banner.
+            (origin.1 + (coordinate(&viewport, "height") - 24.0) * dpr) as u32,
+            12,
+            12,
         );
-    }
+        background.into_iter().zip([246.0, 244.0, 232.0])
+            .all(|(actual, expected)| (actual - expected).abs() < 3.0).then_some(())
+    }).unwrap_or_else(|error| panic!("{error}: DOM selection is insufficient if the browser did not render: {background:?}"));
     let release = observed["events"]
         .as_array()
         .unwrap()
@@ -217,7 +233,7 @@ fn selection(session: &mut Session, browser: &mut Browser, phase: &str, id: &str
         .unwrap();
     for axis in ["x", "y"] {
         assert!(
-            (coordinate(release, axis) - coordinate(&end, axis)).abs() < 0.75,
+            (coordinate(release, axis) - coordinate(end, axis)).abs() < 0.75,
             "held-button {axis} is not the same coordinate space as hover: {report}"
         );
     }
@@ -467,7 +483,11 @@ fn run(name: &str, scale: f32, platform: Platform) {
     if std::env::var_os("CI").is_some() {
         // Same private-page software-renderer policy as the existing Chromium
         // regressions on hosted runners that disable unprivileged namespaces.
-        args.extend(["--no-sandbox", "--use-gl=angle", "--use-angle=swiftshader"]);
+        // Chromium's no-sandbox warning infobar remains visible in DOM
+        // fullscreen and reduces innerHeight. Its official test switch
+        // suppresses startup infobars, keeping the strict viewport/surface
+        // agreement below meaningful. Only this isolated CI browser uses it.
+        args.extend(["--no-sandbox", "--test-type", "--use-gl=angle", "--use-angle=swiftshader"]);
     }
     match platform {
         Platform::Wayland => session.launch_isolated(&program, &args),
@@ -548,7 +568,10 @@ fn run(name: &str, scale: f32, platform: Platform) {
                         .then_some(())
                 },
             )
-            .unwrap();
+            .unwrap_or_else(|error| {
+                let _ = session.screenshot("fullscreen-timeout");
+                panic!("{error}: page={}, world={:?}", value(&mut browser), session.world());
+            });
         }
         // A configure updates compositor and DOM geometry before Chromium's
         // newly sized Wayland buffer necessarily reaches the scene. Fence the

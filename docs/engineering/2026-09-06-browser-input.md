@@ -74,6 +74,24 @@ to the client rectangle. Finally, fullscreen qualification waits for the DOM
 viewport, compositor extent and presented buffer, since their updates are
 asynchronous. Exact selection and coordinate assertions remain in place.
 
+PR #137's CI run exposed a test-environment difference: the hosted runner uses
+`--no-sandbox`, whose Chromium warning infobar stays visible even in DOM
+fullscreen. Reproducing with `CI=1` locally showed the same full-size client
+with a shorter page viewport. The isolated CI browser now uses Chromium's
+`--test-type` startup-infobar suppression (see the
+[Chromium implementation](https://chromium.googlesource.com/chromium/src/+/refs/heads/main/chrome/browser/ui/startup/infobar_utils.cc)).
+This leaves all extent, rendering, selection and repeat assertions intact and
+does not change browser launch options in the user's desktop session.
+Fullscreen timeouts now retain a screenshot and both DOM/compositor geometry.
+The CI-mode rerun also caught SwiftShader presenting an initial black buffer
+at the correct extent before painting the page. The screenshot color assertion
+now polls for that asynchronous paint for at most ten seconds; a permanently
+blank page still fails, and all exact input assertions are unchanged.
+Selection points and viewport size are read atomically after renderer frames,
+and requalified against fullscreen geometry immediately before input. Separate
+CDP reads had occasionally combined an old DOM viewport with the new client
+extent during an XWayland configure sequence.
+
 ## Results
 
 The tested compositor is the installed optimized 0.3.2 executable from
