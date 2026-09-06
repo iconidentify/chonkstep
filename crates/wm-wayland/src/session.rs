@@ -699,6 +699,10 @@ struct SessionOutput {
     /// into the many, and [`redraw_pending`] is what keeps the dispatch
     /// loop coming back until every output has caught up.
     dirty: bool,
+    /// This output still owes a frame with reset buffer ages. Kept per
+    /// connector for the same reason as `dirty`: another output may be ready
+    /// while this one is waiting for an older page flip to complete.
+    full_damage_required: bool,
     /// False after DPMS off; the head remains in the logical layout.
     powered: bool,
     /// Reusable scene-construction storage. Draining this into
@@ -1721,6 +1725,7 @@ fn attach_output(
             frame_pending: None,
             // Nothing has ever been drawn on it.
             dirty: true,
+            full_damage_required: false,
             powered: true,
             scene_scratch: Vec::new(),
             pending_scene: Vec::new(),
@@ -2505,11 +2510,18 @@ pub(crate) fn render_frame_session(comp: &mut Compositor, plain_capture_pending:
         return false;
     };
 
-    if wm.backend().damage {
+    let (scene_damaged, full_damage_required) = {
+        let backend = wm.backend_mut();
+        (
+            std::mem::take(&mut backend.damage),
+            std::mem::take(&mut backend.full_damage_required),
+        )
+    };
+    if scene_damaged {
         for output in session.outputs.iter_mut() {
             output.dirty = true;
+            output.full_damage_required |= full_damage_required;
         }
-        wm.backend_mut().damage = false;
     }
     // Someone else owns the VT: every commit would fail with
     // `DeviceInactive`, and the outputs keep their dirty flags so the
@@ -2581,7 +2593,7 @@ pub(crate) fn render_frame_session(comp: &mut Compositor, plain_capture_pending:
         // stale rectangles rather than a crash — the kind of bug a user
         // hits before a developer does, and one that would otherwise
         // require a rebuild to escape.
-        if full_damage_forced() || plain_capture_pending {
+        if full_damage_forced() || plain_capture_pending || output.full_damage_required {
             output.drm_compositor.reset_buffer_ages();
         }
 
@@ -2774,6 +2786,7 @@ pub(crate) fn render_frame_session(comp: &mut Compositor, plain_capture_pending:
         output.scene_scratch.clear();
         output.frame_clock.observe_render(render_started.elapsed(), Instant::now());
         output.dirty = false;
+        output.full_damage_required = false;
         drew_any = true;
     }
 

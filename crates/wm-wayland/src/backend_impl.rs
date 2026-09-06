@@ -60,6 +60,18 @@ use crate::state::{
     WlWindowId,
 };
 
+/// Whether a previously painted sparse chrome band reaches outside the
+/// replacement frame. Negative offsets count too; use widened arithmetic so a
+/// malformed theme cannot overflow while we are deciding how much to damage.
+fn decoration_part_exceeds_frame(offset: Point, size: Size, frame_size: Size) -> bool {
+    let right = i64::from(offset.x) + i64::from(size.w);
+    let bottom = i64::from(offset.y) + i64::from(size.h);
+    offset.x < 0
+        || offset.y < 0
+        || right > i64::from(frame_size.w)
+        || bottom > i64::from(frame_size.h)
+}
+
 /// `wm-theme` rect -> smithay logical rect. The theme side is
 /// `i32`/`u32`, smithay is `i32`/`i32`; sizes are window-sized, nowhere
 /// near the cast boundary.
@@ -882,6 +894,23 @@ impl Backend for WaylandBackend {
     }
 
     fn paint_decoration(&mut self, frame: Self::FrameId, surface: &DecorationSurface) {
+        // Windowshade keeps the frame mapped, hides the client, and contracts
+        // the frame to its titlebar. The old sparse side and bottom bands then
+        // disappear from the element list. On the DRM path Smithay's buffer-age
+        // history can miss those retired elements, leaving their last pixels on
+        // screen as thin vertical lines. Request one full-damage frame for this
+        // transition; doing it here confines the expensive fallback to the
+        // collapse instead of every cursor or resize frame.
+        let retires_visible_chrome = self.frames.get(&frame).is_some_and(|record| {
+            record.mapped
+                && self
+                    .windows
+                    .get(&record.window)
+                    .is_some_and(|window| !window.mapped)
+                && record.parts.iter().any(|part| {
+                    decoration_part_exceeds_frame(part.offset, part.size, surface.frame_size)
+                })
+        });
         if let Some(record) = self.frames.get_mut(&frame) {
             let mut previous = std::mem::take(&mut record.parts).into_iter();
             let mut imported = Vec::with_capacity(surface.parts.len());
@@ -914,6 +943,9 @@ impl Backend for WaylandBackend {
                 imported.push(FramePart { offset: part.offset, size, buffer });
             }
             record.parts = imported;
+            if retires_visible_chrome {
+                self.full_damage_required = true;
+            }
             self.mark_damaged();
         }
     }
@@ -1934,5 +1966,29 @@ mod tests {
         assert!(!both_axes_maximized(true, false));
         assert!(!both_axes_maximized(false, true));
         assert!(!both_axes_maximized(false, false));
+    }
+
+    #[test]
+    fn shade_detects_retired_side_and_bottom_chrome() {
+        let shaded = Size::new(640, 34);
+
+        // The titlebar already fits the replacement frame and needs no
+        // fallback. The former side and bottom bands lie below it and must
+        // invalidate pixels that no longer have render elements.
+        assert!(!decoration_part_exceeds_frame(
+            Point::new(0, 0),
+            Size::new(640, 32),
+            shaded,
+        ));
+        assert!(decoration_part_exceeds_frame(
+            Point::new(0, 32),
+            Size::new(1, 480),
+            shaded,
+        ));
+        assert!(decoration_part_exceeds_frame(
+            Point::new(0, 510),
+            Size::new(640, 2),
+            shaded,
+        ));
     }
 }

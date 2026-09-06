@@ -794,6 +794,16 @@ pub struct WaylandBackend {
     /// the renderer clears it after drawing. This is the whole
     /// redraw-scheduling protocol: no damage, no render.
     pub(crate) damage: bool,
+    /// A scene transition retired visible pixels that Smithay's
+    /// per-element history cannot reliably rediscover from the new scene.
+    ///
+    /// The physical backend distributes this edge to every output beside
+    /// [`Self::damage`]. Each output keeps it until that output has rendered
+    /// successfully, so a connector blocked on an older page flip cannot
+    /// miss the invalidation. This remains separate from ordinary damage:
+    /// resetting buffer ages for pointer motion would turn every cursor
+    /// sample into a full-panel redraw on hardware without a cursor plane.
+    pub(crate) full_damage_required: bool,
     /// Call site that most recently invalidated the scene. A static
     /// `Location` costs no allocation on the hot path and makes a live
     /// diagnostic dump answer why the compositor last chose to draw.
@@ -1038,6 +1048,7 @@ impl WaylandBackend {
             ime_popups: Vec::new(),
             output_size,
             damage: true,
+            full_damage_required: false,
             last_damage_source: None,
             cursor_hidden: false,
             cursor_hidden_owner: None,
