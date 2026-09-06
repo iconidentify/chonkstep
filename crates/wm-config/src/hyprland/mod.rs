@@ -257,6 +257,9 @@ pub struct Reading {
     /// later entries winning — Hyprland's own rule for a chord bound
     /// twice.
     pub keybindings: Vec<(KeyCombo, Action)>,
+    /// Explicit bind/unbind choices suppress native capture defaults, even when
+    /// a dispatcher is not supported. Never reclaim a user's chosen chord.
+    pub explicit_keys: Vec<KeyCombo>,
     /// Every accepted binding including release/locked/repeat behavior
     /// and its human description.
     pub bindings: Vec<crate::Binding>,
@@ -317,10 +320,11 @@ impl Reading {
         // replaced the built-in keybindings. Destructure exhaustively so a
         // future category cannot silently disappear at this loading boundary.
         let Self {
-            keybindings, bindings, layer_bindings, commands, env, autostart,
+            keybindings, explicit_keys, bindings, layer_bindings, commands, env, autostart,
             float_rules, monitors, input, files: _, skipped: _,
         } = self;
         keybindings.is_empty()
+            && explicit_keys.is_empty()
             && bindings.is_empty()
             && layer_bindings.is_empty()
             && commands.is_empty()
@@ -481,8 +485,17 @@ pub fn apply(config: &mut crate::Config, reading: Option<&Reading>) {
             "hyprland-config: no bindings came out of the read; keeping the built-in keymap"
         );
     } else {
+        let captures: Vec<_> = config.keybindings.iter()
+            .filter(|(key, action)| matches!(action, Action::Capture(_))
+                && !reading.explicit_keys.contains(key)
+                && !reading.keybindings.iter().any(|(other, _)| other == key))
+            .cloned().collect();
         config.keybindings = reading.keybindings.clone();
+        config.keybindings.extend(captures);
     }
+    config.keybindings.retain(|(key, action)| !matches!(action, Action::Capture(_))
+        || !reading.explicit_keys.contains(key)
+        || reading.keybindings.iter().any(|(other, _)| other == key));
     config.bindings = reading.bindings.clone();
     config.layer_bindings = reading.layer_bindings.clone();
     // Commands are *inserted*, so a `[commands]` entry of the same name
@@ -787,13 +800,12 @@ fn lower(stream: Vec<Directive>, report: LoadReport) -> Reading {
                 description,
                 flags,
                 dispatcher,
-            } => bind(
-                &mut reading,
-                &keys,
-                description.as_deref(),
-                flags,
-                &dispatcher,
-            ),
+            } => {
+                if let Ok(spec) = keys::spec_for(&keys) {
+                    if let Some(combo) = crate::parse_key(&spec) { reading.explicit_keys.push(combo); }
+                }
+                bind(&mut reading, &keys, description.as_deref(), flags, &dispatcher)
+            },
             Directive::LayerBind {
                 namespace,
                 keys,
@@ -811,6 +823,7 @@ fn lower(stream: Vec<Directive>, report: LoadReport) -> Reading {
             Directive::Unbind { keys } => match keys::spec_for(&keys) {
                 Ok(spec) => {
                     if let Some(combo) = crate::parse_key(&spec) {
+                        reading.explicit_keys.push(combo);
                         reading
                             .keybindings
                             .retain(|(existing, _)| *existing != combo);

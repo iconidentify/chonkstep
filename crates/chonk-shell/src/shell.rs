@@ -45,6 +45,8 @@ use chonk_dock_proto::wire::PanelCloseReason;
 /// act for the binary to carry out.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ShellOutcome {
+    /// The native backend owns the capture pixels and modal interaction.
+    Capture(wm_config::CaptureMode),
     /// Nothing process-level to do; keep looping.
     Continue,
     /// The user asked to end the session (the root menu's Exit item).
@@ -1815,6 +1817,7 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
     /// of silently binding to nothing.
     pub fn run_action(&mut self, wm: &mut WindowManager<B>, action: &Action) -> ShellOutcome {
         match action {
+            Action::Capture(mode) => return ShellOutcome::Capture(*mode),
             Action::SpawnTerminal => {
                 let terminal = spawn_terminal(
                     self.state.terminal.as_deref(),
@@ -1968,7 +1971,15 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
             // desktop stays up either way; that is the whole contract
             // this crate's config layer is written to.
             Action::Run(name) => match self.state.commands.get(name) {
-                Some(argv) => run_named_command(name, argv, self.state.scale),
+                Some(argv) => {
+                    // The unmodified Omarchy Print binding reaches our selector
+                    // on Wayland. Custom argv and the X11 session keep their
+                    // normal command behavior; this is not a name-only override.
+                    if wm.backend().supports_native_capture() && argv.as_slice() == ["omarchy-capture-screenshot"] {
+                        return ShellOutcome::Capture(wm_config::CaptureMode::Area);
+                    }
+                    run_named_command(name, argv, self.state.scale);
+                }
                 None => tracing::warn!(
                     command = %name,
                     "no such command in [commands]; nothing to run"

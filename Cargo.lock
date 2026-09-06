@@ -3458,6 +3458,7 @@ dependencies = [
  "chonk-hyprland-ipc",
  "chonk-shell",
  "chonk-xsettings",
+ "cosmic-text",
  "libc",
  "profiling",
  "smithay",

@@ -1124,9 +1124,8 @@ fn the_posture_decides_whether_anybody_elses_config_is_read() {
     );
 }
 
-/// The read replaces the baked preset rather than merging with it —
-/// the same replace-don't-merge rule, and the same reason: a chord
-/// with two answers has no documented winner.
+/// Live bindings replace the preset, with native capture defaults filling only
+/// unclaimed chords. No chord may have two answers.
 #[test]
 fn the_live_read_replaces_the_baked_preset() {
     let mut config = crate::Config::default_config();
@@ -1137,11 +1136,25 @@ fn the_live_read_replaces_the_baked_preset() {
     apply(&mut config, Some(&reading));
     assert_eq!(
         config.keybindings.len(),
-        reading.keybindings.len(),
-        "replaced, not merged with, the {baked} baked entries"
+        reading.keybindings.len() + 4,
+        "only four native capture shortcuts augment the live read, not all {baked} entries"
     );
     assert!(config.float_policy.is_some());
     assert!(!config.session_env.is_empty());
+}
+
+#[test]
+fn capture_defaults_honor_live_bind_and_unbind_even_without_other_bindings() {
+    let capture = crate::parse_key("super+ctrl+shift+4").unwrap();
+    for replacement in [None, Some(Action::Close)] {
+        let mut config = crate::Config::default_config();
+        crate::preset::apply_keymap(&mut config, crate::preset::Keymap::Omarchy);
+        let mut reading = Reading { explicit_keys: vec![capture], ..Reading::default() };
+        if let Some(action) = &replacement { reading.keybindings.push((capture, action.clone())); }
+        assert!(!reading.is_empty(), "unbind is an explicit user choice");
+        apply(&mut config, Some(&reading));
+        assert_eq!(config.keybindings.iter().find(|(key, _)| *key == capture).map(|(_, a)| a.clone()), replacement);
+    }
 }
 
 /// Nothing to read means the preset stands. That is what it is for.

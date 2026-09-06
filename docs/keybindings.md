@@ -33,11 +33,21 @@ ever do disagree, the source wins.
 | `alt+shift+right`  | `workspace-carry-next` | Carry the focused window to the next          |
 | `alt+shift+left`   | `workspace-carry-prev` | Carry the focused window back                 |
 | `super+up`         | `overview`             | The modal Overview: every window as a card    |
+| `super+shift+3`    | `capture-screen`       | Save screen PNG and copy it (Wayland)        |
+| `super+shift+4`    | `capture-area`         | Select area; Space selects a window          |
+| `super+shift+5`    | `capture`              | Screenshot / recording controls              |
+| `super+ctrl+escape`| `capture-stop`         | Finish recording                             |
 | `control+escape`   | `window-menu`          | Window commands menu, no titlebar required    |
 
 Window-targeted actions (`close`, `toggle-maximize`, `toggle-shade`,
 `miniaturize`, `toggle-fullscreen`, `window-menu`) act on the focused
 window and do nothing when no window is focused.
+
+See [Capture](capture.md) for saving, clipboard, selection and recording.
+The Omarchy keymap uses **Super+Ctrl+Shift+3/4/5** instead, because
+Super+Shift+digits already carries windows to desktops there. Its unmodified
+Print screenshot command opens the native area selector on Wayland. Explicit
+live Hyprland bindings and unbinds always override the new capture defaults.
 
 Every root, window, and dock-tile menu is keyboard-modal while open.
 Up/Down changes the highlighted row, Right or Enter opens a submenu,
@@ -80,7 +90,8 @@ time. Bind them like anything else:
 keymap = "omarchy"        # ...or desktop = "omarchy", which defaults it
 ```
 
-127 bindings, derived from Omarchy's own configuration on the machine —
+131 bindings, including four native capture shortcuts, derived from Omarchy's
+own configuration on the machine —
 `$OMARCHY_PATH/default/hypr/bindings/*.lua` — rather than from memory of
 Hyprland, with the `o.bind` helpers expanded the way `helpers.lua`
 expands them. A `run <name>` action names an entry the preset declares
@@ -107,6 +118,10 @@ helpers are supported directly.
 
 | Binding                  | Action                                 | Omarchy's own command                                                                                               |
 |--------------------------|----------------------------------------|---------------------------------------------------------------------------------------------------------------------|
+| `super+ctrl+shift+3` | `capture-screen` | -- |
+| `super+ctrl+shift+4` | `capture-area` | -- |
+| `super+ctrl+shift+5` | `capture` | -- |
+| `super+ctrl+escape` | `capture-stop` | -- |
 | `super+return`           | `spawn-terminal`                       | --                                                                                                                  |
 | `super+shift+return`     | `run omarchy-browser`                  | `omarchy-launch-browser`                                                                                            |
 | `super+shift+b`          | `run omarchy-browser`                  | `omarchy-launch-browser`                                                                                            |

@@ -2622,6 +2622,7 @@ pub(crate) fn render_frame_session(comp: &mut Compositor, plain_capture_pending:
             viewport,
         );
 
+        crate::capture_tool::render(&mut output.scene_scratch, renderer, wm.backend(), viewport);
         let (rendered, direct_scanout, render_states) =
             match output.drm_compositor.render_frame(renderer, &output.scene_scratch, clear_color, frame_flags()) {
             Ok(result) => {

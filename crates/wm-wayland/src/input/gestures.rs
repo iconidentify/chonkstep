@@ -8,6 +8,7 @@ use crate::state::Compositor;
 
 fn available(state: &Compositor) -> bool {
     !state.wm.backend().locked
+        && !crate::capture_tool::modal(state.wm.backend())
         && state.layer_shell.exclusive_focus.is_none()
         && !state.focus_grab.is_active()
         && state.wm.backend().pointer_grab.is_none()

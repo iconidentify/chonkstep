@@ -541,6 +541,10 @@ fn dispatch_motion(
 /// it) that must not drift on what each variant means.
 fn exit_requested(shell: &mut Shell<X11Backend>, outcome: ShellOutcome) -> bool {
     match outcome {
+        ShellOutcome::Capture(_) => {
+            tracing::warn!("native capture requires the Chonkstep Wayland session");
+            false
+        }
         ShellOutcome::Continue => false,
         ShellOutcome::Exit => true,
         // The exact path `scripts/restart.sh` takes: re-exec the

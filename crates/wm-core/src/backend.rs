@@ -130,6 +130,8 @@ pub trait Backend {
     fn supports_live_overview(&self) -> bool {
         false
     }
+    /// The backend has the native screenshot and recording selector.
+    fn supports_native_capture(&self) -> bool { false }
     fn show_live_overview(
         &mut self,
         surface: Self::ShellId,

@@ -852,6 +852,7 @@ fn render_frame_winit(comp: &mut Compositor, plain_capture_pending: bool) -> boo
             Rect::new(Point::new(0, 0), entry.size),
         );
 
+        crate::capture_tool::render(scene_scratch, renderer, wm.backend(), Rect::new(Point::new(0, 0), entry.size));
         match damage_tracker.render_output(renderer, &mut framebuffer, age, scene_scratch, clear_color) {
             Ok(result) => {
                 log_damage(age, result.damage.map(Vec::as_slice));
@@ -1474,6 +1475,7 @@ pub(crate) fn push_cursor_elements(
     if matches!(status, CursorImageStatus::Hidden) {
         return;
     }
+    if crate::capture_tool::crosshair(backend).is_some() { return; }
     let subject = crate::input::pointer_subject(backend, global);
     let sprite = match subject {
         crate::input::PointerSubject::Client => None,

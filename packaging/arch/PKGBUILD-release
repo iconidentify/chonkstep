@@ -46,6 +46,11 @@ arch=('x86_64' 'aarch64')
 url="https://github.com/iconidentify/chonkstep"
 license=('GPL-3.0-only')
 depends=(
+  'wl-clipboard'     # lossless PNG clipboard ownership
+  'wf-recorder'      # native Wayland recording (software H.264 works on Asahi)
+  'ffmpeg'           # finalize recoverable MKV recordings as fast-start MP4
+  'libnotify'        # capture completion / failure notifications
+  'xdg-user-dirs'    # localized Pictures / Videos destinations
   'bash'             # the session launcher scripts in /usr/lib/chonkstep
   'gcc-libs'
   'glibc'
@@ -219,6 +224,7 @@ DESKTOP
   install -Dm644 docs/config.example.toml -t "$pkgdir/usr/share/doc/$pkgname"
   install -Dm644 docs/quickstart.md -t "$pkgdir/usr/share/doc/$pkgname"
   install -Dm644 docs/keybindings.md -t "$pkgdir/usr/share/doc/$pkgname"
+  install -Dm644 docs/capture.md -t "$pkgdir/usr/share/doc/$pkgname"
   install -Dm644 docs/gestures.md -t "$pkgdir/usr/share/doc/$pkgname"
   install -Dm644 docs/instrument-platform.md -t "$pkgdir/usr/share/doc/$pkgname"
   install -Dm644 docs/dockapp-protocol.md -t "$pkgdir/usr/share/doc/$pkgname"
