@@ -101,7 +101,7 @@ fn smithay_rect(rect: Rect) -> SmithayRect<i32, Logical> {
 ///
 /// `None` for an empty buffer (nothing to show; callers keep whatever
 /// they had), mirroring `wm-x11`'s blit ignoring empty buffers.
-fn import_buffer(buffer: &DecorationBuffer, opaque: bool) -> Option<MemoryRenderBuffer> {
+pub(crate) fn import_buffer(buffer: &DecorationBuffer, opaque: bool) -> Option<MemoryRenderBuffer> {
     if buffer.width == 0 || buffer.height == 0 {
         return None;
     }
@@ -450,6 +450,13 @@ impl Backend for WaylandBackend {
     }
 
     fn destroy_shell_surface(&mut self, id: Self::ShellId) {
+        if self
+            .overview
+            .as_ref()
+            .is_some_and(|overview| overview.surface == id)
+        {
+            self.overview = None;
+        }
         if self.shells.remove(&id).is_some() {
             self.shell_stacking.retain(|shell| *shell != id);
             self.mark_damaged();
@@ -494,6 +501,34 @@ impl Backend for WaylandBackend {
     fn paint_root_color(&mut self, rgb: (u8, u8, u8)) {
         self.root_background = RootBackground::Color(rgb);
         self.mark_damaged();
+    }
+
+    fn supports_live_overview(&self) -> bool {
+        true
+    }
+
+    fn show_live_overview(
+        &mut self,
+        surface: Self::ShellId,
+        scene: wm_core::OverviewScene<Self::WindowId, Self::FrameId>,
+    ) {
+        self.overview = Some(crate::overview::Overview::new(surface, scene, self));
+        self.mark_damaged();
+    }
+
+    fn select_live_overview(&mut self, selected: usize) {
+        if let Some(overview) = self.overview.as_mut() {
+            if overview.selected != selected {
+                overview.selected = selected;
+                self.mark_damaged();
+            }
+        }
+    }
+
+    fn hide_live_overview(&mut self) {
+        if self.overview.take().is_some() {
+            self.mark_damaged();
+        }
     }
 
     fn set_layer_surface_hidden(&mut self, namespace: &str, hidden: bool) {

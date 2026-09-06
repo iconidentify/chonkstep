@@ -233,6 +233,8 @@ pub struct Binding {
 /// Keyboard settings imported from Hyprland's `input {}` table.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct InputConfig {
+    /// Compositor-owned three/four-finger swipes on the native Wayland seat.
+    pub gestures: wm_core::GestureConfig,
     pub rules: Option<String>,
     pub model: Option<String>,
     pub layout: Option<String>,
@@ -1063,6 +1065,35 @@ fn apply_input_table(config: &mut InputConfig, entries: &toml::Table, prefix: &s
             format!("{prefix}.{key}")
         };
         match key.as_str() {
+            "gestures" if prefix.is_empty() => match value.as_table() {
+                Some(settings) => {
+                    for (key, value) in settings {
+                        match (key.as_str(), value) {
+                            ("enabled", toml::Value::Boolean(enabled)) => {
+                                config.gestures.enabled = *enabled
+                            }
+                            ("fingers", toml::Value::Integer(fingers))
+                                if matches!(fingers, 0 | 3 | 4) =>
+                            {
+                                config.gestures.fingers = *fingers as u32;
+                            }
+                            ("distance", value)
+                                if input_number(value)
+                                    .is_some_and(|v| (24.0..=1000.0).contains(&v)) =>
+                            {
+                                config.gestures.distance = input_number(value).unwrap();
+                            }
+                            _ => {
+                                tracing::warn!(%key, ?value, "config: invalid gesture setting; use enabled (boolean), fingers (0, 3 or 4), distance (24..1000)")
+                            }
+                        }
+                    }
+                }
+                None => tracing::warn!(
+                    ?value,
+                    "config: [input.gestures] must be a table, ignoring it"
+                ),
+            },
             "sensitivity" => match input_number(value) {
                 Some(speed) if (-1.0..=1.0).contains(&speed) => config.sensitivity = Some(speed),
                 _ => tracing::warn!(key = %setting, value = ?value, "config: input sensitivity must be a number from -1 to 1, ignoring it"),
@@ -2067,7 +2098,36 @@ scroll_factor = 0.4
         assert_eq!(config.input.tap_to_click, Some(true));
         assert_eq!(config.input.clickfinger_behavior, Some(true));
         assert_eq!(config.input.scroll_factor, Some(0.4));
-        assert_eq!(config.provenance.get("input").map(String::as_str), Some("config file"));
+        assert_eq!(
+            config.provenance.get("input").map(String::as_str),
+            Some("config file")
+        );
+    }
+
+    #[test]
+    fn native_desktop_gestures_validate_and_keep_independent_scroll_settings() {
+        let config = parse("[input.gestures]\nenabled = false\nfingers = 4\ndistance = 125\n[input.touchpad]\nnatural_scroll = false\n").unwrap();
+        assert_eq!(
+            config.input.gestures,
+            wm_core::GestureConfig {
+                enabled: false,
+                fingers: 4,
+                distance: 125.0
+            }
+        );
+        assert_eq!(config.input.natural_scroll, Some(false));
+        for value in [
+            "distance = nan",
+            "distance = inf",
+            "distance = -1",
+            "distance = 0",
+            "distance = 1001",
+            "fingers = 2",
+            "enabled = 1",
+        ] {
+            let config = parse(&format!("[input.gestures]\n{value}\n")).unwrap();
+            assert_eq!(config.input.gestures, wm_core::GestureConfig::default());
+        }
     }
 
     #[test]

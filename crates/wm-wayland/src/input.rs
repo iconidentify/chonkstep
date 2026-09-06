@@ -58,6 +58,7 @@
 //! it.
 
 pub(crate) mod constraints;
+mod gestures;
 pub(crate) mod keyboard;
 mod seat;
 pub(crate) mod surface;
@@ -111,6 +112,7 @@ type WmEvent = BackendEvent<WlWindowId, WlFrameId>;
 /// map (see the module doc for why there and not on `Compositor`).
 #[derive(Default)]
 struct InputState {
+    swipe: wm_core::SwipeTracker,
     /// The managed window the pointer was inside (chrome or content) at
     /// the last motion — crossing INTO one emits
     /// `BackendEvent::PointerEnter` exactly once, which is what
@@ -352,6 +354,7 @@ pub(crate) fn clear_implicit_grab(seat: &Seat<Compositor>) {
 /// not turn into a client-visible release merely because a VT switch
 /// interrupted it.
 pub(crate) fn resynchronise_input_after_resume(state: &mut Compositor) {
+    gestures::cancel(state);
     let seat = state.seat.clone();
     cancel_active_touches(state);
     let suppressed_keys = with_input(&seat, reset_resume_bookkeeping);
@@ -447,6 +450,7 @@ fn release_stale_pressed_keys<D: SeatHandler + 'static>(
 /// [`InputState`]. This is called on both lock and unlock so neither
 /// domain inherits focus or a held tip from the other.
 pub(crate) fn reset_client_input_focus(state: &mut Compositor) {
+    gestures::cancel(state);
     let seat = state.seat.clone();
     let time = state.start_time.elapsed().as_millis() as u32;
     cancel_active_touches(state);
@@ -780,8 +784,13 @@ pub(crate) fn process_input_event<I: InputBackend>(state: &mut Compositor, event
             }
         }
         InputEvent::DeviceRemoved { device } => {
+            gestures::cancel(state);
             state.mark_hyprland_state_dirty();
-            state.wm.backend_mut().input_devices.retain(|held| held.id != device.id());
+            state
+                .wm
+                .backend_mut()
+                .input_devices
+                .retain(|held| held.id != device.id());
             if device.has_capability(DeviceCapability::TabletTool) {
                 state.seat.tablet_seat().remove_tablet(&TabletDescriptor::from(&device));
             }
@@ -792,6 +801,9 @@ pub(crate) fn process_input_event<I: InputBackend>(state: &mut Compositor, event
         InputEvent::PointerButton { event } => on_pointer_button::<I>(state, event),
         InputEvent::PointerAxis { event } => on_pointer_axis::<I>(state, event),
         InputEvent::GestureSwipeBegin { event } => {
+            if gestures::begin(state, event.fingers(), event.time_msec()) {
+                return;
+            }
             if let Some(pointer) = state.seat.get_pointer() {
                 pointer.gesture_swipe_begin(
                     state,
@@ -804,6 +816,9 @@ pub(crate) fn process_input_event<I: InputBackend>(state: &mut Compositor, event
             }
         }
         InputEvent::GestureSwipeUpdate { event } => {
+            if gestures::update(state, event.delta()) {
+                return;
+            }
             if let Some(pointer) = state.seat.get_pointer() {
                 pointer.gesture_swipe_update(
                     state,
@@ -812,6 +827,9 @@ pub(crate) fn process_input_event<I: InputBackend>(state: &mut Compositor, event
             }
         }
         InputEvent::GestureSwipeEnd { event } => {
+            if gestures::end(state, event.cancelled()) {
+                return;
+            }
             if let Some(pointer) = state.seat.get_pointer() {
                 pointer.gesture_swipe_end(
                     state,

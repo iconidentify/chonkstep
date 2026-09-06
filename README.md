@@ -95,12 +95,13 @@ and the release history in [CHANGELOG.md](CHANGELOG.md).
   drawn in the active theme's language - the same chiseled chrome as
   everything else on screen, not a generic overlay.
 - **The Overview.** `super+up` (the bindable `overview` action) lays
-  every window on the desk out as a card in miniature real chrome with
-  a live capture, over a strip of genuine workspace tiles: arrows
+  windows out at their own proportions over the wallpaper, with
+  desktop thumbnails along the top: arrows
   move, Return or a click focuses, right-click opens the real window
   commands menu, clicking a workspace tile switches desks, Escape
-  dismisses. Captures are served at card resolution while it is open,
-  so terminal text stays legible.
+  dismisses. Wayland scales existing client textures directly: live content,
+  no screenshot readbacks or full-screen pixel buffer, and cached captions
+  on selection. X11 retains the rasterized card fallback.
 - **The Living Desktop.** `restore_session = true` records every
   window's application, geometry, workspace and shape as you work and
   relaunches that layout at the next login - and after a crash, which
@@ -706,6 +707,12 @@ The default bindings:
 
 Alt+Tab window cycling is part of the modal switcher machinery and is
 always available; it is not rebindable from the config file.
+
+The Wayland login session also supports three- and four-finger touchpad swipes:
+left/right changes workspace, up opens Overview, and down dismisses it. A swipe
+commits on finger lift. Top-edge window movement respects a bar's reserved space,
+including Omarchy's bar. See [docs/gestures.md](docs/gestures.md) for settings,
+behavior and the allocation budget.
 
 ## Development
 

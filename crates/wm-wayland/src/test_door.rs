@@ -125,9 +125,11 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 
 use smithay::backend::input::{
-    AbsolutePositionEvent, ButtonState, Device, DeviceCapability, Event, InputBackend, InputEvent,
-    KeyState, KeyboardKeyEvent, PointerButtonEvent, PointerMotionAbsoluteEvent, TouchCancelEvent,
-    TouchDownEvent, TouchEvent, TouchFrameEvent, TouchMotionEvent, TouchSlot, TouchUpEvent, UnusedEvent,
+    AbsolutePositionEvent, ButtonState, Device, DeviceCapability, Event, GestureBeginEvent,
+    GestureEndEvent, GestureSwipeBeginEvent, GestureSwipeEndEvent, GestureSwipeUpdateEvent,
+    InputBackend, InputEvent, KeyState, KeyboardKeyEvent, PointerButtonEvent,
+    PointerMotionAbsoluteEvent, TouchCancelEvent, TouchDownEvent, TouchEvent, TouchFrameEvent,
+    TouchMotionEvent, TouchSlot, TouchUpEvent, UnusedEvent,
 };
 use smithay::backend::renderer::utils::with_renderer_surface_state;
 use smithay::input::keyboard::Keycode;
@@ -297,6 +299,44 @@ impl TouchUpEvent<TestInput> for TestTouchEvent {}
 impl TouchCancelEvent<TestInput> for TestTouchEvent {}
 impl TouchFrameEvent<TestInput> for TestTouchEvent {}
 
+/// Values delivered through the physical swipe event route, for nested tests.
+#[derive(Debug)]
+pub(crate) struct TestSwipeEvent {
+    fingers: u32,
+    delta: (f64, f64),
+    cancelled: bool,
+    time: u64,
+}
+
+impl Event<TestInput> for TestSwipeEvent {
+    fn time(&self) -> u64 {
+        self.time
+    }
+    fn device(&self) -> TestDevice {
+        TestDevice
+    }
+}
+impl GestureBeginEvent<TestInput> for TestSwipeEvent {
+    fn fingers(&self) -> u32 {
+        self.fingers
+    }
+}
+impl GestureEndEvent<TestInput> for TestSwipeEvent {
+    fn cancelled(&self) -> bool {
+        self.cancelled
+    }
+}
+impl GestureSwipeBeginEvent<TestInput> for TestSwipeEvent {}
+impl GestureSwipeEndEvent<TestInput> for TestSwipeEvent {}
+impl GestureSwipeUpdateEvent<TestInput> for TestSwipeEvent {
+    fn delta_x(&self) -> f64 {
+        self.delta.0
+    }
+    fn delta_y(&self) -> f64 {
+        self.delta.1
+    }
+}
+
 impl InputBackend for TestInput {
     type Device = TestDevice;
     type KeyboardKeyEvent = TestKeyEvent;
@@ -304,9 +344,9 @@ impl InputBackend for TestInput {
     type PointerButtonEvent = TestButtonEvent;
     type PointerMotionEvent = UnusedEvent;
     type PointerMotionAbsoluteEvent = TestMotionEvent;
-    type GestureSwipeBeginEvent = UnusedEvent;
-    type GestureSwipeUpdateEvent = UnusedEvent;
-    type GestureSwipeEndEvent = UnusedEvent;
+    type GestureSwipeBeginEvent = TestSwipeEvent;
+    type GestureSwipeUpdateEvent = TestSwipeEvent;
+    type GestureSwipeEndEvent = TestSwipeEvent;
     type GesturePinchBeginEvent = UnusedEvent;
     type GesturePinchUpdateEvent = UnusedEvent;
     type GesturePinchEndEvent = UnusedEvent;
@@ -512,6 +552,57 @@ fn handle_command(line: &str, stream: &mut UnixStream, comp: &mut Compositor) {
                 Some("frame") => InputEvent::TouchFrame { event },
                 _ => unreachable!("validated touch action"),
             };
+            crate::input::process_input_event::<TestInput>(comp, input);
+        }
+        Some("swipe") => {
+            let mut event = TestSwipeEvent {
+                fingers: 0,
+                delta: (0.0, 0.0),
+                cancelled: false,
+                time,
+            };
+            let input = match words.next() {
+                Some("begin") => {
+                    let Some(fingers) = words
+                        .next()
+                        .and_then(|s| s.parse::<u32>().ok())
+                        .filter(|n| (1..=10).contains(n))
+                    else {
+                        reply_err(stream, "swipe begin wants a finger count from 1 to 10");
+                        return;
+                    };
+                    event.fingers = fingers;
+                    InputEvent::GestureSwipeBegin { event }
+                }
+                Some("update") => {
+                    let (Some(x), Some(y)) = (
+                        words.next().and_then(|s| s.parse::<f64>().ok()),
+                        words.next().and_then(|s| s.parse::<f64>().ok()),
+                    ) else {
+                        reply_err(stream, "swipe update wants DX DY");
+                        return;
+                    };
+                    if !x.is_finite() || !y.is_finite() {
+                        reply_err(stream, "swipe deltas must be finite");
+                        return;
+                    }
+                    event.delta = (x, y);
+                    InputEvent::GestureSwipeUpdate { event }
+                }
+                Some("end") => InputEvent::GestureSwipeEnd { event },
+                Some("cancel") => {
+                    event.cancelled = true;
+                    InputEvent::GestureSwipeEnd { event }
+                }
+                _ => {
+                    reply_err(stream, "swipe wants begin N|update DX DY|end|cancel");
+                    return;
+                }
+            };
+            if words.next().is_some() {
+                reply_err(stream, "unexpected swipe arguments");
+                return;
+            }
             crate::input::process_input_event::<TestInput>(comp, input);
         }
         Some("motion") => {
@@ -779,6 +870,27 @@ fn handle_command(line: &str, stream: &mut UnixStream, comp: &mut Compositor) {
                     record.above,
                     record.buffer_bytes,
                 ));
+            }
+            if let Some(overview) = &backend.overview {
+                reply.push_str(&format!(
+                    "overview selected={} label_bytes={} preview_edge={}\n",
+                    overview.selected,
+                    overview.label_bytes(),
+                    backend.preview_edge.unwrap_or(0)
+                ));
+                for window in &overview.windows {
+                    let r = window.destination;
+                    reply.push_str(&format!(
+                        "overview-window id={} x={} y={} w={} h={} source_w={} source_h={}\n",
+                        window.window.0,
+                        r.pos.x,
+                        r.pos.y,
+                        r.size.w,
+                        r.size.h,
+                        window.source.size.w,
+                        window.source.size.h
+                    ));
+                }
             }
             reply.push_str("done\n");
             let _ = stream.write_all(reply.as_bytes());

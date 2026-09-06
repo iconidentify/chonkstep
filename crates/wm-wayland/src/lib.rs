@@ -55,6 +55,7 @@ mod output_power;
 mod protocols;
 mod readback;
 mod renderer;
+mod overview;
 mod selection;
 mod session;
 mod state;

@@ -9,6 +9,7 @@
 mod backend;
 mod client;
 mod focus;
+mod gestures;
 mod hittest;
 mod manager;
 mod motif;
@@ -28,9 +29,12 @@ mod types;
 #[cfg(any(test, feature = "test-support"))]
 pub mod fake_backend;
 
-pub use backend::Backend;
-pub use client::{Client, ClientFlags, ClientId, Lifecycle, MaximizeDirections, MonitorId, MonitorInfo};
+pub use backend::{Backend, OverviewScene, OverviewWindow};
+pub use client::{
+    Client, ClientFlags, ClientId, Lifecycle, MaximizeDirections, MonitorId, MonitorInfo,
+};
 pub use focus::{FocusDirection, FocusPolicy};
+pub use gestures::{DesktopGesture, GestureConfig, SwipeTracker};
 pub use hittest::{hit_test, HitTarget};
 pub use manager::{Notification, WindowManager, DEFAULT_DRAG_MODIFIER, MAX_WORKSPACES};
 pub use motif::{hints_say_client_decorates, MIN_HINT_WORDS};

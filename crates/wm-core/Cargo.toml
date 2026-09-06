@@ -15,3 +15,6 @@ tracing = "0.1"
 # Exposes `fake_backend` so downstream crates can unit-test code that
 # is generic over `Backend` without an X server or a compositor.
 test-support = []
+
+[dev-dependencies]
+chonk-test-support = { path = "../chonk-test-support" }

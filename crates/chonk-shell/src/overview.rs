@@ -1,47 +1,10 @@
-//! The Overview's surface and session state: the shell half of the
-//! modal Exposé-style panel `wm_theme::overview` rasterizes. This type
-//! owns the full-screen shell surface, the captured entries, the
-//! selection, and the layout used for hit-testing; the `Shell`
-//! orchestrator owns the modality around it (when it opens, the
-//! keyboard grab, what a click or key means), and `Desktop` owns the
-//! font state it renders with — so the methods here take fonts as
-//! parameters and `Desktop` wraps them, exactly the switcher's shape.
+//! Overview session state and input routing. Native compositors receive window
+//! transforms and cached, small captions: the output-sized shell is input-only.
+//! Hover changes the selected index without rasterizing, capturing or resizing
+//! a window. Closing drops the scene and captions while preserving shell IDs.
 //!
-//! # Repaint discipline
-//!
-//! The panel surface covers the whole primary monitor — at the
-//! reference desk (3840x2160, scale 2) that is a ~33MB buffer — so it
-//! is rendered on entry and on *entry-set change* (entries replaced,
-//! fresher previews arriving), never per frame and never per
-//! selection move. The selection lives on a second, card-sized
-//! surface stacked over the panel: moving it is a configure (a
-//! position change the compositor applies for free) plus a repaint of
-//! that one card. The first cut painted the selection into the panel
-//! itself, which meant every card the pointer crossed re-rasterized
-//! and re-uploaded the monitor — measured at ~2.1s a crossing on a
-//! debug build, which is what "the Overview drags the mouse" was.
-//! A hover that stays inside the already-selected card still repaints
-//! nothing at all.
-//!
-//! # Preview resolution
-//!
-//! Cards are card-sized, so entry hints the card width to the backend
-//! (`Backend::set_preview_edge`) before fetching previews. A backend
-//! that captures synchronously (X11) is sharp immediately; the
-//! compositor serves its throttled snapshots — icon-sized — and
-//! honors the hint on the next rendered frame, after which its
-//! `preview_generation` moves and `wants_fresh_previews` tells the
-//! shell to fetch again: one extra panel paint, a frame or two after
-//! entry, in exchange for text in the cards being text.
-//!
-//! # Surface lifecycle
-//!
-//! The windows are unmapped between sessions, not destroyed, and only
-//! recreated when the monitor geometry changes — the switcher panel's
-//! rule, adopted for its reason (destroy/recreate churn wedged a
-//! session compositor once; see `SwitcherPanel`'s doc) plus a new one:
-//! the surface identity is cheap to preserve. Its monitor-sized pixels are
-//! released while hidden and rebuilt before the surface is mapped again.
+//! Noncompositing backends retain the raster fallback: a full panel on entry,
+//! a separate selection surface, and one catch-up fetch for sharper previews.
 
 use wm_core::{Backend, ClientId};
 use wm_theme::overview::{self as ov, OverviewEntry, OverviewLayout};
@@ -56,6 +19,8 @@ use wm_theme_api::{DecorationBuffer, Point, Rect, Size};
 pub struct OverviewItem<B: Backend> {
     pub client: ClientId,
     pub window: B::WindowId,
+    pub frame: Option<B::FrameId>,
+    pub geometry: Rect,
     pub title: String,
     pub preview: Option<DecorationBuffer>,
     pub miniaturized: bool,
@@ -92,6 +57,7 @@ pub struct OverviewPanel<B: Backend> {
     /// counter reading that catch-up waits to see move.
     awaiting_previews: bool,
     preview_generation: u64,
+    live: bool,
 }
 
 impl<B: Backend> Default for OverviewPanel<B> {
@@ -107,6 +73,7 @@ impl<B: Backend> Default for OverviewPanel<B> {
             visible: false,
             awaiting_previews: false,
             preview_generation: 0,
+            live: false,
         }
     }
 }
@@ -139,14 +106,30 @@ impl<B: Backend> OverviewPanel<B> {
         self.selected = selected.min(items.len().saturating_sub(1));
         self.items = items;
         self.workspace = workspace;
-        let layout = ov::layout(primary.size, tile, ov::header_height(theme), self.items.len(), workspace.1);
+        self.live = backend.supports_live_overview();
+        let layout = if self.live {
+            let sizes: Vec<_> = self.items.iter().map(|item| item.geometry.size).collect();
+            ov::live::layout(primary.size, tile, &sizes, workspace.1)
+        } else {
+            ov::layout(
+                primary.size,
+                tile,
+                ov::header_height(theme),
+                self.items.len(),
+                workspace.1,
+            )
+        };
         // The card size is the preview resolution worth having, and
         // the backend must hear it before its next capture pass; the
         // catch-up bookkeeping is armed here so the fetch fires
         // exactly once per entry-set, when the counter moves.
-        backend.set_preview_edge(ov::capture_edge(&layout));
+        backend.set_preview_edge(if self.live {
+            None
+        } else {
+            ov::capture_edge(&layout)
+        });
         self.layout = Some(layout);
-        self.awaiting_previews = !self.items.is_empty();
+        self.awaiting_previews = !self.live && !self.items.is_empty();
         self.preview_generation = backend.preview_generation();
 
         if self.window.is_none() {
@@ -162,11 +145,66 @@ impl<B: Backend> OverviewPanel<B> {
             }
         }
         if let Some(window) = self.window {
+            if self.live {
+                let layout = self.layout.as_ref().unwrap();
+                let label_h = (tile / 2).max(16);
+                let windows = self
+                    .items
+                    .iter()
+                    .zip(&layout.cells)
+                    .map(|(item, cell)| wm_core::OverviewWindow {
+                        window: item.window,
+                        frame: item.frame,
+                        source: item.geometry,
+                        destination: *cell,
+                        label: ov::live::label(
+                            theme,
+                            font_system,
+                            swash_cache,
+                            &item.title,
+                            (tile * 6).min(primary.size.w),
+                            label_h,
+                        ),
+                    })
+                    .collect();
+                let spaces = layout
+                    .strip
+                    .iter()
+                    .enumerate()
+                    .map(|(i, rect)| {
+                        (
+                            *rect,
+                            ov::live::label(
+                                theme,
+                                font_system,
+                                swash_cache,
+                                &format!("Desktop {}", i + 1),
+                                rect.size.w,
+                                label_h,
+                            ),
+                        )
+                    })
+                    .collect();
+                backend.show_live_overview(
+                    window,
+                    wm_core::OverviewScene {
+                        geometry: primary,
+                        windows,
+                        spaces,
+                        workspace: workspace.0,
+                        selected: self.selected,
+                        gap: layout.pad,
+                    },
+                );
+            }
             if !self.visible {
                 backend.map_shell_surface(window);
                 self.visible = true;
             }
             backend.raise_shell_surface(window);
+        }
+        if self.live {
+            return;
         }
         self.repaint(backend, theme, font_system, swash_cache);
         // Selection after the panel, so its surface ends up stacked
@@ -220,6 +258,10 @@ impl<B: Backend> OverviewPanel<B> {
         font_system: &mut cosmic_text::FontSystem,
         swash_cache: &mut cosmic_text::SwashCache,
     ) {
+        if self.live {
+            backend.select_live_overview(self.selected);
+            return;
+        }
         let Some(layout) = self.layout.as_ref() else {
             return;
         };
@@ -407,6 +449,9 @@ impl<B: Backend> OverviewPanel<B> {
     /// withdrawn with the session: the backend's snapshots go back to
     /// icon-sized on their own schedule.
     pub fn hide(&mut self, backend: &mut B) {
+        if self.live {
+            backend.hide_live_overview();
+        }
         if let Some(window) = self.window {
             backend.unmap_shell_surface(window);
             backend.release_shell_buffer(window);
@@ -431,6 +476,9 @@ impl<B: Backend> OverviewPanel<B> {
     /// serve would wedge every key on the desk. Ungrabbing when not
     /// grabbed is a no-op on both backends.
     pub fn discard(&mut self, backend: &mut B) {
+        if self.live {
+            backend.hide_live_overview();
+        }
         if self.visible {
             backend.ungrab_keyboard();
         }

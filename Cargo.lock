@@ -3423,6 +3423,7 @@ name = "wm-core"
 version = "0.3.1"
 dependencies = [
  "bitflags 2.13.1",
+ "chonk-test-support",
  "slotmap",
  "tracing",
  "wm-theme-api",

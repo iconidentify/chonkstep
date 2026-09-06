@@ -14,11 +14,6 @@
 use chonk_testkit::{keys, poll_until, Screenshot, Session, SessionOptions, ShellInfo, World};
 use std::time::Duration;
 
-/// The dock/Clip tile edge at scale 2 — `chonk_shell::desktop::tile_px`
-/// restated (56 at 1x, scaled), the number the Overview's strip and
-/// gutters derive from.
-const TILE_AT_SCALE_2: u32 = 112;
-
 /// The Overview's surface in the ledger: mapped, above, and exactly
 /// output-sized — nothing else the shell raises covers the whole head.
 fn overview_shell(world: &World) -> Option<&ShellInfo> {
@@ -174,9 +169,8 @@ fn overview_opens_navigates_and_commits() {
         let world = session.world().unwrap();
         let shell = overview_shell(&world).expect("Overview surface is mapped");
         assert_eq!(
-            shell.buffer_bytes,
-            world.output_w as usize * world.output_h as usize * 4,
-            "the diagnostic accounts for the live monitor-sized RGBA buffer"
+            shell.buffer_bytes, 0,
+            "the native Overview input surface must never allocate output-sized pixels"
         );
         shell.id
     };
@@ -220,19 +214,20 @@ fn overview_opens_navigates_and_commits() {
     // -- a click on a card focuses + raises that window and exits -------
     open_overview(&mut session);
     let world = session.world().unwrap();
-    // Aim with the real layout math (same inputs the shell used:
-    // panel = the output, tile 112 at scale 2, two cards, one desk).
-    let theme = wm_theme::default_theme::nextstep_classic().scaled(2.0);
-    let layout = wm_theme::overview::layout(
-        wm_theme_api::Size::new(world.output_w, world.output_h),
-        TILE_AT_SCALE_2,
-        wm_theme::overview::header_height(&theme),
-        2,
-        1,
-    );
-    // Click the card of the window that is NOT focused: index 0 is A.
-    let target_index = if after == "OverviewA" { 1 } else { 0 };
-    let cell = layout.cells[target_index];
+    // Click the other window at its actual native presentation rectangle.
+    let target = world
+        .window_matching(if after == "OverviewA" {
+            "OverviewB"
+        } else {
+            "OverviewA"
+        })
+        .unwrap();
+    let cell = world
+        .overview_windows
+        .iter()
+        .find(|w| w.id == target.id)
+        .unwrap()
+        .rect;
     let (cx, cy) = (
         cell.pos.x as f64 + cell.size.w as f64 / 2.0,
         cell.pos.y as f64 + cell.size.h as f64 / 2.0,
@@ -269,4 +264,154 @@ fn overview_on_an_empty_desk_is_quiet_not_a_crash() {
     session.door().tap_key(keys::ESC).unwrap();
     assert_overview_closed(&mut session, "Escape on an empty desk");
     assert!(session.compositor_alive());
+}
+
+/// Visible pixels, not merely layout math: different window shapes, wallpaper
+/// between them, live content without captures, modal input and storage bounds.
+#[test]
+#[ignore = "requires nested Wayland: scripts/e2e.sh --headless --test overview"]
+fn native_overview_keeps_wallpaper_proportions_and_live_pixels() {
+    for scale in [1.0, 2.0] {
+        let mut session = Session::boot(
+            &format!("overview-native-{scale}"),
+            SessionOptions {
+                scale: Some(scale),
+                config_extra: "show_dock = false\n".into(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        session.door().barrier().unwrap();
+        let wallpaper = session.screenshot("wallpaper").unwrap();
+        let signal = session.dir.join("change-color");
+        session.launch("foot", &[
+            "--title=LivePortrait", "--window-size-pixels=160x320", "--override", "locked-title=yes",
+            "sh", "-c", r#"printf '\033[48;2;220;30;40m\033[2J'; while ! test -f "$1"; do sleep .05; done; printf '\033[48;2;30;210;70m\033[2J'; exec sleep 120"#,
+            "overview-probe", signal.to_str().unwrap(),
+        ]).unwrap();
+        session
+            .launch(
+                "foot",
+                &[
+                    "--title=WideWindow",
+                    "--window-size-pixels=400x160",
+                    "--override",
+                    "locked-title=yes",
+                ],
+            )
+            .unwrap();
+        poll_until(
+            Duration::from_secs(40),
+            "two differently shaped windows",
+            || {
+                let world = session.world().ok()?;
+                (world.window_matching("LivePortrait").is_some()
+                    && world.window_matching("WideWindow").is_some())
+                .then_some(())
+            },
+        )
+        .unwrap();
+        open_overview(&mut session);
+        session.door().barrier().unwrap();
+        let world = session.world().unwrap();
+        let native = world.overview.as_ref().expect("native scene");
+        assert_eq!(native.preview_edge, 0, "no capture-resolution boost");
+        assert!(
+            native.label_bytes < world.output_w as usize * world.output_h as usize / 2,
+            "captions must be smaller than 1/8 of a full RGBA output"
+        );
+        assert_eq!(overview_shell(&world).unwrap().buffer_bytes, 0);
+        assert_eq!(world.overview_windows.len(), 2);
+        let portrait_id = world.window_matching("LivePortrait").unwrap().id;
+        let portrait = world
+            .overview_windows
+            .iter()
+            .find(|w| w.id == portrait_id)
+            .unwrap();
+        assert!(portrait.rect.size.h > portrait.rect.size.w);
+        for window in &world.overview_windows {
+            assert!(window.rect.size.w <= window.source.w && window.rect.size.h <= window.source.h);
+            let ratio = window.rect.size.w as f64 / window.source.w as f64;
+            assert!((window.rect.size.h as f64 - window.source.h as f64 * ratio).abs() < 2.0);
+        }
+        let shot = session.screenshot("live-windows").unwrap();
+        let mut unchanged = 0;
+        let mut sampled = 0;
+        for y in (world.output_h / 2..world.output_h).step_by(16) {
+            for x in (0..world.output_w).step_by(16) {
+                if world.overview_windows.iter().any(|w| {
+                    let r = w.rect;
+                    x as i32 >= r.pos.x - 150
+                        && x as i32 <= r.pos.x + r.size.w as i32 + 150
+                        && y as i32 >= r.pos.y - 8
+                        && y as i32 <= r.pos.y + r.size.h as i32 + 70
+                }) {
+                    continue;
+                }
+                unchanged += usize::from(shot.pixel(x, y) == wallpaper.pixel(x, y));
+                sampled += 1;
+            }
+        }
+        assert!(
+            sampled > 100 && unchanged * 10 > sampled * 9,
+            "exposed desktop keeps the original wallpaper pixels"
+        );
+        let rect = portrait.rect;
+        let (x, y) = (
+            rect.pos.x as u32 + rect.size.w / 2,
+            rect.pos.y as u32 + rect.size.h / 2,
+        );
+        let red = shot.pixel(x, y);
+        assert!(
+            red[0] > 180 && red[1] < 70,
+            "real red client content: {red:?}"
+        );
+        std::fs::write(&signal, "go").unwrap();
+        poll_until(
+            Duration::from_secs(10),
+            "live preview changing without a snapshot refresh",
+            || {
+                let shot = session.screenshot("live-change").ok()?;
+                let pixel = shot.pixel(x, y);
+                (pixel[1] > 180 && pixel[0] < 70).then_some(())
+            },
+        )
+        .unwrap();
+        session.door().motion(x as f64, y as f64).unwrap();
+        session.door().barrier().unwrap();
+        let hovered = session.world().unwrap();
+        assert_eq!(
+            hovered.overview.as_ref().unwrap().label_bytes,
+            native.label_bytes
+        );
+        assert_eq!(
+            hovered
+                .windows
+                .iter()
+                .find(|w| w.id == portrait_id)
+                .map(|w| (w.w, w.h)),
+            world
+                .windows
+                .iter()
+                .find(|w| w.id == portrait_id)
+                .map(|w| (w.w, w.h)),
+            "Overview does not resize clients"
+        );
+        // Mapping a window while modal must refresh the scene; the old restore
+        // handler returned before delivering this notification to Overview.
+        launch_terminal(&mut session, "AddedDuringOverview");
+        poll_until(
+            Duration::from_secs(10),
+            "new window joins the live scene",
+            || (session.world().ok()?.overview_windows.len() == 3).then_some(()),
+        )
+        .unwrap();
+        session.door().tap_key(keys::ESC).unwrap();
+        assert_overview_closed(&mut session, "Escape");
+        let closed = session.world().unwrap();
+        assert!(
+            closed.overview.is_none() && closed.overview_windows.is_empty(),
+            "scene and captions released"
+        );
+    }
 }

@@ -620,6 +620,7 @@ pub struct WaylandBackend {
     pub(crate) decoration_rules: wm_config::DecorationRules,
     pub(crate) frames: HashMap<WlFrameId, FrameRecord>,
     pub(crate) shells: HashMap<WlShellId, ShellRecord>,
+    pub(crate) overview: Option<crate::overview::Overview>,
     /// Bottom-to-top managed application order — see [`StackEntry`].
     pub(crate) stacking: Vec<StackEntry>,
     /// Whether [`Self::stacking`] has actually moved since the X server
@@ -1007,6 +1008,7 @@ impl WaylandBackend {
         Self {
             next_id: 1,
             windows: HashMap::new(),
+            overview: None,
             scene_index: SceneIndex::default(),
             surface_windows: HashMap::new(),
             popup_roots: HashMap::new(),

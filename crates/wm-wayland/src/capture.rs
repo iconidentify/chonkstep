@@ -166,6 +166,11 @@ impl ScreenshotRequestPoller {
 /// per rendered frame; the implementation throttles its own work, so
 /// this stays affordable at frame rate.
 pub(crate) fn refresh_snapshots(comp: &mut Compositor) {
+    // Overview composes the clients' existing GPU surfaces. Readbacks have no
+    // consumer here and would synchronously stall input for unrelated icons.
+    if comp.wm.backend().overview.is_some() {
+        return;
+    }
     let now = Instant::now();
     let boost = comp.wm.backend().preview_edge;
     let due = due_windows(comp, now, boost);

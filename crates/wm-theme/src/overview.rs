@@ -1,31 +1,12 @@
-//! The Overview: an Exposé-style modal panel showing every window on
-//! the current workspace as a grid of live-thumbnail cards, with a
-//! strip of workspace tiles along the bottom edge — all of it in this
-//! theme's own chiseled language, assembled from the same recipes the
-//! rest of the desktop is built from. Each card is a miniature window:
-//! a real titlebar strip (the window titlebar's fill, relief and type,
-//! active for the selected card exactly as focus paints a real
-//! titlebar black) over a sunken well holding the captured content —
-//! the same well a miniaturized window's icon tile frames its preview
-//! with. The selected card sits on the Alt-Tab switcher's highlight
-//! plate, the panel wears a menu's title strip and frame, and the
-//! workspace strip reuses the Clip tile outright. Pure rasterization
-//! and pure geometry; the desktop shell owns the full-screen surface
-//! this is blitted onto, the input routing, and the modality.
+//! Raster Overview fallback for noncompositing backends. Native Wayland uses
+//! [`live`] for proportional geometry and small captions, and composes the
+//! existing GPU surfaces over the wallpaper instead of painting these cards.
 //!
-//! The selection is rendered apart from the panel, on purpose:
-//! [`render_overview`] draws every card unselected and never needs to
-//! run again while the entry set stands, and [`render_selection`]
-//! draws one card riding its highlight plate (the plate ring, the
-//! awake titlebar) into a plate-sized buffer the shell keeps on its
-//! own small surface over the panel. Hover moves the selection on
-//! every card the pointer crosses, and re-rasterizing a monitor-sized
-//! panel per crossing is what made the first cut of this panel drag
-//! the pointer — the split makes a selection move cost one card, not
-//! one monitor. The pixels compose identically because a card is
-//! opaque over its plate.
+//! The fallback renders the panel on entry and one small selection surface on
+//! hover. The shell owns modality, hit testing and transient surface lifetime.
 
 use tiny_skia::Pixmap;
+pub mod live;
 use wm_theme_api::{DecorationBuffer, Point, Rect, Size};
 
 use crate::model::{TextAlign, Theme};

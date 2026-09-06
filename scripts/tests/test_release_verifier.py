@@ -79,6 +79,9 @@ class ReleaseVerifierTests(unittest.TestCase):
                 "print(f'{sys.argv[-1]}: ELF 64-bit LSB pie executable, x86-64')",
             )
             self.write_tool(tools, "ldd", "print('libc.so.6 => /usr/lib/libc.so.6')")
+            # The entire fixture describes synthetic x86_64 ELF/package data.
+            # Match its host too, so the pipe regression runs on ARM builders.
+            self.write_tool(tools, "uname", "print('x86_64')")
             for command in ("desktop-file-validate", "qmllint"):
                 self.write_tool(tools, command, "sys.exit(0)")
 

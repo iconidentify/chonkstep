@@ -1103,6 +1103,22 @@ pub struct World {
     pub windows: Vec<WindowInfo>,
     pub frames: Vec<FrameInfo>,
     pub shells: Vec<ShellInfo>,
+    pub overview: Option<OverviewInfo>,
+    pub overview_windows: Vec<OverviewWindowInfo>,
+}
+
+#[derive(Clone, Debug)]
+pub struct OverviewInfo {
+    pub selected: usize,
+    pub label_bytes: usize,
+    pub preview_edge: u32,
+}
+
+#[derive(Clone, Debug)]
+pub struct OverviewWindowInfo {
+    pub id: u64,
+    pub rect: wm_theme_api::Rect,
+    pub source: wm_theme_api::Size,
 }
 
 impl World {
@@ -1370,6 +1386,24 @@ impl Door {
 
     pub fn motion(&mut self, x: f64, y: f64) -> Result<(), String> {
         self.send(&format!("motion {x} {y}"))
+    }
+
+    /// Begin a touchpad swipe through the compositor's physical input route.
+    pub fn swipe_begin(&mut self, fingers: u32) -> Result<(), String> {
+        self.send(&format!("swipe begin {fingers}"))
+    }
+
+    /// Logical touchpad displacement, independent of the nested output scale.
+    pub fn swipe_update(&mut self, dx: f64, dy: f64) -> Result<(), String> {
+        self.send(&format!("swipe update {dx} {dy}"))
+    }
+
+    pub fn swipe_end(&mut self, cancelled: bool) -> Result<(), String> {
+        self.send(if cancelled {
+            "swipe cancel"
+        } else {
+            "swipe end"
+        })
     }
 
     /// Touch-down in global output coordinates, through the real backend route.
@@ -1694,6 +1728,30 @@ impl Door {
                 if let Some(shell) = parse_shell_line(&line) {
                     world.shells.push(shell);
                 }
+            } else if line.starts_with("overview ") {
+                world.overview = Some(OverviewInfo {
+                    selected: field(&line, "selected=").unwrap_or_default(),
+                    label_bytes: field(&line, "label_bytes=").unwrap_or_default(),
+                    preview_edge: field(&line, "preview_edge=").unwrap_or_default(),
+                });
+            } else if line.starts_with("overview-window ") {
+                world.overview_windows.push(OverviewWindowInfo {
+                    id: field(&line, "id=").unwrap_or_default(),
+                    rect: wm_theme_api::Rect::new(
+                        wm_theme_api::Point::new(
+                            field(&line, "x=").unwrap_or_default(),
+                            field(&line, "y=").unwrap_or_default(),
+                        ),
+                        wm_theme_api::Size::new(
+                            field(&line, "w=").unwrap_or_default(),
+                            field(&line, "h=").unwrap_or_default(),
+                        ),
+                    ),
+                    source: wm_theme_api::Size::new(
+                        field(&line, "source_w=").unwrap_or_default(),
+                        field(&line, "source_h=").unwrap_or_default(),
+                    ),
+                });
             } else if line.starts_with("err ") {
                 return Err(format!("door reported: {line}"));
             }

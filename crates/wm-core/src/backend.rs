@@ -2,10 +2,31 @@ use wm_theme_api::{DecorationBuffer, DecorationLayout, Point, Rect, ResizeEdge, 
 
 use crate::client::MonitorInfo;
 use crate::types::{
-    BackendEvent, DecorationRules, DragHandle, KeyCombo, KeyboardConfig, Modifiers, MouseButton, NetStateSnapshot,
-    ScrollDelta,
-    SizeHints, WindowType, WmClass, WmProtocol,
+    BackendEvent, DecorationRules, DragHandle, KeyCombo, KeyboardConfig, Modifiers, MouseButton,
+    NetStateSnapshot, ScrollDelta, SizeHints, WindowType, WmClass, WmProtocol,
 };
+
+/// A window's presentation in Overview. Coordinates are physical pixels;
+/// destinations are relative to the Overview output, sources are global.
+/// These transforms never configure or resize the application.
+pub struct OverviewWindow<W, F> {
+    pub window: W,
+    pub frame: Option<F>,
+    pub source: Rect,
+    pub destination: Rect,
+    pub label: DecorationBuffer,
+}
+
+/// A compositor can present existing client textures directly. Only small text
+/// labels cross the CPU/GPU boundary; no screenshots or full-output raster.
+pub struct OverviewScene<W, F> {
+    pub geometry: Rect,
+    pub windows: Vec<OverviewWindow<W, F>>,
+    pub spaces: Vec<(Rect, DecorationBuffer)>,
+    pub workspace: usize,
+    pub selected: usize,
+    pub gap: u32,
+}
 
 /// Everything the protocol-agnostic core needs from a windowing backend
 /// (X11 today via `wm-x11`, a future Wayland/Smithay backend later).
@@ -98,6 +119,21 @@ pub trait Backend {
     /// churn, while their potentially monitor-sized backing has no value
     /// until the next repaint.
     fn release_shell_buffer(&mut self, id: Self::ShellId);
+
+    fn supports_live_overview(&self) -> bool {
+        false
+    }
+    fn show_live_overview(
+        &mut self,
+        surface: Self::ShellId,
+        scene: OverviewScene<Self::WindowId, Self::FrameId>,
+    ) {
+        let _ = (surface, scene);
+    }
+    fn select_live_overview(&mut self, selected: usize) {
+        let _ = selected;
+    }
+    fn hide_live_overview(&mut self) {}
 
     /// Paints the desktop background — solid color or a wallpaper
     /// image. On X11 this is the root window (plus the root-pixmap

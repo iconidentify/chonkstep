@@ -2013,6 +2013,51 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         }
     }
 
+    /// Native swipe settings, read without cloning the session configuration.
+    pub fn desktop_gesture_config(&self) -> wm_core::GestureConfig {
+        self.state.input.gestures
+    }
+
+    /// A desktop swipe can share Overview's grab, but cannot displace another
+    /// modal UI or an interactive window drag.
+    pub fn desktop_gesture_available(&self, wm: &WindowManager<B>) -> bool {
+        !wm.cycle_active() && !wm.interactive_drag_active() && !self.desktop.menu_visible()
+    }
+
+    /// Explicit open/close semantics keep repeated upward swipes from toggling
+    /// Overview off. Workspace movement refreshes its existing card panel once.
+    pub fn on_desktop_gesture(
+        &mut self,
+        wm: &mut WindowManager<B>,
+        gesture: wm_core::DesktopGesture,
+    ) {
+        use wm_core::DesktopGesture;
+        if !self.desktop_gesture_available(wm) {
+            return;
+        }
+        match gesture {
+            DesktopGesture::OverviewOpen if !self.desktop.overview_visible() => {
+                self.open_overview(wm)
+            }
+            DesktopGesture::OverviewClose if self.desktop.overview_visible() => {
+                self.close_overview(wm)
+            }
+            DesktopGesture::WorkspaceNext | DesktopGesture::WorkspacePrevious => {
+                let current = wm.current_workspace();
+                let target = if gesture == DesktopGesture::WorkspaceNext {
+                    current + 1
+                } else {
+                    current.saturating_sub(1)
+                };
+                wm.switch_workspace(target);
+                if wm.current_workspace() != current && self.desktop.overview_visible() {
+                    self.populate_overview(wm);
+                }
+            }
+            _ => {}
+        }
+    }
+
     /// Opens the Overview and takes the modal keyboard grab — the same
     /// `Backend::grab_keyboard` the Alt-Tab cycle uses, taken from the
     /// shell layer because this modality lives here. Grabbed only if
@@ -2060,6 +2105,18 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
                 window: client.window,
                 title: client.title.clone(),
                 preview: None,
+                frame: client.frame,
+                geometry: if client.frame.is_some() {
+                    Rect::new(
+                        Point::new(
+                            client.geometry.pos.x - client.layout.client_offset.x,
+                            client.geometry.pos.y - client.layout.client_offset.y,
+                        ),
+                        client.layout.frame_size,
+                    )
+                } else {
+                    client.geometry
+                },
                 miniaturized: client.lifecycle == Lifecycle::Miniaturized,
             })
             .collect();
@@ -2068,11 +2125,15 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         // panel handoff below needs `backend_mut`, so everything is
         // gathered before the mutable borrow starts (the same
         // collect-then-paint dance `icon_clients` documents).
-        for item in &mut items {
-            item.preview = wm.client_preview(item.client);
+        if !wm.backend().supports_live_overview() {
+            for item in &mut items {
+                item.preview = wm.client_preview(item.client);
+            }
         }
-        let selected =
-            wm.focused_client().and_then(|focused| items.iter().position(|item| item.client == focused)).unwrap_or(0);
+        let selected = wm
+            .focused_client()
+            .and_then(|focused| items.iter().position(|item| item.client == focused))
+            .unwrap_or(0);
         let workspace = (current, wm.workspace_count());
         self.desktop.show_overview(wm.backend_mut(), &self.theme, items, workspace, selected);
     }
@@ -2748,36 +2809,36 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
             // use. A window with no record — the steady state once
             // restore is over — follows normal placement untouched.
             Notification::Mapped(id) => {
-                let Some(class) = wm.client(id).map(|client| client.class.clone()) else {
-                    return;
-                };
-                let Some(record) = self.layout.claim(&class, std::time::Instant::now()) else {
-                    return;
-                };
-                let geometry = restored_geometry(wm.monitors_ref(), &record);
-                tracing::info!(
-                    class = %record.class,
-                    ?geometry,
-                    monitor = ?record.monitor_identity,
-                    workspace = record.workspace,
-                    "restoring a recorded window"
-                );
-                wm.set_client_content_geometry(id, geometry);
-                if record.workspace != wm.current_workspace() {
-                    wm.move_client_to_workspace(id, record.workspace);
-                }
-                // Geometry before flags, deliberately: maximize records
-                // the current geometry as its restore point, so the
-                // remembered rect must be in place first for a later
-                // unmaximize to return to it.
-                if record.maximized {
-                    wm.maximize(id, MaximizeDirections::FULL);
-                }
-                if record.shaded {
-                    wm.shade(id);
-                }
-                if record.miniaturized {
-                    wm.miniaturize(id);
+                let restore = wm
+                    .client(id)
+                    .map(|client| client.class.clone())
+                    .and_then(|class| self.layout.claim(&class, std::time::Instant::now()));
+                if let Some(record) = restore {
+                    let geometry = restored_geometry(wm.monitors_ref(), &record);
+                    tracing::info!(
+                        class = %record.class,
+                        ?geometry,
+                        monitor = ?record.monitor_identity,
+                        workspace = record.workspace,
+                        "restoring a recorded window"
+                    );
+                    wm.set_client_content_geometry(id, geometry);
+                    if record.workspace != wm.current_workspace() {
+                        wm.move_client_to_workspace(id, record.workspace);
+                    }
+                    // Geometry before flags, deliberately: maximize records
+                    // the current geometry as its restore point, so the
+                    // remembered rect must be in place first for a later
+                    // unmaximize to return to it.
+                    if record.maximized {
+                        wm.maximize(id, MaximizeDirections::FULL);
+                    }
+                    if record.shaded {
+                        wm.shade(id);
+                    }
+                    if record.miniaturized {
+                        wm.miniaturize(id);
+                    }
                 }
             }
             Notification::CycleUpdated => {

@@ -116,6 +116,7 @@ render_elements! {
     pub SceneElement<R> where R: ImportAll + ImportMem;
     Surface = RescaleRenderElement<WaylandSurfaceRenderElement<R>>,
     Memory = MemoryRenderBufferRenderElement<R>,
+    ScaledMemory = RescaleRenderElement<MemoryRenderBufferRenderElement<R>>,
     Solid = SolidColorRenderElement,
 }
 
@@ -233,6 +234,25 @@ pub(crate) fn build_scene_into(
     // annotations) — including the desktop's own dock and menus.
     push_layer_band(elements, renderer, backend, WlrLayer::Overlay, viewport);
 
+    if let Some(overview) = backend
+        .overview
+        .as_ref()
+        .filter(|o| o.presented(backend, viewport) && o.covers(viewport))
+    {
+        // Menus opened from Overview stay above it. Its full-output shell is
+        // an input target only; all visual content is retained scene elements.
+        for id in backend.shell_stacking.iter().rev() {
+            if *id == overview.surface {
+                break;
+            }
+            if let Some(record) = backend.shells.get(id).filter(|s| s.above && s.mapped) {
+                push_shell_elements(elements, renderer, record, viewport);
+            }
+        }
+        crate::overview::render(elements, renderer, backend, overview, viewport);
+        return push_background(elements, renderer, backend, viewport);
+    }
+
     // A fullscreen application owns its output's desktop plane. Keep
     // protocol Overlay (OSDs and lock-adjacent surfaces) above it, but
     // suppress ordinary desktop furniture: the shell's dock/menus and
@@ -246,6 +266,11 @@ pub(crate) fn build_scene_into(
                 continue;
             };
             if record.above && record.mapped {
+                if let Some(overview) = backend.overview.as_ref().filter(|o| o.surface == *id) {
+                    crate::overview::render(elements, renderer, backend, overview, viewport);
+                    crate::overview::render_backdrop(elements, renderer, backend, overview, viewport);
+                    continue;
+                }
                 push_shell_elements(elements, renderer, record, viewport);
             }
         }
@@ -366,6 +391,15 @@ pub(crate) fn build_scene_into(
         }
     }
 
+    push_background(elements, renderer, backend, viewport)
+}
+
+pub(crate) fn push_background(
+    elements: &mut Vec<SceneElement<GlesRenderer>>,
+    renderer: &mut GlesRenderer,
+    backend: &WaylandBackend,
+    viewport: Rect,
+) -> Color32F {
     push_layer_band(elements, renderer, backend, WlrLayer::Background, viewport);
 
     // Root background. A solid color is simply the clear color —
@@ -633,6 +667,13 @@ fn overlap_area(a: Rect, b: Rect) -> u64 {
 /// authoritative value `hyprctl activewindow` reports, and `mapped`
 /// excludes minimized, shaded, and parked-workspace content.
 pub(crate) fn fullscreen_occludes_desktop_bands(backend: &WaylandBackend, viewport: Rect) -> bool {
+    if backend
+        .overview
+        .as_ref()
+        .is_some_and(|o| o.presented(backend, viewport))
+    {
+        return false;
+    }
     let Some(window) = backend.ewmh.active_window() else {
         return false;
     };

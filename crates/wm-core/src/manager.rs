@@ -572,6 +572,24 @@ impl<B: Backend> WindowManager<B> {
         self.publish_workarea_union();
         if self.effective_workareas() != before {
             self.refit_maximized();
+            // A bar can map after ordinary windows, including windows on
+            // inactive desktops. Only reflow frames actually inside its strip.
+            let displaced: Vec<_> = self
+                .clients
+                .iter()
+                .filter(|(_, client)| !client.flags.contains(ClientFlags::FULLSCREEN))
+                .filter_map(|(id, client)| {
+                    let frame = client_frame_rect(client);
+                    let anchor = Point::new(
+                        frame.pos.x + frame.size.w as i32 / 2,
+                        frame.pos.y + frame.size.h as i32 / 2,
+                    );
+                    (self.below_top_reservation(frame.pos, anchor) != frame.pos).then_some(id)
+                })
+                .collect();
+            for id in displaced {
+                self.reflow_frame(id);
+            }
         }
     }
 
@@ -784,7 +802,27 @@ impl<B: Backend> WindowManager<B> {
     /// `usable_area`, and what maximize actually measures against.
     pub fn usable_area_at(&self, point: Point) -> Rect {
         let index = self.monitor_index_at(point);
-        self.workareas.get(index).copied().unwrap_or_else(|| self.monitor_rect_at(point))
+        self.workareas
+            .get(index)
+            .copied()
+            .unwrap_or_else(|| self.monitor_rect_at(point))
+    }
+
+    /// A reserved top strip is a hard boundary for managed titlebars. Other
+    /// edges retain normal overlapping-window behavior; an unreserved monitor
+    /// does not inherit its neighbor's bar. The anchor chooses the destination
+    /// output (the pointer during a move, the frame center otherwise).
+    fn below_top_reservation(&self, mut pos: Point, anchor: Point) -> Point {
+        let index = self.monitor_index_at(anchor);
+        if let (Some(area), Some(monitor)) = (
+            self.workareas.get(index),
+            self.backend.monitors_ref().get(index),
+        ) {
+            if area.pos.y > monitor.geometry.pos.y {
+                pos.y = pos.y.max(area.pos.y);
+            }
+        }
+        pos
     }
 
     /// Registers the Alt+Tab / Alt+Shift+Tab window-cycling grabs — the
@@ -1615,7 +1653,15 @@ impl<B: Backend> WindowManager<B> {
             self.placements += 1;
             pos
         };
-        let provisional_frame = Rect { pos: frame_pos, size: layout.frame_size };
+        let anchor = Point::new(
+            frame_pos.x + layout.frame_size.w as i32 / 2,
+            frame_pos.y + layout.frame_size.h as i32 / 2,
+        );
+        let frame_pos = self.below_top_reservation(frame_pos, anchor);
+        let provisional_frame = Rect {
+            pos: frame_pos,
+            size: layout.frame_size,
+        };
         let target_scale = self.backend.decoration_scale(provisional_frame);
         if chrome == ClientChrome::ServerDrawn && target_scale.to_bits() != decoration_scale.to_bits() {
             decoration_scale = target_scale;
@@ -2309,18 +2355,40 @@ impl<B: Backend> WindowManager<B> {
         // it's within `SNAP_THRESHOLD_PX`. Pure geometry against every
         // other *visible* client's current frame rect, recomputed fresh
         // each motion event — cheap at WM scale.
-        let mut targets: Vec<Rect> = self.backend.monitors().into_iter().map(|m| m.geometry).collect();
-        for (other_id, other) in self.clients.iter() {
-            if other_id == client_id || other.lifecycle != Lifecycle::Normal {
-                continue;
-            }
-            let other_frame_pos = Point::new(
-                other.geometry.pos.x - other.layout.client_offset.x,
-                other.geometry.pos.y - other.layout.client_offset.y,
-            );
-            targets.push(Rect { pos: other_frame_pos, size: other.layout.frame_size });
+        let outputs = self
+            .backend
+            .monitors_ref()
+            .iter()
+            .enumerate()
+            .map(|(index, monitor)| {
+                self.workareas
+                    .get(index)
+                    .copied()
+                    .unwrap_or(monitor.geometry)
+            });
+        let neighbors = self
+            .clients
+            .iter()
+            .filter(|(id, other)| {
+                *id != client_id
+                    && other.lifecycle == Lifecycle::Normal
+                    && (other.workspace == self.current_workspace
+                        || other.flags.contains(ClientFlags::STICKY))
+            })
+            .map(|(_, other)| client_frame_rect(other));
+        let snapped = snap::snap_position_iter(
+            Rect {
+                pos: raw_pos,
+                size: frame_size,
+            },
+            outputs.chain(neighbors),
+            self.snap_threshold,
+        );
+        let new_frame_pos = self.below_top_reservation(snapped, root);
+
+        if new_frame_pos == old_frame.pos {
+            return;
         }
-        let new_frame_pos = snap::snap_position(Rect { pos: raw_pos, size: frame_size }, &targets, self.snap_threshold);
 
         // A framed window is moved by its frame; a client-decorated one
         // has only itself to move, and its content sits at the frame
@@ -2369,6 +2437,18 @@ impl<B: Backend> WindowManager<B> {
         let overhead_h = client.layout.frame_size.h.saturating_sub(client.geometry.size.h);
         let start_right = start_frame.pos.x + start_frame.size.w as i32;
         let start_bottom = start_frame.pos.y + start_frame.size.h as i32;
+        let anchor = Point::new(
+            start_frame.pos.x + start_frame.size.w as i32 / 2,
+            start_frame.pos.y + start_frame.size.h as i32 / 2,
+        );
+        let root = if matches!(
+            edge,
+            ResizeEdge::North | ResizeEdge::NorthEast | ResizeEdge::NorthWest
+        ) {
+            self.below_top_reservation(root, anchor)
+        } else {
+            root
+        };
 
         let raw_frame_w = match edge {
             ResizeEdge::North | ResizeEdge::South => start_frame.size.w as i32,
@@ -2510,13 +2590,19 @@ impl<B: Backend> WindowManager<B> {
         // theme to describe chrome that is not drawn produces a layout
         // every consumer would then have to second-guess.
         if client.chrome == ClientChrome::ClientDrawn {
-            let content = client.geometry;
+            let mut content = client.geometry;
+            let anchor = Point::new(
+                content.pos.x + content.size.w as i32 / 2,
+                content.pos.y + content.size.h as i32 / 2,
+            );
+            content.pos = self.below_top_reservation(content.pos, anchor);
             let window = client.window;
             let layout = frameless_layout(content.size);
             self.backend.position_client(window, content.pos);
             self.backend.resize_client(window, content.size);
             if let Some(client) = self.clients.get_mut(id) {
                 client.layout = layout;
+                client.geometry = content;
             }
             self.publish_frame_extents(id);
             return;
@@ -2530,14 +2616,23 @@ impl<B: Backend> WindowManager<B> {
         // own content geometry (and everything the theme computed from
         // it) is left completely untouched, so unshading is exact.
         let shaded = client.flags.contains(ClientFlags::SHADED);
-        let frame_height = if shaded { layout.shaded_frame_height } else { layout.frame_size.h };
-        let frame_geom = Rect {
+        let frame_height = if shaded {
+            layout.shaded_frame_height
+        } else {
+            layout.frame_size.h
+        };
+        let mut frame_geom = Rect {
             pos: Point::new(
                 client.geometry.pos.x - layout.client_offset.x,
                 client.geometry.pos.y - layout.client_offset.y,
             ),
             size: Size::new(layout.frame_size.w, frame_height),
         };
+        let anchor = Point::new(
+            frame_geom.pos.x + frame_geom.size.w as i32 / 2,
+            frame_geom.pos.y + frame_geom.size.h as i32 / 2,
+        );
+        frame_geom.pos = self.below_top_reservation(frame_geom.pos, anchor);
         let window = client.window;
         let content_size = client.geometry.size;
         let frame = client.frame;
@@ -2549,6 +2644,10 @@ impl<B: Backend> WindowManager<B> {
         self.backend.resize_client(window, content_size);
 
         if let Some(client) = self.clients.get_mut(id) {
+            client.geometry.pos = Point::new(
+                frame_geom.pos.x + layout.client_offset.x,
+                frame_geom.pos.y + layout.client_offset.y,
+            );
             client.layout = layout;
         }
         self.publish_frame_extents(id);
@@ -3256,9 +3355,13 @@ impl<B: Backend> WindowManager<B> {
         self.notifications.push_back(Notification::CycleEnded);
     }
 
+    /// Whether Alt+Tab owns a modal session, without allocating a UI snapshot.
+    pub fn cycle_active(&self) -> bool {
+        self.cycle.is_some()
+    }
+
     /// The live switcher session for the shell's panel: `(candidates
-    /// as (id, title), selected index)`, `None` when no session is
-    /// active.
+    /// as (id, title), selected index)`, `None` when no session is active.
     pub fn cycle_state(&self) -> Option<(Vec<(ClientId, String)>, usize)> {
         let session = self.cycle.as_ref()?;
         let entries = session
@@ -6999,6 +7102,122 @@ mod tests {
         let client = wm.client(id).unwrap();
         assert_eq!(client.geometry.size, Size::new(150, 150));
         assert_eq!(client.geometry.pos, Point::new(50, 70), "growing from the SE corner must not move the frame");
+    }
+
+    #[test]
+    fn top_bar_stops_moves_even_without_snapping_and_releases_when_hidden() {
+        let (mut wm, id, frame) = client_for_resize(FakeBackend::new());
+        wm.set_snap_threshold(0);
+        wm.set_workarea(Rect::new(Point::new(0, 40), Size::new(800, 560)));
+        wm.dispatch(frame_press(frame, Point::new(30, 2)));
+        wm.dispatch(BackendEvent::PointerMotion {
+            root: Point::new(150, 0),
+            surface_local: None,
+        });
+        assert_eq!(
+            wm.backend().last_frame_geometry[&frame].pos,
+            Point::new(120, 40)
+        );
+        assert_eq!(
+            wm.client(id).unwrap().geometry.pos.y,
+            60,
+            "the whole titlebar stays below the bar"
+        );
+        wm.set_workarea(Rect::new(Point::new(0, 0), Size::new(800, 600)));
+        wm.dispatch(BackendEvent::PointerMotion {
+            root: Point::new(150, 0),
+            surface_local: None,
+        });
+        assert_eq!(
+            wm.backend().last_frame_geometry[&frame].pos.y,
+            -2,
+            "no reservation, no hard boundary"
+        );
+    }
+
+    #[test]
+    fn top_bar_stops_north_resize_without_moving_the_bottom_edge() {
+        let (mut wm, id, frame) = client_for_resize(FakeBackend::new());
+        wm.set_workarea(Rect::new(Point::new(0, 40), Size::new(800, 560)));
+        let window = wm.client(id).unwrap().window;
+        let before = wm.backend().last_frame_geometry[&frame];
+        wm.dispatch(BackendEvent::ResizeRequest {
+            window,
+            edge: ResizeEdge::North,
+        });
+        wm.dispatch(BackendEvent::PointerMotion {
+            root: Point::new(100, 0),
+            surface_local: None,
+        });
+        let after = wm.backend().last_frame_geometry[&frame];
+        assert_eq!(after.pos.y, 40);
+        assert_eq!(
+            after.pos.y + after.size.h as i32,
+            before.pos.y + before.size.h as i32
+        );
+    }
+
+    #[test]
+    fn late_bar_and_session_restore_keep_normal_and_frameless_windows_reachable() {
+        for frameless in [false, true] {
+            let mut backend = FakeBackend::new();
+            let window = backend.create_window();
+            if frameless {
+                backend.set_client_draws_own_chrome(window, true);
+            }
+            backend.set_geometry(window, Rect::new(Point::new(50, 5), Size::new(200, 100)));
+            let mut wm = wm(backend);
+            wm.dispatch(BackendEvent::MapRequest(window));
+            let id = wm.client_for_window(window).unwrap();
+            wm.set_workarea(Rect::new(Point::new(0, 40), Size::new(800, 560)));
+            assert_eq!(client_frame_rect(wm.client(id).unwrap()).pos.y, 40);
+            wm.set_client_content_geometry(id, Rect::new(Point::new(50, 0), Size::new(200, 100)));
+            assert_eq!(client_frame_rect(wm.client(id).unwrap()).pos.y, 40);
+        }
+    }
+
+    #[test]
+    fn top_reservations_follow_destination_output_including_negative_coordinates() {
+        let mut backend = FakeBackend::new();
+        let left = Rect::new(Point::new(-800, -200), Size::new(800, 600));
+        let right = Rect::new(Point::new(0, 0), Size::new(800, 600));
+        backend.set_monitors(vec![
+            MonitorInfo {
+                geometry: left,
+                name: "left".into(),
+                identity: None,
+                primary: true,
+            },
+            MonitorInfo {
+                geometry: right,
+                name: "right".into(),
+                identity: None,
+                primary: false,
+            },
+        ]);
+        let (mut wm, _, frame) = client_for_resize(backend);
+        wm.set_snap_threshold(0);
+        wm.set_workareas(vec![
+            Rect::new(Point::new(-800, -160), Size::new(800, 560)),
+            right,
+        ]);
+        wm.dispatch(frame_press(frame, Point::new(30, 2)));
+        wm.dispatch(BackendEvent::PointerMotion {
+            root: Point::new(-200, -200),
+            surface_local: None,
+        });
+        assert_eq!(
+            wm.backend().last_frame_geometry[&frame].pos,
+            Point::new(-230, -160)
+        );
+        wm.dispatch(BackendEvent::PointerMotion {
+            root: Point::new(200, 0),
+            surface_local: None,
+        });
+        assert_eq!(
+            wm.backend().last_frame_geometry[&frame].pos,
+            Point::new(170, -2)
+        );
     }
 
     #[test]

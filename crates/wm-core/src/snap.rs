@@ -12,6 +12,18 @@ use wm_theme_api::{Point, Rect};
 /// independent — a window can snap its left edge to one target's right
 /// edge while its top snaps to a different target's bottom edge.
 pub fn snap_position(candidate: Rect, targets: &[Rect], threshold: i32) -> Point {
+    snap_position_iter(candidate, targets.iter().copied(), threshold)
+}
+
+/// Borrow scene geometry directly; interactive motion needs no target buffer.
+pub(crate) fn snap_position_iter(
+    candidate: Rect,
+    targets: impl IntoIterator<Item = Rect>,
+    threshold: i32,
+) -> Point {
+    if threshold <= 0 {
+        return candidate.pos;
+    }
     let (w, h) = (candidate.size.w as i32, candidate.size.h as i32);
     let (left, top) = (candidate.pos.x, candidate.pos.y);
     let (right, bottom) = (left + w, top + h);

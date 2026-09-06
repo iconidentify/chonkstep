@@ -628,3 +628,9 @@
 # drag_modifier above -- just bare.) An xdg client never needs this;
 # it is framed already.
 #server_side = ["bare.kde.app"]
+# Native Wayland desktop swipes (left/right workspaces, up/down Overview).
+# See gestures.md. This table is independent of two-finger scrolling.
+#[input.gestures]
+#enabled = true
+#fingers = 0       # both three and four fingers; or choose 3 or 4
+#distance = 80     # logical touchpad travel, accepted range 24..1000
