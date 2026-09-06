@@ -601,7 +601,9 @@ pub(crate) fn apply(comp: &mut Compositor, action: Action) -> bool {
                 comp.seat
                     .get_keyboard()
                     .and_then(|keyboard| keyboard.current_focus())
-                    .or_else(|| comp.seat.get_pointer().and_then(|pointer| pointer.current_focus()))
+                    .map(|focus| focus.surface().clone())
+                    .or_else(|| comp.seat.get_pointer().and_then(|pointer| pointer.current_focus())
+                        .map(|target| target.surface().clone()))
             });
             let owner = owner.flatten();
             let backend = comp.wm.backend_mut();

@@ -6,7 +6,6 @@
 
 use std::time::{Duration, Instant};
 
-use smithay::input::pointer::PointerHandle;
 use smithay::reexports::wayland_protocols_misc::zwp_input_method_v2::server::{
     zwp_input_method_keyboard_grab_v2::ZwpInputMethodKeyboardGrabV2,
     zwp_input_method_manager_v2::ZwpInputMethodManagerV2,
@@ -15,7 +14,7 @@ use smithay::reexports::wayland_protocols_misc::zwp_input_method_v2::server::{
 };
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
 use smithay::reexports::wayland_server::{backend::ClientId, Client, DataInit, Dispatch, DisplayHandle, Resource};
-use smithay::utils::{Logical, Point as LogicalPoint, Rectangle};
+use smithay::utils::{Logical, Rectangle};
 use smithay::wayland::input_method::{
     InputMethodHandler, InputMethodKeyboardUserData, InputMethodManagerGlobalData, InputMethodManagerState,
     InputMethodPopupSurfaceUserData, InputMethodUserData, PopupSurface,
@@ -23,9 +22,7 @@ use smithay::wayland::input_method::{
 use smithay::wayland::keyboard_shortcuts_inhibit::{
     KeyboardShortcutsInhibitHandler, KeyboardShortcutsInhibitState, KeyboardShortcutsInhibitor,
 };
-use smithay::wayland::pointer_constraints::{
-    with_pointer_constraint, PointerConstraintsHandler, PointerConstraintsState,
-};
+use smithay::wayland::pointer_constraints::PointerConstraintsState;
 use smithay::wayland::xdg_activation::{
     XdgActivationHandler, XdgActivationState, XdgActivationToken, XdgActivationTokenData,
 };
@@ -113,7 +110,7 @@ impl smithay::wayland::xwayland_keyboard_grab::XWaylandKeyboardGrabHandler for C
     /// for anything else means no grab is created, which is the honest
     /// answer for a surface that has no X window behind it.
     fn keyboard_focus_for_xsurface(&self, surface: &WlSurface) -> Option<Self::KeyboardFocus> {
-        self.wm.backend().window_for_surface(surface).map(|_| surface.clone())
+        self.wm.backend().window_for_surface(surface).map(|_| crate::input::keyboard::KeyboardFocus::new(self, surface.clone()))
     }
 }
 
@@ -283,7 +280,7 @@ impl KeyboardShortcutsInhibitHandler for Compositor {
 
     fn new_inhibitor(&mut self, inhibitor: KeyboardShortcutsInhibitor) {
         let focused = self.seat.get_keyboard().and_then(|keyboard| keyboard.current_focus());
-        if focused.as_ref() == Some(inhibitor.wl_surface()) {
+        if focused.as_ref().map(crate::input::keyboard::KeyboardFocus::surface) == Some(inhibitor.wl_surface()) {
             inhibitor.activate();
             self.core_protocols.active_shortcut_inhibitor = Some(inhibitor);
         }
@@ -293,43 +290,6 @@ impl KeyboardShortcutsInhibitHandler for Compositor {
         if self.core_protocols.active_shortcut_inhibitor.as_ref().is_some_and(|active| active == &inhibitor) {
             self.core_protocols.active_shortcut_inhibitor = None;
         }
-    }
-}
-
-impl PointerConstraintsHandler for Compositor {
-    fn new_constraint(&mut self, surface: &WlSurface, pointer: &PointerHandle<Self>) {
-        if pointer.current_focus().as_ref() == Some(surface) {
-            with_pointer_constraint(surface, pointer, |constraint| {
-                if let Some(constraint) = constraint {
-                    constraint.activate();
-                }
-            });
-        }
-    }
-
-    /// The client's statement of where the cursor should reappear when
-    /// its lock ends — how a game puts the arrow back on the menu item
-    /// the player was over, instead of wherever the lock happened to
-    /// start.
-    ///
-    /// Nothing is done *here* on purpose: the protocol says the hint
-    /// takes effect when the lock is released, not when it is set, and
-    /// smithay keeps the committed value on the constraint for us. The
-    /// place it is read is [`crate::input::release_pointer_constraint`].
-    /// Before that existed this body was empty under a comment claiming
-    /// the hint was consumed on release, which nothing did.
-    fn cursor_position_hint(
-        &mut self,
-        surface: &WlSurface,
-        _pointer: &PointerHandle<Self>,
-        location: LogicalPoint<f64, Logical>,
-    ) {
-        tracing::debug!(
-            surface = ?surface.id(),
-            x = location.x,
-            y = location.y,
-            "client set a cursor-position hint for when its pointer lock ends"
-        );
     }
 }
 

@@ -664,7 +664,7 @@ fn take_writes(backend: &mut WaylandBackend) -> Writes {
 pub(crate) fn start(comp: &mut Compositor, display_number: u32) {
     match XEwmh::connect(display_number) {
         Ok(xewmh) => {
-            comp.xewmh = Some(xewmh);
+            comp.xwayland.ewmh = Some(xewmh);
             // Everything `wm-core` published before the display
             // existed (workspaces, workarea, possibly a client list)
             // goes out on the first flush.
@@ -690,7 +690,7 @@ pub(crate) fn start(comp: &mut Compositor, display_number: u32) {
 /// the whole X11 side is going away anyway — and there is no
 /// reconnect story worth a half-working retry loop.
 pub(crate) fn flush(comp: &mut Compositor) {
-    if comp.xewmh.is_none() {
+    if comp.xwayland.ewmh.is_none() {
         return;
     }
     // Inbound before outbound, and before the writes-empty early
@@ -701,12 +701,12 @@ pub(crate) fn flush(comp: &mut Compositor) {
     if writes.is_empty() {
         return;
     }
-    let Some(xewmh) = comp.xewmh.as_ref() else {
+    let Some(xewmh) = comp.xwayland.ewmh.as_ref() else {
         return;
     };
     if let Err(error) = xewmh.apply(&writes) {
         tracing::warn!(%error, "EWMH publishing failed; giving up on it for this session");
-        comp.xewmh = None;
+        comp.xwayland.ewmh = None;
     }
 }
 
@@ -724,7 +724,7 @@ fn drain_inbound(comp: &mut Compositor) {
     // connection inside `comp`, and queueing borrows the backend.
     let mut requests: Vec<WmEvent> = Vec::new();
     {
-        let Some(xewmh) = comp.xewmh.as_ref() else {
+        let Some(xewmh) = comp.xwayland.ewmh.as_ref() else {
             return;
         };
         while let Ok(Some(event)) = xewmh.conn.poll_for_event() {

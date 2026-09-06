@@ -940,6 +940,62 @@ fn an_x_raise_window_request_reaches_the_x_servers_stacking_order() {
     });
 }
 
+/// Unmapping is not destruction: applications reuse an XID when hiding and
+/// showing a window. Destruction must, however, collect its compositor record.
+#[test]
+#[ignore = "needs a nested Wayland session: scripts/e2e.sh --headless --release"]
+fn an_x11_window_keeps_its_identity_across_withdrawal_but_retires_on_destroy() {
+    let mut session = Session::boot("x11-withdraw-remap", SessionOptions::default()).unwrap();
+    let (conn, screen) = session.connect_x11().unwrap();
+    let (xid, id) = map_probe_window(&mut session, &conn, screen, "remap-probe", None);
+    for cycle in 0..10 {
+        conn.unmap_window(xid).unwrap();
+        conn.flush().unwrap();
+        poll_until(EVENT, "withdrawn X11 record retained but hidden", || {
+            let world = session.world().ok()?;
+            let record = world.windows.iter().find(|window| window.id == id)?;
+            (!record.mapped && world.frames.is_empty()).then_some(())
+        })
+        .unwrap_or_else(|error| panic!("cycle {cycle}: {error}\n{:?}", session.world()));
+        conn.map_window(xid).unwrap();
+        conn.flush().unwrap();
+        poll_until(EVENT, "remapped X11 window retains identity and regains focus", || {
+            let world = session.world().ok()?;
+            let record = world.windows.iter().find(|window| window.id == id)?;
+            (record.mapped && world.windows.len() == 1
+                && conn.get_input_focus().ok()?.reply().ok()?.focus == xid)
+                .then_some(())
+        })
+        .unwrap_or_else(|error| panic!("cycle {cycle}: {error}\n{:?}\n{}", session.world(), session.log()));
+    }
+    conn.destroy_window(xid).unwrap();
+    conn.flush().unwrap();
+    poll_until(EVENT, "destroyed X11 window and frame are both collected", || {
+        let world = session.world().ok()?;
+        (world.windows.is_empty() && world.frames.is_empty()).then_some(())
+    })
+    .unwrap_or_else(|error| panic!("{error}\n{:?}\n{}", session.world(), session.log()));
+}
+
+#[test]
+#[ignore = "needs a nested Wayland session: scripts/e2e.sh --headless --release"]
+fn an_x11_client_exit_collects_all_of_its_window_records() {
+    let mut session = Session::boot("x11-client-exit", SessionOptions::default()).unwrap();
+    let (conn, screen) = session.connect_x11().unwrap();
+    for index in 0..12 {
+        map_probe_window(&mut session, &conn, screen, &format!("exit-probe-{index}"), None);
+    }
+    assert_eq!(session.world().unwrap().windows.len(), 12);
+    // Closing the connection destroys its resources on the server. This is
+    // the same lifecycle boundary as a crashing client, without a real crash.
+    drop(conn);
+    poll_until(EVENT, "all disconnected client's windows and frames are collected", || {
+        let world = session.world().ok()?;
+        (world.windows.is_empty() && world.frames.is_empty()).then_some(())
+    })
+    .unwrap_or_else(|error| panic!("{error}\n{:?}\n{}", session.world(), session.log()));
+}
+
 // ---------------------------------------------------------------------
 // zwp_xwayland_keyboard_grab_v1: an X11 client that grabbed the keyboard
 // keeps its combos.

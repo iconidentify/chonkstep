@@ -223,7 +223,7 @@ fn main() {
     // The modal Alt+Tab grabs are `wm-core`'s own and are taken
     // separately, below: the applier only ever reconciles grabs the
     // *config* asked for.
-    shell.apply_session_state(&mut wm, state);
+    shell.initialize_window_manager(&mut wm);
     wm.set_workarea(shell.workarea(screen));
     wm.bind_default_keys();
     for window in existing {

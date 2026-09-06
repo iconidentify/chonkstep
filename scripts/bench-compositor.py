@@ -35,6 +35,15 @@ def command_output(args):
     return (result.stdout + result.stderr).strip()
 
 
+def binary_metadata(path):
+    version = command_output([str(path), "--version"])
+    if "diagnostics: memory-profile" in version:
+        raise ValueError(f"{path} is a memory-profile build; use an uninstrumented binary for timing")
+    with path.open("rb") as executable:
+        digest = hashlib.file_digest(executable, "sha256").hexdigest()
+    return {"path": str(path), "version": version, "sha256": digest}
+
+
 def stop(process):
     if process.poll() is None:
         process.terminate()
@@ -313,6 +322,10 @@ def main():
             env=os.environ | {"CHONKSTEP_BENCH_PRIVATE_BUS": "1"},
         )
         raise SystemExit(result.returncode)
+    try:
+        executable_metadata = {label: binary_metadata(path) for label, path in binaries}
+    except ValueError as error:
+        parser.error(str(error))
     args.output.mkdir(parents=True, exist_ok=False)
     metadata = {
         "date_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -330,9 +343,7 @@ def main():
         "load_average_at_start": os.getloadavg(),
         "renderer_environment": {key: value for key, value in os.environ.items()
                                  if key.startswith(("LIBGL_", "MESA_", "LP_", "GALLIUM_", "DRI_", "__EGL_", "GBM_"))},
-        "binary": {label: {"path": str(path), "version": command_output([str(path), "--version"]),
-                            "sha256": hashlib.file_digest(path.open("rb"), "sha256").hexdigest()}
-                   for label, path in binaries},
+        "binary": executable_metadata,
     }
     (args.output / "metadata.json").write_text(json.dumps(metadata, indent=2) + "\n")
     samples = []

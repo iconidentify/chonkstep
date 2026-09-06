@@ -108,14 +108,12 @@ fn the_dock_steps_under_a_bar_and_windows_maximize_between_them() {
 
 /// Waits for the fake bar to report itself mapped — the line it prints
 /// after the roundtrip that follows its first buffer, by which time the
-/// compositor has run the commit. The log is `client-0-…`: the harness
-/// numbers logs by the clients it is *currently* tracking, and
-/// `kill_client` drops the previous bar, so each bar in turn is the
-/// only one — `launch` truncates the file before this is called.
+/// compositor has run the commit. Read the latest launch's log: prior
+/// client evidence deliberately survives reaping and must not satisfy
+/// readiness for a replacement surface that has not committed yet.
 fn wait_for_client_mapped(session: &Session) {
-    let log = session.dir.join("client-0-chonk-fake-bar.log");
     poll_until(Duration::from_secs(10), "the layer client to report itself mapped", || {
-        std::fs::read_to_string(&log).ok().filter(|text| text.contains("mapped ")).map(|_| ())
+        session.client_log("chonk-fake-bar").contains("mapped ").then_some(())
     })
     .expect("the background surface should map like any other layer surface");
 }

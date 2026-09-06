@@ -96,7 +96,7 @@
 use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -975,6 +975,17 @@ fn run_condition_batch(script: &str, timeout: Duration) -> Option<Conditions> {
 /// shell tick. Two `stat`s a second on paths that exist.
 const FILE_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
+// Menu handles can be replaced or disabled/re-enabled while an older popup
+// still carries an action index. Revisions belong to the process, not to one
+// handle's lifetime. Zero remains the desktop's sentinel for no menu.
+static NEXT_GENERATION: AtomicU64 = AtomicU64::new(1);
+
+fn next_generation() -> u64 {
+    NEXT_GENERATION
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |current| current.checked_add(1))
+        .expect("Omarchy menu generation space exhausted")
+}
+
 /// The shell-facing handle: the two files, the model built from them,
 /// the condition evaluator, and the change polling that ties a
 /// re-read to an edit or an Omarchy upgrade.
@@ -986,7 +997,7 @@ pub struct OmarchyMenu {
     /// at frame rate would be work for nothing.
     script: Option<String>,
     evaluator: Evaluator,
-    /// Bumped on every re-read. The root menu session records the
+    /// Uniquely assigned on every re-read, including new handles. The root menu session records the
     /// generation it was built from, so an action index fired from a
     /// menu opened before a reload cannot name a different command in
     /// the model the reload produced.
@@ -1028,7 +1039,7 @@ impl OmarchyMenu {
         let user = read_entries(&self.paths.user);
         self.model = MenuModel::build(merge_sources(defaults, user));
         self.script = self.model.condition_script();
-        self.generation = self.generation.wrapping_add(1);
+        self.generation = next_generation();
         for (id, why) in self.model.skipped() {
             tracing::debug!(id, ?why, "omarchy menu entry has no row here");
         }
@@ -1473,8 +1484,8 @@ mod tests {
 
     #[test]
     fn a_reload_after_an_edit_changes_the_generation_and_the_tree() {
-        let dir = std::env::temp_dir().join(format!("chonk-omarchy-menu-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let temporary = tempfile::tempdir().unwrap();
+        let dir = temporary.path().to_path_buf();
         std::fs::create_dir_all(dir.join("default/omarchy")).unwrap();
         let paths = MenuPaths::from_env(Some(dir.clone().into()), Some(dir.join("cfg").into()), Some(dir.clone().into()));
         std::fs::write(&paths.default, "{\"a\": {\"label\": \"A\", \"action\": \"true\"}}").unwrap();
@@ -1492,7 +1503,28 @@ mod tests {
         // before the reload cannot fire into the new list.
         assert_eq!(menu.command(first, 0), None);
         assert_eq!(menu.command(menu.generation(), 1), Some("false"));
-        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn replacing_the_menu_cannot_reuse_an_open_menus_command_generation() {
+        let temporary = tempfile::tempdir().unwrap();
+        let paths = MenuPaths {
+            default: temporary.path().join("default.jsonc"),
+            user: temporary.path().join("user.jsonc"),
+        };
+        std::fs::write(&paths.default, r#"{"a":{"label":"A","action":"true"}}"#).unwrap();
+        let first = OmarchyMenu::load(paths.clone());
+        let open_generation = first.generation();
+        assert_eq!(first.command(open_generation, 0), Some("true"));
+        drop(first);
+
+        // Shell's config applier replaces the whole handle, rather than calling
+        // reload on it. A menu opened before that replacement retains its old
+        // action index, which must never authorize the new index's command.
+        std::fs::write(&paths.default, r#"{"b":{"label":"B","action":"false"}}"#).unwrap();
+        let replacement = OmarchyMenu::load(paths);
+        assert_eq!(replacement.command(open_generation, 0), None);
+        assert_eq!(replacement.command(replacement.generation(), 0), Some("false"));
     }
 
     #[test]

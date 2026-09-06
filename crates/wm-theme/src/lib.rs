@@ -77,4 +77,4 @@ pub mod wifi;
 pub mod workspace;
 
 pub use model::{Appearance, Theme};
-pub use raster::{FontState, RasterThemeEngine};
+pub use raster::{FontCacheStatistics, FontState, RasterThemeEngine};

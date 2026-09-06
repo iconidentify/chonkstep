@@ -77,7 +77,11 @@ if "$headless"; then
         exit 1
     fi
 
-    host_runtime=$(mktemp -d "${TMPDIR:-/tmp}/chonkstep-e2e-host.XXXXXX")
+    # Artifacts may live below a long/custom TMPDIR; Unix socket addresses
+    # cannot. Keep the private runtime short enough for nested Hyprland client
+    # sockets as well as Weston itself (hyprsunset appends its signature and
+    # /.hyprsunset.sock). mktemp creates this independently with owner-only mode.
+    host_runtime=$(mktemp -d /tmp/cse.XXXXXX)
     chmod 700 "$host_runtime"
     host_log="$host_runtime/weston.log"
     host_socket=wayland-chonkstep-e2e

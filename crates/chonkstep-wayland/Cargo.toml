@@ -5,6 +5,10 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+default = []
+memory-profile = ["wm-wayland/memory-profile"]
+
 # Everything here is Linux-only: on any other host the binary compiles
 # to its stub arm (see main.rs) with no dependencies at all, so the
 # workspace builds and tests on a macOS dev machine. The list is short

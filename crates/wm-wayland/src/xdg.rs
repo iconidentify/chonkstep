@@ -1,7 +1,5 @@
-//! Wayland protocol handlers on [`Compositor`]: wl_compositor/wl_shm/
-//! wl_seat/wl_output plumbing, the two selection protocols
-//! (wl_data_device and primary selection, whose handlers here are the
-//! Wayland end of the XWayland clipboard bridge in `xwayland.rs`), plus
+//! Surface lifecycle handlers on [`Compositor`]: wl_compositor/wl_shm/
+//! wl_output plumbing, plus
 //! the xdg-shell and xdg-decoration mapping that turns client requests
 //! into the exact `BackendEvent` shapes `wm-core` already speaks (read
 //! alongside `wm-x11`'s `translate_event`/`translate_client_message` —
@@ -35,14 +33,12 @@
 
 #[cfg(test)]
 use std::collections::HashMap;
-use std::os::fd::OwnedFd;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 use smithay::backend::renderer::utils::{on_commit_buffer_handler, with_renderer_surface_state};
 use smithay::desktop::{find_popup_root_surface, PopupKind};
 use smithay::input::pointer::CursorImageStatus;
-use smithay::input::{Seat, SeatHandler, SeatState};
 use smithay::output::Output;
 use smithay::reexports::wayland_protocols::xdg::decoration::zv1::server::zxdg_toplevel_decoration_v1::Mode as DecorationMode;
 use smithay::reexports::wayland_protocols::xdg::xdg_output::zv1::server::{
@@ -61,37 +57,31 @@ use smithay::wayland::buffer::BufferHandler;
 use smithay::wayland::compositor::{
     get_parent, with_states, CompositorClientState, CompositorHandler, CompositorState, SurfaceAttributes,
 };
-use smithay::wayland::keyboard_shortcuts_inhibit::KeyboardShortcutsInhibitorSeat;
 use smithay::wayland::output::{
     OutputHandler, OutputManagerState, OutputUserData, WlOutputData, XdgOutputUserData,
 };
-use smithay::wayland::selection::data_device::{
-    set_data_device_focus, ClientDndGrabHandler, DataDeviceHandler, DataDeviceState, ServerDndGrabHandler,
-};
-use smithay::wayland::selection::primary_selection::{
-    set_primary_focus, PrimarySelectionHandler, PrimarySelectionState,
-};
-use smithay::wayland::selection::{SelectionHandler, SelectionSource, SelectionTarget};
 use smithay::wayland::shell::xdg::decoration::XdgDecorationHandler;
 use smithay::wayland::shell::xdg::{
     PopupSurface, PositionerState, SurfaceCachedState, ToplevelSurface, XdgShellHandler, XdgShellState,
     XdgToplevelSurfaceData,
 };
 use smithay::wayland::shm::{ShmHandler, ShmState};
-use smithay::wayland::text_input::TextInputSeat;
+use smithay::wayland::selection::data_device::{DnDGrab, ServerDnDGrab};
 use smithay::xwayland::XWaylandClientData;
 use smithay::{
-    delegate_compositor, delegate_data_device, delegate_primary_selection, delegate_seat, delegate_shm,
+    delegate_compositor, delegate_shm,
     delegate_xdg_decoration, delegate_xdg_shell,
 };
 
 use wm_core::{BackendEvent, NetState, NetStateAction};
 use wm_theme_api::{
-    clamp_client_size, client_size_limit, subsurface_link_exceeds_depth, Point, Rect, ResizeEdge, Size,
-    MAX_SUBSURFACE_DEPTH,
+    clamp_client_size, client_size_limit, subsurface_link_exceeds_depth, Point, Rect, ResizeEdge,
+    Size, MAX_SUBSURFACE_DEPTH,
 };
 
-use crate::state::{ClientState, Compositor, ManagedSurface, WaylandBackend, WindowRecord, WlFrameId, WlWindowId};
+use crate::state::{
+    ClientState, Compositor, ManagedSurface, WaylandBackend, WindowRecord, WlFrameId, WlWindowId,
+};
 #[cfg(test)]
 use crate::state::{FrameRecord, StackEntry};
 
@@ -491,7 +481,8 @@ fn committed_content_offset(surface: &WlSurface, factor: f64, screen: Size) -> P
         let mut guard = states.cached_state.get::<SurfaceCachedState>();
         guard.current().geometry
     });
-    let Some(geometry) = geometry.filter(|geometry| geometry.size.w > 0 && geometry.size.h > 0) else {
+    let Some(geometry) = geometry.filter(|geometry| geometry.size.w > 0 && geometry.size.h > 0)
+    else {
         return Point::new(0, 0);
     };
     let declared = Size::new(
@@ -730,9 +721,13 @@ impl CompositorHandler for Compositor {
         self.focus_grab.surface_destroyed(surface);
         let backend = self.wm.backend_mut();
         let ime_before = backend.ime_popups.len();
-        backend.ime_popups.retain(|popup| popup.wl_surface() != surface);
+        backend
+            .ime_popups
+            .retain(|popup| popup.wl_surface() != surface);
         let lock_before = backend.lock_surfaces.len();
-        backend.lock_surfaces.retain(|entry| entry.surface.wl_surface() != surface);
+        backend
+            .lock_surfaces
+            .retain(|entry| entry.surface.wl_surface() != surface);
         if backend.ime_popups.len() != ime_before || backend.lock_surfaces.len() != lock_before {
             backend.mark_damaged();
         }
@@ -825,6 +820,7 @@ impl CompositorHandler for Compositor {
         // hooks police their commits, and the damage mark below is all
         // the compositor-side reaction a lock commit requires.
         if crate::layers::handle_commit(self, &root) {
+            crate::input::constraints::surface_committed(self, surface);
             // Hidden Omarchy layers remain healthy clients and may
             // continue committing, but their pixels are not in this
             // compositor's scene. The layer lifecycle itself damages
@@ -871,10 +867,47 @@ impl CompositorHandler for Compositor {
         if self.resolved_surface_affects_scene(&scene_root, scene_owner) {
             self.wm.backend_mut().mark_damaged();
         }
+        crate::input::constraints::surface_committed(self, surface);
     }
 }
 
 impl Compositor {
+    /// Whether `serial` names this toplevel client's current implicit pointer
+    /// grab on the seat resource it supplied.
+    ///
+    /// xdg-shell move/resize serials are authority tokens tied to the user
+    /// action that began the grab. Merely knowing an old serial—or inventing
+    /// one—must not let a client take the compositor's drag path. A DnD grab
+    /// is deliberately not interchangeable with a window-management grab:
+    /// otherwise a toolkit can accidentally turn one gesture into both.
+    fn pointer_grab_authorizes_toplevel(
+        &self,
+        surface: &WlSurface,
+        seat_resource: &WlSeat,
+        serial: Serial,
+    ) -> bool {
+        if !self.seat.owns(seat_resource) {
+            return false;
+        }
+        let Some(pointer) = self.seat.get_pointer() else {
+            return false;
+        };
+        pointer
+            .with_grab(|grab_serial, grab| {
+                if grab_serial != serial
+                    || grab.as_any().is::<DnDGrab<Compositor>>()
+                    || grab.as_any().is::<ServerDnDGrab<Compositor>>()
+                {
+                    return false;
+                }
+                grab.start_data()
+                    .focus
+                    .as_ref()
+                    .is_some_and(|(focus, _)| focus.surface().id().same_client_as(&surface.id()))
+            })
+            .unwrap_or(false)
+    }
+
     /// Release due commit-timing transactions and FIFO transactions that can
     /// no longer wait for presentation. Called after visibility settles and
     /// again after rendering, where it observes presentation-signalled FIFO
@@ -937,9 +970,10 @@ impl Compositor {
                     }
                 }
 
-                if let Some(timers) = states
-                    .data_map
-                    .get::<smithay::wayland::commit_timing::CommitTimerBarrierStateUserData>()
+                if let Some(timers) =
+                    states
+                        .data_map
+                        .get::<smithay::wayland::commit_timing::CommitTimerBarrierStateUserData>()
                 {
                     timers
                         .lock()
@@ -960,7 +994,8 @@ impl Compositor {
         }
         let display = self.display_handle.clone();
         for client in clients.into_values() {
-            self.client_compositor_state(&client).blocker_cleared(self, &display);
+            self.client_compositor_state(&client)
+                .blocker_cleared(self, &display);
         }
     }
 
@@ -978,8 +1013,8 @@ impl Compositor {
             with_states(surface, |states| {
                 let Some(timers) = states
                     .data_map
-                    .get::<smithay::wayland::commit_timing::CommitTimerBarrierStateUserData>()
-                else {
+                    .get::<smithay::wayland::commit_timing::CommitTimerBarrierStateUserData>(
+                ) else {
                     return;
                 };
                 let Some(deadline) = timers
@@ -1228,13 +1263,19 @@ impl Compositor {
             // A caught-up client's snap (foot acking our configure and
             // committing the nearest cell grid) has no pending
             // configure left, so it still adopts exactly as before.
-            let client_behind = with_states(&root, |states| {
-                states
-                    .data_map
-                    .get::<XdgToplevelSurfaceData>()
-                    .map(|data| !data.lock().unwrap().pending_configures().is_empty())
-            })
-            .unwrap_or(false);
+            // IPC can stage geometry after this pass's configure flush. Until
+            // the next flush that debt is just as outstanding as a sent but
+            // unacked configure: an old client commit must not erase it.
+            // Checking only Smithay's sent list misclassifies that window as
+            // caught up and can overwrite the ask before it ever goes out.
+            let client_behind = backend.configure_debt.contains_key(&id)
+                || with_states(&root, |states| {
+                    states
+                        .data_map
+                        .get::<XdgToplevelSurfaceData>()
+                        .map(|data| !data.lock().unwrap().pending_configures().is_empty())
+                })
+                .unwrap_or(false);
             if !client_behind {
                 backend.popup_parent_committed(&root);
             }
@@ -1251,6 +1292,11 @@ impl Compositor {
                     .is_some_and(|record| record.recent_asks.contains(&size))
             });
             if let (Some(size), Some(record)) = (committed, backend.windows.get(&id)) {
+                if size != record.content.size {
+                    tracing::trace!(?id, committed = ?size, desired = ?record.content.size,
+                        client_behind, echoes_ask, staged = backend.configure_debt.contains_key(&id),
+                        "committed client geometry differs from desired geometry");
+                }
                 if record.mapped && !client_behind && !echoes_ask && size != record.content.size {
                     let requested = Rect {
                         pos: record.content.pos,
@@ -1305,8 +1351,7 @@ pub(crate) fn window_is_in_scene(backend: &WaylandBackend, window: WlWindowId) -
     if !record.mapped || !record.surface.alive() {
         return false;
     }
-    record.window_type == wm_core::WindowType::Unmanaged
-        || backend.scene_index.is_presented(window)
+    record.window_type == wm_core::WindowType::Unmanaged || backend.scene_index.is_presented(window)
 }
 
 /// Test oracle for whether the renderer's current stacking slice
@@ -1557,149 +1602,6 @@ impl GlobalDispatch<ZxdgOutputManagerV1, ()> for Compositor {
     }
 }
 
-// -- wl_seat -------------------------------------------------------------
-
-impl SeatHandler for Compositor {
-    // Plain wl_surfaces as focus targets: both xdg toplevels and
-    // XWayland's X11 windows resolve to one (see `ManagedSurface`), so
-    // no bespoke focus enum is needed — `wm-core` owns focus POLICY,
-    // and the backend only ever points the seat at a surface.
-    type KeyboardFocus = WlSurface;
-    type PointerFocus = WlSurface;
-    type TouchFocus = WlSurface;
-
-    fn seat_state(&mut self) -> &mut SeatState<Compositor> {
-        &mut self.seat_state
-    }
-
-    fn focus_changed(&mut self, seat: &Seat<Self>, target: Option<&WlSurface>) {
-        // Keyboard focus carries clipboard access with it — without
-        // this, paste silently targets whichever client focused first.
-        // Both selections follow it, and for the same reason: the
-        // protocols gate `set_selection` on the requesting client
-        // holding focus, and gate the offers a client is told about on
-        // the same thing, so a focus change that only moved one of them
-        // leaves the other reading a stale client's clipboard.
-        let display_handle = self.display_handle.clone();
-        let client = target.and_then(|surface| surface.client());
-        set_data_device_focus(&display_handle, seat, client.clone());
-        set_primary_focus(&display_handle, seat, client);
-
-        // Text-input-v3 and input-method-v2 meet at the seat. Without
-        // moving this focus, both globals bind successfully but an IME
-        // never learns which application's text field owns its edits.
-        seat.text_input().set_focus(target.cloned());
-
-        // Only the focused surface may suppress compositor shortcuts.
-        // Move the active grant with keyboard focus and explicitly
-        // revoke the old one so a background VM cannot retain raw keys.
-        if let Some(active) = self.core_protocols.active_shortcut_inhibitor.take() {
-            active.inactivate();
-        }
-        if let Some(surface) = target {
-            if let Some(inhibitor) = seat.keyboard_shortcuts_inhibitor_for_surface(surface) {
-                inhibitor.activate();
-                self.core_protocols.active_shortcut_inhibitor = Some(inhibitor);
-            }
-        }
-    }
-
-    fn cursor_image(&mut self, _seat: &Seat<Self>, image: CursorImageStatus) {
-        // The renderer composites the pointer itself (there is no
-        // hardware cursor plane on the winit backend), so a client
-        // changing its cursor is scene damage like any other.
-        self.cursor_status = image;
-        self.wm.backend_mut().mark_damaged();
-    }
-}
-
-// -- selections / drag-and-drop ------------------------------------------
-
-/// The Wayland-to-X11 half of the clipboard bridge.
-///
-/// Both callbacks fire only for *client* requests — `set_selection` on
-/// a `wl_data_device` or a `zwp_primary_selection_device_v1` — never
-/// for the compositor-side selections `xwayland.rs` installs when an X
-/// client takes ownership. That asymmetry is what keeps the two halves
-/// from ping-ponging a selection back and forth forever, and it is a
-/// property of smithay's dispatch rather than of a guard here, so it is
-/// worth knowing before adding one.
-impl SelectionHandler for Compositor {
-    type SelectionUserData = ();
-
-    fn new_selection(
-        &mut self,
-        ty: SelectionTarget,
-        source: Option<SelectionSource>,
-        _seat: Seat<Self>,
-    ) {
-        // A Wayland client copied something. Xwayland owns the X-side
-        // selection window, so it has to be told to claim CLIPBOARD (or
-        // PRIMARY) on the X server and advertise these mime types;
-        // `None` means the client dropped the selection, which releases
-        // the X ownership again. Before this existed, copying in a
-        // Wayland app and pasting in xterm produced nothing at all — X
-        // clients asked the X server who owned the selection and the
-        // answer was nobody.
-        let Some(xwm) = self.xwm.as_mut() else {
-            // XWayland is not running (or failed to start); there is no
-            // X server to mirror the selection onto and native clients
-            // already have it.
-            return;
-        };
-        if let Err(error) = xwm.new_selection(ty, source.map(|source| source.mime_types())) {
-            tracing::warn!(?error, ?ty, "could not hand the selection to XWayland");
-        }
-    }
-
-    fn send_selection(
-        &mut self,
-        ty: SelectionTarget,
-        mime_type: String,
-        fd: OwnedFd,
-        _seat: Seat<Self>,
-        _user_data: &(),
-    ) {
-        // A Wayland client is pasting a selection this compositor owns
-        // on behalf of an X client (the one `xwayland.rs`'s
-        // `new_selection` installed). Fetching the bytes is an X
-        // round-trip — INCR transfers included — so `X11Wm` runs it as
-        // a calloop source and writes into `fd` when it completes,
-        // which is why the loop handle goes with it. Nothing blocks
-        // here; the pasting client simply reads its pipe when data
-        // arrives.
-        let loop_handle = self.loop_handle.clone();
-        let Some(xwm) = self.xwm.as_mut() else {
-            return;
-        };
-        if let Err(error) = xwm.send_selection(ty, mime_type, fd, loop_handle) {
-            tracing::warn!(
-                ?error,
-                ?ty,
-                "could not read the X11 selection for a Wayland client"
-            );
-        }
-    }
-}
-
-impl DataDeviceHandler for Compositor {
-    fn data_device_state(&self) -> &DataDeviceState {
-        &self.data_device_state
-    }
-}
-
-impl PrimarySelectionHandler for Compositor {
-    fn primary_selection_state(&self) -> &PrimarySelectionState {
-        &self.primary_selection_state
-    }
-}
-
-// Defaults throughout: client-to-client DnD works through the seat's
-// own grab machinery; a rendered drag icon is a follow-up for the
-// renderer (the icon surface arrives in `started`, unused for now).
-impl ClientDndGrabHandler for Compositor {}
-impl ServerDndGrabHandler for Compositor {}
-
 // -- xdg-shell -----------------------------------------------------------
 
 impl XdgShellHandler for Compositor {
@@ -1783,7 +1685,7 @@ impl XdgShellHandler for Compositor {
         // with a dedicated focus-target enum if it bites.
     }
 
-    fn move_request(&mut self, surface: ToplevelSurface, _seat: WlSeat, _serial: Serial) {
+    fn move_request(&mut self, surface: ToplevelSurface, seat: WlSeat, serial: Serial) {
         // A client-initiated interactive move (a CSD titlebar drag).
         // Under server-side decorations moves start from OUR titlebar,
         // which `wm-core` runs off frame button events, and this request
@@ -1799,12 +1701,13 @@ impl XdgShellHandler for Compositor {
         // outright while another drag is in flight, so a client cannot
         // steal a move the user is already making.
         //
-        // The serial is not checked against a real button press. Doing
-        // so would need the seat's grab history threaded through here,
-        // and the failure it would prevent — a client starting a move
-        // with no pointer down — already ends the moment the user
-        // presses and releases a button, because `wm-core` anchors the
-        // drag on the pointer and finishes it on release.
+        if !self.pointer_grab_authorizes_toplevel(surface.wl_surface(), &seat, serial) {
+            tracing::debug!(
+                ?serial,
+                "ignored xdg move without an authorized pointer grab"
+            );
+            return;
+        }
         let backend = self.wm.backend_mut();
         if let Some(id) = backend.window_for_surface(surface.wl_surface()) {
             backend.queue(WmEvent::MoveRequest(id));
@@ -1814,8 +1717,8 @@ impl XdgShellHandler for Compositor {
     fn resize_request(
         &mut self,
         surface: ToplevelSurface,
-        _seat: WlSeat,
-        _serial: Serial,
+        seat: WlSeat,
+        serial: Serial,
         edges: smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::ResizeEdge,
     ) {
         // This used to be dropped, on the reasoning that unlike a move
@@ -1831,16 +1734,19 @@ impl XdgShellHandler for Compositor {
         // release, size hints respected), anchored on its own record of
         // the window; the edge is the one thing only the client knows.
         //
-        // The serial is unchecked for the same reason `move_request`'s
-        // is: the failure it would prevent ends on its own at the next
-        // press-and-release, and checking would mean threading the
-        // seat's grab history through here.
         let Some(edge) = wm_resize_edge(edges) else {
             // `None` (and any future protocol value): a resize with no
             // edge has no geometry to solve for, so it is refused
             // rather than guessed at.
             return;
         };
+        if !self.pointer_grab_authorizes_toplevel(surface.wl_surface(), &seat, serial) {
+            tracing::debug!(
+                ?serial,
+                "ignored xdg resize without an authorized pointer grab"
+            );
+            return;
+        }
         let backend = self.wm.backend_mut();
         if let Some(id) = backend.window_for_surface(surface.wl_surface()) {
             backend.queue(WmEvent::ResizeRequest { window: id, edge });
@@ -2190,9 +2096,6 @@ smithay::reexports::wayland_server::delegate_dispatch!(Compositor: [
 smithay::reexports::wayland_server::delegate_dispatch!(Compositor: [
     ZxdgOutputManagerV1: ()
 ] => OutputManagerState);
-delegate_seat!(Compositor);
-delegate_data_device!(Compositor);
-delegate_primary_selection!(Compositor);
 delegate_xdg_shell!(Compositor);
 delegate_xdg_decoration!(Compositor);
 

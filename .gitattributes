@@ -1,0 +1,4 @@
+# Preserve checksum-verified upstream archives byte-for-byte. Their historical
+# whitespace is not project-authored; intentional local patches remain linted
+# by Rust's compiler and Clippy.
+vendor/smithay-0.7.0/** -whitespace

@@ -1013,7 +1013,12 @@ impl<B: Backend> WindowManager<B> {
     /// every one mapped while the user was elsewhere — still hands the
     /// keyboard to something rather than to nothing.
     fn focus_successor(&self, excluding: Option<ClientId>) -> Option<ClientId> {
-        self.focus_order().into_iter().find(|&id| Some(id) != excluding)
+        // Only one successor is needed. Avoid allocating the full cycle order
+        // and its de-duplication set on every close, hide or workspace switch.
+        // If history has no eligible entry, checking it again in the fallback
+        // cannot change the answer; creation order remains the final tie-break.
+        self.focus_history.iter().rev().copied().chain(self.clients.keys())
+            .find(|&id| Some(id) != excluding && self.is_focusable(id))
     }
 
     /// Hands focus to [`Self::focus_successor`], or clears it when the
@@ -1173,6 +1178,11 @@ impl<B: Backend> WindowManager<B> {
                 // with three windows on screen and none of them
                 // holding the keyboard.
                 self.focus_successor_of(prev);
+            } else if let Some(next) = self.focus_successor(None) {
+                // Leaving an empty workspace has no previous focused client.
+                // The destination still needs its own most recent eligible
+                // window to regain the keyboard without an extra click.
+                self.focus_client(next);
             }
         }
         tracing::info!(workspace, "switched workspace");
@@ -5007,6 +5017,40 @@ mod tests {
         // And back again, to the window that was focused here.
         wm.switch_workspace(0);
         assert_eq!(wm.focused_client(), Some(c), "returning restores the workspace's own last focus");
+    }
+
+    #[test]
+    fn returning_from_an_empty_workspace_restores_its_most_recent_window() {
+        let (mut wm, _a, _b, c) = three_focused_in_order();
+        for _ in 0..10 {
+            wm.switch_workspace(1);
+            assert_eq!(wm.focused_client(), None);
+            wm.switch_workspace(0);
+            assert_eq!(wm.focused_client(), Some(c),
+                "a previously empty desk has no old focus to nominate a successor");
+            assert!(wm.client(c).unwrap().flags.contains(ClientFlags::FOCUSED));
+        }
+    }
+
+    #[test]
+    fn single_successor_matches_cycle_order_across_visibility_and_focus_restrictions() {
+        for mask in 0..512u32 {
+            let (mut wm, a, b, c) = three_focused_in_order();
+            for (index, id) in [a, b, c].into_iter().enumerate() {
+                let bits = mask >> (index * 3);
+                let client = wm.clients.get_mut(id).unwrap();
+                client.workspace = usize::from(bits & 1 != 0);
+                client.flags.set(ClientFlags::NO_FOCUS, bits & 2 != 0);
+                if bits & 4 != 0 {
+                    client.lifecycle = Lifecycle::Miniaturized;
+                }
+            }
+            for excluding in [None, Some(a), Some(b), Some(c)] {
+                let expected = wm.focus_order().into_iter().find(|id| Some(*id) != excluding);
+                assert_eq!(wm.focus_successor(excluding), expected,
+                    "mask {mask}, exclusion {excluding:?}");
+            }
+        }
     }
 
     #[test]

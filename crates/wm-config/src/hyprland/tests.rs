@@ -524,6 +524,58 @@ o.bind("SUPER + SHIFT + code:201", "Menu", "omarchy-menu")
     }
 }
 
+#[test]
+fn keyboard_repeat_accepts_zero_and_rejects_out_of_range_values() {
+    for value in [0, 1, 1000] {
+        let mut reading = Reading::default();
+        input(&mut reading, "repeat_rate", &value.to_string());
+        assert_eq!(reading.input.repeat_rate, Some(value));
+        assert!(reading.skipped.is_empty());
+    }
+    for value in [0, 1, 5000] {
+        let mut reading = Reading::default();
+        input(&mut reading, "repeat_delay", &value.to_string());
+        assert_eq!(reading.input.repeat_delay, Some(value));
+        assert!(reading.skipped.is_empty());
+    }
+    for (name, value) in [("repeat_rate", "-1"), ("repeat_rate", "1001"), ("repeat_delay", "-1"), ("repeat_delay", "5001")] {
+        let mut reading = Reading::default();
+        input(&mut reading, name, value);
+        assert_eq!(reading.input.repeat_rate, None);
+        assert_eq!(reading.input.repeat_delay, None);
+        assert_eq!(reading.skipped.len(), 1);
+    }
+}
+
+#[test]
+fn keyboard_only_configuration_is_usable_without_replacing_default_bindings() {
+    let root = scratch("keyboard-only");
+    write(&root.join(".config/hypr/hyprland.conf"), "input {\n kb_layout = de\n repeat_rate = 0\n repeat_delay = 0\n}\n");
+    let reading = read(&Roots::under(&root));
+    assert!(!reading.is_empty(), "input settings must not be discarded because no bind was present");
+    let mut config = crate::Config::default_config();
+    let bindings = config.keybindings.clone();
+    apply(&mut config, Some(&reading));
+    assert_eq!(config.keybindings, bindings, "the default escape hatch stays available");
+    assert_eq!(config.input.layout.as_deref(), Some("de"));
+    assert_eq!(config.input.repeat_rate, Some(0));
+    assert_eq!(config.input.repeat_delay, Some(0));
+}
+
+#[test]
+fn metadata_only_is_empty_but_release_bindings_and_monitors_are_not() {
+    let mut reading = Reading::default();
+    reading.files.push("hyprland.conf".into());
+    reading.skipped.push(Skipped { kind: "input".into(), what: "unknown".into(), why: "unsupported".into() });
+    assert!(reading.is_empty());
+    let root = scratch("non-press-config");
+    for fragment in ["bindr = SUPER, R, workspace, 1\n", "monitor = , preferred, auto, 1.5\n"] {
+        write(&root.join(".config/hypr/hyprland.conf"), fragment);
+        let reading = read(&Roots::under(&root));
+        assert!(!reading.is_empty(), "usable configuration discarded: {fragment}");
+    }
+}
+
 /// Bindings that are not key chords at all — the mouse wheel, a mouse
 /// button, the lid switch — are refused by name rather than mangled
 /// into some nearby keysym.

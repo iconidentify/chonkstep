@@ -341,6 +341,10 @@ impl DockWidget for WifiWidget {
     }
 
     fn update(&mut self, samples: &Samples) -> bool {
+        // Panel commands complete independently of the tile's sources, and
+        // their freshness lasts only this pass. Its own dirty flag schedules
+        // an open-panel repaint without claiming that the tile changed.
+        self.panel.update(samples);
         // The three sources run on different cadences and land on
         // different passes, and every one of them feeds the same
         // decision, so any of them being fresh re-derives all of it
@@ -377,7 +381,6 @@ impl DockWidget for WifiWidget {
         // is about the *tile*, so a panel-only change must not claim
         // it — but the header the panel draws is the tile's state, so
         // it is pushed across here, where that state has just settled.
-        self.panel.update(samples);
         self.panel.set_link_header(self.link_header());
         self.state != before
     }
@@ -608,6 +611,41 @@ mod tests {
 
         bench.all_stale();
         assert!(!widget.update(&bench.samples()), "a pass with nothing fresh folds nothing");
+    }
+
+    #[test]
+    fn a_panel_only_sample_updates_its_rows_without_repainting_the_tile() {
+        let mut bench = SampleBench::new();
+        let net = bench.tree(vec![iface("enp0s1", "up\n", "1\n", Some("1000\n"), false)]);
+        let list = bench.text("");
+        let radio = bench.text("enabled\n");
+        let devices = bench.text("enp0s1:ethernet:connected:Wired\n");
+        let connections = bench.text("");
+        let networks = bench.text("");
+        let tailscale = bench.text("");
+        let mut widget = WifiWidget::new();
+        widget.bind(&[net, list, radio, devices, connections, networks, tailscale]);
+        widget.update(&bench.samples());
+        widget.panel_tick(std::time::Instant::now());
+        let tile_before = widget.state.clone();
+
+        // Command completions arrive independently of the tile's sysfs/radio
+        // samples. Freshness lasts this pass only; a later tile update cannot
+        // recover a panel sample skipped here.
+        bench.all_stale();
+        bench.set_text(connections, "Wired:802-3-ethernet:yes:test-uuid\n");
+        assert!(!widget.update(&bench.samples()), "the tile has no changed sample");
+        assert_eq!(widget.state, tile_before);
+        let view = widget.panel.view();
+        assert_eq!(view.connections.len(), 1, "the independent connection result must be folded");
+        assert_eq!(view.connections[0].uuid, "test-uuid");
+        assert!(widget.panel_tick(std::time::Instant::now()), "only the panel is dirty");
+        assert!(!widget.panel_tick(std::time::Instant::now()), "dirty is consumed once");
+
+        bench.all_stale();
+        assert!(!widget.update(&bench.samples()));
+        assert!(!widget.panel_tick(std::time::Instant::now()));
+        assert_eq!(widget.panel.view(), view);
     }
 
     /// The click improvement, stated as a test: with the radio state

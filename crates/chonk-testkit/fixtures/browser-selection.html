@@ -1,0 +1,56 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'">
+<title>ChonkStep Selection Probe</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: rgb(246,244,232); }
+  main { padding: 100px 24px 0; font: 16px/28px monospace; }
+  #plain, #editor { white-space: pre; overflow: hidden; }
+  #editor { margin-top: 24px; outline: 1px solid #385070; min-height: 56px; }
+</style>
+<main>
+  <div id="plain">0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz</div>
+  <div id="editor" contenteditable="true" spellcheck="false">0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz</div>
+</main>
+<script>
+  (() => {
+    const events = [];
+    for (const type of ['mousemove', 'mousedown', 'mouseup', 'keydown', 'keyup']) {
+      document.addEventListener(type, event => {
+        events.push({type, x: event.clientX, y: event.clientY, key: event.key});
+        if (events.length > 64) events.shift();
+      }, true);
+    }
+    window.chonkProbe = {
+      reset() { events.length = 0; getSelection().removeAllRanges(); },
+      point(id, offset) {
+        const node = document.getElementById(id).firstChild;
+        const range = document.createRange();
+        range.setStart(node, offset);
+        range.setEnd(node, offset + 1);
+        const rect = range.getBoundingClientRect();
+        // MouseEvent coordinates are integer CSS pixels in Chromium. Choose
+        // integer points inside the intended character's leading half so the
+        // assertion doesn't mistake DOM rounding for a compositor transform.
+        const x = Math.ceil(rect.x) + 1, y = Math.floor(rect.y + rect.height / 2);
+        const caret = document.caretPositionFromPoint(x, y);
+        return {x, y, offset: caret.offset, sameNode: caret.offsetNode === node};
+      },
+      caret(offset) {
+        const editor = document.getElementById('editor');
+        editor.focus();
+        getSelection().collapse(editor.firstChild, offset);
+      },
+      snapshot() {
+        const selection = getSelection();
+        return {
+          text: selection.toString(), anchor: selection.anchorOffset, focus: selection.focusOffset,
+          anchorId: selection.anchorNode?.parentElement?.id,
+          focusId: selection.focusNode?.parentElement?.id,
+          events: events.slice(), dpr: devicePixelRatio, width: innerWidth, height: innerHeight,
+          fullscreen: Boolean(document.fullscreenElement),
+        };
+      },
+    };
+  })();
+</script>

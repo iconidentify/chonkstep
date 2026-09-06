@@ -93,6 +93,7 @@
 //! panel is snappy exactly when someone is watching it.
 
 pub mod data;
+mod terse;
 pub mod render;
 pub mod tailscale;
 

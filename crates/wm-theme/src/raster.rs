@@ -43,6 +43,21 @@ pub struct FontState {
     swash_cache: Rc<RefCell<GlyphCache>>,
 }
 
+/// Read-only font/raster cache sizes for explicit diagnostics, not RSS.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FontCacheStatistics {
+    /// Available database faces, not the count of eagerly loaded font objects.
+    pub available_faces: usize,
+    /// Image entries, including cached misses.
+    pub image_entries: usize,
+    /// Sum of image byte-vector capacities; excludes hash/scaler overhead.
+    pub image_payload_bytes: usize,
+    /// Outline entries, including cached misses.
+    pub outline_entries: usize,
+    /// Sum of cached outline command storage; excludes hash/scaler overhead.
+    pub outline_payload_bytes: usize,
+}
+
 // Glyph keys include font, size and subpixel position. Keeping every
 // title ever displayed at every scale made this session-long cache grow
 // without a limit. These are soft watermarks, checked between render
@@ -129,6 +144,21 @@ impl FontState {
         let mut cache = self.swash_cache.borrow_mut();
         cache.trim();
         std::cell::RefMut::map(cache, |cache| &mut cache.swash)
+    }
+
+    /// Inspect without eviction or allocation. This walks cache entries;
+    /// callers must not put it on an ordinary frame/input path.
+    pub fn cache_statistics(&self) -> FontCacheStatistics {
+        let cache = self.swash_cache.borrow();
+        FontCacheStatistics {
+            available_faces: self.font_system.borrow().db().faces().count(),
+            image_entries: cache.swash.image_cache.len(),
+            image_payload_bytes: cache.swash.image_cache.values().flatten()
+                .map(|image| image.data.capacity()).sum(),
+            outline_entries: cache.swash.outline_command_cache.len(),
+            outline_payload_bytes: cache.swash.outline_command_cache.values().flatten()
+                .map(|commands| std::mem::size_of_val(commands.as_ref())).sum(),
+        }
     }
 
     /// Whether the database holds a face for `family`. Used to warn
@@ -822,6 +852,27 @@ mod tests {
         cache.trim();
         assert_eq!(cache.swash.image_cache.capacity(), 0);
         assert_eq!(cache.next_check, 1);
+    }
+
+    #[test]
+    fn font_statistics_observe_payload_capacity_without_triggering_eviction() {
+        let fonts = FontState {
+            font_system: Rc::new(RefCell::new(cosmic_text::FontSystem::new_with_locale_and_db(
+                "en-US".into(), cosmic_text::fontdb::Database::new(),
+            ))),
+            swash_cache: Rc::new(RefCell::new(GlyphCache::new())),
+        };
+        let mut image = cosmic_text::SwashImage::new();
+        image.data = Vec::with_capacity(GLYPH_CACHE_BYTES);
+        let capacity = image.data.capacity();
+        fonts.swash_cache.borrow_mut().swash.image_cache.insert(glyph_key(1), Some(image));
+        let first = fonts.cache_statistics();
+        assert_eq!(first.available_faces, 0);
+        assert_eq!(first.image_entries, 1);
+        assert_eq!(first.image_payload_bytes, capacity);
+        assert_eq!(fonts.cache_statistics(), first, "observation does not trim the cache");
+        drop(fonts.swash());
+        assert_eq!(fonts.cache_statistics().image_entries, 0, "normal borrowing still evicts");
     }
 
     #[test]

@@ -62,7 +62,7 @@ fn probe_session(name: &str) -> (Session, WindowInfo) {
     let mut session = Session::boot(name, SessionOptions { scale: Some(1.0), ..SessionOptions::default() })
         .expect("the nested compositor boots");
     session
-        .launch(&probe.to_string_lossy(), &[])
+        .launch(&probe.to_string_lossy(), &["chonk-fullscreen-probe", "chonk-fullscreen-probe", "delayed-configure"])
         .expect("the probe launches against the nested session");
     let window = session.wait_for_window("chonk-fullscreen-probe").expect("the probe maps a window");
     // Click the window's middle before driving it: the injected keys go
@@ -79,6 +79,22 @@ fn probe_session(name: &str) -> (Session, WindowInfo) {
 /// What the probe wrote about what it was told.
 fn probe_log(session: &Session) -> String {
     std::fs::read_to_string(session.dir.join("client-0-chonk-fullscreen-probe.log")).unwrap_or_default()
+}
+
+/// A compositor barrier fences server work, not the client's event queue.
+/// Wait for this request's actual answer, and fail immediately on a refusal;
+/// a slow client must not be mistaken for a wrong configure.
+fn probe_answer(session: &Session, answer: &str) -> String {
+    poll_until(Duration::from_secs(10), answer, || {
+        let log = probe_log(session);
+        if log.contains("answer REFUSED") {
+            Some(Err(format!("a request was refused:\n{log}")))
+        } else {
+            log.contains(answer).then_some(Ok(log))
+        }
+    })
+    .and_then(|result| result)
+    .unwrap_or_else(|error| panic!("{error}\n{}\n{}", probe_log(session), session.log()))
 }
 
 /// Presses one of the probe's controls and lets the compositor settle.
@@ -198,7 +214,7 @@ fn a_clients_fullscreen_control_enters_and_leaves_in_one_press_each() {
     // The client's half, and the invariant the fix states: the answer
     // to a request describes the decision on that request. A refusal
     // here is the bug even when the geometry above looks right.
-    let log = probe_log(&session);
+    let log = probe_answer(&session, "answer granted: asked fullscreen=true, told fullscreen=true");
     assert!(
         !log.contains("answer REFUSED"),
         "a granted fullscreen must not be answered with a configure saying otherwise:\n{log}"
@@ -224,7 +240,7 @@ fn a_clients_fullscreen_control_enters_and_leaves_in_one_press_each() {
         "unfullscreen restores the exact rect the window had before"
     );
 
-    let log = probe_log(&session);
+    let log = probe_answer(&session, "answer granted: asked fullscreen=false, told fullscreen=false");
     assert!(
         log.contains("control exit fullscreen: sent unset"),
         "the second press must be an exit, not another enter — a client whose \
@@ -383,7 +399,7 @@ fn a_clients_maximize_control_is_answered_with_maximized() {
     })
     .expect("one press of a maximize control maximizes the window");
     assert!(big.h > windowed.h, "maximize grows both axes");
-    let log = probe_log(&session);
+    let log = probe_answer(&session, "answer granted: asked maximized=true, told maximized=true");
     assert!(
         log.contains("answer granted: asked maximized=true, told maximized=true"),
         "the configure answering set_maximized must carry the maximized state:\n{log}"
@@ -399,7 +415,7 @@ fn a_clients_maximize_control_is_answered_with_maximized() {
     })
     .expect("a second press of the same control unmaximizes");
     assert_eq!((back.w, back.h), (windowed.w, windowed.h));
-    let log = probe_log(&session);
+    let log = probe_answer(&session, "answer granted: asked maximized=false, told maximized=false");
     assert!(
         log.contains("answer granted: asked maximized=false, told maximized=false"),
         "the configure answering unset_maximized must carry no maximized state:\n{log}"

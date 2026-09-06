@@ -63,6 +63,9 @@
 //!   needs an exemption: children are reaped with `try_wait` inside
 //!   the same bounded polls everything else uses.
 
+mod memory_statistics;
+pub use memory_statistics::MemoryStatistics;
+
 use std::io::{BufRead, BufReader, ErrorKind, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -370,6 +373,9 @@ pub struct Session {
     /// Launched clients with the program name each was started as,
     /// so a test can single one out to kill (`kill_client`).
     clients: Vec<(String, Child)>,
+    /// Monotonic launch identity, independent of the number of live children.
+    /// Reaping a client must never reuse and truncate an earlier evidence log.
+    client_serial: usize,
     door: Door,
     /// The nested compositor's own wayland socket name (e.g.
     /// "wayland-2"), parsed from its log — what clients and grim get
@@ -377,6 +383,14 @@ pub struct Session {
     pub wayland_display: String,
     log_path: PathBuf,
     screenshot_serial: u32,
+}
+
+/// Client transport and filesystem isolation are explicit at the launch site.
+#[derive(Clone, Copy)]
+enum ClientSession {
+    Wayland,
+    IsolatedWayland,
+    IsolatedX11,
 }
 
 impl Session {
@@ -488,6 +502,15 @@ impl Session {
             // it stops propagating, but a harness must not depend on
             // the thing it is testing having already fixed itself.
             .env_remove("CHONKSTEP_SESSION_CONTINUES")
+            // A developer's layout is not this test's layout. Remove rather
+            // than set empty: libxkbcommon treats an empty XKB_DEFAULT_RULES
+            // as an actual empty rules name and cannot build any keymap.
+            // Tests of environment precedence can opt back in below.
+            .env_remove("XKB_DEFAULT_RULES")
+            .env_remove("XKB_DEFAULT_MODEL")
+            .env_remove("XKB_DEFAULT_LAYOUT")
+            .env_remove("XKB_DEFAULT_VARIANT")
+            .env_remove("XKB_DEFAULT_OPTIONS")
             .envs(options.env.iter().map(|(name, value)| (name.as_str(), value.as_str())))
             .stdout(Stdio::from(log))
             .stderr(Stdio::from(log_err))
@@ -498,6 +521,7 @@ impl Session {
             dir,
             compositor,
             clients: Vec::new(),
+            client_serial: 0,
             door: Door::unconnected(),
             wayland_display: String::new(),
             log_path,
@@ -570,20 +594,44 @@ impl Session {
     /// toolkit cannot quietly open on the host session and pass a test
     /// against the wrong desktop.
     pub fn launch(&mut self, program: &str, args: &[&str]) -> Result<(), String> {
+        self.launch_client(program, args, ClientSession::Wayland)
+    }
+
+    /// Launch a native Wayland client with private XDG configuration, cache,
+    /// data and state. Browser wrappers must not import the user's flags or
+    /// write outside the test profile. The nested host's runtime directory is
+    /// retained: it owns the private Wayland socket and session bus.
+    pub fn launch_isolated(&mut self, program: &str, args: &[&str]) -> Result<(), String> {
+        self.launch_client(program, args, ClientSession::IsolatedWayland)
+    }
+
+    /// Launch an X11 client with private XDG directories and this compositor's
+    /// announced XWayland display. Inherited Wayland handles are removed so a
+    /// toolkit cannot silently exercise a different transport or desktop.
+    /// This isolates session configuration, not arbitrary filesystem access;
+    /// applications with non-XDG state still need their own private profile.
+    pub fn launch_x11_isolated(&mut self, program: &str, args: &[&str]) -> Result<(), String> {
+        self.launch_client(program, args, ClientSession::IsolatedX11)
+    }
+
+    fn launch_client(&mut self, program: &str, args: &[&str], session: ClientSession) -> Result<(), String> {
         // Client output is kept per launch: "the client never mapped"
         // is undiagnosable from a /dev/null.
         // A program given by path (this crate's own probe binaries)
         // logs under its file name: the path's slashes are not a
         // directory tree the log should be filed into.
         let short = Path::new(program).file_name().and_then(|name| name.to_str()).unwrap_or(program);
-        let log_path = self.dir.join(format!("client-{}-{short}.log", self.clients.len()));
-        let log = std::fs::File::create(&log_path).map_err(|e| e.to_string())?;
+        let serial = self.client_serial;
+        self.client_serial = serial.checked_add(1).ok_or("client launch identity exhausted")?;
+        let log_path = self.dir.join(format!("client-{serial}-{short}.log"));
+        let log = std::fs::File::create_new(&log_path).map_err(|e| e.to_string())?;
         let log_err = log.try_clone().map_err(|e| e.to_string())?;
         let signature = self.hyprland_signature();
         let mut command = Command::new(program);
         command
             .args(args)
             .env("WAYLAND_DISPLAY", &self.wayland_display)
+            .env_remove("WAYLAND_SOCKET")
             .env_remove("DISPLAY")
             .env_remove("HYPRLAND_INSTANCE_SIGNATURE")
             .env("GDK_BACKEND", "wayland")
@@ -596,6 +644,25 @@ impl Session {
             // of two.
             .env_remove("FORCE_COLOR")
             .env_remove("CLICOLOR_FORCE");
+        if matches!(session, ClientSession::IsolatedX11) {
+            command
+                .env("DISPLAY", self.x11_display()?)
+                .env_remove("WAYLAND_DISPLAY")
+                .env("GDK_BACKEND", "x11")
+                .env("QT_QPA_PLATFORM", "xcb");
+        }
+        if !matches!(session, ClientSession::Wayland) {
+            for (variable, directory) in [
+                ("XDG_CONFIG_HOME", "client-config"),
+                ("XDG_CACHE_HOME", "client-cache"),
+                ("XDG_DATA_HOME", "client-data"),
+                ("XDG_STATE_HOME", "client-state"),
+            ] {
+                let path = self.dir.join(directory);
+                std::fs::create_dir_all(&path).map_err(|error| error.to_string())?;
+                command.env(variable, path);
+            }
+        }
         if let Some(signature) = signature {
             // Clients spawned by the real shell inherit this value
             // from the compositor. Harness clients are siblings of
@@ -621,6 +688,24 @@ impl Session {
         let log = self.log();
         let line = log.lines().find(|line| line.contains("hyprland ipc listening"))?;
         line.split("signature=\"").nth(1)?.split('"').next().map(str::to_owned)
+    }
+
+    /// Connect to this compositor's announced XWayland server, never the
+    /// caller's ambient DISPLAY. Clients can exercise both protocol families
+    /// without an external X11 utility or a connection to the live desktop.
+    pub fn connect_x11(&self) -> Result<(x11rb::rust_connection::RustConnection, usize), String> {
+        x11rb::connect(Some(&self.x11_display()?)).map_err(|error| format!("nested XWayland connection: {error}"))
+    }
+
+    /// Most recently announced private XWayland display, including its colon.
+    /// Never uses the caller's ambient DISPLAY, including after a restart.
+    pub fn x11_display(&self) -> Result<String, String> {
+        let display: u32 = poll_until(Duration::from_secs(10), "this session's XWayland display", || {
+            let log = self.log();
+            let line = log.lines().rev().find(|line| line.contains("XWayland ready"))?;
+            line.split("display=").nth(1)?.trim().parse().ok()
+        })?;
+        Ok(format!(":{display}"))
     }
 
     /// Waits for a mapped window whose app id or title contains
@@ -1194,6 +1279,9 @@ pub struct FrameStats {
     pub shell_us: u128,
     pub protocol_us: u128,
     pub layout_us: u128,
+    /// None for older preserved binaries. A present count includes attempted
+    /// rendering that found no damage and therefore submitted no frame.
+    pub render_attempts: Option<u64>,
     pub render_calls: u64,
     pub render_us: u128,
     pub render_max_us: u128,
@@ -1210,6 +1298,16 @@ pub struct ProtocolLedgers {
     pub ime: usize,
     pub idle: usize,
     pub lock: usize,
+}
+
+/// Retained selection devices, including resources whose clients have exited.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct SelectionDevices {
+    pub core: usize,
+    pub primary: usize,
+    pub wlr: usize,
+    pub ext: usize,
+    pub dead: usize,
 }
 
 /// Hyprland IPC descriptors owned by the server and corresponding
@@ -1266,6 +1364,31 @@ impl Door {
 
     pub fn motion(&mut self, x: f64, y: f64) -> Result<(), String> {
         self.send(&format!("motion {x} {y}"))
+    }
+
+    /// Touch-down in global output coordinates, through the real backend route.
+    pub fn touch_down(&mut self, slot: u32, x: f64, y: f64) -> Result<(), String> {
+        self.send(&format!("touch down {slot} {x} {y}"))
+    }
+
+    /// Move a held touch slot; the client must retain its original focus.
+    pub fn touch_motion(&mut self, slot: u32, x: f64, y: f64) -> Result<(), String> {
+        self.send(&format!("touch motion {slot} {x} {y}"))
+    }
+
+    /// Release a held touch slot.
+    pub fn touch_up(&mut self, slot: u32) -> Result<(), String> {
+        self.send(&format!("touch up {slot}"))
+    }
+
+    /// Finish one logical touch input frame.
+    pub fn touch_frame(&mut self) -> Result<(), String> {
+        self.send("touch frame")
+    }
+
+    /// Cancel all held touches through the physical-input cancellation path.
+    pub fn touch_cancel(&mut self) -> Result<(), String> {
+        self.send("touch cancel")
     }
 
     /// Pointer button by name; `pressed` true for press.
@@ -1367,6 +1490,23 @@ impl Door {
         })
     }
 
+    /// Inspect selection object ownership without pruning dead resources.
+    pub fn selection_devices(&mut self) -> Result<SelectionDevices, String> {
+        self.send("selection-devices")?;
+        let line = self.read_line()?;
+        if !line.starts_with("selection-devices ") {
+            return Err(format!("unexpected selection-devices reply: {line}"));
+        }
+        let count = |key| field(&line, key).ok_or_else(|| format!("missing {key} in {line}"));
+        Ok(SelectionDevices {
+            core: count("core=")?,
+            primary: count("primary=")?,
+            wlr: count("wlr=")?,
+            ext: count("ext=")?,
+            dead: count("dead=")?,
+        })
+    }
+
     /// Number of protocol snapshots/synchronizations attempted so far.
     /// Unlike counting output events, this detects an expensive full diff
     /// that rebuilt state only to discover that nothing changed.
@@ -1386,6 +1526,14 @@ impl Door {
             foreign_drag: field(&line, "foreign_drag=")
                 .ok_or_else(|| format!("protocol-publishes reply has no drag-sync count: {line}"))?,
         })
+    }
+
+    /// Read non-resetting allocation/cache counters from a memory-profile
+    /// compositor. Ordinary builds reject this command instead of reporting
+    /// zero allocations; these samples must never be used as timing baselines.
+    pub fn memory_statistics(&mut self) -> Result<MemoryStatistics, String> {
+        self.send("memory-stats")?;
+        MemoryStatistics::parse(&self.read_line()?)
     }
 
     /// Reads and resets compositor frame/pass timings. Histogram buckets
@@ -1410,6 +1558,7 @@ impl Door {
             shell_us: required!("shell_us="),
             protocol_us: required!("protocol_us="),
             layout_us: required!("layout_us="),
+            render_attempts: field(&line, "render_attempts="),
             render_calls: required!("render_calls="),
             render_us: required!("render_us="),
             render_max_us: required!("render_max_us="),

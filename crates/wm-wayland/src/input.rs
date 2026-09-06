@@ -1,5 +1,5 @@
-//! Seat input translation: raw backend events (winit today, libinput
-//! under the `session` feature later) into exactly the `BackendEvent`
+//! Seat input translation: raw backend events (winit for nested sessions,
+//! libinput under the `session` feature) into exactly the `BackendEvent`
 //! stream `wm-x11` produces, plus direct wl_seat delivery for the input
 //! that belongs to clients rather than the window manager.
 //!
@@ -57,6 +57,15 @@
 //! it for free, and the handlers here stay the only code that can see
 //! it.
 
+pub(crate) mod constraints;
+pub(crate) mod keyboard;
+mod seat;
+pub(crate) mod surface;
+
+use keyboard::repeat::{HeldPress, RepeatingKey};
+pub(crate) use keyboard::repeat::{repeating_binding_deadline, repeating_binding_status, tick_repeating_binding};
+
+use surface::SurfaceTarget;
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 
@@ -139,9 +148,11 @@ struct InputState {
     /// stray release confuses stateful clients (games, VMs) even though
     /// most toolkits shrug it off.
     suppressed_keys: Vec<Keycode>,
-    /// One held `binde` binding. XKB sends repeat parameters to clients
-    /// but compositors must repeat their own bindings themselves.
+    /// One held binding or modal navigation key, with an explicit owner.
     repeating: Option<RepeatingKey>,
+    /// The most recent still-held press, for an Alt+Tab whose modal owner
+    /// becomes active only after that press reaches the window manager.
+    last_pressed: Option<HeldPress>,
     /// Leftover fractions of a wheel notch, for the shell's discrete
     /// scroll channel — see [`ScrollAccumulator`].
     scroll: ScrollAccumulator,
@@ -164,20 +175,6 @@ struct InputState {
 struct TouchRoute {
     target: PressTarget,
     position: Point,
-}
-
-#[derive(Clone, Copy)]
-struct RepeatingKey {
-    keycode: Keycode,
-    combo: KeyCombo,
-    next: std::time::Instant,
-    interval: std::time::Duration,
-    /// Number of compositor-owned repeat presses emitted for this
-    /// hold. Besides making the state self-describing in diagnostics,
-    /// this gives the end-to-end test door a direct observation of the
-    /// scheduler without making repeat correctness depend on child
-    /// process startup time.
-    emitted: u64,
 }
 
 struct ImplicitGrab {
@@ -375,6 +372,7 @@ pub(crate) fn resynchronise_input_after_resume(state: &mut Compositor) {
 
 fn reset_modal_keyboard_grab(backend: &mut WaylandBackend) {
     if std::mem::take(&mut backend.keyboard_grabbed) {
+        backend.keyboard_grab_changed = true;
         backend.queue(WmEvent::KeyRelease(KeyCombo {
             keysym: keysyms::KEY_Alt_L,
             modifiers: Modifiers::empty(),
@@ -386,6 +384,7 @@ fn reset_resume_bookkeeping(input: &mut InputState) -> Vec<Keycode> {
     input.implicit_grab = None;
     input.grab_dismissals.clear();
     input.repeating = None;
+    input.last_pressed = None;
     std::mem::take(&mut input.suppressed_keys)
 }
 
@@ -474,7 +473,7 @@ pub(crate) fn sync_pointer_focus(state: &mut Compositor) {
     };
     let position = state.pointer_location;
     let at = Point::new(position.x.floor() as i32, position.y.floor() as i32);
-    let focus = client_focus(&hit_at(state.wm.backend(), at, position));
+    let mut focus = client_focus(&hit_at(state.wm.backend(), at, position));
     // A constraint belongs to the surface that holds the pointer. The
     // moment the pointer's focus moves elsewhere — the window unmapped,
     // the workspace changed, the session locked — the constraint is
@@ -484,6 +483,15 @@ pub(crate) fn sync_pointer_focus(state: &mut Compositor) {
     let focus_surface = focus.as_ref().map(|(surface, _)| surface.clone());
     if pointer.current_focus() != focus_surface {
         release_pointer_constraint(state);
+        // A committed lock hint can warp the pointer. Resolve the recipient
+        // at that new position rather than reusing the pre-warp hit-test.
+        let position = state.pointer_location;
+        let at = Point::new(position.x.floor() as i32, position.y.floor() as i32);
+        focus = client_focus(&hit_at(state.wm.backend(), at, position));
+    } else if constraints::is_locked(state) {
+        // Scene/configuration reconciliation is not physical motion. The
+        // protocol forbids absolute motion while this lock remains active.
+        return;
     }
     let position = state.pointer_location;
     let event = MotionEvent {
@@ -492,6 +500,7 @@ pub(crate) fn sync_pointer_focus(state: &mut Compositor) {
         time: state.start_time.elapsed().as_millis() as u32,
     };
     pointer.motion(state, focus, &event);
+    constraints::activate_for_current_focus(state);
     pointer.frame(state);
 }
 
@@ -1106,13 +1115,13 @@ fn tablet_focus(
     position: LogicalPoint<f64, Logical>,
 ) -> Option<(WlSurface, LogicalPoint<f64, Logical>)> {
     let at = Point::new(position.x.floor() as i32, position.y.floor() as i32);
-    client_focus(&hit_at(backend, at, position))
+    client_focus(&hit_at(backend, at, position)).map(|(target, origin)| (target.surface().clone(), origin))
 }
 
 /// The seat focus represented by a scene hit. Kept as one adapter so
 /// pointer re-synchronisation and tablet motion cannot disagree about
 /// which client-owned surface a `Hit` names.
-fn client_focus(hit: &Hit) -> Option<(WlSurface, LogicalPoint<f64, Logical>)> {
+fn client_focus(hit: &Hit) -> Option<(SurfaceTarget, LogicalPoint<f64, Logical>)> {
     match hit {
         Hit::Content { surface: Some(surface), origin, .. }
         | Hit::Layer { surface, origin, .. }
@@ -1231,6 +1240,7 @@ fn on_keyboard_key<I: InputBackend>(state: &mut Compositor, event: I::KeyboardKe
     let active_layout_before = state.wm.backend().active_keyboard_layout;
     let seat = state.seat.clone();
     let shortcuts_inhibited = seat.keyboard_shortcuts_inhibited();
+    let modal_owns_keyboard = keyboard::modal_owns_keyboard(state);
     keyboard.input::<(), _>(state, keycode, key_state, serial, time, |data, mods, handle| {
         // Level-0 (unshifted) keysym, exactly like `wm-x11`'s
         // `keysym_for_keycode` taking the keycode's first sym: a combo
@@ -1242,6 +1252,20 @@ fn on_keyboard_key<I: InputBackend>(state: &mut Compositor, event: I::KeyboardKe
         // layouts.
         let keysym = handle.raw_latin_sym_or_raw_current_sym().unwrap_or_else(|| handle.modified_sym());
         let combo = KeyCombo { keysym: keysym.raw(), modifiers: combo_modifiers(mods) };
+        // A repeat belongs to the complete chord, not just its final key.
+        // In particular, releasing Super while R remains held must not keep
+        // running a Super+R action behind subsequent ordinary typing.
+        with_input(&seat, |input| {
+            if key_state == KeyState::Pressed {
+                input.repeating = None;
+                input.last_pressed = Some(HeldPress { keycode, combo });
+            } else if input.last_pressed.is_some_and(|held| held.keycode == keycode) {
+                input.last_pressed = None;
+            }
+            if input.repeating.is_some_and(|repeat| repeat.combo.modifiers != combo.modifiers) {
+                input.repeating = None;
+            }
+        });
         match key_state {
             KeyState::Pressed => {
                 // VT switching outranks every other binding, including
@@ -1306,24 +1330,20 @@ fn on_keyboard_key<I: InputBackend>(state: &mut Compositor, event: I::KeyboardKe
                 {
                     return FilterResult::Forward;
                 }
-                if backend.keyboard_grabbed || backend.grabbed_combos.contains(&combo) {
+                if modal_owns_keyboard || backend.grabbed_combos.contains(&combo) {
                     if !backend.release_combos.contains(&combo) {
                         backend.queue(WmEvent::KeyPress(combo));
                     }
-                    let repeating = backend.repeating_combos.contains(&combo);
+                    let owner = keyboard::repeat::owner_for_press(
+                        modal_owns_keyboard, combo, backend.repeating_combos.contains(&combo),
+                    );
                     let delay = backend.repeat_delay;
-                    let rate = backend.repeat_rate.max(1);
+                    let rate = backend.repeat_rate;
                     with_input(&seat, |input| {
                         input.suppressed_keys.push(keycode);
-                        if repeating {
-                            input.repeating = Some(RepeatingKey {
-                                keycode,
-                                combo,
-                                next: std::time::Instant::now() + delay,
-                                interval: std::time::Duration::from_secs_f64(1.0 / rate as f64),
-                                emitted: 0,
-                            });
-                        }
+                        input.repeating = owner.and_then(|owner| {
+                            RepeatingKey::new(owner, HeldPress { keycode, combo }, rate, delay)
+                        });
                     });
                     FilterResult::Intercept(())
                 } else {
@@ -1336,7 +1356,7 @@ fn on_keyboard_key<I: InputBackend>(state: &mut Compositor, event: I::KeyboardKe
                 // while locked (a combo pressed before the lock landed
                 // owes its release-swallow either way); only the modal
                 // grab's KeyRelease stream stops.
-                if backend.keyboard_grabbed && !backend.locked {
+                if modal_owns_keyboard {
                     backend.queue(WmEvent::KeyRelease(combo));
                 }
                 if backend.release_combos.contains(&combo)
@@ -1372,57 +1392,6 @@ fn on_keyboard_key<I: InputBackend>(state: &mut Compositor, event: I::KeyboardKe
     if state.wm.backend().active_keyboard_layout != active_layout_before {
         state.mark_hyprland_state_dirty();
     }
-}
-
-/// Queues due compositor-side repeats. Called once per event-loop
-/// dispatch; catches up a bounded number after a stalled frame so a
-/// resumed desktop cannot emit an unbounded burst.
-pub(crate) fn tick_repeating_binding(state: &mut Compositor) {
-    let seat = state.seat.clone();
-    let now = std::time::Instant::now();
-    let mut due = None;
-    with_input(&seat, |input| {
-        let Some(repeat) = input.repeating.as_mut() else {
-            return;
-        };
-        let mut count = 0u8;
-        for _ in 0..4 {
-            if repeat.next > now {
-                break;
-            }
-            count += 1;
-            repeat.next += repeat.interval;
-        }
-        if repeat.next <= now {
-            repeat.next = now + repeat.interval;
-        }
-        if count != 0 {
-            repeat.emitted = repeat.emitted.saturating_add(u64::from(count));
-            due = Some((repeat.combo, count));
-        }
-    });
-    if let Some((combo, count)) = due {
-        for _ in 0..count {
-            state.wm.backend_mut().queue(WmEvent::KeyPress(combo));
-        }
-    }
-}
-
-/// Diagnostic state for the currently held compositor-owned binding:
-/// emitted repeats and the configured interval. The production loop
-/// never calls this; the opt-in test door uses it to verify the live
-/// scheduler without timing external programs.
-pub(crate) fn repeating_binding_status(state: &Compositor) -> Option<(u64, std::time::Duration)> {
-    let seat = state.seat.clone();
-    with_input(&seat, |input| input.repeating.map(|repeat| (repeat.emitted, repeat.interval)))
-}
-
-/// When compositor-owned key repeat next becomes due. Client key repeat
-/// is announced through `wl_keyboard` and belongs to the client; this is
-/// only for a held `binde` binding intercepted by the compositor.
-pub(crate) fn repeating_binding_deadline(state: &Compositor) -> Option<std::time::Instant> {
-    let seat = state.seat.clone();
-    with_input(&seat, |input| input.repeating.map(|repeat| repeat.next))
 }
 
 /// Which virtual terminal a press asks for, if any: 1-12, or `None`.
@@ -1491,7 +1460,7 @@ fn on_pointer_move_absolute<I: InputBackend>(state: &mut Compositor, event: I::P
     // path the nested backend and every virtual pointer arrive on, so
     // leaving it unconstrained meant a locked surface could watch the
     // pointer walk out of it.
-    let constrained = apply_pointer_constraint(state, position);
+    let constrained = constraints::apply(state, position);
     pointer_moved(
         state,
         constrained.position,
@@ -1499,6 +1468,9 @@ fn on_pointer_move_absolute<I: InputBackend>(state: &mut Compositor, event: I::P
         None,
         if constrained.locked { PointerDelivery::LockedSilent } else { PointerDelivery::Motion },
     );
+    if !constrained.locked {
+        constraints::activate_for_current_focus(state);
+    }
 }
 
 /// Relative motion (the libinput/session path): accumulate onto the
@@ -1512,83 +1484,6 @@ fn on_pointer_move_relative<I: InputBackend>(state: &mut Compositor, event: I::P
         event.delta_unaccel(),
         event.time_msec(),
     );
-}
-
-/// What the focused surface's pointer constraint, if any, says about a
-/// proposed new position.
-#[derive(Clone, Copy, PartialEq)]
-struct Constrained {
-    /// Where the pointer may actually go.
-    position: LogicalPoint<f64, Logical>,
-    /// Whether a *lock* is in force. A locked pointer does not move at
-    /// all, and the protocol is explicit that the client must not be
-    /// told it did: `wl_pointer.motion` is suppressed entirely and the
-    /// client reads `zwp_relative_pointer_v1` instead. Sending both is
-    /// what makes a first-person camera drift and a 3D viewport spin —
-    /// the application integrates the relative stream *and* is told an
-    /// absolute position it never asked to move to.
-    locked: bool,
-}
-
-/// Applies whatever constraint the pointer's focused surface holds to a
-/// proposed position.
-///
-/// Shared by the relative and the absolute path deliberately. A
-/// constraint that only held on the libinput path was no constraint at
-/// all: `zwlr_virtual_pointer_v1`, remote-control tooling and the
-/// nested backend all arrive absolute, and a locked surface would watch
-/// the pointer walk straight out of it.
-fn apply_pointer_constraint(state: &mut Compositor, proposed: LogicalPoint<f64, Logical>) -> Constrained {
-    let mut result = Constrained { position: proposed, locked: false };
-    let Some((pointer, surface)) = state
-        .seat
-        .get_pointer()
-        .and_then(|pointer| pointer.current_focus().map(|surface| (pointer, surface)))
-    else {
-        return result;
-    };
-    let anchor = state.pointer_location;
-    let current_origin = surface_focus_at(state.wm.backend(), anchor, &surface).map(|(_, origin)| origin);
-    let inside_region = |point: LogicalPoint<f64, Logical>, region: Option<&smithay::wayland::compositor::RegionAttributes>| match (region, current_origin) {
-        (Some(region), Some(origin)) => region.contains((
-            (point.x - origin.x).floor() as i32,
-            (point.y - origin.y).floor() as i32,
-        )),
-        // With no explicit region the complete surface is the region.
-        _ => surface_focus_at(state.wm.backend(), point, &surface).is_some(),
-    };
-    with_pointer_constraint(&surface, &pointer, |constraint| {
-        let Some(constraint) = constraint else { return };
-        if !constraint.is_active() {
-            // Only activate where the protocol permits it. A confined
-            // constraint whose region the pointer is not currently
-            // inside must not snap it in; the client is told the
-            // constraint is pending and the pointer keeps moving
-            // normally until it enters on its own.
-            let may_activate = match &*constraint {
-                PointerConstraint::Locked(_) => true,
-                PointerConstraint::Confined(confined) => {
-                    inside_region(anchor, confined.region())
-                }
-            };
-            if !may_activate {
-                return;
-            }
-            constraint.activate();
-        }
-        match &*constraint {
-            PointerConstraint::Locked(_) => {
-                result.position = anchor;
-                result.locked = true;
-            }
-            PointerConstraint::Confined(confined) => {
-                if !inside_region(proposed, confined.region()) {
-                    result.position = anchor;
-                }
-            }
-        }
-    });
-    result
 }
 
 /// Ends any active constraint the pointer's focused surface holds, and
@@ -1607,9 +1502,10 @@ pub(crate) fn release_pointer_constraint(state: &mut Compositor) {
     else {
         return;
     };
-    let origin = surface_focus_at(state.wm.backend(), state.pointer_location, &surface).map(|(_, origin)| origin);
+    let coordinates = surface_focus_at(state.wm.backend(), state.pointer_location, surface.surface())
+        .map(|(target, _)| target.coordinates());
     let mut warp_to = None;
-    with_pointer_constraint(&surface, &pointer, |constraint| {
+    with_pointer_constraint(surface.surface(), &pointer, |constraint| {
         let Some(constraint) = constraint else { return };
         if !constraint.is_active() {
             return;
@@ -1617,8 +1513,8 @@ pub(crate) fn release_pointer_constraint(state: &mut Compositor) {
         if let PointerConstraint::Locked(locked) = &*constraint {
             // Surface-local, per the protocol; the compositor speaks
             // global coordinates.
-            if let (Some(hint), Some(origin)) = (locked.cursor_position_hint(), origin) {
-                warp_to = Some(LogicalPoint::<f64, Logical>::from((origin.x + hint.x, origin.y + hint.y)));
+            if let (Some(hint), Some(coordinates)) = (locked.cursor_position_hint(), coordinates) {
+                warp_to = Some(coordinates.global(hint));
             }
         }
         constraint.deactivate();
@@ -1642,7 +1538,7 @@ fn pointer_move_relative_values(
         utime: time as u64 * 1_000,
     };
     let proposed = confine_to_outputs(&state.wm.backend().monitors, state.pointer_location + delta);
-    let constrained = apply_pointer_constraint(state, proposed);
+    let constrained = constraints::apply(state, proposed);
     pointer_moved(
         state,
         constrained.position,
@@ -1650,6 +1546,9 @@ fn pointer_move_relative_values(
         Some(relative),
         if constrained.locked { PointerDelivery::LockedSilent } else { PointerDelivery::Motion },
     );
+    if !constrained.locked {
+        constraints::activate_for_current_focus(state);
+    }
 }
 
 /// Injects relative virtual-pointer motion through the physical
@@ -1668,7 +1567,7 @@ pub(crate) fn inject_pointer_motion_absolute(
 ) {
     crate::idle::note_activity(state);
     let proposed = confine_to_outputs(&state.wm.backend().monitors, position);
-    let constrained = apply_pointer_constraint(state, proposed);
+    let constrained = constraints::apply(state, proposed);
     pointer_moved(
         state,
         constrained.position,
@@ -1676,20 +1575,23 @@ pub(crate) fn inject_pointer_motion_absolute(
         None,
         if constrained.locked { PointerDelivery::LockedSilent } else { PointerDelivery::Motion },
     );
+    if !constrained.locked {
+        constraints::activate_for_current_focus(state);
+    }
 }
 
 fn surface_focus_at(
     backend: &WaylandBackend,
     position: LogicalPoint<f64, Logical>,
     wanted: &WlSurface,
-) -> Option<(WlSurface, LogicalPoint<f64, Logical>)> {
+) -> Option<(SurfaceTarget, LogicalPoint<f64, Logical>)> {
     let at = Point::new(position.x.floor() as i32, position.y.floor() as i32);
     match hit_at(backend, at, position) {
         Hit::Content { surface: Some(surface), origin, .. }
         | Hit::Layer { surface, origin, .. }
         | Hit::Ime { surface, origin }
         | Hit::Lock { surface, origin }
-            if &surface == wanted => Some((surface, origin)),
+            if surface.surface() == wanted => Some((surface, origin)),
         _ => None,
     }
 }
@@ -1771,14 +1673,26 @@ fn pointer_moved(
     relative: Option<RelativeMotionEvent>,
     delivery: PointerDelivery,
 ) {
+    let Some(pointer) = state.seat.get_pointer() else {
+        return;
+    };
+    if delivery == PointerDelivery::LockedSilent {
+        // The position, hover and scene are unchanged. Keep the real relative
+        // stream (including any Smithay grab) without rebuilding the scene,
+        // sending absolute motion or queuing WM/shell hover work per report.
+        debug_assert_eq!(position, state.pointer_location);
+        if let Some(relative) = &relative {
+            let focus = pointer.current_focus().map(SurfaceTarget::into_focus_pair);
+            pointer.relative_motion(state, focus, relative);
+            pointer.frame(state);
+        }
+        return;
+    }
     let serial = SERIAL_COUNTER.next_serial();
     // Floor, not round: a pointer at x=10.7 is over pixel 10, and
     // rounding at the output's far edge would name a pixel outside
     // every rect (`Rect::contains` is half-open).
     let at = Point::new(position.x.floor() as i32, position.y.floor() as i32);
-    let Some(pointer) = state.seat.get_pointer() else {
-        return;
-    };
     let seat = state.seat.clone();
     // The renderer composites the cursor at this location itself (no
     // hardware cursor plane on the nested backend), so pointer motion
@@ -1872,7 +1786,7 @@ fn pointer_moved(
     // client windows it crosses — the X11 grab hid those too — and a
     // drag grab pins it to None over content as well, which is the one
     // place the two differ.
-    let mut focus: Option<(WlSurface, LogicalPoint<f64, Logical>)> = None;
+    let mut focus: Option<(SurfaceTarget, LogicalPoint<f64, Logical>)> = None;
     match route.target {
         // A drag over client content, which is where a client-decorated
         // window's own titlebar drag spends its entire life: `wm-core`
@@ -2325,6 +2239,7 @@ fn claim_on_demand_focus(state: &mut Compositor, layer: crate::layers::LayerId, 
         return;
     }
     if let Some(keyboard) = state.seat.get_keyboard() {
+        let surface = keyboard::KeyboardFocus::new(state, surface);
         keyboard.set_focus(state, Some(surface), serial);
     }
 }
@@ -2340,6 +2255,7 @@ fn release_on_demand_focus(state: &mut Compositor, serial: smithay::utils::Seria
     }
     let target = crate::layers::focused_window_surface(state);
     if let Some(keyboard) = state.seat.get_keyboard() {
+        let target = target.map(|surface| keyboard::KeyboardFocus::new(state, surface));
         keyboard.set_focus(state, target, serial);
     }
 }
@@ -2372,7 +2288,7 @@ fn grab_excludes(state: &Compositor, hit: &Hit) -> bool {
                 .find(|record| record.id == *layer)
                 .filter(|record| record.surface.alive())
                 .map(|record| record.surface.wl_surface().clone());
-            (Some(surface.clone()), root)
+            (Some(surface.surface().clone()), root)
         }
         Hit::Content { window, surface, .. } => {
             let root = backend
@@ -2380,10 +2296,11 @@ fn grab_excludes(state: &Compositor, hit: &Hit) -> bool {
                 .get(window)
                 .filter(|record| record.surface.alive())
                 .and_then(|record| record.surface.wl_surface());
-            (surface.clone(), root)
+            (surface.as_ref().map(|target| target.surface().clone()), root)
         }
-        Hit::Ime { surface, .. } => (Some(surface.clone()), Some(surface.clone())),
-        Hit::Lock { surface, .. } => (Some(surface.clone()), Some(surface.clone())),
+        Hit::Ime { surface, .. } | Hit::Lock { surface, .. } => {
+            (Some(surface.surface().clone()), Some(surface.surface().clone()))
+        }
         // Our own chrome around a client's window. The client owns no
         // pixel of it, so only the whole window being whitelisted keeps
         // a titlebar click from dismissing.
@@ -2785,7 +2702,8 @@ fn hit_at(backend: &WaylandBackend, at: Point, position: LogicalPoint<f64, Logic
         if let Some((surface, found)) =
             under_from_surface_tree(popup.wl_surface(), probe, (global.x, global.y), WindowSurfaceType::ALL)
         {
-            return Hit::Ime { surface, origin: seat_origin(position, probe, found.to_f64()) };
+            let (surface, origin) = SurfaceTarget::from_tree(surface, anchor, found.to_f64(), scale, position);
+            return Hit::Ime { surface, origin };
         }
     }
 
@@ -2977,22 +2895,15 @@ fn layer_band_hit(
             )
                 .into();
             let anchor: LogicalPoint<f64, Logical> = (popup_origin.x as f64, popup_origin.y as f64).into();
-            let probe = surface_probe(
-                anchor,
-                position,
-                crate::xdg::effective_surface_scale(
-                    crate::xdg::committed_surface_scale(popup_surface),
-                    output_scale,
-                ),
+            let popup_scale = crate::xdg::effective_surface_scale(
+                crate::xdg::committed_surface_scale(popup_surface), output_scale,
             );
+            let probe = surface_probe(anchor, position, popup_scale);
             if let Some((surface, found)) =
                 under_from_surface_tree(popup_surface, probe, popup_origin, WindowSurfaceType::ALL)
             {
-                return Some(Hit::Layer {
-                    layer: record.id,
-                    surface,
-                    origin: seat_origin(position, probe, found.to_f64()),
-                });
+                let (surface, origin) = SurfaceTarget::from_tree(surface, anchor, found.to_f64(), popup_scale, position);
+                return Some(Hit::Layer { layer: record.id, surface, origin });
             }
         }
         if !record.geometry.contains(at) {
@@ -3003,11 +2914,8 @@ fn layer_band_hit(
         if let Some((surface, found)) =
             under_from_surface_tree(root, probe, (record.geometry.pos.x, record.geometry.pos.y), WindowSurfaceType::ALL)
         {
-            return Some(Hit::Layer {
-                layer: record.id,
-                surface,
-                origin: seat_origin(position, probe, found.to_f64()),
-            });
+            let (surface, origin) = SurfaceTarget::from_tree(surface, anchor, found.to_f64(), scale, position);
+            return Some(Hit::Layer { layer: record.id, surface, origin });
         }
     }
     None
@@ -3021,7 +2929,7 @@ fn layer_band_hit(
 fn lock_hit(
     backend: &WaylandBackend,
     position: LogicalPoint<f64, Logical>,
-) -> Option<(WlSurface, LogicalPoint<f64, Logical>)> {
+) -> Option<(SurfaceTarget, LogicalPoint<f64, Logical>)> {
     let at = Point::new(position.x.floor() as i32, position.y.floor() as i32);
     for entry in &backend.lock_surfaces {
         if !entry.surface.alive() {
@@ -3035,25 +2943,21 @@ fn lock_hit(
         }
         let root = entry.surface.wl_surface();
         let anchor: LogicalPoint<f64, Logical> = (monitor.geometry.pos.x as f64, monitor.geometry.pos.y as f64).into();
-        let probe = surface_probe(
-            anchor,
-            position,
-            crate::xdg::effective_surface_scale(
-                crate::xdg::committed_surface_scale(root),
-                backend.scale_at(monitor.geometry),
-            ),
+        let scale = crate::xdg::effective_surface_scale(
+            crate::xdg::committed_surface_scale(root), backend.scale_at(monitor.geometry),
         );
+        let probe = surface_probe(anchor, position, scale);
         return match under_from_surface_tree(
             root,
             probe,
             (monitor.geometry.pos.x, monitor.geometry.pos.y),
             WindowSurfaceType::ALL,
         ) {
-            Some((surface, found)) => Some((surface, seat_origin(position, probe, found.to_f64()))),
+            Some((surface, found)) => Some(SurfaceTarget::from_tree(surface, anchor, found.to_f64(), scale, position)),
             // The walk declining (a buffer briefly smaller than the
             // output mid-resize) still delivers to the root surface —
             // a locker must never find the pointer unreachable.
-            None => Some((root.clone(), seat_origin(position, probe, anchor))),
+            None => Some(SurfaceTarget::from_tree(root.clone(), anchor, anchor, scale, position)),
         };
     }
     None
@@ -3127,18 +3031,16 @@ enum Hit {
     /// `surface` names the exact wl_surface to focus (`None` for an X11
     /// window whose wl_surface has not been associated yet — nothing to
     /// deliver to, but the WM still learns about the click) and
-    /// `origin` is the point the seat must subtract the pointer
-    /// position from to get the client's own coordinates, which is its
-    /// global position for every client drawing at 1x and something
-    /// else entirely for one that is not (see [`seat_origin`]). No
-    /// local coordinate:
+    /// `origin` belongs to the target's seat adapter, not the scene.
+    /// The target retains the complete transform for implicit grabs
+    /// (see [`surface`]). No local coordinate:
     /// `wm-core` ignores it for `SurfaceRef::Client` events, and the
     /// button handler recomputes a content-local point from the record
     /// for the event shape.
     Content {
         frame: Option<WlFrameId>,
         window: WlWindowId,
-        surface: Option<WlSurface>,
+        surface: Option<SurfaceTarget>,
         origin: LogicalPoint<f64, Logical>,
         /// Distinguishes an xdg popup from its parent's ordinary
         /// surface tree for test-door diagnostics; routing is identical.
@@ -3148,14 +3050,14 @@ enum Hit {
     /// territory with no `wm-core` window behind it. Same seat
     /// delivery contract as `Content` — `surface` is the exact
     /// wl_surface to focus and `origin` the point the seat subtracts
-    /// from (see [`seat_origin`]).
-    Layer { layer: crate::layers::LayerId, surface: WlSurface, origin: LogicalPoint<f64, Logical> },
+    /// from (see [`surface`]).
+    Layer { layer: crate::layers::LayerId, surface: SurfaceTarget, origin: LogicalPoint<f64, Logical> },
     /// An input-method candidate popup, above every normal layer.
-    Ime { surface: WlSurface, origin: LogicalPoint<f64, Logical> },
+    Ime { surface: SurfaceTarget, origin: LogicalPoint<f64, Logical> },
     /// The lock surface under the pointer. This variant can exist only
     /// while `backend.locked`; the early return in `hit_at` makes every
     /// ordinary desktop hit structurally unreachable in that state.
-    Lock { surface: WlSurface, origin: LogicalPoint<f64, Logical> },
+    Lock { surface: SurfaceTarget, origin: LogicalPoint<f64, Logical> },
     /// The desktop background.
     Root,
 }
@@ -3218,9 +3120,12 @@ fn content_hit(
         Some(root) => {
             let scale = backend.window_surface_scale(record);
             let probe = surface_probe(anchor, position, scale);
-            under_from_surface_tree(root, probe, (content_origin.x, content_origin.y), WindowSurfaceType::ALL)
-                .map(|(surface, found)| (Some(surface), seat_origin(position, probe, found.to_f64())))
-                .unwrap_or_else(|| (root_surface.clone(), seat_origin(position, probe, anchor)))
+            let (surface, found) = under_from_surface_tree(
+                root, probe, (content_origin.x, content_origin.y), WindowSurfaceType::ALL,
+            ).map(|(surface, found)| (surface, found.to_f64()))
+                .unwrap_or_else(|| (root.clone(), anchor));
+            let (surface, origin) = SurfaceTarget::from_tree(surface, anchor, found, scale, position);
+            (Some(surface), origin)
         }
         // An X11 window whose wl_surface has not been associated yet:
         // nothing to deliver to, but the click still counts for
@@ -3256,25 +3161,8 @@ fn surface_probe(
     position: LogicalPoint<f64, Logical>,
     scale: f64,
 ) -> LogicalPoint<f64, Logical> {
-    let scale = if scale.is_finite() && scale >= 0.125 { scale } else { 1.0 };
+    let scale = surface::valid_scale(scale);
     (anchor.x + (position.x - anchor.x) / scale, anchor.y + (position.y - anchor.y) / scale).into()
-}
-
-/// The origin to hand the seat for a surface the walk found at `found`
-/// when probed at `probe`.
-///
-/// Not where the surface is on screen: smithay delivers `position -
-/// origin` to the client verbatim, and a client wants that difference
-/// in its own pixels, so this is wherever the surface would have to sit
-/// for the subtraction to come out right. For an unscaled client the
-/// probe *is* the position and this is the surface's screen origin,
-/// unchanged from before any of this existed.
-fn seat_origin(
-    position: LogicalPoint<f64, Logical>,
-    probe: LogicalPoint<f64, Logical>,
-    found: LogicalPoint<f64, Logical>,
-) -> LogicalPoint<f64, Logical> {
-    (position.x - (probe.x - found.x), position.y - (probe.y - found.y)).into()
 }
 
 /// Tests a window's xdg popup tree (context menus, dropdowns of native
@@ -3324,22 +3212,19 @@ fn popup_hit(
         )
             .into();
         let anchor: LogicalPoint<f64, Logical> = (popup_origin.x as f64, popup_origin.y as f64).into();
-        let probe = surface_probe(
-            anchor,
-            position,
-            crate::xdg::effective_surface_scale(
-                crate::xdg::committed_surface_scale(popup_surface),
-                backend.scale_at(record.content),
-            ),
+        let scale = crate::xdg::effective_surface_scale(
+            crate::xdg::committed_surface_scale(popup_surface), backend.scale_at(record.content),
         );
+        let probe = surface_probe(anchor, position, scale);
         if let Some((surface, found)) =
             under_from_surface_tree(popup_surface, probe, popup_origin, WindowSurfaceType::ALL)
         {
+            let (surface, origin) = SurfaceTarget::from_tree(surface, anchor, found.to_f64(), scale, position);
             return Some(Hit::Content {
                 frame,
                 window,
                 surface: Some(surface),
-                origin: seat_origin(position, probe, found.to_f64()),
+                origin,
                 popup: true,
             });
         }
@@ -3374,6 +3259,7 @@ mod tests {
         seat_state: SeatState<Self>,
         keys: Vec<(Keycode, KeyState)>,
         modifiers: Vec<ModifiersState>,
+        focus_changes: Vec<bool>,
     }
 
     impl SeatHandler for TestSeatState {
@@ -3386,6 +3272,10 @@ mod tests {
 
         fn seat_state(&mut self) -> &mut SeatState<Self> {
             &mut self.seat_state
+        }
+
+        fn focus_changed(&mut self, _seat: &Seat<Self>, target: Option<&Self::KeyboardFocus>) {
+            self.focus_changes.push(target.is_some());
         }
     }
 
@@ -3441,6 +3331,18 @@ mod tests {
     }
 
     #[test]
+    fn removing_keyboard_focus_notifies_dependent_focus_owners_once() {
+        let mut state = TestSeatState::default();
+        let mut seat = state.seat_state.new_seat("focus-removal-test");
+        let keyboard = seat.add_keyboard(XkbConfig::default(), 200, 25).expect("default keymap");
+        for focused in [false, true, true, false, false, true] {
+            keyboard.set_focus(&mut state, focused.then_some(TestInputTarget), SERIAL_COUNTER.next_serial());
+        }
+        assert_eq!(state.focus_changes, [true, false, true],
+            "focus removal is a change too; unchanged focus must remain silent");
+    }
+
+    #[test]
     fn resume_clears_xkb_state_and_balances_only_forwarded_presses() {
         const TAB: Keycode = Keycode::new(15 + 8);
         const LEFT_ALT: Keycode = Keycode::new(56 + 8);
@@ -3489,6 +3391,7 @@ mod tests {
             grab_dismissals: vec![272],
             suppressed_keys: vec![keycode],
             repeating: Some(RepeatingKey {
+                owner: keyboard::repeat::RepeatOwner::Binding,
                 keycode,
                 combo,
                 next: std::time::Instant::now(),
@@ -4000,8 +3903,8 @@ mod tests {
     #[test]
     fn a_one_to_one_client_is_probed_where_the_pointer_is() {
         assert_eq!(probe_at((100.0, 100.0), (460.0, 220.0), 1.0), (460.0, 220.0));
-        let origin = seat_origin((460.0, 220.0).into(), (460.0, 220.0).into(), (100.0, 100.0).into());
-        assert_eq!((origin.x, origin.y), (100.0, 100.0));
+        let coordinates = surface::SurfaceCoordinates::new((100.0, 100.0).into(), 1.0);
+        assert_eq!(coordinates.local((460.0, 220.0).into()), (360.0, 120.0).into());
     }
 
     /// A 2x client covers 600 device pixels of screen and reports a
@@ -4021,16 +3924,13 @@ mod tests {
         assert_eq!(probe_at((100.0, 100.0), (699.0, 100.0), 2.0).0, 399.5);
     }
 
-    /// What the client is told, which is the other half: smithay
-    /// delivers `position - origin` verbatim, so the origin has to be
-    /// wherever makes that difference come out in the client's pixels.
+    /// What the client is told, which is the other half of hit-testing.
     #[test]
     fn a_two_x_client_is_told_where_the_pointer_is_in_its_own_pixels() {
         let position: LogicalPoint<f64, Logical> = (400.0, 200.0).into();
         let anchor: LogicalPoint<f64, Logical> = (100.0, 100.0).into();
-        let probe = surface_probe(anchor, position, 2.0);
-        let origin = seat_origin(position, probe, anchor);
-        assert_eq!((position.x - origin.x, position.y - origin.y), (150.0, 50.0));
+        let coordinates = surface::SurfaceCoordinates::new(anchor, 2.0);
+        assert_eq!(coordinates.local(position), (150.0, 50.0).into());
     }
 
     /// A scale the protocol forbids must not turn a window into a

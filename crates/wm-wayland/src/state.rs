@@ -33,7 +33,6 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::os::fd::{BorrowedFd, RawFd};
-use std::process::Stdio;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -73,20 +72,20 @@ use smithay::wayland::shell::xdg::{ToplevelSurface, XdgShellState};
 use smithay::wayland::shm::ShmState;
 use smithay::wayland::socket::ListeningSocketSource;
 use smithay::wayland::xwayland_shell::XWaylandShellState;
-use smithay::xwayland::{X11Surface, X11Wm, XWayland, XWaylandEvent};
+use smithay::xwayland::X11Surface;
 
 use wm_core::{Backend, BackendEvent, KeyCombo, MonitorInfo, MouseButton, ScrollDelta, WindowManager, WindowType};
 use wm_theme::{FontState, RasterThemeEngine};
 use wm_theme_api::{DecorationBuffer, Point, Rect, ResizeEdge, Size};
 
 use crate::input::DragGrab;
+use crate::input::keyboard::{resolve_keyboard_config, ResolvedKeyboard};
 
 use chonk_shell::dockapp::Farewell;
 use chonk_shell::shell::{Shell, ShellOutcome};
 use chonk_shell::startup::{
     ensure_xcursor_size, recovering_from_crash, SessionRequestPoller, SessionState,
 };
-use chonk_xsettings::{DesktopAppearance, ManagerState, XSettingsError, XSettingsManager};
 
 /// A managed client window (an xdg toplevel or an XWayland surface) in
 /// the id space `wm-core` reasons about. Plain integers rather than
@@ -165,6 +164,9 @@ pub(crate) struct FrameStats {
     pub shell: PhaseTiming,
     pub protocols: PhaseTiming,
     pub layout: PhaseTiming,
+    /// Scene/render attempts, including damage-tracker no-ops. Successful
+    /// submissions alone can hide expensive work on an unchanged scene.
+    pub render_attempts: u64,
     pub render: PhaseTiming,
     pub flush: PhaseTiming,
     pub ipc: PhaseTiming,
@@ -741,6 +743,9 @@ pub struct WaylandBackend {
     /// releases additionally queue `KeyRelease` — see wm-x11's
     /// KeyRelease commentary, mirrored by `input.rs`.
     pub(crate) keyboard_grabbed: bool,
+    /// A modal keyboard ownership transition waiting to reach the seat.
+    /// Canceling back to the same window may produce no window-focus intent.
+    pub(crate) keyboard_grab_changed: bool,
     pub(crate) root_background: RootBackground,
     /// Every output this session drives, in the order `run` discovered
     /// them (connector order on the session backend, one entry on the
@@ -1014,6 +1019,7 @@ impl WaylandBackend {
             repeat_rate: 25,
             repeat_delay: std::time::Duration::from_millis(200),
             keyboard_grabbed: false,
+            keyboard_grab_changed: false,
             root_background: RootBackground::Color((0, 0, 0)),
             monitors,
             monitor_scales,
@@ -1511,41 +1517,6 @@ pub(crate) struct OutputSetup {
     pub vrr_enabled: bool,
 }
 
-/// The keyboard settings actually in force, from the config plus the
-/// environment.
-///
-/// `XKB_DEFAULT_*` wins over the file, because a login session's
-/// environment is more specific than a config a user may have copied
-/// between machines — `scripts/wayland-session.sh` is where a login
-/// session sets these, and the nested backend inherits the host
-/// desktop's. Extracted into one function so startup and reload resolve
-/// by identical rules: a reload that resolved differently would change
-/// the keymap out from under a user who edited something else.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct ResolvedKeyboard {
-    pub rules: String,
-    pub model: String,
-    pub layout: String,
-    pub variant: String,
-    pub options: Option<String>,
-    pub repeat_delay: i32,
-    pub repeat_rate: i32,
-}
-
-pub(crate) fn resolve_keyboard_config(config: &wm_core::KeyboardConfig) -> ResolvedKeyboard {
-    let env = |name: &str| std::env::var(name).ok().filter(|value| !value.is_empty());
-    ResolvedKeyboard {
-        rules: env("XKB_DEFAULT_RULES").or_else(|| config.rules.clone()).unwrap_or_default(),
-        model: env("XKB_DEFAULT_MODEL").or_else(|| config.model.clone()).unwrap_or_default(),
-        layout: env("XKB_DEFAULT_LAYOUT").or_else(|| config.layout.clone()).unwrap_or_default(),
-        variant: env("XKB_DEFAULT_VARIANT").or_else(|| config.variant.clone()).unwrap_or_default(),
-        options: env("XKB_DEFAULT_OPTIONS").or_else(|| config.options.clone()),
-        // The same defaults `add_keyboard` was called with before this
-        // existed, so a session that configures neither is unchanged.
-        repeat_delay: config.repeat_delay.unwrap_or(200),
-        repeat_rate: config.repeat_rate.unwrap_or(25),
-    }
-}
 
 /// What one output's connector says about itself: the EDID identity and
 /// the modes it can drive.
@@ -2274,6 +2245,9 @@ pub struct Compositor {
     pub kde_decoration: KdeDecorationState,
     pub shm_state: ShmState,
     pub seat_state: SeatState<Compositor>,
+    /// Last successfully installed settings, not merely the latest request.
+    /// `None` after startup fallback so a later valid edit still installs.
+    pub(crate) keyboard_config: Option<ResolvedKeyboard>,
     pub output_manager_state: OutputManagerState,
     pub data_device_state: DataDeviceState,
     /// The middle-click clipboard. Advertised because the X11 half of
@@ -2324,33 +2298,10 @@ pub struct Compositor {
     pub(crate) pacing_fifo_deadlines:
         HashMap<ObjectId, (smithay::wayland::compositor::Barrier, Instant)>,
 
-    /// The X11 window-manager connection into XWayland, once
-    /// `XWaylandEvent::Ready` has arrived (`None` before that, or if
-    /// XWayland failed to start — native Wayland clients work either
-    /// way).
-    pub xwm: Option<X11Wm>,
-    /// XWayland's display number, mirrored into `DISPLAY` so children
-    /// the shell spawns find it.
-    pub xdisplay: Option<u32>,
-    /// A crashed, previously-ready XWayland gets one clean restart.
-    /// Consumed before spawning so a repeatedly failing server cannot
-    /// become a tight supervisor loop inside the compositor.
-    xwayland_restart_available: bool,
-    /// The XSETTINGS manager publishing this session's DPI, scaling
-    /// factor and cursor size to every X client on the XWayland
-    /// display, once XWayland is up.
-    ///
-    /// `None` before that, and `None` for good if the selection was
-    /// already owned — a degraded session, never a dead one. See
-    /// [`Compositor::start_xsettings`] for what it publishes and, more
-    /// importantly, what it deliberately does not.
-    pub(crate) xsettings: Option<XSettingsManager>,
-    /// The EWMH publisher for the XWayland root — a second ordinary X
-    /// connection beside the XSETTINGS one, same lifecycle: `None`
-    /// before XWayland is ready, `None` for good after a failure
-    /// (degraded to exactly what the session did before it existed —
-    /// X tools see nothing). See `xewmh.rs`.
-    pub(crate) xewmh: Option<crate::xewmh::XEwmh>,
+    /// Generation-owned X11 connections and the bounded restart policy.
+    /// Startup, readiness and retirement live together in xwayland/lifecycle.
+    /// Missing X11 support never prevents native Wayland clients from working.
+    pub(crate) xwayland: crate::xwayland::State,
     /// The UI scale everything in this session is drawn at.
     ///
     /// Held here because two things outside the theme engine are sized
@@ -2497,62 +2448,6 @@ impl Compositor {
     /// than a porting promise, so change that file first if this order
     /// ever needs to move.
     #[cfg_attr(feature = "profile", profiling::function)]
-    /// Installs a keyboard configuration a reload staged, if any.
-    ///
-    /// A whole new keymap and repeat timing on the seat. The keymap is
-    /// broadcast to every bound `wl_keyboard`, so a client that was
-    /// holding a key across the change is told the map changed rather
-    /// than left interpreting the old one.
-    ///
-    /// A rejected keymap costs the *edit*, never the session: the
-    /// running keymap is kept and the error is logged, exactly as the
-    /// startup path falls back rather than refusing to log in.
-    pub(crate) fn apply_pending_keyboard(&mut self) {
-        let Some(requested) = self.wm.backend_mut().pending_keyboard.take() else {
-            return;
-        };
-        let resolved = resolve_keyboard_config(&requested);
-        let Some(keyboard) = self.seat.get_keyboard() else {
-            return;
-        };
-        let xkb = XkbConfig {
-            rules: &resolved.rules,
-            model: &resolved.model,
-            layout: &resolved.layout,
-            variant: &resolved.variant,
-            options: resolved.options.clone(),
-        };
-        match keyboard.set_xkb_config(self, xkb) {
-            Ok(()) => {
-                keyboard.change_repeat_info(resolved.repeat_rate, resolved.repeat_delay);
-                let backend = self.wm.backend_mut();
-                backend.repeat_rate = resolved.repeat_rate.max(1) as u32;
-                backend.repeat_delay = std::time::Duration::from_millis(resolved.repeat_delay.max(0) as u64);
-                backend.keyboard_layout = resolved.layout.clone();
-                tracing::info!(
-                    layout = %resolved.layout,
-                    variant = %resolved.variant,
-                    options = ?resolved.options,
-                    repeat_rate = resolved.repeat_rate,
-                    repeat_delay = resolved.repeat_delay,
-                    "reload applied a new keyboard configuration"
-                );
-                // The IPC's `devices` reply reads its keymap fields from
-                // the snapshot, which is rebuilt from the ledger; mark
-                // it stale so a bar asking after the reload is told the
-                // layout that is now in force rather than the one the
-                // session started with.
-                self.hyprland_state_dirty = true;
-                crate::hyprland_ipc::refresh_keyboard_layout(self);
-            }
-            Err(error) => tracing::warn!(
-                %error,
-                layout = %resolved.layout,
-                "reload's keyboard configuration was rejected; keeping the running keymap"
-            ),
-        }
-    }
-
     pub(crate) fn dispatch_pending(&mut self) {
         let dispatch_span = tracing::info_span!("dispatch_pass");
         let _dispatch_guard = dispatch_span.enter();
@@ -2782,6 +2677,7 @@ impl Compositor {
         // `lock::refresh` runs later in this same pass, so a lock still
         // lands on top of a grab this one just ended.
         crate::focus_grab::refresh(self);
+        crate::input::keyboard::sync_modal_focus(self);
         // Idle inhibition follows visibility, which everything above
         // may have changed.
         crate::idle::refresh(self);
@@ -2904,6 +2800,7 @@ impl Compositor {
         // with more than one output — see `session::redraw_pending`.
         let mut frame_presented = false;
         if self.wm.backend().damage || crate::session::redraw_pending(&self.graphics) {
+            self.frame_stats.render_attempts = self.frame_stats.render_attempts.saturating_add(1);
             let render_started = Instant::now();
             if crate::renderer::render_frame(self) {
                 frame_presented = true;
@@ -3022,207 +2919,6 @@ impl Compositor {
         }
     }
 
-    /// What this session tells X clients about its own appearance.
-    ///
-    /// Scale and nothing else, deliberately. `DesktopAppearance` can
-    /// also carry a widget theme, an icon theme, a cursor theme and a
-    /// default font, and every one of those is left unstated because
-    /// this desktop does not ship them: there is no GTK theme named
-    /// "chonkstep" and no Xcursor theme either, so publishing the name
-    /// would not make applications look like chonkstep — it would make
-    /// every GTK client on the display fail to find the theme, fall
-    /// back to its default, and in the process *override* whatever the
-    /// user had configured in their own `gtk-3.0/settings.ini`. Saying
-    /// nothing leaves that setting alone, which is the honest answer to
-    /// a question this desktop has no opinion on. (`DesktopAppearance`
-    /// treats an empty theme name as exactly that — see its `Default`.)
-    ///
-    /// The scale it does state is the same number, from the same base,
-    /// that `chonk_shell::startup::xcursor_size_for` derives
-    /// `XCURSOR_SIZE` from. The two mechanisms overlap on purpose and
-    /// must not disagree: a client can be reached by either one, and a
-    /// pointer that changes size as it crosses a window border is what
-    /// disagreement looks like.
-    fn appearance(&self) -> DesktopAppearance {
-        DesktopAppearance::new(self.ui_scale, "")
-    }
-
-    /// Takes the XSETTINGS manager selection on the freshly-started
-    /// XWayland display and publishes this session's scale to it.
-    ///
-    /// # Why a second X connection
-    ///
-    /// This process already speaks X to Xwayland — that is what
-    /// `X11Wm` is — but that connection is smithay's, driven by
-    /// smithay's own calloop source, and `XSettingsManager` consumes
-    /// the connection it is given and reads its event queue. Two
-    /// readers on one queue would each swallow events meant for the
-    /// other, which on the window-manager connection means dropped map
-    /// requests. So the manager opens its own, exactly as an external
-    /// settings daemon would.
-    ///
-    /// # Why failure is not fatal
-    ///
-    /// Something else owning `_XSETTINGS_S0` is a legitimate
-    /// configuration — a user running `xsettingsd` for their own
-    /// reasons — and the crate reports it as a clean `AlreadyOwned`
-    /// rather than an error. Standing down is then the correct
-    /// behaviour, not a degraded one: two managers fighting over the
-    /// selection would leave clients following whichever wrote last.
-    /// Everything else that can go wrong here (a display that vanished
-    /// between `Ready` and this call, an X server refusing the window)
-    /// costs the session its live scale publishing and nothing else,
-    /// which is precisely what the session had before this existed.
-    fn start_xsettings(&mut self, display_number: u32) {
-        // The display is named explicitly rather than inherited from
-        // `DISPLAY`: this runs inside the same handler that sets that
-        // variable, and letting which display gets the settings depend
-        // on the order of two lines in one function is a trap worth not
-        // laying. (Called `display_name` because a bare `display` field
-        // in a `tracing` macro resolves to `tracing::field::display`,
-        // which the expansion has in scope, and a local of that name
-        // loses to it — silently, as a type error about `Value`.)
-        let display_name = format!(":{display_number}");
-        // TakeOverPlaceholder: XWayland claims this selection at startup
-        // and publishes an empty settings block — a squatter, not a
-        // manager, and its emptiness is why X11 toolkits under this
-        // compositor got no DPI at all. The policy takes over only an
-        // owner whose property is absent or a valid zero-settings
-        // block; a real manager (a user's own xsettingsd) still gets
-        // the same respectful refusal as before.
-        let mut manager = match XSettingsManager::acquire_with_policy(
-            Some(&display_name),
-            chonk_xsettings::AcquisitionPolicy::TakeOverPlaceholder,
-        ) {
-            Ok(manager) => manager,
-            Err(error @ XSettingsError::AlreadyOwned { .. }) => {
-                tracing::info!(%error, display = display_name, "another XSETTINGS manager owns this display; leaving it alone");
-                return;
-            }
-            Err(error) => {
-                tracing::warn!(%error, display = display_name, "could not publish XSETTINGS; X11 clients will only get the scale their launcher gave them");
-                return;
-            }
-        };
-        let appearance = self.appearance();
-        if let Err(error) = manager.publish_appearance(&appearance) {
-            tracing::warn!(%error, "could not publish the initial XSETTINGS");
-            return;
-        }
-        match manager.publish_resource_manager(&appearance) {
-            Ok(true) => {}
-            Ok(false) => {
-                tracing::debug!("XWayland RESOURCE_MANAGER already carries the current scale");
-            }
-            Err(error) => {
-                // The XSETTINGS property is already useful and lives on
-                // this same connection, so a malformed shared root
-                // property must not discard it. A later real scale
-                // change retries the resource merge.
-                tracing::warn!(%error, "could not publish the initial XWayland resource database");
-            }
-        }
-        tracing::info!(
-            display = display_name,
-            scale = appearance.ui_scale,
-            cursor_px = appearance.effective_cursor_size(),
-            "publishing XSETTINGS and X resources to XWayland clients"
-        );
-        self.xsettings = Some(manager);
-    }
-
-    /// Services the XSETTINGS connection: answers selection requests
-    /// and notices if another manager has taken over.
-    ///
-    /// Not optional bookkeeping. Two things go wrong without it, and
-    /// only one of them is ours. A client that asks to *convert* the
-    /// selection and gets no answer does not fail — it waits out its own
-    /// timeout, which the user experiences as an application that hangs
-    /// on startup for no reason. And a manager that never learns it was
-    /// superseded goes on rewriting a property it no longer owns, which
-    /// ICCCM forbids a former owner from doing and which leaves clients
-    /// following whichever of the two wrote last.
-    ///
-    /// Driven off this loop's existing wakeups rather than a calloop
-    /// source on the connection's descriptor: `poll` is non-blocking and
-    /// drains whatever has arrived, the loop already has a bounded idle
-    /// housekeeping poll, and the crate's own documentation says a timer
-    /// is a sufficient home for it. The cost of being up to 100 ms late
-    /// to notice a takeover is nothing; the cost of a second event source
-    /// is a second thing to unregister on teardown.
-    fn poll_xsettings(&mut self) {
-        let Some(manager) = self.xsettings.as_mut() else {
-            return;
-        };
-        match manager.poll() {
-            Ok(ManagerState::Owner) => {}
-            Ok(ManagerState::Superseded) => {
-                // The crate has already logged the takeover and latched
-                // itself into refusing writes; dropping the handle is
-                // this session agreeing, and stops every later scale
-                // change asking again.
-                tracing::info!("another XSETTINGS manager took the selection; standing down");
-                self.xsettings = None;
-            }
-            Err(error) => {
-                tracing::warn!(%error, "the XSETTINGS connection failed; giving up on it for this session");
-                self.xsettings = None;
-            }
-        }
-    }
-
-    /// Republishes the appearance after a live scale change.
-    ///
-    /// The whole reason the XSETTINGS crate exists: an environment
-    /// variable is read once at launch, so before this, changing the
-    /// scale left every already-running X application at the size it
-    /// started at until it was restarted. `publish_appearance` writes
-    /// the property only when a value actually moved, so calling this
-    /// on a reload that changed nothing else costs one map walk and no
-    /// round trip — which matters, because writing the property wakes
-    /// every client on the display and a GTK application answers by
-    /// re-laying out every window it has.
-    fn republish_xsettings(&mut self) {
-        let appearance = self.appearance();
-        let Some(manager) = self.xsettings.as_mut() else {
-            return;
-        };
-        let xsettings_changed = match manager.publish_appearance(&appearance) {
-            Ok(true) => {
-                true
-            }
-            Ok(false) => false,
-            Err(error) => {
-                // Losing the selection to another manager is one of the
-                // ways this fails, and the crate has already latched
-                // itself into standing down; dropping our handle stops
-                // this session asking again once per scale change for
-                // the rest of its life.
-                tracing::warn!(%error, "could not republish XSETTINGS; giving up on it for this session");
-                self.xsettings = None;
-                return;
-            }
-        };
-        match manager.publish_resource_manager(&appearance) {
-            Ok(resources_changed) if xsettings_changed || resources_changed => {
-                tracing::info!(
-                    scale = appearance.ui_scale,
-                    xsettings_changed,
-                    resources_changed,
-                    "told X11 clients about the new UI scale"
-                );
-            }
-            Ok(_) => {}
-            Err(error) => {
-                // Keep the XSETTINGS manager: an unexpected shared root
-                // property is not a reason to stop serving toolkits that
-                // use the selection we still own. Since the resource
-                // cache advances only after success, a later scale
-                // change will retry this merge.
-                tracing::warn!(%error, "could not republish the XWayland resource database");
-            }
-        }
-    }
 
     /// Brings the set of registered dockapp sources in line with what
     /// the shell is currently waiting on.
@@ -3733,9 +3429,10 @@ impl Compositor {
         // eventual restore is a real `wl_keyboard.enter` rather than a
         // smithay-deduplicated no-op.
         let surface = target
+            .filter(|_| !self.wm.backend().keyboard_grabbed)
             .and_then(|id| self.wm.backend().windows.get(&id))
             .filter(|record| record.surface.alive())
-            .and_then(|record| record.surface.wl_surface());
+            .and_then(|record| crate::input::keyboard::KeyboardFocus::from_managed(&record.surface));
         if let Some(keyboard) = self.seat.get_keyboard() {
             keyboard.set_focus(self, surface, SERIAL_COUNTER.next_serial());
         }
@@ -3784,101 +3481,6 @@ fn recovery_locker_argv<'a>(
     Some((program, parts.collect()))
 }
 
-fn register_xwayland_source(
-    display_handle: &DisplayHandle,
-    loop_handle: &LoopHandle<'static, Compositor>,
-) -> Result<(), String> {
-    let (xwayland, xwayland_client) = match XWayland::spawn(
-        display_handle,
-        None,
-        std::iter::empty::<(String, String)>(),
-        true,
-        Stdio::null(),
-        Stdio::null(),
-        |_| (),
-    ) {
-        Ok(pair) => pair,
-        Err(error) => {
-            tracing::warn!(?error, "could not spawn XWayland; X11 apps unavailable");
-            return Ok(());
-        }
-    };
-    let display_number = xwayland.display_number();
-    loop_handle
-        .insert_source(xwayland, move |event, _, comp| match event {
-            XWaylandEvent::Ready {
-                x11_socket,
-                display_number,
-            } => {
-                match X11Wm::start_wm(
-                    comp.loop_handle.clone(),
-                    x11_socket,
-                    xwayland_client.clone(),
-                ) {
-                    Ok(xwm) => {
-                        comp.xwm = Some(xwm);
-                        comp.xdisplay = Some(display_number);
-                        tracing::info!(display = display_number, "XWayland ready");
-                        comp.start_xsettings(display_number);
-                        crate::xewmh::start(comp, display_number);
-                    }
-                    Err(error) => {
-                        std::env::remove_var("DISPLAY");
-                        tracing::error!(
-                            ?error,
-                            "failed to attach the X11 window manager to XWayland"
-                        );
-                    }
-                }
-            }
-            XWaylandEvent::Error => comp.handle_xwayland_loss("startup failure"),
-        })
-        .map_err(|error| format!("failed to register the XWayland event source: {error}"))?;
-    // Smithay has already reserved the display and bound its listening
-    // sockets. X11 clients can connect now and wait for startup to finish;
-    // publishing only at Ready made autostart inherit the host's DISPLAY
-    // (or no DISPLAY at all) before our first event-loop dispatch.
-    std::env::set_var("DISPLAY", format!(":{display_number}"));
-    tracing::info!(display = display_number, "XWayland listening; display exported for autostart");
-    Ok(())
-}
-
-impl Compositor {
-    /// Retires every piece of state owned by one XWayland generation.
-    /// Called by the startup source and, critically, by
-    /// `XwmHandler::disconnected` after a running X server dies.
-    pub(crate) fn handle_xwayland_loss(&mut self, reason: &'static str) {
-        let was_ready = self.xdisplay.is_some() || self.xwm.is_some();
-        tracing::warn!(reason, "XWayland exited; X11 apps temporarily unavailable");
-        self.xwm = None;
-        self.xdisplay = None;
-        self.xsettings = None;
-        self.xewmh = None;
-        std::env::remove_var("DISPLAY");
-
-        let backend = self.wm.backend_mut();
-        let orphaned: Vec<WlWindowId> = backend
-            .windows
-            .iter()
-            .filter(|(_, record)| matches!(record.surface, ManagedSurface::X11(_)))
-            .map(|(id, _)| *id)
-            .collect();
-        for id in orphaned {
-            backend.forget_window(id);
-            backend.queue(BackendEvent::Destroyed(id));
-        }
-        backend.mark_damaged();
-
-        if was_ready && std::mem::take(&mut self.xwayland_restart_available) {
-            tracing::info!("restarting XWayland once after disconnect");
-            let display_handle = self.display_handle.clone();
-            let loop_handle = self.loop_handle.clone();
-            if let Err(error) = register_xwayland_source(&display_handle, &loop_handle) {
-                tracing::warn!(%error, "could not register the XWayland restart");
-            }
-        }
-    }
-}
 
 pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> {
     // Consume the supervisor's one-shot marker before bringing up any
@@ -3980,23 +3582,9 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
         repeat_rate: config.input.repeat_rate,
         repeat_delay: config.input.repeat_delay,
     });
-    let (xkb_rules, xkb_model, xkb_layout, xkb_variant, xkb_options) = (
-        resolved.rules.clone(),
-        resolved.model.clone(),
-        resolved.layout.clone(),
-        resolved.variant.clone(),
-        resolved.options.clone(),
-    );
-    let xkb_config = XkbConfig {
-        rules: &xkb_rules,
-        model: &xkb_model,
-        layout: &xkb_layout,
-        variant: &xkb_variant,
-        options: xkb_options.clone(),
-    };
     let repeat_delay = resolved.repeat_delay;
     let repeat_rate = resolved.repeat_rate;
-    if let Err(error) = seat.add_keyboard(xkb_config, repeat_delay, repeat_rate) {
+    let keyboard_config = if let Err(error) = seat.add_keyboard(resolved.xkb_config(), repeat_delay, repeat_rate) {
         // A typo—or a Lua value whose runtime source the static config
         // reader cannot resolve—must cost the requested layout, never
         // the login. libxkbcommon has already produced the precise
@@ -4004,15 +3592,18 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
         // keyboard so the user can fix the file from this session.
         tracing::warn!(
             %error,
-            rules = %xkb_rules,
-            model = %xkb_model,
-            layout = %xkb_layout,
-            variant = %xkb_variant,
+            rules = %resolved.rules,
+            model = %resolved.model,
+            layout = %resolved.layout,
+            variant = %resolved.variant,
             "configured xkb keymap was rejected; using the libxkbcommon default"
         );
         seat.add_keyboard(XkbConfig::default(), repeat_delay, repeat_rate)
             .map_err(|fallback| format!("failed to initialize even the default seat keyboard: {fallback}"))?;
-    }
+        None
+    } else {
+        Some(resolved)
+    };
     seat.add_pointer();
     // wl_touch is a seat capability, not a per-device global. Keeping
     // it present lets hot-plugged touchscreens work without changing
@@ -4268,7 +3859,7 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
     // autostart X11 applications. Server initialization overlaps theme
     // and shell setup; its Ready callback is serviced once comp exists.
     // Failure to spawn still degrades only X11 compatibility.
-    register_xwayland_source(&display_handle, &loop_handle)?;
+    crate::xwayland::register_source(&display_handle, &loop_handle)?;
 
     // Hyprland IPC, for Omarchy's unmodified shell and the real
     // `hyprctl`. Bound here, beside `WAYLAND_DISPLAY`, for the same two
@@ -4362,7 +3953,7 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
     backend.repeat_rate = repeat_rate as u32;
     // The layout actually installed, so IPC reports the keymap in force
     // rather than the config's request (they differ under XKB_DEFAULT_*).
-    backend.keyboard_layout = resolved.layout.clone();
+    backend.keyboard_layout = keyboard_config.as_ref().map(|config| config.layout.clone()).unwrap_or_default();
     // The whole screen, as the shell sizes the desktop against it: the
     // union of every monitor. Where the dock and the workareas land
     // inside that union is the shell's decision, not this loop's.
@@ -4388,7 +3979,7 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
     // stacks. `wm-core`'s own modal Alt+Tab grabs belong to
     // `bind_default_keys` below; the applier only ever reconciles the
     // grabs the *config* asked for.
-    shell.apply_session_state(&mut wm, state);
+    shell.initialize_window_manager(&mut wm);
     wm.set_workarea(shell.workarea(output_size));
     wm.bind_default_keys();
 
@@ -4413,6 +4004,7 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
         kde_decoration,
         shm_state,
         seat_state,
+        keyboard_config,
         output_manager_state,
         data_device_state,
         primary_selection_state,
@@ -4430,11 +4022,7 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
         outputs,
         pacing_surfaces: HashMap::new(),
         pacing_fifo_deadlines: HashMap::new(),
-        xwm: None,
-        xdisplay: None,
-        xwayland_restart_available: true,
-        xsettings: None,
-        xewmh: None,
+        xwayland: crate::xwayland::State::default(),
         ui_scale: scale,
         graphics,
         screenshot_poller: crate::capture::ScreenshotRequestPoller::new(Instant::now()),
@@ -4968,35 +4556,6 @@ fn resize_cursor_pixels(scale: f32, angle_rad: f32) -> (Vec<u8>, i32, i32, (i32,
 
 #[cfg(test)]
 mod tests {
-    /// The env must win over the file, and identically at startup and
-    /// at reload — a reload that resolved by different rules would
-    /// change the keymap out from under a user who edited something
-    /// else entirely.
-    #[test]
-    fn xkb_environment_overrides_the_configured_layout() {
-        // SAFETY-adjacent: these are process-wide, so the test sets and
-        // clears them around one assertion rather than leaving them.
-        let config = wm_core::KeyboardConfig {
-            layout: Some("fr".to_string()),
-            variant: Some("azerty".to_string()),
-            repeat_rate: Some(40),
-            repeat_delay: Some(300),
-            ..wm_core::KeyboardConfig::default()
-        };
-        let from_file = resolve_keyboard_config(&config);
-        assert_eq!(from_file.layout, "fr");
-        assert_eq!(from_file.variant, "azerty");
-        assert_eq!(from_file.repeat_rate, 40);
-        assert_eq!(from_file.repeat_delay, 300);
-
-        // Defaults are the ones `add_keyboard` was called with before
-        // this function existed, so an unconfigured session is unchanged.
-        let bare = resolve_keyboard_config(&wm_core::KeyboardConfig::default());
-        assert_eq!(bare.repeat_rate, 25);
-        assert_eq!(bare.repeat_delay, 200);
-        assert_eq!(bare.layout, "");
-        assert_eq!(bare.options, None);
-    }
 
     use super::*;
 

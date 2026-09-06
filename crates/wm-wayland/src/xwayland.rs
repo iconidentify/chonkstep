@@ -19,7 +19,12 @@
 //! business and a window manager never touches it. Here the compositor
 //! sits between two clipboards that know nothing about each other, so
 //! CLIPBOARD and PRIMARY are bridged in both directions — see those
-//! callbacks and `xdg.rs`'s `SelectionHandler` for the two halves.
+//! callbacks and `selection.rs`'s `SelectionHandler` for the two halves.
+
+mod lifecycle;
+mod settings;
+
+pub(crate) use lifecycle::{register_source, State};
 
 use std::os::fd::OwnedFd;
 
@@ -60,10 +65,6 @@ impl XWaylandShellHandler for Compositor {
 
 delegate_xwayland_shell!(Compositor);
 
-/// Reverse lookup by X11 surface handle (cheap Arc'd equality). The
-/// wl_surface-based lookup in `state.rs` cannot serve here: an X11
-/// window exists — and needs configure/property routing — before its
-/// wl_surface association ever arrives.
 /// Tells the X server the stacking order the compositor just settled on.
 ///
 /// Three of smithay's XWM entry points exist to connect the compositor's
@@ -94,7 +95,7 @@ pub(crate) fn sync_stacking_order(comp: &mut Compositor) {
     if !std::mem::take(&mut comp.wm.backend_mut().stacking_dirty) {
         return;
     }
-    let Some(mut xwm) = comp.xwm.take() else {
+    let Some(mut xwm) = comp.xwayland.wm.take() else {
         return;
     };
     // Bottom-to-top, X11 surfaces only — a Wayland window in the middle
@@ -119,12 +120,21 @@ pub(crate) fn sync_stacking_order(comp: &mut Compositor) {
     if let Err(error) = xwm.update_stacking_order_upwards(order.iter()) {
         tracing::warn!(?error, "could not publish the stacking order to XWayland");
     }
-    comp.xwm = Some(xwm);
+    comp.xwayland.wm = Some(xwm);
 }
 
+/// Resolve protocol identity, including during destruction. Smithay marks an
+/// X11Surface dead before `destroyed_window`, and its PartialEq deliberately
+/// rejects dead handles even when they refer to the very same window. Using
+/// that equality here silently leaks every destroyed X11 window's record.
+/// The XWM identity also distinguishes XIDs reused after an XWayland restart.
 fn x11_window_id(backend: &WaylandBackend, window: &X11Surface) -> Option<WlWindowId> {
     backend.windows.iter().find_map(|(id, record)| match &record.surface {
-        ManagedSurface::X11(existing) if existing == window => Some(*id),
+        ManagedSurface::X11(existing)
+            if existing.xwm_id() == window.xwm_id() && existing.window_id() == window.window_id() =>
+        {
+            Some(*id)
+        }
         _ => None,
     })
 }
@@ -176,7 +186,7 @@ impl XwmHandler for Compositor {
     fn xwm_state(&mut self, _xwm: XwmId) -> &mut X11Wm {
         // Smithay only dispatches XWM events after `start_wm` succeeded,
         // which is the only place `xwm` is set (see `run()`).
-        self.xwm.as_mut().expect("XWM event before start_wm")
+        self.xwayland.wm.as_mut().expect("XWM event before start_wm")
     }
 
     fn disconnected(&mut self, _xwm: XwmId) {
@@ -202,7 +212,7 @@ impl XwmHandler for Compositor {
         }
         let modal = window.is_popup()
             || self
-                .xewmh
+                .xwayland.ewmh
                 .as_ref()
                 .is_some_and(|xewmh| xewmh.window_is_modal(window.window_id()));
         let backend = self.wm.backend_mut();
@@ -241,7 +251,7 @@ impl XwmHandler for Compositor {
         // these window types.
         let modal = window.is_popup()
             || self
-                .xewmh
+                .xwayland.ewmh
                 .as_ref()
                 .is_some_and(|xewmh| xewmh.window_is_modal(window.window_id()));
         let backend = self.wm.backend_mut();
@@ -552,7 +562,7 @@ impl XwmHandler for Compositor {
     }
 
     // -- selections -------------------------------------------------------
-    // The X11 side of the clipboard bridge; `xdg.rs`'s `SelectionHandler`
+    // The X11 side of the clipboard bridge; `selection.rs`'s `SelectionHandler`
     // is the Wayland side. Between them, CLIPBOARD and PRIMARY are one
     // selection each across both protocols, which is the only way a
     // session that runs urxvt and a native editor side by side can feel
@@ -562,7 +572,7 @@ impl XwmHandler for Compositor {
     // negotiation (an XDND handshake driven from pointer grabs) and is
     // deliberately not attempted here.
 
-    fn allow_selection_access(&mut self, xwm: XwmId, _selection: SelectionTarget) -> bool {
+    fn allow_selection_access(&mut self, xwm: XwmId, selection: SelectionTarget) -> bool {
         // The X clipboard has no focus rule of its own: any X client can
         // ask the selection owner for the data at any time, and if we
         // always said yes, a background X process could read whatever a
@@ -574,21 +584,17 @@ impl XwmHandler for Compositor {
         let Some(keyboard) = self.seat.get_keyboard() else {
             return false;
         };
-        let Some(focused) = keyboard.current_focus() else {
-            return false;
-        };
-        let backend = self.wm.backend();
-        let Some(window) = backend.window_for_surface(&focused) else {
-            return false;
-        };
-        match backend.windows.get(&window).map(|record| &record.surface) {
-            // The XWM identity is checked, not just "is X11": one
-            // process could in principle manage a second Xwayland
-            // instance, and a selection request from that one must not
-            // be answered because a window of this one has focus.
-            Some(ManagedSurface::X11(surface)) => surface.xwm_id() == Some(xwm),
-            _ => false,
-        }
+        let focused = keyboard.current_focus();
+        // Focus can already be delivered before the first buffer commit adds
+        // a reverse-index entry. Its typed target owns the XWM generation;
+        // re-deriving it from that later index can reject a valid first paste.
+        // Check the actual generation, not merely whether the target is X11.
+        let focused_xwm = focused.as_ref().and_then(|focus| focus.xwm_id());
+        let allowed = focused_xwm == Some(xwm);
+        // Identity/decision only: never trace selection contents or titles.
+        tracing::trace!(?selection, ?xwm, ?focused_xwm, has_focus = focused.is_some(),
+            allowed, "X11 selection access decision");
+        allowed
     }
 
     fn send_selection(

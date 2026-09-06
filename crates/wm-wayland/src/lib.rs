@@ -48,11 +48,14 @@ mod inhibit_bus;
 mod input;
 mod layers;
 mod lock;
+#[cfg(feature = "memory-profile")]
+pub mod memory_profile;
 mod output_mgmt;
 mod output_power;
 mod protocols;
 mod readback;
 mod renderer;
+mod selection;
 mod session;
 mod state;
 // End-to-end test injection door — inert unless CHONKSTEP_TEST_SOCKET

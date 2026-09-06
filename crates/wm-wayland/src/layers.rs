@@ -653,6 +653,7 @@ fn sync_keyboard(comp: &mut Compositor) {
     let Some(keyboard) = comp.seat.get_keyboard() else {
         return;
     };
+    let target = target.map(|surface| crate::input::keyboard::KeyboardFocus::new(comp, surface));
     keyboard.set_focus(comp, target, SERIAL_COUNTER.next_serial());
 }
 
@@ -684,9 +685,9 @@ fn exclusive_claimant(backend: &crate::state::WaylandBackend) -> Option<(LayerId
 /// ([`sync_keyboard`] when a claimant goes away, `lock::unlock` when
 /// the screen unlocks) puts it in the same place.
 ///
-/// Three rungs, highest first — an exclusive layer surface, then an
-/// active focus grab's whitelist, then the window `wm-core` calls
-/// focused. `wm-core` is never told about the top two: focus *policy*
+/// Highest first: an exclusive layer surface, an active focus grab's
+/// whitelist, compositor-owned modal UI (no client), then the window
+/// `wm-core` calls focused. `wm-core` is never told about the top two: focus *policy*
 /// stays in the policy brain, and both are seat-level overrides with
 /// seat-level ends.
 pub(crate) fn keyboard_target(comp: &Compositor) -> Option<WlSurface> {
@@ -708,7 +709,11 @@ fn keyboard_target_given(comp: &Compositor, want: Option<(LayerId, WlSurface)>) 
         // moment any unrelated launcher closed, because `sync_keyboard`
         // runs before `focus_grab::refresh` and that pass only
         // re-asserts focus on the passes something changed.
-        None => focus_grab_target(comp).or_else(|| focused_window_surface(comp)),
+        None => focus_grab_target(comp).or_else(|| {
+            (!comp.wm.backend().keyboard_grabbed)
+                .then(|| focused_window_surface(comp))
+                .flatten()
+        }),
     }
 }
 
@@ -724,7 +729,7 @@ fn focus_grab_target(comp: &Compositor) -> Option<WlSurface> {
     // Ask through the same predicate the input path uses, so there is
     // one definition of "on the whitelist" in the crate: the currently
     // focused surface keeps the keyboard if it is already inside.
-    let focused = comp.seat.get_keyboard().and_then(|keyboard| keyboard.current_focus());
+    let focused = comp.seat.get_keyboard().and_then(|keyboard| keyboard.current_focus()).map(|focus| focus.surface().clone());
     match focused {
         Some(surface) if !comp.focus_grab.escapes(Some(&surface), None) => Some(surface),
         _ => comp.focus_grab.keyboard_surface(),

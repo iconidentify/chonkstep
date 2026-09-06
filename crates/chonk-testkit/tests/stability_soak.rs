@@ -97,15 +97,34 @@ fn sample(session: &mut Session, cycle: usize, elapsed: Duration) -> Value {
     let descriptors: Vec<_> = fs::read_dir(format!("/proc/{pid}/fd")).unwrap().flatten()
         .filter_map(|entry| fs::read_link(entry.path()).ok()).collect();
     let pipes = descriptors.iter().filter(|path| path.to_string_lossy().starts_with("pipe:[")).count();
+    let memory_profile = std::env::var_os("CHONKSTEP_SOAK_MEMORY_STATS").map(|_| {
+        let statistics = session.door().memory_statistics()
+            .expect("memory statistics require a --features memory-profile compositor");
+        assert!(statistics.get("rust_live_bytes").unwrap() > 0,
+            "the diagnostic binary must actually install its counting allocator");
+        statistics.into_values()
+    });
+    let selection_devices = std::env::var_os("CHONKSTEP_SOAK_SELECTION_STATS").map(|_| {
+        let counts = session.door().selection_devices().expect("selection device statistics");
+        assert_eq!(counts.dead, 0, "client teardown must retire every selection device");
+        json!({
+            "core": counts.core, "primary": counts.primary, "wlr": counts.wlr,
+            "ext": counts.ext, "dead": counts.dead,
+        })
+    });
     json!({
         "cycle": cycle, "elapsed_seconds": elapsed.as_secs_f64(), "pid": pid,
         "rss_kib": memory("Rss:"), "pss_kib": memory("Pss:"),
         "private_kib": memory("Private_Clean:") + memory("Private_Dirty:"),
         "private_dirty_kib": memory("Private_Dirty:"), "anonymous_pss_kib": memory("Pss_Anon:"),
+        "swap_pss_kib": memory("SwapPss:"),
+        "anonymous_and_swap_pss_kib": memory("Pss_Anon:") + memory("SwapPss:"),
         "cpu_ticks": fields[11].parse::<u64>().unwrap() + fields[12].parse::<u64>().unwrap(),
         "threads": fs::read_dir(format!("/proc/{pid}/task")).unwrap().count(),
         "fds": descriptors.len(), "nonpipe_fds": descriptors.len() - pipes, "pipe_fds": pipes,
         "windows": world.windows.len(), "frames": world.frames.len(), "shells": world.shells.len(),
+        "memory_profile": memory_profile,
+        "selection_devices": selection_devices,
     })
 }
 
@@ -126,10 +145,10 @@ fn save_proc(session: &Session, label: &str) {
 
 fn check_growth(before: &Value, after: &Value, transient: bool) {
     let metric = |value: &Value, key: &str| value[key].as_u64().unwrap();
-    // Anonymous memory is insensitive to another process mapping the
-    // same library text and reclassifying Private_Clean / Pss_File.
-    assert!(metric(after, "anonymous_pss_kib") <= metric(before, "anonymous_pss_kib") + 64 * 1024,
-        "retained anonymous memory grew by more than 64 MiB: {before} -> {after}");
+    // Anonymous memory is insensitive to library-text sharing. Include swap:
+    // paging cold retained allocations out must not make a leak look fixed.
+    assert!(metric(after, "anonymous_and_swap_pss_kib") <= metric(before, "anonymous_and_swap_pss_kib") + 64 * 1024,
+        "retained anonymous+swap memory grew by more than 64 MiB: {before} -> {after}");
     let slack = if transient { 32 } else { 4 };
     // Visible instruments continuously start bounded command samples.
     // Their short-lived pipes varied by five FDs in the GPU smoke run;
@@ -147,6 +166,26 @@ fn check_growth(before: &Value, after: &Value, transient: bool) {
     // opening it again recreates them. Losing those is not a leak.
     assert!(metric(after, "shells") <= metric(before, "shells"),
         "retired shell surfaces accumulated: {before} -> {after}");
+}
+
+fn memory_fixture(anonymous: u64, swap: u64) -> Value {
+    json!({
+        "anonymous_pss_kib": anonymous, "swap_pss_kib": swap,
+        "anonymous_and_swap_pss_kib": anonymous + swap,
+        "fds": 40, "nonpipe_fds": 40, "threads": 20,
+        "windows": 0, "frames": 0, "shells": 4,
+    })
+}
+
+#[test]
+fn paging_without_growth_does_not_change_the_retained_memory_result() {
+    check_growth(&memory_fixture(80_000, 0), &memory_fixture(40_000, 40_000), false);
+}
+
+#[test]
+#[should_panic(expected = "retained anonymous+swap memory grew")]
+fn swapping_a_leak_out_cannot_hide_it_from_the_growth_guard() {
+    check_growth(&memory_fixture(80_000, 0), &memory_fixture(40_000, 106_000), false);
 }
 
 #[test]

@@ -1118,6 +1118,12 @@ fn hyprland_watch(state: &SessionState) -> Option<(wm_config::hyprland::Roots, w
 }
 
 impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
+    /// Inspect the shared font/glyph cache without clearing it. Explicit
+    /// diagnostics only: this walks cache entries and must not run per frame.
+    pub fn font_cache_statistics(&self) -> wm_theme::FontCacheStatistics {
+        self.fonts.cache_statistics()
+    }
+
     /// Builds the whole shell against an already-connected backend:
     /// scans applications, raises the Dock/Clip/launcher chrome,
     /// compiles the configured keymap and takes its key grabs.
@@ -1320,6 +1326,18 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
     /// later in this same servicing pass, with no call here that a fourth trigger
     /// could forget to make.
     pub fn apply_session_state(&mut self, wm: &mut WindowManager<B>, next: SessionState) {
+        self.apply_session_state_inner(wm, next, true);
+    }
+
+    /// Installs policy into the newly constructed window manager. The shell
+    /// already owns the resolved startup look and menu from [`Self::new`]; use
+    /// the same policy applier without rereading that menu a second time.
+    /// Live reloads must use [`Self::apply_session_state`] instead.
+    pub fn initialize_window_manager(&mut self, wm: &mut WindowManager<B>) {
+        self.apply_session_state_inner(wm, self.state.clone(), false);
+    }
+
+    fn apply_session_state_inner(&mut self, wm: &mut WindowManager<B>, next: SessionState, reload_menu: bool) {
         // 1. Policy.
         wm.set_focus_policy(next.focus);
         wm.set_raise_on_focus(next.autoraise);
@@ -1395,7 +1413,9 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         // The Omarchy submenu is policy too: re-resolved from the key
         // on every pass, which also re-reads the definition files —
         // a reload is the user's way of saying "look again".
-        self.desktop.set_omarchy_menu(omarchy_menu_for(&next));
+        if reload_menu {
+            self.desktop.set_omarchy_menu(omarchy_menu_for(&next));
+        }
 
         // 2. Metrics.
         let theme = next.theme();

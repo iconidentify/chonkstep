@@ -11,11 +11,15 @@ default = []
 # spans on ChonkStep's frame path. Off by default; fixed-size frame
 # counters remain available through the opt-in E2E door in every build.
 profile = ["dep:profiling", "profiling/profile-with-tracing"]
+# Diagnostic builds only: Rust allocation accounting and allocator/cache
+# snapshots over the opt-in test door. Never use these builds for timing claims.
+memory-profile = ["dep:libc"]
 
 # Linux-only by nature: on other hosts this crate compiles to an empty
 # library (see lib.rs's cfg gate) so the whole workspace still builds
 # and tests on a macOS dev machine.
 [target.'cfg(target_os = "linux")'.dependencies]
+libc = { version = "0.2", optional = true }
 wm-core = { path = "../wm-core" }
 wm-theme = { path = "../wm-theme" }
 wm-theme-api = { path = "../wm-theme-api" }

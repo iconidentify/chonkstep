@@ -388,6 +388,7 @@ impl SessionLockHandler for Compositor {
         // from coming back deaf.
         let target = crate::layers::keyboard_target(self);
         if let Some(keyboard) = self.seat.get_keyboard() {
+            let target = target.map(|surface| crate::input::keyboard::KeyboardFocus::new(self, surface));
             keyboard.set_focus(self, target, SERIAL_COUNTER.next_serial());
         }
         // Unlocking is user activity by definition — without this an
@@ -436,7 +437,8 @@ impl SessionLockHandler for Compositor {
         crate::input::sync_pointer_focus(self);
         if focus_target {
             if let Some(keyboard) = self.seat.get_keyboard() {
-                keyboard.set_focus(self, Some(surface.wl_surface().clone()), SERIAL_COUNTER.next_serial());
+                let target = crate::input::keyboard::KeyboardFocus::new(self, surface.wl_surface().clone());
+                keyboard.set_focus(self, Some(target), SERIAL_COUNTER.next_serial());
             }
         }
     }
@@ -659,7 +661,7 @@ pub(crate) fn refresh(comp: &mut Compositor) {
         .get_keyboard()
         .and_then(|keyboard| keyboard.current_focus())
         .map(|surface| !comp.wm.backend().lock_surfaces.iter().any(|entry| {
-            entry.surface.alive() && *entry.surface.wl_surface() == surface
+            entry.surface.alive() && entry.surface.wl_surface() == surface.surface()
         }))
         .unwrap_or(true);
     if focused_dead {
@@ -671,6 +673,7 @@ pub(crate) fn refresh(comp: &mut Compositor) {
             .find(|entry| entry.surface.alive())
             .map(|entry| entry.surface.wl_surface().clone());
         if let Some(keyboard) = comp.seat.get_keyboard() {
+            let next = next.map(|surface| crate::input::keyboard::KeyboardFocus::new(comp, surface));
             keyboard.set_focus(comp, next, SERIAL_COUNTER.next_serial());
         }
     }

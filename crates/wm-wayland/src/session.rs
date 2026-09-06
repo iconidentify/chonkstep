@@ -100,9 +100,9 @@ use crate::state::{Compositor, Graphics, OutputSetup};
 /// The concrete [`DrmCompositor`] this session drives. Spelled out
 /// once because the four type parameters (allocator, framebuffer
 /// exporter, per-frame user data, device fd) appear in every signature
-/// that touches it. The user-data slot is `()`: it exists to carry
-/// presentation feedback back from the page-flip event, and chonkstep
-/// advertises no `wp_presentation` global for that feedback to reach.
+/// that touches it. The user-data slot is `()`: this backend keeps its
+/// pending presentation feedback on the output and completes it from
+/// the corresponding page-flip event.
 type SessionDrmCompositor =
     DrmCompositor<GbmAllocator<DrmDeviceFd>, GbmFramebufferExporter<DrmDeviceFd>, (), DrmDeviceFd>;
 

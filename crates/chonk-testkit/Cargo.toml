@@ -3,9 +3,7 @@
 # cannot see — real input routing, the real renderer — have somewhere
 # to be asserted. See src/lib.rs for the whole story.
 #
-# NOTE for CI: `.github/workflows/ci.yml`'s second clippy gate lists
-# clean crates explicitly; this crate is new and should be added there
-# (it is `-D warnings` clean at birth).
+# The shared scripts/check.sh gate covers this crate with strict Clippy.
 [package]
 name = "chonk-testkit"
 description = "End-to-end test harness: boots a nested compositor, injects input, screenshots, asserts"
@@ -63,8 +61,18 @@ wm-theme = { path = "../wm-theme" }
 # The autostart probe is an independent X11 executable; the EWMH and
 # input tests also use this same client library. Already in the workspace.
 x11rb = "0.13"
+# Deadline-bounded writes to the nonblocking FDs the selection protocol lends
+# test clients. Already in the workspace; no unsafe descriptor manipulation.
+rustix = { version = "1.1", features = ["event", "fs", "net"] }
 
 [dev-dependencies]
+chonk-test-support = { path = "../chonk-test-support" }
+tempfile = "3"
+# Observe the real browser's DOM via its private loopback DevTools socket.
+# Input still enters through the compositor; no CDP input injection. Reuse a
+# maintained WebSocket client instead of implementing framing in the harness.
+# No TLS or compositor/shipping dependency is added.
+tungstenite = { version = "0.30", default-features = false, features = ["handshake"] }
 # The Hyprland IPC connection-storm e2e uses the server's public caps
 # as the contract it drives past; sharing the names keeps the live
 # assertion in lockstep with the documented limit.

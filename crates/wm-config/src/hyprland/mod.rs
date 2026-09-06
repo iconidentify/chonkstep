@@ -313,10 +313,22 @@ impl Reading {
     /// the caller, which keeps the baked preset rather than replacing a
     /// working keymap with an empty one.
     pub fn is_empty(&self) -> bool {
-        self.keybindings.is_empty()
-            && self.env.is_empty()
-            && self.autostart.is_empty()
-            && self.float_rules.is_empty()
+        // Every semantic category counts, independently of whether the user
+        // replaced the built-in keybindings. Destructure exhaustively so a
+        // future category cannot silently disappear at this loading boundary.
+        let Self {
+            keybindings, bindings, layer_bindings, commands, env, autostart,
+            float_rules, monitors, input, files: _, skipped: _,
+        } = self;
+        keybindings.is_empty()
+            && bindings.is_empty()
+            && layer_bindings.is_empty()
+            && commands.is_empty()
+            && env.is_empty()
+            && autostart.is_empty()
+            && float_rules.is_empty()
+            && monitors.lines.is_empty()
+            && *input == crate::InputConfig::default()
     }
 
     /// Logs the read: one summary line, and one line per thing
@@ -948,19 +960,19 @@ fn input(reading: &mut Reading, name: &str, value: &str) {
         "kb_variant" => reading.input.variant = Some(value),
         "kb_options" => reading.input.options = Some(value),
         "repeat_rate" => match value.parse::<i32>() {
-            Ok(rate) if (1..=1000).contains(&rate) => reading.input.repeat_rate = Some(rate),
+            Ok(rate) if (0..=1000).contains(&rate) => reading.input.repeat_rate = Some(rate),
             _ => reading.skipped.push(Skipped {
                 kind: "input".into(),
                 what: format!("repeat_rate = {value}"),
-                why: "repeat rate must be an integer from 1 through 1000".into(),
+                why: "repeat rate must be an integer from 0 through 1000 (0 disables repeat)".into(),
             }),
         },
         "repeat_delay" => match value.parse::<i32>() {
-            Ok(delay) if (1..=5000).contains(&delay) => reading.input.repeat_delay = Some(delay),
+            Ok(delay) if (0..=5000).contains(&delay) => reading.input.repeat_delay = Some(delay),
             _ => reading.skipped.push(Skipped {
                 kind: "input".into(),
                 what: format!("repeat_delay = {value}"),
-                why: "repeat delay must be an integer from 1 through 5000 milliseconds".into(),
+                why: "repeat delay must be an integer from 0 through 5000 milliseconds".into(),
             }),
         },
         "sensitivity" => match value.parse::<f64>() {

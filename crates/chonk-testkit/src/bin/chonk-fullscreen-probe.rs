@@ -70,6 +70,8 @@
 //! The frame-driven mode reports every callback as `frame callback=N`, which
 //! lets the visibility test distinguish a parked client that truly sleeps from
 //! one that keeps drawing invisible buffers behind an active workspace.
+//! `delayed-configure` delays client handling of a requested state's answer by
+//! 200 ms, demonstrating that compositor geometry is not a client receipt fence.
 
 use std::io::Write;
 use std::os::fd::AsFd;
@@ -166,6 +168,8 @@ struct Probe {
     /// The request whose answer has not arrived yet: the next configure
     /// is that answer, per the protocol.
     awaiting: Option<(Want, bool)>,
+    /// Opt-in slow client; the compositor and protocol contents are unchanged.
+    configure_delay: Duration,
     /// The states this client currently has a *session* open for — the
     /// browser-shaped bit. See the module doc.
     sessions: Vec<Want>,
@@ -311,6 +315,9 @@ impl Dispatch<XdgSurface, ()> for Probe {
         _: &QueueHandle<Self>,
     ) {
         if let xdg_surface::Event::Configure { serial } = event {
+            if probe.awaiting.is_some() && !probe.configure_delay.is_zero() {
+                std::thread::sleep(probe.configure_delay);
+            }
             // The toplevel configure that preceded this one carries the
             // content; the surface configure is where it becomes real,
             // so this is where a pending request has been answered.
@@ -555,7 +562,15 @@ fn main() {
     let qh = queue.handle();
     let _registry = connection.display().get_registry(&qh, ());
 
-    let mut probe = Probe { size: WINDOWED, ..Probe::default() };
+    let mut probe = Probe {
+        size: WINDOWED,
+        configure_delay: if animation.as_deref() == Some("delayed-configure") {
+            Duration::from_millis(200)
+        } else {
+            Duration::ZERO
+        },
+        ..Probe::default()
+    };
     queue
         .roundtrip(&mut probe)
         .unwrap_or_else(|error| fatal(&format!("registry roundtrip: {error}")));

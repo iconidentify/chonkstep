@@ -17,7 +17,13 @@ use crate::model::{Color, Theme};
 use crate::paint;
 use crate::tile;
 
-pub fn render_clock_tile(theme: &Theme, size: u32, hour: u32, minute: u32, second: u32) -> DecorationBuffer {
+pub fn render_clock_tile(
+    theme: &Theme,
+    size: u32,
+    hour: u32,
+    minute: u32,
+    second: u32,
+) -> DecorationBuffer {
     let size = size.max(8);
     let mut pixmap = Pixmap::new(size, size).expect("nonzero clock tile size");
 
@@ -35,7 +41,14 @@ pub fn render_clock_tile(theme: &Theme, size: u32, hour: u32, minute: u32, secon
     let bevel_t = theme.tile.bevel.width.max(1);
     let inset = (bevel_t as f32 + 2.0).max(3.0);
     let well_size = (size as f32 - inset * 2.0).max(1.0) as u32;
-    tile::draw_tile_well(&mut pixmap, inset as i32, inset as i32, well_size, well_size, theme);
+    tile::draw_tile_well(
+        &mut pixmap,
+        inset as i32,
+        inset as i32,
+        well_size,
+        well_size,
+        theme,
+    );
 
     let cx = size as f32 / 2.0;
     let cy = size as f32 / 2.0;
@@ -46,10 +59,47 @@ pub fn render_clock_tile(theme: &Theme, size: u32, hour: u32, minute: u32, secon
     // family uses for label/sublabel text.
     let ink = tile::tile_ink(theme);
     let ink_dim = tile::tile_ink_dim(theme);
-    for i in 0..12 {
-        let angle = i as f32 * (PI / 6.0) - PI / 2.0;
-        let (inner, color) = if i % 3 == 0 { (radius * 0.76, ink) } else { (radius * 0.88, ink_dim) };
-        draw_line(&mut pixmap, cx + angle.cos() * inner, cy + angle.sin() * inner, cx + angle.cos() * radius, cy + angle.sin() * radius, color, 1.0);
+    // At tiny radii adjacent round caps overlap. Keeping those strokes
+    // separate preserves the original alpha compositing exactly; normal dock
+    // sizes can batch each color into one path and avoid twenty allocations.
+    if radius < 3.5 {
+        for i in 0..12 {
+            let angle = i as f32 * (PI / 6.0) - PI / 2.0;
+            let (inner, color) = if i % 3 == 0 {
+                (radius * 0.76, ink)
+            } else {
+                (radius * 0.88, ink_dim)
+            };
+            draw_line(
+                &mut pixmap,
+                cx + angle.cos() * inner,
+                cy + angle.sin() * inner,
+                cx + angle.cos() * radius,
+                cy + angle.sin() * radius,
+                color,
+                1.0,
+            );
+        }
+    } else {
+        let mut cardinal_markers = PathBuilder::with_capacity(8, 8);
+        let mut intermediate_markers = PathBuilder::with_capacity(16, 16);
+        for i in 0..12 {
+            let angle = i as f32 * (PI / 6.0) - PI / 2.0;
+            let (inner, path) = if i % 3 == 0 {
+                (radius * 0.76, &mut cardinal_markers)
+            } else {
+                (radius * 0.88, &mut intermediate_markers)
+            };
+            add_line(
+                path,
+                cx + angle.cos() * inner,
+                cy + angle.sin() * inner,
+                cx + angle.cos() * radius,
+                cy + angle.sin() * radius,
+            );
+        }
+        stroke_path(&mut pixmap, cardinal_markers, ink, 1.0);
+        stroke_path(&mut pixmap, intermediate_markers, ink_dim, 1.0);
     }
 
     let hour_angle = ((hour % 12) as f32 + minute as f32 / 60.0) * (PI / 6.0) - PI / 2.0;
@@ -59,11 +109,39 @@ pub fn render_clock_tile(theme: &Theme, size: u32, hour: u32, minute: u32, secon
     // Hands in full ink; the second hand keeps its muted red — the one
     // deliberate accent the tile contract allows, and the traditional
     // color for an instrument's fast hand.
-    draw_line(&mut pixmap, cx, cy, cx + hour_angle.cos() * radius * 0.5, cy + hour_angle.sin() * radius * 0.5, ink, 2.2);
-    draw_line(&mut pixmap, cx, cy, cx + minute_angle.cos() * radius * 0.75, cy + minute_angle.sin() * radius * 0.75, ink, 1.4);
-    draw_line(&mut pixmap, cx, cy, cx + second_angle.cos() * radius * 0.85, cy + second_angle.sin() * radius * 0.85, Color::rgb(0xB0, 0x30, 0x30), 0.8);
+    draw_line(
+        &mut pixmap,
+        cx,
+        cy,
+        cx + hour_angle.cos() * radius * 0.5,
+        cy + hour_angle.sin() * radius * 0.5,
+        ink,
+        2.2,
+    );
+    draw_line(
+        &mut pixmap,
+        cx,
+        cy,
+        cx + minute_angle.cos() * radius * 0.75,
+        cy + minute_angle.sin() * radius * 0.75,
+        ink,
+        1.4,
+    );
+    draw_line(
+        &mut pixmap,
+        cx,
+        cy,
+        cx + second_angle.cos() * radius * 0.85,
+        cy + second_angle.sin() * radius * 0.85,
+        Color::rgb(0xB0, 0x30, 0x30),
+        0.8,
+    );
 
-    DecorationBuffer { width: size, height: size, pixels: pixmap.take() }
+    DecorationBuffer {
+        width: size,
+        height: size,
+        pixels: pixmap.take(),
+    }
 }
 
 /// Anti-aliased stroked line for the dial. Hands and ticks are angled
@@ -71,14 +149,26 @@ pub fn render_clock_tile(theme: &Theme, size: u32, hour: u32, minute: u32, secon
 /// rather than borrowing `tile::draw_line`, whose hard 1px integer
 /// walk is meant for tile chrome, not rotating hands.
 fn draw_line(pixmap: &mut Pixmap, x0: f32, y0: f32, x1: f32, y1: f32, color: Color, width: f32) {
-    let mut pb = PathBuilder::new();
-    pb.move_to(x0, y0);
-    pb.line_to(x1, y1);
-    let Some(path) = pb.finish() else { return };
+    let mut path = PathBuilder::with_capacity(2, 2);
+    add_line(&mut path, x0, y0, x1, y1);
+    stroke_path(pixmap, path, color, width);
+}
+
+fn add_line(path: &mut PathBuilder, x0: f32, y0: f32, x1: f32, y1: f32) {
+    path.move_to(x0, y0);
+    path.line_to(x1, y1);
+}
+
+fn stroke_path(pixmap: &mut Pixmap, path: PathBuilder, color: Color, width: f32) {
+    let Some(path) = path.finish() else { return };
     let mut paint = Paint::default();
     paint.set_color(paint::sk_color(color));
     paint.anti_alias = true;
-    let stroke = Stroke { width, line_cap: LineCap::Round, ..Default::default() };
+    let stroke = Stroke {
+        width,
+        line_cap: LineCap::Round,
+        ..Default::default()
+    };
     pixmap.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
 }
 
@@ -102,6 +192,9 @@ mod tests {
     fn render_clock_tile_is_not_a_blank_buffer() {
         let theme = nextstep_classic();
         let buffer = render_clock_tile(&theme, 56, 3, 15, 0);
-        assert!(buffer.pixels.iter().any(|&b| b != 0), "clock tile should have drawn something");
+        assert!(
+            buffer.pixels.iter().any(|&b| b != 0),
+            "clock tile should have drawn something"
+        );
     }
 }

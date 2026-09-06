@@ -42,7 +42,6 @@
 //! `cargo test -p chonk-testkit -- --ignored --test-threads=1`.
 
 use chonk_testkit::{poll_until, profile_binary, Session, SessionOptions};
-use std::process::Command;
 use std::time::Duration;
 
 /// The ramp length the stand-in advertises. 256 is what the crtc
@@ -306,16 +305,18 @@ fn a_non_diagonal_ctm_is_a_named_protocol_error_not_an_approximation() {
 
 #[test]
 #[ignore = "needs a live Wayland session and the packaged hyprsunset client"]
-// This is an ignored integration test running on Cargo's test thread,
-// never the compositor repaint thread. It must synchronously inspect
-// `hyprctl`'s exit status and output. (The availability check that
-// used to need this too is now `require_client`, a PATH scan.)
-#[allow(clippy::disallowed_methods)]
 fn real_hyprsunset_stays_running_serves_its_ipc_and_restores_on_exit() {
-    if !chonk_testkit::require_client("hyprsunset") {
+    if !chonk_testkit::require_client("hyprsunset") || !chonk_testkit::require_client("hyprctl") {
         return;
     }
     let mut session = Session::boot("hyprsunset-real", with_gamma()).unwrap();
+    let signature = hyprland_signature(&session);
+    let socket = std::path::PathBuf::from(std::env::var_os("XDG_RUNTIME_DIR").unwrap())
+        .join("hypr").join(&signature).join(".hyprsunset.sock");
+    // Validate before launching upstream 0.4, which uses an unchecked strcpy
+    // for this path. The headless runner must keep runtime and artifacts apart.
+    std::os::unix::net::SocketAddr::from_pathname(&socket)
+        .expect("private runtime leaves room for the hyprsunset Unix socket");
     session
         .launch("hyprsunset", &["-t", "3000"])
         .expect("hyprsunset launches");
@@ -324,19 +325,42 @@ fn real_hyprsunset_stays_running_serves_its_ipc_and_restores_on_exit() {
         last_white_point(&warm_log).expect("hyprsunset's CTM reaches the gamma hardware path");
     assert!(warm.2 < warm.0, "3000K reduces the blue channel: {warm:?}");
 
-    let signature = hyprland_signature(&session);
-    let output = Command::new("hyprctl")
-        .args(["hyprsunset", "temperature"])
-        .env("HYPRLAND_INSTANCE_SIGNATURE", signature)
-        .output()
-        .expect("hyprctl is installed with hyprsunset");
+    // A programmed CTM precedes initialization of the separate IPC thread.
+    // Observe the actual listener and fail promptly if the daemon exits.
+    poll_until(Duration::from_secs(10), "hyprsunset's IPC listener", || {
+        let log = session.client_log("hyprsunset");
+        match session.client_status("hyprsunset") {
+            Ok(Some(status)) => Some(Err(format!("hyprsunset exited: {status}\n{log}"))),
+            Err(error) => Some(Err(error)),
+            // bind() creates the path before listen(). Neither file existence
+            // nor upstream's optional verbose log proves it accepts clients.
+            Ok(None) => match std::os::unix::net::UnixStream::connect(&socket) {
+                Ok(connection) => { drop(connection); Some(Ok(())) }
+                Err(error) if matches!(error.kind(), std::io::ErrorKind::NotFound
+                    | std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::Interrupted) => None,
+                Err(error) => Some(Err(format!("{}: {error}", socket.display()))),
+            },
+        }
+    }).and_then(|result| result)
+        .unwrap_or_else(|error| panic!("{error}\n{}\n{}", session.client_log("hyprsunset"), session.log()));
+    // Session owns the child even on timeout/panic. Waiting on its exit is
+    // bounded; Command::output could hang the entire integration runner.
+    session.launch("hyprctl", &["hyprsunset", "temperature"]).unwrap();
+    let status = poll_until(Duration::from_secs(10), "hyprctl's temperature answer", || {
+        match session.client_status("hyprctl") {
+            Ok(Some(status)) => Some(Ok(status)),
+            Ok(None) => None,
+            Err(error) => Some(Err(error)),
+        }
+    }).and_then(|result| result)
+        .unwrap_or_else(|error| panic!("{error}\n{}\n{}", session.client_log("hyprctl"), session.client_log("hyprsunset")));
+    let output = session.client_log("hyprctl");
     assert!(
-        output.status.success(),
-        "hyprctl reaches hyprsunset: {}",
-        String::from_utf8_lossy(&output.stderr)
+        status.success(),
+        "hyprctl reaches hyprsunset: status={status} output={output}"
     );
     assert_eq!(
-        String::from_utf8_lossy(&output.stdout).trim(),
+        output.trim(),
         "3000",
         "hyprsunset reports the value it applied"
     );

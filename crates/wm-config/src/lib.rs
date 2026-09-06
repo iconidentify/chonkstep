@@ -238,7 +238,10 @@ pub struct InputConfig {
     pub layout: Option<String>,
     pub variant: Option<String>,
     pub options: Option<String>,
+    /// Keyboard repeats per second; zero disables repeat. Wayland bounds
+    /// direct configuration to 0..=1000, matching the Hyprland reader.
     pub repeat_rate: Option<i32>,
+    /// Initial repeat delay in milliseconds, including zero (0..=5000).
     pub repeat_delay: Option<i32>,
     /// Libinput pointer/touchpad settings. `scroll_factor` is applied
     /// after libinput so it scales both continuous and v120 axes.

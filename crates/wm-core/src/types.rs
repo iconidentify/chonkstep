@@ -423,7 +423,9 @@ pub struct KeyboardConfig {
     pub layout: Option<String>,
     pub variant: Option<String>,
     pub options: Option<String>,
+    /// Repeats per second; zero disables both client and compositor repeat.
     pub repeat_rate: Option<i32>,
+    /// Initial delay in milliseconds; zero requests no initial delay.
     pub repeat_delay: Option<i32>,
 }
 

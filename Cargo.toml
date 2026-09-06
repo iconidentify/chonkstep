@@ -15,7 +15,12 @@ members = ["crates/*", "examples/*"]
 # one the workspace should not acquire for a single diagnostic.
 # Excluded for that reason rather than for `chonk-switch`'s; see its
 # own README for what it reproduces and how to run it.
-exclude = ["examples/chonk-switch", "examples/layer-role-repro"]
+exclude = ["examples/chonk-switch", "examples/layer-role-repro", "vendor/smithay-0.7.0"]
+
+# Minimal, checksum-pinned 0.7 backport; see vendor/README.md. Keep framework
+# upgrades separate from fixes to the shipping compositor's input contracts.
+[patch.crates-io]
+smithay = { path = "vendor/smithay-0.7.0" }
 
 [workspace.package]
 version = "0.3.0"

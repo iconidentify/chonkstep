@@ -61,12 +61,17 @@
 //! |---|---|
 //! | `motion X Y` | absolute pointer motion to (X, Y) in global (output) coordinates; floats accepted |
 //! | `button left\|middle\|right press\|release` | pointer button by name |
+//! | `touch down\|motion SLOT X Y` | touch position in global output coordinates |
+//! | `touch up SLOT` | release a touch slot |
+//! | `touch cancel\|frame` | cancel the touch sequence or finish its input frame |
 //! | `key CODE press\|release` | keyboard key by *evdev* keycode (`KEY_*` from input-event-codes.h; the xkb +8 offset is applied here) |
 //! | `repeat` | replies with the held compositor-binding repeat count and interval, or `repeat none` |
 //! | `activation-tokens` | replies with the number of retained xdg-activation tokens |
 //! | `protocol-ledgers` | replies with retained input-method popup, idle-inhibitor object, and lock-surface counts |
 //! | `protocol-publishes` | replies with native-control and Hyprland event-snapshot, foreign full-sync and foreign dragged-window-sync counters |
 //! | `hyprland-sources` | replies with desired and registered Hyprland IPC calloop-source counts |
+//! | `memory-stats` | opt-in memory-profile builds only: Rust, allocator and glyph-cache counters; no payloads |
+//! | `selection-devices` | read-only retained core/primary/wlr/ext device counts, including dead resources |
 //! | `hit X Y` | replies with `hit root\|shell\|frame\|content\|layer\|ime\|lock` from the production scene hit-test |
 //! | `barrier` | replies `ok` once every command before it has been dispatched **and** a frame has been rendered with no damage left over |
 //! | `windows` | replies one line per ledger entry (see below), then `done` |
@@ -120,7 +125,8 @@ use std::path::PathBuf;
 
 use smithay::backend::input::{
     AbsolutePositionEvent, ButtonState, Device, DeviceCapability, Event, InputBackend, InputEvent,
-    KeyState, KeyboardKeyEvent, PointerButtonEvent, PointerMotionAbsoluteEvent, UnusedEvent,
+    KeyState, KeyboardKeyEvent, PointerButtonEvent, PointerMotionAbsoluteEvent, TouchCancelEvent,
+    TouchDownEvent, TouchEvent, TouchFrameEvent, TouchMotionEvent, TouchSlot, TouchUpEvent, UnusedEvent,
 };
 use smithay::input::keyboard::Keycode;
 use smithay::reexports::calloop::generic::Generic;
@@ -152,7 +158,7 @@ impl Device for TestDevice {
         "chonkstep test door".into()
     }
     fn has_capability(&self, capability: DeviceCapability) -> bool {
-        matches!(capability, DeviceCapability::Keyboard | DeviceCapability::Pointer)
+        matches!(capability, DeviceCapability::Keyboard | DeviceCapability::Pointer | DeviceCapability::Touch)
     }
     fn usb_id(&self) -> Option<(u32, u32)> {
         None
@@ -259,6 +265,36 @@ impl AbsolutePositionEvent<TestInput> for TestMotionEvent {
 
 impl PointerMotionAbsoluteEvent<TestInput> for TestMotionEvent {}
 
+/// Synthetic touch events go through the same backend dispatch as libinput.
+/// Slots are explicit so the suite can prove independent multi-touch routes.
+#[derive(Debug)]
+pub(crate) struct TestTouchEvent {
+    position: TestMotionEvent,
+    slot: TouchSlot,
+}
+
+impl Event<TestInput> for TestTouchEvent {
+    fn time(&self) -> u64 { self.position.time }
+    fn device(&self) -> TestDevice { TestDevice }
+}
+
+impl AbsolutePositionEvent<TestInput> for TestTouchEvent {
+    fn x(&self) -> f64 { self.position.x }
+    fn y(&self) -> f64 { self.position.y }
+    fn x_transformed(&self, _width: i32) -> f64 { self.position.x }
+    fn y_transformed(&self, _height: i32) -> f64 { self.position.y }
+}
+
+impl TouchEvent<TestInput> for TestTouchEvent {
+    fn slot(&self) -> TouchSlot { self.slot }
+}
+
+impl TouchDownEvent<TestInput> for TestTouchEvent {}
+impl TouchMotionEvent<TestInput> for TestTouchEvent {}
+impl TouchUpEvent<TestInput> for TestTouchEvent {}
+impl TouchCancelEvent<TestInput> for TestTouchEvent {}
+impl TouchFrameEvent<TestInput> for TestTouchEvent {}
+
 impl InputBackend for TestInput {
     type Device = TestDevice;
     type KeyboardKeyEvent = TestKeyEvent;
@@ -274,11 +310,11 @@ impl InputBackend for TestInput {
     type GesturePinchEndEvent = UnusedEvent;
     type GestureHoldBeginEvent = UnusedEvent;
     type GestureHoldEndEvent = UnusedEvent;
-    type TouchDownEvent = UnusedEvent;
-    type TouchUpEvent = UnusedEvent;
-    type TouchMotionEvent = UnusedEvent;
-    type TouchCancelEvent = UnusedEvent;
-    type TouchFrameEvent = UnusedEvent;
+    type TouchDownEvent = TestTouchEvent;
+    type TouchUpEvent = TestTouchEvent;
+    type TouchMotionEvent = TestTouchEvent;
+    type TouchCancelEvent = TestTouchEvent;
+    type TouchFrameEvent = TestTouchEvent;
     type TabletToolAxisEvent = UnusedEvent;
     type TabletToolProximityEvent = UnusedEvent;
     type TabletToolTipEvent = UnusedEvent;
@@ -411,6 +447,58 @@ fn handle_command(line: &str, stream: &mut UnixStream, comp: &mut Compositor) {
         let _ = stream.write_all(format!("err {reason}\n").as_bytes());
     };
     match words.next() {
+        Some("touch") => {
+            let action = words.next();
+            let event = match action {
+                Some("down" | "motion" | "up") => {
+                    let Some(Ok(slot)) = words.next().map(str::parse::<u32>) else {
+                        reply_err(stream, "touch wants a nonnegative SLOT");
+                        return;
+                    };
+                    // TouchSlot's wire ID is signed; avoid a wrapping cast.
+                    if slot > i32::MAX as u32 {
+                        reply_err(stream, "touch SLOT exceeds protocol range");
+                        return;
+                    }
+                    let (x, y) = if action == Some("up") {
+                        (0.0, 0.0)
+                    } else {
+                        let (Some(Ok(x)), Some(Ok(y))) =
+                            (words.next().map(str::parse::<f64>), words.next().map(str::parse::<f64>))
+                        else {
+                            reply_err(stream, "touch down|motion wants SLOT X Y");
+                            return;
+                        };
+                        if !x.is_finite() || !y.is_finite() {
+                            reply_err(stream, "touch coordinates must be finite");
+                            return;
+                        }
+                        (x, y)
+                    };
+                    TestTouchEvent { position: TestMotionEvent { x, y, time }, slot: Some(slot).into() }
+                }
+                Some("cancel" | "frame") => TestTouchEvent {
+                    position: TestMotionEvent { x: 0.0, y: 0.0, time }, slot: None.into(),
+                },
+                _ => {
+                    reply_err(stream, "touch wants down|motion|up|cancel|frame");
+                    return;
+                }
+            };
+            if words.next().is_some() {
+                reply_err(stream, "unexpected touch arguments");
+                return;
+            }
+            let input = match action {
+                Some("down") => InputEvent::TouchDown { event },
+                Some("motion") => InputEvent::TouchMotion { event },
+                Some("up") => InputEvent::TouchUp { event },
+                Some("cancel") => InputEvent::TouchCancel { event },
+                Some("frame") => InputEvent::TouchFrame { event },
+                _ => unreachable!("validated touch action"),
+            };
+            crate::input::process_input_event::<TestInput>(comp, input);
+        }
         Some("motion") => {
             let (Some(Ok(x)), Some(Ok(y))) =
                 (words.next().map(str::parse::<f64>), words.next().map(str::parse::<f64>))
@@ -528,6 +616,27 @@ fn handle_command(line: &str, stream: &mut UnixStream, comp: &mut Compositor) {
                 .as_bytes(),
             );
         }
+        Some("selection-devices") => {
+            let counts = smithay::wayland::selection::selection_device_statistics(&comp.seat);
+            let _ = stream.write_all(format!(
+                "selection-devices core={} primary={} wlr={} ext={} dead={}\n",
+                counts.core, counts.primary, counts.wlr, counts.ext, counts.dead,
+            ).as_bytes());
+        }
+        #[cfg(feature = "memory-profile")]
+        Some("memory-stats") => {
+            let rust = crate::memory_profile::rust_allocations();
+            let allocator = crate::memory_profile::allocator_statistics();
+            let fonts = comp.shell.font_cache_statistics();
+            let _ = stream.write_all(format!(
+                "memory-stats version=1 rust_live_bytes={} rust_peak_bytes={} rust_operations={} rust_allocated_bytes={} glibc_supported={} glibc_arena_bytes={} glibc_in_use_bytes={} glibc_free_bytes={} glibc_mapped_bytes={} glibc_top_releasable_bytes={} font_faces={} glyph_images={} glyph_image_bytes={} glyph_outlines={} glyph_outline_bytes={}\n",
+                rust.live_bytes, rust.peak_bytes, rust.operations, rust.allocated_bytes,
+                u8::from(allocator.supported), allocator.arena_bytes, allocator.in_use_bytes,
+                allocator.free_bytes, allocator.mapped_bytes, allocator.top_releasable_bytes,
+                fonts.available_faces, fonts.image_entries, fonts.image_payload_bytes,
+                fonts.outline_entries, fonts.outline_payload_bytes,
+            ).as_bytes());
+        }
         Some("frame-stats") => {
             let stats = std::mem::take(&mut comp.frame_stats);
             let micros = |duration: std::time::Duration| duration.as_micros();
@@ -536,7 +645,7 @@ fn handle_command(line: &str, stream: &mut UnixStream, comp: &mut Compositor) {
             };
             let _ = stream.write_all(
                 format!(
-                    "frame-stats dispatch_calls={} dispatch_us={} dispatch_max_us={} input_us={} shell_us={} protocol_us={} layout_us={} render_calls={} render_us={} render_max_us={} flush_us={} ipc_us={} dispatch_hist={} render_hist={}\n",
+                    "frame-stats dispatch_calls={} dispatch_us={} dispatch_max_us={} input_us={} shell_us={} protocol_us={} layout_us={} render_calls={} render_us={} render_max_us={} flush_us={} ipc_us={} dispatch_hist={} render_hist={} render_attempts={}\n",
                     stats.dispatch.calls,
                     micros(stats.dispatch.total),
                     micros(stats.dispatch.max),
@@ -551,6 +660,7 @@ fn handle_command(line: &str, stream: &mut UnixStream, comp: &mut Compositor) {
                     micros(stats.ipc.total),
                     buckets(&stats.dispatch_histogram),
                     buckets(&stats.render_histogram),
+                    stats.render_attempts,
                 )
                 .as_bytes(),
             );

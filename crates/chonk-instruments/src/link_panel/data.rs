@@ -18,21 +18,8 @@
 /// Splits one nmcli terse-mode line on unescaped `:`. Terse mode
 /// backslash-escapes both `:` and `\` inside values, so the split has
 /// to walk the escapes rather than the bytes.
-pub(crate) fn split_terse(line: &str) -> Vec<String> {
-    let mut fields = vec![String::new()];
-    let mut chars = line.chars();
-    while let Some(c) = chars.next() {
-        match c {
-            '\\' => {
-                if let Some(escaped) = chars.next() {
-                    fields.last_mut().expect("fields never empty").push(escaped);
-                }
-            }
-            ':' => fields.push(String::new()),
-            _ => fields.last_mut().expect("fields never empty").push(c),
-        }
-    }
-    fields
+pub(crate) fn split_terse(line: &str) -> Vec<std::borrow::Cow<'_, str>> {
+    super::terse::fields(line).map(super::terse::decode).collect()
 }
 
 /// What kind of NIC a device row is. Only the two kinds the panel
@@ -95,23 +82,27 @@ fn parse_device_state(raw: &str) -> DeviceState {
 pub fn parse_devices(text: &str) -> Vec<NmDevice> {
     let mut out = Vec::new();
     for line in text.lines() {
-        let fields = split_terse(line);
-        if fields.len() < 4 {
-            continue;
-        }
-        let kind = match fields[1].as_str() {
+        let mut fields = super::terse::fields(line);
+        let (Some(name), Some(kind_raw), Some(state), Some(_)) =
+            (fields.next(), fields.next(), fields.next(), fields.next()) else { continue };
+        let kind_value = super::terse::decode(kind_raw);
+        let kind = match kind_value.as_ref() {
             "ethernet" => DeviceKind::Ethernet,
             "wifi" => DeviceKind::Wifi,
             _ => continue,
         };
-        let state_raw = fields[2].trim();
+        let state_value = super::terse::decode(state);
+        let state_raw = state_value.trim();
         if state_raw == "unmanaged" {
             continue;
         }
-        // CONNECTION is the last declared field; a raw colon that
-        // survived escaping would split it, so rejoin the tail.
-        let connection = fields[3..].join(":");
-        out.push(NmDevice { name: fields[0].clone(), kind, state: parse_device_state(state_raw), connection });
+        // CONNECTION is the last declared field. Decode its complete raw tail
+        // to preserve stray colons just as the former split-and-join did.
+        // The raw kind can contain escapes, so its byte length, not the
+        // decoded length, determines where the connection tail begins.
+        let connection_start = name.len() + kind_raw.len() + state.len() + 3;
+        let connection = super::terse::decode(&line[connection_start..]).into_owned();
+        out.push(NmDevice { name: super::terse::decode(name).into_owned(), kind, state: parse_device_state(state_raw), connection });
     }
     out
 }
@@ -148,32 +139,42 @@ pub struct NmConnection {
 pub fn parse_connections(text: &str) -> Vec<NmConnection> {
     let mut out = Vec::new();
     for line in text.lines() {
-        let fields = split_terse(line);
-        if fields.len() < 4 {
+        // Only the final three raw fields determine whether a profile is
+        // relevant. Keep them on the stack; allocate its name only if accepted.
+        let mut tail = [(0usize, ""); 3];
+        let mut count = 0;
+        let mut start = 0;
+        for field in super::terse::fields(line) {
+            tail.rotate_left(1);
+            tail[2] = (start, field);
+            start += field.len() + 1;
+            count += 1;
+        }
+        if count < 4 {
             continue;
         }
         // NAME leads and UUID trails; TYPE and ACTIVE sit just before
         // the UUID, so a stray raw colon in the name (escaping should
         // prevent one, but output is input) widens the middle.
-        let n = fields.len();
-        let name = fields[..n - 3].join(":");
-        let kind = match fields[n - 3].as_str() {
+        let kind = match super::terse::decode(tail[0].1).as_ref() {
             "802-3-ethernet" => ConnKind::Ethernet,
             "802-11-wireless" => ConnKind::Wifi,
             "wireguard" => ConnKind::WireGuard,
             "vpn" => ConnKind::Vpn,
             _ => continue,
         };
-        let active = match fields[n - 2].as_str() {
+        let active = match super::terse::decode(tail[1].1).as_ref() {
             "yes" => true,
             "no" => false,
             _ => continue,
         };
-        let uuid = fields[n - 1].trim().to_string();
+        let uuid_value = super::terse::decode(tail[2].1);
+        let uuid = uuid_value.trim();
         if uuid.is_empty() {
             continue;
         }
-        out.push(NmConnection { name, kind, active, uuid });
+        let name = super::terse::decode(&line[..tail[0].0 - 1]).into_owned();
+        out.push(NmConnection { name, kind, active, uuid: uuid.to_string() });
     }
     out
 }
@@ -386,5 +387,21 @@ lo:loopback:yes:9c25c879-aab5-40d0-a50d-ddd0f17922a7
         assert_eq!(split_terse("back\\\\slash:x"), vec!["back\\slash", "x"]);
         assert_eq!(split_terse(""), vec![""]);
         assert_eq!(split_terse("trailing:"), vec!["trailing", ""]);
+    }
+
+    #[test]
+    fn escaped_device_fields_do_not_shift_the_connection_tail() {
+        assert_eq!(parse_devices(r"wl\an0:wi\fi:connec\ted:Lab\:5G:Wing"), vec![NmDevice {
+            name: "wlan0".into(), kind: DeviceKind::Wifi,
+            state: DeviceState::Connected, connection: "Lab:5G:Wing".into(),
+        }]);
+    }
+
+    #[test]
+    fn connection_tail_selection_preserves_escaped_and_raw_name_colons() {
+        assert_eq!(parse_connections(r"Lab\:5G:North:802-11-wire\less:y\es: id\:value "), vec![NmConnection {
+            name: "Lab:5G:North".into(), kind: ConnKind::Wifi,
+            active: true, uuid: "id:value".into(),
+        }]);
     }
 }

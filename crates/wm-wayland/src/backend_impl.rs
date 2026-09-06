@@ -1001,6 +1001,7 @@ impl Backend for WaylandBackend {
             return;
         };
         let resized = record.content.size != size;
+        tracing::trace!(?window, previous = ?record.content.size, ?size, "staging client resize");
         record.content.size = size;
         let mut configure_owed = false;
         let mut popup_root = None;
@@ -1441,11 +1442,15 @@ impl Backend for WaylandBackend {
         // every press AND release to `wm-core` (as KeyPress/KeyRelease)
         // and none to clients — same effect as the X11 active grab,
         // with no server round-trip to fail.
-        self.keyboard_grabbed = true;
+        if !std::mem::replace(&mut self.keyboard_grabbed, true) {
+            self.keyboard_grab_changed = true;
+        }
     }
 
     fn ungrab_keyboard(&mut self) {
-        self.keyboard_grabbed = false;
+        if std::mem::take(&mut self.keyboard_grabbed) {
+            self.keyboard_grab_changed = true;
+        }
     }
 
     fn refresh_client(&mut self, _window: Self::WindowId, _size: Size) {

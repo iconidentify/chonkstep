@@ -615,10 +615,11 @@ fn settle_keyboard(comp: &mut Compositor) {
             // happens to be first.
             let already_inside = keyboard
                 .current_focus()
-                .is_some_and(|focus| !comp.focus_grab.escapes(Some(&focus), None));
+                .is_some_and(|focus| !comp.focus_grab.escapes(Some(focus.surface()), None));
             if already_inside {
                 return;
             }
+            let target = crate::input::keyboard::KeyboardFocus::new(comp, target);
             keyboard.set_focus(comp, Some(target), SERIAL_COUNTER.next_serial());
         }
         None => {
@@ -630,6 +631,7 @@ fn settle_keyboard(comp: &mut Compositor) {
                 return;
             }
             let target = keyboard_fallback(comp);
+            let target = target.map(|surface| crate::input::keyboard::KeyboardFocus::new(comp, surface));
             keyboard.set_focus(comp, target, SERIAL_COUNTER.next_serial());
         }
     }
@@ -645,6 +647,9 @@ fn settle_keyboard(comp: &mut Compositor) {
 /// keyboard past it to a window would silently revoke a claim nobody
 /// released.
 fn keyboard_fallback(comp: &Compositor) -> Option<WlSurface> {
+    if comp.wm.backend().keyboard_grabbed {
+        return None;
+    }
     if let Some(id) = comp.layer_shell.on_demand_focus {
         let record = comp
             .wm

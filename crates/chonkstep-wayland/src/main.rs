@@ -10,6 +10,11 @@
 //! left with exactly the irreducibly process-side jobs: logging setup,
 //! configuration loading, and the exit code.
 
+#[cfg(all(target_os = "linux", feature = "memory-profile"))]
+#[global_allocator]
+static ALLOCATOR: wm_wayland::memory_profile::CountingAllocator =
+    wm_wayland::memory_profile::CountingAllocator;
+
 #[cfg(target_os = "linux")]
 /// Answers `--version` and `-V` before anything else starts.
 ///
@@ -27,6 +32,8 @@ fn print_version_and_exit_if_asked() {
     }
     println!("{} {}", env!("CARGO_PKG_NAME"), env!("CARGO_PKG_VERSION"));
     println!("source: {}", chonk_build_info::SOURCE_ID);
+    #[cfg(feature = "memory-profile")]
+    println!("diagnostics: memory-profile (allocation counters enabled; not a timing baseline)");
     match chonk_build_info::current_elf_build_id() {
         Ok(build_id) => println!("build id: {build_id}"),
         Err(error) => println!("build id: unavailable ({error})"),
@@ -93,6 +100,8 @@ fn main() {
         .with(filter)
         .with(tracing_subscriber::fmt::layer())
         .init();
+    #[cfg(feature = "memory-profile")]
+    tracing::warn!("memory-profile diagnostic build: allocation accounting is enabled; do not use for timing claims");
     let _ = wm_wayland::install_log_filter_reloader(move |directive| {
         let filter = tracing_subscriber::EnvFilter::try_new(directive)
             .map_err(|error| format!("invalid tracing filter: {error}"))?;

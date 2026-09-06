@@ -4,6 +4,7 @@ Run with: python3 -m unittest discover -s scripts/tests -v
 """
 
 import contextlib
+import hashlib
 import importlib.util
 import io
 import os
@@ -104,6 +105,21 @@ class WaylandReadinessTests(unittest.TestCase):
 
 
 class IsolationTests(unittest.TestCase):
+    def test_profiled_binary_cannot_supply_timing_measurements(self):
+        version = "chonkstep test\ndiagnostics: memory-profile (allocation counters enabled; not a timing baseline)"
+        with mock.patch.object(bench, "command_output", return_value=version):
+            with self.assertRaisesRegex(ValueError, "uninstrumented binary"):
+                bench.binary_metadata(Path("/not-even-opened"))
+
+    def test_ordinary_binary_metadata_preserves_version_and_hash(self):
+        path = Path(__file__)
+        with mock.patch.object(bench, "command_output", return_value="chonkstep test"):
+            metadata = bench.binary_metadata(path)
+        self.assertEqual(metadata, {
+            "path": str(path), "version": "chonkstep test",
+            "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+        })
+
     def test_child_context_reaps_its_process_when_measurement_raises(self):
         with tempfile.TemporaryDirectory(prefix="chonk-bench-test-") as temporary:
             with self.assertRaisesRegex(ValueError, "fixture failure"):

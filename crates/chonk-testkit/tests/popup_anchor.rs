@@ -98,6 +98,7 @@ fn chromium_popup_without_a_new_anchor_is_dismissed_on_parent_resize() {
             env: vec![
                 ("WAYLAND_DEBUG".to_string(), "server".to_string()),
                 ("CHONKSTEP_HYPRLAND_IPC".to_string(), "1".to_string()),
+                ("RUST_LOG".to_string(), "info,wm_wayland::xdg=trace,wm_wayland::backend_impl=trace".to_string()),
             ],
             config_extra: "show_dock = false\n".to_string(),
             ..SessionOptions::default()
@@ -188,7 +189,7 @@ fn chromium_popup_without_a_new_anchor_is_dismissed_on_parent_resize() {
         let resized = session.world().ok()?.window_matching("hromium")?.clone();
         (resized.w != window.w || resized.h != window.h).then_some(())
     })
-    .unwrap();
+    .unwrap_or_else(|error| panic!("{error}; original={window:?}; current={:?}\n{}", session.world(), session.log()));
     poll_until(
         EVENT,
         "the compositor to dismiss the now-unanchored popup",
