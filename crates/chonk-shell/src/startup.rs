@@ -238,12 +238,25 @@ impl SessionState {
     /// — a reload that resolved by different rules than the startup it
     /// replaces would make "restart to be sure" true again.
     pub fn resolve(config: &Config) -> Self {
+        Self::resolve_with_scale_default(config, 1.0)
+    }
+
+    /// Resolves the session like [`Self::resolve`], but uses
+    /// `scale_default` when neither the environment nor the config
+    /// carries a valid explicit scale.
+    ///
+    /// Wayland supplies the primary output's automatically detected
+    /// scale here. Live reloads supply the scale already in force so a
+    /// theme-only change cannot quietly turn a 2x desktop back into a
+    /// 1x one. X11 keeps using [`Self::resolve`] and therefore retains
+    /// its historical 1x default.
+    pub fn resolve_with_scale_default(config: &Config, scale_default: f32) -> Self {
         let look = resolve_look(config.theme.as_deref(), config.appearance.as_deref());
         Self {
             base_theme: look.theme,
             appearance: look.appearance,
             following: look.following,
-            scale: read_scale_factor(config.scale),
+            scale: read_scale_factor_with_default(config.scale, scale_default),
             focus: if read_focus_follows_mouse(config.focus_follows_mouse) {
                 FocusPolicy::FocusFollowsMouse
             } else {
@@ -302,7 +315,22 @@ impl SessionState {
 /// because session launchers and dev scripts use it to override a
 /// user's baseline per invocation.
 pub fn read_scale_factor(config_scale: Option<f32>) -> f32 {
-    resolve_scale(std::env::var("CHONKSTEP_SCALE").ok().as_deref(), config_scale)
+    read_scale_factor_with_default(config_scale, 1.0)
+}
+
+/// The valid explicit scale, if either source provides one. This is
+/// the companion to [`read_scale_factor_with_default`] for callers
+/// that need to distinguish "the user requested 1x" from "1x happened
+/// to be the fallback" — notably Wayland's per-output auto-scaler.
+pub fn read_scale_override(config_scale: Option<f32>) -> Option<f32> {
+    resolve_scale_override(std::env::var("CHONKSTEP_SCALE").ok().as_deref(), config_scale)
+}
+
+/// Resolves an explicit scale over a caller-owned default. The default
+/// is validated too: a backend bug must degrade to a usable 1x session,
+/// never feed NaN or a non-positive factor into pixel arithmetic.
+pub fn read_scale_factor_with_default(config_scale: Option<f32>, default: f32) -> f32 {
+    resolve_scale_with_default(std::env::var("CHONKSTEP_SCALE").ok().as_deref(), config_scale, default)
 }
 
 /// Pure core of [`read_scale_factor`]. A value that fails validation -
@@ -311,8 +339,21 @@ pub fn read_scale_factor(config_scale: Option<f32>) -> f32 {
 /// broken config value falls through to 1.0, so a typo degrades to the
 /// next-best answer instead of a garbage scale or a dead session.
 pub fn resolve_scale(env: Option<&str>, config: Option<f32>) -> f32 {
+    resolve_scale_with_default(env, config, 1.0)
+}
+
+/// Pure explicit-source resolver shared by the ordinary and
+/// backend-default scale paths.
+pub fn resolve_scale_override(env: Option<&str>, config: Option<f32>) -> Option<f32> {
     let valid = |s: &f32| s.is_finite() && *s > 0.0;
-    env.and_then(|s| s.trim().parse::<f32>().ok()).filter(valid).or_else(|| config.filter(valid)).unwrap_or(1.0)
+    env.and_then(|s| s.trim().parse::<f32>().ok()).filter(valid).or_else(|| config.filter(valid))
+}
+
+/// Pure core of [`read_scale_factor_with_default`].
+pub fn resolve_scale_with_default(env: Option<&str>, config: Option<f32>, default: f32) -> f32 {
+    resolve_scale_override(env, config).unwrap_or_else(|| {
+        if default.is_finite() && default > 0.0 { default } else { 1.0 }
+    })
 }
 
 /// Whether to switch from click-to-focus to focus-follows-mouse.
@@ -954,6 +995,23 @@ mod tests {
     #[test]
     fn scale_defaults_to_one_with_neither_source() {
         assert_eq!(resolve_scale(None, None), 1.0);
+    }
+    #[test]
+    fn backend_scale_default_survives_a_theme_only_reresolve() {
+        // Wayland detected (or a live monitor action selected) 2x. A
+        // config reload with no scale directive must retain that live
+        // fact instead of injecting the generic 1x default.
+        assert_eq!(resolve_scale_with_default(None, None, 2.0), 2.0);
+    }
+    #[test]
+    fn explicit_scale_still_wins_over_the_backend_default() {
+        assert_eq!(resolve_scale_with_default(None, Some(1.5), 2.0), 1.5);
+        assert_eq!(resolve_scale_with_default(Some("1.25"), Some(1.5), 2.0), 1.25);
+    }
+    #[test]
+    fn invalid_backend_scale_default_degrades_to_one() {
+        assert_eq!(resolve_scale_with_default(None, None, f32::NAN), 1.0);
+        assert_eq!(resolve_scale_with_default(None, None, 0.0), 1.0);
     }
     #[test]
     fn unparseable_env_scale_falls_through_to_config() {

@@ -174,6 +174,43 @@ fn a_session_told_to_follow_omarchy_wears_its_palette_and_re_dresses_when_it_cha
     );
 }
 
+/// Regression for the M1 Air report: Omarchy's monitor panel changed the live
+/// output to 2x, then `omarchy-theme-set` rewrote the followed palette. The
+/// watcher re-resolved a generic session and injected its 1x fallback, making
+/// every theme selection shrink the desktop. No explicit scale is planted in
+/// this fixture: the live output value is therefore the fallback that must
+/// survive the theme-only re-resolution.
+#[test]
+#[ignore = "needs a live Wayland session to nest in: scripts/e2e.sh, or cargo test -p chonk-testkit -- --ignored --test-threads=1"]
+fn an_omarchy_theme_change_retains_the_live_primary_scale() {
+    let mut options = following_options();
+    options.scale = None;
+    let mut session = Session::boot("omarchy-theme-retains-scale", options).unwrap();
+    session.door().set_primary_scale(2.0).unwrap();
+    session.door().barrier().unwrap();
+    assert_eq!(session.world().unwrap().scale, 2.0, "the live monitor change must land before the theme changes");
+
+    // More than the one transition needed to reproduce it: alternate
+    // sixteen real file-watcher cycles so this release carries a short
+    // deterministic soak of the exact interaction, not a lucky sample.
+    for cycle in 0..16 {
+        let (directory, colors, expected) = if cycle % 2 == 0 {
+            ("catppuccin-latte", CATPPUCCIN_LATTE, "Omarchy (Catppuccin Latte)")
+        } else {
+            ("tokyo-night", TOKYO_NIGHT, "Omarchy (Tokyo Night)")
+        };
+        omarchy_sets_theme(&session, directory, colors);
+        poll_until(Duration::from_secs(30), "the Omarchy theme to change without shrinking the desktop", || {
+            let world = session.door().windows().ok()?;
+            (world.theme.name == expected && world.scale == 2.0).then_some(())
+        })
+        .unwrap_or_else(|error| {
+            panic!("{error}; cycle {cycle}; live state: {:?}", session.door().windows().ok())
+        });
+    }
+    assert!(session.compositor_alive(), "the theme/scale transition killed the compositor");
+}
+
 #[test]
 #[ignore = "needs a live Wayland session to nest in: scripts/e2e.sh, or cargo test -p chonk-testkit -- --ignored --test-threads=1"]
 fn an_appearance_request_is_declined_while_following_omarchy() {

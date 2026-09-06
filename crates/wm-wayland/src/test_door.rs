@@ -65,6 +65,7 @@
 //! | `touch up SLOT` | release a touch slot |
 //! | `touch cancel\|frame` | cancel the touch sequence or finish its input frame |
 //! | `key CODE press\|release` | keyboard key by *evdev* keycode (`KEY_*` from input-event-codes.h; the xkb +8 offset is applied here) |
+//! | `primary-scale FACTOR` | changes the live primary-output scale through the production IPC mutation path |
 //! | `repeat` | replies with the held compositor-binding repeat count and interval, or `repeat none` |
 //! | `activation-tokens` | replies with the number of retained xdg-activation tokens |
 //! | `protocol-ledgers` | replies with retained input-method popup, idle-inhibitor object, and lock-surface counts |
@@ -448,6 +449,19 @@ fn handle_command(line: &str, stream: &mut UnixStream, comp: &mut Compositor) {
         let _ = stream.write_all(format!("err {reason}\n").as_bytes());
     };
     match words.next() {
+        Some("primary-scale") => {
+            let Some(Ok(scale)) = words.next().map(str::parse::<f64>) else {
+                reply_err(stream, "primary-scale wants a numeric FACTOR");
+                return;
+            };
+            let Some(name) = comp.outputs.first().map(|entry| entry.output.name()) else {
+                reply_err(stream, "primary-scale needs a connected output");
+                return;
+            };
+            if !comp.set_output_scale(&name, scale) {
+                reply_err(stream, "primary-scale FACTOR must be between 0.5 and 4");
+            }
+        }
         Some("touch") => {
             let action = words.next();
             let event = match action {

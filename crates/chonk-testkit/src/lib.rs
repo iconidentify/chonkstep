@@ -1410,6 +1410,12 @@ impl Door {
         self.send(&format!("key {code} {}", if pressed { "press" } else { "release" }))
     }
 
+    /// Change the live primary-output scale through the same compositor
+    /// method Hyprland IPC and output-management clients use.
+    pub fn set_primary_scale(&mut self, scale: f64) -> Result<(), String> {
+        self.send(&format!("primary-scale {scale}"))
+    }
+
     /// A full tap: press, settle, release, settle — the two edges in
     /// different dispatch passes, the way a human's land.
     pub fn tap_key(&mut self, code: u32) -> Result<(), String> {

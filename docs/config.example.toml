@@ -169,15 +169,18 @@
 # UI scale factor for HiDPI displays: multiplies every pixel dimension
 # in the window chrome, dock, cursors, and terminal font as one system.
 # The CHONKSTEP_SCALE environment variable, when set to a valid value,
-# wins over this. Defaults to 1.0 when neither is set. Must be a finite
-# number greater than zero; an invalid value falls through to the next
-# source rather than breaking startup.
+# wins over this. When neither is set, Wayland automatically selects a
+# per-output scale from physical DPI (and recognizes high-resolution internal
+# laptop panels even when their driver omits physical dimensions); X11
+# defaults to 1.0. Must be a finite number greater than zero; an invalid value
+# falls through to the next source rather than breaking startup.
 #
 # Applied by a reload, live. Two things do not follow, both because
 # they are read by other processes at the moment those processes start:
 # an application already running keeps the font size and the cursor
 # size it was launched with. Anything launched after the reload gets
-# the new scale.
+# the new scale. A theme-only reload retains the detected or live monitor
+# scale instead of replacing it with 1.0.
 #scale = 2.0
 
 # Theme to start in. One of the built-in theme ids:

@@ -240,8 +240,9 @@ lock_command = "swaylock"
 Every edit applies to the running session without restarting anything:
 run `scripts/reload.sh` (`/usr/lib/chonkstep/reload.sh` from the
 package), or bind the `reload` action to a key and the config applies
-itself from the keyboard. On a HiDPI display, `scale = 2.0` scales the
-chrome, dock, cursors and terminal font as one system — also live.
+itself from the keyboard. Wayland detects HiDPI outputs automatically;
+`scale = 2.0` is the explicit override and scales the chrome, dock, cursors
+and terminal font as one system — also live and retained across theme changes.
 
 ## 5. Theming
 

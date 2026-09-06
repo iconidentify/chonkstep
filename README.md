@@ -152,8 +152,11 @@ and the release history in [CHANGELOG.md](CHANGELOG.md).
   compositor. The window manager creates 32-bit ARGB frames so client
   alpha survives reparenting - any translucent app works, not just the
   terminal.
-- **HiDPI scaling, changed live.** `scale` in the config file (or
-  `CHONKSTEP_SCALE`) scales every piece of chrome - titlebars, buttons,
+- **HiDPI scaling, detected automatically and changed live.** The Wayland
+  session selects a per-output scale from the panel's DPI by default, with a
+  conservative resolution fallback for internal laptop panels whose driver
+  omits physical dimensions. `scale` in the config file (or
+  `CHONKSTEP_SCALE`) overrides that detection and scales every piece of chrome - titlebars, buttons,
   bevels, cursors, glyphs - as one system, and `scripts/reload.sh`
   applies a new value to the running session: the chrome re-lays-out,
   the dock and Clip re-measure, the pointer cursors are redrawn, and
@@ -457,9 +460,10 @@ desktop's frame - every `org.omarchy.*` class Omarchy invents,
 without a list naming any of them. `[decorations] client_side` in the
 config is the opt-out for a window whose bare surface is the point.
 
-On a HiDPI display, set `scale = 2.0` in
-`~/.config/chonkstep/config.toml` - it scales chrome, dock, cursors,
-and the terminal font as one system.
+Wayland detects HiDPI outputs automatically. To override it, set
+`scale = 2.0` in `~/.config/chonkstep/config.toml`; it scales chrome,
+dock, cursors, and the terminal font as one system and remains in force across
+Omarchy theme changes.
 
 Nothing is copied out of the repository, so updating is:
 
@@ -654,8 +658,8 @@ with the layer that last wrote each one. The commands are identical on
 `chonkstep-wayland`.
 
 The settings, each documented in full in that file: `focus_follows_mouse`
-(click-to-focus by default), `scale` (HiDPI UI scaling; the
-`CHONKSTEP_SCALE` environment variable overrides it), `theme` (a theme
+(click-to-focus by default), `scale` (an override for Wayland's automatic
+per-output HiDPI scaling; `CHONKSTEP_SCALE` overrides it), `theme` (a theme
 picked live from the root menu is persisted and wins over it),
 `appearance` (`"light"` or `"dark"` - the axis every theme has two
 renditions along; the running session's own persisted mode wins after

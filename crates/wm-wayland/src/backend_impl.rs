@@ -1574,11 +1574,21 @@ impl Backend for WaylandBackend {
             modal,
         } = state;
         let _ = shaded;
-        self.ewmh.note_window_modal(window, modal);
         let Some(record) = self.windows.get_mut(&window) else {
             return;
         };
+        let modal_changed = record.modal != modal;
         record.modal = modal;
+        // The auxiliary EWMH connection has to own modal because smithay
+        // exposes no setter for it, but changing that atom is necessarily a
+        // read/modify/write of the whole `_NET_WM_STATE` property. Do not do
+        // that for an unchanged value: on minimize/restore it raced the XWM
+        // connection's HIDDEN update and could read the old HIDDEN bit, then
+        // write it back after `set_suspended(false)` had removed it. The live
+        // result was a restored window whose property still claimed hidden.
+        if modal_changed {
+            self.ewmh.note_window_modal(window, modal);
+        }
         let fullscreen_changed = record.fullscreen != fullscreen;
         record.fullscreen = fullscreen;
         let maximized = both_axes_maximized(max_h, max_v);

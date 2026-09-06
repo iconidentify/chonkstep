@@ -299,7 +299,10 @@ The supported transaction is:
   advertised mode list (with measured-refresh tolerance);
 - `auto` position, laid out left-to-right, or an explicit `XxY`;
 - numeric scale from 0.5 through 4, or `auto` from physical DPI
-  (1.0/1.5/2.0 thresholds);
+  (1.0/1.5/2.0 thresholds). With no matching rule and no global ChonkStep
+  scale override, `auto` is also the default, matching current Hyprland and
+  niri behavior. High-resolution internal panels use a conservative
+  resolution fallback when the driver omits physical dimensions;
 - `transform, 0` through `transform, 3` for 0/90/180/270-degree
   clockwise output rotation.
 

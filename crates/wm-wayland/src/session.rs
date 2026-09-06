@@ -227,6 +227,10 @@ struct DisplayIdentity {
     make: String,
     model: String,
     serial: String,
+    /// EDID base-block dimensions, used when the DRM connector object
+    /// omits the same data. Some internal-panel drivers expose the
+    /// blob but leave `connector::Info::size()` empty.
+    physical_mm: Option<(u32, u32)>,
 }
 
 impl DisplayIdentity {
@@ -282,7 +286,13 @@ fn parse_edid_identity(data: &[u8]) -> Option<DisplayIdentity> {
             format!("0x{numeric_serial:08X}")
         }
     });
-    Some(DisplayIdentity { make: pnp_name(&pnp), model, serial })
+    let physical_mm = match (data[21], data[22]) {
+        (width_cm, height_cm) if width_cm > 0 && height_cm > 0 => {
+            Some((u32::from(width_cm) * 10, u32::from(height_cm) * 10))
+        }
+        _ => None,
+    };
+    Some(DisplayIdentity { make: pnp_name(&pnp), model, serial, physical_mm })
 }
 
 /// EDID base-block display descriptors occupy four fixed 18-byte
@@ -1534,8 +1544,15 @@ fn attach_output(
     // `state.rs`'s `run`). A KMS scanout buffer's origin is the
     // screen's, so any transform here would visibly flip the desktop.
     let wl_mode = OutputMode::from(*mode);
-    let (physical_w, physical_h) = info.size().unwrap_or((0, 0));
     let identity = connector_identity(drm.device_fd(), info.handle());
+    let (mut physical_w, mut physical_h) = info.size().unwrap_or((0, 0));
+    if physical_w == 0 || physical_h == 0 {
+        if let Some((edid_w, edid_h)) = identity.as_ref().and_then(|identity| identity.physical_mm) {
+            physical_w = edid_w;
+            physical_h = edid_h;
+            tracing::debug!(output = %name, physical_w, physical_h, "recovered output dimensions from EDID");
+        }
+    }
     let make = identity.as_ref().map(|identity| identity.make.clone()).unwrap_or_else(|| "Unknown".into());
     let model = identity.as_ref().map(|identity| identity.model.clone()).unwrap_or_else(|| name.clone());
     let serial = identity.as_ref().map(|identity| identity.serial.clone()).unwrap_or_default();
@@ -3117,6 +3134,8 @@ mod tests {
         edid[8..10].copy_from_slice(&((4u16 << 10) | (5u16 << 5) | 12).to_be_bytes());
         edid[10..12].copy_from_slice(&0x1234u16.to_le_bytes());
         edid[12..16].copy_from_slice(&0x01020304u32.to_le_bytes());
+        edid[21] = 60;
+        edid[22] = 34;
         edid[54..59].copy_from_slice(&[0, 0, 0, 0xfc, 0]);
         edid[59..72].copy_from_slice(b"DELL U2720Q\n ");
         edid[72..77].copy_from_slice(&[0, 0, 0, 0xff, 0]);
@@ -3130,6 +3149,7 @@ mod tests {
         assert!(identity.make == "Dell Inc." || identity.make == "DEL");
         assert_eq!(identity.model, "DELL U2720Q");
         assert_eq!(identity.serial, "ABC123");
+        assert_eq!(identity.physical_mm, Some((600, 340)));
         assert_eq!(identity.description(), format!("{} DELL U2720Q ABC123", identity.make));
     }
 

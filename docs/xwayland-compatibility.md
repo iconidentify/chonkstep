@@ -420,7 +420,12 @@ client's `WM_CHANGE_STATE` request now enters the same miniaturize and
 restore paths as the compositor's titlebar and shell icon tile. The
 round trip publishes `_NET_WM_STATE_HIDDEN` plus ICCCM `WM_STATE`
 (`IconicState` while hidden, `NormalState` after restore), so toolkits
-that draw their own minimize button see the state they requested.
+that draw their own minimize button see the state they requested. Unchanged
+modal state is not republished during that transition: doing so from the
+compositor's auxiliary X connection used to race smithay's hidden-bit removal
+and intermittently leave an already restored window claiming
+`_NET_WM_STATE_HIDDEN`. The complete mapping/ICCCM/EWMH restore assertion is
+stress-tested across fresh compositor processes.
 
 **Client-initiated resize.** `_NET_WM_MOVERESIZE`'s eight *resize* directions
 are dropped: this window manager's resize machinery is driven by its own

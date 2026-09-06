@@ -1731,9 +1731,22 @@ fn advertise_scales(outputs: &mut [OutputEntry], scales: &[f64]) {
 pub(crate) fn apply_monitor_rules(
     setups: &mut [OutputSetup],
     rules: &[wm_config::hyprland::directive::Monitor],
-    fallback_scale: f64,
+    scale_override: Option<f64>,
 ) -> Vec<f64> {
-    let mut scales = vec![fallback_scale.max(0.125); setups.len()];
+    // Both Hyprland and niri treat an omitted output scale as `auto`.
+    // Do the same: an explicit session scale is the common baseline;
+    // otherwise each output gets its own physical-DPI result. This is
+    // initialized before rules because an omitted rule, and an `auto`
+    // rule whose EDID is incomplete, need the same safe answer.
+    let mut scales = setups
+        .iter()
+        .map(|setup| {
+            scale_override
+                .map(|scale| scale.max(0.125))
+                .or_else(|| automatic_output_scale(&setup.output, setup.size))
+                .unwrap_or(1.0)
+        })
+        .collect::<Vec<_>>();
     let mut auto_x = 0i32;
     let mut changed_position = false;
     for (index, setup) in setups.iter_mut().enumerate() {
@@ -1807,9 +1820,9 @@ pub(crate) fn apply_monitor_rules(
 
         let requested_scale = rule.scale.trim();
         let scale = if requested_scale.is_empty() {
-            fallback_scale
+            scales[index]
         } else if requested_scale.eq_ignore_ascii_case("auto") {
-            automatic_output_scale(&setup.output, new_size).unwrap_or(fallback_scale)
+            automatic_output_scale(&setup.output, new_size).unwrap_or(scales[index])
         } else {
             match requested_scale.parse::<f64>() {
                 Ok(scale) if scale.is_finite() && (0.5..=4.0).contains(&scale) => scale,
@@ -2031,7 +2044,7 @@ pub(crate) fn apply_connector_hotplug(
 
     // Re-read monitor rules on the rare structural change so a docked
     // connector lands at its configured position/scale immediately.
-    let session = chonk_shell::startup::SessionState::resolve(&wm_config::load());
+    let config = wm_config::load();
     let mut setups: Vec<OutputSetup> = comp
         .outputs
         .iter()
@@ -2050,7 +2063,8 @@ pub(crate) fn apply_connector_hotplug(
             vrr_enabled: entry.vrr_enabled,
         })
         .collect();
-    let scales = apply_monitor_rules(&mut setups, &session.monitor_rules, comp.ui_scale as f64);
+    let scale_override = chonk_shell::startup::read_scale_override(config.scale).map(f64::from);
+    let scales = apply_monitor_rules(&mut setups, &config.monitor_rules, scale_override);
     crate::session::apply_output_setups(&mut comp.graphics, &mut setups);
     for ((entry, setup), scale) in comp.outputs.iter_mut().zip(setups).zip(scales) {
         entry.position = setup.position;
@@ -2110,7 +2124,7 @@ fn parse_monitor_position(value: &str) -> Option<Point> {
 fn automatic_output_scale(output: &Output, size: Size) -> Option<f64> {
     let physical = output.physical_properties().size;
     if physical.w <= 0 || physical.h <= 0 {
-        return None;
+        return internal_panel_scale(output.name().as_str(), size);
     }
     let dpi_x = size.w as f64 * 25.4 / physical.w as f64;
     let dpi_y = size.h as f64 * 25.4 / physical.h as f64;
@@ -2118,6 +2132,31 @@ fn automatic_output_scale(output: &Output, size: Size) -> Option<f64> {
     Some(if dpi >= 200.0 {
         2.0
     } else if dpi >= 140.0 {
+        1.5
+    } else {
+        1.0
+    })
+}
+
+/// Conservative fallback for laptop panels whose DRM driver does not
+/// publish physical millimetres. This is common on Apple Silicon's DCP
+/// path: the 2560x1600 M1 Air panel is unmistakably HiDPI, but a zero
+/// millimetre size previously made `auto` collapse to 1x.
+///
+/// External displays deliberately get no resolution-only guess: a 4K
+/// television and a 4K desktop monitor can need very different scales.
+/// Internal connector names are stable kernel ABI (`eDP`, `LVDS`, or
+/// `DSI`), and the thresholds keep ordinary 1080p laptop panels at 1x.
+fn internal_panel_scale(name: &str, size: Size) -> Option<f64> {
+    let internal = name.starts_with("eDP-") || name.starts_with("LVDS-") || name.starts_with("DSI-");
+    if !internal {
+        return None;
+    }
+    let short = size.w.min(size.h);
+    let long = size.w.max(size.h);
+    Some(if short >= 1600 && long >= 2400 {
+        2.0
+    } else if short >= 1200 && long >= 1900 {
         1.5
     } else {
         1.0
@@ -3712,8 +3751,12 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
         let init = crate::session::init(&loop_handle, &display_handle)?;
         (init.graphics, init.outputs)
     };
-    let configured_scale = chonk_shell::startup::read_scale_factor(config.scale) as f64;
-    let monitor_scales = apply_monitor_rules(&mut output_setups, &config.monitor_rules, configured_scale);
+    let scale_override = chonk_shell::startup::read_scale_override(config.scale);
+    let monitor_scales = apply_monitor_rules(
+        &mut output_setups,
+        &config.monitor_rules,
+        scale_override.map(f64::from),
+    );
     crate::session::apply_output_setups(&mut graphics, &mut output_setups);
     let initial_layout: Vec<(Point, Size)> = output_setups.iter().map(|setup| (setup.position, setup.size)).collect();
     crate::session::sync_positions(&mut graphics, &initial_layout);
@@ -3880,13 +3923,9 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
     // the same call the reload below makes, so a session that has been
     // reloaded a dozen times is indistinguishable from one that started
     // where it now stands.
-    let explicit_scale = std::env::var_os("CHONKSTEP_SCALE").is_some() || config.scale.is_some();
-    let mut state = SessionState::resolve(&config);
-    if !explicit_scale {
-        if let Some(primary_scale) = monitor_scales.first() {
-            state.scale = *primary_scale as f32;
-        }
-    }
+    let explicit_scale = scale_override.is_some();
+    let primary_scale = monitor_scales.first().copied().unwrap_or(1.0) as f32;
+    let state = SessionState::resolve_with_scale_default(&config, primary_scale);
     // Kept separately because `state` is handed off to the applier
     // below, and the compositor's own pointer is sized from the scale
     // here (and only here — every later change to it arrives through
@@ -4749,7 +4788,7 @@ mod tests {
             monitor_rule("", "preferred", "auto", "1", &[]),
             monitor_rule("DP-1", "preferred", "-1920x100", "1.5", &[]),
         ];
-        let scales = apply_monitor_rules(&mut setups, &rules, 2.0);
+        let scales = apply_monitor_rules(&mut setups, &rules, Some(2.0));
         assert_eq!(scales, vec![1.5, 1.0]);
         assert_eq!(setups[0].position, Point::new(0, 100));
         assert_eq!(setups[1].position, Point::new(1920, 0));
@@ -4770,7 +4809,7 @@ mod tests {
             monitor_rule(&format!("desc:{description}"), "preferred", "0x0", "2", &[]),
         ];
 
-        let scales = apply_monitor_rules(&mut setups, &rules, 1.0);
+        let scales = apply_monitor_rules(&mut setups, &rules, Some(1.0));
         assert_eq!(scales, vec![1.0, 2.0]);
         assert_eq!(setups[1].position, Point::new(0, 0));
     }
@@ -4779,7 +4818,7 @@ mod tests {
     fn monitor_rotation_is_applied_as_part_of_the_whole_line() {
         let mut setups = vec![output_setup("DP-1", (600, 340), Size::new(1920, 1080), Point::new(77, 88))];
         let rules = vec![monitor_rule("DP-1", "preferred", "0x0", "2", &["transform", "1"])];
-        let scales = apply_monitor_rules(&mut setups, &rules, 1.25);
+        let scales = apply_monitor_rules(&mut setups, &rules, Some(1.25));
         assert_eq!(scales, vec![2.0]);
         assert_eq!(setups[0].position, Point::new(0, 0));
         assert_eq!(setups[0].size, Size::new(1080, 1920));
@@ -4792,7 +4831,7 @@ mod tests {
         let original = Point::new(77, 88);
         let mut setups = vec![output_setup("DP-1", (600, 340), Size::new(1920, 1080), original)];
         let rules = vec![monitor_rule("DP-1", "preferred", "0x0", "2", &["cm", "srgb"])];
-        let scales = apply_monitor_rules(&mut setups, &rules, 1.25);
+        let scales = apply_monitor_rules(&mut setups, &rules, Some(1.25));
         assert_eq!(scales, vec![1.25]);
         assert_eq!(setups[0].position, original, "position was not partially applied");
         assert_eq!(setups[0].size, Size::new(1920, 1080));
@@ -4812,12 +4851,12 @@ mod tests {
         ]);
         let mut setups = vec![setup];
         let rules = vec![monitor_rule("DP-1", "2560x1440@144", "auto", "1", &[])];
-        assert_eq!(apply_monitor_rules(&mut setups, &rules, 1.0), vec![1.0]);
+        assert_eq!(apply_monitor_rules(&mut setups, &rules, Some(1.0)), vec![1.0]);
         assert_eq!(setups[0].size, Size::new(2560, 1440));
         assert_eq!(setups[0].requested_mode, Some(2));
 
         let rules = vec![monitor_rule("DP-1", "highres", "auto", "1", &[])];
-        apply_monitor_rules(&mut setups, &rules, 1.0);
+        apply_monitor_rules(&mut setups, &rules, Some(1.0));
         assert_eq!(setups[0].size, Size::new(3840, 2160));
         assert_eq!(setups[0].requested_mode, Some(3));
     }
@@ -4828,6 +4867,25 @@ mod tests {
         assert_eq!(automatic_output_scale(&hidpi.output, hidpi.size), Some(2.0));
         let unknown = output_setup("virtual", (0, 0), Size::new(1920, 1080), Point::new(0, 0));
         assert_eq!(automatic_output_scale(&unknown.output, unknown.size), None);
+    }
+
+    #[test]
+    fn m1_air_panel_is_hidpi_even_when_drm_omits_physical_size() {
+        let panel = output_setup("eDP-1", (0, 0), Size::new(2560, 1600), Point::new(0, 0));
+        assert_eq!(automatic_output_scale(&panel.output, panel.size), Some(2.0));
+
+        let ordinary = output_setup("eDP-1", (0, 0), Size::new(1920, 1080), Point::new(0, 0));
+        assert_eq!(automatic_output_scale(&ordinary.output, ordinary.size), Some(1.0));
+
+        let external = output_setup("HDMI-A-1", (0, 0), Size::new(3840, 2160), Point::new(0, 0));
+        assert_eq!(automatic_output_scale(&external.output, external.size), None);
+    }
+
+    #[test]
+    fn missing_monitor_rule_uses_automatic_scale_without_a_global_override() {
+        let mut setups = vec![output_setup("eDP-1", (0, 0), Size::new(2560, 1600), Point::new(0, 0))];
+        assert_eq!(apply_monitor_rules(&mut setups, &[], None), vec![2.0]);
+        assert_eq!(apply_monitor_rules(&mut setups, &[], Some(1.0)), vec![1.0]);
     }
 
     // -- the resize cursors ------------------------------------------

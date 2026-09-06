@@ -1506,7 +1506,17 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
     /// Omarchy's theme changes. One function so the two cannot resolve
     /// by different rules.
     fn reresolve(&mut self, wm: &mut WindowManager<B>) {
-        self.apply_session_state(wm, SessionState::resolve(&wm_config::load()));
+        self.apply_session_state(wm, self.resolve_live_config());
+    }
+
+    /// Resolve a live configuration edit without forgetting the
+    /// output scale already in force. Startup owns automatic monitor
+    /// detection; after that, the running primary scale is the correct
+    /// fallback whenever neither `CHONKSTEP_SCALE` nor `scale` is an
+    /// explicit override. This also retains a scale selected through
+    /// Omarchy's monitor UI across its subsequent theme-file rewrite.
+    fn resolve_live_config(&self) -> SessionState {
+        SessionState::resolve_with_scale_default(&wm_config::load(), self.state.scale)
     }
 
     /// Re-read the complete configuration and remember that IPC
@@ -2598,7 +2608,7 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
                 if let Err(e) = theme_select::persist(id) {
                     tracing::warn!(?e, id, "failed to persist theme selection");
                 }
-                let next = SessionState::resolve(&wm_config::load());
+                let next = self.resolve_live_config();
                 self.adopt_wallpaper_of(wm, &next.base_theme);
                 self.apply_session_state(wm, next);
             }

@@ -582,15 +582,22 @@ fn xwayland_wm_change_state_minimizes_and_restores() {
     assert!(hidden.windows.iter().any(|window| window.id == managed.id && !window.mapped));
 
     send_state(1); // ICCCM NormalState.
+    let mut last_restore_state = None;
     poll_until(EVENT, "the X11 window to return to NormalState", || {
         let world = session.world().ok()?;
         let window = world.windows.iter().find(|window| window.id == managed.id)?;
         let state = property_values(&conn, xid, wm_state, wm_state);
         let net_state = property_values(&conn, xid, net_wm_state, AtomEnum::ATOM.into());
+        last_restore_state = Some((window.mapped, state.clone(), net_state.clone()));
         (window.mapped && state.first() == Some(&1) && !net_state.contains(&net_wm_state_hidden))
             .then_some(())
     })
-    .expect("NormalState restores and clears the published hidden state");
+    .unwrap_or_else(|error| {
+        panic!(
+            "NormalState restore failed: {error}; last observed mapped/WM_STATE/_NET_WM_STATE = {last_restore_state:?}; compositor log:\n{}",
+            session.log()
+        )
+    });
 }
 
 // ---------------------------------------------------------------------

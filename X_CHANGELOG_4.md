@@ -3,6 +3,12 @@
 We just completed a deep pass over input, clipboard, gaming, memory, startup
 work and the Rust architecture behind ChonkStep:
 
+- Fresh Wayland installs now auto-detect output scale by default. The
+  2560x1600 M1 MacBook Air panel selects 2x even when the DRM driver reports no
+  physical dimensions, and changing an Omarchy theme no longer resets a live
+  2x choice to 1x. A nested-compositor regression held 2x through 16
+  consecutive alternating Omarchy theme changes; explicit config/environment
+  overrides still win.
 - Microsoft Edge text selection is now correct at 1x, 1.5x and 2x scale,
   windowed and fullscreen. The unchanged compositor reproduced the misplaced
   caret at both fractional and 2x scale; the fixed build passes the full real
@@ -38,7 +44,10 @@ work and the Rust architecture behind ChonkStep:
   build delivers the exact requested geometry in 16/16 rounds.
 - X11 lifecycle handling is substantially tougher: first-key focus and repeat,
   withdraw/remap identity, client teardown, selection cancellation and
-  generation-safe XWayland restart all have real-session coverage.
+  generation-safe XWayland restart all have real-session coverage. We also
+  removed a two-X-connection property race that could leave a restored window
+  claiming `_NET_WM_STATE_HIDDEN`; the exact minimize/restore round trip then
+  passed 100 consecutive fresh optimized compositor boots.
 - Chonkcraft menu clicks and geometry now have a real 1x/1.5x/2x windowed and
   fullscreen compatibility matrix. Both old and new builds pass, so we gained
   a permanent gaming guardrail without pretending we reproduced the historical
@@ -57,14 +66,15 @@ work and the Rust architecture behind ChonkStep:
 - CI now distinguishes requested fullscreen geometry from the pixels a client
   has actually committed, eliminating a real Chromium presentation race with
   an observable frame fence instead of sleeps, retries or weaker assertions.
-- The frozen optimized binary finishes a final 199-case nested release suite
+- The frozen optimized binary finishes a final 200-case nested release suite
   plus all three installed-Omarchy checks with no skipped clients.
 
 How we tested: matched 7,202-second baseline/candidate lifecycle soaks, 59,089
 combined churn cycles, paired 60-second startup/idle samples, 14 byte-verified
-clipboard trials, a 306-second allocation-profile pair, and a final 202-case
-nested/installed-Omarchy release gate. Raw samples, screenshots, executable
-hashes and known limitations are preserved.
+clipboard trials, a 306-second allocation-profile pair, and a final 203-case
+nested/installed-Omarchy release gate, plus a 100-process XWayland
+minimize/restore stress gate. Raw samples, screenshots, executable hashes and
+known limitations are preserved.
 
 The complete raw logs, immutable binary hashes, before/after tables and known
 limits are preserved in the repository. These results come from controlled

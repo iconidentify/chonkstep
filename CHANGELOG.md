@@ -14,6 +14,15 @@ regressions instead of retries or timing sleeps.
 
 ### Fixed
 
+- Fresh Wayland sessions now auto-select per-output DPI scaling when no scale
+  override exists. A 2560x1600 M1 MacBook Air panel selects 2x even when its
+  DRM driver omits physical dimensions, while ordinary 1080p laptop panels
+  remain at 1x and ambiguous external displays are not guessed from resolution
+  alone.
+- Omarchy theme changes and live config reloads now retain the detected or
+  manually selected primary-output scale instead of rebuilding the session
+  with the generic 1x fallback. Explicit `scale` and `CHONKSTEP_SCALE`
+  overrides continue to win.
 - Microsoft Edge and Chromium text selection now lands on the intended caret
   at 1x, 1.5x and 2x output scale in both windowed and fullscreen modes.
 - Native Wayland and X11 held-key repeat now survives focus transitions,
@@ -36,6 +45,10 @@ regressions instead of retries or timing sleeps.
 - X11 window identity and input focus survive withdraw/remap cycles; destroyed
   clients no longer leave stale window records, selection transfers or repeat
   state behind.
+- XWayland minimize/restore no longer lets an unchanged modal-state publish
+  race the hidden-state removal and resurrect `_NET_WM_STATE_HIDDEN` on an
+  already restored window. The exact ICCCM/EWMH round trip passed 100
+  consecutive fresh optimized-compositor sessions after the fix.
 - X11 autostart receives ChonkStep's reserved XWayland display, GLES 2 capture
   uses a compatible readback path, and offscreen capture restores the correct
   nested EGL surface and buffer-age state.
@@ -75,9 +88,12 @@ regressions instead of retries or timing sleeps.
 - Startup and idle guardrails use seven alternating samples per executable and
   60-second measurement windows. Clipboard backpressure uses seven alternating
   before/after pairs, resumes every consumer and validates every payload byte.
-- The frozen release executable passed 199 nested end-to-end cases plus all
+- The frozen release executable passed 200 nested end-to-end cases plus all
   three installed-Omarchy checks with no skipped clients, including real Edge,
-  Chromium and isolated Chonkcraft matrices.
+  Chromium and isolated Chonkcraft matrices, plus 16 consecutive live
+  Omarchy-theme transitions at a retained 2x scale. Release qualification also
+  ran the formerly intermittent XWayland minimize/restore round trip through
+  100 fresh optimized compositor processes without a failure.
 - These results do not claim a matched Hyprland victory, native DRM/KMS frame
   timing, game FPS improvement or universal hardware coverage. Full commands,
   raw samples, hashes and limitations are in `docs/engineering/2026-09-05/`.
