@@ -21,6 +21,13 @@ struct Label {
     buffer: Option<MemoryRenderBuffer>,
     size: Size,
 }
+
+struct Workspace {
+    rect: Rect,
+    label: Label,
+    close: Option<(Rect, Label)>,
+    background: Id,
+}
 impl Label {
     fn new(buffer: DecorationBuffer) -> Self {
         Self {
@@ -44,7 +51,7 @@ pub(crate) struct Overview {
     pub surface: WlShellId,
     pub geometry: Rect,
     pub windows: Vec<Window>,
-    spaces: Vec<(Rect, Label, Id)>,
+    spaces: Vec<Workspace>,
     pub selected: usize,
     workspace: usize,
     gap: u32,
@@ -93,7 +100,12 @@ impl Overview {
             spaces: scene
                 .spaces
                 .into_iter()
-                .map(|(rect, label)| (rect, Label::new(label), Id::new()))
+                .map(|space| Workspace {
+                    rect: space.rect,
+                    label: Label::new(space.label),
+                    close: space.close.map(|(rect, glyph)| (rect, Label::new(glyph))),
+                    background: Id::new(),
+                })
                 .collect(),
             ring: std::array::from_fn(|_| Id::new()),
             space_ring: std::array::from_fn(|_| Id::new()),
@@ -111,7 +123,8 @@ impl Overview {
         self.windows
             .iter()
             .map(|w| &w.label)
-            .chain(self.spaces.iter().map(|(_, l, _)| l))
+            .chain(self.spaces.iter().map(|space| &space.label))
+            .chain(self.spaces.iter().filter_map(|space| space.close.as_ref().map(|(_, glyph)| glyph)))
             .map(|l| l.size.w as usize * l.size.h as usize * 4)
             .sum()
     }
@@ -239,15 +252,26 @@ pub(crate) fn render(
             Color32F::new(0.0, 0.0, 0.0, 0.28),
         );
     }
-    for (i, (rect, caption, id)) in overview.spaces.iter().enumerate() {
-        let rect = local(*rect);
-        label(elements, renderer, caption, rect, edge * 2);
+    for (i, space) in overview.spaces.iter().enumerate() {
+        let rect = local(space.rect);
+        if let Some((close, glyph)) = &space.close {
+            let close = local(*close);
+            if let Some(buffer) = &glyph.buffer {
+                if let Ok(element) = MemoryRenderBufferRenderElement::from_buffer(
+                    renderer, (close.pos.x as f64, close.pos.y as f64), buffer,
+                    None, None, None, Kind::Unspecified,
+                ) {
+                    elements.push(element.into());
+                }
+            }
+        }
+        label(elements, renderer, &space.label, rect, edge * 2);
         if i == overview.workspace {
             outline(elements, &overview.space_ring, rect, edge);
         }
-        space_background(elements, renderer, backend, overview.geometry, rect, id);
+        space_background(elements, renderer, backend, overview.geometry, rect, &space.background);
     }
-    if let Some((rect, caption, _)) = overview.spaces.first() {
+    if let Some(space) = overview.spaces.first() {
         solid(
             elements,
             &overview.band,
@@ -255,7 +279,7 @@ pub(crate) fn render(
                 offset,
                 Size::new(
                     overview.geometry.size.w,
-                    rect.pos.y as u32 + rect.size.h + caption.size.h + overview.gap,
+                    space.rect.pos.y as u32 + space.rect.size.h + space.label.size.h + overview.gap,
                 ),
             ),
             Color32F::new(0.0, 0.0, 0.0, 0.3),

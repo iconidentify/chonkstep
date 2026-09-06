@@ -290,8 +290,8 @@ pub struct WindowManager<B: Backend> {
     raise_on_focus: bool,
     /// 0-based, matching `Client::workspace`. Grows on demand up to
     /// [`MAX_WORKSPACES`] the first time something switches to or moves
-    /// a client onto an index past the current row's end. There is no
-    /// way to destroy a workspace once created, the classic behavior.
+    /// a client onto an index past the current row's end. Removing a
+    /// workspace compacts memberships and retains at least one desktop.
     current_workspace: usize,
     workspace_count: usize,
     /// An in-progress Alt-Tab switcher session: the snapshot of cycle
@@ -1155,9 +1155,68 @@ impl<B: Backend> WindowManager<B> {
         self.workspace_count
     }
 
+    /// Includes minimized windows, but not withdrawn clients awaiting remap.
+    pub fn workspace_has_windows(&self, workspace: usize) -> bool {
+        self.clients.values().any(|client| {
+            client.workspace == workspace
+                && matches!(client.lifecycle, Lifecycle::Normal | Lifecycle::Miniaturized)
+        })
+    }
+
+    /// Removes a desktop without closing applications. Its windows join the
+    /// preceding desktop (the next one when removing the first); later desktop
+    /// indices compact. The active desktop and focused window survive this
+    /// renumbering, and the last remaining desktop cannot be removed.
+    pub fn remove_workspace(&mut self, workspace: usize) -> bool {
+        if self.workspace_count <= 1 || workspace >= self.workspace_count {
+            return false;
+        }
+        let remap = |index: usize| {
+            if index == workspace {
+                workspace.saturating_sub(1)
+            } else {
+                index - usize::from(index > workspace)
+            }
+        };
+        let previous = self.current_workspace;
+        self.current_workspace = remap(previous);
+        self.workspace_count -= 1;
+        let mut revealed = Vec::new();
+        for (id, client) in &mut self.clients {
+            let old = client.workspace;
+            client.workspace = remap(old);
+            if client.workspace != old {
+                self.backend.publish_window_desktop(client.window, client.workspace);
+            }
+            // Visible windows stay visible under this merge. Only the newly
+            // joined windows need mapping; minimized/withdrawn clients retain
+            // their lifecycle, and sticky windows were already on screen.
+            if client.lifecycle == Lifecycle::Normal
+                && !client.flags.contains(ClientFlags::STICKY)
+                && old != previous
+                && client.workspace == self.current_workspace
+            {
+                revealed.push(id);
+            }
+        }
+        self.bump_protocol_state_revision();
+        self.backend.publish_workspaces(self.workspace_count, self.current_workspace);
+        self.publish_workarea_union();
+        for id in revealed {
+            self.show_client_surface(id);
+            self.repaint_decoration(id);
+        }
+        if self.focused.is_none() {
+            if let Some(next) = self.focus_successor(None) {
+                self.focus_client(next);
+            }
+        }
+        tracing::info!(workspace, count = self.workspace_count, "removed workspace");
+        true
+    }
+
     /// Switches to `workspace`, growing the workspace row on demand up
-    /// to [`MAX_WORKSPACES`] (there is no way to destroy a workspace
-    /// once created). Every *mapped* client not on
+    /// to [`MAX_WORKSPACES`]. Every *mapped* client not on
     /// the target workspace gets its frame unmapped; every mapped
     /// client that IS on it gets remapped. Miniaturized/withdrawn
     /// clients are left alone entirely — their icon tile (a
@@ -5055,6 +5114,112 @@ mod tests {
         wm.switch_workspace(3);
 
         assert_eq!(wm.workspace_count(), 4, "switching to index 3 means 4 workspaces (0..=3) now exist");
+    }
+
+    #[test]
+    fn removing_any_workspace_preserves_focus_windows_and_compacts_memberships() {
+        for removed in 0..4 {
+            for active in 0..4 {
+                let mut wm = wm(FakeBackend::new());
+                let mut ids = Vec::new();
+                for workspace in 0..4 {
+                    wm.switch_workspace(workspace);
+                    let window = wm.backend_mut().create_window();
+                    wm.dispatch(BackendEvent::MapRequest(window));
+                    ids.push(wm.client_for_window(window).unwrap());
+                }
+                let window = wm.backend_mut().create_window();
+                wm.dispatch(BackendEvent::MapRequest(window));
+                let minimized = wm.client_for_window(window).unwrap();
+                wm.miniaturize(minimized);
+                wm.move_client_to_workspace(minimized, removed);
+                let mini_frame = wm.client(minimized).unwrap().frame.unwrap();
+                wm.switch_workspace(active);
+                wm.focus_client(ids[active]);
+                let before = wm.clients.len();
+                wm.backend_mut().mapped_frames.clear();
+                wm.backend_mut().unmapped_frames.clear();
+
+                assert!(wm.remove_workspace(removed));
+                let expected = |index: usize| if index == removed {
+                    removed.saturating_sub(1)
+                } else {
+                    index - usize::from(index > removed)
+                };
+                assert_eq!(wm.workspace_count(), 3);
+                assert_eq!(wm.current_workspace(), expected(active));
+                assert_eq!(wm.focused_client(), Some(ids[active]));
+                assert_eq!(wm.clients.len(), before, "closing a desktop never closes an application");
+                for (old, id) in ids.iter().enumerate() {
+                    let client = wm.client(*id).unwrap();
+                    assert_eq!(client.workspace, expected(old));
+                    let newly_visible = old != active && expected(old) == expected(active);
+                    assert_eq!(wm.backend().mapped_frames.contains(&client.frame.unwrap()), newly_visible);
+                    if old != expected(old) {
+                        assert!(wm.backend().published_window_desktops.contains(&(client.window, expected(old))));
+                    }
+                }
+                assert!(wm.backend().unmapped_frames.is_empty(), "visible windows never blink during a merge");
+                assert!(!wm.backend().mapped_frames.contains(&mini_frame));
+                assert_eq!(wm.client(minimized).unwrap().lifecycle, Lifecycle::Miniaturized);
+                assert_eq!(wm.client(minimized).unwrap().workspace, removed.saturating_sub(1));
+                assert_eq!(wm.backend().published_workspaces.last(), Some(&(3, expected(active))));
+                assert_eq!(wm.backend().published_workareas.last().unwrap().1, 3);
+            }
+        }
+    }
+
+    #[test]
+    fn removing_empty_desktops_restores_focus_and_cannot_remove_the_last() {
+        let mut wm = wm(FakeBackend::new());
+        assert!(!wm.workspace_has_windows(0));
+        assert!(!wm.remove_workspace(0));
+        let window = wm.backend_mut().create_window();
+        wm.dispatch(BackendEvent::MapRequest(window));
+        let id = wm.client_for_window(window).unwrap();
+        assert!(wm.workspace_has_windows(0));
+        wm.miniaturize(id);
+        assert!(wm.workspace_has_windows(0), "minimized windows still occupy a desktop");
+        wm.deminiaturize(id);
+        wm.switch_workspace(7);
+        assert!(!wm.remove_workspace(8));
+        assert!(!wm.remove_workspace(usize::MAX));
+        for index in (1..8).rev() {
+            assert!(wm.remove_workspace(index));
+            assert_eq!((wm.workspace_count(), wm.current_workspace()), (index, index - 1));
+        }
+        assert_eq!(wm.focused_client(), Some(id));
+        assert!(!wm.remove_workspace(0));
+        assert_eq!(wm.workspace_count(), 1);
+    }
+
+    #[test]
+    fn removing_a_desktop_keeps_frameless_dialogs_together_and_pinned_windows_visible() {
+        let mut backend = FakeBackend::new();
+        let parent = backend.create_window();
+        let dialog = backend.create_window();
+        backend.set_client_draws_own_chrome(parent, true);
+        backend.set_client_draws_own_chrome(dialog, true);
+        backend.set_window_parent(dialog, parent);
+        let mut wm = wm(backend);
+        wm.switch_workspace(1);
+        wm.dispatch(BackendEvent::MapRequest(parent));
+        wm.dispatch(BackendEvent::MapRequest(dialog));
+        let parent_id = wm.client_for_window(parent).unwrap();
+        let dialog_id = wm.client_for_window(dialog).unwrap();
+        wm.switch_workspace(0);
+        assert!(!wm.backend().mapped_frameless.contains(&parent));
+        assert!(!wm.backend().mapped_frameless.contains(&dialog));
+        assert!(wm.remove_workspace(1));
+        assert!(wm.backend().mapped_frameless.contains(&parent));
+        assert!(wm.backend().mapped_frameless.contains(&dialog));
+        assert_eq!(wm.client(dialog_id).unwrap().parent, Some(parent_id));
+        assert_eq!(wm.client(dialog_id).unwrap().workspace, wm.client(parent_id).unwrap().workspace);
+        wm.set_client_pinned(parent_id, true);
+        wm.switch_workspace(2);
+        assert!(wm.remove_workspace(0));
+        assert!(wm.backend().mapped_frameless.contains(&parent));
+        assert!(wm.client(parent_id).unwrap().flags.contains(ClientFlags::STICKY));
     }
 
     /// Three mapped windows on the current workspace, focused in the

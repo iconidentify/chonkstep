@@ -32,6 +32,8 @@ struct Probe {
     /// Set once a `done` has been seen, so the report is only printed
     /// for a settled transaction.
     settled: bool,
+    attack_removed: bool,
+    removed_check_pending: bool,
 }
 
 impl Probe {
@@ -120,6 +122,20 @@ impl Dispatch<ExtWorkspaceHandleV1, ()> for Probe {
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
+        if matches!(event, ext_workspace_handle_v1::Event::Removed) {
+            probe.workspaces.retain(|(handle, _, _)| handle != resource);
+            if probe.attack_removed {
+                // Deliberately stale request: a desktop closed in Overview
+                // must not be resurrected by a still-live protocol handle.
+                resource.activate();
+                if let Some(manager) = &probe.manager {
+                    manager.commit();
+                }
+                probe.removed_check_pending = true;
+            }
+            resource.destroy();
+            return;
+        }
         let Some(entry) = probe.workspaces.iter_mut().find(|(handle, _, _)| handle == resource) else {
             return;
         };
@@ -145,7 +161,10 @@ fn main() {
     let mut queue = connection.new_event_queue::<Probe>();
     let qh = queue.handle();
     connection.display().get_registry(&qh, ());
-    let mut probe = Probe::default();
+    let mut probe = Probe {
+        attack_removed: std::env::args().any(|arg| arg == "--activate-removed"),
+        ..Default::default()
+    };
     queue.roundtrip(&mut probe).expect("registry roundtrip");
     if probe.manager.is_none() {
         say("**ext_workspace_manager_v1 missing**");
@@ -173,6 +192,10 @@ fn main() {
     loop {
         if queue.blocking_dispatch(&mut probe).is_err() {
             return;
+        }
+        if std::mem::take(&mut probe.removed_check_pending) {
+            queue.roundtrip(&mut probe).expect("removed handle request roundtrip");
+            say("**removed activation checked**");
         }
     }
 }

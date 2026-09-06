@@ -11,7 +11,7 @@
 //! in, so `#[ignore]`d; run with `scripts/e2e.sh` or
 //! `cargo test -p chonk-testkit -- --ignored --test-threads=1`.
 
-use chonk_testkit::{keys, poll_until, Screenshot, Session, SessionOptions, ShellInfo, World};
+use chonk_testkit::{keys, poll_until, profile_binary, Screenshot, Session, SessionOptions, ShellInfo, World};
 use std::time::Duration;
 
 /// The Overview's surface in the ledger: mapped, above, and exactly
@@ -413,5 +413,128 @@ fn native_overview_keeps_wallpaper_proportions_and_live_pixels() {
             closed.overview.is_none() && closed.overview_windows.is_empty(),
             "scene and captions released"
         );
+    }
+}
+
+fn workspace_layout(world: &World) -> wm_theme::overview::OverviewLayout {
+    wm_theme::overview::live::layout(
+        wm_theme_api::Size::new(world.output_w, world.output_h),
+        world.dock().expect("default dock supplies the tile size").w,
+        &[],
+        world.workspace_count,
+    )
+}
+
+fn center(rect: wm_theme_api::Rect) -> (f64, f64) {
+    (rect.pos.x as f64 + rect.size.w as f64 / 2.0,
+        rect.pos.y as f64 + rect.size.h as f64 / 2.0)
+}
+
+#[test]
+#[ignore = "requires nested Wayland: scripts/e2e.sh --headless --test overview"]
+fn desktop_close_controls_remove_empty_and_occupied_desktops_without_losing_windows() {
+    for scale in [1.0, 2.0] {
+        let mut session = Session::boot(
+            &format!("overview-close-desktops-{scale}"),
+            SessionOptions {
+                scale: Some(scale),
+                config_extra: "[keybindings]\n\"super+2\" = \"workspace 8\"\n".into(),
+                ..Default::default()
+            },
+        ).unwrap();
+        launch_terminal(&mut session, "KeepOnFirstDesktop");
+        session.door().chord(keys::LEFTMETA, keys::TWO).unwrap();
+        session.door().barrier().unwrap();
+        launch_terminal(&mut session, "KeepOnLastDesktop");
+        let probe = profile_binary("chonk-workspace-probe").unwrap();
+        session.launch(probe.to_str().unwrap(), &["--activate-removed"]).unwrap();
+        poll_until(Duration::from_secs(10), "native workspace client sees eight desktops", || {
+            session.client_log("chonk-workspace-probe").contains("count=8 ").then_some(())
+        }).unwrap();
+        open_overview(&mut session);
+        let world = session.world().unwrap();
+        let panel = overview_shell(&world).unwrap().id;
+        assert_eq!((world.current_workspace, world.workspace_count), (7, 8));
+        let layout = workspace_layout(&world);
+        let shot = session.screenshot("eight-desktops-close-glyphs").unwrap();
+        for index in 0..8 {
+            let close = layout.workspace_close_rect(index).unwrap();
+            let (x, y) = center(close);
+            let pixel = shot.pixel(x as u32, y as u32);
+            assert!(pixel[0] > 190 && pixel[1] > 190 && pixel[2] > 190,
+                "desktop {index} must show the white close glyph at scale {scale}: {pixel:?}");
+        }
+
+        // A cancelled click must neither close a desktop nor dismiss Overview.
+        let (x, y) = center(layout.workspace_close_rect(1).unwrap());
+        session.door().motion(x, y).unwrap();
+        session.door().button("left", true).unwrap();
+        session.door().barrier().unwrap();
+        session.door().motion(2.0, world.output_h as f64 / 2.0).unwrap();
+        session.door().button("left", false).unwrap();
+        session.door().barrier().unwrap();
+        assert_eq!(session.world().unwrap().workspace_count, 8);
+        assert_eq!(overview_shell(&session.world().unwrap()).unwrap().id, panel);
+
+        // Entry-set changes invalidate an armed close instead of targeting a
+        // freshly rearranged row on release.
+        session.door().motion(x, y).unwrap();
+        session.door().button("left", true).unwrap();
+        session.door().barrier().unwrap();
+        launch_terminal(&mut session, "ArrivedDuringClosePress");
+        session.door().button("left", false).unwrap();
+        session.door().barrier().unwrap();
+        assert_eq!(session.world().unwrap().workspace_count, 8);
+
+        session.door().click(x, y).unwrap();
+        let world = session.world().unwrap();
+        assert_eq!((world.current_workspace, world.workspace_count), (6, 7));
+        assert_eq!(overview_shell(&world).unwrap().id, panel);
+        // Closing the occupied active desktop merges its windows leftward.
+        let (x, y) = center(workspace_layout(&world).workspace_close_rect(6).unwrap());
+        session.door().click(x, y).unwrap();
+        let world = session.world().unwrap();
+        assert_eq!((world.current_workspace, world.workspace_count), (5, 6));
+        assert_eq!(world.overview_windows.len(), 2);
+
+        // Switch to the first thumbnail's body, then close that first desktop.
+        let first = workspace_layout(&world).strip[0];
+        let (x, y) = center(first);
+        session.door().click(x, y).unwrap();
+        let world = session.world().unwrap();
+        assert_eq!(world.current_workspace, 0);
+        let (x, y) = center(workspace_layout(&world).workspace_close_rect(0).unwrap());
+        session.door().click(x, y).unwrap();
+        assert_eq!(session.world().unwrap().workspace_count, 5);
+
+        // Repeated close clicks compact all remaining empty slots. The final
+        // occupied inactive desktop joins the active one and stays accessible.
+        while session.world().unwrap().workspace_count > 1 {
+            let world = session.world().unwrap();
+            let (x, y) = center(workspace_layout(&world)
+                .workspace_close_rect(world.workspace_count - 1).unwrap());
+            session.door().click(x, y).unwrap();
+            assert_eq!(session.world().unwrap().workspace_count, world.workspace_count - 1);
+        }
+        poll_until(Duration::from_secs(10), "native clients retire every removed desktop", || {
+            let log = session.client_log("chonk-workspace-probe");
+            (log.contains("count=1 names=1 active=1")
+                && log.contains("**removed activation checked**")).then_some(())
+        }).unwrap();
+        session.door().barrier().unwrap();
+        let world = session.world().unwrap();
+        assert_eq!((world.current_workspace, world.workspace_count), (0, 1),
+            "stale Wayland activation requests cannot resurrect closed desktops");
+        assert_eq!(world.overview_windows.len(), 3);
+        assert_eq!(overview_shell(&world).unwrap().id, panel);
+        assert_eq!(overview_shell(&world).unwrap().buffer_bytes, 0);
+        assert!(workspace_layout(&world).workspace_close_rect(0).is_none());
+        session.screenshot("one-desktop-windows-preserved").unwrap();
+        session.door().tap_key(keys::ESC).unwrap();
+        assert_overview_closed(&mut session, "closing desktops then Escape");
+        for title in ["KeepOnFirstDesktop", "KeepOnLastDesktop", "ArrivedDuringClosePress"] {
+            let window = world.window_matching(title).unwrap();
+            assert!(world.frame_of(window.id).unwrap().mapped, "{title} survives and is visible");
+        }
     }
 }

@@ -156,6 +156,31 @@ pub fn label(
 mod tests {
     use super::*;
     #[test]
+    fn close_controls_are_inside_their_own_desktops_at_both_scales() {
+        for scale in [1, 2] {
+            for count in [1, 2, 8, 64] {
+                for layout in [
+                    layout(Size::new(1280 * scale, 800 * scale), 56 * scale, &[], count),
+                    super::super::layout(Size::new(1280 * scale, 800 * scale), 56 * scale, 24 * scale, 0, count),
+                ] {
+                    for (index, tile) in layout.strip.iter().enumerate() {
+                        let Some(close) = layout.workspace_close_rect(index) else {
+                            assert_eq!(count, 1);
+                            continue;
+                        };
+                        let center = Point::new(close.pos.x + close.size.w as i32 / 2,
+                            close.pos.y + close.size.h as i32 / 2);
+                        assert_eq!(layout.workspace_close_at(center), Some(index));
+                        assert!(tile.contains(close.pos));
+                        assert_eq!(close.pos.x + close.size.w as i32, tile.pos.x + tile.size.w as i32);
+                        assert!(close.pos.y + close.size.h as i32 <= tile.pos.y + tile.size.h as i32);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn mixed_windows_keep_shape_size_and_wallpaper_space() {
         for scale in [1, 2] {
             for n in [0, 1, 2, 7, 32, 128] {

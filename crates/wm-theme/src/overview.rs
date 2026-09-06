@@ -45,7 +45,7 @@ pub struct OverviewLayout {
     /// One card rect per entry, row-major, rows and the last (possibly
     /// short) row centered.
     pub cells: Vec<Rect>,
-    /// One Clip-sized tile per workspace, in a centered bottom row.
+    /// One thumbnail per workspace: native top row or fallback bottom row.
     pub strip: Vec<Rect>,
     /// The region the grid was laid out into — where the quiet
     /// "no windows" line goes when `cells` is empty.
@@ -221,6 +221,61 @@ impl OverviewLayout {
     pub fn workspace_at(&self, p: Point) -> Option<usize> {
         self.strip.iter().position(|tile| tile.contains(p))
     }
+
+    /// The close control lives inside the thumbnail's upper-right corner.
+    /// Its size follows desktop scale, capped by the available thumbnail.
+    /// A single remaining desktop has no close control.
+    pub fn workspace_close_rect(&self, index: usize) -> Option<Rect> {
+        if self.strip.len() <= 1 {
+            return None;
+        }
+        let tile = self.strip.get(index)?;
+        let edge = (self.pad * 2).max(16).min(tile.size.w).min(tile.size.h);
+        (edge > 0).then(|| Rect::new(
+            Point::new(tile.pos.x + (tile.size.w - edge) as i32, tile.pos.y),
+            Size::new(edge, edge),
+        ))
+    }
+
+    pub fn workspace_close_at(&self, p: Point) -> Option<usize> {
+        self.strip.iter().enumerate().find_map(|(index, _)| {
+            self.workspace_close_rect(index).filter(|rect| rect.contains(p)).map(|_| index)
+        })
+    }
+}
+
+/// A small, cached circular ×. Drawn only when the desktop row is rebuilt;
+/// pointer motion never rasterizes the glyph or allocates a new buffer.
+pub fn workspace_close_glyph(edge: u32) -> DecorationBuffer {
+    let edge = edge.max(1);
+    let mut pixmap = Pixmap::new(edge, edge).expect("bounded workspace close glyph");
+    let mut circle = tiny_skia::PathBuilder::new();
+    let middle = edge as f32 / 2.0;
+    circle.push_circle(middle, middle, middle * 0.9);
+    let mut ink = tiny_skia::Paint::default();
+    ink.set_color_rgba8(32, 34, 40, 240);
+    pixmap.fill_path(
+        &circle.finish().unwrap(), &ink, tiny_skia::FillRule::Winding,
+        tiny_skia::Transform::identity(), None,
+    );
+    let inset = edge as f32 * 0.34;
+    let far = edge as f32 - inset;
+    let mut cross = tiny_skia::PathBuilder::new();
+    cross.move_to(inset, inset);
+    cross.line_to(far, far);
+    cross.move_to(far, inset);
+    cross.line_to(inset, far);
+    ink.set_color_rgba8(255, 255, 255, 255);
+    pixmap.stroke_path(
+        &cross.finish().unwrap(), &ink,
+        &tiny_skia::Stroke {
+            width: (edge as f32 / 12.0).max(1.0),
+            line_cap: tiny_skia::LineCap::Round,
+            ..Default::default()
+        },
+        tiny_skia::Transform::identity(), None,
+    );
+    DecorationBuffer { width: edge, height: edge, pixels: pixmap.take() }
 }
 
 /// Arrow-key movement over the row-major grid: `(dx, dy)` in
@@ -314,6 +369,9 @@ pub fn render_overview(
         }
         let clip = workspace::render_clip_tile(theme, font_system, swash_cache, tile_rect.size.w, index, count);
         blit_buffer(&mut pixmap, &clip, tile_rect.pos.x, tile_rect.pos.y);
+        if let Some(rect) = layout.workspace_close_rect(index) {
+            blit_buffer(&mut pixmap, &workspace_close_glyph(rect.size.w), rect.pos.x, rect.pos.y);
+        }
     }
 
     // The panel's own raised frame last, over everything, exactly like

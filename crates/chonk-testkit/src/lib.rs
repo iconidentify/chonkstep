@@ -1097,6 +1097,8 @@ pub struct ThemeInfo {
 #[derive(Clone, Debug, Default)]
 pub struct World {
     pub scale: f32,
+    pub current_workspace: usize,
+    pub workspace_count: usize,
     pub output_w: u32,
     pub output_h: u32,
     pub theme: ThemeInfo,
@@ -1728,6 +1730,9 @@ impl Door {
                 if let Some(shell) = parse_shell_line(&line) {
                     world.shells.push(shell);
                 }
+            } else if line.starts_with("workspaces ") {
+                world.current_workspace = field(&line, "current=").unwrap_or_default();
+                world.workspace_count = field(&line, "count=").unwrap_or_default();
             } else if line.starts_with("overview ") {
                 world.overview = Some(OverviewInfo {
                     selected: field(&line, "selected=").unwrap_or_default(),

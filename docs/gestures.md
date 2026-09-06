@@ -5,7 +5,7 @@ default:
 
 | Swipe | Action |
 | --- | --- |
-| Left | Next workspace, creating one when needed |
+| Left | Next workspace; creates one past an occupied final desktop |
 | Right | Previous workspace; stops at the first |
 | Up | Open Overview with smaller previews of the current workspace's windows |
 | Down | Dismiss Overview |
@@ -18,6 +18,16 @@ window caption. Small windows are never enlarged. Click-to-select, arrow keys,
 Return and Escape work throughout. An upward swipe while it is open keeps it
 open; horizontal swipes also work inside Overview. X11 retains the rasterized
 card fallback.
+
+Each desktop thumbnail has an × in its upper-right corner while more than one
+desktop exists. Click it to remove that desktop. Its windows move to the desktop
+on its left (or the next desktop when closing the first), keeping their sizes,
+focus and minimized state. The row renumbers immediately and Overview stays open.
+The final desktop cannot be closed. Pressing × and releasing away cancels.
+
+Swiping left on an empty final desktop stops there, so repeated swipes cannot
+create a chain of empty desktops. Minimized windows still count as occupying a
+desktop. Explicit workspace keyboard commands can still create desktops on demand.
 
 An action commits when the fingers lift after enough travel. Short movements,
 ambiguous diagonal strokes, cancelled gestures and strokes that return to their
@@ -68,6 +78,9 @@ open, and never allocates a monitor-sized raster. Captions are painted once per
 entry set; selection changes only the outline and which cached caption is
 shown. Packing runs only when the entry set changes (at most 32 linear passes).
 Closing releases the scene, labels and any small minimized-window fallbacks.
+Close glyphs are small cached textures created with the desktop row; hovering
+does not repaint or allocate them. Removing a desktop scans client memberships
+once and only maps windows newly revealed by the merge.
 Move snapping borrows monitor/window records instead of building a target vector
 on every pointer event, and repeated motion against the bar does not resend an
 unchanged frame position.

@@ -33,6 +33,7 @@ pub struct OverviewItem<B: Backend> {
 pub enum OverviewHit {
     Card(usize),
     Workspace(usize),
+    CloseWorkspace(usize),
     Background,
 }
 
@@ -171,10 +172,9 @@ impl<B: Backend> OverviewPanel<B> {
                     .strip
                     .iter()
                     .enumerate()
-                    .map(|(i, rect)| {
-                        (
-                            *rect,
-                            ov::live::label(
+                    .map(|(i, rect)| wm_core::OverviewWorkspace {
+                            rect: *rect,
+                            label: ov::live::label(
                                 theme,
                                 font_system,
                                 swash_cache,
@@ -182,7 +182,8 @@ impl<B: Backend> OverviewPanel<B> {
                                 rect.size.w,
                                 label_h,
                             ),
-                        )
+                            close: layout.workspace_close_rect(i)
+                                .map(|rect| (rect, ov::workspace_close_glyph(rect.size.w))),
                     })
                     .collect();
                 backend.show_live_overview(
@@ -357,6 +358,9 @@ impl<B: Backend> OverviewPanel<B> {
         let Some(layout) = self.layout.as_ref() else {
             return OverviewHit::Background;
         };
+        if let Some(index) = layout.workspace_close_at(local) {
+            return OverviewHit::CloseWorkspace(index);
+        }
         if let Some(index) = layout.cell_at(local) {
             return OverviewHit::Card(index);
         }

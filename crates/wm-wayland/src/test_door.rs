@@ -792,6 +792,8 @@ fn handle_command(line: &str, stream: &mut UnixStream, comp: &mut Compositor) {
             let mut reply = String::new();
             let backend = comp.wm.backend();
             reply.push_str(&format!("scale {}\n", comp.ui_scale));
+            reply.push_str(&format!("workspaces current={} count={}\n",
+                comp.wm.current_workspace(), comp.wm.workspace_count()));
             reply.push_str(&format!(
                 "output {} {}\n",
                 backend.output_size.w, backend.output_size.h

@@ -93,8 +93,8 @@ fn workspace_name(index: usize) -> String {
 
 /// A stable identifier for a workspace, in the protocol's sense: it must
 /// survive a client reconnecting and name the same workspace. The index
-/// is exactly that here — workspaces are a fixed row, not a set that can
-/// be reordered.
+/// names a numbered slot here. Closing a desktop compacts the row's contents
+/// and retires its final slot; surviving slot handles keep their identity.
 fn workspace_id(index: usize) -> String {
     format!("chonkstep-workspace-{index}")
 }
@@ -143,9 +143,16 @@ fn publish_to(display_handle: &DisplayHandle, manager: &mut ManagerInstance, cou
         group.capabilities(ext_workspace_group_handle_v1::GroupCapabilities::empty());
         manager.group = Some(group);
     }
-    // Grow the workspace row to match. A row only ever grows on this
-    // desktop (`MAX_WORKSPACES` is a ceiling, and nothing destroys a
-    // workspace once created), so this is an append rather than a diff.
+    // The core compacts desktop memberships when one closes. Retire surplus
+    // slots before publishing the new active state, in the same done batch.
+    while manager.workspaces.len() > count {
+        if let Some(handle) = manager.workspaces.pop() {
+            if let Some(group) = manager.group.as_ref() {
+                group.workspace_leave(&handle);
+            }
+            handle.removed();
+        }
+    }
     while manager.workspaces.len() < count {
         let index = manager.workspaces.len();
         let Some(handle) = mint_workspace(display_handle, manager, index) else { return };
@@ -182,9 +189,8 @@ fn mint_workspace(
         u32::try_from(index).unwrap_or(u32::MAX).to_ne_bytes().to_vec(),
     );
     // The only thing a client may ask of a workspace here is to make it
-    // the current one. This desktop creates workspaces on demand and
-    // never destroys them, so `remove` and `assign` are not offered
-    // rather than offered and refused.
+    // the current one. Removal belongs to Overview's explicit close control;
+    // `remove` and `assign` are not advertised to external clients.
     handle.capabilities(ext_workspace_handle_v1::WorkspaceCapabilities::Activate);
     Some(handle)
 }
@@ -261,7 +267,7 @@ impl Dispatch<ExtWorkspaceHandleV1, usize> for Compositor {
     fn request(
         state: &mut Self,
         _client: &Client,
-        _resource: &ExtWorkspaceHandleV1,
+        resource: &ExtWorkspaceHandleV1,
         request: ext_workspace_handle_v1::Request,
         index: &usize,
         _dh: &DisplayHandle,
@@ -272,7 +278,16 @@ impl Dispatch<ExtWorkspaceHandleV1, usize> for Compositor {
             // `_NET_CURRENT_DESKTOP` produces — so both protocols reach
             // `switch_workspace` by one path and cannot disagree.
             ext_workspace_handle_v1::Request::Activate => {
-                state.wm.backend_mut().queue(WmEvent::DesktopSwitchRequested(*index));
+                // A removed handle can remain alive until its client destroys
+                // it. Even if its numbered slot is later recreated, an old
+                // handle must not activate it or grow the workspace row again.
+                if *index < state.wm.workspace_count()
+                    && state.workspaces.managers.iter().any(|manager| {
+                        manager.workspaces.get(*index).is_some_and(|handle| handle == resource)
+                    })
+                {
+                    state.wm.backend_mut().queue(WmEvent::DesktopSwitchRequested(*index));
+                }
             }
             // Deactivating *the* current workspace has no meaning on a
             // desktop where exactly one is always current.

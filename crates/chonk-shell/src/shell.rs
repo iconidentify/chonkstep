@@ -1020,6 +1020,8 @@ pub struct Shell<B: Backend + PopupHost<PopupId = B::ShellId>> {
     /// `run_action` `take()`s, so a stale combo cannot leak into a
     /// later session.
     overview_key: Option<KeyCombo>,
+    /// Armed on press, invalidated whenever Overview's entry set changes.
+    overview_close_pressed: Option<usize>,
     /// Every terminal this shell launched that has not been observed
     /// to exit — the retint list for live appearance switches. foot
     /// swaps its color sections on SIGUSR1/SIGUSR2, and these handles
@@ -1277,6 +1279,7 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
             active_layer_namespaces: std::collections::BTreeMap::new(),
             scoped_grabbed: Vec::new(),
             overview_key: None,
+            overview_close_pressed: None,
             grabbed: to_grab,
             layout,
             running_clients: Vec::new(),
@@ -2045,6 +2048,9 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
             DesktopGesture::WorkspaceNext | DesktopGesture::WorkspacePrevious => {
                 let current = wm.current_workspace();
                 let target = if gesture == DesktopGesture::WorkspaceNext {
+                    if current + 1 == wm.workspace_count() && !wm.workspace_has_windows(current) {
+                        return;
+                    }
                     current + 1
                 } else {
                     current.saturating_sub(1)
@@ -2094,6 +2100,7 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
     /// produce for an unmapped window — `None` degrades to the empty
     /// well, never an error.
     fn populate_overview(&mut self, wm: &mut WindowManager<B>) {
+        self.overview_close_pressed = None;
         let current = wm.current_workspace();
         let mut items: Vec<OverviewItem<B>> = wm
             .iter_clients()
@@ -2145,6 +2152,7 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
     /// bare desktop after an Escape, commanding a card that no longer
     /// exists on screen. A no-op when no menu is open.
     fn close_overview(&mut self, wm: &mut WindowManager<B>) {
+        self.overview_close_pressed = None;
         Backend::ungrab_keyboard(wm.backend_mut());
         self.desktop.close_menu(wm.backend_mut());
         self.desktop.hide_overview(wm.backend_mut());
@@ -2186,7 +2194,11 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
     ) -> ShellOutcome {
         let hit = self.desktop.overview_hit(local);
         if pressed {
+            self.overview_close_pressed = None;
             match (button, hit) {
+                (MouseButton::Left, OverviewHit::CloseWorkspace(index)) => {
+                    self.overview_close_pressed = Some(index);
+                }
                 (MouseButton::Left, OverviewHit::Card(index)) => {
                     self.desktop.select_overview_card(wm.backend_mut(), &self.theme, index);
                 }
@@ -2231,7 +2243,11 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
                 _ => {}
             }
         } else if button == MouseButton::Left {
-            if let OverviewHit::Card(index) = hit {
+            if let Some(index) = self.overview_close_pressed.take() {
+                if hit == OverviewHit::CloseWorkspace(index) && wm.remove_workspace(index) {
+                    self.populate_overview(wm);
+                }
+            } else if let OverviewHit::Card(index) = hit {
                 if index == self.desktop.overview_selected() {
                     self.commit_overview(wm);
                 }

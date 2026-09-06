@@ -17,12 +17,19 @@ pub struct OverviewWindow<W, F> {
     pub label: DecorationBuffer,
 }
 
+/// One desktop thumbnail and its optional close control, in panel pixels.
+pub struct OverviewWorkspace {
+    pub rect: Rect,
+    pub label: DecorationBuffer,
+    pub close: Option<(Rect, DecorationBuffer)>,
+}
+
 /// A compositor can present existing client textures directly. Only small text
 /// labels cross the CPU/GPU boundary; no screenshots or full-output raster.
 pub struct OverviewScene<W, F> {
     pub geometry: Rect,
     pub windows: Vec<OverviewWindow<W, F>>,
-    pub spaces: Vec<(Rect, DecorationBuffer)>,
+    pub spaces: Vec<OverviewWorkspace>,
     pub workspace: usize,
     pub selected: usize,
     pub gap: u32,

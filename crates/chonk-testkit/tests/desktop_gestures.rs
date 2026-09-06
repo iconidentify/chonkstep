@@ -71,6 +71,12 @@ fn swipes_switch_once_and_open_close_reusable_overview_at_both_scales() {
             !visible(&mut session, window),
             "left advances to the next workspace"
         );
+        for _ in 0..12 {
+            swipe(&mut session, 3, -100.0, 0.0, false);
+        }
+        let empty = session.world().unwrap();
+        assert_eq!((empty.current_workspace, empty.workspace_count), (1, 2),
+            "swiping on the empty final desktop must not create a chain of empty desktops");
         swipe(&mut session, 4, 100.0, 0.0, false);
         assert!(
             visible(&mut session, window),

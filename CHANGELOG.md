@@ -5,6 +5,13 @@ crate and both session binaries carry the same number.
 
 ## [Unreleased]
 
+- Overview's desktop thumbnails now have an × control. Removing a desktop
+  preserves its windows on a neighboring desktop, compacts the row, keeps
+  minimized state and focus, and leaves at least one desktop.
+- Swiping past an empty final desktop no longer creates more empty desktops.
+- Native workspace clients receive removal events; stale activation requests
+  cannot recreate a removed desktop.
+
 ## [0.3.2] - 2026-09-06
 
 This release adds macOS-style desktop swipes, proportional live windows in

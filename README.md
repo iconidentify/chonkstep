@@ -99,7 +99,8 @@ and the release history in [CHANGELOG.md](CHANGELOG.md).
   desktop thumbnails along the top: arrows
   move, Return or a click focuses, right-click opens the real window
   commands menu, clicking a workspace tile switches desks, Escape
-  dismisses. Wayland scales existing client textures directly: live content,
+  dismisses. Each desktop's × removes it while preserving its windows on a
+  neighboring desktop; the final desktop stays. Wayland scales existing client textures directly: live content,
   no screenshot readbacks or full-screen pixel buffer, and cached captions
   on selection. X11 retains the rasterized card fallback.
 - **The Living Desktop.** `restore_session = true` records every
@@ -711,7 +712,8 @@ always available; it is not rebindable from the config file.
 The Wayland login session also supports three- and four-finger touchpad swipes:
 left/right changes workspace, up opens Overview, and down dismisses it. A swipe
 commits on finger lift. Top-edge window movement respects a bar's reserved space,
-including Omarchy's bar. See [docs/gestures.md](docs/gestures.md) for settings,
+including Omarchy's bar. Swiping past an empty final desktop stops there instead
+of creating more empty desktops. See [docs/gestures.md](docs/gestures.md) for settings,
 behavior and the allocation budget.
 
 ## Development
