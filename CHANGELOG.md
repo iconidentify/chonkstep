@@ -5,6 +5,62 @@ crate and both session binaries carry the same number.
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-09-06
+
+This release adds macOS-style desktop swipes, proportional live windows in
+Overview, and top-bar-aware window placement to the native Wayland session.
+
+### Added
+
+- Three- and four-finger touchpad swipes switch workspaces horizontally, open
+  Overview upward and dismiss it downward. Gestures commit on finger lift;
+  short, ambiguous, reversed and cancelled strokes do not trigger an action.
+  Finger count, travel threshold and enablement are configurable.
+- Wayland Overview shows live windows at their own proportions over the
+  wallpaper, with desktop thumbnails along the top and a compact selection
+  outline and caption. Small windows are never enlarged; applications keep
+  their actual sizes. X11 retains its existing rasterized Overview fallback.
+- Managed titlebars respect each output's reserved top layer-shell bar during
+  placement, movement, resizing and session restore. A bar appearing late also
+  moves existing titlebars below it; fullscreen still covers the full output.
+
+### Fixed
+
+- New windows now refresh an open Overview even without a saved session layout.
+- Shading a Wayland window no longer leaves stale border pixels on screen.
+- The synthetic x86_64 release-verifier regression fixture now identifies its
+  simulated host consistently when run on an ARM64 build machine.
+
+### Performance
+
+- The swipe recognizer uses at most 40 bytes per seat, allocates nothing during
+  updates, and adds no thread or polling timer. Move snapping borrows targets
+  rather than allocating a vector for every pointer event.
+- Native Overview reuses client GPU textures and sparse decoration buffers,
+  suspends periodic screenshot readbacks while open, and uses no output-sized
+  shell pixel buffer. Selection reuses cached captions; closing releases the
+  native scene and caption storage.
+- In three nested software-rendered sessions per binary with six windows,
+  median first-open PSS growth fell from 19,888 KiB to 2,104 KiB (about 89%),
+  and cumulative input-dispatch time across 12 Overview cycles fell from
+  534,523 to 33,873 microseconds (about 94%). End-to-end latency did not improve
+  proportionally; these results do not establish a hardware latency guarantee.
+
+### Validation
+
+- Strict Clippy, documentation, workspace and Wayland unit tests, and all 26
+  Python harness tests passed during feature qualification.
+- The preserved optimized compositor passed 11 nested cases covering Overview,
+  desktop gestures, fullscreen and buffer-age capture, including live pixels,
+  exposed wallpaper, window proportions and bar boundaries at 1x/2x scale.
+- Allocation coverage checks 100,000 recognition updates and snapping queries
+  with zero allocator requests. The installed native Apple DRM session was
+  also visually checked and remained responsive after opening and closing
+  Overview. Physical trackpad frame latency was not measured.
+
+See [gesture behavior and configuration](docs/gestures.md) and the
+[Overview measurements and limitations](docs/engineering/2026-09-06-overview.md).
+
 ## [0.3.1] - 2026-09-06
 
 This patch release concentrates on input correctness, resilient selection

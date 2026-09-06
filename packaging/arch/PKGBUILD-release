@@ -39,7 +39,7 @@
 # those frames into `file:line`.
 options=(strip debug)
 pkgname=chonkstep
-pkgver=0.3.1
+pkgver=0.3.2
 pkgrel=1
 pkgdesc="A traditional floating compositor for Omarchy, compatible with Hyprland workflows"
 arch=('x86_64' 'aarch64')
@@ -219,6 +219,7 @@ DESKTOP
   install -Dm644 docs/config.example.toml -t "$pkgdir/usr/share/doc/$pkgname"
   install -Dm644 docs/quickstart.md -t "$pkgdir/usr/share/doc/$pkgname"
   install -Dm644 docs/keybindings.md -t "$pkgdir/usr/share/doc/$pkgname"
+  install -Dm644 docs/gestures.md -t "$pkgdir/usr/share/doc/$pkgname"
   install -Dm644 docs/instrument-platform.md -t "$pkgdir/usr/share/doc/$pkgname"
   install -Dm644 docs/dockapp-protocol.md -t "$pkgdir/usr/share/doc/$pkgname"
   install -Dm644 docs/xwayland-compatibility.md -t "$pkgdir/usr/share/doc/$pkgname"

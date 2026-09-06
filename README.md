@@ -10,20 +10,20 @@ in place. ChonkStep translates the Hyprland IPC and `hyprctl` calls that
 Omarchy relies on into a classic stacking-window model with real minimize,
 maximize, shade, fullscreen, snapping, workspaces, Alt-Tab, and Overview.
 
-Version 0.3.1 is an **alpha**. It is ready for adventurous users and bug
+Version 0.3.2 is an **alpha**. It is ready for adventurous users and bug
 reports, not machines where a compositor failure would be costly. Hyprland
 stays installed, so ChonkStep is easy to evaluate and easy to leave.
 
 ![ChonkStep replacing Hyprland beneath the Ristretto Omarchy desktop](site/shots/omarchy-desktop.png)
 
-## Install ChonkStep 0.3.1 alpha
+## Install ChonkStep 0.3.2 alpha
 
 Native packages are available for `x86_64` and `aarch64` (including M1 Macs
 running an Arch Linux ARM/Omarchy environment):
 
 ```sh
-curl -fLO "https://github.com/iconidentify/chonkstep/releases/download/preview-v0.3.1/chonkstep-0.3.1-1-$(uname -m).pkg.tar.zst"
-sudo pacman -U "./chonkstep-0.3.1-1-$(uname -m).pkg.tar.zst"
+curl -fLO "https://github.com/iconidentify/chonkstep/releases/download/preview-v0.3.2/chonkstep-0.3.2-1-$(uname -m).pkg.tar.zst"
+sudo pacman -U "./chonkstep-0.3.2-1-$(uname -m).pkg.tar.zst"
 omarchy install desktop-chonkstep
 ```
 
@@ -229,11 +229,11 @@ the local file to pacman:
 ```sh
 chonkstep_dir="$(mktemp -d)"
 chonkstep_arch="$(uname -m)"
-chonkstep_pkg="chonkstep-0.3.1-1-$chonkstep_arch.pkg.tar.zst"
+chonkstep_pkg="chonkstep-0.3.2-1-$chonkstep_arch.pkg.tar.zst"
 curl -fL -o "$chonkstep_dir/$chonkstep_pkg" \
-  "https://github.com/iconidentify/chonkstep/releases/download/preview-v0.3.1/$chonkstep_pkg"
+  "https://github.com/iconidentify/chonkstep/releases/download/preview-v0.3.2/$chonkstep_pkg"
 curl -fL -o "$chonkstep_dir/SHA256SUMS" \
-  "https://github.com/iconidentify/chonkstep/releases/download/preview-v0.3.1/SHA256SUMS"
+  "https://github.com/iconidentify/chonkstep/releases/download/preview-v0.3.2/SHA256SUMS"
 (cd "$chonkstep_dir" && sha256sum --ignore-missing --check SHA256SUMS)
 sudo pacman -U "$chonkstep_dir/$chonkstep_pkg"
 omarchy install desktop-chonkstep

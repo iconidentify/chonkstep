@@ -212,6 +212,7 @@ DESKTOP
   install -Dm644 docs/config.example.toml -t "$pkgdir/usr/share/doc/$pkgname"
   install -Dm644 docs/quickstart.md -t "$pkgdir/usr/share/doc/$pkgname"
   install -Dm644 docs/keybindings.md -t "$pkgdir/usr/share/doc/$pkgname"
+  install -Dm644 docs/gestures.md -t "$pkgdir/usr/share/doc/$pkgname"
   install -Dm644 docs/instrument-platform.md -t "$pkgdir/usr/share/doc/$pkgname"
   install -Dm644 docs/dockapp-protocol.md -t "$pkgdir/usr/share/doc/$pkgname"
   install -Dm644 docs/xwayland-compatibility.md -t "$pkgdir/usr/share/doc/$pkgname"

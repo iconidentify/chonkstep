@@ -180,6 +180,8 @@ jobs:
           cat > "$RUNNER_TEMP/release-notes.md" <<EOF
           Native Arch packages for ChonkStep $version while AUR account registration is unavailable.
 
+          See the [ChonkStep $version release notes](https://github.com/$GITHUB_REPOSITORY/blob/$GITHUB_REF_NAME/docs/releases/$version.md) for changes, validation and known limitations.
+
           Install on x86-64 or ARM64/AArch64 Arch with:
 
           \`\`\`sh
