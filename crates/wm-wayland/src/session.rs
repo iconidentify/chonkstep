@@ -1344,6 +1344,7 @@ pub(crate) fn init(
                 }
             }
             UdevEvent::Removed { device_id } => {
+                crate::input::gestures::cancel(comp);
                 tracing::warn!(?device_id, "a DRM device went away; if it is ours the session will stop painting");
             }
         })
@@ -1373,6 +1374,9 @@ pub(crate) fn init(
         .insert_source(notifier, |event, &mut (), comp: &mut Compositor| {
             match event {
                 SessionEvent::PauseSession => {
+                    // Retire transient scenes before vblank/input disappear;
+                    // an inactive seat must not finish a workspace commit.
+                    crate::input::gestures::cancel(comp);
                     let Graphics::Session(session) = &mut comp.graphics else {
                         return;
                     };
@@ -1757,6 +1761,10 @@ fn attach_output(
             vrr_enabled,
         },
     ))
+}
+
+pub(crate) fn input_active(graphics: &Graphics) -> bool {
+    match graphics { Graphics::Winit(_) => true, Graphics::Session(session) => session.drm.is_active() }
 }
 
 /// Whether any output is still waiting for a frame it has not been able
@@ -2499,6 +2507,7 @@ pub(crate) fn render_frame_session(comp: &mut Compositor, plain_capture_pending:
         wm,
         graphics,
         outputs: output_entries,
+        frame_stats,
         output_mgmt,
         hyprland_state_dirty,
         pointer_location,
@@ -2612,6 +2621,7 @@ pub(crate) fn render_frame_session(comp: &mut Compositor, plain_capture_pending:
                     .map(|monitor| monitor.geometry)
                     .unwrap_or_else(|| Rect::new(output.position, wm.backend().output_size))
             });
+        let gesture_build = wm.backend().gesture_scene.as_ref().map(|_| Instant::now());
         let clear_color = crate::renderer::build_scene_into(
             &mut output.scene_scratch,
             wm.backend(),
@@ -2621,6 +2631,7 @@ pub(crate) fn render_frame_session(comp: &mut Compositor, plain_capture_pending:
             cursors,
             viewport,
         );
+        if let Some(started) = gesture_build { frame_stats.record_gesture_build(started.elapsed()); }
 
         crate::capture_tool::render(&mut output.scene_scratch, renderer, wm.backend(), viewport);
         let (rendered, direct_scanout, render_states) =

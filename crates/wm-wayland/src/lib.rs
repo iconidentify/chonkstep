@@ -57,6 +57,7 @@ mod protocols;
 mod readback;
 mod renderer;
 mod overview;
+mod gesture_scene;
 mod selection;
 mod session;
 mod state;

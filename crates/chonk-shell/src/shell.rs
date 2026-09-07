@@ -29,7 +29,7 @@ use crate::desktop::{
 };
 use crate::dockapp::Farewell;
 use crate::launchdock::{LaunchDock, LaunchDockAction};
-use crate::overview::{OverviewHit, OverviewItem};
+use crate::overview::{OverviewHit, OverviewItem, OverviewRelease};
 use crate::session_layout::{relative_to_monitor, restored_geometry, RelaunchPlan, SessionLayout, WindowRecord};
 use crate::startup::SessionState;
 use crate::widgets::DockInput;
@@ -1919,6 +1919,16 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
                 } else {
                     let rebound_toggle =
                         key.as_ref().is_some_and(|combo| self.keymap.get(combo) == Some(&Action::Overview));
+                    if self.desktop.overview_pointer_pending() && !rebound_toggle {
+                        // Escape cancels the drag first; the panel remains for
+                        // another attempt. Other keys cannot activate a card or
+                        // start a second modal operation under a held pointer.
+                        if key.is_some_and(|combo| combo.keysym == crate::desktop::PANEL_DISMISS_KEYSYM)
+                            && !self.desktop.cancel_overview_pointer(wm.backend_mut(), &self.theme) {
+                            self.close_overview(wm);
+                        }
+                        return ShellOutcome::Continue;
+                    }
                     match key {
                         Some(combo) if !rebound_toggle => match overview_intent(&combo) {
                             OverviewIntent::Move(dx, dy) => {
@@ -2032,10 +2042,50 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         self.state.input.gestures
     }
 
+    /// Prepare a neighboring live Overview without switching the WM or taking
+    /// any input ownership. Called once at horizontal axis lock, never per frame.
+    pub fn desktop_gesture_overview_scene(&self, wm: &WindowManager<B>, workspace: usize,
+        geometry: Rect) -> wm_core::OverviewScene<B::WindowId, B::FrameId> {
+        use wm_theme::overview::live;
+        let tile = crate::desktop::tile_px(self.state.scale);
+        let clients: Vec<_> = wm.iter_clients().filter(|(_, c)| c.workspace == workspace
+            && matches!(c.lifecycle, Lifecycle::Normal | Lifecycle::Miniaturized)).collect();
+        let sources: Vec<_> = clients.iter().map(|(_, c)| if c.frame.is_some() {
+            Rect::new(Point::new(c.geometry.pos.x - c.layout.client_offset.x,
+                c.geometry.pos.y - c.layout.client_offset.y), c.layout.frame_size)
+        } else { c.geometry }).collect();
+        let sizes: Vec<_> = sources.iter().map(|r| r.size).collect();
+        let layout = live::layout(geometry.size, tile, &sizes, wm.workspace_count().max(workspace + 1));
+        let (mut fonts, mut swash) = (self.fonts.system(), self.fonts.swash());
+        let label_h = (tile / 2).max(16);
+        let mut label = |text: &str, width| live::label(&self.theme, &mut fonts, &mut swash, text, width, label_h);
+        let windows = clients.iter().zip(sources).zip(&layout.cells).map(|(((_, c), source), destination)| {
+            wm_core::OverviewWindow { window: c.window, frame: c.frame, source, destination: *destination,
+                label: label(&c.title, (tile * 6).min(geometry.size.w)) }
+        }).collect();
+        let spaces = layout.strip.iter().enumerate().map(|(i, rect)| {
+            let count = wm.iter_clients().filter(|(_, c)| c.workspace == i
+                && matches!(c.lifecycle, Lifecycle::Normal | Lifecycle::Miniaturized)).count();
+            wm_core::OverviewWorkspace { rect: *rect,
+                label: label(&format!("Desktop {} · {}", i + 1, count), rect.size.w),
+                drop_label: label(&format!("Move to Desktop {}", i + 1), rect.size.w),
+                close: layout.workspace_close_rect(i).map(|r| (r, wm_theme::overview::workspace_close_glyph(r.size.w))) }
+        }).collect();
+        let selected = wm.focused_client().and_then(|focused| clients.iter().position(|(id, _)| *id == focused)).unwrap_or(0);
+        wm_core::OverviewScene { geometry, windows, spaces, workspace, selected, gap: layout.pad }
+    }
+
     /// A desktop swipe can share Overview's grab, but cannot displace another
     /// modal UI or an interactive window drag.
     pub fn desktop_gesture_available(&self, wm: &WindowManager<B>) -> bool {
         !wm.cycle_active() && !wm.interactive_drag_active() && !self.desktop.menu_visible()
+            && !self.desktop.overview_pointer_pending()
+    }
+
+    /// A transition's cleanup must release its own Overview grab even after a
+    /// lock or another modal owner has made new desktop gestures unavailable.
+    pub fn finish_desktop_gesture_overview(&mut self, wm: &mut WindowManager<B>, opened: bool) {
+        if !opened { self.close_overview(wm); }
     }
 
     /// Explicit open/close semantics keep repeated upward swipes from toggling
@@ -2153,7 +2203,13 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
             .and_then(|focused| items.iter().position(|item| item.client == focused))
             .unwrap_or(0);
         let workspace = (current, wm.workspace_count());
-        self.desktop.show_overview(wm.backend_mut(), &self.theme, items, workspace, selected);
+        let mut workspace_counts = vec![0; workspace.1];
+        for (_, client) in wm.iter_clients() {
+            if matches!(client.lifecycle, Lifecycle::Normal | Lifecycle::Miniaturized) {
+                if let Some(count) = workspace_counts.get_mut(client.workspace) { *count += 1; }
+            }
+        }
+        self.desktop.show_overview(wm.backend_mut(), &self.theme, items, workspace, &workspace_counts, selected);
     }
 
     /// Ends the session without committing: grab released first, so
@@ -2204,6 +2260,30 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         pressed: bool,
     ) -> ShellOutcome {
         let hit = self.desktop.overview_hit(local);
+        if self.desktop.overview_pointer_pending() {
+            if button == MouseButton::Right && pressed {
+                self.desktop.cancel_overview_pointer(wm.backend_mut(), &self.theme);
+            } else if button == MouseButton::Left && !pressed {
+                match self.desktop.overview_pointer_release(wm.backend_mut(), &self.theme, local) {
+                    Some(OverviewRelease::Click(index)) => {
+                        self.desktop.select_overview_card(wm.backend_mut(), &self.theme, index);
+                        self.commit_overview(wm);
+                    }
+                    Some(OverviewRelease::Move { client, source, target })
+                        // Revalidate both identity and the displayed desktop
+                        // row. Never turn a stale drop into desktop creation.
+                        if self.desktop.overview_workspace() == (wm.current_workspace(), wm.workspace_count())
+                            && target < wm.workspace_count()
+                            && wm.client(client).is_some_and(|c| c.workspace == source
+                                && matches!(c.lifecycle, Lifecycle::Normal | Lifecycle::Miniaturized)) => {
+                            wm.move_client_to_workspace(client, target);
+                            self.populate_overview(wm);
+                    }
+                    _ => {}
+                }
+            }
+            return ShellOutcome::Continue;
+        }
         if pressed {
             self.overview_close_pressed = None;
             match (button, hit) {
@@ -2212,6 +2292,7 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
                 }
                 (MouseButton::Left, OverviewHit::Card(index)) => {
                     self.desktop.select_overview_card(wm.backend_mut(), &self.theme, index);
+                    self.desktop.overview_pointer_press(wm.backend_mut(), index, local);
                 }
                 // Right-click: the same window-commands menu a
                 // titlebar right-click opens, for the window this card
@@ -2257,10 +2338,6 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
             if let Some(index) = self.overview_close_pressed.take() {
                 if hit == OverviewHit::CloseWorkspace(index) && wm.remove_workspace(index) {
                     self.populate_overview(wm);
-                }
-            } else if let OverviewHit::Card(index) = hit {
-                if index == self.desktop.overview_selected() {
-                    self.commit_overview(wm);
                 }
             }
         }
@@ -2750,6 +2827,12 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
     /// does.
     pub fn on_motion(&mut self, wm: &mut WindowManager<B>, root: Point) {
         self.pointer_root = root;
+        if self.desktop.overview_pointer_motion(wm.backend_mut(), &self.theme, root) {
+            // A held card owns motion even outside the Overview output. Drain
+            // stale hover so a later release cannot select a different card.
+            while wm.backend_mut().take_shell_motion().is_some() {}
+            return;
+        }
         self.desktop.drag_icon_motion(wm.backend_mut(), root);
         self.desktop.drag_item_motion(wm.backend_mut(), &self.theme, root);
         // Which dock tile the pointer is inside, from root coordinates
@@ -3018,6 +3101,9 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
             self.desktop.update_overview_previews(wm.backend_mut(), &self.theme, previews, generation);
         }
         let (current, count) = (wm.current_workspace(), wm.workspace_count());
+        if self.desktop.overview_visible() && self.desktop.overview_workspace() != (current, count) {
+            self.populate_overview(wm);
+        }
         self.desktop.set_workspace_display(wm.backend_mut(), &self.theme, current, count);
         self.desktop.tick_menu(wm.backend_mut(), &self.theme);
         self.desktop.tick_items(wm.backend_mut(), &self.theme);

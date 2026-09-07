@@ -532,6 +532,15 @@ impl Backend for WaylandBackend {
         }
     }
 
+    fn drag_live_overview(&mut self, drag: Option<wm_core::OverviewDrag>) {
+        if let Some(overview) = &mut self.overview {
+            if overview.drag != drag {
+                overview.drag = drag;
+                self.mark_damaged();
+            }
+        }
+    }
+
     fn set_layer_surface_hidden(&mut self, namespace: &str, hidden: bool) {
         let changed = if hidden {
             self.hidden_layer_namespaces.insert(namespace.to_string())

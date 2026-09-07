@@ -3,7 +3,7 @@
 //! textures and sparse frame buffers; only small captions own new pixels.
 
 use crate::backend_impl::import_buffer;
-use crate::renderer::{push_surface_tree, SceneElement};
+use crate::renderer::{push_surface_tree_alpha, SceneElement};
 use crate::state::{RootBackground, WaylandBackend, WlFrameId, WlShellId, WlWindowId};
 use smithay::backend::renderer::element::memory::{
     MemoryRenderBuffer, MemoryRenderBufferRenderElement,
@@ -25,6 +25,7 @@ struct Label {
 struct Workspace {
     rect: Rect,
     label: Label,
+    drop_label: Label,
     close: Option<(Rect, Label)>,
     background: Id,
 }
@@ -45,6 +46,19 @@ pub(crate) struct Window {
     label: Label,
     fallback: Option<MemoryRenderBuffer>,
     shadow: Id,
+    pub desktop_visible: bool,
+    pub draw_content: bool,
+    pub sticky: bool,
+}
+
+impl Window {
+    pub fn snapshot(window: WlWindowId, frame: Option<WlFrameId>, source: Rect, backend: &WaylandBackend) -> Self {
+        Self { window, frame, source, destination: source,
+            label: Label { buffer: None, size: Size::default() },
+            fallback: None, shadow: Id::new(),
+            desktop_visible: backend.windows.get(&window).is_some_and(|r| r.mapped),
+            draw_content: true, sticky: false }
+    }
 }
 
 pub(crate) struct Overview {
@@ -53,15 +67,22 @@ pub(crate) struct Overview {
     pub windows: Vec<Window>,
     spaces: Vec<Workspace>,
     pub selected: usize,
+    pub drag: Option<wm_core::OverviewDrag>,
+    /// Absolute desktop-to-Overview fraction, independent of output pixels.
+    pub progress: f64,
+    paint_order: Vec<usize>,
     workspace: usize,
     gap: u32,
     ring: [Id; 4],
     space_ring: [Id; 4],
+    drop_ring: [Id; 4],
+    drop_fill: Id,
     band: Id,
     backdrop: Id,
 }
 
 impl Overview {
+    pub fn token(&self) -> &Id { &self.backdrop }
     pub fn new(
         surface: WlShellId,
         scene: wm_core::OverviewScene<WlWindowId, WlFrameId>,
@@ -71,6 +92,23 @@ impl Overview {
             surface,
             geometry: scene.geometry,
             selected: scene.selected,
+            drag: None,
+            progress: 1.0,
+            paint_order: {
+                let mut indices: std::collections::HashMap<_, _> = scene.windows.iter().enumerate().map(|(i, w)| (w.window, i)).collect();
+                let mut order = Vec::with_capacity(scene.windows.len());
+                for entry in backend.stacking.iter().rev() {
+                    let window = match entry {
+                        crate::state::StackEntry::Window(id) => Some(*id),
+                        crate::state::StackEntry::Frame(id) => backend.frames.get(id).map(|f| f.window),
+                    };
+                    if let Some(index) = window.and_then(|id| indices.remove(&id)) { order.push(index); }
+                }
+                for (i, w) in scene.windows.iter().enumerate() {
+                    if indices.contains_key(&w.window) { order.push(i); }
+                }
+                order
+            },
             workspace: scene.workspace,
             gap: scene.gap,
             windows: scene
@@ -94,6 +132,10 @@ impl Overview {
                         label: Label::new(w.label),
                         fallback,
                         shadow: Id::new(),
+                        desktop_visible: backend.scene_index.is_presented(w.window)
+                            && backend.windows.get(&w.window).is_some_and(|r| r.mapped),
+                        draw_content: true,
+                        sticky: false,
                     }
                 })
                 .collect(),
@@ -103,12 +145,15 @@ impl Overview {
                 .map(|space| Workspace {
                     rect: space.rect,
                     label: Label::new(space.label),
+                    drop_label: Label::new(space.drop_label),
                     close: space.close.map(|(rect, glyph)| (rect, Label::new(glyph))),
                     background: Id::new(),
                 })
                 .collect(),
             ring: std::array::from_fn(|_| Id::new()),
             space_ring: std::array::from_fn(|_| Id::new()),
+            drop_ring: std::array::from_fn(|_| Id::new()),
+            drop_fill: Id::new(),
             band: Id::new(),
             backdrop: Id::new(),
         }
@@ -124,6 +169,7 @@ impl Overview {
             .iter()
             .map(|w| &w.label)
             .chain(self.spaces.iter().map(|space| &space.label))
+            .chain(self.spaces.iter().map(|space| &space.drop_label))
             .chain(self.spaces.iter().filter_map(|space| space.close.as_ref().map(|(_, glyph)| glyph)))
             .map(|l| l.size.w as usize * l.size.h as usize * 4)
             .sum()
@@ -171,8 +217,8 @@ fn solid(elements: &mut Vec<SceneElement<GlesRenderer>>, id: &Id, rect: Rect, co
     );
 }
 
-fn outline(elements: &mut Vec<SceneElement<GlesRenderer>>, ids: &[Id; 4], rect: Rect, edge: u32) {
-    let color = Color32F::new(0.23, 0.61, 1.0, 1.0);
+fn outline(elements: &mut Vec<SceneElement<GlesRenderer>>, ids: &[Id; 4], rect: Rect, edge: u32, alpha: f32) {
+    let color = Color32F::new(0.23 * alpha, 0.61 * alpha, alpha, alpha);
     let x = rect.pos.x - edge as i32;
     let y = rect.pos.y - edge as i32;
     for (id, r) in ids.iter().zip([
@@ -197,6 +243,7 @@ fn label(
     label: &Label,
     rect: Rect,
     gap: u32,
+    alpha: f32,
 ) {
     let Some(buffer) = &label.buffer else { return };
     let location = (
@@ -207,7 +254,7 @@ fn label(
         renderer,
         location,
         buffer,
-        None,
+        Some(alpha),
         None,
         None,
         Kind::Unspecified,
@@ -234,14 +281,35 @@ pub(crate) fn render(
         )
     };
     let edge = (overview.gap / 6).max(2);
-    if let Some(window) = overview.windows.get(overview.selected) {
-        let rect = local(window.destination);
-        outline(elements, &overview.ring, rect, edge);
-        label(elements, renderer, &window.label, rect, edge * 2);
+    // Geometry follows the spring, including its small elastic excursions.
+    // Only opacity saturates; clamping geometry would clip release velocity.
+    let progress = overview.progress;
+    let alpha = progress.clamp(0.0, 1.0) as f32;
+    let placed = |window: &Window| interpolate(
+        Rect::new(Point::new(window.source.pos.x - viewport.pos.x,
+            window.source.pos.y - viewport.pos.y), window.source.size),
+        local(window.destination), progress);
+    if let Some(drag) = overview.drag {
+        if let Some(window) = overview.windows.get(drag.index) {
+            let rect = local(drag.destination);
+            // Frontmost, translucent and bounded: the destination remains
+            // visible through the live image. No capture or client configure.
+            render_window(elements, renderer, backend, window, rect, 0.82);
+            solid(elements, &window.shadow, Rect::new(
+                Point::new(rect.pos.x - edge as i32, rect.pos.y - edge as i32),
+                Size::new(rect.size.w + edge * 2, rect.size.h + edge * 3)),
+                Color32F::new(0.0, 0.0, 0.0, 0.24));
+        }
+    } else if let Some(window) = overview.windows.get(overview.selected) {
+        let rect = placed(window);
+        outline(elements, &overview.ring, rect, edge, alpha);
+        label(elements, renderer, &window.label, rect, edge * 2, alpha);
     }
-    for window in &overview.windows {
-        let rect = local(window.destination);
-        render_window(elements, renderer, backend, window, rect);
+    for &index in &overview.paint_order {
+        let window = &overview.windows[index];
+        if overview.drag.is_some_and(|drag| drag.index == index) { continue; }
+        let rect = placed(window);
+        render_window(elements, renderer, backend, window, rect, if window.desktop_visible { 1.0 } else { alpha });
         solid(
             elements,
             &window.shadow,
@@ -249,27 +317,34 @@ pub(crate) fn render(
                 Point::new(rect.pos.x - edge as i32, rect.pos.y - edge as i32),
                 Size::new(rect.size.w + edge * 2, rect.size.h + edge * 3),
             ),
-            Color32F::new(0.0, 0.0, 0.0, 0.28),
+            Color32F::new(0.0, 0.0, 0.0, 0.28 * alpha),
         );
     }
     for (i, space) in overview.spaces.iter().enumerate() {
         let rect = local(space.rect);
-        if let Some((close, glyph)) = &space.close {
+        // A desktop is a single generous drop target during a drag, including
+        // its close-control corner. Never imply that dropping will delete it.
+        if let Some((close, glyph)) = space.close.as_ref().filter(|_| overview.drag.is_none()) {
             let close = local(*close);
             if let Some(buffer) = &glyph.buffer {
                 if let Ok(element) = MemoryRenderBufferRenderElement::from_buffer(
                     renderer, (close.pos.x as f64, close.pos.y as f64), buffer,
-                    None, None, None, Kind::Unspecified,
+                    Some(alpha), None, None, Kind::Unspecified,
                 ) {
                     elements.push(element.into());
                 }
             }
         }
-        label(elements, renderer, &space.label, rect, edge * 2);
-        if i == overview.workspace {
-            outline(elements, &overview.space_ring, rect, edge);
+        let targeted = overview.drag.is_some_and(|drag| drag.workspace == Some(i));
+        label(elements, renderer, if targeted { &space.drop_label } else { &space.label }, rect, edge * 2, alpha);
+        if overview.drag.is_some_and(|drag| drag.workspace == Some(i)) {
+            outline(elements, &overview.drop_ring, rect, edge * 2, alpha);
+            solid(elements, &overview.drop_fill, rect, Color32F::new(0.03, 0.09, 0.16, 0.24));
         }
-        space_background(elements, renderer, backend, overview.geometry, rect, &space.background);
+        if i == overview.workspace {
+            outline(elements, &overview.space_ring, rect, edge, alpha);
+        }
+        space_background_alpha(elements, renderer, backend, overview.geometry, rect, &space.background, alpha);
     }
     if let Some(space) = overview.spaces.first() {
         solid(
@@ -282,17 +357,26 @@ pub(crate) fn render(
                     space.rect.pos.y as u32 + space.rect.size.h + space.label.size.h + overview.gap,
                 ),
             ),
-            Color32F::new(0.0, 0.0, 0.0, 0.3),
+            Color32F::new(0.0, 0.0, 0.0, 0.3 * alpha),
         );
     }
 }
 
-fn render_window(
+pub(crate) fn interpolate(source: Rect, target: Rect, progress: f64) -> Rect {
+    let mix = |a: f64, b: f64| a + (b - a) * progress;
+    Rect::new(Point::new(mix(source.pos.x as f64, target.pos.x as f64).round() as i32,
+        mix(source.pos.y as f64, target.pos.y as f64).round() as i32),
+        Size::new(mix(source.size.w as f64, target.size.w as f64).round().max(1.0) as u32,
+        mix(source.size.h as f64, target.size.h as f64).round().max(1.0) as u32))
+}
+
+pub(crate) fn render_window(
     elements: &mut Vec<SceneElement<GlesRenderer>>,
     renderer: &mut GlesRenderer,
     backend: &WaylandBackend,
     window: &Window,
     destination: Rect,
+    alpha: f32,
 ) {
     let Some(record) = backend
         .windows
@@ -307,7 +391,7 @@ fn render_window(
         return;
     }
     let before = elements.len();
-    if let Some(surface) = record.surface.wl_surface() {
+    if let Some(surface) = record.surface.wl_surface().filter(|_| window.draw_content) {
         let origin = SPoint::<i32, Physical>::from((
             destination.pos.x
                 + ((record.content.pos.x - record.content_offset.x - window.source.pos.x) as f64
@@ -318,7 +402,7 @@ fn render_window(
                     * scale)
                     .round() as i32,
         ));
-        push_surface_tree(
+        push_surface_tree_alpha(
             elements,
             renderer,
             &surface,
@@ -326,6 +410,7 @@ fn render_window(
             backend.window_surface_scale(record) * scale,
             1.0,
             Kind::Unspecified,
+            alpha,
         );
     }
     if let Some(buffer) = window
@@ -339,7 +424,7 @@ fn render_window(
             renderer,
             (destination.pos.x as f64, destination.pos.y as f64),
             buffer,
-            None,
+            Some(alpha),
             None,
             None,
             Kind::Unspecified,
@@ -372,7 +457,7 @@ fn render_window(
                 renderer,
                 origin.to_f64(),
                 &part.buffer,
-                None,
+                Some(alpha),
                 None,
                 None,
                 Kind::Unspecified,
@@ -384,12 +469,12 @@ fn render_window(
             elements,
             &frame.fill_id,
             destination,
-            Color32F::new(0.0, 0.0, 0.0, 1.0),
+            Color32F::new(0.0, 0.0, 0.0, alpha),
         );
     }
 }
 
-fn space_background(
+pub(crate) fn space_background(
     elements: &mut Vec<SceneElement<GlesRenderer>>,
     renderer: &mut GlesRenderer,
     backend: &WaylandBackend,
@@ -397,6 +482,11 @@ fn space_background(
     destination: Rect,
     id: &Id,
 ) {
+    space_background_alpha(elements, renderer, backend, source, destination, id, 1.0);
+}
+#[allow(clippy::too_many_arguments)]
+fn space_background_alpha(elements: &mut Vec<SceneElement<GlesRenderer>>, renderer: &mut GlesRenderer,
+    backend: &WaylandBackend, source: Rect, destination: Rect, id: &Id, alpha: f32) {
     let scale = destination.size.w as f64 / source.size.w.max(1) as f64;
     for record in backend.layers.iter().rev().filter(|r| {
         r.layer == Layer::Background && backend.layer_presented(r) && overlaps(r.geometry, source)
@@ -412,7 +502,7 @@ fn space_background(
             destination.pos.y
                 + ((record.geometry.pos.y - source.pos.y) as f64 * scale).round() as i32,
         );
-        push_surface_tree(
+        push_surface_tree_alpha(
             elements,
             renderer,
             surface,
@@ -420,6 +510,7 @@ fn space_background(
             factor * scale,
             1.0,
             Kind::Unspecified,
+            alpha,
         );
     }
     match &backend.root_background {
@@ -427,7 +518,7 @@ fn space_background(
             elements,
             id,
             destination,
-            Color32F::new(*r as f32 / 255.0, *g as f32 / 255.0, *b as f32 / 255.0, 1.0),
+            Color32F::new(*r as f32 / 255.0 * alpha, *g as f32 / 255.0 * alpha, *b as f32 / 255.0 * alpha, alpha),
         ),
         RootBackground::Image(buffer) => {
             let src = SRect::new(
@@ -438,7 +529,7 @@ fn space_background(
                 renderer,
                 (destination.pos.x as f64, destination.pos.y as f64),
                 buffer,
-                None,
+                Some(alpha),
                 Some(src),
                 Some((destination.size.w as i32, destination.size.h as i32).into()),
                 Kind::Unspecified,

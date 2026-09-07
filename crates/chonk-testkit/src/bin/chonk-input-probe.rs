@@ -27,6 +27,10 @@ use wayland_client::protocol::{
     wl_touch,
 };
 use wayland_client::{Connection, Dispatch, QueueHandle};
+use wayland_protocols::wp::pointer_gestures::zv1::client::{
+    zwp_pointer_gestures_v1::ZwpPointerGesturesV1,
+    zwp_pointer_gesture_swipe_v1::{self, ZwpPointerGestureSwipeV1},
+};
 use wayland_protocols::wp::keyboard_shortcuts_inhibit::zv1::client::{
     zwp_keyboard_shortcuts_inhibit_manager_v1::ZwpKeyboardShortcutsInhibitManagerV1,
     zwp_keyboard_shortcuts_inhibitor_v1::{self, ZwpKeyboardShortcutsInhibitorV1},
@@ -65,6 +69,7 @@ struct Probe {
     seat: Option<wl_seat::WlSeat>,
     seat_version: u32,
     pointer: Option<wl_pointer::WlPointer>,
+    gestures: Option<ZwpPointerGesturesV1>,
     keyboard: Option<wl_keyboard::WlKeyboard>,
     text_input_manager: Option<ZwpTextInputManagerV3>,
     input_method_manager: Option<ZwpInputMethodManagerV2>,
@@ -121,6 +126,7 @@ impl Dispatch<wl_registry::WlRegistry, ()> for Probe {
                     probe.compositor = Some(registry.bind(name, version.min(4), qh, ()))
                 }
                 "wl_subcompositor" => probe.subcompositor = Some(registry.bind(name, 1, qh, ())),
+                "zwp_pointer_gestures_v1" => probe.gestures = Some(registry.bind(name, version.min(3), qh, ())),
                 "wl_shm" => probe.shm = Some(registry.bind(name, 1, qh, ())),
                 "xdg_wm_base" => probe.wm_base = Some(registry.bind(name, version.min(3), qh, ())),
                 "wl_seat" => {
@@ -521,7 +527,20 @@ impl Dispatch<XdgSurface, ()> for Probe {
         _: &QueueHandle<Self>,
     ) {
         if let xdg_surface::Event::Configure { serial } = event {
+            say(&format!("surface configure {serial}"));
             surface.ack_configure(serial);
+        }
+    }
+}
+
+impl Dispatch<ZwpPointerGestureSwipeV1, ()> for Probe {
+    fn event(_: &mut Self, _: &ZwpPointerGestureSwipeV1, event: zwp_pointer_gesture_swipe_v1::Event,
+        _: &(), _: &Connection, _: &QueueHandle<Self>) {
+        match event {
+            zwp_pointer_gesture_swipe_v1::Event::Begin { fingers, .. } => say(&format!("swipe begin {fingers}")),
+            zwp_pointer_gesture_swipe_v1::Event::Update { dx, dy, .. } => say(&format!("swipe update {dx} {dy}")),
+            zwp_pointer_gesture_swipe_v1::Event::End { cancelled, .. } => say(&format!("swipe end {cancelled}")),
+            _ => {}
         }
     }
 }
@@ -539,6 +558,7 @@ macro_rules! ignore_events {
 }
 
 ignore_events!(
+    ZwpPointerGesturesV1,
     ZwpKeyboardShortcutsInhibitManagerV1,
     ZwpInputMethodManagerV2,
     ZwpTextInputManagerV3,
@@ -583,6 +603,7 @@ fn main() {
     };
     queue.roundtrip(&mut probe).expect("registry");
     queue.roundtrip(&mut probe).expect("seat capabilities");
+    let _swipe = probe.gestures.as_ref().map(|manager| manager.get_swipe_gesture(probe.pointer.as_ref().expect("pointer"), &qh, ()));
     let _input_method = std::env::args().any(|arg| arg == "ime").then(|| {
         probe
             .input_method_manager

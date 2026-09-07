@@ -21,6 +21,7 @@ pub struct OverviewWindow<W, F> {
 pub struct OverviewWorkspace {
     pub rect: Rect,
     pub label: DecorationBuffer,
+    pub drop_label: DecorationBuffer,
     pub close: Option<(Rect, DecorationBuffer)>,
 }
 
@@ -33,6 +34,16 @@ pub struct OverviewScene<W, F> {
     pub workspace: usize,
     pub selected: usize,
     pub gap: u32,
+}
+
+/// Pointer-owned Overview presentation. Updating it only moves existing GPU
+/// content; it never configures the application or changes workspace membership.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OverviewDrag {
+    pub index: usize,
+    pub destination: Rect,
+    /// A valid destination desktop, excluding the source desktop.
+    pub workspace: Option<usize>,
 }
 
 /// Everything the protocol-agnostic core needs from a windowing backend
@@ -143,6 +154,10 @@ pub trait Backend {
         let _ = selected;
     }
     fn hide_live_overview(&mut self) {}
+
+    fn drag_live_overview(&mut self, drag: Option<OverviewDrag>) {
+        let _ = drag;
+    }
 
     /// Paints the desktop background — solid color or a wallpaper
     /// image. On X11 this is the root window (plus the root-pixmap

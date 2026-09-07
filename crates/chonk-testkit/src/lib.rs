@@ -1107,10 +1107,29 @@ pub struct World {
     pub shells: Vec<ShellInfo>,
     pub overview: Option<OverviewInfo>,
     pub overview_windows: Vec<OverviewWindowInfo>,
+    pub overview_drag: Option<OverviewDragInfo>,
+    pub gesture: Option<GestureInfo>,
+    pub logical_focus: Option<u64>,
+    pub seat_focus: Option<u64>,
+}
+
+#[derive(Clone, Debug)]
+pub struct GestureInfo {
+    pub kind: String, pub axis: String, pub x: f64, pub y: f64,
+    pub raw_progress: f64, pub progress: f64, pub velocity: f64, pub projected: f64,
+    pub target: f64, pub settling: bool, pub origin: usize,
+}
+
+#[derive(Clone, Debug)]
+pub struct OverviewDragInfo {
+    pub id: u64,
+    pub rect: wm_theme_api::Rect,
+    pub target: Option<usize>,
 }
 
 #[derive(Clone, Debug)]
 pub struct OverviewInfo {
+    pub progress: f64,
     pub selected: usize,
     pub label_bytes: usize,
     pub preview_edge: u32,
@@ -1309,6 +1328,9 @@ pub struct FrameStats {
     pub render_calls: u64,
     pub render_us: u128,
     pub render_max_us: u128,
+    pub gesture_build_calls: u64,
+    pub gesture_build_us: u128,
+    pub gesture_build_max_us: u128,
     pub flush_us: u128,
     pub ipc_us: u128,
     pub dispatch_histogram: [u64; 16],
@@ -1393,6 +1415,23 @@ impl Door {
     /// Begin a touchpad swipe through the compositor's physical input route.
     pub fn swipe_begin(&mut self, fingers: u32) -> Result<(), String> {
         self.send(&format!("swipe begin {fingers}"))
+    }
+    pub fn reset_input(&mut self, resume: bool) -> Result<(), String> {
+        self.send(if resume { "input-reset resume" } else { "input-reset device" })
+    }
+    pub fn pause_gesture_input(&mut self) -> Result<(), String> {
+        self.send("input-reset pause")
+    }
+
+    /// Timestamped physical-path samples, independent of machine/test speed.
+    pub fn swipe_begin_at(&mut self, fingers: u32, time: u32) -> Result<(), String> {
+        self.send(&format!("swipe-at {time} begin {fingers}"))
+    }
+    pub fn swipe_update_at(&mut self, dx: f64, dy: f64, time: u32) -> Result<(), String> {
+        self.send(&format!("swipe-at {time} update {dx} {dy}"))
+    }
+    pub fn swipe_end_at(&mut self, cancelled: bool, time: u32) -> Result<(), String> {
+        self.send(&format!("swipe-at {time} {}", if cancelled { "cancel" } else { "end" }))
     }
 
     /// Logical touchpad displacement, independent of the nested output scale.
@@ -1610,6 +1649,9 @@ impl Door {
             render_calls: required!("render_calls="),
             render_us: required!("render_us="),
             render_max_us: required!("render_max_us="),
+            gesture_build_calls: field(&line, "gesture_build_calls=").unwrap_or_default(),
+            gesture_build_us: field(&line, "gesture_build_us=").unwrap_or_default(),
+            gesture_build_max_us: field(&line, "gesture_build_max_us=").unwrap_or_default(),
             flush_us: required!("flush_us="),
             ipc_us: required!("ipc_us="),
             dispatch_histogram: histogram_field(&line, "dispatch_hist=")?,
@@ -1735,9 +1777,30 @@ impl Door {
                 world.workspace_count = field(&line, "count=").unwrap_or_default();
             } else if line.starts_with("overview ") {
                 world.overview = Some(OverviewInfo {
+                    progress: field(&line, "progress=").unwrap_or(1.0),
                     selected: field(&line, "selected=").unwrap_or_default(),
                     label_bytes: field(&line, "label_bytes=").unwrap_or_default(),
                     preview_edge: field(&line, "preview_edge=").unwrap_or_default(),
+                });
+            } else if line.starts_with("gesture-focus ") {
+                world.logical_focus = field::<u64>(&line, "logical=").filter(|id| *id != 0);
+                world.seat_focus = field::<u64>(&line, "seat=").filter(|id| *id != 0);
+            } else if line.starts_with("gesture ") {
+                world.gesture = Some(GestureInfo {
+                    kind: field(&line, "kind=").unwrap_or_default(), axis: field(&line, "axis=").unwrap_or_default(),
+                    x: field(&line, "x=").unwrap_or_default(), y: field(&line, "y=").unwrap_or_default(),
+                    raw_progress: field(&line, "raw_progress=").unwrap_or_default(), progress: field(&line, "progress=").unwrap_or_default(),
+                    velocity: field(&line, "velocity=").unwrap_or_default(), projected: field(&line, "projected=").unwrap_or_default(),
+                    target: field(&line, "target=").unwrap_or_default(), settling: field(&line, "settling=").unwrap_or_default(),
+                    origin: field(&line, "origin=").unwrap_or_default(),
+                });
+            } else if line.starts_with("overview-drag ") {
+                world.overview_drag = Some(OverviewDragInfo {
+                    id: field(&line, "id=").unwrap_or_default(),
+                    rect: wm_theme_api::Rect::new(
+                        wm_theme_api::Point::new(field(&line, "x=").unwrap_or_default(), field(&line, "y=").unwrap_or_default()),
+                        wm_theme_api::Size::new(field(&line, "w=").unwrap_or_default(), field(&line, "h=").unwrap_or_default())),
+                    target: field::<i64>(&line, "target=").and_then(|i| usize::try_from(i).ok()),
                 });
             } else if line.starts_with("overview-window ") {
                 world.overview_windows.push(OverviewWindowInfo {

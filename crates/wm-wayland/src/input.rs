@@ -58,7 +58,7 @@
 //! it.
 
 pub(crate) mod constraints;
-mod gestures;
+pub(crate) mod gestures;
 pub(crate) mod keyboard;
 mod seat;
 pub(crate) mod surface;
@@ -827,7 +827,7 @@ pub(crate) fn process_input_event<I: InputBackend>(state: &mut Compositor, event
             }
         }
         InputEvent::GestureSwipeUpdate { event } => {
-            if gestures::update(state, event.delta()) {
+            if gestures::update(state, event.delta(), event.time_msec()) {
                 return;
             }
             if let Some(pointer) = state.seat.get_pointer() {
@@ -838,7 +838,7 @@ pub(crate) fn process_input_event<I: InputBackend>(state: &mut Compositor, event
             }
         }
         InputEvent::GestureSwipeEnd { event } => {
-            if gestures::end(state, event.cancelled()) {
+            if gestures::end(state, event.cancelled(), event.time_msec()) {
                 return;
             }
             if let Some(pointer) = state.seat.get_pointer() {
@@ -1954,6 +1954,11 @@ fn pointer_button(
 ) {
     let serial = SERIAL_COUNTER.next_serial();
     let pressed = button_state == ButtonState::Pressed;
+    if !state.wm.backend().locked && pressed && state.wm.backend().gesture_scene.is_some() {
+        gestures::cancel(state);
+        with_input(&state.seat, |input| input.grab_dismissals.push(button_code));
+        return;
+    }
     if !state.wm.backend().locked && crate::capture_tool::button(state, button_code, pressed) {
         return;
     }
@@ -2707,6 +2712,7 @@ pub(crate) fn inject_pointer_axis(
 /// and the renderer's makes clicks land on things the user cannot see,
 /// so both sides cite `backend_impl.rs`'s stacking-band contract.
 fn hit_at(backend: &WaylandBackend, at: Point, position: LogicalPoint<f64, Logical>) -> Hit {
+    if !backend.locked && backend.gesture_scene.is_some() { return Hit::Root; }
     if !backend.locked && crate::capture_tool::modal(backend) { return Hit::Root; }
     // The lock is a scene domain, not one more band in the desktop's
     // z-order. Put its boundary on the shared hit-test itself so a new

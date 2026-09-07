@@ -554,7 +554,21 @@ fn handle_command(line: &str, stream: &mut UnixStream, comp: &mut Compositor) {
             };
             crate::input::process_input_event::<TestInput>(comp, input);
         }
-        Some("swipe") => {
+        Some("input-reset") => {
+            match words.next() {
+                Some("resume") => crate::input::resynchronise_input_after_resume(comp),
+                Some("pause") => crate::input::gestures::cancel(comp),
+                Some("device") => crate::input::process_input_event::<TestInput>(comp, InputEvent::DeviceRemoved { device: TestDevice }),
+                _ => reply_err(stream, "input-reset wants pause|resume|device"),
+            }
+        }
+        Some(command @ ("swipe" | "swipe-at")) => {
+            let time = if command == "swipe-at" {
+                let Some(time) = words.next().and_then(|s| s.parse::<u32>().ok()) else {
+                    reply_err(stream, "swipe-at wants a millisecond timestamp"); return;
+                };
+                u64::from(time) * 1000
+            } else { time };
             let mut event = TestSwipeEvent {
                 fingers: 0,
                 delta: (0.0, 0.0),
@@ -751,7 +765,7 @@ fn handle_command(line: &str, stream: &mut UnixStream, comp: &mut Compositor) {
             };
             let _ = stream.write_all(
                 format!(
-                    "frame-stats dispatch_calls={} dispatch_us={} dispatch_max_us={} input_us={} shell_us={} protocol_us={} layout_us={} render_calls={} render_us={} render_max_us={} flush_us={} ipc_us={} dispatch_hist={} render_hist={} render_attempts={}\n",
+                    "frame-stats dispatch_calls={} dispatch_us={} dispatch_max_us={} input_us={} shell_us={} protocol_us={} layout_us={} render_calls={} render_us={} render_max_us={} flush_us={} ipc_us={} dispatch_hist={} render_hist={} render_attempts={} gesture_build_calls={} gesture_build_us={} gesture_build_max_us={}\n",
                     stats.dispatch.calls,
                     micros(stats.dispatch.total),
                     micros(stats.dispatch.max),
@@ -767,6 +781,7 @@ fn handle_command(line: &str, stream: &mut UnixStream, comp: &mut Compositor) {
                     buckets(&stats.dispatch_histogram),
                     buckets(&stats.render_histogram),
                     stats.render_attempts,
+                    stats.gesture_build.calls, micros(stats.gesture_build.total), micros(stats.gesture_build.max),
                 )
                 .as_bytes(),
             );
@@ -791,6 +806,13 @@ fn handle_command(line: &str, stream: &mut UnixStream, comp: &mut Compositor) {
         Some("windows") => {
             let mut reply = String::new();
             let backend = comp.wm.backend();
+            let logical_focus = comp.wm.focused_client().and_then(|id| comp.wm.client(id)).map(|c| c.window);
+            let seat_focus = comp.seat.get_keyboard().and_then(|k| k.current_focus())
+                .and_then(|focus| backend.window_for_surface(focus.surface()));
+            reply.push_str(&format!("gesture-focus logical={} seat={}\n",
+                logical_focus.map_or(0, |w| w.0), seat_focus.map_or(0, |w| w.0)));
+            let (owner, (x, y), motion) = crate::input::gestures::inspect(comp);
+            reply.push_str(&format!("swipe-stream owner={owner} x={x} y={y} axis={:?}\n", motion.map(|m| m.axis)));
             reply.push_str(&format!("scale {}\n", comp.ui_scale));
             reply.push_str(&format!("workspaces current={} count={}\n",
                 comp.wm.current_workspace(), comp.wm.workspace_count()));
@@ -875,10 +897,10 @@ fn handle_command(line: &str, stream: &mut UnixStream, comp: &mut Compositor) {
             }
             if let Some(overview) = &backend.overview {
                 reply.push_str(&format!(
-                    "overview selected={} label_bytes={} preview_edge={}\n",
+                    "overview selected={} label_bytes={} preview_edge={} progress={}\n",
                     overview.selected,
                     overview.label_bytes(),
-                    backend.preview_edge.unwrap_or(0)
+                    backend.preview_edge.unwrap_or(0), overview.progress
                 ));
                 for window in &overview.windows {
                     let r = window.destination;
@@ -893,6 +915,22 @@ fn handle_command(line: &str, stream: &mut UnixStream, comp: &mut Compositor) {
                         window.source.size.h
                     ));
                 }
+                if let Some(drag) = overview.drag {
+                    if let Some(window) = overview.windows.get(drag.index) {
+                        let r = drag.destination;
+                        reply.push_str(&format!(
+                            "overview-drag id={} x={} y={} w={} h={} target={}\n",
+                            window.window.0, r.pos.x, r.pos.y, r.size.w, r.size.h,
+                            drag.workspace.map_or(-1, |index| index as i64)));
+                    }
+                }
+            }
+            if let Some(scene) = &backend.gesture_scene {
+                reply.push_str(&format!("gesture kind={} axis={:?} x={} y={} raw_progress={} progress={} velocity={} projected={} target={} settling={} origin={} previous={} next={}\n",
+                    if scene.horizontal() { "workspace" } else { "overview" }, scene.motion.axis,
+                    scene.motion.x, scene.motion.y, scene.motion.progress, scene.position, scene.velocity,
+                    scene.projected, scene.spring.map_or(f64::NAN, |s| s.target), scene.spring.is_some(), scene.origin,
+                    scene.previous.map_or(-1, |i| i as i64), scene.next.map_or(-1, |i| i as i64)));
             }
             reply.push_str("done\n");
             let _ = stream.write_all(reply.as_bytes());

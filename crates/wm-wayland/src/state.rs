@@ -168,6 +168,7 @@ pub(crate) struct FrameStats {
     /// submissions alone can hide expensive work on an unchanged scene.
     pub render_attempts: u64,
     pub render: PhaseTiming,
+    pub gesture_build: PhaseTiming,
     pub flush: PhaseTiming,
     pub ipc: PhaseTiming,
     /// Power-of-two microsecond ceilings, from <=1 us through >16384 us.
@@ -176,6 +177,9 @@ pub(crate) struct FrameStats {
 }
 
 impl FrameStats {
+    pub(crate) fn record_gesture_build(&mut self, elapsed: Duration) {
+        self.gesture_build.record(elapsed);
+    }
     fn histogram_bucket(elapsed: Duration) -> usize {
         let micros = elapsed.as_micros().max(1);
         (u128::BITS - (micros - 1).leading_zeros()).min(15) as usize
@@ -621,6 +625,7 @@ pub struct WaylandBackend {
     pub(crate) frames: HashMap<WlFrameId, FrameRecord>,
     pub(crate) shells: HashMap<WlShellId, ShellRecord>,
     pub(crate) overview: Option<crate::overview::Overview>,
+    pub(crate) gesture_scene: Option<crate::gesture_scene::Transition>,
     pub(crate) capture_ui: Option<crate::capture_tool::Overlay>,
     /// Bottom-to-top managed application order — see [`StackEntry`].
     pub(crate) stacking: Vec<StackEntry>,
@@ -1010,6 +1015,7 @@ impl WaylandBackend {
             next_id: 1,
             windows: HashMap::new(),
             overview: None,
+            gesture_scene: None,
             capture_ui: None,
             scene_index: SceneIndex::default(),
             surface_windows: HashMap::new(),
@@ -2508,6 +2514,9 @@ impl Compositor {
         let dispatch_span = tracing::info_span!("dispatch_pass");
         let _dispatch_guard = dispatch_span.enter();
         let dispatch_started = Instant::now();
+        // Spring commits join the ordinary notification/focus/protocol drain
+        // below, so a workspace settles and receives keyboard focus together.
+        crate::gesture_scene::tick(self);
         self.apply_pending_keyboard();
         if let Some(config) = self.wm.backend_mut().pending_pointer.take() {
             self.wm.backend_mut().scroll_factor = config.scroll_factor.unwrap_or(1.0);
@@ -2542,6 +2551,7 @@ impl Compositor {
             // switcher open (see the X11 loop's longer commentary;
             // `KeyRelease` is never intercepted at all).
             if let BackendEvent::KeyPress(combo) = &event {
+                if self.wm.backend().gesture_scene.is_some() { crate::input::gestures::cancel(self); }
                 if crate::capture_tool::key(self, combo) {
                     continue;
                 }
@@ -2825,6 +2835,8 @@ impl Compositor {
         // before rendering. It is event-driven: without a new surface,
         // output change, or surface death this returns immediately.
         crate::lock::refresh(self);
+        crate::gesture_scene::validate(self);
+        crate::input::keyboard::sync_modal_focus(self);
 
         // Timed commits are independent of presentation, and an invisible
         // surface cannot ever satisfy a FIFO presentation barrier. Visibility
@@ -4216,6 +4228,9 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
             wait = wait.min(deadline.saturating_duration_since(now));
         }
         if let Some(deadline) = crate::session::next_render_deadline(&comp.graphics) {
+            wait = wait.min(deadline.saturating_duration_since(now));
+        }
+        if let Some(deadline) = crate::gesture_scene::deadline(&comp) {
             wait = wait.min(deadline.saturating_duration_since(now));
         }
         if let Some(deadline) = crate::session::next_hotplug_deadline(&comp.graphics) {
