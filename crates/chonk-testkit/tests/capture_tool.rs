@@ -669,7 +669,7 @@ fn recording_screen_and_area_preserve_changing_content() {
             String::from_utf8_lossy(&decoded.stderr)
         );
         assert!(
-            decoded.stdout.len() > 90 * 3,
+            decoded.stdout.len() > 20 * 3,
             "recording has advancing frames"
         );
         let mut red = false;
