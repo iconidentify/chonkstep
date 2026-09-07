@@ -18,3 +18,4 @@ test-support = []
 
 [dev-dependencies]
 chonk-test-support = { path = "../chonk-test-support" }
+wm-theme = { path = "../wm-theme" }

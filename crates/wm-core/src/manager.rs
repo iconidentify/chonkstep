@@ -4440,6 +4440,10 @@ fn shaded_paint_inputs(
     layout: &DecorationLayout,
 ) -> (DecorationRequest, DecorationLayout) {
     let mut request = request.clone();
+    // Sparse themes size the side strips from the painted content height.
+    // Keeping the client's restore height here redraws those strips below
+    // the shortened frame on every repaint; frame_size does not clip them.
+    request.content_size.h = 0;
     request.resizable = false;
     let mut layout = layout.clone();
     layout.frame_size.h = layout.shaded_frame_height;
@@ -8388,6 +8392,59 @@ mod tests {
                 !(flags.contains(ClientFlags::SHADED) && flags.contains(ClientFlags::FULLSCREEN)),
                 "ordering {order} left both SHADED and FULLSCREEN set"
             );
+        }
+    }
+
+    #[test]
+    fn shaded_sparse_chrome_fits_the_frame_and_matches_the_full_painter() {
+        use wm_theme::{default_theme, Appearance, FontState, RasterThemeEngine};
+        use wm_theme_api::ThemeEngine;
+
+        let fonts = FontState::new();
+        for appearance in [Appearance::Light, Appearance::Dark] {
+            for theme in default_theme::all_themes_in(appearance) {
+                let name = theme.id.clone();
+                let engine = RasterThemeEngine::with_fonts(theme.clone(), fonts.clone());
+                for scale in [1.0, 1.5, 2.0] {
+                    let full_engine = RasterThemeEngine::with_fonts(theme.scaled(scale), fonts.clone());
+                    for (title, focused) in [("Terminal", true), ("Changed title", false)] {
+                        let request = DecorationRequest {
+                            content_size: Size::new(300, 200),
+                            title: title.into(),
+                            focused,
+                            resizable: true,
+                            buttons: Vec::new(),
+                        };
+                        let layout = engine.layout_at(&request, scale);
+                        let (paint_request, paint_layout) = shaded_paint_inputs(&request, &layout);
+                        let surface = engine.render_surface_at(&paint_request, &paint_layout, scale);
+                        let full = full_engine.render(&paint_request, &paint_layout);
+                        let mut pixels = vec![0; full.pixels.len()];
+                        for pixel in pixels.as_chunks_mut::<4>().0 {
+                            pixel[3] = 255; // The backend's opaque black gap fill.
+                        }
+                        for part in surface.parts {
+                            assert!(
+                                part.offset.x >= 0 && part.offset.y >= 0
+                                    && part.offset.x as u32 + part.buffer.width <= full.width
+                                    && part.offset.y as u32 + part.buffer.height <= full.height,
+                                "{name} {appearance:?} scale {scale}: sparse chrome at {:?}, {}x{} exceeds the {}x{} shaded frame",
+                                part.offset, part.buffer.width, part.buffer.height, full.width, full.height
+                            );
+                            for y in 0..part.buffer.height as usize {
+                                let src = y * part.buffer.width as usize * 4;
+                                let dst = ((part.offset.y as usize + y) * full.width as usize
+                                    + part.offset.x as usize) * 4;
+                                let len = part.buffer.width as usize * 4;
+                                pixels[dst..dst + len].copy_from_slice(&part.buffer.pixels[src..src + len]);
+                            }
+                        }
+                        assert!(pixels == full.pixels, "{name} {appearance:?} scale {scale}: shaded titlebar and bottom border must match the full painter");
+                        assert_eq!(request.content_size, Size::new(300, 200), "the client's restore size is untouched");
+                        assert!(layout.frame_size.h > paint_layout.frame_size.h);
+                    }
+                }
+            }
         }
     }
 
