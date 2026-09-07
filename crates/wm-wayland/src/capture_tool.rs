@@ -317,7 +317,9 @@ fn commit(comp: &mut Compositor) {
             rect,
             monitor,
             entry.output.current_scale().integer_scale(),
-            entry.transform,
+            // Match the transform advertised to the screencopy client. The
+            // nested backend adds an EGL flip absent from the layout transform.
+            entry.output.current_transform(),
         ) else {
             comp.capture_tool.submit(Job::Error(
                 "This recording region cannot be represented by the output's capture grid".into(),
