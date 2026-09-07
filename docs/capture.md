@@ -76,6 +76,12 @@ screenshot opens in the default image viewer through `xdg-open` (imv on a
 standard Omarchy installation). Your chosen default is respected. An unavailable
 viewer does not undo the saved file or clipboard copy.
 
+Saved-capture notifications show the screenshot itself or a small first-frame
+preview of the recording. Video previews are generated asynchronously and kept
+in the XDG cache under `chonkstep/capture-previews` so notification history can
+reload them. If a preview cannot be generated, the recording notification uses
+a video icon; the saved recording and review window are unaffected.
+
 ## Recording
 
 Select a display or an area within one display, then press Record or Enter.

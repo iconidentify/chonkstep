@@ -267,6 +267,7 @@ pub struct InputConfig {
     pub sensitivity: Option<f64>,
     pub natural_scroll: Option<bool>,
     pub tap_to_click: Option<bool>,
+    pub disable_while_typing: Option<bool>,
     pub clickfinger_behavior: Option<bool>,
     pub scroll_factor: Option<f64>,
     pub left_handed: Option<bool>,
@@ -1168,6 +1169,10 @@ fn apply_input_table(config: &mut InputConfig, entries: &toml::Table, prefix: &s
             },
             "tap_to_click" => match value.as_bool() {
                 Some(enabled) => config.tap_to_click = Some(enabled),
+                None => tracing::warn!(key = %setting, value = ?value, "config: input setting must be a boolean, ignoring it"),
+            },
+            "disable_while_typing" => match value.as_bool() {
+                Some(enabled) => config.disable_while_typing = Some(enabled),
                 None => tracing::warn!(key = %setting, value = ?value, "config: input setting must be a boolean, ignoring it"),
             },
             "clickfinger_behavior" => match value.as_bool() {
@@ -2203,10 +2208,12 @@ mod tests {
 sensitivity = -0.35
 accel_profile = "FLAT"
 left_handed = true
+disable_while_typing = true
 
 [input.touchpad]
 natural_scroll = true
 tap_to_click = true
+disable_while_typing = false
 clickfinger_behavior = true
 scroll_factor = 0.4
 "#,
@@ -2218,12 +2225,23 @@ scroll_factor = 0.4
         assert_eq!(config.input.left_handed, Some(true));
         assert_eq!(config.input.natural_scroll, Some(true));
         assert_eq!(config.input.tap_to_click, Some(true));
+        assert_eq!(config.input.disable_while_typing, Some(false));
         assert_eq!(config.input.clickfinger_behavior, Some(true));
         assert_eq!(config.input.scroll_factor, Some(0.4));
         assert_eq!(
             config.provenance.get("input").map(String::as_str),
             Some("config file")
         );
+    }
+
+    #[test]
+    fn typing_suppression_requires_a_boolean() {
+        for input in ["true", "false"] {
+            let config = parse(&format!("[input]\ndisable_while_typing = {input}")).unwrap();
+            assert_eq!(config.input.disable_while_typing, Some(input == "true"));
+        }
+        let config = parse("[input.touchpad]\ndisable_while_typing = 'false'").unwrap();
+        assert_eq!(config.input.disable_while_typing, None);
     }
 
     #[test]

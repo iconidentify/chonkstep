@@ -1462,6 +1462,7 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
             sensitivity: next.input.sensitivity,
             natural_scroll: next.input.natural_scroll,
             tap_to_click: next.input.tap_to_click,
+            disable_while_typing: next.input.disable_while_typing,
             clickfinger_behavior: next.input.clickfinger_behavior,
             scroll_factor: next.input.scroll_factor,
             left_handed: next.input.left_handed,

@@ -147,6 +147,12 @@ have persistent one-based numeric wire names derived from their internal
 indices, with no independent mutable-name field. It is therefore an
 intentional model boundary, not an omitted command handler.
 
+Chonkstep also gives the exact `org.omarchy.screensaver` identity a fullscreen
+map default, even in a fresh account with no Chonkstep configuration or imported
+Hyprland rules. Omarchy's launcher supplies the identity but does not request
+fullscreen itself. An explicit imported fullscreen rule can override the default;
+other Omarchy utilities retain their normal window placement.
+
 The screensaver launcher can open its terminal clients because long-bracket
 Lua commands and `openwindow` events are supported. Chonkstep does not have
 Hyprland's independent per-monitor workspace/focus model, so requests that

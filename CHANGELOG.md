@@ -5,6 +5,20 @@ crate and both session binaries carry the same number.
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-09-07
+
+- Game pointer capture suspends touchpad "disable while typing", allowing held
+  movement keys and camera motion together in Wayland and XWayland games.
+  Normal typing suppression returns when capture ends. The preference is also
+  supported in TOML and imported Hyprland input configuration.
+- Omarchy's screensaver opens fullscreen on fresh accounts without imported
+  window rules, instead of inheriting the generic utility-window size.
+  Explicit imported fullscreen rules still take precedence.
+
+- Capture notifications show the saved screenshot or a thumbnail from the
+  recording, fixing the missing camera icon shown as a pink checkerboard.
+  Video preview failures fall back to a video icon without delaying capture.
+
 ## [0.4.1] - 2026-09-07
 
 - Window capture now finishes by clicking the highlighted window. A camera

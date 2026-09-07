@@ -58,6 +58,8 @@
 //! - **No DRM leasing.** A crtc is never handed to another process,
 //!   so a VR headset cannot take one over.
 
+mod touchpad;
+
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::path::{Path, PathBuf};
@@ -2236,7 +2238,7 @@ fn note_libinput_device(comp: &mut Compositor, event: &InputEvent<LibinputInputB
         InputEvent::DeviceAdded { device } => {
             let config = comp.wm.backend().pointer_config.clone();
             let mut device = device.clone();
-            configure_libinput_device(&mut device, &config);
+            configure_libinput_device(&mut device, &config, comp.touchpad_pointer_captured);
             if let Graphics::Session(session) = &mut comp.graphics {
                 if !session.input_devices.iter().any(|held| held.sysname() == device.sysname()) {
                     session.input_devices.push(device);
@@ -2252,19 +2254,31 @@ fn note_libinput_device(comp: &mut Compositor, event: &InputEvent<LibinputInputB
     }
 }
 
-pub(crate) fn apply_pointer_config(graphics: &mut Graphics, config: &wm_core::PointerConfig) {
+pub(crate) fn apply_pointer_config(graphics: &mut Graphics, config: &wm_core::PointerConfig, captured: bool) {
     let Graphics::Session(session) = graphics else {
         return;
     };
     for device in &mut session.input_devices {
-        configure_libinput_device(device, config);
+        configure_libinput_device(device, config, captured);
     }
 }
 
-fn configure_libinput_device(device: &mut libinput_crate::Device, config: &wm_core::PointerConfig) {
+pub(crate) fn apply_touchpad_typing(graphics: &mut Graphics, requested: Option<bool>, captured: bool) {
+    let Graphics::Session(session) = graphics else { return };
+    for device in &session.input_devices {
+        if let Err(error) = touchpad::configure(device, requested, captured) {
+            tracing::warn!(device = device.name(), ?error, "could not update touchpad typing suppression");
+        }
+    }
+}
+
+fn configure_libinput_device(device: &mut libinput_crate::Device, config: &wm_core::PointerConfig, captured: bool) {
     use libinput_crate::{AccelProfile, ClickMethod};
 
     let mut rejected = Vec::new();
+    if let Err(error) = touchpad::configure(device, config.disable_while_typing, captured) {
+        rejected.push(format!("disable_while_typing: {error:?}"));
+    }
     if let Some(speed) = config.sensitivity {
         if !device.config_accel_is_available() {
             rejected.push("sensitivity: unsupported".to_string());

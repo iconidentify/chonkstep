@@ -244,7 +244,7 @@ impl FloatPolicy for FloatRules {
     }
 
     fn window_decision_for(&self, class: &str, title: &str) -> WindowRuleDecision {
-        let mut decision = WindowRuleDecision::default();
+        let mut decision = WindowRuleDecision::for_identity(class);
         for rule in &self.rules {
             if !rule.matches(class, title) {
                 continue;

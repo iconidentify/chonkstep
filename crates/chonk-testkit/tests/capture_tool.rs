@@ -56,6 +56,7 @@ fn boot(name: &str, scale: f32) -> Session {
     // Never launch real review apps against the developer's desktop in E2E.
     // Record argument boundaries and whether publication preceded the launch.
     let wrapper = "#!/bin/sh\npublished=missing\nif [ \"$#\" -eq 1 ] && [ -s \"$1\" ]; then published=published; fi\nprintf '%s\\0' \"${0##*/}\" \"$#\" \"$@\" \"$published\" >> \"$CHONK_TEST_CAPTURE_REVIEW_LOG\"\n";
+    let notification = "#!/bin/sh\npublished=missing\nif [ -s \"$3\" ]; then published=published; fi\nprintf '%s\\0' \"$#\" \"$@\" \"$published\" >> \"$CHONK_TEST_CAPTURE_NOTIFICATION_LOG\"\n";
     let session = Session::boot(
         name,
         SessionOptions {
@@ -68,7 +69,7 @@ fn boot(name: &str, scale: f32) -> Session {
             config_files: ["xdg-open", "omacut"]
                 .into_iter()
                 .map(|program| (format!("fixture-bin/{program}"), wrapper.into()))
-                .chain(std::iter::once(("fixture-bin/notify-send".into(), "#!/bin/sh\nexit 0\n".into())))
+                .chain(std::iter::once(("fixture-bin/notify-send".into(), notification.into())))
                 .collect(),
             env: vec![
                 (
@@ -80,6 +81,11 @@ fn boot(name: &str, scale: f32) -> Session {
                     "CHONK_TEST_CAPTURE_REVIEW_LOG".into(),
                     root.join("capture-review.log").display().to_string(),
                 ),
+                (
+                    "CHONK_TEST_CAPTURE_NOTIFICATION_LOG".into(),
+                    root.join("capture-notification.log").display().to_string(),
+                ),
+                ("XDG_CACHE_HOME".into(), root.join("cache").display().to_string()),
                 ("OMARCHY_SCREENSHOT_DIR".into(), dir.display().to_string()),
                 ("OMARCHY_SCREENRECORD_DIR".into(), dir.display().to_string()),
             ],
@@ -97,6 +103,29 @@ fn boot(name: &str, scale: f32) -> Session {
         .unwrap();
     }
     session
+}
+
+fn notification_preview(session: &Session, capture: &Path, title: &str) -> PathBuf {
+    use std::os::unix::ffi::{OsStrExt, OsStringExt};
+    poll_until(Duration::from_secs(10), "capture notification has a readable preview", || {
+        let log = std::fs::read(session.dir.join("capture-notification.log")).ok()?;
+        let arguments: Vec<_> = log.split(|byte| *byte == 0).collect();
+        for record in arguments.as_chunks::<8>().0 {
+            if !record[5].starts_with(title.as_bytes()) || record[6] != capture.as_os_str().as_bytes() {
+                continue;
+            }
+            assert_eq!(record[0], b"6");
+            assert_eq!(record[1], b"--app-name=Chonkstep Capture");
+            assert_eq!(record[2], b"--icon");
+            assert_eq!(record[4], b"--");
+            assert_eq!(record[7], b"published", "preview must exist before notify-send starts");
+            let path = PathBuf::from(std::ffi::OsString::from_vec(record[3].to_vec()));
+            Screenshot::load(&path).expect("notification icon is a decodable PNG");
+            assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+            return Some(path);
+        }
+        None
+    }).unwrap()
 }
 
 fn window_click_workflow(scale: f32, name: &str) {
@@ -307,6 +336,7 @@ fn screenshot_workflow(scale: f32, name: &str) {
     shortcut(&mut session, 3);
     let path = saved(&exports, 1, "png");
     reviews_opened(&session, &[("xdg-open", &path)]);
+    assert_eq!(notification_preview(&session, &path, "Screenshot saved"), path);
     let full = Screenshot::load(&path).unwrap();
     assert_eq!((full.width, full.height), (before.width, before.height));
     assert_eq!(full.pixel(0, 0), before.pixel(0, 0));
@@ -344,6 +374,7 @@ fn screenshot_workflow(scale: f32, name: &str) {
     session.door().barrier().unwrap();
     let area_path = saved(&exports, 2, "png");
     reviews_opened(&session, &[("xdg-open", &path), ("xdg-open", &area_path)]);
+    assert_eq!(notification_preview(&session, &area_path, "Screenshot saved"), area_path);
     let area = Screenshot::load(&area_path).unwrap();
     assert_eq!(
         (area.width, area.height),
@@ -563,6 +594,10 @@ fn recording_odd_area_is_playable_and_controls_are_excluded() {
     shortcut(&mut session, 5); // Stop / finish
     let path = saved(&exports, 1, "mp4");
     reviews_opened(&session, &[("omacut", &path)]);
+    let preview_path = notification_preview(&session, &path, "Recording saved");
+    assert!(preview_path.starts_with(session.dir.join("cache/chonkstep/capture-previews")));
+    let preview = Screenshot::load(&preview_path).unwrap();
+    assert_eq!((preview.width, preview.height), (256, 171));
     let probe = Command::new("ffprobe")
         .args([
             "-v",
@@ -611,6 +646,11 @@ fn recording_odd_area_is_playable_and_controls_are_excluded() {
             actual[channel].abs_diff(expected[channel]) < 12,
             "no dim overlay encoded: {actual:?} vs {expected:?}"
         );
+    }
+    let thumbnail_pixel = preview.pixel(70 * preview.width / frame.width, 15 * preview.height / frame.height);
+    for channel in 0..3 {
+        assert!(thumbnail_pixel[channel].abs_diff(actual[channel]) < 12,
+            "thumbnail contains the recorded scene: {thumbnail_pixel:?} vs {actual:?}");
     }
     shortcut(&mut session, 4);
     session.door().tap_key(1).unwrap(); // Tool can be reopened after finalization.
@@ -744,6 +784,38 @@ fn failed_mp4_export_preserves_video_and_muxer_diagnostics() {
     );
     shortcut(&mut session, 4);
     session.door().tap_key(1).unwrap();
+}
+
+#[test]
+#[ignore = "needs nested Wayland, wf-recorder and ffmpeg"]
+fn failed_video_preview_uses_glyph_and_preserves_saved_recording() {
+    let mut session = boot("capture-preview-failure", 1.0);
+    let ffmpeg = session.dir.join("config/chonkstep/fixture-bin/ffmpeg");
+    std::fs::write(&ffmpeg,
+        "#!/bin/sh\nfor arg do\n  if [ \"$arg\" = pipe:1 ]; then printf 'incomplete PNG'; exit 7; fi\ndone\nexec /usr/bin/ffmpeg \"$@\"\n"
+    ).unwrap();
+    std::fs::set_permissions(ffmpeg, std::fs::Permissions::from_mode(0o700)).unwrap();
+    shortcut(&mut session, 5);
+    session.door().tap_key(5).unwrap(); // record display
+    session.door().tap_key(28).unwrap();
+    std::thread::sleep(Duration::from_secs(2));
+    shortcut(&mut session, 5);
+    let path = saved(&session.dir.join("exports"), 1, "mp4");
+    reviews_opened(&session, &[("omacut", &path)]);
+    poll_until(Duration::from_secs(10), "video fallback notification", || {
+        let log = std::fs::read(session.dir.join("capture-notification.log")).ok()?;
+        let arguments: Vec<_> = log.split(|byte| *byte == 0).collect();
+        arguments.as_chunks::<8>().0.iter().find(|record| record[5] == b"Recording saved").map(|record| {
+            assert_eq!(record[2], b"--hint", "no missing themed icon lookup");
+            assert_eq!(record[3], "string:omarchy-glyph:\u{f03d}".as_bytes());
+            assert_eq!(record[6], path.to_str().unwrap().as_bytes());
+        })
+    }).unwrap();
+    assert!(files(&session.dir.join("cache/chonkstep/capture-previews"), "png").is_empty());
+    assert!(Command::new("ffprobe").args(["-v", "error"]).arg(path).status().unwrap().success());
+    shortcut(&mut session, 3);
+    let screenshot = saved(&session.dir.join("exports"), 1, "png");
+    assert_eq!(notification_preview(&session, &screenshot, "Screenshot saved"), screenshot);
 }
 
 #[test]
@@ -971,6 +1043,9 @@ fn toolbar_screen_modes_work_without_moving_off_the_toolbar_and_badge_stops() {
         .unwrap();
     let path = saved(&exports, 1, "mp4");
     let screenshot_path = files(&exports, "png").pop().unwrap();
+    assert_eq!(notification_preview(&session, &screenshot_path, "Screenshot saved"), screenshot_path);
+    let preview = Screenshot::load(&notification_preview(&session, &path, "Recording saved")).unwrap();
+    assert!(preview.width <= 256 && preview.height <= 256);
     reviews_opened(
         &session,
         &[("xdg-open", &screenshot_path), ("omacut", &path)],

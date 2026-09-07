@@ -1659,7 +1659,7 @@ impl<B: Backend> WindowManager<B> {
             .float_policy
             .as_deref()
             .map(|policy| policy.window_decision_for(&client.class, &client.title))
-            .unwrap_or_default();
+            .unwrap_or_else(|| placement::WindowRuleDecision::for_identity(&client.class));
         if window_rule.pin {
             client.flags.insert(ClientFlags::STICKY);
         }

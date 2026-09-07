@@ -155,6 +155,9 @@
 # "flat". `scroll_factor` is a positive multiplier applied to both smooth and
 # wheel scrolling. `[input.touchpad]` is an optional nested spelling for the
 # touchpad-oriented controls; it overrides the corresponding flat key.
+# disable_while_typing defaults to each device’s libinput preference. Active
+# pointer locks/confinement temporarily disable it so games can accept keyboard
+# and touchpad input together; releasing capture restores the preference.
 #[input]
 #sensitivity = 0.0
 #accel_profile = "adaptive"
@@ -163,6 +166,7 @@
 #[input.touchpad]
 #natural_scroll = true
 #tap_to_click = false
+#disable_while_typing = true
 #clickfinger_behavior = true
 #scroll_factor = 0.4
 

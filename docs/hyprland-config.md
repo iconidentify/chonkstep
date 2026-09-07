@@ -265,11 +265,17 @@ default usable keymap instead of aborting the login.
 Pointer configuration is also carried from both classic `input {}` /
 `touchpad {}` blocks and Omarchy's Lua tables. `sensitivity` and
 `accel_profile` configure libinput acceleration; `natural_scroll`,
-`tap_to_click`, `clickfinger_behavior`, and `left_handed` are applied
+`tap_to_click`, `disable_while_typing`, `clickfinger_behavior`, and `left_handed` are applied
 where the device advertises them. `scroll_factor` multiplies continuous
 and wheel-axis motion after libinput so the configured speed also works
 on the nested backend. Unsupported capabilities are named per device
 without rejecting the rest of the configuration.
+
+Active pointer locks and confinement temporarily suspend `disable_while_typing`
+so games can receive keyboard and touchpad motion together. This includes
+XWayland pointer grabs. Releasing capture, changing focus, or opening the
+overview restores the configured preference (or each device’s libinput default).
+Hotplug and live reload honor the current capture state.
 
 Binding flags retain their behavior: `bindl`/`locked` actions may run
 on the lock screen, `binde`/`repeating` actions repeat after the

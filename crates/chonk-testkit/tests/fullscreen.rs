@@ -422,3 +422,28 @@ fn a_clients_maximize_control_is_answered_with_maximized() {
     );
     assert!(!log.contains("answer REFUSED"), "no request in this test was refused:\n{log}");
 }
+
+#[test]
+#[ignore = "needs a nested session: scripts/e2e.sh --headless --release"]
+fn screensaver_covers_the_output_without_any_imported_window_rules() {
+    for scale in [1.0, 1.5, 2.0] {
+        let mut session = Session::boot(&format!("screensaver-default-{scale}"), SessionOptions {
+            scale: Some(scale),
+            config_extra: "hyprland_config = false\n".into(),
+            ..Default::default()
+        }).unwrap();
+        let probe = profile_binary("chonk-fullscreen-probe").unwrap();
+        // Like Omarchy's launcher, supply only the service identity. There is
+        // deliberately no client request or keypress to enter fullscreen.
+        session.launch(probe.to_str().unwrap(), &["screensaver", "org.omarchy.screensaver"]).unwrap();
+        session.wait_for_window("org.omarchy.screensaver").unwrap();
+        poll_until(Duration::from_secs(10), "screensaver fullscreen geometry and committed pixels", || {
+            let world = session.world().ok()?;
+            let saver = world.window_matching("org.omarchy.screensaver")?;
+            if (saver.x, saver.y, saver.w, saver.h) != (0, 0, world.output_w, world.output_h) { return None; }
+            let shot = session.screenshot("screensaver-fullscreen").ok()?;
+            [(8, 8), (world.output_w - 24, 8), (8, world.output_h - 24), (world.output_w - 24, world.output_h - 24)]
+                .iter().all(|&(x,y)| near(shot.mean_rgb(x, y, 16, 16), PROBE_RGB)).then_some(())
+        }).unwrap();
+    }
+}

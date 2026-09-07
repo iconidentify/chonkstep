@@ -296,6 +296,18 @@ pub struct WindowRuleDecision {
     pub maximize: bool,
 }
 
+impl WindowRuleDecision {
+    /// Compatibility defaults for desktop services that rely on window rules
+    /// instead of requesting their own state. Explicit imported rules override
+    /// these defaults, including an explicit `fullscreen = false`.
+    pub fn for_identity(class: &str) -> Self {
+        Self {
+            fullscreen: class == "org.omarchy.screensaver",
+            ..Self::default()
+        }
+    }
+}
+
 /// A source of per-window float rules, supplied by the shell.
 ///
 /// A trait rather than a data type because the rules this desktop
@@ -315,8 +327,8 @@ pub trait FloatPolicy: std::fmt::Debug + Send + Sync {
     /// Answers the non-placement half of the same identity rules.
     /// Existing/custom policies remain source-compatible and simply
     /// make no such decisions.
-    fn window_decision_for(&self, _class: &str, _title: &str) -> WindowRuleDecision {
-        WindowRuleDecision::default()
+    fn window_decision_for(&self, class: &str, _title: &str) -> WindowRuleDecision {
+        WindowRuleDecision::for_identity(class)
     }
 }
 

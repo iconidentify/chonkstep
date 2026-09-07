@@ -438,6 +438,9 @@ pub struct PointerConfig {
     pub sensitivity: Option<f64>,
     pub natural_scroll: Option<bool>,
     pub tap_to_click: Option<bool>,
+    /// Typing suppression outside application pointer capture; None restores
+    /// each device's libinput default. Active locks/confinement suspend it.
+    pub disable_while_typing: Option<bool>,
     pub clickfinger_behavior: Option<bool>,
     pub scroll_factor: Option<f64>,
     pub left_handed: Option<bool>,

@@ -1654,6 +1654,17 @@ impl Door {
         MemoryStatistics::parse(&self.read_line()?)
     }
 
+    /// Whether active pointer capture is suspending touchpad typing suppression.
+    pub fn touchpad_captured(&mut self) -> Result<bool, String> {
+        self.send("touchpad-capture")?;
+        let line = self.read_line()?;
+        match line.as_str() {
+            "touchpad-capture true" => Ok(true),
+            "touchpad-capture false" => Ok(false),
+            _ => Err(format!("unexpected touchpad-capture reply: {line}")),
+        }
+    }
+
     /// Reads and resets compositor frame/pass timings. Histogram buckets
     /// use power-of-two microsecond ceilings and always contain 16 entries.
     pub fn frame_stats(&mut self) -> Result<FrameStats, String> {
