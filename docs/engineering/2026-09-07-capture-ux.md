@@ -59,6 +59,19 @@ concurrently, and publication depends on both. Already compressed package
 artifacts are uploaded without another compression pass. Release optimization,
 debug symbols, package verification, checksums and attestations are preserved.
 
+Tags may reuse the latest successful main-branch push CI for the exact commit
+when it started within the preceding 24 hours. Wrong revisions, PRs, failed or
+cancelled runs, old runs, and API errors require fresh CI. Tests exercise these
+fallbacks, including a newer failure following an older success. Publication
+explicitly checks native package success and either successful fresh validation
+or verified reuse; a skipped job alone never permits publication.
+
 A local build of the five shipping binaries succeeded in 2m09s using the
 existing dependency cache. This is not a comparable cold CI timing; runner
 measurements are needed for a release-duration claim.
+
+Local qualification passed 2,049 Rust unit/doc tests, strict workspace Clippy
+and documentation checks, the 15-test capture suite plus the MP4 failure test,
+49 Python harness tests, four validation-proof tests, Actionlint, ShellCheck and
+the Omarchy installer integration tests. Hardware decoder behavior on the
+reporter's machine remains unverified.

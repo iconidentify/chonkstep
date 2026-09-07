@@ -7,6 +7,7 @@ on:
       - "preview-v*"
 
 permissions:
+  actions: read
   contents: read
   attestations: write
   id-token: write
@@ -16,8 +17,23 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  validation-status:
+    name: find validation for this exact revision
+    runs-on: ubuntu-24.04
+    outputs:
+      reusable: ${{ steps.proof.outputs.reusable }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Check recent main-branch CI
+        id: proof
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash scripts/release-validation.sh
+
   validation:
     name: validate the release revision
+    needs: validation-status
+    if: needs.validation-status.outputs.reusable != 'true'
     uses: ./.github/workflows/ci.yml
     permissions:
       contents: read
@@ -153,8 +169,12 @@ jobs:
 
   publish-preview:
     name: publish preview release
-    if: startsWith(github.ref, 'refs/tags/preview-v')
-    needs: [validation, package]
+    if: >-
+      always() && !cancelled() && startsWith(github.ref, 'refs/tags/preview-v') &&
+      needs.validation-status.result == 'success' && needs.package.result == 'success' &&
+      (needs.validation.result == 'success' ||
+       (needs.validation.result == 'skipped' && needs.validation-status.outputs.reusable == 'true'))
+    needs: [validation-status, validation, package]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
