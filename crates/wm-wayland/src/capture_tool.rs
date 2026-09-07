@@ -60,9 +60,11 @@ pub(crate) struct Overlay {
     toolbar: Rect,
     label: Option<MemoryRenderBuffer>,
     hint: Option<MemoryRenderBuffer>,
+    camera: Option<MemoryRenderBuffer>,
     dimming: dimming::Dimming,
     ids: [Id; 16],
     armed: Option<usize>,
+    armed_window: Option<WlWindowId>,
     hovered: Option<usize>,
 }
 
@@ -137,7 +139,7 @@ pub(crate) fn modal(backend: &WaylandBackend) -> bool {
     backend.capture_ui.as_ref().is_some_and(|ui| !ui.badge)
 }
 
-pub(crate) fn crosshair(backend: &WaylandBackend) -> Option<Point> {
+pub(crate) fn selection_cursor(backend: &WaylandBackend) -> Option<Point> {
     let ui = backend.capture_ui.as_ref().filter(|ui| !ui.badge)?;
     backend.pointer.filter(|p| !ui.toolbar.contains(*p))
 }
@@ -223,9 +225,11 @@ pub(crate) fn begin(comp: &mut Compositor, mode: CaptureMode) {
         toolbar,
         label: None,
         hint: None,
+        camera: None,
         dimming: dimming::Dimming::default(),
         ids: std::array::from_fn(|_| Id::new()),
         armed: None,
+        armed_window: None,
         hovered: None,
     });
     crate::input::release_pointer_constraint(comp);
@@ -349,9 +353,11 @@ fn commit(comp: &mut Compositor) {
                 ),
                 label: None,
                 hint: None,
+                camera: None,
                 dimming: dimming::Dimming::default(),
                 ids: std::array::from_fn(|_| Id::new()),
                 armed: None,
+                armed_window: None,
                 hovered: None,
             });
             // The badge may appear under a stationary pointer. Retire the
@@ -455,6 +461,9 @@ fn set_mode(comp: &mut Compositor, mode: Mode) {
         ui.selection = matches!(mode, Mode::Screen | Mode::RecordScreen).then_some(ui.monitor);
         ui.window = None;
         ui.drag = None;
+        ui.armed = None;
+        ui.armed_window = None;
+        ui.move_selection = false;
     }
     motion(comp, pointer(comp));
     repaint(comp);
@@ -586,6 +595,11 @@ pub(crate) fn button(comp: &mut Compositor, code: u32, pressed: bool) -> bool {
     if pressed {
         let ui = comp.wm.backend_mut().capture_ui.as_mut().unwrap();
         ui.armed = hit;
+        ui.armed_window = if !ui.toolbar.contains(at) && ui.mode == Mode::Window {
+            ui.window
+        } else {
+            None
+        };
         if hit.is_none() && ui.mode.area() && !ui.toolbar.contains(at) {
             let corner = ui
                 .selection
@@ -600,7 +614,13 @@ pub(crate) fn button(comp: &mut Compositor, code: u32, pressed: bool) -> bool {
     } else {
         let ui = comp.wm.backend_mut().capture_ui.as_mut().unwrap();
         let armed = ui.armed.take();
-        ui.drag = None;
+        let armed_window = ui.armed_window.take();
+        let dragged = ui.drag.take().is_some();
+        // Only finish a click we acquired. In particular, dragging out of a
+        // toolbar control or its padding must not photograph a nearby window.
+        if !held {
+            return true;
+        }
         if let Some(index) = hit.filter(|h| Some(*h) == armed) {
             match index {
                 0 => dismiss(comp),
@@ -616,7 +636,11 @@ pub(crate) fn button(comp: &mut Compositor, code: u32, pressed: bool) -> bool {
                 ),
                 _ => commit(comp),
             }
-        } else if armed.is_none() && ui.quick && !ui.toolbar.contains(at) {
+        } else if armed.is_none()
+            && !ui.toolbar.contains(at)
+            && ((ui.mode == Mode::Window && armed_window.is_some() && armed_window == ui.window)
+                || (ui.quick && ui.mode.area() && dragged))
+        {
             commit(comp);
         }
     }
@@ -872,34 +896,54 @@ pub(crate) fn render(
         .take_while(|e| e.kind() == Kind::Cursor)
         .count();
     let scene_end = elements.len();
-    if let Some(at) = crosshair(backend) {
-        for (i, (x, y, w, h)) in [
-            (at.x - 10, at.y - 1, 21, 3),
-            (at.x - 1, at.y - 10, 3, 21),
-            (at.x - 10, at.y, 21, 1),
-            (at.x, at.y - 10, 1, 21),
-        ]
-        .into_iter()
-        .enumerate()
-        .rev()
-        {
-            elements.push(
-                SolidColorRenderElement::new(
-                    ui.ids[8 + i].clone(),
-                    SRect::<i32, Physical>::new(
-                        (x - viewport.pos.x, y - viewport.pos.y).into(),
-                        (w, h).into(),
+    if let Some(at) = selection_cursor(backend) {
+        if ui.mode == Mode::Window {
+            if let Some(buffer) = &ui.camera {
+                let scale = ui.toolbar.size.h as f64 / 86.0;
+                if let Ok(element) = MemoryRenderBufferRenderElement::from_buffer(
+                    renderer,
+                    (
+                        (at.x - viewport.pos.x) as f64 - 16.0 * scale,
+                        (at.y - viewport.pos.y) as f64 - 16.0 * scale,
                     ),
-                    CommitCounter::default(),
-                    if i < 2 {
-                        Color32F::new(0.0, 0.0, 0.0, 1.0)
-                    } else {
-                        Color32F::new(1.0, 1.0, 1.0, 1.0)
-                    },
+                    buffer,
+                    None,
+                    None,
+                    None,
                     Kind::Cursor,
-                )
-                .into(),
-            );
+                ) {
+                    elements.push(element.into());
+                }
+            }
+        } else {
+            for (i, (x, y, w, h)) in [
+                (at.x - 10, at.y - 1, 21, 3),
+                (at.x - 1, at.y - 10, 3, 21),
+                (at.x - 10, at.y, 21, 1),
+                (at.x, at.y - 10, 1, 21),
+            ]
+            .into_iter()
+            .enumerate()
+            .rev()
+            {
+                elements.push(
+                    SolidColorRenderElement::new(
+                        ui.ids[8 + i].clone(),
+                        SRect::<i32, Physical>::new(
+                            (x - viewport.pos.x, y - viewport.pos.y).into(),
+                            (w, h).into(),
+                        ),
+                        CommitCounter::default(),
+                        if i < 2 {
+                            Color32F::new(0.0, 0.0, 0.0, 1.0)
+                        } else {
+                            Color32F::new(1.0, 1.0, 1.0, 1.0)
+                        },
+                        Kind::Cursor,
+                    )
+                    .into(),
+                );
+            }
         }
     }
     if let Some(buffer) = &ui.hint {

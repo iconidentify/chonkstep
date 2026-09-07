@@ -64,6 +64,7 @@ jobs:
             packaging/arch/PKGBUILD \
             packaging/arch/PKGBUILD-release \
             scripts/check.sh \
+            scripts/build-release.sh \
             scripts/e2e.sh \
             scripts/install.sh \
             scripts/chonkstep-bugreport \
@@ -75,6 +76,7 @@ jobs:
             scripts/wayland-session.sh
           shellcheck \
             scripts/check.sh \
+            scripts/build-release.sh \
             scripts/e2e.sh \
             scripts/chonkstep-bugreport \
             scripts/omarchy-install-desktop-chonkstep \

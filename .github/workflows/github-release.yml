@@ -25,7 +25,8 @@ jobs:
 
   package:
     name: package (${{ matrix.arch }})
-    needs: validation
+    # Build the exact revision while its independent checks run. Publication
+    # below still requires BOTH architectures and every validation job.
     strategy:
       fail-fast: false
       matrix:
@@ -148,11 +149,12 @@ jobs:
           path: ${{ runner.temp }}/chonkstep-package/dist/
           if-no-files-found: error
           retention-days: 14
+          compression-level: 0 # .pkg.tar.zst files are already compressed.
 
   publish-preview:
     name: publish preview release
     if: startsWith(github.ref, 'refs/tags/preview-v')
-    needs: package
+    needs: [validation, package]
     runs-on: ubuntu-24.04
     permissions:
       contents: write

@@ -33,6 +33,7 @@ struct StatusKey {
 pub(super) struct Cache {
     controls: Option<(ControlsKey, MemoryRenderBuffer)>,
     status: Option<(StatusKey, MemoryRenderBuffer)>,
+    camera: Option<(u32, MemoryRenderBuffer)>,
 }
 
 pub(super) fn hint_y(ui: &Overlay) -> i32 {
@@ -87,8 +88,55 @@ impl Cache {
         // Cloning these handles shares the backing pixels and uploaded texture.
         ui.label = self.controls.as_ref().map(|(_, buffer)| buffer.clone());
         ui.hint = self.status.as_ref().map(|(_, buffer)| buffer.clone());
+        if ui.mode == Mode::Window && !ui.badge {
+            if !self
+                .camera
+                .as_ref()
+                .is_some_and(|(height, _)| *height == ui.toolbar.size.h)
+            {
+                self.camera = paint_camera(ui.toolbar.size.h as f32 / 86.0)
+                    .and_then(import)
+                    .map(|buffer| (ui.toolbar.size.h, buffer));
+            }
+            ui.camera = self.camera.as_ref().map(|(_, buffer)| buffer.clone());
+        }
         changed
     }
+}
+
+// A small cached sprite, with the lens centered on the selection hotspot.
+// Drawing the glyph ourselves keeps it legible without a particular icon font
+// or cursor theme, and pointer motion only moves its uploaded buffer.
+fn paint_camera(scale: f32) -> Option<Pixmap> {
+    let mut pixmap = Pixmap::new((32.0 * scale).ceil() as u32, (30.0 * scale).ceil() as u32)?;
+    let mut path = PathBuilder::new();
+    path.move_to(4.0, 9.0);
+    path.line_to(10.0, 9.0);
+    path.line_to(12.0, 5.0);
+    path.line_to(20.0, 5.0);
+    path.line_to(22.0, 9.0);
+    path.line_to(28.0, 9.0);
+    path.line_to(28.0, 25.0);
+    path.line_to(4.0, 25.0);
+    path.close();
+    path.push_circle(16.0, 16.0, 5.0);
+    let path = path.finish()?;
+    for (width, color) in [(4.5, [12, 16, 23, 255]), (2.0, [255, 255, 255, 255])] {
+        let mut paint = Paint::default();
+        paint.set_color_rgba8(color[0], color[1], color[2], color[3]);
+        pixmap.stroke_path(
+            &path,
+            &paint,
+            &Stroke {
+                width,
+                line_join: tiny_skia::LineJoin::Round,
+                ..Stroke::default()
+            },
+            Transform::from_scale(scale, scale),
+            None,
+        );
+    }
+    Some(pixmap)
 }
 
 fn import(pixmap: Pixmap) -> Option<MemoryRenderBuffer> {
@@ -352,7 +400,7 @@ fn paint_status(key: StatusKey, fonts: &FontState) -> Option<Pixmap> {
     } else {
         let action = match key.mode {
             Mode::Screen => "Screen · Enter to capture",
-            Mode::Window => "Choose a window · Enter to capture",
+            Mode::Window => "Click a window to capture · Enter also captures",
             Mode::Area => "Drag an area · Enter to capture",
             Mode::RecordScreen => "Record screen · Enter to start",
             Mode::RecordArea => "Drag an area · Enter to record",
@@ -413,6 +461,8 @@ mod tests {
             toolbar: Rect::new(Point::new(280, 690), Size::new(720, 86)),
             selection: Some(Rect::new(Point::new(100, 100), Size::new(320, 240))),
             window: None,
+            camera: None,
+            armed_window: None,
             drag: None,
             move_selection: false,
             label: None,

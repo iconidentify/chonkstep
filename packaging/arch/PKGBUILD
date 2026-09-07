@@ -112,7 +112,7 @@ build() {
   export CARGO_TARGET_DIR=target
   # Record the exact checkout, not only the workspace package version.
   export CHONKSTEP_GIT_DESCRIBE="$(git describe --tags --always --dirty)"
-  cargo build --release --frozen --workspace
+  bash scripts/build-release.sh --frozen
 }
 
 check() {

@@ -110,7 +110,7 @@ build() {
   # own explicit `+unknown-source` fallback in chonk-build-info.
   export CHONKSTEP_GIT_DESCRIBE="${CHONKSTEP_GIT_DESCRIBE:-v$pkgver}"
   # --frozen: build exactly the dependency tree the repository ships.
-  cargo build --release --frozen --workspace
+  bash scripts/build-release.sh --frozen
 }
 
 check() {
