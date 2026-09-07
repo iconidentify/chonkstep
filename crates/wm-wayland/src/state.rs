@@ -2457,6 +2457,8 @@ pub struct Compositor {
     /// `input.rs` — the renderer draws the cursor here, and hit-tests
     /// run against it.
     pub pointer_location: SPoint<f64, Logical>,
+    /// Last pointer-capture policy applied to physical touchpads.
+    pub(crate) touchpad_pointer_captured: bool,
     /// What the cursor should look like, per the focused client's
     /// `wl_pointer.set_cursor` (maintained by `input.rs`'s
     /// `SeatHandler::cursor_image`). Honored only while the pointer is
@@ -2531,7 +2533,7 @@ impl Compositor {
         self.apply_pending_keyboard();
         if let Some(config) = self.wm.backend_mut().pending_pointer.take() {
             self.wm.backend_mut().scroll_factor = config.scroll_factor.unwrap_or(1.0);
-            crate::session::apply_pointer_config(&mut self.graphics, &config);
+            crate::session::apply_pointer_config(&mut self.graphics, &config, self.touchpad_pointer_captured);
         }
         tracing::debug_span!("dispatch_phase", phase = "connector_hotplug")
             .in_scope(|| crate::session::service_connector_hotplug(self));
@@ -2848,6 +2850,7 @@ impl Compositor {
         crate::lock::refresh(self);
         crate::gesture_scene::validate(self);
         crate::input::keyboard::sync_modal_focus(self);
+        crate::input::sync_touchpad_typing(self);
 
         // Timed commits are independent of presentation, and an invisible
         // surface cannot ever satisfy a FIFO presentation barrier. Visibility
@@ -4129,6 +4132,7 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
         _virtual_keyboard: virtual_keyboard,
         _virtual_pointer: virtual_pointer,
         pointer_location: (0.0, 0.0).into(),
+        touchpad_pointer_captured: false,
         cursor_status: CursorImageStatus::default_named(),
         cursors: CursorSet::build(scale),
         start_time: Instant::now(),

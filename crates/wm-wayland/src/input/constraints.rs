@@ -68,6 +68,16 @@ pub(super) fn is_locked(state: &Compositor) -> bool {
     })
 }
 
+/// Both relative-camera locks and confinement (including XWayland grabs)
+/// indicate that the client needs simultaneous keyboard and pointer input.
+pub(super) fn is_captured(state: &Compositor) -> bool {
+    let Some(pointer) = state.seat.get_pointer() else { return false };
+    let Some(surface) = pointer.current_focus() else { return false };
+    with_pointer_constraint(surface.surface(), &pointer, |constraint| {
+        constraint.is_some_and(|constraint| constraint.is_active())
+    })
+}
+
 /// Apply only an already-active constraint. Pending constraints activate after
 /// motion reaches their region, so the client observes its entry coordinate
 /// before being told the pointer is locked there.
@@ -129,7 +139,7 @@ pub(super) fn apply(state: &mut Compositor, proposed: Position) -> Constrained {
 
 /// Activate only at an already-delivered, visible surface-local position that
 /// belongs to both input regions. No mouse warp or focus change is implied.
-pub(super) fn activate_for_current_focus(state: &Compositor) {
+pub(super) fn activate_for_current_focus(state: &mut Compositor) {
     let Some(pointer) = state.seat.get_pointer() else {
         return;
     };
@@ -154,6 +164,7 @@ pub(super) fn activate_for_current_focus(state: &Compositor) {
             }
         }
     });
+    super::sync_touchpad_typing(state);
 }
 
 impl PointerConstraintsHandler for Compositor {

@@ -319,6 +319,44 @@ fn full_surface_confinement_does_not_reenter_the_surface_state_lock() {
 
 #[test]
 #[ignore = "needs a nested session: scripts/e2e.sh --headless --release"]
+fn held_movement_key_keeps_camera_motion_and_capture_restores_typing_policy() {
+    for mode in ["lock-full", "confine-full"] {
+        let (mut session, _) = boot_named(mode, 2.0, "-typing");
+        assert!(!session.door().touchpad_captured().unwrap());
+        fence_key(&mut session, 59);
+        poll_until(EVENT, "capture to suspend typing suppression", || {
+            session.door().touchpad_captured().ok()?.then_some(())
+        }).unwrap();
+        session.door().key(17, true).unwrap(); // Hold W throughout camera motion.
+        wait_line(&session, "keyboard key 17 down", 1);
+        for _ in 0..8 {
+            let before = latest(&session, "relative").map_or(0, |event| event.sequence);
+            session.door().motion_relative(3.0, 2.0).unwrap();
+            poll_until(EVENT, "relative camera motion while W remains held", || {
+                latest(&session, "relative").filter(|event| event.sequence > before)
+            }).unwrap();
+        }
+        assert_eq!(count(&session, "keyboard key 17 up"), 0);
+        session.door().key(17, false).unwrap();
+        fence_key(&mut session, 61); // Destroy the protocol object without mouse motion.
+        poll_until(EVENT, "destroying capture to restore typing suppression", || {
+            (!session.door().touchpad_captured().ok()?).then_some(())
+        }).unwrap();
+        fence_key(&mut session, 59);
+        assert!(session.door().touchpad_captured().unwrap());
+        session.door().chord(chonk_testkit::keys::LEFTMETA, chonk_testkit::keys::UP).unwrap();
+        poll_until(EVENT, "overview to restore typing suppression", || {
+            (!session.door().touchpad_captured().ok()?).then_some(())
+        }).unwrap();
+        session.door().tap_key(chonk_testkit::keys::ESC).unwrap();
+        poll_until(EVENT, "returning to the captured client", || {
+            session.door().touchpad_captured().ok()?.then_some(())
+        }).unwrap();
+    }
+}
+
+#[test]
+#[ignore = "needs a nested session: scripts/e2e.sh --headless --release"]
 fn locked_relative_burst_preserves_all_scaled_clients_raw_deltas() {
     const REPORTS: usize = 8192;
     let (mut session, _) = boot("lock-full", 2.0);

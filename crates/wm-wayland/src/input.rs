@@ -1553,10 +1553,27 @@ pub(crate) fn release_pointer_constraint(state: &mut Compositor) {
         }
         constraint.deactivate();
     });
+    sync_touchpad_typing(state);
     if let Some(target) = warp_to {
         let position = confine_to_outputs(&state.wm.backend().monitors, target);
         let time = state.start_time.elapsed().as_millis() as u32;
         pointer_moved(state, position, time, None, PointerDelivery::Motion);
+    }
+}
+
+/// Apply capture transitions before the next hardware dispatch. The settled
+/// scene also calls this after resource destruction, unmap, focus and lock
+/// changes, which need not produce another pointer-motion event.
+pub(crate) fn sync_touchpad_typing(state: &mut Compositor) {
+    let captured = constraints::is_captured(state);
+    if state.touchpad_pointer_captured != captured {
+        state.touchpad_pointer_captured = captured;
+        crate::session::apply_touchpad_typing(
+            &mut state.graphics,
+            state.wm.backend().pointer_config.disable_while_typing,
+            captured,
+        );
+        tracing::debug!(captured, "touchpad typing suppression follows pointer capture");
     }
 }
 

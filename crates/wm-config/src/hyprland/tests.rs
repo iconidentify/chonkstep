@@ -478,7 +478,7 @@ hl.config({ input = {
   kb_options = "compose:caps", repeat_rate = 40, repeat_delay = 250,
   follow_mouse = 1, sensitivity = -0.25, accel_profile = "flat",
   touchpad = {
-    natural_scroll = true, tap_to_click = false,
+    natural_scroll = true, tap_to_click = false, disable_while_typing = false,
     clickfinger_behavior = true, scroll_factor = 0.4,
   },
 } })
@@ -499,6 +499,7 @@ o.bind("SUPER + SHIFT + code:201", "Menu", "omarchy-menu")
     assert_eq!(reading.input.accel_profile.as_deref(), Some("flat"));
     assert_eq!(reading.input.natural_scroll, Some(true));
     assert_eq!(reading.input.tap_to_click, Some(false));
+    assert_eq!(reading.input.disable_while_typing, Some(false));
     assert_eq!(reading.input.clickfinger_behavior, Some(true));
     assert_eq!(reading.input.scroll_factor, Some(0.4));
     assert!(
@@ -2102,4 +2103,20 @@ fn the_numbers_the_documents_quote_are_the_numbers_this_machine_produces() {
             && GUIDE.contains("float_rules=45 monitors=1 skipped=165"),
         "the guide's sample log line no longer matches what this machine reports"
     );
+}
+
+#[test]
+fn screensaver_defaults_survive_unrelated_rules_and_allow_explicit_opt_out() {
+    let root = scratch("screensaver-defaults");
+    let path = root.join(".config/hypr/hyprland.conf");
+    write(&path, "windowrule = float on, match:class ^notes$\ninput {\n touchpad {\n  disable_while_typing = false\n }\n}\n");
+    let reading = read(&Roots::under(&root));
+    assert_eq!(reading.input.disable_while_typing, Some(false));
+    assert!(reading.float_rules.window_decision_for("org.omarchy.screensaver", "foot").fullscreen);
+    for other in ["foot", "org.omarchy.btop", "org.omarchy.screensaver.settings"] {
+        assert!(!reading.float_rules.window_decision_for(other, "org.omarchy.screensaver").fullscreen);
+    }
+    write(&path, "windowrule = fullscreen off, match:class ^org\\.omarchy\\.screensaver$\n");
+    let reading = read(&Roots::under(&root));
+    assert!(!reading.float_rules.window_decision_for("org.omarchy.screensaver", "foot").fullscreen);
 }

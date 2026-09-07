@@ -1079,3 +1079,31 @@ fn an_x11_keyboard_grab_keeps_the_combos_the_desktop_binds() {
         "a grabbing X11 client must receive the combo instead of the desktop running its binding"
     );
 }
+
+#[test]
+#[ignore = "needs a nested session: scripts/e2e.sh --headless --release"]
+fn x11_pointer_grab_suspends_typing_suppression_until_ungrab() {
+    use x11rb::protocol::xproto::{GrabMode, GrabStatus};
+    let mut session = Session::boot("xwayland-pointer-typing", SessionOptions::default()).unwrap();
+    let (conn, screen_num) = x11rb::connect(Some(&format!(":{}", xwayland_display(&session)))).unwrap();
+    let (xid, id) = map_probe_window(&mut session, &conn, screen_num, "game-grab-probe", None);
+    let window = session.world().unwrap().windows.into_iter().find(|w| w.id == id).unwrap();
+    session.door().click(f64::from(window.x + window.w as i32 / 2), f64::from(window.y + window.h as i32 / 2)).unwrap();
+    session.door().barrier().unwrap();
+    assert!(!session.door().touchpad_captured().unwrap());
+    let grab = conn.grab_pointer(false, xid, EventMask::POINTER_MOTION | EventMask::BUTTON_PRESS | EventMask::BUTTON_RELEASE,
+        GrabMode::ASYNC, GrabMode::ASYNC, xid, x11rb::NONE, x11rb::CURRENT_TIME).unwrap().reply().unwrap();
+    assert_eq!(grab.status, GrabStatus::SUCCESS);
+    conn.flush().unwrap();
+    poll_until(EVENT, "XWayland confinement to suspend typing suppression", || {
+        session.door().touchpad_captured().ok()?.then_some(())
+    }).unwrap();
+    session.door().key(17, true).unwrap();
+    for _ in 0..8 { session.door().motion_relative(3.0, 2.0).unwrap(); }
+    session.door().key(17, false).unwrap();
+    conn.ungrab_pointer(x11rb::CURRENT_TIME).unwrap();
+    conn.flush().unwrap();
+    poll_until(EVENT, "XWayland ungrab to restore typing suppression", || {
+        (!session.door().touchpad_captured().ok()?).then_some(())
+    }).unwrap();
+}

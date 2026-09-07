@@ -1011,6 +1011,9 @@ fn input(reading: &mut Reading, name: &str, value: &str) {
         "tap_to_click" | "touchpad:tap_to_click" => {
             parse_input_bool(reading, name, &value, |input, enabled| input.tap_to_click = Some(enabled))
         }
+        "disable_while_typing" | "touchpad:disable_while_typing" => {
+            parse_input_bool(reading, name, &value, |input, enabled| input.disable_while_typing = Some(enabled))
+        }
         "clickfinger_behavior" | "touchpad:clickfinger_behavior" => {
             parse_input_bool(reading, name, &value, |input, enabled| input.clickfinger_behavior = Some(enabled))
         }

@@ -761,6 +761,9 @@ fn handle_command(line: &str, stream: &mut UnixStream, comp: &mut Compositor) {
                 fonts.outline_entries, fonts.outline_payload_bytes,
             ).as_bytes());
         }
+        Some("touchpad-capture") => {
+            let _ = stream.write_all(format!("touchpad-capture {}\n", comp.touchpad_pointer_captured).as_bytes());
+        }
         Some("frame-stats") => {
             let stats = std::mem::take(&mut comp.frame_stats);
             let micros = |duration: std::time::Duration| duration.as_micros();
