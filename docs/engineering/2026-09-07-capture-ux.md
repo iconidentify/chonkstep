@@ -39,6 +39,16 @@ multiple red/blue transitions inside the client's content. Pointer motion alone
 cannot satisfy it. Failed MP4 conversion also retains the muxer's stderr beside
 the recoverable MKV and reports that diagnostic path.
 
+The changing-content regression exposed another real recording defect in CI:
+the nested backend's advertised output includes an EGL flip, but recording had
+used its unflipped layout transform. wf-recorder 0.4.1 left the video upside
+down; 0.6.0's automatic transform hid that defect locally and applied the flip
+after the crop instead of before it. Recording now uses
+`entry.output.current_transform()` so its explicit normalization matches the
+actual screencopy buffer. Both 0.4.1 (in an isolated Ubuntu container) and the
+host's 0.6.0 pass the area and screen motion tests with this correction. This
+orientation defect does not establish the cause of the reported Omacut stall.
+
 Local artifacts, including the baseline executable, probe source, videos,
 Omacut screenshots and command logs, are retained outside the repository at
 `/home/chrisk/src/chonkstep-capture-ux-artifacts`.
@@ -67,11 +77,28 @@ explicitly checks native package success and either successful fresh validation
 or verified reuse; a skipped job alone never permits publication.
 
 A local build of the five shipping binaries succeeded in 2m09s using the
-existing dependency cache. This is not a comparable cold CI timing; runner
-measurements are needed for a release-duration claim.
+existing dependency cache. The native package rehearsal `34142960605` then
+measured these release compilation times on the same runner classes:
+
+| Architecture | 0.4.0 release | Five shipping binaries | Reduction |
+| --- | --- | --- | --- |
+| x86_64 | 13m08s | 9m52s | 25% |
+| aarch64 | 6m42s | 5m49s | 13% |
+
+Both native package jobs passed tests, package verification and attestations;
+the last package finished 16m24s after workflow start. The original release took
+32m43s including publication. The rehearsal itself is recorded as failed
+because its full Wayland gate exposed the orientation defect described above;
+it is not a successful-release measurement. The corrected source is qualified
+separately, and no 0.4.1 release has been published from this rehearsal.
 
 Local qualification passed 2,049 Rust unit/doc tests, strict workspace Clippy
 and documentation checks, the 15-test capture suite plus the MP4 failure test,
 49 Python harness tests, four validation-proof tests, Actionlint, ShellCheck and
 the Omarchy installer integration tests. Hardware decoder behavior on the
 reporter's machine remains unverified.
+
+The corrected implementation `21f2348` passed the complete GitHub CI run
+`34143790174`, including the full Wayland suite (12m31s), unit tests, lint,
+SDK/harness checks, installer integration and dependency audit. The follow-up
+commit to this report changes documentation only.
