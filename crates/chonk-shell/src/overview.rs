@@ -6,7 +6,7 @@
 //! Noncompositing backends retain the raster fallback: a full panel on entry,
 //! a separate selection surface, and one catch-up fetch for sharper previews.
 
-use wm_core::{Backend, ClientId};
+use wm_core::{Backend, ClientId, DragHandle, OverviewDrag};
 use wm_theme::overview::{self as ov, OverviewEntry, OverviewLayout};
 use wm_theme::Theme;
 use wm_theme_api::{DecorationBuffer, Point, Rect, Size};
@@ -37,6 +37,45 @@ pub enum OverviewHit {
     Background,
 }
 
+#[derive(Clone, Copy)]
+struct CardPress {
+    client: ClientId,
+    index: usize,
+    start: Point,
+    cell: Rect,
+    workspace: usize,
+    grab: DragHandle,
+    dragging: bool,
+    cancelled: bool,
+}
+
+/// A release can commit exactly the card armed by its matching press. A drag
+/// never falls back to activation, even when dropped over another card.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OverviewRelease {
+    Click(usize),
+    Move { client: ClientId, source: usize, target: usize },
+    Cancelled,
+}
+
+fn passed_threshold(start: Point, point: Point, threshold: i32) -> bool {
+    let dx = i64::from(point.x) - i64::from(start.x);
+    let dy = i64::from(point.y) - i64::from(start.y);
+    // Unsigned saturating squares also handle adversarial/global coordinates.
+    dx.unsigned_abs().saturating_pow(2).saturating_add(dy.unsigned_abs().saturating_pow(2))
+        >= (threshold.max(1) as u64).pow(2)
+}
+
+fn drag_rect(cell: Rect, start: Point, point: Point, limit: Size) -> Rect {
+    let scale = (limit.w as f64 / cell.size.w.max(1) as f64)
+        .min(limit.h as f64 / cell.size.h.max(1) as f64).min(1.0);
+    let offset_x = ((i64::from(start.x) - i64::from(cell.pos.x)) as f64 * scale).round() as i32;
+    let offset_y = ((i64::from(start.y) - i64::from(cell.pos.y)) as f64 * scale).round() as i32;
+    Rect::new(Point::new(point.x.saturating_sub(offset_x), point.y.saturating_sub(offset_y)),
+        Size::new((cell.size.w as f64 * scale).round().max(1.0) as u32,
+            (cell.size.h as f64 * scale).round().max(1.0) as u32))
+}
+
 pub struct OverviewPanel<B: Backend> {
     window: Option<B::ShellId>,
     /// The selection: highlight plate plus the awake card, on its own
@@ -59,6 +98,10 @@ pub struct OverviewPanel<B: Backend> {
     awaiting_previews: bool,
     preview_generation: u64,
     live: bool,
+    press: Option<CardPress>,
+    drag: Option<OverviewDrag>,
+    drag_threshold: i32,
+    drag_limit: Size,
 }
 
 impl<B: Backend> Default for OverviewPanel<B> {
@@ -75,6 +118,10 @@ impl<B: Backend> Default for OverviewPanel<B> {
             awaiting_previews: false,
             preview_generation: 0,
             live: false,
+            press: None,
+            drag: None,
+            drag_threshold: 3,
+            drag_limit: Size::new(168, 112),
         }
     }
 }
@@ -94,8 +141,10 @@ impl<B: Backend> OverviewPanel<B> {
         tile: u32,
         items: Vec<OverviewItem<B>>,
         workspace: (usize, usize),
+        workspace_counts: &[usize],
         selected: usize,
     ) {
+        self.invalidate_pointer(backend);
         if self.window.is_some() && self.geometry != primary {
             // The monitor arrangement moved under a kept surface; a
             // stale-sized buffer would letterbox or clip the panel.
@@ -108,6 +157,8 @@ impl<B: Backend> OverviewPanel<B> {
         self.items = items;
         self.workspace = workspace;
         self.live = backend.supports_live_overview();
+        self.drag_threshold = (tile as f64 * 3.0 / 56.0).ceil().max(2.0) as i32;
+        self.drag_limit = Size::new(tile * 3, tile * 2);
         let layout = if self.live {
             let sizes: Vec<_> = self.items.iter().map(|item| item.geometry.size).collect();
             ov::live::layout(primary.size, tile, &sizes, workspace.1)
@@ -178,10 +229,12 @@ impl<B: Backend> OverviewPanel<B> {
                                 theme,
                                 font_system,
                                 swash_cache,
-                                &format!("Desktop {}", i + 1),
+                                &format!("Desktop {} · {}", i + 1, workspace_counts.get(i).copied().unwrap_or(0)),
                                 rect.size.w,
                                 label_h,
                             ),
+                            drop_label: ov::live::label(theme, font_system, swash_cache,
+                                &format!("Move to Desktop {}", i + 1), rect.size.w, label_h),
                             close: layout.workspace_close_rect(i)
                                 .map(|rect| (rect, ov::workspace_close_glyph(rect.size.w))),
                     })
@@ -275,7 +328,8 @@ impl<B: Backend> OverviewPanel<B> {
             return;
         };
         let started = std::time::Instant::now();
-        let plate = ov::plate_rect(*cell, layout.pad);
+        let cell = self.drag.map_or(*cell, |drag| drag.destination);
+        let plate = ov::plate_rect(cell, layout.pad);
         // The layout speaks panel-local coordinates; surfaces live in
         // the global space the panel's own rect is in.
         let global = Rect {
@@ -391,7 +445,7 @@ impl<B: Backend> OverviewPanel<B> {
         if self.selection == Some(surface) {
             if let Some(layout) = self.layout.as_ref() {
                 if let Some(cell) = layout.cells.get(self.selected) {
-                    let plate = ov::plate_rect(*cell, layout.pad);
+                    let plate = ov::plate_rect(self.drag.map_or(*cell, |d| d.destination), layout.pad);
                     return Point::new(local.x + plate.pos.x, local.y + plate.pos.y);
                 }
             }
@@ -401,6 +455,105 @@ impl<B: Backend> OverviewPanel<B> {
 
     pub fn selected(&self) -> usize {
         self.selected
+    }
+
+    pub fn workspace(&self) -> (usize, usize) {
+        self.workspace
+    }
+
+    pub fn pointer_pending(&self) -> bool {
+        self.press.is_some()
+    }
+
+    /// Grab on press, not on crossing the threshold: a quick throw can leave
+    /// the output before its next motion, but its release still belongs here.
+    pub fn pointer_press(&mut self, backend: &mut B, index: usize, local: Point) {
+        self.end_pointer(backend);
+        let (Some(item), Some(cell)) = (self.items.get(index), self.layout.as_ref().and_then(|l| l.cells.get(index))) else { return };
+        self.press = Some(CardPress {
+            client: item.client, index, start: local, cell: *cell,
+            workspace: self.workspace.0, grab: backend.grab_pointer_for_drag(),
+            dragging: false, cancelled: false,
+        });
+    }
+
+    /// Invalidation consumes the eventual release instead of letting it click
+    /// a newly laid-out card or a desktop close control. The grab stays owned
+    /// until release (or teardown), including after Escape while still held.
+    fn invalidate_pointer(&mut self, backend: &mut B) {
+        if let Some(press) = &mut self.press {
+            press.cancelled = true;
+        }
+        self.drag = None;
+        backend.drag_live_overview(None);
+    }
+
+    fn end_pointer(&mut self, backend: &mut B) {
+        self.drag = None;
+        backend.drag_live_overview(None);
+        if let Some(press) = self.press.take() {
+            backend.ungrab_pointer(press.grab);
+        }
+    }
+
+    pub fn cancel_pointer(&mut self, backend: &mut B, theme: &Theme,
+        fonts: &mut cosmic_text::FontSystem, cache: &mut cosmic_text::SwashCache) -> bool {
+        if !self.press.is_some_and(|p| !p.cancelled) { return false; }
+        self.invalidate_pointer(backend);
+        self.place_selection(backend, theme, fonts, cache);
+        true
+    }
+
+    pub fn pointer_motion(&mut self, backend: &mut B, theme: &Theme,
+        fonts: &mut cosmic_text::FontSystem, cache: &mut cosmic_text::SwashCache, root: Point) -> bool {
+        let local = Point::new(root.x.saturating_sub(self.geometry.pos.x), root.y.saturating_sub(self.geometry.pos.y));
+        self.update_pointer(backend, theme, fonts, cache, local)
+    }
+
+    fn update_pointer(&mut self, backend: &mut B, theme: &Theme,
+        fonts: &mut cosmic_text::FontSystem, cache: &mut cosmic_text::SwashCache, local: Point) -> bool {
+        let Some(press) = &mut self.press else { return false };
+        if press.cancelled { return true; }
+        press.dragging |= passed_threshold(press.start, local, self.drag_threshold);
+        if !press.dragging { return true; }
+        let workspace = self.layout.as_ref().and_then(|l| l.workspace_at(local))
+            .filter(|target| *target != press.workspace);
+        let drag = OverviewDrag { index: press.index,
+            destination: drag_rect(press.cell, press.start, local, self.drag_limit), workspace };
+        let first = self.drag.is_none();
+        if self.drag == Some(drag) { return true; }
+        self.drag = Some(drag);
+        if self.live {
+            backend.drag_live_overview(Some(drag));
+        } else if first {
+            // Legacy X11 retains the existing small raster selection as its
+            // drag image. Paint once on pickup; subsequent motions only move it.
+            self.place_selection(backend, theme, fonts, cache);
+        } else if let (Some(selection), Some(layout)) = (self.selection, &self.layout) {
+            let plate = ov::plate_rect(drag.destination, layout.pad);
+            backend.configure_shell_surface(selection, Rect::new(
+                Point::new(plate.pos.x + self.geometry.pos.x, plate.pos.y + self.geometry.pos.y), plate.size));
+        }
+        true
+    }
+
+    pub fn pointer_release(&mut self, backend: &mut B, theme: &Theme,
+        fonts: &mut cosmic_text::FontSystem, cache: &mut cosmic_text::SwashCache,
+        local: Point) -> Option<OverviewRelease> {
+        // A coalesced press/motion/release burst may not have delivered an
+        // intermediate motion to the shell. The release's coordinates count.
+        self.update_pointer(backend, theme, fonts, cache, local);
+        let press = self.press?;
+        let result = if press.cancelled { OverviewRelease::Cancelled }
+        else if press.dragging {
+            self.drag.and_then(|d| d.workspace).map_or(OverviewRelease::Cancelled, |target|
+                OverviewRelease::Move { client: press.client, source: press.workspace, target })
+        } else if self.hit(local) == OverviewHit::Card(press.index) {
+            OverviewRelease::Click(press.index)
+        } else { OverviewRelease::Cancelled };
+        self.end_pointer(backend);
+        self.place_selection(backend, theme, fonts, cache);
+        Some(result)
     }
 
     pub fn item(&self, index: usize) -> Option<&OverviewItem<B>> {
@@ -453,6 +606,7 @@ impl<B: Backend> OverviewPanel<B> {
     /// withdrawn with the session: the backend's snapshots go back to
     /// icon-sized on their own schedule.
     pub fn hide(&mut self, backend: &mut B) {
+        self.end_pointer(backend);
         if self.live {
             backend.hide_live_overview();
         }
@@ -480,6 +634,7 @@ impl<B: Backend> OverviewPanel<B> {
     /// serve would wedge every key on the desk. Ungrabbing when not
     /// grabbed is a no-op on both backends.
     pub fn discard(&mut self, backend: &mut B) {
+        self.end_pointer(backend);
         if self.live {
             backend.hide_live_overview();
         }
@@ -503,5 +658,26 @@ impl<B: Backend> OverviewPanel<B> {
     /// The panel's current size, for tests and diagnostics.
     pub fn size(&self) -> Size {
         self.geometry.size
+    }
+}
+
+#[cfg(test)]
+mod drag_tests {
+    use super::*;
+    #[test]
+    fn threshold_is_radial_scale_aware_and_overflow_safe() {
+        for scale in [1, 2] {
+            assert!(!passed_threshold(Point::new(0, 0), Point::new(scale, scale), 3 * scale));
+            assert!(passed_threshold(Point::new(0, 0), Point::new(3 * scale, 0), 3 * scale));
+        }
+        assert!(passed_threshold(Point::new(i32::MIN, i32::MIN), Point::new(i32::MAX, i32::MAX), 3));
+    }
+    #[test]
+    fn drag_image_keeps_the_grab_anchor_and_never_upscales() {
+        let cell = Rect::new(Point::new(100, 200), Size::new(400, 200));
+        let rect = drag_rect(cell, Point::new(200, 250), Point::new(800, 300), Size::new(200, 100));
+        assert_eq!(rect, Rect::new(Point::new(750, 275), Size::new(200, 100)));
+        let small = Rect::new(Point::new(100, 200), Size::new(40, 20));
+        assert_eq!(drag_rect(small, small.pos, Point::new(500, 300), Size::new(200, 100)).size, small.size);
     }
 }

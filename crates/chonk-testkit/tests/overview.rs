@@ -431,6 +431,72 @@ fn center(rect: wm_theme_api::Rect) -> (f64, f64) {
 }
 
 #[test]
+#[ignore = "requires nested Wayland"]
+fn dragging_a_live_card_moves_only_that_window_and_keeps_overview_open() {
+    for scale in [1.0, 1.5, 2.0] {
+        let mut session = Session::boot(&format!("overview-window-drag-{scale}"), SessionOptions {
+            scale: Some(scale),
+            config_extra: "[keybindings]\n\"super+1\" = \"workspace 1\"\n\"super+2\" = \"workspace 2\"\n".into(),
+            ..Default::default()
+        }).unwrap();
+        launch_terminal(&mut session, "DraggedCard");
+        launch_terminal(&mut session, "StationaryCard");
+        let original = session.world().unwrap();
+        let dragged = original.window_matching("DraggedCard").unwrap().id;
+        let stationary = original.window_matching("StationaryCard").unwrap().id;
+        session.door().chord(keys::LEFTMETA, keys::TWO).unwrap();
+        session.door().chord(keys::LEFTMETA, keys::ONE).unwrap();
+        open_overview(&mut session);
+        let world = session.world().unwrap();
+        let panel = overview_shell(&world).unwrap().id;
+        let cell = world.overview_windows.iter().find(|w| w.id == dragged).unwrap().rect;
+        let from = center(cell);
+        // Tiny finger jitter remains a click, and cannot start the drag scene.
+        session.door().motion(from.0, from.1).unwrap();
+        session.door().button("left", true).unwrap();
+        session.door().motion(from.0 + 1.0, from.1).unwrap();
+        assert!(session.world().unwrap().overview_drag.is_none());
+        // Escape cancels the armed press, not Overview; release cannot activate.
+        session.door().tap_key(keys::ESC).unwrap();
+        session.door().button("left", false).unwrap();
+        assert_eq!(overview_shell(&session.world().unwrap()).unwrap().id, panel);
+        let target = workspace_layout(&world).workspace_close_rect(1).unwrap();
+        let to = center(target);
+        session.door().drag_to(from, to).unwrap();
+        let active = session.world().unwrap();
+        let preview = active.overview_drag.as_ref().expect("live drag image");
+        assert_eq!((preview.id, preview.target), (dragged, Some(1)));
+        assert!(preview.rect.size.w <= world.dock().unwrap().w * 3);
+        assert_eq!(active.current_workspace, 0, "hovering the target is visual, not a switch");
+        session.screenshot("window-over-desktop").unwrap();
+        session.door().button("left", false).unwrap();
+        session.door().barrier().unwrap();
+        let moved = session.world().unwrap();
+        assert!(moved.overview_drag.is_none());
+        assert_eq!(overview_shell(&moved).unwrap().id, panel);
+        assert_eq!((moved.current_workspace, moved.workspace_count), (0, 2), "drop on close corner is a move, never delete");
+        assert!(!moved.frame_of(dragged).unwrap().mapped);
+        assert!(moved.frame_of(stationary).unwrap().mapped);
+        assert!(!moved.overview_windows.iter().any(|w| w.id == dragged));
+        let to = center(workspace_layout(&moved).strip[1]);
+        session.door().click(to.0, to.1).unwrap();
+        let destination = session.world().unwrap();
+        assert_eq!(destination.current_workspace, 1);
+        assert!(destination.overview_windows.iter().any(|w| w.id == dragged));
+        assert!(!destination.overview_windows.iter().any(|w| w.id == stationary));
+        // Dragging into empty space is cancellation, never card activation.
+        let card = destination.overview_windows.iter().find(|w| w.id == dragged).unwrap().rect;
+        session.door().drag_to(center(card), (8.0, destination.output_h as f64 - 8.0)).unwrap();
+        session.door().button("left", false).unwrap();
+        session.door().barrier().unwrap();
+        assert!(session.world().unwrap().overview.is_some());
+        session.door().tap_key(keys::ESC).unwrap();
+        assert_overview_closed(&mut session, "ending drag session");
+        assert!(session.world().unwrap().frame_of(dragged).unwrap().mapped);
+    }
+}
+
+#[test]
 #[ignore = "requires nested Wayland: scripts/e2e.sh --headless --test overview"]
 fn desktop_close_controls_remove_empty_and_occupied_desktops_without_losing_windows() {
     for scale in [1.0, 2.0] {

@@ -119,7 +119,11 @@ pub fn label(
     height: u32,
 ) -> DecorationBuffer {
     let font = &theme.menu.item_font;
-    let width = ((text.chars().count() as f32 * font.size * 0.65) as u32 + height)
+    // Bound shaping work for arbitrarily long client titles before doing the
+    // accurate fit. Twice the display budget keeps ordinary captions intact.
+    let bounded = paint::elide(text, max_width.saturating_mul(2), font.size);
+    let text = bounded.as_str();
+    let width = paint::text_width(fonts, font, text).saturating_add(height / 2)
         .min(max_width)
         .max(1);
     let height = height.max(1);
@@ -132,11 +136,15 @@ pub fn label(
         tiny_skia::Transform::identity(),
         None,
     );
+    // These captions are cached at layout time, so shape once rather than
+    // conservatively eliding short desktop names that already fit on screen.
+    let text = paint::fit_measured_prefix(text, width.saturating_sub(height / 2), "…",
+        |candidate| paint::text_width(fonts, font, candidate));
     paint::draw_text(
         &mut pixmap,
         fonts,
         cache,
-        &paint::elide(text, width.saturating_sub(height / 2), font.size),
+        &text,
         font,
         Color::rgb(255, 255, 255),
         (height / 4) as i32,

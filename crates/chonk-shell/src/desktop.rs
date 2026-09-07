@@ -38,7 +38,7 @@ use crate::dockapp::panel::{self as instrument, InstrumentPanel};
 use crate::dockapp::tile::{clamp_panel_grant, reserved_filter, RemoteTile, ServiceContext, StopReason, TileState};
 use crate::dockapp::{self, DockHost, Farewell};
 use crate::omarchy_shell::BarVisibility;
-use crate::overview::{OverviewHit, OverviewItem, OverviewPanel};
+use crate::overview::{OverviewHit, OverviewItem, OverviewPanel, OverviewRelease};
 use crate::wallpaper::Wallpaper;
 use crate::widgets::{
     run_detached, BluetoothWidget, ClockWidget, DockInput, DockItem, DockWidget, Effect, NetTrafficWidget, PanelCtx,
@@ -3540,11 +3540,12 @@ impl<B: Backend> Desktop<B> {
         theme: &Theme,
         items: Vec<OverviewItem<B>>,
         workspace: (usize, usize),
+        workspace_counts: &[usize],
         selected: usize,
     ) {
         let Self { overview, fonts, tile, primary, .. } = self;
         let (mut font_system, mut swash_cache) = (fonts.system(), fonts.swash());
-        overview.show(backend, theme, &mut font_system, &mut swash_cache, *primary, *tile, items, workspace, selected);
+        overview.show(backend, theme, &mut font_system, &mut swash_cache, *primary, *tile, items, workspace, workspace_counts, selected);
     }
 
     pub fn overview_visible(&self) -> bool {
@@ -3596,6 +3597,32 @@ impl<B: Backend> Desktop<B> {
 
     pub fn overview_selected(&self) -> usize {
         self.overview.selected()
+    }
+
+    pub fn overview_workspace(&self) -> (usize, usize) { self.overview.workspace() }
+
+    pub fn overview_pointer_pending(&self) -> bool { self.overview.pointer_pending() }
+
+    pub fn overview_pointer_press(&mut self, backend: &mut B, index: usize, local: Point) {
+        self.overview.pointer_press(backend, index, local);
+    }
+
+    pub fn overview_pointer_motion(&mut self, backend: &mut B, theme: &Theme, root: Point) -> bool {
+        let Self { overview, fonts, .. } = self;
+        let (mut font_system, mut swash_cache) = (fonts.system(), fonts.swash());
+        overview.pointer_motion(backend, theme, &mut font_system, &mut swash_cache, root)
+    }
+
+    pub fn overview_pointer_release(&mut self, backend: &mut B, theme: &Theme, local: Point) -> Option<OverviewRelease> {
+        let Self { overview, fonts, .. } = self;
+        let (mut font_system, mut swash_cache) = (fonts.system(), fonts.swash());
+        overview.pointer_release(backend, theme, &mut font_system, &mut swash_cache, local)
+    }
+
+    pub fn cancel_overview_pointer(&mut self, backend: &mut B, theme: &Theme) -> bool {
+        let Self { overview, fonts, .. } = self;
+        let (mut font_system, mut swash_cache) = (fonts.system(), fonts.swash());
+        overview.cancel_pointer(backend, theme, &mut font_system, &mut swash_cache)
     }
 
     pub fn overview_item(&self, index: usize) -> Option<&OverviewItem<B>> {

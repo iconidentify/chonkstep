@@ -86,7 +86,7 @@ use std::time::Duration;
 use smithay::backend::renderer::element::memory::MemoryRenderBufferRenderElement;
 use smithay::backend::renderer::element::solid::SolidColorRenderElement;
 use smithay::backend::renderer::element::surface::WaylandSurfaceRenderElement;
-use smithay::backend::renderer::element::utils::RescaleRenderElement;
+use smithay::backend::renderer::element::utils::{CropRenderElement, RescaleRenderElement};
 use smithay::backend::renderer::element::{Kind, RenderElementStates};
 use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::backend::renderer::utils::{CommitCounter, RendererSurfaceStateUserData};
@@ -118,6 +118,33 @@ render_elements! {
     Memory = MemoryRenderBufferRenderElement<R>,
     ScaledMemory = RescaleRenderElement<MemoryRenderBufferRenderElement<R>>,
     Solid = SolidColorRenderElement,
+    CroppedSurface = CropRenderElement<RescaleRenderElement<WaylandSurfaceRenderElement<R>>>,
+    CroppedMemory = CropRenderElement<MemoryRenderBufferRenderElement<R>>,
+    CroppedScaledMemory = CropRenderElement<RescaleRenderElement<MemoryRenderBufferRenderElement<R>>>,
+    CroppedSolid = CropRenderElement<SolidColorRenderElement>,
+}
+
+/// Clip a just-appended plane in place. Stable IDs and retained vector capacity
+/// survive the transform; no intermediate scene vector or texture is created.
+pub(crate) fn clip_plane(elements: &mut Vec<SceneElement<GlesRenderer>>, start: usize,
+    rect: Rect, id: &smithay::backend::renderer::element::Id) {
+    let crop = SRect::new((rect.pos.x, rect.pos.y).into(), (rect.size.w as i32, rect.size.h as i32).into());
+    let empty = SolidColorRenderElement::new(id.clone(), SRect::from_size((0, 0).into()),
+        CommitCounter::default(), Color32F::TRANSPARENT, Kind::Unspecified);
+    let mut index = 0;
+    elements.retain_mut(|element| {
+        index += 1;
+        if index <= start { return true; }
+        let old = std::mem::replace(element, empty.clone().into());
+        let clipped = match old {
+            SceneElement::Surface(e) => CropRenderElement::from_element(e, 1.0, crop).map(Into::into),
+            SceneElement::Memory(e) => CropRenderElement::from_element(e, 1.0, crop).map(Into::into),
+            SceneElement::ScaledMemory(e) => CropRenderElement::from_element(e, 1.0, crop).map(Into::into),
+            SceneElement::Solid(e) => CropRenderElement::from_element(e, 1.0, crop).map(Into::into),
+            other => Some(other),
+        };
+        if let Some(clipped) = clipped { *element = clipped; true } else { false }
+    });
 }
 
 /// Renders one full frame from the current ledger, submits it, sends
@@ -234,6 +261,10 @@ pub(crate) fn build_scene_into(
     // annotations) — including the desktop's own dock and menus.
     push_layer_band(elements, renderer, backend, WlrLayer::Overlay, viewport);
 
+    if let Some(transition) = backend.gesture_scene.as_ref().filter(|t| t.horizontal()) {
+        return crate::gesture_scene::render(elements, renderer, backend, transition, viewport);
+    }
+
     if let Some(overview) = backend
         .overview
         .as_ref()
@@ -249,7 +280,10 @@ pub(crate) fn build_scene_into(
                 push_shell_elements(elements, renderer, record, viewport);
             }
         }
+        let furniture_alpha = (1.0 - overview.progress.clamp(0.0, 1.0)) as f32;
+        push_furniture(elements, renderer, backend, viewport, furniture_alpha, true);
         crate::overview::render(elements, renderer, backend, overview, viewport);
+        push_furniture(elements, renderer, backend, viewport, furniture_alpha, false);
         return push_background(elements, renderer, backend, viewport);
     }
 
@@ -627,6 +661,7 @@ pub(crate) fn take_presentation_feedback(
 /// than rediscovering visibility from all windows and all stacking
 /// entries on every frame callback and presentation-feedback drain.
 fn for_each_presented_window(backend: &WaylandBackend, mut visit: impl FnMut(&WindowRecord)) {
+    crate::gesture_scene::for_each_neighbor(backend, &mut visit);
     for window in backend.scene_index.unmanaged() {
         if let Some(record) = backend
             .windows
@@ -794,7 +829,7 @@ fn render_frame_winit(comp: &mut Compositor, plain_capture_pending: bool) -> boo
     // framebuffer) mutates while the ledger is read — both live on
     // `Compositor`, so destructure instead of going through `&mut
     // self` methods.
-    let Compositor { wm, graphics, outputs, pointer_location, cursor_status, cursors, start_time, .. } = comp;
+    let Compositor { wm, graphics, outputs, pointer_location, cursor_status, cursors, start_time, frame_stats, .. } = comp;
     let Graphics::Winit(winit_backend) = graphics else {
         return false;
     };
@@ -842,6 +877,7 @@ fn render_frame_winit(comp: &mut Compositor, plain_capture_pending: bool) -> boo
             }
         };
 
+        let gesture_build = wm.backend().gesture_scene.as_ref().map(|_| std::time::Instant::now());
         let clear_color = build_scene_into(
             scene_scratch,
             wm.backend(),
@@ -851,6 +887,7 @@ fn render_frame_winit(comp: &mut Compositor, plain_capture_pending: bool) -> boo
             cursors,
             Rect::new(Point::new(0, 0), entry.size),
         );
+        if let Some(started) = gesture_build { frame_stats.record_gesture_build(started.elapsed()); }
 
         crate::capture_tool::render(scene_scratch, renderer, wm.backend(), Rect::new(Point::new(0, 0), entry.size));
         match damage_tracker.render_output(renderer, &mut framebuffer, age, scene_scratch, clear_color) {
@@ -1023,6 +1060,10 @@ fn push_layer_band(
     band: WlrLayer,
     viewport: Rect,
 ) {
+    push_layer_band_alpha(elements, renderer, backend, band, viewport, 1.0);
+}
+fn push_layer_band_alpha(elements: &mut Vec<SceneElement<GlesRenderer>>, renderer: &mut GlesRenderer,
+    backend: &WaylandBackend, band: WlrLayer, viewport: Rect, alpha: f32) {
     for record in backend.layers.iter().rev() {
         if record.layer != band || !backend.layer_presented(record) {
             continue;
@@ -1062,10 +1103,10 @@ fn push_layer_band(
                 global.x - viewport.pos.x,
                 global.y - viewport.pos.y,
             ));
-            push_surface_tree(elements, renderer, popup_surface, location, popup_factor, 1.0, Kind::Unspecified);
+            push_surface_tree_alpha(elements, renderer, popup_surface, location, popup_factor, 1.0, Kind::Unspecified, alpha);
         }
         if surface_tree_reaches_viewport(surface, record.geometry.pos, record.geometry, factor, viewport) {
-            push_surface_tree(elements, renderer, surface, origin, factor, 1.0, Kind::Unspecified);
+            push_surface_tree_alpha(elements, renderer, surface, origin, factor, 1.0, Kind::Unspecified, alpha);
         }
     }
 }
@@ -1080,6 +1121,10 @@ fn push_shell_elements(
     record: &crate::state::ShellRecord,
     viewport: Rect,
 ) {
+    push_shell_elements_alpha(elements, renderer, record, viewport, 1.0);
+}
+fn push_shell_elements_alpha(elements: &mut Vec<SceneElement<GlesRenderer>>, renderer: &mut GlesRenderer,
+    record: &crate::state::ShellRecord, viewport: Rect, alpha: f32) {
     if overlap_area(record.geometry, viewport) == 0 {
         return;
     }
@@ -1093,7 +1138,7 @@ fn push_shell_elements(
                 renderer,
                 location,
                 buffer,
-                None,
+                Some(alpha),
                 None,
                 None,
                 Kind::Unspecified,
@@ -1123,13 +1168,25 @@ fn push_shell_elements(
                     record.fill_id.clone(),
                     geometry,
                     CommitCounter::default(),
-                    Color32F::new(r as f32 / 255.0, g as f32 / 255.0, b as f32 / 255.0, 1.0),
+                    Color32F::new(r as f32 / 255.0 * alpha, g as f32 / 255.0 * alpha, b as f32 / 255.0 * alpha, alpha),
                     Kind::Unspecified,
                 )
                 .into(),
             );
         }
     }
+}
+
+pub(crate) fn push_furniture(elements: &mut Vec<SceneElement<GlesRenderer>>, renderer: &mut GlesRenderer,
+    backend: &WaylandBackend, viewport: Rect, alpha: f32, above: bool) {
+    if alpha <= 0.0 || fullscreen_occludes_desktop_bands(backend, viewport) { return; }
+    for id in backend.shell_stacking.iter().rev() {
+        if backend.overview.as_ref().is_some_and(|o| o.surface == *id) { continue; }
+        if let Some(record) = backend.shells.get(id).filter(|s| s.mapped && s.above == above) {
+            push_shell_elements_alpha(elements, renderer, record, viewport, alpha);
+        }
+    }
+    push_layer_band_alpha(elements, renderer, backend, if above { WlrLayer::Top } else { WlrLayer::Bottom }, viewport, alpha);
 }
 
 /// Pushes one managed window's client content (front to back): its
@@ -1295,6 +1352,15 @@ pub(crate) fn push_surface_tree(
     render_scale: f64,
     kind: Kind,
 ) {
+    push_surface_tree_alpha(elements, renderer, surface, location, factor, render_scale, kind, 1.0);
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn push_surface_tree_alpha(
+    elements: &mut Vec<SceneElement<GlesRenderer>>, renderer: &mut GlesRenderer,
+    surface: &WlSurface, location: SPoint<i32, Physical>, factor: f64,
+    render_scale: f64, kind: Kind, alpha: f32,
+) {
     // This is smithay's `render_elements_from_surface_tree` traversal
     // with its sink made caller-owned. That helper necessarily returns
     // a fresh Vec, which meant one allocator round trip per visible
@@ -1380,7 +1446,7 @@ pub(crate) fn push_surface_tree(
                         return None;
                     }
                     Some(WaylandSurfaceRenderElement::from_surface(
-                        renderer, &node, states, location, 1.0, kind,
+                        renderer, &node, states, location, alpha, kind,
                     ))
                 });
                 match drawn {
