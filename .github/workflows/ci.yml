@@ -389,7 +389,7 @@ jobs:
             libxkbcommon-dev libegl-dev libgles-dev libwayland-dev \
             libdrm-dev libgbm-dev libinput-dev libudev-dev libseat-dev \
             weston xwayland foot alacritty zenity grim wayland-utils wlr-randr wtype \
-            wl-clipboard wf-recorder ffmpeg libnotify-bin xdg-user-dirs
+            wl-clipboard wf-recorder ffmpeg libnotify-bin xdg-user-dirs xdg-utils
 
       # --locked: the compositor pins Smithay 0.7.0, and a silent
       # re-resolution here would test a different dependency tree than

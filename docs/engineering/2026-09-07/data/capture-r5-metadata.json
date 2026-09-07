@@ -1,0 +1,61 @@
+{
+  "date_utc": "2026-09-07T11:42:19Z",
+  "harness_sha256": "e216fc98c66dfe647a897cf9bebf1b5a69173eac3d875a71cfedcb245e60df45",
+  "base_harness_sha256": "7fd16421e6f24964354f68d6342c437d06410eaf21295a1d114829edab33f8e7",
+  "binary": {
+    "baseline": {
+      "path": "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/baseline/release/chonkstep-wayland",
+      "version": "chonkstep-wayland 0.3.2\nsource: preview-v0.3.2-10-gc74772d\nbuild id: 1271a16f136593a862c2935933813112b70f8d38",
+      "sha256": "b9dbcfb9ff13039980c6eb750bea34533fffdb7b74074f33bf53f433189771f1"
+    },
+    "capture-r5": {
+      "path": "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/capture-r5/release/chonkstep-wayland",
+      "version": "chonkstep-wayland 0.3.2\nsource: preview-v0.3.2-10-gc74772d-dirty\nbuild id: 98ae1f42b2ac92d9e5443c37ddea7a35d2c08701",
+      "sha256": "a078df7197a10df54818c109dcdc113d204e044343d0458e73cfca2695dec4b5"
+    }
+  },
+  "memory_profile": false,
+  "fixture": "1280x800 scale1 nested winit on private headless Weston pixman; llvmpipe",
+  "page_cache": "uncontrolled; fresh shader cache per process",
+  "latency": "final shortcut key press through rendering barrier; includes nested frame scheduling",
+  "allocation_scope": "whole-process Rust counters including test door, separate diagnostic builds only",
+  "cpu": "Architecture:                            x86_64\nCPU op-mode(s):                          32-bit, 64-bit\nAddress sizes:                           39 bits physical, 48 bits virtual\nByte Order:                              Little Endian\nCPU(s):                                  16\nOn-line CPU(s) list:                     0-15\nVendor ID:                               GenuineIntel\nModel name:                              Intel(R) Core(TM) i9-9900K CPU @ 3.60GHz\nCPU family:                              6\nModel:                                   158\nThread(s) per core:                      2\nCore(s) per socket:                      8\nSocket(s):                               1\nStepping:                                13\nMicrocode version:                       0x104\nCPU(s) scaling MHz:                      94%\nCPU max MHz:                             5000.0000\nCPU min MHz:                             800.0000\nBogoMIPS:                                7202.00\nFlags:                                   fpu vme de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush dts acpi mmx fxsr sse sse2 ss ht tm pbe syscall nx pdpe1gb rdtscp lm constant_tsc art arch_perfmon pebs bts rep_good nopl xtopology nonstop_tsc cpuid aperfmperf pni pclmulqdq dtes64 monitor ds_cpl smx est tm2 ssse3 sdbg fma cx16 xtpr pdcm pcid sse4_1 sse4_2 x2apic movbe popcnt tsc_deadline_timer aes xsave avx f16c rdrand lahf_lm abm 3dnowprefetch cpuid_fault epb ssbd ibrs ibpb stibp ibrs_enhanced fsgsbase tsc_adjust bmi1 avx2 smep bmi2 erms invpcid mpx rdseed adx smap clflushopt intel_pt xsaveopt xsavec xgetbv1 xsaves dtherm ida arat pln pts hwp hwp_notify hwp_act_window hwp_epp md_clear flush_l1d arch_capabilities\nL1d cache:                               256 KiB (8 instances)\nL1i cache:                               256 KiB (8 instances)\nL2 cache:                                2 MiB (8 instances)\nL3 cache:                                16 MiB (1 instance)\nNUMA node(s):                            1\nNUMA node0 CPU(s):                       0-15\nVulnerability Gather data sampling:      Mitigation; Microcode\nVulnerability Ghostwrite:                Not affected\nVulnerability Indirect target selection: Mitigation; Aligned branch/return thunks\nVulnerability Itlb multihit:             KVM: Mitigation: VMX unsupported\nVulnerability L1tf:                      Not affected\nVulnerability Mds:                       Not affected\nVulnerability Meltdown:                  Not affected\nVulnerability Mmio stale data:           Mitigation; Clear CPU buffers; SMT vulnerable\nVulnerability Old microcode:             Not affected\nVulnerability Reg file data sampling:    Not affected\nVulnerability Retbleed:                  Mitigation; Enhanced IBRS\nVulnerability Spec rstack overflow:      Not affected\nVulnerability Spec store bypass:         Mitigation; Speculative Store Bypass disabled via prctl\nVulnerability Spectre v1:                Mitigation; usercopy/swapgs barriers and __user pointer sanitization\nVulnerability Spectre v2:                Mitigation; Enhanced / Automatic IBRS; IBPB conditional; PBRSB-eIBRS SW sequence; BHI SW loop, KVM SW loop\nVulnerability Srbds:                     Mitigation; Microcode\nVulnerability Tsa:                       Not affected\nVulnerability Tsx async abort:           Mitigation; TSX disabled\nVulnerability Vmscape:                   Mitigation; IBPB before exit to userspace",
+  "cpu_affinity": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14,
+    15
+  ],
+  "load_average": [
+    1.443359375,
+    1.79443359375,
+    1.962890625
+  ],
+  "args": {
+    "binary": [
+      "baseline=/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/baseline/release/chonkstep-wayland",
+      "capture-r5=/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/capture-r5/release/chonkstep-wayland"
+    ],
+    "output": "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/comparison-capture-r5-three",
+    "runs": 3,
+    "warm_opens": 10,
+    "settle_seconds": 2.0,
+    "idle_seconds": 10.0,
+    "motion_seconds": 5.0,
+    "motion_hz": 120,
+    "memory": false
+  },
+  "renderer_environment": {}
+}

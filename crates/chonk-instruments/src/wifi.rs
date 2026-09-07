@@ -340,6 +340,14 @@ impl DockWidget for WifiWidget {
         self.panel.bind(ids.get(TILE_SOURCES..).unwrap_or(&[]));
     }
 
+    fn source_active(&self, index: usize, panel_open: bool) -> bool {
+        index < TILE_SOURCES || panel_open || self.panel.needs_sampling()
+    }
+
+    fn panel_visibility_changed(&mut self, open: bool) {
+        self.panel.visibility_changed(open);
+    }
+
     fn update(&mut self, samples: &Samples) -> bool {
         // Panel commands complete independently of the tile's sources, and
         // their freshness lasts only this pass. Its own dirty flag schedules

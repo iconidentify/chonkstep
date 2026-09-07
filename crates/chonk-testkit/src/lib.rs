@@ -1594,6 +1594,20 @@ impl Door {
         })
     }
 
+    /// Retained capture targets and their RGBA pixel bytes, excluding driver
+    /// overhead. This read-only query does not render or evict anything.
+    pub fn capture_cache(&mut self) -> Result<(usize, u64), String> {
+        self.send("capture-cache")?;
+        let line = self.read_line()?;
+        if !line.starts_with("capture-cache ") {
+            return Err(format!("unexpected capture-cache reply: {line}"));
+        }
+        Ok((
+            field(&line, "entries=").ok_or_else(|| format!("capture-cache missing count: {line}"))?,
+            field(&line, "pixel_bytes=").ok_or_else(|| format!("capture-cache missing bytes: {line}"))?,
+        ))
+    }
+
     /// Inspect selection object ownership without pruning dead resources.
     pub fn selection_devices(&mut self) -> Result<SelectionDevices, String> {
         self.send("selection-devices")?;

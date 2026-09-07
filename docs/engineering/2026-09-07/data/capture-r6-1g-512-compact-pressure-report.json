@@ -1,0 +1,3576 @@
+{
+  "complete": true,
+  "missing_samples": [],
+  "unexpected_samples": [],
+  "complete_pairs": 3,
+  "before": "baseline",
+  "after": "capture-r6",
+  "scope": {
+    "unit": "chonk-capture-pressure-443aa9dd29e14aeabe45f5b6171e1d00.scope",
+    "passed": true,
+    "oom_event_observed": false,
+    "cgroup_gone_at_analysis": true,
+    "whole_scope_deltas": {
+      "cpu.stat": {
+        "usage_usec": 291611419,
+        "user_usec": 270252248,
+        "system_usec": 21359170,
+        "nice_usec": 6666,
+        "core_sched.force_idle_usec": 0,
+        "nr_periods": 3884,
+        "nr_throttled": 0,
+        "throttled_usec": 0,
+        "nr_bursts": 0,
+        "burst_usec": 0
+      },
+      "cpu.pressure": {
+        "some_total_us": 14877614,
+        "full_total_us": 617798
+      },
+      "memory.events": {
+        "low": 0,
+        "high": 101932,
+        "max": 0,
+        "oom": 0,
+        "oom_kill": 0,
+        "oom_group_kill": 0
+      },
+      "memory.pressure": {
+        "some_total_us": 120343592,
+        "full_total_us": 92387304
+      }
+    },
+    "whole_scope_kernel_memory_peak_bytes": "833863680",
+    "memory_max_bytes": 1073741824,
+    "memory_high_bytes": 805306368,
+    "cpu_affinity": [
+      2,
+      3
+    ],
+    "lp_num_threads": 2,
+    "full_result": "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/comparison-capture-r6-1g-512-mixed-scope/result.json"
+  },
+  "fixture": {
+    "payload_mib": 512,
+    "churn_mib": 32,
+    "binaries": {
+      "baseline": {
+        "path": "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/baseline/release/chonkstep-wayland",
+        "version": "chonkstep-wayland 0.3.2\nsource: preview-v0.3.2-10-gc74772d\nbuild id: 1271a16f136593a862c2935933813112b70f8d38",
+        "sha256": "b9dbcfb9ff13039980c6eb750bea34533fffdb7b74074f33bf53f433189771f1"
+      },
+      "capture-r6": {
+        "path": "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/capture-r6/release/chonkstep-wayland",
+        "version": "chonkstep-wayland 0.3.2\nsource: preview-v0.3.2-10-gc74772d-dirty\nbuild id: f567cc0c1002b7295695acab02aca93952205e77",
+        "sha256": "315598fbe0b8a49eec2e0c3654331472dfd67c2f5946aaef54caa9077ab6da8f"
+      }
+    },
+    "clients": {
+      "animation_probe": {
+        "path": "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/capture-r3/release/chonk-fullscreen-probe",
+        "sha256": "63c0e39a80e4ce37064f18c67cdc4a11eed89fd851e3eafd10c0678c95efde0e"
+      },
+      "input_probe": {
+        "path": "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/capture-r3/release/chonk-input-probe",
+        "sha256": "9e6e3343bbaef1203ce46198125552c019fd073e1d96b4d827442e84b107e945"
+      },
+      "foot": {
+        "path": "/usr/bin/foot",
+        "sha256": "79ce907b8c00ab1dec254d5b954365c7212f00d67ce54e876799c8706da1d4e5"
+      }
+    },
+    "harness_sha256": "a3009482a2c36b1c51e8c8d44d039198bf81737ee9bee673bd6eb0e137bb21b4",
+    "mixed_fixture_sha256": "1e6fe7e1b597ad8f10a89cb2d96b6067fa8738f5d618f9e177a962cc8f9b406b"
+  },
+  "samples_in_execution_order": [
+    {
+      "sample": "00-baseline",
+      "run": 0,
+      "label": "baseline",
+      "start_monotonic_ns": 325312482773124,
+      "first_open_ms": 91.298593,
+      "warm_open_ms": [
+        81.630549,
+        53.224112,
+        39.645429,
+        28.059571,
+        41.726353,
+        72.778008,
+        56.884399,
+        90.122843,
+        137.50748,
+        101.40508
+      ],
+      "input": {
+        "before_ms": 54.293898,
+        "after_ms": 237.684066
+      },
+      "active_window_pressure": {
+        "available": true,
+        "bracket_seconds": 59.283197351,
+        "extra_before_ms": 192.3768,
+        "extra_after_ms": 119.764288,
+        "sampled_memory_current_max_bytes": 829157376,
+        "memory_psi_some_seconds": 16.901917,
+        "memory_psi_some_percent": 28.510467982906285,
+        "memory_psi_full_seconds": 13.16763,
+        "memory_psi_full_percent": 22.211403210994128,
+        "cpu_psi_some_seconds": 2.564426,
+        "cpu_psi_some_percent": 4.325721476891197,
+        "cpu_psi_full_seconds": 0.106307,
+        "cpu_psi_full_percent": 0.17932062498347484,
+        "memory_events_high": 16013,
+        "memory_events_max": 0,
+        "memory_events_oom": 0,
+        "memory_events_oom_kill": 0,
+        "memory_events_oom_group_kill": 0,
+        "cpu_usage_usec": 45550811,
+        "cpu_nr_periods": 593,
+        "cpu_nr_throttled": 0,
+        "cpu_throttled_usec": 0
+      },
+      "phases": [
+        {
+          "name": "first-open",
+          "seconds": 0.268583371,
+          "cpu_percent": 33.50914826368755,
+          "render_calls": 4,
+          "frame_callbacks": 9,
+          "pss_kib": 137200
+        },
+        {
+          "name": "warm-open",
+          "seconds": 1.697304516,
+          "cpu_percent": 27.69096503128611,
+          "render_calls": 42,
+          "frame_callbacks": 43,
+          "pss_kib": 137312
+        },
+        {
+          "name": "overlay-idle",
+          "seconds": 10.254471964,
+          "cpu_percent": 11.702211525008757,
+          "render_calls": 349,
+          "frame_callbacks": 368,
+          "pss_kib": 141928
+        },
+        {
+          "name": "toolbar-motion",
+          "seconds": 5.292763616,
+          "cpu_percent": 11.903044339549057,
+          "render_calls": 173,
+          "frame_callbacks": 193,
+          "pss_kib": 141964,
+          "final_barrier_ms": 52.418324,
+          "sender_lateness_p95_ms": 0.303292297758162,
+          "sender_lateness_max_ms": 39.84322602627799
+        },
+        {
+          "name": "selection-draw",
+          "seconds": 5.328625399,
+          "cpu_percent": 45.039758292080315,
+          "render_calls": 133,
+          "frame_callbacks": 89,
+          "pss_kib": 138557,
+          "final_barrier_ms": 218.386315,
+          "sender_lateness_p95_ms": 1.7132513457909226,
+          "sender_lateness_max_ms": 6.705464678816497,
+          "pressure": {
+            "available": true,
+            "bracket_seconds": 5.547229221,
+            "extra_before_ms": 42.509636,
+            "extra_after_ms": 110.29805,
+            "sampled_memory_current_max_bytes": 825434112,
+            "memory_psi_some_seconds": 1.77492,
+            "memory_psi_some_percent": 31.996514463125695,
+            "memory_psi_full_seconds": 1.500164,
+            "memory_psi_full_percent": 27.04348315589463,
+            "cpu_psi_some_seconds": 0.47632,
+            "cpu_psi_some_percent": 8.586629126425999,
+            "cpu_psi_full_seconds": 0.021701,
+            "cpu_psi_full_percent": 0.3912043136390884,
+            "memory_events_high": 2555,
+            "memory_events_max": 0,
+            "memory_events_oom": 0,
+            "memory_events_oom_kill": 0,
+            "memory_events_oom_group_kill": 0,
+            "cpu_usage_usec": 5051006,
+            "cpu_nr_periods": 55,
+            "cpu_nr_throttled": 0,
+            "cpu_throttled_usec": 0
+          }
+        },
+        {
+          "name": "selection-resize",
+          "seconds": 5.241000112,
+          "cpu_percent": 46.74680304605191,
+          "render_calls": 137,
+          "frame_callbacks": 81,
+          "pss_kib": 139661,
+          "final_barrier_ms": 207.35391,
+          "sender_lateness_p95_ms": 1.481023384258151,
+          "sender_lateness_max_ms": 6.240891001652926,
+          "pressure": {
+            "available": true,
+            "bracket_seconds": 5.54822637,
+            "extra_before_ms": 161.85752,
+            "extra_after_ms": 36.01608,
+            "sampled_memory_current_max_bytes": 826814464,
+            "memory_psi_some_seconds": 1.527707,
+            "memory_psi_some_percent": 27.535051710588366,
+            "memory_psi_full_seconds": 1.305398,
+            "memory_psi_full_percent": 23.528203662677882,
+            "cpu_psi_some_seconds": 0.500939,
+            "cpu_psi_some_percent": 9.028813292634274,
+            "cpu_psi_full_seconds": 0.01005,
+            "cpu_psi_full_percent": 0.1811389681996699,
+            "memory_events_high": 2242,
+            "memory_events_max": 0,
+            "memory_events_oom": 0,
+            "memory_events_oom_kill": 0,
+            "memory_events_oom_group_kill": 0,
+            "cpu_usage_usec": 5241503,
+            "cpu_nr_periods": 56,
+            "cpu_nr_throttled": 0,
+            "cpu_throttled_usec": 0
+          }
+        },
+        {
+          "name": "selection-settled-idle",
+          "seconds": 10.0397084,
+          "cpu_percent": 11.255306976844068,
+          "render_calls": 353,
+          "frame_callbacks": 353,
+          "pss_kib": 140015
+        },
+        {
+          "name": "closed-idle",
+          "seconds": 10.028465066,
+          "cpu_percent": 9.273602628911028,
+          "render_calls": 353,
+          "frame_callbacks": 354,
+          "pss_kib": 139223
+        }
+      ]
+    },
+    {
+      "sample": "00-capture-r6",
+      "run": 0,
+      "label": "capture-r6",
+      "start_monotonic_ns": 325376668130009,
+      "first_open_ms": 81.894938,
+      "warm_open_ms": [
+        53.875143,
+        59.682955,
+        30.737852,
+        25.544206,
+        57.979572,
+        59.79929,
+        30.304926,
+        26.739984,
+        103.064667,
+        30.496591
+      ],
+      "input": {
+        "before_ms": 27.910547,
+        "after_ms": 54.428132
+      },
+      "active_window_pressure": {
+        "available": true,
+        "bracket_seconds": 59.006431875,
+        "extra_before_ms": 51.90943,
+        "extra_after_ms": 217.769187,
+        "sampled_memory_current_max_bytes": 830836736,
+        "memory_psi_some_seconds": 17.043277,
+        "memory_psi_some_percent": 28.883761411136845,
+        "memory_psi_full_seconds": 13.186745,
+        "memory_psi_full_percent": 22.34797899309515,
+        "cpu_psi_some_seconds": 1.969682,
+        "cpu_psi_some_percent": 3.338080167552921,
+        "cpu_psi_full_seconds": 0.082808,
+        "cpu_psi_full_percent": 0.1403372435320637,
+        "memory_events_high": 15150,
+        "memory_events_max": 0,
+        "memory_events_oom": 0,
+        "memory_events_oom_kill": 0,
+        "memory_events_oom_group_kill": 0,
+        "cpu_usage_usec": 43982242,
+        "cpu_nr_periods": 590,
+        "cpu_nr_throttled": 0,
+        "cpu_throttled_usec": 0
+      },
+      "phases": [
+        {
+          "name": "first-open",
+          "seconds": 0.372867623,
+          "cpu_percent": 29.501086502219586,
+          "render_calls": 4,
+          "frame_callbacks": 13,
+          "pss_kib": 137875
+        },
+        {
+          "name": "warm-open",
+          "seconds": 1.426776691,
+          "cpu_percent": 30.137862688142274,
+          "render_calls": 43,
+          "frame_callbacks": 61,
+          "pss_kib": 138155
+        },
+        {
+          "name": "overlay-idle",
+          "seconds": 10.105187023,
+          "cpu_percent": 11.974048547997864,
+          "render_calls": 355,
+          "frame_callbacks": 383,
+          "pss_kib": 142740
+        },
+        {
+          "name": "toolbar-motion",
+          "seconds": 5.103376453,
+          "cpu_percent": 10.581229994948993,
+          "render_calls": 151,
+          "frame_callbacks": 105,
+          "pss_kib": 143020,
+          "final_barrier_ms": 48.308735,
+          "sender_lateness_p95_ms": 0.40686968713998795,
+          "sender_lateness_max_ms": 51.420935371425
+        },
+        {
+          "name": "selection-draw",
+          "seconds": 5.215622682,
+          "cpu_percent": 13.996411253432,
+          "render_calls": 182,
+          "frame_callbacks": 131,
+          "pss_kib": 139494,
+          "final_barrier_ms": 163.676939,
+          "sender_lateness_p95_ms": 0.4999936791136861,
+          "sender_lateness_max_ms": 35.2434579981491,
+          "pressure": {
+            "available": true,
+            "bracket_seconds": 5.548736354,
+            "extra_before_ms": 122.881608,
+            "extra_after_ms": 197.892974,
+            "sampled_memory_current_max_bytes": 827486208,
+            "memory_psi_some_seconds": 1.605671,
+            "memory_psi_some_percent": 28.937597635946354,
+            "memory_psi_full_seconds": 1.350818,
+            "memory_psi_full_percent": 24.3446059394445,
+            "cpu_psi_some_seconds": 0.11541,
+            "cpu_psi_some_percent": 2.0799330268557936,
+            "cpu_psi_full_seconds": 0.014311,
+            "cpu_psi_full_percent": 0.257914578869537,
+            "memory_events_high": 1887,
+            "memory_events_max": 0,
+            "memory_events_oom": 0,
+            "memory_events_oom_kill": 0,
+            "memory_events_oom_group_kill": 0,
+            "cpu_usage_usec": 4186544,
+            "cpu_nr_periods": 55,
+            "cpu_nr_throttled": 0,
+            "cpu_throttled_usec": 0
+          }
+        },
+        {
+          "name": "selection-resize",
+          "seconds": 5.280517854,
+          "cpu_percent": 13.066900237394782,
+          "render_calls": 177,
+          "frame_callbacks": 157,
+          "pss_kib": 139425,
+          "final_barrier_ms": 31.511958,
+          "sender_lateness_p95_ms": 0.403293059207499,
+          "sender_lateness_max_ms": 20.49610565882176,
+          "pressure": {
+            "available": true,
+            "bracket_seconds": 5.547481035,
+            "extra_before_ms": 19.082411,
+            "extra_after_ms": 149.134022,
+            "sampled_memory_current_max_bytes": 826335232,
+            "memory_psi_some_seconds": 1.514303,
+            "memory_psi_some_percent": 27.29712801983468,
+            "memory_psi_full_seconds": 1.171289,
+            "memory_psi_full_percent": 21.113889215846594,
+            "cpu_psi_some_seconds": 0.141556,
+            "cpu_psi_some_percent": 2.5517167000103136,
+            "cpu_psi_full_seconds": 0.006242,
+            "cpu_psi_full_percent": 0.11251953743722894,
+            "memory_events_high": 1702,
+            "memory_events_max": 0,
+            "memory_events_oom": 0,
+            "memory_events_oom_kill": 0,
+            "memory_events_oom_group_kill": 0,
+            "cpu_usage_usec": 4291665,
+            "cpu_nr_periods": 55,
+            "cpu_nr_throttled": 0,
+            "cpu_throttled_usec": 0
+          }
+        },
+        {
+          "name": "selection-settled-idle",
+          "seconds": 10.157719928,
+          "cpu_percent": 11.518332935867495,
+          "render_calls": 353,
+          "frame_callbacks": 368,
+          "pss_kib": 140487
+        },
+        {
+          "name": "closed-idle",
+          "seconds": 10.138308294,
+          "cpu_percent": 9.567671172261157,
+          "render_calls": 355,
+          "frame_callbacks": 365,
+          "pss_kib": 140169
+        }
+      ]
+    },
+    {
+      "sample": "01-capture-r6",
+      "run": 1,
+      "label": "capture-r6",
+      "start_monotonic_ns": 325440831748916,
+      "first_open_ms": 99.917643,
+      "warm_open_ms": [
+        52.831432,
+        54.721714,
+        26.683864,
+        52.573798,
+        53.275383,
+        67.100646,
+        53.428011,
+        54.756927,
+        61.636279,
+        58.81448
+      ],
+      "input": {
+        "before_ms": 35.767324,
+        "after_ms": 28.139288
+      },
+      "active_window_pressure": {
+        "available": true,
+        "bracket_seconds": 57.005915756,
+        "extra_before_ms": 167.425339,
+        "extra_after_ms": 202.360171,
+        "sampled_memory_current_max_bytes": 830373888,
+        "memory_psi_some_seconds": 16.284732,
+        "memory_psi_some_percent": 28.566740458486535,
+        "memory_psi_full_seconds": 12.42465,
+        "memory_psi_full_percent": 21.795369542313296,
+        "cpu_psi_some_seconds": 1.535241,
+        "cpu_psi_some_percent": 2.693125756581522,
+        "cpu_psi_full_seconds": 0.087312,
+        "cpu_psi_full_percent": 0.15316305131158292,
+        "memory_events_high": 13612,
+        "memory_events_max": 0,
+        "memory_events_oom": 0,
+        "memory_events_oom_kill": 0,
+        "memory_events_oom_group_kill": 0,
+        "cpu_usage_usec": 41166816,
+        "cpu_nr_periods": 570,
+        "cpu_nr_throttled": 0,
+        "cpu_throttled_usec": 0
+      },
+      "phases": [
+        {
+          "name": "first-open",
+          "seconds": 0.37356013,
+          "cpu_percent": 29.446397290845788,
+          "render_calls": 4,
+          "frame_callbacks": 12,
+          "pss_kib": 137057
+        },
+        {
+          "name": "warm-open",
+          "seconds": 1.466275611,
+          "cpu_percent": 30.69000102191566,
+          "render_calls": 48,
+          "frame_callbacks": 46,
+          "pss_kib": 137370
+        },
+        {
+          "name": "overlay-idle",
+          "seconds": 10.190261717,
+          "cpu_percent": 11.579682963701057,
+          "render_calls": 337,
+          "frame_callbacks": 356,
+          "pss_kib": 141750
+        },
+        {
+          "name": "toolbar-motion",
+          "seconds": 5.055550774,
+          "cpu_percent": 9.692316859322279,
+          "render_calls": 130,
+          "frame_callbacks": 95,
+          "pss_kib": 142038,
+          "final_barrier_ms": 39.692081,
+          "sender_lateness_p95_ms": 0.22946635726839304,
+          "sender_lateness_max_ms": 56.4052943373099
+        },
+        {
+          "name": "selection-draw",
+          "seconds": 5.179824332,
+          "cpu_percent": 14.286198769877512,
+          "render_calls": 177,
+          "frame_callbacks": 140,
+          "pss_kib": 138713,
+          "final_barrier_ms": 32.021538,
+          "sender_lateness_p95_ms": 0.3622903604991734,
+          "sender_lateness_max_ms": 26.5355950105004,
+          "pressure": {
+            "available": true,
+            "bracket_seconds": 5.799850141,
+            "extra_before_ms": 229.928448,
+            "extra_after_ms": 224.500276,
+            "sampled_memory_current_max_bytes": 827453440,
+            "memory_psi_some_seconds": 1.792404,
+            "memory_psi_some_percent": 30.90431573962973,
+            "memory_psi_full_seconds": 1.246657,
+            "memory_psi_full_percent": 21.494641580257337,
+            "cpu_psi_some_seconds": 0.147225,
+            "cpu_psi_some_percent": 2.5384276562465753,
+            "cpu_psi_full_seconds": 0.011769,
+            "cpu_psi_full_percent": 0.20291903607652195,
+            "memory_events_high": 1880,
+            "memory_events_max": 0,
+            "memory_events_oom": 0,
+            "memory_events_oom_kill": 0,
+            "memory_events_oom_group_kill": 0,
+            "cpu_usage_usec": 4572821,
+            "cpu_nr_periods": 58,
+            "cpu_nr_throttled": 0,
+            "cpu_throttled_usec": 0
+          }
+        },
+        {
+          "name": "selection-resize",
+          "seconds": 5.078598129,
+          "cpu_percent": 13.389521728782569,
+          "render_calls": 183,
+          "frame_callbacks": 136,
+          "pss_kib": 138438,
+          "final_barrier_ms": 39.737423,
+          "sender_lateness_p95_ms": 0.1541940146125853,
+          "sender_lateness_max_ms": 3.126840980257839,
+          "pressure": {
+            "available": true,
+            "bracket_seconds": 5.547909554,
+            "extra_before_ms": 215.294121,
+            "extra_after_ms": 243.674128,
+            "sampled_memory_current_max_bytes": 827338752,
+            "memory_psi_some_seconds": 1.119228,
+            "memory_psi_some_percent": 20.17386889793553,
+            "memory_psi_full_seconds": 0.797864,
+            "memory_psi_full_percent": 14.381344761194715,
+            "cpu_psi_some_seconds": 0.107267,
+            "cpu_psi_some_percent": 1.9334669924938,
+            "cpu_psi_full_seconds": 0.006058,
+            "cpu_psi_full_percent": 0.10919428193691853,
+            "memory_events_high": 436,
+            "memory_events_max": 0,
+            "memory_events_oom": 0,
+            "memory_events_oom_kill": 0,
+            "memory_events_oom_group_kill": 0,
+            "cpu_usage_usec": 4262182,
+            "cpu_nr_periods": 56,
+            "cpu_nr_throttled": 0,
+            "cpu_throttled_usec": 0
+          }
+        },
+        {
+          "name": "selection-settled-idle",
+          "seconds": 10.149627034,
+          "cpu_percent": 11.428991391645653,
+          "render_calls": 353,
+          "frame_callbacks": 357,
+          "pss_kib": 139522
+        },
+        {
+          "name": "closed-idle",
+          "seconds": 10.152797591,
+          "cpu_percent": 9.554016922979548,
+          "render_calls": 358,
+          "frame_callbacks": 371,
+          "pss_kib": 139400
+        }
+      ]
+    },
+    {
+      "sample": "01-baseline",
+      "run": 1,
+      "label": "baseline",
+      "start_monotonic_ns": 325501911140802,
+      "first_open_ms": 58.962062,
+      "warm_open_ms": [
+        56.118902,
+        29.119764,
+        54.241557,
+        31.095608,
+        54.489494,
+        27.688588,
+        55.949763,
+        52.862771,
+        27.46245,
+        54.609443
+      ],
+      "input": {
+        "before_ms": 26.670135,
+        "after_ms": 69.349703
+      },
+      "active_window_pressure": {
+        "available": true,
+        "bracket_seconds": 60.575059569,
+        "extra_before_ms": 202.724371,
+        "extra_after_ms": 192.495285,
+        "sampled_memory_current_max_bytes": 832290816,
+        "memory_psi_some_seconds": 20.954812,
+        "memory_psi_some_percent": 34.59313478038059,
+        "memory_psi_full_seconds": 16.971482,
+        "memory_psi_full_percent": 28.017276616406928,
+        "cpu_psi_some_seconds": 2.406669,
+        "cpu_psi_some_percent": 3.973036125963038,
+        "cpu_psi_full_seconds": 0.103546,
+        "cpu_psi_full_percent": 0.17093833788483948,
+        "memory_events_high": 18956,
+        "memory_events_max": 0,
+        "memory_events_oom": 0,
+        "memory_events_oom_kill": 0,
+        "memory_events_oom_group_kill": 0,
+        "cpu_usage_usec": 44217486,
+        "cpu_nr_periods": 606,
+        "cpu_nr_throttled": 0,
+        "cpu_throttled_usec": 0
+      },
+      "phases": [
+        {
+          "name": "first-open",
+          "seconds": 0.340596715,
+          "cpu_percent": 29.36023619605374,
+          "render_calls": 3,
+          "frame_callbacks": 12,
+          "pss_kib": 137404
+        },
+        {
+          "name": "warm-open",
+          "seconds": 1.372203957,
+          "cpu_percent": 32.06520413787147,
+          "render_calls": 42,
+          "frame_callbacks": 45,
+          "pss_kib": 137348
+        },
+        {
+          "name": "overlay-idle",
+          "seconds": 10.205960854,
+          "cpu_percent": 11.463888767919821,
+          "render_calls": 336,
+          "frame_callbacks": 361,
+          "pss_kib": 142033
+        },
+        {
+          "name": "toolbar-motion",
+          "seconds": 5.174187586,
+          "cpu_percent": 12.175824504403655,
+          "render_calls": 173,
+          "frame_callbacks": 194,
+          "pss_kib": 142039,
+          "final_barrier_ms": 46.643964,
+          "sender_lateness_p95_ms": 0.4373550182208419,
+          "sender_lateness_max_ms": 54.0392060065642
+        },
+        {
+          "name": "selection-draw",
+          "seconds": 5.313807757,
+          "cpu_percent": 45.72991931819336,
+          "render_calls": 136,
+          "frame_callbacks": 85,
+          "pss_kib": 138533,
+          "final_barrier_ms": 90.560993,
+          "sender_lateness_p95_ms": 1.656545966397971,
+          "sender_lateness_max_ms": 49.766293668653816,
+          "pressure": {
+            "available": true,
+            "bracket_seconds": 5.799432334,
+            "extra_before_ms": 175.565885,
+            "extra_after_ms": 194.396303,
+            "sampled_memory_current_max_bytes": 827203584,
+            "memory_psi_some_seconds": 1.68703,
+            "memory_psi_some_percent": 29.089571234576635,
+            "memory_psi_full_seconds": 1.405838,
+            "memory_psi_full_percent": 24.240958753119234,
+            "cpu_psi_some_seconds": 0.555154,
+            "cpu_psi_some_percent": 9.572557588875217,
+            "cpu_psi_full_seconds": 0.012499,
+            "cpu_psi_full_percent": 0.21552109379262568,
+            "memory_events_high": 2463,
+            "memory_events_max": 0,
+            "memory_events_oom": 0,
+            "memory_events_oom_kill": 0,
+            "memory_events_oom_group_kill": 0,
+            "cpu_usage_usec": 5535669,
+            "cpu_nr_periods": 58,
+            "cpu_nr_throttled": 0,
+            "cpu_throttled_usec": 0
+          }
+        },
+        {
+          "name": "selection-resize",
+          "seconds": 5.09147891,
+          "cpu_percent": 44.38788886194168,
+          "render_calls": 130,
+          "frame_callbacks": 83,
+          "pss_kib": 139931,
+          "final_barrier_ms": 40.801109,
+          "sender_lateness_p95_ms": 1.9223599811084569,
+          "sender_lateness_max_ms": 43.6334703117609,
+          "pressure": {
+            "available": true,
+            "bracket_seconds": 5.299524145,
+            "extra_before_ms": 92.802254,
+            "extra_after_ms": 104.175703,
+            "sampled_memory_current_max_bytes": 828239872,
+            "memory_psi_some_seconds": 1.512104,
+            "memory_psi_some_percent": 28.53282594111098,
+            "memory_psi_full_seconds": 1.371181,
+            "memory_psi_full_percent": 25.873662662593638,
+            "cpu_psi_some_seconds": 0.430539,
+            "cpu_psi_some_percent": 8.1241067729865,
+            "cpu_psi_full_seconds": 0.007699,
+            "cpu_psi_full_percent": 0.14527719450554555,
+            "memory_events_high": 1787,
+            "memory_events_max": 0,
+            "memory_events_oom": 0,
+            "memory_events_oom_kill": 0,
+            "memory_events_oom_group_kill": 0,
+            "cpu_usage_usec": 4734296,
+            "cpu_nr_periods": 53,
+            "cpu_nr_throttled": 0,
+            "cpu_throttled_usec": 0
+          }
+        },
+        {
+          "name": "selection-settled-idle",
+          "seconds": 10.35187416,
+          "cpu_percent": 11.302301225037303,
+          "render_calls": 342,
+          "frame_callbacks": 363,
+          "pss_kib": 140420
+        },
+        {
+          "name": "closed-idle",
+          "seconds": 10.202479974,
+          "cpu_percent": 9.311461550730607,
+          "render_calls": 350,
+          "frame_callbacks": 360,
+          "pss_kib": 139540
+        }
+      ]
+    },
+    {
+      "sample": "02-baseline",
+      "run": 2,
+      "label": "baseline",
+      "start_monotonic_ns": 325567680017656,
+      "first_open_ms": 92.312653,
+      "warm_open_ms": [
+        31.908264,
+        79.897809,
+        27.421258,
+        28.329512,
+        54.550831,
+        54.331476,
+        27.519469,
+        79.9024,
+        59.055263,
+        54.442672
+      ],
+      "input": {
+        "before_ms": 53.878433,
+        "after_ms": 54.909497
+      },
+      "active_window_pressure": {
+        "available": true,
+        "bracket_seconds": 61.280231311,
+        "extra_before_ms": 95.044097,
+        "extra_after_ms": 175.69806,
+        "sampled_memory_current_max_bytes": 832638976,
+        "memory_psi_some_seconds": 21.998144,
+        "memory_psi_some_percent": 35.897619067980344,
+        "memory_psi_full_seconds": 16.970138,
+        "memory_psi_full_percent": 27.692679412183946,
+        "cpu_psi_some_seconds": 2.579996,
+        "cpu_psi_some_percent": 4.2101603482963394,
+        "cpu_psi_full_seconds": 0.09314,
+        "cpu_psi_full_percent": 0.15199028790754754,
+        "memory_events_high": 16785,
+        "memory_events_max": 0,
+        "memory_events_oom": 0,
+        "memory_events_oom_kill": 0,
+        "memory_events_oom_group_kill": 0,
+        "cpu_usage_usec": 45347510,
+        "cpu_nr_periods": 613,
+        "cpu_nr_throttled": 0,
+        "cpu_throttled_usec": 0
+      },
+      "phases": [
+        {
+          "name": "first-open",
+          "seconds": 0.369273204,
+          "cpu_percent": 35.20428739259402,
+          "render_calls": 4,
+          "frame_callbacks": 31,
+          "pss_kib": 136952
+        },
+        {
+          "name": "warm-open",
+          "seconds": 1.485536442,
+          "cpu_percent": 29.618930075361966,
+          "render_calls": 45,
+          "frame_callbacks": 40,
+          "pss_kib": 136988
+        },
+        {
+          "name": "overlay-idle",
+          "seconds": 10.288689325,
+          "cpu_percent": 11.371710847144273,
+          "render_calls": 330,
+          "frame_callbacks": 351,
+          "pss_kib": 141417
+        },
+        {
+          "name": "toolbar-motion",
+          "seconds": 5.044350307,
+          "cpu_percent": 12.290978268095923,
+          "render_calls": 174,
+          "frame_callbacks": 186,
+          "pss_kib": 141420,
+          "final_barrier_ms": 36.290479,
+          "sender_lateness_p95_ms": 0.14873401960358024,
+          "sender_lateness_max_ms": 33.22339931037277
+        },
+        {
+          "name": "selection-draw",
+          "seconds": 5.336632254,
+          "cpu_percent": 43.47310981117493,
+          "render_calls": 131,
+          "frame_callbacks": 96,
+          "pss_kib": 137997,
+          "final_barrier_ms": 192.163746,
+          "sender_lateness_p95_ms": 1.9611380412243307,
+          "sender_lateness_max_ms": 21.690283028874546,
+          "pressure": {
+            "available": true,
+            "bracket_seconds": 5.546950411,
+            "extra_before_ms": 4.254909,
+            "extra_after_ms": 64.412001,
+            "sampled_memory_current_max_bytes": 828649472,
+            "memory_psi_some_seconds": 1.92295,
+            "memory_psi_some_percent": 34.666796302823485,
+            "memory_psi_full_seconds": 1.628168,
+            "memory_psi_full_percent": 29.352488833706285,
+            "cpu_psi_some_seconds": 0.450991,
+            "cpu_psi_some_percent": 8.130431436806294,
+            "cpu_psi_full_seconds": 0.010395,
+            "cpu_psi_full_percent": 0.18740026915304614,
+            "memory_events_high": 2179,
+            "memory_events_max": 0,
+            "memory_events_oom": 0,
+            "memory_events_oom_kill": 0,
+            "memory_events_oom_group_kill": 0,
+            "cpu_usage_usec": 4957493,
+            "cpu_nr_periods": 55,
+            "cpu_nr_throttled": 0,
+            "cpu_throttled_usec": 0
+          }
+        },
+        {
+          "name": "selection-resize",
+          "seconds": 5.221124077,
+          "cpu_percent": 41.37040162510584,
+          "render_calls": 121,
+          "frame_callbacks": 102,
+          "pss_kib": 139288,
+          "final_barrier_ms": 103.584471,
+          "sender_lateness_p95_ms": 1.254288014024496,
+          "sender_lateness_max_ms": 6.896619335748255,
+          "pressure": {
+            "available": true,
+            "bracket_seconds": 6.555606464,
+            "extra_before_ms": 246.471273,
+            "extra_after_ms": 216.361446,
+            "sampled_memory_current_max_bytes": 829648896,
+            "memory_psi_some_seconds": 2.171707,
+            "memory_psi_some_percent": 33.127476640428185,
+            "memory_psi_full_seconds": 1.857571,
+            "memory_psi_full_percent": 28.335608767866393,
+            "cpu_psi_some_seconds": 0.602861,
+            "cpu_psi_some_percent": 9.196113331552173,
+            "cpu_psi_full_seconds": 0.024111,
+            "cpu_psi_full_percent": 0.36779205909331414,
+            "memory_events_high": 2102,
+            "memory_events_max": 0,
+            "memory_events_oom": 0,
+            "memory_events_oom_kill": 0,
+            "memory_events_oom_group_kill": 0,
+            "cpu_usage_usec": 5715835,
+            "cpu_nr_periods": 66,
+            "cpu_nr_throttled": 0,
+            "cpu_throttled_usec": 0
+          }
+        },
+        {
+          "name": "selection-settled-idle",
+          "seconds": 10.201993335,
+          "cpu_percent": 11.076266793110975,
+          "render_calls": 345,
+          "frame_callbacks": 353,
+          "pss_kib": 140046
+        },
+        {
+          "name": "closed-idle",
+          "seconds": 10.174465426,
+          "cpu_percent": 9.435385151015403,
+          "render_calls": 345,
+          "frame_callbacks": 352,
+          "pss_kib": 138730
+        }
+      ]
+    },
+    {
+      "sample": "02-capture-r6",
+      "run": 2,
+      "label": "capture-r6",
+      "start_monotonic_ns": 325633794749615,
+      "first_open_ms": 60.115116,
+      "warm_open_ms": [
+        41.736811,
+        62.752909,
+        52.772698,
+        37.783869,
+        81.998911,
+        30.976225,
+        53.644158,
+        67.763264,
+        26.911574,
+        87.735128
+      ],
+      "input": {
+        "before_ms": 29.38634,
+        "after_ms": 9.946205
+      },
+      "active_window_pressure": {
+        "available": true,
+        "bracket_seconds": 61.523793221,
+        "extra_before_ms": 137.95034,
+        "extra_after_ms": 220.36983,
+        "sampled_memory_current_max_bytes": 833626112,
+        "memory_psi_some_seconds": 22.336166,
+        "memory_psi_some_percent": 36.30492339730439,
+        "memory_psi_full_seconds": 16.360989,
+        "memory_psi_full_percent": 26.592945823788188,
+        "cpu_psi_some_seconds": 2.088373,
+        "cpu_psi_some_percent": 3.3944152183503093,
+        "cpu_psi_full_seconds": 0.093547,
+        "cpu_psi_full_percent": 0.15205011769019058,
+        "memory_events_high": 17097,
+        "memory_events_max": 0,
+        "memory_events_oom": 0,
+        "memory_events_oom_kill": 0,
+        "memory_events_oom_group_kill": 0,
+        "cpu_usage_usec": 45051249,
+        "cpu_nr_periods": 615,
+        "cpu_nr_throttled": 0,
+        "cpu_throttled_usec": 0
+      },
+      "phases": [
+        {
+          "name": "first-open",
+          "seconds": 1.036555037,
+          "cpu_percent": 15.435745743233506,
+          "render_calls": 4,
+          "frame_callbacks": 38,
+          "pss_kib": 137189
+        },
+        {
+          "name": "warm-open",
+          "seconds": 1.579031296,
+          "cpu_percent": 28.498485187718536,
+          "render_calls": 39,
+          "frame_callbacks": 56,
+          "pss_kib": 137429
+        },
+        {
+          "name": "overlay-idle",
+          "seconds": 10.413210341,
+          "cpu_percent": 11.331759960268723,
+          "render_calls": 334,
+          "frame_callbacks": 363,
+          "pss_kib": 141915
+        },
+        {
+          "name": "toolbar-motion",
+          "seconds": 5.683812768,
+          "cpu_percent": 8.445035394241192,
+          "render_calls": 109,
+          "frame_callbacks": 120,
+          "pss_kib": 142140,
+          "final_barrier_ms": 251.736117,
+          "sender_lateness_p95_ms": 0.7606969447806478,
+          "sender_lateness_max_ms": 60.85065036313608
+        },
+        {
+          "name": "selection-draw",
+          "seconds": 5.051970493,
+          "cpu_percent": 14.647749843854838,
+          "render_calls": 184,
+          "frame_callbacks": 145,
+          "pss_kib": 138732,
+          "final_barrier_ms": 42.445214,
+          "sender_lateness_p95_ms": 0.25039660977199674,
+          "sender_lateness_max_ms": 41.57129232771695,
+          "pressure": {
+            "available": true,
+            "bracket_seconds": 5.294895824,
+            "extra_before_ms": 191.761211,
+            "extra_after_ms": 40.824509,
+            "sampled_memory_current_max_bytes": 833036288,
+            "memory_psi_some_seconds": 1.430516,
+            "memory_psi_some_percent": 27.016886593234695,
+            "memory_psi_full_seconds": 0.935888,
+            "memory_psi_full_percent": 17.67528637216867,
+            "cpu_psi_some_seconds": 0.10575,
+            "cpu_psi_some_percent": 1.9972064326680508,
+            "cpu_psi_full_seconds": 0.003891,
+            "cpu_psi_full_percent": 0.0734858650544812,
+            "memory_events_high": 907,
+            "memory_events_max": 0,
+            "memory_events_oom": 0,
+            "memory_events_oom_kill": 0,
+            "memory_events_oom_group_kill": 0,
+            "cpu_usage_usec": 4073143,
+            "cpu_nr_periods": 53,
+            "cpu_nr_throttled": 0,
+            "cpu_throttled_usec": 0
+          }
+        },
+        {
+          "name": "selection-resize",
+          "seconds": 5.223794879,
+          "cpu_percent": 13.40021988256174,
+          "render_calls": 177,
+          "frame_callbacks": 140,
+          "pss_kib": 138680,
+          "final_barrier_ms": 45.48691,
+          "sender_lateness_p95_ms": 0.8262916235253215,
+          "sender_lateness_max_ms": 84.62475030682981,
+          "pressure": {
+            "available": true,
+            "bracket_seconds": 5.546887446,
+            "extra_before_ms": 162.830791,
+            "extra_after_ms": 0.094752,
+            "sampled_memory_current_max_bytes": 830058496,
+            "memory_psi_some_seconds": 1.933528,
+            "memory_psi_some_percent": 34.8578913638191,
+            "memory_psi_full_seconds": 1.364915,
+            "memory_psi_full_percent": 24.60686309732631,
+            "cpu_psi_some_seconds": 0.153791,
+            "cpu_psi_some_percent": 2.7725639198051972,
+            "cpu_psi_full_seconds": 0.006066,
+            "cpu_psi_full_percent": 0.10935862786208767,
+            "memory_events_high": 1392,
+            "memory_events_max": 0,
+            "memory_events_oom": 0,
+            "memory_events_oom_kill": 0,
+            "memory_events_oom_group_kill": 0,
+            "cpu_usage_usec": 4286883,
+            "cpu_nr_periods": 56,
+            "cpu_nr_throttled": 0,
+            "cpu_throttled_usec": 0
+          }
+        },
+        {
+          "name": "selection-settled-idle",
+          "seconds": 10.205320171,
+          "cpu_percent": 11.072656036907789,
+          "render_calls": 343,
+          "frame_callbacks": 356,
+          "pss_kib": 139737
+        },
+        {
+          "name": "closed-idle",
+          "seconds": 10.132267715,
+          "cpu_percent": 9.277291386689342,
+          "render_calls": 345,
+          "frame_callbacks": 356,
+          "pss_kib": 139648
+        }
+      ]
+    }
+  ],
+  "distributions": {
+    "baseline": {
+      "active_window_bracket_seconds": {
+        "median": 60.575059569,
+        "min": 59.283197351,
+        "max": 61.280231311,
+        "samples": [
+          59.283197351,
+          60.575059569,
+          61.280231311
+        ]
+      },
+      "active_window_cpu_nr_periods": {
+        "median": 606,
+        "min": 593,
+        "max": 613,
+        "samples": [
+          593,
+          606,
+          613
+        ]
+      },
+      "active_window_cpu_nr_throttled": {
+        "median": 0,
+        "min": 0,
+        "max": 0,
+        "samples": [
+          0,
+          0,
+          0
+        ]
+      },
+      "active_window_cpu_psi_full_percent": {
+        "median": 0.17093833788483948,
+        "min": 0.15199028790754754,
+        "max": 0.17932062498347484,
+        "samples": [
+          0.17932062498347484,
+          0.17093833788483948,
+          0.15199028790754754
+        ]
+      },
+      "active_window_cpu_psi_full_seconds": {
+        "median": 0.103546,
+        "min": 0.09314,
+        "max": 0.106307,
+        "samples": [
+          0.106307,
+          0.103546,
+          0.09314
+        ]
+      },
+      "active_window_cpu_psi_some_percent": {
+        "median": 4.2101603482963394,
+        "min": 3.973036125963038,
+        "max": 4.325721476891197,
+        "samples": [
+          4.325721476891197,
+          3.973036125963038,
+          4.2101603482963394
+        ]
+      },
+      "active_window_cpu_psi_some_seconds": {
+        "median": 2.564426,
+        "min": 2.406669,
+        "max": 2.579996,
+        "samples": [
+          2.564426,
+          2.406669,
+          2.579996
+        ]
+      },
+      "active_window_cpu_throttled_usec": {
+        "median": 0,
+        "min": 0,
+        "max": 0,
+        "samples": [
+          0,
+          0,
+          0
+        ]
+      },
+      "active_window_cpu_usage_usec": {
+        "median": 45347510,
+        "min": 44217486,
+        "max": 45550811,
+        "samples": [
+          45550811,
+          44217486,
+          45347510
+        ]
+      },
+      "active_window_extra_after_ms": {
+        "median": 175.69806,
+        "min": 119.764288,
+        "max": 192.495285,
+        "samples": [
+          119.764288,
+          192.495285,
+          175.69806
+        ]
+      },
+      "active_window_extra_before_ms": {
+        "median": 192.3768,
+        "min": 95.044097,
+        "max": 202.724371,
+        "samples": [
+          192.3768,
+          202.724371,
+          95.044097
+        ]
+      },
+      "active_window_memory_events_high": {
+        "median": 16785,
+        "min": 16013,
+        "max": 18956,
+        "samples": [
+          16013,
+          18956,
+          16785
+        ]
+      },
+      "active_window_memory_events_max": {
+        "median": 0,
+        "min": 0,
+        "max": 0,
+        "samples": [
+          0,
+          0,
+          0
+        ]
+      },
+      "active_window_memory_events_oom": {
+        "median": 0,
+        "min": 0,
+        "max": 0,
+        "samples": [
+          0,
+          0,
+          0
+        ]
+      },
+      "active_window_memory_events_oom_group_kill": {
+        "median": 0,
+        "min": 0,
+        "max": 0,
+        "samples": [
+          0,
+          0,
+          0
+        ]
+      },
+      "active_window_memory_events_oom_kill": {
+        "median": 0,
+        "min": 0,
+        "max": 0,
+        "samples": [
+          0,
+          0,
+          0
+        ]
+      },
+      "active_window_memory_psi_full_percent": {
+        "median": 27.692679412183946,
+        "min": 22.211403210994128,
+        "max": 28.017276616406928,
+        "samples": [
+          22.211403210994128,
+          28.017276616406928,
+          27.692679412183946
+        ]
+      },
+      "active_window_memory_psi_full_seconds": {
+        "median": 16.970138,
+        "min": 13.16763,
+        "max": 16.971482,
+        "samples": [
+          13.16763,
+          16.971482,
+          16.970138
+        ]
+      },
+      "active_window_memory_psi_some_percent": {
+        "median": 34.59313478038059,
+        "min": 28.510467982906285,
+        "max": 35.897619067980344,
+        "samples": [
+          28.510467982906285,
+          34.59313478038059,
+          35.897619067980344
+        ]
+      },
+      "active_window_memory_psi_some_seconds": {
+        "median": 20.954812,
+        "min": 16.901917,
+        "max": 21.998144,
+        "samples": [
+          16.901917,
+          20.954812,
+          21.998144
+        ]
+      },
+      "active_window_sampled_memory_current_max_bytes": {
+        "median": 832290816,
+        "min": 829157376,
+        "max": 832638976,
+        "samples": [
+          829157376,
+          832290816,
+          832638976
+        ]
+      },
+      "closed-idle_cpu_percent": {
+        "median": 9.311461550730607,
+        "min": 9.273602628911028,
+        "max": 9.435385151015403,
+        "samples": [
+          9.273602628911028,
+          9.311461550730607,
+          9.435385151015403
+        ]
+      },
+      "closed-idle_frame_callbacks": {
+        "median": 354,
+        "min": 352,
+        "max": 360,
+        "samples": [
+          354,
+          360,
+          352
+        ]
+      },
+      "closed-idle_pss_kib": {
+        "median": 139223,
+        "min": 138730,
+        "max": 139540,
+        "samples": [
+          139223,
+          139540,
+          138730
+        ]
+      },
+      "closed-idle_render_calls": {
+        "median": 350,
+        "min": 345,
+        "max": 353,
+        "samples": [
+          353,
+          350,
+          345
+        ]
+      },
+      "closed-idle_seconds": {
+        "median": 10.174465426,
+        "min": 10.028465066,
+        "max": 10.202479974,
+        "samples": [
+          10.028465066,
+          10.202479974,
+          10.174465426
+        ]
+      },
+      "first-open_cpu_percent": {
+        "median": 33.50914826368755,
+        "min": 29.36023619605374,
+        "max": 35.20428739259402,
+        "samples": [
+          33.50914826368755,
+          29.36023619605374,
+          35.20428739259402
+        ]
+      },
+      "first-open_frame_callbacks": {
+        "median": 12,
+        "min": 9,
+        "max": 31,
+        "samples": [
+          9,
+          12,
+          31
+        ]
+      },
+      "first-open_pss_kib": {
+        "median": 137200,
+        "min": 136952,
+        "max": 137404,
+        "samples": [
+          137200,
+          137404,
+          136952
+        ]
+      },
+      "first-open_render_calls": {
+        "median": 4,
+        "min": 3,
+        "max": 4,
+        "samples": [
+          4,
+          3,
+          4
+        ]
+      },
+      "first-open_seconds": {
+        "median": 0.340596715,
+        "min": 0.268583371,
+        "max": 0.369273204,
+        "samples": [
+          0.268583371,
+          0.340596715,
+          0.369273204
+        ]
+      },
+      "first_open_ms": {
+        "median": 91.298593,
+        "min": 58.962062,
+        "max": 92.312653,
+        "samples": [
+          91.298593,
+          58.962062,
+          92.312653
+        ]
+      },
+      "input_after_ms": {
+        "median": 69.349703,
+        "min": 54.909497,
+        "max": 237.684066,
+        "samples": [
+          237.684066,
+          69.349703,
+          54.909497
+        ]
+      },
+      "input_before_ms": {
+        "median": 53.878433,
+        "min": 26.670135,
+        "max": 54.293898,
+        "samples": [
+          54.293898,
+          26.670135,
+          53.878433
+        ]
+      },
+      "overlay-idle_cpu_percent": {
+        "median": 11.463888767919821,
+        "min": 11.371710847144273,
+        "max": 11.702211525008757,
+        "samples": [
+          11.702211525008757,
+          11.463888767919821,
+          11.371710847144273
+        ]
+      },
+      "overlay-idle_frame_callbacks": {
+        "median": 361,
+        "min": 351,
+        "max": 368,
+        "samples": [
+          368,
+          361,
+          351
+        ]
+      },
+      "overlay-idle_pss_kib": {
+        "median": 141928,
+        "min": 141417,
+        "max": 142033,
+        "samples": [
+          141928,
+          142033,
+          141417
+        ]
+      },
+      "overlay-idle_render_calls": {
+        "median": 336,
+        "min": 330,
+        "max": 349,
+        "samples": [
+          349,
+          336,
+          330
+        ]
+      },
+      "overlay-idle_seconds": {
+        "median": 10.254471964,
+        "min": 10.205960854,
+        "max": 10.288689325,
+        "samples": [
+          10.254471964,
+          10.205960854,
+          10.288689325
+        ]
+      },
+      "selection-draw_cpu_percent": {
+        "median": 45.039758292080315,
+        "min": 43.47310981117493,
+        "max": 45.72991931819336,
+        "samples": [
+          45.039758292080315,
+          45.72991931819336,
+          43.47310981117493
+        ]
+      },
+      "selection-draw_final_barrier_ms": {
+        "median": 192.163746,
+        "min": 90.560993,
+        "max": 218.386315,
+        "samples": [
+          218.386315,
+          90.560993,
+          192.163746
+        ]
+      },
+      "selection-draw_frame_callbacks": {
+        "median": 89,
+        "min": 85,
+        "max": 96,
+        "samples": [
+          89,
+          85,
+          96
+        ]
+      },
+      "selection-draw_pss_kib": {
+        "median": 138533,
+        "min": 137997,
+        "max": 138557,
+        "samples": [
+          138557,
+          138533,
+          137997
+        ]
+      },
+      "selection-draw_render_calls": {
+        "median": 133,
+        "min": 131,
+        "max": 136,
+        "samples": [
+          133,
+          136,
+          131
+        ]
+      },
+      "selection-draw_seconds": {
+        "median": 5.328625399,
+        "min": 5.313807757,
+        "max": 5.336632254,
+        "samples": [
+          5.328625399,
+          5.313807757,
+          5.336632254
+        ]
+      },
+      "selection-draw_sender_lateness_max_ms": {
+        "median": 21.690283028874546,
+        "min": 6.705464678816497,
+        "max": 49.766293668653816,
+        "samples": [
+          6.705464678816497,
+          49.766293668653816,
+          21.690283028874546
+        ]
+      },
+      "selection-draw_sender_lateness_p95_ms": {
+        "median": 1.7132513457909226,
+        "min": 1.656545966397971,
+        "max": 1.9611380412243307,
+        "samples": [
+          1.7132513457909226,
+          1.656545966397971,
+          1.9611380412243307
+        ]
+      },
+      "selection-resize_cpu_percent": {
+        "median": 44.38788886194168,
+        "min": 41.37040162510584,
+        "max": 46.74680304605191,
+        "samples": [
+          46.74680304605191,
+          44.38788886194168,
+          41.37040162510584
+        ]
+      },
+      "selection-resize_final_barrier_ms": {
+        "median": 103.584471,
+        "min": 40.801109,
+        "max": 207.35391,
+        "samples": [
+          207.35391,
+          40.801109,
+          103.584471
+        ]
+      },
+      "selection-resize_frame_callbacks": {
+        "median": 83,
+        "min": 81,
+        "max": 102,
+        "samples": [
+          81,
+          83,
+          102
+        ]
+      },
+      "selection-resize_pss_kib": {
+        "median": 139661,
+        "min": 139288,
+        "max": 139931,
+        "samples": [
+          139661,
+          139931,
+          139288
+        ]
+      },
+      "selection-resize_render_calls": {
+        "median": 130,
+        "min": 121,
+        "max": 137,
+        "samples": [
+          137,
+          130,
+          121
+        ]
+      },
+      "selection-resize_seconds": {
+        "median": 5.221124077,
+        "min": 5.09147891,
+        "max": 5.241000112,
+        "samples": [
+          5.241000112,
+          5.09147891,
+          5.221124077
+        ]
+      },
+      "selection-resize_sender_lateness_max_ms": {
+        "median": 6.896619335748255,
+        "min": 6.240891001652926,
+        "max": 43.6334703117609,
+        "samples": [
+          6.240891001652926,
+          43.6334703117609,
+          6.896619335748255
+        ]
+      },
+      "selection-resize_sender_lateness_p95_ms": {
+        "median": 1.481023384258151,
+        "min": 1.254288014024496,
+        "max": 1.9223599811084569,
+        "samples": [
+          1.481023384258151,
+          1.9223599811084569,
+          1.254288014024496
+        ]
+      },
+      "selection-settled-idle_cpu_percent": {
+        "median": 11.255306976844068,
+        "min": 11.076266793110975,
+        "max": 11.302301225037303,
+        "samples": [
+          11.255306976844068,
+          11.302301225037303,
+          11.076266793110975
+        ]
+      },
+      "selection-settled-idle_frame_callbacks": {
+        "median": 353,
+        "min": 353,
+        "max": 363,
+        "samples": [
+          353,
+          363,
+          353
+        ]
+      },
+      "selection-settled-idle_pss_kib": {
+        "median": 140046,
+        "min": 140015,
+        "max": 140420,
+        "samples": [
+          140015,
+          140420,
+          140046
+        ]
+      },
+      "selection-settled-idle_render_calls": {
+        "median": 345,
+        "min": 342,
+        "max": 353,
+        "samples": [
+          353,
+          342,
+          345
+        ]
+      },
+      "selection-settled-idle_seconds": {
+        "median": 10.201993335,
+        "min": 10.0397084,
+        "max": 10.35187416,
+        "samples": [
+          10.0397084,
+          10.35187416,
+          10.201993335
+        ]
+      },
+      "toolbar-motion_cpu_percent": {
+        "median": 12.175824504403655,
+        "min": 11.903044339549057,
+        "max": 12.290978268095923,
+        "samples": [
+          11.903044339549057,
+          12.175824504403655,
+          12.290978268095923
+        ]
+      },
+      "toolbar-motion_final_barrier_ms": {
+        "median": 46.643964,
+        "min": 36.290479,
+        "max": 52.418324,
+        "samples": [
+          52.418324,
+          46.643964,
+          36.290479
+        ]
+      },
+      "toolbar-motion_frame_callbacks": {
+        "median": 193,
+        "min": 186,
+        "max": 194,
+        "samples": [
+          193,
+          194,
+          186
+        ]
+      },
+      "toolbar-motion_pss_kib": {
+        "median": 141964,
+        "min": 141420,
+        "max": 142039,
+        "samples": [
+          141964,
+          142039,
+          141420
+        ]
+      },
+      "toolbar-motion_render_calls": {
+        "median": 173,
+        "min": 173,
+        "max": 174,
+        "samples": [
+          173,
+          173,
+          174
+        ]
+      },
+      "toolbar-motion_seconds": {
+        "median": 5.174187586,
+        "min": 5.044350307,
+        "max": 5.292763616,
+        "samples": [
+          5.292763616,
+          5.174187586,
+          5.044350307
+        ]
+      },
+      "toolbar-motion_sender_lateness_max_ms": {
+        "median": 39.84322602627799,
+        "min": 33.22339931037277,
+        "max": 54.0392060065642,
+        "samples": [
+          39.84322602627799,
+          54.0392060065642,
+          33.22339931037277
+        ]
+      },
+      "toolbar-motion_sender_lateness_p95_ms": {
+        "median": 0.303292297758162,
+        "min": 0.14873401960358024,
+        "max": 0.4373550182208419,
+        "samples": [
+          0.303292297758162,
+          0.4373550182208419,
+          0.14873401960358024
+        ]
+      },
+      "warm-open_cpu_percent": {
+        "median": 29.618930075361966,
+        "min": 27.69096503128611,
+        "max": 32.06520413787147,
+        "samples": [
+          27.69096503128611,
+          32.06520413787147,
+          29.618930075361966
+        ]
+      },
+      "warm-open_frame_callbacks": {
+        "median": 43,
+        "min": 40,
+        "max": 45,
+        "samples": [
+          43,
+          45,
+          40
+        ]
+      },
+      "warm-open_pss_kib": {
+        "median": 137312,
+        "min": 136988,
+        "max": 137348,
+        "samples": [
+          137312,
+          137348,
+          136988
+        ]
+      },
+      "warm-open_render_calls": {
+        "median": 42,
+        "min": 42,
+        "max": 45,
+        "samples": [
+          42,
+          42,
+          45
+        ]
+      },
+      "warm-open_seconds": {
+        "median": 1.485536442,
+        "min": 1.372203957,
+        "max": 1.697304516,
+        "samples": [
+          1.697304516,
+          1.372203957,
+          1.485536442
+        ]
+      },
+      "warm_open_process_median_ms": {
+        "median": 54.387074,
+        "min": 53.552164000000005,
+        "max": 64.8312035,
+        "samples": [
+          64.8312035,
+          53.552164000000005,
+          54.387074
+        ]
+      }
+    },
+    "capture-r6": {
+      "active_window_bracket_seconds": {
+        "median": 59.006431875,
+        "min": 57.005915756,
+        "max": 61.523793221,
+        "samples": [
+          59.006431875,
+          57.005915756,
+          61.523793221
+        ]
+      },
+      "active_window_cpu_nr_periods": {
+        "median": 590,
+        "min": 570,
+        "max": 615,
+        "samples": [
+          590,
+          570,
+          615
+        ]
+      },
+      "active_window_cpu_nr_throttled": {
+        "median": 0,
+        "min": 0,
+        "max": 0,
+        "samples": [
+          0,
+          0,
+          0
+        ]
+      },
+      "active_window_cpu_psi_full_percent": {
+        "median": 0.15205011769019058,
+        "min": 0.1403372435320637,
+        "max": 0.15316305131158292,
+        "samples": [
+          0.1403372435320637,
+          0.15316305131158292,
+          0.15205011769019058
+        ]
+      },
+      "active_window_cpu_psi_full_seconds": {
+        "median": 0.087312,
+        "min": 0.082808,
+        "max": 0.093547,
+        "samples": [
+          0.082808,
+          0.087312,
+          0.093547
+        ]
+      },
+      "active_window_cpu_psi_some_percent": {
+        "median": 3.338080167552921,
+        "min": 2.693125756581522,
+        "max": 3.3944152183503093,
+        "samples": [
+          3.338080167552921,
+          2.693125756581522,
+          3.3944152183503093
+        ]
+      },
+      "active_window_cpu_psi_some_seconds": {
+        "median": 1.969682,
+        "min": 1.535241,
+        "max": 2.088373,
+        "samples": [
+          1.969682,
+          1.535241,
+          2.088373
+        ]
+      },
+      "active_window_cpu_throttled_usec": {
+        "median": 0,
+        "min": 0,
+        "max": 0,
+        "samples": [
+          0,
+          0,
+          0
+        ]
+      },
+      "active_window_cpu_usage_usec": {
+        "median": 43982242,
+        "min": 41166816,
+        "max": 45051249,
+        "samples": [
+          43982242,
+          41166816,
+          45051249
+        ]
+      },
+      "active_window_extra_after_ms": {
+        "median": 217.769187,
+        "min": 202.360171,
+        "max": 220.36983,
+        "samples": [
+          217.769187,
+          202.360171,
+          220.36983
+        ]
+      },
+      "active_window_extra_before_ms": {
+        "median": 137.95034,
+        "min": 51.90943,
+        "max": 167.425339,
+        "samples": [
+          51.90943,
+          167.425339,
+          137.95034
+        ]
+      },
+      "active_window_memory_events_high": {
+        "median": 15150,
+        "min": 13612,
+        "max": 17097,
+        "samples": [
+          15150,
+          13612,
+          17097
+        ]
+      },
+      "active_window_memory_events_max": {
+        "median": 0,
+        "min": 0,
+        "max": 0,
+        "samples": [
+          0,
+          0,
+          0
+        ]
+      },
+      "active_window_memory_events_oom": {
+        "median": 0,
+        "min": 0,
+        "max": 0,
+        "samples": [
+          0,
+          0,
+          0
+        ]
+      },
+      "active_window_memory_events_oom_group_kill": {
+        "median": 0,
+        "min": 0,
+        "max": 0,
+        "samples": [
+          0,
+          0,
+          0
+        ]
+      },
+      "active_window_memory_events_oom_kill": {
+        "median": 0,
+        "min": 0,
+        "max": 0,
+        "samples": [
+          0,
+          0,
+          0
+        ]
+      },
+      "active_window_memory_psi_full_percent": {
+        "median": 22.34797899309515,
+        "min": 21.795369542313296,
+        "max": 26.592945823788188,
+        "samples": [
+          22.34797899309515,
+          21.795369542313296,
+          26.592945823788188
+        ]
+      },
+      "active_window_memory_psi_full_seconds": {
+        "median": 13.186745,
+        "min": 12.42465,
+        "max": 16.360989,
+        "samples": [
+          13.186745,
+          12.42465,
+          16.360989
+        ]
+      },
+      "active_window_memory_psi_some_percent": {
+        "median": 28.883761411136845,
+        "min": 28.566740458486535,
+        "max": 36.30492339730439,
+        "samples": [
+          28.883761411136845,
+          28.566740458486535,
+          36.30492339730439
+        ]
+      },
+      "active_window_memory_psi_some_seconds": {
+        "median": 17.043277,
+        "min": 16.284732,
+        "max": 22.336166,
+        "samples": [
+          17.043277,
+          16.284732,
+          22.336166
+        ]
+      },
+      "active_window_sampled_memory_current_max_bytes": {
+        "median": 830836736,
+        "min": 830373888,
+        "max": 833626112,
+        "samples": [
+          830836736,
+          830373888,
+          833626112
+        ]
+      },
+      "closed-idle_cpu_percent": {
+        "median": 9.554016922979548,
+        "min": 9.277291386689342,
+        "max": 9.567671172261157,
+        "samples": [
+          9.567671172261157,
+          9.554016922979548,
+          9.277291386689342
+        ]
+      },
+      "closed-idle_frame_callbacks": {
+        "median": 365,
+        "min": 356,
+        "max": 371,
+        "samples": [
+          365,
+          371,
+          356
+        ]
+      },
+      "closed-idle_pss_kib": {
+        "median": 139648,
+        "min": 139400,
+        "max": 140169,
+        "samples": [
+          140169,
+          139400,
+          139648
+        ]
+      },
+      "closed-idle_render_calls": {
+        "median": 355,
+        "min": 345,
+        "max": 358,
+        "samples": [
+          355,
+          358,
+          345
+        ]
+      },
+      "closed-idle_seconds": {
+        "median": 10.138308294,
+        "min": 10.132267715,
+        "max": 10.152797591,
+        "samples": [
+          10.138308294,
+          10.152797591,
+          10.132267715
+        ]
+      },
+      "first-open_cpu_percent": {
+        "median": 29.446397290845788,
+        "min": 15.435745743233506,
+        "max": 29.501086502219586,
+        "samples": [
+          29.501086502219586,
+          29.446397290845788,
+          15.435745743233506
+        ]
+      },
+      "first-open_frame_callbacks": {
+        "median": 13,
+        "min": 12,
+        "max": 38,
+        "samples": [
+          13,
+          12,
+          38
+        ]
+      },
+      "first-open_pss_kib": {
+        "median": 137189,
+        "min": 137057,
+        "max": 137875,
+        "samples": [
+          137875,
+          137057,
+          137189
+        ]
+      },
+      "first-open_render_calls": {
+        "median": 4,
+        "min": 4,
+        "max": 4,
+        "samples": [
+          4,
+          4,
+          4
+        ]
+      },
+      "first-open_seconds": {
+        "median": 0.37356013,
+        "min": 0.372867623,
+        "max": 1.036555037,
+        "samples": [
+          0.372867623,
+          0.37356013,
+          1.036555037
+        ]
+      },
+      "first_open_ms": {
+        "median": 81.894938,
+        "min": 60.115116,
+        "max": 99.917643,
+        "samples": [
+          81.894938,
+          99.917643,
+          60.115116
+        ]
+      },
+      "input_after_ms": {
+        "median": 28.139288,
+        "min": 9.946205,
+        "max": 54.428132,
+        "samples": [
+          54.428132,
+          28.139288,
+          9.946205
+        ]
+      },
+      "input_before_ms": {
+        "median": 29.38634,
+        "min": 27.910547,
+        "max": 35.767324,
+        "samples": [
+          27.910547,
+          35.767324,
+          29.38634
+        ]
+      },
+      "overlay-idle_cpu_percent": {
+        "median": 11.579682963701057,
+        "min": 11.331759960268723,
+        "max": 11.974048547997864,
+        "samples": [
+          11.974048547997864,
+          11.579682963701057,
+          11.331759960268723
+        ]
+      },
+      "overlay-idle_frame_callbacks": {
+        "median": 363,
+        "min": 356,
+        "max": 383,
+        "samples": [
+          383,
+          356,
+          363
+        ]
+      },
+      "overlay-idle_pss_kib": {
+        "median": 141915,
+        "min": 141750,
+        "max": 142740,
+        "samples": [
+          142740,
+          141750,
+          141915
+        ]
+      },
+      "overlay-idle_render_calls": {
+        "median": 337,
+        "min": 334,
+        "max": 355,
+        "samples": [
+          355,
+          337,
+          334
+        ]
+      },
+      "overlay-idle_seconds": {
+        "median": 10.190261717,
+        "min": 10.105187023,
+        "max": 10.413210341,
+        "samples": [
+          10.105187023,
+          10.190261717,
+          10.413210341
+        ]
+      },
+      "selection-draw_cpu_percent": {
+        "median": 14.286198769877512,
+        "min": 13.996411253432,
+        "max": 14.647749843854838,
+        "samples": [
+          13.996411253432,
+          14.286198769877512,
+          14.647749843854838
+        ]
+      },
+      "selection-draw_final_barrier_ms": {
+        "median": 42.445214,
+        "min": 32.021538,
+        "max": 163.676939,
+        "samples": [
+          163.676939,
+          32.021538,
+          42.445214
+        ]
+      },
+      "selection-draw_frame_callbacks": {
+        "median": 140,
+        "min": 131,
+        "max": 145,
+        "samples": [
+          131,
+          140,
+          145
+        ]
+      },
+      "selection-draw_pss_kib": {
+        "median": 138732,
+        "min": 138713,
+        "max": 139494,
+        "samples": [
+          139494,
+          138713,
+          138732
+        ]
+      },
+      "selection-draw_render_calls": {
+        "median": 182,
+        "min": 177,
+        "max": 184,
+        "samples": [
+          182,
+          177,
+          184
+        ]
+      },
+      "selection-draw_seconds": {
+        "median": 5.179824332,
+        "min": 5.051970493,
+        "max": 5.215622682,
+        "samples": [
+          5.215622682,
+          5.179824332,
+          5.051970493
+        ]
+      },
+      "selection-draw_sender_lateness_max_ms": {
+        "median": 35.2434579981491,
+        "min": 26.5355950105004,
+        "max": 41.57129232771695,
+        "samples": [
+          35.2434579981491,
+          26.5355950105004,
+          41.57129232771695
+        ]
+      },
+      "selection-draw_sender_lateness_p95_ms": {
+        "median": 0.3622903604991734,
+        "min": 0.25039660977199674,
+        "max": 0.4999936791136861,
+        "samples": [
+          0.4999936791136861,
+          0.3622903604991734,
+          0.25039660977199674
+        ]
+      },
+      "selection-resize_cpu_percent": {
+        "median": 13.389521728782569,
+        "min": 13.066900237394782,
+        "max": 13.40021988256174,
+        "samples": [
+          13.066900237394782,
+          13.389521728782569,
+          13.40021988256174
+        ]
+      },
+      "selection-resize_final_barrier_ms": {
+        "median": 39.737423,
+        "min": 31.511958,
+        "max": 45.48691,
+        "samples": [
+          31.511958,
+          39.737423,
+          45.48691
+        ]
+      },
+      "selection-resize_frame_callbacks": {
+        "median": 140,
+        "min": 136,
+        "max": 157,
+        "samples": [
+          157,
+          136,
+          140
+        ]
+      },
+      "selection-resize_pss_kib": {
+        "median": 138680,
+        "min": 138438,
+        "max": 139425,
+        "samples": [
+          139425,
+          138438,
+          138680
+        ]
+      },
+      "selection-resize_render_calls": {
+        "median": 177,
+        "min": 177,
+        "max": 183,
+        "samples": [
+          177,
+          183,
+          177
+        ]
+      },
+      "selection-resize_seconds": {
+        "median": 5.223794879,
+        "min": 5.078598129,
+        "max": 5.280517854,
+        "samples": [
+          5.280517854,
+          5.078598129,
+          5.223794879
+        ]
+      },
+      "selection-resize_sender_lateness_max_ms": {
+        "median": 20.49610565882176,
+        "min": 3.126840980257839,
+        "max": 84.62475030682981,
+        "samples": [
+          20.49610565882176,
+          3.126840980257839,
+          84.62475030682981
+        ]
+      },
+      "selection-resize_sender_lateness_p95_ms": {
+        "median": 0.403293059207499,
+        "min": 0.1541940146125853,
+        "max": 0.8262916235253215,
+        "samples": [
+          0.403293059207499,
+          0.1541940146125853,
+          0.8262916235253215
+        ]
+      },
+      "selection-settled-idle_cpu_percent": {
+        "median": 11.428991391645653,
+        "min": 11.072656036907789,
+        "max": 11.518332935867495,
+        "samples": [
+          11.518332935867495,
+          11.428991391645653,
+          11.072656036907789
+        ]
+      },
+      "selection-settled-idle_frame_callbacks": {
+        "median": 357,
+        "min": 356,
+        "max": 368,
+        "samples": [
+          368,
+          357,
+          356
+        ]
+      },
+      "selection-settled-idle_pss_kib": {
+        "median": 139737,
+        "min": 139522,
+        "max": 140487,
+        "samples": [
+          140487,
+          139522,
+          139737
+        ]
+      },
+      "selection-settled-idle_render_calls": {
+        "median": 353,
+        "min": 343,
+        "max": 353,
+        "samples": [
+          353,
+          353,
+          343
+        ]
+      },
+      "selection-settled-idle_seconds": {
+        "median": 10.157719928,
+        "min": 10.149627034,
+        "max": 10.205320171,
+        "samples": [
+          10.157719928,
+          10.149627034,
+          10.205320171
+        ]
+      },
+      "toolbar-motion_cpu_percent": {
+        "median": 9.692316859322279,
+        "min": 8.445035394241192,
+        "max": 10.581229994948993,
+        "samples": [
+          10.581229994948993,
+          9.692316859322279,
+          8.445035394241192
+        ]
+      },
+      "toolbar-motion_final_barrier_ms": {
+        "median": 48.308735,
+        "min": 39.692081,
+        "max": 251.736117,
+        "samples": [
+          48.308735,
+          39.692081,
+          251.736117
+        ]
+      },
+      "toolbar-motion_frame_callbacks": {
+        "median": 105,
+        "min": 95,
+        "max": 120,
+        "samples": [
+          105,
+          95,
+          120
+        ]
+      },
+      "toolbar-motion_pss_kib": {
+        "median": 142140,
+        "min": 142038,
+        "max": 143020,
+        "samples": [
+          143020,
+          142038,
+          142140
+        ]
+      },
+      "toolbar-motion_render_calls": {
+        "median": 130,
+        "min": 109,
+        "max": 151,
+        "samples": [
+          151,
+          130,
+          109
+        ]
+      },
+      "toolbar-motion_seconds": {
+        "median": 5.103376453,
+        "min": 5.055550774,
+        "max": 5.683812768,
+        "samples": [
+          5.103376453,
+          5.055550774,
+          5.683812768
+        ]
+      },
+      "toolbar-motion_sender_lateness_max_ms": {
+        "median": 56.4052943373099,
+        "min": 51.420935371425,
+        "max": 60.85065036313608,
+        "samples": [
+          51.420935371425,
+          56.4052943373099,
+          60.85065036313608
+        ]
+      },
+      "toolbar-motion_sender_lateness_p95_ms": {
+        "median": 0.40686968713998795,
+        "min": 0.22946635726839304,
+        "max": 0.7606969447806478,
+        "samples": [
+          0.40686968713998795,
+          0.22946635726839304,
+          0.7606969447806478
+        ]
+      },
+      "warm-open_cpu_percent": {
+        "median": 30.137862688142274,
+        "min": 28.498485187718536,
+        "max": 30.69000102191566,
+        "samples": [
+          30.137862688142274,
+          30.69000102191566,
+          28.498485187718536
+        ]
+      },
+      "warm-open_frame_callbacks": {
+        "median": 56,
+        "min": 46,
+        "max": 61,
+        "samples": [
+          61,
+          46,
+          56
+        ]
+      },
+      "warm-open_pss_kib": {
+        "median": 137429,
+        "min": 137370,
+        "max": 138155,
+        "samples": [
+          138155,
+          137370,
+          137429
+        ]
+      },
+      "warm-open_render_calls": {
+        "median": 43,
+        "min": 39,
+        "max": 48,
+        "samples": [
+          43,
+          48,
+          39
+        ]
+      },
+      "warm-open_seconds": {
+        "median": 1.466275611,
+        "min": 1.426776691,
+        "max": 1.579031296,
+        "samples": [
+          1.426776691,
+          1.466275611,
+          1.579031296
+        ]
+      },
+      "warm_open_process_median_ms": {
+        "median": 53.208428,
+        "min": 42.3064975,
+        "max": 54.074862499999995,
+        "samples": [
+          42.3064975,
+          54.074862499999995,
+          53.208428
+        ]
+      }
+    }
+  },
+  "paired_after_minus_before": {
+    "active_window_bracket_seconds": {
+      "median": -0.27676547600000134,
+      "min": -3.5691438129999966,
+      "max": 0.24356190999999683,
+      "samples": [
+        -0.27676547600000134,
+        -3.5691438129999966,
+        0.24356190999999683
+      ],
+      "lower_pairs": 2,
+      "equal_pairs": 0,
+      "higher_pairs": 1
+    },
+    "active_window_cpu_nr_periods": {
+      "median": -3,
+      "min": -36,
+      "max": 2,
+      "samples": [
+        -3,
+        -36,
+        2
+      ],
+      "lower_pairs": 2,
+      "equal_pairs": 0,
+      "higher_pairs": 1
+    },
+    "active_window_cpu_nr_throttled": {
+      "median": 0,
+      "min": 0,
+      "max": 0,
+      "samples": [
+        0,
+        0,
+        0
+      ],
+      "lower_pairs": 0,
+      "equal_pairs": 3,
+      "higher_pairs": 0
+    },
+    "active_window_cpu_psi_full_percent": {
+      "median": -0.017775286573256555,
+      "min": -0.03898338145141114,
+      "max": 5.982978264304495e-05,
+      "samples": [
+        -0.03898338145141114,
+        -0.017775286573256555,
+        5.982978264304495e-05
+      ],
+      "lower_pairs": 2,
+      "equal_pairs": 0,
+      "higher_pairs": 1
+    },
+    "active_window_cpu_psi_full_seconds": {
+      "median": -0.016234,
+      "min": -0.023498999999999992,
+      "max": 0.0004070000000000046,
+      "samples": [
+        -0.023498999999999992,
+        -0.016234,
+        0.0004070000000000046
+      ],
+      "lower_pairs": 2,
+      "equal_pairs": 0,
+      "higher_pairs": 1
+    },
+    "active_window_cpu_psi_some_percent": {
+      "median": -0.9876413093382763,
+      "min": -1.2799103693815157,
+      "max": -0.8157451299460301,
+      "samples": [
+        -0.9876413093382763,
+        -1.2799103693815157,
+        -0.8157451299460301
+      ],
+      "lower_pairs": 3,
+      "equal_pairs": 0,
+      "higher_pairs": 0
+    },
+    "active_window_cpu_psi_some_seconds": {
+      "median": -0.5947440000000002,
+      "min": -0.8714279999999999,
+      "max": -0.49162300000000014,
+      "samples": [
+        -0.5947440000000002,
+        -0.8714279999999999,
+        -0.49162300000000014
+      ],
+      "lower_pairs": 3,
+      "equal_pairs": 0,
+      "higher_pairs": 0
+    },
+    "active_window_cpu_throttled_usec": {
+      "median": 0,
+      "min": 0,
+      "max": 0,
+      "samples": [
+        0,
+        0,
+        0
+      ],
+      "lower_pairs": 0,
+      "equal_pairs": 3,
+      "higher_pairs": 0
+    },
+    "active_window_cpu_usage_usec": {
+      "median": -1568569,
+      "min": -3050670,
+      "max": -296261,
+      "samples": [
+        -1568569,
+        -3050670,
+        -296261
+      ],
+      "lower_pairs": 3,
+      "equal_pairs": 0,
+      "higher_pairs": 0
+    },
+    "active_window_extra_after_ms": {
+      "median": 44.67177000000001,
+      "min": 9.864886000000013,
+      "max": 98.004899,
+      "samples": [
+        98.004899,
+        9.864886000000013,
+        44.67177000000001
+      ],
+      "lower_pairs": 0,
+      "equal_pairs": 0,
+      "higher_pairs": 3
+    },
+    "active_window_extra_before_ms": {
+      "median": -35.29903199999998,
+      "min": -140.46737000000002,
+      "max": 42.90624300000002,
+      "samples": [
+        -140.46737000000002,
+        -35.29903199999998,
+        42.90624300000002
+      ],
+      "lower_pairs": 2,
+      "equal_pairs": 0,
+      "higher_pairs": 1
+    },
+    "active_window_memory_events_high": {
+      "median": -863,
+      "min": -5344,
+      "max": 312,
+      "samples": [
+        -863,
+        -5344,
+        312
+      ],
+      "lower_pairs": 2,
+      "equal_pairs": 0,
+      "higher_pairs": 1
+    },
+    "active_window_memory_events_max": {
+      "median": 0,
+      "min": 0,
+      "max": 0,
+      "samples": [
+        0,
+        0,
+        0
+      ],
+      "lower_pairs": 0,
+      "equal_pairs": 3,
+      "higher_pairs": 0
+    },
+    "active_window_memory_events_oom": {
+      "median": 0,
+      "min": 0,
+      "max": 0,
+      "samples": [
+        0,
+        0,
+        0
+      ],
+      "lower_pairs": 0,
+      "equal_pairs": 3,
+      "higher_pairs": 0
+    },
+    "active_window_memory_events_oom_group_kill": {
+      "median": 0,
+      "min": 0,
+      "max": 0,
+      "samples": [
+        0,
+        0,
+        0
+      ],
+      "lower_pairs": 0,
+      "equal_pairs": 3,
+      "higher_pairs": 0
+    },
+    "active_window_memory_events_oom_kill": {
+      "median": 0,
+      "min": 0,
+      "max": 0,
+      "samples": [
+        0,
+        0,
+        0
+      ],
+      "lower_pairs": 0,
+      "equal_pairs": 3,
+      "higher_pairs": 0
+    },
+    "active_window_memory_psi_full_percent": {
+      "median": -1.0997335883957575,
+      "min": -6.221907074093632,
+      "max": 0.13657578210102272,
+      "samples": [
+        0.13657578210102272,
+        -6.221907074093632,
+        -1.0997335883957575
+      ],
+      "lower_pairs": 2,
+      "equal_pairs": 0,
+      "higher_pairs": 1
+    },
+    "active_window_memory_psi_full_seconds": {
+      "median": -0.6091489999999986,
+      "min": -4.546832000000002,
+      "max": 0.019114999999999327,
+      "samples": [
+        0.019114999999999327,
+        -4.546832000000002,
+        -0.6091489999999986
+      ],
+      "lower_pairs": 2,
+      "equal_pairs": 0,
+      "higher_pairs": 1
+    },
+    "active_window_memory_psi_some_percent": {
+      "median": 0.37329342823056066,
+      "min": -6.0263943218940526,
+      "max": 0.4073043293240488,
+      "samples": [
+        0.37329342823056066,
+        -6.0263943218940526,
+        0.4073043293240488
+      ],
+      "lower_pairs": 1,
+      "equal_pairs": 0,
+      "higher_pairs": 2
+    },
+    "active_window_memory_psi_some_seconds": {
+      "median": 0.14135999999999882,
+      "min": -4.670079999999999,
+      "max": 0.3380219999999987,
+      "samples": [
+        0.14135999999999882,
+        -4.670079999999999,
+        0.3380219999999987
+      ],
+      "lower_pairs": 1,
+      "equal_pairs": 0,
+      "higher_pairs": 2
+    },
+    "active_window_sampled_memory_current_max_bytes": {
+      "median": 987136,
+      "min": -1916928,
+      "max": 1679360,
+      "samples": [
+        1679360,
+        -1916928,
+        987136
+      ],
+      "lower_pairs": 1,
+      "equal_pairs": 0,
+      "higher_pairs": 2
+    },
+    "closed-idle_cpu_percent": {
+      "median": 0.24255537224894042,
+      "min": -0.15809376432606115,
+      "max": 0.29406854335012866,
+      "samples": [
+        0.29406854335012866,
+        0.24255537224894042,
+        -0.15809376432606115
+      ],
+      "lower_pairs": 1,
+      "equal_pairs": 0,
+      "higher_pairs": 2
+    },
+    "closed-idle_frame_callbacks": {
+      "median": 11,
+      "min": 4,
+      "max": 11,
+      "samples": [
+        11,
+        11,
+        4
+      ],
+      "lower_pairs": 0,
+      "equal_pairs": 0,
+      "higher_pairs": 3
+    },
+    "closed-idle_pss_kib": {
+      "median": 918,
+      "min": -140,
+      "max": 946,
+      "samples": [
+        946,
+        -140,
+        918
+      ],
+      "lower_pairs": 1,
+      "equal_pairs": 0,
+      "higher_pairs": 2
+    },
+    "closed-idle_render_calls": {
+      "median": 2,
+      "min": 0,
+      "max": 8,
+      "samples": [
+        2,
+        8,
+        0
+      ],
+      "lower_pairs": 0,
+      "equal_pairs": 1,
+      "higher_pairs": 2
+    },
+    "closed-idle_seconds": {
+      "median": -0.04219771100000003,
+      "min": -0.04968238299999861,
+      "max": 0.10984322799999902,
+      "samples": [
+        0.10984322799999902,
+        -0.04968238299999861,
+        -0.04219771100000003
+      ],
+      "lower_pairs": 2,
+      "equal_pairs": 0,
+      "higher_pairs": 1
+    },
+    "first-open_cpu_percent": {
+      "median": -4.008061761467964,
+      "min": -19.768541649360515,
+      "max": 0.08616109479204681,
+      "samples": [
+        -4.008061761467964,
+        0.08616109479204681,
+        -19.768541649360515
+      ],
+      "lower_pairs": 2,
+      "equal_pairs": 0,
+      "higher_pairs": 1
+    },
+    "first-open_frame_callbacks": {
+      "median": 4,
+      "min": 0,
+      "max": 7,
+      "samples": [
+        4,
+        0,
+        7
+      ],
+      "lower_pairs": 0,
+      "equal_pairs": 1,
+      "higher_pairs": 2
+    },
+    "first-open_pss_kib": {
+      "median": 237,
+      "min": -347,
+      "max": 675,
+      "samples": [
+        675,
+        -347,
+        237
+      ],
+      "lower_pairs": 1,
+      "equal_pairs": 0,
+      "higher_pairs": 2
+    },
+    "first-open_render_calls": {
+      "median": 0,
+      "min": 0,
+      "max": 1,
+      "samples": [
+        0,
+        1,
+        0
+      ],
+      "lower_pairs": 0,
+      "equal_pairs": 2,
+      "higher_pairs": 1
+    },
+    "first-open_seconds": {
+      "median": 0.10428425199999997,
+      "min": 0.032963414999999996,
+      "max": 0.6672818330000001,
+      "samples": [
+        0.10428425199999997,
+        0.032963414999999996,
+        0.6672818330000001
+      ],
+      "lower_pairs": 0,
+      "equal_pairs": 0,
+      "higher_pairs": 3
+    },
+    "first_open_ms": {
+      "median": -9.403655,
+      "min": -32.197537,
+      "max": 40.955580999999995,
+      "samples": [
+        -9.403655,
+        40.955580999999995,
+        -32.197537
+      ],
+      "lower_pairs": 2,
+      "equal_pairs": 0,
+      "higher_pairs": 1
+    },
+    "input_after_ms": {
+      "median": -44.963292,
+      "min": -183.255934,
+      "max": -41.210415000000005,
+      "samples": [
+        -183.255934,
+        -41.210415000000005,
+        -44.963292
+      ],
+      "lower_pairs": 3,
+      "equal_pairs": 0,
+      "higher_pairs": 0
+    },
+    "input_before_ms": {
+      "median": -24.492093,
+      "min": -26.383350999999998,
+      "max": 9.097189000000004,
+      "samples": [
+        -26.383350999999998,
+        9.097189000000004,
+        -24.492093
+      ],
+      "lower_pairs": 2,
+      "equal_pairs": 0,
+      "higher_pairs": 1
+    },
+    "overlay-idle_cpu_percent": {
+      "median": 0.11579419578123584,
+      "min": -0.03995088687555004,
+      "max": 0.27183702298910717,
+      "samples": [
+        0.27183702298910717,
+        0.11579419578123584,
+        -0.03995088687555004
+      ],
+      "lower_pairs": 1,
+      "equal_pairs": 0,
+      "higher_pairs": 2
+    },
+    "overlay-idle_frame_callbacks": {
+      "median": 12,
+      "min": -5,
+      "max": 15,
+      "samples": [
+        15,
+        -5,
+        12
+      ],
+      "lower_pairs": 1,
+      "equal_pairs": 0,
+      "higher_pairs": 2
+    },
+    "overlay-idle_pss_kib": {
+      "median": 498,
+      "min": -283,
+      "max": 812,
+      "samples": [
+        812,
+        -283,
+        498
+      ],
+      "lower_pairs": 1,
+      "equal_pairs": 0,
+      "higher_pairs": 2
+    },
+    "overlay-idle_render_calls": {
+      "median": 4,
+      "min": 1,
+      "max": 6,
+      "samples": [
+        6,
+        1,
+        4
+      ],
+      "lower_pairs": 0,
+      "equal_pairs": 0,
+      "higher_pairs": 3
+    },
+    "overlay-idle_seconds": {
+      "median": -0.015699137000000363,
+      "min": -0.14928494100000123,
+      "max": 0.12452101599999921,
+      "samples": [
+        -0.14928494100000123,
+        -0.015699137000000363,
+        0.12452101599999921
+      ],
+      "lower_pairs": 2,
+      "equal_pairs": 0,
+      "higher_pairs": 1
+    },
+    "selection-draw_cpu_percent": {
+      "median": -31.043347038648314,
+      "min": -31.44372054831585,
+      "max": -28.82535996732009,
+      "samples": [
+        -31.043347038648314,
+        -31.44372054831585,
+        -28.82535996732009
+      ],
+      "lower_pairs": 3,
+      "equal_pairs": 0,
+      "higher_pairs": 0
+    },
+    "selection-draw_final_barrier_ms": {
+      "median": -58.539455,
+      "min": -149.718532,
+      "max": -54.70937599999999,
+      "samples": [
+        -54.70937599999999,
+        -58.539455,
+        -149.718532
+      ],
+      "lower_pairs": 3,
+      "equal_pairs": 0,
+      "higher_pairs": 0
+    },
+    "selection-draw_frame_callbacks": {
+      "median": 49,
+      "min": 42,
+      "max": 55,
+      "samples": [
+        42,
+        55,
+        49
+      ],
+      "lower_pairs": 0,
+      "equal_pairs": 0,
+      "higher_pairs": 3
+    },
+    "selection-draw_pss_kib": {
+      "median": 735,
+      "min": 180,
+      "max": 937,
+      "samples": [
+        937,
+        180,
+        735
+      ],
+      "lower_pairs": 0,
+      "equal_pairs": 0,
+      "higher_pairs": 3
+    },
+    "selection-draw_render_calls": {
+      "median": 49,
+      "min": 41,
+      "max": 53,
+      "samples": [
+        49,
+        41,
+        53
+      ],
+      "lower_pairs": 0,
+      "equal_pairs": 0,
+      "higher_pairs": 3
+    },
+    "selection-draw_seconds": {
+      "median": -0.13398342500000027,
+      "min": -0.2846617610000006,
+      "max": -0.11300271699999964,
+      "samples": [
+        -0.11300271699999964,
+        -0.13398342500000027,
+        -0.2846617610000006
+      ],
+      "lower_pairs": 3,
+      "equal_pairs": 0,
+      "higher_pairs": 0
+    },
+    "selection-draw_sender_lateness_max_ms": {
+      "median": 19.8810092988424,
+      "min": -23.230698658153415,
+      "max": 28.5379933193326,
+      "samples": [
+        28.5379933193326,
+        -23.230698658153415,
+        19.8810092988424
+      ],
+      "lower_pairs": 1,
+      "equal_pairs": 0,
+      "higher_pairs": 2
+    },
+    "selection-draw_sender_lateness_p95_ms": {
+      "median": -1.2942556058987975,
+      "min": -1.710741431452334,
+      "max": -1.2132576666772366,
+      "samples": [
+        -1.2132576666772366,
+        -1.2942556058987975,
+        -1.710741431452334
+      ],
+      "lower_pairs": 3,
+      "equal_pairs": 0,
+      "higher_pairs": 0
+    },
+    "selection-resize_cpu_percent": {
+      "median": -30.998367133159114,
+      "min": -33.679902808657125,
+      "max": -27.970181742544103,
+      "samples": [
+        -33.679902808657125,
+        -30.998367133159114,
+        -27.970181742544103
+      ],
+      "lower_pairs": 3,
+      "equal_pairs": 0,
+      "higher_pairs": 0
+    },
+    "selection-resize_final_barrier_ms": {
+      "median": -58.09756099999999,
+      "min": -175.84195200000002,
+      "max": -1.063685999999997,
+      "samples": [
+        -175.84195200000002,
+        -1.063685999999997,
+        -58.09756099999999
+      ],
+      "lower_pairs": 3,
+      "equal_pairs": 0,
+      "higher_pairs": 0
+    },
+    "selection-resize_frame_callbacks": {
+      "median": 53,
+      "min": 38,
+      "max": 76,
+      "samples": [
+        76,
+        53,
+        38
+      ],
+      "lower_pairs": 0,
+      "equal_pairs": 0,
+      "higher_pairs": 3
+    },
+    "selection-resize_pss_kib": {
+      "median": -608,
+      "min": -1493,
+      "max": -236,
+      "samples": [
+        -236,
+        -1493,
+        -608
+      ],
+      "lower_pairs": 3,
+      "equal_pairs": 0,
+      "higher_pairs": 0
+    },
+    "selection-resize_render_calls": {
+      "median": 53,
+      "min": 40,
+      "max": 56,
+      "samples": [
+        40,
+        53,
+        56
+      ],
+      "lower_pairs": 0,
+      "equal_pairs": 0,
+      "higher_pairs": 3
+    },
+    "selection-resize_seconds": {
+      "median": 0.0026708019999999166,
+      "min": -0.012880780999999786,
+      "max": 0.03951774200000013,
+      "samples": [
+        0.03951774200000013,
+        -0.012880780999999786,
+        0.0026708019999999166
+      ],
+      "lower_pairs": 1,
+      "equal_pairs": 0,
+      "higher_pairs": 2
+    },
+    "selection-resize_sender_lateness_max_ms": {
+      "median": 14.255214657168835,
+      "min": -40.50662933150306,
+      "max": 77.72813097108155,
+      "samples": [
+        14.255214657168835,
+        -40.50662933150306,
+        77.72813097108155
+      ],
+      "lower_pairs": 1,
+      "equal_pairs": 0,
+      "higher_pairs": 2
+    },
+    "selection-resize_sender_lateness_p95_ms": {
+      "median": -1.077730325050652,
+      "min": -1.7681659664958715,
+      "max": -0.4279963904991746,
+      "samples": [
+        -1.077730325050652,
+        -1.7681659664958715,
+        -0.4279963904991746
+      ],
+      "lower_pairs": 3,
+      "equal_pairs": 0,
+      "higher_pairs": 0
+    },
+    "selection-settled-idle_cpu_percent": {
+      "median": 0.1266901666083502,
+      "min": -0.0036107562031855167,
+      "max": 0.26302595902342674,
+      "samples": [
+        0.26302595902342674,
+        0.1266901666083502,
+        -0.0036107562031855167
+      ],
+      "lower_pairs": 1,
+      "equal_pairs": 0,
+      "higher_pairs": 2
+    },
+    "selection-settled-idle_frame_callbacks": {
+      "median": 3,
+      "min": -6,
+      "max": 15,
+      "samples": [
+        15,
+        -6,
+        3
+      ],
+      "lower_pairs": 1,
+      "equal_pairs": 0,
+      "higher_pairs": 2
+    },
+    "selection-settled-idle_pss_kib": {
+      "median": -309,
+      "min": -898,
+      "max": 472,
+      "samples": [
+        472,
+        -898,
+        -309
+      ],
+      "lower_pairs": 2,
+      "equal_pairs": 0,
+      "higher_pairs": 1
+    },
+    "selection-settled-idle_render_calls": {
+      "median": 0,
+      "min": -2,
+      "max": 11,
+      "samples": [
+        0,
+        11,
+        -2
+      ],
+      "lower_pairs": 1,
+      "equal_pairs": 1,
+      "higher_pairs": 1
+    },
+    "selection-settled-idle_seconds": {
+      "median": 0.0033268360000011654,
+      "min": -0.2022471259999996,
+      "max": 0.11801152800000025,
+      "samples": [
+        0.11801152800000025,
+        -0.2022471259999996,
+        0.0033268360000011654
+      ],
+      "lower_pairs": 1,
+      "equal_pairs": 0,
+      "higher_pairs": 2
+    },
+    "toolbar-motion_cpu_percent": {
+      "median": -2.4835076450813762,
+      "min": -3.8459428738547317,
+      "max": -1.3218143446000639,
+      "samples": [
+        -1.3218143446000639,
+        -2.4835076450813762,
+        -3.8459428738547317
+      ],
+      "lower_pairs": 3,
+      "equal_pairs": 0,
+      "higher_pairs": 0
+    },
+    "toolbar-motion_final_barrier_ms": {
+      "median": -4.109589,
+      "min": -6.951882999999995,
+      "max": 215.445638,
+      "samples": [
+        -4.109589,
+        -6.951882999999995,
+        215.445638
+      ],
+      "lower_pairs": 2,
+      "equal_pairs": 0,
+      "higher_pairs": 1
+    },
+    "toolbar-motion_frame_callbacks": {
+      "median": -88,
+      "min": -99,
+      "max": -66,
+      "samples": [
+        -88,
+        -99,
+        -66
+      ],
+      "lower_pairs": 3,
+      "equal_pairs": 0,
+      "higher_pairs": 0
+    },
+    "toolbar-motion_pss_kib": {
+      "median": 720,
+      "min": -1,
+      "max": 1056,
+      "samples": [
+        1056,
+        -1,
+        720
+      ],
+      "lower_pairs": 1,
+      "equal_pairs": 0,
+      "higher_pairs": 2
+    },
+    "toolbar-motion_render_calls": {
+      "median": -43,
+      "min": -65,
+      "max": -22,
+      "samples": [
+        -22,
+        -43,
+        -65
+      ],
+      "lower_pairs": 3,
+      "equal_pairs": 0,
+      "higher_pairs": 0
+    },
+    "toolbar-motion_seconds": {
+      "median": -0.11863681200000009,
+      "min": -0.18938716300000014,
+      "max": 0.6394624609999999,
+      "samples": [
+        -0.18938716300000014,
+        -0.11863681200000009,
+        0.6394624609999999
+      ],
+      "lower_pairs": 2,
+      "equal_pairs": 0,
+      "higher_pairs": 1
+    },
+    "toolbar-motion_sender_lateness_max_ms": {
+      "median": 11.577709345147014,
+      "min": 2.366088330745697,
+      "max": 27.627251052763313,
+      "samples": [
+        11.577709345147014,
+        2.366088330745697,
+        27.627251052763313
+      ],
+      "lower_pairs": 0,
+      "equal_pairs": 0,
+      "higher_pairs": 3
+    },
+    "toolbar-motion_sender_lateness_p95_ms": {
+      "median": 0.10357738938182592,
+      "min": -0.20788866095244884,
+      "max": 0.6119629251770675,
+      "samples": [
+        0.10357738938182592,
+        -0.20788866095244884,
+        0.6119629251770675
+      ],
+      "lower_pairs": 1,
+      "equal_pairs": 0,
+      "higher_pairs": 2
+    },
+    "warm-open_cpu_percent": {
+      "median": -1.1204448876434299,
+      "min": -1.3752031159558094,
+      "max": 2.4468976568561622,
+      "samples": [
+        2.4468976568561622,
+        -1.3752031159558094,
+        -1.1204448876434299
+      ],
+      "lower_pairs": 2,
+      "equal_pairs": 0,
+      "higher_pairs": 1
+    },
+    "warm-open_frame_callbacks": {
+      "median": 16,
+      "min": 1,
+      "max": 18,
+      "samples": [
+        18,
+        1,
+        16
+      ],
+      "lower_pairs": 0,
+      "equal_pairs": 0,
+      "higher_pairs": 3
+    },
+    "warm-open_pss_kib": {
+      "median": 441,
+      "min": 22,
+      "max": 843,
+      "samples": [
+        843,
+        22,
+        441
+      ],
+      "lower_pairs": 0,
+      "equal_pairs": 0,
+      "higher_pairs": 3
+    },
+    "warm-open_render_calls": {
+      "median": 1,
+      "min": -6,
+      "max": 6,
+      "samples": [
+        1,
+        6,
+        -6
+      ],
+      "lower_pairs": 1,
+      "equal_pairs": 0,
+      "higher_pairs": 2
+    },
+    "warm-open_seconds": {
+      "median": 0.09349485400000002,
+      "min": -0.27052782500000006,
+      "max": 0.09407165399999995,
+      "samples": [
+        -0.27052782500000006,
+        0.09407165399999995,
+        0.09349485400000002
+      ],
+      "lower_pairs": 1,
+      "equal_pairs": 0,
+      "higher_pairs": 2
+    },
+    "warm_open_process_median_ms": {
+      "median": -1.1786460000000005,
+      "min": -22.524706000000002,
+      "max": 0.52269849999999,
+      "samples": [
+        -22.524706000000002,
+        0.52269849999999,
+        -1.1786460000000005
+      ],
+      "lower_pairs": 2,
+      "equal_pairs": 0,
+      "higher_pairs": 1
+    }
+  },
+  "calibration_reference": {
+    "source": "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/mixed-calibration-summary.json",
+    "scenario": "1g-512",
+    "first_open_ms": 164.438942,
+    "selection_tail_barriers_ms": {
+      "selection-draw": 297.761467,
+      "selection-resize": 288.686732
+    },
+    "caveat": "One baseline calibration with shorter phases; retained as evidence, not pooled with matched runs."
+  },
+  "interpretation_limits": [
+    "All expected samples are retained; any missing sample or failed scope prevents complete=true.",
+    "Identical caps/payloads are held fixed. Actual PSI/high events may differ because allocation/rendering behavior differs; report that severity difference.",
+    "Active-window pressure spans first-open through closed-idle, including intervening settling/actions, but excludes initial client setup.",
+    "External samples enclose each window; excess boundary milliseconds are explicit. Short phase values are not exact kernel attribution.",
+    "Per-label memory maxima are sampled memory.current, not per-label kernel peaks; the kernel peak applies to the entire mixed scope.",
+    "Compare callback/render counts with phase durations and sender lateness. Nested barriers are not physical display/input latency.",
+    "A 500 ms open/input pass gate is not a hitch-free guarantee."
+  ]
+}

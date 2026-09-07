@@ -1,0 +1,453 @@
+{
+  "samples": [
+    {
+      "sample": "00-baseline",
+      "input_after_ms": 32.284219,
+      "post_closed_window_ms": 241.59862,
+      "post_closed_pressure": {
+        "available": true,
+        "start_monotonic_ns": 325758197491975,
+        "end_monotonic_ns": 325758701580826,
+        "extra_before_ms": 244.121599,
+        "extra_after_ms": 18.368632,
+        "observed_memory_current_max_bytes": 1602293760,
+        "deltas": {
+          "cpu.stat": {
+            "system_usec": 130070,
+            "nr_periods": 5,
+            "core_sched.force_idle_usec": 0,
+            "user_usec": 361667,
+            "usage_usec": 491737,
+            "nr_throttled": 0,
+            "throttled_usec": 0,
+            "burst_usec": 0,
+            "nr_bursts": 0,
+            "nice_usec": 0
+          },
+          "cpu.pressure": {
+            "some_total_us": 15486,
+            "full_total_us": 158
+          },
+          "memory.events": {
+            "oom_kill": 0,
+            "max": 0,
+            "oom_group_kill": 0,
+            "oom": 0,
+            "high": 0,
+            "low": 0
+          },
+          "memory.pressure": {
+            "some_total_us": 0,
+            "full_total_us": 0
+          }
+        }
+      },
+      "draw_frame_stats": {
+        "dispatch_calls": 174,
+        "dispatch_us": 4971132,
+        "dispatch_max_us": 43832,
+        "input_us": 97,
+        "render_calls": 173,
+        "render_us": 4961079,
+        "render_max_us": 43781,
+        "render_hist": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          173
+        ]
+      },
+      "draw_barrier_ms": 37.764938,
+      "draw_sender_last_ms": 0.09018939454108477,
+      "draw_sender_max_ms": 5.111490667331964,
+      "draw_events": 600
+    },
+    {
+      "sample": "00-capture-r6",
+      "input_after_ms": 52.979753,
+      "post_closed_window_ms": 641.889118,
+      "post_closed_pressure": {
+        "available": true,
+        "start_monotonic_ns": 325821744159945,
+        "end_monotonic_ns": 325822753069530,
+        "extra_before_ms": 210.665348,
+        "extra_after_ms": 156.355119,
+        "observed_memory_current_max_bytes": 1603153920,
+        "deltas": {
+          "cpu.stat": {
+            "system_usec": 222566,
+            "nr_periods": 10,
+            "core_sched.force_idle_usec": 0,
+            "user_usec": 714601,
+            "usage_usec": 937166,
+            "nr_throttled": 0,
+            "throttled_usec": 0,
+            "burst_usec": 0,
+            "nr_bursts": 0,
+            "nice_usec": 0
+          },
+          "cpu.pressure": {
+            "some_total_us": 60309,
+            "full_total_us": 6304
+          },
+          "memory.events": {
+            "oom_kill": 0,
+            "max": 0,
+            "oom_group_kill": 0,
+            "oom": 0,
+            "high": 0,
+            "low": 0
+          },
+          "memory.pressure": {
+            "some_total_us": 0,
+            "full_total_us": 0
+          }
+        }
+      },
+      "draw_frame_stats": {
+        "dispatch_calls": 189,
+        "dispatch_us": 5034752,
+        "dispatch_max_us": 32489,
+        "input_us": 69,
+        "render_calls": 187,
+        "render_us": 5024544,
+        "render_max_us": 32431,
+        "render_hist": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          187
+        ]
+      },
+      "draw_barrier_ms": 46.854858,
+      "draw_sender_last_ms": 0.15105039346963167,
+      "draw_sender_max_ms": 2.221870992798358,
+      "draw_events": 600
+    },
+    {
+      "sample": "01-baseline",
+      "input_after_ms": 32.176017,
+      "post_closed_window_ms": 421.724687,
+      "post_closed_pressure": {
+        "available": true,
+        "start_monotonic_ns": 325945860869484,
+        "end_monotonic_ns": 325946364964990,
+        "extra_before_ms": 34.64394,
+        "extra_after_ms": 47.726879,
+        "observed_memory_current_max_bytes": 1634947072,
+        "deltas": {
+          "cpu.stat": {
+            "system_usec": 372808,
+            "nr_periods": 5,
+            "core_sched.force_idle_usec": 0,
+            "user_usec": 297966,
+            "usage_usec": 670774,
+            "nr_throttled": 0,
+            "throttled_usec": 0,
+            "burst_usec": 0,
+            "nr_bursts": 0,
+            "nice_usec": 0
+          },
+          "cpu.pressure": {
+            "some_total_us": 153650,
+            "full_total_us": 1970
+          },
+          "memory.events": {
+            "oom_kill": 0,
+            "max": 0,
+            "oom_group_kill": 0,
+            "oom": 0,
+            "high": 376,
+            "low": 0
+          },
+          "memory.pressure": {
+            "some_total_us": 209034,
+            "full_total_us": 163181
+          }
+        }
+      },
+      "draw_frame_stats": {
+        "dispatch_calls": 179,
+        "dispatch_us": 4901509,
+        "dispatch_max_us": 37727,
+        "input_us": 93,
+        "render_calls": 179,
+        "render_us": 4891194,
+        "render_max_us": 37664,
+        "render_hist": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          1,
+          178
+        ]
+      },
+      "draw_barrier_ms": 42.825944,
+      "draw_sender_last_ms": 0.08664937922731042,
+      "draw_sender_max_ms": 5.7705220533534884,
+      "draw_events": 600
+    },
+    {
+      "sample": "01-capture-r6",
+      "input_after_ms": 53.960731,
+      "post_closed_window_ms": 654.185369,
+      "post_closed_pressure": {
+        "available": true,
+        "start_monotonic_ns": 325884041386358,
+        "end_monotonic_ns": 325885049771566,
+        "extra_before_ms": 216.484112,
+        "extra_after_ms": 137.715727,
+        "observed_memory_current_max_bytes": 1603653632,
+        "deltas": {
+          "cpu.stat": {
+            "system_usec": 197214,
+            "nr_periods": 10,
+            "core_sched.force_idle_usec": 0,
+            "user_usec": 739659,
+            "usage_usec": 936873,
+            "nr_throttled": 0,
+            "throttled_usec": 0,
+            "burst_usec": 0,
+            "nr_bursts": 0,
+            "nice_usec": 0
+          },
+          "cpu.pressure": {
+            "some_total_us": 45821,
+            "full_total_us": 3218
+          },
+          "memory.events": {
+            "oom_kill": 0,
+            "max": 0,
+            "oom_group_kill": 0,
+            "oom": 0,
+            "high": 0,
+            "low": 0
+          },
+          "memory.pressure": {
+            "some_total_us": 0,
+            "full_total_us": 0
+          }
+        }
+      },
+      "draw_frame_stats": {
+        "dispatch_calls": 187,
+        "dispatch_us": 5038217,
+        "dispatch_max_us": 32313,
+        "input_us": 90,
+        "render_calls": 187,
+        "render_us": 5027500,
+        "render_max_us": 32280,
+        "render_hist": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          187
+        ]
+      },
+      "draw_barrier_ms": 50.327297,
+      "draw_sender_last_ms": 0.13840937754139304,
+      "draw_sender_max_ms": 5.47286996152252,
+      "draw_events": 600
+    },
+    {
+      "sample": "02-baseline",
+      "input_after_ms": 31.602896,
+      "post_closed_window_ms": 445.714967,
+      "post_closed_pressure": {
+        "available": true,
+        "start_monotonic_ns": 326008408583167,
+        "end_monotonic_ns": 326009167077041,
+        "extra_before_ms": 70.66135,
+        "extra_after_ms": 242.117557,
+        "observed_memory_current_max_bytes": 1635946496,
+        "deltas": {
+          "cpu.stat": {
+            "system_usec": 420968,
+            "nr_periods": 8,
+            "core_sched.force_idle_usec": 0,
+            "user_usec": 560731,
+            "usage_usec": 981700,
+            "nr_throttled": 0,
+            "throttled_usec": 0,
+            "burst_usec": 0,
+            "nr_bursts": 0,
+            "nice_usec": 0
+          },
+          "cpu.pressure": {
+            "some_total_us": 123692,
+            "full_total_us": 1905
+          },
+          "memory.events": {
+            "oom_kill": 0,
+            "max": 0,
+            "oom_group_kill": 0,
+            "oom": 0,
+            "high": 394,
+            "low": 0
+          },
+          "memory.pressure": {
+            "some_total_us": 208936,
+            "full_total_us": 113847
+          }
+        }
+      },
+      "draw_frame_stats": {
+        "dispatch_calls": 174,
+        "dispatch_us": 4826595,
+        "dispatch_max_us": 66829,
+        "input_us": 86,
+        "render_calls": 173,
+        "render_us": 4816326,
+        "render_max_us": 66763,
+        "render_hist": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          1,
+          172
+        ]
+      },
+      "draw_barrier_ms": 28.667414,
+      "draw_sender_last_ms": 0.10056636529043317,
+      "draw_sender_max_ms": 7.047461345791817,
+      "draw_events": 600
+    },
+    {
+      "sample": "02-capture-r6",
+      "input_after_ms": 160.25619,
+      "post_closed_window_ms": 511.210039,
+      "post_closed_pressure": {
+        "available": true,
+        "start_monotonic_ns": 326069433587120,
+        "end_monotonic_ns": 326070189984744,
+        "extra_before_ms": 224.123752,
+        "extra_after_ms": 21.063833,
+        "observed_memory_current_max_bytes": 1634689024,
+        "deltas": {
+          "cpu.stat": {
+            "system_usec": 102295,
+            "nr_periods": 7,
+            "core_sched.force_idle_usec": 0,
+            "user_usec": 543422,
+            "usage_usec": 645716,
+            "nr_throttled": 0,
+            "throttled_usec": 0,
+            "burst_usec": 0,
+            "nr_bursts": 0,
+            "nice_usec": 0
+          },
+          "cpu.pressure": {
+            "some_total_us": 30810,
+            "full_total_us": 5135
+          },
+          "memory.events": {
+            "oom_kill": 0,
+            "max": 0,
+            "oom_group_kill": 0,
+            "oom": 0,
+            "high": 150,
+            "low": 0
+          },
+          "memory.pressure": {
+            "some_total_us": 16117,
+            "full_total_us": 11442
+          }
+        }
+      },
+      "draw_frame_stats": {
+        "dispatch_calls": 185,
+        "dispatch_us": 5041514,
+        "dispatch_max_us": 44605,
+        "input_us": 86,
+        "render_calls": 185,
+        "render_us": 5030647,
+        "render_max_us": 44522,
+        "render_hist": [
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          0,
+          185
+        ]
+      },
+      "draw_barrier_ms": 54.202553,
+      "draw_sender_last_ms": 0.07019139593467116,
+      "draw_sender_max_ms": 8.35520337568596,
+      "draw_events": 600
+    }
+  ],
+  "notes": [
+    "Post-closed window includes reading/focusing the input window and its barrier plus key injection/log polling and subsequent snapshot reads. Key start/end timestamps are not separately recorded, so this cannot attribute a particular stall to compositor versus client/poller.",
+    "External 250 ms pressure samples bracket windows and exceed input durations; boundary times are retained.",
+    "Draw final barrier is a single endpoint after 600 paced input events and requires a damage-free rendered frame; it is not a distribution of event-to-frame latency. All three adverse paired signs remain valid observations."
+  ]
+}

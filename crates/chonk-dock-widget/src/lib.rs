@@ -131,6 +131,24 @@ pub trait DockWidget {
         let _ = ids;
     }
 
+    /// Whether a declared source needs periodic readings now. `index` is
+    /// positional in `sources`, never a newly assigned source id. The host
+    /// also gates every source on Dock visibility. Defaults preserve tile
+    /// sampling; panel widgets may retain only discovery or reconciliation
+    /// work while closed. This is a cheap state query, with no I/O.
+    fn source_active(&self, index: usize, panel_open: bool) -> bool {
+        let _ = (index, panel_open);
+        true
+    }
+
+    /// An actual panel ownership transition, distinct from pointer crossings.
+    /// Opening invalidates old in-flight readings and requests fresh samples.
+    /// Widgets may keep cached pixels, but should reset transient input state
+    /// and wait for those readings before acting on stale panel data.
+    fn panel_visibility_changed(&mut self, open: bool) {
+        let _ = open;
+    }
+
     /// Folds this pass's readings into the widget's state. Returns
     /// whether `render` would now produce different pixels, so the dock
     /// only repaints when something actually changed.

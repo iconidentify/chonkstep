@@ -2242,8 +2242,16 @@ impl<B: Backend> Desktop<B> {
                 }
             }
         }
+        self.sync_builtin_sampling();
         if changed {
             self.redraw_dock(backend, theme);
+        }
+    }
+
+    fn sync_builtin_sampling(&mut self) {
+        let owner = self.builtin_panel.as_ref().map(|panel| panel.id.as_str());
+        for item in &mut self.items {
+            item.sync_sampling(&mut self.samplers, owner == Some(item.id()));
         }
     }
 
@@ -2334,22 +2342,29 @@ impl<B: Backend> Desktop<B> {
     /// this single source of truth, so they can never disagree about
     /// where a widget sits. No gap between consecutive slots — tiles
     /// snap together, the way the classic dock stacks them.
-    fn item_slots(&self) -> Vec<(usize, Rect)> {
-        let mut y = self.items_top();
-        let mut slots = Vec::with_capacity(self.items.len());
-        for (index, widget) in self.items.iter().enumerate() {
-            let h = self.tile * widget.tile_height();
-            slots.push((index, Rect { pos: Point::new(0, y), size: Size::new(self.tile, h) }));
-            y += h as i32;
-        }
-        slots
+    fn item_slots(&self) -> impl Iterator<Item = (usize, Rect)> + '_ {
+        // Hit-testing stops at the first match without allocating a
+        // vector for every pointer report. Painting collects only the
+        // visible prefix before mutably borrowing the widget renderers.
+        self.items
+            .iter()
+            .enumerate()
+            .scan(self.items_top(), |y, (index, widget)| {
+                let h = self.tile * widget.tile_height();
+                let rect = Rect {
+                    pos: Point::new(0, *y),
+                    size: Size::new(self.tile, h),
+                };
+                *y += h as i32;
+                Some((index, rect))
+            })
     }
 
     /// Which widget slot (if any) `local` — in dock-local coordinates —
     /// falls within. Misses both the identity tile above and the
     /// inter-widget gaps between slots.
     fn item_index_at(&self, local: Point) -> Option<usize> {
-        self.item_slots().into_iter().find(|(_, rect)| rect.contains(local)).map(|(index, _)| index)
+        self.item_slots().find(|(_, rect)| rect.contains(local)).map(|(index, _)| index)
     }
 
     /// Starts a middle-click drag-to-reorder on whichever widget sits at
@@ -2449,7 +2464,7 @@ impl<B: Backend> Desktop<B> {
         let Some(local) = input.local() else {
             return false;
         };
-        let Some((index, rect)) = self.item_slots().into_iter().find(|(_, rect)| rect.contains(local)) else {
+        let Some((index, rect)) = self.item_slots().find(|(_, rect)| rect.contains(local)) else {
             return false;
         };
         // The panel's toggle and click-away, resolved before delivery.
@@ -2669,6 +2684,7 @@ impl<B: Backend> Desktop<B> {
                 self.builtin_panel = None;
             }
         }
+        self.sync_builtin_sampling();
 
         // Whoever holds an open grant now owns the screen (at most one,
         // by the arbitration above).
@@ -2688,7 +2704,6 @@ impl<B: Backend> Desktop<B> {
         // Geometry: beside the dock, level with the owning tile's slot.
         let Some((index, slot_top)) = self
             .item_slots()
-            .into_iter()
             .find(|(index, _)| self.items[*index].id() == owner)
             .map(|(index, rect)| (index, rect.pos.y))
         else {
@@ -2705,9 +2720,26 @@ impl<B: Backend> Desktop<B> {
         // panel data rides the same pass that folds its samples.
         let (granted, ready) = if self.builtin_panel.is_some() {
             let ticked = self.items[index].panel_tick(now);
+            // Cold panel sources may populate rows after the first grant.
+            // Reuse the protocol's workarea/size bounds, and allocate only
+            // when the granted dimensions actually change.
+            let requested = if ticked {
+                let workarea = self.primary_workarea();
+                let chrome = instrument::chrome_inset(theme) * 2;
+                let bounds = (workarea.size.w.saturating_sub(chrome), workarea.size.h.saturating_sub(chrome));
+                self.items[index].panel_spec(self.tile)
+                    .and_then(|spec| clamp_panel_grant(spec.width, spec.height, bounds))
+            } else {
+                None
+            };
             let Some(panel) = self.builtin_panel.as_mut() else {
                 return;
             };
+            if let Some(granted) = requested.filter(|&granted| granted != panel.granted) {
+                panel.granted = granted;
+                panel.frame = PanelFrame::new(granted.0, granted.1);
+                panel.dirty = true;
+            }
             let ready = std::mem::take(&mut panel.dirty) || ticked;
             (panel.granted, ready)
         } else {
@@ -2815,6 +2847,7 @@ impl<B: Backend> Desktop<B> {
             just_opened: true,
             dirty: true,
         });
+        self.sync_builtin_sampling();
         true
     }
 
@@ -2835,6 +2868,7 @@ impl<B: Backend> Desktop<B> {
             }
             PanelReaction::Close => {
                 self.builtin_panel = None;
+                self.sync_builtin_sampling();
                 return;
             }
             // Both Run arities flatten through `effects()`, so the
@@ -2855,6 +2889,7 @@ impl<B: Backend> Desktop<B> {
             panel.dirty |= repaint;
         }
         run_detached(commands, self.launch_env());
+        self.sync_builtin_sampling();
     }
 
     /// Pairs the bare-Escape grab with all transient UI that Escape
@@ -2901,6 +2936,7 @@ impl<B: Backend> Desktop<B> {
         // A built-in owner has no one to notify: dropping the state is
         // the whole close.
         self.builtin_panel = None;
+        self.sync_builtin_sampling();
         if self.instrument_panel.visible() {
             self.instrument_panel.hide(backend);
         }
@@ -3246,7 +3282,15 @@ impl<B: Backend> Desktop<B> {
             None,
         );
 
-        for (index, rect) in self.item_slots() {
+        // The column is clipped to the usable output height. Fully
+        // clipped faces cannot contribute a pixel, but their updates
+        // and remote lifecycle still run in `tick_items`. A partially
+        // visible tile must render normally; blitting clips its bottom.
+        let visible_slots: Vec<_> = self
+            .item_slots()
+            .take_while(|(_, rect)| rect.pos.y < dock_height as i32)
+            .collect();
+        for (index, rect) in visible_slots {
             // `None` is an evicted widget: the dock draws its own
             // tombstone rather than calling code it has already
             // disowned. `render_dead_tile` is the same powered-off
@@ -4195,6 +4239,160 @@ mod tests {
 
         assert_eq!(stacked_dock_height(56, 1_080, &items), 280);
         assert_eq!(stacked_dock_height(56, 200, &items), 200, "oversized stacks are screen-clamped");
+    }
+
+    #[test]
+    fn clipped_widgets_keep_updating_and_render_when_revealed() {
+        use std::cell::Cell;
+        use std::rc::Rc;
+        use wm_core::fake_backend::FakeBackend;
+
+        struct PaintProbe {
+            height: u32,
+            paints: Rc<Cell<usize>>,
+            updates: Rc<Cell<usize>>,
+        }
+
+        impl DockWidget for PaintProbe {
+            fn name(&self) -> &str {
+                "PAINT"
+            }
+
+            fn tile_height(&self) -> u32 {
+                self.height
+            }
+
+            fn update(&mut self, _samples: &crate::widgets::Samples) -> bool {
+                self.updates.set(self.updates.get() + 1);
+                true
+            }
+
+            fn render(
+                &self,
+                _theme: &Theme,
+                _tile: u32,
+                _fonts: &mut cosmic_text::FontSystem,
+                _swash: &mut cosmic_text::SwashCache,
+            ) -> DecorationBuffer {
+                self.paints.set(self.paints.get() + 1);
+                DecorationBuffer {
+                    width: 1,
+                    height: 1,
+                    pixels: vec![255; 4],
+                }
+            }
+        }
+
+        let theme = test_theme();
+        let primary = Rect {
+            pos: Point::new(0, 0),
+            size: TEST_SCREEN,
+        };
+        let mut backend = FakeBackend::new();
+        let mut desktop = Desktop::new(
+            &mut backend,
+            TEST_SCREEN,
+            primary,
+            1.0,
+            &theme,
+            wm_theme::Appearance::Dark,
+            Vec::new(),
+            wm_theme::FontState::new(),
+        );
+        let paints: [_; 3] = std::array::from_fn(|_| Rc::new(Cell::new(0)));
+        let updates: [_; 3] = std::array::from_fn(|_| Rc::new(Cell::new(0)));
+        desktop.items = [1, 2, 1]
+            .into_iter()
+            .enumerate()
+            .map(|(index, height)| {
+                SupervisedWidget::new(DockItem::builtin(
+                    ["builtin:first", "builtin:tall", "builtin:last"][index],
+                    Box::new(PaintProbe {
+                        height,
+                        paints: paints[index].clone(),
+                        updates: updates[index].clone(),
+                    }),
+                ))
+            })
+            .collect();
+        let paint_counts = || paints.each_ref().map(|count| count.get());
+        let tile = desktop.tile;
+
+        // Hit-testing follows the same multi-height geometry, including
+        // half-open edges and the logical slots below the clipped face.
+        for (point, expected) in [
+            (Point::new(0, tile as i32 - 1), None),
+            (Point::new(0, tile as i32), Some(0)),
+            (Point::new(0, (2 * tile) as i32), Some(1)),
+            (Point::new(0, (4 * tile - 1) as i32), Some(1)),
+            (Point::new(0, (4 * tile) as i32), Some(2)),
+            (Point::new(0, (5 * tile) as i32), None),
+            (Point::new(-1, tile as i32), None),
+            (Point::new(tile as i32, tile as i32), None),
+        ] {
+            assert_eq!(desktop.item_index_at(point), expected, "slot at {point:?}");
+        }
+
+        desktop.primary.size.h = 2 * tile;
+        desktop.redraw_dock(&mut backend, &theme);
+        assert_eq!(
+            paint_counts(),
+            [1, 0, 0],
+            "a slot beginning at the clip edge is fully invisible"
+        );
+
+        desktop.primary.size.h += 1;
+        desktop.redraw_dock(&mut backend, &theme);
+        assert_eq!(
+            paint_counts(),
+            [2, 1, 0],
+            "even one visible row requires the tall tile's pixels"
+        );
+        desktop.tick_items(&mut backend, &theme);
+        assert_eq!(
+            updates.each_ref().map(|count| count.get()),
+            [1, 1, 1],
+            "clipping must not suspend widget state"
+        );
+        assert_eq!(
+            paint_counts(),
+            [3, 2, 0],
+            "an update still must not rasterize the invisible face"
+        );
+
+        desktop.primary.size.h = 5 * tile;
+        desktop.redraw_dock(&mut backend, &theme);
+        assert_eq!(
+            paint_counts(),
+            [4, 3, 1],
+            "a newly exposed face paints immediately"
+        );
+
+        desktop.set_scale(2.0);
+        desktop.redraw_dock(&mut backend, &theme.scaled(2.0));
+        assert_eq!(
+            paint_counts(),
+            [5, 4, 1],
+            "scale changes recalculate clipping, including partial faces"
+        );
+        desktop.set_appearance(wm_theme::Appearance::Light);
+        let light =
+            wm_theme::default_theme::theme_variant("nextstep-classic", wm_theme::Appearance::Light)
+                .unwrap();
+        desktop.redraw_dock(&mut backend, &light.scaled(2.0));
+        assert_eq!(
+            paint_counts(),
+            [6, 5, 1],
+            "every visible face receives the current palette"
+        );
+
+        desktop.items.swap(0, 2);
+        desktop.redraw_dock(&mut backend, &light.scaled(2.0));
+        assert_eq!(
+            paint_counts(),
+            [6, 6, 2],
+            "reordering can expose a previously clipped widget"
+        );
     }
 
     /// A second head placed to the *left* of the primary: the whole
@@ -5431,6 +5629,104 @@ mod tests {
     const PROBE_GREEN: [u8; 4] = [0x00, 0xFF, 0x00, 0xFF];
     const PROBE_RED: [u8; 4] = [0xFF, 0x00, 0x00, 0xFF];
 
+    #[test]
+    fn panel_sampling_tracks_ownership_and_cold_rows_resize_within_the_grant() {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+        use crate::widgets::{Source, SourceId};
+
+        struct State {
+            requested: (u32, u32),
+            dirty: bool,
+            transitions: Vec<bool>,
+            rendered: Vec<(u32, u32)>,
+            readings: usize,
+        }
+        struct Probe { state: Rc<RefCell<State>>, clock: SourceId }
+        impl DockWidget for Probe {
+            fn name(&self) -> &str { "TST" }
+            fn sources(&self) -> Vec<Source> {
+                vec![Source::Clock { interval: std::time::Duration::from_secs(3600) }]
+            }
+            fn bind(&mut self, ids: &[SourceId]) { self.clock = ids[0]; }
+            fn source_active(&self, _: usize, panel_open: bool) -> bool { panel_open }
+            fn panel_visibility_changed(&mut self, open: bool) { self.state.borrow_mut().transitions.push(open); }
+            fn update(&mut self, samples: &crate::widgets::Samples) -> bool {
+                if samples.fresh(self.clock) { self.state.borrow_mut().readings += 1; }
+                false
+            }
+            fn render(&self, _: &Theme, tile: u32, _: &mut cosmic_text::FontSystem, _: &mut cosmic_text::SwashCache) -> DecorationBuffer {
+                DecorationBuffer { width: tile, height: tile, pixels: vec![0; tile as usize * tile as usize * 4] }
+            }
+            fn panel_spec(&self, _: u32) -> Option<crate::widgets::PanelSpec> {
+                let (w, h) = self.state.borrow().requested;
+                Some(crate::widgets::PanelSpec::new(w, h))
+            }
+            fn panel_tick(&mut self, _: std::time::Instant) -> bool { std::mem::take(&mut self.state.borrow_mut().dirty) }
+            fn render_panel(&mut self, frame: &mut PanelFrame, _: &mut PanelCtx<'_>) {
+                self.state.borrow_mut().rendered.push((frame.width(), frame.height()));
+                frame.pixels_mut().fill(255);
+            }
+        }
+
+        let mut backend = wm_core::fake_backend::FakeBackend::new();
+        let theme = test_theme();
+        let (mut desktop, _) = desk_with_probe(&mut backend);
+        // These clocks exercise real registry freshness without sampling this
+        // test machine's native audio/network sources.
+        desktop.items.clear();
+        desktop.samplers = SamplerRegistry::new();
+        let mut states = Vec::new();
+        for id in ["builtin:sampling-a", "builtin:sampling-b"] {
+            let state = Rc::new(RefCell::new(State {
+                requested: (300, 80), dirty: false, transitions: Vec::new(), rendered: Vec::new(), readings: 0,
+            }));
+            let mut item = SupervisedWidget::new(DockItem::builtin(id, Box::new(Probe {
+                state: state.clone(), clock: SourceId::UNBOUND,
+            })));
+            item.bind(&mut desktop.samplers);
+            desktop.items.push(item);
+            states.push(state);
+        }
+        let points: Vec<_> = desktop.item_slots().map(|(_, rect)| rect.pos).collect();
+        desktop.tick_items(&mut backend, &theme);
+        assert_eq!(states[0].borrow().readings, 0, "closed panel has no clock work either");
+        assert!(desktop.toggle_builtin_panel(&mut backend, &theme, points[0]));
+        desktop.tick_items(&mut backend, &theme);
+        assert_eq!(states[0].borrow().transitions, [true]);
+        assert_eq!(states[0].borrow().readings, 1);
+        assert_eq!(desktop.builtin_panel.as_ref().unwrap().granted, (300, 80));
+
+        states[0].borrow_mut().requested = (300, 420);
+        states[0].borrow_mut().dirty = true;
+        desktop.sync_instrument_panel(&mut backend, &theme);
+        let panel = desktop.builtin_panel.as_ref().unwrap();
+        assert_eq!(panel.granted, (300, 420));
+        let retained = panel.frame.buffer().pixels.as_ptr();
+        states[0].borrow_mut().dirty = true;
+        desktop.sync_instrument_panel(&mut backend, &theme);
+        assert_eq!(desktop.builtin_panel.as_ref().unwrap().frame.buffer().pixels.as_ptr(), retained,
+            "unchanged grants reuse their existing frame allocation");
+        states[0].borrow_mut().requested = (4000, 4000);
+        states[0].borrow_mut().dirty = true;
+        desktop.sync_instrument_panel(&mut backend, &theme);
+        let granted = desktop.builtin_panel.as_ref().unwrap().granted;
+        let area = desktop.primary_workarea();
+        assert!(granted.0 <= area.size.w && granted.1 <= area.size.h);
+
+        assert!(desktop.toggle_builtin_panel(&mut backend, &theme, points[1]));
+        desktop.tick_items(&mut backend, &theme);
+        assert_eq!(states[0].borrow().transitions, [true, false]);
+        assert_eq!(states[1].borrow().transitions, [true]);
+        desktop.apply_panel_reaction(PanelReaction::Close);
+        assert_eq!(states[1].borrow().transitions, [true, false]);
+        assert!(desktop.toggle_builtin_panel(&mut backend, &theme, points[0]));
+        desktop.tick_items(&mut backend, &theme);
+        assert_eq!(states[0].borrow().readings, 2, "same wall-clock value is a fresh snapshot on reopening");
+        desktop.set_dock_visibility(&mut backend, &theme, DockVisibility::Hidden);
+        assert_eq!(states[0].borrow().transitions, [true, false, true, false]);
+    }
+
     /// A desk with the panel probe appended to the stock column, plus
     /// the probe's slot center in dock-local coordinates.
     fn desk_with_probe(
@@ -5453,7 +5749,6 @@ mod tests {
         )));
         let (_, rect) = desktop
             .item_slots()
-            .into_iter()
             .find(|(index, _)| desktop.items[*index].id() == "builtin:panel-probe")
             .expect("the probe is in the column");
         let center = Point::new(rect.pos.x + rect.size.w as i32 / 2, rect.pos.y + rect.size.h as i32 / 2);
@@ -5475,7 +5770,6 @@ mod tests {
         // sits at the bottom of the stock column above the probe.
         let (_, clock_rect) = desktop
             .item_slots()
-            .into_iter()
             .find(|(index, _)| desktop.items[*index].id() == "builtin:clock")
             .expect("the clock is in the column");
         assert!(
@@ -5521,7 +5815,6 @@ mod tests {
         let (mut desktop, probe_center) = desk_with_probe(&mut backend);
         let (_, clock_rect) = desktop
             .item_slots()
-            .into_iter()
             .find(|(index, _)| desktop.items[*index].id() == "builtin:clock")
             .expect("the clock is in the column");
 
@@ -5602,7 +5895,6 @@ mod tests {
         // The column just grew: find both slots afresh.
         let (_, rect_b) = desktop
             .item_slots()
-            .into_iter()
             .find(|(index, _)| desktop.items[*index].id() == "builtin:panel-probe-b")
             .unwrap();
 

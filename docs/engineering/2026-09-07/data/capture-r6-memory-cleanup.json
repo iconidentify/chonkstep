@@ -1,0 +1,94 @@
+{
+  "utc": "2026-09-07T12:25:45.007941+00:00",
+  "fixture": "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/comparison-capture-r6-memory-three",
+  "scope": null,
+  "recorded_processes": [
+    {
+      "pid": 3590727,
+      "start_ticks": 32640572,
+      "source": "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/comparison-capture-r6-memory-three/00-baseline-memory/first-open-before/stat",
+      "exited": true,
+      "proc_entry_absent": true
+    },
+    {
+      "pid": 3590781,
+      "start_ticks": 32640579,
+      "source": "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/comparison-capture-r6-memory-three/00-baseline-memory/closed-idle-after/child-3590781/stat",
+      "exited": true,
+      "proc_entry_absent": true
+    },
+    {
+      "pid": 3591524,
+      "start_ticks": 32646037,
+      "source": "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/comparison-capture-r6-memory-three/00-capture-r6-memory/first-open-before/stat",
+      "exited": true,
+      "proc_entry_absent": true
+    },
+    {
+      "pid": 3591561,
+      "start_ticks": 32646045,
+      "source": "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/comparison-capture-r6-memory-three/00-capture-r6-memory/closed-idle-after/child-3591561/stat",
+      "exited": true,
+      "proc_entry_absent": true
+    },
+    {
+      "pid": 3592306,
+      "start_ticks": 32651499,
+      "source": "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/comparison-capture-r6-memory-three/01-capture-r6-memory/first-open-before/stat",
+      "exited": true,
+      "proc_entry_absent": true
+    },
+    {
+      "pid": 3592343,
+      "start_ticks": 32651506,
+      "source": "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/comparison-capture-r6-memory-three/01-capture-r6-memory/closed-idle-after/child-3592343/stat",
+      "exited": true,
+      "proc_entry_absent": true
+    },
+    {
+      "pid": 3592932,
+      "start_ticks": 32656967,
+      "source": "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/comparison-capture-r6-memory-three/01-baseline-memory/first-open-before/stat",
+      "exited": true,
+      "proc_entry_absent": true
+    },
+    {
+      "pid": 3592969,
+      "start_ticks": 32656974,
+      "source": "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/comparison-capture-r6-memory-three/01-baseline-memory/closed-idle-after/child-3592969/stat",
+      "exited": true,
+      "proc_entry_absent": true
+    },
+    {
+      "pid": 3593582,
+      "start_ticks": 32662427,
+      "source": "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/comparison-capture-r6-memory-three/02-baseline-memory/first-open-before/stat",
+      "exited": true,
+      "proc_entry_absent": true
+    },
+    {
+      "pid": 3593619,
+      "start_ticks": 32662434,
+      "source": "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/comparison-capture-r6-memory-three/02-baseline-memory/closed-idle-after/child-3593619/stat",
+      "exited": true,
+      "proc_entry_absent": true
+    },
+    {
+      "pid": 3594199,
+      "start_ticks": 32667893,
+      "source": "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/comparison-capture-r6-memory-three/02-capture-r6-memory/first-open-before/stat",
+      "exited": true,
+      "proc_entry_absent": true
+    },
+    {
+      "pid": 3594236,
+      "start_ticks": 32667900,
+      "source": "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/comparison-capture-r6-memory-three/02-capture-r6-memory/closed-idle-after/child-3594236/stat",
+      "exited": true,
+      "proc_entry_absent": true
+    }
+  ],
+  "invalid_saved_stat_records": [],
+  "complete": true,
+  "limits": "Only recorded PID/start-time identities are checked. A gone owned cgroup additionally covers all fixture descendants that inherited its boundary. No process is signalled."
+}

@@ -1,0 +1,7 @@
+{
+  "utc": "2026-09-07T12:51:55.493254+00:00",
+  "identity_marker": "CHONKSTEP_WAYLAND_BIN=/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/capture-r7/release/chonkstep-wayland",
+  "survivors": [],
+  "complete": true,
+  "limits": "Read-only scan for the exact frozen-r7 runner marker inherited by its fixture processes. No process was signalled."
+}

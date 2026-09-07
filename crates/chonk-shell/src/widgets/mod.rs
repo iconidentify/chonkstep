@@ -199,6 +199,19 @@ impl DockWidget for DockItem {
         }
     }
 
+    fn source_active(&self, index: usize, panel_open: bool) -> bool {
+        match self {
+            DockItem::Builtin { widget, .. } => widget.source_active(index, panel_open),
+            DockItem::Remote(_) => true,
+        }
+    }
+
+    fn panel_visibility_changed(&mut self, open: bool) {
+        if let DockItem::Builtin { widget, .. } = self {
+            widget.panel_visibility_changed(open);
+        }
+    }
+
     fn update(&mut self, samples: &Samples) -> bool {
         match self {
             DockItem::Builtin { widget, .. } => widget.update(samples),
@@ -590,6 +603,9 @@ pub(crate) struct SupervisedWidget {
     /// Cleared by the next [`SupervisedWidget::update`], which reports
     /// "changed" so the dock relays out exactly once.
     relayout: bool,
+    source_ids: Vec<SourceId>,
+    source_requests: Vec<bool>,
+    panel_open: bool,
 }
 
 impl SupervisedWidget {
@@ -603,6 +619,9 @@ impl SupervisedWidget {
             entry: [EntryPoint::default(); CallKind::COUNT],
             evicted: false,
             relayout: false,
+            source_ids: Vec::new(),
+            source_requests: Vec::new(),
+            panel_open: false,
         }
     }
 
@@ -680,6 +699,41 @@ impl SupervisedWidget {
     pub(crate) fn bind(&mut self, registry: &mut SamplerRegistry) {
         let ids = registry.register(self.item.sources());
         self.item.bind(&ids);
+        self.source_requests = (0..ids.len()).map(|index| self.item.source_active(index, false)).collect();
+        self.source_ids = ids;
+        for (&id, &active) in self.source_ids.iter().zip(&self.source_requests) {
+            registry.set_periodic(id, active);
+        }
+    }
+
+    /// Reconcile actual panel ownership and sampling demand without rebuilding
+    /// sources, ids, or per-pass vectors. Both trait calls are supervised; an
+    /// evicted widget loses periodic sampling without being called again.
+    pub(crate) fn sync_sampling(&mut self, registry: &mut SamplerRegistry, panel_open: bool) {
+        let open = panel_open && !self.evicted;
+        let opening = open && !self.panel_open;
+        let start = Instant::now();
+        if open != self.panel_open {
+            self.panel_open = open;
+            if !self.evicted {
+                self.item.panel_visibility_changed(open);
+            }
+        }
+        for (index, requested) in self.source_requests.iter_mut().enumerate() {
+            *requested = !self.evicted && self.item.source_active(index, open);
+        }
+        if !self.evicted {
+            self.charge(CallKind::Update, start.elapsed());
+        }
+        for (&id, &requested) in self.source_ids.iter().zip(&self.source_requests) {
+            // Invalidate before enabling periodic work, so the first command
+            // already belongs to this opening even if it starts immediately.
+            if opening && !self.evicted {
+                registry.fresh_on_open(id, requested);
+            } else {
+                registry.set_periodic(id, requested && !self.evicted);
+            }
+        }
     }
 
     /// `None` means "evicted — draw the tombstone instead". The buffer

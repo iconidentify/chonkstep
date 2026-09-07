@@ -1,0 +1,55 @@
+{
+  "baseline_revision": "c74772ddc7e00ce483d107235b8ff025f846d4a0",
+  "final_ordinary_sha256": "315598fbe0b8a49eec2e0c3654331472dfd67c2f5946aaef54caa9077ab6da8f",
+  "checkpoints": [
+    {
+      "label": "r4",
+      "validation": "58 native targets; 245 initial cases pass, corrected cache fixture adds 1. Three successful targets had artifact-copy failures on Chromium symlinks.",
+      "record": "capture-r4/e2e-assertion-summary.json"
+    },
+    {
+      "label": "r5",
+      "validation": "check.sh all passed; 2047 Rust cases in display-free gate; 31 native cases across eight affected targets passed.",
+      "record": "capture-r5/commands.json"
+    },
+    {
+      "label": "r6",
+      "validation": "Only LinkPanel product file changed after r5. Strict all-target Clippy, 677 instrument/shell cases and relevant native checks passed after diagnostic marker correction.",
+      "record": "capture-r6/commands.json"
+    },
+    {
+      "label": "r6-capture-fixture-correction",
+      "validation": "Initial product run passed9/11; atomic filename marker fixed the fixture race; unchanged frozen r6 product passed11/11.",
+      "record": "capture-r6-marker-fixture-fix/e2e/result.json"
+    },
+    {
+      "label": "final-harness",
+      "validation": "48 Python harness cases passed.",
+      "record": "validation/final-harness-tests.log"
+    }
+  ],
+  "interpretation": "Build and source hashes remain in each checkpoint provenance. Corrected fixture runs do not erase the initial failures. Whole-workspace gates and native subsets are labeled separately; no claim that the entire native suite reran on r6.",
+  "r6_soak": {
+    "duration_seconds": 602.214685534,
+    "cycles_after_warmup": 1813,
+    "result": "all resource guards and zero-dead-selection checks passed; scope removed",
+    "record": "capture-r6-final-validation/soak-summary.json"
+  },
+  "candidate_r7": {
+    "change": "one pre-render Winit flush; post-render flush retained",
+    "ordinary_sha256": "f58b224a46a354be407d60780f120de90d9e6a488f99766058ac266b230ca31a",
+    "display_free_gate": "check.sh all passed,2049 Rust plus48 Python cases",
+    "native_status": "all 58 targets and 248 functional cases passed; runner succeeded for every target",
+    "evaluation_status": "rejected after three matched 2GiB pairs; no consistent overall latency benefit, all data retained; exact added block removed",
+    "cleanup": "no surviving process with the exact frozen-r7 fixture marker",
+    "record": "comparison-r6-r7-2g-1280-mixed-capture/RECOMMENDATION.md"
+  },
+  "accepted_checkpoint": "capture-r6",
+  "final_restoration": {
+    "production_scripts_packaging_dependency_files_verified": 33,
+    "ordinary_sha256": "315598fbe0b8a49eec2e0c3654331472dfd67c2f5946aaef54caa9077ab6da8f",
+    "matches_frozen_r6": true,
+    "candidate_r7_block_removed": true,
+    "record": "accepted-r6/build-ordinary.json"
+  }
+}

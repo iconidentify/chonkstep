@@ -5,6 +5,14 @@ output geometry, configuration, clients, and measurement interval. The harness
 in `scripts/bench-compositor.py` writes individual samples and raw process
 accounting so a reported median can be checked against the underlying runs.
 
+## Capture and pressure campaign — 2026-09-07
+
+The [capture performance report](engineering/2026-09-07/capture-performance.md)
+records the cursor/toolbar repair, ordinary capture CPU comparisons, bounded
+readback and encoding work, and the subsequent constrained workload campaign.
+It starts from the newer `c74772d` baseline; keep it separate from the September 5
+results below.
+
 ## Final before/after result — 2026-09-05
 
 The original 0.3.0 preview executable was compared with `combined-7`, the final

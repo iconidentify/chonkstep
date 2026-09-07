@@ -181,6 +181,7 @@ pub struct LinkPanel {
     /// The panel's pixels no longer match its state. Set by folds and
     /// input, taken by [`LinkPanel::take_dirty`] from `panel_tick`.
     dirty: bool,
+    fresh_panel: u8,
 }
 
 impl LinkPanel {
@@ -204,6 +205,7 @@ impl LinkPanel {
             pressed: None,
             granted: None,
             dirty: false,
+            fresh_panel: 0,
         }
     }
 
@@ -231,13 +233,11 @@ impl LinkPanel {
                 interval: PANEL_INTERVAL,
             },
             // `--peers=false` is load-bearing, not tidiness. The peer
-            // map is ~1KB per peer, and the dock's command sampler
-            // reads stdout only after the child exits, so a tailnet
-            // past ~60 peers wrote more than a pipe buffer, blocked
-            // forever, and was SIGKILLed at the 8s deadline on every
-            // cycle — a worker thread burned every 13 seconds for a
-            // row that never once got a reading. Without the flag the
-            // document is unbounded in the size of someone's tailnet;
+            // map is ~1KB per peer. Before incremental pipe draining,
+            // a tailnet past ~60 peers could fill stdout and time out.
+            // Draining fixes that deadlock, but we still should not
+            // transfer and parse peer data this panel never displays.
+            // Without the flag the document grows with the tailnet;
             // with it, ~2.4KB flat. See `tailscale`'s module doc.
             Source::Command {
                 program: "tailscale",
@@ -252,6 +252,21 @@ impl LinkPanel {
         self.connections_src = ids.get(1).copied().unwrap_or(SourceId::UNBOUND);
         self.wifi_src = ids.get(2).copied().unwrap_or(SourceId::UNBOUND);
         self.tailscale_src = ids.get(3).copied().unwrap_or(SourceId::UNBOUND);
+    }
+
+    /// Pending toggles and explicit-rescan cooldowns retain their existing
+    /// finite sample budgets after close. Quiescent panels need no polling.
+    pub(crate) fn needs_sampling(&self) -> bool {
+        !self.pending.is_empty() || self.rescan_cooldown > 0
+    }
+
+    pub(crate) fn visibility_changed(&mut self, open: bool) {
+        self.dirty |= self.hover.is_some() || self.pressed.is_some();
+        self.hover = None;
+        self.pressed = None;
+        if open {
+            self.fresh_panel = 0;
+        }
     }
 
     /// The size this panel wants at the dock's current tile scale —
@@ -276,6 +291,25 @@ impl LinkPanel {
         }
         let before = self.view();
 
+        // A stopped source will produce no more grace samples. Retire only
+        // its associated work, so missing executables cannot leave the other
+        // panel commands polling forever on behalf of an unfinishable toggle.
+        if samples.unusable(self.connections_src) {
+            self.pending.retain(|p| !matches!(p.key, RowKey::Conn(_) | RowKey::Net(_)));
+        }
+        if samples.unusable(self.wifi_src) {
+            self.pending.retain(|p| !matches!(p.key, RowKey::Net(_)));
+            self.rescan_cooldown = 0;
+        }
+        if samples.unusable(self.tailscale_src) {
+            self.pending.retain(|p| p.key != RowKey::Tailscale);
+        }
+        for (bit, id) in [(1, self.devices_src), (2, self.connections_src), (4, self.wifi_src)] {
+            if samples.fresh(id) {
+                self.fresh_panel = (self.fresh_panel & !bit) | if samples.text(id).is_some() { bit } else { 0 };
+            }
+        }
+
         if samples.fresh(self.devices_src) {
             if let Some(text) = samples.text(self.devices_src) {
                 self.devices = parse_devices(text);
@@ -295,10 +329,15 @@ impl LinkPanel {
             self.reconcile_networks();
         }
         if samples.unusable(self.tailscale_src) {
+            self.fresh_panel &= !8;
             self.ts_absent = true;
             self.ts = None;
         } else if samples.fresh(self.tailscale_src) {
-            if let Some(status) = samples.text(self.tailscale_src).and_then(parse_status) {
+            let status = samples.text(self.tailscale_src).and_then(parse_status);
+            // A successful command can still return invalid/empty JSON. Keep
+            // cached pixels, but only parsed current state authorizes a toggle.
+            self.fresh_panel = (self.fresh_panel & !8) | if status.is_some() { 8 } else { 0 };
+            if let Some(status) = status {
                 self.ts = Some(status);
             }
             self.reconcile_tailscale();
@@ -590,6 +629,17 @@ impl LinkPanel {
     /// The action table, applied to one clicked row. Every argv here
     /// is in the module doc's table; nothing else can be requested.
     fn activate(&mut self, key: &RowKey) -> Option<Effect> {
+        // Keep cached rows visible during refresh, but never execute an old
+        // profile/network/tailnet state immediately after a long closure.
+        let needed = match key {
+            RowKey::Conn(_) => 2,
+            RowKey::Net(_) => 2 | 4,
+            RowKey::Tailscale => 8,
+            RowKey::Rescan => 0,
+        };
+        if self.fresh_panel & needed != needed {
+            return None;
+        }
         if self.is_pending(key) {
             return None;
         }
@@ -728,6 +778,89 @@ wg-home:wireguard:no:uuid-wg
         assert!(panel.update(&bench.samples()));
         assert!(panel.take_dirty(), "a changed fold marks the panel dirty");
         Rig { bench, panel, devices, connections, wifi, ts }
+    }
+
+    #[test]
+    fn closing_preserves_bounded_reconciliation_and_source_failure_retires_it() {
+        let mut r = rig();
+        assert!(!r.panel.needs_sampling());
+        assert!(!click(&mut r.panel, &RowKey::Conn("uuid-wg".into())).effects().is_empty());
+        r.panel.visibility_changed(false);
+        assert!(r.panel.needs_sampling(), "closing does not discard an accepted toggle");
+        for _ in 0..PENDING_DEADLINE_SAMPLES {
+            r.bench.all_stale();
+            r.bench.set_text(r.connections, CONNECTIONS);
+            r.panel.update(&r.bench.samples());
+        }
+        assert!(!r.panel.needs_sampling(), "unconfirmed toggles eventually stop closed-panel polling");
+
+        assert!(!click(&mut r.panel, &RowKey::Conn("uuid-wg".into())).effects().is_empty());
+        let absent = r.bench.unusable();
+        r.panel.bind(&[r.devices, absent, r.wifi, r.ts]);
+        r.panel.update(&r.bench.samples());
+        assert!(!r.panel.needs_sampling(), "no grace sample will ever arrive from a stopped source");
+    }
+
+    #[test]
+    fn reopening_requires_only_the_relevant_fresh_sources_for_each_control() {
+        let mut r = rig();
+        r.panel.visibility_changed(true);
+        r.bench.all_stale();
+        r.panel.update(&r.bench.samples());
+        assert!(click(&mut r.panel, &RowKey::Conn("uuid-wg".into())).effects().is_empty());
+        assert!(click(&mut r.panel, &RowKey::Tailscale).effects().is_empty());
+
+        r.bench.set_text(r.connections, CONNECTIONS);
+        r.panel.update(&r.bench.samples());
+        assert!(!click(&mut r.panel, &RowKey::Conn("uuid-wg".into())).effects().is_empty(),
+            "a slow unrelated tailscale query cannot disable fresh connection controls");
+        assert!(click(&mut r.panel, &RowKey::Net("HomeBase".into())).effects().is_empty(),
+            "joining also needs the current network list");
+        r.bench.all_stale();
+        r.bench.set_text(r.wifi, WIFI);
+        r.panel.update(&r.bench.samples());
+        assert!(!click(&mut r.panel, &RowKey::Net("HomeBase".into())).effects().is_empty());
+    }
+
+    #[test]
+    fn reopening_does_not_authorize_cached_tailscale_state_from_empty_or_malformed_success() {
+        for text in ["", "not JSON", r#"{"BackendState":"Running""#, r#"{"unexpected":true}"#] {
+            let mut r = rig();
+            let cached = r.panel.view().tailscale.unwrap().status;
+            r.panel.visibility_changed(false);
+            r.panel.visibility_changed(true);
+            r.bench.all_stale();
+            // set_text is a fresh successful command result, distinct from a
+            // missing reading or unusable executable. Parsing must gate it.
+            r.bench.set_text(r.ts, text);
+            r.panel.update(&r.bench.samples());
+            assert_eq!(r.panel.view().tailscale.unwrap().status, cached, "cached pixels stay visible");
+            assert!(click(&mut r.panel, &RowKey::Tailscale).effects().is_empty(),
+                "invalid fresh status must not execute the cached Running state's down action: {text:?}");
+            assert!(!r.panel.needs_sampling(), "a declined click creates no reconciliation work");
+
+            r.bench.all_stale();
+            r.bench.set_text(r.ts, TS_STOPPED);
+            r.panel.update(&r.bench.samples());
+            let (program, args, then) = run_of(click(&mut r.panel, &RowKey::Tailscale));
+            assert_eq!(program, "tailscale");
+            assert_eq!(args, ["up"], "recovery uses the new status, not cached Running");
+            assert_eq!(then, Some(r.ts));
+        }
+    }
+
+    #[test]
+    fn malformed_status_also_revokes_authority_after_a_valid_opening_sample() {
+        let mut r = rig();
+        r.panel.visibility_changed(true);
+        r.bench.all_stale();
+        r.bench.set_text(r.ts, TS_RUNNING);
+        r.panel.update(&r.bench.samples());
+        r.bench.all_stale();
+        r.bench.set_text(r.ts, "");
+        r.panel.update(&r.bench.samples());
+        assert!(click(&mut r.panel, &RowKey::Tailscale).effects().is_empty());
+        assert_eq!(r.panel.view().tailscale.unwrap().status.unwrap().backend, BackendState::Running);
     }
 
     /// Panel-local center of a row, for synthetic clicks.

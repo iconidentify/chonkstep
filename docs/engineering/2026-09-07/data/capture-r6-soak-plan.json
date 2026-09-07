@@ -1,0 +1,33 @@
+{
+  "seconds": 600,
+  "selection_stats": true,
+  "runner": "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/harness/run-frozen-soak.py",
+  "runner_sha256": "5f900b73fda264e5526fc19ce0e53be4f6ccfc83875d40a4be7ca09b7c8eca82",
+  "runner_change": "Preserve only the two explicitly named test controls after isolated_environment strips CHONKSTEP variables; product environment otherwise unchanged.",
+  "command": [
+    "python3",
+    "-B",
+    "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/harness/bench-pressure-memory-high.py",
+    "--output",
+    "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/capture-r6-soak-scope",
+    "--memory",
+    "2G",
+    "--cpus",
+    "2,3",
+    "--timeout-seconds",
+    "900",
+    "--",
+    "env",
+    "CHONKSTEP_SOAK_SECONDS=600",
+    "CHONKSTEP_SOAK_SELECTION_STATS=1",
+    "python3",
+    "-B",
+    "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/harness/run-frozen-soak.py",
+    "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/capture-r6-soak",
+    "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/capture-r6/release/chonkstep-wayland",
+    "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/capture-r6/release/deps/stability_soak-d9110e05cf7fbb84",
+    "--exact",
+    "real_desktop_churn_keeps_resources_bounded_and_protocols_responsive"
+  ],
+  "purpose": "Sustained private desktop/resource churn with a 2GiB safety ceiling and two physical cores; no synthetic memory pressure and no before/after timing claim."
+}

@@ -1,0 +1,79 @@
+{
+  "command": [
+    "python3",
+    "-B",
+    "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/harness/mixed-v2/bench-capture-mixed.py",
+    "--binary",
+    "capture-r6=/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/capture-r6/release/chonkstep-wayland",
+    "--binary",
+    "capture-r7=/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/capture-r7/release/chonkstep-wayland",
+    "--animation-probe",
+    "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/capture-r3/release/chonk-fullscreen-probe",
+    "--input-probe",
+    "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/capture-r3/release/chonk-input-probe",
+    "--payload-mib",
+    "1280",
+    "--churn-mib",
+    "32",
+    "--worker-seconds",
+    "800",
+    "--runs",
+    "3",
+    "--warm-opens",
+    "10",
+    "--idle-seconds",
+    "10",
+    "--motion-seconds",
+    "5",
+    "--settle-seconds",
+    "2",
+    "--output",
+    "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/comparison-r6-r7-2g-1280-mixed-capture"
+  ],
+  "unit": "chonk-capture-pressure-a2768eda00d9409ba1478f7d3608b683.scope",
+  "completed": true,
+  "oom_event_observed": false,
+  "launcher_returncode": 0,
+  "command_result": {
+    "returncode": 0,
+    "start_monotonic_ns": 328354945742165,
+    "end_monotonic_ns": 328729936818322
+  },
+  "cgroup_final_snapshot_available": true,
+  "deltas": {
+    "cpu.stat": {
+      "usage_usec": 295373706,
+      "user_usec": 274060541,
+      "system_usec": 21313164,
+      "nice_usec": 3331,
+      "core_sched.force_idle_usec": 0,
+      "nr_periods": 3750,
+      "nr_throttled": 0,
+      "throttled_usec": 0,
+      "nr_bursts": 0,
+      "burst_usec": 0
+    },
+    "cpu.pressure": {
+      "some_total_us": 12020496,
+      "full_total_us": 520889
+    },
+    "memory.events": {
+      "low": 0,
+      "high": 44656,
+      "max": 0,
+      "oom": 0,
+      "oom_kill": 0,
+      "oom_group_kill": 0
+    },
+    "memory.pressure": {
+      "some_total_us": 17576613,
+      "full_total_us": 14129964
+    }
+  },
+  "cleanup": {
+    "returncode": 5,
+    "stderr": "Failed to stop chonk-capture-pressure-a2768eda00d9409ba1478f7d3608b683.scope: Unit chonk-capture-pressure-a2768eda00d9409ba1478f7d3608b683.scope not loaded."
+  },
+  "passed": true,
+  "wall_seconds": 375.1812745190109
+}

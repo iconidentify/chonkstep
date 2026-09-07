@@ -1,0 +1,14 @@
+--- mixed-v1/bench-capture-mixed.py
++++ mixed-v2/bench-capture-mixed.py
+@@ -72,7 +72,10 @@
+ 
+ def screenshot(root, artifact, name):
+     output = artifact / f"{name}.png"
+-    (root / "state/chonkstep/screenshot").write_text(str(output))
++    marker = root / "state/chonkstep/screenshot"
++    staging = marker.with_name("screenshot.pending")
++    staging.write_text(str(output))
++    os.replace(staging, marker)
+     deadline = time.monotonic() + 10
+     while time.monotonic() < deadline:
+         if output.exists() and output.stat().st_size > 8:

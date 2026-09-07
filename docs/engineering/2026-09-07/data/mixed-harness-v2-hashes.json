@@ -1,0 +1,6 @@
+{
+  "harness/mixed-v2/bench-capture-mixed.py": "a3009482a2c36b1c51e8c8d44d039198bf81737ee9bee673bd6eb0e137bb21b4",
+  "harness/mixed-v2/bench-compositor-c74772d.py": "7fd16421e6f24964354f68d6342c437d06410eaf21295a1d114829edab33f8e7",
+  "harness/mixed-v2/mixed-capture-fixture.py": "1e6fe7e1b597ad8f10a89cb2d96b6067fa8738f5d618f9e177a962cc8f9b406b",
+  "harness/mixed-v2/test_mixed_capture_fixture.py": "923bb92bfb877448c5106b41326b12c12b5e85f280a529e6105e53c6e1af6c71"
+}

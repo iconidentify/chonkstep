@@ -1,0 +1,22 @@
+{
+  "label": "capture-r6",
+  "argv": [
+    "cargo",
+    "build",
+    "--release",
+    "--locked",
+    "-p",
+    "chonkstep-wayland",
+    "--features",
+    "memory-profile"
+  ],
+  "cwd": "/home/chrisk/src/chonkstep-capture-performance",
+  "started_utc": "2026-09-07T12:17:07.642569+00:00",
+  "version": "chonkstep-wayland 0.3.2\nsource: preview-v0.3.2-10-gc74772d-dirty\ndiagnostics: memory-profile (allocation counters enabled; not a timing baseline)\nbuild id: b3e9660ea8f7ebc0bdced6c2c4e14f1d6d8e93ef",
+  "sha256": "dbbdd005ef5e592edc79357e59ea54512cb243bd06f0672e794e000851ccb7d3",
+  "base": "c74772ddc7e00ce483d107235b8ff025f846d4a0",
+  "lock_sha256": "6a0c87b478b7573cf45ec43d3c952451197b1e12666de328052c9fbbc5e3d7aa",
+  "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)\nbinary: rustc\ncommit-hash: 48a229ceaefd4985c50990b14116b6d856af0985\ncommit-date: 2026-09-01\nhost: x86_64-unknown-linux-gnu\nrelease: 1.98.1\nLLVM version: 22.1.8\n",
+  "normal_source_freeze": "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/capture-r6/provenance.json",
+  "purpose": "allocation diagnostics only; do not report timing from this binary"
+}

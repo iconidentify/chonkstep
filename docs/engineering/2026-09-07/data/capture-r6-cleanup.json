@@ -1,0 +1,13 @@
+{
+  "utc": "2026-09-07T12:36:26.243776+00:00",
+  "fixture": "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/capture-r6-soak",
+  "scope": {
+    "unit": "chonk-capture-pressure-1913d740f7ca4c7cb785c197c5d0536e.scope",
+    "cgroup": "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice/chonk-capture-pressure-1913d740f7ca4c7cb785c197c5d0536e.scope",
+    "gone": true
+  },
+  "recorded_processes": [],
+  "invalid_saved_stat_records": [],
+  "complete": true,
+  "limits": "Only recorded PID/start-time identities are checked. A gone owned cgroup additionally covers all fixture descendants that inherited its boundary. No process is signalled."
+}

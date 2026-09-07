@@ -27,6 +27,7 @@
 //!   file carries the same extension, so it adds nothing to the
 //!   identity that launcher pins persist.
 
+use std::collections::{hash_map::Entry, HashMap};
 use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -206,19 +207,30 @@ fn desktop_stem(path: &Path) -> Option<&str> {
 /// with `Hidden=true` shadows the system file of the same id first,
 /// and only then gets dropped by the parser — removing the app from
 /// the menu entirely instead of letting the system copy resurface.
-fn collate_scanned(sources: Vec<(usize, String, String)>, program_exists: &dyn Fn(&str) -> bool) -> Vec<AppEntry> {
-    // Linear scan instead of a map: a real system carries a few hundred
-    // entries at most, and this keeps first-seen tie-breaking obvious.
-    let mut chosen: Vec<(usize, String, String)> = Vec::new();
+fn collate_scanned(
+    sources: Vec<(usize, String, String)>,
+    program_exists: &dyn Fn(&str) -> bool,
+) -> Vec<AppEntry> {
+    // Index by id so a large installed application set does not search
+    // every earlier entry for every source. Replacing only a strictly
+    // lower rank preserves the first-seen winner within one directory.
+    // Move both strings into the map; duplicate ids need no extra copy.
+    let mut chosen: HashMap<String, (usize, String)> = HashMap::new();
     for (rank, id, text) in sources {
-        match chosen.iter_mut().find(|(_, chosen_id, _)| *chosen_id == id) {
-            Some(existing) if rank < existing.0 => *existing = (rank, id, text),
-            Some(_) => {}
-            None => chosen.push((rank, id, text)),
+        match chosen.entry(id) {
+            Entry::Occupied(mut existing) if rank < existing.get().0 => {
+                existing.insert((rank, text));
+            }
+            Entry::Occupied(_) => {}
+            Entry::Vacant(slot) => {
+                slot.insert((rank, text));
+            }
         }
     }
-    let mut entries: Vec<AppEntry> =
-        chosen.iter().filter_map(|(_, id, text)| parse_with_lookup(id, text, program_exists)).collect();
+    let mut entries: Vec<AppEntry> = chosen
+        .into_iter()
+        .filter_map(|(id, (_, text))| parse_with_lookup(&id, &text, program_exists))
+        .collect();
     // Case-insensitive by name so "gimp" files next to "GIMP"; id as the
     // tie-break keeps equal names deterministic across runs.
     entries.sort_by_cached_key(|e| (e.name.to_lowercase(), e.id.clone()));
@@ -840,6 +852,128 @@ mod tests {
     fn collation_passes_the_tryexec_seam_through_to_parsing() {
         let sources = vec![(0, "app".to_string(), app_fixture("TryExec=absent"))];
         assert!(collate_scanned(sources, &|_| false).is_empty());
+    }
+
+    /// The previous collation algorithm, retained only as a behavioral
+    /// oracle and timing baseline. This deliberately does not share the
+    /// indexed deduplication used in production.
+    fn collate_linear(sources: Vec<(usize, String, String)>) -> Vec<AppEntry> {
+        let mut chosen: Vec<(usize, String, String)> = Vec::new();
+        for (rank, id, text) in sources {
+            match chosen.iter_mut().find(|(_, chosen_id, _)| *chosen_id == id) {
+                Some(existing) if rank < existing.0 => *existing = (rank, id, text),
+                Some(_) => {}
+                None => chosen.push((rank, id, text)),
+            }
+        }
+        let mut entries: Vec<_> = chosen
+            .iter()
+            .filter_map(|(_, id, text)| parse_with_lookup(id, text, &|program| program != "absent"))
+            .collect();
+        entries.sort_by_cached_key(|entry| (entry.name.to_lowercase(), entry.id.clone()));
+        entries
+    }
+
+    fn collation_fixture(count: usize) -> Vec<(usize, String, String)> {
+        let mut sources = Vec::with_capacity(count * 4);
+        for index in 0..count {
+            let id = format!("org.example.app-{index:05}");
+            // Equal names exercise the final id tie-break, independent
+            // of randomized hash iteration. Every source layer also
+            // supplies a different executable, making wrong winners
+            // observable even when the labels match.
+            let source = |rank: usize, extra: &str| {
+                (
+                    rank,
+                    id.clone(),
+                    format!(
+                        "[Desktop Entry]\nType=Application\nName={}\nExec=layer-{rank}-{index}\n{extra}\n",
+                        ["Alpha", "alpha", "βeta", "zeta"][index % 4]
+                    ),
+                )
+            };
+            sources.push(source(3, ""));
+            let extra = match index % 7 {
+                0 => "Hidden=true",
+                1 => "TryExec=absent",
+                2 => "NoDisplay=true",
+                3 => "Exec=", // an invalid override also hides its system copy
+                _ => "",
+            };
+            sources.push(source(0, extra));
+            sources.push(source(0, "Exec=same-rank-later"));
+            sources.push(source(2, ""));
+        }
+        sources
+    }
+
+    #[test]
+    fn indexed_collation_preserves_overrides_and_sorting_for_large_shuffled_catalogues() {
+        let mut sources = collation_fixture(1024);
+        // Fixed-seed Fisher-Yates keeps the fixture reproducible while
+        // mixing directory ranks and same-rank ties throughout it.
+        let mut random = 0x613e_8c5b_u64;
+        for index in (1..sources.len()).rev() {
+            random = random.wrapping_mul(6364136223846793005).wrapping_add(1);
+            sources.swap(index, (random as usize) % (index + 1));
+        }
+        let expected = collate_linear(sources.clone());
+        assert!(!expected.is_empty());
+        for _ in 0..3 {
+            // Each call gets a new randomized map seed. Output order
+            // and the selected entry must remain identical every time.
+            assert_eq!(
+                collate_scanned(sources.clone(), &|program| program != "absent"),
+                expected
+            );
+        }
+    }
+
+    /// Pure collation only: excludes fixture construction, directory
+    /// I/O and real TryExec probes. This measures the changed algorithm,
+    /// not whole-session startup, and imposes no flaky timing threshold.
+    #[test]
+    #[ignore = "manual collation timing; run with --release --ignored --nocapture"]
+    fn benchmark_application_collation() {
+        use std::hint::black_box;
+        use std::time::Instant;
+
+        for count in [64, 512, 4096] {
+            let sources = collation_fixture(count);
+            let expected = collate_linear(sources.clone());
+            let mut linear = Vec::new();
+            let mut indexed = Vec::new();
+            for round in 0..8 {
+                // Alternate order to avoid consistently giving one
+                // algorithm the warmer caches. Clone outside timing.
+                for use_index in [round % 2 == 0, round % 2 != 0] {
+                    let input = sources.clone();
+                    let start = Instant::now();
+                    let entries = if use_index {
+                        collate_scanned(black_box(input), &|program| program != "absent")
+                    } else {
+                        collate_linear(black_box(input))
+                    };
+                    let elapsed = start.elapsed();
+                    assert_eq!(black_box(&entries), &expected);
+                    if round != 0 {
+                        if use_index {
+                            indexed.push(elapsed);
+                        } else {
+                            linear.push(elapsed);
+                        }
+                    }
+                }
+            }
+            linear.sort_unstable();
+            indexed.sort_unstable();
+            eprintln!(
+                "application collation: {count} ids, {} sources, linear median {:?}, indexed median {:?}",
+                sources.len(),
+                linear[linear.len() / 2],
+                indexed[indexed.len() / 2]
+            );
+        }
     }
 
     // -- filesystem walk (the one thin non-pure piece) --

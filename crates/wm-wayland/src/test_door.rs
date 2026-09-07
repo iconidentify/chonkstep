@@ -723,6 +723,10 @@ fn handle_command(line: &str, stream: &mut UnixStream, comp: &mut Compositor) {
             let lock = comp.wm.backend().lock_surfaces.len();
             let _ = stream.write_all(format!("protocol-ledgers ime={ime} idle={idle} lock={lock}\n").as_bytes());
         }
+        Some("capture-cache") => {
+            let (entries, pixel_bytes) = crate::protocols::capture_cache_statistics(comp);
+            let _ = stream.write_all(format!("capture-cache entries={entries} pixel_bytes={pixel_bytes}\n").as_bytes());
+        }
         Some("protocol-publishes") => {
             let metrics = comp.protocol_publish_metrics;
             let _ = stream.write_all(

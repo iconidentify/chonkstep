@@ -1,0 +1,420 @@
+{
+  "ready_to_run": true,
+  "status": "frozen r7 and unchanged workload verified; root granted exclusive timing slot",
+  "sequence": [
+    "mixed-2g-1280"
+  ],
+  "checks": {
+    "chonk-fullscreen-probe": {
+      "path": "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/capture-r3/release/chonk-fullscreen-probe",
+      "sha256": "63c0e39a80e4ce37064f18c67cdc4a11eed89fd851e3eafd10c0678c95efde0e",
+      "same_bytes_as_r5_client": true,
+      "same_bytes_as_r6_client": true,
+      "same_bytes_as_r7_client": true
+    },
+    "chonk-input-probe": {
+      "path": "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/capture-r3/release/chonk-input-probe",
+      "sha256": "9e6e3343bbaef1203ce46198125552c019fd073e1d96b4d827442e84b107e945",
+      "same_bytes_as_r5_client": true,
+      "same_bytes_as_r6_client": true,
+      "same_bytes_as_r7_client": true
+    },
+    "harness/bench-pressure-memory-high.py": {
+      "path": "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/harness/bench-pressure-memory-high.py",
+      "sha256": "8472c85b279d183b93d6ebd941fd930e7bb0b69a5e2935680d0fb071642908ad"
+    },
+    "foot": {
+      "path": "/usr/bin/foot",
+      "sha256": "79ce907b8c00ab1dec254d5b954365c7212f00d67ce54e876799c8706da1d4e5",
+      "same_as_calibration": true
+    },
+    "capture-r6": {
+      "path": "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/capture-r6/release/chonkstep-wayland",
+      "sha256": "315598fbe0b8a49eec2e0c3654331472dfd67c2f5946aaef54caa9077ab6da8f",
+      "provenance_sha256": "2694bd0b874435c089081723840ac11795ff5e28a3ab4e712047c92a3e8f177e"
+    },
+    "harness/mixed-v2/bench-capture-mixed.py": {
+      "path": "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/harness/mixed-v2/bench-capture-mixed.py",
+      "sha256": "a3009482a2c36b1c51e8c8d44d039198bf81737ee9bee673bd6eb0e137bb21b4"
+    },
+    "harness/mixed-v2/bench-compositor-c74772d.py": {
+      "path": "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/harness/mixed-v2/bench-compositor-c74772d.py",
+      "sha256": "7fd16421e6f24964354f68d6342c437d06410eaf21295a1d114829edab33f8e7"
+    },
+    "harness/mixed-v2/mixed-capture-fixture.py": {
+      "path": "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/harness/mixed-v2/mixed-capture-fixture.py",
+      "sha256": "1e6fe7e1b597ad8f10a89cb2d96b6067fa8738f5d618f9e177a962cc8f9b406b"
+    },
+    "harness/mixed-v2/test_mixed_capture_fixture.py": {
+      "path": "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/harness/mixed-v2/test_mixed_capture_fixture.py",
+      "sha256": "923bb92bfb877448c5106b41326b12c12b5e85f280a529e6105e53c6e1af6c71"
+    },
+    "capture-r7": {
+      "path": "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/capture-r7/release/chonkstep-wayland",
+      "sha256": "f58b224a46a354be407d60780f120de90d9e6a488f99766058ac266b230ca31a",
+      "provenance_sha256": "3d2ed5012720b1b32cd0588994709d4b9b9743d0bcb568fa22ba2f39cbc6a0c3"
+    }
+  },
+  "datasets": [
+    {
+      "name": "mixed-2g-1280",
+      "measurement_command": [
+        "python3",
+        "-B",
+        "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/harness/bench-pressure-memory-high.py",
+        "--memory",
+        "2G",
+        "--memory-high-percent",
+        "75",
+        "--cpus",
+        "2,3",
+        "--timeout-seconds",
+        "900",
+        "--output",
+        "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/comparison-r6-r7-2g-1280-mixed-scope",
+        "--",
+        "python3",
+        "-B",
+        "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/harness/mixed-v2/bench-capture-mixed.py",
+        "--binary",
+        "capture-r6=/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/capture-r6/release/chonkstep-wayland",
+        "--binary",
+        "capture-r7=/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/capture-r7/release/chonkstep-wayland",
+        "--animation-probe",
+        "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/capture-r3/release/chonk-fullscreen-probe",
+        "--input-probe",
+        "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/capture-r3/release/chonk-input-probe",
+        "--payload-mib",
+        "1280",
+        "--churn-mib",
+        "32",
+        "--worker-seconds",
+        "800",
+        "--runs",
+        "3",
+        "--warm-opens",
+        "10",
+        "--idle-seconds",
+        "10",
+        "--motion-seconds",
+        "5",
+        "--settle-seconds",
+        "2",
+        "--output",
+        "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/comparison-r6-r7-2g-1280-mixed-capture"
+      ],
+      "result_directories": [
+        "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/comparison-r6-r7-2g-1280-mixed-scope",
+        "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/comparison-r6-r7-2g-1280-mixed-capture"
+      ],
+      "analysis_commands": [
+        [
+          "python3",
+          "-B",
+          "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/harness/summarize-normal-pairs.py",
+          "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/comparison-r6-r7-2g-1280-mixed-capture",
+          "--before",
+          "capture-r6",
+          "--after",
+          "capture-r7",
+          "--output",
+          "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/comparison-r6-r7-2g-1280-mixed-capture/paired-summary.json"
+        ],
+        [
+          "python3",
+          "-B",
+          "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/harness/summarize-mixed-comparison.py",
+          "--scope",
+          "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/comparison-r6-r7-2g-1280-mixed-scope",
+          "--fixture",
+          "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/comparison-r6-r7-2g-1280-mixed-capture",
+          "--output",
+          "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/comparison-r6-r7-2g-1280-mixed-capture/pressure-analysis.json"
+        ],
+        [
+          "python3",
+          "-B",
+          "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/harness/summarize-matched-pressure-compact.py",
+          "--scope",
+          "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/comparison-r6-r7-2g-1280-mixed-scope",
+          "--fixture",
+          "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/comparison-r6-r7-2g-1280-mixed-capture",
+          "--before",
+          "capture-r6",
+          "--after",
+          "capture-r7",
+          "--calibration",
+          "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/mixed-calibration-summary.json",
+          "--output",
+          "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/comparison-r6-r7-2g-1280-mixed-capture/compact-pressure-report.json"
+        ],
+        [
+          "python3",
+          "-B",
+          "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/harness/summarize-frame-stage-comparison.py",
+          "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/comparison-r6-r7-2g-1280-mixed-capture",
+          "--before",
+          "capture-r6",
+          "--after",
+          "capture-r7",
+          "--output",
+          "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/comparison-r6-r7-2g-1280-mixed-capture/frame-stage-analysis.json"
+        ]
+      ],
+      "cleanup_command": [
+        "python3",
+        "-B",
+        "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/harness/verify-fixture-cleanup.py",
+        "--fixture",
+        "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/comparison-r6-r7-2g-1280-mixed-capture",
+        "--output",
+        "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/campaign-r6-r7-2g-prepared/mixed-2g-1280-cleanup.json",
+        "--scope",
+        "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/comparison-r6-r7-2g-1280-mixed-scope"
+      ],
+      "expected_process_pairs": 3,
+      "expected_labels": [
+        "capture-r6",
+        "capture-r7"
+      ],
+      "state": "ready"
+    }
+  ],
+  "frozen_memory_payload_mib": {
+    "2G": 1280
+  },
+  "source_expectation": "Root proposes one extra nonblocking native-client flush before Winit render attempts only. Verify final frozen product source diff; no causal or performance conclusion is assumed.",
+  "notes": [
+    "Three alternating r6/r7 process pairs use exactly the preserved mixed-v2 harness, r3-frozen animation/input clients, foot, 2G MemoryMax, 75% MemoryHigh, swap0, affinity2,3, CPUQuota200%, LP_NUM_THREADS2, retained1280MiB plus32MiB churn.",
+    "All earlier baseline/r6 datasets and calibration remain preserved. This comparison isolates the additional r7 source change, not the original capture optimization.",
+    "Retain input-before/after, all warm opens, draw/resize endpoint barriers, frames/callbacks, sender lateness and per-build PSI. No 500ms gate implies hitch-free behavior.",
+    "Check PAUSE-AFTER-CURRENT before any next stage. Stop and preserve all evidence on failure.",
+    "Root confirms r7 pre-render flush duration enters the existing flush_us accumulator; report r6 end-only versus r7 aggregate pre+end, without treating render_attempts as an exact measured scan count."
+  ],
+  "analysis_sources": {
+    "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/harness/summarize-normal-pairs.py": "211cead147889bc031ff68558583e7f7c93c0f5d0425a6ea325f881026f6a15e",
+    "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/harness/summarize-mixed-comparison.py": "40f2aa692822f11ccbfe73f01b6b3ca233b18f39f3c2d3354de3e5dfe76740e4",
+    "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/harness/summarize-matched-pressure-compact.py": "86fb311f6e02964dbf80adcbf2fb90544bc2825557072b8549a8735c42099e33",
+    "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/harness/verify-fixture-cleanup.py": "aacdf155299cd8359f0400e09125815beee30557baed8ba0b14d65e9a0bd4c10",
+    "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/harness/summarize-frame-stage-comparison.py": "097802bf36d1ba9d9b045246d43b3ee42ebec52fe9693f37d5ac7a836773de93"
+  },
+  "source_comparison_r6_r7": {
+    "recorded_production_changes": {
+      "crates/wm-wayland/src/state.rs": [
+        "0e9c609281d5d7df8f058d78d6335a893249fb98a946ca2b3e21b3182937b5e9",
+        "c1bc55d5ffb3ce690fa260e2396441f53841128867c945a4dfa80d9f889e0ca6"
+      ]
+    },
+    "all_recorded_changes": {
+      "crates/chonk-testkit/tests/capture_tool.rs": [
+        "6c4e771e9de2e8754166854c61cc7d8d3065f15a14bdcd6f0c87e4a3e7e718df",
+        "97d4dc4b06e25374037f7ccbd6ca138b3c31820124c6299280f7520e36f5e0d6"
+      ],
+      "crates/wm-wayland/src/state.rs": [
+        "0e9c609281d5d7df8f058d78d6335a893249fb98a946ca2b3e21b3182937b5e9",
+        "c1bc55d5ffb3ce690fa260e2396441f53841128867c945a4dfa80d9f889e0ca6"
+      ],
+      "docs/engineering/2026-09-07-performance-audit-render-input.md": [
+        "3dfae54777c5e50c58bb1b742e644e227d7254fea258380dda9d1f44822f6a1b",
+        "5646c54d9e970b8197ae534032eb1b38fdf77fca1db857e6536353499df77c66"
+      ],
+      "docs/engineering/2026-09-07/audit-startup-memory.md": [
+        "0741a892b1bc07fc69d96040bf2104b27ed9e733781171914e2622c129d98597",
+        "c618f5ca3e9b30014f9c3df20610bc4371f25d4f9927aa800d072f6afd104ac6"
+      ],
+      "docs/engineering/2026-09-07/capture-performance.md": [
+        "80d68ace7056af4fc2d5325bcdb993a269c73d355c823f7a27f255e89cee015c",
+        "fa5d914ff92c8c54957d16d6d2aea88defa89ef7575d414ef9fe97e3ca09205d"
+      ],
+      "docs/engineering/2026-09-07/data/README.md": [
+        "b72a5a5fe9480a67f1cfe3f84905af79d9c9b41ea651105041d59b497eefac05",
+        "d314793cfac0bc1d4723145573c33dfd15314ec3d269a6de4a75b2ab74df3409"
+      ],
+      "docs/engineering/2026-09-07/data/baseline-memory-profile-build-metadata.json": [
+        null,
+        "1a50fb202b90c98911ec6cfbacc77d758b23c6162e8f6d04a47bda1cd21a3719"
+      ],
+      "docs/engineering/2026-09-07/data/capture-r6-1g-512-REPORT.md": [
+        null,
+        "3163e372abf257e95e41d5cf358d12ec081479768043e4b8fb302ad849b58a10"
+      ],
+      "docs/engineering/2026-09-07/data/capture-r6-1g-512-cleanup.json": [
+        null,
+        "9355527292f823a2927b1adb101fe8b0d2515c3a64db87dbb011a11e4aa3d51d"
+      ],
+      "docs/engineering/2026-09-07/data/capture-r6-1g-512-compact-pressure-report.json": [
+        null,
+        "fe0e89620b282954edbede6e879e3b9dae5e1c88065e2c4dcb00b8a10267c865"
+      ],
+      "docs/engineering/2026-09-07/data/capture-r6-1g-512-metadata.json": [
+        null,
+        "c2e058e362a69cb45fc79ad1c45fac432ad793efbfe209458915cc5031940159"
+      ],
+      "docs/engineering/2026-09-07/data/capture-r6-1g-512-paired-summary.json": [
+        null,
+        "47055af5db5a019a6e7cc73c35cf37e747c7dc9eed98ee0e343b40affa2783f3"
+      ],
+      "docs/engineering/2026-09-07/data/capture-r6-1g-512-scope-job.json": [
+        null,
+        "a21fa8b1e1e17c59e2e04eea57e678f7f1ce9cf93801741cecc51133cc037d99"
+      ],
+      "docs/engineering/2026-09-07/data/capture-r6-1g-512-scope-result.json": [
+        null,
+        "40e07f32ce2a792b11234c93590cc44a99d454faf4b6476806e73472fa59eb22"
+      ],
+      "docs/engineering/2026-09-07/data/capture-r6-1g-512-summary.json": [
+        null,
+        "b51d8c67f6c373770e6c5338c898f0236491fc9fe87f685663df290bc67aaaf7"
+      ],
+      "docs/engineering/2026-09-07/data/capture-r6-2g-1280-REPORT.md": [
+        null,
+        "33582317fcd4a54225a324cb42f5175ccb28902e7dc46a24d3bd98d4e3d8ef21"
+      ],
+      "docs/engineering/2026-09-07/data/capture-r6-2g-1280-adverse-analysis.json": [
+        null,
+        "14342dfafbc461224cec00a848f162adda74fda1859a5d3ecf150288399c20e7"
+      ],
+      "docs/engineering/2026-09-07/data/capture-r6-2g-1280-cleanup.json": [
+        null,
+        "bbf01979065ef087765c9c30c9478396731974c410b50bfe9682d6739c8823b8"
+      ],
+      "docs/engineering/2026-09-07/data/capture-r6-2g-1280-compact-pressure-report.json": [
+        null,
+        "a1fba8fa27c729c830e07ee52907a5b6b12509011c5f2a7ee84b7e59245015de"
+      ],
+      "docs/engineering/2026-09-07/data/capture-r6-2g-1280-metadata.json": [
+        null,
+        "463b1281f226a6303fbd7254f023a69e8dad4faf9b1b04eb1ebc89f44f90e7d3"
+      ],
+      "docs/engineering/2026-09-07/data/capture-r6-2g-1280-paired-summary.json": [
+        null,
+        "6408eac95befea13fcc31cf0b35bd7fecc7f483d0e3c68f1fb8d2031f67a0d1d"
+      ],
+      "docs/engineering/2026-09-07/data/capture-r6-2g-1280-scope-job.json": [
+        null,
+        "38962c0e9b7b7cda09232381dc36bbec1891aea450d83d9e40e4f0961bcab3a0"
+      ],
+      "docs/engineering/2026-09-07/data/capture-r6-2g-1280-scope-result.json": [
+        null,
+        "545962edec41c2df9ba5550db943ece6fbd49ca996f534d85822beecf63038c3"
+      ],
+      "docs/engineering/2026-09-07/data/capture-r6-2g-1280-summary.json": [
+        null,
+        "6068caaeb9dad75a3da8e44a5f10537ee164d4f8af999750e52c305a10b95a99"
+      ],
+      "docs/engineering/2026-09-07/data/capture-r6-cleanup.json": [
+        null,
+        "1eb102b48b616f3f221aa4dc8d8300c7b1d0e8b371bbaeebf9e1eb0d4e2a30f6"
+      ],
+      "docs/engineering/2026-09-07/data/capture-r6-memory-REPORT.md": [
+        null,
+        "902f129a52ff56d756b9fd35b2fc6df715d3ff795e7705a0aad5fff870fa84b5"
+      ],
+      "docs/engineering/2026-09-07/data/capture-r6-memory-allocation-summary.json": [
+        null,
+        "8515fc115d73fac874f6e1131ac0bbd069a90fbc87345c0a7b32a97b4d80f87d"
+      ],
+      "docs/engineering/2026-09-07/data/capture-r6-memory-cleanup.json": [
+        null,
+        "9a4087242e66bef65b8e0583a74682e4ebc25a210bc46c4439384596b6933665"
+      ],
+      "docs/engineering/2026-09-07/data/capture-r6-memory-execution.json": [
+        null,
+        "f8000b11f81e6baeacbf50b7dbf3060443ecab855649a279f08e561e8a398e36"
+      ],
+      "docs/engineering/2026-09-07/data/capture-r6-memory-metadata.json": [
+        null,
+        "2635c84321b13158c2cb7802d82007c702528ba2d9b4e14ddbbc4d42dc1c904c"
+      ],
+      "docs/engineering/2026-09-07/data/capture-r6-memory-preflight.json": [
+        null,
+        "dfffda40e93421503f40a45cc1e56465cbcd7a05b19e664cf854e5b72693d037"
+      ],
+      "docs/engineering/2026-09-07/data/capture-r6-memory-profile-build-metadata.json": [
+        null,
+        "6376dae6d5df4ade229672bc7201343bc5af1d935185eb434e368c51a8adcffb"
+      ],
+      "docs/engineering/2026-09-07/data/capture-r6-ordinary-restored.json": [
+        null,
+        "dcf8ae11cb8be4e6fe69d593fc743b87fd6c5ecc2455daa17b4a283979ef78a1"
+      ],
+      "docs/engineering/2026-09-07/data/capture-r6-pressure-execution.json": [
+        null,
+        "7bfb519c1ed32a01394fcef0990d8afc3932b3867aaa5d0e1048f1d68373a5c3"
+      ],
+      "docs/engineering/2026-09-07/data/capture-r6-pressure-plan.json": [
+        null,
+        "8f2c9f97793d1fa3f3fb6a296acc0cf92c2e3af4b18b6830121376182ab958fb"
+      ],
+      "docs/engineering/2026-09-07/data/capture-r6-soak-plan.json": [
+        null,
+        "c83e3d4d550e9b261ba720c6ae7ae937a5026190b8f8387551f92a2aa3e666f9"
+      ],
+      "docs/engineering/2026-09-07/data/capture-r6-soak-samples.jsonl": [
+        null,
+        "ecd17be487bf664d6fa3806caac468e4bf140be351575b139fa64201435b4e17"
+      ],
+      "docs/engineering/2026-09-07/data/capture-r6-soak-scope-job.json": [
+        null,
+        "0d78d0026a5c63be918b48ec8b8360e483342392bec7d7c07a4393f5c696cc8c"
+      ],
+      "docs/engineering/2026-09-07/data/capture-r6-soak-scope-result.json": [
+        null,
+        "a0c5e11a4efe5bdce9999a23ce8f48083d7917027b57695cf5f076a7d8ce278f"
+      ],
+      "docs/engineering/2026-09-07/data/capture-r6-soak-summary.json": [
+        null,
+        "cd344a683428885c04ca5d78f26a279904cfaa2e35d766897250edd59ed82e03"
+      ],
+      "docs/engineering/2026-09-07/data/mixed-harness-v2-NOTE.md": [
+        null,
+        "cca855e9118c4b8da79dfec9f83d902b1f0bac422385fdf8eb64b06df16e7ce4"
+      ],
+      "docs/engineering/2026-09-07/data/mixed-harness-v2-hashes.json": [
+        null,
+        "faae2c67e865be9c1f7774a258260795e4c80ac5c99aca4003abaa0cd2bc9977"
+      ],
+      "docs/engineering/2026-09-07/data/mixed-harness-v2-publication.diff": [
+        null,
+        "0a551e0e0d852f406067d6e9f1eff40267eee93be2a0833e22d3af4d3047e551"
+      ],
+      "docs/engineering/2026-09-07/data/normal-v2-NOTE.md": [
+        null,
+        "6716deadb8769177c06029e5bb076acbae0ddd17dea6d8fcba9ca4215e0ff31f"
+      ],
+      "docs/engineering/2026-09-07/data/normal-v2-hashes.json": [
+        null,
+        "9bd460ecb885508293a7e863ecd414f8d2417c37c3f8b15624d2e0c3b0696891"
+      ],
+      "docs/engineering/2026-09-07/data/normal-v2-publication.diff": [
+        null,
+        "d896d82a3212a22be30080d1758e103c89318ddc50447de21e515b5512e6b678"
+      ],
+      "docs/engineering/2026-09-07/data/validation-checkpoints.json": [
+        null,
+        "f46593e23f4317ff3342dccfca97de3dabfb88da43977efd2c7da43a79d4a771"
+      ],
+      "docs/engineering/2026-09-07/mixed-workload.md": [
+        null,
+        "4d23d22289b015ab9141a8e0ccecdc74a59735cbf3d5ec1f704f459042b83ae3"
+      ],
+      "scripts/bench-capture-mixed.py": [
+        null,
+        "2da054697384570dbb3f54c3f4983ebfa65ab0013b6b22778fc3bf6ad4a08cfd"
+      ],
+      "scripts/bench-capture.py": [
+        "ceb1bec414257d18e28f3d3c386c7b5335365c76cdaceee96441e6271241b6c9",
+        "345d529a557e035056bb7455b3b5113796053bccef959f0baeb5da40ed441591"
+      ],
+      "scripts/mixed-capture-fixture.py": [
+        null,
+        "1e6fe7e1b597ad8f10a89cb2d96b6067fa8738f5d618f9e177a962cc8f9b406b"
+      ],
+      "scripts/tests/test_mixed_capture_fixture.py": [
+        null,
+        "b05d6adb798a7640d4ecee5b2e3686c19cbb4b771e0dbb63f76482683f496487"
+      ]
+    }
+  },
+  "authorized_utc": "2026-09-07T12:52:41.018771+00:00"
+}

@@ -1,0 +1,18 @@
+
+running 1 test
+test capture_tool::worker::png_tests::benchmark_png_streaming ... PNG 1920x1080 noise=false streaming=false: 26 allocations, 23040945 requested bytes, 2594783 encoded bytes
+PNG 1920x1080 noise=false streaming=true: 3 allocations, 138753 requested bytes, 2595251 encoded bytes
+PNG 1920x1080 noise=false: old median 11.463878ms, stream median 12.201485ms; pure encoding, excludes filesystem/fsync, fixture and active allocation counting
+PNG 1920x1080 noise=true streaming=false: 41 allocations, 92467946 requested bytes, 8296178 encoded bytes
+PNG 1920x1080 noise=true streaming=true: 3 allocations, 138753 requested bytes, 9034500 encoded bytes
+PNG 1920x1080 noise=true: old median 17.495804ms, stream median 17.565901ms; pure encoding, excludes filesystem/fsync, fixture and active allocation counting
+PNG 3840x2160 noise=false streaming=false: 28 allocations, 92116056 requested bytes, 10373484 encoded bytes
+PNG 3840x2160 noise=false streaming=true: 3 allocations, 146433 requested bytes, 10375380 encoded bytes
+PNG 3840x2160 noise=false: old median 51.737116ms, stream median 47.603706ms; pure encoding, excludes filesystem/fsync, fixture and active allocation counting
+PNG 3840x2160 noise=true streaming=false: 44 allocations, 369783766 requested bytes, 33182358 encoded bytes
+PNG 3840x2160 noise=true streaming=true: 3 allocations, 146433 requested bytes, 36137304 encoded bytes
+PNG 3840x2160 noise=true: old median 117.104962ms, stream median 69.881175ms; pure encoding, excludes filesystem/fsync, fixture and active allocation counting
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 277 filtered out; finished in 2.51s
+

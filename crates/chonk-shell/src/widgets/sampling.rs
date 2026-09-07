@@ -65,6 +65,7 @@ use chonk_dock_widget::{Reading, Samples, Slot, Source, SourceId, TreeEntry};
 pub(crate) struct SamplerRegistry {
     samplers: Vec<Sampler>,
     active: bool,
+    periodic: Vec<bool>,
     /// Per source, the sampler generation already folded into
     /// `snapshot`. Parallel to `samplers`, as is `snapshot`; three
     /// vectors indexed by [`SourceId`] rather than one vector of
@@ -91,7 +92,7 @@ enum Sampler {
 
 impl SamplerRegistry {
     pub(crate) fn new() -> Self {
-        Self { samplers: Vec::new(), active: true, seen: Vec::new(), snapshot: Vec::new() }
+        Self { samplers: Vec::new(), active: true, periodic: Vec::new(), seen: Vec::new(), snapshot: Vec::new() }
     }
 
     /// Hidden docks retain their readings but do no background sampling.
@@ -130,11 +131,42 @@ impl SamplerRegistry {
                     Source::Clock { interval } => Sampler::Clock { granularity: interval.as_secs().max(1) },
                 };
                 self.samplers.push(sampler);
+                self.periodic.push(true);
                 self.seen.push(0);
                 self.snapshot.push(Slot::default());
                 SourceId::from_index(self.samplers.len() - 1)
             })
             .collect()
+    }
+
+    /// Stable source ids outlive every panel opening. Unchanged policy bits
+    /// cost no worker mutex operation on the compositor's regular tick.
+    pub(crate) fn set_periodic(&mut self, id: SourceId, periodic: bool) {
+        let Some(index) = id.index().filter(|&i| i < self.samplers.len()) else { return };
+        if self.periodic[index] == periodic {
+            return;
+        }
+        self.periodic[index] = periodic;
+        self.snapshot[index].fresh = false;
+        match &mut self.samplers[index] {
+            Sampler::Text(worker) => worker.set_periodic(periodic),
+            Sampler::Tree(worker) => worker.set_periodic(periodic),
+            Sampler::Clock { .. } => {}
+        }
+    }
+
+    /// A panel may open while discovery or an action already keeps a source
+    /// active. Invalidate that old run too, rather than accepting it as the
+    /// fresh opening snapshot merely because its command completed later.
+    pub(crate) fn fresh_on_open(&mut self, id: SourceId, periodic: bool) {
+        let Some(index) = id.index().filter(|&i| i < self.samplers.len()) else { return };
+        self.periodic[index] = periodic;
+        self.snapshot[index].fresh = false;
+        match &mut self.samplers[index] {
+            Sampler::Text(worker) => worker.fresh_on_open(periodic),
+            Sampler::Tree(worker) => worker.fresh_on_open(periodic),
+            Sampler::Clock { .. } => self.snapshot[index].reading = Reading::Missing,
+        }
     }
 
     /// Pulls whatever the workers have finished into the snapshot and
@@ -174,6 +206,10 @@ impl SamplerRegistry {
                     None => slot.fresh = false,
                 },
                 Sampler::Clock { granularity } => {
+                    if !self.periodic[index] {
+                        slot.fresh = false;
+                        continue;
+                    }
                     let (h, m, s) = wall_clock(*granularity);
                     let reading = Reading::Clock(h, m, s);
                     slot.fresh = slot.reading != reading;
@@ -192,10 +228,16 @@ impl SamplerRegistry {
 
     /// A thread-safe nudge for one source, or `None` for a clock (which
     /// has no worker to wake and is never behind).
-    pub(crate) fn resampler(&self, id: SourceId) -> Option<Resampler> {
-        match id.index().and_then(|index| self.samplers.get(index))? {
-            Sampler::Text(worker) => Some(worker.resampler()),
-            Sampler::Tree(worker) => Some(worker.resampler()),
+    pub(crate) fn resampler(&mut self, id: SourceId) -> Option<Resampler> {
+        match id.index().and_then(|index| self.samplers.get_mut(index))? {
+            Sampler::Text(worker) => {
+                worker.ensure_started();
+                Some(worker.resampler())
+            }
+            Sampler::Tree(worker) => {
+                worker.ensure_started();
+                Some(worker.resampler())
+            }
             Sampler::Clock { .. } => None,
         }
     }
@@ -270,8 +312,8 @@ impl BackgroundCommand {
             // as if it were current. `bluetoothctl` with no `org.bluez`
             // on the bus does exactly that — blocks indefinitely,
             // silently — which is why the deadline below is not a
-            // nicety. Stdout is piped so it can be collected after the
-            // wait. Stderr is discarded, and that is a deliberate
+            // nicety. Stdout is drained while the command runs under
+            // that same deadline. Stderr is discarded, deliberately:
             // change from "wherever the shell's goes": a sampler runs
             // on a timer forever, so a command that complains on every
             // run does not report a problem — it floods the session
@@ -480,74 +522,143 @@ const RUN_DEADLINE: Duration = Duration::from_secs(120);
 /// before the tool wedged.
 const SAMPLE_DEADLINE: Duration = Duration::from_secs(8);
 
+/// Status replies are normally kilobytes. Allow large device/stream
+/// inventories without retaining unlimited output from a broken tool.
+/// Exceeding this limit fails the entire reading; a truncated JSON or
+/// text prefix must never be mistaken for a complete system snapshot.
+const SAMPLE_OUTPUT_LIMIT: usize = 4 * 1024 * 1024;
+
 /// Waits for `child` up to `deadline`, killing it if it overruns.
 /// `Some(stdout)` for a command that exited successfully within the
 /// deadline; `None` for every other outcome — non-zero exit, unreadable
-/// output, or the deadline.
+/// or oversized output, or the deadline.
 ///
-/// Polling rather than a `wait_timeout` from a crate: this is a worker
-/// thread with nothing else to do, the poll is a `waitpid(WNOHANG)`,
-/// and 20ms of latency on a command that takes hundreds of
-/// milliseconds is invisible. The alternative — a dependency whose job
-/// is one loop — is not worth it here.
-///
-/// One caveat the callers are built around: stdout is read *after* the
-/// child exits, so a command that writes more than a pipe buffer's
-/// worth (64KB) without exiting would block on the pipe and be killed
-/// at the deadline. Every sampler command here is a line-oriented
-/// status query measured in kilobytes; a source that needs to stream
-/// wants a different mechanism, not a bigger buffer.
+/// The pipe is nonblocking and drained while the child runs. Waiting
+/// for exit first deadlocks any legitimate reply larger than the pipe
+/// buffer; reading to EOF after exit can block forever if a descendant
+/// inherited stdout. Exit and EOF must both arrive before one deadline.
 fn wait_with_deadline(mut child: std::process::Child, program: &str, deadline: Duration) -> Option<String> {
+    use std::io::{ErrorKind, Read};
+    use std::os::fd::AsRawFd;
+
     let start = std::time::Instant::now();
+    let mut pipe = child.stdout.take();
+    if let Some(pipe) = &pipe {
+        let fd = pipe.as_raw_fd();
+        // SAFETY: ChildStdout owns this live descriptor for both calls.
+        // Preserve its existing flags and change only the read endpoint.
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+        let nonblocking = flags >= 0 && {
+            // SAFETY: the same ChildStdout still owns fd; the valid retrieved
+            // flags are preserved while enabling nonblocking reads.
+            unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) >= 0 }
+        };
+        if !nonblocking {
+            tracing::warn!(program, error = ?std::io::Error::last_os_error(), "could not make sampler output nonblocking");
+            reap_failed_command(&mut child);
+            return None;
+        }
+    }
+    let mut output = Vec::new();
+    let mut exited = false;
+    let mut buffer = [0u8; 16 * 1024];
     loop {
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                if !status.success() {
-                    return None;
-                }
-                // The child's stdout is a pipe only when the caller
-                // asked for one; a `spawn`ed command with inherited
-                // stdio has nothing to read and answers with an empty
-                // string, which its caller ignores.
-                let mut out = String::new();
-                if let Some(mut pipe) = child.stdout.take() {
-                    use std::io::Read;
-                    if pipe.read_to_string(&mut out).is_err() {
+        if start.elapsed() >= deadline {
+            if !exited {
+                reap_failed_command(&mut child);
+            }
+            tracing::warn!(program, ?deadline, "command or its output exceeded the deadline");
+            return None;
+        }
+        if let Some(reader) = &mut pipe {
+            let mut eof = false;
+            // A continuously writing tool must yield to deadline and
+            // exit checks. Four reads cap work per pass at 64 KiB.
+            for _ in 0..4 {
+                match reader.read(&mut buffer) {
+                    Ok(0) => {
+                        eof = true;
+                        break;
+                    }
+                    Ok(count) if count > SAMPLE_OUTPUT_LIMIT.saturating_sub(output.len()) => {
+                        tracing::warn!(program, limit = SAMPLE_OUTPUT_LIMIT, "sampler output exceeded its size limit");
+                        if !exited {
+                            reap_failed_command(&mut child);
+                        }
+                        return None;
+                    }
+                    Ok(count) => {
+                        let needed = output.len() + count;
+                        if needed > output.capacity() {
+                            // Geometric growth without letting Vec's
+                            // final doubling exceed the output budget.
+                            let capacity = output.capacity().saturating_mul(2).max(needed).min(SAMPLE_OUTPUT_LIMIT);
+                            output.reserve_exact(capacity - output.len());
+                        }
+                        output.extend_from_slice(&buffer[..count]);
+                    }
+                    Err(error) if error.kind() == ErrorKind::WouldBlock => break,
+                    Err(error) if error.kind() == ErrorKind::Interrupted => continue,
+                    Err(error) => {
+                        tracing::warn!(?error, program, "could not read sampler output");
+                        if !exited {
+                            reap_failed_command(&mut child);
+                        }
                         return None;
                     }
                 }
-                return Some(out);
             }
-            Ok(None) => {
-                if start.elapsed() >= deadline {
-                    // Kill, then reap: a killed child left unwaited is
-                    // a zombie, and this desktop runs for weeks.
-                    //
-                    // Audited exception to `clippy.toml`'s ban on
-                    // `Child::wait`, on both counts the ban names. The
-                    // thread: this function only ever runs on a dock
-                    // worker (a sampler's, or an effect's), never the
-                    // repaint thread — the whole point of the deadline
-                    // above is that this worker gets *unstuck*, so
-                    // trading the wait for a leaked zombie would be
-                    // undoing the fix. The duration: the child has just
-                    // been sent SIGKILL, which is not catchable, so
-                    // this is a reap of a process already on its way
-                    // out rather than a wait on one still working.
-                    let _ = child.kill();
-                    #[allow(clippy::disallowed_methods)]
-                    let _ = child.wait();
-                    tracing::warn!(program, ?deadline, "killing a command that never exited");
-                    return None;
-                }
-                std::thread::sleep(Duration::from_millis(20));
-            }
-            Err(error) => {
-                tracing::warn!(?error, program, "could not wait on a command; giving up on it");
-                return None;
+            if eof {
+                pipe = None;
             }
         }
+        if !exited {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    if !status.success() {
+                        return None;
+                    }
+                    exited = true;
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::warn!(?error, program, "could not wait on a command");
+                    reap_failed_command(&mut child);
+                    return None;
+                }
+            }
+        }
+        if exited && pipe.is_none() && start.elapsed() < deadline {
+            return String::from_utf8(output).ok();
+        }
+        let pause = deadline.saturating_sub(start.elapsed()).min(Duration::from_millis(20));
+        if let Some(pipe) = &pipe {
+            let mut poll = libc::pollfd { fd: pipe.as_raw_fd(), events: libc::POLLIN, revents: 0 };
+            // SAFETY: poll points to one initialized descriptor owned by
+            // `pipe`, which stays alive until the bounded call returns.
+            let ready = unsafe { libc::poll(&mut poll, 1, pause.as_millis().max(1) as libc::c_int) };
+            if ready < 0 && std::io::Error::last_os_error().kind() != ErrorKind::Interrupted {
+                tracing::warn!(program, error = ?std::io::Error::last_os_error(), "could not poll sampler output");
+                if !exited {
+                    reap_failed_command(&mut child);
+                }
+                return None;
+            }
+        } else {
+            // Effects discard stdout, and a command may close stdout
+            // before exiting. Either still needs its exit status.
+            std::thread::sleep(pause);
+        }
     }
+}
+
+fn reap_failed_command(child: &mut std::process::Child) {
+    // This function runs only on the sampler/effect worker. Kill before
+    // waiting so an overrun cannot keep running; wait consumes its exit
+    // status instead of leaking a zombie on each sampling interval.
+    let _ = child.kill();
+    #[allow(clippy::disallowed_methods)]
+    let _ = child.wait();
 }
 
 /// The sampler thread and the mailbox it drops results into, shared by
@@ -583,6 +694,7 @@ struct SampleState<T> {
     /// it acts on it.
     resample_now: bool,
     active: bool,
+    periodic: bool,
     stopping: bool,
     /// A sample belongs to the visibility period in which it started,
     /// not the one in which a slow command happened to finish. Old
@@ -617,7 +729,7 @@ impl<T: Clone + Send + 'static> Worker<T> {
         let shared = Arc::new(Shared {
             state: Mutex::new(SampleState {
                 reading: None, unusable: false, generation: 0, resample_now: false,
-                active: false, stopping: false,
+                active: false, periodic: true, stopping: false,
                 visibility_epoch: 0, reading_epoch: 0,
             }),
             wake: Condvar::new(),
@@ -646,17 +758,50 @@ impl<T: Clone + Send + 'static> Worker<T> {
             if state.active != active {
                 state.active = active;
                 state.visibility_epoch = state.visibility_epoch.wrapping_add(1);
-                if active {
+                if active && state.periodic {
                     state.resample_now = true;
                 }
                 self.shared.wake.notify_all();
             }
         }
-        if active {
+        let needed = self.shared.state.lock().is_ok_and(|state| state.periodic || state.resample_now);
+        if active && needed {
+            self.ensure_started();
+        }
+    }
+
+    fn ensure_started(&mut self) {
+        if self.shared.state.lock().is_ok_and(|state| state.active) {
             if let Some(start) = self.start.take() {
                 start();
             }
         }
+    }
+
+    fn set_periodic(&mut self, periodic: bool) {
+        if let Ok(mut state) = self.shared.state.lock() {
+            if state.periodic == periodic {
+                return;
+            }
+            state.periodic = periodic;
+            if periodic {
+                state.resample_now = true;
+            }
+            self.shared.wake.notify_all();
+        }
+        if periodic {
+            self.ensure_started();
+        }
+    }
+
+    fn fresh_on_open(&mut self, periodic: bool) {
+        if let Ok(mut state) = self.shared.state.lock() {
+            state.periodic = periodic;
+            state.visibility_epoch = state.visibility_epoch.wrapping_add(1);
+            state.resample_now = true;
+            self.shared.wake.notify_all();
+        }
+        self.ensure_started();
     }
 
     /// The latest completed run from the current visibility period, or
@@ -730,7 +875,7 @@ fn sample_loop<T>(shared: Arc<Shared<T>>, mut sample: impl FnMut() -> Outcome<T>
     loop {
         let visibility_epoch = {
             let Ok(mut state) = shared.state.lock() else { return };
-            while !state.active && !state.stopping {
+            while (!state.active || (!state.periodic && !state.resample_now)) && !state.stopping {
                 state = match shared.wake.wait(state) {
                     Ok(state) => state,
                     Err(_) => return,
@@ -766,7 +911,7 @@ fn sample_loop<T>(shared: Arc<Shared<T>>, mut sample: impl FnMut() -> Outcome<T>
         let deadline = std::time::Instant::now() + interval;
         // Pause and teardown wake this wait too. Reusing the deadline
         // prevents spurious wakes from extending the sampling interval.
-        while state.active && !state.stopping && !state.resample_now {
+        while state.active && state.periodic && !state.stopping && !state.resample_now {
             let remaining = deadline.saturating_duration_since(std::time::Instant::now());
             if remaining.is_zero() {
                 break;
@@ -874,6 +1019,86 @@ mod tests {
             assert!(std::time::Instant::now() < deadline, "worker did not publish generation {generation}");
             std::thread::sleep(Duration::from_millis(1));
         }
+    }
+
+    #[test]
+    fn a_closed_panel_accepts_one_shot_confirmation_but_a_hidden_dock_defers_it() {
+        let (started, starts) = std::sync::mpsc::channel();
+        let mut count = 0;
+        let mut worker = Worker::spawn("test-panel-demand".into(), Duration::from_millis(1), false, move || {
+            count += 1;
+            let _ = started.send(count);
+            Outcome::Sampled(Some(count))
+        });
+        worker.set_periodic(false);
+        worker.set_active(true);
+        assert!(worker.start.is_some(), "an unopened panel creates no thread");
+        // The registry prepares a sleeping worker when handing an effect its
+        // completion handle; that callback still cannot enable periodic work.
+        worker.ensure_started();
+        let then = worker.resampler();
+        then.resample_soon();
+        assert_eq!(starts.recv_timeout(TEST_DEADLINE).unwrap(), 1);
+        wait_for_generation(&worker, 1);
+        assert!(starts.recv_timeout(Duration::from_millis(30)).is_err(), "one nudge must not restart a 1ms periodic source");
+
+        worker.set_active(false);
+        then.resample_soon();
+        assert!(starts.recv_timeout(Duration::from_millis(30)).is_err(), "hidden Dock defers even effect confirmations");
+        worker.set_active(true);
+        assert_eq!(starts.recv_timeout(TEST_DEADLINE).unwrap(), 2);
+        wait_for_generation(&worker, 2);
+        assert!(starts.recv_timeout(Duration::from_millis(30)).is_err());
+    }
+
+    #[test]
+    fn opening_invalidates_an_active_discovery_run_and_preserves_a_mid_run_nudge() {
+        let (started, starts) = std::sync::mpsc::channel();
+        let (release, proceed) = std::sync::mpsc::channel();
+        let mut count = 0;
+        let mut worker = Worker::spawn("test-panel-opening".into(), Duration::from_secs(3600), true, move || {
+            count += 1;
+            let _ = started.send(count);
+            let _ = proceed.recv();
+            Outcome::Sampled(Some(count))
+        });
+        assert_eq!(starts.recv_timeout(TEST_DEADLINE).unwrap(), 1);
+        worker.fresh_on_open(true);
+        release.send(()).unwrap();
+        assert_eq!(starts.recv_timeout(TEST_DEADLINE).unwrap(), 2);
+        let mut seen = 0;
+        assert!(worker.take_if_new(&mut seen).is_none(), "bootstrap answer is not a fresh opening snapshot");
+        // Close while this opening's read is in flight, then finish an effect.
+        worker.set_periodic(false);
+        worker.resampler().resample_soon();
+        release.send(()).unwrap();
+        assert_eq!(starts.recv_timeout(TEST_DEADLINE).unwrap(), 3, "completion during a read requires a later read");
+        release.send(()).unwrap();
+        wait_for_generation(&worker, 3);
+        assert_eq!(worker.take_if_new(&mut seen).unwrap().reading, Some(3));
+        assert!(starts.recv_timeout(Duration::from_millis(30)).is_err());
+    }
+
+    #[test]
+    fn source_policy_and_opening_leave_bound_ids_and_handles_stable() {
+        let mut registry = SamplerRegistry::new();
+        registry.set_active(false);
+        let ids = registry.register(vec![
+            Source::File { path: PathBuf::from("/nonexistent/chonk-panel-fixture"), interval: Duration::from_secs(3600) },
+            Source::Clock { interval: Duration::from_secs(1) },
+        ]);
+        registry.set_periodic(ids[0], false);
+        let before = registry.resampler(ids[0]).unwrap();
+        for _ in 0..10 {
+            registry.fresh_on_open(ids[0], true);
+            registry.set_periodic(ids[0], false);
+        }
+        let after = registry.resampler(ids[0]).unwrap();
+        assert!(Arc::ptr_eq(&before.shared, &after.shared));
+        assert_eq!(registry.samplers.len(), 2);
+        assert_eq!(ids, [SourceId::from_index(0), SourceId::from_index(1)]);
+        let Sampler::Text(worker) = &registry.samplers[0] else { unreachable!() };
+        assert!(worker.start.is_some(), "hidden lifecycle changes still create no thread");
     }
 
     #[test]
@@ -1276,5 +1501,111 @@ mod tests {
         #[allow(clippy::disallowed_methods)]
         let child = Command::new("false").stdout(std::process::Stdio::piped()).spawn().expect("false exists");
         assert_eq!(wait_with_deadline(child, "false", Duration::from_secs(5)), None, "a non-zero exit is still no reading");
+    }
+
+    #[test]
+    fn a_reply_larger_than_the_pipe_is_drained_before_waiting_for_exit() {
+        // 256 KiB exceeds an ordinary Linux pipe's capacity. Waiting
+        // for `head` to exit before reading turns this valid reply into
+        // a timeout, even though neither process has useful work left.
+        #[allow(clippy::disallowed_methods)]
+        let child = Command::new("head")
+            .args(["-c", "262144", "/dev/zero"])
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("head exists");
+        let output = wait_with_deadline(child, "head", TEST_DEADLINE).expect("complete large reply");
+        assert_eq!(output.len(), 262144);
+        assert!(output.bytes().all(|byte| byte == 0));
+    }
+
+    #[test]
+    fn the_output_limit_accepts_the_boundary_and_rejects_the_whole_oversized_reply() {
+        for length in [SAMPLE_OUTPUT_LIMIT, SAMPLE_OUTPUT_LIMIT + 1] {
+            #[allow(clippy::disallowed_methods)]
+            let child = Command::new("head")
+                .args(["-c", &length.to_string(), "/dev/zero"])
+                .stdout(std::process::Stdio::piped())
+                .spawn()
+                .expect("head exists");
+            let output = wait_with_deadline(child, "head", TEST_DEADLINE);
+            if length == SAMPLE_OUTPUT_LIMIT {
+                assert_eq!(output.as_ref().map(String::len), Some(length));
+            } else {
+                assert_eq!(output, None, "an over-limit prefix must never become a valid reading");
+            }
+        }
+    }
+
+    #[test]
+    fn streamed_utf8_is_validated_only_when_the_complete_reply_arrives() {
+        for (script, expected) in [
+            ("printf '\\303'; sleep 0.02; printf '\\251'", Some("é")),
+            ("printf '\\377'", None),
+            ("printf plausible; exit 1", None),
+        ] {
+            #[allow(clippy::disallowed_methods)]
+            let child = Command::new("sh")
+                .args(["-c", script])
+                .stdout(std::process::Stdio::piped())
+                .spawn()
+                .expect("sh exists");
+            assert_eq!(wait_with_deadline(child, "sh", TEST_DEADLINE).as_deref(), expected);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn an_inherited_stdout_writer_cannot_extend_the_deadline() {
+        use std::os::fd::{FromRawFd, OwnedFd};
+        use std::process::Stdio;
+
+        // Two real subprocesses inherit the same write endpoint, as
+        // when a query forks a descendant before returning. Keeping
+        // both children directly owned by this test lets it reap the
+        // writer even if the deadline implementation regresses.
+        let mut descriptors = [-1; 2];
+        // SAFETY: the two-element array has room for both returned fds.
+        assert_eq!(unsafe { libc::pipe2(descriptors.as_mut_ptr(), libc::O_CLOEXEC) }, 0);
+        // SAFETY: successful pipe2 returned two new owned descriptors.
+        let reader = unsafe { OwnedFd::from_raw_fd(descriptors[0]) };
+        // SAFETY: this is the other newly owned descriptor from pipe2,
+        // distinct from reader and not previously wrapped or closed.
+        let writer = unsafe { OwnedFd::from_raw_fd(descriptors[1]) };
+        #[allow(clippy::disallowed_methods)]
+        let mut query = Command::new("echo")
+            .arg("complete")
+            .stdout(Stdio::from(writer.try_clone().unwrap()))
+            .spawn()
+            .expect("echo exists");
+        query.stdout = Some(reader.into());
+        #[allow(clippy::disallowed_methods)]
+        let mut inherited = Command::new("sleep")
+            .arg("30")
+            .stdout(Stdio::from(writer))
+            .spawn()
+            .expect("sleep exists");
+        let (finished, result) = std::sync::mpsc::channel();
+        let waiter = std::thread::spawn(move || {
+            let reading = wait_with_deadline(query, "echo", Duration::from_millis(150));
+            let _ = finished.send(reading);
+        });
+        let completed = result.recv_timeout(Duration::from_secs(3));
+        // Release the inherited endpoint before assertions, including
+        // on the old blocking-read path, so no test child is abandoned.
+        reap_failed_command(&mut inherited);
+        waiter.join().unwrap();
+        assert_eq!(completed.expect("the worker must finish while the inherited writer remains alive"), None);
+    }
+
+    #[test]
+    fn stdout_eof_does_not_replace_a_successful_child_exit() {
+        #[allow(clippy::disallowed_methods)]
+        let child = Command::new("sh")
+            .args(["-c", "exec 1>&-; exec sleep 30"])
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .expect("sh exists");
+        assert_eq!(wait_with_deadline(child, "sh", Duration::from_millis(150)), None);
     }
 }

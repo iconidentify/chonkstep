@@ -1,0 +1,346 @@
+{
+  "status": "verified frozen r6 and v2; root granted exclusive workload slot",
+  "sequence": [
+    "mixed-1g-512",
+    "mixed-2g-1280"
+  ],
+  "checks": {
+    "baseline": {
+      "path": "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/baseline/release/chonkstep-wayland",
+      "sha256": "b9dbcfb9ff13039980c6eb750bea34533fffdb7b74074f33bf53f433189771f1"
+    },
+    "chonk-fullscreen-probe": {
+      "path": "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/capture-r3/release/chonk-fullscreen-probe",
+      "sha256": "63c0e39a80e4ce37064f18c67cdc4a11eed89fd851e3eafd10c0678c95efde0e",
+      "same_bytes_as_r5_client": true,
+      "same_bytes_as_r6_client": true
+    },
+    "chonk-input-probe": {
+      "path": "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/capture-r3/release/chonk-input-probe",
+      "sha256": "9e6e3343bbaef1203ce46198125552c019fd073e1d96b4d827442e84b107e945",
+      "same_bytes_as_r5_client": true,
+      "same_bytes_as_r6_client": true
+    },
+    "harness/bench-capture.py": {
+      "path": "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/harness/bench-capture.py",
+      "sha256": "e216fc98c66dfe647a897cf9bebf1b5a69173eac3d875a71cfedcb245e60df45"
+    },
+    "harness/bench-compositor-c74772d.py": {
+      "path": "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/harness/bench-compositor-c74772d.py",
+      "sha256": "7fd16421e6f24964354f68d6342c437d06410eaf21295a1d114829edab33f8e7"
+    },
+    "harness/bench-pressure-memory-high.py": {
+      "path": "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/harness/bench-pressure-memory-high.py",
+      "sha256": "8472c85b279d183b93d6ebd941fd930e7bb0b69a5e2935680d0fb071642908ad"
+    },
+    "foot": {
+      "path": "/usr/bin/foot",
+      "sha256": "79ce907b8c00ab1dec254d5b954365c7212f00d67ce54e876799c8706da1d4e5",
+      "same_as_calibration": true
+    },
+    "capture-r6": {
+      "path": "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/capture-r6/release/chonkstep-wayland",
+      "sha256": "315598fbe0b8a49eec2e0c3654331472dfd67c2f5946aaef54caa9077ab6da8f",
+      "provenance_sha256": "2694bd0b874435c089081723840ac11795ff5e28a3ab4e712047c92a3e8f177e"
+    },
+    "harness/mixed-v2/bench-capture-mixed.py": {
+      "path": "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/harness/mixed-v2/bench-capture-mixed.py",
+      "sha256": "a3009482a2c36b1c51e8c8d44d039198bf81737ee9bee673bd6eb0e137bb21b4"
+    },
+    "harness/mixed-v2/bench-compositor-c74772d.py": {
+      "path": "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/harness/mixed-v2/bench-compositor-c74772d.py",
+      "sha256": "7fd16421e6f24964354f68d6342c437d06410eaf21295a1d114829edab33f8e7"
+    },
+    "harness/mixed-v2/mixed-capture-fixture.py": {
+      "path": "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/harness/mixed-v2/mixed-capture-fixture.py",
+      "sha256": "1e6fe7e1b597ad8f10a89cb2d96b6067fa8738f5d618f9e177a962cc8f9b406b"
+    },
+    "harness/mixed-v2/test_mixed_capture_fixture.py": {
+      "path": "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/harness/mixed-v2/test_mixed_capture_fixture.py",
+      "sha256": "923bb92bfb877448c5106b41326b12c12b5e85f280a529e6105e53c6e1af6c71"
+    }
+  },
+  "datasets": [
+    {
+      "name": "mixed-1g-512",
+      "measurement_command": [
+        "python3",
+        "-B",
+        "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/harness/bench-pressure-memory-high.py",
+        "--memory",
+        "1G",
+        "--memory-high-percent",
+        "75",
+        "--cpus",
+        "2,3",
+        "--timeout-seconds",
+        "900",
+        "--output",
+        "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/comparison-capture-r6-1g-512-mixed-scope",
+        "--",
+        "python3",
+        "-B",
+        "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/harness/mixed-v2/bench-capture-mixed.py",
+        "--binary",
+        "baseline=/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/baseline/release/chonkstep-wayland",
+        "--binary",
+        "capture-r6=/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/capture-r6/release/chonkstep-wayland",
+        "--animation-probe",
+        "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/capture-r3/release/chonk-fullscreen-probe",
+        "--input-probe",
+        "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/capture-r3/release/chonk-input-probe",
+        "--payload-mib",
+        "512",
+        "--churn-mib",
+        "32",
+        "--worker-seconds",
+        "800",
+        "--runs",
+        "3",
+        "--warm-opens",
+        "10",
+        "--idle-seconds",
+        "10",
+        "--motion-seconds",
+        "5",
+        "--settle-seconds",
+        "2",
+        "--output",
+        "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/comparison-capture-r6-1g-512-mixed-capture"
+      ],
+      "result_directories": [
+        "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/comparison-capture-r6-1g-512-mixed-scope",
+        "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/comparison-capture-r6-1g-512-mixed-capture"
+      ],
+      "analysis_commands": [
+        [
+          "python3",
+          "-B",
+          "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/harness/summarize-normal-pairs.py",
+          "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/comparison-capture-r6-1g-512-mixed-capture",
+          "--before",
+          "baseline",
+          "--after",
+          "capture-r6",
+          "--output",
+          "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/comparison-capture-r6-1g-512-mixed-capture/paired-summary.json"
+        ],
+        [
+          "python3",
+          "-B",
+          "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/harness/summarize-mixed-comparison.py",
+          "--scope",
+          "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/comparison-capture-r6-1g-512-mixed-scope",
+          "--fixture",
+          "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/comparison-capture-r6-1g-512-mixed-capture",
+          "--output",
+          "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/comparison-capture-r6-1g-512-mixed-capture/pressure-analysis.json"
+        ],
+        [
+          "python3",
+          "-B",
+          "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/harness/summarize-matched-pressure-compact.py",
+          "--scope",
+          "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/comparison-capture-r6-1g-512-mixed-scope",
+          "--fixture",
+          "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/comparison-capture-r6-1g-512-mixed-capture",
+          "--before",
+          "baseline",
+          "--after",
+          "capture-r6",
+          "--calibration",
+          "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/mixed-calibration-summary.json",
+          "--output",
+          "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/comparison-capture-r6-1g-512-mixed-capture/compact-pressure-report.json"
+        ]
+      ],
+      "cleanup_command": [
+        "python3",
+        "-B",
+        "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/harness/verify-fixture-cleanup.py",
+        "--fixture",
+        "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/comparison-capture-r6-1g-512-mixed-capture",
+        "--output",
+        "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/campaign-r6-prepared/mixed-1g-512-cleanup.json",
+        "--scope",
+        "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/comparison-capture-r6-1g-512-mixed-scope"
+      ],
+      "expected_process_pairs": 3,
+      "expected_labels": [
+        "baseline",
+        "capture-r6"
+      ],
+      "state": "ready; explicitly authorized workload slot; v2 pure preflight required before launch"
+    },
+    {
+      "name": "mixed-2g-1280",
+      "measurement_command": [
+        "python3",
+        "-B",
+        "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/harness/bench-pressure-memory-high.py",
+        "--memory",
+        "2G",
+        "--memory-high-percent",
+        "75",
+        "--cpus",
+        "2,3",
+        "--timeout-seconds",
+        "900",
+        "--output",
+        "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/comparison-capture-r6-2g-1280-mixed-scope",
+        "--",
+        "python3",
+        "-B",
+        "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/harness/mixed-v2/bench-capture-mixed.py",
+        "--binary",
+        "baseline=/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/baseline/release/chonkstep-wayland",
+        "--binary",
+        "capture-r6=/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/capture-r6/release/chonkstep-wayland",
+        "--animation-probe",
+        "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/capture-r3/release/chonk-fullscreen-probe",
+        "--input-probe",
+        "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/capture-r3/release/chonk-input-probe",
+        "--payload-mib",
+        "1280",
+        "--churn-mib",
+        "32",
+        "--worker-seconds",
+        "800",
+        "--runs",
+        "3",
+        "--warm-opens",
+        "10",
+        "--idle-seconds",
+        "10",
+        "--motion-seconds",
+        "5",
+        "--settle-seconds",
+        "2",
+        "--output",
+        "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/comparison-capture-r6-2g-1280-mixed-capture"
+      ],
+      "result_directories": [
+        "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/comparison-capture-r6-2g-1280-mixed-scope",
+        "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/comparison-capture-r6-2g-1280-mixed-capture"
+      ],
+      "analysis_commands": [
+        [
+          "python3",
+          "-B",
+          "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/harness/summarize-normal-pairs.py",
+          "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/comparison-capture-r6-2g-1280-mixed-capture",
+          "--before",
+          "baseline",
+          "--after",
+          "capture-r6",
+          "--output",
+          "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/comparison-capture-r6-2g-1280-mixed-capture/paired-summary.json"
+        ],
+        [
+          "python3",
+          "-B",
+          "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/harness/summarize-mixed-comparison.py",
+          "--scope",
+          "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/comparison-capture-r6-2g-1280-mixed-scope",
+          "--fixture",
+          "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/comparison-capture-r6-2g-1280-mixed-capture",
+          "--output",
+          "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/comparison-capture-r6-2g-1280-mixed-capture/pressure-analysis.json"
+        ],
+        [
+          "python3",
+          "-B",
+          "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/harness/summarize-matched-pressure-compact.py",
+          "--scope",
+          "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/comparison-capture-r6-2g-1280-mixed-scope",
+          "--fixture",
+          "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/comparison-capture-r6-2g-1280-mixed-capture",
+          "--before",
+          "baseline",
+          "--after",
+          "capture-r6",
+          "--calibration",
+          "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/mixed-calibration-summary.json",
+          "--output",
+          "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/comparison-capture-r6-2g-1280-mixed-capture/compact-pressure-report.json"
+        ]
+      ],
+      "cleanup_command": [
+        "python3",
+        "-B",
+        "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/harness/verify-fixture-cleanup.py",
+        "--fixture",
+        "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/comparison-capture-r6-2g-1280-mixed-capture",
+        "--output",
+        "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/campaign-r6-prepared/mixed-2g-1280-cleanup.json",
+        "--scope",
+        "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/comparison-capture-r6-2g-1280-mixed-scope"
+      ],
+      "expected_process_pairs": 3,
+      "expected_labels": [
+        "baseline",
+        "capture-r6"
+      ],
+      "state": "ready; explicitly authorized workload slot; v2 pure preflight required before launch"
+    }
+  ],
+  "frozen_memory_payload_mib": {
+    "1G": 512,
+    "2G": 1280
+  },
+  "ordinary_confirmation": {
+    "version": "capture-r5",
+    "source": "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/comparison-capture-r5-three/paired-summary.json",
+    "cleanup": "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/campaign-r5-prepared/ordinary-three-cleanup.json",
+    "reason": "Root states final r6 change is LinkPanel parsing gate/tests only; verify capture source equality at freeze."
+  },
+  "notes": [
+    "Each command must finish and its private scope/fixtures exit before the next starts.",
+    "Use the same r3-frozen clients as calibration; their SHA256 values are identical in r4.",
+    "The ordinary comparison has no synthetic worker, CPU quota, affinity pin, or MemoryHigh.",
+    "No source change to any measured harness is permitted without a new documented version.",
+    "Abort on an unexpected exit/deadline/OOM; preserve all completed and incomplete evidence.",
+    "Pressure only: r5 ordinary results remain separate evidence.",
+    "Check PAUSE-AFTER-CURRENT between stages; never pre-load an uninterruptible entire campaign again.",
+    "Root explicitly approved v2 atomic diagnostic marker publication only, without recalibration; timing loops and all frozen workloads remain identical."
+  ],
+  "analysis_sources": {
+    "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/harness/summarize-normal-pairs.py": "211cead147889bc031ff68558583e7f7c93c0f5d0425a6ea325f881026f6a15e",
+    "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/harness/summarize-mixed-comparison.py": "40f2aa692822f11ccbfe73f01b6b3ca233b18f39f3c2d3354de3e5dfe76740e4",
+    "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/harness/summarize-matched-pressure-compact.py": "86fb311f6e02964dbf80adcbf2fb90544bc2825557072b8549a8735c42099e33",
+    "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/harness/verify-fixture-cleanup.py": "aacdf155299cd8359f0400e09125815beee30557baed8ba0b14d65e9a0bd4c10"
+  },
+  "ready_to_run": true,
+  "source_comparison_r5_r6": {
+    "product_changes": {
+      "crates/chonk-instruments/src/link_panel.rs": [
+        "e1e3d2d2d7341f4e29eaf3cea1ad4d9a8e2b9d9bfe93a9c84766c992c2076a71",
+        "1fdefa8431fa64ab584554899bdba42abf717049605dbdd21674dddc3becef13"
+      ]
+    },
+    "all_recorded_source_changes": {
+      "crates/chonk-instruments/src/link_panel.rs": [
+        "e1e3d2d2d7341f4e29eaf3cea1ad4d9a8e2b9d9bfe93a9c84766c992c2076a71",
+        "1fdefa8431fa64ab584554899bdba42abf717049605dbdd21674dddc3becef13"
+      ],
+      "docs/engineering/2026-09-07/capture-performance.md": [
+        "50158c56005b7e04779648939345965a77c538bf3397e4c17dbb85ec61a4b1c6",
+        "80d68ace7056af4fc2d5325bcdb993a269c73d355c823f7a27f255e89cee015c"
+      ],
+      "docs/engineering/2026-09-07/data/capture-r5-metadata.json": [
+        null,
+        "f3a76f011194b02fb327aa17ebf8e525bff6782626c7ad440b041ce7f6e5f344"
+      ],
+      "docs/engineering/2026-09-07/data/capture-r5-paired-summary.json": [
+        null,
+        "db0558da88a8a3aae27ca8e9867e1672d56a8eef09de630f0e77ffb16d78a0fa"
+      ],
+      "docs/engineering/2026-09-07/data/capture-r5-summary.json": [
+        null,
+        "a09968f0d52d6fce20fb21336665f4eb6c8a99d0158f5f6e75e6ff6b05de5821"
+      ]
+    },
+    "capture_paths_identical": true
+  },
+  "harness_v2_note": "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/harness/mixed-v2-NOTE.md"
+}

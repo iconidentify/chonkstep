@@ -1,0 +1,466 @@
+[
+  {
+    "target": "screencopy_pressure",
+    "returncode": 0,
+    "seconds": 4.002815607003868,
+    "assertion_results": [
+      "test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 3.66s"
+    ]
+  },
+  {
+    "target": "capture_cache",
+    "returncode": 0,
+    "seconds": 6.677410040982068,
+    "assertion_results": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 6.32s"
+    ]
+  },
+  {
+    "target": "image_capture",
+    "returncode": 0,
+    "seconds": 4.462406337028369,
+    "assertion_results": [
+      "test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 4.11s"
+    ]
+  },
+  {
+    "target": "surface_pacing",
+    "returncode": 0,
+    "seconds": 2.443519494961947,
+    "assertion_results": [
+      "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.10s"
+    ]
+  },
+  {
+    "target": "capture_tool",
+    "returncode": 0,
+    "seconds": 31.130405243020505,
+    "assertion_results": [
+      "test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 30.73s"
+    ]
+  },
+  {
+    "target": "builtin_panel",
+    "returncode": 0,
+    "seconds": 2.2531626929994673,
+    "assertion_results": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.91s"
+    ]
+  },
+  {
+    "target": "instrument_panel",
+    "returncode": 0,
+    "seconds": 2.200119855988305,
+    "assertion_results": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.86s"
+    ]
+  },
+  {
+    "target": "activation_tokens",
+    "returncode": 0,
+    "seconds": 0.7542870049946941,
+    "assertion_results": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.39s"
+    ]
+  },
+  {
+    "target": "browser_selection",
+    "returncode": 0,
+    "seconds": 78.97112071100855,
+    "assertion_results": [
+      "test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out; finished in 78.49s"
+    ]
+  },
+  {
+    "target": "chonkcraft",
+    "returncode": 0,
+    "seconds": 0.35256852000020444,
+    "assertion_results": [
+      "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s"
+    ]
+  },
+  {
+    "target": "commands",
+    "returncode": 0,
+    "seconds": 2.2018301059724763,
+    "assertion_results": [
+      "test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.86s"
+    ]
+  },
+  {
+    "target": "control_socket",
+    "returncode": 0,
+    "seconds": 1.4984875320224091,
+    "assertion_results": [
+      "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.15s"
+    ]
+  },
+  {
+    "target": "desktop_gestures",
+    "returncode": 0,
+    "seconds": 52.380397474044,
+    "assertion_results": [
+      "test result: ok. 9 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 52.01s"
+    ]
+  },
+  {
+    "target": "dock_toggle",
+    "returncode": 0,
+    "seconds": 1.6741977999918163,
+    "assertion_results": [
+      "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.32s"
+    ]
+  },
+  {
+    "target": "e2e",
+    "returncode": 0,
+    "seconds": 14.669787129969336,
+    "assertion_results": [
+      "test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 14.29s"
+    ]
+  },
+  {
+    "target": "ext_workspace",
+    "returncode": 0,
+    "seconds": 1.100631347973831,
+    "assertion_results": [
+      "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.74s"
+    ]
+  },
+  {
+    "target": "focus_grab",
+    "returncode": 0,
+    "seconds": 0.7481972600216977,
+    "assertion_results": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.37s"
+    ]
+  },
+  {
+    "target": "fullscreen",
+    "returncode": 0,
+    "seconds": 3.5605932070175186,
+    "assertion_results": [
+      "test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.21s"
+    ]
+  },
+  {
+    "target": "gamma",
+    "returncode": 0,
+    "seconds": 2.3402746510109864,
+    "assertion_results": [
+      "test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.99s"
+    ]
+  },
+  {
+    "target": "hidden_surface_damage",
+    "returncode": 0,
+    "seconds": 8.289227414992638,
+    "assertion_results": [
+      "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 7.94s"
+    ]
+  },
+  {
+    "target": "hyprland_config",
+    "returncode": 0,
+    "seconds": 4.1194971080403775,
+    "assertion_results": [
+      "test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.73s"
+    ]
+  },
+  {
+    "target": "hyprland_ipc",
+    "returncode": 0,
+    "seconds": 10.15197620698018,
+    "assertion_results": [
+      "test result: ok. 18 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 9.79s"
+    ]
+  },
+  {
+    "target": "idle",
+    "returncode": 0,
+    "seconds": 3.20957162900595,
+    "assertion_results": [
+      "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.87s"
+    ]
+  },
+  {
+    "target": "interactive_request",
+    "returncode": 0,
+    "seconds": 2.8272913219989277,
+    "assertion_results": [
+      "test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.49s"
+    ]
+  },
+  {
+    "target": "keyboard_focus",
+    "returncode": 0,
+    "seconds": 3.276384725002572,
+    "assertion_results": [
+      "test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.92s"
+    ]
+  },
+  {
+    "target": "keyboard_repeat",
+    "returncode": 0,
+    "seconds": 8.411720589036122,
+    "assertion_results": [
+      "test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 8.04s"
+    ]
+  },
+  {
+    "target": "layer_bar",
+    "returncode": 0,
+    "seconds": 3.2072752109961584,
+    "assertion_results": [
+      "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.86s"
+    ]
+  },
+  {
+    "target": "memory",
+    "returncode": 0,
+    "seconds": 1.998191759979818,
+    "assertion_results": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.64s"
+    ]
+  },
+  {
+    "target": "nested_buffer_age",
+    "returncode": 0,
+    "seconds": 3.36343194602523,
+    "assertion_results": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.02s"
+    ]
+  },
+  {
+    "target": "omarchy",
+    "returncode": 0,
+    "seconds": 22.180043997999746,
+    "assertion_results": [
+      "test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 21.82s"
+    ]
+  },
+  {
+    "target": "omarchy_bar",
+    "returncode": 0,
+    "seconds": 2.5274160919943824,
+    "assertion_results": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.18s"
+    ]
+  },
+  {
+    "target": "omarchy_menu",
+    "returncode": 0,
+    "seconds": 3.298502549994737,
+    "assertion_results": [
+      "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.95s"
+    ]
+  },
+  {
+    "target": "omarchy_menu_loading",
+    "returncode": 0,
+    "seconds": 0.745183730032295,
+    "assertion_results": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.40s"
+    ]
+  },
+  {
+    "target": "omarchy_mode",
+    "returncode": 0,
+    "seconds": 2.1612593539757654,
+    "assertion_results": [
+      "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.82s"
+    ]
+  },
+  {
+    "target": "omarchy_terminal",
+    "returncode": 0,
+    "seconds": 1.4749592580483295,
+    "assertion_results": [
+      "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.11s"
+    ]
+  },
+  {
+    "target": "output_management",
+    "returncode": 0,
+    "seconds": 0.8668878159951419,
+    "assertion_results": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.46s"
+    ]
+  },
+  {
+    "target": "overview",
+    "returncode": 0,
+    "seconds": 17.429445345012937,
+    "assertion_results": [
+      "test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 17.05s"
+    ]
+  },
+  {
+    "target": "pointer_constraints",
+    "returncode": 0,
+    "seconds": 7.765002998989075,
+    "assertion_results": [
+      "test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 7.39s"
+    ]
+  },
+  {
+    "target": "pointer_coordinates",
+    "returncode": 0,
+    "seconds": 7.331480243010446,
+    "assertion_results": [
+      "test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.96s"
+    ]
+  },
+  {
+    "target": "pointer_lock",
+    "returncode": 0,
+    "seconds": 0.9695207980112173,
+    "assertion_results": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.61s"
+    ]
+  },
+  {
+    "target": "popup_anchor",
+    "returncode": 0,
+    "seconds": 1.6893595199799165,
+    "assertion_results": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.33s"
+    ]
+  },
+  {
+    "target": "protocol_ledgers",
+    "returncode": 0,
+    "seconds": 1.0108001200133003,
+    "assertion_results": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.65s"
+    ]
+  },
+  {
+    "target": "protocol_torture",
+    "returncode": 0,
+    "seconds": 3.5119749099831097,
+    "assertion_results": [
+      "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.17s"
+    ]
+  },
+  {
+    "target": "resize_order",
+    "returncode": 0,
+    "seconds": 4.209465660038404,
+    "assertion_results": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.85s"
+    ]
+  },
+  {
+    "target": "selection_buffer",
+    "returncode": 0,
+    "seconds": 0.3888726060395129,
+    "assertion_results": [
+      "test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 6 filtered out; finished in 0.00s"
+    ]
+  },
+  {
+    "target": "selection_lifecycle",
+    "returncode": 0,
+    "seconds": 2.691571297007613,
+    "assertion_results": [
+      "test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 2.35s"
+    ]
+  },
+  {
+    "target": "selection_transfer",
+    "returncode": 0,
+    "seconds": 24.86810844502179,
+    "assertion_results": [
+      "test result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 24.47s"
+    ]
+  },
+  {
+    "target": "session_lifecycle",
+    "returncode": 0,
+    "seconds": 1.1048795609967783,
+    "assertion_results": [
+      "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.73s"
+    ]
+  },
+  {
+    "target": "session_lock",
+    "returncode": 0,
+    "seconds": 1.8529932390083559,
+    "assertion_results": [
+      "test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.50s"
+    ]
+  },
+  {
+    "target": "session_restore",
+    "returncode": 0,
+    "seconds": 8.05764505296247,
+    "assertion_results": [
+      "test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 7.72s"
+    ]
+  },
+  {
+    "target": "spatial_layout",
+    "returncode": 0,
+    "seconds": 82.4922183410381,
+    "assertion_results": [
+      "test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 82.13s"
+    ]
+  },
+  {
+    "target": "stability_soak",
+    "returncode": 0,
+    "seconds": 7.880580379976891,
+    "assertion_results": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 7.50s"
+    ]
+  },
+  {
+    "target": "subsurface_depth",
+    "returncode": 0,
+    "seconds": 1.9593134270398878,
+    "assertion_results": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.59s"
+    ]
+  },
+  {
+    "target": "supervisor",
+    "returncode": 0,
+    "seconds": 0.6739126530010253,
+    "assertion_results": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 8 filtered out; finished in 0.31s"
+    ]
+  },
+  {
+    "target": "wayland_globals",
+    "returncode": 0,
+    "seconds": 0.7360712660010904,
+    "assertion_results": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.39s"
+    ]
+  },
+  {
+    "target": "window_shade",
+    "returncode": 0,
+    "seconds": 15.186532945022918,
+    "assertion_results": [
+      "test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 14.83s"
+    ]
+  },
+  {
+    "target": "workspace_by_index",
+    "returncode": 0,
+    "seconds": 1.7595412170048803,
+    "assertion_results": [
+      "test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.38s"
+    ]
+  },
+  {
+    "target": "xwayland_input",
+    "returncode": 0,
+    "seconds": 7.070173276995774,
+    "assertion_results": [
+      "test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.69s"
+    ]
+  }
+]

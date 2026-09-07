@@ -1,0 +1,83 @@
+{
+  "status": "complete",
+  "utc_started": "2026-09-07T12:52:46.172746+00:00",
+  "stages": [
+    {
+      "name": "mixed-2g-1280",
+      "status": "complete",
+      "start_monotonic_ns": 328354828268681,
+      "measurement_returncode": 0,
+      "end_monotonic_ns": 328730060924250,
+      "wall_seconds": 375.232655569,
+      "cleanup_returncode": 0,
+      "cleanup_output": "",
+      "analysis": [
+        {
+          "command": [
+            "python3",
+            "-B",
+            "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/harness/summarize-normal-pairs.py",
+            "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/comparison-r6-r7-2g-1280-mixed-capture",
+            "--before",
+            "capture-r6",
+            "--after",
+            "capture-r7",
+            "--output",
+            "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/comparison-r6-r7-2g-1280-mixed-capture/paired-summary.json"
+          ],
+          "returncode": 0
+        },
+        {
+          "command": [
+            "python3",
+            "-B",
+            "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/harness/summarize-mixed-comparison.py",
+            "--scope",
+            "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/comparison-r6-r7-2g-1280-mixed-scope",
+            "--fixture",
+            "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/comparison-r6-r7-2g-1280-mixed-capture",
+            "--output",
+            "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/comparison-r6-r7-2g-1280-mixed-capture/pressure-analysis.json"
+          ],
+          "returncode": 0
+        },
+        {
+          "command": [
+            "python3",
+            "-B",
+            "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/harness/summarize-matched-pressure-compact.py",
+            "--scope",
+            "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/comparison-r6-r7-2g-1280-mixed-scope",
+            "--fixture",
+            "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/comparison-r6-r7-2g-1280-mixed-capture",
+            "--before",
+            "capture-r6",
+            "--after",
+            "capture-r7",
+            "--calibration",
+            "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/mixed-calibration-summary.json",
+            "--output",
+            "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/comparison-r6-r7-2g-1280-mixed-capture/compact-pressure-report.json"
+          ],
+          "returncode": 0
+        },
+        {
+          "command": [
+            "python3",
+            "-B",
+            "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/harness/summarize-frame-stage-comparison.py",
+            "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/comparison-r6-r7-2g-1280-mixed-capture",
+            "--before",
+            "capture-r6",
+            "--after",
+            "capture-r7",
+            "--output",
+            "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/comparison-r6-r7-2g-1280-mixed-capture/frame-stage-analysis.json"
+          ],
+          "returncode": 0
+        }
+      ]
+    }
+  ],
+  "utc_finished": "2026-09-07T12:59:01.976571+00:00"
+}
