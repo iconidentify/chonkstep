@@ -24,6 +24,7 @@ pub struct OverviewItem<B: Backend> {
     pub title: String,
     pub preview: Option<DecorationBuffer>,
     pub miniaturized: bool,
+    pub managed: bool,
 }
 
 /// What a panel-local point lands on — the shell resolves clicks and
@@ -161,7 +162,12 @@ impl<B: Backend> OverviewPanel<B> {
         self.drag_limit = Size::new(tile * 3, tile * 2);
         let layout = if self.live {
             let sizes: Vec<_> = self.items.iter().map(|item| item.geometry.size).collect();
-            ov::live::layout(primary.size, tile, &sizes, workspace.1)
+            let mut layout = ov::live::layout(primary.size, tile, &sizes, workspace.1);
+            if self.items.iter().any(|i| i.managed) {
+                let sources: Vec<_> = self.items.iter().map(|i| i.geometry).collect();
+                ov::live::preserve_arrangement(&mut layout, &sources);
+            }
+            layout
         } else {
             ov::layout(
                 primary.size,

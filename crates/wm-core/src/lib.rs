@@ -16,6 +16,7 @@ mod motif;
 mod placement;
 mod resize;
 mod snap;
+mod spatial;
 mod types;
 
 // The in-memory `Backend` double is compiled for this crate's own
@@ -29,7 +30,7 @@ mod types;
 #[cfg(any(test, feature = "test-support"))]
 pub mod fake_backend;
 
-pub use backend::{Backend, OverviewDrag, OverviewScene, OverviewWindow, OverviewWorkspace};
+pub use backend::{Backend, LayoutDrag, OverviewDrag, OverviewScene, OverviewWindow, OverviewWorkspace};
 pub use client::{
     Client, ClientFlags, ClientId, Lifecycle, MaximizeDirections, MonitorId, MonitorInfo,
 };
@@ -45,6 +46,7 @@ pub use placement::{place_frame, FloatDecision, FloatPolicy, PlacementPolicy, Wi
 // geometry is part of this crate's own published interface the moment
 // one of its public types contains it.
 pub use snap::snap_position;
+pub use spatial::{LayoutMode, LayoutStatistics, WindowPlacement};
 pub use types::{
     BackendEvent, ClientChrome, DecorationRules, DragHandle, KeyCombo, KeyboardConfig, Modifiers, MouseButton, NetState,
     PointerConfig,

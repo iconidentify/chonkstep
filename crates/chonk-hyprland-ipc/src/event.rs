@@ -206,6 +206,12 @@ impl Differ {
                     ),
                 ));
             }
+            if old.floating != window.floating {
+                events.push(Event::new(
+                    "changefloatingmode",
+                    format!("{},{}", address(window), u8::from(window.floating)),
+                ));
+            }
             if old.title != window.title {
                 events.push(Event::new("windowtitlev2", format!("{},{}", address(window), window.title)));
                 // Hyprland emits the v1 form too, and it carries the
@@ -326,6 +332,7 @@ mod tests {
     fn the_owned_diff_keeps_the_producers_snapshot_allocation() {
         let mut snapshot = Snapshot::default();
         snapshot.workspaces.push(Workspace {
+            layout: "freeform".into(),
             index: 0,
             monitor: "eDP-1".into(),
             monitor_id: 0,

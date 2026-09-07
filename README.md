@@ -49,8 +49,8 @@ and non-Omarchy sessions, see [Installing on Omarchy (or any Arch)](#installing-
   Omarchy applications run against ChonkStep rather than a replica.
 - **Traditional window management.** Windows float by default and can be
   minimized, maximized, shaded, resized from every edge, snapped, stacked, and
-  moved between workspaces. Tiling-only Hyprland commands are deliberately left
-  unbound instead of being mapped to surprising approximations.
+  moved between workspaces. Development builds also support Mosaic and Flow;
+  inapplicable split commands are quiet no-ops.
 - **A safe side-by-side install.** SDDM owns the choice of session. Installing
   ChonkStep does not uninstall or patch Hyprland or modify Omarchy-owned files.
 
@@ -71,6 +71,13 @@ and the release history in [CHANGELOG.md](CHANGELOG.md).
 
 ## Features
 
+- **Three workspace styles (development builds).** Freeform lets you place
+  windows yourself. Mosaic keeps everything visible. Flow lets windows extend
+  sideways beyond the screen. Native Wayland transitions animate live windows,
+  and returning to Freeform restores your original arrangement. **Super+L**
+  toggles Mosaic/Flow, **Super+Shift+L** returns to Freeform, and **Super+T**
+  floats/rejoins a window at its remembered place. Living Desktop saves the
+  organization. See the [keybinding card](docs/keybindings.md).
 - **Chiseled decorations.** Focused black/unfocused gray titlebars,
   flush full-height buttons with the stock glyphs, etched resizebar
   grips - every metric, bevel step, and glyph bitmap written down to

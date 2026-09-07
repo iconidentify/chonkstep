@@ -8,6 +8,48 @@ use crate::{
 };
 use wm_theme_api::{DecorationBuffer, Point, Rect, Size};
 
+/// Keep Mosaic's rows/columns and Flow's sequence recognizable in Overview.
+/// Bounding the whole virtual arrangement also brings offscreen Flow clients
+/// into the existing live, selectable panel without changing their geometry.
+pub fn preserve_arrangement(layout: &mut OverviewLayout, sources: &[Rect]) {
+    if sources.is_empty() {
+        return;
+    }
+    let left = sources.iter().map(|r| r.pos.x as i64).min().unwrap();
+    let top = sources.iter().map(|r| r.pos.y as i64).min().unwrap();
+    let right = sources
+        .iter()
+        .map(|r| r.pos.x as i64 + r.size.w as i64)
+        .max()
+        .unwrap();
+    let bottom = sources
+        .iter()
+        .map(|r| r.pos.y as i64 + r.size.h as i64)
+        .max()
+        .unwrap();
+    let scale = (layout.grid.size.w as f64 / (right - left).max(1) as f64)
+        .min(layout.grid.size.h as f64 / (bottom - top).max(1) as f64)
+        .min(0.8);
+    let origin = Point::new(
+        layout.grid.pos.x
+            + ((layout.grid.size.w as f64 - (right - left) as f64 * scale) / 2.0) as i32,
+        layout.grid.pos.y
+            + ((layout.grid.size.h as f64 - (bottom - top) as f64 * scale) / 2.0) as i32,
+    );
+    for (cell, source) in layout.cells.iter_mut().zip(sources) {
+        *cell = Rect::new(
+            Point::new(
+                origin.x + ((source.pos.x as i64 - left) as f64 * scale) as i32,
+                origin.y + ((source.pos.y as i64 - top) as f64 * scale) as i32,
+            ),
+            Size::new(
+                (source.size.w as f64 * scale * 0.94).round().max(1.0) as u32,
+                (source.size.h as f64 * scale * 0.94).round().max(1.0) as u32,
+            ),
+        );
+    }
+}
+
 pub fn layout(panel: Size, tile: u32, sizes: &[Size], workspaces: usize) -> OverviewLayout {
     let pad = (tile / 4).max(8).min(panel.w / 8).min(panel.h / 8);
     let label_h = (tile / 2).max(16);
@@ -228,6 +270,47 @@ mod tests {
                     .strip
                     .iter()
                     .all(|s| s.pos.y < l.grid.pos.y && s.size.w > s.size.h));
+            }
+        }
+    }
+    #[test]
+    fn managed_overview_preserves_spatial_structure_and_selectable_live_cells() {
+        for sources in [
+            vec![
+                Rect::new(Point::new(0, 0), Size::new(700, 900)),
+                Rect::new(Point::new(706, 0), Size::new(700, 447)),
+                Rect::new(Point::new(706, 453), Size::new(700, 447)),
+            ],
+            vec![
+                Rect::new(Point::new(-1800, 0), Size::new(800, 900)),
+                Rect::new(Point::new(-994, 0), Size::new(600, 900)),
+                Rect::new(Point::new(-388, 0), Size::new(1200, 900)),
+            ],
+        ] {
+            for scale in [1, 2] {
+                let sizes: Vec<_> = sources.iter().map(|r| r.size).collect();
+                let mut panel = layout(Size::new(1280 * scale, 800 * scale), 56 * scale, &sizes, 3);
+                preserve_arrangement(&mut panel, &sources);
+                for (index, cell) in panel.cells.iter().enumerate() {
+                    assert!(cell.pos.x >= panel.grid.pos.x && cell.pos.y >= panel.grid.pos.y);
+                    assert!(
+                        cell.pos.x + cell.size.w as i32
+                            <= panel.grid.pos.x + panel.grid.size.w as i32
+                    );
+                    assert!(
+                        cell.pos.y + cell.size.h as i32
+                            <= panel.grid.pos.y + panel.grid.size.h as i32
+                    );
+                    assert_eq!(
+                        panel.cell_at(Point::new(
+                            cell.pos.x + cell.size.w as i32 / 2,
+                            cell.pos.y + cell.size.h as i32 / 2
+                        )),
+                        Some(index)
+                    );
+                }
+                assert!(panel.cells[0].pos.x < panel.cells[1].pos.x);
+                assert_eq!(panel.cells[0].pos.y, panel.cells[1].pos.y);
             }
         }
     }

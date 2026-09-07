@@ -27,14 +27,28 @@ fn foot_record(x: i32, y: i32, w: u32, h: u32) -> String {
 /// if the file exists and holds one.
 fn recorded_foot(session: &Session) -> Option<(i32, i32, u32, u32)> {
     let text = std::fs::read_to_string(session.state_file("session")).ok()?;
-    let line = text.lines().find(|line| line.starts_with("foot\t"))?;
-    let fields: Vec<&str> = line.split('\t').collect();
-    Some((
-        fields.get(2)?.parse().ok()?,
-        fields.get(3)?.parse().ok()?,
-        fields.get(4)?.parse().ok()?,
-        fields.get(5)?.parse().ok()?,
-    ))
+    text.lines().find_map(|line| {
+        let (line, escaped) = line
+            .strip_prefix("@window\t")
+            .map_or((line, false), |record| (record, true));
+        let mut fields = line.split('\t');
+        let class = fields.next()?;
+        let is_foot = if escaped {
+            serde_json::from_str::<String>(class).ok()? == "foot"
+        } else {
+            class == "foot"
+        };
+        if !is_foot {
+            return None;
+        }
+        fields.next()?; // application identity
+        Some((
+            fields.next()?.parse().ok()?,
+            fields.next()?.parse().ok()?,
+            fields.next()?.parse().ok()?,
+            fields.next()?.parse().ok()?,
+        ))
+    })
 }
 
 /// Pillar 1, the recording half: arrange a window, and the arrangement

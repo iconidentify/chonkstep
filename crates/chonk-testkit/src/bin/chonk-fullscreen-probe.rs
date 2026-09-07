@@ -77,6 +77,9 @@ use std::io::Write;
 use std::os::fd::AsFd;
 use std::time::Duration;
 
+#[path = "chonk-fullscreen-probe/popup.rs"]
+mod popup;
+
 use wayland_client::protocol::{
     wl_buffer::WlBuffer, wl_callback, wl_compositor::WlCompositor, wl_keyboard, wl_registry,
     wl_seat, wl_shm, wl_shm_pool, wl_surface::WlSurface,
@@ -159,6 +162,9 @@ struct Probe {
     text_input_manager: Option<ZwpTextInputManagerV3>,
     input_method_manager: Option<ZwpInputMethodManagerV2>,
     surface: Option<WlSurface>,
+    xdg_surface: Option<XdgSurface>,
+    popup: Option<popup::Popup>,
+    large_minimum: bool,
     toplevel: Option<XdgToplevel>,
     /// The size the compositor's latest configure asked for, or
     /// [`WINDOWED`] until one names a size.
@@ -362,6 +368,10 @@ impl Dispatch<XdgToplevel, ()> for Probe {
                         Ok(xdg_toplevel::State::Activated) => names.push("activated"),
                         Ok(xdg_toplevel::State::Resizing) => names.push("resizing"),
                         Ok(xdg_toplevel::State::Suspended) => names.push("suspended"),
+                        Ok(xdg_toplevel::State::TiledLeft) => names.push("tiled-left"),
+                        Ok(xdg_toplevel::State::TiledRight) => names.push("tiled-right"),
+                        Ok(xdg_toplevel::State::TiledTop) => names.push("tiled-top"),
+                        Ok(xdg_toplevel::State::TiledBottom) => names.push("tiled-bottom"),
                         _ => names.push("other"),
                     }
                 }
@@ -413,6 +423,13 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for Probe {
             match key {
                 KEY_F => probe.control(Want::Fullscreen, qh),
                 KEY_M => probe.control(Want::Maximized, qh),
+                25 => popup::toggle(probe, qh), // P: a native application menu.
+                49 => {
+                    probe.large_minimum = !probe.large_minimum;
+                    let (w, h) = if probe.large_minimum { (2000, 1200) } else { (0, 0) };
+                    probe.toplevel.as_ref().unwrap().set_min_size(w, h);
+                    probe.surface.as_ref().unwrap().commit();
+                }
                 _ => {}
             }
         }
@@ -602,6 +619,7 @@ fn main() {
 
     let surface = compositor.create_surface(&qh, ());
     let xdg_surface = wm_base.get_xdg_surface(&surface, &qh, ());
+    probe.xdg_surface = Some(xdg_surface.clone());
     let toplevel = xdg_surface.get_toplevel(&qh, ());
     toplevel.set_title(title.clone());
     toplevel.set_app_id(app_id);
@@ -642,6 +660,10 @@ fn main() {
                 &qh,
                 (),
             );
+            // The buffer owns its pool storage. Retaining the protocol pool
+            // and every replaced buffer leaks one frame per configure during
+            // repeated layout/focus operations.
+            pool.destroy();
             surface.attach(Some(&buffer), 0, 0);
             surface.damage(0, 0, width.max(1), height.max(1));
             if frame_driven && !probe.frame_pending {
@@ -649,7 +671,9 @@ fn main() {
                 probe.frame_pending = true;
             }
             surface.commit();
-            attached_buffer = Some(buffer);
+            if let Some(previous) = attached_buffer.replace(buffer) {
+                previous.destroy();
+            }
             if inhibit_idle && probe.idle_inhibitor.is_none() {
                 let manager = probe
                     .idle_inhibit_manager
@@ -668,7 +692,6 @@ fn main() {
                 probe.idle_notification = Some(notifier.get_idle_notification(250, seat, &qh, ()));
                 say("idle inhibition armed");
             }
-            pool.destroy();
             attached = probe.size;
             probe.dirty = false;
         }

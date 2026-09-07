@@ -112,9 +112,14 @@ pub enum Action {
     ToggleShade,
     Miniaturize,
     ToggleFullscreen,
+    Layout(wm_core::LayoutMode),
+    ToggleLayout,
+    Floating(Option<bool>),
+    Move(FocusDirection),
+    Resize(wm_core::Point),
+    LayoutNoop,
     /// Focus the nearest visible window in this root-coordinate
-    /// direction. This is spatial navigation over floating frames, not
-    /// a tiling-tree approximation.
+    /// direction, using the workspace style's spatial navigation policy.
     Focus(FocusDirection),
     WorkspaceNext,
     WorkspacePrev,
@@ -285,6 +290,20 @@ fn action_from_name(name: &str) -> Option<Action> {
     match normalized.as_str() {
         "spawn-terminal" => Some(Action::SpawnTerminal),
         "close" => Some(Action::Close),
+        "layout-freeform" => Some(Action::Layout(wm_core::LayoutMode::Freeform)),
+        "layout-mosaic" => Some(Action::Layout(wm_core::LayoutMode::Mosaic)),
+        "layout-flow" => Some(Action::Layout(wm_core::LayoutMode::Flow)),
+        "toggle-layout" => Some(Action::ToggleLayout),
+        "grow-width" => Some(Action::Resize(wm_core::Point::new(25, 0))),
+        "shrink-width" => Some(Action::Resize(wm_core::Point::new(-25, 0))),
+        "grow-height" => Some(Action::Resize(wm_core::Point::new(0, 25))),
+        "shrink-height" => Some(Action::Resize(wm_core::Point::new(0, -25))),
+        "layout-noop" => Some(Action::LayoutNoop),
+        "toggle-floating" => Some(Action::Floating(None)),
+        "move-left" => Some(Action::Move(FocusDirection::Left)),
+        "move-right" => Some(Action::Move(FocusDirection::Right)),
+        "move-up" => Some(Action::Move(FocusDirection::Up)),
+        "move-down" => Some(Action::Move(FocusDirection::Down)),
         "toggle-maximize" => Some(Action::ToggleMaximize),
         "toggle-shade" => Some(Action::ToggleShade),
         "miniaturize" => Some(Action::Miniaturize),
@@ -678,6 +697,30 @@ impl Config {
             bindings: Vec::new(),
             layer_bindings: BTreeMap::new(),
             keybindings: vec![
+                bind("super+t", Action::Floating(None)),
+                bind("super+l", Action::ToggleLayout),
+                bind(
+                    "super+shift+l",
+                    Action::Layout(wm_core::LayoutMode::Freeform),
+                ),
+                bind("super+ctrl+left", Action::Focus(FocusDirection::Left)),
+                bind("super+ctrl+right", Action::Focus(FocusDirection::Right)),
+                bind("super+ctrl+up", Action::Focus(FocusDirection::Up)),
+                bind("super+ctrl+down", Action::Focus(FocusDirection::Down)),
+                bind("super+shift+left", Action::Move(FocusDirection::Left)),
+                bind("super+shift+right", Action::Move(FocusDirection::Right)),
+                bind("super+shift+up", Action::Move(FocusDirection::Up)),
+                bind("super+shift+down", Action::Move(FocusDirection::Down)),
+                bind("super+equal", Action::Resize(wm_core::Point::new(25, 0))),
+                bind("super+minus", Action::Resize(wm_core::Point::new(-25, 0))),
+                bind(
+                    "super+shift+equal",
+                    Action::Resize(wm_core::Point::new(0, 25)),
+                ),
+                bind(
+                    "super+shift+minus",
+                    Action::Resize(wm_core::Point::new(0, -25)),
+                ),
                 bind("alt+shift+return", Action::SpawnTerminal),
                 bind("alt+shift+q", Action::Close),
                 bind("alt+shift+x", Action::ToggleMaximize),
@@ -689,7 +732,7 @@ impl Config {
                 bind("alt+shift+right", Action::WorkspaceCarryNext),
                 bind("alt+shift+left", Action::WorkspaceCarryPrev),
                 // Super+Up "steps back" from the desk for the modal
-                // Overview: the whole super row is otherwise free, and
+                // Overview: keep the established chord, while Ctrl+arrows focus, and
                 // the arrow pairs with the arrows that then drive the
                 // selection inside it.
                 bind("super+up", Action::Overview),
@@ -2009,6 +2052,60 @@ mod tests {
         // Expected combos written out with literal keysyms (not via
         // parse_key) so this test cannot be fooled by a parser bug.
         let expected = vec![
+            (combo(0x74, Modifiers::SUPER), Action::Floating(None)),
+            (combo(0x6c, Modifiers::SUPER), Action::ToggleLayout),
+            (
+                combo(0x6c, Modifiers::SUPER | Modifiers::SHIFT),
+                Action::Layout(wm_core::LayoutMode::Freeform),
+            ),
+            (
+                combo(0xff51, Modifiers::SUPER | Modifiers::CONTROL),
+                Action::Focus(FocusDirection::Left),
+            ),
+            (
+                combo(0xff53, Modifiers::SUPER | Modifiers::CONTROL),
+                Action::Focus(FocusDirection::Right),
+            ),
+            (
+                combo(0xff52, Modifiers::SUPER | Modifiers::CONTROL),
+                Action::Focus(FocusDirection::Up),
+            ),
+            (
+                combo(0xff54, Modifiers::SUPER | Modifiers::CONTROL),
+                Action::Focus(FocusDirection::Down),
+            ),
+            (
+                combo(0xff51, Modifiers::SUPER | Modifiers::SHIFT),
+                Action::Move(FocusDirection::Left),
+            ),
+            (
+                combo(0xff53, Modifiers::SUPER | Modifiers::SHIFT),
+                Action::Move(FocusDirection::Right),
+            ),
+            (
+                combo(0xff52, Modifiers::SUPER | Modifiers::SHIFT),
+                Action::Move(FocusDirection::Up),
+            ),
+            (
+                combo(0xff54, Modifiers::SUPER | Modifiers::SHIFT),
+                Action::Move(FocusDirection::Down),
+            ),
+            (
+                combo(0x3d, Modifiers::SUPER),
+                Action::Resize(wm_core::Point::new(25, 0)),
+            ),
+            (
+                combo(0x2d, Modifiers::SUPER),
+                Action::Resize(wm_core::Point::new(-25, 0)),
+            ),
+            (
+                combo(0x3d, Modifiers::SUPER | Modifiers::SHIFT),
+                Action::Resize(wm_core::Point::new(0, 25)),
+            ),
+            (
+                combo(0x2d, Modifiers::SUPER | Modifiers::SHIFT),
+                Action::Resize(wm_core::Point::new(0, -25)),
+            ),
             (combo(0xff0d, alt_shift), Action::SpawnTerminal),
             (combo(0x71, alt_shift), Action::Close),
             (combo(0x78, alt_shift), Action::ToggleMaximize),
@@ -2267,7 +2364,10 @@ scroll_factor = 0.4
             action_for(&config, "alt+shift+left"),
             Some(Action::WorkspaceCarryPrev)
         );
-        assert_eq!(config.keybindings.len(), Config::default_config().keybindings.len() + 1);
+        assert_eq!(
+            config.keybindings.len(),
+            Config::default_config().keybindings.len()
+        );
     }
 
     /// The one conversion between the two workspace vocabularies, in
@@ -2482,7 +2582,10 @@ scroll_factor = 0.4
         assert_eq!(config.diagnostics, vec!["bind: SUPER J — tiling-only"]);
         let report = effective_config_report(&config);
         assert!(report.contains("focus_follows_mouse = true\t# config file"));
-        assert!(report.contains("keybindings = 16\t# live Hyprland config"));
+        assert!(report.contains(&format!(
+            "keybindings = {}\t# live Hyprland config",
+            Config::default_config().keybindings.len()
+        )));
     }
 
     #[test]
@@ -2585,7 +2688,10 @@ scroll_factor = 0.4
         assert_eq!(action_for(&config, "super+u"), None);
         assert_eq!(action_for(&config, "super+v"), None);
         // ...and the untouched defaults survived: one removed, one added.
-        assert_eq!(config.keybindings.len(), Config::default_config().keybindings.len());
+        assert_eq!(
+            config.keybindings.len(),
+            Config::default_config().keybindings.len() - 1
+        );
         assert_eq!(
             action_for(&config, "alt+shift+x"),
             Some(Action::ToggleMaximize)

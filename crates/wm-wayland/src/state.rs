@@ -364,6 +364,8 @@ impl ManagedSurface {
 /// caches it and the queries become lookups.
 pub(crate) struct WindowRecord {
     pub surface: ManagedSurface,
+    /// Last observed protocol constraints, for change-driven core events.
+    pub size_hints: wm_core::SizeHints,
     /// The client content's root-relative rectangle — the analogue of
     /// the client window's geometry inside its X11 frame. Written by
     /// `Backend::configure_client`/`position_client`; read by the
@@ -480,6 +482,7 @@ impl WindowRecord {
     pub(crate) fn new(surface: ManagedSurface, content: Rect) -> Self {
         Self {
             surface,
+            size_hints: wm_core::SizeHints::default(),
             content,
             mapped: false,
             fullscreen: false,
@@ -626,6 +629,7 @@ pub struct WaylandBackend {
     pub(crate) shells: HashMap<WlShellId, ShellRecord>,
     pub(crate) overview: Option<crate::overview::Overview>,
     pub(crate) gesture_scene: Option<crate::gesture_scene::Transition>,
+    pub(crate) layout_scene: crate::layout_scene::Scene,
     pub(crate) capture_ui: Option<crate::capture_tool::Overlay>,
     /// Bottom-to-top managed application order — see [`StackEntry`].
     pub(crate) stacking: Vec<StackEntry>,
@@ -1016,6 +1020,7 @@ impl WaylandBackend {
             windows: HashMap::new(),
             overview: None,
             gesture_scene: None,
+            layout_scene: crate::layout_scene::Scene::default(),
             capture_ui: None,
             scene_index: SceneIndex::default(),
             surface_windows: HashMap::new(),
@@ -1211,7 +1216,11 @@ impl WaylandBackend {
         }
         crate::xdg::effective_surface_scale(
             crate::xdg::committed_surface_scale(&surface),
-            self.scale_at(record.content),
+            self.scale_at(
+                self.window_for_surface(&surface)
+                    .and_then(|id| self.layout_scene.workarea(id))
+                    .unwrap_or(record.content),
+            ),
         )
     }
 
@@ -2517,6 +2526,7 @@ impl Compositor {
         // Spring commits join the ordinary notification/focus/protocol drain
         // below, so a workspace settles and receives keyboard focus together.
         crate::gesture_scene::tick(self);
+        crate::layout_scene::tick(self);
         self.apply_pending_keyboard();
         if let Some(config) = self.wm.backend_mut().pending_pointer.take() {
             self.wm.backend_mut().scroll_factor = config.scroll_factor.unwrap_or(1.0);
@@ -4228,6 +4238,9 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
             wait = wait.min(deadline.saturating_duration_since(now));
         }
         if let Some(deadline) = crate::session::next_render_deadline(&comp.graphics) {
+            wait = wait.min(deadline.saturating_duration_since(now));
+        }
+        if let Some(deadline) = crate::layout_scene::deadline(&comp) {
             wait = wait.min(deadline.saturating_duration_since(now));
         }
         if let Some(deadline) = crate::gesture_scene::deadline(&comp) {

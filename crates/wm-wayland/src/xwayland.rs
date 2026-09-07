@@ -436,6 +436,9 @@ impl XwmHandler for Compositor {
             WmWindowProperty::MotifHints => {
                 backend.queue(WmEvent::ChromeChanged(id));
             }
+            WmWindowProperty::NormalHints => {
+                backend.queue(WmEvent::SizeHintsChanged(id));
+            }
             // ICCCM `WM_HINTS`, whose urgency bit is how the great
             // majority of X11 applications actually ask for attention —
             // IRC and chat clients, terminal bells, mail notifiers.

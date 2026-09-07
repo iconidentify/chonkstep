@@ -1266,6 +1266,9 @@ impl X11Backend {
                 if e.atom == self.motif_wm_hints {
                     return Some(BackendEvent::ChromeChanged(XWindow(e.window)));
                 }
+                if e.atom == u32::from(AtomEnum::WM_NORMAL_HINTS) {
+                    return Some(BackendEvent::SizeHintsChanged(XWindow(e.window)));
+                }
                 if e.atom == u32::from(AtomEnum::WM_TRANSIENT_FOR) {
                     return Some(BackendEvent::ParentChanged(XWindow(e.window)));
                 }

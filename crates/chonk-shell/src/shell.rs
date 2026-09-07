@@ -30,7 +30,10 @@ use crate::desktop::{
 use crate::dockapp::Farewell;
 use crate::launchdock::{LaunchDock, LaunchDockAction};
 use crate::overview::{OverviewHit, OverviewItem, OverviewRelease};
-use crate::session_layout::{relative_to_monitor, restored_geometry, RelaunchPlan, SessionLayout, WindowRecord};
+use crate::session_layout::{
+    relative_to_monitor, restored_geometry, restored_on_monitor, RelaunchPlan, SessionLayout,
+    SpatialRecord, WindowRecord,
+};
 use crate::startup::SessionState;
 use crate::widgets::DockInput;
 use crate::{spawn, theme_select, wallpaper};
@@ -842,11 +845,41 @@ fn running_matches_clients<B: Backend>(wm: &WindowManager<B>, running: &[(String
 fn layout_snapshot<B: Backend>(wm: &WindowManager<B>, apps: &[AppEntry]) -> Vec<WindowRecord> {
     wm.iter_clients()
         .filter(|(_, client)| !client.class.is_empty())
-        .map(|(_, client)| {
-            let maximized = client.flags.intersects(ClientFlags::MAXIMIZED_H | ClientFlags::MAXIMIZED_V);
-            let root_geometry = if maximized { client.restore_geometry.unwrap_or(client.geometry) } else { client.geometry };
+        .map(|(id, client)| {
+            let maximized = client
+                .flags
+                .intersects(ClientFlags::MAXIMIZED_H | ClientFlags::MAXIMIZED_V);
+            let root_geometry = client.placement.freeform.unwrap_or_else(|| {
+                if maximized {
+                    client.restore_geometry.unwrap_or(client.geometry)
+                } else {
+                    client.geometry
+                }
+            });
             let (geometry, monitor_identity) = layout_record_geometry(wm, root_geometry);
+            let floating = floating_record_geometry(wm, id);
             WindowRecord {
+                spatial: Some(SpatialRecord {
+                    floating: client.placement.floating,
+                    order: wm
+                        .layout_order(client.workspace)
+                        .iter()
+                        .position(|&i| i == id)
+                        .unwrap_or(0),
+                    flow_width: client.placement.flow_width,
+                    mosaic_weight: client.placement.mosaic_weight,
+                    output: client.placement.output.clone(),
+                    focused: wm.focused_client() == Some(id),
+                    floating_geometry: floating.map(|(rect, _)| {
+                        [
+                            rect.pos.x as i64,
+                            rect.pos.y as i64,
+                            rect.size.w as i64,
+                            rect.size.h as i64,
+                        ]
+                    }),
+                    floating_monitor: floating.and_then(|(_, monitor)| monitor.map(str::to_owned)),
+                }),
                 class: client.class.clone(),
                 app: apps::match_window_class(apps, &client.class).map(|index| apps[index].id.clone()),
                 geometry,
@@ -871,6 +904,15 @@ fn layout_record_geometry<B: Backend>(wm: &WindowManager<B>, geometry: Rect) -> 
     relative_to_monitor(monitor, geometry)
 }
 
+fn floating_record_geometry<B: Backend>(
+    wm: &WindowManager<B>,
+    id: ClientId,
+) -> Option<(Rect, Option<&str>)> {
+    let client = wm.client(id)?;
+    (client.placement.floating && client.placement.freeform.is_some())
+        .then(|| layout_record_geometry(wm, client.geometry))
+}
+
 /// Whether `records` still describe the live client set exactly,
 /// without cloning a class name or consulting the application index.
 ///
@@ -887,13 +929,47 @@ fn layout_record_geometry<B: Backend>(wm: &WindowManager<B>, geometry: Rect) -> 
 fn layout_matches_clients<B: Backend>(wm: &WindowManager<B>, records: &[WindowRecord]) -> bool {
     let mut clients = wm.iter_clients().filter(|(_, client)| !client.class.is_empty());
     for record in records {
-        let Some((_, client)) = clients.next() else {
+        let Some((id, client)) = clients.next() else {
             return false;
         };
-        let maximized = client.flags.intersects(ClientFlags::MAXIMIZED_H | ClientFlags::MAXIMIZED_V);
-        let root_geometry = if maximized { client.restore_geometry.unwrap_or(client.geometry) } else { client.geometry };
+        let maximized = client
+            .flags
+            .intersects(ClientFlags::MAXIMIZED_H | ClientFlags::MAXIMIZED_V);
+        let root_geometry = client.placement.freeform.unwrap_or_else(|| {
+            if maximized {
+                client.restore_geometry.unwrap_or(client.geometry)
+            } else {
+                client.geometry
+            }
+        });
         let (geometry, monitor_identity) = layout_record_geometry(wm, root_geometry);
-        if record.class != client.class
+        let placement = &client.placement;
+        let floating = floating_record_geometry(wm, id);
+        let spatial_matches = record.spatial.as_ref().is_some_and(|r| {
+            r.floating == placement.floating
+                && r.flow_width == placement.flow_width
+                && r.mosaic_weight == placement.mosaic_weight
+                && r.output == placement.output
+                && r.focused == (wm.focused_client() == Some(id))
+                && r.order
+                    == wm
+                        .layout_order(client.workspace)
+                        .iter()
+                        .position(|&i| i == id)
+                        .unwrap_or(0)
+                && r.floating_geometry
+                    == floating.map(|(rect, _)| {
+                        [
+                            rect.pos.x as i64,
+                            rect.pos.y as i64,
+                            rect.size.w as i64,
+                            rect.size.h as i64,
+                        ]
+                    })
+                && r.floating_monitor.as_deref() == floating.and_then(|(_, monitor)| monitor)
+        });
+        if !spatial_matches
+            || record.class != client.class
             || record.geometry != geometry
             || record.monitor_identity.as_deref() != monitor_identity
             || record.workspace != client.workspace
@@ -1005,6 +1081,7 @@ pub struct Shell<B: Backend + PopupHost<PopupId = B::ShellId>> {
     /// records while a restore is matching mapped windows against
     /// them. See `crate::session_layout` for all the rules.
     layout: SessionLayout,
+    restore_focus: Option<ClientId>,
     /// Owned identities last reconciled into the launcher strip's
     /// running lamps. Most ticks prove these still match through
     /// borrowed comparisons and avoid allocating/cloning them again.
@@ -1284,6 +1361,7 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
             overview_close_pressed: None,
             grabbed: to_grab,
             layout,
+            restore_focus: None,
             running_clients: Vec::new(),
             terminals,
             state: state.clone(),
@@ -1863,6 +1941,36 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
             // same `WindowMenuRequested` notification a titlebar
             // right-click raises, so the menu, its items and its
             // dispatch are shared verbatim.
+            Action::Layout(mode) => wm.set_workspace_layout(wm.current_workspace(), *mode),
+            Action::ToggleLayout => wm.toggle_workspace_layout(),
+            Action::Floating(value) => {
+                if let Some(id) = wm.focused_client() {
+                    if let Some(value) = value {
+                        wm.set_floating(id, *value);
+                    } else {
+                        wm.toggle_floating(id);
+                    }
+                }
+            }
+            Action::Move(direction) => {
+                if let Some(id) = wm.focused_client() {
+                    wm.move_layout_window(id, *direction);
+                }
+            }
+            Action::Resize(delta) => {
+                if let Some(id) = wm.focused_client() {
+                    if !wm.resize_layout_window(id, *delta) {
+                        if let Some(c) = wm.client(id) {
+                            let size = wm_core::Size::new(
+                                (c.geometry.size.w as i64 + delta.x as i64).clamp(1, 65536) as u32,
+                                (c.geometry.size.h as i64 + delta.y as i64).clamp(1, 65536) as u32,
+                            );
+                            wm.resize_client_content(id, size);
+                        }
+                    }
+                }
+            }
+            Action::LayoutNoop => {}
             Action::WindowMenu => wm.request_window_menu_for_focused(),
             Action::RootMenu => {
                 let at = wm
@@ -2055,7 +2163,15 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
                 c.geometry.pos.y - c.layout.client_offset.y), c.layout.frame_size)
         } else { c.geometry }).collect();
         let sizes: Vec<_> = sources.iter().map(|r| r.size).collect();
-        let layout = live::layout(geometry.size, tile, &sizes, wm.workspace_count().max(workspace + 1));
+        let mut layout = live::layout(
+            geometry.size,
+            tile,
+            &sizes,
+            wm.workspace_count().max(workspace + 1),
+        );
+        if wm.workspace_layout(workspace) != wm_core::LayoutMode::Freeform {
+            live::preserve_arrangement(&mut layout, &sources);
+        }
         let (mut fonts, mut swash) = (self.fonts.system(), self.fonts.swash());
         let label_h = (tile / 2).max(16);
         let mut label = |text: &str, width| live::label(&self.theme, &mut fonts, &mut swash, text, width, label_h);
@@ -2170,6 +2286,7 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
             })
             .map(|(id, client)| OverviewItem {
                 client: id,
+                managed: wm.is_layout_managed(id),
                 window: client.window,
                 title: client.title.clone(),
                 preview: None,
@@ -2902,6 +3019,7 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
                     | Notification::Deminiaturized(_)
                     | Notification::Removed(_)
                     | Notification::Mapped(_)
+                    | Notification::LayoutChanged(_)
             );
         match notification {
             Notification::Miniaturized(id, preview) => {
@@ -2932,6 +3050,8 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
                         workspace = record.workspace,
                         "restoring a recorded window"
                     );
+                    let initially_floating = wm.client(id).is_some_and(|c| c.placement.floating);
+                    wm.set_floating(id, true);
                     wm.set_client_content_geometry(id, geometry);
                     if record.workspace != wm.current_workspace() {
                         wm.move_client_to_workspace(id, record.workspace);
@@ -2949,7 +3069,51 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
                     if record.miniaturized {
                         wm.miniaturize(id);
                     }
+                    if let Some(spatial) = record.spatial {
+                        if let Some(r) = spatial.floating_geometry {
+                            let rect = restored_on_monitor(
+                                wm.monitors_ref(),
+                                Rect::new(
+                                    Point::new(r[0] as i32, r[1] as i32),
+                                    wm_core::Size::new(r[2] as u32, r[3] as u32),
+                                ),
+                                spatial.floating_monitor.as_deref(),
+                            );
+                            wm.set_client_content_geometry(id, rect);
+                        }
+                        let freeform = (wm.workspace_layout(record.workspace)
+                            != wm_core::LayoutMode::Freeform)
+                            .then_some(geometry);
+                        wm.restore_window_placement(
+                            id,
+                            wm_core::WindowPlacement {
+                                freeform,
+                                floating: spatial.floating,
+                                output: spatial.output,
+                                flow_width: spatial.flow_width,
+                                mosaic_weight: spatial.mosaic_weight,
+                            },
+                            spatial.order,
+                        );
+                        if spatial.focused {
+                            self.restore_focus = Some(id);
+                        }
+                    } else {
+                        wm.set_floating(id, initially_floating);
+                    }
                 }
+            }
+            Notification::LayoutChanged(mode) => {
+                let (mut fonts, mut swash) = (self.fonts.system(), self.fonts.swash());
+                let label = wm_theme::overview::live::label(
+                    &self.theme,
+                    &mut fonts,
+                    &mut swash,
+                    mode.name(),
+                    (180.0 * self.state.scale) as u32,
+                    (36.0 * self.state.scale) as u32,
+                );
+                wm.backend_mut().show_layout_mode(mode, label);
             }
             Notification::CycleUpdated => {
                 if let Some((candidates, selected)) = wm.cycle_state() {
@@ -3014,6 +3178,20 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
     /// this routine therefore does not approximate state change with an
     /// action-shaped boolean.
     pub fn tick(&mut self, wm: &mut WindowManager<B>) {
+        if let Some(modes) = self.layout.take_restored_modes() {
+            for (workspace, mode) in modes.into_iter().enumerate() {
+                wm.set_workspace_layout(workspace, mode);
+            }
+        }
+        if !self.layout.restoring() {
+            if let Some(id) = self.restore_focus.take() {
+                if let Some(c) = wm.client(id) {
+                    let (workspace, window) = (c.workspace, c.window);
+                    wm.switch_workspace(workspace);
+                    wm.dispatch(BackendEvent::ActivateRequested(window));
+                }
+            }
+        }
         let now = Instant::now();
         // The appearance-request file, consumed the way the binaries
         // consume reload/restart markers: one cached path at a bounded
@@ -3122,6 +3300,10 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         // debounce without allocating, cloning every class, or
         // rescanning the application index. A real change still builds
         // the full owned snapshot once and resets the settle clock.
+        self.layout.note_modes(
+            (0..wm.workspace_count()).map(|i| wm.workspace_layout(i)),
+            now,
+        );
         if layout_matches_clients(wm, self.layout.current()) {
             self.layout.service_current(now);
         } else {

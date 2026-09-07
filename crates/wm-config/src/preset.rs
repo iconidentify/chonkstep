@@ -66,20 +66,10 @@
 //!    "install chonkstep, keep your Omarchy" claim made literal:
 //!    `SUPER + SPACE` opens Omarchy's menu because it runs Omarchy's
 //!    `omarchy-menu`, not an imitation of it.
-//! 3. **Everything else stays unbound**, and says why in
-//!    [`OMARCHY_UNBOUND`]. A tiling desktop's vocabulary is full of
-//!    verbs that have no meaning on a stacking desk — split ratios,
-//!    gaps, layout cycling, "toggle floating" on a desk where
-//!    everything floats already — and the temptation is to map each one
-//!    to whatever is nearest. An approximation is worse than a dead
-//!    key: a dead key is discovered in five seconds and looked up,
-//!    while `SUPER + J` that does something *else* is a bug report.
-//!
-//! The same filter the Omarchy menu already applies applies here: an
-//! action that invokes `hyprctl` or an `omarchy-hyprland-*` script
-//! commands a compositor that is not running, so it is left unbound
-//! rather than bound to a command that will fail
-//! (`chonk_shell::omarchy_menu`, `Skip::HyprlandOnly`).
+//! 3. **Workspace styles** map to the native Mosaic and Flow layouts.
+//!    Super+T floats/rejoins, Super+L switches managed styles, and
+//!    Super+Shift+L returns to Freeform. Tree-only messages are quiet
+//!    no-ops; grouping and unavailable system operations stay unbound.
 
 use std::collections::BTreeMap;
 
@@ -400,6 +390,20 @@ pub const OMARCHY_BINDINGS: &[(&str, &str)] = &[
     // These select the closest focusable frame in the requested
     // direction, which preserves Omarchy's intent without inventing a
     // tiling tree.
+    ("super+j", "layout-noop"),
+    ("super+p", "layout-noop"),
+    ("super+ctrl+f", "toggle-maximize"),
+    ("super+equal", "grow-width"),
+    ("super+minus", "shrink-width"),
+    ("super+shift+equal", "grow-height"),
+    ("super+shift+minus", "shrink-height"),
+    ("super+t", "toggle-floating"),
+    ("super+l", "toggle-layout"),
+    ("super+shift+l", "layout-freeform"),
+    ("super+shift+left", "move-left"),
+    ("super+shift+right", "move-right"),
+    ("super+shift+up", "move-up"),
+    ("super+shift+down", "move-down"),
     ("super+left", "focus-left"),
     ("super+right", "focus-right"),
     ("super+up", "focus-up"),
@@ -571,9 +575,7 @@ pub const OMARCHY_BINDINGS: &[(&str, &str)] = &[
 /// place and forgotten in the other is how a table starts lying.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Unbound {
-    /// Names a tiling-layout action — split direction, gaps, ratios,
-    /// grouping, layout cycling — that has no meaning on a stacking
-    /// desktop where every window already floats at its own size.
+    /// A grouping or layout-specific operation outside the three styles.
     TilingOnly,
     /// Commands Hyprland itself (`hyprctl`, an `omarchy-hyprland-*`
     /// script, or a `hl.config` write from Lua). The compositor it
@@ -602,7 +604,7 @@ impl Unbound {
     /// The one-line reason, as the docs table prints it.
     pub fn reason(self) -> &'static str {
         match self {
-            Self::TilingOnly => "tiling-only: no meaning on a stacking desk",
+            Self::TilingOnly => "requires window groups or a feature ChonkStep does not provide",
             Self::HyprlandOnly => "commands Hyprland, which is not running",
             Self::NoVerb => "chonkstep has no verb for it, and no command can stand in",
             Self::NotAKey => "not a key chord this config format can express",
@@ -633,24 +635,14 @@ pub const OMARCHY_UNBOUND: &[(&str, &str, Unbound)] = &[
         Unbound::NoVerb,
     ),
     // tiling.lua
-    ("super+j", "toggle window split", Unbound::TilingOnly),
-    ("super+p", "pseudo-tile the window", Unbound::TilingOnly),
-    ("super+t", "toggle floating / tiling", Unbound::TilingOnly),
-    ("super+ctrl+f", "tiled fullscreen", Unbound::TilingOnly),
     ("super+o", "pop the window out, floating and pinned", Unbound::TilingOnly),
     ("super+home / super+alt+home", "restore / save window width", Unbound::HyprlandOnly),
-    ("super+l", "cycle the workspace layout", Unbound::HyprlandOnly),
     ("super+g / super+alt+g", "toggle grouping / move out of group", Unbound::TilingOnly),
     ("super+alt+left/right/up/down", "move the window into the group in that direction", Unbound::TilingOnly),
     ("super+alt+tab / super+alt+shift+tab", "next / previous window in the group", Unbound::TilingOnly),
     ("super+ctrl+left / super+ctrl+right", "move the grouped-window focus", Unbound::TilingOnly),
     ("super+alt+1..5", "focus the nth window of the group", Unbound::TilingOnly),
-    ("super+shift+left/right/up/down", "swap the window with its neighbour", Unbound::TilingOnly),
-    (
-        "super+minus / super+equal, +shift/alt/ctrl variants",
-        "grow and shrink the window by 25 / 100 / 300 px",
-        Unbound::TilingOnly,
-    ),
+    ("super+alt/ctrl+minus/equal", "large resize increments", Unbound::NoVerb),
     ("super+s", "toggle the scratchpad workspace", Unbound::NoVerb),
     ("super+ctrl+tab", "the workspace before this one", Unbound::NoVerb),
     ("super+shift+alt+left/right/up/down", "move the workspace to the monitor in that direction", Unbound::NoVerb),
@@ -834,6 +826,8 @@ mod tests {
 
         // The intended aliases, as (action, how many chords reach it).
         let expected: BTreeMap<&str, usize> = [
+            ("layout-noop", 2),
+            ("toggle-maximize", 2),
             ("run omarchy-browser", 2),
             ("run omarchy-menu", 2),
             ("run omarchy-menu-system", 2),
@@ -871,26 +865,15 @@ mod tests {
         // checked mechanically; the rest describe a family (`super+1..0`)
         // and are expanded here by hand where a family is checkable.
         let literal = [
-            "super+j",
-            "super+p",
-            "super+t",
-            "super+ctrl+f",
             "super+o",
             "super+home",
             "super+alt+home",
-            "super+l",
             "super+g",
             "super+alt+g",
             "super+alt+tab",
             "super+alt+shift+tab",
             "super+ctrl+left",
             "super+ctrl+right",
-            "super+shift+left",
-            "super+shift+right",
-            "super+shift+up",
-            "super+shift+down",
-            "super+minus",
-            "super+equal",
             "super+s",
             "super+ctrl+tab",
             "ctrl+alt+tab",

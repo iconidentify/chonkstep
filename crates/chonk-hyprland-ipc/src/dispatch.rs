@@ -1,21 +1,9 @@
 //! Dispatch: turning Hyprland's verbs into chonkstep's, or refusing.
 //!
-//! # The rule this module exists to enforce
-//!
-//! **A verb we cannot honour must fail, loudly, rather than succeed
-//! plausibly.**
-//!
-//! chonkstep is a floating window manager. Hyprland is a tiling one, and
-//! a large part of its dispatch vocabulary — `layoutmsg`, `togglesplit`,
-//! `swapwindow`, `pseudo`, `movewindow l` — means nothing here. The
-//! tempting thing is to answer `ok` and move on, because `ok` is what
-//! callers expect and nothing visibly breaks.
-//!
-//! It is the wrong thing, and the reason is worth being concrete about.
-//! A script that gets `ok` from `togglesplit` believes the layout
-//! changed and takes its next branch accordingly; the mistake is now
-//! invisible and permanent, and it surfaces later as behaviour the user
-//! cannot explain.
+//! Mosaic and Flow translate spatial actions directly; Freeform preserves
+//! traditional geometry. Inapplicable tree messages deliberately succeed
+//! quietly, so the same shortcut stays predictable in all three styles.
+//! Unavailable grouping and system actions remain explicit errors.
 //!
 //! Omarchy often appears to provide a fallback:
 //!
@@ -29,7 +17,7 @@
 //! therefore not treated as a compatibility mechanism: caller-visible
 //! paths are implemented, hidden from chonkstep-owned menus, or tracked
 //! as a bug. It remains the only truthful protocol answer for a request
-//! with no meaning on this floating desktop.
+//! whose requested behavior is unavailable.
 //!
 //! So: [`Outcome::Unsupported`] is a first-class result here, not a
 //! shortfall, and it is reported to the caller as an error string
@@ -69,6 +57,7 @@ pub enum Action {
     ExecArgv(Vec<String>),
     /// Set or toggle fullscreen on the focused window.
     Fullscreen(Fullscreen),
+    ToggleMaximize,
     /// Focus the next/previous window.
     CycleFocus { forward: bool },
     MoveWindow { window: u64, x: i32, y: i32, relative: bool },
@@ -92,9 +81,18 @@ pub enum Action {
     ReloadConfig,
     SetDiagnostic { name: String, enabled: bool },
     SetLogFilter(String),
-    /// The requested window is already floating; applying this still
-    /// validates that the target survived until the action ran.
-    ConfirmFloating(u64),
+    /// Set or toggle membership in the current workspace layout.
+    SetFloating {
+        window: u64,
+        floating: Option<bool>,
+    },
+    SetWorkspaceLayout {
+        workspace: usize,
+        mode: String,
+    },
+    ToggleLayout,
+    MoveDirection(Direction),
+    LayoutNoop,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -152,8 +150,7 @@ impl Outcome {
     }
 }
 
-/// Every tiling-only verb in Hyprland's dispatch table, with the reason
-/// chonkstep cannot honour it.
+/// Known operations outside ChonkStep's model, with their refusal reason.
 ///
 /// Listing them explicitly — rather than letting them fall through to
 /// "unknown dispatcher" — is the difference between "chonkstep does not
@@ -161,13 +158,7 @@ impl Outcome {
 /// asked for and is not able to do it". The second is a much better
 /// error to read at 2am, and it is the one that tells a script author
 /// their fallback path is the right one to write.
-const TILING_ONLY: &[(&str, &str)] = &[
-    ("layoutmsg", "chonkstep has no tiling layout to message"),
-    ("togglesplit", "chonkstep has no split direction; every window floats"),
-    ("swapsplit", "chonkstep has no split direction; every window floats"),
-    ("swapwindow", "chonkstep has no tiling order to swap within"),
-    ("swapnext", "chonkstep has no tiling order to swap within"),
-    ("pseudo", "pseudotiling is meaningless in a floating window manager"),
+const UNSUPPORTED: &[(&str, &str)] = &[
     ("togglegroup", "chonkstep has no window groups"),
     ("changegroupactive", "chonkstep has no window groups"),
     ("moveintogroup", "chonkstep has no window groups"),
@@ -176,13 +167,6 @@ const TILING_ONLY: &[(&str, &str)] = &[
     ("togglespecialworkspace", "chonkstep has no special (scratchpad) workspaces"),
     ("workspaceopt", "chonkstep has no per-workspace layout options"),
     ("submap", "chonkstep's keybindings do not have submaps"),
-];
-
-/// Verbs chonkstep understands but which target something it does not
-/// model, listed separately from the tiling ones because the reason is
-/// different and a reader deserves to know which kind of "no" this is.
-const NOT_MODELLED: &[(&str, &str)] = &[
-    ("settiled", "chonkstep cannot tile a window"),
 ];
 
 /// Parse a dispatch argument string.
@@ -220,14 +204,28 @@ fn split_verb(args: &str) -> (String, &str) {
 }
 
 fn parse_classic(verb: &str, rest: &str, snapshot: &Snapshot) -> Outcome {
-    if let Some((_, why)) = TILING_ONLY.iter().find(|(name, _)| *name == verb) {
-        return Outcome::Unsupported((*why).to_string());
-    }
-    if let Some((_, why)) = NOT_MODELLED.iter().find(|(name, _)| *name == verb) {
+    if let Some((_, why)) = UNSUPPORTED.iter().find(|(name, _)| *name == verb) {
         return Outcome::Unsupported((*why).to_string());
     }
 
     match verb {
+        "layoutmsg" | "togglesplit" | "swapsplit" | "pseudo" | "splitratio" => {
+            Outcome::Run(Action::LayoutNoop)
+        }
+        "togglelayout" => Outcome::Run(Action::ToggleLayout),
+        "layout" => layout_action(snapshot.active_workspace().map_or(0, |w| w.index), rest),
+        "swapnext" => Outcome::Run(Action::MoveDirection(if rest.contains("prev") {
+            Direction::Left
+        } else {
+            Direction::Right
+        })),
+        "movewindow" | "swapwindow" => match rest.trim() {
+            "l" | "left" => Outcome::Run(Action::MoveDirection(Direction::Left)),
+            "r" | "right" => Outcome::Run(Action::MoveDirection(Direction::Right)),
+            "u" | "up" => Outcome::Run(Action::MoveDirection(Direction::Up)),
+            "d" | "down" => Outcome::Run(Action::MoveDirection(Direction::Down)),
+            _ => Outcome::Unsupported("window movement requires a direction".into()),
+        },
         "workspace" => match workspace_target(rest, snapshot) {
             Ok(index) => Outcome::Run(Action::FocusWorkspace(index)),
             Err(why) => Outcome::Unsupported(why),
@@ -270,14 +268,15 @@ fn parse_classic(verb: &str, rest: &str, snapshot: &Snapshot) -> Outcome {
             Outcome::Run(Action::MoveToWorkspace { window, workspace, follow })
         }
         "exec" => classic_exec(rest),
-        "fullscreen" => Outcome::Run(Action::Fullscreen(match rest.trim() {
-            "" | "0" => Fullscreen::Toggle,
-            // Hyprland's `1` is "maximize to the window's monitor",
-            // which for a floating window manager with no tiling to
-            // return to is the same operation as fullscreen.
-            "1" | "2" => Fullscreen::On,
-            _ => Fullscreen::Toggle,
-        })),
+        "fullscreen" => {
+            if rest.trim() == "1" {
+                Outcome::Run(Action::ToggleMaximize)
+            } else if rest.trim() == "2" {
+                Outcome::Run(Action::Fullscreen(Fullscreen::On))
+            } else {
+                Outcome::Run(Action::Fullscreen(Fullscreen::Toggle))
+            }
+        }
         "fullscreenstate" => {
             let client = rest.split_whitespace().nth(1).unwrap_or("0");
             Outcome::Run(Action::Fullscreen(if client == "0" { Fullscreen::Off } else { Fullscreen::On }))
@@ -305,8 +304,17 @@ fn parse_classic(verb: &str, rest: &str, snapshot: &Snapshot) -> Outcome {
         "pin" => selected_window(rest, snapshot)
             .map(|window| Outcome::Run(Action::SetPinned { window: window.id, pinned: None }))
             .unwrap_or_else(|| Outcome::Unsupported(format!("no window matches {rest:?}"))),
-        "togglefloating" | "setfloating" => selected_window(rest, snapshot)
-            .map(|window| Outcome::Run(Action::ConfirmFloating(window.id)))
+        "togglefloating" | "setfloating" | "settiled" => selected_window(rest, snapshot)
+            .map(|window| {
+                Outcome::Run(Action::SetFloating {
+                    window: window.id,
+                    floating: match verb {
+                        "setfloating" => Some(true),
+                        "settiled" => Some(false),
+                        _ => None,
+                    },
+                })
+            })
             .unwrap_or_else(|| Outcome::Unsupported(format!("no window matches {rest:?}"))),
         "tagwindow" => classic_tag(rest, snapshot),
         "dpms" => parse_dpms(rest, snapshot),
@@ -357,7 +365,15 @@ fn parse_lua(rest: &str, snapshot: &Snapshot) -> Outcome {
             Some(command) => Outcome::Run(Action::ExecShell(command)),
             None => Outcome::Unknown("hl.dsp.exec_cmd with no command".to_string()),
         },
-        "window.float" => lua_window(body, snapshot, |window| Action::ConfirmFloating(window.id)),
+        "window.float" => lua_window(body, snapshot, |window| Action::SetFloating {
+            window: window.id,
+            floating: match lua_field(body, "action").as_deref() {
+                Some("on" | "set") => Some(true),
+                Some("off" | "unset") => Some(false),
+                _ => None,
+            },
+        }),
+        "layout" => Outcome::Run(Action::LayoutNoop),
         "window.pin" => lua_window(body, snapshot, |window| Action::SetPinned { window: window.id, pinned: None }),
         "window.resize" => lua_geometry(body, snapshot, true),
         "window.move" => lua_geometry(body, snapshot, false),
@@ -431,15 +447,53 @@ pub fn parse_eval(source: &str, snapshot: &Snapshot) -> Outcome {
         return Outcome::Unsupported("hl.device enable/disable is not supported by this input backend".to_string());
     }
     if source.starts_with("hl.workspace_rule(") {
-        return Outcome::Unsupported("chonkstep is floating-only and cannot apply a tiled workspace layout".to_string());
+        let workspace = lua_field(source, "workspace")
+            .and_then(|s| s.parse::<i32>().ok())
+            .and_then(workspace_index_from_hypr_id);
+        return match (workspace, lua_field(source, "layout")) {
+            (Some(workspace), Some(mode)) if workspace < 99 => layout_action(workspace, &mode),
+            _ => Outcome::Unsupported(
+                "workspace_rule requires a workspace from 1 to 99 and a layout".into(),
+            ),
+        };
     }
     Outcome::Unknown(format!("unknown eval expression {source:?}"))
 }
 
-/// Parse the one live `keyword` mutation chonkstep deliberately
-/// supports. The broad namespace remains a refusal; this exception is
-/// the exact fallback shipped by Omarchy's screensaver.
+fn layout_action(workspace: usize, mode: &str) -> Outcome {
+    if matches!(
+        mode.trim(),
+        "freeform" | "mosaic" | "flow" | "dwindle" | "scrolling"
+    ) {
+        Outcome::Run(Action::SetWorkspaceLayout {
+            workspace,
+            mode: mode.trim().into(),
+        })
+    } else {
+        Outcome::Unsupported(
+            "layout must be Freeform, Mosaic/dwindle or Flow/scrolling (lowercase)".into(),
+        )
+    }
+}
+
+/// Parse the supported workspace, monitor and diagnostic keyword mutations.
 pub fn parse_keyword(source: &str) -> Outcome {
+    if let Some(spec) = source.trim().strip_prefix("workspace ") {
+        if let Some((workspace, mode)) = spec.split_once(',') {
+            if let Some(index) = workspace
+                .trim()
+                .parse::<i32>()
+                .ok()
+                .and_then(workspace_index_from_hypr_id)
+                .filter(|&i| i < 99)
+            {
+                if let Some(mode) = mode.trim().strip_prefix("layout:") {
+                    return layout_action(index, mode);
+                }
+            }
+        }
+        return Outcome::Unsupported("workspace requires N, layout:MODE".into());
+    }
     let source = source.trim();
     if let Some(spec) = source.strip_prefix("monitor ") {
         if let Some((name, operation)) = spec.split_once(',') {

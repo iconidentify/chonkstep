@@ -153,10 +153,12 @@ Hyprland's independent per-monitor workspace/focus model, so requests that
 promise monitor-specific placement are refused and logged rather than
 pretending all screens landed correctly.
 
-Tiling-only operations—layouts, groups, pseudo-tiling, silent moves, and
-special workspaces—remain deliberately unsupported on chonkstep's floating
-desktop. The mirrored root menu omits the installed actions that have no
-honest meaning here. Every IPC refusal emits a warning and increments a
+Workspace layout switching, floating/rejoining, spatial movement and silent
+workspace sends are native. Mosaic/Flow accept inapplicable split and pseudo
+messages quietly. Groups and special workspaces remain unsupported. The
+mirrored root menu retains its conservative filter for direct Hyprland scripts;
+layout switching is available through the native shortcuts. Every IPC refusal
+emits a warning and increments a
 session counter; see [hyprland-ipc.md](hyprland-ipc.md) for the exact query,
 mutation, and event surface.
 

@@ -137,6 +137,9 @@ pub struct Client<B: Backend> {
     pub class: String,
     /// Root-relative content geometry (standard X11 convention).
     pub geometry: Rect,
+    pub placement: crate::WindowPlacement,
+    pub(crate) layout_excluded: bool,
+    pub(crate) layout_restore_order: Option<usize>,
     /// Who drew this window's chrome. `ClientDrawn` means `frame` stays
     /// `None` for the window's whole life (or until the client changes
     /// its mind — see `WindowManager::refresh_client_chrome`) while
@@ -186,6 +189,9 @@ impl<B: Backend> Client<B> {
             title,
             class: String::new(),
             geometry: Rect::default(),
+            placement: crate::WindowPlacement::default(),
+            layout_excluded: false,
+            layout_restore_order: None,
             // Overwritten at map time from the backend's answer; the
             // default is what keeps a client that says nothing framed.
             chrome: ClientChrome::ServerDrawn,

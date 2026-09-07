@@ -291,7 +291,7 @@ fn enter_lock_domain(comp: &mut Compositor) {
     // held across the lock cannot route the first post-unlock events
     // to a pre-lock target.
     backend.end_pointer_grab();
-    backend.queue(BackendEvent::DragEnded);
+    backend.queue(BackendEvent::DragCancelled);
     backend.mark_damaged();
     let seat = comp.seat.clone();
     crate::input::clear_implicit_grab(&seat);

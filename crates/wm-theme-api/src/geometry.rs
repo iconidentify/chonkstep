@@ -129,8 +129,22 @@ impl Rect {
     pub fn contains(&self, p: Point) -> bool {
         p.x >= self.pos.x
             && p.y >= self.pos.y
-            && p.x < self.pos.x + self.size.w as i32
-            && p.y < self.pos.y + self.size.h as i32
+            && (p.x as i64) < self.pos.x as i64 + self.size.w as i64
+            && (p.y as i64) < self.pos.y as i64 + self.size.h as i64
+    }
+
+    /// Half-open intersection, including rectangles crossing the signed
+    /// coordinate limit. Empty rectangles never contribute visible pixels.
+    pub fn intersection(self, other: Self) -> Option<Self> {
+        let x = self.pos.x.max(other.pos.x);
+        let y = self.pos.y.max(other.pos.y);
+        let right = (self.pos.x as i64 + self.size.w as i64)
+            .min(other.pos.x as i64 + other.size.w as i64);
+        let bottom = (self.pos.y as i64 + self.size.h as i64)
+            .min(other.pos.y as i64 + other.size.h as i64);
+        (right > x as i64 && bottom > y as i64).then(|| {
+            Self::new(Point::new(x, y), Size::new((right - x as i64) as u32, (bottom - y as i64) as u32))
+        })
     }
 }
 
@@ -145,6 +159,19 @@ mod tests {
         assert!(r.contains(Point::new(14, 14)));
         assert!(!r.contains(Point::new(15, 15)));
         assert!(!r.contains(Point::new(9, 10)));
+    }
+
+    #[test]
+    fn rectangles_handle_extreme_coordinates_and_empty_intersections() {
+        let rect = Rect::new(Point::new(i32::MAX - 10, i32::MIN), Size::new(100, u32::MAX));
+        assert!(rect.contains(Point::new(i32::MAX, 0)));
+        assert!(!rect.contains(Point::new(i32::MAX - 11, 0)));
+        let part = Rect::new(Point::new(i32::MAX, 0), Size::new(1, 1));
+        assert_eq!(rect.intersection(part), Some(part));
+        assert_eq!(part.intersection(rect), Some(part));
+        assert_eq!(rect.intersection(Rect::new(rect.pos, Size::default())), None);
+        let adjacent = Rect::new(Point::new(10, 0), Size::new(5, 5));
+        assert_eq!(adjacent.intersection(Rect::new(Point::new(0, 0), Size::new(10, 5))), None);
     }
 
     #[test]

@@ -318,6 +318,8 @@ pub(crate) fn build_scene_into(
         push_layer_band(elements, renderer, backend, WlrLayer::Top, viewport);
     }
 
+    crate::layout_scene::render_feedback(elements, renderer, backend, viewport);
+
     // XWayland override-redirect windows (menus, tooltips —
     // `WindowType::Unmanaged`, so they own no frame and no
     // stacking entry) draw above every managed frame, which is
@@ -330,6 +332,9 @@ pub(crate) fn build_scene_into(
     }
 
     for entry in backend.stacking.iter().rev() {
+        if crate::layout_scene::render_window(elements, renderer, backend, entry, viewport) {
+            continue;
+        }
         // A managed window whose client drew its own chrome has no
         // frame and no decoration buffer — just its content, at the
         // depth its own stacking slot gives it. Nothing else in this
@@ -1286,25 +1291,26 @@ fn push_window_content(
 /// incorrectly clipping overflow at an output boundary. The expensive
 /// import/element construction then runs only for outputs the tree can
 /// actually reach.
-fn surface_tree_reaches_viewport(
+pub(crate) fn surface_tree_reaches_viewport(
     surface: &WlSurface,
     global_origin: Point,
     ledger_rect: Rect,
-    factor: f64,
+    factor: impl Into<Scale<f64>>,
     viewport: Rect,
 ) -> bool {
     if overlap_area(ledger_rect, viewport) > 0 {
         return true;
     }
+    let factor = factor.into();
     let logical = bbox_from_surface_tree(surface, (0, 0));
     let x = global_origin
         .x
-        .saturating_add(crate::xdg::scale_length(logical.loc.x, factor));
+        .saturating_add(crate::xdg::scale_length(logical.loc.x, factor.x));
     let y = global_origin
         .y
-        .saturating_add(crate::xdg::scale_length(logical.loc.y, factor));
-    let width = crate::xdg::scale_length(logical.size.w, factor).max(0) as u32;
-    let height = crate::xdg::scale_length(logical.size.h, factor).max(0) as u32;
+        .saturating_add(crate::xdg::scale_length(logical.loc.y, factor.y));
+    let width = crate::xdg::scale_length(logical.size.w, factor.x).max(0) as u32;
+    let height = crate::xdg::scale_length(logical.size.h, factor.y).max(0) as u32;
     overlap_area(Rect::new(Point::new(x, y), wm_theme_api::Size::new(width, height)), viewport) > 0
 }
 
@@ -1357,9 +1363,14 @@ pub(crate) fn push_surface_tree(
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn push_surface_tree_alpha(
-    elements: &mut Vec<SceneElement<GlesRenderer>>, renderer: &mut GlesRenderer,
-    surface: &WlSurface, location: SPoint<i32, Physical>, factor: f64,
-    render_scale: f64, kind: Kind, alpha: f32,
+    elements: &mut Vec<SceneElement<GlesRenderer>>,
+    renderer: &mut GlesRenderer,
+    surface: &WlSurface,
+    location: SPoint<i32, Physical>,
+    factor: impl Into<Scale<f64>>,
+    render_scale: f64,
+    kind: Kind,
+    alpha: f32,
 ) {
     // This is smithay's `render_elements_from_surface_tree` traversal
     // with its sink made caller-owned. That helper necessarily returns
@@ -1377,6 +1388,7 @@ pub(crate) fn push_surface_tree_alpha(
     // inside smithay that cannot be rewritten from here — but the walk
     // this compositor owns should not need that bound to be safe, and
     // does not.
+    let factor = factor.into();
     let tree_origin = location;
     let scale: Scale<f64> = render_scale.into();
     let mut pending = take_walk_stack();

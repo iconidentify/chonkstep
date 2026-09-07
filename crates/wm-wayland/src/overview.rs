@@ -198,7 +198,12 @@ fn overlaps(a: Rect, b: Rect) -> bool {
         && b.pos.y < a.pos.y + a.size.h as i32
 }
 
-fn solid(elements: &mut Vec<SceneElement<GlesRenderer>>, id: &Id, rect: Rect, color: Color32F) {
+pub(crate) fn solid(
+    elements: &mut Vec<SceneElement<GlesRenderer>>,
+    id: &Id,
+    rect: Rect,
+    color: Color32F,
+) {
     if rect.size.w == 0 || rect.size.h == 0 {
         return;
     }
@@ -378,6 +383,40 @@ pub(crate) fn render_window(
     destination: Rect,
     alpha: f32,
 ) {
+    render_window_scaled(
+        elements,
+        renderer,
+        backend,
+        window,
+        destination,
+        alpha,
+        false,
+        None,
+    );
+}
+
+pub(crate) fn render_layout_window(
+    elements: &mut Vec<SceneElement<GlesRenderer>>,
+    renderer: &mut GlesRenderer,
+    backend: &WaylandBackend,
+    window: &Window,
+    destination: Rect,
+    viewport: Rect,
+) {
+    render_window_scaled(elements, renderer, backend, window, destination, 1.0, true, Some(viewport));
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_window_scaled(
+    elements: &mut Vec<SceneElement<GlesRenderer>>,
+    renderer: &mut GlesRenderer,
+    backend: &WaylandBackend,
+    window: &Window,
+    destination: Rect,
+    alpha: f32,
+    stretch: bool,
+    viewport: Option<Rect>,
+) {
     let Some(record) = backend
         .windows
         .get(&window.window)
@@ -390,28 +429,75 @@ pub(crate) fn render_window(
     if scale <= 0.0 {
         return;
     }
+    let sx = if stretch {
+        destination.size.w as f64 / window.source.size.w.max(1) as f64
+    } else {
+        scale
+    };
+    let sy = if stretch {
+        destination.size.h as f64 / window.source.size.h.max(1) as f64
+    } else {
+        scale
+    };
     let before = elements.len();
     if let Some(surface) = record.surface.wl_surface().filter(|_| window.draw_content) {
         let origin = SPoint::<i32, Physical>::from((
             destination.pos.x
                 + ((record.content.pos.x - record.content_offset.x - window.source.pos.x) as f64
-                    * scale)
+                    * sx)
                     .round() as i32,
             destination.pos.y
                 + ((record.content.pos.y - record.content_offset.y - window.source.pos.y) as f64
-                    * scale)
+                    * sy)
                     .round() as i32,
         ));
-        push_surface_tree_alpha(
-            elements,
-            renderer,
-            &surface,
-            origin,
-            backend.window_surface_scale(record) * scale,
-            1.0,
-            Kind::Unspecified,
-            alpha,
-        );
+        let factor = backend.window_surface_scale(record);
+        let committed = if stretch {
+            crate::xdg::committed_content_size(&surface, factor, backend.output_size)
+                .unwrap_or(record.content.size)
+        } else {
+            record.content.size
+        };
+        let surface_scale = smithay::utils::Scale::from((
+            factor * sx * record.content.size.w as f64 / committed.w.max(1) as f64,
+            factor * sy * record.content.size.h as f64 / committed.h.max(1) as f64,
+        ));
+        // Managed presentation owns the same popup plane as ordinary windows.
+        // Each popup keeps its own committed scale, anchored through its
+        // parent's transform. Overview retains its existing thumbnail policy.
+        if stretch {
+            for (popup, offset) in backend.popups_for_surface(&surface) {
+                let popup_surface = popup.wl_surface();
+                let popup_factor = crate::xdg::effective_surface_scale(
+                    crate::xdg::committed_surface_scale(popup_surface),
+                    backend.scale_at(record.content),
+                );
+                let popup_scale = smithay::utils::Scale::from((popup_factor * sx, popup_factor * sy));
+                let at = Point::new(
+                    origin.x.saturating_add((offset.x as f64 * factor * sx).round() as i32),
+                    origin.y.saturating_add((offset.y as f64 * factor * sy).round() as i32),
+                );
+                if viewport.is_none_or(|v| crate::renderer::surface_tree_reaches_viewport(
+                    popup_surface, at, Rect::new(at, Size::default()), popup_scale, v,
+                )) {
+                    push_surface_tree_alpha(elements, renderer, popup_surface,
+                        (at.x, at.y).into(), popup_scale, 1.0, Kind::Unspecified, alpha);
+                }
+            }
+        }
+        if viewport.is_none_or(|v| crate::renderer::surface_tree_reaches_viewport(
+            &surface, Point::new(origin.x, origin.y), destination, surface_scale, v,
+        )) {
+            push_surface_tree_alpha(
+                elements, renderer, &surface, origin, surface_scale, 1.0, Kind::Unspecified, alpha,
+            );
+        }
+    }
+    // Offscreen Flow cells still get the exact surface-tree check above: a
+    // subsurface or popup may extend into view. Their chrome and fallback
+    // cannot, so skip their imports and element construction entirely.
+    if viewport.is_some_and(|v| destination.intersection(v).is_none()) {
+        return;
     }
     if let Some(buffer) = window
         .fallback
@@ -447,10 +533,10 @@ pub(crate) fn render_window(
         for part in &frame.parts {
             let origin = SPoint::<i32, Physical>::from((
                 destination.pos.x
-                    + ((frame.geometry.pos.x + part.offset.x - window.source.pos.x) as f64 * scale)
+                    + ((frame.geometry.pos.x + part.offset.x - window.source.pos.x) as f64 * sx)
                         .round() as i32,
                 destination.pos.y
-                    + ((frame.geometry.pos.y + part.offset.y - window.source.pos.y) as f64 * scale)
+                    + ((frame.geometry.pos.y + part.offset.y - window.source.pos.y) as f64 * sy)
                         .round() as i32,
             ));
             if let Ok(element) = MemoryRenderBufferRenderElement::from_buffer(
@@ -462,7 +548,14 @@ pub(crate) fn render_window(
                 None,
                 Kind::Unspecified,
             ) {
-                elements.push(RescaleRenderElement::from_element(element, origin, scale).into());
+                elements.push(
+                    RescaleRenderElement::from_element(
+                        element,
+                        origin,
+                        smithay::utils::Scale::from((sx, sy)),
+                    )
+                    .into(),
+                );
             }
         }
         solid(

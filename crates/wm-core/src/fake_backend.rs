@@ -28,6 +28,7 @@ pub struct FakeBackend {
     geometries: HashMap<FakeWindowId, Rect>,
     hints: HashMap<FakeWindowId, SizeHints>,
     monitors: Vec<MonitorInfo>,
+    monitor_scales: Vec<f32>,
     /// Per-window `_NET_WM_WINDOW_TYPE` the fake reports — absent means
     /// `WindowType::Normal`, matching both the trait default and the
     /// EWMH fallback for windows that declare no type.
@@ -257,6 +258,11 @@ impl FakeBackend {
         self.monitors = monitors;
     }
 
+    /// Per-output scales for logical-coordinate layout and cross-output tests.
+    pub fn set_monitor_scales(&mut self, scales: Vec<f32>) {
+        self.monitor_scales = scales;
+    }
+
     /// Sets the `_NET_WM_WINDOW_TYPE` this fake reports for `window` —
     /// windows never set report `WindowType::Normal`, same as the trait
     /// default. Lets tests exercise the `Unmanaged` map path.
@@ -362,6 +368,19 @@ impl Backend for FakeBackend {
 
     fn monitors(&self) -> Vec<MonitorInfo> {
         self.monitors.clone()
+    }
+
+    fn decoration_scale(&self, frame: Rect) -> f32 {
+        let center = Point::new(
+            frame.pos.x + frame.size.w as i32 / 2,
+            frame.pos.y + frame.size.h as i32 / 2,
+        );
+        let index = self
+            .monitors
+            .iter()
+            .position(|m| m.geometry.contains(center))
+            .unwrap_or(0);
+        self.monitor_scales.get(index).copied().unwrap_or(1.0)
     }
 
     fn monitors_ref(&self) -> &[MonitorInfo] {

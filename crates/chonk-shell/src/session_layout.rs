@@ -46,9 +46,11 @@
 //! when every pending record is matched or expired.
 
 use std::path::{Path, PathBuf};
+use std::io::{Read, Write};
+use std::os::unix::fs::OpenOptionsExt;
 use std::time::{Duration, Instant};
 
-use wm_core::MonitorInfo;
+use wm_core::{LayoutMode, MonitorInfo};
 use wm_theme_api::{Point, Rect, Size};
 
 use crate::apps::{match_window_class, AppEntry};
@@ -65,10 +67,17 @@ pub const DEBOUNCE: Duration = Duration::from_secs(2);
 /// claim whatever same-class window the user opens next week.
 pub const RESTORE_GRACE: Duration = Duration::from_secs(30);
 
+// Restore is a bounded startup operation, including damaged files. These are
+// generous file/record limits, not user-facing window-management settings.
+const MAX_SESSION_BYTES: u64 = 8 * 1024 * 1024;
+const MAX_RECORD_BYTES: usize = 64 * 1024;
+const MAX_RECORDS: usize = 4096;
+
 /// One remembered window: everything restore needs to relaunch its
 /// application and re-place its window, and nothing more.
 #[derive(Clone, Debug, PartialEq)]
 pub struct WindowRecord {
+    pub spatial: Option<SpatialRecord>,
     /// The window's `WM_CLASS` class / Wayland app id — the matching
     /// key at restore time.
     pub class: String,
@@ -93,6 +102,20 @@ pub struct WindowRecord {
     pub maximized: bool,
     pub shaded: bool,
     pub miniaturized: bool,
+}
+
+/// Optional layout metadata. Invalid metadata leaves the base record usable.
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct SpatialRecord {
+    pub floating: bool,
+    pub order: usize,
+    pub flow_width: u32,
+    pub mosaic_weight: [u32; 2],
+    pub output: Option<String>,
+    pub focused: bool,
+    pub floating_geometry: Option<[i64; 4]>,
+    pub floating_monitor: Option<String>,
 }
 
 /// How one record's application should be brought back. Split from the
@@ -130,8 +153,20 @@ pub(crate) fn relative_to_monitor(monitor: Option<&MonitorInfo>, mut geometry: R
 /// preserving its within-monitor offset. Eight-field legacy records
 /// have no identity and remain absolute exactly as before.
 pub(crate) fn restored_geometry(monitors: &[MonitorInfo], record: &WindowRecord) -> Rect {
-    let Some(identity) = record.monitor_identity.as_deref() else {
-        return record.geometry;
+    restored_on_monitor(
+        monitors,
+        record.geometry,
+        record.monitor_identity.as_deref(),
+    )
+}
+
+pub(crate) fn restored_on_monitor(
+    monitors: &[MonitorInfo],
+    mut geometry: Rect,
+    identity: Option<&str>,
+) -> Rect {
+    let Some(identity) = identity else {
+        return geometry;
     };
     let target = monitors
         .iter()
@@ -139,9 +174,8 @@ pub(crate) fn restored_geometry(monitors: &[MonitorInfo], record: &WindowRecord)
         .or_else(|| monitors.iter().find(|monitor| monitor.primary))
         .or_else(|| monitors.first());
     let Some(target) = target else {
-        return record.geometry;
+        return geometry;
     };
-    let mut geometry = record.geometry;
     geometry.pos.x = geometry.pos.x.saturating_add(target.geometry.pos.x);
     geometry.pos.y = geometry.pos.y.saturating_add(target.geometry.pos.y);
     geometry
@@ -151,6 +185,9 @@ pub(crate) fn restored_geometry(monitors: &[MonitorInfo], record: &WindowRecord)
 /// and when the file was last worth writing.
 pub struct SessionLayout {
     path: Option<PathBuf>,
+    modes: Vec<LayoutMode>,
+    restored_modes: Option<Vec<LayoutMode>>,
+    persisted_modes: Vec<LayoutMode>,
     /// Records loaded at startup and not yet claimed by a mapped
     /// window. Non-empty exactly while a restore is in progress.
     pending: Vec<WindowRecord>,
@@ -179,6 +216,9 @@ impl SessionLayout {
     pub fn start_at(path: Option<PathBuf>, restore: bool, apps: &[AppEntry], now: Instant) -> (Self, Vec<RelaunchPlan>) {
         let mut layout = Self {
             path,
+            modes: Vec::new(),
+            restored_modes: None,
+            persisted_modes: Vec::new(),
             pending: Vec::new(),
             restore_deadline: None,
             last_snapshot: Vec::new(),
@@ -188,12 +228,15 @@ impl SessionLayout {
         if !restore {
             return (layout, Vec::new());
         }
-        let Some(text) = layout.path.as_deref().and_then(|p| std::fs::read_to_string(p).ok()) else {
+        let Some(text) = layout.path.as_deref().and_then(|p| read_session(p).ok()) else {
             // First opt-in session, or nothing recorded yet: nothing
             // to restore is the normal case, not a problem.
             return (layout, Vec::new());
         };
         let records = parse(&text);
+        layout.modes = parse_modes(&text);
+        layout.persisted_modes = layout.modes.clone();
+        layout.restored_modes = Some(layout.modes.clone());
         let plans: Vec<RelaunchPlan> = records.iter().filter_map(|record| relaunch_plan(record, apps)).collect();
         tracing::info!(
             windows = records.len(),
@@ -206,13 +249,29 @@ impl SessionLayout {
         (layout, plans)
     }
 
-    /// One housekeeping pass: expire an overdue restore, then decide
-    /// whether the snapshot has settled into something worth writing —
-    /// and write it if so. Call once per shell tick with a snapshot of
-    /// the live client set.
+    /// Whether application windows are still claiming saved records.
+    pub fn restoring(&self) -> bool {
+        !self.pending.is_empty()
+    }
+
+    pub fn take_restored_modes(&mut self) -> Option<Vec<LayoutMode>> {
+        self.restored_modes.take()
+    }
+
+    pub fn note_modes(&mut self, modes: impl Iterator<Item = LayoutMode> + Clone, now: Instant) {
+        if self.modes.iter().copied().eq(modes.clone()) {
+            return;
+        }
+        self.modes.clear();
+        self.modes.extend(modes);
+        self.settled_at = now;
+    }
+
+    /// Check whether the snapshot has settled into something worth writing,
+    /// and write it if so. Called by the existing shell tick.
     pub fn service(&mut self, snapshot: Vec<WindowRecord>, now: Instant) {
         if self.note(snapshot, now) {
-            self.write_out();
+            self.write_out(now);
         }
     }
 
@@ -229,7 +288,7 @@ impl SessionLayout {
     /// identical `Vec<WindowRecord>` first.
     pub fn service_current(&mut self, now: Instant) {
         if self.ready(now) {
-            self.write_out();
+            self.write_out(now);
         }
     }
 
@@ -274,13 +333,16 @@ impl SessionLayout {
         if !self.pending.is_empty() {
             return false;
         }
-        if self.persisted.as_ref() == Some(&self.last_snapshot) {
+        if self.persisted.as_ref() == Some(&self.last_snapshot)
+            && self.persisted_modes == self.modes
+        {
             return false;
         }
         if now < self.settled_at + DEBOUNCE {
             return false;
         }
         self.persisted = Some(self.last_snapshot.clone());
+        self.persisted_modes.clone_from(&self.modes);
         true
     }
 
@@ -303,25 +365,40 @@ impl SessionLayout {
     /// restore is still pending, for the same partial-layout reason
     /// `note` suppresses ordinary persists then.
     pub fn flush(&mut self) {
-        if !self.pending.is_empty() || self.persisted.as_ref() == Some(&self.last_snapshot) {
+        if !self.pending.is_empty()
+            || (self.persisted.as_ref() == Some(&self.last_snapshot)
+                && self.persisted_modes == self.modes)
+        {
             return;
         }
         self.persisted = Some(self.last_snapshot.clone());
-        self.write_out();
+        self.persisted_modes.clone_from(&self.modes);
+        self.write_out(Instant::now());
     }
 
     /// The I/O half of a persist: serialize `last_snapshot` and write
     /// it atomically. A failure warns and leaves the previous file
     /// intact — the next settled change tries again.
-    fn write_out(&mut self) {
+    fn write_out(&mut self, now: Instant) {
         let Some(path) = self.path.as_deref() else {
             return;
         };
-        if let Err(error) = write_atomic(path, &serialize(&self.last_snapshot)) {
+        let mut text = serialize(&self.last_snapshot);
+        for (index, mode) in self.modes.iter().enumerate() {
+            text.push_str(&format!(
+                "@workspace\t{index}\t{}\n",
+                mode.compatible_name()
+            ));
+        }
+        if let Err(error) = write_atomic(path, &text) {
             tracing::warn!(?error, path = %path.display(), "could not persist the session layout");
             // Disk truth is now unknown; clearing the cache makes the
             // next settle retry rather than believe this write landed.
             self.persisted = None;
+            // A read-only/full filesystem must not turn every compositor
+            // wakeup into another write attempt and warning. Reuse the settle
+            // interval for a bounded retry without requiring another edit.
+            self.settled_at = now;
         }
     }
 }
@@ -350,11 +427,14 @@ fn relaunch_plan(record: &WindowRecord, apps: &[AppEntry]) -> Option<RelaunchPla
 /// theme/wallpaper/dock files beside it:
 ///
 /// ```text
-/// class \t app-or-'-' \t x \t y \t w \t h \t workspace \t flags-or-'-' \t monitor-or-'-'
+/// @window \t class-json \t app-json \t x \t y \t w \t h \t workspace \t flags-or-'-' \t monitor-json \t spatial-json
 /// ```
 ///
-/// Tabs because a class is free text that may contain spaces; flags
-/// are a comma-joined subset of `maximized,shaded,miniaturized`. A
+/// Text fields are JSON strings (or null), so client-controlled newlines and
+/// tabs cannot create records or workspace directives. The explicit prefix
+/// distinguishes escaped fields from legacy literal classes, including quotes
+/// and backslashes. Eight-, nine- and ten-column legacy records remain readable.
+/// Flags are a comma-joined subset of `maximized,shaded,miniaturized`. A
 /// line that does not parse is skipped with a warning — one corrupted
 /// record must cost that record, never the layout.
 fn serialize(records: &[WindowRecord]) -> String {
@@ -372,64 +452,141 @@ fn serialize(records: &[WindowRecord]) -> String {
         }
         let flags = if flags.is_empty() { "-".to_string() } else { flags.join(",") };
         text.push_str(&format!(
-            "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
-            record.class,
-            record.app.as_deref().unwrap_or("-"),
+            "@window\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+            serde_json::to_string(&record.class).expect("string serialization is infallible"),
+            serde_json::to_string(&record.app).expect("string serialization is infallible"),
             record.geometry.pos.x,
             record.geometry.pos.y,
             record.geometry.size.w,
             record.geometry.size.h,
             record.workspace,
             flags,
-            record.monitor_identity.as_deref().unwrap_or("-"),
+            serde_json::to_string(&record.monitor_identity).expect("string serialization is infallible"),
+            record
+                .spatial
+                .as_ref()
+                .and_then(|s| serde_json::to_string(s).ok())
+                .unwrap_or_else(|| "-".into()),
         ));
     }
     text
 }
 
 fn parse(text: &str) -> Vec<WindowRecord> {
-    text.lines().filter(|line| !line.trim().is_empty()).filter_map(parse_line).collect()
+    let mut rejected = 0usize;
+    let records = text.lines()
+        .filter(|line| !line.trim().is_empty()
+            && !(line.starts_with("@workspace\t") && line.split('\t').count() == 3))
+        .filter_map(|line| {
+            let record = parse_line(line);
+            rejected += usize::from(record.is_none());
+            record
+        })
+        .take(MAX_RECORDS)
+        .collect();
+    if rejected != 0 {
+        tracing::warn!(rejected, "skipping unparsable session-layout records");
+    }
+    records
+}
+
+fn parse_modes(text: &str) -> Vec<LayoutMode> {
+    let mut modes = Vec::new();
+    for line in text.lines().filter_map(|s| s.strip_prefix("@workspace\t")) {
+        if line.split('\t').count() != 2 { continue; }
+        let Some((index, mode)) = line.split_once('\t') else {
+            continue;
+        };
+        let Some(index) = index
+            .parse::<usize>()
+            .ok()
+            .filter(|&i| i < wm_core::MAX_WORKSPACES)
+        else {
+            continue;
+        };
+        modes.resize((index + 1).max(modes.len()), LayoutMode::Freeform);
+        modes[index] = LayoutMode::parse(mode).unwrap_or_default();
+    }
+    modes
 }
 
 fn parse_line(line: &str) -> Option<WindowRecord> {
-    let fields: Vec<&str> = line.split('\t').collect();
-    let parsed = (|| -> Option<WindowRecord> {
-        let [class, app, x, y, w, h, workspace, flags, monitor @ ..] = fields.as_slice() else {
-            return None;
-        };
-        if monitor.len() > 1 {
-            return None;
-        }
-        if class.is_empty() {
-            return None;
-        }
-        // Zero-sized windows can't have been recorded by `snapshot`;
-        // a record claiming one is corruption, and restoring it would
-        // hand the client a degenerate configure.
-        let (w, h) = (w.parse::<u32>().ok()?, h.parse::<u32>().ok()?);
-        if w == 0 || h == 0 {
-            return None;
-        }
-        Some(WindowRecord {
-            class: class.to_string(),
-            app: (*app != "-" && !app.is_empty()).then(|| app.to_string()),
-            geometry: Rect {
-                pos: Point::new(x.parse().ok()?, y.parse().ok()?),
-                size: Size::new(w, h),
-            },
-            monitor_identity: monitor
-                .first()
-                .and_then(|identity| (!identity.is_empty() && *identity != "-").then(|| (*identity).to_string())),
-            workspace: workspace.parse().ok()?,
-            maximized: flags.split(',').any(|f| f == "maximized"),
-            shaded: flags.split(',').any(|f| f == "shaded"),
-            miniaturized: flags.split(',').any(|f| f == "miniaturized"),
-        })
-    })();
-    if parsed.is_none() {
-        tracing::warn!(line, "skipping an unparsable session-layout record");
+    if line.len() > MAX_RECORD_BYTES {
+        return None;
     }
-    parsed
+    // Eleven fields identify the versioned format unambiguously. A legacy
+    // client named @window still has at most ten fields.
+    let escaped = line.starts_with("@window\t") && line.split('\t').count() == 11;
+    let line = if escaped {
+        line.strip_prefix("@window\t")?
+    } else {
+        line
+    };
+    let fields: Vec<&str> = line.splitn(11, '\t').collect();
+    let [class, app, x, y, w, h, workspace, flags, monitor @ ..] = fields.as_slice() else {
+        return None;
+    };
+    if monitor.len() > 2 {
+        return None;
+    }
+    let class: String = if escaped {
+        serde_json::from_str(class).ok()?
+    } else {
+        class.to_string()
+    };
+    if class.is_empty() {
+        return None;
+    }
+    // Zero-sized windows can't have been recorded by `snapshot`;
+    // a record claiming one is corruption, and restoring it would
+    // hand the client a degenerate configure.
+    let (w, h) = (w.parse::<u32>().ok()?, h.parse::<u32>().ok()?);
+    if w == 0 || h == 0 {
+        return None;
+    }
+    let spatial = monitor
+        .get(1)
+        .and_then(|text| serde_json::from_str::<SpatialRecord>(text).ok())
+        .filter(|s| {
+            s.order < 10000
+                && s.flow_width <= 65536
+                && s.mosaic_weight.iter().all(|&v| v <= 1_000_000)
+                && s.floating_geometry.is_none_or(|r| {
+                    r[0].unsigned_abs() <= i32::MAX as u64
+                        && r[1].unsigned_abs() <= i32::MAX as u64
+                        && r[2] > 0
+                        && r[2] <= 65536
+                        && r[3] > 0
+                        && r[3] <= 65536
+                })
+        });
+    Some(WindowRecord {
+        spatial,
+        class,
+        app: if escaped {
+            serde_json::from_str(app).ok()?
+        } else {
+            (*app != "-" && !app.is_empty()).then(|| app.to_string())
+        },
+        geometry: Rect {
+            pos: Point::new(x.parse().ok()?, y.parse().ok()?),
+            size: Size::new(w, h),
+        },
+        monitor_identity: if escaped {
+            serde_json::from_str(monitor.first()?).ok()?
+        } else {
+            monitor.first().and_then(|identity| {
+                (!identity.is_empty() && *identity != "-").then(|| (*identity).to_string())
+            })
+        },
+        workspace: workspace
+            .parse::<usize>()
+            .ok()
+            .filter(|&w| w < wm_core::MAX_WORKSPACES)?,
+        maximized: flags.split(',').any(|f| f == "maximized"),
+        shaded: flags.split(',').any(|f| f == "shaded"),
+        miniaturized: flags.split(',').any(|f| f == "miniaturized"),
+    })
 }
 
 /// Temp-and-rename write: the layout file is always either the old
@@ -437,12 +594,31 @@ fn parse_line(line: &str) -> Option<WindowRecord> {
 /// whole point of persisting is surviving a crash, and a crash is
 /// allowed to happen mid-write.
 fn write_atomic(path: &Path, text: &str) -> std::io::Result<()> {
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+    let parent = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
+    std::fs::create_dir_all(parent)?;
+    // A unique, owner-only file avoids following a stale .tmp symlink and
+    // cleans up on failure. Rename gives process-crash atomicity; no claim
+    // of power-loss durability (which would require file/directory fsync).
+    let mut tmp = tempfile::Builder::new().prefix(".session-layout-").tempfile_in(parent)?;
+    tmp.write_all(text.as_bytes())?;
+    tmp.persist(path).map_err(|e| e.error)?;
+    Ok(())
+}
+
+fn read_session(path: &Path) -> std::io::Result<String> {
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW)
+        .open(path)?;
+    if !file.metadata()?.is_file() {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "session state is not a regular file"));
     }
-    let tmp = path.with_extension("tmp");
-    std::fs::write(&tmp, text)?;
-    std::fs::rename(&tmp, path)
+    let mut text = String::new();
+    file.take(MAX_SESSION_BYTES + 1).read_to_string(&mut text)?;
+    if text.len() as u64 > MAX_SESSION_BYTES {
+        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "session state exceeds size limit"));
+    }
+    Ok(text)
 }
 
 #[cfg(test)]
@@ -452,6 +628,7 @@ mod tests {
 
     fn record(class: &str, x: i32) -> WindowRecord {
         WindowRecord {
+            spatial: None,
             class: class.to_string(),
             app: None,
             geometry: Rect { pos: Point::new(x, 40), size: Size::new(500, 400) },
@@ -482,6 +659,7 @@ mod tests {
     fn the_wire_format_round_trips_every_field() {
         let records = vec![
             WindowRecord {
+                spatial: None,
                 class: "Navigator".to_string(),
                 app: Some("org.mozilla.firefox".to_string()),
                 geometry: Rect { pos: Point::new(-40, 12), size: Size::new(1280, 900) },
@@ -494,6 +672,81 @@ mod tests {
             record("foot", 100),
         ];
         assert_eq!(parse(&serialize(&records)), records);
+    }
+
+    #[test]
+    fn client_text_cannot_inject_records_or_workspace_modes() {
+        let mut item = record("bad\n@workspace\t0\tflow\nfoot\t-\t0\t0\t500\t400\t0\t-", 100);
+        item.app = Some("app\twith\nseparators\\and\"quotes".into());
+        item.monitor_identity = Some("monitor\r\nwith\ttabs".into());
+        let encoded = serialize(std::slice::from_ref(&item));
+        assert_eq!(encoded.lines().count(), 1);
+        assert!(parse_modes(&encoded).is_empty());
+        assert_eq!(parse(&encoded), vec![item]);
+        for class in ["@workspace", "@window", "-", "\"quoted\"", "日本語", "literal\\n"] {
+            let item = record(class, 10);
+            assert_eq!(parse(&serialize(std::slice::from_ref(&item))), vec![item]);
+        }
+        for class in ["@window", "@workspace", "\"quoted\"", "literal\\n"] {
+            let legacy = format!("{class}\t-\t10\t40\t500\t400\t0\t-\n");
+            assert_eq!(parse(&legacy), vec![record(class, 10)]);
+            assert!(parse_modes(&legacy).is_empty());
+        }
+    }
+
+    #[test]
+    fn corrupt_restore_files_have_bounded_reads_records_and_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session");
+        let file = std::fs::File::create(&path).unwrap();
+        file.set_len(MAX_SESSION_BYTES + 1).unwrap();
+        assert!(read_session(&path).is_err());
+        assert!(read_session(dir.path()).is_err());
+        let (layout, plans) = SessionLayout::start_at(Some(path), true, &[], Instant::now());
+        assert!(!layout.restoring());
+        assert!(plans.is_empty());
+        let one = serialize(&[record("foot", 10)]);
+        assert_eq!(parse(&one.repeat(MAX_RECORDS + 5)).len(), MAX_RECORDS);
+        assert!(parse_line(&"x".repeat(MAX_RECORD_BYTES + 1)).is_none());
+    }
+
+    #[test]
+    fn atomic_write_is_private_and_does_not_follow_a_stale_temporary_symlink() {
+        use std::os::unix::fs::{symlink, PermissionsExt};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("session");
+        let other = dir.path().join("unrelated");
+        std::fs::write(&other, "keep").unwrap();
+        symlink(&other, path.with_extension("tmp")).unwrap();
+        write_atomic(&path, "new session").unwrap();
+        assert_eq!(std::fs::read_to_string(&other).unwrap(), "keep");
+        assert_eq!(read_session(&path).unwrap(), "new session");
+        assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+        assert!(read_session(&path.with_extension("tmp")).is_err());
+        // Failed replacement removes its unique temporary file and leaves the
+        // previous state alone, including when the destination is a directory.
+        let entries = std::fs::read_dir(dir.path()).unwrap().count();
+        assert!(write_atomic(dir.path(), "cannot replace a directory").is_err());
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), entries);
+        assert_eq!(read_session(&path).unwrap(), "new session");
+    }
+
+    #[test]
+    fn failed_persistence_retries_without_a_new_user_action() {
+        let dir = tempfile::tempdir().unwrap();
+        let parent = dir.path().join("blocked");
+        std::fs::write(&parent, "not a directory").unwrap();
+        let path = parent.join("session");
+        let start = Instant::now();
+        let (mut store, _) = SessionLayout::start_at(Some(path.clone()), false, &[], start);
+        store.service(vec![record("foot", 10)], start);
+        store.service_current(start + DEBOUNCE);
+        assert!(store.persisted.is_none());
+        std::fs::remove_file(parent).unwrap();
+        store.service_current(start + DEBOUNCE + DEBOUNCE / 2);
+        assert!(!path.exists(), "a failed write retries at the settle interval");
+        store.service_current(start + DEBOUNCE * 2);
+        assert_eq!(parse(&read_session(&path).unwrap()), vec![record("foot", 10)]);
     }
 
     #[test]
@@ -732,5 +985,69 @@ mod tests {
         layout.flush();
         assert_eq!(parse(&std::fs::read_to_string(&path).unwrap()), vec![record("foot", 700)]);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+    #[test]
+    fn spatial_metadata_roundtrips_order_membership_width_and_empty_workspace_modes() {
+        let mut item = record("foot", 80);
+        item.spatial = Some(SpatialRecord {
+            floating: true,
+            order: 3,
+            flow_width: 780,
+            mosaic_weight: [600, 400],
+            output: Some("Dell monitor serial".into()),
+            focused: true,
+            floating_geometry: Some([40, 50, 700, 600]),
+            floating_monitor: Some("Other monitor serial".into()),
+        });
+        let text = format!(
+            "{}@workspace\t0\tdwindle\n@workspace\t4\tscrolling\n",
+            serialize(&[item.clone()])
+        );
+        assert_eq!(parse(&text), vec![item]);
+        assert_eq!(
+            parse_modes(&text),
+            vec![
+                LayoutMode::Mosaic,
+                LayoutMode::Freeform,
+                LayoutMode::Freeform,
+                LayoutMode::Freeform,
+                LayoutMode::Flow
+            ]
+        );
+        let now = Instant::now();
+        let mut store = fresh(now);
+        store.note_modes([LayoutMode::Flow].into_iter(), now);
+        assert!(!store.note(Vec::new(), now));
+        assert!(store.ready(now + DEBOUNCE));
+        assert!(!store.ready(now + DEBOUNCE * 2));
+    }
+
+    #[test]
+    fn malformed_spatial_metadata_never_discards_a_usable_legacy_window() {
+        let base = "foot\t-\t80\t40\t500\t400\t0\t-";
+        assert_eq!(parse(base), vec![record("foot", 80)]);
+        assert!(parse_modes(base).is_empty());
+        for metadata in [
+            "-",
+            "not json",
+            r#"{"order":10000}"#,
+            r#"{"flow_width":-1}"#,
+            r#"{"flow_width":4294967295}"#,
+            r#"{"mosaic_weight":[4000000000,0]}"#,
+            r#"{"floating_geometry":[-9223372036854775808,0,10,10]}"#,
+            r#"{"floating_geometry":[0,0,0,10]}"#,
+        ] {
+            assert_eq!(
+                parse(&format!("{base}\t-\t{metadata}")),
+                vec![record("foot", 80)],
+                "{metadata}"
+            );
+        }
+        assert_eq!(
+            parse_modes(
+                "@workspace\t0\tunknown\n@workspace\t9999999999999\tflow\n@workspace\t-1\tmosaic"
+            ),
+            vec![LayoutMode::Freeform]
+        );
     }
 }

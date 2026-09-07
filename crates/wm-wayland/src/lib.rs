@@ -58,6 +58,7 @@ mod readback;
 mod renderer;
 mod overview;
 mod gesture_scene;
+mod layout_scene;
 mod selection;
 mod session;
 mod state;
