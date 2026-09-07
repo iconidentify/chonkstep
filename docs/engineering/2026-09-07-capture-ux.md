@@ -102,3 +102,7 @@ The corrected implementation `21f2348` passed the complete GitHub CI run
 `34143790174`, including the full Wayland suite (12m31s), unit tests, lint,
 SDK/harness checks, installer integration and dependency audit. The follow-up
 commit to this report changes documentation only.
+
+A subsequent [release pipeline change](2026-09-07-release-promotion.md) moves
+native packaging into main CI so a release can promote those exact verified
+artifacts instead of compiling them again after the merge.

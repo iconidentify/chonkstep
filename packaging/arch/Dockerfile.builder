@@ -1,4 +1,4 @@
-# Native x86_64/aarch64 Arch package builder used by github-release.yml.
+# Native x86_64/aarch64 Arch package builder used by package.yml.
 #
 # The bootstrap shape is adapted from omacom/omarchy-pkgs' multi-architecture
 # builder (MIT): Alpine's pacman creates a minimal target-architecture rootfs,

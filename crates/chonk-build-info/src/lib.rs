@@ -9,10 +9,12 @@ use std::path::Path;
 
 use object::Object;
 
-/// `git describe --tags --always --dirty` from build time.
+/// The source identity supplied by packaging, or `git describe` at build time.
 ///
 /// A source-archive packager supplies the description through
-/// `CHONKSTEP_GIT_DESCRIBE`, because an archive has no `.git` directory.
+/// `CHONKSTEP_GIT_DESCRIBE`, because an archive has no `.git` directory. GitHub
+/// packages use `v<version>+git.<commit>` so tagging can promote the exact binary
+/// already built and verified on main.
 /// A direct non-git build says `v<version>+unknown-source` rather than
 /// pretending the package version identifies unknown source exactly.
 pub const SOURCE_ID: &str = env!("CHONKSTEP_SOURCE_ID");
