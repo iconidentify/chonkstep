@@ -5,6 +5,11 @@ crate and both session binaries carry the same number.
 
 ## [Unreleased]
 
+- Native Wayland capture: lossless screen, area and unobscured-window PNGs,
+  automatic saving and PNG clipboard ownership, a keyboard/pointer selector,
+  and region/display recording with a stop indicator and recoverable MP4 export.
+  Omarchy workspace/group shortcuts are preserved; see [Capture](docs/capture.md).
+
 - Overview's desktop thumbnails now have an × control. Removing a desktop
   preserves its windows on a neighboring desktop, compacts the row, keeps
   minimized state and focus, and leaves at least one desktop.

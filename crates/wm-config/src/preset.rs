@@ -362,6 +362,11 @@ pub fn omarchy_keybindings() -> Vec<(wm_core::KeyCombo, Action)> {
 /// a future Omarchy release is a file-by-file read rather than a hunt.
 /// A `run <name>` action names an entry in [`OMARCHY_COMMANDS`].
 pub const OMARCHY_BINDINGS: &[(&str, &str)] = &[
+    // Shift+digits carry windows; Alt+digits select groups. Keep both intact.
+    ("super+ctrl+shift+3", "capture-screen"),
+    ("super+ctrl+shift+4", "capture-area"),
+    ("super+ctrl+shift+5", "capture"),
+    ("super+ctrl+escape", "capture-stop"),
     // -- applications.lua: the ungated essentials ---------------------
     //
     // Omarchy's own gate (`o.preinstalled_bindings_enabled()`) is what

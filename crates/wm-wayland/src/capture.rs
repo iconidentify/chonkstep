@@ -246,7 +246,7 @@ pub(crate) fn capture_output_png(comp: &mut Compositor, path: &Path) -> Result<(
     // The same scene the frame about to be drawn will submit - cursor
     // included, because "what is the session showing" includes where
     // the pointer is.
-    let (elements, clear_color) = build_scene(
+    let (mut elements, clear_color) = build_scene(
         wm.backend(),
         renderer,
         *pointer_location,
@@ -256,6 +256,9 @@ pub(crate) fn capture_output_png(comp: &mut Compositor, path: &Path) -> Result<(
         // every element stays at the coordinate the ledger holds it at.
         Rect::new(Point::new(0, 0), size),
     );
+    // Diagnostic marker captures what the user sees, including capture chrome.
+    // User exports and protocol screencopy deliberately do not add this layer.
+    crate::capture_tool::render(&mut elements, renderer, wm.backend(), Rect::new(Point::new(0, 0), size));
     let buffer = render_offscreen(renderer, &elements, size, 1.0, clear_color)
         .ok_or_else(|| "offscreen render of the desktop failed".to_string())?;
     write_png(buffer, path)
@@ -272,6 +275,36 @@ fn graphics_renderer(graphics: &mut Graphics) -> &mut GlesRenderer {
         Graphics::Winit(backend) => backend.renderer(),
         Graphics::Session(session) => session.renderer(),
     }
+}
+
+/// A user screenshot is lossless device pixels, without the pointer or capture
+/// controls. Window capture renders that surface and its own chrome in isolation
+/// so overlapping applications cannot appear in the saved window image.
+pub(crate) fn capture_user_pixels(comp: &mut Compositor, viewport: Rect, window: Option<WlWindowId>) -> Option<DecorationBuffer> {
+    if comp.wm.backend().locked || viewport.size.w == 0 || viewport.size.h == 0 { return None; }
+    let Compositor { wm, graphics, pointer_location, cursors, .. } = comp;
+    let renderer = graphics_renderer(graphics);
+    let (elements, clear_color) = if let Some(window) = window {
+        let backend = wm.backend();
+        let record = backend.windows.get(&window).filter(|r| r.mapped)?;
+        let surface = record.surface.wl_surface()?;
+        let mut elements = Vec::new();
+        crate::renderer::push_surface_tree(&mut elements, renderer, &surface,
+            (record.content.pos.x - viewport.pos.x, record.content.pos.y - viewport.pos.y).into(),
+            backend.window_surface_scale(record), 1.0, Kind::Unspecified);
+        for frame in backend.frames.values().filter(|f| f.window == window && f.mapped) {
+            for part in &frame.parts {
+                if let Ok(element) = smithay::backend::renderer::element::memory::MemoryRenderBufferRenderElement::from_buffer(
+                    renderer, ((frame.geometry.pos.x + part.offset.x - viewport.pos.x) as f64,
+                        (frame.geometry.pos.y + part.offset.y - viewport.pos.y) as f64),
+                    &part.buffer, None, None, None, Kind::Unspecified) { elements.push(element.into()); }
+            }
+        }
+        (elements, Color32F::new(0.0, 0.0, 0.0, 0.0))
+    } else {
+        build_scene(wm.backend(), renderer, *pointer_location, &smithay::input::pointer::CursorImageStatus::Hidden, cursors, viewport)
+    };
+    render_offscreen(renderer, &elements, viewport.size, 1.0, clear_color)
 }
 
 /// The windows whose snapshot is stale - at most

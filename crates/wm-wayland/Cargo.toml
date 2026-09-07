@@ -64,6 +64,7 @@ calloop = { version = "0.14", features = ["signals"] }
 # Screenshot encoding (see `capture.rs`) - the same rasterizer the
 # theme engine draws with, so no second image stack enters the graph.
 tiny-skia = "0.11"
+cosmic-text = "0.19"
 # Protocol code generation for the one interface no published crate
 # carries: `hyprland-focus-grab-v1` (see `focus_grab.rs` and the XML
 # vendored beside it in `protocols/`). Omarchy's Quickshell desktop

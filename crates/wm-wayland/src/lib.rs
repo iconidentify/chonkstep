@@ -25,6 +25,7 @@
 
 mod backend_impl;
 mod capture;
+mod capture_tool;
 mod core_protocols;
 mod ctm;
 mod data_control;

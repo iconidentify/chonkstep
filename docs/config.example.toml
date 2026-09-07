@@ -558,6 +558,12 @@
 "alt+shift+right" = "workspace-carry-next"  # carry the focused window along
 "alt+shift+left" = "workspace-carry-prev"   # carry the focused window back
 "super+up" = "overview"                     # the modal Overview (see below)
+"super+shift+3" = "capture-screen"          # Wayland: screen PNG + clipboard
+"super+shift+4" = "capture-area"            # drag an area; Space selects a window
+"super+shift+5" = "capture"                 # screenshot / recording toolbar
+"super+ctrl+escape" = "capture-stop"        # finish the active screen recording
+# Omarchy defaults add Ctrl to Shift+3/4/5, preserving desktop-carry bindings.
+# Omit the three numbered lines above to retain Omarchy's choices.
 
 # Workspaces by number are unbound in this keymap -- the defaults above
 # reach them by stepping -- but the verbs are there for the taking, and

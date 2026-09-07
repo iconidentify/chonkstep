@@ -621,6 +621,7 @@ pub struct WaylandBackend {
     pub(crate) frames: HashMap<WlFrameId, FrameRecord>,
     pub(crate) shells: HashMap<WlShellId, ShellRecord>,
     pub(crate) overview: Option<crate::overview::Overview>,
+    pub(crate) capture_ui: Option<crate::capture_tool::Overlay>,
     /// Bottom-to-top managed application order — see [`StackEntry`].
     pub(crate) stacking: Vec<StackEntry>,
     /// Whether [`Self::stacking`] has actually moved since the X server
@@ -1009,6 +1010,7 @@ impl WaylandBackend {
             next_id: 1,
             windows: HashMap::new(),
             overview: None,
+            capture_ui: None,
             scene_index: SceneIndex::default(),
             surface_windows: HashMap::new(),
             popup_roots: HashMap::new(),
@@ -2371,6 +2373,7 @@ pub struct Compositor {
     /// requests. Kept beside the renderer because servicing one needs
     /// the live graphics context even when the scene is otherwise idle.
     pub(crate) screenshot_poller: crate::capture::ScreenshotRequestPoller,
+    pub(crate) capture_tool: crate::capture_tool::Service,
     /// linux-dmabuf: the format set we advertise and the protocol
     /// state behind it. Always present; "this renderer cannot do
     /// dmabuf" is represented inside, not by an `Option`, so protocol
@@ -2501,6 +2504,7 @@ impl Compositor {
     /// ever needs to move.
     #[cfg_attr(feature = "profile", profiling::function)]
     pub(crate) fn dispatch_pending(&mut self) {
+        crate::capture_tool::tick(self);
         let dispatch_span = tracing::info_span!("dispatch_pass");
         let _dispatch_guard = dispatch_span.enter();
         let dispatch_started = Instant::now();
@@ -2538,6 +2542,9 @@ impl Compositor {
             // switcher open (see the X11 loop's longer commentary;
             // `KeyRelease` is never intercepted at all).
             if let BackendEvent::KeyPress(combo) = &event {
+                if crate::capture_tool::key(self, combo) {
+                    continue;
+                }
                 if let Some(resolution) = self.shell.keymap_action(combo) {
                     if let Some(motion) = pending_motion.take() {
                         self.dispatch_motion(motion);
@@ -3218,6 +3225,7 @@ impl Compositor {
     fn note_outcome(&mut self, outcome: ShellOutcome) {
         match outcome {
             ShellOutcome::Continue => {}
+            ShellOutcome::Capture(mode) => crate::capture_tool::begin(self, mode),
             ShellOutcome::Exit => self.running = false,
             ShellOutcome::Restart => {
                 self.restart = true;
@@ -4078,6 +4086,7 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
         ui_scale: scale,
         graphics,
         screenshot_poller: crate::capture::ScreenshotRequestPoller::new(Instant::now()),
+        capture_tool: crate::capture_tool::Service::new(),
         dmabuf,
         syncobj,
         protocols,

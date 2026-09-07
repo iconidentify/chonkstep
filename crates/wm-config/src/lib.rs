@@ -104,6 +104,8 @@ use wm_core::{KeyCombo, Modifiers, PlacementPolicy};
 /// do-nothing case that should have been filtered out at parse time.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Action {
+    /// Native Wayland screenshot / recording workflow.
+    Capture(CaptureMode),
     SpawnTerminal,
     Close,
     ToggleMaximize,
@@ -217,6 +219,16 @@ pub enum Action {
     Run(String),
 }
 
+/// Entry points to the native Wayland capture tool.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CaptureMode {
+    Screen,
+    Area,
+    Window,
+    Toolbar,
+    Stop,
+}
+
 /// A configured binding with the behavioral facts Hyprland attaches
 /// to it. The legacy `Config::keybindings` projection remains the
 /// press-action map used by both window-manager backends.
@@ -285,6 +297,11 @@ fn action_from_name(name: &str) -> Option<Action> {
         "workspace-prev" => Some(Action::WorkspacePrev),
         "workspace-carry-next" => Some(Action::WorkspaceCarryNext),
         "workspace-carry-prev" => Some(Action::WorkspaceCarryPrev),
+        "capture-screen" => Some(Action::Capture(CaptureMode::Screen)),
+        "capture-area" => Some(Action::Capture(CaptureMode::Area)),
+        "capture-window" => Some(Action::Capture(CaptureMode::Window)),
+        "capture" => Some(Action::Capture(CaptureMode::Toolbar)),
+        "capture-stop" => Some(Action::Capture(CaptureMode::Stop)),
         "overview" => Some(Action::Overview),
         "root-menu" => Some(Action::RootMenu),
         "window-menu" => Some(Action::WindowMenu),
@@ -676,6 +693,10 @@ impl Config {
                 // the arrow pairs with the arrows that then drive the
                 // selection inside it.
                 bind("super+up", Action::Overview),
+                bind("super+shift+3", Action::Capture(CaptureMode::Screen)),
+                bind("super+shift+4", Action::Capture(CaptureMode::Area)),
+                bind("super+shift+5", Action::Capture(CaptureMode::Toolbar)),
+                bind("super+ctrl+escape", Action::Capture(CaptureMode::Stop)),
                 // The window commands menu, reachable without a
                 // titlebar to right-click. Window Maker binds exactly
                 // this, on exactly this key, and documents it as the
@@ -1999,6 +2020,10 @@ mod tests {
             (combo(0xff53, alt_shift), Action::WorkspaceCarryNext),
             (combo(0xff51, alt_shift), Action::WorkspaceCarryPrev),
             (combo(0xff52, Modifiers::SUPER), Action::Overview),
+            (combo(0x33, Modifiers::SUPER | Modifiers::SHIFT), Action::Capture(CaptureMode::Screen)),
+            (combo(0x34, Modifiers::SUPER | Modifiers::SHIFT), Action::Capture(CaptureMode::Area)),
+            (combo(0x35, Modifiers::SUPER | Modifiers::SHIFT), Action::Capture(CaptureMode::Toolbar)),
+            (combo(0xff1b, Modifiers::SUPER | Modifiers::CONTROL), Action::Capture(CaptureMode::Stop)),
             (combo(0xff1b, Modifiers::CONTROL), Action::WindowMenu),
         ];
         let config = Config::default_config();
@@ -2242,8 +2267,7 @@ scroll_factor = 0.4
             action_for(&config, "alt+shift+left"),
             Some(Action::WorkspaceCarryPrev)
         );
-        // 12 defaults - 1 unbound + 2 new = 13.
-        assert_eq!(config.keybindings.len(), 13);
+        assert_eq!(config.keybindings.len(), Config::default_config().keybindings.len() + 1);
     }
 
     /// The one conversion between the two workspace vocabularies, in
@@ -2458,7 +2482,7 @@ scroll_factor = 0.4
         assert_eq!(config.diagnostics, vec!["bind: SUPER J — tiling-only"]);
         let report = effective_config_report(&config);
         assert!(report.contains("focus_follows_mouse = true\t# config file"));
-        assert!(report.contains("keybindings = 12\t# live Hyprland config"));
+        assert!(report.contains("keybindings = 16\t# live Hyprland config"));
     }
 
     #[test]
@@ -2482,14 +2506,14 @@ scroll_factor = 0.4
         assert_eq!(action_for(&config, "alt+shift+x"), Some(Action::Close));
         // Every other default is untouched, and no entry was duplicated.
         assert_eq!(action_for(&config, "alt+shift+q"), Some(Action::Close));
-        assert_eq!(config.keybindings.len(), 12);
+        assert_eq!(config.keybindings.len(), Config::default_config().keybindings.len());
     }
 
     #[test]
     fn none_unbinds_a_default() {
         let config = parse("[keybindings]\n\"alt+shift+q\" = \"none\"\n").unwrap();
         assert_eq!(action_for(&config, "alt+shift+q"), None);
-        assert_eq!(config.keybindings.len(), 11);
+        assert_eq!(config.keybindings.len(), Config::default_config().keybindings.len() - 1);
         assert!(!config.keybindings.iter().any(|(_, a)| *a == Action::Close));
     }
 
@@ -2499,7 +2523,7 @@ scroll_factor = 0.4
         // through an alias/case variant of the default's spelling works.
         let config = parse("[keybindings]\n\"ALT+CONTROL+RIGHT\" = \"None\"\n").unwrap();
         assert_eq!(action_for(&config, "alt+ctrl+right"), None);
-        assert_eq!(config.keybindings.len(), 11);
+        assert_eq!(config.keybindings.len(), Config::default_config().keybindings.len() - 1);
     }
 
     #[test]
@@ -2560,8 +2584,8 @@ scroll_factor = 0.4
         // ...the bad ones were skipped without binding anything...
         assert_eq!(action_for(&config, "super+u"), None);
         assert_eq!(action_for(&config, "super+v"), None);
-        // ...and the untouched defaults survived: 12 - 1 + 1 = 12.
-        assert_eq!(config.keybindings.len(), 12);
+        // ...and the untouched defaults survived: one removed, one added.
+        assert_eq!(config.keybindings.len(), Config::default_config().keybindings.len());
         assert_eq!(
             action_for(&config, "alt+shift+x"),
             Some(Action::ToggleMaximize)
@@ -2590,7 +2614,7 @@ scroll_factor = 0.4
         assert_eq!(config.theme, None);
         assert_eq!(config.placement, PlacementPolicy::Smart);
         assert_eq!(config.edge_resistance, 10);
-        assert_eq!(config.keybindings.len(), 12);
+        assert_eq!(config.keybindings.len(), Config::default_config().keybindings.len());
     }
 
     #[test]

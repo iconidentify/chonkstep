@@ -506,6 +506,7 @@ impl Backend for WaylandBackend {
     fn supports_live_overview(&self) -> bool {
         true
     }
+    fn supports_native_capture(&self) -> bool { true }
 
     fn show_live_overview(
         &mut self,

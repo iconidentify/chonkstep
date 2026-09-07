@@ -204,7 +204,7 @@ between "chonkstep knows what Omarchy's chords were in August" and
 their UI and the running session follows it within a second.
 
 On the machine this was developed on the live read produced **153
-bindings over 113 commands**, against the baked table's 127 over 77 —
+bindings over 113 commands**, against the baked table's 131 over 77 —
 the extra ones are mostly the preinstalled webapp and TUI chords, which
 a table of constants had to write off because Omarchy gates them on a
 file test that only a live read can make.
@@ -224,7 +224,7 @@ what the live read falls back to.
 
 Both tables live in the keybinding card, beside chonkstep's own:
 **[keybindings.md](keybindings.md), under "The Omarchy keymap"**
-— 127 bindings over 77 declared commands, then the 32 groups of Omarchy
+— 131 bindings over 77 declared commands, then the 32 groups of Omarchy
 chords that are deliberately dead here and why. Both are transcribed
 from `crates/wm-config/src/preset.rs`, which is the authoritative list;
 `crates/wm-config/tests/preset_doc.rs` fails if the card and the table

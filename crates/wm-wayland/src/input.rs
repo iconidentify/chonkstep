@@ -342,6 +342,11 @@ pub(crate) fn clear_implicit_grab(seat: &Seat<Compositor>) {
     });
 }
 
+/// Capture must not interrupt a shell/client press or a touch-owned gesture.
+pub(crate) fn capture_pointer_busy(seat: &Seat<Compositor>) -> bool {
+    with_input(seat, |input| input.implicit_grab.is_some() || !input.active_touches.is_empty())
+}
+
 /// Reconciles every held-input state after the real session regains its
 /// seat.
 ///
@@ -752,6 +757,12 @@ pub(crate) fn process_input_event<I: InputBackend>(state: &mut Compositor, event
     if family.resets_idle() {
         crate::output_power::wake_all(state);
         crate::idle::note_activity(state);
+    }
+    // The capture selector is pointer/keyboard driven. Other interaction
+    // families must not operate the desktop behind its modal selection.
+    if !state.wm.backend().locked && crate::capture_tool::modal(state.wm.backend())
+        && matches!(family, InputFamily::Touch | InputFamily::TabletTool | InputFamily::Gesture) {
+        return;
     }
     // Buttons, scroll and gestures are delivered against the seat's
     // existing pointer focus. Re-assert the locked domain before any
@@ -1721,6 +1732,11 @@ fn pointer_moved(
     // answer without reaching the `Compositor` — see that verb for the
     // stale-anchor bug the mirror exists to prevent.
     state.wm.backend_mut().pointer = Some(at);
+    if !state.wm.backend().locked && crate::capture_tool::motion(state, at) {
+        pointer.motion(state, None, &MotionEvent { location: position, serial, time });
+        pointer.frame(state);
+        return;
+    }
     // A locked session's pointer exists only for the lock surfaces:
     // one seat motion against whichever covers the position, and none
     // of the routing below — no hover bookkeeping, no shell queues, no
@@ -1938,6 +1954,9 @@ fn pointer_button(
 ) {
     let serial = SERIAL_COUNTER.next_serial();
     let pressed = button_state == ButtonState::Pressed;
+    if !state.wm.backend().locked && crate::capture_tool::button(state, button_code, pressed) {
+        return;
+    }
     // L/M/R map onto the WM's vocabulary; anything else (side buttons,
     // wheel tilt) is client-only — `wm-x11` swallowed those outright,
     // here they at least still reach a client under the pointer.
@@ -2539,6 +2558,7 @@ fn route_shell_scroll_values(
     vertical_v120: Option<f64>,
     source: AxisSource,
 ) -> bool {
+    if !state.wm.backend().locked && crate::capture_tool::modal(state.wm.backend()) { return true; }
     // Locked: nothing here is the shell's — the axis flows to the seat
     // and lands on the lock surface like every other locked input.
     if state.wm.backend().locked {
@@ -2687,6 +2707,7 @@ pub(crate) fn inject_pointer_axis(
 /// and the renderer's makes clicks land on things the user cannot see,
 /// so both sides cite `backend_impl.rs`'s stacking-band contract.
 fn hit_at(backend: &WaylandBackend, at: Point, position: LogicalPoint<f64, Logical>) -> Hit {
+    if !backend.locked && crate::capture_tool::modal(backend) { return Hit::Root; }
     // The lock is a scene domain, not one more band in the desktop's
     // z-order. Put its boundary on the shared hit-test itself so a new
     // input caller cannot accidentally see a window, layer, shell or
