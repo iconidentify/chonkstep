@@ -13,16 +13,19 @@ The pipeline now has one native package producer, `package.yml`:
    as immutable Actions artifacts for 14 days.
 3. A release tag looks for the latest main push run for that exact commit. If it
    is still queued or running, the release waits for it instead of building again.
-   A successful run started within 24 hours supplies both validation and packages.
+   A successful run supplies the packages while its artifacts remain available;
+   its validation can also be reused if the run started within 24 hours.
 4. Release assembly downloads those artifacts by run ID and artifact IDs. It
    requires all four expected files, rejects download digest mismatches, and
    verifies each package's attestation against the repository, shared package
    workflow, source commit and workflow commit. It then creates checksums and
    publishes the same files. There is no Cargo compilation in this path.
 
-The 24-hour proof limit is deliberate: an old green run does not bypass current
-dependency auditing indefinitely. Missing, expired or incomplete artifacts cause
-native builds; missing, stale or unsuccessful validation causes fresh CI. The
+The 24-hour validation limit is deliberate: an old green run does not bypass
+current dependency auditing indefinitely. Fresh validation can run while reusing
+the already built packages; age alone does not require recompilation. Missing,
+expired or incomplete artifacts cause native builds; missing, stale or
+unsuccessful validation causes fresh CI. The
 fresh validation and package builds remain concurrent. A failure to observe an
 active main run stops the release rather than launching competing work. A skipped
 job is accepted only alongside its explicit reuse proof. The fresh and reused

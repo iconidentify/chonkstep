@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Reuse only the latest push CI for this exact main-branch revision, for one day.
+# Reuse only the latest successful push CI for this exact main-branch revision.
+# Validation expires after one day; the built packages last until artifact expiry.
 # A tag arriving during main CI waits for that run instead of duplicating it.
 # Packages come only from that successful run and must include both architectures.
 set -euo pipefail
@@ -30,10 +31,11 @@ if run_id=$(jq -er 'select(.status != "completed") | .id
 fi
 
 if run_id=$(jq -er --arg sha "$GITHUB_SHA" --arg repo "$GITHUB_REPOSITORY" \
-  "$select_run"' | select(.status == "completed" and .conclusion == "success"
-    and (.run_started_at | fromdateiso8601) >= now - 86400)
+  "$select_run"' | select(.status == "completed" and .conclusion == "success")
   | .id | select(type == "number" and . > 0)' <<< "$run"); then
-  reusable=true
+  if jq -e '(.run_started_at | fromdateiso8601) >= now - 86400' <<< "$run" >/dev/null; then
+    reusable=true
+  fi
   if artifacts=$(gh api --method GET \
     "repos/$GITHUB_REPOSITORY/actions/runs/$run_id/artifacts" -f per_page=100); then
     if package_artifact_ids=$(jq -er --arg sha "$GITHUB_SHA" --argjson run "$run_id" '

@@ -84,17 +84,21 @@ class ReleaseValidationTests(unittest.TestCase):
         self.assertIn(f"head_sha={SHA}", calls[0])
         self.assertNotIn("status=completed", calls[0])
 
-    def test_wrong_revision_context_stale_or_unsuccessful_run_requires_fresh_ci(self):
+    def test_wrong_revision_context_or_unsuccessful_run_requires_fresh_ci_and_packages(self):
         for override in [
             {"head_sha": "b" * 40}, {"head_branch": "feature"}, {"event": "pull_request"},
             {"repository": {"full_name": "someone/fork"}}, {"conclusion": "failure"},
             {"conclusion": "cancelled"}, {"conclusion": None},
-            {"run_started_at": "2020-01-01T00:00:00Z"}, {"id": None},
+            {"id": None},
         ]:
             with self.subTest(override=override):
                 output, _, _ = self.proof([run_record(**override)])
                 self.assertEqual(output["reusable"], "false")
                 self.assertEqual(output["package_run_id"], "")
+
+    def test_old_validation_is_refreshed_without_recompiling_available_packages(self):
+        output, _, _ = self.proof([run_record(run_started_at=timestamp(days=-3))])
+        self.assertEqual(output, {"reusable": "false", "package_run_id": "123", "package_artifact_ids": "789,456"})
 
     def test_latest_failure_cannot_be_hidden_by_an_earlier_success(self):
         earlier = run_record(run_started_at=timestamp(hours=-1))
