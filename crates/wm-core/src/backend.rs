@@ -46,6 +46,15 @@ pub struct OverviewDrag {
     pub workspace: Option<usize>,
 }
 
+/// Presentation of a managed drag; policy and membership stay in WindowManager.
+#[derive(Clone, Copy, Debug)]
+pub struct LayoutDrag<Window, Frame> {
+    pub window: Window,
+    pub frame: Option<Frame>,
+    pub source: Rect,
+    pub destination: Rect,
+}
+
 /// Everything the protocol-agnostic core needs from a windowing backend
 /// (X11 today via `wm-x11`, a future Wayland/Smithay backend later).
 /// Deliberately scoped to what a *window manager* needs, not a
@@ -60,6 +69,32 @@ pub struct OverviewDrag {
 pub trait Backend {
     type WindowId: Copy + Eq + std::hash::Hash + std::fmt::Debug;
     type FrameId: Copy + Eq + std::hash::Hash + std::fmt::Debug;
+
+    /// Establish output clipping before staging final geometry, then animate
+    /// live surfaces from the old frame without intermediate configures.
+    /// `clip` confines managed windows to their output workarea. Backends without native transforms settle
+    /// immediately. This carries presentation only, never layout policy.
+    fn present_layout(
+        &mut self,
+        _window: Self::WindowId,
+        _frame: Option<Self::FrameId>,
+        _source: Rect,
+        _destination: Rect,
+        _clip: Option<Rect>,
+        _animate: bool,
+    ) {
+    }
+
+    /// Input-transparent transient mode caption, rendered by the compositor.
+    fn show_layout_mode(&mut self, _mode: crate::LayoutMode, _label: DecorationBuffer) {}
+
+    /// Whole-cell managed drag target. None is the idempotent cleanup path.
+    fn preview_layout_drop(
+        &mut self,
+        _drag: Option<LayoutDrag<Self::WindowId, Self::FrameId>>,
+        _target: Option<Rect>,
+    ) {
+    }
 
     // -- lifecycle --------------------------------------------------------
     fn scan_existing_windows(&mut self) -> Vec<Self::WindowId>;

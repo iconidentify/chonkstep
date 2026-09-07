@@ -1,5 +1,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
+mod spatial_layout;
+
 use slotmap::SlotMap;
 use wm_theme_api::{
     clamp_client_size, ButtonKind, ButtonRuntimeState, DecorationBuffer, DecorationLayout,
@@ -23,6 +25,8 @@ use crate::types::{
 /// X server "double-click time" setting yet — a reasonable fixed
 /// default, in the same ballpark as the classic desktop's.
 const DOUBLE_CLICK_MS: u32 = 400;
+/// Maximum travel between titlebar clicks, in logical pixels.
+const DOUBLE_CLICK_DISTANCE: f32 = 4.0;
 
 /// How close (in pixels) a dragged frame edge must come to a screen edge
 /// or another window's edge before it snaps flush — the classic "edge
@@ -110,6 +114,7 @@ struct ActiveButtonPress {
 /// since `Miniaturized` carries an owned pixel buffer.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Notification {
+    LayoutChanged(crate::LayoutMode),
     /// A client was iconified — the shell should show an icon tile for
     /// it (clicking the tile should call `WindowManager::deminiaturize`).
     /// The `Option<DecorationBuffer>` is a snapshot of the window's
@@ -200,8 +205,8 @@ pub struct WindowManager<B: Backend> {
     active_button_press: Option<ActiveButtonPress>,
     /// The most recent press on a titlebar drag region, for double-click
     /// detection — a second press on the *same* client's titlebar within
-    /// `DOUBLE_CLICK_MS` toggles maximize instead of starting a move.
-    last_titlebar_press: Option<(ClientId, u32)>,
+    /// `DOUBLE_CLICK_MS` and the movement tolerance trigger a titlebar action.
+    last_titlebar_press: Option<(ClientId, u32, Point)>,
     /// Per-monitor screen area windows should maximize into,
     /// reserved-space-aware — e.g. `chonkstep`'s desktop shell excludes
     /// its dock strip from the entry for the monitor the dock hangs on,
@@ -294,6 +299,10 @@ pub struct WindowManager<B: Backend> {
     /// workspace compacts memberships and retains at least one desktop.
     current_workspace: usize,
     workspace_count: usize,
+    layouts: Vec<crate::spatial::WorkspaceLayout>,
+    layout_drop: Option<(ClientId, ClientId)>,
+    layout_resize_snapshot: Option<crate::spatial::ResizeSnapshot>,
+    layout_statistics: crate::LayoutStatistics,
     /// An in-progress Alt-Tab switcher session: the snapshot of cycle
     /// candidates and which one is currently selected. Selection moves
     /// on every Tab press while Alt stays held; releasing Alt commits
@@ -379,6 +388,10 @@ impl<B: Backend> WindowManager<B> {
             raise_on_focus: true,
             current_workspace: 0,
             workspace_count: 1,
+            layouts: vec![crate::spatial::WorkspaceLayout::default()],
+            layout_drop: None,
+            layout_resize_snapshot: None,
+            layout_statistics: crate::LayoutStatistics::default(),
             cycle: None,
             managed_order: Vec::new(),
             focus_history: Vec::new(),
@@ -539,6 +552,7 @@ impl<B: Backend> WindowManager<B> {
             // bypasses the theme entirely and is correct unchanged.
             self.reflow_frame(id);
         }
+        self.reflow_layouts();
     }
 
     /// Reserves screen space windows should not maximize into (e.g. a
@@ -572,6 +586,7 @@ impl<B: Backend> WindowManager<B> {
         self.publish_workarea_union();
         if self.effective_workareas() != before {
             self.refit_maximized();
+            self.reflow_layouts();
             // A bar can map after ordinary windows, including windows on
             // inactive desktops. Only reflow frames actually inside its strip.
             let displaced: Vec<_> = self
@@ -742,6 +757,7 @@ impl<B: Backend> WindowManager<B> {
     /// geometry obey the same rules if the X backend grows RandR
     /// hotplug later.
     pub fn rescue_clients_from_removed_monitor(&mut self, departed: Rect) {
+        self.end_active_drag();
         let monitors = self.backend.monitors();
         if monitors.is_empty() {
             return;
@@ -795,6 +811,7 @@ impl<B: Backend> WindowManager<B> {
             self.reflow_frame(id);
             tracing::info!(?id, ?departed, ?target, "rescued window from a removed monitor");
         }
+        self.reflow_layouts();
     }
 
     /// That monitor's workarea: the shell-reserved area if one was set
@@ -911,16 +928,24 @@ impl<B: Backend> WindowManager<B> {
     /// Pin/unpin a window. Pinned windows are visible on every
     /// workspace and are kept above ordinary windows.
     pub fn set_client_pinned(&mut self, id: ClientId, pinned: bool) -> bool {
+        self.cancel_client_layout_interaction(id);
+        if pinned && self.is_layout_managed(id) {
+            if let Some(saved) = self.clients[id].placement.freeform {
+                self.restore_freeform_geometry(id, saved);
+            }
+        }
         let Some(client) = self.clients.get_mut(id) else { return false };
         if client.flags.contains(ClientFlags::STICKY) == pinned {
             return true;
         }
         client.flags.set(ClientFlags::STICKY, pinned);
+        self.reflow_client_workspace(id);
         self.bump_protocol_state_revision();
         if pinned {
             self.show_client_surface(id);
             self.raise_client(id);
         } else if self.clients.get(id).is_some_and(|client| client.workspace != self.current_workspace) {
+            self.focus_successor_of(id);
             self.hide_client_surface(id);
         }
         true
@@ -1135,6 +1160,16 @@ impl<B: Backend> WindowManager<B> {
     /// Miniaturized, hidden-workspace and `NO_FOCUS` clients cannot be
     /// destinations, exactly as for immediate focus cycling.
     pub fn focus_direction(&mut self, direction: FocusDirection) -> bool {
+        if let Some(id) = self.focused.filter(|&id| self.is_layout_managed(id)) {
+            let Some(target) = self
+                .layout_neighbor(id, direction)
+                .or_else(|| self.layout_neighbor_across_outputs(id, direction))
+            else {
+                return false;
+            };
+            self.focus_client(target);
+            return true;
+        }
         let Some(source) = self.focused.and_then(|id| self.clients.get(id)).map(client_frame_rect) else {
             return false;
         };
@@ -1171,6 +1206,12 @@ impl<B: Backend> WindowManager<B> {
         if self.workspace_count <= 1 || workspace >= self.workspace_count {
             return false;
         }
+        self.end_active_drag();
+        let removed = self.layouts.remove(workspace);
+        let target = workspace.saturating_sub(1).min(self.layouts.len() - 1);
+        self.layouts[target]
+            .order
+            .extend(removed.order.iter().copied());
         let remap = |index: usize| {
             if index == workspace {
                 workspace.saturating_sub(1)
@@ -1199,6 +1240,12 @@ impl<B: Backend> WindowManager<B> {
                 revealed.push(id);
             }
         }
+        if self.workspace_layout(target) == crate::LayoutMode::Freeform {
+            for id in removed.order {
+                self.restore_freeform_view(id);
+            }
+        }
+        self.reflow_layouts();
         self.bump_protocol_state_revision();
         self.backend.publish_workspaces(self.workspace_count, self.current_workspace);
         self.publish_workarea_union();
@@ -1232,6 +1279,10 @@ impl<B: Backend> WindowManager<B> {
             return;
         }
         self.workspace_count = self.workspace_count.max(workspace + 1);
+        self.layouts.resize_with(
+            self.workspace_count,
+            crate::spatial::WorkspaceLayout::default,
+        );
         self.current_workspace = workspace;
         self.bump_protocol_state_revision();
         self.backend.publish_workspaces(self.workspace_count, self.current_workspace);
@@ -1291,6 +1342,7 @@ impl<B: Backend> WindowManager<B> {
     /// next/previous workspace" window actions. A no-op if `id` is
     /// already on `workspace` or if the index is out of range.
     pub fn move_client_to_workspace(&mut self, id: ClientId, workspace: usize) {
+        self.cancel_client_layout_interaction(id);
         for member in self.transient_family(id) {
             self.move_one_client_to_workspace(member, workspace);
         }
@@ -1331,6 +1383,7 @@ impl<B: Backend> WindowManager<B> {
         let Some(client) = self.clients.get_mut(id) else {
             return;
         };
+        let old_workspace = client.workspace;
         client.workspace = workspace;
         let window = client.window;
         let should_hide = workspace != self.current_workspace && !client.flags.contains(ClientFlags::STICKY);
@@ -1339,6 +1392,15 @@ impl<B: Backend> WindowManager<B> {
         // changes — pagers track membership from this property, not by
         // guessing from map/unmap traffic.
         self.backend.publish_window_desktop(window, workspace);
+        self.layouts[old_workspace]
+            .order
+            .retain(|&other| other != id);
+        self.register_layout_client(id);
+        if self.workspace_layout(workspace) == crate::LayoutMode::Freeform {
+            self.restore_freeform_view(id);
+        }
+        self.reflow_workspace(old_workspace);
+        self.reflow_workspace(workspace);
         if should_hide {
             self.hide_client_surface(id);
             if self.focused == Some(id) {
@@ -1471,12 +1533,19 @@ impl<B: Backend> WindowManager<B> {
             }
             BackendEvent::TitleChanged(window) => self.handle_title_changed(window),
             BackendEvent::ChromeChanged(window) => self.handle_chrome_changed(window),
+            BackendEvent::SizeHintsChanged(window) => {
+                if let Some(id) = self.client_for_window(window) {
+                    self.cancel_client_layout_interaction(id);
+                    self.reflow_client_workspace(id);
+                }
+            }
             BackendEvent::ParentChanged(window) => self.handle_parent_changed(window),
             BackendEvent::ModalChanged { window, modal } => {
                 self.handle_modal_changed(window, modal)
             }
             BackendEvent::MoveRequest(window) => self.handle_move_request(window),
-            BackendEvent::DragEnded => self.end_active_drag(),
+            BackendEvent::DragEnded => self.commit_active_drag(),
+            BackendEvent::DragCancelled => self.end_active_drag(),
             BackendEvent::ResizeRequest { window, edge } => self.handle_resize_request(window, edge),
             // Routed through the very same miniaturize the titlebar
             // button runs, so the client's own button and ours are one
@@ -1768,6 +1837,14 @@ impl<B: Backend> WindowManager<B> {
 
         client.frame = frame;
         client.layout = layout;
+        let hints = self.backend.size_hints(window);
+        client.placement.floating = floated.is_some()
+            || window_type == WindowType::Dialog
+            || client.parent.is_some()
+            || hints
+                .min_size
+                .zip(hints.max_size)
+                .is_some_and(|(min, max)| min == max);
 
         let id = self.clients.insert(client);
         self.bump_protocol_state_revision();
@@ -1807,6 +1884,8 @@ impl<B: Backend> WindowManager<B> {
         }
 
         self.publish_frame_extents(id);
+        self.register_layout_client(id);
+        self.reflow_client_workspace(id);
         self.notifications.push_back(Notification::Mapped(id));
         // Maximize first so a simultaneous fullscreen rule preserves
         // the maximized geometry/state underneath fullscreen.
@@ -1829,6 +1908,17 @@ impl<B: Backend> WindowManager<B> {
     /// (`handle_configure_request`), so both end up equally "real" as
     /// far as layout/repaint are concerned.
     pub fn resize_client_content(&mut self, id: ClientId, size: Size) {
+        if self.is_layout_managed(id) {
+            let current = self.clients[id].geometry.size;
+            self.resize_layout_window(
+                id,
+                Point::new(
+                    size.w as i32 - current.w as i32,
+                    size.h as i32 - current.h as i32,
+                ),
+            );
+            return;
+        }
         let Some(client) = self.clients.get_mut(id) else {
             return;
         };
@@ -1852,6 +1942,10 @@ impl<B: Backend> WindowManager<B> {
     /// for this itself). A no-op for an unknown `id`, like every other
     /// stale-id path here.
     pub fn set_client_content_geometry(&mut self, id: ClientId, geometry: Rect) {
+        if self.is_layout_managed(id) {
+            self.resize_client_content(id, geometry.size);
+            return;
+        }
         let Some(client) = self.clients.get_mut(id) else {
             return;
         };
@@ -1887,11 +1981,16 @@ impl<B: Backend> WindowManager<B> {
         self.focus_history.retain(|&other| other != id);
         if self.active_move.as_ref().is_some_and(|m| m.client == id)
             || self.active_resize.as_ref().is_some_and(|r| r.client == id)
+            || self.layout_drop.is_some_and(|(_, target)| target == id)
         {
             // The window being dragged has gone. Ending the drag here
             // is what stops the grab outliving it — a pointer grab with
             // nothing left to move is a frozen desktop.
             self.end_active_drag();
+        }
+        let workspace = self.clients.get(id).map(|c| c.workspace);
+        for layout in &mut self.layouts {
+            layout.order.retain(|&other| other != id);
         }
         self.fullscreen_restore.remove(&id);
         self.idle_inhibit_clients.remove(&id);
@@ -1932,6 +2031,9 @@ impl<B: Backend> WindowManager<B> {
                 session.selected = session.selected.min(session.order.len() - 1);
                 self.notifications.push_back(Notification::CycleUpdated);
             }
+        }
+        if let Some(workspace) = workspace {
+            self.reflow_workspace(workspace);
         }
         self.notifications.push_back(Notification::Removed(id));
         self.bump_protocol_state_revision();
@@ -1976,9 +2078,13 @@ impl<B: Backend> WindowManager<B> {
         {
             return;
         }
+        if parent.is_some() && self.is_layout_managed(id) {
+            self.set_floating(id, true);
+        }
         if let Some(client) = self.clients.get_mut(id) {
             client.parent = parent;
         }
+        self.reflow_client_workspace(id);
         let Some(parent) = parent else {
             return;
         };
@@ -2011,12 +2117,16 @@ impl<B: Backend> WindowManager<B> {
             self.reflow_frame(id);
         }
         self.raise_client(parent);
+        self.reflow_client_workspace(id);
     }
 
     fn handle_modal_changed(&mut self, window: B::WindowId, modal: bool) {
         let Some(&id) = self.window_index.get(&window) else {
             return;
         };
+        if modal && self.is_layout_managed(id) {
+            self.set_floating(id, true);
+        }
         let Some(client) = self.clients.get_mut(id) else {
             return;
         };
@@ -2026,6 +2136,7 @@ impl<B: Backend> WindowManager<B> {
         client.flags.set(ClientFlags::MODAL, modal);
         self.bump_protocol_state_revision();
         self.publish_client_net_state(id);
+        self.reflow_client_workspace(id);
         if modal {
             self.focus_client(id);
         }
@@ -2040,6 +2151,9 @@ impl<B: Backend> WindowManager<B> {
             return;
         };
 
+        if self.is_layout_managed(id) {
+            return;
+        }
         let Some(client) = self.clients.get_mut(id) else {
             return;
         };
@@ -2114,7 +2228,7 @@ impl<B: Backend> WindowManager<B> {
         // of them means the same thing, and treating only one of them
         // as the end is what left the window stuck to the cursor.
         if !pressed && button == MouseButton::Left && (self.active_move.is_some() || self.active_resize.is_some()) {
-            self.end_active_drag();
+            self.commit_active_drag();
         }
         match surface {
             SurfaceRef::Frame(frame) => self.handle_frame_button(frame, local, button, pressed, time_ms, mods),
@@ -2255,10 +2369,17 @@ impl<B: Backend> WindowManager<B> {
                 // flagship default.) No X server gives double-click
                 // detection for free; this is why
                 // `BackendEvent::PointerButton` carries a timestamp.
+                let at = Point::new(
+                    client.geometry.pos.x - client.layout.client_offset.x + local.x,
+                    client.geometry.pos.y - client.layout.client_offset.y + local.y,
+                );
+                let tolerance = (DOUBLE_CLICK_DISTANCE * self.client_decoration_scale(id)).ceil() as i64;
                 let is_double_click = self
                     .last_titlebar_press
-                    .take_if(|(prev_id, prev_time)| {
-                        *prev_id == id && time_ms.saturating_sub(*prev_time) <= DOUBLE_CLICK_MS
+                    .take_if(|(prev_id, prev_time, prev_at)| {
+                        *prev_id == id && time_ms.wrapping_sub(*prev_time) <= DOUBLE_CLICK_MS
+                            && (at.x as i64 - prev_at.x as i64).abs() <= tolerance
+                            && (at.y as i64 - prev_at.y as i64).abs() <= tolerance
                     })
                     .is_some();
                 if is_double_click {
@@ -2271,7 +2392,7 @@ impl<B: Backend> WindowManager<B> {
                         (false, false) => self.toggle_shade(id),
                     }
                 } else {
-                    self.last_titlebar_press = Some((id, time_ms));
+                    self.last_titlebar_press = Some((id, time_ms, at));
                     // Dragging a maximized window is the gesture that
                     // un-maximizes it. Without this the window travels
                     // under the pointer still flagged maximized: the
@@ -2311,7 +2432,7 @@ impl<B: Backend> WindowManager<B> {
         if self.active_move.as_ref().is_some_and(|m| m.client == id)
             || self.active_resize.as_ref().is_some_and(|r| r.client == id)
         {
-            self.end_active_drag();
+            self.commit_active_drag();
         }
 
         let Some(active) = self.active_button_press.take_if(|p| p.client == id) else {
@@ -2380,6 +2501,19 @@ impl<B: Backend> WindowManager<B> {
             return;
         };
         let (client_id, grab_offset) = (active.client, active.grab_offset);
+        let tolerance = (DOUBLE_CLICK_DISTANCE * self.client_decoration_scale(client_id)).ceil() as i64;
+        if self.last_titlebar_press.is_some_and(|(id, _, at)| {
+            id == client_id && ((root.x as i64 - at.x as i64).abs() > tolerance
+                || (root.y as i64 - at.y as i64).abs() > tolerance)
+        }) {
+            // A drag is not the first click of a double-click, even if it is
+            // cancelled and the user immediately grabs the same titlebar.
+            self.last_titlebar_press = None;
+        }
+        if self.is_layout_managed(client_id) {
+            self.preview_managed_move(client_id, root);
+            return;
+        }
 
         let Some(client) = self.clients.get(client_id) else {
             self.end_active_drag();
@@ -2524,6 +2658,33 @@ impl<B: Backend> WindowManager<B> {
 
         let raw_content =
             Size::new((raw_frame_w as u32).saturating_sub(overhead_w), (raw_frame_h as u32).saturating_sub(overhead_h));
+        if self.is_layout_managed(client_id) {
+            if self.layout_resize_snapshot.is_none() {
+                let workspace = self.clients[client_id].workspace;
+                self.layout_resize_snapshot = Some(crate::spatial::ResizeSnapshot {
+                    workspace,
+                    viewports: self.layouts[workspace].viewports.clone(),
+                    placements: self
+                        .layout_order(workspace)
+                        .iter()
+                        .map(|&id| {
+                            let p = &self.clients[id].placement;
+                            (id, p.mosaic_weight, p.flow_width)
+                        })
+                        .collect(),
+                });
+            }
+            let current = self.clients[client_id].geometry.size;
+            self.resize_managed(
+                client_id,
+                Point::new(
+                    raw_content.w as i32 - current.w as i32,
+                    raw_content.h as i32 - current.h as i32,
+                ),
+                Some(edge),
+            );
+            return;
+        }
         let hints = self.backend.size_hints(client.window);
         let content = resize::constrain_size(raw_content, hints);
 
@@ -2667,8 +2828,7 @@ impl<B: Backend> WindowManager<B> {
             return;
         }
         let request = Self::decoration_request(client, None);
-        let current_frame = client_frame_rect(client);
-        let scale = self.backend.decoration_scale(current_frame);
+        let scale = self.client_decoration_scale(id);
         let layout = self.theme.layout_at(&request, scale);
         // Shaded windows show only the titlebar — the frame's *visible*
         // height is overridden to `shaded_frame_height`, but the client's
@@ -2724,7 +2884,9 @@ impl<B: Backend> WindowManager<B> {
     /// in either axis) so `unmaximize` can restore it. No titlebar button
     /// triggers this — see `MaximizeDirections`'s doc comment.
     pub fn maximize(&mut self, id: ClientId, directions: MaximizeDirections) {
+        self.cancel_client_layout_interaction(id);
         self.fit_maximized(id, directions);
+        self.reflow_client_workspace(id);
         tracing::info!(?id, ?directions, "maximized");
     }
 
@@ -2732,16 +2894,37 @@ impl<B: Backend> WindowManager<B> {
     /// refit, where one bar coming up would otherwise log a maximize
     /// per window as if the user had asked for each.
     fn fit_maximized(&mut self, id: ClientId, directions: MaximizeDirections) {
+        if self.clients.get(id).is_some_and(|c| c.flags.contains(ClientFlags::FULLSCREEN)) {
+            // Maximize changes the state underneath fullscreen. Derive its
+            // chrome and workarea geometry from that state, then keep the
+            // visible presentation fullscreen. The backend coalesces these
+            // staged sizes into the operation's final configure.
+            let client = &mut self.clients[id];
+            client.flags.remove(ClientFlags::FULLSCREEN);
+            if let Some(saved) = self.fullscreen_restore.get(&id) {
+                client.geometry = *saved;
+            }
+            self.reflow_frame(id);
+            self.fit_maximized(id, directions);
+            self.fullscreen_restore.insert(id, self.clients[id].geometry);
+            self.clients[id].flags.insert(ClientFlags::FULLSCREEN);
+            self.reflow_frame(id);
+            self.publish_client_net_state(id);
+            return;
+        }
         // The window's *own* monitor, not the primary: a window dragged
         // onto the second head must maximize there. Same frame-center
         // rule fullscreen picks its monitor by (`client_frame_center`),
         // but through that monitor's workarea rather than its raw rect
         // — maximize respects the shell's reserved strip, fullscreen
         // deliberately does not.
-        let usable = match self.client_frame_center(id) {
-            Some(center) => self.usable_area_at(center),
-            None => self.usable_area(),
-        };
+        let index = self.client_output_index(id);
+        let usable = self
+            .workareas
+            .get(index)
+            .copied()
+            .or_else(|| self.backend.monitors_ref().get(index).map(|m| m.geometry))
+            .unwrap_or(NO_MONITOR_FALLBACK);
         let Some(client) = self.clients.get_mut(id) else {
             return;
         };
@@ -2781,17 +2964,23 @@ impl<B: Backend> WindowManager<B> {
     /// Restores the geometry saved by the most recent `maximize` call, if
     /// any (a no-op on an already-unmaximized client).
     pub fn unmaximize(&mut self, id: ClientId) {
+        self.cancel_client_layout_interaction(id);
         let Some(client) = self.clients.get_mut(id) else {
             return;
         };
         let Some(restore) = client.restore_geometry.take() else {
             return;
         };
-        client.geometry = restore;
+        if client.flags.contains(ClientFlags::FULLSCREEN) {
+            self.fullscreen_restore.insert(id, restore);
+        } else {
+            client.geometry = restore;
+        }
         client.flags.remove(ClientFlags::MAXIMIZED_H | ClientFlags::MAXIMIZED_V);
         self.bump_protocol_state_revision();
         self.reflow_frame(id);
         self.publish_client_net_state(id);
+        self.reflow_client_workspace(id);
         tracing::info!(?id, "unmaximized");
     }
 
@@ -2844,6 +3033,10 @@ impl<B: Backend> WindowManager<B> {
     /// untouched, so `unshade` restores exactly. A no-op if already
     /// shaded.
     pub fn shade(&mut self, id: ClientId) {
+        self.cancel_client_layout_interaction(id);
+        if self.is_layout_managed(id) && self.clients[id].chrome == ClientChrome::ServerDrawn {
+            self.set_floating(id, true);
+        }
         let Some(client) = self.clients.get_mut(id) else {
             return;
         };
@@ -2937,15 +3130,10 @@ impl<B: Backend> WindowManager<B> {
     /// `usable_area_at`: fullscreen covers the dock strip too — that's
     /// the whole point of the state.
     fn fullscreen_monitor_rect(&self, id: ClientId) -> Rect {
-        match self.client_frame_center(id) {
-            Some(center) => self.monitor_rect_at(center),
-            None => self
-                .backend
-                .monitors()
-                .get(self.primary_monitor_index())
-                .map(|m| m.geometry)
-                .unwrap_or(NO_MONITOR_FALLBACK),
-        }
+        self.backend
+            .monitors_ref()
+            .get(self.client_output_index(id))
+            .map_or(NO_MONITOR_FALLBACK, |m| m.geometry)
     }
 
     /// Enters EWMH fullscreen: the frame becomes exactly the client's
@@ -2957,6 +3145,7 @@ impl<B: Backend> WindowManager<B> {
     /// still finds its own pre-maximize snapshot intact. A no-op if
     /// already fullscreen.
     pub fn fullscreen(&mut self, id: ClientId) {
+        self.cancel_client_layout_interaction(id);
         let Some(client) = self.clients.get_mut(id) else {
             return;
         };
@@ -2991,6 +3180,7 @@ impl<B: Backend> WindowManager<B> {
         // windows would be useless.
         self.raise_client(id);
         self.publish_client_net_state(id);
+        self.reflow_client_workspace(id);
         tracing::info!(?id, "entered fullscreen");
     }
 
@@ -2998,6 +3188,7 @@ impl<B: Backend> WindowManager<B> {
     /// on entry through the normal reflow path (theme layout recomputed,
     /// chrome repainted). A no-op if not currently fullscreen.
     pub fn unfullscreen(&mut self, id: ClientId) {
+        self.cancel_client_layout_interaction(id);
         let Some(client) = self.clients.get_mut(id) else {
             return;
         };
@@ -3013,6 +3204,7 @@ impl<B: Backend> WindowManager<B> {
         self.bump_protocol_state_revision();
         self.reflow_frame(id);
         self.publish_client_net_state(id);
+        self.reflow_client_workspace(id);
         tracing::info!(?id, "left fullscreen");
     }
 
@@ -3035,6 +3227,7 @@ impl<B: Backend> WindowManager<B> {
     /// once unmapped, there's nothing left to capture (see
     /// `Backend::capture_window_image`).
     pub fn miniaturize(&mut self, id: ClientId) {
+        self.cancel_client_layout_interaction(id);
         for member in self.transient_family(id) {
             self.miniaturize_one(member);
         }
@@ -3063,6 +3256,7 @@ impl<B: Backend> WindowManager<B> {
         self.focus_successor_of(id);
         self.notifications.push_back(Notification::Miniaturized(id, preview));
         self.publish_client_net_state(id);
+        self.reflow_client_workspace(id);
         tracing::info!(?id, "miniaturized");
     }
 
@@ -3108,6 +3302,7 @@ impl<B: Backend> WindowManager<B> {
         // Painting it ourselves right here removes that dependency on
         // Expose timing entirely instead of hoping one arrives.
         self.repaint_decoration(id);
+        self.reflow_client_workspace(id);
         self.notifications.push_back(Notification::Deminiaturized(id));
         self.publish_client_net_state(id);
         self.focus_client(id);
@@ -3323,6 +3518,7 @@ impl<B: Backend> WindowManager<B> {
                     self.cycle_step(1);
                 }
             }
+            XK_ESCAPE if self.interactive_drag_active() => self.end_active_drag(),
             XK_ESCAPE if self.cycle.is_some() => self.cycle_end(false),
             // Any other key without Alt held means the Alt release was
             // lost (it can slip into the gap before the modal keyboard
@@ -3599,6 +3795,11 @@ impl<B: Backend> WindowManager<B> {
         // focus change pays only a flag comparison.
         self.set_urgent(id, false);
         self.repaint_decoration(id);
+        if self.is_layout_managed(id)
+            && self.workspace_layout(self.clients[id].workspace) == crate::LayoutMode::Flow
+        {
+            self.reflow_client_workspace(id);
+        }
     }
 
     /// Pushes a client's current `_NET_WM_STATE`-relevant flags to the
@@ -3784,6 +3985,7 @@ impl<B: Backend> WindowManager<B> {
         } else {
             self.hide_client_surface(id);
         }
+        self.reflow_client_workspace(id);
     }
 
     /// Publish `_NET_FRAME_EXTENTS` for `id` from whatever its layout
@@ -4016,10 +4218,30 @@ impl<B: Backend> WindowManager<B> {
     /// workspace switching out from under it — goes through here, so
     /// that "the drag is over" and "the pointer is free" cannot come
     /// apart. Safe to call when nothing is dragging.
+    fn commit_active_drag(&mut self) {
+        self.layout_resize_snapshot = None;
+        self.commit_layout_drop();
+        self.end_active_drag();
+    }
+
     fn end_active_drag(&mut self) {
+        self.layout_drop = None;
+        self.backend.preview_layout_drop(None, None);
         let client = self.interactive_drag_client();
         self.active_move = None;
         self.active_resize = None;
+        if let Some(snapshot) = self.layout_resize_snapshot.take() {
+            for (id, weight, width) in snapshot.placements {
+                if let Some(c) = self.clients.get_mut(id) {
+                    c.placement.mosaic_weight = weight;
+                    c.placement.flow_width = width;
+                }
+            }
+            if let Some(layout) = self.layouts.get_mut(snapshot.workspace) {
+                layout.viewports = snapshot.viewports;
+            }
+            self.reflow_workspace(snapshot.workspace);
+        }
         if let Some(handle) = self.drag_grab.take() {
             self.backend.ungrab_pointer(handle);
         }
@@ -4114,14 +4336,7 @@ impl<B: Backend> WindowManager<B> {
         } else {
             (request, client.layout.clone())
         };
-        let frame_rect = Rect {
-            pos: Point::new(
-                client.geometry.pos.x - client.layout.client_offset.x,
-                client.geometry.pos.y - client.layout.client_offset.y,
-            ),
-            size: paint_layout.frame_size,
-        };
-        let scale = self.backend.decoration_scale(frame_rect);
+        let scale = self.client_decoration_scale(id);
         if client.last_decoration_request.as_ref() == Some(&paint_request)
             && client.last_decoration_frame_size == paint_layout.frame_size
             && client.last_decoration_scale_bits == scale.to_bits()
@@ -4249,10 +4464,9 @@ fn union_rect(a: Rect, b: Rect) -> Rect {
 /// Squared distance from `point` to the nearest point of `rect`, `0`
 /// for a point inside it — the ordering `monitor_index_at` picks its
 /// nearest monitor by. Squared because only the ordering matters and a
-/// square root would cost precision for nothing; `i64` because a
-/// desktop spanning several 4K outputs has coordinates whose square
-/// overflows `i32`.
-fn squared_distance_to(rect: Rect, point: Point) -> i64 {
+/// square root would cost precision for nothing. The sum needs `u128`:
+/// restored coordinates can span the full signed range in both axes.
+fn squared_distance_to(rect: Rect, point: Point) -> u128 {
     // `Rect::contains` is half-open, so the last pixel actually inside
     // is one short of the far edge — measuring to the edge itself would
     // report a one-pixel gap as zero distance.
@@ -4260,7 +4474,7 @@ fn squared_distance_to(rect: Rect, point: Point) -> i64 {
     let last_y = rect.pos.y as i64 + rect.size.h as i64 - 1;
     let dx = (rect.pos.x as i64 - point.x as i64).max(point.x as i64 - last_x).max(0);
     let dy = (rect.pos.y as i64 - point.y as i64).max(point.y as i64 - last_y).max(0);
-    dx * dx + dy * dy
+    (dx as u128) * (dx as u128) + (dy as u128) * (dy as u128)
 }
 
 /// The root-coordinate rectangle of a managed client's outer frame.
@@ -9061,6 +9275,8 @@ mod tests {
             top_area,
             "a point nowhere near any output still has to resolve to one"
         );
+        assert_eq!(wm.usable_area_at(Point::new(i32::MIN, i32::MIN)), top_area);
+        assert_eq!(wm.usable_area_at(Point::new(i32::MAX, i32::MAX)), bottom_area);
     }
 
     #[test]
@@ -9098,4 +9314,5 @@ mod tests {
             "_NET_WORKAREA must span every monitor's workarea"
         );
     }
+    mod spatial;
 }

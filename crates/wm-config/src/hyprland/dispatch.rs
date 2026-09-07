@@ -15,14 +15,9 @@
 //!    declared under a name derived from the argv itself.
 //! 3. Everything else stays unbound and says why.
 //!
-//! The rule that makes the third answer worth having is the preset's,
-//! quoted because it is the thing most easily lost when a table becomes
-//! a parser: *an approximation is worse than a dead key.* `SUPER + J`
-//! toggles a split on Omarchy; on a stacking desk there is nothing to
-//! split, and binding it to the nearest-looking verb turns a key the
-//! user would look up in five seconds into a bug report. Every
-//! dispatcher below that has no true answer here is written down as
-//! having none.
+//! Workspace layout dispatchers select Mosaic/Flow and preserve floating
+//! membership. Tree-only messages deliberately succeed without changing the
+//! scene; unavailable grouping operations remain explicitly unbound.
 //!
 //! # Why this reads a table of dispatchers and not of chords
 //!
@@ -77,6 +72,11 @@ fn exec_verb(command: &str) -> Verb {
     let Some(program) = argv.first() else {
         return Verb::Unbound(Unbound::NoVerb);
     };
+    if argv.len() == 1
+        && program.rsplit('/').next() == Some("omarchy-hyprland-workspace-layout-toggle")
+    {
+        return Verb::Action(Action::ToggleLayout);
+    }
     if commands_hyprland(program) {
         return Verb::Unbound(Unbound::HyprlandOnly);
     }
@@ -160,11 +160,26 @@ fn compositor_verb(name: &str, arg: &str) -> Verb {
         },
         // `fullscreenstate` sets the *client's* idea and the
         // compositor's separately, which is how Omarchy builds "tiled
-        // fullscreen". There is no tiling here to be full inside of.
+        // fullscreen". Independent client/internal states are not modeled.
         "fullscreenstate" => Verb::Unbound(Unbound::TilingOnly),
-        "layoutmsg" | "pseudo" | "togglefloating" | "setfloating" | "settiled" | "swapwindow"
-        | "swapnext" | "resizeactive" | "moveactive" | "splitratio" | "pin" | "togglesplit"
-        | "movewindoworgroup" | "centerwindow" => Verb::Unbound(Unbound::TilingOnly),
+        "togglefloating" => Verb::Action(Action::Floating(None)),
+        "setfloating" => Verb::Action(Action::Floating(Some(true))),
+        "settiled" => Verb::Action(Action::Floating(Some(false))),
+        "layoutmsg" | "togglesplit" | "swapsplit" | "pseudo" | "splitratio" => {
+            Verb::Action(Action::LayoutNoop)
+        }
+        "resizeactive" => {
+            let values: Vec<_> = arg
+                .split_whitespace()
+                .filter_map(|s| s.parse::<i32>().ok())
+                .collect();
+            if let [x, y] = values.as_slice() {
+                Verb::Action(Action::Resize(wm_core::Point::new(*x, *y)))
+            } else {
+                Verb::Unbound(Unbound::NoVerb)
+            }
+        }
+        "swapnext" | "moveactive" | "pin" | "centerwindow" => Verb::Unbound(Unbound::TilingOnly),
         "togglegroup"
         | "changegroupactive"
         | "moveintogroup"
@@ -182,7 +197,12 @@ fn compositor_verb(name: &str, arg: &str) -> Verb {
             "d" | "down" => Verb::Action(Action::Focus(FocusDirection::Down)),
             _ => Verb::Unbound(Unbound::NoVerb),
         },
-        "movewindow" => Verb::Unbound(Unbound::TilingOnly),
+        "movewindow" | "swapwindow" | "movewindoworgroup" => {
+            match compositor_verb("movefocus", arg) {
+                Verb::Action(Action::Focus(direction)) => Verb::Action(Action::Move(direction)),
+                _ => Verb::Unbound(Unbound::NoVerb),
+            }
+        }
         // Workspaces. `e+1`/`e-1` are "the next/previous workspace that
         // exists", which is exactly what this desktop's two workspace
         // verbs do; a bare number is a workspace by index, and

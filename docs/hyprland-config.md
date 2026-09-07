@@ -73,11 +73,11 @@ Each binding gets one of three answers:
    Omarchy's `omarchy-menu`, not an imitation of it.
 3. **Everything else stays unbound**, with the reason logged.
 
-The third answer is the important one, and the rule behind it is *an
-approximation is worse than a dead key*. `SUPER + J` toggles a tiling
-split on Omarchy; on a stacking desk there is nothing to split. A dead
-key is discovered in five seconds and looked up; a key that does
-something *else* is a bug report.
+Workspace styles are native: `dwindle` selects Mosaic and `scrolling` selects
+Flow. Omarchy's layout toggle and floating toggle work without a config change.
+`Super+Shift+L` returns to Freeform. Tree-only messages such as `togglesplit`
+are quiet no-ops in every style, including Flow; unavailable window groups
+remain explicitly unsupported.
 
 Because the recogniser keys on the **dispatcher** rather than on the
 chord, moving "close window" from `SUPER + W` to `SUPER + Q` through
@@ -213,18 +213,19 @@ specific directive, not a count. Turn on `RUST_LOG=debug` to see them.
 
 ### Bindings this desktop has no verb for
 
-Beyond the tiling vocabulary, one specific chord family stays dead and
+One additional chord family remains unbound and
 is worth knowing about:
 
 - **The universal clipboard chords** (`SUPER + C/V/X`), which Omarchy
   builds by synthesising `Ctrl+C` at the seat. That is the
   compositor's own input path; no command could stand in.
 
-Directional focus (`movefocus l/r/u/d`) is native: Chonkstep ranks the
-visible floating frames by their actual root-coordinate geometry and
-focuses the closest candidate in that direction. Directional movement
-and swapping remain tiling-only because a free-form window has no
-neighbouring slot to move into.
+Directional focus (`movefocus l/r/u/d`) follows actual geometry in Freeform
+and Mosaic. Flow follows its horizontal sequence; up/down does nothing.
+`movewindow` and `swapwindow` directions reorder managed windows while keeping
+focus. `resizeactive` changes Mosaic boundaries or the focused Flow width.
+`fullscreen 0` toggles real fullscreen; `fullscreen 1` toggles maximize within
+the workarea. Floating windows retain traditional movement and resizing.
 
 Silent workspace sends (`movetoworkspacesilent 1..99`) are native too:
 the active window moves without changing the current workspace, and an
@@ -354,7 +355,7 @@ shape this reader cannot follow. There is never a moment where both are
 in effect.
 
 The preset's *judgements* are carried over rather than re-argued: the
-same `Unbound` reasons, the same "tiling-only stays dead", the same
+same `Unbound` reasons, the same deliberate handling of unsupported operations, the same
 scratchpad-to-`miniaturize` call. `docs/keybindings.md` still documents
 that table, and it remains accurate for a machine with no Hyprland
 configuration on it.
@@ -462,10 +463,10 @@ One `info` line per read, and one `debug` line per thing skipped:
 
 ```
 INFO  hyprland-config: read the desktop's live Hyprland configuration
-      files=42 bindings=153 commands=113 env=8 autostart=4
-      float_rules=45 monitors=1 skipped=173
-DEBUG hyprland-config: not carried over kind=bind what="SUPER + J (Toggle window split)"
-      why="tiling-only: no meaning on a stacking desk"
+      files=42 bindings=161 commands=113 env=8 autostart=4
+      float_rules=45 monitors=1 skipped=165
+DEBUG hyprland-config: not carried over kind=bind what="SUPER + G (Toggle window group)"
+      why="requires window groups or a feature ChonkStep does not provide"
 ```
 
 `skipped` being large is normal and not a problem — a stock Omarchy

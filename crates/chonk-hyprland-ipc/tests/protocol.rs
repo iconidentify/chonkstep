@@ -46,11 +46,19 @@ fn monitor(id: i32, name: &str, focused: bool, active_workspace: usize) -> Monit
 }
 
 fn workspace(index: usize, windows: u32) -> Workspace {
-    Workspace { index, monitor: "eDP-1".to_string(), monitor_id: 0, windows, has_fullscreen: false }
+    Workspace {
+        layout: "freeform".into(),
+        index,
+        monitor: "eDP-1".to_string(),
+        monitor_id: 0,
+        windows,
+        has_fullscreen: false,
+    }
 }
 
 fn window(id: u64, title: &str, class: &str, workspace: usize) -> Window {
     Window {
+        floating: true,
         id,
         title: title.to_string(),
         class: class.to_string(),
@@ -228,7 +236,6 @@ fn an_ok_answer_always_comes_with_an_action() {
         "workspace 100",
         "workspace 0",
         "workspace -1",
-        "togglesplit",
         "killactive",
         "movetoworkspace 4",
         "focuswindow class:^(foot)$",
@@ -408,13 +415,9 @@ fn live_diagnostic_commands_have_truthful_wire_shapes() {
 /// and each must produce an error a caller can branch on rather than
 /// an `ok` it will believe.
 #[test]
-fn tiling_dispatchers_fail_cleanly_and_never_act() {
+fn unsupported_group_and_special_workspace_dispatchers_fail_cleanly() {
     let snapshot = desktop();
     for verb in [
-        "layoutmsg orientationtop",
-        "togglesplit",
-        "swapwindow l",
-        "pseudo",
         "togglegroup",
         "togglespecialworkspace magic",
         "workspaceopt allfloat",
@@ -431,8 +434,8 @@ fn tiling_dispatchers_fail_cleanly_and_never_act() {
 /// the right path.
 #[test]
 fn refusals_explain_themselves() {
-    let (response, _) = answer_payload(b"/dispatch togglesplit", &desktop());
-    assert!(response.contains("float"), "got {response:?}");
+    let (response, _) = answer_payload(b"/dispatch togglegroup", &desktop());
+    assert!(response.contains("groups"), "got {response:?}");
 }
 
 /// Omarchy sends the Lua form first and the classic form on failure.
@@ -522,6 +525,8 @@ fn fullscreen_arguments_map() {
     let (_, actions) = answer_payload(b"/dispatch fullscreen", &snapshot);
     assert_eq!(actions, vec![Action::Fullscreen(Fullscreen::Toggle)]);
     let (_, actions) = answer_payload(b"/dispatch fullscreen 1", &snapshot);
+    assert_eq!(actions, vec![Action::ToggleMaximize]);
+    let (_, actions) = answer_payload(b"/dispatch fullscreen 2", &snapshot);
     assert_eq!(actions, vec![Action::Fullscreen(Fullscreen::On)]);
 }
 
@@ -1023,4 +1028,58 @@ fn cursor_visibility_does_not_turn_keyword_into_a_general_config_backdoor() {
     let (response, actions) = answer_payload(b"eval hl.config({ cursor = { invisible = maybe } })", &desktop());
     assert!(response.contains("requires true or false"), "got {response:?}");
     assert!(actions.is_empty());
+}
+
+#[test]
+fn spatial_aliases_toggles_and_inapplicable_messages_have_deliberate_answers() {
+    let (_, actions) = answer_payload(b"/dispatch settiled", &desktop());
+    assert!(matches!(
+        actions.as_slice(),
+        [Action::SetFloating {
+            floating: Some(false),
+            ..
+        }]
+    ));
+    let snapshot = desktop();
+    for command in [
+        "/dispatch layoutmsg togglesplit",
+        "/dispatch togglesplit",
+        "/dispatch pseudo",
+        "/dispatch hl.dsp.layout(\"togglesplit\")",
+    ] {
+        let (response, actions) = answer_payload(command.as_bytes(), &snapshot);
+        assert_eq!(response, "ok");
+        assert_eq!(actions, vec![Action::LayoutNoop]);
+    }
+    for (command, mode) in [
+        ("/keyword workspace 1, layout:scrolling", "scrolling"),
+        (
+            "/eval hl.workspace_rule({ workspace = \"1\", layout = \"dwindle\" })",
+            "dwindle",
+        ),
+    ] {
+        let (response, actions) = answer_payload(command.as_bytes(), &snapshot);
+        assert_eq!(response, "ok");
+        assert_eq!(
+            actions,
+            vec![Action::SetWorkspaceLayout {
+                workspace: 0,
+                mode: mode.into()
+            }]
+        );
+    }
+}
+
+#[test]
+fn membership_events_and_workspace_json_report_the_authoritative_layout() {
+    let mut snapshot = desktop();
+    let mut differ = chonk_hyprland_ipc::event::Differ::new();
+    differ.diff(&snapshot);
+    snapshot.windows[0].floating = false;
+    snapshot.workspaces[0].layout = "scrolling".into();
+    let events = differ.diff(&snapshot);
+    assert!(events.iter().any(|e| e.name() == "changefloatingmode"));
+    let (reply, _) = answer_payload(b"j/activeworkspace", &snapshot);
+    let workspace: serde_json::Value = serde_json::from_str(&reply).unwrap();
+    assert_eq!(workspace["tiledLayout"], "scrolling");
 }

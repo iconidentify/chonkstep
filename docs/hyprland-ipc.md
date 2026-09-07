@@ -31,9 +31,9 @@ hyprctl dispatch 'hl.dsp.focus({ window = "address:0x..." })' || \
 The policy is consequently:
 
 - implement every reachable, meaningful Omarchy operation;
-- omit known tiling-only actions from chonkstep's mirrored menu;
-- return `Invalid dispatcher: <reason>` for operations with no honest
-  floating-desktop meaning;
+- omit unsupported Hyprland script actions from chonkstep's mirrored menu;
+- make inapplicable layout messages quiet no-ops;
+- return `Invalid dispatcher: <reason>` for unavailable operations;
 - log every refusal at warning level with a session-long counter.
 
 That makes interactive failures readable and silent script failures
@@ -84,7 +84,7 @@ start with `[[BATCH]]` and use `;` separators.
 | --- | --- |
 | `status` | `configProvider="chonkstep"`; Quickshell uses classic dispatch while scripts may use the supported Lua forms |
 | `monitors` | Live output name, geometry, scale, focus, active workspace, transform, DPMS state, and measured VRR capability/runtime state. The optional `all` argument is accepted and ignored because connected outputs remain in the layout while powered down. |
-| `workspaces` | One-based ids; real per-workspace monitor assignment and fullscreen state |
+| `workspaces` | One-based ids; real per-workspace monitor assignment, fullscreen state and `tiledLayout` (`freeform`, `dwindle`, `scrolling`) |
 | `clients` / `activewindow` | Live pid, class/title, position, size, workspace, monitor, XWayland, floating, pinned, fullscreen, tags, focus history and idle inhibition |
 | `activeworkspace` | Exactly the active workspace, in JSON or one plain block |
 | `cursorpos` | The live pointer as plain `X, Y` |
@@ -118,7 +118,11 @@ actions. Supported families include:
 - workspace focus and moving a window to a workspace;
 - focus by selector or spatial direction, close, kill-active, cycle,
   fullscreen/maximize;
-- move, resize, center, raise, pin, tags, and confirm-floating;
+- move, resize, center, raise, pin, tags, and floating membership;
+- `layout freeform|mosaic|flow`, `togglelayout`, `togglefloating`, `setfloating`,
+  `settiled`, and directional `movewindow`/`swapwindow`;
+- `eval hl.workspace_rule({ workspace = "1", layout = "scrolling" })` and
+  `keyword workspace 1, layout:scrolling` (also `dwindle` and `freeform`);
 - `exec -- <argv...>` as direct argv and Lua `exec_cmd` as shell
   source, including `[[...]]` and `[=[...]=]` strings;
 - `eval hl.dispatch(hl.dsp....)`;
@@ -137,7 +141,7 @@ not reported as unknown syntax. Monitor scaling validates the output
 and range before changing anything, so an Omarchy script cannot record
 a scale that the compositor said it applied but did not.
 
-`keyword` is refused except for the named
+`keyword` supports workspace layouts and the named
 `keyword cursor:invisible BOOL` screensaver fallback, which reaches the
 same live cursor flag as `hl.config`. If the focused client that hid
 the cursor disconnects without restoring it, chonkstep restores the
@@ -168,13 +172,12 @@ and runtime activation is restricted to direct scanout. Set
 `CHONKSTEP_NO_VRR=1` to force it off. A backend driving no real mode reports 60 Hz rather than 0,
 because a bar divides this into a frame budget.
 
-Tiling vocabulary—`layoutmsg`, `togglesplit`, `swapwindow`, `pseudo`,
-groups, special workspaces, tiled workspace options—has no faithful
-meaning on this floating desktop and is refused. The mirrored Omarchy
-menu continues to hide the five installed `omarchy-hyprland-*` actions;
-each remains genuinely tiling/Hyprland specific. In particular,
-workspace layout toggle (`SUPER+L`) is unbound and its menu row is
-absent, so it cannot display a false “layout changed” notification.
+Omarchy's `dwindle` and `scrolling` select Mosaic and Flow. `Super+L` toggles
+between them; `Super+Shift+L` restores Freeform. `layoutmsg`, `togglesplit`,
+`swapsplit`, `pseudo` and `splitratio` are deliberate quiet no-ops. Groups,
+special workspaces and unsupported workspace options remain explicit refusals.
+The mirrored menu retains its filter for direct Hyprland script rows; native
+shortcuts show a transient compositor caption without launching a script.
 
 ## Event stream and workspace lifetime
 
@@ -185,7 +188,7 @@ event:
 `createworkspacev2`, `destroyworkspacev2`, `workspacev2`, `workspace`,
 `moveworkspacev2`, `focusedmon`, `fullscreen`, `openwindow`,
 `closewindow`, `movewindowv2`, `windowtitlev2`, `windowtitle`,
-`activewindowv2`, `activewindow`, `urgent`, and `activelayout`.
+`activewindowv2`, `activewindow`, `urgent`, `changefloatingmode`, and `activelayout`.
 
 Addresses are `0x...` in JSON and bare hexadecimal in events; both are
 the same `ClientId`. Workspace ids are one-based on this wire and

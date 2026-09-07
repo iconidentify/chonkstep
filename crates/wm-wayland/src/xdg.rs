@@ -73,7 +73,7 @@ use smithay::{
     delegate_xdg_decoration, delegate_xdg_shell,
 };
 
-use wm_core::{BackendEvent, NetState, NetStateAction};
+use wm_core::{Backend, BackendEvent, NetState, NetStateAction};
 use wm_theme_api::{
     clamp_client_size, client_size_limit, subsurface_link_exceeds_depth, Point, Rect, ResizeEdge,
     Size, MAX_SUBSURFACE_DEPTH,
@@ -522,7 +522,11 @@ fn committed_content_offset(surface: &WlSurface, factor: f64, screen: Size) -> P
 /// any other number and the three descriptions of one window stop
 /// agreeing: the frame is drawn to one rectangle, the pointer routed by
 /// a second, and the client's pixels land in a third.
-fn committed_content_size(surface: &WlSurface, factor: f64, screen: Size) -> Option<Size> {
+pub(crate) fn committed_content_size(
+    surface: &WlSurface,
+    factor: f64,
+    screen: Size,
+) -> Option<Size> {
     let geometry = with_states(surface, |states| {
         let mut guard = states.cached_state.get::<SurfaceCachedState>();
         guard.current().geometry
@@ -1122,7 +1126,8 @@ impl Compositor {
         let backend = self.wm.backend();
         if let Some(id) = owner {
             if let Some(record) = backend.windows.get(&id) {
-                return backend.scale_at(record.content);
+                return backend
+                    .scale_at(backend.layout_scene.workarea(id).unwrap_or(record.content));
             }
         }
         if let Some(record) = backend
@@ -1168,6 +1173,13 @@ impl Compositor {
             with_renderer_surface_state(&root, |state| state.buffer().is_some()).unwrap_or(false);
         let was_mapped = mapped_marker(&root);
         let backend = self.wm.backend_mut();
+        let hints = backend.size_hints(id);
+        if let Some(record) = backend.windows.get_mut(&id) {
+            if record.size_hints != hints {
+                record.size_hints = hints;
+                backend.queue(WmEvent::SizeHintsChanged(id));
+            }
+        }
         let parent = toplevel
             .parent()
             .and_then(|surface| backend.window_for_surface(&surface));
@@ -1297,7 +1309,12 @@ impl Compositor {
                         client_behind, echoes_ask, staged = backend.configure_debt.contains_key(&id),
                         "committed client geometry differs from desired geometry");
                 }
-                if record.mapped && !client_behind && !echoes_ask && size != record.content.size {
+                if record.mapped
+                    && !client_behind
+                    && !echoes_ask
+                    && !backend.layout_scene.transitioning(id)
+                    && size != record.content.size
+                {
                     let requested = Rect {
                         pos: record.content.pos,
                         size,
@@ -1542,6 +1559,8 @@ impl WaylandBackend {
                 continue;
             }
             let staged_configure_sent = toplevel.send_pending_configure().is_some();
+            self.layout_scene.configures +=
+                u64::from(staged_configure_sent || debt.forces_configure(staged_configure_sent));
             if debt.forces_configure(staged_configure_sent) {
                 // Nothing changed, so `wm-core` declined the request (or
                 // the window was already in the asked-for state). The

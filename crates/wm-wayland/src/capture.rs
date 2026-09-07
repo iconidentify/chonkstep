@@ -168,7 +168,10 @@ impl ScreenshotRequestPoller {
 pub(crate) fn refresh_snapshots(comp: &mut Compositor) {
     // Overview composes the clients' existing GPU surfaces. Readbacks have no
     // consumer here and would synchronously stall input for unrelated icons.
-    if comp.wm.backend().overview.is_some() || comp.wm.backend().gesture_scene.is_some() {
+    if comp.wm.backend().overview.is_some()
+        || comp.wm.backend().gesture_scene.is_some()
+        || comp.wm.backend().layout_scene.animating()
+    {
         return;
     }
     let now = Instant::now();

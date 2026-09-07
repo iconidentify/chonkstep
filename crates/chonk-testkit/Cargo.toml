@@ -16,6 +16,7 @@ wm-theme-api = { path = "../wm-theme-api" }
 # PNG decode for screenshot assertions — already in the workspace's
 # dependency graph (winit pulls it), so this adds no new code to vet.
 png = "0.17"
+tempfile = "3"
 # The instrument-panel e2e drives a real dockapp against the nested
 # shell: `src/bin/chonk-panel-probe.rs` is that dockapp, speaking the
 # wire protocol directly through the reference crate rather than
@@ -68,7 +69,6 @@ rustix = { version = "1.1", features = ["event", "fs", "net"] }
 
 [dev-dependencies]
 chonk-test-support = { path = "../chonk-test-support" }
-tempfile = "3"
 # Observe the real browser's DOM via its private loopback DevTools socket.
 # Input still enters through the compositor; no CDP input injection. Reuse a
 # maintained WebSocket client instead of implementing framing in the harness.

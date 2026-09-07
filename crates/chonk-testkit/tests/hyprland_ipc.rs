@@ -609,7 +609,7 @@ fn foreign_toplevel_mapping_returns_the_same_live_ipc_address() {
     // unchanged client commit sends nothing, while a real WM mutation
     // closes one new atomic foreign-toplevel batch with `done`.
     let done_before = session.client_log("chonk-toplevel-mapping-probe").matches("**foreign done**").count();
-    assert_eq!(request(&dir, "dispatch fullscreen 1").trim(), "ok");
+    assert_eq!(request(&dir, "dispatch fullscreen 0").trim(), "ok");
     poll_until(EVENT, "the foreign-toplevel handle to publish fullscreen", || {
         (session.client_log("chonk-toplevel-mapping-probe").matches("**foreign done**").count() > done_before)
             .then_some(())
@@ -910,17 +910,17 @@ fn native_control_mutations_reach_the_hyprland_event_stream() {
 /// and is seen to change nothing.
 #[test]
 #[ignore = "needs a Wayland session to nest inside"]
-fn tiling_verbs_fail_honestly_against_a_live_desktop() {
+fn inapplicable_layout_messages_are_quiet_and_unavailable_groups_still_fail() {
     let session = boot("hypr-ipc-refusal");
     let dir = socket_dir(&session);
 
     let before = json(&dir, "j/activeworkspace");
 
-    for verb in ["togglesplit", "layoutmsg orientationtop", "pseudo", "togglegroup"] {
-        let response = request(&dir, &format!("/dispatch {verb}"));
-        assert_ne!(response.trim(), "ok", "{verb} must not claim success");
-        assert!(response.starts_with("Invalid dispatcher"), "{verb} must fail the way Hyprland does, got {response:?}");
+    for verb in ["togglesplit", "layoutmsg orientationtop", "pseudo"] {
+        assert_eq!(request(&dir, &format!("/dispatch {verb}")).trim(), "ok");
     }
+    let response = request(&dir, "/dispatch togglegroup");
+    assert!(response.starts_with("Invalid dispatcher"), "groups remain unsupported: {response:?}");
 
     assert_eq!(json(&dir, "j/activeworkspace"), before, "a refused verb changes nothing");
 

@@ -377,10 +377,10 @@ fn plain_clients(snapshot: &Snapshot) -> String {
 
 fn plain_client(window: &crate::state::Window) -> String {
     format!(
-        "Window {} -> {}:\n\tmapped: {}\n\thidden: {}\n\tat: {},{}\n\tsize: {},{}\n\tworkspace: {} ({})\n\tfloating: 1\n\tpseudo: 0\n\tmonitor: {}\n\tclass: {}\n\ttitle: {}\n\tinitialClass: {}\n\tinitialTitle: {}\n\tpid: {}\n\txwayland: {}\n\tpinned: {}\n\tfullscreen: {}\n",
+        "Window {} -> {}:\n\tmapped: {}\n\thidden: {}\n\tat: {},{}\n\tsize: {},{}\n\tworkspace: {} ({})\n\tfloating: {}\n\tpseudo: 0\n\tmonitor: {}\n\tclass: {}\n\ttitle: {}\n\tinitialClass: {}\n\tinitialTitle: {}\n\tpid: {}\n\txwayland: {}\n\tpinned: {}\n\tfullscreen: {}\n",
         window.address(), window.title, !window.hidden, window.hidden, window.x, window.y,
         window.width, window.height, window.workspace + 1, window.workspace + 1,
-        window.monitor, window.class, window.title, window.class, window.title, window.pid,
+        i32::from(window.floating), window.monitor, window.class, window.title, window.class, window.title, window.pid,
         window.xwayland, window.pinned, i32::from(window.fullscreen),
     )
 }

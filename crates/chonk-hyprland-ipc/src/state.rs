@@ -23,19 +23,11 @@
 //! [`Workspace::hypr_id`] and [`workspace_index_from_hypr_id`], and
 //! nowhere else.
 //!
-//! **chonkstep has no tiling, so every window floats.** `wm-core` is a
-//! floating window manager; there is no flag recording "floating"
-//! because there is no alternative to it. The JSON therefore reports
-//! `floating: true` for every window, which is not a stub — it is the
-//! truth, and it is why the tiling dispatchers in [`crate::dispatch`]
-//! refuse rather than pretend.
-//!
-//! **A window's monitor is geometric, not stored.** `Client::monitor`
-//! in `wm-core` is an unset slotmap key; multi-monitor policy resolves a
-//! window's output from its frame centre against the backend's monitor
-//! list. The caller must do that resolution when filling in
-//! [`Window::monitor`], because reading the field would report every
-//! window on monitor zero.
+//! Floating membership and workspace style are projected from WindowManager.
+//! Managed windows report `floating: false`; workspace `tiledLayout` uses the
+//! compatible names dwindle/scrolling. Freeform reports freeform. Output
+//! ownership comes from core affinity for managed Flow windows, whose virtual
+//! geometry can extend beyond every physical output.
 
 use serde::Serialize;
 
@@ -105,6 +97,7 @@ const FALLBACK_REFRESH_HZ: f64 = 60.0;
 /// One workspace.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Workspace {
+    pub layout: String,
     /// The **0-based** chonkstep index. Converted on the way out.
     pub index: usize,
     /// Name of the monitor this workspace is on.
@@ -158,6 +151,7 @@ pub fn workspace_index_from_hypr_id(id: i32) -> Option<usize> {
 /// One managed window.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Window {
+    pub floating: bool,
     /// chonkstep's opaque `ClientId::as_u64()`. Rendered as Hyprland's
     /// hex `address`.
     pub id: u64,
@@ -368,6 +362,8 @@ pub struct MonitorJson {
 
 #[derive(Debug, Serialize)]
 pub struct WorkspaceJson {
+    #[serde(rename = "tiledLayout")]
+    pub tiled_layout: String,
     pub id: i32,
     pub name: String,
     pub monitor: String,
@@ -392,8 +388,7 @@ pub struct ClientJson {
     /// `[w, h]`, indexed as `.size[0]` / `.size[1]`.
     pub size: [i32; 2],
     pub workspace: WorkspaceRef,
-    /// Always true: chonkstep is a floating window manager and has no
-    /// other state for a window to be in. See the module doc.
+    /// True when this window is outside managed layout.
     pub floating: bool,
     pub pseudo: bool,
     pub monitor: i32,
@@ -497,6 +492,7 @@ impl Snapshot {
             monitor_id: workspace.monitor_id,
             windows: workspace.windows,
             hasfullscreen: workspace.has_fullscreen,
+            tiled_layout: workspace.layout.clone(),
             lastwindow: last.map(Window::address).unwrap_or_else(|| "0x0".to_string()),
             lastwindowtitle: last.map(|window| window.title.clone()).unwrap_or_default(),
             ispersistent: false,
@@ -520,7 +516,7 @@ impl Snapshot {
                 id: workspace.map_or(1, Workspace::hypr_id),
                 name: workspace.map_or_else(|| "1".to_string(), Workspace::hypr_name),
             },
-            floating: true,
+            floating: window.floating,
             pseudo: false,
             monitor: window.monitor,
             class: window.class.clone(),

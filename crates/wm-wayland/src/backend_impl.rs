@@ -216,6 +216,40 @@ impl Backend for WaylandBackend {
 
     // -- lifecycle --------------------------------------------------------
 
+    fn present_layout(
+        &mut self,
+        window: WlWindowId,
+        frame: Option<WlFrameId>,
+        source: Rect,
+        destination: Rect,
+        clip: Option<Rect>,
+        animate: bool,
+    ) {
+        let mut changed = false;
+        if let Some(ManagedSurface::Xdg(surface)) = self.windows.get(&window).map(|r| &r.surface) {
+            surface.with_pending_state(|state| {
+                for edge in [XdgToplevelState::TiledLeft, XdgToplevelState::TiledRight,
+                    XdgToplevelState::TiledTop, XdgToplevelState::TiledBottom] {
+                    changed |= state.states.contains(edge) != clip.is_some();
+                    if clip.is_some() { state.states.set(edge); } else { state.states.unset(edge); }
+                }
+            });
+        }
+        if changed { self.note_configure(window); }
+        crate::layout_scene::present(self, window, frame, source, destination, clip, animate);
+    }
+    fn show_layout_mode(&mut self, _mode: wm_core::LayoutMode, label: DecorationBuffer) {
+        crate::layout_scene::caption(self, label);
+    }
+    fn preview_layout_drop(
+        &mut self,
+        drag: Option<wm_core::LayoutDrag<WlWindowId, WlFrameId>>,
+        target: Option<Rect>,
+    ) {
+        crate::layout_scene::preview(self, drag, target);
+        self.mark_damaged();
+    }
+
     fn scan_existing_windows(&mut self) -> Vec<Self::WindowId> {
         // A compositor owns its display from the first instant — no
         // client can have connected before `run()` created the socket,

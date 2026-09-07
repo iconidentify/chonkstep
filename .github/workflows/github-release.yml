@@ -16,8 +16,16 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  validation:
+    name: validate the release revision
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+      checks: write
+
   package:
     name: package (${{ matrix.arch }})
+    needs: validation
     strategy:
       fail-fast: false
       matrix:
@@ -73,11 +81,13 @@ jobs:
           # asset so the main package stays small and only someone
           # reading a crash pays for it.
           debug_package_name="chonkstep-debug-$version-$package_release-${{ matrix.arch }}.pkg.tar.zst"
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "package_release=$package_release" >> "$GITHUB_OUTPUT"
-          echo "package_name=$package_name" >> "$GITHUB_OUTPUT"
-          echo "debug_package_name=$debug_package_name" >> "$GITHUB_OUTPUT"
-          echo "source_id=$source_id" >> "$GITHUB_OUTPUT"
+          {
+            echo "version=$version"
+            echo "package_release=$package_release"
+            echo "package_name=$package_name"
+            echo "debug_package_name=$debug_package_name"
+            echo "source_id=$source_id"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Build the native Arch package environment
         run: |

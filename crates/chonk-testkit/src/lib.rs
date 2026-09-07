@@ -1096,6 +1096,7 @@ pub struct ThemeInfo {
 /// One `windows` reply: the compositor's whole idea of the screen.
 #[derive(Clone, Debug, Default)]
 pub struct World {
+    pub spatial: SpatialInfo,
     pub scale: f32,
     pub current_workspace: usize,
     pub workspace_count: usize,
@@ -1111,6 +1112,22 @@ pub struct World {
     pub gesture: Option<GestureInfo>,
     pub logical_focus: Option<u64>,
     pub seat_focus: Option<u64>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct SpatialInfo {
+    pub mode: String,
+    pub moving: bool,
+    pub calculations: u64,
+    pub calculation_us: u128,
+    pub managed: usize,
+    pub changes: u64,
+    pub setups: u64,
+    pub setup_us: u128,
+    pub configures: u64,
+    pub builds: u64,
+    pub build_us: u128,
+    pub culled: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -1772,6 +1789,21 @@ impl Door {
                 if let Some(shell) = parse_shell_line(&line) {
                     world.shells.push(shell);
                 }
+            } else if line.starts_with("spatial ") {
+                world.spatial = SpatialInfo {
+                    mode: field::<String>(&line, "mode=").unwrap_or_default(),
+                    moving: field(&line, "moving=").unwrap_or_default(),
+                    calculations: field(&line, "calculations=").unwrap_or_default(),
+                    calculation_us: field(&line, "calculation_us=").unwrap_or_default(),
+                    managed: field(&line, "managed=").unwrap_or_default(),
+                    changes: field(&line, "changes=").unwrap_or_default(),
+                    setups: field(&line, "setups=").unwrap_or_default(),
+                    setup_us: field(&line, "setup_us=").unwrap_or_default(),
+                    configures: field(&line, "configures=").unwrap_or_default(),
+                    builds: field(&line, "builds=").unwrap_or_default(),
+                    build_us: field(&line, "build_us=").unwrap_or_default(),
+                    culled: field(&line, "culled=").unwrap_or_default(),
+                };
             } else if line.starts_with("workspaces ") {
                 world.current_workspace = field(&line, "current=").unwrap_or_default();
                 world.workspace_count = field(&line, "count=").unwrap_or_default();

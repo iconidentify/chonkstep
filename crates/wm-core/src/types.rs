@@ -243,6 +243,8 @@ pub enum BackendEvent<Win, Frame> {
     ///
     /// [`Backend::client_draws_own_chrome`]: crate::Backend::client_draws_own_chrome
     ChromeChanged(Win),
+    /// Committed minimum/maximum sizes or resize increments changed.
+    SizeHintsChanged(Win),
     /// The toplevel's transient parent changed. Backends emit this for
     /// `xdg_toplevel.set_parent` and `WM_TRANSIENT_FOR` updates.
     ParentChanged(Win),
@@ -276,6 +278,8 @@ pub enum BackendEvent<Win, Frame> {
     /// A backend may emit this instead of, or in addition to, a
     /// `PointerButton` release; ending a drag is idempotent.
     DragEnded,
+    /// A modal owner, lock, or device loss cancelled the grab.
+    DragCancelled,
     /// The client asked the window manager to start resizing it from
     /// `edge` — X11's `_NET_WM_MOVERESIZE` resize directions, or a
     /// Wayland toplevel's `resize` request.

@@ -220,11 +220,7 @@ fn build_snapshot(
         counts[client.workspace] += 1;
 
         let geometry = client.geometry;
-        let centre = Point {
-            x: geometry.pos.x + i32::try_from(geometry.size.w / 2).unwrap_or(0),
-            y: geometry.pos.y + i32::try_from(geometry.size.h / 2).unwrap_or(0),
-        };
-        let monitor = i32::try_from(wm.monitor_index_at(centre)).unwrap_or(0);
+        let monitor = i32::try_from(wm.client_output_index(id)).unwrap_or(0);
         workspace_monitors[client.workspace].get_or_insert(monitor);
         workspace_fullscreen[client.workspace] |=
             client.flags.contains(wm_core::ClientFlags::FULLSCREEN);
@@ -246,6 +242,7 @@ fn build_snapshot(
             // Hyprland's own "unknown" — a number invented to fill the
             // gap would let a script signal the wrong process.
             pid: wm.backend().window_pid(client.window).and_then(|pid| i32::try_from(pid).ok()).unwrap_or(0),
+            floating: !wm.is_layout_managed(id),
             xwayland: wm.backend().windows.get(&client.window)
                 .is_some_and(|record| matches!(record.surface, ManagedSurface::X11(_))),
             fullscreen: client.flags.contains(wm_core::ClientFlags::FULLSCREEN),
@@ -269,6 +266,7 @@ fn build_snapshot(
                 .unwrap_or(0);
             Workspace {
                 index,
+                layout: wm.workspace_layout(index).compatible_name().into(),
                 monitor: monitors.iter().find(|monitor| monitor.id == monitor_id)
                     .map(|monitor| monitor.name.clone()).unwrap_or_default(),
                 monitor_id,
@@ -541,6 +539,12 @@ pub(crate) fn apply(comp: &mut Compositor, action: Action) -> bool {
                 (None, _, _) => false,
             }
         }
+        Action::ToggleMaximize => {
+            if let Some(id) = wm.focused_client() {
+                wm.toggle_maximize(id, wm_core::MaximizeDirections::FULL);
+            }
+            true
+        }
         Action::Fullscreen(which) => match wm.focused_client() {
             Some(client) => {
                 match which {
@@ -553,13 +557,21 @@ pub(crate) fn apply(comp: &mut Compositor, action: Action) -> bool {
             None => false,
         },
         Action::CycleFocus { forward } => wm.focus_adjacent_client(forward),
-        Action::FocusDirection(direction) => wm.focus_direction(match direction {
-            chonk_hyprland_ipc::dispatch::Direction::Left => wm_core::FocusDirection::Left,
-            chonk_hyprland_ipc::dispatch::Direction::Right => wm_core::FocusDirection::Right,
-            chonk_hyprland_ipc::dispatch::Direction::Up => wm_core::FocusDirection::Up,
-            chonk_hyprland_ipc::dispatch::Direction::Down => wm_core::FocusDirection::Down,
-        }),
-        Action::MoveWindow { window, x, y, relative } => match client_of(wm, window) {
+        Action::FocusDirection(direction) => {
+            wm.focus_direction(match direction {
+                chonk_hyprland_ipc::dispatch::Direction::Left => wm_core::FocusDirection::Left,
+                chonk_hyprland_ipc::dispatch::Direction::Right => wm_core::FocusDirection::Right,
+                chonk_hyprland_ipc::dispatch::Direction::Up => wm_core::FocusDirection::Up,
+                chonk_hyprland_ipc::dispatch::Direction::Down => wm_core::FocusDirection::Down,
+            });
+            true
+        }
+        Action::MoveWindow {
+            window,
+            x,
+            y,
+            relative,
+        } => match client_of(wm, window) {
             Some(id) => {
                 let Some(client) = wm.client(id) else { return false };
                 let mut geometry = client.geometry;
@@ -592,10 +604,52 @@ pub(crate) fn apply(comp: &mut Compositor, action: Action) -> bool {
             None => false,
         },
         Action::SetTag { window, tag, present } => client_of(wm, window).is_some_and(|id| wm.set_client_tag(id, &tag, present)),
-        Action::ConfirmFloating(window) => client_of(wm, window).is_some(),
-        Action::SetMonitorScale { output, scale_120 } => comp.set_output_scale(&output, scale_120 as f64 / 120.0),
-        Action::SetDpms { output, powered } => crate::output_power::set_from_ipc(comp, output.as_deref(), powered),
-        Action::SwitchKeyboardLayout { device, target } => switch_keyboard_layout(comp, &device, target),
+        Action::SetFloating { window, floating } => {
+            if let Some(id) = client_of(wm, window) {
+                if let Some(value) = floating {
+                    wm.set_floating(id, value);
+                } else {
+                    wm.toggle_floating(id);
+                }
+                true
+            } else {
+                false
+            }
+        }
+        Action::SetWorkspaceLayout { workspace, mode } => {
+            if let Some(mode) = wm_core::LayoutMode::parse(&mode) {
+                wm.set_workspace_layout(workspace, mode);
+                true
+            } else {
+                false
+            }
+        }
+        Action::ToggleLayout => {
+            wm.toggle_workspace_layout();
+            true
+        }
+        Action::LayoutNoop => true,
+        Action::MoveDirection(direction) => {
+            let direction = match direction {
+                chonk_hyprland_ipc::dispatch::Direction::Left => wm_core::FocusDirection::Left,
+                chonk_hyprland_ipc::dispatch::Direction::Right => wm_core::FocusDirection::Right,
+                chonk_hyprland_ipc::dispatch::Direction::Up => wm_core::FocusDirection::Up,
+                chonk_hyprland_ipc::dispatch::Direction::Down => wm_core::FocusDirection::Down,
+            };
+            if let Some(id) = wm.focused_client() {
+                wm.move_layout_window(id, direction);
+            }
+            true
+        }
+        Action::SetMonitorScale { output, scale_120 } => {
+            comp.set_output_scale(&output, scale_120 as f64 / 120.0)
+        }
+        Action::SetDpms { output, powered } => {
+            crate::output_power::set_from_ipc(comp, output.as_deref(), powered)
+        }
+        Action::SwitchKeyboardLayout { device, target } => {
+            switch_keyboard_layout(comp, &device, target)
+        }
         Action::SetCursorHidden(hidden) => {
             let owner = hidden.then(|| {
                 comp.seat

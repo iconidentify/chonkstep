@@ -3457,6 +3457,7 @@ dependencies = [
  "chonk-build-info",
  "chonk-hyprland-ipc",
  "chonk-shell",
+ "chonk-test-support",
  "chonk-xsettings",
  "cosmic-text",
  "libc",

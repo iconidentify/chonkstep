@@ -584,7 +584,7 @@ fn reclaim_leaked_grab(state: &mut Compositor, seat: &Seat<Compositor>) {
     }
     tracing::debug!(buttons_held, "reclaiming a pointer grab its drag outlived");
     backend.end_pointer_grab();
-    backend.queue(WmEvent::DragEnded);
+    backend.queue(WmEvent::DragCancelled);
 }
 
 /// Applies a pointer-grab transition the ledger recorded, in the one
@@ -1270,6 +1270,7 @@ fn on_keyboard_key<I: InputBackend>(state: &mut Compositor, event: I::KeyboardKe
     let seat = state.seat.clone();
     let shortcuts_inhibited = seat.keyboard_shortcuts_inhibited();
     let modal_owns_keyboard = keyboard::modal_owns_keyboard(state);
+    let dragging = state.wm.interactive_drag_active();
     keyboard.input::<(), _>(state, keycode, key_state, serial, time, |data, mods, handle| {
         // Level-0 (unshifted) keysym, exactly like `wm-x11`'s
         // `keysym_for_keycode` taking the keycode's first sym: a combo
@@ -1359,7 +1360,10 @@ fn on_keyboard_key<I: InputBackend>(state: &mut Compositor, event: I::KeyboardKe
                 {
                     return FilterResult::Forward;
                 }
-                if modal_owns_keyboard || backend.grabbed_combos.contains(&combo) {
+                if modal_owns_keyboard
+                    || (dragging && combo.keysym == 0xff1b)
+                    || backend.grabbed_combos.contains(&combo)
+                {
                     if !backend.release_combos.contains(&combo) {
                         backend.queue(WmEvent::KeyPress(combo));
                     }
@@ -2812,6 +2816,14 @@ fn hit_at(backend: &WaylandBackend, at: Point, position: LogicalPoint<f64, Logic
 
     // Frame band.
     for entry in backend.stacking.iter().rev() {
+        let window = match entry {
+            StackEntry::Window(id) => Some(*id),
+            StackEntry::Frame(id) => backend.frames.get(id).map(|f| f.window),
+        };
+        if window.is_some_and(|id| !backend.layout_scene.allows_pointer(id, at)) {
+            continue;
+        }
+
         // A managed window with no frame is in this band at its own
         // depth (see `StackEntry::Window`). Everything the frame arm
         // below does applies to it but the chrome: popups first, then

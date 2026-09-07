@@ -163,11 +163,9 @@ Three kinds of Omarchy binding get three different answers:
    command, declared in `[commands]` by the preset. `super+space` opens
    Omarchy's menu because it runs Omarchy's `omarchy-menu` — not an
    imitation of it.
-3. **Everything else stays unbound, and says why.** A tiling desktop's
-   vocabulary is full of verbs with no meaning on a stacking desk, and
-   an approximation is worse than a dead key: a dead key is looked up in
-   five seconds, while `super+j` that does something *else* is a bug
-   report.
+3. **Workspace styles are native.** Super+T floats/rejoins a window,
+   Super+L toggles Mosaic/Flow, and Super+Shift+L returns to Freeform.
+   Tree-only messages are quiet no-ops; grouping remains unsupported.
 
 ### Three chords we do differently
 
@@ -184,11 +182,11 @@ keys marked `locked = true` work over the lock screen, ramps marked
 ### When a mapped command is itself the limitation
 
 The keymap guarantees the chord reaches the command. Whether a
-Hyprland-specific operation has an honest floating-desktop equivalent is a
+Hyprland-specific operation has a native equivalent is a
 separate question, answered script by script in
 [omarchy-integration.md](omarchy-integration.md). Common window, capture,
-input, and night-light paths are supported; tiling-only operations are
-refused and logged.
+input, layout, and night-light paths are supported. Unsupported grouping
+operations are reported; inapplicable layout messages are quiet no-ops.
 
 ### On a real Omarchy machine, the table is read live
 
@@ -203,8 +201,8 @@ between "chonkstep knows what Omarchy's chords were in August" and
 "Omarchy's menu still configures your machine": rebind a key through
 their UI and the running session follows it within a second.
 
-On the machine this was developed on the live read produced **153
-bindings over 113 commands**, against the baked table's 131 over 77 —
+On the machine this was developed on the live read produced **161
+bindings over 113 commands**, against the baked table's 145 over 77 —
 the extra ones are mostly the preinstalled webapp and TUI chords, which
 a table of constants had to write off because Omarchy gates them on a
 file test that only a live read can make.
@@ -224,8 +222,8 @@ what the live read falls back to.
 
 Both tables live in the keybinding card, beside chonkstep's own:
 **[keybindings.md](keybindings.md), under "The Omarchy keymap"**
-— 131 bindings over 77 declared commands, then the 32 groups of Omarchy
-chords that are deliberately dead here and why. Both are transcribed
+— 145 bindings over 77 declared commands, then the 26 groups of Omarchy
+chords that remain unbound and why. Both are transcribed
 from `crates/wm-config/src/preset.rs`, which is the authoritative list;
 `crates/wm-config/tests/preset_doc.rs` fails if the card and the table
 disagree.

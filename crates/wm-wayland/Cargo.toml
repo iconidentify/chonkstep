@@ -135,3 +135,6 @@ smithay = { version = "0.7.0", default-features = false, features = [
     "wayland_frontend",
     "xwayland",
 ] }
+
+[dev-dependencies]
+chonk-test-support = { path = "../chonk-test-support" }

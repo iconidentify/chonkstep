@@ -813,6 +813,12 @@ fn handle_command(line: &str, stream: &mut UnixStream, comp: &mut Compositor) {
                 logical_focus.map_or(0, |w| w.0), seat_focus.map_or(0, |w| w.0)));
             let (owner, (x, y), motion) = crate::input::gestures::inspect(comp);
             reply.push_str(&format!("swipe-stream owner={owner} x={x} y={y} axis={:?}\n", motion.map(|m| m.axis)));
+            let spatial = comp.wm.layout_statistics();
+            reply.push_str(&format!("spatial mode={} moving={} calculations={} calculation_us={} managed={} changes={} setups={} setup_us={} configures={} builds={} build_us={} culled={}\n",
+                comp.wm.workspace_layout(comp.wm.current_workspace()).name(), backend.layout_scene.animating(), spatial.calculations,
+                spatial.calculation_us, comp.wm.layout_order(comp.wm.current_workspace()).iter().filter(|&&id| comp.wm.is_layout_managed(id)).count(), spatial.geometry_changes,
+                backend.layout_scene.setups, backend.layout_scene.setup_ns / 1000, backend.layout_scene.configures,
+                backend.layout_scene.builds.get(), backend.layout_scene.build_ns.get() / 1000, backend.layout_scene.culled.get()));
             reply.push_str(&format!("scale {}\n", comp.ui_scale));
             reply.push_str(&format!("workspaces current={} count={}\n",
                 comp.wm.current_workspace(), comp.wm.workspace_count()));

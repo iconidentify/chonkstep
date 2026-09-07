@@ -43,6 +43,24 @@ Window-targeted actions (`close`, `toggle-maximize`, `toggle-shade`,
 `miniaturize`, `toggle-fullscreen`, `window-menu`) act on the focused
 window and do nothing when no window is focused.
 
+ChonkStep has three workspace styles. **Freeform** lets you place windows
+yourself. **Mosaic** keeps windows visible. **Flow** extends them sideways.
+**Super+L** enters Mosaic, then toggles Mosaic/Flow. **Super+Shift+L** returns
+to Freeform, with your original positions intact. **Super+T** floats a window
+and returns it to its remembered place on the next press.
+
+In the native keymap, **Super+Ctrl+arrows** focuses spatially and
+**Super+Shift+arrows** moves a managed window. **Super+minus/equal** adjusts
+width; add Shift to adjust height in Mosaic. Flow's up/down actions are quiet.
+The Omarchy keymap keeps **Super+arrows** for focus. Drag a managed titlebar onto
+another window to reorder; the outline shows the destination. Drag a resize
+edge to adjust a shared Mosaic boundary or a Flow width. Escape cancels a drag.
+Shading floats a managed window; rejoining unshades it. Maximize and fullscreen
+are temporary presentations, and minimizing keeps the window's remembered place.
+At an output edge, a move carries the managed window onto the neighboring
+output. Freeform’s floating toggle is a quiet no-op. Workspace style and
+organization are saved with Living Desktop.
+
 See [Capture](capture.md) for saving, clipboard, selection and recording.
 The Omarchy keymap uses **Super+Ctrl+Shift+3/4/5** instead, because
 Super+Shift+digits already carries windows to desktops there. Its unmodified
@@ -90,7 +108,7 @@ time. Bind them like anything else:
 keymap = "omarchy"        # ...or desktop = "omarchy", which defaults it
 ```
 
-131 bindings, including four native capture shortcuts, derived from Omarchy's
+145 bindings, including four native capture shortcuts, derived from Omarchy's
 own configuration on the machine —
 `$OMARCHY_PATH/default/hypr/bindings/*.lua` — rather than from memory of
 Hyprland, with the `o.bind` helpers expanded the way `helpers.lua`
@@ -112,7 +130,7 @@ guarantees; whether that Omarchy command does anything under a
 compositor that is not Hyprland is
 [omarchy-integration.md](omarchy-integration.md)'s subject — it is the
 honest inventory, script by script, and a few of the commands below
-are intentional floating-desktop refusals. The integration guide records
+are intentional compatibility limits. The integration guide records
 those boundaries; night light, capture layers, and the common window
 helpers are supported directly.
 
@@ -132,6 +150,20 @@ helpers are supported directly.
 | `super+w`                | `close`                                | --                                                                                                                  |
 | `super+f`                | `toggle-fullscreen`                    | --                                                                                                                  |
 | `super+alt+f`            | `toggle-maximize`                      | --                                                                                                                  |
+| `super+j` | `layout-noop` | -- |
+| `super+p` | `layout-noop` | -- |
+| `super+ctrl+f` | `toggle-maximize` | -- |
+| `super+equal` | `grow-width` | -- |
+| `super+minus` | `shrink-width` | -- |
+| `super+shift+equal` | `grow-height` | -- |
+| `super+shift+minus` | `shrink-height` | -- |
+| `super+t` | `toggle-floating` | -- |
+| `super+l` | `toggle-layout` | -- |
+| `super+shift+l` | `layout-freeform` | -- |
+| `super+shift+left` | `move-left` | -- |
+| `super+shift+right` | `move-right` | -- |
+| `super+shift+up` | `move-up` | -- |
+| `super+shift+down` | `move-down` | -- |
 | `super+left`             | `focus-left`                           | --                                                                                                                  |
 | `super+right`            | `focus-right`                          | --                                                                                                                  |
 | `super+up`               | `focus-up`                             | --                                                                                                                  |
@@ -252,28 +284,21 @@ helpers are supported directly.
 
 ### Deliberately unbound
 
-32 groups of Omarchy chord this keymap leaves dead, and why. Left dead
-rather than approximated: a dead key is looked up in five seconds,
-while a `super+j` that does something *else* is a bug report.
+26 groups of Omarchy chords remain unbound in the static preset. The table
+explains each limit; the live configuration reader supports additional chords.
 
 | Omarchy chord                                                                                      | What Omarchy does with it                                            | Why not here                                                |
 |----------------------------------------------------------------------------------------------------|----------------------------------------------------------------------|-------------------------------------------------------------|
 | `super+alt+return, super+ctrl+return, super+shift+{a,c,d,e,g,m,o,p,s,w,x,y,/}, +alt/ctrl variants` | Omarchy's preinstalled application, TUI and webapp chords            | Omarchy binds it conditionally; a table of constants cannot |
 | `super+c / super+v / super+x`                                                                      | universal copy / paste / cut, by synthesising Ctrl+C/V/X at the seat | chonkstep has no verb for it, and no command can stand in   |
-| `super+j`                                                                                          | toggle window split                                                  | tiling-only: no meaning on a stacking desk                  |
-| `super+p`                                                                                          | pseudo-tile the window                                               | tiling-only: no meaning on a stacking desk                  |
-| `super+t`                                                                                          | toggle floating / tiling                                             | tiling-only: no meaning on a stacking desk                  |
-| `super+ctrl+f`                                                                                     | tiled fullscreen                                                     | tiling-only: no meaning on a stacking desk                  |
-| `super+o`                                                                                          | pop the window out, floating and pinned                              | tiling-only: no meaning on a stacking desk                  |
+| `super+o` | pop the window out, floating and pinned | requires window groups or a feature ChonkStep does not provide |
 | `super+home / super+alt+home`                                                                      | restore / save window width                                          | commands Hyprland, which is not running                     |
-| `super+l`                                                                                          | cycle the workspace layout                                           | commands Hyprland, which is not running                     |
-| `super+g / super+alt+g`                                                                            | toggle grouping / move out of group                                  | tiling-only: no meaning on a stacking desk                  |
-| `super+alt+left/right/up/down`                                                                     | move the window into the group in that direction                     | tiling-only: no meaning on a stacking desk                  |
-| `super+alt+tab / super+alt+shift+tab`                                                              | next / previous window in the group                                  | tiling-only: no meaning on a stacking desk                  |
-| `super+ctrl+left / super+ctrl+right`                                                               | move the grouped-window focus                                        | tiling-only: no meaning on a stacking desk                  |
-| `super+alt+1..5`                                                                                   | focus the nth window of the group                                    | tiling-only: no meaning on a stacking desk                  |
-| `super+shift+left/right/up/down`                                                                   | swap the window with its neighbour                                   | tiling-only: no meaning on a stacking desk                  |
-| `super+minus / super+equal, +shift/alt/ctrl variants`                                              | grow and shrink the window by 25 / 100 / 300 px                      | tiling-only: no meaning on a stacking desk                  |
+| `super+g / super+alt+g` | toggle grouping / move out of group | requires window groups or a feature ChonkStep does not provide |
+| `super+alt+left/right/up/down` | move the window into the group in that direction | requires window groups or a feature ChonkStep does not provide |
+| `super+alt+tab / super+alt+shift+tab` | next / previous window in the group | requires window groups or a feature ChonkStep does not provide |
+| `super+ctrl+left / super+ctrl+right` | move the grouped-window focus | requires window groups or a feature ChonkStep does not provide |
+| `super+alt+1..5` | focus the nth window of the group | requires window groups or a feature ChonkStep does not provide |
+| `super+alt/ctrl+minus/equal` | large resize increments | chonkstep has no verb for it, and no command can stand in |
 | `super+s`                                                                                          | toggle the scratchpad workspace                                      | chonkstep has no verb for it, and no command can stand in   |
 | `super+ctrl+tab`                                                                                   | the workspace before this one                                        | chonkstep has no verb for it, and no command can stand in   |
 | `super+shift+alt+left/right/up/down`                                                               | move the workspace to the monitor in that direction                  | chonkstep has no verb for it, and no command can stand in   |

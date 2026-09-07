@@ -326,8 +326,10 @@ fn direct_session_owns_graphical_targets_and_publishes_only_curated_environment(
 
     let started = poll_until(Duration::from_secs(10), "the direct session to publish its X display", || {
         let text = std::fs::read_to_string(&calls).ok()?;
-        text.lines()
-            .any(|line| line.starts_with("dbus ") && line.contains("DISPLAY=:7"))
+        // Environment publication precedes starting the targets. Wait for
+        // both observable effects before inspecting the complete startup.
+        (text.lines().any(|line| line.starts_with("dbus ") && line.contains("DISPLAY=:7"))
+            && text.contains("--user start graphical-session.target xdg-desktop-autostart.target"))
             .then_some(text)
     })
     .expect("the activation environment must gain DISPLAY once XWayland is ready");

@@ -485,11 +485,18 @@ pub fn apply(config: &mut crate::Config, reading: Option<&Reading>) {
             "hyprland-config: no bindings came out of the read; keeping the built-in keymap"
         );
     } else {
-        let captures: Vec<_> = config.keybindings.iter()
-            .filter(|(key, action)| matches!(action, Action::Capture(_))
-                && !reading.explicit_keys.contains(key)
-                && !reading.keybindings.iter().any(|(other, _)| other == key))
-            .cloned().collect();
+        let captures: Vec<_> = config
+            .keybindings
+            .iter()
+            .filter(|(key, action)| {
+                matches!(
+                    action,
+                    Action::Capture(_) | Action::Layout(wm_core::LayoutMode::Freeform)
+                ) && !reading.explicit_keys.contains(key)
+                    && !reading.keybindings.iter().any(|(other, _)| other == key)
+            })
+            .cloned()
+            .collect();
         config.keybindings = reading.keybindings.clone();
         config.keybindings.extend(captures);
     }
