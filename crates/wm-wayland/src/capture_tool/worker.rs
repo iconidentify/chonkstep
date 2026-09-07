@@ -721,12 +721,18 @@ fn record(output: &str, geometry: &str, filter: &str) -> Result<Recording, Strin
     let (partial, destination, file) = paths(true, "mp4")?;
     drop(file);
     let log = partial.with_extension("log");
-    let stderr = OpenOptions::new()
+    let stderr = match OpenOptions::new()
         .write(true)
         .create_new(true)
         .mode(0o600)
         .open(&log)
-        .map_err(|e| e.to_string())?;
+    {
+        Ok(file) => file,
+        Err(error) => {
+            let _ = std::fs::remove_file(&partial);
+            return Err(format!("Could not create recording log: {error}"));
+        }
+    };
     // Software H.264 is intentional: no VAAPI/NVIDIA assumption on Apple
     // Silicon / Asahi. Pad odd selections instead of dropping their last row.
     // calloop uses signalfd, so children inherit blocked INT/TERM/HUP. GNU env
@@ -785,7 +791,11 @@ fn finish(mut active: Recording, background: &mut Background, review: bool) {
     if !wait_child(&mut active.child, Duration::from_secs(8)) {
         background.notify(
             "Recording needs recovery",
-            &active.partial.display().to_string(),
+            &format!(
+                "{}\nDetails: {}",
+                active.partial.display(),
+                active.log.display()
+            ),
         );
         return;
     }
@@ -796,17 +806,25 @@ fn finish(mut active: Recording, background: &mut Background, review: bool) {
         .mode(0o600)
         .open(&temporary)
         .is_ok();
+    // Keep muxer diagnostics with encoder diagnostics. A missing ffmpeg is
+    // only one failure mode; disk errors and invalid media need their actual
+    // explanation, not a misleading instruction to reinstall the encoder.
     let converted = reserved
-        && Command::new("ffmpeg")
-            .args(["-nostdin", "-v", "error", "-y", "-i"])
-            .arg(&active.partial)
-            .args(["-c", "copy", "-movflags", "+faststart"])
-            .arg(&temporary)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .is_ok_and(|mut child| wait_child(&mut child, Duration::from_secs(30)));
+        && OpenOptions::new()
+            .append(true)
+            .open(&active.log)
+            .is_ok_and(|log| {
+                Command::new("ffmpeg")
+                    .args(["-nostdin", "-v", "error", "-y", "-i"])
+                    .arg(&active.partial)
+                    .args(["-c", "copy", "-movflags", "+faststart"])
+                    .arg(&temporary)
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::null())
+                    .stderr(log)
+                    .spawn()
+                    .is_ok_and(|mut child| wait_child(&mut child, Duration::from_secs(30)))
+            });
     if converted && std::fs::hard_link(&temporary, &active.destination).is_ok() {
         let _ = std::fs::remove_file(&temporary);
         let _ = std::fs::remove_file(&active.partial);
@@ -822,8 +840,9 @@ fn finish(mut active: Recording, background: &mut Background, review: bool) {
         background.notify(
             "Recording preserved as MKV",
             &format!(
-                "{}\nInstall ffmpeg for MP4 export.",
-                active.partial.display()
+                "MP4 export failed. Video: {}\nDetails: {}",
+                active.partial.display(),
+                active.log.display()
             ),
         );
     }

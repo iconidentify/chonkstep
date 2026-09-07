@@ -39,7 +39,7 @@
 # those frames into `file:line`.
 options=(strip debug)
 pkgname=chonkstep
-pkgver=0.4.0
+pkgver=0.4.1
 pkgrel=1
 pkgdesc="A traditional floating compositor for Omarchy, compatible with Hyprland workflows"
 arch=('x86_64' 'aarch64')
@@ -105,12 +105,13 @@ build() {
   export RUSTUP_TOOLCHAIN=stable
   export CARGO_TARGET_DIR=target
   # A tag archive has no `.git`. The release workflow passes its exact
-  # `git describe` through makepkg; a normal AUR build falls back to the
+  # version and immutable commit ID through makepkg, so tagging does not
+  # change a package already built on main. A normal AUR build falls back to the
   # tag this recipe downloads. Direct non-git Cargo builds have their
   # own explicit `+unknown-source` fallback in chonk-build-info.
   export CHONKSTEP_GIT_DESCRIBE="${CHONKSTEP_GIT_DESCRIBE:-v$pkgver}"
   # --frozen: build exactly the dependency tree the repository ships.
-  cargo build --release --frozen --workspace
+  bash scripts/build-release.sh --frozen
 }
 
 check() {

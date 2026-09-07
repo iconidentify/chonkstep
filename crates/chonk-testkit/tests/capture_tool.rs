@@ -99,6 +99,108 @@ fn boot(name: &str, scale: f32) -> Session {
     session
 }
 
+fn window_click_workflow(scale: f32, name: &str) {
+    let mut session = boot(name, scale);
+    let exports = session.dir.join("exports");
+    let probe = profile_binary("chonk-input-probe").unwrap();
+    session.launch(probe.to_str().unwrap(), &["1"]).unwrap();
+    let window = session.wait_for_window("input-probe").unwrap();
+    let at = ((window.x + 50) as f64, (window.y + 60) as f64);
+    session.door().click(at.0, at.1).unwrap();
+    let releases = session
+        .client_log("chonk-input-probe")
+        .matches(" release ")
+        .count();
+    shortcut(&mut session, 5);
+    let world = session.world().unwrap();
+    let width = (720.0 * scale).min(world.output_w as f32 - 16.0);
+    let left = (world.output_w as f32 - width) / 2.0;
+    let top = world.output_h as f32 - 110.0 * scale;
+    // Use the actual Window button, then drag out of its padding: that is
+    // navigation, never an implicit capture on the release over the desktop.
+    session
+        .door()
+        .click(
+            (left + width * 2.5 / 7.0) as f64,
+            (top + 23.0 * scale) as f64,
+        )
+        .unwrap();
+    session
+        .door()
+        .drag_to(
+            ((left + width / 2.0) as f64, (top + 3.0 * scale) as f64),
+            at,
+        )
+        .unwrap();
+    session.door().button("left", false).unwrap();
+    session.door().barrier().unwrap();
+    assert!(files(&exports, "png").is_empty());
+    let camera = diagnostic(&mut session, "camera-cursor");
+    session
+        .door()
+        .motion(at.0 + 60.0 * scale as f64, at.1)
+        .unwrap();
+    let elsewhere = diagnostic(&mut session, "camera-moved");
+    let radius = (18.0 * scale) as u32;
+    let x = at.0 as u32;
+    let y = at.1 as u32;
+    let changed = (x - radius..x + radius)
+        .flat_map(|px| (y - radius..y + radius).map(move |py| (px, py)))
+        .filter(|&(px, py)| camera.pixel(px, py) != elsewhere.pixel(px, py))
+        .count();
+    assert!(
+        changed > (70.0 * scale * scale) as usize,
+        "camera glyph is visible at {scale}x"
+    );
+    // The camera body extends well beyond the old 21-pixel crosshair.
+    let edge_x = (at.0 + 12.0 * scale as f64) as u32;
+    assert_ne!(camera.pixel(edge_x, y), elsewhere.pixel(edge_x, y));
+    session.door().click(at.0, at.1).unwrap();
+    let path = saved(&exports, 1, "png");
+    let image = Screenshot::load(&path).unwrap();
+    let frame = world.frame_of(window.id).unwrap();
+    assert_eq!((image.width, image.height), (frame.w, frame.h));
+    reviews_opened(&session, &[("xdg-open", &path)]);
+    assert_eq!(
+        session
+            .client_log("chonk-input-probe")
+            .matches(" release ")
+            .count(),
+        releases,
+        "the capture click must not reach the target app"
+    );
+    session.door().tap_key(30).unwrap();
+    poll_until(
+        Duration::from_secs(5),
+        "window click releases input grab",
+        || {
+            session
+                .client_log("chonk-input-probe")
+                .contains("keyboard key 30 down")
+                .then_some(())
+        },
+    )
+    .unwrap();
+}
+
+#[test]
+#[ignore = "needs nested Wayland"]
+fn toolbar_window_click_1x() {
+    window_click_workflow(1.0, "capture-window-click-1x");
+}
+
+#[test]
+#[ignore = "needs nested Wayland"]
+fn toolbar_window_click_fractional() {
+    window_click_workflow(1.5, "capture-window-click-15x");
+}
+
+#[test]
+#[ignore = "needs nested Wayland"]
+fn toolbar_window_click_2x() {
+    window_click_workflow(2.0, "capture-window-click-2x");
+}
+
 fn reviews_opened(session: &Session, expected: &[(&str, &Path)]) {
     let mut bytes = Vec::new();
     for (program, path) in expected {
@@ -512,6 +614,136 @@ fn recording_odd_area_is_playable_and_controls_are_excluded() {
     }
     shortcut(&mut session, 4);
     session.door().tap_key(1).unwrap(); // Tool can be reopened after finalization.
+}
+
+#[test]
+#[ignore = "needs nested Wayland, wf-recorder and ffmpeg"]
+fn recording_screen_and_area_preserve_changing_content() {
+    let mut session = boot("capture-motion", 1.0);
+    session.launch("foot", &[
+        "--title=capture-animation", "--override=locked-title=yes", "bash", "-c",
+        "while true; do printf '\\033[48;2;240;20;20m\\033[2J'; sleep 0.4; printf '\\033[48;2;20;20;240m\\033[2J'; sleep 0.4; done",
+    ]).unwrap();
+    let window = session.wait_for_window("capture-animation").unwrap();
+    let x = window.x + 50;
+    let y = window.y + 60;
+    let exports = session.dir.join("exports");
+    for (index, mode) in [5, 6].into_iter().enumerate() {
+        shortcut(&mut session, 5);
+        session.door().tap_key(mode).unwrap(); // record screen / area
+        if mode == 6 {
+            session
+                .door()
+                .drag_to((x as f64, y as f64), ((x + 301) as f64, (y + 201) as f64))
+                .unwrap();
+            session.door().button("left", false).unwrap();
+        }
+        session.door().tap_key(28).unwrap();
+        // The video needs multiple timed changes, not just a decodable first
+        // frame or moving pointer. The producer's background changes every 400ms.
+        std::thread::sleep(Duration::from_secs(3));
+        shortcut(&mut session, 5);
+        let path = saved(&exports, index + 1, "mp4");
+        let (sample_x, sample_y) = if mode == 6 {
+            (10, 10)
+        } else {
+            (x + 10, y + 10)
+        };
+        let decoded = Command::new("ffmpeg")
+            .args(["-nostdin", "-v", "error", "-xerror", "-i"])
+            .arg(&path)
+            .args([
+                "-vf",
+                &format!("crop=16:16:{sample_x}:{sample_y},scale=1:1"),
+                "-pix_fmt",
+                "rgb24",
+                "-f",
+                "rawvideo",
+                "-",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            decoded.status.success(),
+            "{}",
+            String::from_utf8_lossy(&decoded.stderr)
+        );
+        assert!(
+            decoded.stdout.len() > 20 * 3,
+            "recording has advancing frames"
+        );
+        let mut red = false;
+        let mut blue = false;
+        let mut transitions = 0;
+        let mut previous = None;
+        for rgb in decoded.stdout.as_chunks::<3>().0 {
+            let is_red = rgb[0] > 150 && rgb[2] < 100;
+            let is_blue = rgb[2] > 150 && rgb[0] < 100;
+            red |= is_red;
+            blue |= is_blue;
+            if is_red || is_blue {
+                if previous.is_some_and(|last| last != is_red) {
+                    transitions += 1;
+                }
+                previous = Some(is_red);
+            }
+        }
+        assert!(red && blue && transitions >= 3,
+            "recording mode {mode} contains actual scene updates: red={red}, blue={blue}, transitions={transitions}");
+    }
+}
+
+#[test]
+#[ignore = "needs nested Wayland and wf-recorder"]
+fn failed_mp4_export_preserves_video_and_muxer_diagnostics() {
+    let mut session = boot("capture-mux-failure", 1.0);
+    let ffmpeg = session.dir.join("config/chonkstep/fixture-bin/ffmpeg");
+    std::fs::write(
+        &ffmpeg,
+        "#!/bin/sh\necho 'fixture: MP4 write failed' >&2\nexit 7\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(ffmpeg, std::fs::Permissions::from_mode(0o700)).unwrap();
+    shortcut(&mut session, 5);
+    session.door().tap_key(6).unwrap();
+    session
+        .door()
+        .drag_to((30.0, 40.0), (231.0, 153.0))
+        .unwrap();
+    session.door().button("left", false).unwrap();
+    session.door().tap_key(28).unwrap();
+    std::thread::sleep(Duration::from_secs(2));
+    shortcut(&mut session, 5);
+    poll_until(Duration::from_secs(15), "MP4 failure is reported", || {
+        session.log().contains("MP4 export failed").then_some(())
+    })
+    .unwrap();
+    let exports = session.dir.join("exports");
+    assert!(files(&exports, "mp4").is_empty());
+    let paths: Vec<_> = std::fs::read_dir(exports)
+        .unwrap()
+        .flatten()
+        .map(|e| e.path())
+        .collect();
+    let video = paths
+        .iter()
+        .find(|p| p.extension().is_some_and(|e| e == "mkv"))
+        .unwrap();
+    let log = paths
+        .iter()
+        .find(|p| p.extension().is_some_and(|e| e == "log"))
+        .unwrap();
+    assert!(video.metadata().unwrap().len() > 1000);
+    assert!(std::fs::read_to_string(log)
+        .unwrap()
+        .contains("fixture: MP4 write failed"));
+    assert!(session.log().contains(&log.display().to_string()));
+    assert!(
+        !session.dir.join("capture-review.log").exists(),
+        "failed export does not launch Omacut"
+    );
+    shortcut(&mut session, 4);
+    session.door().tap_key(1).unwrap();
 }
 
 #[test]

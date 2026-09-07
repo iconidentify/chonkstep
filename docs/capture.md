@@ -40,6 +40,11 @@ area and window selection; click a highlighted window to capture it, including
 its Chonkstep titlebar, without overlapping applications. Escape or right-click
 cancels without saving or changing the clipboard.
 
+Window mode shows a camera cursor with its lens on the target. Clicking the
+highlighted window also captures directly when entered from the toolbar; there
+is no need to move back to Capture. Enter remains available. A drag from the
+toolbar onto a window does not capture it.
+
 The toolbar offers screen, window, area, record-screen and record-area modes.
 Keys 1–5 select the modes; Enter captures or starts recording. In toolbar area
 mode, releasing the pointer keeps the selection so it can be adjusted: drag

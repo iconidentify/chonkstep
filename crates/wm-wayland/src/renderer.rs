@@ -1561,7 +1561,7 @@ pub(crate) fn push_cursor_elements(
     if matches!(status, CursorImageStatus::Hidden) {
         return;
     }
-    if crate::capture_tool::crosshair(backend).is_some() { return; }
+    if crate::capture_tool::selection_cursor(backend).is_some() { return; }
     let subject = if capture_cursor {
         crate::input::PointerSubject::Desktop
     } else {

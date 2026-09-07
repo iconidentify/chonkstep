@@ -9,7 +9,21 @@ on:
   pull_request:
   workflow_call:
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
+  # Only merged commits pay for native packaging. PRs keep their existing
+  # checks; tagging a green main commit promotes these exact attested files.
+  package:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    uses: ./.github/workflows/package.yml
+    permissions:
+      contents: read
+      attestations: write
+      id-token: write
+
   dependency-audit:
     runs-on: ubuntu-latest
     permissions:
@@ -64,6 +78,10 @@ jobs:
             packaging/arch/PKGBUILD \
             packaging/arch/PKGBUILD-release \
             scripts/check.sh \
+            scripts/build-release.sh \
+            scripts/release-validation.sh \
+            scripts/release-metadata.sh \
+            scripts/verify-release-assets.sh \
             scripts/e2e.sh \
             scripts/install.sh \
             scripts/chonkstep-bugreport \
@@ -75,6 +93,10 @@ jobs:
             scripts/wayland-session.sh
           shellcheck \
             scripts/check.sh \
+            scripts/build-release.sh \
+            scripts/release-validation.sh \
+            scripts/release-metadata.sh \
+            scripts/verify-release-assets.sh \
             scripts/e2e.sh \
             scripts/chonkstep-bugreport \
             scripts/omarchy-install-desktop-chonkstep \
