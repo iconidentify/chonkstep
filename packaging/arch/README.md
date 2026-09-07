@@ -5,16 +5,22 @@
 package `chonkstep`.
 
 `.github/workflows/github-release.yml` is the account-independent preview
-distribution path. A `preview-v$pkgver` tag builds the same recipe natively on
-GitHub's x86-64 and ARM64 runners, verifies each package on its build
-architecture, creates `SHA256SUMS`, records GitHub provenance attestations, and
-attaches the two `.pkg.tar.zst` files to a prerelease. The AArch64 builder is
-bootstrapped from Arch Linux ARM repositories; it is not an Ubuntu-linked
-cross-build. A manual workflow dispatch performs both builds and attestations
-without creating a release, which is the pre-tag acceptance gate.
+release path. Main CI builds and tests the native x86-64 and ARM64 packages
+through `package.yml`, verifies each package on its build architecture, and
+records GitHub provenance attestations. A `preview-v$pkgver` tag reuses those
+exact artifacts from the successful main run for the same commit, creates
+`SHA256SUMS`, and publishes both packages and their matching debug packages.
+If main CI is still running, the release waits; unavailable artifacts require a
+fresh native build. Set the release version before merging so tagging can reuse
+the merged commit's packages.
+
+The AArch64 builder uses Arch Linux ARM repositories. A manual workflow dispatch
+exercises package assembly and provenance verification without publishing a
+release. See the [release pipeline](../../docs/engineering/2026-09-07-release-promotion.md)
+for validation freshness and artifact retention.
 
 Pushing a tag whose name matches the workspace version, for example
-`v0.4.0`, runs `.github/workflows/aur.yml`. The job copies the release
+`v0.4.1`, runs `.github/workflows/aur.yml`. The job copies the release
 recipe to `PKGBUILD`, replaces `SKIP` with the tag archive's real
 SHA-256 checksum, generates `.SRCINFO` with Arch's `makepkg`, and pushes
 both files to `ssh://aur@aur.archlinux.org/chonkstep.git`.

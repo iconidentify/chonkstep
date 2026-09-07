@@ -39,7 +39,7 @@
 # those frames into `file:line`.
 options=(strip debug)
 pkgname=chonkstep
-pkgver=0.4.0
+pkgver=0.4.1
 pkgrel=1
 pkgdesc="A traditional floating compositor for Omarchy, compatible with Hyprland workflows"
 arch=('x86_64' 'aarch64')

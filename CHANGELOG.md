@@ -5,6 +5,25 @@ crate and both session binaries carry the same number.
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-09-07
+
+- Window capture now finishes by clicking the highlighted window. A camera
+  cursor shows the capture hotspot, including at fractional display scales.
+  Dragging out of the toolbar cannot accidentally capture a window.
+- Screen and area recording normalize the output's advertised transform before
+  cropping, fixing upside-down video with wf-recorder 0.4.1 in nested sessions.
+  Changing-content regressions pass with wf-recorder 0.4.1 and 0.6.0.
+- Failed MP4 conversion retains the recoverable recording and encoder log, and
+  reports their paths for diagnosis.
+- Main CI builds both native release packages once. Releases reuse the verified
+  packages and debug symbols from the same commit, waiting for main CI if needed.
+  Release compilation selects only the five installed binaries, and superseded
+  PR checks are cancelled.
+
+The reported Omacut playback stall could not be reproduced in the available
+setup and remains unconfirmed. This release does not claim to resolve it.
+See the [0.4.1 release notes](docs/releases/0.4.1.md).
+
 ## [0.4.0] - 2026-09-07
 
 This alpha release adds native capture, finger-following gestures, reversible
