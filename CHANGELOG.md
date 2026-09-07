@@ -5,6 +5,12 @@ crate and both session binaries carry the same number.
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-09-07
+
+- Capture notifications show the saved screenshot or a thumbnail from the
+  recording, fixing the missing camera icon shown as a pink checkerboard.
+  Video preview failures fall back to a video icon without delaying capture.
+
 ## [0.4.1] - 2026-09-07
 
 - Window capture now finishes by clicking the highlighted window. A camera

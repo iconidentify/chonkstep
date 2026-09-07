@@ -3,6 +3,7 @@
 // no renderer, input callback or shell tick waits for these children.
 #![allow(clippy::disallowed_methods)]
 use std::collections::VecDeque;
+use std::ffi::OsStr;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::os::unix::fs::OpenOptionsExt;
@@ -71,10 +72,12 @@ struct Review {
 struct Background {
     reviews: Vec<Review>,
     notifications: Vec<(Child, Instant)>,
+    previews: Vec<RecordingPreview>,
 }
 
 const MAX_REVIEWS: usize = 16;
 const MAX_NOTIFICATIONS: usize = 8;
+const MAX_PREVIEWS: usize = 2;
 const MAX_CLIPBOARD_JOBS: usize = 2;
 const CLIPBOARD_PROBE: Duration = Duration::from_millis(100);
 
@@ -237,21 +240,122 @@ fn review_command(kind: ReviewKind, path: &Path) -> Result<Command, String> {
     Ok(command)
 }
 
+struct RecordingPreview {
+    child: Child,
+    video: PathBuf,
+    image: PathBuf,
+    deadline: Instant,
+}
+
+impl RecordingPreview {
+    fn start(video: &Path, directory: &Path) -> std::io::Result<Self> {
+        std::fs::create_dir_all(directory)?;
+        let mut name = video.file_name().unwrap_or_default().to_os_string();
+        name.push(".png");
+        let image = directory.join(name);
+        let output = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&image)?;
+        // Decode just the first frame, including recordings shorter than 0.1s.
+        // This child is polled alongside notifications: a slow decoder cannot
+        // delay another screenshot, recording, or review launch.
+        let child = Command::new("ffmpeg")
+            .args(["-nostdin", "-v", "error", "-threads", "1", "-i"])
+            .arg(video)
+            .args([
+                "-frames:v", "1", "-vf",
+                "scale=256:256:force_original_aspect_ratio=decrease",
+                "-filter_threads", "1", "-threads", "1",
+                "-f", "image2pipe", "-c:v", "png", "pipe:1",
+            ])
+            .stdin(Stdio::null())
+            .stdout(output)
+            .stderr(Stdio::null())
+            .spawn();
+        match child {
+            Ok(child) => Ok(Self {
+                child,
+                video: video.to_owned(),
+                image,
+                deadline: Instant::now() + Duration::from_secs(3),
+            }),
+            Err(error) => {
+                let _ = std::fs::remove_file(image);
+                Err(error)
+            }
+        }
+    }
+
+    /// None while pending; failed or timed-out previews use the media icon.
+    fn poll(&mut self, now: Instant) -> Option<bool> {
+        let ready = match self.child.try_wait() {
+            Ok(None) if now < self.deadline => return None,
+            Ok(Some(status)) => status.success()
+                && tiny_skia::Pixmap::load_png(&self.image).is_ok(),
+            _ => {
+                let _ = self.child.kill();
+                let _ = self.child.wait();
+                false
+            }
+        };
+        if !ready {
+            let _ = std::fs::remove_file(&self.image);
+        }
+        Some(ready)
+    }
+}
+
+fn preview_directory() -> Option<PathBuf> {
+    std::env::var_os("XDG_CACHE_HOME")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .or_else(|| {
+            std::env::var_os("HOME")
+                .map(|home| PathBuf::from(home).join(".cache"))
+                .filter(|path| path.is_absolute())
+        })
+        .map(|base| base.join("chonkstep/capture-previews"))
+}
+
+enum NotificationIcon<'a> {
+    Image(&'a Path),
+    Video,
+    Warning,
+}
+
+impl NotificationIcon<'_> {
+    fn argument(&self) -> (&'static str, &OsStr) {
+        match self {
+            Self::Image(path) => ("--icon", path.as_os_str()),
+            // Quickshell's icon provider can return its pink checkerboard as
+            // Image.Ready for missing themed names. Omarchy's glyph slot avoids
+            // that provider entirely; other notification servers ignore the
+            // hint and still show the result text.
+            Self::Video => ("--hint", OsStr::new("string:omarchy-glyph:\u{f03d}")),
+            Self::Warning => ("--hint", OsStr::new("string:omarchy-glyph:\u{f071}")),
+        }
+    }
+}
+
 impl Background {
     fn notify(&mut self, title: &str, message: &str) {
+        self.notify_with_icon(title, message, NotificationIcon::Warning);
+    }
+
+    fn notify_with_icon(&mut self, title: &str, message: &str, icon: NotificationIcon<'_>) {
         tracing::info!(title, message, "capture result");
         // A broken notification service must not stall capture or accumulate
         // unlimited helper processes. The log always retains the result.
         if self.notifications.len() >= MAX_NOTIFICATIONS {
             return;
         }
+        let (option, value) = icon.argument();
         if let Ok(child) = Command::new("notify-send")
-            .args([
-                "--app-name=Chonkstep Capture",
-                "--icon=camera-photo",
-                title,
-                message,
-            ])
+            .args(["--app-name=Chonkstep Capture", option])
+            .arg(value)
+            .args(["--", title, message])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -260,6 +364,22 @@ impl Background {
             self.notifications
                 .push((child, Instant::now() + Duration::from_secs(2)));
         }
+    }
+
+    fn recording_saved(&mut self, video: &Path) {
+        if self.previews.len() < MAX_PREVIEWS {
+            if let Some(preview) = preview_directory()
+                .and_then(|directory| RecordingPreview::start(video, &directory).ok())
+            {
+                self.previews.push(preview);
+                return;
+            }
+        }
+        self.notify_with_icon(
+            "Recording saved",
+            &video.display().to_string(),
+            NotificationIcon::Video,
+        );
     }
 
     fn review(&mut self, kind: ReviewKind, path: PathBuf) {
@@ -296,6 +416,21 @@ impl Background {
 
     fn poll(&mut self) {
         let now = Instant::now();
+        let mut finished = Vec::new();
+        self.previews.retain_mut(|preview| {
+            let Some(ready) = preview.poll(now) else { return true };
+            finished.push((preview.video.clone(), ready.then(|| preview.image.clone())));
+            false
+        });
+        for (video, image) in finished {
+            // Keep successful previews in the cache so notification history
+            // can reload them after the toast or notification helper exits.
+            self.notify_with_icon(
+                "Recording saved",
+                &video.display().to_string(),
+                image.as_deref().map_or(NotificationIcon::Video, NotificationIcon::Image),
+            );
+        }
         self.notifications
             .retain_mut(|(child, deadline)| match child.try_wait() {
                 Ok(Some(_)) => false,
@@ -334,6 +469,7 @@ impl Background {
 
     fn interval(&self, recording: bool, clipboard: bool) -> Option<Duration> {
         if recording
+            || !self.previews.is_empty()
             || !self.notifications.is_empty()
             || self
                 .reviews
@@ -349,6 +485,11 @@ impl Background {
     }
 
     fn stop_notifications(&mut self) {
+        for mut preview in self.previews.drain(..) {
+            let _ = preview.child.kill();
+            let _ = preview.child.wait();
+            let _ = std::fs::remove_file(preview.image);
+        }
         for (child, _) in &mut self.notifications {
             let _ = child.kill();
             let _ = child.wait();
@@ -374,13 +515,14 @@ pub(super) fn start() -> (
             background.poll();
             for result in clipboard.poll(Instant::now(), spawn_clipboard) {
                 let _ = updates.try_send(Update::ScreenshotDone);
-                background.notify(
+                background.notify_with_icon(
                     if result.copied {
                         "Screenshot saved and copied"
                     } else {
                         "Screenshot saved (clipboard unavailable)"
                     },
                     &result.path.display().to_string(),
+                    NotificationIcon::Image(&result.path),
                 );
             }
             let mut interval =
@@ -404,9 +546,10 @@ pub(super) fn start() -> (
                             background.review(ReviewKind::Screenshot, path.clone());
                             if let Err(path) = clipboard.enqueue(path) {
                                 let _ = updates.try_send(Update::ScreenshotDone);
-                                background.notify(
+                                background.notify_with_icon(
                                     "Screenshot saved (clipboard unavailable)",
                                     &path.display().to_string(),
+                                    NotificationIcon::Image(&path),
                                 );
                             }
                         }
@@ -829,7 +972,7 @@ fn finish(mut active: Recording, background: &mut Background, review: bool) {
         let _ = std::fs::remove_file(&temporary);
         let _ = std::fs::remove_file(&active.partial);
         let _ = std::fs::remove_file(&active.log);
-        background.notify("Recording saved", &active.destination.display().to_string());
+        background.recording_saved(&active.destination);
         if review {
             background.review(ReviewKind::Recording, active.destination);
         }
@@ -1103,5 +1246,62 @@ mod tests {
             .try_wait()
             .unwrap()
             .is_none());
+    }
+
+    #[test]
+    fn recording_preview_requires_successful_decode_and_keeps_valid_images_for_history() {
+        for (valid_png, exit_code) in [(true, 0), (false, 0), (true, 7)] {
+            let mut fixture = Fixture::new();
+            let image = fixture.directory.join("preview.png");
+            if valid_png {
+                tiny_skia::Pixmap::new(8, 4).unwrap().save_png(&image).unwrap();
+            } else {
+                std::fs::write(&image, b"incomplete PNG").unwrap();
+            }
+            let video = fixture.directory.join("saved.mp4");
+            std::fs::write(&video, b"saved video").unwrap();
+            let child = Command::new("/bin/sh")
+                .args(["-c", &format!("exit {exit_code}")])
+                .spawn().unwrap();
+            let mut preview = RecordingPreview {
+                child, video: video.clone(), image: image.clone(),
+                deadline: Instant::now() + Duration::from_secs(3),
+            };
+            let mut ready = None;
+            fixture.wait_until(|_| {
+                ready = preview.poll(Instant::now());
+                ready.is_some()
+            });
+            assert_eq!(ready, Some(valid_png && exit_code == 0));
+            assert_eq!(image.exists(), ready.unwrap());
+            assert_eq!(std::fs::read(video).unwrap(), b"saved video");
+        }
+    }
+
+    #[test]
+    fn recording_preview_timeout_and_shutdown_reap_decoder_and_remove_partial_image() {
+        for shutdown in [false, true] {
+            let mut fixture = Fixture::new();
+            let image = fixture.directory.join("partial.png");
+            std::fs::write(&image, b"incomplete PNG").unwrap();
+            let child = Command::new("/usr/bin/sleep").arg("30").spawn().unwrap();
+            let deadline = Instant::now() + Duration::from_secs(3);
+            let mut preview = RecordingPreview {
+                child, video: fixture.directory.join("saved.mp4"), image: image.clone(), deadline,
+            };
+            assert_eq!(preview.poll(deadline - Duration::from_secs(1)), None);
+            assert!(image.exists());
+            if shutdown {
+                fixture.background.previews.push(preview);
+                assert_eq!(fixture.background.interval(false, false), Some(Duration::from_millis(100)));
+                fixture.background.stop_notifications();
+                assert!(fixture.background.previews.is_empty());
+                assert_eq!(fixture.background.interval(false, false), None);
+            } else {
+                assert_eq!(preview.poll(deadline), Some(false));
+                assert!(preview.child.try_wait().unwrap().is_some());
+            }
+            assert!(!image.exists());
+        }
     }
 }
