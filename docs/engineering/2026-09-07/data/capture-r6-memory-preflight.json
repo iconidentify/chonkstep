@@ -1,0 +1,56 @@
+{
+  "utc": "2026-09-07T12:19:47.194448+00:00",
+  "authorized": true,
+  "status": "verified, ready to launch",
+  "checks": {
+    "baseline": {
+      "path": "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/baseline/memory-profile/chonkstep-wayland",
+      "sha256": "8d9fa6f23548136aa9b7a2c1f1d6b0b931eff5171db204cc89a8abc74774a070",
+      "version": "chonkstep-wayland 0.3.2\nsource: preview-v0.3.2-10-gc74772d-dirty\ndiagnostics: memory-profile (allocation counters enabled; not a timing baseline)\nbuild id: 1819cb2aecb147a3f9dc020b1cad82787a361e91",
+      "adjacent_files": [
+        "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/baseline/memory-profile/build.log",
+        "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/baseline/memory-profile/chonkstep-wayland",
+        "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/baseline/memory-profile/metadata.json",
+        "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/baseline/memory-profile/tracked.patch"
+      ]
+    },
+    "capture-r6": {
+      "path": "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/capture-r6/memory-profile/chonkstep-wayland",
+      "sha256": "dbbdd005ef5e592edc79357e59ea54512cb243bd06f0672e794e000851ccb7d3",
+      "version": "chonkstep-wayland 0.3.2\nsource: preview-v0.3.2-10-gc74772d-dirty\ndiagnostics: memory-profile (allocation counters enabled; not a timing baseline)\nbuild id: b3e9660ea8f7ebc0bdced6c2c4e14f1d6d8e93ef",
+      "adjacent_files": [
+        "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/capture-r6/memory-profile/build.log",
+        "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/capture-r6/memory-profile/chonkstep-wayland",
+        "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/capture-r6/memory-profile/metadata.json",
+        "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/capture-r6/memory-profile/tracked.patch"
+      ]
+    }
+  },
+  "harness": {
+    "harness/normal-v2/bench-capture.py": "46b86dafe02470c1ab9bfa740fc9f28722ec52d00b9d18f1372b938a348f9a22",
+    "harness/normal-v2/bench-compositor-c74772d.py": "7fd16421e6f24964354f68d6342c437d06410eaf21295a1d114829edab33f8e7"
+  },
+  "command": [
+    "python3",
+    "-B",
+    "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/harness/normal-v2/bench-capture.py",
+    "--memory",
+    "--binary",
+    "baseline-memory=/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/baseline/memory-profile/chonkstep-wayland",
+    "--binary",
+    "capture-r6-memory=/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/capture-r6/memory-profile/chonkstep-wayland",
+    "--output",
+    "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/comparison-capture-r6-memory-three",
+    "--runs",
+    "3",
+    "--warm-opens",
+    "10",
+    "--idle-seconds",
+    "10",
+    "--motion-seconds",
+    "5",
+    "--settle-seconds",
+    "2"
+  ],
+  "note": "Whole-process Rust allocation diagnostics only, no timing interpretation. Private no-stressor ordinary fixture uses no animation/input client; capture input injected through test door."
+}

@@ -31,7 +31,6 @@
 //! cannot change. Map, unmap, and layout edges damage through their own ledger
 //! verbs, so the gate applies only to steady-state pixel commits.
 
-#[cfg(test)]
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::time::{Duration, Instant};
@@ -82,6 +81,16 @@ use wm_theme_api::{
 use crate::state::{
     ClientState, Compositor, ManagedSurface, WaylandBackend, WindowRecord, WlFrameId, WlWindowId,
 };
+
+/// Reused by the two pacing services per dispatch. Only surfaces which have
+/// actually used FIFO or commit timing enter this scratch, and every resource
+/// handle is released before the allocation is returned to the compositor.
+#[derive(Default)]
+pub(crate) struct PacingScratch {
+    surfaces: Vec<WlSurface>,
+    clients: HashMap<smithay::reexports::wayland_server::backend::ClientId, Client>,
+}
+
 #[cfg(test)]
 use crate::state::{FrameRecord, StackEntry};
 
@@ -919,21 +928,35 @@ impl Compositor {
     pub(crate) fn service_surface_pacing(&mut self) {
         const FIFO_DEADLINE: Duration = Duration::from_secs(1);
 
+        let mut scratch = std::mem::take(&mut self.pacing_scratch);
+        scratch.surfaces.extend(self.pacing_surfaces.values().filter(|surface| {
+            with_states(surface, |states| {
+                states.cached_state.has::<smithay::wayland::fifo::FifoBarrierCachedState>()
+                    || states.data_map
+                        .get::<smithay::wayland::commit_timing::CommitTimerBarrierStateUserData>()
+                        .is_some()
+            })
+        }).cloned());
+        if scratch.surfaces.is_empty() {
+            self.pacing_scratch = scratch;
+            return;
+        }
         let now = Instant::now();
         let clock_now = smithay::utils::Clock::<smithay::utils::Monotonic>::new().now();
-        let surfaces: Vec<_> = self.pacing_surfaces.values().cloned().collect();
-        for surface in &surfaces {
-            let visible = self.surface_affects_scene(surface);
+        for surface in &scratch.surfaces {
             let object = surface.id();
+            // Checking absence must not construct a cache for the ordinary
+            // no-FIFO surface. Its root/popup visibility is irrelevant too.
+            let fifo = with_states(surface, |states| {
+                states.cached_state.has::<smithay::wayland::fifo::FifoBarrierCachedState>()
+                    .then(|| states.cached_state
+                        .get::<smithay::wayland::fifo::FifoBarrierCachedState>()
+                        .current().barrier.as_ref()
+                        .filter(|barrier| !barrier.is_signaled()).cloned())
+                    .flatten()
+            });
+            let visible = fifo.is_some() && self.surface_affects_scene(surface);
             with_states(surface, |states| {
-                let fifo = states
-                    .cached_state
-                    .get::<smithay::wayland::fifo::FifoBarrierCachedState>()
-                    .current()
-                    .barrier
-                    .as_ref()
-                    .filter(|barrier| !barrier.is_signaled())
-                    .cloned();
                 match fifo {
                     Some(barrier) if !visible => {
                         barrier.signal();
@@ -990,17 +1013,19 @@ impl Compositor {
         // Signalling a Smithay barrier changes its state but deliberately does
         // not poll the transaction queue. One no-op-safe call per client also
         // covers FIFO barriers taken by the renderer at presentation.
-        let mut clients = std::collections::HashMap::new();
-        for surface in surfaces {
+        for surface in &scratch.surfaces {
             if let Some(client) = surface.client() {
-                clients.entry(client.id()).or_insert(client);
+                scratch.clients.entry(client.id()).or_insert(client);
             }
         }
         let display = self.display_handle.clone();
-        for client in clients.into_values() {
+        for (_, client) in scratch.clients.drain() {
             self.client_compositor_state(&client)
                 .blocker_cleared(self, &display);
         }
+        scratch.surfaces.clear();
+        debug_assert!(scratch.clients.is_empty());
+        self.pacing_scratch = scratch;
     }
 
     /// Nearest wakeup required by a future commit timestamp or the bounded

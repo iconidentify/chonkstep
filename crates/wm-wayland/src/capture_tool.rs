@@ -2,6 +2,8 @@
 //! recorder I/O run on one bounded worker. The overlay is added only to scanout,
 //! never to the scenes exported through screencopy / image-copy-capture.
 
+mod chrome;
+pub(crate) mod dimming;
 mod worker;
 
 use std::collections::HashSet;
@@ -12,7 +14,7 @@ use smithay::backend::renderer::element::memory::{
     MemoryRenderBuffer, MemoryRenderBufferRenderElement,
 };
 use smithay::backend::renderer::element::solid::SolidColorRenderElement;
-use smithay::backend::renderer::element::{Id, Kind};
+use smithay::backend::renderer::element::{Element, Id, Kind};
 use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::backend::renderer::utils::CommitCounter;
 use smithay::backend::renderer::Color32F;
@@ -20,8 +22,8 @@ use smithay::input::pointer::CursorImageStatus;
 use smithay::utils::{Physical, Rectangle as SRect};
 use wm_config::CaptureMode;
 use wm_core::{Backend, KeyCombo, Modifiers};
-use wm_theme::model::{Color, FontSpec, FontStyle, FontWeight, TextAlign};
-use wm_theme_api::{DecorationBuffer, Point, Rect, Size};
+use wm_theme::FontState;
+use wm_theme_api::{Point, Rect, Size};
 
 use crate::renderer::SceneElement;
 use crate::state::{Compositor, StackEntry, WaylandBackend, WlWindowId};
@@ -57,15 +59,23 @@ pub(crate) struct Overlay {
     move_selection: bool,
     toolbar: Rect,
     label: Option<MemoryRenderBuffer>,
+    hint: Option<MemoryRenderBuffer>,
+    dimming: dimming::Dimming,
     ids: [Id; 16],
     armed: Option<usize>,
+    hovered: Option<usize>,
 }
 
-pub(crate) struct Service {
+struct Worker {
     jobs: SyncSender<Job>,
     updates: Receiver<Update>,
     worker: Option<std::thread::JoinHandle<()>>,
-    fonts: Option<(cosmic_text::FontSystem, cosmic_text::SwashCache)>,
+}
+
+pub(crate) struct Service {
+    worker: Option<Worker>,
+    fonts: FontState,
+    chrome: chrome::Cache,
     buttons: HashSet<u32>,
     recording: bool,
     finishing: bool,
@@ -77,13 +87,11 @@ pub(crate) struct Service {
 }
 
 impl Service {
-    pub fn new() -> Self {
-        let (jobs, updates, worker) = worker::start();
+    pub fn new(fonts: FontState) -> Self {
         Self {
-            jobs,
-            updates,
-            worker: Some(worker),
-            fonts: None,
+            worker: None,
+            fonts,
+            chrome: chrome::Cache::default(),
             buttons: HashSet::new(),
             recording: false,
             finishing: false,
@@ -95,8 +103,18 @@ impl Service {
         }
     }
 
-    fn submit(&self, job: Job) -> bool {
-        if let Err(error) = self.jobs.try_send(job) {
+    fn submit(&mut self, job: Job) -> bool {
+        // Selecting pixels needs no I/O thread. Start it only when a file,
+        // recording or notification is actually requested.
+        let worker = self.worker.get_or_insert_with(|| {
+            let (jobs, updates, worker) = worker::start();
+            Worker {
+                jobs,
+                updates,
+                worker: Some(worker),
+            }
+        });
+        if let Err(error) = worker.jobs.try_send(job) {
             tracing::warn!(%error, "capture worker busy; request not queued");
             return false;
         }
@@ -104,7 +122,7 @@ impl Service {
     }
 }
 
-impl Drop for Service {
+impl Drop for Worker {
     fn drop(&mut self) {
         // Only at orderly logout, never in the input/render loop. The worker
         // signals and reaps its own children, preserving unfinished recordings.
@@ -122,6 +140,14 @@ pub(crate) fn modal(backend: &WaylandBackend) -> bool {
 pub(crate) fn crosshair(backend: &WaylandBackend) -> Option<Point> {
     let ui = backend.capture_ui.as_ref().filter(|ui| !ui.badge)?;
     backend.pointer.filter(|p| !ui.toolbar.contains(*p))
+}
+
+pub(crate) fn owns_cursor(backend: &WaylandBackend, at: Point) -> bool {
+    !backend.locked
+        && backend
+            .capture_ui
+            .as_ref()
+            .is_some_and(|ui| !ui.badge || ui.toolbar.contains(at))
 }
 
 pub(crate) fn begin(comp: &mut Compositor, mode: CaptureMode) {
@@ -196,8 +222,11 @@ pub(crate) fn begin(comp: &mut Compositor, mode: CaptureMode) {
         move_selection: false,
         toolbar,
         label: None,
+        hint: None,
+        dimming: dimming::Dimming::default(),
         ids: std::array::from_fn(|_| Id::new()),
         armed: None,
+        hovered: None,
     });
     crate::input::release_pointer_constraint(comp);
     comp.wm.backend_mut().grab_keyboard();
@@ -319,9 +348,19 @@ fn commit(comp: &mut Compositor) {
                     Size::new(width, (42.0 * scale) as u32),
                 ),
                 label: None,
+                hint: None,
+                dimming: dimming::Dimming::default(),
                 ids: std::array::from_fn(|_| Id::new()),
                 armed: None,
+                hovered: None,
             });
+            // The badge may appear under a stationary pointer. Retire the
+            // previous client's cursor authority immediately, without waiting
+            // for the next physical pointer report.
+            crate::input::sync_pointer_focus(comp);
+            if owns_cursor(comp.wm.backend(), pointer(comp)) {
+                comp.cursor_status = CursorImageStatus::default_named();
+            }
             repaint(comp);
         }
     } else if photograph(comp, rect, window) {
@@ -402,6 +441,7 @@ pub(crate) fn key(comp: &mut Compositor, combo: &KeyCombo) -> bool {
                 };
                 ui.selection = ui.selection.map(|r| moved_rect(r, dx, dy, ui.monitor));
             }
+            comp.wm.backend_mut().mark_damaged();
             repaint(comp);
         }
         _ => {}
@@ -422,7 +462,7 @@ fn set_mode(comp: &mut Compositor, mode: Mode) {
 
 /// Returns true only when the capture UI owns this motion.
 pub(crate) fn motion(comp: &mut Compositor, at: Point) -> bool {
-    if !modal(comp.wm.backend()) {
+    if !owns_cursor(comp.wm.backend(), at) {
         return false;
     }
     if comp
@@ -430,11 +470,35 @@ pub(crate) fn motion(comp: &mut Compositor, at: Point) -> bool {
         .backend()
         .capture_ui
         .as_ref()
-        .is_some_and(|ui| ui.toolbar.contains(at) && ui.drag.is_none())
+        .is_some_and(|ui| ui.badge)
+        && (crate::input::capture_pointer_busy(&comp.seat)
+            || comp.wm.interactive_drag_active()
+            || comp.seat.get_pointer().is_some_and(|p| p.is_grabbed()))
+    {
+        return false;
+    }
+    comp.cursor_status = CursorImageStatus::default_named();
+    // The cursor is itself damage, including over a stationary toolbar.
+    // Chrome changes only when a different control is hovered.
+    let ui = comp.wm.backend_mut().capture_ui.as_mut().unwrap();
+    let hovered = toolbar_hit(ui, at);
+    if ui.hovered != hovered {
+        ui.hovered = hovered;
+        comp.capture_tool.label_dirty = true;
+    }
+    comp.wm.backend_mut().mark_damaged();
+    if comp
+        .wm
+        .backend()
+        .capture_ui
+        .as_ref()
+        .is_some_and(|ui| ui.badge || (ui.toolbar.contains(at) && ui.drag.is_none()))
     {
         return true;
     }
-    let window = hovered_window(comp.wm.backend(), at);
+    let window = (comp.wm.backend().capture_ui.as_ref().unwrap().mode == Mode::Window)
+        .then(|| hovered_window(comp.wm.backend(), at))
+        .flatten();
     let monitor = comp
         .wm
         .backend()
@@ -462,7 +526,7 @@ pub(crate) fn motion(comp: &mut Compositor, at: Point) -> bool {
             }
         }
     }
-    if previous != ui.selection {
+    if previous.map(|r| r.size) != ui.selection.map(|r| r.size) {
         comp.capture_tool.label_dirty = true;
     }
     comp.wm.backend_mut().mark_damaged();
@@ -479,6 +543,22 @@ pub(crate) fn button(comp: &mut Compositor, code: u32, pressed: bool) -> bool {
         .is_some_and(|ui| !ui.badge || ui.toolbar.contains(at));
     let held = comp.capture_tool.buttons.contains(&code);
     if !capture_hit && !held {
+        return false;
+    }
+    if comp
+        .wm
+        .backend()
+        .capture_ui
+        .as_ref()
+        .is_some_and(|ui| ui.badge)
+        && !held
+        && (!pressed
+            || crate::input::capture_pointer_busy(&comp.seat)
+            || comp.wm.interactive_drag_active()
+            || comp.seat.get_pointer().is_some_and(|p| p.is_grabbed()))
+    {
+        // A nonmodal badge never acquires the release of an application's
+        // earlier press, nor a new button in its active implicit grab.
         return false;
     }
     if pressed {
@@ -506,7 +586,7 @@ pub(crate) fn button(comp: &mut Compositor, code: u32, pressed: bool) -> bool {
     if pressed {
         let ui = comp.wm.backend_mut().capture_ui.as_mut().unwrap();
         ui.armed = hit;
-        if hit.is_none() && ui.mode.area() {
+        if hit.is_none() && ui.mode.area() && !ui.toolbar.contains(at) {
             let corner = ui
                 .selection
                 .and_then(|r| resize_anchor(r, at, (ui.toolbar.size.h / 10).max(6) as i32));
@@ -536,7 +616,7 @@ pub(crate) fn button(comp: &mut Compositor, code: u32, pressed: bool) -> bool {
                 ),
                 _ => commit(comp),
             }
-        } else if armed.is_none() && ui.quick {
+        } else if armed.is_none() && ui.quick && !ui.toolbar.contains(at) {
             commit(comp);
         }
     }
@@ -545,9 +625,19 @@ pub(crate) fn button(comp: &mut Compositor, code: u32, pressed: bool) -> bool {
 }
 
 fn toolbar_hit(ui: &Overlay, at: Point) -> Option<usize> {
-    ui.toolbar
-        .contains(at)
-        .then(|| (((at.x - ui.toolbar.pos.x) as u32 * 7 / ui.toolbar.size.w) as usize).min(6))
+    if !ui.toolbar.contains(at) {
+        return None;
+    }
+    if ui.badge {
+        return Some(0);
+    }
+    let y = (at.y - ui.toolbar.pos.y) as u32;
+    // The status line and the outer padding describe the action; only the
+    // visible controls activate it.
+    if y < ui.toolbar.size.h * 7 / 86 || y >= ui.toolbar.size.h * 57 / 86 {
+        return None;
+    }
+    Some((((at.x - ui.toolbar.pos.x) as u32 * 7 / ui.toolbar.size.w) as usize).min(6))
 }
 
 fn hovered_window(backend: &WaylandBackend, at: Point) -> Option<(WlWindowId, Rect)> {
@@ -677,12 +767,18 @@ pub(crate) fn tick(comp: &mut Compositor) {
         dismiss(comp);
     }
     if comp.wm.backend().locked {
+        comp.capture_tool.buttons.clear();
         if modal(comp.wm.backend()) {
             dismiss(comp);
         }
         stop(comp);
     }
-    while let Ok(update) = comp.capture_tool.updates.try_recv() {
+    while let Some(update) = comp
+        .capture_tool
+        .worker
+        .as_ref()
+        .and_then(|worker| worker.updates.try_recv().ok())
+    {
         match update {
             Update::ScreenshotDone => {
                 comp.capture_tool.screenshots = comp.capture_tool.screenshots.saturating_sub(1);
@@ -715,167 +811,46 @@ pub(crate) fn tick(comp: &mut Compositor) {
     }
 }
 
+/// Held capture input cannot survive losing the seat: releases may have gone
+/// to another session, so cancel the selection and retire its ownership.
+pub(crate) fn reset_input(comp: &mut Compositor) {
+    comp.capture_tool.buttons.clear();
+    if modal(comp.wm.backend()) {
+        dismiss(comp);
+    }
+}
+
 fn repaint(comp: &mut Compositor) {
     comp.capture_tool.label_dirty = false;
     comp.capture_tool.label_deadline = Instant::now() + std::time::Duration::from_millis(33);
     let Some(ui) = comp.wm.backend_mut().capture_ui.as_mut() else {
         return;
     };
-    let (fonts, cache) = comp.capture_tool.fonts.get_or_insert_with(|| {
-        (
-            cosmic_text::FontSystem::new(),
-            cosmic_text::SwashCache::new(),
-        )
-    });
-    let Some(mut pixmap) = tiny_skia::Pixmap::new(ui.toolbar.size.w, ui.toolbar.size.h) else {
-        return;
-    };
-    let scale = ui.toolbar.size.h as f32 / if ui.badge { 42.0 } else { 86.0 };
-    let font = FontSpec {
-        family: "sans-serif".into(),
-        size: 12.0 * scale,
-        weight: FontWeight::Normal,
-        style: FontStyle::Normal,
-    };
-    let mut paint = tiny_skia::Paint::default();
-    paint.set_color_rgba8(24, 27, 33, 246);
-    if let Some(path) = rounded_rect(
-        ui.toolbar.size.w as f32,
-        ui.toolbar.size.h as f32,
-        12.0 * scale,
+    let service = &mut comp.capture_tool;
+    if service.chrome.paint(
+        ui,
+        &service.fonts,
+        service.started.elapsed().as_secs(),
+        service.finishing,
     ) {
-        pixmap.fill_path(
-            &path,
-            &paint,
-            tiny_skia::FillRule::Winding,
-            tiny_skia::Transform::identity(),
-            None,
-        );
+        comp.wm.backend_mut().mark_damaged();
     }
-    if ui.badge {
-        let secs = comp.capture_tool.started.elapsed().as_secs();
-        let text = if comp.capture_tool.finishing {
-            "Finishing recording…".into()
-        } else {
-            format!("●  {:02}:{:02}     ■  Stop recording", secs / 60, secs % 60)
-        };
-        wm_theme::paint::draw_text(
-            &mut pixmap,
-            fonts,
-            cache,
-            &text,
-            &font,
-            Color::rgb(255, 170, 170),
-            4,
-            0,
-            ui.toolbar.size.w - 8,
-            ui.toolbar.size.h,
-            TextAlign::Center,
-        );
+}
+
+/// Only pending label work or a running recording contributes a deadline.
+/// A settled selector adds no periodic wakeups to the compositor.
+pub(crate) fn deadline(comp: &Compositor) -> Option<Instant> {
+    let service = &comp.capture_tool;
+    if service.label_dirty {
+        Some(service.label_deadline)
+    } else if service.recording && !service.finishing {
+        Some(service.started + std::time::Duration::from_secs(service.last_second + 1))
     } else {
-        let labels = [
-            "×  Close",
-            "1  Screen",
-            "2  Window",
-            "3  Area",
-            "4  Record",
-            "5  Rec area",
-            if ui.mode.recording() {
-                "Record"
-            } else {
-                "Capture"
-            },
-        ];
-        let selected = match ui.mode {
-            Mode::Screen => 1,
-            Mode::Window => 2,
-            Mode::Area => 3,
-            Mode::RecordScreen => 4,
-            Mode::RecordArea => 5,
-        };
-        let width = ui.toolbar.size.w / 7;
-        for (i, label) in labels.iter().enumerate() {
-            let x = i as i32 * width as i32;
-            if i == selected || i == 6 {
-                wm_theme::paint::fill_rect(
-                    &mut pixmap,
-                    x + 4,
-                    (10.0 * scale) as i32,
-                    width.saturating_sub(8),
-                    (34.0 * scale) as u32,
-                    if i == 6 && ui.selection.is_some_and(|r| r.size.w > 0 && r.size.h > 0) {
-                        Color::rgb(50, 107, 188)
-                    } else {
-                        Color::rgb(61, 66, 77)
-                    },
-                );
-            }
-            wm_theme::paint::draw_text(
-                &mut pixmap,
-                fonts,
-                cache,
-                label,
-                &font,
-                Color::rgb(246, 247, 249),
-                x,
-                (8.0 * scale) as i32,
-                width,
-                (38.0 * scale) as u32,
-                TextAlign::Center,
-            );
-        }
-        let dimensions = ui
-            .selection
-            .map(|r| format!("{} × {} px  ·  ", r.size.w, r.size.h))
-            .unwrap_or_default();
-        let hint = format!(
-            "{dimensions}Drag to select · Space: window / area · Enter: capture · Esc: cancel"
-        );
-        let font = FontSpec {
-            size: 11.0 * scale,
-            ..font
-        };
-        wm_theme::paint::draw_text(
-            &mut pixmap,
-            fonts,
-            cache,
-            &hint,
-            &font,
-            Color::rgb(176, 183, 196),
-            8,
-            (48.0 * scale) as i32,
-            ui.toolbar.size.w.saturating_sub(16),
-            (30.0 * scale) as u32,
-            TextAlign::Center,
-        );
+        None
     }
-    ui.label = crate::backend_impl::import_buffer(
-        &DecorationBuffer {
-            width: pixmap.width(),
-            height: pixmap.height(),
-            pixels: pixmap.take(),
-        },
-        false,
-    );
-    comp.wm.backend_mut().mark_damaged();
 }
 
-fn rounded_rect(w: f32, h: f32, r: f32) -> Option<tiny_skia::Path> {
-    let mut p = tiny_skia::PathBuilder::new();
-    p.move_to(r, 0.0);
-    p.line_to(w - r, 0.0);
-    p.quad_to(w, 0.0, w, r);
-    p.line_to(w, h - r);
-    p.quad_to(w, h, w - r, h);
-    p.line_to(r, h);
-    p.quad_to(0.0, h, 0.0, h - r);
-    p.line_to(0.0, r);
-    p.quad_to(0.0, 0.0, r, 0.0);
-    p.close();
-    p.finish()
-}
-
-/// Scanout-only overlay. Stable solid IDs keep selection damage sparse; no
+/// Scanout-only overlay. Stable geometry keeps selection damage sparse; no
 /// monitor-sized CPU images are allocated while the pointer moves.
 pub(crate) fn render(
     elements: &mut Vec<SceneElement<GlesRenderer>>,
@@ -889,7 +864,14 @@ pub(crate) fn render(
     let Some(ui) = backend.capture_ui.as_ref() else {
         return;
     };
-    let mut overlay = Vec::with_capacity(10);
+    // Scenes are front-to-back: keep the existing pointer above the toolbar.
+    // Append into the retained scene vector and rotate in place, avoiding a
+    // fresh overlay allocation (and growth) on every pointer frame.
+    let insertion = elements
+        .iter()
+        .take_while(|e| e.kind() == Kind::Cursor)
+        .count();
+    let scene_end = elements.len();
     if let Some(at) = crosshair(backend) {
         for (i, (x, y, w, h)) in [
             (at.x - 10, at.y - 1, 21, 3),
@@ -901,7 +883,7 @@ pub(crate) fn render(
         .enumerate()
         .rev()
         {
-            overlay.push(
+            elements.push(
                 SolidColorRenderElement::new(
                     ui.ids[8 + i].clone(),
                     SRect::<i32, Physical>::new(
@@ -920,6 +902,22 @@ pub(crate) fn render(
             );
         }
     }
+    if let Some(buffer) = &ui.hint {
+        if let Ok(element) = MemoryRenderBufferRenderElement::from_buffer(
+            renderer,
+            (
+                (ui.toolbar.pos.x) as f64 - viewport.pos.x as f64,
+                (ui.toolbar.pos.y + chrome::hint_y(ui)) as f64 - viewport.pos.y as f64,
+            ),
+            buffer,
+            None,
+            None,
+            None,
+            Kind::Unspecified,
+        ) {
+            elements.push(element.into());
+        }
+    }
     if let Some(buffer) = &ui.label {
         if let Ok(element) = MemoryRenderBufferRenderElement::from_buffer(
             renderer,
@@ -933,7 +931,7 @@ pub(crate) fn render(
             None,
             Kind::Unspecified,
         ) {
-            overlay.push(element.into());
+            elements.push(element.into());
         }
     }
     if !ui.badge {
@@ -952,23 +950,7 @@ pub(crate) fn render(
             .clamp(x1, viewport.pos.x + viewport.size.w as i32);
         let y2 = (selection.pos.y + selection.size.h as i32)
             .clamp(y1, viewport.pos.y + viewport.size.h as i32);
-        let right = viewport.pos.x + viewport.size.w as i32;
-        let bottom = viewport.pos.y + viewport.size.h as i32;
         let rects = [
-            (
-                viewport.pos.x,
-                viewport.pos.y,
-                viewport.size.w,
-                (y1 - viewport.pos.y) as u32,
-            ),
-            (viewport.pos.x, y2, viewport.size.w, (bottom - y2) as u32),
-            (
-                viewport.pos.x,
-                y1,
-                (x1 - viewport.pos.x) as u32,
-                (y2 - y1) as u32,
-            ),
-            (x2, y1, (right - x2) as u32, (y2 - y1) as u32),
             (x1, y1, (x2 - x1) as u32, 1),
             (x1, y2, (x2 - x1) as u32, 1),
             (x1, y1, 1, (y2 - y1) as u32),
@@ -978,19 +960,15 @@ pub(crate) fn render(
             if w == 0 || h == 0 {
                 continue;
             }
-            overlay.push(
+            elements.push(
                 SolidColorRenderElement::new(
-                    ui.ids[i].clone(),
+                    ui.ids[4 + i].clone(),
                     SRect::<i32, Physical>::new(
                         (x - viewport.pos.x, y - viewport.pos.y).into(),
                         (w as i32, h as i32).into(),
                     ),
                     CommitCounter::default(),
-                    if i < 4 {
-                        Color32F::new(0.0, 0.0, 0.0, 0.42)
-                    } else {
-                        Color32F::new(1.0, 1.0, 1.0, 0.95)
-                    },
+                    Color32F::new(1.0, 1.0, 1.0, 0.95),
                     Kind::Unspecified,
                 )
                 .into(),
@@ -1001,7 +979,7 @@ pub(crate) fn render(
                 .into_iter()
                 .enumerate()
             {
-                overlay.push(
+                elements.push(
                     SolidColorRenderElement::new(
                         ui.ids[12 + i].clone(),
                         SRect::<i32, Physical>::new(
@@ -1016,8 +994,10 @@ pub(crate) fn render(
                 );
             }
         }
+        elements.push(ui.dimming.element(ui.selection, viewport).into());
     }
-    elements.splice(0..0, overlay);
+    let overlay_len = elements.len() - scene_end;
+    elements[insertion..].rotate_right(overlay_len);
 }
 
 #[cfg(test)]

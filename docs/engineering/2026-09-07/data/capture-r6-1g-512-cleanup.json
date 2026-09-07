@@ -1,0 +1,266 @@
+{
+  "utc": "2026-09-07T12:08:27.686248+00:00",
+  "fixture": "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/comparison-capture-r6-1g-512-mixed-capture",
+  "scope": {
+    "unit": "chonk-capture-pressure-443aa9dd29e14aeabe45f5b6171e1d00.scope",
+    "cgroup": "/sys/fs/cgroup/user.slice/user-1000.slice/user@1000.service/app.slice/chonk-capture-pressure-443aa9dd29e14aeabe45f5b6171e1d00.scope",
+    "gone": true
+  },
+  "recorded_processes": [
+    {
+      "pid": 3576249,
+      "start_ticks": 32530841,
+      "source": "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/comparison-capture-r6-1g-512-mixed-capture/00-baseline/first-open-before/stat",
+      "exited": true,
+      "proc_entry_absent": true
+    },
+    {
+      "pid": 3576258,
+      "start_ticks": 32530851,
+      "source": "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/comparison-capture-r6-1g-512-mixed-capture/00-baseline/closed-idle-after/child-3576258/stat",
+      "exited": true,
+      "proc_entry_absent": true
+    },
+    {
+      "pid": 3576262,
+      "start_ticks": 32530871,
+      "source": "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/comparison-capture-r6-1g-512-mixed-capture/00-baseline/mixed-animation-325310276477634/stat",
+      "exited": true,
+      "proc_entry_absent": true
+    },
+    {
+      "pid": 3576276,
+      "start_ticks": 32530921,
+      "source": "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/comparison-capture-r6-1g-512-mixed-capture/00-baseline/mixed-foot-325310277374194/stat",
+      "exited": true,
+      "proc_entry_absent": true
+    },
+    {
+      "pid": 3576278,
+      "start_ticks": 32530931,
+      "source": "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/comparison-capture-r6-1g-512-mixed-capture/00-baseline/mixed-memory-worker-325310262040718/stat",
+      "exited": true,
+      "proc_entry_absent": true
+    },
+    {
+      "pid": 3576299,
+      "start_ticks": 32530982,
+      "source": "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/comparison-capture-r6-1g-512-mixed-capture/00-baseline/mixed-input-325310294604769/stat",
+      "exited": true,
+      "proc_entry_absent": true
+    },
+    {
+      "pid": 3577043,
+      "start_ticks": 32537231,
+      "source": "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/comparison-capture-r6-1g-512-mixed-capture/00-capture-r6/first-open-before/stat",
+      "exited": true,
+      "proc_entry_absent": true
+    },
+    {
+      "pid": 3577051,
+      "start_ticks": 32537238,
+      "source": "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/comparison-capture-r6-1g-512-mixed-capture/00-capture-r6/closed-idle-after/child-3577051/stat",
+      "exited": true,
+      "proc_entry_absent": true
+    },
+    {
+      "pid": 3577062,
+      "start_ticks": 32537260,
+      "source": "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/comparison-capture-r6-1g-512-mixed-capture/00-capture-r6/mixed-animation-325374295210519/stat",
+      "exited": true,
+      "proc_entry_absent": true
+    },
+    {
+      "pid": 3577071,
+      "start_ticks": 32537308,
+      "source": "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/comparison-capture-r6-1g-512-mixed-capture/00-capture-r6/mixed-foot-325374295933904/stat",
+      "exited": true,
+      "proc_entry_absent": true
+    },
+    {
+      "pid": 3577073,
+      "start_ticks": 32537322,
+      "source": "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/comparison-capture-r6-1g-512-mixed-capture/00-capture-r6/mixed-memory-worker-325374076289649/stat",
+      "exited": true,
+      "proc_entry_absent": true
+    },
+    {
+      "pid": 3577098,
+      "start_ticks": 32537375,
+      "source": "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/comparison-capture-r6-1g-512-mixed-capture/00-capture-r6/mixed-input-325374311893789/stat",
+      "exited": true,
+      "proc_entry_absent": true
+    },
+    {
+      "pid": 3577792,
+      "start_ticks": 32543642,
+      "source": "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/comparison-capture-r6-1g-512-mixed-capture/01-capture-r6/first-open-before/stat",
+      "exited": true,
+      "proc_entry_absent": true
+    },
+    {
+      "pid": 3577801,
+      "start_ticks": 32543651,
+      "source": "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/comparison-capture-r6-1g-512-mixed-capture/01-capture-r6/closed-idle-after/child-3577801/stat",
+      "exited": true,
+      "proc_entry_absent": true
+    },
+    {
+      "pid": 3577804,
+      "start_ticks": 32543672,
+      "source": "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/comparison-capture-r6-1g-512-mixed-capture/01-capture-r6/mixed-animation-325438584482539/stat",
+      "exited": true,
+      "proc_entry_absent": true
+    },
+    {
+      "pid": 3577818,
+      "start_ticks": 32543723,
+      "source": "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/comparison-capture-r6-1g-512-mixed-capture/01-capture-r6/mixed-foot-325438651261812/stat",
+      "exited": true,
+      "proc_entry_absent": true
+    },
+    {
+      "pid": 3577820,
+      "start_ticks": 32543736,
+      "source": "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/comparison-capture-r6-1g-512-mixed-capture/01-capture-r6/mixed-memory-worker-325438140642904/stat",
+      "exited": true,
+      "proc_entry_absent": true
+    },
+    {
+      "pid": 3577841,
+      "start_ticks": 32543779,
+      "source": "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/comparison-capture-r6-1g-512-mixed-capture/01-capture-r6/mixed-input-325438668354732/stat",
+      "exited": true,
+      "proc_entry_absent": true
+    },
+    {
+      "pid": 3578460,
+      "start_ticks": 32549777,
+      "source": "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/comparison-capture-r6-1g-512-mixed-capture/01-baseline/first-open-before/stat",
+      "exited": true,
+      "proc_entry_absent": true
+    },
+    {
+      "pid": 3578469,
+      "start_ticks": 32549784,
+      "source": "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/comparison-capture-r6-1g-512-mixed-capture/01-baseline/closed-idle-after/child-3578469/stat",
+      "exited": true,
+      "proc_entry_absent": true
+    },
+    {
+      "pid": 3578473,
+      "start_ticks": 32549805,
+      "source": "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/comparison-capture-r6-1g-512-mixed-capture/01-baseline/mixed-animation-325499731613886/stat",
+      "exited": true,
+      "proc_entry_absent": true
+    },
+    {
+      "pid": 3578486,
+      "start_ticks": 32549845,
+      "source": "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/comparison-capture-r6-1g-512-mixed-capture/01-baseline/mixed-foot-325499732375784/stat",
+      "exited": true,
+      "proc_entry_absent": true
+    },
+    {
+      "pid": 3578488,
+      "start_ticks": 32549856,
+      "source": "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/comparison-capture-r6-1g-512-mixed-capture/01-baseline/mixed-memory-worker-325499514556230/stat",
+      "exited": true,
+      "proc_entry_absent": true
+    },
+    {
+      "pid": 3578515,
+      "start_ticks": 32549902,
+      "source": "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/comparison-capture-r6-1g-512-mixed-capture/01-baseline/mixed-input-325499749967560/stat",
+      "exited": true,
+      "proc_entry_absent": true
+    },
+    {
+      "pid": 3579215,
+      "start_ticks": 32556308,
+      "source": "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/comparison-capture-r6-1g-512-mixed-capture/02-baseline/first-open-before/stat",
+      "exited": true,
+      "proc_entry_absent": true
+    },
+    {
+      "pid": 3579223,
+      "start_ticks": 32556316,
+      "source": "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/comparison-capture-r6-1g-512-mixed-capture/02-baseline/closed-idle-after/child-3579223/stat",
+      "exited": true,
+      "proc_entry_absent": true
+    },
+    {
+      "pid": 3579228,
+      "start_ticks": 32556335,
+      "source": "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/comparison-capture-r6-1g-512-mixed-capture/02-baseline/mixed-animation-325564837454363/stat",
+      "exited": true,
+      "proc_entry_absent": true
+    },
+    {
+      "pid": 3579242,
+      "start_ticks": 32556378,
+      "source": "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/comparison-capture-r6-1g-512-mixed-capture/02-baseline/mixed-foot-325564838548049/stat",
+      "exited": true,
+      "proc_entry_absent": true
+    },
+    {
+      "pid": 3579244,
+      "start_ticks": 32556392,
+      "source": "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/comparison-capture-r6-1g-512-mixed-capture/02-baseline/mixed-memory-worker-325564823824476/stat",
+      "exited": true,
+      "proc_entry_absent": true
+    },
+    {
+      "pid": 3579265,
+      "start_ticks": 32556444,
+      "source": "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/comparison-capture-r6-1g-512-mixed-capture/02-baseline/mixed-input-325564883792725/stat",
+      "exited": true,
+      "proc_entry_absent": true
+    },
+    {
+      "pid": 3579978,
+      "start_ticks": 32562928,
+      "source": "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/comparison-capture-r6-1g-512-mixed-capture/02-capture-r6/first-open-before/stat",
+      "exited": true,
+      "proc_entry_absent": true
+    },
+    {
+      "pid": 3579987,
+      "start_ticks": 32562935,
+      "source": "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/comparison-capture-r6-1g-512-mixed-capture/02-capture-r6/closed-idle-after/child-3579987/stat",
+      "exited": true,
+      "proc_entry_absent": true
+    },
+    {
+      "pid": 3579990,
+      "start_ticks": 32562958,
+      "source": "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/comparison-capture-r6-1g-512-mixed-capture/02-capture-r6/mixed-animation-325631207870874/stat",
+      "exited": true,
+      "proc_entry_absent": true
+    },
+    {
+      "pid": 3580003,
+      "start_ticks": 32562997,
+      "source": "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/comparison-capture-r6-1g-512-mixed-capture/02-capture-r6/mixed-foot-325631294533148/stat",
+      "exited": true,
+      "proc_entry_absent": true
+    },
+    {
+      "pid": 3580025,
+      "start_ticks": 32563012,
+      "source": "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/comparison-capture-r6-1g-512-mixed-capture/02-capture-r6/mixed-memory-worker-325631012293642/stat",
+      "exited": true,
+      "proc_entry_absent": true
+    },
+    {
+      "pid": 3580050,
+      "start_ticks": 32563058,
+      "source": "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/comparison-capture-r6-1g-512-mixed-capture/02-capture-r6/mixed-input-325631523465275/stat",
+      "exited": true,
+      "proc_entry_absent": true
+    }
+  ],
+  "invalid_saved_stat_records": [],
+  "complete": true,
+  "limits": "Only recorded PID/start-time identities are checked. A gone owned cgroup additionally covers all fixture descendants that inherited its boundary. No process is signalled."
+}

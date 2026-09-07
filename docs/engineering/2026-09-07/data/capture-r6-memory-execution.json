@@ -1,0 +1,30 @@
+{
+  "status": "complete",
+  "command": [
+    "python3",
+    "-B",
+    "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/harness/normal-v2/bench-capture.py",
+    "--memory",
+    "--binary",
+    "baseline-memory=/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/baseline/memory-profile/chonkstep-wayland",
+    "--binary",
+    "capture-r6-memory=/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/capture-r6/memory-profile/chonkstep-wayland",
+    "--output",
+    "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/comparison-capture-r6-memory-three",
+    "--runs",
+    "3",
+    "--warm-opens",
+    "10",
+    "--idle-seconds",
+    "10",
+    "--motion-seconds",
+    "5",
+    "--settle-seconds",
+    "2"
+  ],
+  "start_monotonic_ns": 326405035309956,
+  "measurement_returncode": 0,
+  "end_monotonic_ns": 326733624377759,
+  "cleanup_returncode": 0,
+  "analysis_returncode": 0
+}

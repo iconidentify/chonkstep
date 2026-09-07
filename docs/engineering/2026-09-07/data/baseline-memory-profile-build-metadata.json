@@ -1,0 +1,22 @@
+{
+  "label": "baseline",
+  "argv": [
+    "cargo",
+    "build",
+    "--release",
+    "--locked",
+    "-p",
+    "chonkstep-wayland",
+    "--features",
+    "memory-profile"
+  ],
+  "cwd": "/home/chrisk/src/chonkstep",
+  "started_utc": "2026-09-07T12:15:26.349186+00:00",
+  "version": "chonkstep-wayland 0.3.2\nsource: preview-v0.3.2-10-gc74772d-dirty\ndiagnostics: memory-profile (allocation counters enabled; not a timing baseline)\nbuild id: 1819cb2aecb147a3f9dc020b1cad82787a361e91",
+  "sha256": "8d9fa6f23548136aa9b7a2c1f1d6b0b931eff5171db204cc89a8abc74774a070",
+  "base": "c74772ddc7e00ce483d107235b8ff025f846d4a0",
+  "lock_sha256": "e8679bc6d659e50fb7c7f613c790a18b89c1dde383763c07b8eca3ab0d1d4d7e",
+  "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)\nbinary: rustc\ncommit-hash: 48a229ceaefd4985c50990b14116b6d856af0985\ncommit-date: 2026-09-01\nhost: x86_64-unknown-linux-gnu\nrelease: 1.98.1\nLLVM version: 22.1.8\n",
+  "normal_source_freeze": "unchanged c74772d",
+  "purpose": "allocation diagnostics only; do not report timing from this binary"
+}

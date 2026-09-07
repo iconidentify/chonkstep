@@ -1,0 +1,273 @@
+{
+  "samples": [
+    {
+      "sample": "00-capture-r6",
+      "input_before_ms": 30.318872,
+      "input_after_ms": 53.296409,
+      "post_closed_window_ms": 239.430527,
+      "post_closed_pressure": {
+        "available": true,
+        "start_monotonic_ns": 328416199957110,
+        "end_monotonic_ns": 328416704130835,
+        "extra_before_ms": 51.502855,
+        "extra_after_ms": 213.240343,
+        "observed_memory_current_max_bytes": 1602506752,
+        "deltas": {
+          "cpu.stat": {
+            "nr_bursts": 0,
+            "system_usec": 158746,
+            "burst_usec": 0,
+            "user_usec": 350237,
+            "nice_usec": 0,
+            "usage_usec": 508983,
+            "throttled_usec": 0,
+            "nr_periods": 5,
+            "nr_throttled": 0,
+            "core_sched.force_idle_usec": 0
+          },
+          "cpu.pressure": {
+            "full_total_us": 291,
+            "some_total_us": 38029
+          },
+          "memory.events": {
+            "high": 0,
+            "oom_group_kill": 0,
+            "oom_kill": 0,
+            "max": 0,
+            "oom": 0,
+            "low": 0
+          },
+          "memory.pressure": {
+            "full_total_us": 0,
+            "some_total_us": 0
+          }
+        }
+      }
+    },
+    {
+      "sample": "00-capture-r7",
+      "input_before_ms": 27.70174,
+      "input_after_ms": 27.663018,
+      "post_closed_window_ms": 154.343887,
+      "post_closed_pressure": {
+        "available": true,
+        "start_monotonic_ns": 328478722961240,
+        "end_monotonic_ns": 328479226915975,
+        "extra_before_ms": 132.960704,
+        "extra_after_ms": 216.650144,
+        "observed_memory_current_max_bytes": 1602875392,
+        "deltas": {
+          "cpu.stat": {
+            "nr_bursts": 0,
+            "system_usec": 97556,
+            "burst_usec": 0,
+            "user_usec": 353309,
+            "nice_usec": 0,
+            "usage_usec": 450865,
+            "throttled_usec": 0,
+            "nr_periods": 5,
+            "nr_throttled": 0,
+            "core_sched.force_idle_usec": 0
+          },
+          "cpu.pressure": {
+            "full_total_us": 1038,
+            "some_total_us": 16418
+          },
+          "memory.events": {
+            "high": 0,
+            "oom_group_kill": 0,
+            "oom_kill": 0,
+            "max": 0,
+            "oom": 0,
+            "low": 0
+          },
+          "memory.pressure": {
+            "full_total_us": 0,
+            "some_total_us": 0
+          }
+        }
+      }
+    },
+    {
+      "sample": "01-capture-r6",
+      "input_before_ms": 27.431203,
+      "input_after_ms": 28.895294,
+      "post_closed_window_ms": 778.098609,
+      "post_closed_pressure": {
+        "available": true,
+        "start_monotonic_ns": 328602801983896,
+        "end_monotonic_ns": 328604062363651,
+        "extra_before_ms": 249.052134,
+        "extra_after_ms": 233.229012,
+        "observed_memory_current_max_bytes": 1634848768,
+        "deltas": {
+          "cpu.stat": {
+            "nr_bursts": 0,
+            "system_usec": 450974,
+            "burst_usec": 0,
+            "user_usec": 878695,
+            "nice_usec": 0,
+            "usage_usec": 1329670,
+            "throttled_usec": 0,
+            "nr_periods": 13,
+            "nr_throttled": 0,
+            "core_sched.force_idle_usec": 0
+          },
+          "cpu.pressure": {
+            "full_total_us": 4452,
+            "some_total_us": 141305
+          },
+          "memory.events": {
+            "high": 294,
+            "oom_group_kill": 0,
+            "oom_kill": 0,
+            "max": 0,
+            "oom": 0,
+            "low": 0
+          },
+          "memory.pressure": {
+            "full_total_us": 42802,
+            "some_total_us": 101466
+          }
+        }
+      }
+    },
+    {
+      "sample": "01-capture-r7",
+      "input_before_ms": 26.572497,
+      "input_after_ms": 27.265019,
+      "post_closed_window_ms": 194.32832,
+      "post_closed_pressure": {
+        "available": true,
+        "start_monotonic_ns": 328541507570919,
+        "end_monotonic_ns": 328542011657152,
+        "extra_before_ms": 106.170504,
+        "extra_after_ms": 203.587409,
+        "observed_memory_current_max_bytes": 1603948544,
+        "deltas": {
+          "cpu.stat": {
+            "nr_bursts": 0,
+            "system_usec": 76702,
+            "burst_usec": 0,
+            "user_usec": 370333,
+            "nice_usec": 0,
+            "usage_usec": 447035,
+            "throttled_usec": 0,
+            "nr_periods": 5,
+            "nr_throttled": 0,
+            "core_sched.force_idle_usec": 0
+          },
+          "cpu.pressure": {
+            "full_total_us": 248,
+            "some_total_us": 16950
+          },
+          "memory.events": {
+            "high": 0,
+            "oom_group_kill": 0,
+            "oom_kill": 0,
+            "max": 0,
+            "oom": 0,
+            "low": 0
+          },
+          "memory.pressure": {
+            "full_total_us": 0,
+            "some_total_us": 0
+          }
+        }
+      }
+    },
+    {
+      "sample": "02-capture-r6",
+      "input_before_ms": 27.692588,
+      "input_after_ms": 27.731047,
+      "post_closed_window_ms": 536.388661,
+      "post_closed_pressure": {
+        "available": true,
+        "start_monotonic_ns": 328666871691017,
+        "end_monotonic_ns": 328667627879185,
+        "extra_before_ms": 185.002159,
+        "extra_after_ms": 34.797348,
+        "observed_memory_current_max_bytes": 1634344960,
+        "deltas": {
+          "cpu.stat": {
+            "nr_bursts": 0,
+            "system_usec": 198165,
+            "burst_usec": 0,
+            "user_usec": 526185,
+            "nice_usec": 0,
+            "usage_usec": 724351,
+            "throttled_usec": 0,
+            "nr_periods": 7,
+            "nr_throttled": 0,
+            "core_sched.force_idle_usec": 0
+          },
+          "cpu.pressure": {
+            "full_total_us": 496,
+            "some_total_us": 40830
+          },
+          "memory.events": {
+            "high": 165,
+            "oom_group_kill": 0,
+            "oom_kill": 0,
+            "max": 0,
+            "oom": 0,
+            "low": 0
+          },
+          "memory.pressure": {
+            "full_total_us": 60497,
+            "some_total_us": 71127
+          }
+        }
+      }
+    },
+    {
+      "sample": "02-capture-r7",
+      "input_before_ms": 26.309919,
+      "input_after_ms": 184.622408,
+      "post_closed_window_ms": 327.142137,
+      "post_closed_pressure": {
+        "available": true,
+        "start_monotonic_ns": 328728692216960,
+        "end_monotonic_ns": 328729196359150,
+        "extra_before_ms": 172.040226,
+        "extra_after_ms": 4.959827,
+        "observed_memory_current_max_bytes": 1636225024,
+        "deltas": {
+          "cpu.stat": {
+            "nr_bursts": 0,
+            "system_usec": 116433,
+            "burst_usec": 0,
+            "user_usec": 392317,
+            "nice_usec": 0,
+            "usage_usec": 508750,
+            "throttled_usec": 0,
+            "nr_periods": 5,
+            "nr_throttled": 0,
+            "core_sched.force_idle_usec": 0
+          },
+          "cpu.pressure": {
+            "full_total_us": 5215,
+            "some_total_us": 45847
+          },
+          "memory.events": {
+            "high": 160,
+            "oom_group_kill": 0,
+            "oom_kill": 0,
+            "max": 0,
+            "oom": 0,
+            "low": 0
+          },
+          "memory.pressure": {
+            "full_total_us": 48928,
+            "some_total_us": 92138
+          }
+        }
+      }
+    }
+  ],
+  "limits": [
+    "Post-closed window includes reading/focusing input window, its barrier, key injection/log polling and snapshot reads; input start/end were not separately timestamped.",
+    "External pressure counters enclose the window at250ms cadence, so pressure cannot be attributed to the exact key receipt interval.",
+    "All6 samples including r7 184.622408ms are retained. Differing measured PSI does not establish a cause or justify discarding an adverse tail."
+  ]
+}

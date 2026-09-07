@@ -359,6 +359,7 @@ pub(crate) fn capture_pointer_busy(seat: &Seat<Compositor>) -> bool {
 /// not turn into a client-visible release merely because a VT switch
 /// interrupted it.
 pub(crate) fn resynchronise_input_after_resume(state: &mut Compositor) {
+    crate::capture_tool::reset_input(state);
     gestures::cancel(state);
     let seat = state.seat.clone();
     cancel_active_touches(state);
@@ -2717,7 +2718,7 @@ pub(crate) fn inject_pointer_axis(
 /// so both sides cite `backend_impl.rs`'s stacking-band contract.
 fn hit_at(backend: &WaylandBackend, at: Point, position: LogicalPoint<f64, Logical>) -> Hit {
     if !backend.locked && backend.gesture_scene.is_some() { return Hit::Root; }
-    if !backend.locked && crate::capture_tool::modal(backend) { return Hit::Root; }
+    if crate::capture_tool::owns_cursor(backend, at) { return Hit::Root; }
     // The lock is a scene domain, not one more band in the desktop's
     // z-order. Put its boundary on the shared hit-test itself so a new
     // input caller cannot accidentally see a window, layer, shell or

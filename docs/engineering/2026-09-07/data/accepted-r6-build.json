@@ -1,0 +1,16 @@
+{
+  "utc": "2026-09-07T13:05:31.605750+00:00",
+  "command": [
+    "cargo",
+    "build",
+    "--release",
+    "--locked",
+    "-p",
+    "chonkstep-wayland"
+  ],
+  "returncode": 0,
+  "binary": "/home/chrisk/src/chonkstep/target/release/chonkstep-wayland",
+  "sha256": "315598fbe0b8a49eec2e0c3654331472dfd67c2f5946aaef54caa9077ab6da8f",
+  "version": "chonkstep-wayland 0.3.2\nsource: preview-v0.3.2-10-gc74772d-dirty\nbuild id: f567cc0c1002b7295695acab02aca93952205e77\n",
+  "matches_accepted_frozen_r6": true
+}

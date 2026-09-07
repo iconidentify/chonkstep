@@ -311,57 +311,137 @@ publish_portal_env() {
     # contamination, not a reason to leave the real session's portal
     # environment unpublished; it was scrubbed above.
     command -v dbus-update-activation-environment >/dev/null 2>&1 || return 0
-    local log_start="$1" published="" sock sig display state_key
-    local -a portal_state activation_env
+    # Keep one descriptor and byte cursor: old session bytes are never scanned
+    # again. stat is the only extra process on an unchanged poll. LC_ALL=C makes
+    # Bash string lengths byte offsets, including non-ASCII client log text.
+    local LC_ALL=C boundary="$1" boundary_anchor="${2:-}" published="" sock="" sig="" display="" state_key
+    local watcher_pid=$BASHPID boundary_identity boundary_size
+    IFS='|' read -r boundary_identity boundary_size _ <<< "$boundary"
+    local log_fd="" identity="" position=0 metadata="" seen_metadata=""
+    local file_identity file_size chunk take budget previous_position info_key info_value remainder chunk_end
+    local pending="" dropping=0 anchor="" observed_anchor initial=1
+    local socket_re='wayland socket listening[^"]*"([^"]+)"'
+    local signature_re='hyprland ipc listening[^"]*"([^"]+)"'
+    local display_re='XWayland ready[^0-9]*([0-9]+)'
+    local ansi_re=$'\033''\[[0-9;]*m'
+    local -a activation_env
     while :; do
-        # Read only lines written by this supervisor invocation. The log
-        # is append-only across logins; consuming an older XWayland-ready
-        # line could otherwise publish a dead DISPLAY during the next
-        # login's startup window.
-        #
-        # Reset the optional fields at every Wayland socket line. That
-        # makes the latest socket a generation boundary: while a crashed
-        # compositor's replacement is still starting, its fresh socket
-        # can never be paired with its predecessor's signature or X
-        # display. Strip tracing's ANSI decoration before parsing because
-        # unlike the quoted socket fields the numeric display has no
-        # delimiter that naturally skips the colour sequences.
-        mapfile -t portal_state < <(
-            tail -c "+$((log_start + 1))" "$LOG" 2>/dev/null | awk '
-                BEGIN { esc = sprintf("%c", 27) }
-                {
-                    line = $0
-                    gsub(esc "\\[[0-9;]*m", "", line)
-                }
-                line ~ /wayland socket listening/ {
-                    sock = line
-                    sub(/^.*wayland socket listening[^"]*"/, "", sock)
-                    sub(/".*$/, "", sock)
-                    sig = ""
-                    display = ""
-                    next
-                }
-                sock != "" && line ~ /hyprland ipc listening/ {
-                    sig = line
-                    sub(/^.*hyprland ipc listening[^"]*"/, "", sig)
-                    sub(/".*$/, "", sig)
-                    next
-                }
-                sock != "" && line ~ /XWayland ready/ {
-                    display = line
-                    sub(/^.*XWayland ready[^0-9]*/, "", display)
-                    sub(/[^0-9].*$/, "", display)
-                }
-                END {
-                    print sock
-                    print sig
-                    print display
-                }
-            '
-        )
-        sock=${portal_state[0]:-}
-        sig=${portal_state[1]:-}
-        display=${portal_state[2]:-}
+        metadata=$(stat -Lc '%d:%i|%s|%y|%z' -- "$LOG" 2>/dev/null) || metadata=""
+        if [ -n "$metadata" ]; then
+            IFS='|' read -r file_identity file_size _ <<< "$metadata"
+            if [ -z "$log_fd" ] || [ "$file_identity" != "$identity" ] \
+                    || [ "$file_size" -lt "$position" ]; then
+                if [ -n "$log_fd" ]; then exec {log_fd}<&-; fi
+                log_fd=""
+                # A pathname replacement between stat and open is retried on
+                # the next poll; it must not inherit the old file's offset.
+                if exec {log_fd}< "$LOG"; then
+                    identity=$(stat -Lc '%d:%i' -- "/proc/$watcher_pid/fd/$log_fd" 2>/dev/null) || identity=""
+                    position=0
+                    pending="" dropping=0 anchor="" seen_metadata=""
+                    if [ "$initial" -eq 1 ] && [ "$identity" = "$boundary_identity" ] \
+                            && [ "$file_size" -ge "${boundary_size:-0}" ]; then
+                        position=${boundary_size:-0}
+                        anchor=$boundary_anchor
+                        # GNU dd seeks the shared open description without
+                        # reading historical log bytes or retaining them in RAM.
+                        dd bs=1 skip="$position" count=0 status=none <&"$log_fd" 2>/dev/null || position=0
+                    fi
+                    initial=0
+                    if [ "$identity" != "$file_identity" ]; then
+                        exec {log_fd}<&-
+                        log_fd=""
+                    fi
+                fi
+            fi
+            # copytruncate can shrink and regrow past our offset between polls.
+            # Check only the last 256 consumed bytes after metadata changes,
+            # through a separately opened descriptor so our cursor never moves.
+            # The sentinel preserves trailing newlines in command substitution.
+            if [ -n "$log_fd" ] && [ -n "$anchor" ] \
+                    && [ "$metadata" != "$seen_metadata" ]; then
+                observed_anchor=$(dd if="/proc/$watcher_pid/fd/$log_fd" bs=256 \
+                    skip="$((position - ${#anchor}))" count="${#anchor}" \
+                    iflag=skip_bytes,count_bytes status=none 2>/dev/null; printf '.')
+                observed_anchor=${observed_anchor%.}
+                if [ "$observed_anchor" != "$anchor" ]; then
+                    exec {log_fd}<&-
+                    log_fd=""
+                    pending="" dropping=0 anchor="" position=0 identity=""
+                    continue
+                fi
+            fi
+            if [ -n "$log_fd" ]; then
+                # At most 1 MiB per publication pass; catch up without sleeping
+                # when the log is busy. Chunks and unterminated lines are bounded.
+                budget=1048576
+                while [ "$position" -lt "$file_size" ] && [ "$budget" -gt 0 ]; do
+                    take=$((file_size - position))
+                    if [ "$take" -gt 65536 ]; then take=65536; fi
+                    chunk=""
+                    IFS= read -r -d '' -n "$take" chunk <&"$log_fd" || true
+                    previous_position=$position
+                    # NUL terminates this bounded read; unlike read -N, it
+                    # cannot scan arbitrary binary input while counting only
+                    # non-NUL characters. The kernel cursor is the byte authority.
+                    while read -r info_key info_value; do
+                        if [ "$info_key" = 'pos:' ]; then position=$info_value; break; fi
+                    done < "/proc/$watcher_pid/fdinfo/$log_fd"
+                    [ "$position" -gt "$previous_position" ] || break
+                    budget=$((budget - (position - previous_position)))
+                    if [ "$((position - previous_position))" -ne "${#chunk}" ]; then
+                        # A NUL makes this chunk malformed. Seek over only its
+                        # bounded remainder rather than looping once per NUL.
+                        remainder=$((take - (position - previous_position)))
+                        if [ "$remainder" -gt 0 ]; then
+                            dd bs=1 skip="$remainder" count=0 status=none <&"$log_fd" 2>/dev/null || true
+                            previous_position=$position
+                            while read -r info_key info_value; do
+                                if [ "$info_key" = 'pos:' ]; then position=$info_value; break; fi
+                            done < "/proc/$watcher_pid/fdinfo/$log_fd"
+                            budget=$((budget - (position - previous_position)))
+                        fi
+                        pending="" dropping=1 anchor=""
+                        # Preserve the next valid record when the skipped block
+                        # ends at a newline; otherwise discard its split suffix.
+                        read -r chunk_end <<< "$(dd if="/proc/$watcher_pid/fd/$log_fd" bs=1 \
+                            skip="$((position - 1))" count=1 status=none 2>/dev/null | od -An -tu1)"
+                        if [ "$chunk_end" = 10 ]; then dropping=0; fi
+                        continue
+                    fi
+                    anchor+="$chunk"
+                    if [ "${#anchor}" -gt 256 ]; then anchor=${anchor: -256}; fi
+                    if [ "$dropping" -eq 1 ]; then
+                        if [[ $chunk != *$'\n'* ]]; then continue; fi
+                        chunk=${chunk#*$'\n'}
+                        dropping=0
+                    fi
+                    pending+="$chunk"
+                    while [[ $pending == *$'\n'* ]]; do
+                        local line=${pending%%$'\n'*}
+                        pending=${pending#*$'\n'}
+                        # An overlong line is ignored, including a field-looking
+                        # suffix, so an attacker cannot splice a valid event.
+                        [ "${#line}" -le 65536 ] || continue
+                        while [[ $line =~ $ansi_re ]]; do
+                            line=${line//"${BASH_REMATCH[0]}"/}
+                        done
+                        if [[ $line =~ $socket_re ]]; then
+                            sock=${BASH_REMATCH[1]}
+                            sig="" display=""
+                        elif [ -n "$sock" ] && [[ $line =~ $signature_re ]]; then
+                            sig=${BASH_REMATCH[1]}
+                        elif [ -n "$sock" ] && [[ $line =~ $display_re ]]; then
+                            display=${BASH_REMATCH[1]}
+                        fi
+                    done
+                    if [ "${#pending}" -gt 65536 ]; then
+                        pending="" dropping=1
+                    fi
+                done
+                seen_metadata=$metadata
+            fi
+        fi
         state_key="$sock|$sig|$display"
         if [ -n "$sock" ] && [ "$state_key" != "$published" ] \
                 && [ -S "$XDG_RUNTIME_DIR/$sock" ]; then
@@ -401,6 +481,9 @@ publish_portal_env() {
             fi
             published="$state_key"
         fi
+        if [ -n "$log_fd" ] && [ "$position" -lt "${file_size:-0}" ]; then
+            continue
+        fi
         sleep 1
     done
 }
@@ -408,13 +491,19 @@ publish_portal_env() {
 # the compositor can write its first line. Doing this inside the
 # background function would leave a scheduling race with the launch
 # below.
-_env_log_start=0
-if [ -f "$LOG" ]; then
-    _env_log_start=$(wc -c < "$LOG")
+_env_log_boundary=$(stat -Lc '%d:%i|%s|%y|%z' -- "$LOG" 2>/dev/null) || _env_log_boundary=""
+_env_log_anchor=""
+if [ -n "$_env_log_boundary" ]; then
+    IFS='|' read -r _env_log_identity _env_log_size _ <<< "$_env_log_boundary"
+    _env_anchor_start=$((_env_log_size > 256 ? _env_log_size - 256 : 0))
+    _env_log_anchor=$(dd if="$LOG" bs=256 skip="$_env_anchor_start" \
+        count="$((_env_log_size - _env_anchor_start))" iflag=skip_bytes,count_bytes \
+        status=none 2>/dev/null; printf '.')
+    _env_log_anchor=${_env_log_anchor%.}
 fi
-publish_portal_env "$_env_log_start" &
+publish_portal_env "$_env_log_boundary" "$_env_log_anchor" &
 _env_watcher=$!
-unset _env_log_start
+unset _env_log_boundary _env_log_anchor _env_log_identity _env_log_size _env_anchor_start
 # The watcher must not outlive the session: it holds the log open and
 # would republish a stale socket into the next login's environment.
 _session_stopping=0

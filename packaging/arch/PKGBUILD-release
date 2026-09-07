@@ -39,7 +39,7 @@
 # those frames into `file:line`.
 options=(strip debug)
 pkgname=chonkstep
-pkgver=0.3.2
+pkgver=0.4.0
 pkgrel=1
 pkgdesc="A traditional floating compositor for Omarchy, compatible with Hyprland workflows"
 arch=('x86_64' 'aarch64')
@@ -51,6 +51,7 @@ depends=(
   'ffmpeg'           # finalize recoverable MKV recordings as fast-start MP4
   'libnotify'        # capture completion / failure notifications
   'xdg-user-dirs'    # localized Pictures / Videos destinations
+  'xdg-utils'        # open screenshots in the configured image viewer
   'bash'             # the session launcher scripts in /usr/lib/chonkstep
   'gcc-libs'
   'glibc'

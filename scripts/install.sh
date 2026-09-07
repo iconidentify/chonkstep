@@ -132,7 +132,7 @@ pacman -Qq | grep -qx 'ttf-jetbrains-mono-nerd\(-basic\)\?' && jb_font=""
 sudo pacman -S --needed --noconfirm \
     xorg-server xorg-xinit xorg-xauth \
     foot picom wireplumber \
-    wl-clipboard wf-recorder ffmpeg libnotify xdg-user-dirs \
+    wl-clipboard wf-recorder ffmpeg libnotify xdg-user-dirs xdg-utils \
     ttf-dejavu gsfonts $jb_font noto-fonts \
     libxkbcommon libglvnd mesa xorg-xwayland \
     libdrm libinput systemd-libs seatd hwdata \

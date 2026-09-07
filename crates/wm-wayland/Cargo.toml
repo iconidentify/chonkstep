@@ -64,6 +64,12 @@ calloop = { version = "0.14", features = ["signals"] }
 # Screenshot encoding (see `capture.rs`) - the same rasterizer the
 # theme engine draws with, so no second image stack enters the graph.
 tiny-skia = "0.11"
+# Stream screenshots to their private output file without tiny-skia's
+# full-image clone and complete encoded PNG buffer. Already used by image.
+png = "0.18"
+# Already used by png: join each Sub filter byte with its row while emitting
+# bounded IDAT chunks, preserving the fast compressor's original grouping.
+fdeflate = "0.3"
 cosmic-text = "0.19"
 # Protocol code generation for the one interface no published crate
 # carries: `hyprland-focus-grab-v1` (see `focus_grab.rs` and the XML

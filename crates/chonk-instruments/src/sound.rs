@@ -70,18 +70,11 @@
 //!
 //! ## One reaction, several commands
 //!
-//! [`PanelReaction`] carries at most one [`Effect`], and a device
-//! switch is `set-default-sink` *plus* one `pactl move-sink-input` per
-//! playing stream — `pactl` takes one command per invocation, so the
-//! recipe cannot be folded into a single argv. Until the reaction can
-//! carry a list, the extra commands wait in [`SoundWidget::pending`]
-//! and one drains ahead of each subsequent panel event (see
-//! [`SoundWidget::react`]). The set-default always goes first and is
-//! the half that carries the confirming resample, so the visible answer
-//! is never the one that waits.
+//! A switch submits `set-default-sink` and every eligible stream move in
+//! one ordered [`PanelReaction::RunAll`]. The host finishes that batch
+//! even if the panel closes immediately; no later pointer event is needed.
 
 use std::cell::Cell;
-use std::collections::VecDeque;
 use std::time::Duration;
 
 use wm_theme::{panel, soundctl, Theme};
@@ -167,10 +160,8 @@ fn args(argv: &[&str]) -> Vec<String> {
 }
 
 /// How often the stream list is re-read. Slower than [`SAMPLE_INTERVAL`]
-/// on purpose: no pixel depends on it — it is only the migration list a
-/// device switch consults, and a switch happens seconds after the panel
-/// opened, not in the same frame. Halving that reading's cost costs
-/// nothing anyone can see.
+/// on purpose: no pixel depends on it. Opening always requests a fresh
+/// migration list before accepting a switch, even for an immediate click.
 const STREAM_INTERVAL: Duration = Duration::from_millis(2000);
 
 pub struct SoundWidget {
@@ -209,11 +200,9 @@ pub struct SoundWidget {
     /// before it delivers a pointer event, so the hit-test measures the
     /// panel that is actually on screen.
     metrics: PanelMetrics,
-    /// Commands an action produced that the one-effect
-    /// [`PanelReaction`] could not carry — see the module doc's "One
-    /// reaction, several commands". Drained oldest-first, one per
-    /// subsequent panel event.
-    pending: VecDeque<Effect>,
+    /// Which panel sources have answered in this opening. Cached rows
+    /// remain visible, but cannot drive a switch using old stream ids.
+    fresh_panel: u8,
 }
 
 /// The tile edge assumed until the dock has rendered once. Only the
@@ -233,7 +222,7 @@ impl SoundWidget {
             panel_dirty: false,
             tile: Cell::new(ASSUMED_TILE),
             metrics: PanelMetrics::granted(ASSUMED_TILE, 0, 0, 0),
-            pending: VecDeque::new(),
+            fresh_panel: 0,
         }
     }
 
@@ -258,29 +247,21 @@ impl SoundWidget {
         }
     }
 
-    /// Queues an action's commands and answers the event that caused
-    /// it. The first command leaves immediately as this event's
-    /// reaction; any remainder waits for the next one.
+    /// Submit the complete ordered action before returning to input.
     fn act(&mut self, action: &PanelAction, repaint: bool) -> PanelReaction {
         let confirm = Some(self.confirms(action));
-        self.pending.extend(audio_panel::action_effects(action, self.panel.inputs(), confirm));
-        self.react(repaint)
+        self.panel_dirty |= repaint;
+        let mut effects = audio_panel::action_effects(action, self.panel.inputs(), confirm);
+        if effects.len() == 1 {
+            PanelReaction::Run(effects.remove(0))
+        } else {
+            PanelReaction::run_all(effects)
+        }
     }
 
-    /// Turns "the pixels moved" into a reaction, draining one queued
-    /// command ahead of it when there is one. A repaint displaced that
-    /// way is not lost: [`DockWidget::panel_tick`] runs every
-    /// event-loop pass an open panel has and picks it up on the next
-    /// one.
+    /// Pointer-only changes never carry deferred commands.
     fn react(&mut self, repaint: bool) -> PanelReaction {
-        match self.pending.pop_front() {
-            Some(effect) => {
-                self.panel_dirty |= repaint;
-                PanelReaction::Run(effect)
-            }
-            None if repaint => PanelReaction::Repaint,
-            None => PanelReaction::None,
-        }
+        if repaint { PanelReaction::Repaint } else { PanelReaction::None }
     }
 }
 
@@ -316,6 +297,23 @@ impl DockWidget for SoundWidget {
         self.streams = id(3);
     }
 
+    fn source_active(&self, index: usize, panel_open: bool) -> bool {
+        match index {
+            0 => true,
+            // Preserve discovery/recovery before pactl has first answered.
+            1 => panel_open || !self.devices_known,
+            2 => panel_open || self.panel.awaiting_confirmation(),
+            _ => panel_open,
+        }
+    }
+
+    fn panel_visibility_changed(&mut self, open: bool) {
+        self.panel_dirty |= self.panel.on_leave();
+        if open {
+            self.fresh_panel = 0;
+        }
+    }
+
     fn update(&mut self, samples: &Samples) -> bool {
         // Before the first run lands there is nothing to say, and
         // overwriting a good reading with `None` would flash the dead
@@ -333,14 +331,21 @@ impl DockWidget for SoundWidget {
         // and an open panel asks for them in `panel_tick`.
         if samples.fresh(self.sinks) {
             let reading = samples.text(self.sinks).and_then(audio_panel::parse_sinks);
+            self.fresh_panel = (self.fresh_panel & !1) | u8::from(reading.is_some());
             self.devices_known |= reading.is_some();
             self.panel_dirty |= self.panel.fold_sinks(reading);
         }
         if samples.fresh(self.default_sink) {
+            self.fresh_panel |= 2;
             let reading = samples.text(self.default_sink).and_then(audio_panel::parse_default_sink);
             self.panel_dirty |= self.panel.fold_default(reading);
         }
+        if samples.unusable(self.default_sink) {
+            self.fresh_panel |= 2;
+            self.panel_dirty |= self.panel.confirmation_unusable();
+        }
         if samples.fresh(self.streams) {
+            self.fresh_panel = (self.fresh_panel & !4) | (u8::from(samples.text(self.streams).is_some()) * 4);
             let streams = samples.text(self.streams).map(audio_panel::parse_sink_inputs).unwrap_or_default();
             self.panel_dirty |= self.panel.fold_inputs(streams);
         }
@@ -417,6 +422,14 @@ impl DockWidget for SoundWidget {
     }
 
     fn panel_input(&mut self, event: PanelEvent, _tile: u32) -> PanelReaction {
+        let needs_streams = matches!(event, PanelEvent::LeftRelease { .. })
+            && self.panel.pressed().is_some_and(|target| target.zone == audio_panel::PanelZone::Row);
+        let stale = self.fresh_panel & 1 == 0 || (needs_streams && self.fresh_panel != 7);
+        if stale && matches!(event,
+            PanelEvent::LeftPress { .. } | PanelEvent::LeftRelease { .. } | PanelEvent::Scroll { .. }) {
+            let cleared = self.panel.on_leave();
+            return self.react(cleared);
+        }
         // The hit-test is against `metrics`, which was built from the
         // *granted* size in `render_panel` — a truer yardstick than the
         // tile edge, since a clamped grant is a shorter panel.
@@ -821,8 +834,7 @@ mod tests {
     /// A row click is the switch recipe: `set-default-sink` first,
     /// carrying the resample of the reading that will confirm it, then
     /// one `move-sink-input` per real application stream. The reaction
-    /// carries one effect, so the migration rides the next panel event
-    /// — see the module doc.
+    /// carries the whole batch, independent of later panel events.
     #[test]
     fn a_row_click_switches_and_migrates_the_playing_streams() {
         let (mut widget, b) = panel_widget();
@@ -831,20 +843,23 @@ mod tests {
 
         assert!(matches!(widget.panel_input(PanelEvent::LeftPress { local: row(0) }, 56), PanelReaction::Repaint));
         let reaction = widget.panel_input(PanelEvent::LeftRelease { local: row(0) }, 56);
-        let (program, args, then) = run_argv(&reaction);
+        let effects = reaction.effects();
+        assert_eq!(effects.len(), 2);
+        let mut effects = effects.into_iter();
+        let first = PanelReaction::Run(effects.next().unwrap());
+        let (program, args, then) = run_argv(&first);
         assert_eq!(program, "pactl");
         assert_eq!(args, ["set-default-sink", "hdmi"]);
         assert_eq!(then, Some(b.default_sink), "the default reading is what proves the switch");
         assert_eq!(widget.panel.shown_default(), Some("hdmi"), "the lamp jumps on the click, optimistically");
 
-        // The next event drains the migration. Only the named stream
-        // moves; the filter chain's nameless one stays put.
-        let reaction = widget.panel_input(PanelEvent::Motion { local: row(1) }, 56);
-        let (program, args, then) = run_argv(&reaction);
+        // Closing needs no follow-up event: every move was submitted already.
+        widget.panel_visibility_changed(false);
+        let second = PanelReaction::Run(effects.next().unwrap());
+        let (program, args, then) = run_argv(&second);
         assert_eq!(program, "pactl");
         assert_eq!(args, ["move-sink-input", "7", "hdmi"]);
         assert_eq!(then, None, "a migration changes nothing the panel draws");
-        assert!(widget.pending.is_empty(), "one real stream, one move");
 
         // The repaint that event asked for is not lost — it is deferred
         // by exactly one pass, onto the tick.
@@ -852,6 +867,67 @@ mod tests {
 
         // And the panel is back to ordinary reactions.
         assert!(matches!(widget.panel_input(PanelEvent::Motion { local: row(0) }, 56), PanelReaction::Repaint));
+    }
+
+    #[test]
+    fn closed_sound_discovers_once_and_keeps_only_pending_confirmation_active() {
+        let mut widget = SoundWidget::new();
+        assert_eq!((0..4).map(|i| widget.source_active(i, false)).collect::<Vec<_>>(), [true, true, false, false]);
+        let (known, mut b) = panel_widget();
+        widget = known;
+        assert_eq!((0..4).map(|i| widget.source_active(i, false)).collect::<Vec<_>>(), [true, false, false, false]);
+        let size = grant(&widget, 2);
+        open(&mut widget, size);
+        widget.panel_input(PanelEvent::LeftPress { local: row(0) }, 56);
+        let effects = widget.panel_input(PanelEvent::LeftRelease { local: row(0) }, 56).effects();
+        assert_eq!(effects.len(), 2);
+        widget.panel_visibility_changed(false);
+        assert!(widget.source_active(2, false));
+        b.bench.all_stale();
+        b.bench.set_text(b.default_sink, "hdmi");
+        widget.update(&b.bench.samples());
+        assert!(!widget.source_active(2, false), "confirmation retires closed-panel work");
+
+        widget.panel_input(PanelEvent::LeftPress { local: row(1) }, 56);
+        widget.panel_input(PanelEvent::LeftRelease { local: row(1) }, 56);
+        assert!(widget.source_active(2, false));
+        let absent = b.bench.unusable();
+        widget.bind(&[b.wpctl, b.sinks, absent, b.streams]);
+        widget.update(&b.bench.samples());
+        assert!(!widget.source_active(2, false), "a stopped confirming worker cannot leave a permanent prediction");
+    }
+
+    #[test]
+    fn reopening_waits_for_new_sink_and_stream_data_before_switching() {
+        let (mut widget, mut b) = panel_widget();
+        let size = grant(&widget, 2);
+        open(&mut widget, size);
+        widget.panel_visibility_changed(true);
+        b.bench.all_stale();
+        widget.update(&b.bench.samples());
+        widget.panel_input(PanelEvent::LeftPress { local: row(0) }, 56);
+        assert!(widget.panel_input(PanelEvent::LeftRelease { local: row(0) }, 56).effects().is_empty());
+
+        b.bench.set_text(b.sinks, SINKS);
+        b.bench.set_text(b.default_sink, "usb");
+        widget.update(&b.bench.samples());
+        widget.panel_input(PanelEvent::LeftPress { local: row(0) }, 56);
+        assert!(widget.panel_input(PanelEvent::LeftRelease { local: row(0) }, 56).effects().is_empty(),
+            "the old stream list must not authorize a switch");
+        assert_eq!(widget.panel.shown_default(), Some("usb"), "no false prediction while refreshing");
+        // Volume/mute need the fresh sink, not the independent stream query.
+        assert!(!widget.panel_input(PanelEvent::Scroll { local: row(0), delta: 1 }, 56).effects().is_empty());
+
+        b.bench.all_stale();
+        b.bench.set_text(b.streams, r#"[{"index":42,"properties":{"application.name":"New player"}}]"#);
+        widget.update(&b.bench.samples());
+        widget.panel_input(PanelEvent::LeftPress { local: row(0) }, 56);
+        let effects = widget.panel_input(PanelEvent::LeftRelease { local: row(0) }, 56).effects();
+        assert!(matches!(effects.as_slice(), [Effect::Run { .. }, Effect::Run { args, .. }]
+            if args == &["move-sink-input", "42", "hdmi"]));
+        widget.panel_visibility_changed(false);
+        assert!(widget.panel_input(PanelEvent::Motion { local: row(1) }, 56).effects().is_empty(),
+            "no migration can be deferred to a later opening's pointer event");
     }
 
     /// A press that does not finish on what it started on asks for
@@ -865,12 +941,10 @@ mod tests {
 
         widget.panel_input(PanelEvent::LeftPress { local: row(0) }, 56);
         assert!(matches!(widget.panel_input(PanelEvent::LeftRelease { local: row(1) }, 56), PanelReaction::Repaint));
-        assert!(widget.pending.is_empty(), "a slip queues nothing");
 
         // Row 1 is the USB sink, which is already the default.
         widget.panel_input(PanelEvent::LeftPress { local: row(1) }, 56);
         assert!(matches!(widget.panel_input(PanelEvent::LeftRelease { local: row(1) }, 56), PanelReaction::Repaint));
-        assert!(widget.pending.is_empty());
     }
 
     /// The mute square is one command on one name, confirmed by the
@@ -888,7 +962,6 @@ mod tests {
         assert_eq!(program, "pactl");
         assert_eq!(args, ["set-sink-mute", "usb", "toggle"]);
         assert_eq!(then, Some(b.sinks));
-        assert!(widget.pending.is_empty());
         assert_eq!(widget.panel.shown_default(), Some("usb"), "muting is not switching");
     }
 
@@ -929,6 +1002,5 @@ mod tests {
         widget.panel_input(PanelEvent::LeftPress { local: row(0) }, 56);
         assert!(matches!(widget.panel_input(PanelEvent::Leave, 56), PanelReaction::Repaint));
         assert!(matches!(widget.panel_input(PanelEvent::LeftRelease { local: row(0) }, 56), PanelReaction::None));
-        assert!(widget.pending.is_empty(), "an abandoned press switches nothing");
     }
 }

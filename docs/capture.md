@@ -1,8 +1,7 @@
 # Capture
 
 Chonkstep's Wayland session has a native, Mac-inspired screenshot and recording
-tool. Selection stays inside the compositor: no external region picker, editor
-launch, or X11 round trip. Saving, PNG encoding, clipboard serving and video
+tool. Selection stays inside the compositor. Saving, PNG encoding, clipboard serving and video
 finalization run on a bounded background worker.
 
 ## Shortcuts
@@ -67,8 +66,10 @@ Existing files are never replaced; published captures have owner-only access.
 Every successful screenshot also offers the exact saved PNG as `image/png` on
 the Wayland clipboard. Saving does not depend on clipboard availability; the
 completion notification distinguishes those outcomes. Failed writes are
-reported and do not leave the input grab active. No review application opens
-automatically. Open/review and annotation UI are intentionally deferred.
+reported and do not leave the input grab active. After a successful save, the
+screenshot opens in the default image viewer through `xdg-open` (imv on a
+standard Omarchy installation). Your chosen default is respected. An unavailable
+viewer does not undo the saved file or clipboard copy.
 
 ## Recording
 
@@ -87,7 +88,10 @@ been measured. Hardware acceleration, audio controls and window-following
 recording are not part of this first version.
 
 An in-progress hidden `.partial.mkv` lives beside the eventual file. Stopping
-flushes the recorder, then remuxes to a fast-start MP4 without re-encoding.
+flushes the recorder, then remuxes to a fast-start MP4 without re-encoding and
+opens the completed file in Omacut. If Omacut is unavailable, the recording stays
+saved and a notification reports the problem. Partial or failed recordings do
+not open automatically.
 On an encoder/finalization failure the MKV and diagnostic log remain available;
 the notification identifies their paths. An abrupt process or machine failure
 can lose the latest buffered frames; an unfinished recording is not promised
@@ -96,7 +100,14 @@ capture grid; an unrepresentable edge on an odd-sized output is refused rather
 than silently cropped.
 
 Dependencies are included in the Arch package and source installer:
-`wl-clipboard`, `wf-recorder`, `ffmpeg`, `libnotify`, and `xdg-user-dirs`.
+`wl-clipboard`, `wf-recorder`, `ffmpeg`, `libnotify`, `xdg-user-dirs`, and
+`xdg-utils`. Omacut is provided by the Omarchy desktop; standalone installations
+need it installed to review recordings automatically.
+
+Review applications and notifications are launched asynchronously. At most 16
+review processes started by capture are tracked at once; further screenshots
+still save and copy, with a notification explaining that auto-opening is paused
+until an earlier review process exits.
 
 ## Verification
 
@@ -105,5 +116,6 @@ GPU readback, PNG clipboard, scale, occlusion, recording and failure tests.
 Use the screenshot marker when inspecting the visible selector: ordinary
 screencopy intentionally omits capture chrome. See
 [the engineering report](engineering/2026-09-06-capture.md) for validation and
-known limits. This is a tested native workflow, not a claim that every macOS
+known limits, and [the performance campaign](engineering/2026-09-07/capture-performance.md)
+for cursor, rendering and pressure validation. This is a tested native workflow, not a claim that every macOS
 capture feature or every GPU has been reproduced.

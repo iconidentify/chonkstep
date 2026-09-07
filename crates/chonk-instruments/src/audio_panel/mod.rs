@@ -507,6 +507,14 @@ impl AudioPanel {
         &self.inputs
     }
 
+    pub(crate) fn awaiting_confirmation(&self) -> bool {
+        self.prediction.is_some()
+    }
+
+    pub(crate) fn confirmation_unusable(&mut self) -> bool {
+        self.prediction.take().is_some()
+    }
+
     /// The sink whose lamp is lit: the prediction while one is alive,
     /// the sampled truth otherwise.
     pub fn shown_default(&self) -> Option<&str> {

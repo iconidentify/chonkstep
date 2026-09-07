@@ -1,0 +1,50 @@
+{
+  "created_utc": "2026-09-07T11:25:40Z",
+  "binary": {
+    "before": {
+      "path": "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/baseline/release/chonkstep-wayland",
+      "version": "chonkstep-wayland 0.3.2\nsource: preview-v0.3.2-10-gc74772d\nbuild id: 1271a16f136593a862c2935933813112b70f8d38",
+      "sha256": "b9dbcfb9ff13039980c6eb750bea34533fffdb7b74074f33bf53f433189771f1"
+    },
+    "after": {
+      "path": "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/capture-r4/release/chonkstep-wayland",
+      "version": "chonkstep-wayland 0.3.2\nsource: preview-v0.3.2-10-gc74772d-dirty\nbuild id: d424c006e2d90e672420884b43892daeb772f288",
+      "sha256": "e6a86649b6029369b20033d52f9e67722091474324198d6e71cc9d7b4a0819e3"
+    }
+  },
+  "harness_sha256": "c9f2c121e5fceec50bb2b4173c9974fcc9890783621c84701e01c04f24d5227b",
+  "wrapper_sha256": "fc31de92359297e1f432c44266dc697becbf90dd80064cadad034973957ea9c8",
+  "shared_helper_sha256": "7fd16421e6f24964354f68d6342c437d06410eaf21295a1d114829edab33f8e7",
+  "provenance": "Visible-Dock sampling comparison with synthetic healthy command replies.\n\nUses real compositor source workers and shell wrappers, not live audio/network\nservices. CPU results characterize this fixture's cheap Bash processes and JSON,\nnot the cost of the real pactl/nmcli/BlueZ/Tailscale services. Procfs/sysfs tile\nreaders remain real, read-only, and uncontrolled. No application actions execute.\n",
+  "cpu_affinity": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14,
+    15
+  ],
+  "load_average": [
+    1.25732421875,
+    2.27197265625,
+    2.51708984375
+  ],
+  "renderer": "llvmpipe, LP_NUM_THREADS=4, Weston pixman",
+  "runs": 3,
+  "seconds": 20.0,
+  "settle_seconds": 6,
+  "open_seconds": 6,
+  "opening_metric": "mapped shell / first frame barrier; command start times do not prove parsing or input readiness",
+  "cpu_metric": "compositor and reaped-child CPU separate; child CPU is cheap Bash fixture cost, not real service cost",
+  "command_clock": "Bash EPOCHREALTIME, filtered to wall-clock phase boundaries; CPU denominator uses monotonic snapshots"
+}

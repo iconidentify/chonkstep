@@ -2362,6 +2362,7 @@ pub struct Compositor {
     /// subsurfaces. Commit-timing blockers can be installed before a role is
     /// assigned, so the ordinary scene ledgers are not a complete registry.
     pub(crate) pacing_surfaces: HashMap<ObjectId, WlSurface>,
+    pub(crate) pacing_scratch: crate::xdg::PacingScratch,
     /// Bounded escape for a FIFO barrier whose presentation never completes.
     /// Retaining the barrier identity gives each replacement a fresh deadline.
     pub(crate) pacing_fifo_deadlines:
@@ -4040,6 +4041,7 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
     // union of every monitor. Where the dock and the workareas land
     // inside that union is the shell's decision, not this loop's.
     let output_size = backend.output_size;
+    let capture_tool = crate::capture_tool::Service::new(fonts.clone());
     let mut shell = Shell::new(&mut backend, &state, fonts);
     // No `scan_existing_windows` here: a compositor's clients cannot
     // predate the compositor. (Hot-restart adoption is impossible for
@@ -4103,12 +4105,13 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
         seat,
         outputs,
         pacing_surfaces: HashMap::new(),
+        pacing_scratch: crate::xdg::PacingScratch::default(),
         pacing_fifo_deadlines: HashMap::new(),
         xwayland: crate::xwayland::State::default(),
         ui_scale: scale,
         graphics,
         screenshot_poller: crate::capture::ScreenshotRequestPoller::new(Instant::now()),
-        capture_tool: crate::capture_tool::Service::new(),
+        capture_tool,
         dmabuf,
         syncobj,
         protocols,
@@ -4244,6 +4247,15 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
             wait = wait.min(deadline.saturating_duration_since(now));
         }
         if let Some(deadline) = crate::gesture_scene::deadline(&comp) {
+            wait = wait.min(deadline.saturating_duration_since(now));
+        }
+        if let Some(deadline) = crate::capture_tool::deadline(&comp) {
+            wait = wait.min(deadline.saturating_duration_since(now));
+        }
+        if let Some(deadline) = crate::image_capture::deadline(&comp) {
+            wait = wait.min(deadline.saturating_duration_since(now));
+        }
+        if let Some(deadline) = crate::protocols::screencopy_deadline(&comp.protocols) {
             wait = wait.min(deadline.saturating_duration_since(now));
         }
         if let Some(deadline) = crate::session::next_hotplug_deadline(&comp.graphics) {

@@ -118,6 +118,7 @@ render_elements! {
     Memory = MemoryRenderBufferRenderElement<R>,
     ScaledMemory = RescaleRenderElement<MemoryRenderBufferRenderElement<R>>,
     Solid = SolidColorRenderElement,
+    CaptureDimming = crate::capture_tool::dimming::DimmingElement,
     CroppedSurface = CropRenderElement<RescaleRenderElement<WaylandSurfaceRenderElement<R>>>,
     CroppedMemory = CropRenderElement<MemoryRenderBufferRenderElement<R>>,
     CroppedScaledMemory = CropRenderElement<RescaleRenderElement<MemoryRenderBufferRenderElement<R>>>,
@@ -578,6 +579,11 @@ fn signal_pacing_barriers(surface: &WlSurface) {
         (),
         |_, _, &()| TraversalAction::DoChildren(()),
         |_, states, &()| {
+            // Most surfaces never use FIFO. A frame callback must not create
+            // pacing state which makes every later input pass service them.
+            if !states.cached_state.has::<smithay::wayland::fifo::FifoBarrierCachedState>() {
+                return;
+            }
             if let Some(barrier) = states
                 .cached_state
                 .get::<smithay::wayland::fifo::FifoBarrierCachedState>()
@@ -1532,7 +1538,9 @@ pub(crate) fn push_cursor_elements(
     cursors: &crate::state::CursorSet,
     viewport: Rect,
 ) {
-    if backend.cursor_hidden {
+    let capture_cursor = crate::capture_tool::owns_cursor(backend,
+        Point::new(location.x.floor() as i32, location.y.floor() as i32));
+    if backend.cursor_hidden && !capture_cursor {
         return;
     }
     // The pointer has one position in global space. Build it in each
@@ -1554,7 +1562,11 @@ pub(crate) fn push_cursor_elements(
         return;
     }
     if crate::capture_tool::crosshair(backend).is_some() { return; }
-    let subject = crate::input::pointer_subject(backend, global);
+    let subject = if capture_cursor {
+        crate::input::PointerSubject::Desktop
+    } else {
+        crate::input::pointer_subject(backend, global)
+    };
     let sprite = match subject {
         crate::input::PointerSubject::Client => None,
         crate::input::PointerSubject::Frame(Some(edge)) => Some(cursors.for_edge(edge)),

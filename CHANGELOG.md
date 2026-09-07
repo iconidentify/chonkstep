@@ -5,10 +5,25 @@ crate and both session binaries carry the same number.
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-09-07
+
+This alpha release adds native capture, finger-following gestures, reversible
+workspace layouts, and a measured capture and background-work performance pass.
+
+### Added and improved
+
 - Native Wayland capture: lossless screen, area and unobscured-window PNGs,
   automatic saving and PNG clipboard ownership, a keyboard/pointer selector,
   and region/display recording with a stop indicator and recoverable MP4 export.
   Omarchy workspace/group shortcuts are preserved; see [Capture](docs/capture.md).
+- Capture controls keep the cursor visible, with clearer icons, spacing and
+  selection feedback. Saved screenshots open in the configured default viewer
+  (imv on the tested Omarchy installation); finished recordings open in Omacut.
+- Native desktop and Overview gestures follow the fingers, support reversal and
+  velocity-aware settling, and let users catch a settling transition.
+- Drag live windows onto desktop thumbnails to move them from Overview.
+- Freeform, Mosaic and Flow workspace layouts are reversible and preserve the
+  floating arrangement when returning to Freeform.
 
 - Overview's desktop thumbnails now have an × control. Removing a desktop
   preserves its windows on a neighboring desktop, compacts the row, keeps
@@ -21,6 +36,37 @@ crate and both session binaries carry the same number.
   behavior, release, Omarchy reloads, and Overview focus recovery. The same
   matrix was also verified with Microsoft Edge; see the
   [browser input report](docs/engineering/2026-09-06-browser-input.md).
+
+### Performance and reliability
+
+- Sparse capture-overlay damage reduced drawing and resizing CPU by roughly
+  85–86% in repeated nested software-rendered comparisons. Selection allocation
+  traffic fell roughly 69%; an idle selector schedules no periodic redraws.
+- Capture queues, readback caches, clipboard admission and review helpers have
+  explicit bounds. PNG output streams with small scratch buffers, and cancelled
+  screencopy requests no longer strand later requests.
+- Closed detail panels stop their extra polling and request fresh state on
+  opening. Stalled sampler subprocesses are bounded; malformed Tailscale status
+  cannot leave stale actions enabled.
+- Application indexing avoids quadratic deduplication; clipped Dock content
+  skips painting; icons avoid a full pixel clone; impossible layout candidates
+  are rejected before expensive placement work.
+- Session environment discovery reads appended log data rather than repeatedly
+  scanning the complete history. Shaded windows no longer paint full-height
+  side strips.
+
+### Validation and limits
+
+- Qualification includes strict Clippy, documentation, Rust and Python checks,
+  native capture and panel regressions, paired 1 GiB/2 GiB constrained workloads,
+  and a ten-minute, 1,813-cycle stability run.
+- Startup and retained idle memory did not improve significantly. Some 2 GiB
+  pressure checks had worse input latency despite lower CPU usage. Nested
+  software-rendered results do not establish hitch-free native hardware behavior.
+
+See the [0.4.0 release notes](docs/releases/0.4.0.md) and the
+[performance report](docs/engineering/2026-09-07/capture-performance.md) for
+measurements, checkpoint-specific validation and remaining limitations.
 
 ## [0.3.2] - 2026-09-06
 

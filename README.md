@@ -10,20 +10,20 @@ in place. ChonkStep translates the Hyprland IPC and `hyprctl` calls that
 Omarchy relies on into a classic stacking-window model with real minimize,
 maximize, shade, fullscreen, snapping, workspaces, Alt-Tab, and Overview.
 
-Version 0.3.2 is an **alpha**. It is ready for adventurous users and bug
+Version 0.4.0 is an **alpha**. It is ready for adventurous users and bug
 reports, not machines where a compositor failure would be costly. Hyprland
 stays installed, so ChonkStep is easy to evaluate and easy to leave.
 
 ![ChonkStep replacing Hyprland beneath the Ristretto Omarchy desktop](site/shots/omarchy-desktop.png)
 
-## Install ChonkStep 0.3.2 alpha
+## Install ChonkStep 0.4.0 alpha
 
 Native packages are available for `x86_64` and `aarch64` (including M1 Macs
 running an Arch Linux ARM/Omarchy environment):
 
 ```sh
-curl -fLO "https://github.com/iconidentify/chonkstep/releases/download/preview-v0.3.2/chonkstep-0.3.2-1-$(uname -m).pkg.tar.zst"
-sudo pacman -U "./chonkstep-0.3.2-1-$(uname -m).pkg.tar.zst"
+curl -fLO "https://github.com/iconidentify/chonkstep/releases/download/preview-v0.4.0/chonkstep-0.4.0-1-$(uname -m).pkg.tar.zst"
+sudo pacman -U "./chonkstep-0.4.0-1-$(uname -m).pkg.tar.zst"
 omarchy install desktop-chonkstep
 ```
 
@@ -49,7 +49,7 @@ and non-Omarchy sessions, see [Installing on Omarchy (or any Arch)](#installing-
   Omarchy applications run against ChonkStep rather than a replica.
 - **Traditional window management.** Windows float by default and can be
   minimized, maximized, shaded, resized from every edge, snapped, stacked, and
-  moved between workspaces. Development builds also support Mosaic and Flow;
+  moved between workspaces. Workspaces also support Mosaic and Flow;
   inapplicable split commands are quiet no-ops.
 - **A safe side-by-side install.** SDDM owns the choice of session. Installing
   ChonkStep does not uninstall or patch Hyprland or modify Omarchy-owned files.
@@ -71,7 +71,7 @@ and the release history in [CHANGELOG.md](CHANGELOG.md).
 
 ## Features
 
-- **Three workspace styles (development builds).** Freeform lets you place
+- **Three workspace styles.** Freeform lets you place
   windows yourself. Mosaic keeps everything visible. Flow lets windows extend
   sideways beyond the screen. Native Wayland transitions animate live windows,
   and returning to Freeform restores your original arrangement. **Super+L**
@@ -237,11 +237,11 @@ the local file to pacman:
 ```sh
 chonkstep_dir="$(mktemp -d)"
 chonkstep_arch="$(uname -m)"
-chonkstep_pkg="chonkstep-0.3.2-1-$chonkstep_arch.pkg.tar.zst"
+chonkstep_pkg="chonkstep-0.4.0-1-$chonkstep_arch.pkg.tar.zst"
 curl -fL -o "$chonkstep_dir/$chonkstep_pkg" \
-  "https://github.com/iconidentify/chonkstep/releases/download/preview-v0.3.2/$chonkstep_pkg"
+  "https://github.com/iconidentify/chonkstep/releases/download/preview-v0.4.0/$chonkstep_pkg"
 curl -fL -o "$chonkstep_dir/SHA256SUMS" \
-  "https://github.com/iconidentify/chonkstep/releases/download/preview-v0.3.2/SHA256SUMS"
+  "https://github.com/iconidentify/chonkstep/releases/download/preview-v0.4.0/SHA256SUMS"
 (cd "$chonkstep_dir" && sha256sum --ignore-missing --check SHA256SUMS)
 sudo pacman -U "$chonkstep_dir/$chonkstep_pkg"
 omarchy install desktop-chonkstep

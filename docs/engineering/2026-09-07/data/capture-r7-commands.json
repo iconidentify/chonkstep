@@ -1,0 +1,64 @@
+[
+  {
+    "name": "check-all",
+    "argv": [
+      "bash",
+      "scripts/check.sh",
+      "all"
+    ],
+    "started_utc": "2026-09-07T12:38:17.208228+00:00",
+    "returncode": 0
+  },
+  {
+    "name": "build-product",
+    "argv": [
+      "cargo",
+      "build",
+      "--release",
+      "--locked",
+      "-p",
+      "chonkstep-wayland",
+      "--message-format=json"
+    ],
+    "started_utc": "2026-09-07T12:41:16.829791+00:00",
+    "returncode": 0
+  },
+  {
+    "name": "build-e2e",
+    "argv": [
+      "cargo",
+      "test",
+      "--release",
+      "--locked",
+      "-p",
+      "chonk-testkit",
+      "--tests",
+      "--no-run",
+      "--message-format=json"
+    ],
+    "started_utc": "2026-09-07T12:42:59.941596+00:00",
+    "returncode": 0
+  },
+  {
+    "name": "freeze",
+    "argv": [
+      "python3",
+      "-B",
+      "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/harness/freeze-checkpoint.py",
+      "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/capture-r7"
+    ],
+    "started_utc": "2026-09-07T12:43:00.076659+00:00",
+    "returncode": 0
+  },
+  {
+    "name": "full-e2e",
+    "argv": [
+      "python3",
+      "-B",
+      "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/harness/run-frozen-suite.py",
+      "/home/chrisk/src/chonkstep-capture-performance-artifacts/2026-09-07/capture-r7"
+    ],
+    "started_utc": "2026-09-07T12:43:02.750924+00:00",
+    "returncode": 0
+  }
+]

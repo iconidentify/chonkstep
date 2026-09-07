@@ -129,11 +129,12 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 use smithay::backend::allocator::Fourcc;
 use smithay::backend::renderer::damage::OutputDamageTracker;
 use smithay::backend::renderer::gles::{GlesRenderer, GlesTexture};
-use smithay::backend::renderer::{Bind, Offscreen};
+use smithay::backend::renderer::{Bind, Offscreen, Renderer};
 use smithay::input::pointer::CursorImageStatus;
 use smithay::output::Output;
 use smithay::reexports::wayland_protocols_wlr::foreign_toplevel::v1::server::zwlr_foreign_toplevel_handle_v1::{
@@ -229,9 +230,13 @@ pub(crate) struct ProtocolState {
     minimize_requests: Vec<(WlWindowId, bool)>,
     /// Capture requests waiting for a frame to answer them.
     captures: Vec<PendingCapture>,
+    /// At most one downloaded image survives a dispatch turn. Matching
+    /// consumers share it while bounded client copies yield to input.
+    capture_batch: Option<CaptureBatch>,
+    capture_service_after: Instant,
     /// A small retained pool keyed by capture geometry. A recorder normally
-    /// uses one entry for its entire life; the bound prevents a hostile stream
-    /// of odd sizes from retaining unbounded GPU memory.
+    /// uses one entry for its entire life. Count, pixel-byte and idle bounds
+    /// keep old regions from retaining a recording's working set indefinitely.
     capture_targets: Vec<CaptureTarget>,
 }
 
@@ -244,6 +249,95 @@ struct CaptureTarget {
     damage_tracker: OutputDamageTracker,
     scene_scratch: Vec<SceneElement<GlesRenderer>>,
     rendered: bool,
+    used: Instant,
+}
+
+const CAPTURE_CACHE_BYTES: u64 = 64 * 1024 * 1024;
+const CAPTURE_CACHE_IDLE: Duration = Duration::from_secs(5);
+const MAX_PENDING_SCREENCOPIES: usize = 256;
+const CAPTURE_COPY_INTERVAL: Duration = Duration::from_millis(4);
+
+struct CaptureBatch {
+    pixels: crate::readback::RgbaDownload,
+    size: Size,
+    stamp: Duration,
+    locked: bool,
+    captures: std::collections::VecDeque<PendingCapture>,
+}
+
+/// Bound copying as well as readbacks: a shared download can still have
+/// hundreds of consumers. Permit one oversized image so large outputs make
+/// progress; the budget is checked between non-preemptible buffer copies.
+struct CaptureCopyBudget {
+    started: Instant,
+    copies: usize,
+    pixels: u64,
+}
+
+impl CaptureCopyBudget {
+    fn new(started: Instant) -> Self { Self { started, copies: 0, pixels: 0 } }
+
+    fn reserve(&mut self, size: Size, now: Instant) -> bool {
+        let pixels = u64::from(size.w) * u64::from(size.h);
+        if self.copies > 0 && (self.copies >= 4
+            || pixels > (4 * 1024 * 1024u64).saturating_sub(self.pixels)
+            || now.saturating_duration_since(self.started) >= Duration::from_millis(2)) {
+            return false;
+        }
+        self.copies += 1;
+        self.pixels = self.pixels.saturating_add(pixels);
+        true
+    }
+}
+
+fn capture_pixel_bytes(size: Size) -> u64 {
+    u64::from(size.w).saturating_mul(u64::from(size.h)).saturating_mul(4)
+}
+
+/// Retain the newest useful targets, reserving room BEFORE allocating a miss.
+/// A single larger working target is allowed so continuous 8K capture does not
+/// reallocate every frame; it displaces every other entry. These are pixel
+/// bytes, not an assertion about driver overhead or total graphics memory.
+fn capture_cache_keep(sizes: impl DoubleEndedIterator<Item = Size>, incoming: Size) -> usize {
+    let mut bytes = capture_pixel_bytes(incoming);
+    let limit = CAPTURE_CACHE_BYTES.max(bytes);
+    let mut keep = 0;
+    for size in sizes.rev().take(7) {
+        let needed = capture_pixel_bytes(size);
+        if needed > limit.saturating_sub(bytes) { break; }
+        bytes += needed;
+        keep += 1;
+    }
+    keep
+}
+
+fn reserve_capture_target(targets: &mut Vec<CaptureTarget>, renderer: &mut GlesRenderer, size: Size) -> Result<(), String> {
+    let remove = targets.len() - capture_cache_keep(targets.iter().map(|target| target.size), size);
+    if remove > 0 {
+        targets.drain(..remove);
+        // GlesTexture drops enqueue deletion. Drain those deletions while the
+        // context is current before allocating the replacement working image.
+        renderer.cleanup_texture_cache().map_err(|error| format!("release capture buffers: {error:?}"))?;
+    }
+    Ok(())
+}
+
+pub(crate) fn capture_cache_statistics(comp: &Compositor) -> (usize, u64) {
+    let targets = &comp.protocols.capture_targets;
+    (targets.len(), targets.iter().map(|target| capture_pixel_bytes(target.size)).sum())
+}
+
+fn retire_idle_capture_targets(comp: &mut Compositor) {
+    let targets = &mut comp.protocols.capture_targets;
+    // Recency order means one timestamp check covers the overwhelmingly common
+    // empty or warm path. Use existing housekeeping; add no capture idle timer.
+    let Some(first) = targets.first() else { return };
+    let now = Instant::now();
+    if now.saturating_duration_since(first.used) < CAPTURE_CACHE_IDLE { return; }
+    targets.retain(|target| now.saturating_duration_since(target.used) < CAPTURE_CACHE_IDLE);
+    if let Err(error) = graphics_renderer(&mut comp.graphics).cleanup_texture_cache() {
+        tracing::warn!(?error, "could not release idle capture buffers");
+    }
 }
 
 /// Resolve an ext foreign-toplevel resource back to its managed window.
@@ -373,6 +467,9 @@ struct PendingCapture {
     /// where the scene actually changed, so a recorder polling in a
     /// tight loop does not capture the same still frame forever.
     with_damage: bool,
+    /// A presentation has made this request eligible. Keep this fact when
+    /// budgeted work yields, without manufacturing another scene change.
+    eligible: bool,
 }
 
 /// Per-frame protocol state, parked on the `zwlr_screencopy_frame_v1`
@@ -423,6 +520,8 @@ pub(crate) fn init(display_handle: &DisplayHandle) -> ProtocolState {
         toplevels: HashMap::new(),
         minimize_requests: Vec::new(),
         captures: Vec::new(),
+        capture_batch: None,
+        capture_service_after: Instant::now(),
         capture_targets: Vec::new(),
     }
 }
@@ -433,6 +532,7 @@ pub(crate) fn init(display_handle: &DisplayHandle) -> ProtocolState {
 /// still serviced on every pass. See the module's integration contract
 /// for why this position matters.
 pub(crate) fn refresh(comp: &mut Compositor) {
+    retire_idle_capture_targets(comp);
     apply_minimize_requests(comp);
     comp.notice_wm_protocol_changes();
     let new_manager = comp.protocols.managers.iter().any(|manager| !manager.announced);
@@ -1186,7 +1286,7 @@ impl Dispatch<ZwlrScreencopyFrameV1, ScreencopyFrameData> for Compositor {
             Request::Copy { buffer } => (buffer, false),
             Request::CopyWithDamage { buffer } => (buffer, true),
             Request::Destroy => {
-                state.protocols.captures.retain(|capture| &capture.frame != resource);
+                remove_screencopy(&mut state.protocols, resource);
                 return;
             }
             _ => return,
@@ -1208,6 +1308,17 @@ impl Dispatch<ZwlrScreencopyFrameV1, ScreencopyFrameData> for Compositor {
             return;
         }
 
+        state.protocols.captures.retain(screencopy_live);
+        if let Some(batch) = &mut state.protocols.capture_batch {
+            batch.captures.retain(screencopy_live);
+        }
+        let held = state.protocols.captures.len()
+            + state.protocols.capture_batch.as_ref().map_or(0, |batch| batch.captures.len());
+        if held >= MAX_PENDING_SCREENCOPIES {
+            resource.failed();
+            return;
+        }
+
         state.protocols.captures.push(PendingCapture {
             frame: resource.clone(),
             buffer,
@@ -1215,6 +1326,7 @@ impl Dispatch<ZwlrScreencopyFrameV1, ScreencopyFrameData> for Compositor {
             transform: data.transform,
             overlay_cursor: data.overlay_cursor,
             with_damage,
+            eligible: false,
         });
         // A plain copy is paced by presenting one compositor frame. Damage-
         // aware copies deliberately wait for a real scene change instead.
@@ -1229,70 +1341,147 @@ impl Dispatch<ZwlrScreencopyFrameV1, ScreencopyFrameData> for Compositor {
         resource: &ZwlrScreencopyFrameV1,
         _data: &ScreencopyFrameData,
     ) {
-        state.protocols.captures.retain(|capture| &capture.frame != resource);
+        remove_screencopy(&mut state.protocols, resource);
     }
 }
 
-/// Called once after the compositor submitted a visible frame. This is the
-/// screencopy pacing clock: protocol dispatch can run many times between
-/// presentations, but it cannot trigger extra readbacks.
+fn remove_screencopy(state: &mut ProtocolState, frame: &ZwlrScreencopyFrameV1) {
+    state.captures.retain(|capture| &capture.frame != frame);
+    if let Some(batch) = &mut state.capture_batch {
+        batch.captures.retain(|capture| &capture.frame != frame);
+    }
+}
+
+fn screencopy_live(capture: &PendingCapture) -> bool {
+    if !capture.frame.is_alive() { return false; }
+    if !capture.buffer.is_alive() {
+        capture.frame.failed();
+        return false;
+    }
+    true
+}
+
+/// A real presentation admits waiting requests. Work already admitted can
+/// finish across later dispatch turns without forcing more presentations or
+/// admitting a new damage-aware stream against an unchanged scene.
 pub(crate) fn frame_presented(comp: &mut Compositor, presented: bool) {
-    if !presented || comp.protocols.captures.is_empty() {
-        return;
+    if !comp.protocols.captures.is_empty() {
+        // A dead buffer must not consume this output's geometry admission and
+        // leave a live plain request waiting for a presentation that was lost.
+        // Do this on the destruction dispatch too: waiting damage-aware frames
+        // must not retain a dead buffer's SHM mapping until another repaint.
+        comp.protocols.captures.retain(screencopy_live);
     }
-
-    // Pick at most one distinct capture geometry per output this frame. All
-    // consumers asking for that exact geometry share the render/readback.
-    let monitors = comp.wm.backend().monitors();
-    let mut selected: HashMap<usize, (Rect, Transform, bool)> = HashMap::new();
-    let mut due: Vec<PendingCapture> = Vec::new();
-    comp.protocols.captures.retain(|capture| {
-        if !capture.frame.is_alive() {
-            return false;
-        }
-        let output = monitors
-            .iter()
-            .enumerate()
-            .max_by_key(|(_, monitor)| overlap_area(capture.region, monitor.geometry))
-            .map(|(index, _)| index)
-            .unwrap_or(usize::MAX);
-        let key = (capture.region, capture.transform, capture.overlay_cursor);
-        match selected.get(&output) {
-            Some(existing) if existing != &key => true,
-            Some(_) => {
-                due.push(capture.clone());
-                false
-            }
-            None => {
-                selected.insert(output, key);
-                due.push(capture.clone());
-                false
+    if presented && !comp.protocols.captures.is_empty() {
+        // Preserve one newly admitted geometry per output/presentation.
+        // Matching fanout may drain later, but a different region is not a
+        // license to issue another readback on every service deadline.
+        let monitors = comp.wm.backend().monitors();
+        let mut selected = HashMap::new();
+        for capture in &mut comp.protocols.captures {
+            let output = monitors.iter().enumerate()
+                .max_by_key(|(_, monitor)| overlap_area(capture.region, monitor.geometry))
+                .map(|(index, _)| index).unwrap_or(usize::MAX);
+            let key = (capture.region, capture.transform, capture.overlay_cursor);
+            if *selected.entry(output).or_insert(key) == key {
+                capture.eligible = true;
             }
         }
-    });
-
-    while let Some(first) = due.pop() {
-        let mut group = vec![first.clone()];
-        let mut index = 0;
-        while index < due.len() {
-            if due[index].region == first.region
-                && due[index].transform == first.transform
-                && due[index].overlay_cursor == first.overlay_cursor
-            {
-                group.push(due.swap_remove(index));
-            } else {
-                index += 1;
-            }
-        }
-        service_capture_group(comp, &group);
     }
+    match screencopy_deadline(&comp.protocols) {
+        None => {
+            // An admitted frame may have been destroyed during the cooldown,
+            // removing the last deadline while a different plain region waits.
+            request_plain_capture_frame(comp);
+            return;
+        }
+        Some(deadline) if Instant::now() < deadline => return,
+        Some(_) => {}
+    }
+    let started = Instant::now();
+    if comp.protocols.capture_batch.is_none() {
+        let Some(index) = comp.protocols.captures.iter().position(|capture| capture.eligible) else {
+            // An empty eligibility cohort must not strand a remaining plain
+            // request. Retained batches revalidate their own handles below.
+            request_plain_capture_frame(comp);
+            return;
+        };
+        let first = comp.protocols.captures.remove(index);
+        let mut group = vec![first];
+        let first = &group[0];
+        let key = (first.region, first.transform, first.overlay_cursor);
+        group.extend(comp.protocols.captures.extract_if(.., |capture| {
+            capture.eligible && (capture.region, capture.transform, capture.overlay_cursor) == key
+        }));
+        // One download is the entire retained staging budget. Matching
+        // consumers share its mapping rather than cloning a fullscreen image.
+        if let Some(pixels) = prepare_capture_group(comp, &group) {
+            comp.protocols.capture_batch = Some(CaptureBatch {
+                pixels,
+                size: buffer_size(key.0.size, key.1),
+                stamp: comp.start_time.elapsed(),
+                locked: comp.wm.backend().locked,
+                captures: group.into(),
+            });
+        }
+    }
+    if let Some(mut batch) = comp.protocols.capture_batch.take() {
+        let mut budget = CaptureCopyBudget::new(started);
+        let locked = comp.wm.backend().locked;
+        let result = if batch.locked != locked {
+            Err("lock state changed after screenshot download".to_string())
+        } else {
+            batch.pixels.with_pixels(graphics_renderer(&mut comp.graphics), |pixels| {
+                while let Some(capture) = batch.captures.front() {
+                    if !capture.frame.is_alive() || !capture.buffer.is_alive() {
+                        let capture = batch.captures.pop_front().unwrap();
+                        if capture.frame.is_alive() { capture.frame.failed(); }
+                        continue;
+                    }
+                    if !budget.reserve(batch.size, Instant::now()) { break; }
+                    let capture = batch.captures.pop_front().unwrap();
+                    match write_capture_bytes(&capture.buffer, batch.size, pixels) {
+                        Ok(()) => finish_capture(batch.stamp, &capture, batch.size),
+                        Err(error) => {
+                            tracing::warn!(%error, "screencopy could not write into the client's buffer");
+                            capture.frame.failed();
+                        }
+                    }
+                }
+            })
+        };
+        if let Err(error) = result {
+            tracing::debug!(%error, "discarding deferred screencopy download");
+            for capture in batch.captures.drain(..) {
+                if capture.frame.is_alive() { capture.frame.failed(); }
+            }
+        }
+        if batch.captures.is_empty() {
+            drop(batch);
+            // Mapping drops queue PBO deletion. Release it now even if the
+            // scene goes idle, before a following capture allocates another.
+            if let Err(error) = graphics_renderer(&mut comp.graphics).cleanup_texture_cache() {
+                tracing::warn!(?error, "could not release completed screencopy download");
+            }
+        } else {
+            comp.protocols.capture_batch = Some(batch);
+        }
+    }
+    // Retain the cooldown even when the queue empties; a client that refills
+    // it immediately must still yield. An empty queue adds no wakeup.
+    comp.protocols.capture_service_after = Instant::now() + CAPTURE_COPY_INTERVAL;
+    request_plain_capture_frame(comp);
+}
 
-    // A client may have queued different regions for the same output. Keep
-    // them paced: book one more presentation rather than draining them in the
-    // same dispatch turn.
-    if comp.protocols.captures.iter().any(|capture| !capture.with_damage) {
+fn request_plain_capture_frame(comp: &mut Compositor) {
+    if plain_capture_pending(&comp.protocols) {
         comp.wm.backend_mut().damage = true;
     }
+}
+
+pub(crate) fn screencopy_deadline(state: &ProtocolState) -> Option<Instant> {
+    (state.capture_batch.is_some() || state.captures.iter().any(|capture| capture.eligible))
+        .then_some(state.capture_service_after)
 }
 
 /// Whether a one-shot screencopy is waiting for the presentation it was
@@ -1305,7 +1494,7 @@ pub(crate) fn frame_presented(comp: &mut Compositor, presented: bool) {
 /// after which [`frame_presented`] drains the request. Damage-aware streams do
 /// not force frames; they continue to sleep until the scene really changes.
 pub(crate) fn plain_capture_pending(state: &ProtocolState) -> bool {
-    state.captures.iter().any(|capture| !capture.with_damage && capture.frame.is_alive())
+    state.captures.iter().any(|capture| !capture.with_damage && !capture.eligible && capture.frame.is_alive())
 }
 
 fn overlap_area(a: Rect, b: Rect) -> u64 {
@@ -1314,17 +1503,17 @@ fn overlap_area(a: Rect, b: Rect) -> u64 {
         .unwrap_or(0)
 }
 
-fn service_capture_group(comp: &mut Compositor, captures: &[PendingCapture]) {
-    let Some(first) = captures.first() else { return };
+fn prepare_capture_group(comp: &mut Compositor, captures: &[PendingCapture]) -> Option<crate::readback::RgbaDownload> {
+    let first = captures.first()?;
     let target_size = buffer_size(first.region.size, first.transform);
     if target_size.w == 0 || target_size.h == 0 {
         for capture in captures {
             capture.frame.failed();
         }
-        return;
+        return None;
     }
 
-    let Compositor { wm, graphics, pointer_location, cursor_status, cursors, protocols, start_time, .. } = comp;
+    let Compositor { wm, graphics, pointer_location, cursor_status, cursors, protocols, .. } = comp;
     let cache_index = protocols
         .capture_targets
         .iter()
@@ -1336,8 +1525,13 @@ fn service_capture_group(comp: &mut Compositor, captures: &[PendingCapture]) {
         });
     let renderer = graphics_renderer(graphics);
     let mut target = match cache_index {
-        Some(index) => protocols.capture_targets.swap_remove(index),
+        Some(index) => protocols.capture_targets.remove(index),
         None => {
+            if let Err(error) = reserve_capture_target(&mut protocols.capture_targets, renderer, target_size) {
+                tracing::warn!(%error, "could not prepare screencopy storage");
+                for capture in captures { capture.frame.failed(); }
+                return None;
+            }
             let width = target_size.w as i32;
             let height = target_size.h as i32;
             let texture = match renderer.create_buffer(
@@ -1348,7 +1542,7 @@ fn service_capture_group(comp: &mut Compositor, captures: &[PendingCapture]) {
                 Err(error) => {
                     tracing::warn!(?error, width, height, "could not allocate a screencopy buffer");
                     for capture in captures { capture.frame.failed(); }
-                    return;
+                    return None;
                 }
             };
             CaptureTarget {
@@ -1364,6 +1558,7 @@ fn service_capture_group(comp: &mut Compositor, captures: &[PendingCapture]) {
                 ),
                 scene_scratch: Vec::new(),
                 rendered: false,
+                used: Instant::now(),
             }
         }
     };
@@ -1397,28 +1592,16 @@ fn service_capture_group(comp: &mut Compositor, captures: &[PendingCapture]) {
             .render_output(renderer, &mut framebuffer, age, &target.scene_scratch, clear_color)
             .map_err(|error| format!("render: {error:?}"))?;
         target.rendered = true;
-        crate::readback::with_rgba_pixels(renderer, &mut framebuffer, (width, height).into(), |pixels| {
-            for capture in captures {
-                match write_capture_bytes(&capture.buffer, target_size, pixels) {
-                    Ok(()) => finish_capture(start_time.elapsed(), capture, target_size),
-                    Err(error) => {
-                        tracing::warn!(%error, "screencopy could not write into the client's buffer");
-                        capture.frame.failed();
-                    }
-                }
-            }
-        })?;
-        Ok::<(), String>(())
+        crate::readback::download_rgba(renderer, &mut framebuffer, (width, height).into())
     })();
     target.scene_scratch.clear();
-    if let Err(error) = success {
+    if let Err(error) = &success {
         tracing::warn!(%error, "screencopy render failed");
         for capture in captures { capture.frame.failed(); }
     }
+    target.used = Instant::now();
     protocols.capture_targets.push(target);
-    if protocols.capture_targets.len() > 8 {
-        protocols.capture_targets.remove(0);
-    }
+    success.ok()
 }
 
 fn finish_capture(stamp: std::time::Duration, capture: &PendingCapture, size: Size) {
@@ -1528,8 +1711,9 @@ pub(crate) fn capture_region_into(
         });
     let renderer = graphics_renderer(graphics);
     let mut target = match cache_index {
-        Some(index) => protocols.capture_targets.swap_remove(index),
+        Some(index) => protocols.capture_targets.remove(index),
         None => {
+            reserve_capture_target(&mut protocols.capture_targets, renderer, target_size)?;
             let width = target_size.w as i32;
             let height = target_size.h as i32;
             let texture = renderer
@@ -1548,6 +1732,7 @@ pub(crate) fn capture_region_into(
                 ),
                 scene_scratch: Vec::new(),
                 rendered: false,
+                used: Instant::now(),
             }
         }
     };
@@ -1581,10 +1766,8 @@ pub(crate) fn capture_region_into(
     })();
 
     target.scene_scratch.clear();
+    target.used = Instant::now();
     protocols.capture_targets.push(target);
-    if protocols.capture_targets.len() > 8 {
-        protocols.capture_targets.remove(0);
-    }
     result.map(|()| target_size)
 }
 
@@ -1709,6 +1892,51 @@ fn write_capture_bytes(buffer: &WlBuffer, size: Size, pixels: &[u8]) -> Result<(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn screencopy_copy_budget_bounds_fanout_pixels_and_time_with_large_frame_progress() {
+        let now = Instant::now();
+        let mut small = CaptureCopyBudget::new(now);
+        for _ in 0..4 { assert!(small.reserve(Size::new(1, 1), now)); }
+        assert!(!small.reserve(Size::new(1, 1), now));
+        let mut pixels = CaptureCopyBudget::new(now);
+        assert!(pixels.reserve(Size::new(2048, 1024), now));
+        assert!(pixels.reserve(Size::new(2048, 1024), now));
+        assert!(!pixels.reserve(Size::new(1, 1), now));
+        let mut timed = CaptureCopyBudget::new(now);
+        assert!(timed.reserve(Size::new(1, 1), now));
+        assert!(!timed.reserve(Size::new(1, 1), now + Duration::from_millis(2)));
+        let mut large = CaptureCopyBudget::new(now);
+        assert!(large.reserve(Size::new(7680, 4320), now + Duration::from_secs(1)));
+        assert!(!large.reserve(Size::new(1, 1), now + Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn capture_cache_retains_a_bounded_recent_working_set_before_allocating() {
+        let hd = Size::new(1920, 1080);
+        let uhd = Size::new(3840, 2160);
+        let eight_k = Size::new(7680, 4320);
+        assert_eq!(capture_cache_keep([uhd, uhd].into_iter(), uhd), 1);
+        assert_eq!(capture_cache_keep([hd; 8].into_iter(), hd), 7);
+        assert_eq!(capture_cache_keep([uhd, hd].into_iter(), eight_k), 0);
+        assert_eq!(capture_cache_keep([eight_k].into_iter(), hd), 0);
+        assert_eq!(capture_pixel_bytes(Size::new(u32::MAX, u32::MAX)), u64::MAX);
+
+        let mut held = Vec::new();
+        let mut random = 9123u64;
+        for _ in 0..10_000 {
+            random = random.wrapping_mul(6364136223846793005).wrapping_add(1);
+            let incoming = [Size::new(1, 1), hd, uhd, eight_k][(random >> 32) as usize % 4];
+            let keep = capture_cache_keep(held.iter().copied(), incoming);
+            held.drain(..held.len() - keep);
+            // This is the allocation boundary: old storage has already gone.
+            let working = held.iter().map(|&size| capture_pixel_bytes(size)).sum::<u64>()
+                + capture_pixel_bytes(incoming);
+            assert!(working <= CAPTURE_CACHE_BYTES || held.is_empty());
+            held.push(incoming);
+            assert!(held.len() <= 8);
+        }
+    }
 
     // The protocol halves of this module need a wayland display and a
     // client on the other end of it, and the capture half needs an EGL

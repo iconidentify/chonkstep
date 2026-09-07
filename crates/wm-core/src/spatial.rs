@@ -136,11 +136,30 @@ fn columns(
     count: usize,
     gap: u32,
 ) -> Option<Vec<Rect>> {
+    // These are the same minimum constraints enforced by partition below.
+    // Reject impossible columns before calculating weights or allocating
+    // their geometry: thin, wide/tall clients can fit in total area while
+    // making most column arrangements impossible.
+    let mut available_width = area
+        .w
+        .checked_sub(gap.checked_mul(count.saturating_sub(1) as u32)?)?;
     let mut minima = Vec::with_capacity(count);
+    for column in 0..count {
+        let slice = &indices[column * indices.len() / count..(column + 1) * indices.len() / count];
+        let mut available_height = area
+            .h
+            .checked_sub(gap.checked_mul(slice.len().saturating_sub(1) as u32)?)?;
+        let mut minimum_width = 1;
+        for &i in slice {
+            minimum_width = minimum_width.max(items[i].min.w);
+            available_height = available_height.checked_sub(items[i].min.h.max(1))?;
+        }
+        available_width = available_width.checked_sub(minimum_width)?;
+        minima.push(minimum_width);
+    }
     let mut weights = Vec::with_capacity(count);
     for column in 0..count {
         let slice = &indices[column * indices.len() / count..(column + 1) * indices.len() / count];
-        minima.push(slice.iter().map(|&i| items[i].min.w).max().unwrap_or(1));
         weights.push(
             (slice
                 .iter()
@@ -320,6 +339,152 @@ mod tests {
             min: Size::new(1, 1),
             weight: [0, 0],
             width: 0,
+        }
+    }
+
+    fn cross_strip_items(count: usize, ordering: &str) -> Vec<Item> {
+        (0..count)
+            .map(|index| {
+                let wide = match ordering {
+                    "wide-first" => index < count / 2,
+                    "tall-first" => index >= count / 2,
+                    _ => index % 2 == 0,
+                };
+                Item {
+                    min: if wide {
+                        Size::new(999, 1)
+                    } else {
+                        Size::new(1, 999)
+                    },
+                    ..item()
+                }
+            })
+            .collect()
+    }
+
+    fn placement_digest(result: &[Option<Rect>]) -> u64 {
+        // Include placement index, presence and every coordinate: matching
+        // counts alone can hide changed exclusion order or rounding.
+        let mut digest = 0xcbf29ce484222325_u64;
+        for (index, rect) in result.iter().enumerate() {
+            let fields = match rect {
+                Some(rect) => [
+                    index as u64,
+                    1,
+                    rect.pos.x as u64,
+                    rect.pos.y as u64,
+                    rect.size.w as u64,
+                    rect.size.h as u64,
+                ],
+                None => [index as u64, 0, 0, 0, 0, 0],
+            };
+            for field in fields {
+                for byte in field.to_le_bytes() {
+                    digest = (digest ^ byte as u64).wrapping_mul(0x100000001b3);
+                }
+            }
+        }
+        digest
+    }
+
+    #[test]
+    fn incompatible_cross_strips_preserve_original_placements() {
+        // Captured from the preserved release baseline before adding early
+        // column rejection. Both grouped orders and interleaving matter:
+        // the deterministic exclusion rule leaves different clients tiled.
+        let expected = [
+            (
+                8,
+                [0xbbb6f75d69cb2317, 0x1e93da6caff6ac6f, 0x4f6b31a614d94264],
+            ),
+            (
+                32,
+                [0xddb091631fd4e901, 0xec5e1cf7391541b1, 0x995ad8b0cbe9ba64],
+            ),
+            (
+                64,
+                [0x086adfb526eb9793, 0x45858ad6693acdb3, 0x588656e40beaaa64],
+            ),
+            (
+                128,
+                [0xbb44b53a9c92fc43, 0xea12354879ba2113, 0xea38184942581264],
+            ),
+            (
+                256,
+                [0x84da81edaa233a4d, 0x56fdfd724a138d45, 0x968557edc3dcda64],
+            ),
+            (
+                512,
+                [0x61c9337bf7f4cef1, 0xd9f3ac09e424dab1, 0xdc91532411361f64],
+            ),
+        ];
+        for (count, digests) in expected {
+            for (ordering, expected) in ["wide-first", "tall-first", "alternating"]
+                .into_iter()
+                .zip(digests)
+            {
+                let items = cross_strip_items(count, ordering);
+                let result = mosaic(Size::new(1000, 1000), &items);
+                assert_eq!(
+                    placement_digest(&result),
+                    expected,
+                    "{count} clients, {ordering}"
+                );
+            }
+        }
+    }
+
+    /// Geometrically incompatible minima can fit in total area, bypassing
+    /// the existing area rejection. Retain every sample and the exact output
+    /// digest when comparing an optimization with a preserved baseline build.
+    #[test]
+    #[ignore = "performance profile: cargo test --release -p wm-core mosaic_cross_strips_profile -- --ignored --nocapture"]
+    fn mosaic_cross_strips_profile() {
+        use std::hint::black_box;
+        use std::time::Instant;
+        let area = Size::new(1000, 1000);
+        for count in [8, 32, 64, 128, 256, 512] {
+            for ordering in ["wide-first", "tall-first", "alternating"] {
+                let items = cross_strip_items(count, ordering);
+                assert!(
+                    items
+                        .iter()
+                        .map(|item| item.min.w as u64 * item.min.h as u64)
+                        .sum::<u64>()
+                        < area.w as u64 * area.h as u64
+                );
+                let mut expected = None;
+                for sample in 0..3 {
+                    let started = Instant::now();
+                    let result = mosaic(black_box(area), black_box(&items));
+                    let elapsed = started.elapsed();
+                    let digest = placement_digest(&result);
+                    if let Some(expected) = &expected {
+                        assert_eq!(&result, expected);
+                    }
+                    for (index, rect) in result
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(i, r)| r.map(|r| (i, r)))
+                    {
+                        assert!(
+                            rect.size.w >= items[index].min.w && rect.size.h >= items[index].min.h
+                        );
+                        assert_eq!(
+                            Rect::new(Point::new(0, 0), area).intersection(rect),
+                            Some(rect)
+                        );
+                        assert!(result
+                            .iter()
+                            .skip(index + 1)
+                            .flatten()
+                            .all(|other| rect.intersection(*other).is_none()));
+                    }
+                    println!("mosaic-cross-strips count={count} ordering={ordering} sample={sample} elapsed_us={} included={} digest={digest:016x}",
+                        elapsed.as_micros(), result.iter().flatten().count());
+                    expected = Some(result);
+                }
+            }
         }
     }
 

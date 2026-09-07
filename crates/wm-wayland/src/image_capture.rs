@@ -7,9 +7,10 @@
 //! `zwlr_screencopy_v1`; the long-lived session adds constraint updates and
 //! source lifetime tracking around that pixel path.
 
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use smithay::output::Output;
 use smithay::reexports::wayland_protocols::ext::image_capture_source::v1::server::{
@@ -38,6 +39,54 @@ use wm_theme_api::{Rect, Size};
 use crate::state::{Compositor, WlWindowId};
 
 const VERSION: u32 = 1;
+const MAX_SESSIONS: usize = 256;
+const MAX_PENDING: usize = 256;
+const MAX_EXAMINED: usize = 32;
+const MAX_FRAMES: usize = 4;
+const MAX_PIXELS: u64 = 4 * 1024 * 1024;
+const SERVICE_TIME: Duration = Duration::from_millis(2);
+const SERVICE_PAUSE: Duration = Duration::from_millis(4);
+
+/// Bound each batch, including abandoned or invalid requests. A single
+/// readback cannot be preempted; the first valid frame may exceed the pixel
+/// allowance so large outputs still make progress.
+struct ServiceBudget {
+    started: Instant,
+    examined: usize,
+    frames: usize,
+    pixels: u64,
+}
+
+impl ServiceBudget {
+    fn new(started: Instant) -> Self {
+        Self {
+            started,
+            examined: 0,
+            frames: 0,
+            pixels: 0,
+        }
+    }
+
+    fn examine(&mut self, now: Instant) -> bool {
+        if self.examined == MAX_EXAMINED
+            || self.frames == MAX_FRAMES
+            || (self.examined > 0 && now.duration_since(self.started) >= SERVICE_TIME)
+        {
+            return false;
+        }
+        self.examined += 1;
+        true
+    }
+
+    fn reserve_frame(&mut self, pixels: u64) -> bool {
+        if self.frames > 0 && self.pixels.saturating_add(pixels) > MAX_PIXELS {
+            return false;
+        }
+        self.frames += 1;
+        self.pixels = self.pixels.saturating_add(pixels);
+        true
+    }
+}
 
 #[derive(Clone, Debug)]
 enum CaptureTarget {
@@ -91,7 +140,18 @@ struct CursorSessionData {
 
 pub(crate) struct ImageCapture {
     sessions: Vec<SessionInstance>,
-    captures: Vec<PendingCapture>,
+    captures: VecDeque<PendingCapture>,
+    service_after: Instant,
+}
+
+impl ImageCapture {
+    fn deadline(&self) -> Option<Instant> {
+        (!self.captures.is_empty()).then_some(self.service_after)
+    }
+}
+
+pub(crate) fn deadline(comp: &Compositor) -> Option<Instant> {
+    comp.image_capture.deadline()
 }
 
 pub(crate) fn init(display: &DisplayHandle) -> ImageCapture {
@@ -109,7 +169,8 @@ pub(crate) fn init(display: &DisplayHandle) -> ImageCapture {
     );
     ImageCapture {
         sessions: Vec::new(),
-        captures: Vec::new(),
+        captures: VecDeque::new(),
+        service_after: Instant::now(),
     }
 }
 
@@ -119,19 +180,24 @@ pub(crate) fn refresh(comp: &mut Compositor) {
     comp.image_capture
         .sessions
         .retain(|session| session.resource.is_alive());
-    let sessions: Vec<_> = comp
-        .image_capture
-        .sessions
-        .iter()
-        .map(|session| (session.resource.clone(), Arc::clone(&session.shared)))
-        .collect();
-    for (resource, shared) in sessions {
-        update_constraints(comp, &resource, &shared);
+    for session in &comp.image_capture.sessions {
+        update_constraints(comp, &session.resource, &session.shared);
     }
 
-    let pending = std::mem::take(&mut comp.image_capture.captures);
-    for capture in pending {
+    let started = Instant::now();
+    if comp.image_capture.captures.is_empty() || started < comp.image_capture.service_after {
+        return;
+    }
+    let mut budget = ServiceBudget::new(started);
+    while budget.examine(Instant::now()) {
+        let Some(capture) = comp.image_capture.captures.pop_front() else {
+            break;
+        };
         if !capture.frame.is_alive() {
+            continue;
+        }
+        if !capture.buffer.is_alive() {
+            capture.frame.failed(FailureReason::Unknown);
             continue;
         }
         if capture.shared.stopped.load(Ordering::Relaxed) {
@@ -156,6 +222,12 @@ pub(crate) fn refresh(comp: &mut Compositor) {
         {
             capture.frame.failed(FailureReason::Unknown);
             continue;
+        }
+        if !budget.reserve_frame(constraints.size.w as u64 * constraints.size.h as u64) {
+            // Keep arrival order when the current batch has insufficient
+            // room. The first frame in the next batch is always admitted.
+            comp.image_capture.captures.push_front(capture);
+            break;
         }
         let size = match capture.shared.target.as_ref() {
             Some(CaptureTarget::Output(name)) => {
@@ -209,6 +281,10 @@ pub(crate) fn refresh(comp: &mut Compositor) {
         );
         capture.frame.ready();
     }
+    // Keep the cooldown when the queue drains, preventing a client from
+    // bypassing the budget with one new request per dispatch. An empty queue
+    // contributes no event-loop deadline and causes no periodic wakeups.
+    comp.image_capture.service_after = Instant::now() + SERVICE_PAUSE;
 }
 
 fn target_constraints(comp: &Compositor, target: Option<&CaptureTarget>) -> Option<Constraints> {
@@ -289,6 +365,14 @@ fn create_session(
         stopped: AtomicBool::new(false),
     });
     let resource = data_init.init(id, Arc::clone(&shared));
+    state
+        .image_capture
+        .sessions
+        .retain(|session| session.resource.is_alive());
+    if state.image_capture.sessions.len() >= MAX_SESSIONS {
+        stop_session(&shared, Some(&resource));
+        return;
+    }
     state
         .image_capture
         .sessions
@@ -528,10 +612,8 @@ impl Dispatch<ExtImageCopyCaptureFrameV1, FrameData> for Compositor {
         let mut frame = data.state.lock().unwrap();
         match request {
             ext_image_copy_capture_frame_v1::Request::Destroy => {
-                state
-                    .image_capture
-                    .captures
-                    .retain(|capture| &capture.frame != resource);
+                // The bounded service loop consumes this dead queue entry.
+                // Avoid scanning the queue once per frame destruction.
                 data.shared.frame_live.store(false, Ordering::Relaxed);
             }
             ext_image_copy_capture_frame_v1::Request::AttachBuffer { buffer } => {
@@ -580,27 +662,26 @@ impl Dispatch<ExtImageCopyCaptureFrameV1, FrameData> for Compositor {
                     return;
                 };
                 frame.captured = true;
-                state.image_capture.captures.push(PendingCapture {
+                if state.image_capture.captures.len() >= MAX_PENDING {
+                    resource.failed(FailureReason::Unknown);
+                    return;
+                }
+                state.image_capture.captures.push_back(PendingCapture {
                     frame: resource.clone(),
                     buffer,
                     shared: Arc::clone(&data.shared),
                 });
-                state.wm.backend_mut().mark_damaged();
             }
             _ => {}
         }
     }
 
     fn destroyed(
-        state: &mut Self,
+        _state: &mut Self,
         _client: ClientId,
-        resource: &ExtImageCopyCaptureFrameV1,
+        _resource: &ExtImageCopyCaptureFrameV1,
         data: &FrameData,
     ) {
-        state
-            .image_capture
-            .captures
-            .retain(|capture| &capture.frame != resource);
         data.shared.frame_live.store(false, Ordering::Relaxed);
     }
 }
@@ -632,5 +713,54 @@ impl Dispatch<ExtImageCopyCaptureCursorSessionV1, CursorSessionData> for Composi
             ext_image_copy_capture_cursor_session_v1::Request::Destroy => {}
             _ => {}
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn capture_batches_bound_invalid_entries_frames_pixels_and_time() {
+        let now = Instant::now();
+        let mut invalid = ServiceBudget::new(now);
+        for _ in 0..MAX_EXAMINED {
+            assert!(invalid.examine(now));
+        }
+        assert!(!invalid.examine(now), "dead requests must also yield");
+
+        let mut small = ServiceBudget::new(now);
+        for _ in 0..MAX_FRAMES {
+            assert!(small.examine(now));
+            assert!(small.reserve_frame(1));
+        }
+        assert!(
+            !small.examine(now),
+            "tiny requests cannot evade the frame limit"
+        );
+
+        let mut pixels = ServiceBudget::new(now);
+        assert!(pixels.examine(now));
+        assert!(pixels.reserve_frame(MAX_PIXELS));
+        assert!(!pixels.reserve_frame(1));
+
+        let mut slow = ServiceBudget::new(now);
+        assert!(slow.examine(now));
+        assert!(!slow.examine(now + SERVICE_TIME));
+    }
+
+    #[test]
+    fn an_oversized_first_capture_progresses_and_idle_cooldown_never_wakes() {
+        let now = Instant::now();
+        let mut budget = ServiceBudget::new(now);
+        assert!(budget.examine(now));
+        assert!(budget.reserve_frame(MAX_PIXELS * 4));
+        assert!(!budget.reserve_frame(1));
+        let capture = ImageCapture {
+            sessions: Vec::new(),
+            captures: VecDeque::new(),
+            service_after: now + SERVICE_PAUSE,
+        };
+        assert_eq!(capture.deadline(), None);
     }
 }

@@ -97,8 +97,12 @@ fn draw_preview(dest: &mut tiny_skia::Pixmap, src: &DecorationBuffer, x: u32, y:
     if w == 0 || h == 0 || src.width == 0 || src.height == 0 {
         return;
     }
-    let Some(size) = tiny_skia::IntSize::from_wh(src.width, src.height) else { return };
-    let Some(src_pixmap) = tiny_skia::Pixmap::from_vec(src.pixels.clone(), size) else { return };
+    // PixmapRef accepts a longer backing slice, whereas the former owned
+    // Pixmap rejected mismatched lengths. Keep that validation while borrowing
+    // the preview instead of copying every pixel for a read-only thumbnail.
+    let expected = (src.width as usize).checked_mul(src.height as usize).and_then(|pixels| pixels.checked_mul(4));
+    if expected != Some(src.pixels.len()) { return; }
+    let Some(src_pixmap) = tiny_skia::PixmapRef::from_bytes(&src.pixels, src.width, src.height) else { return };
 
     let scale = (w as f32 / src.width as f32).min(h as f32 / src.height as f32);
     let dst_w = src.width as f32 * scale;
@@ -107,7 +111,7 @@ fn draw_preview(dest: &mut tiny_skia::Pixmap, src: &DecorationBuffer, x: u32, y:
     let dy = y as f32 + (h as f32 - dst_h) / 2.0;
 
     let paint = PixmapPaint { quality: FilterQuality::Bilinear, ..Default::default() };
-    dest.draw_pixmap(0, 0, src_pixmap.as_ref(), &paint, Transform::from_row(scale, 0.0, 0.0, scale, dx, dy), None);
+    dest.draw_pixmap(0, 0, src_pixmap, &paint, Transform::from_row(scale, 0.0, 0.0, scale, dx, dy), None);
 }
 
 #[cfg(test)]
@@ -121,6 +125,42 @@ mod tests {
             pixels.extend_from_slice(&[color.0, color.1, color.2, 0xFF]);
         }
         DecorationBuffer { width, height, pixels }
+    }
+
+    #[test]
+    fn borrowed_previews_preserve_owned_pixels_and_invalid_length_fallback() {
+        fn previous(dest: &mut tiny_skia::Pixmap, src: &DecorationBuffer, x: u32, y: u32, w: u32, h: u32) {
+            if w == 0 || h == 0 || src.width == 0 || src.height == 0 { return; }
+            let Some(size) = tiny_skia::IntSize::from_wh(src.width, src.height) else { return };
+            let Some(pixmap) = tiny_skia::Pixmap::from_vec(src.pixels.clone(), size) else { return };
+            let scale = (w as f32 / src.width as f32).min(h as f32 / src.height as f32);
+            let dx = x as f32 + (w as f32 - src.width as f32 * scale) / 2.0;
+            let dy = y as f32 + (h as f32 - src.height as f32 * scale) / 2.0;
+            let paint = PixmapPaint { quality: FilterQuality::Bilinear, ..Default::default() };
+            dest.draw_pixmap(0, 0, pixmap.as_ref(), &paint, Transform::from_row(scale, 0.0, 0.0, scale, dx, dy), None);
+        }
+        for (width, height) in [(1, 1), (1, 64), (64, 1), (160, 90), (40, 120)] {
+            let mut source = solid_preview(width, height, (0, 0, 0));
+            for (index, pixel) in source.pixels.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+                let alpha = index as u8;
+                pixel.copy_from_slice(&[alpha / 2, alpha / 3, alpha / 5, alpha]);
+            }
+            for (x, y, w, h) in [(5, 7, 48, 42), (0, 0, 112, 112), (55, 61, 20, 8), (2, 3, 0, 20)] {
+                let mut expected = tiny_skia::Pixmap::new(64, 64).unwrap();
+                expected.fill(tiny_skia::Color::from_rgba8(90, 60, 20, 255));
+                let mut actual = expected.clone();
+                previous(&mut expected, &source, x, y, w, h);
+                draw_preview(&mut actual, &source, x, y, w, h);
+                assert_eq!(actual, expected, "source {width}x{height}, destination {x},{y}/{w}x{h}");
+            }
+        }
+        for length in [0, 3, 5, 8] {
+            let invalid = DecorationBuffer { width: 1, height: 1, pixels: vec![255; length] };
+            let mut dest = tiny_skia::Pixmap::new(16, 16).unwrap();
+            let original = dest.clone();
+            draw_preview(&mut dest, &invalid, 0, 0, 16, 16);
+            assert_eq!(dest, original, "invalid length {length} must leave the well unchanged");
+        }
     }
 
     #[test]
