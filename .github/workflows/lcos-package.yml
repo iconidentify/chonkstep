@@ -141,6 +141,11 @@ jobs:
               apt-get install -y -qq dpkg-dev
               packaging/debian/build-deb.sh
             '
+          # The container writes dist/ as root onto the bind mount, which
+          # leaves the runner unable to write its own checksum file in
+          # there. Docker Desktop remaps ownership on macOS, so this only
+          # bites on Linux CI.
+          sudo chown -R "$(id -u):$(id -g)" dist
 
       # The real test of a control file is a machine that has nothing on
       # it. If Depends is short a library, this is where it shows up --
