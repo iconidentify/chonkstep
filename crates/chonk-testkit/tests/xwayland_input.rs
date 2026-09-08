@@ -24,15 +24,86 @@ const TITLE: &str = "xwayland-input-probe";
 
 #[test]
 #[ignore = "needs a nested Wayland session: scripts/e2e.sh --headless --release"]
+fn fullscreen_publishes_border_changes_before_a_settled_resize() {
+    use x11rb::protocol::xproto::PropMode;
+
+    for scale in [1.0, 1.5, 2.0] {
+        let mut session = Session::boot(&format!("x11-fullscreen-borders-{scale}"), SessionOptions {
+            scale: Some(scale),
+            ..Default::default()
+        }).unwrap();
+        let (conn, screen_num) = x11rb::connect(Some(&format!(":{}", xwayland_display(&session)))).unwrap();
+        let root = conn.setup().roots[screen_num].root;
+        let xid = conn.generate_id().unwrap();
+        conn.create_window(COPY_DEPTH_FROM_PARENT, xid, root, 40, 30, 400, 240, 0,
+            WindowClass::INPUT_OUTPUT, COPY_FROM_PARENT,
+            &CreateWindowAux::new().background_pixel(0x406080)
+                .event_mask(EventMask::STRUCTURE_NOTIFY | EventMask::PROPERTY_CHANGE)).unwrap();
+        conn.change_property8(PropMode::REPLACE, xid, AtomEnum::WM_NAME, AtomEnum::STRING,
+            b"SDL fullscreen border handshake").unwrap();
+        conn.map_window(xid).unwrap();
+        conn.flush().unwrap();
+        let extents = intern(&conn, b"_NET_FRAME_EXTENTS");
+        let net_state = intern(&conn, b"_NET_WM_STATE");
+        let fullscreen = intern(&conn, b"_NET_WM_STATE_FULLSCREEN");
+        let original = poll_until(EVENT, "the decorated X11 window's borders", || {
+            let values = property_values(&conn, xid, extents, AtomEnum::CARDINAL.into());
+            (values.len() == 4 && values[2] > 0).then_some(values)
+        }).unwrap();
+        session.door().barrier().unwrap();
+        let world = session.world().unwrap();
+        let output = (world.output_w, world.output_h);
+
+        // SDL holds back size events until the WM announces the new borders.
+        // Assert both halves on the actual X wire, including the event order;
+        // checking the compositor's fullscreen rectangle alone missed Steam's
+        // browser staying at its old size inside a fullscreen X window.
+        for enter in [true, false, true, false] {
+            while conn.poll_for_event().unwrap().is_some() {}
+            conn.send_event(false, root, EventMask::SUBSTRUCTURE_REDIRECT | EventMask::SUBSTRUCTURE_NOTIFY,
+                ClientMessageEvent::new(32, xid, net_state,
+                    [u32::from(enter), fullscreen, 0, 1, 0])).unwrap();
+            conn.flush().unwrap();
+            let expected_extents = if enter { vec![0; 4] } else { original.clone() };
+            let expected_size = if enter { output } else { (400, 240) };
+            let mut borders_announced = false;
+            poll_until(EVENT, "a resize after the fullscreen border transition", || {
+                while let Some(event) = conn.poll_for_event().ok()? {
+                    match event {
+                        Event::PropertyNotify(event) if event.atom == extents => {
+                            borders_announced = property_values(&conn, xid, extents, AtomEnum::CARDINAL.into()) == expected_extents;
+                        }
+                        Event::ConfigureNotify(event) if borders_announced
+                            && (u32::from(event.width), u32::from(event.height)) == expected_size => {
+                            let states = property_values(&conn, xid, net_state, AtomEnum::ATOM.into());
+                            if states.contains(&fullscreen) == enter { return Some(()); }
+                        }
+                        _ => {}
+                    }
+                }
+                None
+            }).unwrap_or_else(|error| panic!("{error}; enter={enter}, scale={scale}\n{}", session.log()));
+            let geometry = conn.get_geometry(xid).unwrap().reply().unwrap();
+            assert_eq!((u32::from(geometry.width), u32::from(geometry.height)), expected_size);
+        }
+    }
+}
+
+#[test]
+#[ignore = "needs a nested Wayland session: scripts/e2e.sh --headless --release"]
 fn x11_autostart_connects_to_the_nested_display_before_the_first_dispatch() {
     let probe = profile_binary("chonk-x11-autostart-probe").expect("probe is built");
     let marker = session_dir("x11-autostart").join("inherited-display");
     let mut session = Session::boot("x11-autostart", SessionOptions {
-        config_extra: format!("autostart = [[{:?}, {:?}]]\n", probe, marker),
+        config_extra: format!("autostart = [[{:?}, {:?}, \"check-scale-env\"]]\n", probe, marker),
         // A nested compositor must replace even a stale inherited X11
         // display. Using an invalid number also keeps the regression
         // incapable of opening its window on the real desktop.
-        env: vec![("DISPLAY".into(), ":65534".into())],
+        env: vec![
+            ("DISPLAY".into(), ":65534".into()),
+            ("GDK_SCALE".into(), "2".into()),
+            ("GDK_DPI_SCALE".into(), "1.5".into()),
+        ],
         ..Default::default()
     }).expect("nested session boots");
     let expected = format!("DISPLAY=:{}\n", xwayland_display(&session));

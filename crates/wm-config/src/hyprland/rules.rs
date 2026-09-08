@@ -73,7 +73,7 @@ impl Pattern {
     /// size limit caps that; a pattern over it is refused like any
     /// other malformed one.
     fn compile(pattern: &str) -> Option<Self> {
-        RegexBuilder::new(pattern)
+        RegexBuilder::new(&format!(r"\A(?:{pattern})\z"))
             .size_limit(1 << 20)
             .dfa_size_limit(1 << 20)
             .build()
@@ -84,13 +84,10 @@ impl Pattern {
             })
     }
 
-    /// Hyprland matches window rules by *search*, not by full match:
-    /// `o.window("localsend", …)` is what floats a window whose class
-    /// is `localsend_app`, and half of Omarchy's own patterns carry an
-    /// explicit `^…$` precisely because the default is unanchored.
-    /// `Regex::is_match` is already a search, so this is the default
-    /// behaviour rather than a decision — but it is the decision that
-    /// makes fifteen of Omarchy's rules work, so it is written down.
+    /// Hyprland's CRegexMatchEngine uses RE2::FullMatch. Anchoring the
+    /// whole expression at compile time preserves alternation and explicit
+    /// anchors while preventing a rule for title `Steam` from resizing
+    /// `Steam Big Picture Mode` or `Sign in to Steam` as a desktop window.
     fn matches(&self, text: &str) -> bool {
         self.regex.is_match(text)
     }

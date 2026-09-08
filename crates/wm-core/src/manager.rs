@@ -2801,6 +2801,7 @@ impl<B: Backend> WindowManager<B> {
             }
             self.backend.position_client(window, Point::new(0, 0));
             self.backend.resize_client(window, monitor.size);
+            self.publish_frame_extents(id);
             return;
         }
         // A client-decorated window has no chrome to lay out and no
@@ -6748,6 +6749,13 @@ mod tests {
         // or a client reasoning from them lands off by the difference.
         assert_eq!(left + 800 + right, layout.frame_size.w);
         assert_eq!(top + 600 + bottom, layout.frame_size.h);
+
+        wm.fullscreen(id);
+        assert_eq!(wm.backend().frame_extents[&window], (0, 0, 0, 0),
+            "fullscreen must publish the removal of every border; SDL waits for it before resizing");
+        wm.unfullscreen(id);
+        assert_eq!(wm.backend().frame_extents[&window], (left, right, top, bottom),
+            "leaving fullscreen restores the actual decoration extents");
 
         wm.backend_mut().set_client_draws_own_chrome(window, true);
         wm.dispatch(BackendEvent::ChromeChanged(window));

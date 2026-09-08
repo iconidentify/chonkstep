@@ -8,6 +8,13 @@ use x11rb::wrapper::ConnectionExt as _;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let marker = std::env::args().nth(1).ok_or("expected marker path")?;
+    if std::env::args().nth(2).as_deref() == Some("check-scale-env") {
+        for name in ["GDK_SCALE", "GDK_DPI_SCALE"] {
+            if std::env::var_os(name).is_some() {
+                return Err(format!("inherited {name} would double-apply desktop scaling").into());
+            }
+        }
+    }
     let display = std::env::var("DISPLAY")?;
     let (connection, screen_number) = x11rb::connect(None)?;
     let screen = &connection.setup().roots[screen_number];

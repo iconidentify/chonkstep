@@ -641,14 +641,20 @@ fn the_sizes_the_hardcoded_rule_could_not_express_come_through() {
             .and_then(|d| d.size),
         Some(wm_core::Size::new(920, 480))
     );
-    // `apps/localsend.lua`, whose pattern has no anchors — Hyprland
-    // matches by search, so it catches the real class `localsend_app`.
+    // Hyprland requires a full match even without explicit anchors.
     assert_eq!(
         policy
-            .decision_for("localsend_app", "")
+            .decision_for("localsend", "")
             .and_then(|d| d.size),
         Some(wm_core::Size::new(1100, 700))
     );
+    assert!(policy.decision_for("localsend_app", "").is_none());
+    for title in ["Steam Big Picture Mode", "Sign in to Steam"] {
+        assert_eq!(policy.decision_for("steam", title).and_then(|d| d.size), None,
+            "the desktop size rule must not resize {title}");
+    }
+    assert!(policy.decision_for("steam_app_123", "Steam").is_none(),
+        "Steam's floating rule must not turn a game's window into the launcher");
 }
 
 /// A rule this reader only half-understands is dropped whole and says

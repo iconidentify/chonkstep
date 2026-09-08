@@ -136,6 +136,12 @@ fn window_click_workflow(scale: f32, name: &str) {
     let window = session.wait_for_window("input-probe").unwrap();
     let at = ((window.x + 50) as f64, (window.y + 60) as f64);
     session.door().click(at.0, at.1).unwrap();
+    // The compositor barrier does not wait for the client's event loop or
+    // log write. Observe the setup click before taking the baseline, or its
+    // delayed release can be mistaken for a capture click leaking through.
+    poll_until(Duration::from_secs(5), "the probe receives the setup click", || {
+        session.client_log("chonk-input-probe").contains(" release ").then_some(())
+    }).unwrap();
     let releases = session
         .client_log("chonk-input-probe")
         .matches(" release ")
@@ -190,14 +196,6 @@ fn window_click_workflow(scale: f32, name: &str) {
     let frame = world.frame_of(window.id).unwrap();
     assert_eq!((image.width, image.height), (frame.w, frame.h));
     reviews_opened(&session, &[("xdg-open", &path)]);
-    assert_eq!(
-        session
-            .client_log("chonk-input-probe")
-            .matches(" release ")
-            .count(),
-        releases,
-        "the capture click must not reach the target app"
-    );
     session.door().tap_key(30).unwrap();
     poll_until(
         Duration::from_secs(5),
@@ -210,6 +208,16 @@ fn window_click_workflow(scale: f32, name: &str) {
         },
     )
     .unwrap();
+    // Seeing the subsequent key also proves the client has drained any
+    // earlier pointer events before we assert that capture consumed them.
+    assert_eq!(
+        session
+            .client_log("chonk-input-probe")
+            .matches(" release ")
+            .count(),
+        releases,
+        "the capture click must not reach the target app"
+    );
 }
 
 #[test]

@@ -111,8 +111,8 @@ windowrule   = float on, match:class steam               # 0.53+
 The supported properties are `float`, `size`, `center`, `idle_inhibit`,
 `pin`, `no_focus`, `no_initial_focus`, `focus_on_activate`,
 `fullscreen`, and `maximize`. They match `class` and `title` as regular
-expressions, unanchored (a *search*, which is how Hyprland matches and
-why `o.window("localsend", …)` catches `localsend_app`). Last matching
+expressions, matched against the entire class or title, as in Hyprland's
+`RE2::FullMatch`. Use `.*` when a substring is intended. Last matching
 rule wins independently for each property.
 
 `idle_inhibit` follows the mapped/visible interpretation: a matching
@@ -178,6 +178,11 @@ and logged:
 | `XDG_CURRENT_DESKTOP`, `XDG_SESSION_DESKTOP` | Omarchy sets both to `Hyprland`, which under chonkstep is false. Carrying them routes xdg-desktop-portal at `xdg-desktop-portal-hyprland`, which would then try to talk to a compositor that is not there — and break screen sharing rather than one key. |
 | `WAYLAND_DISPLAY`, `DISPLAY`, `XDG_SESSION_TYPE`, `XDG_RUNTIME_DIR`, `HYPRLAND_INSTANCE_SIGNATURE` | They name *this* session, which the compositor sets for itself. A stale value out of a file points every child at a display that does not exist. |
 | `GDK_SCALE`, `GDK_DPI_SCALE`, `QT_SCALE_FACTOR`, `ELM_SCALE` | Global toolkit scaling can disagree with per-output Wayland scale. Monitor rules and fractional scale are the single scale path. |
+
+Wayland startup also removes inherited `GDK_SCALE` and `GDK_DPI_SCALE`, including
+stale values in the activation environment. GTK and Steam receive scale through
+Wayland or XSETTINGS/X resources. Per-application launch commands can still set
+an explicit override when needed.
 
 Blanket activation-environment commands are never admitted as
 autostart. In particular, `systemctl --user import-environment $(env

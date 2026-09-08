@@ -144,6 +144,10 @@ _CHONKSTEP_STALE_ENV=(
     CHONKSTEP_TEST_RUST_LOG
     CHONKSTEP_TEST_SOCKET
     CHONKSTEP_WAYLAND_BIN
+    # Display protocols already publish scale. Inheriting these from another
+    # desktop doubles GTK/Steam scaling, including in D-Bus activated clients.
+    GDK_SCALE
+    GDK_DPI_SCALE
 )
 _CHONKSTEP_STALE_OWNED_CURSOR=0
 if [ -n "${CHONKSTEP_OWNS_XCURSOR_SIZE:-}" ]; then

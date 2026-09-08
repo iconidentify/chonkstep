@@ -303,6 +303,8 @@ fn direct_session_owns_graphical_targets_and_publishes_only_curated_environment(
         .env("CHONKSTEP_SESSION_CONTINUES", "1")
         .env("CHONKSTEP_TEST_SOCKET", "/tmp/stale-test-door.sock")
         .env("XCURSOR_SIZE", "96")
+        .env("GDK_SCALE", "2")
+        .env("GDK_DPI_SCALE", "1.5")
         .env("CARGO_POISON", "must-not-be-published")
         .env("LD_LIBRARY_PATH", "/also/not/published")
         .stdout(Stdio::null())
@@ -348,6 +350,10 @@ fn direct_session_owns_graphical_targets_and_publishes_only_curated_environment(
     );
     assert!(!started.contains("CARGO_POISON"));
     assert!(!started.contains("LD_LIBRARY_PATH"));
+    assert!(started.lines().any(|line| line.contains("--user unset-environment")
+        && line.split_whitespace().any(|name| name == "GDK_SCALE")
+        && line.split_whitespace().any(|name| name == "GDK_DPI_SCALE")),
+        "activation must not hand Steam the previous desktop's GTK scale");
 
     // SAFETY: the child was spawned by this test, has not been reaped, and
     // `kill` only passes its numeric pid and a valid signal to the kernel.
