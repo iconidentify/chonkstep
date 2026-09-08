@@ -1098,7 +1098,15 @@ fn monitor_from(fields: &[(Option<String>, Value)]) -> Monitor {
     for (key, value) in fields {
         let Some(key) = key else { continue };
         if !matches!(key.as_str(), "output" | "mode" | "position" | "scale") {
-            extra.push(format!("{key} {}", property_text(value)));
+            // Two separate tokens, not one joined "key value" string: the
+            // conf front end splits `monitor = …, transform, N` on commas
+            // (`conf.rs`'s `fields.iter().skip(4)`), and wm-wayland's
+            // `monitor_transform()` only recognizes that exact
+            // `["transform", "N"]` shape. A single combined string here
+            // silently refused every Lua-configured rotation as an
+            // unsupported field.
+            extra.push(key.clone());
+            extra.push(property_text(value));
         }
     }
     Monitor {

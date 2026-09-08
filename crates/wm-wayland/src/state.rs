@@ -1860,6 +1860,7 @@ pub(crate) fn apply_monitor_rules(
                         scale = requested_scale,
                         "hyprland-config: monitor line refused whole; scale must be auto or 0.5 through 4"
                     );
+                    auto_x = auto_x.max(setup.position.x.saturating_add(setup.size.w as i32));
                     continue;
                 }
             }
@@ -2000,6 +2001,10 @@ fn resolve_monitor_mode(output: &Output, modes: &[Mode], request: &str) -> Optio
     }
 }
 
+/// `1`/`3` map directly onto Smithay's `_90`/`_270`. The rendered
+/// direction still needs native DRM validation; the nested test backend
+/// refuses non-normal transforms. See the outstanding hardware check in
+/// <https://github.com/iconidentify/chonkstep/issues/144>.
 fn monitor_transform(extra: &[String]) -> Result<Transform, &str> {
     if extra.is_empty() {
         return Ok(Transform::Normal);
@@ -4879,6 +4884,31 @@ mod tests {
         assert_eq!(setups[0].size, Size::new(1920, 1080));
         assert_eq!(setups[0].transform, Transform::Normal);
         assert_eq!(setups[0].requested_mode, None);
+    }
+
+    #[test]
+    fn an_invalid_scale_still_reserves_its_layout_slot_for_auto_positioning() {
+        for scale in ["999", "0.25", "NaN", "inf", "invalid"] {
+            let mut setups = vec![
+                output_setup("DP-1", (600, 340), Size::new(1920, 1080), Point::new(0, 0)),
+                output_setup("HDMI-A-1", (300, 170), Size::new(1920, 1080), Point::new(500, 500)),
+            ];
+            let rules = vec![
+                monitor_rule("DP-1", "preferred", "100x100", scale, &["transform", "1"]),
+                monitor_rule("HDMI-A-1", "preferred", "auto", "1", &[]),
+            ];
+            let scales = apply_monitor_rules(&mut setups, &rules, Some(1.25));
+            assert_eq!(scales, vec![1.25, 1.0], "rejected scale {scale}");
+            assert_eq!(setups[0].position, Point::new(0, 0));
+            assert_eq!(setups[0].size, Size::new(1920, 1080));
+            assert_eq!(setups[0].transform, Transform::Normal);
+            assert_eq!(setups[0].requested_mode, None, "the whole rule must be refused");
+            assert_eq!(
+                setups[1].position,
+                Point::new(1920, 0),
+                "auto-positioning must reserve the rejected output's original width"
+            );
+        }
     }
 
     #[test]

@@ -5,6 +5,36 @@ crate and both session binaries carry the same number.
 
 ## [Unreleased]
 
+## [0.4.4] - 2026-09-08
+
+- LCOS gains an amd64 X11 package, four themes, desktop branding, and
+  theme-specific wallpapers. LCOS assets are enabled only in that package;
+  the default Arch build retains its existing assets.
+- Client-decorated Wayland windows honor their input regions and resize
+  grab offsets, restoring toolkit resize handles at integer and fractional
+  display scales.
+- Logout signals remain deliverable in launched applications. Nested hot
+  restart reconnects to the original host display and preserves signal delivery.
+- Security-context clients cannot bind privileged capture, clipboard-control,
+  virtual-input, layer-shell, and related globals.
+- Presentation feedback, frame callbacks, and FIFO barriers use actual visible
+  surfaces, including subsurfaces. Hidden animation clients stop redrawing.
+- Appearance changes use one worker with bounded subprocess execution and
+  coalesce pending requests. Unchanged config polling avoids rebuilding its
+  path list, and X11 property reads have explicit size limits.
+- Text pen positions snap to whole pixels and desktop marks are resampled
+  before drawing for more consistent small text and icon edges.
+- Lua `hl.monitor({ …, transform = N })` now reaches the monitor applier.
+  The Lua reader was joining `transform` and its value into one combined
+  string before handing it to the applier, which only recognizes the two
+  separate tokens the classic `.conf` syntax produces — so every
+  Lua-configured monitor rotation was silently refused as an unsupported
+  field. `monitor=` lines with other unsupported fields (`disable`,
+  `mirror`, `cm`, `bitdepth`, …) are still refused whole either way.
+- A `monitor=` line refused for an out-of-range or malformed `scale` now
+  still reserves its layout slot, so a later `auto`-positioned monitor no
+  longer lands on top of it instead of past its width.
+
 ## [0.4.3] - 2026-09-07
 
 - Fullscreen publishes zero frame extents, and XWayland sends the settled

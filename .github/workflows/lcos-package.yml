@@ -117,10 +117,12 @@ jobs:
               exit 1
             }
           fi
-          echo "version=$version"     >> "$GITHUB_OUTPUT"
-          echo "revision=$revision"   >> "$GITHUB_OUTPUT"
-          echo "source_id=$source_id" >> "$GITHUB_OUTPUT"
-          echo "deb=chonkstep_${version}-${revision}_${{ matrix.arch }}.deb" >> "$GITHUB_OUTPUT"
+          {
+            echo "version=$version"
+            echo "revision=$revision"
+            echo "source_id=$source_id"
+            echo "deb=chonkstep_${version}-${revision}_${{ matrix.arch }}.deb"
+          } >> "$GITHUB_OUTPUT"
 
       # Built inside debian:trixie's own Rust image so the binary is
       # linked against exactly the glibc the target runs. LCOS 0.3 and
@@ -195,7 +197,8 @@ jobs:
   publish:
     name: attach to the preview release
     if: startsWith(github.ref, 'refs/tags/preview-v')
-    needs: deb
+    # Publication requires the recipe and feature-isolation checks too.
+    needs: [lint, separation, deb]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -207,6 +210,7 @@ jobs:
           pattern: chonkstep-deb-*
           path: dist
           merge-multiple: true
+          digest-mismatch: error
 
       # github-release.yml creates the release; this only adds assets to
       # it. That ordering is not guaranteed -- the Arch packages take
@@ -240,5 +244,5 @@ jobs:
         run: |
           set -euo pipefail
           cd dist
-          ls -la
-          gh release upload "$GITHUB_REF_NAME" *.deb *.deb.sha256 --clobber
+          sha256sum --check ./*.deb.sha256
+          gh release upload "$GITHUB_REF_NAME" ./*.deb ./*.deb.sha256 --clobber

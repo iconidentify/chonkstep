@@ -123,6 +123,10 @@ jobs:
 
           See the [ChonkStep $version release notes](https://github.com/$GITHUB_REPOSITORY/blob/$GITHUB_REF_NAME/docs/releases/$version.md) for changes, validation and known limitations.
 
+          The LCOS workflow also attaches an amd64 X11 package and its checksum
+          to this release. See [LCOS installation](https://github.com/$GITHUB_REPOSITORY/blob/$GITHUB_REF_NAME/docs/releases/$version.md#installing-on-lcos)
+          for download and verification instructions.
+
           Install on x86-64 or ARM64/AArch64 Arch with:
 
           \`\`\`sh
