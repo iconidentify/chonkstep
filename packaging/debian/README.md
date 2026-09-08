@@ -61,7 +61,9 @@ a given version is.
 
 ## Installing on LCOS
 
-    sudo apt install ./chonkstep_0.3.0-1_amd64.deb
+Download and verify the package using the
+[0.4.4 LCOS installation instructions](../../docs/releases/0.4.4.md#installing-on-lcos),
+then install it with `sudo apt install ./chonkstep_0.4.4-1_amd64.deb`.
 
 The session then appears in LightDM's session picker as "chonkstep".
 To make it the autologin session instead of picking it by hand:
