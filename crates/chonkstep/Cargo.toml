@@ -5,6 +5,11 @@ edition.workspace = true
 license.workspace = true
 description = "A modern NeXTSTEP-style window manager for X11."
 
+[features]
+# Passthrough, so packaging can say `--features lcos` against the binary
+# it actually builds. See chonk-shell's own `lcos` feature.
+lcos = ["chonk-shell/lcos"]
+
 [dependencies]
 chonk-build-info = { path = "../chonk-build-info" }
 # The backend-generic desktop shell — everything the desktop *is*; this
