@@ -135,7 +135,7 @@ jobs:
             --volume "$GITHUB_WORKSPACE:/src" \
             --workdir /src \
             rust:trixie \
-            bash -lc '
+            bash -c '
               set -euo pipefail
               apt-get update -qq
               apt-get install -y -qq dpkg-dev
@@ -151,7 +151,7 @@ jobs:
             --platform "linux/${{ matrix.platform }}" \
             --volume "$GITHUB_WORKSPACE/dist:/dist:ro" \
             debian:trixie-slim \
-            bash -lc '
+            bash -c '
               set -euo pipefail
               apt-get update -qq
               apt-get install -y -qq /dist/${{ steps.metadata.outputs.deb }} desktop-file-utils
