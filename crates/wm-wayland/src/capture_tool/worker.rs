@@ -878,9 +878,9 @@ fn record(output: &str, geometry: &str, filter: &str) -> Result<Recording, Strin
     };
     // Software H.264 is intentional: no VAAPI/NVIDIA assumption on Apple
     // Silicon / Asahi. Pad odd selections instead of dropping their last row.
-    // calloop uses signalfd, so children inherit blocked INT/TERM/HUP. GNU env
-    // resets their disposition AND mask before exec; otherwise Stop would hang
-    // until the hard timeout despite delivering SIGINT to the correct process.
+    // Keep the recorder's explicit signal defaults for its SIGINT stop path.
+    // General child signal delivery is established by termination.rs; this
+    // older recorder-specific boundary also resets ignored dispositions.
     let child = Command::new("env")
         .args(["--default-signal=INT,TERM,HUP", "wf-recorder"])
         .args([

@@ -81,19 +81,17 @@ struct ActiveMove {
     grab_offset: Point,
 }
 
-/// An in-progress edge/corner resize drag. `start_frame` is the frame's
-/// own geometry at press time — every motion event recomputes the new
-/// size fresh from it and the current pointer position rather than
-/// accumulating deltas
-/// (same "no drift" reasoning as `ActiveMove::grab_offset`), anchored
-/// at whichever corner/edge doesn't move for `edge`: the theme this WM
-/// ships only ever offers south-facing handles (`South`/`SouthEast`/
-/// `SouthWest`), so the top edge is always the fixed anchor and only
-/// which horizontal edge is fixed varies.
+/// An edge/corner resize drag. Every motion recomputes geometry from the
+/// starting frame, preserving the opposite edge rather than accumulating
+/// deltas. Client requests also retain the pointer's offset from the edge.
 struct ActiveResize {
     client: ClientId,
     edge: ResizeEdge,
     start_frame: Rect,
+    /// Client resize handles may sit inside or outside window geometry.
+    /// Preserve that offset instead of jumping the edge under the pointer.
+    /// Server chrome and modifier drags retain their edge-position behavior.
+    start_pointer: Option<Point>,
 }
 
 /// A titlebar button currently held down (pressed but not yet
@@ -2418,7 +2416,7 @@ impl<B: Backend> WindowManager<B> {
                     ),
                     size: client.layout.frame_size,
                 };
-                self.active_resize = Some(ActiveResize { client: id, edge, start_frame });
+                self.active_resize = Some(ActiveResize { client: id, edge, start_frame, start_pointer: None });
                 self.begin_drag_grab();
             }
             _ => {}
@@ -2630,6 +2628,22 @@ impl<B: Backend> WindowManager<B> {
         let overhead_h = client.layout.frame_size.h.saturating_sub(client.geometry.size.h);
         let start_right = start_frame.pos.x + start_frame.size.w as i32;
         let start_bottom = start_frame.pos.y + start_frame.size.h as i32;
+        let root = if let Some(pointer) = active.start_pointer {
+            let dx = root.x.saturating_sub(pointer.x);
+            let dy = root.y.saturating_sub(pointer.y);
+            Point::new(
+                match edge {
+                    ResizeEdge::West | ResizeEdge::NorthWest | ResizeEdge::SouthWest => start_frame.pos.x.saturating_add(dx),
+                    _ => start_right.saturating_add(dx),
+                },
+                match edge {
+                    ResizeEdge::North | ResizeEdge::NorthWest | ResizeEdge::NorthEast => start_frame.pos.y.saturating_add(dy),
+                    _ => start_bottom.saturating_add(dy),
+                },
+            )
+        } else {
+            root
+        };
         let anchor = Point::new(
             start_frame.pos.x + start_frame.size.w as i32 / 2,
             start_frame.pos.y + start_frame.size.h as i32 / 2,
@@ -4144,7 +4158,7 @@ impl<B: Backend> WindowManager<B> {
                     Point::new(local.x + offset.x, local.y + offset.y),
                 );
                 self.active_resize =
-                    Some(ActiveResize { client: id, edge, start_frame: Rect { pos: frame_pos, size: frame_size } });
+                    Some(ActiveResize { client: id, edge, start_frame: Rect { pos: frame_pos, size: frame_size }, start_pointer: None });
                 self.begin_drag_grab();
                 tracing::debug!(?id, ?edge, "modifier-drag resize begun");
             }
@@ -4269,6 +4283,9 @@ impl<B: Backend> WindowManager<B> {
         let Some(&id) = self.window_index.get(&window) else {
             return;
         };
+        let Some(pointer) = self.backend.pointer_position().or(self.last_pointer) else {
+            return;
+        };
         let Some(client) = self.clients.get(id) else {
             return;
         };
@@ -4282,7 +4299,7 @@ impl<B: Backend> WindowManager<B> {
             ),
             size: client.layout.frame_size,
         };
-        self.active_resize = Some(ActiveResize { client: id, edge, start_frame });
+        self.active_resize = Some(ActiveResize { client: id, edge, start_frame, start_pointer: Some(pointer) });
         // Without the grab this resize could start but never end — the
         // client asked precisely because the pointer is over its own
         // chrome, where neither the motion nor the release reach us.
@@ -6911,6 +6928,60 @@ mod tests {
     }
 
     #[test]
+    fn client_resize_preserves_the_grab_offset_at_every_edge() {
+        use ResizeEdge::*;
+        for framed in [false, true] {
+            for gap in [-6, 12] {
+                for edge in [North, NorthEast, East, SouthEast, South, SouthWest, West, NorthWest] {
+                    let mut backend = FakeBackend::new();
+                    let window = backend.create_window();
+                    backend.set_geometry(window, Rect::new(Point::new(100, 100), Size::new(400, 300)));
+                    backend.set_client_draws_own_chrome(window, !framed);
+                    let mut wm = wm(backend);
+                    wm.dispatch(BackendEvent::MapRequest(window));
+                    let id = wm.client_for_window(window).unwrap();
+                    let before = wm.client(id).unwrap().geometry;
+                    let frame = client_frame_rect(wm.client(id).unwrap());
+                    let west = matches!(edge, West | NorthWest | SouthWest);
+                    let east = matches!(edge, East | NorthEast | SouthEast);
+                    let north = matches!(edge, North | NorthWest | NorthEast);
+                    let south = matches!(edge, South | SouthWest | SouthEast);
+                    let pointer = Point::new(
+                        frame.pos.x + if west { -gap } else if east { frame.size.w as i32 + gap } else { 100 },
+                        frame.pos.y + if north { -gap } else if south { frame.size.h as i32 + gap } else { 100 },
+                    );
+                    wm.dispatch(BackendEvent::PointerMotion { root: pointer, surface_local: None });
+                    wm.dispatch(BackendEvent::ResizeRequest { window, edge });
+                    wm.dispatch(BackendEvent::PointerMotion { root: pointer, surface_local: None });
+                    assert_eq!(wm.client(id).unwrap().geometry, before, "no jump: {edge:?}, gap={gap}, framed={framed}");
+                    wm.dispatch(BackendEvent::PointerMotion {
+                        root: Point::new(pointer.x + 30, pointer.y + 20), surface_local: None,
+                    });
+                    let expected = Rect::new(
+                        Point::new(before.pos.x + if west { 30 } else { 0 }, before.pos.y + if north { 20 } else { 0 }),
+                        Size::new(
+                            (before.size.w as i32 + if west { -30 } else if east { 30 } else { 0 }) as u32,
+                            (before.size.h as i32 + if north { -20 } else if south { 20 } else { 0 }) as u32,
+                        ),
+                    );
+                    assert_eq!(wm.client(id).unwrap().geometry, expected, "{edge:?}, gap={gap}, framed={framed}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn client_resize_without_a_pointer_position_cannot_start() {
+        let mut backend = FakeBackend::new();
+        let window = backend.create_window();
+        let mut wm = wm(backend);
+        wm.dispatch(BackendEvent::MapRequest(window));
+        wm.dispatch(BackendEvent::ResizeRequest { window, edge: ResizeEdge::SouthEast });
+        assert!(!wm.interactive_drag_active());
+        assert_eq!(wm.backend().outstanding_pointer_grabs, 0);
+    }
+
+    #[test]
     fn a_drag_whose_window_disappears_gives_the_pointer_back() {
         // The other way a leaked grab happens: the dragged client dies
         // mid-drag. A pointer grab with nothing left to move is a
@@ -7532,6 +7603,10 @@ mod tests {
         wm.set_workarea(Rect::new(Point::new(0, 40), Size::new(800, 560)));
         let window = wm.client(id).unwrap().window;
         let before = wm.backend().last_frame_geometry[&frame];
+        wm.dispatch(BackendEvent::PointerMotion {
+            root: Point::new(100, before.pos.y - 12),
+            surface_local: None,
+        });
         wm.dispatch(BackendEvent::ResizeRequest {
             window,
             edge: ResizeEdge::North,

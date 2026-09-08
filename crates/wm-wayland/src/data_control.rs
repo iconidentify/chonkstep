@@ -73,10 +73,10 @@
 //! # Shared security-context gate
 //!
 //! Data control is a read-anything-on-the-clipboard capability, so both
-//! globals consult `state::privileged_global_visible`. Security-context
-//! clients are now tagged and can be distinguished there. The current
-//! single-user policy remains permissive, where a clipboard manager, a
-//! terminal and a browser are all equally that user's own programs.
+//! globals consult `state::privileged_global_visible`. Clients admitted
+//! through a sandbox security context cannot bind them. Ordinary desktop
+//! clipboard managers retain access; confined applications use the focused
+//! `wl_data_device` clipboard path.
 
 use smithay::reexports::wayland_server::DisplayHandle;
 use smithay::wayland::selection::ext_data_control::{

@@ -1248,6 +1248,33 @@ fn chonksteps_own_config_still_wins_over_the_read() {
 
 // ---- the watch --------------------------------------------------------
 
+#[global_allocator]
+static ALLOCATOR: chonk_test_support::AllocationCounter = chonk_test_support::AllocationCounter;
+
+#[test]
+fn unchanged_watch_polls_do_not_allocate() {
+    let root = scratch("watch-allocations");
+    let roots = Roots::under(&root);
+    let mut reading = Reading::default();
+    for index in 0..256 {
+        let path = roots.user.join(format!("source-{index}.conf"));
+        write(&path, "# unchanged\n");
+        reading.files.push(path);
+    }
+    let mut watch = Watch::new(&roots, &reading);
+    let now = std::time::Instant::now();
+    assert!(!watch.changed(now));
+    let (changed, stats) = chonk_test_support::measure(|| {
+        (1..=20).fold(false, |changed, seconds| {
+            watch.changed(now + std::time::Duration::from_secs(seconds)) | changed
+        })
+    });
+    std::fs::remove_dir_all(root).unwrap();
+    assert!(!changed);
+    eprintln!("256 files, 20 unchanged polls: {stats:?}");
+    assert_eq!(stats, chonk_test_support::AllocationStats::default());
+}
+
 /// The live-edit path: a change to a watched file is seen, once.
 #[test]
 fn an_edit_to_a_watched_file_is_noticed_once() {

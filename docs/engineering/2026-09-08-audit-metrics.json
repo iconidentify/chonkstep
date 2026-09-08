@@ -1,0 +1,533 @@
+{
+  "baseline_commit": "facf999aa92a2bd06f8b411ec64e191bbb20fb6e",
+  "date": "2026-09-08",
+  "environment": {
+    "backend": "nested-winit-on-headless-weston",
+    "renderer": "llvmpipe",
+    "host_renderer": "pixman",
+    "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)\nbinary: rustc\ncommit-hash: 48a229ceaefd4985c50990b14116b6d856af0985\ncommit-date: 2026-09-01\nhost: x86_64-unknown-linux-gnu\nrelease: 1.98.1\nLLVM version: 22.1.8",
+    "weston": "weston 15.0.1",
+    "page_cache": "warm/uncontrolled; no system cache dropping",
+    "load_average_at_start": [
+      6.33740234375,
+      5.888671875,
+      6.5947265625
+    ]
+  },
+  "binary_sha256": {
+    "baseline": {
+      "chonkstep-wayland": "9ae68780118b210ed81762c95ac072bb99cbdbf565a1feb7e785623f794e821f",
+      "chonkstep": "f218e5c6d26438b87094abd2929ca972b14c35633dca4822a99fd0d07348b7ec"
+    },
+    "candidate": {
+      "chonkstep-wayland": "1f95c42b0858b0089dddcf119dffcdb638d66ada2e6e17394037091bdc162b5b",
+      "chonkstep": "35539393f05f3001907a353458995bcd640bf42dfd35ee9bf79f11cb74e182be"
+    }
+  },
+  "provenance_note": "Candidate built from the audit working tree. Only explanatory comments in state.rs and virtual_keyboard.rs and review artifacts changed after this build. Preserved executable hashes identify the exact measured binaries.",
+  "pre_comment_cleanup_source_sha256": {
+    "crates/wm-wayland/src/virtual_keyboard.rs": "f5419628afea625e1fd324416e27ed5c216a6ea0867ffeacf36657d612dbbbba",
+    "crates/wm-wayland/src/state.rs": "5398752a2a5ce3269220681cec76ba234cd2119f6799e1138fd34f177786e490"
+  },
+  "offscreen_animation": {
+    "method": "Three alternating paired release runs; 120 changing visible frames and one frame-callback-driven offscreen client. Wall timings include nested presentation waits, not CPU or input latency.",
+    "samples": [
+      {
+        "run": 1,
+        "label": "baseline",
+        "dispatch_calls": 383,
+        "dispatch_us": 1957846,
+        "elapsed_us": 1999546,
+        "hidden_redraws": 120,
+        "render_calls": 120,
+        "render_us": 1942512,
+        "visible_presentations": 120
+      },
+      {
+        "run": 1,
+        "label": "candidate",
+        "dispatch_calls": 260,
+        "dispatch_us": 1967077,
+        "elapsed_us": 1992148,
+        "hidden_redraws": 0,
+        "render_calls": 120,
+        "render_us": 1959201,
+        "visible_presentations": 120
+      },
+      {
+        "run": 2,
+        "label": "candidate",
+        "dispatch_calls": 259,
+        "dispatch_us": 1970562,
+        "elapsed_us": 1993411,
+        "hidden_redraws": 0,
+        "render_calls": 120,
+        "render_us": 1962962,
+        "visible_presentations": 120
+      },
+      {
+        "run": 2,
+        "label": "baseline",
+        "dispatch_calls": 381,
+        "dispatch_us": 1956356,
+        "elapsed_us": 1994452,
+        "hidden_redraws": 120,
+        "render_calls": 120,
+        "render_us": 1940608,
+        "visible_presentations": 120
+      },
+      {
+        "run": 3,
+        "label": "baseline",
+        "dispatch_calls": 386,
+        "dispatch_us": 1954503,
+        "elapsed_us": 1999323,
+        "hidden_redraws": 120,
+        "render_calls": 120,
+        "render_us": 1940030,
+        "visible_presentations": 120
+      },
+      {
+        "run": 3,
+        "label": "candidate",
+        "dispatch_calls": 263,
+        "dispatch_us": 1968564,
+        "elapsed_us": 1994094,
+        "hidden_redraws": 0,
+        "render_calls": 120,
+        "render_us": 1960552,
+        "visible_presentations": 120
+      }
+    ],
+    "medians": {
+      "baseline": {
+        "hidden_redraws": 120,
+        "dispatch_calls": 383,
+        "elapsed_us": 1999323,
+        "render_calls": 120,
+        "dispatch_us": 1956356,
+        "render_us": 1940608
+      },
+      "candidate": {
+        "hidden_redraws": 0,
+        "dispatch_calls": 260,
+        "elapsed_us": 1993411,
+        "render_calls": 120,
+        "dispatch_us": 1968564,
+        "render_us": 1960552
+      }
+    }
+  },
+  "config_watch": {
+    "files": 256,
+    "polls": 20,
+    "baseline": {
+      "allocation_requests": 5240,
+      "requested_bytes": 646000
+    },
+    "candidate": {
+      "allocation_requests": 0,
+      "requested_bytes": 0
+    },
+    "scope": "Per-thread allocation requests; does not measure RSS, filesystem syscall reduction or elapsed time."
+  },
+  "idle": {
+    "method": "Five alternating pairs, two-second settle and five-second sampling. CPU tick resolution is approximately 0.2 percentage points per sample. Unrelated background workloads were left running. No established idle CPU, PSS or startup improvement.",
+    "summary": {
+      "baseline": {
+        "ready_ms": {
+          "median": 271.764659,
+          "min": 257.372946,
+          "max": 279.625616,
+          "samples": [
+            275.001354,
+            257.372946,
+            260.683846,
+            279.625616,
+            271.764659
+          ]
+        },
+        "frame_ms": {
+          "median": 271.99951,
+          "min": 257.617071,
+          "max": 279.78795,
+          "samples": [
+            275.190326,
+            257.617071,
+            260.895535,
+            279.78795,
+            271.99951
+          ]
+        },
+        "cpu_percent": {
+          "median": 0.0,
+          "min": 0.0,
+          "max": 0.19954747007866705,
+          "samples": [
+            0.0,
+            0.0,
+            0.19954747007866705,
+            0.0,
+            0.0
+          ]
+        },
+        "context_switches_per_second": {
+          "median": 12.371389661994213,
+          "min": 11.966269756428039,
+          "max": 12.570834657926838,
+          "samples": [
+            11.966269756428039,
+            12.570834657926838,
+            12.371943144877356,
+            12.371389661994213,
+            11.97134826827426
+          ]
+        },
+        "rss_kib": {
+          "median": 258448,
+          "min": 258032,
+          "max": 258996,
+          "samples": [
+            258448,
+            258032,
+            258416,
+            258920,
+            258996
+          ]
+        },
+        "pss_kib": {
+          "median": 137561,
+          "min": 137214,
+          "max": 138179,
+          "samples": [
+            137561,
+            137214,
+            137440,
+            137942,
+            138179
+          ]
+        },
+        "private_kib": {
+          "median": 102232,
+          "min": 101944,
+          "max": 102904,
+          "samples": [
+            102232,
+            101944,
+            102112,
+            102608,
+            102904
+          ]
+        },
+        "tree_pss_kib": {
+          "median": 188521,
+          "min": 188201,
+          "max": 189114,
+          "samples": [
+            188521,
+            188201,
+            188303,
+            188848,
+            189114
+          ]
+        },
+        "fds": {
+          "median": 46,
+          "min": 46,
+          "max": 46,
+          "samples": [
+            46,
+            46,
+            46,
+            46,
+            46
+          ]
+        },
+        "threads": {
+          "median": 40,
+          "min": 40,
+          "max": 40,
+          "samples": [
+            40,
+            40,
+            40,
+            40,
+            40
+          ]
+        }
+      },
+      "candidate": {
+        "ready_ms": {
+          "median": 260.7219,
+          "min": 256.820933,
+          "max": 275.388007,
+          "samples": [
+            259.709746,
+            275.388007,
+            256.820933,
+            262.357378,
+            260.7219
+          ]
+        },
+        "frame_ms": {
+          "median": 260.845528,
+          "min": 257.051368,
+          "max": 275.581003,
+          "samples": [
+            259.905181,
+            275.581003,
+            257.051368,
+            262.588584,
+            260.845528
+          ]
+        },
+        "cpu_percent": {
+          "median": 0.1995266249976487,
+          "min": 0.0,
+          "max": 0.1995350507675912,
+          "samples": [
+            0.1995350507675912,
+            0.0,
+            0.19953403873464703,
+            0.1995266249976487,
+            0.0
+          ]
+        },
+        "context_switches_per_second": {
+          "median": 11.972430187075956,
+          "min": 11.97204232407882,
+          "max": 12.17112412485657,
+          "samples": [
+            11.972103046055473,
+            11.972430187075956,
+            11.97204232407882,
+            12.17112412485657,
+            11.972838275414336
+          ]
+        },
+        "rss_kib": {
+          "median": 258204,
+          "min": 257908,
+          "max": 258888,
+          "samples": [
+            258204,
+            258888,
+            258200,
+            257908,
+            258448
+          ]
+        },
+        "pss_kib": {
+          "median": 137363,
+          "min": 137066,
+          "max": 137948,
+          "samples": [
+            137363,
+            137948,
+            137275,
+            137066,
+            137600
+          ]
+        },
+        "private_kib": {
+          "median": 102048,
+          "min": 101784,
+          "max": 102628,
+          "samples": [
+            102048,
+            102628,
+            101956,
+            101784,
+            102312
+          ]
+        },
+        "tree_pss_kib": {
+          "median": 188268,
+          "min": 187931,
+          "max": 188864,
+          "samples": [
+            188268,
+            188864,
+            188158,
+            187931,
+            188512
+          ]
+        },
+        "fds": {
+          "median": 46,
+          "min": 46,
+          "max": 46,
+          "samples": [
+            46,
+            46,
+            46,
+            46,
+            46
+          ]
+        },
+        "threads": {
+          "median": 40,
+          "min": 40,
+          "max": 40,
+          "samples": [
+            40,
+            40,
+            40,
+            40,
+            40
+          ]
+        }
+      }
+    }
+  },
+  "validation": {
+    "rust_tests_including_doctests": 2057,
+    "wayland_integration_tests": 271,
+    "installed_omarchy_checks": 3,
+    "missing_client_skips": 0,
+    "python_harness_tests": 65,
+    "python_sdk_cases": 44,
+    "python_sdk_abstract_base_skips": 7,
+    "go_sdk": "go test ./... passed via mise exec go@1.27.0",
+    "x11_oversized_properties": "Passed on private Xvfb; test added to CI",
+    "clippy": "Strict workspace all-targets passed",
+    "rustdoc": "Warnings denied, passed"
+  },
+  "dependency_audit": {
+    "vulnerability_category_count": 0,
+    "warnings": [
+      {
+        "kind": "unmaintained",
+        "id": "RUSTSEC-2026-0196",
+        "package": "cgmath",
+        "title": "`cgmath` is unmaintained"
+      },
+      {
+        "kind": "unmaintained",
+        "id": "RUSTSEC-2026-0192",
+        "package": "ttf-parser",
+        "title": "`ttf-parser` is unmaintained"
+      },
+      {
+        "kind": "unsound",
+        "id": "RUSTSEC-2026-0197",
+        "package": "cgmath",
+        "title": "`Matrix{2,3,4}::swap_columns` can trigger undefined behavior for identical indices"
+      }
+    ]
+  },
+  "source_inventory": {
+    "bindings/go": [
+      6,
+      2428
+    ],
+    "bindings/python": [
+      7,
+      2383
+    ],
+    "crates/chonk-about": [
+      1,
+      92
+    ],
+    "crates/chonk-btpair": [
+      7,
+      2156
+    ],
+    "crates/chonk-build-info": [
+      2,
+      154
+    ],
+    "crates/chonk-dock-proto": [
+      7,
+      6482
+    ],
+    "crates/chonk-dock-widget": [
+      3,
+      1487
+    ],
+    "crates/chonk-hyprland-ipc": [
+      7,
+      4742
+    ],
+    "crates/chonk-instruments": [
+      23,
+      13021
+    ],
+    "crates/chonk-netjoin": [
+      7,
+      1776
+    ],
+    "crates/chonk-shell": [
+      27,
+      30110
+    ],
+    "crates/chonk-test-support": [
+      1,
+      146
+    ],
+    "crates/chonk-testkit": [
+      90,
+      29829
+    ],
+    "crates/chonk-toplevel": [
+      1,
+      587
+    ],
+    "crates/chonk-ui": [
+      4,
+      1239
+    ],
+    "crates/chonk-xsettings": [
+      7,
+      3953
+    ],
+    "crates/chonkstep": [
+      2,
+      713
+    ],
+    "crates/chonkstep-wayland": [
+      2,
+      210
+    ],
+    "crates/wm-config": [
+      12,
+      12419
+    ],
+    "crates/wm-core": [
+      18,
+      15679
+    ],
+    "crates/wm-theme": [
+      37,
+      15467
+    ],
+    "crates/wm-theme-api": [
+      4,
+      420
+    ],
+    "crates/wm-wayland": [
+      56,
+      44421
+    ],
+    "crates/wm-x11": [
+      2,
+      3553
+    ],
+    "examples": [
+      8,
+      3262
+    ],
+    "omarchy": [
+      2,
+      634
+    ],
+    "packaging": [
+      2,
+      239
+    ],
+    "scripts": [
+      39,
+      6339
+    ]
+  }
+}

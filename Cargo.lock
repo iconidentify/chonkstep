@@ -348,7 +348,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4dbf9978365bac10f54d1d4b04f7ce4427e51f71d61f2fe15e3fed5166474df7"
 dependencies = [
  "bitflags 2.13.1",
- "nix",
  "polling",
  "rustix 1.1.4",
  "slab",
@@ -414,7 +413,7 @@ dependencies = [
 
 [[package]]
 name = "chonk-about"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "chonk-ui",
  "cosmic-text",
@@ -423,7 +422,7 @@ dependencies = [
 
 [[package]]
 name = "chonk-btpair"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "chonk-ui",
  "cosmic-text",
@@ -434,21 +433,21 @@ dependencies = [
 
 [[package]]
 name = "chonk-build-info"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "object",
 ]
 
 [[package]]
 name = "chonk-dock-proto"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "libc",
 ]
 
 [[package]]
 name = "chonk-dock-widget"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "cosmic-text",
  "tracing",
@@ -459,7 +458,7 @@ dependencies = [
 
 [[package]]
 name = "chonk-dockapp-torture"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "chonk-dock-proto",
  "chonk-ui",
@@ -467,14 +466,14 @@ dependencies = [
 
 [[package]]
 name = "chonk-dockclock"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "chonk-ui",
 ]
 
 [[package]]
 name = "chonk-hyprland-ipc"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "chonk-dock-proto",
  "serde",
@@ -484,7 +483,7 @@ dependencies = [
 
 [[package]]
 name = "chonk-instruments"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "chonk-dock-widget",
  "chonk-test-support",
@@ -496,7 +495,7 @@ dependencies = [
 
 [[package]]
 name = "chonk-netjoin"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "chonk-ui",
  "cosmic-text",
@@ -507,7 +506,7 @@ dependencies = [
 
 [[package]]
 name = "chonk-shelf"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "chonk-dock-proto",
  "chonk-ui",
@@ -517,7 +516,7 @@ dependencies = [
 
 [[package]]
 name = "chonk-shell"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "chonk-dock-proto",
  "chonk-dock-widget",
@@ -539,11 +538,11 @@ dependencies = [
 
 [[package]]
 name = "chonk-test-support"
-version = "0.4.3"
+version = "0.4.4"
 
 [[package]]
 name = "chonk-testkit"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "chonk-dock-proto",
  "chonk-hyprland-ipc",
@@ -566,7 +565,7 @@ dependencies = [
 
 [[package]]
 name = "chonk-toplevel"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "wayland-client",
  "wayland-protocols-wlr",
@@ -574,7 +573,7 @@ dependencies = [
 
 [[package]]
 name = "chonk-ui"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "chonk-dock-proto",
  "tiny-skia",
@@ -586,7 +585,7 @@ dependencies = [
 
 [[package]]
 name = "chonk-xsettings"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "thiserror 2.0.20",
  "tracing",
@@ -595,7 +594,7 @@ dependencies = [
 
 [[package]]
 name = "chonkstep"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "chonk-build-info",
  "chonk-shell",
@@ -612,7 +611,7 @@ dependencies = [
 
 [[package]]
 name = "chonkstep-wayland"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "chonk-build-info",
  "chonk-shell",
@@ -1583,18 +1582,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "nix"
-version = "0.31.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cf20d2fde8ff38632c426f1165ed7436270b44f199fc55284c38276f9db47c3d"
-dependencies = [
- "bitflags 2.13.1",
- "cfg-if",
- "cfg_aliases",
- "libc",
-]
-
-[[package]]
 name = "nu-ansi-term"
 version = "0.50.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2374,6 +2361,16 @@ name = "shlex"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
+
+[[package]]
+name = "signal-hook"
+version = "0.4.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b2a0c28ca5908dbdbcd52e6fdaa00358ab88637f8ab33e1f188dd510eb44b53d"
+dependencies = [
+ "libc",
+ "signal-hook-registry",
+]
 
 [[package]]
 name = "signal-hook-registry"
@@ -3409,8 +3406,9 @@ checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
 
 [[package]]
 name = "wm-config"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
+ "chonk-test-support",
  "regex",
  "serde",
  "toml",
@@ -3420,7 +3418,7 @@ dependencies = [
 
 [[package]]
 name = "wm-core"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "bitflags 2.13.1",
  "chonk-test-support",
@@ -3432,7 +3430,7 @@ dependencies = [
 
 [[package]]
 name = "wm-theme"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "chonk-test-support",
  "cosmic-text",
@@ -3445,14 +3443,14 @@ dependencies = [
 
 [[package]]
 name = "wm-theme-api"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "serde",
 ]
 
 [[package]]
 name = "wm-wayland"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "calloop 0.14.4",
  "chonk-build-info",
@@ -3465,6 +3463,7 @@ dependencies = [
  "libc",
  "png 0.18.1",
  "profiling",
+ "signal-hook",
  "smithay",
  "tiny-skia",
  "tracing",
@@ -3479,7 +3478,7 @@ dependencies = [
 
 [[package]]
 name = "wm-x11"
-version = "0.4.3"
+version = "0.4.4"
 dependencies = [
  "thiserror 2.0.20",
  "tracing",

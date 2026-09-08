@@ -128,7 +128,10 @@ jobs:
         # compiled client rather than a shell one-liner.
         run: |
           sudo apt-get update
-          sudo apt-get install -y xvfb xterm x11-utils libx11-dev libgtk-3-bin
+          sudo apt-get install -y xvfb xauth xterm x11-utils libx11-dev libgtk-3-bin
+
+      - name: Reject oversized X11 application properties
+        run: xvfb-run -a cargo test --locked -p wm-x11 hostile_properties -- --ignored
 
       - name: Build release binaries
         run: cargo build --release -p chonkstep

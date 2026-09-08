@@ -24,3 +24,6 @@ serde = { version = "1", features = ["derive"] }
 # iterating the table in document order, not BTreeMap key order.
 toml = { version = "0.9", features = ["preserve_order"] }
 tracing = "0.1"
+
+[dev-dependencies]
+chonk-test-support = { path = "../chonk-test-support" }

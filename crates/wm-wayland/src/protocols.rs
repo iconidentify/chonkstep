@@ -495,11 +495,8 @@ pub(crate) struct ScreencopyFrameData {
 /// Registers both globals. Called once from `run` — see the module's
 /// integration contract for where.
 ///
-/// Never fails. Both globals consult the shared security-context-aware
-/// predicate. That predicate remains permissive today because chonkstep
-/// runs one user's session rather than a multi-tenant kiosk, but clients
-/// admitted through `wp_security_context_v1` are now identifiable when
-/// that policy changes.
+/// Never fails. Both globals consult the shared security-context predicate:
+/// ordinary desktop helpers can bind; sandbox-context clients cannot.
 pub(crate) fn init(display_handle: &DisplayHandle) -> ProtocolState {
     // The `GlobalId`s are dropped deliberately: dropping one does not
     // withdraw the global (that takes `DisplayHandle::remove_global`),

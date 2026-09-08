@@ -36,7 +36,6 @@ use std::os::fd::{BorrowedFd, RawFd};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use calloop::signals::{Signal, Signals};
 use smithay::backend::allocator::Fourcc;
 use smithay::backend::renderer::damage::OutputDamageTracker;
 use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
@@ -1433,15 +1432,14 @@ pub(crate) fn client_is_confined(client: &smithay::reexports::wayland_server::Cl
         .is_some_and(|data| data.security_context.lock().is_ok_and(|context| context.is_some()))
 }
 
-/// One gate for capabilities that affect other clients. The current
-/// policy remains permissive for both ordinary and confined clients;
-/// centralizing the decision makes confinement a policy choice instead
-/// of information the compositor cannot represent.
+/// Capabilities that affect other clients belong to ordinary desktop helpers,
+/// not clients explicitly admitted through a sandbox security context. Keep
+/// this gate shared so capture, input injection, clipboard monitoring and
+/// output/session management enforce the same boundary.
 pub(crate) fn privileged_global_visible(
     client: &smithay::reexports::wayland_server::Client,
 ) -> bool {
-    let _confined = client_is_confined(client);
-    true
+    !client_is_confined(client)
 }
 
 /// The security-context protocol's own recursively-confined-listener guard.
@@ -3579,6 +3577,7 @@ fn recovery_locker_argv<'a>(
 
 
 pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> {
+    let host_display = crate::restart::HostDisplay::capture();
     // Consume the supervisor's one-shot marker before bringing up any
     // display machinery. A recovery with no resolved locker must fail
     // at the login boundary, not finish booting an unlocked desktop.
@@ -3598,19 +3597,9 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
     let mut event_loop: EventLoop<Compositor> = EventLoop::try_new()?;
     let loop_handle = event_loop.handle();
 
-    // A display-manager/session-scope stop is a logout, not a crash.
-    // signalfd integrates the three ordinary termination signals into
-    // the same event loop as every protocol client, so teardown below
-    // runs in order and `main` returns success. SIGABRT is deliberately
-    // absent: the panic hook uses it as the watchdog's crash signal.
-    loop_handle.insert_source(
-        Signals::new(&[Signal::SIGTERM, Signal::SIGHUP, Signal::SIGINT])?,
-        |event, &mut (), comp| {
-            tracing::info!(signal = ?event.signal(), "session termination requested; logging out cleanly");
-            comp.restart = false;
-            comp.running = false;
-        },
-    )?;
+    // Keep registration alive through teardown. Children inherit ordinary
+    // signal delivery, while session stops still run the event-loop cleanup.
+    let _termination = crate::termination::install(&loop_handle)?;
 
     let display: Display<Compositor> = Display::new()?;
     let display_handle = display.handle();
@@ -3880,7 +3869,7 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
     // The ecosystem protocols, under the same timing rule. Layer-shell
     // is what fuzzel/mako/waybar look for the moment they connect;
     // layer-shell and session-lock both consult the shared
-    // security-context-aware policy (currently permissive); the idle
+    // security-context policy excluding confined clients; the idle
     // notifier's timers live on this very event loop.
     let layer_shell = crate::layers::LayerShell::new(
         smithay::wayland::shell::wlr_layer::WlrLayerShellState::new_with_filter::<Compositor, _>(
@@ -4316,7 +4305,7 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
         // `nested` is the decision this process made at startup, so the
         // replacement makes the same one rather than re-deriving it
         // from an environment this compositor itself wrote.
-        restart_in_place(nested);
+        restart_in_place(nested, &host_display);
     }
     tracing::info!("compositor session over");
     Ok(())
@@ -4327,23 +4316,13 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
 /// X11 binary documents at length. The one behavioral difference is
 /// unavoidable: Wayland clients die with our socket (no SaveSet), so
 /// the fresh process starts with an empty session.
-fn restart_in_place(nested: bool) -> ! {
+fn restart_in_place(nested: bool, host_display: &crate::restart::HostDisplay) -> ! {
     use std::os::unix::process::CommandExt;
     let bin = std::env::args_os().next().unwrap_or_else(|| "chonkstep-wayland".into());
     let mut command = std::process::Command::new(&bin);
-    // Pin the backend across the re-exec instead of letting the new
-    // process guess again.
-    //
-    // A compositor exports `WAYLAND_DISPLAY` (and `DISPLAY`, through
-    // XWayland) into its own environment so the apps it spawns find it.
-    // `exec` keeps that environment, so a session restarted from a TTY
-    // would wake up seeing both variables set, conclude from them that
-    // a desktop is already running here, and try to nest inside the
-    // compositor it just replaced - which is gone, taking the session
-    // with it. Passing the decision explicitly is the fix; the sockets
-    // themselves are stale after the exec either way, so they are
-    // cleared rather than handed to the new process.
-    command.env("CHONKSTEP_BACKEND", if nested { "winit" } else { "drm" });
+    // Pin the backend and restore its upstream display. The current
+    // environment instead names our own sockets, which die on exec.
+    host_display.configure_restart(&mut command, nested);
     // A deliberate hot restart is a continuation of the same session,
     // not a fresh login — session-layout restore must not fire from
     // it. On this stack the distinction is subtle (the clients die
@@ -4354,10 +4333,6 @@ fn restart_in_place(nested: bool) -> ! {
     // by the session supervisor with a fresh environment, which is
     // exactly when restore *should* fire.
     command.env("CHONKSTEP_SESSION_CONTINUES", "1");
-    if !nested {
-        command.env_remove("WAYLAND_DISPLAY");
-        command.env_remove("DISPLAY");
-    }
     let err = command.exec();
     tracing::error!(?err, bin = ?bin, "re-exec failed; exiting instead of restarting");
     std::process::exit(1);

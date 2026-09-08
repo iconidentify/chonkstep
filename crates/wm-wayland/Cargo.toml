@@ -13,13 +13,13 @@ default = []
 profile = ["dep:profiling", "profiling/profile-with-tracing"]
 # Diagnostic builds only: Rust allocation accounting and allocator/cache
 # snapshots over the opt-in test door. Never use these builds for timing claims.
-memory-profile = ["dep:libc"]
+memory-profile = []
 
 # Linux-only by nature: on other hosts this crate compiles to an empty
 # library (see lib.rs's cfg gate) so the whole workspace still builds
 # and tests on a macOS dev machine.
 [target.'cfg(target_os = "linux")'.dependencies]
-libc = { version = "0.2", optional = true }
+libc = "0.2"
 wm-core = { path = "../wm-core" }
 wm-theme = { path = "../wm-theme" }
 wm-theme-api = { path = "../wm-theme-api" }
@@ -57,10 +57,10 @@ profiling = { version = "1.0", default-features = false, optional = true }
 # its blocking facade owns a small off-loop service thread and sends
 # only policy edges into calloop (see `inhibit_bus.rs`).
 zbus = "5.19"
-# Smithay reexports this same version; enabling its Linux signalfd
-# source lets TERM/HUP/INT enter the compositor event loop and receive
-# orderly logout teardown.
-calloop = { version = "0.14", features = ["signals"] }
+# Self-pipe signal handlers wake calloop without blocking termination
+# signals in every application and helper the compositor launches.
+calloop = "0.14"
+signal-hook = { version = "0.4", default-features = false }
 # Screenshot encoding (see `capture.rs`) - the same rasterizer the
 # theme engine draws with, so no second image stack enters the graph.
 tiny-skia = "0.11"

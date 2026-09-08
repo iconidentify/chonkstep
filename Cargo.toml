@@ -23,7 +23,7 @@ exclude = ["examples/chonk-switch", "examples/layer-role-repro", "vendor/smithay
 smithay = { path = "vendor/smithay-0.7.0" }
 
 [workspace.package]
-version = "0.4.3"
+version = "0.4.4"
 edition = "2021"
 license = "GPL-3.0-only"
 

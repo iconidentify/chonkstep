@@ -538,7 +538,7 @@ fn terminating_the_real_compositor_is_a_clean_logout() {
     unsafe { libc::kill(session.compositor_pid() as i32, libc::SIGTERM) };
     let status = session
         .wait_for_compositor_exit(Duration::from_secs(10))
-        .expect("the signalfd handler must end the event loop");
+        .expect("the termination handler must end the event loop");
     assert!(status.success(), "SIGTERM is a requested logout, not a crash: {status}");
     assert!(
         session.log().contains("session termination requested; logging out cleanly"),

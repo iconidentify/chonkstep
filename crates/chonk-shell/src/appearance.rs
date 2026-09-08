@@ -203,6 +203,8 @@ pub fn resolve(config_appearance: Option<&str>, theme_native: Appearance) -> App
 /// writing it is the one move that reaches GTK4/libadwaita, Electron
 /// and everything else watching `org.freedesktop.appearance
 /// color-scheme` — live, no restart.
+mod propagation;
+
 const GSETTINGS_SCHEMA: &str = "org.gnome.desktop.interface";
 
 /// GTK theme pairs this desktop is willing to publish, in preference
@@ -274,11 +276,9 @@ pub fn gtk_theme_name(mode: Appearance) -> Option<&'static str> {
 
 /// Tells foreign toolkits about the mode, off-thread.
 ///
-/// Two GSettings writes at most, run on a dedicated short-lived thread
-/// because reading the current `gtk-theme` back means waiting on a
-/// child, which is banned on the shell's thread (see `clippy.toml` —
-/// this is the same shape as the widget sampler workers). Switches are
-/// user gestures, so the thread count is bounded by fingers.
+/// One lazy worker serializes GSettings writes, retaining only the latest
+/// pending mode. Each helper has a deadline and bounded output; a stalled
+/// settings service cannot accumulate workers or reorder final preferences.
 ///
 /// - `color-scheme` is always set (`prefer-dark`/`prefer-light`): it
 ///   is a preference, not a theme name, and cannot dangle.
@@ -309,53 +309,52 @@ pub fn propagate_to_applications(mode: Appearance) {
         tracing::info!(mode = mode.name(), "appearance propagation to GSettings disabled by environment");
         return;
     }
-    std::thread::spawn(move || {
-        let scheme = match mode {
-            Appearance::Dark => "prefer-dark",
-            Appearance::Light => "prefer-light",
-        };
-        // Audited exception to `clippy.toml`'s ban on blocking child
-        // calls: this closure is the whole body of a thread spawned per
-        // user gesture; nothing waits on it, and a gsettings that never
-        // returns holds up one thread-sized allocation, not the shell.
-        #[allow(clippy::disallowed_methods)]
-        let run = |args: &[&str]| -> Option<std::process::Output> {
-            std::process::Command::new("gsettings")
-                .args(args)
-                .output()
-                .ok()
-        };
-        let set = run(&["set", GSETTINGS_SCHEMA, "color-scheme", scheme]);
-        match set {
-            Some(output) if output.status.success() => {
-                tracing::info!(scheme, "told GSettings the appearance (portal color-scheme follows)");
-            }
-            _ => {
-                // One line, as promised: covers both "no gsettings on
-                // this system" and "no org.gnome.desktop.interface
-                // schema installed".
-                tracing::warn!(scheme, "gsettings unavailable or schema missing; GTK/portal applications will not follow the appearance");
-                return;
-            }
+    propagation::submit(mode);
+}
+
+fn apply_to_applications(mode: Appearance) {
+    let scheme = match mode {
+        Appearance::Dark => "prefer-dark",
+        Appearance::Light => "prefer-light",
+    };
+    let run = |args: &[&str]| -> Option<String> {
+        let child = std::process::Command::new("gsettings")
+            .args(args)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn().ok()?;
+        crate::widgets::sampling::wait_with_deadline(child, "gsettings", std::time::Duration::from_secs(2))
+    };
+    let set = run(&["set", GSETTINGS_SCHEMA, "color-scheme", scheme]);
+    match set {
+        Some(_) => {
+            tracing::info!(scheme, "told GSettings the appearance (portal color-scheme follows)");
         }
-        let Some((light, dark)) = gtk_theme_pair() else {
+        _ => {
+            // One line, as promised: covers both "no gsettings on
+            // this system" and "no org.gnome.desktop.interface
+            // schema installed".
+            tracing::warn!(scheme, "gsettings unavailable or schema missing; GTK/portal applications will not follow the appearance");
             return;
-        };
-        let Some(current) = run(&["get", GSETTINGS_SCHEMA, "gtk-theme"]) else {
-            return;
-        };
-        let current = String::from_utf8_lossy(&current.stdout).trim().trim_matches('\'').to_string();
-        if current == light || current == dark {
-            let next = match mode {
-                Appearance::Light => light,
-                Appearance::Dark => dark,
-            };
-            if current != next {
-                let _ = run(&["set", GSETTINGS_SCHEMA, "gtk-theme", next]);
-                tracing::info!(from = %current, to = %next, "flipped the managed GTK theme pair");
-            }
         }
-    });
+    }
+    let Some((light, dark)) = gtk_theme_pair() else {
+        return;
+    };
+    let Some(current) = run(&["get", GSETTINGS_SCHEMA, "gtk-theme"]) else {
+        return;
+    };
+    let current = current.trim().trim_matches('\'');
+    if current == light || current == dark {
+        let next = match mode {
+            Appearance::Light => light,
+            Appearance::Dark => dark,
+        };
+        if current != next && run(&["set", GSETTINGS_SCHEMA, "gtk-theme", next]).is_some() {
+            tracing::info!(from = %current, to = %next, "flipped the managed GTK theme pair");
+        }
+    }
 }
 
 #[cfg(test)]

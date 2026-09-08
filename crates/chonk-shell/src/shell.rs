@@ -2925,7 +2925,16 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
     /// composes the same full look. The Wallpaper menu can still
     /// override it afterward.
     fn adopt_wallpaper_of(&mut self, wm: &mut WindowManager<B>, base: &Theme) {
-        if let Some(paper) = wallpaper::Wallpaper::from_id(&base.wallpaper) {
+        // A theme that has a photograph on this machine wears it; the
+        // wallpaper it names is the ground it falls back to elsewhere.
+        // See `wallpaper::host_art_for_theme` for why the picture is a
+        // preference resolved here rather than the theme's own field.
+        #[cfg(feature = "lcos")]
+        let chosen = wallpaper::host_art_for_theme(&base.id)
+            .or_else(|| wallpaper::Wallpaper::from_id(&base.wallpaper));
+        #[cfg(not(feature = "lcos"))]
+        let chosen = wallpaper::Wallpaper::from_id(&base.wallpaper);
+        if let Some(paper) = chosen {
             if let Err(e) = paper.persist() {
                 tracing::warn!(?e, theme = %base.id, "failed to persist theme wallpaper");
             }
