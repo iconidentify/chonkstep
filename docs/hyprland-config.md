@@ -316,7 +316,17 @@ The supported transaction is:
   niri behavior. High-resolution internal panels use a conservative
   resolution fallback when the driver omits physical dimensions;
 - `transform, 0` through `transform, 3` for 0/90/180/270-degree
-  clockwise output rotation.
+  clockwise output rotation, per the same convention Sway documents for
+  the identical value set (`sway-output(5)`: "the rotation is performed
+  clockwise") — the Wayland protocol's own enum naming calls this
+  "counter-clockwise", but that describes an internal framing rather
+  than the on-screen direction real compositors document. Unverified
+  against this compositor's own session/DRM backend: `chonk-testkit`
+  only drives the nested `winit` backend, which refuses any non-`Normal`
+  transform outright, so no automated test exercises real rotation in
+  either direction (see [#144][transform-direction]).
+
+[transform-direction]: https://github.com/iconidentify/chonkstep/issues/144
 
 Negative positions are normalized together so the logical desktop
 starts at zero without changing relative placement. An unadvertised
