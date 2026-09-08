@@ -400,8 +400,7 @@ fn scale_2_composition_stays_intact() {
 /// own chrome has no server-side resize borders, so grabbing its edge
 /// means the pointer is over the client's *shadow* — outside the
 /// ledger's content rectangle — and the whole path only works if the
-/// hit test extends a frameless window's claim into that margin (see
-/// `frameless_claims` in `wm-wayland/src/input.rs`) and the
+/// hit test honors the surface's input region in that margin and the
 /// client-initiated `xdg_toplevel.resize` then drives `wm-core`'s
 /// resize machinery. A resizable zenity (--text-info) is the guinea
 /// pig; the corner drag must make it bigger.

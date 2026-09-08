@@ -61,6 +61,7 @@ mod gesture_scene;
 mod layout_scene;
 mod selection;
 mod session;
+mod termination;
 mod state;
 // End-to-end test injection door — inert unless CHONKSTEP_TEST_SOCKET
 // is set; see its module docs for the three regressions it exists for.

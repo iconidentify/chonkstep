@@ -649,9 +649,22 @@ fn main() {
         .unwrap_or_else(|| "input-probe".into());
     toplevel.set_title(name.clone());
     toplevel.set_app_id(name);
-    toplevel.set_min_size(400, 300);
+    // GTK-style shadow buffer with an explicit resize band and a hole in
+    // the interior. Deliberately asymmetric: window geometry is not an
+    // input region, and its top-left offset cannot predict the other edges.
+    let csd_region = std::env::args().any(|arg| arg == "--csd-input-region");
+    let (content_w, content_h) = if csd_region { (340, 230) } else { (400, 300) };
+    if csd_region {
+        xdg.set_window_geometry(25, 30, content_w, content_h);
+        let region = probe.compositor.as_ref().unwrap().create_region(&qh, ());
+        region.add(13, 18, 364, 254);
+        region.subtract(180, 130, 20, 20);
+        surface.set_input_region(Some(&region));
+        region.destroy();
+    }
+    toplevel.set_min_size(content_w, content_h);
     if !probe.interactive.enabled() {
-        toplevel.set_max_size(400, 300);
+        toplevel.set_max_size(content_w, content_h);
     }
     surface.commit();
     queue.roundtrip(&mut probe).expect("initial configure");
