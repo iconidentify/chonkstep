@@ -83,6 +83,11 @@ jobs:
 
   deb:
     name: deb (${{ matrix.arch }})
+    # amd64 only, deliberately. LCOS has never shipped anything else:
+    # every release (0.1, 0.2, 0.3) is a single amd64 ISO, and the 0.3
+    # image carries only vmlinuz-*-amd64. An arm64 package would build
+    # for a machine that does not exist. Kept as a matrix so a future
+    # arm64 LCOS is one entry away.
     strategy:
       fail-fast: false
       matrix:
@@ -90,9 +95,6 @@ jobs:
           - arch: amd64
             platform: amd64
             runner: ubuntu-24.04
-          - arch: arm64
-            platform: arm64
-            runner: ubuntu-24.04-arm
     runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
