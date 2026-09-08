@@ -2001,15 +2001,10 @@ fn resolve_monitor_mode(output: &Output, modes: &[Mode], request: &str) -> Optio
     }
 }
 
-/// `1`/`3` map onto smithay's own `_90`/`_270` with no inversion — the
-/// same clockwise convention Sway documents for the identical value set
-/// (`sway-output(5)`), not the Wayland protocol enum's literal
-/// "counter-clockwise" naming (see `docs/hyprland-config.md` and
-/// https://github.com/iconidentify/chonkstep/issues/144). Unverified
-/// against the real session/DRM backend: `chonk-testkit` only drives
-/// `CHONKSTEP_BACKEND=winit`, which `apply_transform` refuses to rotate
-/// at all, so this mapping has no rendered-pixel test in either
-/// direction.
+/// `1`/`3` map directly onto Smithay's `_90`/`_270`. The rendered
+/// direction still needs native DRM validation; the nested test backend
+/// refuses non-normal transforms. See the outstanding hardware check in
+/// <https://github.com/iconidentify/chonkstep/issues/144>.
 fn monitor_transform(extra: &[String]) -> Result<Transform, &str> {
     if extra.is_empty() {
         return Ok(Transform::Normal);
@@ -4893,22 +4888,27 @@ mod tests {
 
     #[test]
     fn an_invalid_scale_still_reserves_its_layout_slot_for_auto_positioning() {
-        let mut setups = vec![
-            output_setup("DP-1", (600, 340), Size::new(1920, 1080), Point::new(0, 0)),
-            output_setup("HDMI-A-1", (300, 170), Size::new(1920, 1080), Point::new(500, 500)),
-        ];
-        let rules = vec![
-            monitor_rule("DP-1", "preferred", "0x0", "999", &[]),
-            monitor_rule("HDMI-A-1", "preferred", "auto", "1", &[]),
-        ];
-        let scales = apply_monitor_rules(&mut setups, &rules, Some(1.25));
-        assert_eq!(scales, vec![1.25, 1.0], "DP-1's rule was refused so it keeps the pre-rule scale");
-        assert_eq!(setups[0].position, Point::new(0, 0), "DP-1 keeps its size/position since its rule was refused whole");
-        assert_eq!(
-            setups[1].position,
-            Point::new(1920, 0),
-            "HDMI-A-1 must auto-position past DP-1's width, not overlap it because DP-1's rejection didn't reserve its slot"
-        );
+        for scale in ["999", "0.25", "NaN", "inf", "invalid"] {
+            let mut setups = vec![
+                output_setup("DP-1", (600, 340), Size::new(1920, 1080), Point::new(0, 0)),
+                output_setup("HDMI-A-1", (300, 170), Size::new(1920, 1080), Point::new(500, 500)),
+            ];
+            let rules = vec![
+                monitor_rule("DP-1", "preferred", "100x100", scale, &["transform", "1"]),
+                monitor_rule("HDMI-A-1", "preferred", "auto", "1", &[]),
+            ];
+            let scales = apply_monitor_rules(&mut setups, &rules, Some(1.25));
+            assert_eq!(scales, vec![1.25, 1.0], "rejected scale {scale}");
+            assert_eq!(setups[0].position, Point::new(0, 0));
+            assert_eq!(setups[0].size, Size::new(1920, 1080));
+            assert_eq!(setups[0].transform, Transform::Normal);
+            assert_eq!(setups[0].requested_mode, None, "the whole rule must be refused");
+            assert_eq!(
+                setups[1].position,
+                Point::new(1920, 0),
+                "auto-positioning must reserve the rejected output's original width"
+            );
+        }
     }
 
     #[test]

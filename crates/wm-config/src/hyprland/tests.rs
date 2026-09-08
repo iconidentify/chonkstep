@@ -843,27 +843,39 @@ fn monitor_lines_are_read_and_reported_rather_than_applied() {
 /// which is exactly what happened on real hardware before this fix.
 #[test]
 fn lua_monitor_transform_lowers_to_the_same_extra_shape_as_conf() {
-    let mut globals = lua::Globals::default();
-    let mut out = Vec::new();
-    lua::read(
-        r#"hl.monitor({ output = "DP-2", mode = "preferred", position = "auto", scale = 2, transform = 3 })"#,
-        &lua::Facts { path: Vec::new(), home: None, state_home: None },
-        &mut globals,
-        &mut out,
-    );
-    let monitor = out
-        .iter()
-        .find_map(|directive| match directive {
-            Directive::Monitor(monitor) => Some(monitor),
-            _ => None,
-        })
-        .expect("hl.monitor(...) should lower to a Monitor directive");
-    assert_eq!(
-        monitor.extra,
-        vec!["transform".to_string(), "3".to_string()],
-        "extra must split into separate tokens, not one joined \"transform 3\" string, \
-         or wm-wayland's monitor_transform() rejects the whole line as unsupported"
-    );
+    // Exercise both parsers, including unsupported extra fields: parity
+    // must not accidentally make a partially supported monitor rule valid.
+    for (lua_extra, conf_extra) in [
+        ("transform = 0", "transform, 0"),
+        ("transform = 1", "transform, 1"),
+        ("transform = 2", "transform, 2"),
+        ("transform = 3", "transform, 3"),
+        ("transform = 4", "transform, 4"),
+        ("transform = 3, bitdepth = 10", "transform, 3, bitdepth, 10"),
+        ("mirror = 'DP-1'", "mirror, DP-1"),
+    ] {
+        let mut globals = lua::Globals::default();
+        let mut lua_out = Vec::new();
+        lua::read(
+            &format!("hl.monitor({{ output = 'DP-2', mode = 'preferred', position = 'auto', scale = 2, {lua_extra} }})"),
+            &lua::Facts { path: Vec::new(), home: None, state_home: None },
+            &mut globals,
+            &mut lua_out,
+        );
+        let mut conf_out = Vec::new();
+        conf::read(
+            &format!("monitor = DP-2, preferred, auto, 2, {conf_extra}"),
+            &mut Default::default(),
+            &mut conf_out,
+        );
+        let monitor = |out: Vec<Directive>| {
+            out.into_iter().find_map(|directive| match directive {
+                Directive::Monitor(monitor) => Some(monitor),
+                _ => None,
+            }).expect("each parser must emit a Monitor directive")
+        };
+        assert_eq!(monitor(lua_out), monitor(conf_out), "{lua_extra}");
+    }
 }
 
 // ---- the classic conf syntax ------------------------------------------
