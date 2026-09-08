@@ -21,6 +21,29 @@ pub enum Wallpaper {
     JadeTerrace,
     IvoryOrb,
     IndigoWaves,
+    /// The LCOS theme's ground. Original to this project, built from
+    /// the two colours LCOS's own boot splash is made of; see
+    /// `scripts/gen-lcos-wallpaper.py`.
+    #[cfg(feature = "lcos")]
+    LundukeNavy,
+    /// Solid warm grounds for the three Lunduke desk themes, each the
+    /// quiet colour of the picture its theme was drawn from. Like
+    /// [`Self::ClassicLavender`] these are a colour rather than a file,
+    /// so they cost the binary nothing.
+    ///
+    /// They exist because a built-in theme cannot name a host-discovered
+    /// picture: `omarchy-export-themes` has to resolve and render a
+    /// theme's wallpaper, and errors outright on one it cannot find. So
+    /// each theme names its ground, and the matching photograph stays a
+    /// separate choice in the Wallpaper menu — which is the arrangement
+    /// the two menus already have, and the palettes come from those
+    /// photographs either way.
+    #[cfg(feature = "lcos")]
+    WalnutGround,
+    #[cfg(feature = "lcos")]
+    DeskGround,
+    #[cfg(feature = "lcos")]
+    OakGround,
     /// Whatever Omarchy's `current/background` link points at right
     /// now — the theme's own picture, in Omarchy's own formats. Not in
     /// [`Self::ALL`]: the menu offers it only on a desk that has
@@ -30,12 +53,135 @@ pub enum Wallpaper {
     /// when the link is missing or the file will not decode, Graphite
     /// Fold stands in — the neutral artwork, in the current mood.
     Omarchy,
+    /// One of the host distribution's own backgrounds, discovered at
+    /// runtime under `/usr/share/backgrounds/<ID>/` and addressed by
+    /// slot. Not in [`Self::ALL`]: like [`Self::Omarchy`] it has no
+    /// pixels of its own and is only offered where the files exist.
+    ///
+    /// Read rather than embedded, deliberately. LCOS ships four of
+    /// these and they are Lunduke's artwork; shipping copies inside
+    /// this binary would redistribute them, which is the same reason
+    /// `lunduke-navy` is original work and the dock mark is read from
+    /// `/usr/share/pixmaps`. Showing a picture already installed on the
+    /// user's own machine carries no such question.
+    HostArt(u8),
+}
+
+/// How many host backgrounds the menu will offer. A cap rather than a
+/// limit anybody should hit: it keeps the Wallpaper submenu a menu
+/// rather than a file browser, and keeps the action ids bounded.
+pub const HOST_ART_SLOTS: usize = 6;
+
+/// The host's own backgrounds: `(path, menu label)`, sorted by filename
+/// so a slot means the same picture across restarts, deduplicated by
+/// stem so a `.jpg`/`.png` pair of the same artwork is offered once.
+///
+/// Scanned once. Empty on a host that ships none, which is what keeps
+/// these rows out of the menu everywhere they do not apply.
+pub fn host_art() -> &'static [(PathBuf, &'static str, &'static str)] {
+    static ART: std::sync::OnceLock<Vec<(PathBuf, &'static str, &'static str)>> = std::sync::OnceLock::new();
+    ART.get_or_init(|| {
+        let Some(id) = crate::desktop::os_release_field("ID") else { return Vec::new() };
+        if id.is_empty() || id.contains('/') || id.contains("..") {
+            return Vec::new();
+        }
+        let dir = PathBuf::from(format!("/usr/share/backgrounds/{id}"));
+        let Ok(entries) = std::fs::read_dir(&dir) else { return Vec::new() };
+        let mut files: Vec<PathBuf> = entries
+            .filter_map(|entry| entry.ok().map(|e| e.path()))
+            .filter(|path| {
+                path.is_file()
+                    && matches!(
+                        path.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).as_deref(),
+                        Some("png" | "jpg" | "jpeg" | "webp")
+                    )
+            })
+            .collect();
+        files.sort();
+        let mut seen: Vec<String> = Vec::new();
+        let mut out: Vec<(PathBuf, &'static str, &'static str)> = Vec::new();
+        for path in files {
+            let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else { continue };
+            if seen.iter().any(|s| s == stem) {
+                continue;
+            }
+            seen.push(stem.to_string());
+            out.push((
+                path.clone(),
+                Box::leak(pretty_label(stem, &id).into_boxed_str()) as &'static str,
+                // Named after the file, not the slot. A theme naming a
+                // host background has to survive the host installing
+                // another one ahead of it alphabetically, which a slot
+                // index would not.
+                Box::leak(format!("host:{stem}").into_boxed_str()) as &'static str,
+            ));
+            if out.len() == HOST_ART_SLOTS {
+                break;
+            }
+        }
+        out
+    })
+    .as_slice()
+}
+
+/// The host photograph a built-in theme would rather wear, when this
+/// machine actually ships it.
+///
+/// The three Lunduke desk themes have their palettes sampled from these
+/// photographs, so wearing the picture is the look they were drawn for;
+/// the solid ground each theme *names* is the fallback for a machine
+/// without them.
+///
+/// It is a preference resolved here rather than the theme's `wallpaper`
+/// field naming the picture directly, and that is not a detail:
+/// `omarchy-export-themes` has to resolve and render a theme's declared
+/// wallpaper, and fails outright ("theme names an unknown wallpaper") on
+/// one that only exists on somebody else's disk. Declaring the ground
+/// and preferring the picture keeps both true — the theme is always
+/// exportable, and on LCOS it still arrives wearing the photograph.
+#[cfg(feature = "lcos")]
+pub fn host_art_for_theme(theme_id: &str) -> Option<Wallpaper> {
+    let stem = match theme_id {
+        "lunduke-walnut" => "lcos-desktop-4k-wood",
+        "lunduke-desk" => "lcos-desktop-desk-coffee",
+        "lunduke-oak" => "lcos-desktop-desk-oak-map",
+        _ => return None,
+    };
+    host_art()
+        .iter()
+        .position(|(path, _, _)| path.file_stem().and_then(|s| s.to_str()) == Some(stem))
+        .map(|slot| Wallpaper::HostArt(slot as u8))
+}
+
+/// A filename stem turned into something worth reading in a menu:
+/// `lcos-desktop-desk-oak-map` -> `Desk Oak Map`. The distro id and a
+/// `desktop` filler word are dropped because every one of the files
+/// repeats them, and a submenu of "Lcos Desktop ..." five times over
+/// tells the reader nothing.
+fn pretty_label(stem: &str, id: &str) -> String {
+    let mut words: Vec<String> = Vec::new();
+    for word in stem.split(['-', '_']).filter(|w| !w.is_empty()) {
+        let lower = word.to_ascii_lowercase();
+        if lower == id.to_ascii_lowercase() || lower == "desktop" || lower == "background" {
+            continue;
+        }
+        // "4k" reads as an acronym, not a word to title-case.
+        if lower.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+            words.push(lower.to_ascii_uppercase());
+        } else {
+            let mut chars = lower.chars();
+            let first = chars.next().unwrap_or('?').to_ascii_uppercase();
+            words.push(format!("{first}{}", chars.as_str()));
+        }
+    }
+    if words.is_empty() { "Background".to_string() } else { words.join(" ") }
 }
 
 impl Wallpaper {
     pub const DEFAULT: Self = Self::LavenderGrid;
     /// The embedded artworks, in menu order. [`Self::Omarchy`] is not
     /// one: it has no pixels of its own.
+    #[cfg(not(feature = "lcos"))]
     pub const ALL: [Self; 8] = [
         Self::LavenderGrid,
         Self::AmberTerminal,
@@ -47,7 +193,26 @@ impl Wallpaper {
         Self::IndigoWaves,
     ];
 
-    pub const fn label(self) -> &'static str {
+    /// The same artworks with the LCOS grounds appended. Spelled out
+    /// rather than concatenated so each array's length is compile-time
+    /// checked.
+    #[cfg(feature = "lcos")]
+    pub const ALL: [Self; 12] = [
+        Self::LavenderGrid,
+        Self::AmberTerminal,
+        Self::TealBlueprint,
+        Self::GraphiteFold,
+        Self::ClassicLavender,
+        Self::JadeTerrace,
+        Self::IvoryOrb,
+        Self::IndigoWaves,
+        Self::LundukeNavy,
+        Self::WalnutGround,
+        Self::DeskGround,
+        Self::OakGround,
+    ];
+
+    pub fn label(self) -> &'static str {
         match self {
             Self::LavenderGrid => "Lavender Grid",
             Self::AmberTerminal => "Amber Terminal",
@@ -57,11 +222,20 @@ impl Wallpaper {
             Self::JadeTerrace => "Jade Terrace",
             Self::IvoryOrb => "Ivory Orb",
             Self::IndigoWaves => "Indigo Waves",
+            #[cfg(feature = "lcos")]
+            Self::LundukeNavy => "Lunduke Navy",
+            #[cfg(feature = "lcos")]
+            Self::WalnutGround => "Walnut",
+            #[cfg(feature = "lcos")]
+            Self::DeskGround => "Desk",
+            #[cfg(feature = "lcos")]
+            Self::OakGround => "Oak",
             Self::Omarchy => "Omarchy's Background",
+            Self::HostArt(slot) => host_art().get(slot as usize).map_or("Background", |(_, label, _)| *label),
         }
     }
 
-    pub const fn id(self) -> &'static str {
+    pub fn id(self) -> &'static str {
         match self {
             Self::LavenderGrid => "lavender-grid",
             Self::AmberTerminal => "amber-terminal",
@@ -71,12 +245,25 @@ impl Wallpaper {
             Self::JadeTerrace => "jade-terrace",
             Self::IvoryOrb => "ivory-orb",
             Self::IndigoWaves => "indigo-waves",
+            #[cfg(feature = "lcos")]
+            Self::LundukeNavy => "lunduke-navy",
+            #[cfg(feature = "lcos")]
+            Self::WalnutGround => "walnut-ground",
+            #[cfg(feature = "lcos")]
+            Self::DeskGround => "desk-ground",
+            #[cfg(feature = "lcos")]
+            Self::OakGround => "oak-ground",
             Self::Omarchy => wm_theme::omarchy::WALLPAPER,
+            Self::HostArt(slot) => host_art().get(slot as usize).map_or("host:none", |(_, _, id)| *id),
         }
     }
 
     pub(crate) fn from_id(id: &str) -> Option<Self> {
-        Self::ALL.into_iter().chain([Self::Omarchy]).find(|wallpaper| wallpaper.id() == id)
+        Self::ALL
+            .into_iter()
+            .chain([Self::Omarchy])
+            .chain((0..host_art().len() as u8).map(Self::HostArt))
+            .find(|wallpaper| wallpaper.id() == id)
     }
 
     /// Restores the last menu selection; with none — a first launch, or
@@ -104,6 +291,24 @@ impl Wallpaper {
         std::fs::write(path, self.id())
     }
 
+    /// True for the artworks that are a colour rather than a picture:
+    /// [`Self::render`] returns `None` for these and the caller paints
+    /// [`Self::dock_color`] across the whole desk instead.
+    ///
+    /// A property rather than a list of names repeated at each use, so
+    /// adding another solid ground does not mean hunting down every
+    /// test that has to skip decoding one.
+    pub const fn is_solid_colour(self) -> bool {
+        #[cfg(feature = "lcos")]
+        {
+            matches!(self, Self::ClassicLavender | Self::WalnutGround | Self::DeskGround | Self::OakGround)
+        }
+        #[cfg(not(feature = "lcos"))]
+        {
+            matches!(self, Self::ClassicLavender)
+        }
+    }
+
     /// The quiet color at the right edge of each artwork's rendition,
     /// used behind the dock so the sidebar belongs to the selected
     /// composition in the selected mood.
@@ -124,12 +329,34 @@ impl Wallpaper {
             (Self::IvoryOrb, Appearance::Light) => (250, 247, 234),
             (Self::IvoryOrb, Appearance::Dark) => (18, 17, 16),
             (Self::IndigoWaves, Appearance::Dark) => (29, 32, 45),
+            #[cfg(feature = "lcos")]
+            (Self::LundukeNavy, Appearance::Dark) => (10, 20, 35),
+            #[cfg(feature = "lcos")]
+            (Self::LundukeNavy, Appearance::Light) => (220, 226, 238),
+            // Sampled from each photograph: the wood's own mid tone, and
+            // a paper-side counterpart for the light rendition.
+            #[cfg(feature = "lcos")]
+            (Self::WalnutGround, Appearance::Dark) => (74, 46, 26),
+            #[cfg(feature = "lcos")]
+            (Self::WalnutGround, Appearance::Light) => (222, 206, 188),
+            #[cfg(feature = "lcos")]
+            (Self::DeskGround, Appearance::Dark) => (58, 40, 24),
+            #[cfg(feature = "lcos")]
+            (Self::DeskGround, Appearance::Light) => (232, 220, 202),
+            #[cfg(feature = "lcos")]
+            (Self::OakGround, Appearance::Dark) => (44, 30, 18),
+            #[cfg(feature = "lcos")]
+            (Self::OakGround, Appearance::Light) => (214, 198, 178),
             (Self::IndigoWaves, Appearance::Light) => (226, 228, 236),
             // The floor under Omarchy's picture is Graphite Fold's:
             // this colour is the ground the dock's X11 window shows
             // before its first paint and the root's colour when the
             // image cannot be shown, and both are the neutral artwork's.
             (Self::Omarchy, appearance) => Self::GraphiteFold.dock_color(appearance),
+            // Same neutral floor as Omarchy's, and for the same reason:
+            // the picture is the host's and its edge colour is unknown
+            // until it is decoded.
+            (Self::HostArt(_), appearance) => Self::GraphiteFold.dock_color(appearance),
         }
     }
 
@@ -155,7 +382,14 @@ impl Wallpaper {
             (Self::IvoryOrb, Appearance::Dark) => Some(include_bytes!("../assets/wallpapers/ivory-orb-dark.png")),
             (Self::IndigoWaves, Appearance::Dark) => Some(include_bytes!("../assets/wallpapers/indigo-waves.png")),
             (Self::IndigoWaves, Appearance::Light) => Some(include_bytes!("../assets/wallpapers/indigo-waves-light.png")),
+            #[cfg(feature = "lcos")]
+            (Self::LundukeNavy, Appearance::Dark) => Some(include_bytes!("../assets/wallpapers/lunduke-navy.png")),
+            #[cfg(feature = "lcos")]
+            (Self::LundukeNavy, Appearance::Light) => Some(include_bytes!("../assets/wallpapers/lunduke-navy-light.png")),
+            #[cfg(feature = "lcos")]
+            (Self::WalnutGround | Self::DeskGround | Self::OakGround, _) => None,
             (Self::Omarchy, _) => None,
+            (Self::HostArt(_), _) => None,
         }
     }
 
@@ -165,6 +399,15 @@ impl Wallpaper {
     /// artwork, and for an image that cannot be read — the caller
     /// paints [`Self::dock_color`] instead.
     pub fn render(self, screen: Size, appearance: Appearance) -> Option<DecorationBuffer> {
+        if let Self::HostArt(slot) = self {
+            let path = host_art().get(slot as usize).map(|(path, _, _)| path.clone());
+            return match path.as_deref().and_then(load_image) {
+                Some(source) => Some(cover(&source, screen)),
+                // A picture that has been uninstalled since it was
+                // chosen should not leave a bare desk.
+                None => Self::GraphiteFold.render(screen, appearance),
+            };
+        }
         if self == Self::Omarchy {
             let link = wm_theme::omarchy::current_background_path();
             return Self::omarchy_background(link.as_deref(), screen, appearance);
@@ -272,10 +515,7 @@ mod tests {
     #[test]
     fn every_art_wallpaper_decodes_and_covers_the_requested_size_in_both_moods() {
         for appearance in [Appearance::Light, Appearance::Dark] {
-            for wallpaper in Wallpaper::ALL
-                .into_iter()
-                .filter(|w| *w != Wallpaper::ClassicLavender)
-            {
+            for wallpaper in Wallpaper::ALL.into_iter().filter(|w| !w.is_solid_colour()) {
                 let rendered = wallpaper
                     .render(Size::new(320, 180), appearance)
                     .expect("embedded wallpaper should decode");
@@ -295,7 +535,7 @@ mod tests {
             let sum: u64 = buffer.pixels.as_chunks::<4>().0.iter().map(|px| (px[0] as u64 + px[1] as u64 + px[2] as u64) / 3).sum();
             (sum / (u64::from(buffer.width) * u64::from(buffer.height))) as i64
         };
-        for wallpaper in Wallpaper::ALL.into_iter().filter(|w| *w != Wallpaper::ClassicLavender) {
+        for wallpaper in Wallpaper::ALL.into_iter().filter(|w| !w.is_solid_colour()) {
             let light = wallpaper.render(Size::new(160, 90), Appearance::Light).unwrap();
             let dark = wallpaper.render(Size::new(160, 90), Appearance::Dark).unwrap();
             assert!(

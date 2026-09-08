@@ -5,6 +5,14 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+# Everything LCOS-specific: the Lunduke Navy artwork, the LCOS dock
+# mark, the solid grounds the desk themes name, and the wm-theme themes
+# themselves. 2.5MB of assets that the Arch/Omarchy package has no use
+# for, so they are compiled out of it entirely rather than shipped and
+# ignored — `include_bytes!` behind a `cfg` leaves nothing behind.
+lcos = ["wm-theme/lcos"]
+
 [dependencies]
 chonk-dock-proto = { path = "../chonk-dock-proto" }
 chonk-dock-widget = { path = "../chonk-dock-widget" }

@@ -5,6 +5,12 @@ edition.workspace = true
 license.workspace = true
 description = "NeXTSTEP-style theme data model and rendering engine."
 
+[features]
+# The LCOS themes. Off by default: Omarchy is the primary audience and
+# has no use for them, and a theme nobody can pick is still a theme
+# somebody has to read past in a menu.
+lcos = []
+
 [dependencies]
 wm-theme-api = { path = "../wm-theme-api" }
 serde = { version = "1", features = ["derive"] }

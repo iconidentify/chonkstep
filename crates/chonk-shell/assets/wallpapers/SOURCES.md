@@ -10,6 +10,17 @@ binary's provenance. Recorded per file.
 - `amber-terminal.png`
 - `teal-blueprint.png`
 - `graphite-fold.png`
+- `lunduke-navy.png` / `lunduke-navy-light.png` — drawn by
+  `scripts/gen-lcos-wallpaper.py`, which is committed, so the artwork is
+  reproducible from source rather than only from the PNG. Its two
+  colours are sampled from LCOS's own boot splash (`boot/grub/splash.png`
+  on the LCOS 0.3 ISO): a #081830 ground across 95.8% of the frame,
+  inked #F8F8F8. Colour values are facts about a released product, not
+  copyrightable expression, and nothing of LCOS's artwork is reproduced
+  here — the concentric ring figure is this project's own, drawn
+  deliberately so that LCOS's circular mark, which is Lunduke's, stays
+  out of the shell binary. Both renditions are generated directly by
+  that script rather than derived by `gen-wallpaper-renditions.py`.
 
 ## Composited over Omarchy's bundled background art
 

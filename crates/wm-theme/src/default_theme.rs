@@ -19,6 +19,7 @@ fn tile_gradient(from: Color, to: Color, bevel: Bevel) -> TileStyle {
 /// const so menu construction doesn't have to build every full `Theme`
 /// struct just to list them. `registry_matches_choices` pins this to
 /// `all_themes()`.
+#[cfg(not(feature = "lcos"))]
 pub const CHOICES: [(&str, &str); 8] = [
     ("nextstep-classic", "NeXTSTEP Classic"),
     ("amber-phosphor", "Amber Phosphor"),
@@ -28,6 +29,26 @@ pub const CHOICES: [(&str, &str); 8] = [
     ("jade-lacquer", "Jade Lacquer"),
     ("ivory-halftone", "Ivory Halftone"),
     ("indigo-filament", "Indigo Filament"),
+];
+
+/// The same list with the LCOS themes appended. Written out rather than
+/// concatenated so the array length is checked at compile time; the two
+/// must stay in step, and `every_choice_resolves` fails loudly if they
+/// do not.
+#[cfg(feature = "lcos")]
+pub const CHOICES: [(&str, &str); 12] = [
+    ("nextstep-classic", "NeXTSTEP Classic"),
+    ("amber-phosphor", "Amber Phosphor"),
+    ("teal-blueprint", "Teal Blueprint"),
+    ("graphite", "Graphite"),
+    ("next-lavender", "NeXT Lavender"),
+    ("jade-lacquer", "Jade Lacquer"),
+    ("ivory-halftone", "Ivory Halftone"),
+    ("indigo-filament", "Indigo Filament"),
+    ("lcos", "LCOS"),
+    ("lunduke-walnut", "Lunduke Walnut"),
+    ("lunduke-desk", "Lunduke Desk"),
+    ("lunduke-oak", "Lunduke Oak"),
 ];
 
 /// Every built-in theme in its *native* rendition, same order as
@@ -47,6 +68,14 @@ pub fn all_themes() -> Vec<Theme> {
         jade_lacquer(),
         ivory_halftone(),
         indigo_filament(),
+        #[cfg(feature = "lcos")]
+        lcos(),
+        #[cfg(feature = "lcos")]
+        lunduke_walnut(),
+        #[cfg(feature = "lcos")]
+        lunduke_desk(),
+        #[cfg(feature = "lcos")]
+        lunduke_oak(),
     ]
 }
 
@@ -101,6 +130,22 @@ pub fn theme_variant(id: &str, appearance: Appearance) -> Option<Theme> {
         ("ivory-halftone", Appearance::Light) => ivory_halftone(),
         ("indigo-filament", Appearance::Dark) => indigo_filament(),
         ("indigo-filament", Appearance::Light) => indigo_filament_light(),
+        #[cfg(feature = "lcos")]
+        ("lcos", Appearance::Dark) => lcos(),
+        #[cfg(feature = "lcos")]
+        ("lcos", Appearance::Light) => lcos_light(),
+        #[cfg(feature = "lcos")]
+        ("lunduke-walnut", Appearance::Dark) => lunduke_walnut(),
+        #[cfg(feature = "lcos")]
+        ("lunduke-walnut", Appearance::Light) => lunduke_walnut_light(),
+        #[cfg(feature = "lcos")]
+        ("lunduke-desk", Appearance::Dark) => lunduke_desk(),
+        #[cfg(feature = "lcos")]
+        ("lunduke-desk", Appearance::Light) => lunduke_desk_light(),
+        #[cfg(feature = "lcos")]
+        ("lunduke-oak", Appearance::Dark) => lunduke_oak(),
+        #[cfg(feature = "lcos")]
+        ("lunduke-oak", Appearance::Light) => lunduke_oak_light(),
         _ => return None,
     };
     Some(theme)
@@ -1186,6 +1231,530 @@ pub fn indigo_filament_light() -> Theme {
                 Color::rgb(0xEA, 0x76, 0xCB),
                 Color::rgb(0x17, 0x92, 0x99),
                 Color::rgb(0x5C, 0x5F, 0x77),
+            ],
+            opacity: Some(94),
+        },
+    })
+}
+
+
+/// LCOS: the desk dressed as Bryan Lunduke's Lunduke Computer Operating
+/// System. The palette is not a designer's impression of LCOS -- it is
+/// LCOS's own. Its boot splash is #081830 across 95.8% of the frame,
+/// inked in #F8F8F8, and those two values are the whole scheme: navy
+/// titlebars and menu caps, near-white text, and the chiselled 90s grey
+/// LCOS's own desktop keeps faith with.
+///
+/// DejaVu Sans rather than Nimbus Sans, deliberately. Nimbus is the
+/// finer, more Helvetica-like face and reads thin at 12px; LCOS's
+/// stated brief is "modern tech, 1990s UI", which wants the sturdier
+/// screen face -- and DejaVu is what LCOS itself ships.
+#[cfg(feature = "lcos")]
+pub fn lcos() -> Theme {
+    build_chrome(ChromeSpec {
+        id: "lcos".into(),
+        name: "LCOS".into(),
+        appearance: Appearance::Dark,
+        wallpaper: "lunduke-navy",
+        font_family: "DejaVu Sans",
+        active: Fill::Gradient(Gradient {
+            direction: GradientDirection::Diagonal,
+            from: Color::rgb(0x16, 0x30, 0x4F),
+            to: Color::rgb(0x08, 0x18, 0x30),
+        }),
+        inactive: Fill::Gradient(Gradient {
+            direction: GradientDirection::Diagonal,
+            from: Color::rgb(0x93, 0xA2, 0xB8),
+            to: Color::rgb(0x74, 0x84, 0x9C),
+        }),
+        text_active: Color::rgb(0xF8, 0xF8, 0xF8),
+        text_inactive: Color::rgb(0x0A, 0x16, 0x26),
+        border: Color::rgb(0x03, 0x09, 0x0F),
+        resizebar: Fill::Solid(Color::rgb(0x84, 0x94, 0xAC)),
+        bevel: Bevel { style: BevelStyle::Raised, width: 1, light: Color::rgb(0xC6, 0xD2, 0xE4), dark: Color::rgb(0x06, 0x0E, 0x1A) },
+        menu_title_bg: Fill::Gradient(Gradient {
+            direction: GradientDirection::Diagonal,
+            from: Color::rgb(0x16, 0x30, 0x4F),
+            to: Color::rgb(0x08, 0x18, 0x30),
+        }),
+        menu_title_text: Color::rgb(0xF8, 0xF8, 0xF8),
+        menu_bg: Fill::Solid(Color::rgb(0xBC, 0xC6, 0xD6)),
+        menu_text: Color::rgb(0x0A, 0x16, 0x26),
+        menu_highlight_bg: Fill::Solid(Color::rgb(0xF0, 0xF4, 0xFA)),
+        menu_highlight_text: Color::rgb(0x08, 0x18, 0x30),
+        tile: (Color::rgb(0x98, 0xA8, 0xC0), Color::rgb(0x2A, 0x3A, 0x52)),
+        terminal: TerminalPalette {
+            fg: Color::rgb(0xDC, 0xE6, 0xF4),
+            bg: Color::rgb(0x08, 0x18, 0x30),
+            cursor: Color::rgb(0xF8, 0xF8, 0xF8),
+            ansi: [
+                Color::rgb(0x08, 0x18, 0x30),
+                Color::rgb(0xD8, 0x5A, 0x5A),
+                Color::rgb(0x5A, 0xB8, 0x78),
+                Color::rgb(0xD8, 0xA8, 0x50),
+                Color::rgb(0x5A, 0x90, 0xD8),
+                Color::rgb(0xA8, 0x7A, 0xC8),
+                Color::rgb(0x58, 0xA8, 0xC0),
+                Color::rgb(0xDC, 0xE6, 0xF4),
+                Color::rgb(0x3A, 0x4A, 0x62),
+                Color::rgb(0xF0, 0x78, 0x78),
+                Color::rgb(0x7A, 0xD8, 0x98),
+                Color::rgb(0xF0, 0xC8, 0x70),
+                Color::rgb(0x7A, 0xB0, 0xF0),
+                Color::rgb(0xC8, 0x9A, 0xE0),
+                Color::rgb(0x78, 0xC8, 0xE0),
+                Color::rgb(0xF8, 0xF8, 0xF8),
+            ],
+            opacity: Some(88),
+        },
+    })
+}
+
+/// LCOS on paper. The navy stays where it carries the identity -- the
+/// titlebar and the menu cap -- rather than being lightened along with
+/// everything else, which would leave a generic grey desk that happens
+/// to be called LCOS.
+#[cfg(feature = "lcos")]
+pub fn lcos_light() -> Theme {
+    build_chrome(ChromeSpec {
+        id: "lcos".into(),
+        name: "LCOS".into(),
+        appearance: Appearance::Light,
+        wallpaper: "lunduke-navy",
+        font_family: "DejaVu Sans",
+        active: Fill::Gradient(Gradient {
+            direction: GradientDirection::Diagonal,
+            from: Color::rgb(0x16, 0x30, 0x4F),
+            to: Color::rgb(0x08, 0x18, 0x30),
+        }),
+        inactive: Fill::Gradient(Gradient {
+            direction: GradientDirection::Diagonal,
+            from: Color::rgb(0xC8, 0xD2, 0xE2),
+            to: Color::rgb(0xAE, 0xBA, 0xCD),
+        }),
+        text_active: Color::rgb(0xF8, 0xF8, 0xF8),
+        text_inactive: Color::rgb(0x24, 0x30, 0x4A),
+        border: Color::rgb(0x78, 0x84, 0x9A),
+        resizebar: Fill::Solid(Color::rgb(0xC0, 0xCA, 0xDA)),
+        bevel: Bevel { style: BevelStyle::Raised, width: 1, light: Color::rgb(0xFF, 0xFF, 0xFF), dark: Color::rgb(0x93, 0xA0, 0xB4) },
+        menu_title_bg: Fill::Gradient(Gradient {
+            direction: GradientDirection::Diagonal,
+            from: Color::rgb(0x16, 0x30, 0x4F),
+            to: Color::rgb(0x08, 0x18, 0x30),
+        }),
+        menu_title_text: Color::rgb(0xF8, 0xF8, 0xF8),
+        menu_bg: Fill::Solid(Color::rgb(0xDC, 0xE2, 0xEC)),
+        menu_text: Color::rgb(0x10, 0x1A, 0x2C),
+        menu_highlight_bg: Fill::Solid(Color::rgb(0xFF, 0xFF, 0xFF)),
+        menu_highlight_text: Color::rgb(0x08, 0x18, 0x30),
+        tile: (Color::rgb(0xE2, 0xE8, 0xF2), Color::rgb(0x84, 0x94, 0xAC)),
+        terminal: TerminalPalette {
+            fg: Color::rgb(0x12, 0x20, 0x3A),
+            bg: Color::rgb(0xEE, 0xF2, 0xF8),
+            cursor: Color::rgb(0x08, 0x18, 0x30),
+            ansi: [
+                Color::rgb(0x10, 0x1A, 0x2C),
+                Color::rgb(0xA8, 0x30, 0x30),
+                Color::rgb(0x2A, 0x7A, 0x44),
+                Color::rgb(0x8A, 0x60, 0x10),
+                Color::rgb(0x1E, 0x50, 0xA0),
+                Color::rgb(0x7A, 0x3A, 0x96),
+                Color::rgb(0x1A, 0x6E, 0x84),
+                Color::rgb(0x46, 0x52, 0x66),
+                Color::rgb(0x68, 0x74, 0x88),
+                Color::rgb(0xC8, 0x4A, 0x4A),
+                Color::rgb(0x3A, 0x96, 0x5A),
+                Color::rgb(0xA8, 0x7A, 0x20),
+                Color::rgb(0x3A, 0x70, 0xC0),
+                Color::rgb(0x96, 0x52, 0xB0),
+                Color::rgb(0x2A, 0x8A, 0xA0),
+                Color::rgb(0x10, 0x1A, 0x2C),
+            ],
+            opacity: Some(94),
+        },
+    })
+}
+
+
+/// Lunduke Walnut: the chrome for LCOS's 4K wood desk background.
+/// The palette is the picture's own — mid walnut #804020 dominates it,
+/// its highlight runs to #A06030 — so the titlebars are cut from the
+/// same board the wallpaper is, and cream ink sits on them the way the
+/// light falls on that wood.
+#[cfg(feature = "lcos")]
+pub fn lunduke_walnut() -> Theme {
+    build_chrome(ChromeSpec {
+        id: "lunduke-walnut".into(),
+        name: "Lunduke Walnut".into(),
+        appearance: Appearance::Dark,
+        wallpaper: "walnut-ground",
+        font_family: "DejaVu Sans",
+        active: Fill::Gradient(Gradient {
+            direction: GradientDirection::Diagonal,
+            from: Color::rgb(0x5A, 0x2E, 0x14),
+            to: Color::rgb(0x3E, 0x1F, 0x0C),
+        }),
+        inactive: Fill::Gradient(Gradient {
+            direction: GradientDirection::Diagonal,
+            from: Color::rgb(0xB4, 0x90, 0x70),
+            to: Color::rgb(0x8E, 0x6E, 0x52),
+        }),
+        text_active: Color::rgb(0xF6, 0xE8, 0xD8),
+        text_inactive: Color::rgb(0x2A, 0x16, 0x08),
+        border: Color::rgb(0x1C, 0x0E, 0x05),
+        resizebar: Fill::Solid(Color::rgb(0x9E, 0x7E, 0x5E)),
+        bevel: Bevel { style: BevelStyle::Raised, width: 1, light: Color::rgb(0xDC, 0xC4, 0xA4), dark: Color::rgb(0x24, 0x12, 0x0A) },
+        menu_title_bg: Fill::Gradient(Gradient {
+            direction: GradientDirection::Diagonal,
+            from: Color::rgb(0x5A, 0x2E, 0x14),
+            to: Color::rgb(0x3E, 0x1F, 0x0C),
+        }),
+        menu_title_text: Color::rgb(0xF6, 0xE8, 0xD8),
+        menu_bg: Fill::Solid(Color::rgb(0xC8, 0xAE, 0x90)),
+        menu_text: Color::rgb(0x24, 0x12, 0x06),
+        menu_highlight_bg: Fill::Solid(Color::rgb(0xF2, 0xE4, 0xD0)),
+        menu_highlight_text: Color::rgb(0x24, 0x12, 0x06),
+        tile: (Color::rgb(0xC0, 0xA4, 0x84), Color::rgb(0x4A, 0x2E, 0x18)),
+        terminal: TerminalPalette {
+            fg: Color::rgb(0xEF, 0xE0, 0xCC),
+            bg: Color::rgb(0x2A, 0x1A, 0x0E),
+            cursor: Color::rgb(0xF6, 0xE8, 0xD8),
+            ansi: [
+                Color::rgb(0x2A, 0x1A, 0x0E),
+                Color::rgb(0xC0, 0x55, 0x2F),
+                Color::rgb(0x7A, 0x9A, 0x48),
+                Color::rgb(0xD8, 0x9A, 0x3C),
+                Color::rgb(0x6A, 0x8F, 0xB8),
+                Color::rgb(0xA8, 0x70, 0x9A),
+                Color::rgb(0x5F, 0xA0, 0xA0),
+                Color::rgb(0xEF, 0xE0, 0xCC),
+                Color::rgb(0x5A, 0x46, 0x32),
+                Color::rgb(0xE0, 0x7A, 0x55),
+                Color::rgb(0x9C, 0xC0, 0x77),
+                Color::rgb(0xF0, 0xBE, 0x6A),
+                Color::rgb(0x92, 0xB4, 0xD8),
+                Color::rgb(0xC7, 0x9A, 0xBC),
+                Color::rgb(0x8F, 0xC4, 0xC4),
+                Color::rgb(0xFB, 0xF3, 0xE6),
+            ],
+            opacity: Some(88),
+        },
+    })
+}
+
+/// Lunduke Desk: cream paper on a brown desk, after LCOS's coffee-ring
+/// background. That picture is two things — paper at #E0D0C0 and desk at
+/// #604020 — so the menus take the paper and the titlebars take the
+/// desk, which is also what stops the chrome vanishing into the sheet.
+#[cfg(feature = "lcos")]
+pub fn lunduke_desk() -> Theme {
+    build_chrome(ChromeSpec {
+        id: "lunduke-desk".into(),
+        name: "Lunduke Desk".into(),
+        appearance: Appearance::Dark,
+        wallpaper: "desk-ground",
+        font_family: "DejaVu Sans",
+        active: Fill::Gradient(Gradient {
+            direction: GradientDirection::Diagonal,
+            from: Color::rgb(0x54, 0x36, 0x19),
+            to: Color::rgb(0x32, 0x20, 0x0F),
+        }),
+        inactive: Fill::Gradient(Gradient {
+            direction: GradientDirection::Diagonal,
+            from: Color::rgb(0xD2, 0xC2, 0xAE),
+            to: Color::rgb(0xAE, 0x9C, 0x86),
+        }),
+        text_active: Color::rgb(0xF8, 0xEE, 0xDE),
+        text_inactive: Color::rgb(0x35, 0x24, 0x0F),
+        border: Color::rgb(0x1F, 0x14, 0x08),
+        resizebar: Fill::Solid(Color::rgb(0xBC, 0xAA, 0x94)),
+        bevel: Bevel { style: BevelStyle::Raised, width: 1, light: Color::rgb(0xF0, 0xE4, 0xD2), dark: Color::rgb(0x2A, 0x1B, 0x0E) },
+        menu_title_bg: Fill::Gradient(Gradient {
+            direction: GradientDirection::Diagonal,
+            from: Color::rgb(0x54, 0x36, 0x19),
+            to: Color::rgb(0x32, 0x20, 0x0F),
+        }),
+        menu_title_text: Color::rgb(0xF8, 0xEE, 0xDE),
+        menu_bg: Fill::Solid(Color::rgb(0xE0, 0xD2, 0xBE)),
+        menu_text: Color::rgb(0x2A, 0x1C, 0x0E),
+        menu_highlight_bg: Fill::Solid(Color::rgb(0xFC, 0xF6, 0xEA)),
+        menu_highlight_text: Color::rgb(0x2A, 0x1C, 0x0E),
+        tile: (Color::rgb(0xDC, 0xCD, 0xBA), Color::rgb(0x6A, 0x45, 0x26)),
+        terminal: TerminalPalette {
+            fg: Color::rgb(0xEF, 0xE2, 0xCE),
+            bg: Color::rgb(0x2E, 0x21, 0x14),
+            cursor: Color::rgb(0xF8, 0xEE, 0xDE),
+            ansi: [
+                Color::rgb(0x2A, 0x1A, 0x0E),
+                Color::rgb(0xC0, 0x55, 0x2F),
+                Color::rgb(0x7A, 0x9A, 0x48),
+                Color::rgb(0xD8, 0x9A, 0x3C),
+                Color::rgb(0x6A, 0x8F, 0xB8),
+                Color::rgb(0xA8, 0x70, 0x9A),
+                Color::rgb(0x5F, 0xA0, 0xA0),
+                Color::rgb(0xEF, 0xE0, 0xCC),
+                Color::rgb(0x5A, 0x46, 0x32),
+                Color::rgb(0xE0, 0x7A, 0x55),
+                Color::rgb(0x9C, 0xC0, 0x77),
+                Color::rgb(0xF0, 0xBE, 0x6A),
+                Color::rgb(0x92, 0xB4, 0xD8),
+                Color::rgb(0xC7, 0x9A, 0xBC),
+                Color::rgb(0x8F, 0xC4, 0xC4),
+                Color::rgb(0xFB, 0xF3, 0xE6),
+            ],
+            opacity: Some(90),
+        },
+    })
+}
+
+/// Lunduke Oak: the darkest of the three, matched to the oak desk and
+/// map background whose ground sits around #302010. Deeper and browner
+/// than Walnut, with the same warm ink, so a desk photographed in low
+/// light does not get chrome lit for a brighter room.
+#[cfg(feature = "lcos")]
+pub fn lunduke_oak() -> Theme {
+    build_chrome(ChromeSpec {
+        id: "lunduke-oak".into(),
+        name: "Lunduke Oak".into(),
+        appearance: Appearance::Dark,
+        wallpaper: "oak-ground",
+        font_family: "DejaVu Sans",
+        active: Fill::Gradient(Gradient {
+            direction: GradientDirection::Diagonal,
+            from: Color::rgb(0x4A, 0x2E, 0x18),
+            to: Color::rgb(0x22, 0x12, 0x06),
+        }),
+        inactive: Fill::Gradient(Gradient {
+            direction: GradientDirection::Diagonal,
+            from: Color::rgb(0x9C, 0x80, 0x60),
+            to: Color::rgb(0x7A, 0x62, 0x48),
+        }),
+        text_active: Color::rgb(0xF2, 0xE4, 0xD0),
+        text_inactive: Color::rgb(0x1E, 0x12, 0x06),
+        border: Color::rgb(0x14, 0x0A, 0x04),
+        resizebar: Fill::Solid(Color::rgb(0x8A, 0x70, 0x52)),
+        bevel: Bevel { style: BevelStyle::Raised, width: 1, light: Color::rgb(0xC8, 0xB0, 0x90), dark: Color::rgb(0x1A, 0x0E, 0x06) },
+        menu_title_bg: Fill::Gradient(Gradient {
+            direction: GradientDirection::Diagonal,
+            from: Color::rgb(0x4A, 0x2E, 0x18),
+            to: Color::rgb(0x22, 0x12, 0x06),
+        }),
+        menu_title_text: Color::rgb(0xF2, 0xE4, 0xD0),
+        menu_bg: Fill::Solid(Color::rgb(0xB2, 0x98, 0x74)),
+        menu_text: Color::rgb(0x1E, 0x12, 0x06),
+        menu_highlight_bg: Fill::Solid(Color::rgb(0xEA, 0xDC, 0xC4)),
+        menu_highlight_text: Color::rgb(0x1E, 0x12, 0x06),
+        tile: (Color::rgb(0xAC, 0x92, 0x70), Color::rgb(0x3A, 0x24, 0x10)),
+        terminal: TerminalPalette {
+            fg: Color::rgb(0xEA, 0xDC, 0xC4),
+            bg: Color::rgb(0x22, 0x16, 0x06),
+            cursor: Color::rgb(0xF2, 0xE4, 0xD0),
+            ansi: [
+                Color::rgb(0x2A, 0x1A, 0x0E),
+                Color::rgb(0xC0, 0x55, 0x2F),
+                Color::rgb(0x7A, 0x9A, 0x48),
+                Color::rgb(0xD8, 0x9A, 0x3C),
+                Color::rgb(0x6A, 0x8F, 0xB8),
+                Color::rgb(0xA8, 0x70, 0x9A),
+                Color::rgb(0x5F, 0xA0, 0xA0),
+                Color::rgb(0xEF, 0xE0, 0xCC),
+                Color::rgb(0x5A, 0x46, 0x32),
+                Color::rgb(0xE0, 0x7A, 0x55),
+                Color::rgb(0x9C, 0xC0, 0x77),
+                Color::rgb(0xF0, 0xBE, 0x6A),
+                Color::rgb(0x92, 0xB4, 0xD8),
+                Color::rgb(0xC7, 0x9A, 0xBC),
+                Color::rgb(0x8F, 0xC4, 0xC4),
+                Color::rgb(0xFB, 0xF3, 0xE6),
+            ],
+            opacity: Some(86),
+        },
+    })
+}
+
+/// Walnut on paper. The titlebar keeps its walnut because that is the
+/// theme's identity; everything around it lightens.
+#[cfg(feature = "lcos")]
+pub fn lunduke_walnut_light() -> Theme {
+    build_chrome(ChromeSpec {
+        id: "lunduke-walnut".into(),
+        name: "Lunduke Walnut".into(),
+        appearance: Appearance::Light,
+        wallpaper: "walnut-ground",
+        font_family: "DejaVu Sans",
+        active: Fill::Gradient(Gradient {
+            direction: GradientDirection::Diagonal,
+            from: Color::rgb(0x5A, 0x2E, 0x14),
+            to: Color::rgb(0x3E, 0x1F, 0x0C),
+        }),
+        inactive: Fill::Gradient(Gradient {
+            direction: GradientDirection::Diagonal,
+            from: Color::rgb(0xE2, 0xD2, 0xBE),
+            to: Color::rgb(0xC4, 0xB0, 0x98),
+        }),
+        text_active: Color::rgb(0xF6, 0xE8, 0xD8),
+        text_inactive: Color::rgb(0x3A, 0x28, 0x18),
+        border: Color::rgb(0x8A, 0x74, 0x58),
+        resizebar: Fill::Solid(Color::rgb(0xD6, 0xC4, 0xAC)),
+        bevel: Bevel { style: BevelStyle::Raised, width: 1, light: Color::rgb(0xFF, 0xFF, 0xFF), dark: Color::rgb(0xA0, 0x8A, 0x6E) },
+        menu_title_bg: Fill::Gradient(Gradient {
+            direction: GradientDirection::Diagonal,
+            from: Color::rgb(0x5A, 0x2E, 0x14),
+            to: Color::rgb(0x3E, 0x1F, 0x0C),
+        }),
+        menu_title_text: Color::rgb(0xF6, 0xE8, 0xD8),
+        menu_bg: Fill::Solid(Color::rgb(0xEA, 0xDC, 0xC8)),
+        menu_text: Color::rgb(0x2A, 0x1C, 0x0E),
+        menu_highlight_bg: Fill::Solid(Color::rgb(0xFF, 0xFF, 0xFF)),
+        menu_highlight_text: Color::rgb(0x2A, 0x1C, 0x0E),
+        tile: (Color::rgb(0xF0, 0xE4, 0xD2), Color::rgb(0x9E, 0x84, 0x64)),
+        terminal: TerminalPalette {
+            fg: Color::rgb(0x33, 0x25, 0x1A),
+            bg: Color::rgb(0xF4, 0xEA, 0xDA),
+            cursor: Color::rgb(0x3E, 0x1F, 0x0C),
+            ansi: [
+                Color::rgb(0x2A, 0x1C, 0x10),
+                Color::rgb(0x9A, 0x3D, 0x1C),
+                Color::rgb(0x44, 0x66, 0x2E),
+                Color::rgb(0x8A, 0x63, 0x18),
+                Color::rgb(0x2F, 0x5C, 0x8A),
+                Color::rgb(0x7A, 0x45, 0x70),
+                Color::rgb(0x2C, 0x6E, 0x6E),
+                Color::rgb(0x4E, 0x40, 0x34),
+                Color::rgb(0x6E, 0x5A, 0x46),
+                Color::rgb(0xC0, 0x5A, 0x32),
+                Color::rgb(0x5F, 0x8A, 0x44),
+                Color::rgb(0xB0, 0x8A, 0x2A),
+                Color::rgb(0x4A, 0x79, 0xA8),
+                Color::rgb(0x9C, 0x64, 0x94),
+                Color::rgb(0x4A, 0x8E, 0x8E),
+                Color::rgb(0x2A, 0x1C, 0x10),
+            ],
+            opacity: Some(94),
+        },
+    })
+}
+
+/// Desk in daylight: the same desk-and-paper pairing, with the paper
+/// brought up to the sheet in the photograph rather than tinted down.
+#[cfg(feature = "lcos")]
+pub fn lunduke_desk_light() -> Theme {
+    build_chrome(ChromeSpec {
+        id: "lunduke-desk".into(),
+        name: "Lunduke Desk".into(),
+        appearance: Appearance::Light,
+        wallpaper: "desk-ground",
+        font_family: "DejaVu Sans",
+        active: Fill::Gradient(Gradient {
+            direction: GradientDirection::Diagonal,
+            from: Color::rgb(0x54, 0x36, 0x19),
+            to: Color::rgb(0x32, 0x20, 0x0F),
+        }),
+        inactive: Fill::Gradient(Gradient {
+            direction: GradientDirection::Diagonal,
+            from: Color::rgb(0xE8, 0xDC, 0xCA),
+            to: Color::rgb(0xCD, 0xBC, 0xA4),
+        }),
+        text_active: Color::rgb(0xF8, 0xEE, 0xDE),
+        text_inactive: Color::rgb(0x3A, 0x28, 0x18),
+        border: Color::rgb(0x8E, 0x7A, 0x5E),
+        resizebar: Fill::Solid(Color::rgb(0xDD, 0xD0, 0xBC)),
+        bevel: Bevel { style: BevelStyle::Raised, width: 1, light: Color::rgb(0xFF, 0xFF, 0xFF), dark: Color::rgb(0xA8, 0x92, 0x72) },
+        menu_title_bg: Fill::Gradient(Gradient {
+            direction: GradientDirection::Diagonal,
+            from: Color::rgb(0x54, 0x36, 0x19),
+            to: Color::rgb(0x32, 0x20, 0x0F),
+        }),
+        menu_title_text: Color::rgb(0xF8, 0xEE, 0xDE),
+        menu_bg: Fill::Solid(Color::rgb(0xEF, 0xE4, 0xD2)),
+        menu_text: Color::rgb(0x2A, 0x1C, 0x0E),
+        menu_highlight_bg: Fill::Solid(Color::rgb(0xFF, 0xFF, 0xFF)),
+        menu_highlight_text: Color::rgb(0x2A, 0x1C, 0x0E),
+        tile: (Color::rgb(0xF6, 0xED, 0xDE), Color::rgb(0xA0, 0x8A, 0x6A)),
+        terminal: TerminalPalette {
+            fg: Color::rgb(0x33, 0x25, 0x1A),
+            bg: Color::rgb(0xF7, 0xEF, 0xE2),
+            cursor: Color::rgb(0x32, 0x20, 0x0F),
+            ansi: [
+                Color::rgb(0x2A, 0x1C, 0x10),
+                Color::rgb(0x9A, 0x3D, 0x1C),
+                Color::rgb(0x44, 0x66, 0x2E),
+                Color::rgb(0x8A, 0x63, 0x18),
+                Color::rgb(0x2F, 0x5C, 0x8A),
+                Color::rgb(0x7A, 0x45, 0x70),
+                Color::rgb(0x2C, 0x6E, 0x6E),
+                Color::rgb(0x4E, 0x40, 0x34),
+                Color::rgb(0x6E, 0x5A, 0x46),
+                Color::rgb(0xC0, 0x5A, 0x32),
+                Color::rgb(0x5F, 0x8A, 0x44),
+                Color::rgb(0xB0, 0x8A, 0x2A),
+                Color::rgb(0x4A, 0x79, 0xA8),
+                Color::rgb(0x9C, 0x64, 0x94),
+                Color::rgb(0x4A, 0x8E, 0x8E),
+                Color::rgb(0x2A, 0x1C, 0x10),
+            ],
+            opacity: Some(95),
+        },
+    })
+}
+
+/// Oak in daylight. Still the darkest titlebar of the three, so the
+/// three themes stay in the same order in either appearance.
+#[cfg(feature = "lcos")]
+pub fn lunduke_oak_light() -> Theme {
+    build_chrome(ChromeSpec {
+        id: "lunduke-oak".into(),
+        name: "Lunduke Oak".into(),
+        appearance: Appearance::Light,
+        wallpaper: "oak-ground",
+        font_family: "DejaVu Sans",
+        active: Fill::Gradient(Gradient {
+            direction: GradientDirection::Diagonal,
+            from: Color::rgb(0x4A, 0x2E, 0x18),
+            to: Color::rgb(0x22, 0x12, 0x06),
+        }),
+        inactive: Fill::Gradient(Gradient {
+            direction: GradientDirection::Diagonal,
+            from: Color::rgb(0xDC, 0xCC, 0xB4),
+            to: Color::rgb(0xBC, 0xA8, 0x8C),
+        }),
+        text_active: Color::rgb(0xF2, 0xE4, 0xD0),
+        text_inactive: Color::rgb(0x32, 0x22, 0x0E),
+        border: Color::rgb(0x7E, 0x6A, 0x4E),
+        resizebar: Fill::Solid(Color::rgb(0xD0, 0xC0, 0xA8)),
+        bevel: Bevel { style: BevelStyle::Raised, width: 1, light: Color::rgb(0xFF, 0xFF, 0xFF), dark: Color::rgb(0x9A, 0x84, 0x64) },
+        menu_title_bg: Fill::Gradient(Gradient {
+            direction: GradientDirection::Diagonal,
+            from: Color::rgb(0x4A, 0x2E, 0x18),
+            to: Color::rgb(0x22, 0x12, 0x06),
+        }),
+        menu_title_text: Color::rgb(0xF2, 0xE4, 0xD0),
+        menu_bg: Fill::Solid(Color::rgb(0xE6, 0xD8, 0xC2)),
+        menu_text: Color::rgb(0x26, 0x18, 0x0A),
+        menu_highlight_bg: Fill::Solid(Color::rgb(0xFF, 0xFF, 0xFF)),
+        menu_highlight_text: Color::rgb(0x26, 0x18, 0x0A),
+        tile: (Color::rgb(0xEE, 0xE2, 0xCE), Color::rgb(0x98, 0x80, 0x5E)),
+        terminal: TerminalPalette {
+            fg: Color::rgb(0x2E, 0x20, 0x14),
+            bg: Color::rgb(0xF2, 0xE8, 0xD6),
+            cursor: Color::rgb(0x22, 0x12, 0x06),
+            ansi: [
+                Color::rgb(0x2A, 0x1C, 0x10),
+                Color::rgb(0x9A, 0x3D, 0x1C),
+                Color::rgb(0x44, 0x66, 0x2E),
+                Color::rgb(0x8A, 0x63, 0x18),
+                Color::rgb(0x2F, 0x5C, 0x8A),
+                Color::rgb(0x7A, 0x45, 0x70),
+                Color::rgb(0x2C, 0x6E, 0x6E),
+                Color::rgb(0x4E, 0x40, 0x34),
+                Color::rgb(0x6E, 0x5A, 0x46),
+                Color::rgb(0xC0, 0x5A, 0x32),
+                Color::rgb(0x5F, 0x8A, 0x44),
+                Color::rgb(0xB0, 0x8A, 0x2A),
+                Color::rgb(0x4A, 0x79, 0xA8),
+                Color::rgb(0x9C, 0x64, 0x94),
+                Color::rgb(0x4A, 0x8E, 0x8E),
+                Color::rgb(0x2A, 0x1C, 0x10),
             ],
             opacity: Some(94),
         },
