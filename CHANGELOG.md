@@ -5,6 +5,17 @@ crate and both session binaries carry the same number.
 
 ## [Unreleased]
 
+- Lua `hl.monitor({ …, transform = N })` now actually rotates the output.
+  The Lua reader was joining `transform` and its value into one combined
+  string before handing it to the applier, which only recognizes the two
+  separate tokens the classic `.conf` syntax produces — so every
+  Lua-configured monitor rotation was silently refused as an unsupported
+  field. `monitor=` lines with other unsupported fields (`disable`,
+  `mirror`, `cm`, `bitdepth`, …) are still refused whole either way.
+- A `monitor=` line refused for an out-of-range or malformed `scale` now
+  still reserves its layout slot, so a later `auto`-positioned monitor no
+  longer lands on top of it instead of past its width.
+
 ## [0.4.3] - 2026-09-07
 
 - Fullscreen publishes zero frame extents, and XWayland sends the settled

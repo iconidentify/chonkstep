@@ -834,6 +834,38 @@ fn monitor_lines_are_read_and_reported_rather_than_applied() {
     );
 }
 
+/// `wm-wayland`'s `monitor_transform()` recognizes `extra == ["transform",
+/// "N"]` — the shape the conf front end produces by splitting
+/// `monitor = …, transform, N` on commas (`conf.rs`'s
+/// `fields.iter().skip(4)`). The Lua front end has to produce the exact
+/// same two-token shape for `hl.monitor({ …, transform = N })`, or every
+/// Lua-configured rotation is silently refused as an unsupported field —
+/// which is exactly what happened on real hardware before this fix.
+#[test]
+fn lua_monitor_transform_lowers_to_the_same_extra_shape_as_conf() {
+    let mut globals = lua::Globals::default();
+    let mut out = Vec::new();
+    lua::read(
+        r#"hl.monitor({ output = "DP-2", mode = "preferred", position = "auto", scale = 2, transform = 3 })"#,
+        &lua::Facts { path: Vec::new(), home: None, state_home: None },
+        &mut globals,
+        &mut out,
+    );
+    let monitor = out
+        .iter()
+        .find_map(|directive| match directive {
+            Directive::Monitor(monitor) => Some(monitor),
+            _ => None,
+        })
+        .expect("hl.monitor(...) should lower to a Monitor directive");
+    assert_eq!(
+        monitor.extra,
+        vec!["transform".to_string(), "3".to_string()],
+        "extra must split into separate tokens, not one joined \"transform 3\" string, \
+         or wm-wayland's monitor_transform() rejects the whole line as unsupported"
+    );
+}
+
 // ---- the classic conf syntax ------------------------------------------
 
 /// The same machine's Omarchy 3 configuration, read through the other
