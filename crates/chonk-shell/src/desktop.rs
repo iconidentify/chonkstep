@@ -379,6 +379,10 @@ const ACTION_WALLPAPER_BASE: u32 = 100;
 /// Offered on the same condition as that row (Omarchy has a palette on
 /// this machine), and like it always resolvable.
 const ACTION_WALLPAPER_OMARCHY: u32 = ACTION_WALLPAPER_BASE + Wallpaper::ALL.len() as u32;
+/// The host's own backgrounds, in the slots after Omarchy's row. Still
+/// inside the wallpaper range (100..200), which has ample room: nine
+/// built-ins, one Omarchy row and at most `HOST_ART_SLOTS` of these.
+const ACTION_WALLPAPER_HOST_BASE: u32 = ACTION_WALLPAPER_OMARCHY + 1;
 const ACTION_THEME_BASE: u32 = 200;
 /// The Theme submenu's follow-Omarchy row: the slot right after the
 /// built-ins, so it lives in the Theme range without displacing the
@@ -414,8 +418,8 @@ const ACTION_OMARCHY_INERT_ROW: u32 = 600;
 const ACTION_APP_BASE: u32 = 1000;
 const ACTION_OMARCHY_BASE: u32 = 1_000_000;
 
-/// The root menu's fixed title — also what a fresh `ShellMenu` is
-/// titled before any session opens.
+/// What the root menu is titled when the host does not say otherwise —
+/// also what a fresh `ShellMenu` is titled before any session opens.
 ///
 /// "Omarchy", not "chonkstep", because that is what this desktop *is*
 /// to the person using it: a replacement desktop environment for
@@ -424,7 +428,102 @@ const ACTION_OMARCHY_BASE: u32 = 1_000_000;
 /// renamed — crates, log lines, config paths and the session
 /// signature all stay `chonkstep`, because renaming those breaks
 /// existing installs and buys nothing anybody sees.
-const ROOT_MENU_TITLE: &str = "Omarchy";
+const DEFAULT_ROOT_MENU_TITLE: &str = "Omarchy";
+
+/// The root menu's title: the name of the desktop the person installed,
+/// taken from the host's `/etc/os-release`.
+///
+/// The reasoning above — that the title names the desktop, not the
+/// window manager — was never specific to Omarchy; it was only ever
+/// hardcoded because Omarchy was the one host. It is not any more, and a
+/// menu captioned "Omarchy" on somebody's LCOS desktop is simply wrong.
+///
+/// `NAME=` is exactly the field for this, and the two hosts spell
+/// themselves cleanly: Omarchy sets `NAME="Omarchy"`, LCOS sets
+/// `NAME="LCOS"`. So on Omarchy this resolves to the identical string
+/// the constant used to hold and nothing there changes at all — which is
+/// the point. Read once; an unreadable or empty value falls back.
+fn root_menu_title() -> &'static str {
+    static TITLE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    TITLE
+        .get_or_init(|| {
+            os_release_field("NAME").unwrap_or_else(|| DEFAULT_ROOT_MENU_TITLE.to_string())
+        })
+        .as_str()
+}
+
+/// One field from the host's `/etc/os-release`, unquoted and trimmed;
+/// `None` when the file is unreadable or the key is absent or empty.
+///
+/// The file is read once. `strip_prefix` anchors at the start of the
+/// line, so asking for `NAME` cannot accidentally match `PRETTY_NAME=`
+/// or `ID` match `ID_LIKE=`.
+pub(crate) fn os_release_field(key: &str) -> Option<String> {
+    static TEXT: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    let text = TEXT.get_or_init(|| std::fs::read_to_string("/etc/os-release").ok()).as_ref()?;
+    let prefix = format!("{key}=");
+    text.lines()
+        .find_map(|line| line.strip_prefix(prefix.as_str()))
+        .map(|value| value.trim().trim_matches('"').trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+/// The mark on the dock's top tile.
+///
+/// The ChonkStep mark, except on a host this project has drawn one for.
+/// Today that is LCOS, whose mark is `gen-lcos-logo.py`'s — original
+/// work, like the `lunduke-navy` wallpaper, so nothing of Lunduke's is
+/// redistributed in this binary.
+///
+/// Note what this deliberately is *not*: a generic scan of
+/// `/usr/share/pixmaps` for whatever the distribution calls its logo.
+/// That was tried and was wrong twice over. LCOS's own logo is a
+/// three-line wordmark ("THE / LUNDUKE / COMPUTER OPERATING SYSTEM");
+/// in a 56px tile its third line is sub-pixel and the tile reads as a
+/// smudge. And it silently changed the mark on Omarchy too, which ships
+/// its own `omarchy.png` — a visible change to somebody's main desktop
+/// as a side effect of an LCOS request. Drawing a mark for a host is a
+/// deliberate act, so it takes a deliberate branch.
+/// The dock mark resampled to the size it will be drawn at.
+///
+/// Drawing a 256px mark into a 44px tile means a 5.8x reduction, and
+/// `FilterQuality::Bicubic` is a four-tap filter: at that ratio it
+/// samples far too sparsely and the result aliases — a hard, stair-
+/// stepped disc edge with none of the intermediate tones the source
+/// actually has. tiny-skia has no mipmapping to fall back on, so the
+/// fix is to reduce properly, once, with a filter that looks at every
+/// source pixel, and then blit at 1:1.
+///
+/// `image` is already a dependency here for wallpaper decoding, and
+/// Lanczos3 is what its wallpaper path uses. Both buffers are
+/// premultiplied RGBA8 in the same byte order, and premultiplied is the
+/// correct space to resample alpha in anyway — straight alpha would
+/// fringe the disc edge against transparency.
+///
+/// This is not LCOS-specific: the ChonkStep mark is the same 256px into
+/// the same tile and was aliasing the same way, just less visibly on a
+/// design with no long curved edge to show it.
+fn scale_mark(src: &Pixmap, size: u32) -> Option<Pixmap> {
+    if size == 0 || src.width() == size {
+        return None;
+    }
+    let source = image::RgbaImage::from_raw(src.width(), src.height(), src.data().to_vec())?;
+    let resized = image::imageops::resize(&source, size, size, image::imageops::FilterType::Lanczos3);
+    let mut out = Pixmap::new(size, size)?;
+    out.data_mut().copy_from_slice(resized.as_raw());
+    Some(out)
+}
+
+fn dock_mark() -> Pixmap {
+    #[cfg(feature = "lcos")]
+    let art: &[u8] = match os_release_field("ID").as_deref() {
+        Some("lcos") => include_bytes!("../assets/branding/lcos-logo-icon.png"),
+        _ => include_bytes!("../assets/branding/chonkstep-logo-icon.png"),
+    };
+    #[cfg(not(feature = "lcos"))]
+    let art: &[u8] = include_bytes!("../assets/branding/chonkstep-logo-icon.png");
+    Pixmap::decode_png(art).expect("embedded dock mark should decode")
+}
 
 /// The shared current-choice marker: a leading bullet on the selected
 /// row, matching spaces on every other row so all labels in the column
@@ -514,6 +613,12 @@ fn root_menu_items(
         .chain(follow_omarchy.map(|_| MenuItem::Action {
             label: bullet_label(selected_wallpaper == Wallpaper::Omarchy, Wallpaper::Omarchy.label()),
             action: ACTION_WALLPAPER_OMARCHY,
+        }))
+        // The host's own pictures, when it ships any. Empty everywhere
+        // that does, so no row appears and no id is offered.
+        .chain((0..crate::wallpaper::host_art().len() as u8).map(|slot| MenuItem::Action {
+            label: bullet_label(selected_wallpaper == Wallpaper::HostArt(slot), Wallpaper::HostArt(slot).label()),
+            action: ACTION_WALLPAPER_HOST_BASE + slot as u32,
         }))
         .collect();
     let theme_items = wm_theme::default_theme::CHOICES
@@ -625,6 +730,16 @@ fn resolve_action(action: u32, bounds: RootMenuBounds) -> Option<RootMenuAction>
             Some(RootMenuAction::SetWallpaper(Wallpaper::ALL[(action - ACTION_WALLPAPER_BASE) as usize]))
         }
         ACTION_WALLPAPER_OMARCHY => Some(RootMenuAction::SetWallpaper(Wallpaper::Omarchy)),
+        // Bounds, not availability — the same contract the Omarchy rows
+        // keep: a slot that no longer has a file resolves, and the
+        // render falls back rather than leaving a bare desk.
+        action
+            if (ACTION_WALLPAPER_HOST_BASE
+                ..ACTION_WALLPAPER_HOST_BASE + crate::wallpaper::HOST_ART_SLOTS as u32)
+                .contains(&action) =>
+        {
+            Some(RootMenuAction::SetWallpaper(Wallpaper::HostArt((action - ACTION_WALLPAPER_HOST_BASE) as u8)))
+        }
         action if (ACTION_THEME_BASE..ACTION_THEME_OMARCHY).contains(&action) => {
             Some(RootMenuAction::SetTheme(wm_theme::default_theme::CHOICES[(action - ACTION_THEME_BASE) as usize].0))
         }
@@ -865,7 +980,7 @@ impl<Id: Copy + Eq + std::fmt::Debug> ShellMenu<Id> {
         // is never consulted — and zero is the value that would refuse
         // every app and Omarchy id anyway.
         Self {
-            menu: CascadeMenu::new(ROOT_MENU_TITLE, DESKTOP_BG),
+            menu: CascadeMenu::new(root_menu_title(), DESKTOP_BG),
             session: MenuSession::Root { bounds: RootMenuBounds::default() },
         }
     }
@@ -913,7 +1028,7 @@ impl<Id: Copy + Eq + std::fmt::Debug> ShellMenu<Id> {
         at: Point,
         bounds: Size,
     ) {
-        self.begin_session(host, MenuSession::Root { bounds: root_bounds }, ROOT_MENU_TITLE.to_string());
+        self.begin_session(host, MenuSession::Root { bounds: root_bounds }, root_menu_title().to_string());
         self.menu.open(host, theme, font_system, items, at, bounds, true);
     }
 
@@ -1666,6 +1781,9 @@ pub struct Desktop<B: Backend> {
     /// [`Desktop::set_dock_visibility`] before the first frame.
     dock: DockVisibility,
     logo: Pixmap,
+    /// [`Self::logo`] resampled to the size it is actually drawn at,
+    /// rebuilt when the tile size changes. See `scale_mark`.
+    logo_scaled: Option<(u32, Pixmap)>,
 }
 
 impl<B: Backend> Desktop<B> {
@@ -1789,8 +1907,7 @@ impl<B: Backend> Desktop<B> {
         backend.map_shell_surface(clip_window);
         backend.raise_shell_surface(clip_window);
 
-        let logo = Pixmap::decode_png(include_bytes!("../assets/branding/chonkstep-logo-icon.png"))
-            .expect("embedded ChonkStep logo should decode");
+        let logo = dock_mark();
         let desktop = Self {
             dock_window,
             screen,
@@ -1832,6 +1949,7 @@ impl<B: Backend> Desktop<B> {
             // choice through `set_dock_visibility` a moment later.
             dock: DockVisibility::Shown,
             logo,
+            logo_scaled: None,
         };
         desktop.repaint_wallpaper(backend);
         desktop
@@ -3271,12 +3389,18 @@ impl<B: Backend> Desktop<B> {
         tile::draw_tile_base(&mut pixmap, 0, 0, self.tile, theme);
         let logo_inset = (self.tile / 9).max(2);
         let logo_size = self.tile.saturating_sub(logo_inset * 2);
-        let logo_scale = logo_size as f32 / self.logo.width() as f32;
+        // Resample once per tile size rather than per repaint, then blit
+        // at 1:1 — see `scale_mark` for why not to let the blit scale it.
+        if self.logo_scaled.as_ref().is_none_or(|(size, _)| *size != logo_size) {
+            self.logo_scaled = scale_mark(&self.logo, logo_size).map(|art| (logo_size, art));
+        }
+        let mark = self.logo_scaled.as_ref().map_or(&self.logo, |(_, art)| art);
+        let logo_scale = logo_size as f32 / mark.width() as f32;
         let logo_paint = PixmapPaint { quality: FilterQuality::Bicubic, ..PixmapPaint::default() };
         pixmap.draw_pixmap(
             0,
             0,
-            self.logo.as_ref(),
+            mark.as_ref(),
             &logo_paint,
             Transform::from_row(logo_scale, 0.0, 0.0, logo_scale, logo_inset as f32, logo_inset as f32),
             None,
@@ -5590,7 +5714,7 @@ mod tests {
             None,
             DockVisibility::Shown,
         );
-        let row = f.row_point(ROOT_MENU_TITLE, &items, 0);
+        let row = f.row_point(root_menu_title(), &items, 0);
         assert!(matches!(f.click(window, row), Some(MenuAction::Root(RootMenuAction::LaunchTerminal))));
     }
 
@@ -5608,7 +5732,7 @@ mod tests {
             None,
             DockVisibility::Shown,
         );
-        let applications = f.row_point(ROOT_MENU_TITLE, &items, 1);
+        let applications = f.row_point(root_menu_title(), &items, 1);
         assert!(f.click(root, applications).is_none());
         assert_eq!(f.host.open.len(), 2, "the Applications cascade opened");
         assert!(f.menu.is_open());
