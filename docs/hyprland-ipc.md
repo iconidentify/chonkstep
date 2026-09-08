@@ -239,9 +239,12 @@ presentation feedback comes from winit presentation or DRM vblank.
 FIFO barriers release at that same presentation boundary; commit
 timestamps arm the event loop's monotonic-clock deadline, and invisible
 surfaces cannot remain wedged behind an unpresentable barrier. Security
-contexts tag admitted clients and every cross-client capability consults
-one shared policy predicate; the current single-user policy remains
-permissive, preserving ordinary and confined-client behavior.
+contexts tag admitted clients. A shared policy hides privileged globals from
+those clients, including capture, input injection, clipboard monitoring,
+layer surfaces and output/session management. Ordinary desktop helpers retain
+access; confined applications keep normal window, input and focused clipboard
+protocols. This boundary requires the sandbox launcher to use a security-context
+listener and prevent access to the unrestricted display socket.
 Tablet proximity, tip, buttons, pressure, distance, tilt, rotation,
 slider and wheel are forwarded from libinput.
 

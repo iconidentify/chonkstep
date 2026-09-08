@@ -3408,6 +3408,7 @@ checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
 name = "wm-config"
 version = "0.4.4"
 dependencies = [
+ "chonk-test-support",
  "regex",
  "serde",
  "toml",

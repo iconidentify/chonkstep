@@ -537,7 +537,7 @@ const SAMPLE_OUTPUT_LIMIT: usize = 4 * 1024 * 1024;
 /// for exit first deadlocks any legitimate reply larger than the pipe
 /// buffer; reading to EOF after exit can block forever if a descendant
 /// inherited stdout. Exit and EOF must both arrive before one deadline.
-fn wait_with_deadline(mut child: std::process::Child, program: &str, deadline: Duration) -> Option<String> {
+pub(crate) fn wait_with_deadline(mut child: std::process::Child, program: &str, deadline: Duration) -> Option<String> {
     use std::io::{ErrorKind, Read};
     use std::os::fd::AsRawFd;
 

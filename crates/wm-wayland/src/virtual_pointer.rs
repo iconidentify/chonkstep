@@ -30,10 +30,8 @@ use crate::state::Compositor;
 
 const VERSION: u32 = 2;
 
-/// Held for the global's lifetime. The policy seam deliberately has
-/// the same shape as virtual-keyboard's; every client on this socket is
-/// currently a full user-session peer, and this is where a future
-/// security-context restriction belongs.
+/// Held for the global's lifetime. The shared virtual-input policy permits
+/// ordinary desktop helpers and excludes sandbox-context clients.
 pub(crate) struct VirtualPointerState {
     _global: GlobalId,
 }

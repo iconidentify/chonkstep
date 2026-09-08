@@ -405,7 +405,7 @@ mod security_context_tests {
     use std::sync::Arc;
 
     #[test]
-    fn confined_clients_cannot_nest_security_contexts_but_keep_current_policy() {
+    fn confined_clients_cannot_nest_security_contexts_or_use_privileged_globals() {
         let display = Display::<Compositor>::new().expect("wayland display");
         let mut handle = display.handle();
         let (creator_socket, _creator_peer) =
@@ -431,7 +431,7 @@ mod security_context_tests {
         assert!(crate::state::security_context_global_visible(&creator));
         assert!(!crate::state::security_context_global_visible(&confined));
         assert!(crate::state::privileged_global_visible(&creator));
-        assert!(crate::state::privileged_global_visible(&confined));
+        assert!(!crate::state::privileged_global_visible(&confined));
     }
 }
 delegate_relative_pointer!(Compositor);
