@@ -20,7 +20,7 @@ release. See the [release pipeline](../../docs/engineering/2026-09-07-release-pr
 for validation freshness and artifact retention.
 
 Pushing a tag whose name matches the workspace version, for example
-`v0.4.2`, runs `.github/workflows/aur.yml`. The job copies the release
+`v0.4.3`, runs `.github/workflows/aur.yml`. The job copies the release
 recipe to `PKGBUILD`, replaces `SKIP` with the tag archive's real
 SHA-256 checksum, generates `.SRCINFO` with Arch's `makepkg`, and pushes
 both files to `ssh://aur@aur.archlinux.org/chonkstep.git`.

@@ -3992,6 +3992,7 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
     // Empty on a session that reads no such configuration, which is
     // most of them.
     chonk_shell::startup::apply_session_env(&state.session_env);
+    chonk_shell::startup::clear_inherited_gtk_scale_env();
     let theme = state.theme();
     tracing::info!(theme = %theme.id, "theme loaded");
     // The font database is built out here rather than inside the engine

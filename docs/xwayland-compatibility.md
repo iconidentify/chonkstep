@@ -381,10 +381,11 @@ the X11 session everything is an X11 client.
 | JetBrains IDEs (IntelliJ, CLion) | XWayland | Framed by chonkstep — JBR does not set the Motif hint | `Xft.dpi` from `RESOURCE_MANAGER` | Java reads the resource when opening the display; restart after a live scale change. Unverified with a real IDE |
 | GIMP | XWayland or native GTK | Framed; GIMP asks for server-side chrome | XSETTINGS (X11); the output scale (Wayland) | Multi-window mode leans on `_NET_WM_WINDOW_TYPE_UTILITY` and `_DIALOG`, both handled |
 | Qt applications (VLC, Krita, qBittorrent) | Native Wayland or XWayland | Framed, single titlebar either way | `QT_SCALE_FACTOR` at launch (X11); the output scale (Wayland) | Qt defers to server-side decorations when offered, and the compositor always offers |
-| Steam | XWayland | Mixed — Steam's own windows ask for various chrome | 1× unless Steam is told otherwise | Its Chromium-embedded UI, overlay and Big Picture mode are all unverified here |
+| Steam | XWayland | Mixed — Steam's own windows ask for various chrome | Desktop DPI from XSETTINGS/X resources | Desktop and Big Picture are covered by the 0.4.3 fullscreen/scaling validation; see the release notes for the tested scope |
 | Wine / Proton applications | XWayland | Depends on winecfg's "allow the window manager to decorate the windows"; Wine sets the Motif hint when it decorates itself | Wine's own DPI setting | Fullscreen games depend on `_NET_WM_STATE_FULLSCREEN`, which works in the X11 session; see the state caveat below for the Wayland one |
 
-Every row is **From the code** or weaker. None has been run.
+Except for the Steam validation linked above, these rows are **From the code**
+or weaker and have not been checked with the real applications.
 
 ## Known not to work
 

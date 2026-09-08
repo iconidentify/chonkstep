@@ -485,8 +485,31 @@ impl XEwmh {
         for &(window, desktop) in &writes.window_desktops {
             self.conn.change_property32(PropMode::REPLACE, window, self.atoms.net_wm_desktop, AtomEnum::CARDINAL, &[desktop])?;
         }
-        for &(window, extents) in &writes.frame_extents {
+        for &(window, extents, content) in &writes.frame_extents {
             self.conn.change_property32(PropMode::REPLACE, window, self.atoms.net_frame_extents, AtomEnum::CARDINAL, &extents)?;
+            // SDL suppresses resize events while fullscreen still advertises
+            // borders (and while windowed mode waits for borders to return).
+            // The XWM's resize may already have arrived on its connection.
+            // Send the settled geometry AFTER the extents on this connection
+            // so PropertyNotify always releases that gate before this event.
+            self.conn.send_event(
+                false,
+                window,
+                x11rb::protocol::xproto::EventMask::STRUCTURE_NOTIFY,
+                x11rb::protocol::xproto::ConfigureNotifyEvent {
+                    response_type: x11rb::protocol::xproto::CONFIGURE_NOTIFY_EVENT,
+                    sequence: 0,
+                    event: window,
+                    window,
+                    above_sibling: x11rb::NONE,
+                    x: content.pos.x as i16,
+                    y: content.pos.y as i16,
+                    width: content.size.w as u16,
+                    height: content.size.h as u16,
+                    border_width: 0,
+                    override_redirect: false,
+                },
+            )?;
         }
         for &(window, state) in &writes.window_states {
             // ICCCM 4.1.3.1: two 32-bit values, state and icon window
@@ -556,7 +579,7 @@ struct Writes {
     workspaces: Option<(u32, u32)>,
     workarea: Option<Vec<u32>>,
     window_desktops: Vec<(XWindow, u32)>,
-    frame_extents: Vec<(XWindow, [u32; 4])>,
+    frame_extents: Vec<(XWindow, [u32; 4], Rect)>,
     window_states: Vec<(XWindow, u32)>,
     window_modal: Vec<(XWindow, bool)>,
 }
@@ -641,7 +664,7 @@ fn take_writes(backend: &mut WaylandBackend) -> Writes {
         frame_extents: ledger
             .frame_extents
             .drain()
-            .filter_map(|(id, (l, r, t, b))| Some((x11_id(windows, id)?, [l, r, t, b])))
+            .filter_map(|(id, (l, r, t, b))| Some((x11_id(windows, id)?, [l, r, t, b], windows.get(&id)?.content)))
             .collect(),
         window_states: ledger
             .window_iconic

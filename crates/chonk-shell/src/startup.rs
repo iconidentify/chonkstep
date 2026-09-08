@@ -882,6 +882,25 @@ pub fn apply_session_env(env: &[(String, String)]) {
     }
 }
 
+/// Let Wayland output scale and XSETTINGS provide GTK's scale exactly once.
+/// Session launchers and hot restarts can inherit these variables even though
+/// the Hyprland importer correctly refuses them. Steam, for example, multiplies
+/// inherited GDK_SCALE=2 by the X11 desktop's 2x DPI and starts its UI at 4x.
+/// An application can still opt into an override in its own launch command.
+///
+/// # Safety
+/// Call only during single-threaded process startup, before starting clients.
+pub fn clear_inherited_gtk_scale_env() {
+    for name in ["GDK_SCALE", "GDK_DPI_SCALE"] {
+        if std::env::var_os(name).is_some() {
+            tracing::info!(name, "discarding inherited GTK scale; display protocols provide the output scale");
+            // SAFETY: the Wayland startup caller runs before any other thread
+            // exists, under the same contract as apply_session_env.
+            unsafe { std::env::remove_var(name) };
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

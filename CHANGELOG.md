@@ -5,6 +5,19 @@ crate and both session binaries carry the same number.
 
 ## [Unreleased]
 
+## [0.4.3] - 2026-09-07
+
+- Fullscreen publishes zero frame extents, and XWayland sends the settled
+  resize after border changes. This fixes Steam Big Picture rendering into
+  its old window size with black space around it, including SDL clients that
+  wait for borders to disappear before accepting a fullscreen resize.
+- Wayland startup clears inherited GTK scaling overrides from the compositor
+  and activation environment, preventing Steam from multiplying a 2x desktop
+  by `GDK_SCALE=2` and starting at 4x.
+- Imported Hyprland rules now match the entire class and title. Omarchy's size
+  rule for `Steam` no longer catches Big Picture or sign-in windows, and its
+  floating rule no longer catches `steam_app_*` game windows.
+
 ## [0.4.2] - 2026-09-07
 
 - Game pointer capture suspends touchpad "disable while typing", allowing held
