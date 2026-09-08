@@ -357,16 +357,6 @@ pub(crate) fn elide(title: &str, width: u32, font_size: f32) -> String {
     out
 }
 
-/// Renders `text` with `font`, blending glyph coverage onto `pixmap`
-/// on one non-wrapping line within the `(x, y, w, h)` box per `align`.
-/// Glyph pixels are clipped to that box, including fallback-font ink
-/// whose bearings extend past the shaped advance. Assumes the destination
-/// pixels in that box are already fully opaque (alpha 255) — true for
-/// every caller here, since text is always drawn over an
-/// already-filled titlebar/menu/item background — which lets this treat
-/// tiny-skia's premultiplied storage as if it were straight RGBA (at
-/// alpha 255 the two are identical) instead of unpremultiplying on read.
-#[allow(clippy::too_many_arguments)]
 /// [`cosmic_text::LayoutGlyph::physical`], with the glyph's horizontal
 /// subpixel bin forced to zero.
 ///
@@ -402,7 +392,16 @@ fn physical_snapped(
     glyph.physical((offset.0 + (pen_x.round() - pen_x), offset.1), 1.0)
 }
 
-
+/// Renders `text` with `font`, blending glyph coverage onto `pixmap`
+/// on one non-wrapping line within the `(x, y, w, h)` box per `align`.
+/// Glyph pixels are clipped to that box, including fallback-font ink
+/// whose bearings extend past the shaped advance. Assumes the destination
+/// pixels in that box are already fully opaque (alpha 255) — true for
+/// every caller here, since text is always drawn over an
+/// already-filled titlebar/menu/item background — which lets this treat
+/// tiny-skia's premultiplied storage as if it were straight RGBA (at
+/// alpha 255 the two are identical) instead of unpremultiplying on read.
+#[allow(clippy::too_many_arguments)]
 pub fn draw_text(
     pixmap: &mut Pixmap,
     font_system: &mut cosmic_text::FontSystem,
