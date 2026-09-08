@@ -152,18 +152,13 @@ fn binds_two_private_sockets_where_the_protocol_says() {
 fn disconnected_socket_probes_leave_no_fds_and_no_busy_loop_behind() {
     let mut session = boot("hypr-ipc-probe-eof");
     let dir = socket_dir(&session);
-    let compositor_pid = session.compositor_pid();
-    let fd_count = || {
-        std::fs::read_dir(format!("/proc/{compositor_pid}/fd"))
-            .expect("the harness can inspect its child process")
-            .count()
-    };
-
-    // Settle startup/XWayland first. A tolerance of two covers a
-    // transient render fence without being large enough to hide even
-    // one full batch of leaked request/event connections.
+    // A frame barrier does not settle asynchronous XWayland, D-Bus,
+    // or renderer startup. A process-wide fd baseline can therefore
+    // grow for reasons unrelated to these probes. Inspect the owned IPC
+    // descriptors and their event sources, with no leaked-peer tolerance.
     session.door().barrier().unwrap();
-    let baseline = fd_count();
+    let listeners = HyprlandSources { desired: 2, registered: 2 };
+    assert_eq!(session.door().hyprland_sources().unwrap(), listeners);
     for _ in 0..8 {
         for socket in [".socket.sock", ".socket2.sock"] {
             for _ in 0..4 {
@@ -174,10 +169,10 @@ fn disconnected_socket_probes_leave_no_fds_and_no_busy_loop_behind() {
     }
 
     poll_until(EVENT, "disconnected probe fds to be pruned", || {
-        let current = fd_count();
-        (current <= baseline + 2).then_some(current)
+        let current = session.door().hyprland_sources().unwrap();
+        (current == listeners).then_some(current)
     })
-    .unwrap_or_else(|error| panic!("{error}; baseline={baseline}, now={}", fd_count()));
+    .unwrap_or_else(|error| panic!("{error}; remaining IPC sources={:?}", session.door().hyprland_sources()));
 
     assert!(json(&dir, "j/version").is_object(), "the request socket still answers after the probe storm");
 }
