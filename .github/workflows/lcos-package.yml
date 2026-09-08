@@ -1,0 +1,237 @@
+# The Debian/LCOS artifact: chonkstep's X11 session as a .deb.
+#
+# This lives in its own workflow rather than as another job in
+# github-release.yml, and that is the point. The Arch packages are the
+# Omarchy deliverable and nothing here may hold them up: a broken Debian
+# build must not fail the workflow that publishes them, and no change to
+# this file can touch that one. The two meet only at the end, where this
+# workflow uploads its assets to the release the Arch workflow already
+# created.
+#
+# It also runs on pull requests, build-only. A packaging recipe that is
+# exercised solely at tag time is a recipe that is broken at tag time.
+name: build Debian package
+
+on:
+  workflow_dispatch:
+  pull_request:
+  push:
+    tags:
+      - "preview-v*"
+
+permissions:
+  contents: read
+  attestations: write
+  id-token: write
+
+concurrency:
+  group: lcos-package-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # The recipe is linted here rather than added to ci.yml's validation
+  # list, so a fault in the Debian packaging fails this workflow and not
+  # the one gating Omarchy's own installer scripts.
+  lint:
+    name: lint the packaging recipe
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Check the build scripts
+        run: |
+          bash -n packaging/debian/build-deb.sh packaging/debian/debian-session.sh
+          shellcheck packaging/debian/build-deb.sh packaging/debian/debian-session.sh
+
+  # The whole point of the feature split, asserted rather than assumed.
+  # Omarchy is the primary audience and its package must not carry a byte
+  # of LCOS artwork; this fails the LCOS workflow — not Omarchy's — if
+  # that ever stops being true.
+  separation:
+    name: prove the Omarchy build carries no LCOS assets
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+
+      - name: Build both variants
+        run: |
+          CARGO_TARGET_DIR=target/default cargo build --release --locked -p chonkstep
+          CARGO_TARGET_DIR=target/lcos    cargo build --release --locked -p chonkstep --features lcos
+
+      - name: No LCOS string may appear in the default binary
+        run: |
+          set -euo pipefail
+          strip -o /tmp/default target/default/release/chonkstep
+          strip -o /tmp/lcos    target/lcos/release/chonkstep
+          failed=0
+          for marker in lunduke-navy walnut-ground desk-ground oak-ground 'Lunduke Walnut' 'Lunduke Desk' 'Lunduke Oak'; do
+            if strings /tmp/default | grep -q -- "$marker"; then
+              echo "::error::'$marker' leaked into the default (Omarchy) build"; failed=1
+            fi
+            # And it must genuinely be there when asked for, or this
+            # check would pass by building nothing at all.
+            strings /tmp/lcos | grep -q -- "$marker" || {
+              echo "::error::'$marker' missing from the --features lcos build"; failed=1; }
+          done
+          d=$(stat -c%s /tmp/default); l=$(stat -c%s /tmp/lcos)
+          echo "default (Omarchy): $d bytes"
+          echo "with lcos        : $l bytes"
+          echo "LCOS costs       : $((l - d)) bytes"
+          test "$l" -gt "$d" || { echo "::error::the lcos build is not larger; is the feature wired up?"; failed=1; }
+          exit $failed
+
+  deb:
+    name: deb (${{ matrix.arch }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            platform: amd64
+            runner: ubuntu-24.04
+          - arch: arm64
+            platform: arm64
+            runner: ubuntu-24.04-arm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+
+      - name: Resolve the package version and source id
+        id: metadata
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -n1)
+          revision="${DEB_REVISION:-1}"
+          source_id=$(git describe --tags --always --dirty)
+          if [[ $GITHUB_REF == refs/tags/preview-v* ]]; then
+            tag_version=${GITHUB_REF_NAME#preview-v}
+            tag_version=${tag_version%-r[0-9]*}
+            test "$tag_version" = "$version" || {
+              echo "tag version $tag_version does not match workspace version $version" >&2
+              exit 1
+            }
+          fi
+          echo "version=$version"     >> "$GITHUB_OUTPUT"
+          echo "revision=$revision"   >> "$GITHUB_OUTPUT"
+          echo "source_id=$source_id" >> "$GITHUB_OUTPUT"
+          echo "deb=chonkstep_${version}-${revision}_${{ matrix.arch }}.deb" >> "$GITHUB_OUTPUT"
+
+      # Built inside debian:trixie's own Rust image so the binary is
+      # linked against exactly the glibc the target runs. LCOS 0.3 and
+      # trixie are both glibc 2.41; building on the Ubuntu runner's
+      # newer libc would produce a package that installs and then
+      # refuses to start.
+      - name: Build the package
+        run: |
+          docker run --rm \
+            --platform "linux/${{ matrix.platform }}" \
+            --env CARGO_INCREMENTAL=0 \
+            --env "CHONKSTEP_GIT_DESCRIBE=${{ steps.metadata.outputs.source_id }}" \
+            --env "DEB_REVISION=${{ steps.metadata.outputs.revision }}" \
+            --volume "$GITHUB_WORKSPACE:/src" \
+            --workdir /src \
+            rust:trixie \
+            bash -lc '
+              set -euo pipefail
+              apt-get update -qq
+              apt-get install -y -qq dpkg-dev
+              packaging/debian/build-deb.sh
+            '
+
+      # The real test of a control file is a machine that has nothing on
+      # it. If Depends is short a library, this is where it shows up --
+      # not on a user's LCOS install.
+      - name: Verify the package installs and runs on a bare Debian
+        run: |
+          docker run --rm \
+            --platform "linux/${{ matrix.platform }}" \
+            --volume "$GITHUB_WORKSPACE/dist:/dist:ro" \
+            debian:trixie-slim \
+            bash -lc '
+              set -euo pipefail
+              apt-get update -qq
+              apt-get install -y -qq /dist/${{ steps.metadata.outputs.deb }} desktop-file-utils
+              chonkstep --version
+              desktop-file-validate /usr/share/xsessions/chonkstep.desktop
+              # A window manager that cannot resolve its own libraries
+              # fails at login, where it is hardest to debug.
+              ! ldd /usr/bin/chonkstep | grep "not found"
+              # The session launcher is what the display manager execs;
+              # if it is not there the session entry points at nothing.
+              test -x /usr/lib/chonkstep/xsession.sh
+            '
+
+      - name: Record the package digest
+        working-directory: dist
+        run: sha256sum "${{ steps.metadata.outputs.deb }}" | tee "${{ steps.metadata.outputs.deb }}.sha256"
+
+      - name: Attest package provenance
+        if: startsWith(github.ref, 'refs/tags/preview-v')
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        with:
+          subject-path: dist/${{ steps.metadata.outputs.deb }}
+
+      - name: Upload the package for release assembly
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: chonkstep-deb-${{ matrix.arch }}
+          path: |
+            dist/*.deb
+            dist/*.deb.sha256
+          if-no-files-found: error
+          retention-days: 14
+
+  publish:
+    name: attach to the preview release
+    if: startsWith(github.ref, 'refs/tags/preview-v')
+    needs: deb
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          pattern: chonkstep-deb-*
+          path: dist
+          merge-multiple: true
+
+      # github-release.yml creates the release; this only adds assets to
+      # it. That ordering is not guaranteed -- the Arch packages take
+      # considerably longer to build than a .deb does -- so wait for the
+      # release rather than racing it and failing. Deliberately never
+      # creates the release itself: the Arch workflow owns the release
+      # body and its notes, and two workflows creating one release is a
+      # coin flip over whose notes survive.
+      - name: Wait for the release to exist
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 60); do
+            if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+              echo "release $GITHUB_REF_NAME is present"
+              exit 0
+            fi
+            echo "waiting for release $GITHUB_REF_NAME ($attempt/60)"
+            sleep 30
+          done
+          echo "release $GITHUB_REF_NAME never appeared; the Arch workflow likely failed" >&2
+          exit 1
+
+      # Per-file checksums rather than a combined SHA256SUMS: that name
+      # belongs to the Arch workflow's manifest, and uploading a second
+      # one with --clobber would silently replace it.
+      - name: Upload the Debian packages
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          cd dist
+          ls -la
+          gh release upload "$GITHUB_REF_NAME" *.deb *.deb.sha256 --clobber

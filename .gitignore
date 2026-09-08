@@ -8,3 +8,4 @@ __pycache__/
 
 # The out-of-workspace reproducer builds into its own target directory.
 /examples/layer-role-repro/target/
+/dist
