@@ -100,52 +100,15 @@
 //!
 //! # Trust model
 //!
-//! [`may_create_virtual_keyboard`] is where a compositor says no, and
-//! this one says yes to every client. That deserves an argument,
-//! because the reflex — "this protocol lets any client type into any
-//! other client" — is correct and the conclusion still does not
-//! follow.
+//! [`may_create_virtual_keyboard`] uses the shared privileged-global policy.
+//! Ordinary desktop helpers can bind, so `wtype` and Omarchy's text-insertion
+//! tools work. Clients admitted through `wp_security_context_v1` cannot bind
+//! virtual keyboards or other desktop-wide capabilities. Their sandbox launcher
+//! must also prevent access to the unrestricted Wayland socket.
 //!
-//! The reasoning `test_door.rs` uses for its debugging socket
-//! ("anything that can set the compositor's environment and reach the
-//! socket path already runs as the user") does **not** transfer as
-//! written. That door demands a privilege — writing the compositor's
-//! environment before it starts — that an ordinary client does not
-//! have. This global is bound off the registry by anything that opened
-//! the Wayland socket. The premise is different, so the argument has
-//! to be made again from scratch.
-//!
-//! Made again, it lands in the same place, for a different reason:
-//! this session grants no client less than user privilege in the first
-//! place. Any client on this socket can already capture every pixel of
-//! every other client's window (`zwlr_screencopy_manager_v1`, under
-//! the shared policy — see [`crate::protocols::init`]), enumerate every
-//! window and close or raise any of them
-//! (`zwlr_foreign_toplevel_manager_v1`, under the same shared policy),
-//! and lock the session out from under the user (`ext_session_lock_v1`,
-//! which consults that policy too). Nearest of all: it can read every
-//! copy the user makes, at the
-//! moment they make it and without ever holding focus, through
-//! data-control (see [`crate::data_control`], which grants that to
-//! every client for its own stated reasons). A protocol that hands out
-//! the contents of the clipboard and one that hands out the ability to
-//! type are the same trust decision viewed from two sides, and this
-//! session has already made it once. It is also, being a process of
-//! this user, free to `ptrace`
-//! the compositor, write `~/.bashrc`, or start its own `wtype` against
-//! any other compositor the user runs. Reading a password field is
-//! already within reach; typing into one is a smaller step, not a new
-//! kind of one. Refusing it would break `wtype` — and the three
-//! Omarchy features above — while moving nothing out of an attacker's
-//! reach.
-//!
-//! `wp_security_context_v1` now gives that future policy a real input:
-//! clients admitted through one are tagged in `ClientState`, cannot
-//! create nested security contexts, and every cross-client capability
-//! consults `state::privileged_global_visible`. The current single-user
-//! policy deliberately returns true for both tagged and ordinary
-//! clients, preserving the behavior above while making a later policy
-//! change one shared predicate instead of eleven unrelated filters.
+//! This is a bind-time boundary. Ordinary clients that already hold a virtual
+//! keyboard retain it across lock/unlock, as described above; this protocol's
+//! upstream handler does not provide a per-event authorization callback.
 //!
 //! # Integration contract
 //!
@@ -271,10 +234,9 @@ mod tests {
         assert!(seat_can_accept_virtual_keys(&seat));
     }
 
-    /// The shared policy is currently permissive, deliberately. This test
-    /// preserves byte-for-byte behavior for an ordinary unconfined client.
+    /// Ordinary unconfined desktop helpers retain virtual-input access.
     #[test]
-    fn every_client_on_this_socket_may_create_a_virtual_keyboard() {
+    fn ordinary_clients_may_create_a_virtual_keyboard() {
         let display = Display::<Compositor>::new().expect("wayland display");
         let mut display_handle = display.handle();
         let (compositor_end, _client_end) =

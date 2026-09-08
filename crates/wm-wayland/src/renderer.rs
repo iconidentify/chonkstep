@@ -87,13 +87,14 @@ use smithay::backend::renderer::element::memory::MemoryRenderBufferRenderElement
 use smithay::backend::renderer::element::solid::SolidColorRenderElement;
 use smithay::backend::renderer::element::surface::WaylandSurfaceRenderElement;
 use smithay::backend::renderer::element::utils::{CropRenderElement, RescaleRenderElement};
-use smithay::backend::renderer::element::{Kind, RenderElementStates};
+use smithay::backend::renderer::element::{default_primary_scanout_output_compare, Kind, RenderElementStates};
 use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::backend::renderer::utils::{CommitCounter, RendererSurfaceStateUserData};
 use smithay::backend::renderer::{Color32F, ImportAll, ImportMem};
 use smithay::desktop::utils::{
     bbox_from_surface_tree, send_frames_surface_tree, take_presentation_feedback_surface_tree,
-    surface_presentation_feedback_flags_from_states, OutputPresentationFeedback,
+    surface_presentation_feedback_flags_from_states, surface_primary_scanout_output,
+    update_surface_primary_scanout_output, OutputPresentationFeedback,
 };
 use smithay::input::pointer::{CursorImageAttributes, CursorImageStatus};
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
@@ -480,9 +481,8 @@ pub(crate) fn push_background(
 /// surface must hear them while a parked window or policy-hidden layer
 /// should sleep. Shared by both backends for exactly that reason.
 ///
-/// Called from one output's completed presentation boundary. Only
-/// surfaces whose owning rectangle selects that output receive the
-/// callback, so mixed-refresh heads pace independently.
+/// Called from one output's completed presentation boundary. Render results
+/// select each surface's primary output; hidden surfaces receive no callbacks.
 pub(crate) fn send_frame_callbacks(
     backend: &WaylandBackend,
     output: &smithay::output::Output,
@@ -491,10 +491,9 @@ pub(crate) fn send_frame_callbacks(
     pointer_location: SPoint<f64, Logical>,
     elapsed: Duration,
 ) {
-    let throttle = frame_interval(output);
     let send_tree = |surface: &WlSurface| {
-        signal_pacing_barriers(surface);
-        send_frames_surface_tree(surface, output, elapsed, throttle, |_, _| Some(output.clone()));
+        signal_pacing_barriers(surface, output);
+        send_frames_surface_tree(surface, output, elapsed, None, surface_primary_scanout_output);
     };
     // While locked, ONLY lock surfaces hear about frames: withholding
     // callbacks from everything else freezes those clients for the
@@ -520,9 +519,7 @@ pub(crate) fn send_frame_callbacks(
     // namespace policy stay mapped but are absent from the scene, so
     // withholding callbacks is what makes them actually idle.
     for record in &backend.layers {
-        if !backend.layer_presented(record)
-            || !is_primary_rect(backend, record.geometry, output_rect)
-        {
+        if !backend.layer_presented(record) {
             continue;
         }
         let surface = record.surface.wl_surface();
@@ -537,12 +534,10 @@ pub(crate) fn send_frame_callbacks(
     // client produced a frame. The workspace transition frame supplies
     // the first callback when it becomes exposed again.
     for_each_presented_window(backend, |record| {
-        if is_primary_rect(backend, record.content, output_rect) {
-            if let Some(surface) = record.surface.wl_surface() {
-                send_tree(&surface);
-                for (popup, _) in backend.popups_for_surface(&surface) {
-                    send_tree(popup.wl_surface());
-                }
+        if let Some(surface) = record.surface.wl_surface() {
+            send_tree(&surface);
+            for (popup, _) in backend.popups_for_surface(&surface) {
+                send_tree(popup.wl_surface());
             }
         }
     });
@@ -553,17 +548,7 @@ pub(crate) fn send_frame_callbacks(
         }
     }
     for popup in &backend.ime_popups {
-        let Some(parent) = popup.get_parent() else {
-            continue;
-        };
-        let parent_rect = Rect::new(
-            Point::new(parent.location.loc.x, parent.location.loc.y),
-            wm_theme_api::Size::new(
-                parent.location.size.w.max(0) as u32,
-                parent.location.size.h.max(0) as u32,
-            ),
-        );
-        if popup.alive() && is_primary_rect(backend, parent_rect, output_rect) {
+        if popup.alive() && popup.get_parent().is_some() {
             send_tree(popup.wl_surface());
         }
     }
@@ -573,12 +558,15 @@ pub(crate) fn send_frame_callbacks(
 /// a presentation boundary. Commit timing is clock-driven instead and is
 /// serviced by `Compositor::service_surface_pacing`; coupling it to a frame
 /// would deadlock the commit whose pixels are waiting behind that timer.
-fn signal_pacing_barriers(surface: &WlSurface) {
+fn signal_pacing_barriers(surface: &WlSurface, output: &smithay::output::Output) {
     compositor::with_surface_tree_downward(
         surface,
         (),
         |_, _, &()| TraversalAction::DoChildren(()),
-        |_, states, &()| {
+        |surface, states, &()| {
+            if surface_primary_scanout_output(surface, states).as_ref() != Some(output) {
+                return;
+            }
             // Most surfaces never use FIFO. A frame callback must not create
             // pacing state which makes every later input pass service them.
             if !states.cached_state.has::<smithay::wayland::fifo::FifoBarrierCachedState>() {
@@ -598,28 +586,31 @@ fn signal_pacing_barriers(surface: &WlSurface) {
     );
 }
 
-/// Drain presentation requests for the surfaces whose primary output
-/// is `output`. The ownership choice is deterministic on multi-head:
-/// whichever monitor contains the largest part of the owning window
-/// wins, with monitor order breaking ties.
+/// Update surface visibility from a successfully submitted frame and drain
+/// feedback only for surfaces actually presented on their primary output.
+/// Smithay selects that output from visible area and refresh rate.
 pub(crate) fn take_presentation_feedback(
     backend: &WaylandBackend,
     output: &smithay::output::Output,
     output_rect: Rect,
-    render_states: Option<&RenderElementStates>,
+    render_states: &RenderElementStates,
+    cursor_status: &CursorImageStatus,
+    pointer_location: SPoint<f64, Logical>,
 ) -> OutputPresentationFeedback {
     let mut feedback = OutputPresentationFeedback::new(output);
     let mut take_tree = |surface: &WlSurface| {
+        // Use actual rendered pixels, including transforms, clipping,
+        // occlusion and each subsurface/popup's independent visibility.
+        // Geometry-based ownership invents presentations for offscreen Flow
+        // windows and misses overflow rendered on a parent's other output.
         take_presentation_feedback_surface_tree(
             surface,
             &mut feedback,
-            |_, _| Some(output.clone()),
-            |surface, _| {
-                render_states.map_or_else(
-                    smithay::reexports::wayland_protocols::wp::presentation_time::server::wp_presentation_feedback::Kind::empty,
-                    |states| surface_presentation_feedback_flags_from_states(surface, states),
-                )
+            |surface, states| {
+                update_surface_primary_scanout_output(surface, output, states, render_states,
+                    default_primary_scanout_output_compare)
             },
+            |surface, _| surface_presentation_feedback_flags_from_states(surface, render_states),
         );
     };
 
@@ -635,17 +626,15 @@ pub(crate) fn take_presentation_feedback(
     }
 
     for_each_presented_window(backend, |record| {
-        if is_primary_rect(backend, record.content, output_rect) {
-            if let Some(surface) = record.surface.wl_surface() {
-                take_tree(&surface);
-                for (popup, _) in backend.popups_for_surface(&surface) {
-                    take_tree(popup.wl_surface());
-                }
+        if let Some(surface) = record.surface.wl_surface() {
+            take_tree(&surface);
+            for (popup, _) in backend.popups_for_surface(&surface) {
+                take_tree(popup.wl_surface());
             }
         }
     });
     for record in &backend.layers {
-        if !backend.layer_presented(record) || !is_primary_rect(backend, record.geometry, output_rect) {
+        if !backend.layer_presented(record) {
             continue;
         }
         let surface = record.surface.wl_surface();
@@ -655,13 +644,14 @@ pub(crate) fn take_presentation_feedback(
         }
     }
     for popup in &backend.ime_popups {
-        let Some(parent) = popup.get_parent() else { continue };
-        let parent_rect = Rect::new(
-            Point::new(parent.location.loc.x, parent.location.loc.y),
-            wm_theme_api::Size::new(parent.location.size.w.max(0) as u32, parent.location.size.h.max(0) as u32),
-        );
-        if popup.alive() && is_primary_rect(backend, parent_rect, output_rect) {
+        if popup.alive() && popup.get_parent().is_some() {
             take_tree(popup.wl_surface());
+        }
+    }
+    let pointer = Point::new(pointer_location.x.floor() as i32, pointer_location.y.floor() as i32);
+    if output_rect.contains(pointer) {
+        if let CursorImageStatus::Surface(surface) = cursor_status {
+            take_tree(surface);
         }
     }
     feedback
@@ -735,27 +725,11 @@ fn fullscreen_rect_occludes_viewport(content: Rect, viewport: Rect) -> bool {
     overlap_area(content, viewport) > 0
 }
 
-fn is_primary_rect(backend: &WaylandBackend, surface: Rect, candidate: Rect) -> bool {
-    backend
-        .monitors
-        .iter()
-        .max_by_key(|monitor| overlap_area(surface, monitor.geometry))
-        .is_none_or(|monitor| monitor.geometry == candidate)
-}
-
 pub(crate) fn presentation_refresh(output: &smithay::output::Output) -> smithay::wayland::presentation::Refresh {
     output.current_mode().and_then(|mode| u64::try_from(mode.refresh).ok()).filter(|rate| *rate > 0).map_or(
         smithay::wayland::presentation::Refresh::Unknown,
         |millihertz| smithay::wayland::presentation::Refresh::fixed(Duration::from_nanos(1_000_000_000_000 / millihertz)),
     )
-}
-
-fn frame_interval(output: &smithay::output::Output) -> Option<Duration> {
-    output
-        .current_mode()
-        .and_then(|mode| u64::try_from(mode.refresh).ok())
-        .filter(|rate| *rate > 0)
-        .map(|millihertz| Duration::from_nanos(1_000_000_000_000 / millihertz))
 }
 
 pub(crate) fn present_now(
@@ -950,7 +924,7 @@ fn render_frame_winit(comp: &mut Compositor, plain_capture_pending: bool) -> boo
 
     note_frame_success();
     let output_rect = wm.backend().monitors.first().map(|monitor| monitor.geometry).unwrap_or_default();
-    let mut feedback = take_presentation_feedback(wm.backend(), output, output_rect, Some(&render_states));
+    let mut feedback = take_presentation_feedback(wm.backend(), output, output_rect, &render_states, cursor_status, *pointer_location);
     present_now(
         &mut feedback,
         presentation_refresh(output),

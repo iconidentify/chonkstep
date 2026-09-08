@@ -2738,7 +2738,9 @@ pub(crate) fn render_frame_session(comp: &mut Compositor, plain_capture_pending:
                             wm.backend(),
                             &entry.output,
                             monitor.geometry,
-                            Some(&render_states),
+                            &render_states,
+                            cursor_status,
+                            *pointer_location,
                         ));
                     }
                 }
@@ -2753,7 +2755,9 @@ pub(crate) fn render_frame_session(comp: &mut Compositor, plain_capture_pending:
                             wm.backend(),
                             &entry.output,
                             monitor.geometry,
-                            Some(&render_states),
+                            &render_states,
+                            cursor_status,
+                            *pointer_location,
                         );
                         let flags = smithay::reexports::wayland_protocols::wp::presentation_time::server::wp_presentation_feedback::Kind::Vsync;
                         if let Some((at, sequence)) = output.last_vblank {

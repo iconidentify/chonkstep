@@ -18,6 +18,11 @@ use x11rb::wrapper::ConnectionExt as _;
 use x11rb::{COPY_DEPTH_FROM_PARENT, CURRENT_TIME, NONE};
 
 
+// GetProperty's length is in 32-bit words, even for 8-bit strings. Bound
+// the server reply itself: truncating after receiving it still allocates and
+// transfers the entire client-controlled property on the desktop thread.
+const MAX_PROPERTY_WORDS: u32 = (64 * 1024) / 4;
+
 /// A client's own top-level window.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct XWindow(pub Window);
@@ -214,9 +219,9 @@ impl X11Backend {
     /// for `UTF8_STRING`-typed ones. `None` for a missing or empty value,
     /// never an empty string — callers treat both as "no title."
     fn get_text_property(&self, window: Window, atom: Atom, type_atom: Atom) -> Option<String> {
-        let cookie = self.conn.get_property(false, window, atom, type_atom, 0, u32::MAX).ok()?;
+        let cookie = self.conn.get_property(false, window, atom, type_atom, 0, MAX_PROPERTY_WORDS).ok()?;
         let reply = cookie.reply().ok()?;
-        if reply.value.is_empty() {
+        if reply.format != 8 || reply.value.is_empty() {
             None
         } else {
             Some(String::from_utf8_lossy(&reply.value).into_owned())
@@ -2219,14 +2224,12 @@ impl X11Backend {
     /// so naming the class still catches every instance under it. The
     /// compositor's XWayland arm resolves the identity the same way.
     fn window_identity(&self, window: XWindow) -> Option<String> {
-        let cookie = self.conn.get_property(false, window.0, AtomEnum::WM_CLASS, AtomEnum::STRING, 0, u32::MAX).ok()?;
-        let reply = cookie.reply().ok()?;
-        let mut parts = reply.value.split(|&b| b == 0).map(|s| String::from_utf8_lossy(s).into_owned());
-        let instance = parts.next().unwrap_or_default();
-        if !instance.is_empty() {
-            return Some(instance);
+        let identity = self.window_class(window)?;
+        if !identity.instance.is_empty() {
+            Some(identity.instance)
+        } else {
+            (!identity.class.is_empty()).then_some(identity.class)
         }
-        parts.next().filter(|class| !class.is_empty())
     }
 }
 
@@ -2431,8 +2434,11 @@ impl Backend for X11Backend {
     }
 
     fn window_class(&self, window: Self::WindowId) -> Option<WmClass> {
-        let cookie = self.conn.get_property(false, window.0, AtomEnum::WM_CLASS, AtomEnum::STRING, 0, u32::MAX).ok()?;
+        let cookie = self.conn.get_property(false, window.0, AtomEnum::WM_CLASS, AtomEnum::STRING, 0, MAX_PROPERTY_WORDS).ok()?;
         let reply = cookie.reply().ok()?;
+        // A partial class could accidentally match a different application's
+        // rules. Reject oversized identities instead of inventing one.
+        if reply.format != 8 || reply.bytes_after != 0 { return None; }
         let mut parts = reply.value.split(|&b| b == 0).map(|s| String::from_utf8_lossy(s).into_owned());
         let instance = parts.next()?;
         let class = parts.next().unwrap_or_default();
@@ -2465,12 +2471,13 @@ impl Backend for X11Backend {
             WmProtocol::DeleteWindow => self.wm_delete_window,
             WmProtocol::TakeFocus => self.wm_take_focus,
         };
-        let Ok(cookie) = self.conn.get_property(false, window.0, self.wm_protocols, AtomEnum::ATOM, 0, u32::MAX) else {
+        let Ok(cookie) = self.conn.get_property(false, window.0, self.wm_protocols, AtomEnum::ATOM, 0, MAX_PROPERTY_WORDS) else {
             return false;
         };
         let Ok(reply) = cookie.reply() else {
             return false;
         };
+        if reply.bytes_after != 0 { return false; }
         reply.value32().map(|it| it.into_iter().any(|a| a == target)).unwrap_or(false)
     }
 
@@ -2502,13 +2509,14 @@ impl Backend for X11Backend {
             self.ewmh.net_wm_state,
             AtomEnum::ATOM,
             0,
-            u32::MAX,
+            MAX_PROPERTY_WORDS,
         ) else {
             return false;
         };
         let Ok(reply) = cookie.reply() else {
             return false;
         };
+        if reply.bytes_after != 0 { return false; }
         reply
             .value32()
             .is_some_and(|mut atoms| atoms.any(|atom| atom == self.ewmh.net_wm_state_modal))
@@ -3367,6 +3375,49 @@ impl wm_theme_api::PopupHost for X11Backend {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "run only on a private server: xvfb-run -a cargo test -p wm-x11 hostile_properties -- --ignored"]
+    fn hostile_properties_are_bounded_and_ordinary_titles_still_work() {
+        let backend = X11Backend::connect_and_become_wm(None, 1.0).unwrap();
+        let window = backend.conn.generate_id().unwrap();
+        backend.conn.create_window(x11rb::COPY_DEPTH_FROM_PARENT, window, backend.root,
+            0, 0, 100, 100, 0, WindowClass::INPUT_OUTPUT, 0, &CreateWindowAux::default()).unwrap().check().unwrap();
+        let large = vec![b'x'; 128 * 1024];
+        backend.conn.change_property8(PropMode::REPLACE, window, backend.net_wm_name,
+            backend.utf8_string, &large).unwrap().check().unwrap();
+        let title = backend.window_title(XWindow(window)).unwrap();
+        assert_eq!(title.len(), 64 * 1024, "a title request must cap the server reply before allocation");
+        backend.conn.change_property8(PropMode::REPLACE, window, AtomEnum::WM_CLASS,
+            AtomEnum::STRING, &large).unwrap().check().unwrap();
+        assert!(backend.window_class(XWindow(window)).is_none(), "truncated identity must not match application rules");
+        assert!(backend.window_identity(XWindow(window)).is_none());
+        backend.conn.change_property8(PropMode::REPLACE, window, backend.net_wm_name,
+            backend.utf8_string, "normal λ title".as_bytes()).unwrap().check().unwrap();
+        assert_eq!(backend.window_title(XWindow(window)).as_deref(), Some("normal λ title"));
+        backend.conn.change_property8(PropMode::REPLACE, window, AtomEnum::WM_CLASS,
+            AtomEnum::STRING, b"instance\0Class\0").unwrap().check().unwrap();
+        assert_eq!(backend.window_identity(XWindow(window)).as_deref(), Some("instance"));
+        let class = backend.window_class(XWindow(window)).unwrap();
+        assert_eq!((class.instance.as_str(), class.class.as_str()), ("instance", "Class"));
+        // Atom properties are bounded too; an overlong list is malformed,
+        // even when a supported value appears in its retained prefix.
+        let atoms = vec![backend.wm_delete_window; 32 * 1024];
+        backend.conn.change_property32(PropMode::REPLACE, window, backend.wm_protocols,
+            AtomEnum::ATOM, &atoms).unwrap().check().unwrap();
+        assert!(!backend.supports_protocol(XWindow(window), WmProtocol::DeleteWindow));
+        backend.conn.change_property32(PropMode::REPLACE, window, backend.wm_protocols,
+            AtomEnum::ATOM, &[backend.wm_delete_window]).unwrap().check().unwrap();
+        assert!(backend.supports_protocol(XWindow(window), WmProtocol::DeleteWindow));
+        let states = vec![backend.ewmh.net_wm_state_modal; 32 * 1024];
+        backend.conn.change_property32(PropMode::REPLACE, window, backend.ewmh.net_wm_state,
+            AtomEnum::ATOM, &states).unwrap().check().unwrap();
+        assert!(!backend.window_is_modal(XWindow(window)));
+        backend.conn.change_property32(PropMode::REPLACE, window, backend.ewmh.net_wm_state,
+            AtomEnum::ATOM, &[backend.ewmh.net_wm_state_modal]).unwrap().check().unwrap();
+        assert!(backend.window_is_modal(XWindow(window)));
+        backend.conn.destroy_window(window).unwrap().check().unwrap();
+    }
 
     fn monitor(name: &str, x: i32, y: i32, w: u32, h: u32, primary: bool) -> MonitorInfo {
         MonitorInfo {

@@ -171,3 +171,28 @@ fn each_session_termination_signal_exits_the_compositor_cleanly() {
         assert!(session.log().contains("session termination requested; logging out cleanly"));
     }
 }
+
+#[test]
+#[ignore = "needs an isolated Wayland host; scripts/e2e.sh --headless --test logout"]
+fn repeated_nested_restarts_reconnect_to_the_host_and_keep_logout_working() {
+    let name = "logout-after-reexec";
+    let dir = session_dir(name);
+    let pid_file = dir.join("child.pid");
+    let config = format!("autostart = [{}]\n", sleeper_command(&pid_file));
+    let mut session = Session::boot(name, SessionOptions { config_extra: config, ..Default::default() }).unwrap();
+    let compositor = session.compositor_pid();
+    for _ in 0..2 {
+        let child = Sleeper::ready(&pid_file);
+        assert_eq!(blocked(child.pid()) & TERMINATION_MASK, 0);
+        child.terminate(libc::SIGTERM);
+        std::fs::remove_file(&pid_file).unwrap();
+        std::fs::write(dir.join("state/chonkstep/restart"), []).unwrap();
+        poll_until(EVENT, "the restarted compositor to autostart its child", || {
+            pid_file.exists().then_some(())
+        }).unwrap_or_else(|error| panic!("{error}\n{}", session.log()));
+        assert_eq!(session.compositor_pid(), compositor, "restart must exec in place");
+    }
+    Sleeper::ready(&pid_file).terminate(libc::SIGTERM);
+    signal(compositor, libc::SIGTERM);
+    assert!(session.wait_for_compositor_exit(EVENT).unwrap().success());
+}

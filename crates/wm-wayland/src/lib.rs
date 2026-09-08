@@ -56,6 +56,7 @@ mod output_power;
 mod protocols;
 mod readback;
 mod renderer;
+mod restart;
 mod overview;
 mod gesture_scene;
 mod layout_scene;

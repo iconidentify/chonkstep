@@ -1231,9 +1231,8 @@ fn filter_env(env: Vec<(String, String)>, skipped: &mut Vec<Skipped>) -> Vec<(St
 pub struct Watch {
     cadence: std::time::Duration,
     last_checked: Option<std::time::Instant>,
-    seen: Option<Signature>,
-    watched: Vec<PathBuf>,
-    directories: Vec<PathBuf>,
+    seen: bool,
+    signature: Signature,
 }
 
 /// What identifies one watched file: its modification time, size and
@@ -1258,14 +1257,16 @@ impl Watch {
         Self {
             cadence: std::time::Duration::from_secs(1),
             last_checked: None,
-            seen: None,
-            watched: reading.files.clone(),
-            directories: vec![
-                roots.user.clone(),
-                roots.defaults.clone(),
-                roots.defaults.join("bindings"),
-                roots.defaults.join("apps"),
-            ],
+            seen: false,
+            signature: Signature {
+                files: reading.files.iter().cloned().map(|path| (path, None)).collect(),
+                directories: [
+                    roots.user.clone(),
+                    roots.defaults.clone(),
+                    roots.defaults.join("bindings"),
+                    roots.defaults.join("apps"),
+                ].into_iter().map(|path| (path, None)).collect(),
+            },
         }
     }
 
@@ -1285,9 +1286,8 @@ impl Watch {
             return false;
         }
         self.last_checked = Some(now);
-        let signature = self.signature();
-        let changed = self.seen.as_ref().is_some_and(|seen| *seen != signature);
-        self.seen = Some(signature);
+        let changed = self.refresh() && self.seen;
+        self.seen = true;
         changed
     }
 
@@ -1299,34 +1299,29 @@ impl Watch {
     /// line brings a file into the set that was never watched before,
     /// and a user deleting one takes it out.
     pub fn follow(&mut self, reading: &Reading) {
-        self.watched = reading.files.clone();
-        self.seen = Some(self.signature());
+        self.signature.files = reading.files.iter().cloned().map(|path| (path, None)).collect();
+        self.refresh();
+        self.seen = true;
     }
 
-    fn signature(&self) -> Signature {
+    /// Reuse the stable path set and replace only scalar metadata. Do not
+    /// short-circuit after a change: every entry needs the same new baseline.
+    fn refresh(&mut self) -> bool {
         use std::os::unix::fs::MetadataExt;
-        Signature {
-            files: self
-                .watched
-                .iter()
-                .map(|path| {
-                    let identity = std::fs::metadata(path)
-                        .ok()
-                        .and_then(|m| Some((m.modified().ok()?, m.len(), m.ino())));
-                    (path.clone(), identity)
-                })
-                .collect(),
-            directories: self
-                .directories
-                .iter()
-                .map(|path| {
-                    (
-                        path.clone(),
-                        std::fs::metadata(path).and_then(|m| m.modified()).ok(),
-                    )
-                })
-                .collect(),
+        let mut changed = false;
+        for (path, previous) in &mut self.signature.files {
+            let identity = std::fs::metadata(path)
+                .ok()
+                .and_then(|m| Some((m.modified().ok()?, m.len(), m.ino())));
+            changed |= *previous != identity;
+            *previous = identity;
         }
+        for (path, previous) in &mut self.signature.directories {
+            let identity = std::fs::metadata(path).and_then(|m| m.modified()).ok();
+            changed |= *previous != identity;
+            *previous = identity;
+        }
+        changed
     }
 }
 
