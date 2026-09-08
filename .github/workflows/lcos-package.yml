@@ -210,6 +210,7 @@ jobs:
           pattern: chonkstep-deb-*
           path: dist
           merge-multiple: true
+          digest-mismatch: error
 
       # github-release.yml creates the release; this only adds assets to
       # it. That ordering is not guaranteed -- the Arch packages take
@@ -243,5 +244,5 @@ jobs:
         run: |
           set -euo pipefail
           cd dist
-          ls -la
+          sha256sum --check ./*.deb.sha256
           gh release upload "$GITHUB_REF_NAME" ./*.deb ./*.deb.sha256 --clobber
