@@ -36,7 +36,6 @@ use std::os::fd::{BorrowedFd, RawFd};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use calloop::signals::{Signal, Signals};
 use smithay::backend::allocator::Fourcc;
 use smithay::backend::renderer::damage::OutputDamageTracker;
 use smithay::backend::renderer::element::memory::MemoryRenderBuffer;
@@ -3588,19 +3587,9 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
     let mut event_loop: EventLoop<Compositor> = EventLoop::try_new()?;
     let loop_handle = event_loop.handle();
 
-    // A display-manager/session-scope stop is a logout, not a crash.
-    // signalfd integrates the three ordinary termination signals into
-    // the same event loop as every protocol client, so teardown below
-    // runs in order and `main` returns success. SIGABRT is deliberately
-    // absent: the panic hook uses it as the watchdog's crash signal.
-    loop_handle.insert_source(
-        Signals::new(&[Signal::SIGTERM, Signal::SIGHUP, Signal::SIGINT])?,
-        |event, &mut (), comp| {
-            tracing::info!(signal = ?event.signal(), "session termination requested; logging out cleanly");
-            comp.restart = false;
-            comp.running = false;
-        },
-    )?;
+    // Keep registration alive through teardown. Children inherit ordinary
+    // signal delivery, while session stops still run the event-loop cleanup.
+    let _termination = crate::termination::install(&loop_handle)?;
 
     let display: Display<Compositor> = Display::new()?;
     let display_handle = display.handle();
