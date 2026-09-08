@@ -367,6 +367,42 @@ pub(crate) fn elide(title: &str, width: u32, font_size: f32) -> String {
 /// tiny-skia's premultiplied storage as if it were straight RGBA (at
 /// alpha 255 the two are identical) instead of unpremultiplying on read.
 #[allow(clippy::too_many_arguments)]
+/// [`cosmic_text::LayoutGlyph::physical`], with the glyph's horizontal
+/// subpixel bin forced to zero.
+///
+/// cosmic-text bins the *fractional* part of a glyph's pen position into
+/// its cache key (`SubpixelBin`), so the same character, shaped from the
+/// same font at the same size, rasterises to a *different* bitmap
+/// depending on where in a string it happens to land. Measured in this
+/// desk's own Wallpaper menu before this function existed: the word
+/// "Lavender" came out 56px wide in one row and 55px in another, the two
+/// bitmaps differing by 4.6% of full ink coverage. That is correct,
+/// standard behaviour — it is what browsers and FreeType do, and it buys
+/// evenly tracked words — but at the 12px this chrome is set in a stem is
+/// barely wider than a pixel, so it reads as repeated words being
+/// subtly, inconsistently weighted.
+///
+/// Snapping the pen to whole pixels trades that even tracking for glyphs
+/// that are identical everywhere they appear. That is the bargain the
+/// 1990s desktops this chrome is modelled on made, and the one that
+/// suits it: crisp and repeatable over smoothly spaced. cosmic-text
+/// already truncates the Y axis for the same reason (its `physical` says
+/// "Hinting in Y axis"); this extends the same treatment to X.
+fn physical_snapped(
+    glyph: &cosmic_text::LayoutGlyph,
+    offset: (f32, f32),
+) -> cosmic_text::PhysicalGlyph {
+    // `physical` builds the pen position as
+    //     (glyph.x + font_size * x_offset) * scale + offset.0
+    // with scale 1.0 at every call site here. Nudge the offset we hand it
+    // by exactly enough to land that sum on a whole pixel, rather than
+    // rounding afterwards — the rounding has to happen *before*
+    // cosmic-text derives the cache key, or the bin is already baked in.
+    let pen_x = glyph.x + glyph.font_size * glyph.x_offset + offset.0;
+    glyph.physical((offset.0 + (pen_x.round() - pen_x), offset.1), 1.0)
+}
+
+
 pub fn draw_text(
     pixmap: &mut Pixmap,
     font_system: &mut cosmic_text::FontSystem,
@@ -430,7 +466,7 @@ pub fn draw_text(
     let mut max_ink_y: Option<i32> = None;
     for run in buffer.layout_runs() {
         for glyph in run.glyphs.iter() {
-            let physical = glyph.physical((x as f32 + offset_x, 0.0), 1.0);
+            let physical = physical_snapped(glyph, (x as f32 + offset_x, 0.0));
             let Some(image) = swash_cache.get_image(font_system, physical.cache_key) else { continue };
             if image.placement.width == 0 || image.placement.height == 0 {
                 continue;
@@ -462,7 +498,7 @@ pub fn draw_text(
 
     for run in buffer.layout_runs() {
         for glyph in run.glyphs.iter() {
-            let physical = glyph.physical((x as f32 + offset_x, y as f32 + offset_y as f32), 1.0);
+            let physical = physical_snapped(glyph, (x as f32 + offset_x, y as f32 + offset_y as f32));
             if let Some(image) = swash_cache.get_image(font_system, physical.cache_key) {
                 let img_x = physical.x + image.placement.left;
                 let img_y = physical.y - image.placement.top + run.line_y as i32;
