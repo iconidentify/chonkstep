@@ -49,6 +49,9 @@ jobs:
       - name: Run the Python SDK tests
         run: python3 -m unittest discover bindings/python/tests
 
+      - name: Install image verification dependency
+        run: python3 -m pip install Pillow==12.3.0
+
       - name: Run benchmark and preflight harness regression tests
         run: scripts/check.sh harness
 

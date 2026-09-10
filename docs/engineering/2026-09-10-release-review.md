@@ -60,6 +60,10 @@ scripts/check.sh all
 scripts/e2e.sh --headless --host-renderer gl
 ```
 
+CI explicitly installs the real-Fcitx/GTK test dependencies and Pillow for
+benchmark image verification; the first remote SDK run exposed the missing
+Pillow dependency.
+
 The first command runs strict Clippy, private Rustdoc, workspace and Wayland unit
 tests, and the Python harness tests. The second uses real clients and production
 input/protocol/rendering paths. The E2E compositor can be pinned with

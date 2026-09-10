@@ -257,6 +257,10 @@ def run(args):
         wait('nested desktop maps', lambda: window(parent))
         chord(parent, [29,125], 33)  # Real fullscreen action on the recording parent.
         wait('1920x1080 demo output', lambda: 'output 1920 1080' in door.query('windows', multiple=True))
+        # Park the recording parent's pointer at its lower edge. The pointer
+        # demonstrated inside the child remains part of the captured content.
+        send(parent,'motion 1919 1079')
+        assert parent.query('barrier') == 'ok'
         fixture = SCRIPTS/'demos/capture-desktop.py'
         version = metadata['binary']['version'].splitlines()[0].split()[1]
         for role, pos in [('terminal', (75,105)), ('notes',(120,575))]:
@@ -335,8 +339,8 @@ def run(args):
     raw.unlink()
     caption_file(metadata['timeline'],output)
     captioned = output/f'chonkstep-{args.scenario}-captioned.mp4'
-    subtitle_filter = ("subtitles=timeline.srt:force_style='Fontname=DejaVu Sans,Fontsize=20,"
-                       "Outline=1,Shadow=0,BorderStyle=3,BackColour=&H90000000,MarginV=22'")
+    subtitle_filter = ("subtitles=timeline.srt:force_style='Fontname=DejaVu Sans,Fontsize=9,"
+                       "Outline=0.6,Shadow=0,BorderStyle=3,OutlineColour=&H60000000,MarginV=8'")
     subprocess.run(['ffmpeg','-v','error','-i',final.name,'-vf',subtitle_filter,
                     '-c:v','libx264','-preset','fast','-crf','18','-pix_fmt','yuv420p',
                     '-movflags','+faststart',captioned.name],cwd=output,check=True,timeout=60)
