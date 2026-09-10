@@ -107,11 +107,11 @@
 //! 180° projection and `glReadPixels`' bottom-up order cancel, which is
 //! why the `y_invert` flag below is never set), `Fourcc::Abgr8888` is
 //! the RGBA byte order, and the pixels come out premultiplied. Read
-//! that module's header before touching [`capture_region_into`] here.
+//! that module's header before touching [`capture_region`] here.
 //!
 //! It differs from `capture.rs` in exactly one thing, and that one
 //! thing matters: this applies the source output's transform (see
-//! [`capture_region_into`]), because a screencopy client is handed the
+//! [`capture_region`]), because a screencopy client is handed the
 //! output's *buffer* and un-transforms it itself, whereas a screenshot
 //! PNG is looked at directly and wants logical orientation.
 //!
@@ -161,7 +161,7 @@ use smithay::utils::{Buffer as BufferCoords, Physical, Size as SSize, Transform}
 use smithay::wayland::shm::{with_buffer_contents, with_buffer_contents_mut, BufferData};
 
 use wm_core::{Backend, BackendEvent, ClientFlags, Lifecycle, NetState, NetStateAction};
-use wm_theme_api::{DecorationBuffer, Point, Rect, Size};
+use wm_theme_api::{Point, Rect, Size};
 
 use crate::renderer::{build_scene_into, SceneElement};
 use crate::state::{Compositor, Graphics, ManagedSurface, WaylandBackend, WlFrameId, WlWindowId};
@@ -460,7 +460,7 @@ struct PendingCapture {
     /// Source rectangle in compositor-global logical coordinates,
     /// already clipped to its output.
     region: Rect,
-    /// Its output's transform — see [`capture_region_into`].
+    /// Its output's transform — see [`capture_region`].
     transform: Transform,
     overlay_cursor: bool,
     /// `copy_with_damage` rather than `copy`: answer only on a pass
@@ -481,7 +481,7 @@ pub(crate) struct ScreencopyFrameData {
     /// it.
     region: Rect,
     /// The transform of the output this region belongs to. See
-    /// [`capture_region_into`]: the buffer a screencopy client is handed is
+    /// [`capture_region`]: the buffer a screencopy client is handed is
     /// in the output's *buffer* space, not its logical one.
     transform: Transform,
     overlay_cursor: bool,
@@ -1423,6 +1423,29 @@ pub(crate) fn frame_presented(comp: &mut Compositor, presented: bool) {
         }
     }
     if let Some(mut batch) = comp.protocols.capture_batch.take() {
+        batch.captures.retain(screencopy_live);
+        if !batch.pixels.ready() {
+            let expired = batch.pixels.expired(Instant::now());
+            if expired || batch.locked != comp.wm.backend().locked {
+                for capture in batch.captures.drain(..) {
+                    if capture.frame.is_alive() { capture.frame.failed(); }
+                }
+                if expired {
+                    for capture in comp.protocols.captures.drain(..) {
+                        if capture.frame.is_alive() { capture.frame.failed(); }
+                    }
+                }
+            }
+            // Retire canceled/timed-out downloads in this same bounded slot.
+            // Dropping client elements before the GPU finishes reading them
+            // would signal buffer release early, even though nobody wants PNGs.
+            comp.protocols.capture_service_after = Instant::now() + if batch.captures.is_empty() {
+                Duration::from_millis(100)
+            } else { CAPTURE_COPY_INTERVAL };
+            comp.protocols.capture_batch = Some(batch);
+            return;
+        }
+        batch.pixels.release_scene();
         let mut budget = CaptureCopyBudget::new(started);
         let locked = comp.wm.backend().locked;
         let result = if batch.locked != locked {
@@ -1573,7 +1596,7 @@ fn prepare_capture_group(comp: &mut Compositor, captures: &[PendingCapture]) -> 
     );
     let width = target_size.w as i32;
     let height = target_size.h as i32;
-    let success = (|| {
+    let success: Result<_, String> = (|| {
         let mut framebuffer = renderer.bind(&mut target.texture).map_err(|error| format!("bind: {error:?}"))?;
         // A plain `copy` is an independent snapshot, often from a new
         // one-shot client such as grim. Redraw it in full: unlike an output
@@ -1589,7 +1612,9 @@ fn prepare_capture_group(comp: &mut Compositor, captures: &[PendingCapture]) -> 
             .render_output(renderer, &mut framebuffer, age, &target.scene_scratch, clear_color)
             .map_err(|error| format!("render: {error:?}"))?;
         target.rendered = true;
-        crate::readback::download_rgba(renderer, &mut framebuffer, (width, height).into())
+        let mut download = crate::readback::download_rgba(renderer, &mut framebuffer, (width, height).into())?;
+        download.hold_scene(&mut target.scene_scratch);
+        Ok(download)
     })();
     target.scene_scratch.clear();
     if let Err(error) = &success {
@@ -1684,13 +1709,12 @@ fn intersection(a: Rect, b: Rect) -> Option<Rect> {
 /// wrong in the preview" failure mode `capture.rs` warns about, arrived
 /// at from the other direction, and it was observed before it was
 /// argued: `grim` against a nested session came back upside down.
-pub(crate) fn capture_region_into(
+pub(crate) fn capture_region(
     comp: &mut Compositor,
     region: Rect,
     transform: Transform,
     overlay_cursor: bool,
-    buffer: &WlBuffer,
-) -> Result<Size, String> {
+) -> Result<crate::capture::PendingImage, String> {
     let target_size = buffer_size(region.size, transform);
     if target_size.w == 0 || target_size.h == 0 {
         return Err("capture region is empty".to_string());
@@ -1747,7 +1771,7 @@ pub(crate) fn capture_region_into(
     );
     let width = target_size.w as i32;
     let height = target_size.h as i32;
-    let result = (|| {
+    let result: Result<_, String> = (|| {
         let mut framebuffer = renderer.bind(&mut target.texture).map_err(|error| format!("bind: {error:?}"))?;
         // Ext-image-copy captures are independent snapshots too; retain the
         // expensive storage, but make every returned image authoritative.
@@ -1757,15 +1781,15 @@ pub(crate) fn capture_region_into(
             .render_output(renderer, &mut framebuffer, age, &target.scene_scratch, clear_color)
             .map_err(|error| format!("render: {error:?}"))?;
         target.rendered = true;
-        crate::readback::with_rgba_pixels(renderer, &mut framebuffer, (width, height).into(), |pixels| {
-            write_capture_bytes(buffer, target_size, pixels)
-        })?
+        let mut pixels = crate::readback::download_rgba(renderer, &mut framebuffer, (width, height).into())?;
+        pixels.hold_scene(&mut target.scene_scratch);
+        Ok(crate::capture::PendingImage { size: target_size, pixels })
     })();
 
     target.scene_scratch.clear();
     target.used = Instant::now();
     protocols.capture_targets.push(target);
-    result.map(|()| target_size)
+    result
 }
 
 /// The session's `GlesRenderer`, whichever graphics stack is running.
@@ -1835,11 +1859,7 @@ fn pixel_layout(format: wl_shm::Format) -> Option<(bool, bool)> {
 /// `ONE, ONE_MINUS_SRC_ALPHA` over a cleared buffer, and `wl_shm`'s
 /// `argb8888` is defined premultiplied — so nothing but the channel
 /// order changes.
-pub(crate) fn write_capture(buffer: &WlBuffer, capture: &DecorationBuffer) -> Result<(), String> {
-    write_capture_bytes(buffer, Size::new(capture.width, capture.height), &capture.pixels)
-}
-
-fn write_capture_bytes(buffer: &WlBuffer, size: Size, pixels: &[u8]) -> Result<(), String> {
+pub(crate) fn write_capture_bytes(buffer: &WlBuffer, size: Size, pixels: &[u8]) -> Result<(), String> {
     let data = shm_layout(buffer, size)?;
     let (swap_rb, opaque) = pixel_layout(data.format).ok_or("unsupported buffer format")?;
     let width = size.w as usize;

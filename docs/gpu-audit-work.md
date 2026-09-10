@@ -104,3 +104,26 @@ Repeated paired results are being collected in `/tmp/cg5-pair2`.
 Asynchronous capture completion and render/target GPU support remain the next
 implementation stages. Physical KMS qualification remains unavailable with all
 connectors disconnected.
+
+## Capture and 5K checkpoint
+
+PBO readback now defers mapping behind a post-copy EGL fence for WLR screencopy,
+ext-image-copy output/toplevel capture, user screenshots and window previews.
+Queues and retirement are bounded; canceled GPU work retains client-buffer
+references until completion. A five-second deadline fails stalled consumers
+without blocking input. Older GLES/fence paths report synchronous fallback.
+
+GPU-backed validation: screencopy pressure 8/8, image-copy 5/5, capture cache 1/1,
+user screenshot/recording 17/17. New fault-injection tests prove input progress,
+no writes to destroyed image-copy buffers, bounded staging after cancellation,
+and safe retirement after a timeout. Wayland unit suite: 284 passed, 2 ignored;
+strict Wayland/testkit Clippy passed. Logs: `/tmp/chonk-async-screencopy_pressure.log`,
+`/tmp/chonk-async-image-final.log`, `/tmp/chonk-async-capture_cache.log`,
+`/tmp/chonk-async-capture_tool.log`, `/tmp/chonk-async-unit.log`,
+`/tmp/chonk-async-lint.log`.
+
+The repeated 5K comparison is complete: [report and machine-readable results](benchmarks/5k-2026-09-10/README.md).
+All cases sustained roughly 60 FPS; candidate GPU composition medians were
+1.786 ms native, 1.999 ms fractional, and 1.835 ms legacy. CPU differences were
+small and mixed. These nested, shared-GPU measurements establish no compositor
+ranking and no KMS scanout result.

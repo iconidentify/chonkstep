@@ -311,6 +311,7 @@ impl Backend for WaylandBackend {
         );
         let _ = writeln!(report, "diagnostics {}", crate::diagnostics::describe());
         self.gpu_timings.borrow().describe(&mut report);
+        report.push_str(&crate::readback::diagnostics());
         for output in &self.native_frame_stats { output.describe(&mut report); }
 
         report.push_str("scene bottom-to-top\n");

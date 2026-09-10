@@ -2407,6 +2407,7 @@ pub struct Compositor {
     /// Cached marker path and deadline for compositor-native PNG
     /// requests. Kept beside the renderer because servicing one needs
     /// the live graphics context even when the scene is otherwise idle.
+    pub(crate) snapshot_downloads: crate::capture::SnapshotDownloads,
     pub(crate) screenshot_poller: crate::capture::ScreenshotRequestPoller,
     pub(crate) capture_tool: crate::capture_tool::Service,
     /// linux-dmabuf: the format set we advertise and the protocol
@@ -2542,6 +2543,7 @@ impl Compositor {
     #[cfg_attr(feature = "profile", profiling::function)]
     pub(crate) fn dispatch_pending(&mut self) {
         crate::selection::persistence::tick(self);
+        crate::capture::service_snapshots(self);
         crate::capture_tool::tick(self);
         let dispatch_span = tracing::info_span!("dispatch_pass");
         let _dispatch_guard = dispatch_span.enter();
@@ -4133,6 +4135,7 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
         xwayland: crate::xwayland::State::default(),
         ui_scale: scale,
         graphics,
+        snapshot_downloads: crate::capture::SnapshotDownloads::default(),
         screenshot_poller: crate::capture::ScreenshotRequestPoller::new(Instant::now()),
         capture_tool,
         dmabuf,
@@ -4272,6 +4275,9 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
             wait = wait.min(deadline.saturating_duration_since(now));
         }
         if let Some(deadline) = crate::gesture_scene::deadline(&comp) {
+            wait = wait.min(deadline.saturating_duration_since(now));
+        }
+        if let Some(deadline) = comp.snapshot_downloads.deadline() {
             wait = wait.min(deadline.saturating_duration_since(now));
         }
         if let Some(deadline) = crate::capture_tool::deadline(&comp) {

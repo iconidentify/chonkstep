@@ -92,3 +92,32 @@ latency, hotplug and multi-monitor cadence end to end.
 
 References: [Khronos timer-query specification](https://registry.khronos.org/OpenGL/extensions/EXT/EXT_disjoint_timer_query.txt),
 [Smithay DRM compositor](https://smithay.github.io/smithay/smithay/backend/drm/compositor/index.html).
+
+## Capture completion
+
+GLES 3 output screencopy, ext-image-copy output/toplevel captures, user screenshots,
+and window previews submit PBO downloads and poll an EGL fence placed **after**
+the copy command. They map only after a zero-time fence check reports completion.
+GPU submission is flushed, not finished. GLES 2 or missing fence support retains
+an explicitly counted synchronous fallback. PNG encoding, publication, clipboard
+I/O and recorder work remain on the existing capture worker.
+
+Staging is bounded: one shared WLR fanout download, one ext-image-copy download,
+two user screenshots (including worker jobs), and two preview downloads. Queues
+retain their existing request limits. Services poll active work every 4 ms and
+retired work every 100 ms, without adding an idle deadline after queues drain.
+A five-second timeout fails consumers; their original staging slot and scene
+buffer references remain retained until the GPU fence signals. Client destruction,
+lock changes and stale image-copy constraints cancel delivery before mapping or
+writing. No unbounded retirement queue is created by repeated cancellation.
+
+The `readback` diagnostic line reports submissions, pending polls, synchronous
+fallbacks, live/peak staging bytes, maps and CPU map time. Staging byte counts do
+not include cached render targets, client SHM or PNG-worker images. The private
+test door allows `CHONKSTEP_TEST_READBACK_DELAY_MS` (bounded at 10 seconds) to defer
+readiness without blocking the compositor, proving input progress, timeout and
+safe retirement deterministically. It has no effect without `CHONKSTEP_TEST_SOCKET`.
+Diagnostic screenshot-marker export currently uses an explicit synchronous wait;
+its frame is a verification artifact and is excluded from benchmark sampling.
+
+Measured 5K results: [paired workload report](benchmarks/5k-2026-09-10/README.md).

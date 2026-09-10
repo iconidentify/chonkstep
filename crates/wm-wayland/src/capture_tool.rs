@@ -75,6 +75,11 @@ struct Worker {
     worker: Option<std::thread::JoinHandle<()>>,
 }
 
+struct PendingScreenshot {
+    image: crate::capture::PendingImage,
+    destination: Option<Destination>,
+}
+
 pub(crate) struct Service {
     worker: Option<Worker>,
     fonts: FontState,
@@ -85,6 +90,8 @@ pub(crate) struct Service {
     started: Instant,
     last_second: u64,
     screenshots: usize,
+    downloads: Vec<PendingScreenshot>,
+    download_poll: Instant,
     label_dirty: bool,
     label_deadline: Instant,
 }
@@ -101,6 +108,8 @@ impl Service {
             started: Instant::now(),
             last_second: 0,
             screenshots: 0,
+            downloads: Vec::new(),
+            download_poll: Instant::now(),
             label_dirty: false,
             label_deadline: Instant::now(),
         }
@@ -268,18 +277,18 @@ fn dismiss(comp: &mut Compositor) {
 fn photograph(comp: &mut Compositor, rect: Rect, window: Option<WlWindowId>, destination: Destination) -> bool {
     // Bound readback memory as well as worker queue length, including the image
     // currently being encoded. Repeated shortcuts cannot accumulate 4K buffers.
-    if comp.capture_tool.screenshots >= 2 {
+    if comp.capture_tool.screenshots >= 2 || comp.capture_tool.downloads.len() >= 2 {
         comp.capture_tool.submit(Job::Error(
             "Finishing previous screenshots; please try again shortly".into(),
         ));
         return false;
     }
     match crate::capture::capture_user_pixels(comp, rect, window) {
-        Some(pixels) => {
-            if comp.capture_tool.submit(Job::Screenshot(pixels, destination)) {
-                comp.capture_tool.screenshots += 1;
-                return true;
-            }
+        Some(image) => {
+            comp.capture_tool.downloads.push(PendingScreenshot { image, destination: Some(destination) });
+            comp.capture_tool.download_poll = Instant::now() + std::time::Duration::from_millis(4);
+            comp.capture_tool.screenshots += 1;
+            return true;
         }
         None => {
             comp.capture_tool
@@ -797,7 +806,37 @@ fn moved_rect(mut rect: Rect, dx: i32, dy: i32, bounds: Rect) -> Rect {
     rect
 }
 
+fn service_screenshots(comp: &mut Compositor) {
+    let now = Instant::now();
+    if comp.capture_tool.downloads.is_empty() || now < comp.capture_tool.download_poll { return; }
+    let Compositor { wm, graphics, capture_tool: service, .. } = comp;
+    let renderer = crate::capture::graphics_renderer(graphics);
+    let mut pending = std::mem::take(&mut service.downloads);
+    pending.retain_mut(|pending| {
+        if (wm.backend().locked || pending.image.pixels.expired(now)) && pending.destination.take().is_some() {
+            service.screenshots = service.screenshots.saturating_sub(1);
+            service.submit(Job::Error("Screenshot canceled before its pixels became available".into()));
+        }
+        // Retire canceled downloads in their original bounded slots until the
+        // GPU has finished reading client buffers; never block the input loop.
+        if !pending.image.pixels.ready() { return true; }
+        pending.image.pixels.release_scene();
+        if let Some(destination) = pending.destination.take() {
+            let submitted = match pending.image.copy_pixels(renderer) {
+                Ok(pixels) => service.submit(Job::Screenshot(pixels, destination)),
+                Err(error) => { service.submit(Job::Error(error)); false }
+            };
+            if !submitted { service.screenshots = service.screenshots.saturating_sub(1); }
+        }
+        false
+    });
+    service.download_poll = now + std::time::Duration::from_millis(
+        if pending.iter().all(|pending| pending.destination.is_none()) { 100 } else { 4 });
+    service.downloads = pending;
+}
+
 pub(crate) fn tick(comp: &mut Compositor) {
+    service_screenshots(comp);
     if comp.capture_tool.label_dirty && Instant::now() >= comp.capture_tool.label_deadline {
         repaint(comp);
     }
@@ -881,13 +920,12 @@ fn repaint(comp: &mut Compositor) {
 /// A settled selector adds no periodic wakeups to the compositor.
 pub(crate) fn deadline(comp: &Compositor) -> Option<Instant> {
     let service = &comp.capture_tool;
-    if service.label_dirty {
+    let ui = if service.label_dirty {
         Some(service.label_deadline)
     } else if service.recording && !service.finishing {
         Some(service.started + std::time::Duration::from_secs(service.last_second + 1))
-    } else {
-        None
-    }
+    } else { None };
+    ui.into_iter().chain((!service.downloads.is_empty()).then_some(service.download_poll)).min()
 }
 
 /// Scanout-only overlay. Stable geometry keeps selection damage sparse; no

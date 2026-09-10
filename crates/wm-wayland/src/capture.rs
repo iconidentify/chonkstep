@@ -165,54 +165,86 @@ impl ScreenshotRequestPoller {
 /// Refreshes the per-window snapshots used for previews. Called once
 /// per rendered frame; the implementation throttles its own work, so
 /// this stays affordable at frame rate.
-pub(crate) fn refresh_snapshots(comp: &mut Compositor) {
-    // Overview composes the clients' existing GPU surfaces. Readbacks have no
-    // consumer here and would synchronously stall input for unrelated icons.
-    if comp.wm.backend().overview.is_some()
-        || comp.wm.backend().gesture_scene.is_some()
-        || comp.wm.backend().layout_scene.animating()
-    {
-        return;
+pub(crate) struct SnapshotDownloads {
+    pending: Vec<SnapshotDownload>,
+    poll_after: Instant,
+}
+
+struct SnapshotDownload {
+    window: WlWindowId,
+    image: PendingImage,
+    canceled: bool,
+    boosted: bool,
+}
+
+impl Default for SnapshotDownloads {
+    fn default() -> Self { Self { pending: Vec::new(), poll_after: Instant::now() } }
+}
+
+impl SnapshotDownloads {
+    pub fn deadline(&self) -> Option<Instant> { (!self.pending.is_empty()).then_some(self.poll_after) }
+}
+
+pub(crate) fn service_snapshots(comp: &mut Compositor) {
+    let now = Instant::now();
+    if comp.snapshot_downloads.pending.is_empty() || now < comp.snapshot_downloads.poll_after { return; }
+    let Compositor { wm, graphics, snapshot_downloads, .. } = comp;
+    let renderer = graphics_renderer(graphics);
+    let mut boosted_landed = false;
+    snapshot_downloads.pending.retain_mut(|pending| {
+        let was_canceled = pending.canceled;
+        pending.canceled |= wm.backend().locked || !wm.backend().windows.contains_key(&pending.window)
+            || pending.image.pixels.expired(now);
+        if pending.canceled && !was_canceled {
+            if let Some(record) = wm.backend_mut().windows.get_mut(&pending.window) { record.snapshot_dirty = true; }
+        }
+        if !pending.image.pixels.ready() { return true; }
+        pending.image.pixels.release_scene();
+        if !pending.canceled {
+            match pending.image.copy_pixels(renderer) {
+                Ok(buffer) => {
+                    if let Some(record) = wm.backend_mut().windows.get_mut(&pending.window) {
+                        record.snapshot = Some(buffer);
+                        // snapshot_dirty was cleared at submission; a newer
+                        // client commit may have set it again while pending.
+                        boosted_landed |= pending.boosted;
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "could not map completed window preview");
+                    if let Some(record) = wm.backend_mut().windows.get_mut(&pending.window) { record.snapshot_dirty = true; }
+                }
+            }
+        }
+        false
+    });
+    snapshot_downloads.poll_after = now + if snapshot_downloads.pending.iter().all(|pending| pending.canceled) {
+        Duration::from_millis(100)
+    } else { Duration::from_millis(4) };
+    if boosted_landed {
+        let backend = wm.backend_mut();
+        backend.preview_generation = backend.preview_generation.wrapping_add(1);
     }
+}
+
+pub(crate) fn refresh_snapshots(comp: &mut Compositor) {
+    if comp.wm.backend().locked || comp.wm.backend().overview.is_some()
+        || comp.wm.backend().gesture_scene.is_some() || comp.wm.backend().layout_scene.animating()
+        || comp.snapshot_downloads.pending.len() >= MAX_SNAPSHOTS_PER_FRAME { return; }
     let now = Instant::now();
     let boost = comp.wm.backend().preview_edge;
     let due = due_windows(comp, now, boost);
-    if due.is_empty() {
-        return;
-    }
-
-    // Disjoint field borrows: the renderer lives in `graphics` and the
-    // records live under `wm`, and both are needed at once - the same
-    // destructure `renderer::render_frame_winit` does, for the same
-    // reason (there is no `&mut self` method that could hand out both).
-    let Compositor { wm, graphics, .. } = comp;
+    let Compositor { wm, graphics, snapshot_downloads, .. } = comp;
     let renderer = graphics_renderer(graphics);
     let edge = boost.unwrap_or(MAX_SNAPSHOT_EDGE);
-    let mut boosted_landed = false;
     for (window, surface, size, factor) in due {
-        // Stamp before rendering, not after: a window whose capture
-        // fails (a client that just died, an unimportable buffer) must
-        // wait out the interval like any other, or it retries at frame
-        // rate forever.
-        if let Some(record) = wm.backend_mut().windows.get_mut(&window) {
-            record.snapshot_attempted_at = Some(now);
-        }
-        let Some(buffer) = snapshot_window(renderer, &surface, size, factor, edge) else {
-            continue;
-        };
-        if let Some(record) = wm.backend_mut().windows.get_mut(&window) {
-            record.snapshot = Some(buffer);
-            record.snapshot_dirty = false;
-            boosted_landed = boost.is_some();
-        }
-    }
-    if boosted_landed {
-        // Tell the shell (through `Backend::preview_generation`) that
-        // previews fetched before this pass are now beatable - the
-        // Overview painted its first frame from the default snapshots
-        // and refreshes its cards exactly once when this moves.
-        let backend = wm.backend_mut();
-        backend.preview_generation = backend.preview_generation.wrapping_add(1);
+        if snapshot_downloads.pending.len() == MAX_SNAPSHOTS_PER_FRAME { break; }
+        if snapshot_downloads.pending.iter().any(|pending| pending.window == window) { continue; }
+        if let Some(record) = wm.backend_mut().windows.get_mut(&window) { record.snapshot_attempted_at = Some(now); }
+        let Some(image) = snapshot_window(renderer, &surface, size, factor, edge) else { continue; };
+        if let Some(record) = wm.backend_mut().windows.get_mut(&window) { record.snapshot_dirty = false; }
+        snapshot_downloads.pending.push(SnapshotDownload { window, image, canceled: false, boosted: boost.is_some() });
+        snapshot_downloads.poll_after = now + Duration::from_millis(4);
     }
 }
 
@@ -262,7 +294,7 @@ pub(crate) fn capture_output_png(comp: &mut Compositor, path: &Path) -> Result<(
     // Diagnostic marker captures what the user sees, including capture chrome.
     // User exports and protocol screencopy deliberately do not add this layer.
     crate::capture_tool::render(&mut elements, renderer, wm.backend(), Rect::new(Point::new(0, 0), size));
-    let buffer = render_offscreen(renderer, &elements, size, 1.0, clear_color)
+    let buffer = render_offscreen(renderer, &mut elements, size, 1.0, clear_color)
         .ok_or_else(|| "offscreen render of the desktop failed".to_string())?;
     write_png(buffer, path)
 }
@@ -273,7 +305,7 @@ pub(crate) fn capture_output_png(comp: &mut Compositor, path: &Path) -> Result<(
 /// nested window go through identical code. `dmabuf.rs` carries the
 /// same three lines for the same reason; a shared helper would belong
 /// on `Graphics` itself, in `state.rs`.
-fn graphics_renderer(graphics: &mut Graphics) -> &mut GlesRenderer {
+pub(crate) fn graphics_renderer(graphics: &mut Graphics) -> &mut GlesRenderer {
     match graphics {
         Graphics::Winit(backend) => backend.renderer(),
         Graphics::Session(session) => session.renderer(),
@@ -283,11 +315,11 @@ fn graphics_renderer(graphics: &mut Graphics) -> &mut GlesRenderer {
 /// A user screenshot is lossless device pixels, without the pointer or capture
 /// controls. Window capture renders that surface and its own chrome in isolation
 /// so overlapping applications cannot appear in the saved window image.
-pub(crate) fn capture_user_pixels(comp: &mut Compositor, viewport: Rect, window: Option<WlWindowId>) -> Option<DecorationBuffer> {
+pub(crate) fn capture_user_pixels(comp: &mut Compositor, viewport: Rect, window: Option<WlWindowId>) -> Option<PendingImage> {
     if comp.wm.backend().locked || viewport.size.w == 0 || viewport.size.h == 0 { return None; }
     let Compositor { wm, graphics, pointer_location, cursors, .. } = comp;
     let renderer = graphics_renderer(graphics);
-    let (elements, clear_color) = if let Some(window) = window {
+    let (mut elements, clear_color) = if let Some(window) = window {
         let backend = wm.backend();
         let record = backend.windows.get(&window).filter(|r| r.mapped)?;
         let surface = record.surface.wl_surface()?;
@@ -307,7 +339,7 @@ pub(crate) fn capture_user_pixels(comp: &mut Compositor, viewport: Rect, window:
     } else {
         build_scene(wm.backend(), renderer, *pointer_location, &smithay::input::pointer::CursorImageStatus::Hidden, cursors, viewport)
     };
-    render_offscreen(renderer, &elements, viewport.size, 1.0, clear_color)
+    render_offscreen_pending(renderer, &mut elements, viewport.size, 1.0, clear_color)
 }
 
 /// The windows whose snapshot is stale - at most
@@ -321,10 +353,9 @@ pub(crate) fn capture_user_pixels(comp: &mut Compositor, viewport: Rect, window:
 /// With a `boost` edge hinted (an Overview session is open), the
 /// schedule changes shape entirely: every mapped window whose stored
 /// snapshot is smaller than the hinted edge would produce is due *now*
-/// and the batch is uncapped - the whole point of the hint is to have
-/// card-resolution captures on the very next frame, and paying N
-/// readbacks once at panel entry is the cost the Overview signed up
-/// for. Windows already captured at the hinted edge are not due at
+/// and all candidates are returned. Submission still admits at most two
+/// downloads at once, yielding to input while their fences complete. Each
+/// completed boosted snapshot advances the preview generation. Windows already captured at the hinted edge are not due at
 /// all, interval or no interval: the panel freezes its cards at entry
 /// (it repaints on state change, not per frame), so keeping N
 /// card-sized readbacks ticking behind a static picture would be pure
@@ -432,7 +463,7 @@ fn snapshot_window(
     source: Size,
     factor: f64,
     max_edge: u32,
-) -> Option<DecorationBuffer> {
+) -> Option<PendingImage> {
     let (size, scale) = snapshot_target(source, max_edge)?;
     tracing::trace!(width = size.w, height = size.h, "capturing window preview");
     // The scene's own constructor, at capture scale: the GPU does the
@@ -460,7 +491,7 @@ fn snapshot_window(
     // stays empty, which the icon tile composites over its well floor
     // and the switcher over its own backing - both better than a black
     // border baked into the thumbnail.
-    render_offscreen(renderer, &elements, size, scale, Color32F::new(0.0, 0.0, 0.0, 0.0))
+    render_offscreen_pending(renderer, &mut elements, size, scale, Color32F::new(0.0, 0.0, 0.0, 0.0))
 }
 
 /// Captures one managed toplevel at its full compositor size for
@@ -471,7 +502,7 @@ pub(crate) fn capture_window_full(
     comp: &mut Compositor,
     window: WlWindowId,
     paint_cursor: bool,
-) -> Option<DecorationBuffer> {
+) -> Option<PendingImage> {
     let (surface, viewport, factor) = {
         let backend = comp.wm.backend();
         let record = backend.windows.get(&window)?;
@@ -507,9 +538,9 @@ pub(crate) fn capture_window_full(
     if elements.len() == surface_element_start {
         return None;
     }
-    render_offscreen(
+    render_offscreen_pending(
         renderer,
-        &elements,
+        &mut elements,
         viewport.size,
         1.0,
         Color32F::new(0.0, 0.0, 0.0, 0.0),
@@ -525,13 +556,38 @@ pub(crate) fn capture_window_full(
 /// the target texture is new and therefore entirely stale, and a
 /// tracker carried across calls would compute incremental damage
 /// against a buffer that no longer exists and skip drawing outright.
+pub(crate) struct PendingImage {
+    pub size: Size,
+    pub pixels: crate::readback::RgbaDownload,
+}
+
+impl PendingImage {
+    pub fn copy_pixels(&mut self, renderer: &mut GlesRenderer) -> Result<DecorationBuffer, String> {
+        self.pixels.release_scene();
+        let pixels = self.pixels.with_pixels(renderer, <[u8]>::to_vec)?;
+        Ok(DecorationBuffer { width: self.size.w, height: self.size.h, pixels })
+    }
+}
+
 fn render_offscreen(
     renderer: &mut GlesRenderer,
-    elements: &[SceneElement<GlesRenderer>],
+    elements: &mut Vec<SceneElement<GlesRenderer>>,
     size: Size,
     scale: f64,
     clear_color: Color32F,
 ) -> Option<DecorationBuffer> {
+    let mut pending = render_offscreen_pending(renderer, elements, size, scale, clear_color)?;
+    pending.pixels.wait().ok()?;
+    pending.copy_pixels(renderer).ok()
+}
+
+fn render_offscreen_pending(
+    renderer: &mut GlesRenderer,
+    elements: &mut Vec<SceneElement<GlesRenderer>>,
+    size: Size,
+    scale: f64,
+    clear_color: Color32F,
+) -> Option<PendingImage> {
     if size.w == 0 || size.h == 0 {
         return None;
     }
@@ -567,16 +623,15 @@ fn render_offscreen(
         return None;
     }
 
-    let pixels = match crate::readback::with_rgba_pixels(
-        renderer, &mut framebuffer, (width, height).into(), <[u8]>::to_vec,
-    ) {
+    let mut pixels = match crate::readback::download_rgba(renderer, &mut framebuffer, (width, height).into()) {
         Ok(pixels) => pixels,
         Err(error) => {
-            tracing::warn!(?error, "could not read back the offscreen capture buffer");
+            tracing::warn!(?error, "could not submit the offscreen capture download");
             return None;
         }
     };
-    Some(DecorationBuffer { width: size.w, height: size.h, pixels })
+    pixels.hold_scene(elements);
+    Some(PendingImage { size, pixels })
 }
 
 /// Encodes a captured buffer as a PNG. `tiny-skia` is already the

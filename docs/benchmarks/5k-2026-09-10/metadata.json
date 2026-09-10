@@ -1,0 +1,24 @@
+{
+  "date_utc": "2026-09-10T07:53:34Z",
+  "backend": "nested-winit / Weston GL headless kiosk / physical framebuffer 5120x2880",
+  "limitation": "No physical KMS, plane scanout, or monitor latency measurement. Competing GPU load is recorded, not stopped.",
+  "binary": {
+    "baseline": {
+      "path": "/tmp/chonk-gpu-baseline/chonkstep-wayland",
+      "version": "chonkstep-wayland 0.4.4\nsource: preview-v0.4.4-1-gda52c0d\nbuild id: 74f7d20488b6a604efa2ef2f90dc71ebac6a19c4",
+      "sha256": "a59b0b54995e47f9d8924f7723f5355e85a573869fdfcaa11d94fc793b4b751b"
+    },
+    "stage1": {
+      "path": "/tmp/chonk-gpu-stage1/chonkstep-wayland",
+      "version": "chonkstep-wayland 0.4.4\nsource: preview-v0.4.4-1-gda52c0d-dirty\nbuild id: f713ff1fa3db737e0c3111b88bdbc14aa812282e",
+      "sha256": "9544a49c7f04c2674711a4f06c13ee1e628894816cff4df2a8d1d5c10884c501"
+    }
+  },
+  "probe": {
+    "path": "/tmp/chonk-gpu-fixture/chonk-fullscreen-probe",
+    "sha256": "d9f2cf0f34c9806b2d76937649dcbeaaf9243f992339995004c746be0aca3cce"
+  },
+  "runs": 3,
+  "harness_sha256": "f8ced7c0d84ad82c2ccd7cf12b60671c49b76bdaddc35df8eccf64b132702151",
+  "weston": "weston 15.0.1"
+}
