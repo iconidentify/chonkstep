@@ -2335,6 +2335,7 @@ pub struct Compositor {
     pub(crate) keyboard_config: Option<ResolvedKeyboard>,
     pub(crate) clipboard_persistence: crate::selection::persistence::Persistence,
     pub(crate) mac_keyboard: crate::input::keyboard::mac::MacKeyboard,
+    pub(crate) mac_copy_order: crate::input::keyboard::copy_order::CopyOrder,
     pub output_manager_state: OutputManagerState,
     pub data_device_state: DataDeviceState,
     /// The middle-click clipboard. Advertised because the X11 half of
@@ -2542,6 +2543,7 @@ impl Compositor {
     /// ever needs to move.
     #[cfg_attr(feature = "profile", profiling::function)]
     pub(crate) fn dispatch_pending(&mut self) {
+        crate::input::keyboard::copy_order::service(self);
         crate::selection::persistence::tick(self);
         crate::capture::service_snapshots(self);
         crate::capture_tool::tick(self);
@@ -4113,6 +4115,7 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
         keyboard_config,
         clipboard_persistence: crate::selection::persistence::Persistence::default(),
         mac_keyboard: crate::input::keyboard::mac::MacKeyboard::default(),
+        mac_copy_order: Default::default(),
         output_manager_state,
         data_device_state,
         primary_selection_state,
@@ -4262,6 +4265,7 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
         // the seat, not to the backend-generic shell.
         let now = std::time::Instant::now();
         let mut wait = comp.shell.next_housekeeping_in(now);
+        if let Some(deadline) = comp.mac_copy_order.deadline() { wait = wait.min(deadline.saturating_duration_since(now)); }
         if comp.clipboard_persistence.active() || !comp.wm.backend().pending_quit.is_empty() { wait = wait.min(Duration::from_millis(5)); }
         wait = wait.min(request_poller.next_deadline().saturating_duration_since(now));
         wait = wait.min(comp.screenshot_poller.next_deadline().saturating_duration_since(now));

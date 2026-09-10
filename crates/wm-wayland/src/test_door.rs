@@ -973,7 +973,7 @@ pub(crate) fn after_frame(comp: &mut Compositor) {
             return;
         }
         let backend = comp.wm.backend();
-        if backend.damage || !backend.pending.is_empty() {
+        if backend.damage || !backend.pending.is_empty() || comp.mac_copy_order.queued() {
             return;
         }
         for mut stream in pending.drain(..) {

@@ -11,6 +11,7 @@ use crate::state::Compositor;
 
 mod focus;
 pub(crate) mod mac;
+pub(crate) mod copy_order;
 pub(super) mod repeat;
 pub(crate) use focus::KeyboardFocus;
 

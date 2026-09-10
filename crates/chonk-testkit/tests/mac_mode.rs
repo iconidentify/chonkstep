@@ -743,6 +743,16 @@ fn nautilus_copies_files_using_command_shortcuts() {
     )
     .unwrap();
     let window = s.wait_for_window("source").unwrap();
+    // Mapping the GTK window precedes its asynchronous directory listing. Wait
+    // for the only fixture file to be painted in the content area's first row;
+    // sending Select All while that row is empty cannot select a future file.
+    poll_until(WAIT, "Nautilus source file painted", || {
+        let shot = s.screenshot("source-loaded").ok()?;
+        let ink = (60..200).flat_map(|y| (220..window.w.saturating_sub(30)).map(move |x| (x, y)))
+            .filter(|&(x, y)| shot.pixel(window.x.max(0) as u32 + x, window.y.max(0) as u32 + y)[..3]
+                .iter().all(|channel| *channel > 110)).count();
+        (ink > 100).then_some(())
+    }).unwrap();
     s.door()
         .click(
             window.x as f64 + window.w as f64 * 0.7,
@@ -859,4 +869,59 @@ fn libreoffice_and_browser_exchange_document_text() {
         let _ = s.screenshot("writer-save-failure");
         panic!("{e}: windows {:?}", s.world().unwrap().windows);
     });
+}
+
+#[test]
+#[ignore = "scripts/e2e.sh --headless --host-renderer gl --test mac_mode"]
+fn delayed_real_copy_followed_by_one_burst_switch_and_paste_keeps_clipboard_order() {
+    let mut s = boot("mac-copy-order");
+    let output = s.dir.join("pty-bytes");
+    let script = s.dir.join("terminal.py");
+    std::fs::write(&script, "import os,sys,tty\ntty.setraw(0)\nf=open(sys.argv[1],'wb',buffering=0)\nwhile True:\n b=os.read(0,4096)\n if not b: break\n f.write(b)\n").unwrap();
+    assert!(chonk_testkit::require_client("foot"));
+    s.launch_isolated("foot", &["--title=Copy Order Terminal", "--app-id=foot", "python3",
+        script.to_str().unwrap(), output.to_str().unwrap()]).unwrap();
+    s.wait_for_window("Copy Order Terminal").unwrap();
+    poll_until(WAIT, "terminal raw input ready", || output.exists().then_some(())).unwrap();
+    let mut source = browser(&mut s, "wayland", "copy-source");
+    focus(&mut s, &mut source, "source");
+    chord(&mut s, &[CMD], 30);
+    poll_until(WAIT, "source text selected", || {
+        (source.evaluate("source.selectionEnd-source.selectionStart === source.value.length").ok()? == true).then_some(())
+    }).unwrap();
+    // Delay ordinary handling, never synthesize a copy or write the clipboard.
+    source.evaluate("document.addEventListener('keydown',e=>{if(e.ctrlKey && e.key==='c'){const end=performance.now()+150;while(performance.now()<end){}}});true").unwrap();
+    chord(&mut s, &[CMD], 46);
+    // No barriers between Tab and Paste. Each WM focus change must settle
+    // before routing the later client key, including queued releases.
+    for (code, pressed) in [(CMD,true),(15,true),(15,false),(CMD,false),(CMD,true),(47,true),(47,false),(CMD,false)] {
+        s.door().key(code, pressed).unwrap();
+    }
+    s.door().barrier().unwrap();
+    let expected = CONTENT.replace('\n', "\r");
+    poll_until(WAIT, "delayed source pasted into the actual terminal", || {
+        (std::fs::read(&output).ok()? == expected.as_bytes()).then_some(())
+    }).unwrap();
+    s.door().tap_key(30).unwrap();
+    poll_until(WAIT, "Command released after replay", || {
+        (std::fs::read(&output).ok()? == format!("{expected}a").as_bytes()).then_some(())
+    }).unwrap();
+    chord(&mut s, &[CTRL], 46);
+    poll_until(WAIT, "physical Control still reaches the PTY", || {
+        std::fs::read(&output).ok()?.ends_with(&[3]).then_some(())
+    }).unwrap();
+    // A copy with no selected text publishes no replacement offer. The bounded
+    // wait must expire and still deliver a later switch and ordinary typing.
+    chord(&mut s, &[CMD], 15);
+    focus(&mut s, &mut source, "source");
+    source.evaluate("source.setSelectionRange(0,0);true").unwrap();
+    chord(&mut s, &[CMD], 46);
+    let started = std::time::Instant::now();
+    chord(&mut s, &[CMD], 15);
+    assert!(started.elapsed() < Duration::from_secs(1), "a no-op Copy must not hold input indefinitely");
+    s.door().tap_key(30).unwrap();
+    poll_until(WAIT, "typing after clipboard wait expires", || {
+        std::fs::read(&output).ok()?.ends_with(&[3, b'a']).then_some(())
+    }).unwrap();
+    assert!(s.compositor_alive());
 }

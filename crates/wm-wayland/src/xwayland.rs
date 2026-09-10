@@ -646,6 +646,7 @@ impl XwmHandler for Compositor {
 
     fn new_selection(&mut self, _xwm: XwmId, selection: SelectionTarget, mime_types: Vec<String>) {
         if selection == SelectionTarget::Clipboard {
+            if !mime_types.is_empty() { self.mac_copy_order.offered(); }
             self.clipboard_persistence.clear();
             if self.wm.mac_mode() && self.wm.interaction_config().clipboard_persistence {
                 let requests = self.clipboard_persistence.begin(None, mime_types.clone());

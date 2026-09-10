@@ -1,7 +1,9 @@
 # Mac interaction validation — 2026-09-10
 
-The implemented Mac profile passed 94 distinct end-to-end tests across nine
-targets, plus 1,146 unit tests in the affected libraries. This is software
+The original Mac profile passed 94 distinct end-to-end tests across nine
+targets, plus 1,146 unit tests in the affected libraries. The final GPU-backed
+regression run passed 144 end-to-end tests across 18 targets and 1,917 workspace
+unit tests; details follow below. This is software
 qualification of the documented profile, not a claim of complete macOS or
 Apple hardware parity. See [supported behavior and remaining work](mac-mode.md).
 
@@ -96,3 +98,40 @@ Physical Apple Fn/Globe, all international layouts, Bluetooth/hotplug, complete
 application-specific widget behavior, and the other gaps in `mac-mode.md`
 remain unqualified. No “every application” or “full macOS parity” claim follows
 from these results.
+
+## Final GPU-backed regression
+
+The final run used `scripts/e2e.sh --headless --host-renderer gl --release
+--test TARGET` with a private Weston GL host on the real RTX 3090. All nine
+targets above passed again; `mac_mode` now has **11** workflows. Another nine
+targets passed: `omarchy_terminal` (2), `screencopy_pressure` (8), `image_capture`
+(5), `capture_cache` (1), `hidden_surface_damage` (2), `hyprland_ipc` (19),
+`fullscreen` (5), `overview` (5), and `idle` (2). Total: **144 distinct E2E tests**,
+no missing-client skips. Repeated installed-menu/theme helper checks are not
+included in that total.
+
+Real GPU scheduling exposed a copy/focus race in Writer: it published its offer
+after Command-Tab changed focus, and Wayland correctly refused ownership from
+the unfocused source. Mac copy ordering now defers subsequent keyboard commands
+until an offer arrives or the bounded deadline expires. The added E2E sends
+physical Command-C, Command-Tab and Command-V without intervening compositor
+barriers, delays the browser's ordinary copy handler by 150 ms, and verifies
+exact Unicode/multiline bytes in foot's PTY. It also verifies balanced Command
+release, physical Control-C, and prompt recovery after a copy with no selection.
+Writer's existing two-way document exchange passes on the GPU host too.
+
+The Nautilus fixture now waits for its file row to paint before selecting and
+copying; directory enumeration is asynchronous and a compositor barrier alone
+does not establish that readiness. The test still performs one real copy action.
+
+Final workspace library tests: **1,917 passed, 12 environment-dependent tests
+ignored**, across 18 library targets. Strict workspace Clippy, private Rustdoc,
+and optional GPU-producer Clippy passed. The separately invoked ignored two-GPU
+hardware test also passed; see [GPU audit evidence](gpu-audit-work.md).
+
+Logs: `/tmp/chonk-final-TARGET.log` (substitute each target; idle's successful
+retry is `/tmp/chonk-final-idle-retry.log`), `/tmp/chonk-gpu-final-unit2.log`,
+`/tmp/chonk-interop-lint.log`, `/tmp/chonk-gpu-final-docs.log`, and
+`/tmp/chonk-texture-fixture-lint.log`. The initial idle attempt collided with a
+source edit during compilation; the completed-source retry passed. This was not
+an idle runtime failure. Physical Apple input and native KMS remain unqualified.

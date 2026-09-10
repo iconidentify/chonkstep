@@ -245,4 +245,8 @@ pub(crate) fn forward(comp: &mut Compositor, keyboard: &KeyboardHandle<Composito
     keyboard.input_forward(comp, out_code, state, serial, time, true);
     comp.mac_keyboard.modifiers = None;
     comp.mac_keyboard.suppress_key = false;
+    if state == KeyState::Pressed && !suppress && eligible && comp.wm.mac_mode()
+        && combo.modifiers == Modifiers::SUPER && matches!(combo.keysym, 0x63 | 0x78) {
+        if let Some(focus) = focus { comp.mac_copy_order.copied(focus); }
+    }
 }

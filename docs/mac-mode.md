@@ -126,6 +126,14 @@ The existing Wayland/XWayland bridge preserves text, HTML, PNG, URI lists, and
 binary representations without converting everything to plain text. PRIMARY
 selection stays separate from the clipboard.
 
+After Command-C/X, subsequent keyboard commands wait for the source's clipboard
+offer before switching or pasting. This preserves a rapid copy → switch → paste
+sequence when a toolkit publishes its copy asynchronously. Releases needed by
+the copying application still arrive immediately; client dispatch and pointer
+motion continue. A 250 ms deadline releases the sequence if the application has
+no selection or does not publish an offer. The queue is bounded and resets on
+lock/resume. This does not grant an unfocused client clipboard ownership.
+
 Mac mode retains one clipboard snapshot in memory, with no disk history, and
 restores it when its owner exits. Data-control clipboard managers remain usable;
 ChonkStep does not continuously claim their live offers. Old protocol offers
@@ -164,8 +172,9 @@ remain usable while locked. No firmware Fn setting is changed.
 
 ## Validation and remaining parity
 
-The [validation report](mac-mode-validation.md) records versions, 94 passing
-end-to-end cases, unit/lint/doc checks, and the limits of that evidence.
+The [validation report](mac-mode-validation.md) records versions, the original
+94-case run and final GPU-backed 144-case regression run, unit/lint/doc checks,
+and the limits of that evidence.
 
 Run the real client workflows in an isolated headless Weston session:
 

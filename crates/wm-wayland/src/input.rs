@@ -359,6 +359,7 @@ pub(crate) fn capture_pointer_busy(seat: &Seat<Compositor>) -> bool {
 /// not turn into a client-visible release merely because a VT switch
 /// interrupted it.
 pub(crate) fn resynchronise_input_after_resume(state: &mut Compositor) {
+    state.mac_copy_order.reset();
     crate::capture_tool::reset_input(state);
     gestures::cancel(state);
     let seat = state.seat.clone();
@@ -1270,8 +1271,13 @@ fn on_tablet_button<I: InputBackend>(state: &mut Compositor, event: I::TabletToo
 fn on_keyboard_key<I: InputBackend>(state: &mut Compositor, event: I::KeyboardKeyEvent) {
     let keycode = event.key_code();
     let key_state = event.state();
-    let serial = SERIAL_COUNTER.next_serial();
     let time = event.time_msec();
+    if keyboard::copy_order::defer(state, keyboard::copy_order::Key { code: keycode, state: key_state, time }) { return; }
+    deliver_keyboard_key(state, keycode, key_state, time);
+}
+
+pub(crate) fn deliver_keyboard_key(state: &mut Compositor, keycode: Keycode, key_state: KeyState, time: u32) {
+    let serial = SERIAL_COUNTER.next_serial();
     let Some(keyboard) = state.seat.get_keyboard() else {
         return;
     };

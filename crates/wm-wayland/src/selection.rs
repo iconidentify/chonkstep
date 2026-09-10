@@ -87,6 +87,7 @@ impl SelectionHandler for Compositor {
     ) {
         tracing::debug!(?ty, clear = source.is_none(), "client selection changed");
         if ty == SelectionTarget::Clipboard {
+            if source.is_some() { self.mac_copy_order.offered(); }
             self.clipboard_persistence.clear();
             if self.wm.mac_mode() && self.wm.interaction_config().clipboard_persistence {
                 if let Some(source) = source.as_ref() {
