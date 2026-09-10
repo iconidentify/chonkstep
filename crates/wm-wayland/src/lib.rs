@@ -65,6 +65,7 @@ mod overview;
 mod gesture_scene;
 mod layout_scene;
 mod selection;
+mod multi_gpu;
 mod session;
 mod termination;
 mod state;

@@ -13,12 +13,11 @@
 //! Scope, stated up front so the omissions read as decisions rather
 //! than gaps:
 //!
-//! - **One GPU, every connected connector on it.** [`init`] picks the
-//!   primary DRM device and drives every connector on it that is
-//!   plugged in, each with its own crtc, its own `DrmCompositor`, and
-//!   its own page-flip bookkeeping (the kernel reports flips per crtc,
-//!   so nothing about frame scheduling can be shared between outputs).
-//!   A second GPU's outputs are dark.
+//! - **One KMS device, every connected connector on it.** Each output has
+//!   its own crtc, `DrmCompositor`, and page-flip bookkeeping. An explicit
+//!   `CHONKSTEP_RENDER_DEVICE` selects a second GPU for composition, with
+//!   Smithay MultiRenderer transferring into the KMS device's swapchain.
+//!   Additional KMS devices are not driven concurrently.
 //! - **The startup layout is a guess; the running layout is
 //!   configurable.** Outputs come up left to right in
 //!   connector-enumeration order at their preferred modes — nothing at
@@ -27,16 +26,9 @@
 //!   outputs, change their modes ([`apply_mode`] re-programs the crtc)
 //!   and set per-output scales — which is how `kanshi` gives a session
 //!   a remembered layout. Mirroring and rotation remain future work.
-//! - **No per-surface output tracking.** Nothing sends
-//!   `wl_surface.enter`/`leave`, so a client is never told which screen
-//!   it is on. That was invisible while there was one screen and one
-//!   possible answer; with several, a client that scales itself per
-//!   output (or wants that output's refresh) gets no signal and falls
-//!   back to its default. The same bookkeeping would give frame
-//!   callbacks a per-output cadence instead of the primary's (see
-//!   [`render_frame_session`]) and is the prerequisite for
-//!   `wp_presentation` feedback, so all three arrive together or not
-//!   at all.
+//! - **Per-surface output tracking.** Scene membership sends enter/leave and
+//!   output-specific allocation feedback. Retained rendered visibility chooses
+//!   each surface's primary presentation output and callback cadence.
 //! - **No GPU hot-plug.** The udev source logs device add/remove and
 //!   does not act on it. Adopting a GPU that appeared after startup
 //!   means re-running every step of [`init`] against it while the old
@@ -616,7 +608,7 @@ pub(crate) struct SessionGraphics {
     /// [`SessionGraphics::renderer`], which is the spelling
     /// backend-blind code uses so both arms of [`Graphics`] read the
     /// same.
-    pub(crate) renderer: GlesRenderer,
+    render_stack: crate::multi_gpu::Stack,
     /// The exact render node backing `renderer`, if it could be proved.
     /// This is deliberately not the KMS primary node: split display /
     /// render hardware has no render node on the display device, and
@@ -1009,7 +1001,7 @@ impl SessionGraphics {
     /// two arms of [`Graphics`] into one expression instead of
     /// branching on a method here and a field there.
     pub(crate) fn renderer(&mut self) -> &mut GlesRenderer {
-        &mut self.renderer
+        self.render_stack.gles()
     }
 
     /// The KMS device's fd, cloned for whoever needs to import into
@@ -1024,6 +1016,14 @@ impl SessionGraphics {
     /// Resolved once during initialization and absent rather than guessed.
     pub(crate) fn render_node(&self) -> Option<DrmNode> {
         self.render_node
+    }
+
+    /// Device clients should prefer for buffers intended for this KMS target.
+    pub(crate) fn scanout_node(&self) -> Option<DrmNode> {
+        match &self.render_stack {
+            crate::multi_gpu::Stack::Single(_) => self.render_node,
+            crate::multi_gpu::Stack::Multi(multi) => Some(multi.target),
+        }
     }
 
     /// Exact plane capabilities for this output and the active experiment.
@@ -1043,6 +1043,9 @@ impl SessionGraphics {
         if flags.contains(FrameFlags::ALLOW_OVERLAY_PLANE_SCANOUT) {
             formats.extend(output.overlay_formats.indexset().iter().copied());
         }
+        if let crate::multi_gpu::Stack::Multi(multi) = &self.render_stack {
+            formats.retain(|format| multi.scanout_imports.contains(format));
+        }
         formats.into_iter().collect()
     }
 
@@ -1056,12 +1059,13 @@ pub(crate) fn graphics_diagnostics(graphics: &Graphics) -> String {
     match graphics {
         Graphics::Winit(_) => "backend=nested-winit renderer=GLES host_output=true".to_string(),
         Graphics::Session(session) => format!(
-            "backend=drm-session kms_device={} drm_driver={} render_node={}",
+            "backend=drm-session kms_device={} drm_driver={} render_node={} {}",
             session.device_path.display(),
             session.driver_name,
             session
                 .render_node
                 .map_or_else(|| "unknown".to_string(), |node| node.to_string()),
+            session.render_stack.diagnostics(),
         ),
     }
 }
@@ -1152,7 +1156,7 @@ pub(crate) fn init(
     // exact identity. If the optional EGL query extension is absent,
     // pairing the KMS node is safe only when a real render node exists;
     // `render_node_for_fd` deliberately declines a primary-node guess.
-    let render_node = crate::dmabuf::render_node_for_renderer(&renderer)
+    let mut render_node = crate::dmabuf::render_node_for_renderer(&renderer)
         .or_else(|| render_node_for_fd(drm.device_fd()));
     match render_node {
         Some(node) => tracing::info!(render_node = %node, "session backend: renderer device identified"),
@@ -1165,7 +1169,24 @@ pub(crate) fn init(
     // against the primary plane's formats by `DrmCompositor::new` to
     // choose the swapchain format. Collected eagerly so the borrow of
     // the renderer ends here.
-    let render_formats: Vec<Format> = renderer.egl_context().dmabuf_render_formats().iter().copied().collect();
+    let mut render_formats: Vec<Format> = renderer.egl_context().dmabuf_render_formats().iter().copied().collect();
+    let mut render_stack = crate::multi_gpu::Stack::Single(Box::new(renderer));
+    if let Some(path) = std::env::var_os("CHONKSTEP_RENDER_DEVICE") {
+        let path = PathBuf::from(path);
+        let requested = DrmNode::from_path(&path).map_err(|error| format!("requested render device: {error}"))?;
+        if requested.ty() != NodeType::Render { return Err("CHONKSTEP_RENDER_DEVICE must name a DRM render node".into()); }
+        let target = render_node.ok_or("multi-GPU requires an identified target renderer device")?;
+        if requested != target {
+            let mut multi = crate::multi_gpu::CrossGpu::new(&path, target, drm.device_fd().device_fd())?;
+            // The scanout swapchain belongs to the target GPU. Its renderable
+            // formats, not the source GPU's, constrain DRM allocation.
+            render_formats = multi.target_formats();
+            render_node = Some(multi.render);
+            tracing::warn!(render = %multi.render, target = %multi.target,
+                "experimental multi-GPU composition enabled; DMA transfer preferred, CPU fallback possible");
+            render_stack = crate::multi_gpu::Stack::Multi(Box::new(multi));
+        }
+    }
 
     // 4. One output per connected connector, laid out left to right in
     //    connector order at their mode sizes (see the module docs on
@@ -1342,7 +1363,7 @@ pub(crate) fn init(
     loop_handle
         .insert_source(udev_backend, |event, _, comp: &mut Compositor| match event {
             UdevEvent::Added { device_id, path } => {
-                tracing::info!(?device_id, path = %path.display(), "a DRM device appeared; chonkstep drives a single GPU and will not adopt it");
+                tracing::info!(?device_id, path = %path.display(), "a DRM device appeared; chonkstep drives one KMS device and will not adopt another during this session");
             }
             UdevEvent::Changed { device_id } => {
                 let Graphics::Session(session) = &mut comp.graphics else { return };
@@ -1499,7 +1520,7 @@ pub(crate) fn init(
     //    them.
     let strict_release = strict_release_configured(
         std::env::var_os("CHONKSTEP_STRICT_BUFFER_RELEASE"),
-        driver_is_nvidia(drm.device_fd()),
+        driver_is_nvidia(drm.device_fd()) || matches!(render_stack, crate::multi_gpu::Stack::Multi(_)),
     );
     let driver_name = {
         use smithay::reexports::drm::Device as _;
@@ -1519,7 +1540,7 @@ pub(crate) fn init(
             driver_name,
             seat_session,
             drm,
-            renderer,
+            render_stack,
             render_node,
             gbm,
             render_formats,
@@ -2575,7 +2596,7 @@ pub(crate) fn render_frame_session(comp: &mut Compositor, plain_capture_pending:
         service_pending_flips(session);
     }
 
-    let SessionGraphics { renderer, outputs: session_outputs, strict_release, .. } = &mut **session;
+    let SessionGraphics { render_stack, outputs: session_outputs, strict_release, .. } = &mut **session;
     let strict_release = *strict_release;
     let mut drew_any = false;
     for (output_index, output) in session_outputs.iter_mut().enumerate() {
@@ -2660,6 +2681,7 @@ pub(crate) fn render_frame_session(comp: &mut Compositor, plain_capture_pending:
                     .map(|monitor| monitor.geometry)
                     .unwrap_or_else(|| Rect::new(output.position, wm.backend().output_size))
             });
+        let renderer = render_stack.gles();
         let scene_started = Instant::now();
         let gesture_build = wm.backend().gesture_scene.as_ref().map(|_| Instant::now());
         let clear_color = crate::renderer::build_scene_into(
@@ -2682,8 +2704,15 @@ pub(crate) fn render_frame_session(comp: &mut Compositor, plain_capture_pending:
             surface_outputs.update_scene(&entry.output, (entry.size.w as i32, entry.size.h as i32).into(), &output.scene_scratch, dmabuf.default_feedback());
         }
         let timing = gpu_timer.begin(renderer, &output.name);
-        let frame = output.drm_compositor.render_frame(renderer, &output.scene_scratch, clear_color, flags);
-        gpu_timer.end(renderer, timing);
+        let frame = match render_stack {
+            crate::multi_gpu::Stack::Single(renderer) => output.drm_compositor
+                .render_frame(renderer.as_mut(), &output.scene_scratch, clear_color, flags).map_err(|error| format!("{error:?}")),
+            crate::multi_gpu::Stack::Multi(multi) => multi.renderer(output.drm_compositor.format()).and_then(|mut renderer| {
+                output.drm_compositor.render_frame(&mut renderer, &output.scene_scratch, clear_color, flags)
+                    .map_err(|error| format!("{error:?}"))
+            }),
+        };
+        gpu_timer.end(render_stack.gles(), timing);
         let (rendered, direct_scanout, render_states) = match frame {
             Ok(result) => {
                 let direct_scanout = matches!(&result.primary_element, PrimaryPlaneElement::Element(_));

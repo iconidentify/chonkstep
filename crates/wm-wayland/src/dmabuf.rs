@@ -149,12 +149,13 @@ impl DmabufSupport {
         self.policy = Some(policy);
         self.outputs.clear();
         let (Some(node), Graphics::Session(session)) = (self.render_node, graphics) else { return true; };
+        let scanout_device = session.scanout_node().unwrap_or(node);
         for (index, output) in outputs.iter().enumerate() {
             let scanout: FormatSet = session.output_scanout_formats(index).indexset().iter()
                 .filter(|format| self.formats.contains(format)).copied().collect();
             if scanout.indexset().is_empty() { continue; }
             match DmabufFeedbackBuilder::new(node.dev_id(), self.formats.clone())
-                .add_preference_tranche(node.dev_id(), Some(TrancheFlags::Scanout), scanout).build() {
+                .add_preference_tranche(scanout_device.dev_id(), Some(TrancheFlags::Scanout), scanout).build() {
                 Ok(feedback) => self.outputs.push((output.output.clone(), feedback)),
                 Err(error) => tracing::warn!(?error, output = %output.output.name(), "could not build output dmabuf feedback"),
             }
@@ -324,7 +325,7 @@ fn is_render_node_type(node_type: NodeType) -> bool {
 fn graphics_renderer(graphics: &mut Graphics) -> &mut GlesRenderer {
     match graphics {
         Graphics::Winit(backend) => backend.renderer(),
-        Graphics::Session(session) => &mut session.renderer,
+        Graphics::Session(session) => session.renderer(),
     }
 }
 
