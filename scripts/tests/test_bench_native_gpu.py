@@ -16,6 +16,15 @@ def feedback(stamps, flags=7, clock=1):
 
 
 class NativeMeasurementTests(unittest.TestCase):
+    def test_modesets_choose_real_changes_on_60_hz_panel(self):
+        current = {"width": 3840, "height": 2160, "refresh": 59.997}
+        smaller = {"width": 3200, "height": 1800, "refresh": 59.982}
+        self.assertEqual(bench.transition_modes([current, smaller], 3840, 2160, 60), (smaller, current))
+        with self.assertRaisesRegex(ValueError, "two distinct"):
+            bench.transition_modes([current], 3840, 2160, 60)
+        fast = current | {"refresh": 144}
+        self.assertEqual(bench.transition_modes([current, smaller, fast], 3840, 2160, 144), (current, fast))
+
     def test_uses_hardware_timestamps_and_excludes_warmup(self):
         result = bench.presentation_stats(feedback([1, 1_000_000_000, 1_006_944_444, 1_013_888_888, 2_000_000_000]),
                                           1_000_000_000, 1_020_000_000, 144)

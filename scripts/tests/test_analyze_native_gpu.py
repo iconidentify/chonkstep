@@ -11,6 +11,17 @@ spec.loader.exec_module(analysis)
 
 
 class NativeAnalysisTests(unittest.TestCase):
+    def test_sysfs_uses_monotonic_window_and_entire_read_interval(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / "000").mkdir()
+            (root / "000/gpu.jsonl").write_text("\n".join(json.dumps({"schema": 1, "source": "amdgpu-sysfs",
+                "pci": "0000:01:00.0", "wall_ns": 999999999, "start_monotonic_ns": start * 10**9,
+                "monotonic_ns": end * 10**9, "metrics": {"power_w": power}})
+                for start, end, power in ((1.9, 2.1, 999), (2, 2.01, 50), (3, 3.01, 70), (3.9, 4.1, 999))))
+            sample = {"directory": "000", "before": {"monotonic_ns": 10**9}, "after": {"monotonic_ns": 5 * 10**9}}
+            self.assertEqual(analysis.board_metrics(root, sample, None)["0000:01:00.0"]["power_w"]["mean"], 60)
+
     def test_telemetry_excludes_warmup_capture_and_other_board(self):
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)

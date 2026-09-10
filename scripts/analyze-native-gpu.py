@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Summarize completed native GPU campaigns, retaining individual samples.
 
-GPU CSV timestamps are filtered to the measured interval, excluding its first
-and last second. Old campaigns may provide wall-monotonic-calibration.json.
-GPU metrics describe the entire board, including the producer and other apps.
+Telemetry is filtered to the measured interval, excluding its first and last
+second. AMD/Apple JSONL uses monotonic timestamps. Old NVIDIA CSV campaigns may
+provide wall-monotonic-calibration.json. GPU board metrics include other apps;
+Apple SMC system/rail power is reported separately and is not GPU power.
 """
 import argparse
 import csv
@@ -21,6 +22,23 @@ def distribution(values):
 
 
 def board_metrics(root, sample, utc_offset):
+    jsonl = root / sample["directory"] / "gpu.jsonl"
+    if jsonl.exists():
+        boards = {}
+        for line in jsonl.read_text().splitlines():
+            row = json.loads(line)
+            if row["schema"] != 1 or row["source"] not in ("amdgpu-sysfs", "apple-smc-sysfs"):
+                raise ValueError("unknown GPU telemetry schema")
+            if (row["start_monotonic_ns"] < sample["before"]["monotonic_ns"] + 1e9
+                    or row["monotonic_ns"] > sample["after"]["monotonic_ns"] - 1e9):
+                continue
+            values = boards.setdefault(row.get("pci") or row["device"], {})
+            for metric, value in row["metrics"].items():
+                if math.isfinite(value):
+                    values.setdefault(metric, []).append(value)
+        return {pci: {key: distribution(values) for key, values in data.items()} for pci, data in boards.items()}
+    if utc_offset is None:
+        raise ValueError("NVIDIA CSV requires --utc-offset-seconds")
     calibration_path = root / "wall-monotonic-calibration.json"
     calibration = json.loads(calibration_path.read_text()) if calibration_path.exists() else None
     offset = calibration["wall_ns"] - calibration["monotonic_ns"] if calibration else None
@@ -76,7 +94,7 @@ def paired_changes(samples, reference, candidate, metric):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("campaign", type=Path)
-    parser.add_argument("--utc-offset-seconds", type=int, required=True, help="timezone used by nvidia-smi timestamps during this campaign")
+    parser.add_argument("--utc-offset-seconds", type=int, help="required for legacy nvidia-smi CSV; sysfs uses monotonic timestamps")
     parser.add_argument("--reference", default="baseline")
     parser.add_argument("--candidate", default="final")
     parser.add_argument("--output", type=Path, required=True)

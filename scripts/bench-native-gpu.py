@@ -24,6 +24,7 @@ import shutil
 import signal
 import statistics
 import subprocess
+import sys
 import time
 
 spec = importlib.util.spec_from_file_location("scaling_bench", Path(__file__).with_name("bench-gpu-scaling.py"))
@@ -42,6 +43,35 @@ CASES = {"native": (2.0, 2), "direct": (2.0, 2), "fractional": (1.5, 2), "window
 
 def write_json(path, data):
     path.write_text(json.dumps(data, indent=2) + "\n")
+
+
+def telemetry_config(device):
+    sys_device = Path("/sys/class/drm") / device.name / "device"
+    if (sys_device / "driver").resolve().name == "apple-drm":
+        command = [sys.executable, str(Path(__file__).with_name("gpu-sysfs-telemetry.py")), "--apple"]
+        return command, "gpu.jsonl", json.loads(checked(command + ["--metadata"]))
+    vendor = (sys_device / "vendor").read_text().strip()
+    if vendor == "0x1002":
+        command = [sys.executable, str(Path(__file__).with_name("gpu-sysfs-telemetry.py"))]
+        return command, "gpu.jsonl", json.loads(checked(command + ["--metadata"]))
+    if vendor == "0x10de":
+        return (["nvidia-smi", "--query-gpu=timestamp,index,uuid,utilization.gpu,utilization.memory,power.draw,clocks.gr,clocks.mem,temperature.gpu,memory.used",
+                 "--format=csv,noheader,nounits", "-lms", "1000"], "gpu.csv",
+                checked(["nvidia-smi", "--query-gpu=index,pci.bus_id,name,driver_version", "--format=csv,noheader"]).strip())
+    raise ValueError(f"no telemetry implementation for GPU vendor {vendor}")
+
+
+def transition_modes(modes, width, height, hz):
+    """Select two distinct advertised modes, preferring refresh-only changes."""
+    current = min((m for m in modes if (m["width"], m["height"]) == (width, height)
+                   and abs(m["refresh"] - hz) < 0.1), key=lambda m: abs(m["refresh"] - hz))
+    alternate = [m for m in modes if (m["width"], m["height"]) != (width, height)
+                 or abs(m["refresh"] - current["refresh"]) >= 0.1]
+    if not alternate:
+        raise ValueError("modeset stress requires two distinct advertised modes")
+    chosen = min(alternate, key=lambda m: ((m["width"], m["height"]) != (width, height),
+                 -(m["width"] * m["height"]), abs(m["refresh"] - 60)))
+    return chosen, current
 
 
 def checked(command, **kwargs):
@@ -203,7 +233,7 @@ def stress_session(args, runtime, door, client_env, root):
         before = callbacks()
         gpu.wait_for("frame callbacks resumed", lambda: callbacks() >= before + 20, timeout=10)
 
-    def snapshot_phase(label, fullscreen=True):
+    def snapshot_phase(label, fullscreen=True, size=None):
         progressing()
         report = gpu.diagnostics(runtime)
         (evidence / f"{label}.txt").write_text(report)
@@ -214,7 +244,7 @@ def stress_session(args, runtime, door, client_env, root):
         # A popup has its own overlap test; other phases must show a newer
         # client frame, not merely the same valid texture from before a pause.
         witness = args.frame_marker and label != "popup"
-        pixels = verify_pixels(path, [args.width, args.height], fullscreen, rect, witness)
+        pixels = verify_pixels(path, size or [args.width, args.height], fullscreen, rect, witness)
         if witness:
             submitted = [int(value) for value in re.findall(r"^GPU frame_marker=(\d+)$", (root / "client.log").read_text(), re.M)]
             previous = [result["pixels"]["frame_marker"] for result in results
@@ -309,17 +339,20 @@ def stress_session(args, runtime, door, client_env, root):
             raise ValueError(f"unexpected VT queue failure: {errors}")
         expected_vt_queue_failures += failed
 
-    # Exercise real atomic modesets, including restoration of the user's 144 Hz.
-    for hz in (60, args.hz):
+    if args.skip_modesets:
+        results.append({"phase": "modesets-skipped", "reason": args.skip_modesets})
+        modes = []
+    else:
         outputs = json.loads(checked(["wlr-randr", "--json"], env=client_env))
         output = next(output for output in outputs if output["name"] == args.connector)
-        modes = [mode for mode in output["modes"] if mode["width"] == args.width and mode["height"] == args.height and abs(mode["refresh"] - hz) < 0.1]
-        selected = min(modes, key=lambda mode: abs(mode["refresh"] - hz))
-        # The EDID's nominal 60 Hz is 59.997 Hz on this monitor. Request
-        # the actual advertised mode, not a rounded name wlr-randr rejects.
-        checked(["wlr-randr", "--output", args.connector, "--mode", f"{args.width}x{args.height}@{selected['refresh']:.6f}Hz"], env=client_env)
-        gpu.wait_for("changed physical mode", lambda: any(c["active"] and abs(c["hz"] - hz) < 0.1 for c in json.loads(checked([str(args.drm_info), str(args.device)]))["crtcs"]))
-        snapshot_phase(f"mode-{hz}")
+        modes = transition_modes(output["modes"], args.width, args.height, args.hz)
+    for selected in modes:
+        width, height, hz = selected["width"], selected["height"], selected["refresh"]
+        mode = f"{width}x{height}@{hz:.6f}Hz"
+        checked(["wlr-randr", "--output", args.connector, "--mode", mode], env=client_env)
+        gpu.wait_for("changed physical mode", lambda: any(c["active"] and (c["width"], c["height"]) == (width, height)
+                     and abs(c["hz"] - hz) < 0.1 for c in json.loads(checked([str(args.drm_info), str(args.device)]))["crtcs"]))
+        snapshot_phase(f"mode-{mode}", size=[width, height])
 
     final_report = gpu.diagnostics(runtime)
     final_native = counters(final_report, "native_pipeline")
@@ -329,10 +362,11 @@ def stress_session(args, runtime, door, client_env, root):
     if readback.get("synchronous_fallbacks") or readback.get("queued", 0) < 20:
         raise ValueError(f"asynchronous readback did not service the captures: {readback}")
     (evidence / "final.txt").write_text(final_report)
+    skipped = [result for result in results if result["phase"].endswith("-skipped")]
     results.append({"phase": "complete", "passed": True, "native": final_native, "readback": readback,
-                    "expected_vt_permission_retries": expected_vt_queue_failures})
+                    "expected_vt_permission_retries": expected_vt_queue_failures, "skipped_phases": skipped})
     write_json(evidence / "results.json", results)
-    print(json.dumps({"stress_passed": True, "phases": len(results), "directory": str(evidence)}), flush=True)
+    print(json.dumps({"stress_passed": True, "phases": len(results), "skipped_phases": skipped, "directory": str(evidence)}), flush=True)
 
 
 @contextlib.contextmanager
@@ -441,6 +475,11 @@ def measure(args, label, binary, case, policy, root):
             if case != "idle":
                 client = stack.enter_context(gpu.bench.child([str(args.probe), "NativeGpuProbe", "native-gpu-probe", "animate-frame"], client_env, root / "client.log"))
                 gpu.wait_for("GPU client", lambda: json.loads(gpu.ipc(runtime, "j/clients")))
+                # Mapping can precede delivery of the initial activation
+                # configures. The strict probe treats the next configure as
+                # its request's answer, so let those initial frames complete
+                # before asking it to enter fullscreen. This is untimed setup.
+                gpu.wait_for("initial client frames", lambda: "frame callback=2\n" in (root / "client.log").read_text())
                 if case != "windowed":
                     door.stream.sendall(b"key 33 press\nkey 33 release\n")
                     door.query("barrier")
@@ -458,9 +497,10 @@ def measure(args, label, binary, case, policy, root):
             (root / "diagnostics-before.txt").write_text(before_report)
             if case != "idle" and "surface_buffer " in before_report and "kind=Some(Dma)" not in before_report:
                 raise ValueError("EGL fixture did not deliver DMA-BUFs")
-            # GPU query process is identical for all samples. It covers both
-            # devices, making unrelated GPU load visible in the raw CSV.
-            telemetry = stack.enter_context(gpu.bench.child(["nvidia-smi", "--query-gpu=timestamp,index,uuid,utilization.gpu,utilization.memory,power.draw,clocks.gr,clocks.mem,temperature.gpu,memory.used", "--format=csv,noheader,nounits", "-lms", "1000"], os.environ.copy(), root / "gpu.csv"))
+            # Use the same read-only, once-per-second collector for each A/B
+            # sample. Its board totals include the producer and other apps.
+            telemetry_command, telemetry_file, _ = telemetry_config(args.device)
+            telemetry = stack.enter_context(gpu.bench.child(telemetry_command, os.environ.copy(), root / telemetry_file))
             door.query("frame-stats")
             before = snapshot(pid)
             start_ns = before["monotonic_ns"]
@@ -478,8 +518,8 @@ def measure(args, label, binary, case, policy, root):
                 else:
                     time.sleep(min(0.05, max(0, end_at - time.monotonic())))
             after = snapshot(pid)
-            if telemetry.poll() is not None or not (root / "gpu.csv").stat().st_size:
-                raise ValueError("GPU telemetry failed; inspect gpu.csv")
+            if telemetry.poll() is not None or not (root / telemetry_file).stat().st_size:
+                raise ValueError(f"GPU telemetry failed; inspect {telemetry_file}")
             gpu.bench.stop(telemetry)
             frames = gpu.frame_stats(door.query("frame-stats"))
             after_report = gpu.diagnostics(runtime)
@@ -551,6 +591,7 @@ def main():
     p.add_argument("--log-filter", default="info")
     p.add_argument("--require-scanout", choices=("primary", "overlay", "cursor"))
     p.add_argument("--stress", action="store_true", help="test transitions, Spaces, captures, DPMS, VT switches and modesets after sampling")
+    p.add_argument("--skip-modesets", metavar="REASON", help="explicitly record an untested modeset path during stress")
     p.add_argument("--frame-marker", action="store_true", help="opt-in changing GPU pixels to reject stale captures during --stress")
     p.add_argument("--capture-every", type=float, default=0)
     p.add_argument("--output", type=Path, required=True)
@@ -561,6 +602,8 @@ def main():
         p.error("--stress requires --cases direct")
     if args.frame_marker and not args.stress:
         p.error("--frame-marker requires --stress for freshness verification")
+    if args.skip_modesets is not None and (not args.stress or not args.skip_modesets.strip()):
+        p.error("--skip-modesets requires --stress and a nonempty reason")
     if args.test_vt == args.return_vt or min(args.test_vt, args.return_vt) < 1 or max(args.test_vt, args.return_vt) > 63:
         p.error("test and recovery VTs must be different numbers from 1 to 63")
     if any(not math.isfinite(v) for v in (args.seconds, args.settle_seconds, args.hz, args.capture_every)) or min(args.seconds, args.hz, args.width, args.height, args.runs) <= 0 or min(args.settle_seconds, args.capture_every) < 0:
@@ -571,6 +614,9 @@ def main():
     args.probe = args.probe.resolve(strict=True)
     args.drm_info = args.drm_info.resolve(strict=True)
     args.device = args.device.resolve(strict=True)
+    # Fail before taking the test VT if capture verification is unavailable.
+    importlib.import_module("PIL.Image")
+    importlib.import_module("PIL.ImageStat")
     binaries = []
     for value in args.binary:
         label, separator, path = value.partition("=")
@@ -586,14 +632,14 @@ def main():
     args.output.mkdir(parents=True, exist_ok=False)
     source_dir = args.output / "harness"
     source_dir.mkdir()
-    for name in ("bench-native-gpu.py", "bench-gpu-scaling.py", "bench-compositor.py", "native-drm-info.c"):
+    for name in ("bench-native-gpu.py", "bench-gpu-scaling.py", "bench-compositor.py", "native-drm-info.c", "gpu-sysfs-telemetry.py"):
         shutil.copy2(Path(__file__).with_name(name), source_dir / name)
     metadata = {"date_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()), "backend": "native DRM/KMS",
                 "arguments": {key: str(value) if isinstance(value, Path) else value for key, value in vars(args).items()},
                 "binaries": {label: gpu.bench.binary_metadata(binary) for label, binary in binaries},
                 "probe_sha256": hashlib.sha256(args.probe.read_bytes()).hexdigest(), "harness_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
-                "kernel": checked(["uname", "-a"]).strip(), "gpus": gpu.load_report(),
-                "driver": checked(["nvidia-smi", "--query-gpu=index,pci.bus_id,name,driver_version", "--format=csv,noheader"]).strip(),
+                "kernel": checked(["uname", "-a"]).strip(), "load_average": os.getloadavg(),
+                "driver": telemetry_config(args.device)[2],
                 "limitations": "Synthetic frame-paced opaque EGL producer uses glFinish before handoff. Single physical output. Presentation is hardware completion, not photon/input latency. GPU board telemetry includes other processes. Histogram percentiles are upper bounds."}
     write_json(args.output / "metadata.json", metadata)
     samples = []
