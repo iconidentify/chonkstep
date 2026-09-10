@@ -34,6 +34,9 @@ impl<B: Backend> WindowManager<B> {
             let ids: Vec<_> = self.clients.keys().collect();
             for id in ids { self.publish_space_output(id); }
             self.refresh_space_visibility();
+            self.repair_space_focus();
+            self.bump_protocol_state_revision();
+            self.backend.publish_workspaces(self.workspace_count, self.current_workspace);
         }
 
         if was_mac != self.mac_mode() {
@@ -174,6 +177,11 @@ impl<B: Backend> WindowManager<B> {
         let origin = self.clients[id].workspace;
         if self.separate_spaces() { self.select_output(self.client_output_index(id)); }
         let Some(space) = self.create_workspace() else { return; };
+        // A borrowed desktop's fullscreen child belongs to the same home
+        // display, even though it is temporarily shown on another output.
+        if let Some(state) = self.display_spaces.as_mut().filter(|_| self.interaction.separate_spaces) {
+            state.snapshot.spaces[space].home_display = state.snapshot.spaces[origin].home_display.clone();
+        }
         self.mac_fullscreen.insert(id, (origin, space));
         for member in self.transient_family(id) {
             self.move_one_client_to_workspace(member, space);

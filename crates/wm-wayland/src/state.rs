@@ -2062,6 +2062,8 @@ pub(crate) fn apply_connector_hotplug(
     removed: &[usize],
     added: Vec<OutputSetup>,
 ) {
+    // Retire gesture-owned output geometry before changing any output indices.
+    crate::input::gestures::cancel(comp);
     comp.dmabuf.invalidate();
     comp.surface_outputs.reset_feedback(comp.dmabuf.default_feedback());
     comp.wm.backend_mut().native_frame_stats = crate::session::native_frame_stats(&comp.graphics);

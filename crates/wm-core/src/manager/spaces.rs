@@ -62,13 +62,47 @@ impl DisplaySpacesSnapshot {
                     && keys.contains(s.home_display.as_str())
                     && keys.contains(s.output_display.as_str())
             })
-            && self.displays.iter().all(|d| d.active == 0 || ids.contains(&d.active))
+            && self
+                .displays
+                .iter()
+                .all(|d| d.active == 0 || ids.contains(&d.active))
+    }
+}
+
+/// Geometry retained while a disconnected display lends its Spaces elsewhere.
+/// The normal rectangle is independent of current maximize/fullscreen flags;
+/// temporary rescue placement must not overwrite the home restore point.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SpaceHomeGeometry {
+    pub display: String,
+    pub bounds: Rect,
+    pub normal: Rect,
+    pub freeform: Option<Rect>,
+}
+
+impl SpaceHomeGeometry {
+    pub fn valid(&self) -> bool {
+        let rect = |r: Rect| {
+            r.size.w > 0
+                && r.size.w <= 65536
+                && r.size.h > 0
+                && r.size.h <= 65536
+                && r.pos.x.unsigned_abs() <= 1_000_000
+                && r.pos.y.unsigned_abs() <= 1_000_000
+        };
+        !self.display.is_empty()
+            && self.display.len() <= 1024
+            && !self.display.chars().any(char::is_control)
+            && rect(self.bounds)
+            && rect(self.normal)
+            && self.freeform.is_none_or(rect)
     }
 }
 
 pub(super) struct DisplaySpaces {
     pub snapshot: DisplaySpacesSnapshot,
     pub reconciling: bool,
+    pub home_geometry: HashMap<ClientId, SpaceHomeGeometry>,
 }
 
 impl<B: Backend> WindowManager<B> {
@@ -84,18 +118,144 @@ impl<B: Backend> WindowManager<B> {
     /// Restore only before clients map. Reject corrupt topology as a whole,
     /// keeping the working live model and bounded allocation/ID arithmetic.
     pub fn restore_display_spaces(&mut self, snapshot: DisplaySpacesSnapshot) -> bool {
-        if !self.mac_mode() || !self.interaction.separate_spaces || !self.clients.is_empty() || !snapshot.valid() {
+        if !self.mac_mode()
+            || !self.interaction.separate_spaces
+            || !self.clients.is_empty()
+            || !snapshot.valid()
+        {
             return false;
         }
         self.workspace_count = snapshot.spaces.len();
-        self.layouts
-            .resize_with(self.workspace_count, crate::spatial::WorkspaceLayout::default);
+        self.layouts.resize_with(
+            self.workspace_count,
+            crate::spatial::WorkspaceLayout::default,
+        );
         self.display_spaces = Some(DisplaySpaces {
             snapshot,
             reconciling: false,
+            home_geometry: HashMap::new(),
         });
         self.reconcile_display_spaces();
         true
+    }
+
+    pub fn space_home_geometry(&self, id: ClientId) -> Option<&SpaceHomeGeometry> {
+        let state = self
+            .display_spaces
+            .as_ref()
+            .filter(|_| self.separate_spaces())?;
+        let saved = state.home_geometry.get(&id)?;
+        let space = state.snapshot.spaces.get(self.clients.get(id)?.workspace)?;
+        (space.home_display == saved.display).then_some(saved)
+    }
+
+    /// Restore opt-in session metadata only for a window's own home display.
+    /// If it has already reconnected, consume the saved geometry immediately.
+    pub fn restore_space_home_geometry(&mut self, id: ClientId, saved: SpaceHomeGeometry) -> bool {
+        if !saved.valid() || !self.separate_spaces() {
+            return false;
+        }
+        let Some(client) = self.clients.get(id) else {
+            return false;
+        };
+        let state = self.display_spaces.as_mut().unwrap();
+        if state
+            .snapshot
+            .spaces
+            .get(client.workspace)
+            .is_none_or(|s| s.home_display != saved.display)
+        {
+            return false;
+        }
+        let connected = state
+            .snapshot
+            .displays
+            .iter()
+            .find(|d| d.connected && d.key == saved.display)
+            .map(|d| d.geometry);
+        if let Some(target) = connected {
+            let reconciling = state.reconciling;
+            state.reconciling = true;
+            self.apply_home_geometry(id, saved, target);
+            self.display_spaces.as_mut().unwrap().reconciling = reconciling;
+            self.reflow_client_workspace(id);
+        } else {
+            state.home_geometry.insert(id, saved);
+        }
+        self.bump_protocol_state_revision();
+        true
+    }
+
+    fn remember_home_geometry(&mut self, id: ClientId, display: String, bounds: Rect) {
+        let client = &self.clients[id];
+        let saved = SpaceHomeGeometry {
+            display,
+            bounds,
+            normal: client
+                .restore_geometry
+                .or(self.fullscreen_restore.get(&id).copied())
+                .unwrap_or(client.geometry),
+            freeform: client.placement.freeform,
+        };
+        self.display_spaces
+            .as_mut()
+            .unwrap()
+            .home_geometry
+            .entry(id)
+            .or_insert(saved);
+    }
+
+    fn apply_home_geometry(&mut self, id: ClientId, saved: SpaceHomeGeometry, target: Rect) {
+        let translate = |mut rect: Rect| {
+            rect.pos.x = rect
+                .pos
+                .x
+                .saturating_sub(saved.bounds.pos.x)
+                .saturating_add(target.pos.x);
+            rect.pos.y = rect
+                .pos
+                .y
+                .saturating_sub(saved.bounds.pos.y)
+                .saturating_add(target.pos.y);
+            if saved.bounds.size != target.size {
+                rect.pos.x = rect.pos.x.clamp(
+                    target.pos.x,
+                    target
+                        .pos
+                        .x
+                        .saturating_add(target.size.w.saturating_sub(rect.size.w) as i32),
+                );
+                rect.pos.y = rect.pos.y.clamp(
+                    target.pos.y,
+                    target
+                        .pos
+                        .y
+                        .saturating_add(target.size.h.saturating_sub(rect.size.h) as i32),
+                );
+            }
+            rect
+        };
+        let normal = translate(saved.normal);
+        let client = &mut self.clients[id];
+        let mut maximize = MaximizeDirections::empty();
+        maximize.set(
+            MaximizeDirections::HORIZONTAL,
+            client.flags.contains(ClientFlags::MAXIMIZED_H),
+        );
+        maximize.set(
+            MaximizeDirections::VERTICAL,
+            client.flags.contains(ClientFlags::MAXIMIZED_V),
+        );
+        client.geometry = normal;
+        client.placement.freeform = saved.freeform.map(translate);
+        client.restore_geometry = (!maximize.is_empty()).then_some(normal);
+        if client.flags.contains(ClientFlags::FULLSCREEN) {
+            self.fullscreen_restore.insert(id, normal);
+        }
+        self.reflow_frame(id);
+        if !maximize.is_empty() {
+            self.fit_maximized(id, maximize);
+        }
     }
 
     pub fn mac_fullscreen_origin(&self, id: ClientId) -> Option<usize> {
@@ -158,8 +318,13 @@ impl<B: Backend> WindowManager<B> {
     pub fn workspace_output_index(&self, workspace: usize) -> Option<usize> {
         let snapshot = self.display_spaces_snapshot()?;
         let owner = &snapshot.spaces.get(workspace)?.output_display;
-        let display = snapshot.displays.iter().find(|d| d.connected && &d.key == owner)?;
-        self.monitors_ref().iter().position(|m| m.name == display.name)
+        let display = snapshot
+            .displays
+            .iter()
+            .find(|d| d.connected && &d.key == owner)?;
+        self.monitors_ref()
+            .iter()
+            .position(|m| m.name == display.name)
     }
 
     pub fn workspace_id(&self, workspace: usize) -> String {
@@ -172,12 +337,13 @@ impl<B: Backend> WindowManager<B> {
     }
 
     pub fn active_output_index(&self) -> usize {
-        self.workspace_output_index(self.current_workspace).unwrap_or_else(|| {
-            self.focused
-                .map(|id| self.client_output_index(id))
-                .or_else(|| self.last_pointer.map(|point| self.monitor_index_at(point)))
-                .unwrap_or_else(|| self.primary_monitor_index())
-        })
+        self.workspace_output_index(self.current_workspace)
+            .unwrap_or_else(|| {
+                self.focused
+                    .map(|id| self.client_output_index(id))
+                    .or_else(|| self.last_pointer.map(|point| self.monitor_index_at(point)))
+                    .unwrap_or_else(|| self.primary_monitor_index())
+            })
     }
 
     pub fn active_workspace_on_output(&self, index: usize) -> usize {
@@ -205,10 +371,11 @@ impl<B: Backend> WindowManager<B> {
             return workspace == self.current_workspace;
         };
         snapshot.spaces.get(workspace).is_some_and(|space| {
-            snapshot
-                .displays
-                .iter()
-                .any(|display| display.connected && display.key == space.output_display && display.active == space.id)
+            snapshot.displays.iter().any(|display| {
+                display.connected
+                    && display.key == space.output_display
+                    && display.active == space.id
+            })
         })
     }
 
@@ -280,7 +447,12 @@ impl<B: Backend> WindowManager<B> {
             .iter()
             .find(|d| d.connected && &d.key == owner)
             .map(|d| d.active);
-        let Some(current) = state.snapshot.spaces.iter().position(|s| Some(s.id) == active) else {
+        let Some(current) = state
+            .snapshot
+            .spaces
+            .iter()
+            .position(|s| Some(s.id) == active)
+        else {
             return;
         };
         if &state.snapshot.selected == owner && self.current_workspace == current {
@@ -289,7 +461,8 @@ impl<B: Backend> WindowManager<B> {
         state.snapshot.selected = owner.clone();
         self.current_workspace = current;
         self.bump_protocol_state_revision();
-        self.backend.publish_workspaces(self.workspace_count, current);
+        self.backend
+            .publish_workspaces(self.workspace_count, current);
     }
 
     fn append_display_space(&mut self, key: &str) -> Option<usize> {
@@ -306,8 +479,10 @@ impl<B: Backend> WindowManager<B> {
             output_display: key.into(),
         });
         self.workspace_count += 1;
-        self.layouts
-            .resize_with(self.workspace_count, crate::spatial::WorkspaceLayout::default);
+        self.layouts.resize_with(
+            self.workspace_count,
+            crate::spatial::WorkspaceLayout::default,
+        );
         Some(index)
     }
 
@@ -321,8 +496,10 @@ impl<B: Backend> WindowManager<B> {
         } else {
             let space = self.workspace_count;
             self.workspace_count += 1;
-            self.layouts
-                .resize_with(self.workspace_count, crate::spatial::WorkspaceLayout::default);
+            self.layouts.resize_with(
+                self.workspace_count,
+                crate::spatial::WorkspaceLayout::default,
+            );
             space
         };
         self.bump_protocol_state_revision();
@@ -337,7 +514,9 @@ impl<B: Backend> WindowManager<B> {
         }
         let state = self.display_spaces.as_mut().unwrap();
         let additional = count.saturating_sub(state.snapshot.spaces.len()) as u64;
-        if state.snapshot.next_id.checked_add(additional).is_none() { return false; }
+        if state.snapshot.next_id.checked_add(additional).is_none() {
+            return false;
+        }
         while state.snapshot.spaces.len() < count {
             state.snapshot.next_id += 1;
             state.snapshot.spaces.push(Space {
@@ -374,10 +553,13 @@ impl<B: Backend> WindowManager<B> {
             .collect();
         let primary = self.primary_monitor_index().min(monitors.len() - 1);
         let initializing = self.display_spaces.is_none();
+        let linked_current = self.current_workspace;
+        let selected_output = self.active_output_index().min(monitors.len() - 1);
         if initializing {
             let key = keys[primary].clone();
             self.display_spaces = Some(DisplaySpaces {
                 reconciling: true,
+                home_geometry: HashMap::new(),
                 snapshot: DisplaySpacesSnapshot {
                     spaces: (0..self.workspace_count)
                         .map(|i| Space {
@@ -395,7 +577,12 @@ impl<B: Backend> WindowManager<B> {
         let state = self.display_spaces.as_mut().unwrap();
         state.reconciling = true;
         let old_displays = state.snapshot.displays.clone();
-        let previous_owner: Vec<_> = state.snapshot.spaces.iter().map(|s| s.output_display.clone()).collect();
+        let previous_owner: Vec<_> = state
+            .snapshot
+            .spaces
+            .iter()
+            .map(|s| s.output_display.clone())
+            .collect();
         for display in &mut state.snapshot.displays {
             display.connected = false;
         }
@@ -409,7 +596,11 @@ impl<B: Backend> WindowManager<B> {
                     key: key.clone(),
                     name: monitor.name.clone(),
                     geometry: monitor.geometry,
-                    active: 0,
+                    active: if initializing && key == &keys[primary] {
+                        linked_current as u64 + 1
+                    } else {
+                        0
+                    },
                     connected: true,
                 });
             }
@@ -431,7 +622,8 @@ impl<B: Backend> WindowManager<B> {
                 .iter()
                 .enumerate()
                 .any(|(index, s)| {
-                    &s.output_display == key && !self.mac_fullscreen.values().any(|(_, full)| *full == index)
+                    &s.output_display == key
+                        && !self.mac_fullscreen.values().any(|(_, full)| *full == index)
                 });
             if !has_regular && self.append_display_space(key).is_none() {
                 // At the global safety cap, move an existing desktop instead of
@@ -450,7 +642,10 @@ impl<B: Backend> WindowManager<B> {
                                 .enumerate()
                                 .filter(|(other, s)| {
                                     s.output_display == space.output_display
-                                        && !self.mac_fullscreen.values().any(|(_, full)| full == other)
+                                        && !self
+                                            .mac_fullscreen
+                                            .values()
+                                            .any(|(_, full)| full == other)
                                 })
                                 .count()
                                 > 1
@@ -500,13 +695,33 @@ impl<B: Backend> WindowManager<B> {
             .unwrap_or(0);
 
         if initializing {
-            // Split a running linked desktop without merging windows from
-            // distinct old desktops. Empty matching slots are created lazily.
+            // Reserve each secondary display's active desktop for the old active
+            // desktop, even if a hidden window is encountered first. This also
+            // preserves empty active Spaces and separates hidden desktop rows.
             let mut assignments = HashMap::new();
+            for output in 0..monitors.len() {
+                if output != primary {
+                    assignments.insert(
+                        (output, linked_current),
+                        self.active_workspace_on_output(output),
+                    );
+                }
+            }
             let clients: Vec<_> = self.clients.keys().collect();
             for id in clients {
-                let output =
-                    self.monitor_index_at(self.client_frame_center(id).unwrap_or(self.clients[id].geometry.pos));
+                let mut root = id;
+                for _ in 0..8 {
+                    match self.clients.get(root).and_then(|c| c.parent) {
+                        Some(parent) if parent != id && self.clients.contains_key(parent) => {
+                            root = parent
+                        }
+                        _ => break,
+                    }
+                }
+                let output = self.monitor_index_at(
+                    self.client_frame_center(root)
+                        .unwrap_or(self.clients[root].geometry.pos),
+                );
                 if output == primary {
                     continue;
                 }
@@ -514,17 +729,17 @@ impl<B: Backend> WindowManager<B> {
                 let target = if let Some(&target) = assignments.get(&(output, old)) {
                     target
                 } else {
-                    let current = self.active_workspace_on_output(output);
-                    let target = if assignments.keys().any(|(monitor, _)| *monitor == output) {
-                        self.append_display_space(&keys[output]).unwrap_or(current)
-                    } else {
-                        current
+                    // At capacity, leave a hidden client in its original Space
+                    // rather than merge it into a different visible desktop.
+                    let Some(target) = self.append_display_space(&keys[output]) else {
+                        continue;
                     };
                     assignments.insert((output, old), target);
                     target
                 };
                 self.assign_space_membership(id, target);
             }
+            self.select_output(selected_output);
         }
         let clients: Vec<_> = self.clients.keys().collect();
         for id in clients {
@@ -537,7 +752,28 @@ impl<B: Backend> WindowManager<B> {
                 .get(workspace)
                 .and_then(|key| old_displays.iter().find(|d| &d.key == key))
                 .map(|d| d.geometry);
-            if let Some(old) = old.filter(|old| *old != target) {
+            let home = self.display_spaces.as_ref().unwrap().snapshot.spaces[workspace]
+                .home_display
+                .clone();
+            let returning = keys[output] == home;
+            if !returning && previous_owner.get(workspace) == Some(&home) {
+                if let Some(bounds) = old {
+                    self.remember_home_geometry(id, home.clone(), bounds);
+                }
+            }
+            let saved = if returning {
+                self.display_spaces
+                    .as_mut()
+                    .unwrap()
+                    .home_geometry
+                    .remove(&id)
+                    .filter(|saved| saved.display == home)
+            } else {
+                None
+            };
+            if let Some(saved) = saved {
+                self.apply_home_geometry(id, saved, target);
+            } else if let Some(old) = old.filter(|old| *old != target) {
                 self.translate_client_between_displays(id, old, target);
             }
             self.publish_space_output(id);
@@ -575,15 +811,27 @@ impl<B: Backend> WindowManager<B> {
 
     fn translate_client_between_displays(&mut self, id: ClientId, from: Rect, to: Rect) {
         let translate = |rect: &mut Rect| {
-            rect.pos.x = rect.pos.x.saturating_sub(from.pos.x).saturating_add(to.pos.x);
-            rect.pos.y = rect.pos.y.saturating_sub(from.pos.y).saturating_add(to.pos.y);
+            rect.pos.x = rect
+                .pos
+                .x
+                .saturating_sub(from.pos.x)
+                .saturating_add(to.pos.x);
+            rect.pos.y = rect
+                .pos
+                .y
+                .saturating_sub(from.pos.y)
+                .saturating_add(to.pos.y);
             rect.pos.x = rect.pos.x.clamp(
                 to.pos.x,
-                to.pos.x.saturating_add(to.size.w.saturating_sub(rect.size.w) as i32),
+                to.pos
+                    .x
+                    .saturating_add(to.size.w.saturating_sub(rect.size.w) as i32),
             );
             rect.pos.y = rect.pos.y.clamp(
                 to.pos.y,
-                to.pos.y.saturating_add(to.size.h.saturating_sub(rect.size.h) as i32),
+                to.pos
+                    .y
+                    .saturating_add(to.size.h.saturating_sub(rect.size.h) as i32),
             );
         };
         if let Some(client) = self.clients.get_mut(id) {
@@ -608,7 +856,19 @@ impl<B: Backend> WindowManager<B> {
             .workspace_output_index(client.workspace)
             .and_then(|i| self.monitors_ref().get(i))
             .map(|m| m.name.clone());
-        self.backend.set_window_space_output(client.window, name.as_deref());
+        self.backend
+            .set_window_space_output(client.window, name.as_deref());
+        if let Some(state) = self.display_spaces.as_mut() {
+            if state.home_geometry.get(&id).is_some_and(|saved| {
+                state
+                    .snapshot
+                    .spaces
+                    .get(client.workspace)
+                    .is_none_or(|space| space.home_display != saved.display)
+            }) {
+                state.home_geometry.remove(&id);
+            }
+        }
     }
 
     fn assign_space_membership(&mut self, id: ClientId, workspace: usize) {
@@ -617,13 +877,16 @@ impl<B: Backend> WindowManager<B> {
             return;
         }
         self.clients[id].workspace = workspace;
-        self.backend.publish_window_desktop(self.clients[id].window, workspace);
+        self.backend
+            .publish_window_desktop(self.clients[id].window, workspace);
         if let Some(layout) = self.layouts.get_mut(old) {
             layout.order.retain(|&other| other != id);
         }
         self.register_layout_client(id);
         self.publish_space_output(id);
-        if self.workspace_layout(workspace) == crate::LayoutMode::Freeform { self.restore_freeform_view(id); }
+        if self.workspace_layout(workspace) == crate::LayoutMode::Freeform {
+            self.restore_freeform_view(id);
+        }
         self.bump_protocol_state_revision();
     }
 
@@ -635,11 +898,13 @@ impl<B: Backend> WindowManager<B> {
             return;
         };
         if client.flags.contains(ClientFlags::FULLSCREEN)
-            || (self.workspace_layout(client.workspace) != crate::LayoutMode::Freeform && !client.placement.floating)
+            || (self.workspace_layout(client.workspace) != crate::LayoutMode::Freeform
+                && !client.placement.floating)
         {
             return;
         }
-        let output = self.monitor_index_at(self.client_frame_center(id).unwrap_or(client.geometry.pos));
+        let output =
+            self.monitor_index_at(self.client_frame_center(id).unwrap_or(client.geometry.pos));
         if self.workspace_output_index(client.workspace) == Some(output) {
             return;
         }
@@ -657,10 +922,32 @@ impl<B: Backend> WindowManager<B> {
                 _ => break,
             }
         }
-        let target = self.regular_workspace_on_output(output);
         let family = self.transient_family(root);
-        let old_workspaces: HashSet<_> = family.iter().map(|&member| self.clients[member].workspace).collect();
-        let owns_focus = self.focused.is_some_and(|focused| family.contains(&focused));
+        // Retiring a fullscreen Space normally cancels an interactive drag.
+        // This migration is part of the same freeform drag: keep its grab and
+        // pointer offset alive across Space compaction so motion can continue.
+        let drag = self.interactive_drag_client()
+            .filter(|active| family.contains(active) && !self.is_layout_managed(*active))
+            .map(|_| (self.active_move.take(), self.active_resize.take(), self.drag_grab.take()));
+        let previous_focus = self.focused;
+        // A dialog can be the dragged member of a fullscreen family. Retire
+        // every fullscreen owner before resolving target slots (which compact
+        // on exit), and defer geometry-driven membership changes until done.
+        let reconciling = self.display_spaces.as_ref().unwrap().reconciling;
+        self.display_spaces.as_mut().unwrap().reconciling = true;
+        for &member in &family {
+            if self.clients[member].flags.contains(ClientFlags::FULLSCREEN) {
+                self.unfullscreen(member);
+            }
+        }
+        let target = self.regular_workspace_on_output(output);
+        let old_workspaces: HashSet<_> = family
+            .iter()
+            .map(|&member| self.clients[member].workspace)
+            .collect();
+        let owns_focus = self
+            .focused
+            .is_some_and(|focused| family.contains(&focused));
         for &member in &family {
             if member != id {
                 self.translate_space_move(member, target);
@@ -672,7 +959,11 @@ impl<B: Backend> WindowManager<B> {
         if !self.workspace_visible(target) {
             self.switch_workspace(target);
         }
-        for old in old_workspaces { if old != target { self.reflow_workspace(old); } }
+        for old in old_workspaces {
+            if old != target {
+                self.reflow_workspace(old);
+            }
+        }
         self.reflow_workspace(target);
         for member in family {
             if member != id {
@@ -682,9 +973,18 @@ impl<B: Backend> WindowManager<B> {
         if owns_focus {
             self.select_output(output);
         }
+        self.display_spaces.as_mut().unwrap().reconciling = reconciling;
+        if let Some((moving, resizing, grab)) = drag {
+            self.active_move = moving;
+            self.active_resize = resizing;
+            self.drag_grab = grab;
+            if let Some(focused) = previous_focus.filter(|&id| self.is_focusable(id)) {
+                self.focus_client(focused);
+            }
+        }
     }
 
-    fn repair_space_focus(&mut self) {
+    pub(super) fn repair_space_focus(&mut self) {
         if self.focused.is_none_or(|id| self.is_focusable(id)) {
             return;
         }
@@ -700,7 +1000,9 @@ impl<B: Backend> WindowManager<B> {
             .rev()
             .copied()
             .chain(self.clients.keys())
-            .find(|&id| self.clients[id].workspace == self.current_workspace && self.is_focusable(id));
+            .find(|&id| {
+                self.clients[id].workspace == self.current_workspace && self.is_focusable(id)
+            });
         if let Some(next) = next {
             self.focus_client(next);
         } else {
@@ -723,8 +1025,9 @@ impl<B: Backend> WindowManager<B> {
             if client.lifecycle != Lifecycle::Normal {
                 continue;
             }
-            if !self.mac_client_hidden(id)
-                && (self.workspace_visible(client.workspace) || client.flags.contains(ClientFlags::STICKY))
+            if !self.monitors_ref().is_empty() && !self.mac_client_hidden(id)
+                && (self.workspace_visible(client.workspace)
+                    || client.flags.contains(ClientFlags::STICKY))
             {
                 self.show_client_surface(id);
                 self.repaint_decoration(id);
@@ -735,10 +1038,14 @@ impl<B: Backend> WindowManager<B> {
     }
 
     pub(super) fn switch_display_workspace(&mut self, workspace: usize) {
-        if !self.ensure_display_space_slots(workspace + 1) { return; }
+        if !self.ensure_display_space_slots(workspace + 1) {
+            return;
+        }
         self.workspace_count = self.workspace_count.max(workspace + 1);
-        self.layouts
-            .resize_with(self.workspace_count, crate::spatial::WorkspaceLayout::default);
+        self.layouts.resize_with(
+            self.workspace_count,
+            crate::spatial::WorkspaceLayout::default,
+        );
         let state = self.display_spaces.as_mut().unwrap();
         let space = &state.snapshot.spaces[workspace];
         let Some(display) = state
@@ -778,7 +1085,12 @@ impl<B: Backend> WindowManager<B> {
     }
 
     pub(super) fn remove_display_workspace(&mut self, workspace: usize) -> bool {
-        if workspace >= self.workspace_count || self.mac_fullscreen.values().any(|(_, full)| *full == workspace) {
+        if workspace >= self.workspace_count
+            || self
+                .mac_fullscreen
+                .values()
+                .any(|(_, full)| *full == workspace)
+        {
             return false;
         }
         let Some(output) = self.workspace_output_index(workspace) else {
@@ -818,7 +1130,8 @@ impl<B: Backend> WindowManager<B> {
             let old = client.workspace;
             client.workspace = remap(old);
             if old != client.workspace {
-                self.backend.publish_window_desktop(client.window, client.workspace);
+                self.backend
+                    .publish_window_desktop(client.window, client.workspace);
             }
         }
         self.workspace_count -= 1;

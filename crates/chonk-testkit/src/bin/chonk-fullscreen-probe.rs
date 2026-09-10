@@ -79,6 +79,8 @@ use std::time::Duration;
 
 #[path = "chonk-fullscreen-probe/popup.rs"]
 mod popup;
+#[path = "chonk-fullscreen-probe/dialog.rs"]
+mod dialog;
 #[path = "chonk-fullscreen-probe/gpu.rs"]
 mod gpu;
 
@@ -167,6 +169,7 @@ struct Probe {
     surface: Option<WlSurface>,
     xdg_surface: Option<XdgSurface>,
     popup: Option<popup::Popup>,
+    dialog: Option<dialog::Dialog>,
     large_minimum: bool,
     toplevel: Option<XdgToplevel>,
     /// The size the compositor's latest configure asked for, or
@@ -427,6 +430,7 @@ impl Dispatch<wl_keyboard::WlKeyboard, ()> for Probe {
             match key {
                 KEY_F => probe.control(Want::Fullscreen, qh),
                 KEY_M => probe.control(Want::Maximized, qh),
+                32 => dialog::toggle(probe, qh), // D: a native transient toplevel.
                 25 => popup::toggle(probe, qh), // P: a native application menu.
                 49 => {
                     probe.large_minimum = !probe.large_minimum;

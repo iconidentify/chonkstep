@@ -13,7 +13,10 @@ separate_spaces = true  # default in Mac mode
 
 Set `separate_spaces = false` to use the previous linked-display desktop policy.
 Configuration reload preserves windows; changing the policy first exits dedicated
-fullscreen Spaces so their return desktops remain meaningful.
+fullscreen Spaces so their return desktops remain meaningful. Enabling separate
+Spaces keeps the active linked desktop visible on each display. Linking displays
+repairs keyboard focus before accepting further input if the previously focused
+window is parked.
 
 ## Display and window policy
 
@@ -32,6 +35,8 @@ fullscreen Spaces so their return desktops remain meaningful.
   its parent. Moving a window's center across the display boundary joins the
   destination display's active regular desktop and carries its dialog family.
   Moving into a fullscreen display reveals that display's regular desktop.
+  Dragging a fullscreen application's dialog exits the parent's fullscreen Space,
+  moves the whole family, and continues the drag on the destination display.
 - Client content, popups and decorations are clipped to their owning output.
   Input uses the same boundary. Unmanaged X11 menus inherit the managed parent's
   display. A window straddling an edge cannot paint or take clicks in the adjacent
@@ -41,6 +46,8 @@ fullscreen Spaces so their return desktops remain meaningful.
   the original desktop and geometry, removes an empty fullscreen Space, and
   preserves the other displays' active Spaces. Fullscreen suppresses its display's
   desktop furniture even when keyboard focus is elsewhere.
+- Clicking a pinned window keeps the current Space selected; its original Space
+  remains its membership, not an instruction to navigate away.
 - Deleting an ordinary Space moves its windows to a neighboring ordinary Space
   on the same display. Each display retains an ordinary desktop. A live fullscreen
   Space must be exited before it can be deleted.
@@ -67,7 +74,15 @@ reachable through its local navigation. Windows move into usable coordinates and
 focus is repaired if its previous window became hidden. Reconnecting returns the
 borrowed Spaces and windows to their home display and restores its remembered
 active Space. Interactive drags end at topology changes. With no connected outputs,
-windows are parked while their Spaces and geometry remain available for reconnect.
+windows (including pinned windows) are parked while their Spaces and geometry
+remain available for reconnect. Active swipes are cancelled and new desktop swipes
+are ignored until an output returns.
+
+Temporary placement on a smaller surviving display does not overwrite the home
+position, normal restore size, or freeform restore rectangle. These return when
+the home display reconnects, including after a restart while it was disconnected.
+Explicitly moving a window into a Space belonging to another home display adopts
+that display and discards the old return point.
 
 The existing 99-Space safety limit remains global. At capacity, adding an output
 reassigns an existing ordinary desktop, preferring an empty one, rather than
@@ -76,7 +91,9 @@ leaving the new display without a Space.
 Opt-in `restore_session = true` now restores stable IDs, empty Space rows,
 per-display active selections, window membership, and dedicated fullscreen return
 Spaces. The existing atomic session file gains an `@spaces` record and optional
-fullscreen metadata on window records. Legacy window/layout records remain
+fullscreen and retained home-geometry metadata on window records. A window saved
+while maximized and fullscreen retains its original normal rectangle, so leaving
+both states after restore recovers its original size. Legacy window/layout records remain
 readable; malformed topology metadata is rejected without discarding otherwise
 valid window records. Geometry uses monitor-relative coordinates, including a
 connector-name fallback for virtual displays.
@@ -113,11 +130,14 @@ scripts/e2e.sh --headless --host-renderer gl --release --test mac_spaces
 cargo test --locked -p wm-core -p wm-config -p chonk-shell -p wm-wayland --lib
 ```
 
-The nine workflows cover independent Control-arrow navigation and Command-Tab,
+The sixteen workflows cover independent Control-arrow navigation and Command-Tab,
 dual fullscreen with exact geometry restore and visible-Space furniture rules, live swipes with local boundary resistance, clipping plus input exclusion and
 surface output membership, native workspace groups, hotplug recovery, second-display
 Overview and grab cleanup, and persisted fullscreen/empty Spaces across reconnect.
-Core tests additionally cover dialog families, output reordering, duplicate EDIDs,
+The regression cases also exercise policy reload focus, active-desktop preservation,
+pinned-window clicks, fullscreen-dialog dragging, complete disconnect with swipes,
+unequal display sizes, and maximized/fullscreen save-and-restart both online and
+while the home display is absent. Core tests additionally cover dialog families, output reordering, duplicate EDIDs,
 all outputs disconnected, capacity limits, malformed restore data, and linked mode.
 
 See [validation results](mac-mode-validation.md) for the completed regression run.

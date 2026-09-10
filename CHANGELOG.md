@@ -5,6 +5,13 @@ crate and both session binaries carry the same number.
 
 ## [Unreleased]
 
+- Fix all seven findings from the per-display Spaces review: no-output gestures,
+  hidden-client keyboard focus on policy reload, fullscreen dialog-family moves,
+  home geometry after borrowing a smaller display, active desktops when enabling
+  separate Spaces, maximized/fullscreen session restore, and pinned-window focus.
+  Full disconnect now preserves parked window sizes, and dialog drags continue
+  after retiring their parent's fullscreen Space.
+
 - Mac mode now provides independent per-display Spaces, local keyboard/swipe
   navigation and Overview, simultaneous fullscreen, display boundary clipping,
   dialog-family moves, and preserved membership through hotplug and session

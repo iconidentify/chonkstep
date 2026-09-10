@@ -18,7 +18,10 @@ fn request(s: &Session, command: &str) -> String {
     stream.set_read_timeout(Some(WAIT)).unwrap();
     stream.write_all(command.as_bytes()).unwrap();
     let mut response = String::new();
-    stream.take(1024 * 1024).read_to_string(&mut response).unwrap();
+    stream
+        .take(1024 * 1024)
+        .read_to_string(&mut response)
+        .unwrap();
     response
 }
 fn json(s: &Session, name: &str) -> Value {
@@ -42,7 +45,8 @@ fn boot(name: &str) -> Session {
     let mut s = Session::boot(
         name,
         SessionOptions {
-            config_extra: "interaction_mode = 'mac'\nshow_dock = false\nhyprland_config = false\n".into(),
+            config_extra: "interaction_mode = 'mac'\nshow_dock = false\nhyprland_config = false\n"
+                .into(),
             ..Default::default()
         },
     )
@@ -77,7 +81,9 @@ fn pixel(s: &mut Session, title: &str, label: &str) -> [u8; 4] {
 }
 fn focus(s: &mut Session, title: &str) {
     let w = s.world().unwrap().window_matching(title).unwrap().clone();
-    s.door().click((w.x + 50) as f64, (w.y + 50) as f64).unwrap();
+    s.door()
+        .click((w.x + 50) as f64, (w.y + 50) as f64)
+        .unwrap();
     s.door().barrier().unwrap();
 }
 #[test]
@@ -87,7 +93,10 @@ fn control_arrows_switch_only_the_pointed_display_and_keep_other_pixels() {
     probe(&mut s, "Spaces Left", 0);
     probe(&mut s, "Spaces Right", 1);
     assert_eq!(heads(&s), (1, 2));
-    assert_eq!(pixel(&mut s, "Spaces Right", "right-before"), [32, 64, 128, 255]);
+    assert_eq!(
+        pixel(&mut s, "Spaces Right", "right-before"),
+        [32, 64, 128, 255]
+    );
     s.door().motion(250.0, 200.0).unwrap();
     s.door().barrier().unwrap();
     dispatch(&mut s, "workspace 3");
@@ -106,7 +115,10 @@ fn control_arrows_switch_only_the_pointed_display_and_keep_other_pixels() {
     );
     chord(&mut s, &[29], 105);
     assert_eq!(heads(&s), (1, 2));
-    assert_eq!(pixel(&mut s, "Spaces Left", "left-restored"), [32, 64, 128, 255]);
+    assert_eq!(
+        pixel(&mut s, "Spaces Left", "left-restored"),
+        [32, 64, 128, 255]
+    );
     chord(&mut s, &[29], 106);
     assert_eq!(heads(&s), (3, 2));
     s.door().motion(950.0, 200.0).unwrap();
@@ -162,15 +174,34 @@ fn unplug_reconnect_preserves_membership_and_rehomes_client_pixels() {
     s.door().virtual_outputs(false).unwrap();
     assert_eq!(json(&s, "monitors").as_array().unwrap().len(), 1);
     dispatch(&mut s, "workspace 2");
-    let borrowed = s.world().unwrap().window_matching("Dock Right").unwrap().clone();
+    let borrowed = s
+        .world()
+        .unwrap()
+        .window_matching("Dock Right")
+        .unwrap()
+        .clone();
     assert!(borrowed.x < right.x);
-    assert_eq!(pixel(&mut s, "Dock Right", "borrowed-right"), [32, 64, 128, 255]);
+    assert_eq!(
+        pixel(&mut s, "Dock Right", "borrowed-right"),
+        [32, 64, 128, 255]
+    );
     s.door().virtual_outputs(true).unwrap();
     assert_eq!(heads(&s), (1, 2));
-    let restored = s.world().unwrap().window_matching("Dock Right").unwrap().clone();
+    let restored = s
+        .world()
+        .unwrap()
+        .window_matching("Dock Right")
+        .unwrap()
+        .clone();
     assert_eq!((restored.x, restored.y), (right.x, right.y));
-    assert_eq!(pixel(&mut s, "Dock Left", "left-after-reconnect"), [32, 64, 128, 255]);
-    assert_eq!(pixel(&mut s, "Dock Right", "right-after-reconnect"), [32, 64, 128, 255]);
+    assert_eq!(
+        pixel(&mut s, "Dock Left", "left-after-reconnect"),
+        [32, 64, 128, 255]
+    );
+    assert_eq!(
+        pixel(&mut s, "Dock Right", "right-after-reconnect"),
+        [32, 64, 128, 255]
+    );
 }
 #[test]
 #[ignore = "scripts/e2e.sh --headless --test mac_spaces"]
@@ -178,12 +209,16 @@ fn native_workspace_clients_receive_two_independent_active_groups() {
     let mut s = boot("mac-spaces-protocol");
     let path = profile_binary("chonk-workspace-probe").unwrap();
     s.launch(path.to_str().unwrap(), &[]).unwrap();
-    poll_until(WAIT, "two independently active native workspace groups", || {
-        let log = s.client_log("chonk-workspace-probe");
-        log.lines()
-            .any(|line| line.contains("groups=2 count=2") && line.contains("active=1,1"))
-            .then_some(())
-    })
+    poll_until(
+        WAIT,
+        "two independently active native workspace groups",
+        || {
+            let log = s.client_log("chonk-workspace-probe");
+            log.lines()
+                .any(|line| line.contains("groups=2 count=2") && line.contains("active=1,1"))
+                .then_some(())
+        },
+    )
     .unwrap_or_else(|e| panic!("{e}: {}", s.client_log("chonk-workspace-probe")));
 }
 
@@ -202,7 +237,12 @@ fn a_crossing_window_is_clipped_until_its_center_moves_to_the_other_display() {
         )
         .unwrap();
     s.door().barrier().unwrap();
-    let w = s.world().unwrap().window_matching("Boundary Left").unwrap().clone();
+    let w = s
+        .world()
+        .unwrap()
+        .window_matching("Boundary Left")
+        .unwrap()
+        .clone();
     let y = w.y + 40;
     assert!(
         w.x < edge && w.x + w.w as i32 > edge + 10,
@@ -214,10 +254,16 @@ fn a_crossing_window_is_clipped_until_its_center_moves_to_the_other_display() {
     assert_eq!(s.door().hit(edge + 10, y).unwrap(), "root");
     let f = s.world().unwrap().frame_of(w.id).unwrap().clone();
     s.door()
-        .drag_to((f.x as f64 + 150.0, f.y as f64 + 10.0), ((edge + 160) as f64, 100.0))
+        .drag_to(
+            (f.x as f64 + 150.0, f.y as f64 + 10.0),
+            ((edge + 160) as f64, 100.0),
+        )
         .unwrap();
     s.door().barrier().unwrap();
-    assert_eq!(pixel(&mut s, "Boundary Left", "joined-right-space"), [32, 64, 128, 255]);
+    assert_eq!(
+        pixel(&mut s, "Boundary Left", "joined-right-space"),
+        [32, 64, 128, 255]
+    );
     let clients = json(&s, "clients");
     let client = clients
         .as_array()
@@ -226,21 +272,25 @@ fn a_crossing_window_is_clipped_until_its_center_moves_to_the_other_display() {
         .find(|c| c["title"] == "Boundary Left")
         .unwrap();
     assert_eq!(client["workspace"]["id"], 2);
-    poll_until(WAIT, "native surface leaves left output and enters right", || {
-        let log = s.client_log("chonk-fullscreen-probe");
-        let output_id = |name: &str| {
-            log.lines().find_map(|line| {
-                let rest = line.split("output id=").nth(1)?;
-                let (id, value) = rest.split_once(" name=")?;
-                (value == name).then_some(id.to_string())
-            })
-        };
-        let left = output_id("chonkstep")?;
-        let right = output_id("chonkstep-right")?;
-        (log.contains(&format!("surface output leave id={left}"))
-            && log.contains(&format!("surface output enter id={right}")))
-        .then_some(())
-    })
+    poll_until(
+        WAIT,
+        "native surface leaves left output and enters right",
+        || {
+            let log = s.client_log("chonk-fullscreen-probe");
+            let output_id = |name: &str| {
+                log.lines().find_map(|line| {
+                    let rest = line.split("output id=").nth(1)?;
+                    let (id, value) = rest.split_once(" name=")?;
+                    (value == name).then_some(id.to_string())
+                })
+            };
+            let left = output_id("chonkstep")?;
+            let right = output_id("chonkstep-right")?;
+            (log.contains(&format!("surface output leave id={left}"))
+                && log.contains(&format!("surface output enter id={right}")))
+            .then_some(())
+        },
+    )
     .unwrap_or_else(|error| panic!("{error}: {}", s.client_log("chonk-fullscreen-probe")));
 }
 
@@ -259,7 +309,11 @@ fn overview_uses_the_selected_display_and_hotplug_releases_its_keyboard_grab() {
     assert_eq!(world.overview_windows[0].id, right.id);
     s.door().motion(100.0, 100.0).unwrap();
     chord(&mut s, &[29], 106);
-    assert_eq!(heads(&s), (1, 3), "Overview navigation stays on its opening display");
+    assert_eq!(
+        heads(&s),
+        (1, 3),
+        "Overview navigation stays on its opening display"
+    );
     assert!(s.world().unwrap().overview_windows.is_empty());
     chord(&mut s, &[29], 105);
     assert_eq!(heads(&s), (1, 2));
@@ -279,7 +333,10 @@ fn overview_uses_the_selected_display_and_hotplug_releases_its_keyboard_grab() {
             clients
                 .as_array()?
                 .iter()
-                .any(|c| c["title"] == "Overview Left" && c["fullscreen"].as_u64().is_some_and(|state| state != 0))
+                .any(|c| {
+                    c["title"] == "Overview Left"
+                        && c["fullscreen"].as_u64().is_some_and(|state| state != 0)
+                })
                 .then_some(())
         },
     )
@@ -311,13 +368,22 @@ fn session_restore_keeps_empty_spaces_and_fullscreen_return_on_a_reconnected_dis
     focus(&mut s, "Restored Right");
     chord(&mut s, &[125, 29], 33);
     assert_eq!(heads(&s), (1, 2));
-    let w = s.world().unwrap().window_matching("Restored Right").unwrap().clone();
+    let w = s
+        .world()
+        .unwrap()
+        .window_matching("Restored Right")
+        .unwrap()
+        .clone();
     assert_eq!((w.x, w.y, w.w, w.h), (670, 90, 400, 300));
     poll_until(WAIT, "stable surviving Space IDs persisted", || {
         let text = std::fs::read_to_string(s.state_file("session")).ok()?;
-        let line = text.lines().find_map(|line| line.strip_prefix("@spaces\t"))?;
+        let line = text
+            .lines()
+            .find_map(|line| line.strip_prefix("@spaces\t"))?;
         let saved: Value = serde_json::from_str(line).ok()?;
-        (saved["spaces"].as_array()?.len() == 2 && saved["spaces"][0][0] == 7 && saved["spaces"][1][0] == 9)
+        (saved["spaces"].as_array()?.len() == 2
+            && saved["spaces"][0][0] == 7
+            && saved["spaces"][1][0] == 9)
             .then_some(())
     })
     .unwrap();
@@ -338,15 +404,27 @@ fn a_live_swipe_moves_only_its_display_and_stops_at_that_rows_boundary() {
     s.door().barrier().unwrap();
     assert!(s.world().unwrap().gesture.is_some());
     assert_eq!(heads(&s), (1, 2), "finger motion does not commit the Space");
-    assert_eq!(pixel(&mut s, "Swipe Right", "right-during-left-swipe"), [32, 64, 128, 255]);
-    assert_ne!(pixel(&mut s, "Swipe Left", "left-moved-before-swipe-commit"), [32, 64, 128, 255]);
+    assert_eq!(
+        pixel(&mut s, "Swipe Right", "right-during-left-swipe"),
+        [32, 64, 128, 255]
+    );
+    assert_ne!(
+        pixel(&mut s, "Swipe Left", "left-moved-before-swipe-commit"),
+        [32, 64, 128, 255]
+    );
     s.door().swipe_end_at(false, 350).unwrap();
-    poll_until(WAIT, "left swipe settles", || s.world().ok()?.gesture.is_none().then_some(())).unwrap();
+    poll_until(WAIT, "left swipe settles", || {
+        s.world().ok()?.gesture.is_none().then_some(())
+    })
+    .unwrap();
     assert_eq!(heads(&s), (3, 2));
     s.door().swipe_begin_at(3, 1000).unwrap();
     s.door().swipe_update_at(-500.0, 0.0, 1200).unwrap();
     s.door().swipe_end_at(false, 1350).unwrap();
-    poll_until(WAIT, "boundary resistance settles", || s.world().ok()?.gesture.is_none().then_some(())).unwrap();
+    poll_until(WAIT, "boundary resistance settles", || {
+        s.world().ok()?.gesture.is_none().then_some(())
+    })
+    .unwrap();
     assert_eq!(heads(&s), (3, 2));
     assert_eq!(s.world().unwrap().workspace_count, 3);
 }
@@ -357,7 +435,12 @@ fn fullscreen_furniture_follows_visible_spaces_instead_of_global_keyboard_focus(
     let mut s = boot("mac-spaces-fullscreen-furniture");
     let bar = profile_binary("chonk-fake-bar").unwrap();
     s.launch(bar.to_str().unwrap(), &["30"]).unwrap();
-    poll_until(WAIT, "top bar maps", || s.client_log("chonk-fake-bar").contains("mapped ").then_some(())).unwrap();
+    poll_until(WAIT, "top bar maps", || {
+        s.client_log("chonk-fake-bar")
+            .contains("mapped ")
+            .then_some(())
+    })
+    .unwrap();
     probe(&mut s, "Furniture Left", 0);
     probe(&mut s, "Furniture Right", 1);
     focus(&mut s, "Furniture Left");
@@ -371,4 +454,255 @@ fn fullscreen_furniture_follows_visible_spaces_instead_of_global_keyboard_focus(
     let rgb = chonk_testkit::FAKE_BAR_RGB;
     assert_eq!(shot.pixel(100, 10), [rgb[0], rgb[1], rgb[2], 255]);
     assert_eq!(s.door().hit(100, 10).unwrap(), "layer");
+}
+
+fn geometry(w: &WindowInfo) -> (i32, i32, u32, u32) {
+    (w.x, w.y, w.w, w.h)
+}
+
+fn reload_spaces(s: &mut Session, separate: bool) {
+    let reloads = s.log().matches("reload requested").count();
+    s.rewrite_config(&format!("interaction_mode = 'mac'\nshow_dock = false\nhyprland_config = false\n[mac]\nseparate_spaces = {separate}\n")).unwrap();
+    s.request_reload().unwrap();
+    poll_until(WAIT, "Spaces configuration reload", || {
+        (s.log().matches("reload requested").count() > reloads).then_some(())
+    })
+    .unwrap();
+    s.door().barrier().unwrap();
+}
+
+#[test]
+#[ignore = "scripts/e2e.sh --headless --test mac_spaces"]
+fn linking_displays_repairs_focus_before_more_keys_reach_clients() {
+    let mut s = boot("mac-spaces-link-focus");
+    let left = probe(&mut s, "Link Left", 0);
+    probe(&mut s, "Link Right", 1);
+    focus(&mut s, "Link Left");
+    s.door().motion(1000.0, 600.0).unwrap();
+    s.door().barrier().unwrap();
+    reload_spaces(&mut s, false);
+    assert!(!s.world().unwrap().frame_of(left.id).unwrap().mapped);
+    assert_eq!(json(&s, "activewindow")["title"], "Link Right");
+    s.door().tap_key(33).unwrap();
+    poll_until(WAIT, "visible client receives its fullscreen key", || {
+        s.client_log("chonk-fullscreen-probe")
+            .contains("answer granted: asked fullscreen=true")
+            .then_some(())
+    })
+    .unwrap();
+    let hidden_log =
+        std::fs::read_to_string(s.dir.join("client-0-chonk-fullscreen-probe.log")).unwrap();
+    assert!(
+        !hidden_log.contains("control enter fullscreen"),
+        "hidden client received F: {hidden_log}"
+    );
+    assert!(!s.world().unwrap().frame_of(left.id).unwrap().mapped);
+}
+
+#[test]
+#[ignore = "scripts/e2e.sh --headless --test mac_spaces"]
+fn headless_swipes_are_ignored_and_reconnect_recovers_input_and_pixels() {
+    let mut s = boot("mac-spaces-headless-swipe");
+    let left = probe(&mut s, "Headless Left", 0);
+    dispatch(&mut s, "workspace 3");
+    dispatch(&mut s, "workspace 1");
+    s.door().swipe_begin_at(3, 1000).unwrap();
+    s.door().swipe_update_at(-150.0, 0.0, 1040).unwrap();
+    s.door().barrier().unwrap();
+    assert!(s.world().unwrap().gesture.is_some());
+    s.door().set_virtual_outputs("none").unwrap();
+    assert!(json(&s, "monitors").as_array().unwrap().is_empty());
+    assert!(s.world().unwrap().gesture.is_none());
+    assert!(!s.world().unwrap().frame_of(left.id).unwrap().mapped);
+    s.door().swipe_begin_at(3, 2000).unwrap();
+    s.door().swipe_update_at(-150.0, 0.0, 2040).unwrap();
+    s.door().swipe_end_at(false, 2080).unwrap();
+    s.door().barrier().unwrap();
+    assert!(s.compositor_alive());
+    assert!(s.world().unwrap().gesture.is_none());
+    s.door().set_virtual_outputs("split").unwrap();
+    assert_eq!(
+        geometry(s.world().unwrap().window_matching("Headless Left").unwrap()),
+        geometry(&left)
+    );
+    assert_eq!(
+        pixel(&mut s, "Headless Left", "after-full-reconnect"),
+        [32, 64, 128, 255]
+    );
+    focus(&mut s, "Headless Left");
+    s.door().tap_key(33).unwrap();
+    poll_until(WAIT, "input works after full reconnect", || {
+        s.client_log("chonk-fullscreen-probe")
+            .contains("answer granted: asked fullscreen=true")
+            .then_some(())
+    })
+    .unwrap();
+}
+
+#[test]
+#[ignore = "scripts/e2e.sh --headless --test mac_spaces"]
+fn smaller_survivor_keeps_home_position_and_restore_geometry() {
+    for fullscreen_before_disconnect in [true, false] {
+        let mut s = boot(&format!("mac-spaces-smaller-survivor-{fullscreen_before_disconnect}"));
+        probe(&mut s, "Sized Right", 1);
+        dispatch(&mut s, "moveactive exact 850 350");
+        let original = s.world().unwrap().window_matching("Sized Right").unwrap().clone();
+        assert!(original.y >= 350);
+        dispatch(&mut s, "fullscreen 1");
+        if fullscreen_before_disconnect {
+            chord(&mut s, &[125, 29], 33);
+        }
+        s.door().set_virtual_outputs("compact").unwrap();
+        if !fullscreen_before_disconnect {
+            dispatch(&mut s, "workspace 2");
+            focus(&mut s, "Sized Right");
+            chord(&mut s, &[125, 29], 33);
+        }
+        let compact = s.world().unwrap().window_matching("Sized Right").unwrap().clone();
+        assert_eq!((compact.w, compact.h), (400, 300));
+        s.door().set_virtual_outputs("split").unwrap();
+        // Reconnect restores the home's remembered active Space. A fullscreen
+        // Space created while borrowed may need explicit activation first.
+        let clients = json(&s, "clients");
+        let workspace = clients.as_array().unwrap().iter()
+            .find(|c| c["title"] == "Sized Right").unwrap()["workspace"]["id"].as_u64().unwrap();
+        dispatch(&mut s, &format!("workspace {workspace}"));
+        focus(&mut s, "Sized Right");
+        chord(&mut s, &[125, 29], 33);
+        dispatch(&mut s, "fullscreen 1");
+        assert_eq!(geometry(s.world().unwrap().window_matching("Sized Right").unwrap()), geometry(&original));
+        assert_eq!(pixel(&mut s, "Sized Right", "home-geometry-restored"), [32, 64, 128, 255]);
+    }
+}
+
+#[test]
+#[ignore = "scripts/e2e.sh --headless --test mac_spaces"]
+fn enabling_separate_spaces_preserves_the_live_linked_desktop() {
+    let mut s = boot("mac-spaces-enable-live");
+    reload_spaces(&mut s, false);
+    dispatch(&mut s, "workspace 4");
+    let left = probe(&mut s, "Enable Left", 0);
+    let right = probe(&mut s, "Enable Right", 1);
+    reload_spaces(&mut s, true);
+    let world = s.world().unwrap();
+    assert!(world.frame_of(left.id).unwrap().mapped && world.frame_of(right.id).unwrap().mapped);
+    assert_eq!(json(&s, "activewindow")["title"], "Enable Right");
+    assert_eq!(
+        pixel(&mut s, "Enable Left", "active-left-preserved"),
+        [32, 64, 128, 255]
+    );
+    assert_eq!(
+        pixel(&mut s, "Enable Right", "active-right-preserved"),
+        [32, 64, 128, 255]
+    );
+}
+
+#[test]
+#[ignore = "scripts/e2e.sh --headless --test mac_spaces"]
+fn clicking_a_pinned_window_keeps_the_current_space() {
+    let mut s = boot("mac-spaces-pinned-focus");
+    probe(&mut s, "Pinned Left", 0);
+    dispatch(&mut s, "pin");
+    dispatch(&mut s, "workspace 3");
+    focus(&mut s, "Pinned Left");
+    assert_eq!(heads(&s), (3, 2));
+    assert_eq!(json(&s, "activewindow")["title"], "Pinned Left");
+    assert_eq!(
+        pixel(&mut s, "Pinned Left", "pinned-focus-without-switch"),
+        [32, 64, 128, 255]
+    );
+}
+
+#[test]
+#[ignore = "scripts/e2e.sh --headless --test mac_spaces"]
+fn dragging_a_fullscreen_dialog_moves_a_consistent_family() {
+    let mut s = boot("mac-spaces-fullscreen-dialog");
+    let parent = probe(&mut s, "Dialog Parent", 0);
+    chord(&mut s, &[125, 29], 33);
+    s.door().tap_key(32).unwrap();
+    let dialog = s.wait_for_window("Space Dialog").unwrap();
+    let frame = s.world().unwrap().frame_of(dialog.id).unwrap().clone();
+    s.door()
+        .drag_to(
+            (frame.x as f64 + 100.0, frame.y as f64 + 10.0),
+            (1000.0, 300.0),
+        )
+        .unwrap();
+    s.door().barrier().unwrap();
+    let clients = json(&s, "clients");
+    for title in ["Dialog Parent", "Space Dialog"] {
+        let client = clients
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["title"] == title)
+            .unwrap();
+        assert_eq!(
+            client["workspace"]["id"], 2,
+            "family member must join the right Space"
+        );
+    }
+    assert_eq!(
+        s.world().unwrap().workspace_count,
+        2,
+        "retire the vacated fullscreen Space"
+    );
+    assert_eq!(
+        s.world()
+            .unwrap()
+            .window_matching("Dialog Parent")
+            .unwrap()
+            .w,
+        parent.w
+    );
+    assert_eq!(
+        pixel(&mut s, "Space Dialog", "dialog-family-on-right"),
+        [32, 64, 128, 255]
+    );
+}
+
+#[test]
+#[ignore = "scripts/e2e.sh --headless --test mac_spaces"]
+fn saved_fullscreen_over_maximize_unwinds_to_the_original_window() {
+    for borrowed in [false, true] {
+        let mut source = boot(&format!("mac-spaces-save-zoom-{borrowed}"));
+        source.door().motion(900.0, 300.0).unwrap();
+        source.door().barrier().unwrap();
+        let path = profile_binary("chonk-fullscreen-probe").unwrap();
+        source
+            .launch(path.to_str().unwrap(), &["Saved Zoom", "foot"])
+            .unwrap();
+        let original = source.wait_for_window("Saved Zoom").unwrap();
+        dispatch(&mut source, "fullscreen 1");
+        chord(&mut source, &[125, 29], 33);
+        if borrowed {
+            source.door().set_virtual_outputs("compact").unwrap();
+        }
+        let record = poll_until(WAIT, "fullscreen/maximize session snapshot", || {
+            let text = std::fs::read_to_string(source.state_file("session")).ok()?;
+            (text.contains("\"fullscreen_origin\":1")
+                && text.contains("maximized")
+                && (!borrowed || text.contains("\"home_geometry\":{")))
+            .then_some(text)
+        })
+        .unwrap();
+        drop(source);
+        let mut s = Session::boot(&format!("mac-spaces-restore-zoom-{borrowed}"), SessionOptions {
+        config_extra: format!("interaction_mode = 'mac'\nshow_dock = false\nhyprland_config = false\nrestore_session = true\nterminal = [\"{}\", \"Restored Zoom\", \"foot\"]\n", path.display()),
+        state_files: vec![("session".into(), record)], ..Default::default()
+    }).unwrap();
+        s.wait_for_window("Restored Zoom").unwrap();
+        s.door().set_virtual_outputs("split").unwrap();
+        focus(&mut s, "Restored Zoom");
+        chord(&mut s, &[125, 29], 33);
+        dispatch(&mut s, "fullscreen 1");
+        assert_eq!(
+            geometry(s.world().unwrap().window_matching("Restored Zoom").unwrap()),
+            geometry(&original)
+        );
+        assert_eq!(
+            pixel(&mut s, "Restored Zoom", "restored-original-size"),
+            [32, 64, 128, 255]
+        );
+    }
 }

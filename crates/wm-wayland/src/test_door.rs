@@ -484,40 +484,51 @@ fn on_readable(connection: &mut Connection, comp: &mut Compositor) -> PostAction
 /// docs for why nowhere shallower would do.
 /// Only the explicitly enabled test socket can create nested heads. The output
 /// lifecycle below is the same connector reconciliation native hardware uses.
-fn virtual_outputs(comp: &mut Compositor, split: bool) -> Result<(), &'static str> {
+fn virtual_outputs(comp: &mut Compositor, topology: &str) -> Result<(), &'static str> {
     use crate::state::{Graphics, OutputSetup};
     use smithay::output::{Output, PhysicalProperties, Mode, Subpixel};
     use smithay::utils::Transform;
     use wm_theme_api::{Point, Size};
     let Graphics::Winit(host) = &comp.graphics else { return Err("virtual outputs require a nested host"); };
     let host_size = host.window_size();
-    if host_size.w < 400 || host_size.h < 200 { return Err("host is too small for virtual displays"); }
-    let width = if split { host_size.w / 2 } else { host_size.w };
-    let size = Size::new(width as u32, host_size.h as u32);
-    let mode = Mode { size: (width, host_size.h).into(), refresh: 60_000 };
-    let Some(left) = comp.outputs.first_mut() else { return Err("no nested output"); };
-    left.size = size;
-    left.output.change_current_state(Some(mode), None, None, None);
-    left.output.set_preferred(mode);
-    left.modes = vec![mode];
+    if host_size.w < 400 || host_size.h < 300 { return Err("host is too small for virtual displays"); }
+    let sizes: Vec<Size> = match topology {
+        "none" => Vec::new(),
+        "compact" => vec![Size::new(400, 300)],
+        "single" => vec![Size::new(host_size.w as u32, host_size.h as u32)],
+        "split" => vec![Size::new((host_size.w / 2) as u32, host_size.h as u32),
+            Size::new((host_size.w - host_size.w / 2) as u32, host_size.h as u32)],
+        _ => return Err("virtual-outputs wants split, single, compact or none"),
+    };
     let mut added = Vec::new();
-    if split && comp.outputs.len() == 1 {
-        let right_size = Size::new((host_size.w - width) as u32, host_size.h as u32);
-        let right_mode = Mode { size: (right_size.w as i32, right_size.h as i32).into(), refresh: 60_000 };
-        let output = Output::new("chonkstep-right".into(), PhysicalProperties { size: (0, 0).into(),
-            subpixel: Subpixel::Unknown, make: "chonkstep".into(), model: "nested test display".into() });
-        output.change_current_state(Some(right_mode), Some(Transform::Flipped180), None, Some((width, 0).into()));
-        output.set_preferred(right_mode);
-        added.push(OutputSetup { output, identity: None, serial: String::new(), position: Point::new(width, 0),
-            size: right_size, transform: Transform::Normal, requested_mode: None, modes: vec![right_mode],
-            powered: true, vrr_supported: false, vrr_requested: false, vrr_enabled: false });
+    let mut x = 0;
+    for (index, &size) in sizes.iter().enumerate() {
+        let mode = Mode { size: (size.w as i32, size.h as i32).into(), refresh: 60_000 };
+        if let Some(entry) = comp.outputs.get_mut(index) {
+            entry.size = size;
+            entry.position = Point::new(x, 0);
+            entry.output.change_current_state(Some(mode), None, None, Some((x, 0).into()));
+            entry.output.set_preferred(mode);
+            entry.modes = vec![mode];
+        } else {
+            let name = if index == 0 { "chonkstep" } else { "chonkstep-right" };
+            let output = Output::new(name.into(), PhysicalProperties { size: (0, 0).into(),
+                subpixel: Subpixel::Unknown, make: "chonkstep".into(), model: "nested test display".into() });
+            output.change_current_state(Some(mode), Some(Transform::Flipped180), None, Some((x, 0).into()));
+            output.set_preferred(mode);
+            added.push(OutputSetup { output, identity: None, serial: String::new(), position: Point::new(x, 0),
+                size, transform: Transform::Normal, requested_mode: None, modes: vec![mode],
+                powered: true, vrr_supported: false, vrr_requested: false, vrr_enabled: false });
+        }
+        x += size.w as i32;
     }
-    let removed: Vec<_> = if split { Vec::new() } else { (1..comp.outputs.len()).rev().collect() };
+    let removed: Vec<_> = (sizes.len()..comp.outputs.len()).rev().collect();
     crate::state::apply_connector_hotplug(comp, &removed, added);
-    // A single host swap covers the union, while wl_output continues to expose
-    // each head's actual viewport and membership independently.
+    // A host swap covers the framebuffer; wl_output retains each head's viewport.
     let total = Size::new(host_size.w as u32, host_size.h as u32);
-    comp.outputs[0].damage_tracker = crate::state::physical_damage_tracker(&comp.outputs[0].output, total);
+    if let Some(first) = comp.outputs.first_mut() {
+        first.damage_tracker = crate::state::physical_damage_tracker(&first.output, total);
+    }
     comp.wm.backend_mut().mark_damaged();
     Ok(())
 }
@@ -531,10 +542,10 @@ fn handle_command(line: &str, stream: &mut UnixStream, comp: &mut Compositor) {
     match words.next() {
         Some("virtual-outputs") => {
             match (words.next(), words.next()) {
-                (Some(mode @ ("split" | "single")), None) => {
-                    if let Err(error) = virtual_outputs(comp, mode == "split") { reply_err(stream, error); }
+                (Some(mode @ ("split" | "single" | "compact" | "none")), None) => {
+                    if let Err(error) = virtual_outputs(comp, mode) { reply_err(stream, error); }
                 }
-                _ => reply_err(stream, "virtual-outputs wants split or single"),
+                _ => reply_err(stream, "virtual-outputs wants split, single, compact or none"),
             }
         }
         Some("primary-scale") => {
@@ -1021,7 +1032,8 @@ pub(crate) fn after_frame(comp: &mut Compositor) {
             return;
         }
         let backend = comp.wm.backend();
-        if backend.damage || !backend.pending.is_empty() || comp.mac_copy_order.queued() {
+        // With no outputs there can be no completed frame; fence dispatch only.
+        if (backend.damage && !comp.outputs.is_empty()) || !backend.pending.is_empty() || comp.mac_copy_order.queued() {
             return;
         }
         for mut stream in pending.drain(..) {

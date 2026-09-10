@@ -109,6 +109,7 @@ pub struct WindowRecord {
 #[serde(default)]
 pub struct SpatialRecord {
     pub fullscreen_origin: Option<usize>,
+    pub home_geometry: Option<HomeGeometryRecord>,
     pub floating: bool,
     pub order: usize,
     pub flow_width: u32,
@@ -117,6 +118,43 @@ pub struct SpatialRecord {
     pub focused: bool,
     pub floating_geometry: Option<[i64; 4]>,
     pub floating_monitor: Option<String>,
+}
+
+/// Optional home placement, retained across a restart while a monitor is absent.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct HomeGeometryRecord {
+    pub display: String,
+    pub bounds: [i64; 4],
+    pub normal: [i64; 4],
+    pub freeform: Option<[i64; 4]>,
+}
+
+fn rect_record(rect: Rect) -> [i64; 4] {
+    [i64::from(rect.pos.x), i64::from(rect.pos.y), i64::from(rect.size.w), i64::from(rect.size.h)]
+}
+
+impl From<&wm_core::SpaceHomeGeometry> for HomeGeometryRecord {
+    fn from(saved: &wm_core::SpaceHomeGeometry) -> Self {
+        Self { display: saved.display.clone(), bounds: rect_record(saved.bounds),
+            normal: rect_record(saved.normal), freeform: saved.freeform.map(rect_record) }
+    }
+}
+
+impl HomeGeometryRecord {
+    pub fn matches(&self, saved: &wm_core::SpaceHomeGeometry) -> bool {
+        self.display == saved.display && self.bounds == rect_record(saved.bounds)
+            && self.normal == rect_record(saved.normal) && self.freeform == saved.freeform.map(rect_record)
+    }
+
+    pub fn to_geometry(&self) -> Option<wm_core::SpaceHomeGeometry> {
+        let rect = |r: [i64; 4]| Some(Rect::new(
+            Point::new(i32::try_from(r[0]).ok()?, i32::try_from(r[1]).ok()?),
+            Size::new(u32::try_from(r[2]).ok()?, u32::try_from(r[3]).ok()?)));
+        let saved = wm_core::SpaceHomeGeometry { display: self.display.clone(),
+            bounds: rect(self.bounds)?, normal: rect(self.normal)?,
+            freeform: match self.freeform { Some(r) => Some(rect(r)?), None => None } };
+        saved.valid().then_some(saved)
+    }
 }
 
 /// How one record's application should be brought back. Split from the
@@ -567,7 +605,8 @@ fn parse_line(line: &str) -> Option<WindowRecord> {
         .get(1)
         .and_then(|text| serde_json::from_str::<SpatialRecord>(text).ok())
         .filter(|s| {
-            s.order < 10000
+            s.home_geometry.as_ref().is_none_or(|r| r.to_geometry().is_some())
+                && s.order < 10000
                 && s.flow_width <= 65536
                 && s.mosaic_weight.iter().all(|&v| v <= 1_000_000)
                 && s.floating_geometry.is_none_or(|r| {
@@ -1037,6 +1076,7 @@ mod tests {
         let mut item = record("foot", 80);
         item.spatial = Some(SpatialRecord {
             fullscreen_origin: None,
+            home_geometry: None,
             floating: true,
             order: 3,
             flow_width: 780,
@@ -1141,5 +1181,31 @@ mod display_space_tests {
             geometry: Rect::new(Point::new(-640, 0), Size::new(640, 800)) }];
         let geometry = restored_on_monitor(&monitors, Rect::new(Point::new(12, 80), Size::new(400, 300)), Some("two"));
         assert_eq!(geometry.pos, Point::new(-628, 80));
+    }
+}
+
+#[cfg(test)]
+mod home_geometry_tests {
+    use super::*;
+
+    #[test]
+    fn home_geometry_roundtrips_and_rejects_out_of_range_coordinates() {
+        let saved = wm_core::SpaceHomeGeometry {
+            display: "connector:external".into(),
+            bounds: Rect::new(Point::new(800, 0), Size::new(800, 600)),
+            normal: Rect::new(Point::new(1100, 300), Size::new(400, 200)),
+            freeform: Some(Rect::new(Point::new(1050, 200), Size::new(350, 300))),
+        };
+        let record = HomeGeometryRecord::from(&saved);
+        assert_eq!(record.to_geometry(), Some(saved.clone()));
+        assert!(record.matches(&saved));
+        let encoded = serde_json::to_string(&record).unwrap();
+        let mut decoded: HomeGeometryRecord = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded, record);
+        decoded.normal[0] = i64::MAX;
+        assert!(decoded.to_geometry().is_none());
+        decoded.normal[0] = 1100;
+        decoded.bounds[2] = 0;
+        assert!(decoded.to_geometry().is_none());
     }
 }

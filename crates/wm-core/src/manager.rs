@@ -17,7 +17,7 @@ use crate::resize;
 use crate::snap;
 mod mac;
 mod spaces;
-pub use spaces::{DisplaySpace, DisplaySpacesSnapshot, Space};
+pub use spaces::{DisplaySpace, DisplaySpacesSnapshot, Space, SpaceHomeGeometry};
 use crate::types::{
     BackendEvent, ClientChrome, DragHandle, KeyCombo, Modifiers, MouseButton, NetState, NetStateAction,
     NetStateSnapshot, SurfaceRef, WindowType,
@@ -597,6 +597,9 @@ impl<B: Backend> WindowManager<B> {
         self.workareas = areas;
         self.workarea_revision = self.workarea_revision.wrapping_add(1);
         self.publish_workarea_union();
+        // A disconnected Mac session retains its window geometry until a
+        // real output returns; the headless fallback is not a resize target.
+        if self.separate_spaces() && self.monitors_ref().is_empty() { return; }
         if self.effective_workareas() != before {
             self.refit_maximized();
             self.reflow_layouts();
@@ -1044,7 +1047,8 @@ impl<B: Backend> WindowManager<B> {
     /// silently refuse it and leave the switcher pointing at a window
     /// that never got focus.
     fn is_focusable(&self, id: ClientId) -> bool {
-        if self.mac_client_hidden(id) { return false; }
+        if self.mac_client_hidden(id)
+            || (self.separate_spaces() && self.monitors_ref().is_empty()) { return false; }
         self.clients.get(id).is_some_and(|client| {
             client.lifecycle == Lifecycle::Normal
                 && (self.workspace_visible(client.workspace)
@@ -2039,6 +2043,7 @@ impl<B: Backend> WindowManager<B> {
             layout.order.retain(|&other| other != id);
         }
         self.fullscreen_restore.remove(&id);
+        if let Some(state) = self.display_spaces.as_mut() { state.home_geometry.remove(&id); }
         self.idle_inhibit_clients.remove(&id);
         if let Some(client) = self.clients.remove(id) {
             if let Some(frame) = client.frame {
@@ -2838,6 +2843,9 @@ impl<B: Backend> WindowManager<B> {
     /// backend. Shared tail of any operation that changes a client's
     /// content size in place (`ConfigureRequest`, maximize, unmaximize).
     fn reflow_frame(&mut self, id: ClientId) {
+        // Parked clients have no physical frame to fit. In particular, do not
+        // clamp their retained size against the 1x1 headless screen fallback.
+        if self.separate_spaces() && self.monitors_ref().is_empty() { return; }
         self.track_window_display(id);
         let screen = self.backend.screen_size();
         if let Some(client) = self.clients.get_mut(id) {
@@ -3807,8 +3815,11 @@ impl<B: Backend> WindowManager<B> {
             return;
         }
         if self.separate_spaces() {
-            if let Some(workspace) = self.clients.get(id).map(|c| c.workspace) {
-                if !self.workspace_visible(workspace) { self.switch_workspace(workspace); }
+            if let Some(client) = self.clients.get(id) {
+                let workspace = client.workspace;
+                if !client.flags.contains(ClientFlags::STICKY) && !self.workspace_visible(workspace) {
+                    self.switch_workspace(workspace);
+                }
                 self.select_space_output(workspace);
             }
         }

@@ -1218,7 +1218,15 @@ impl Compositor {
             .get(&id)
             .map(|record| backend.window_surface_scale(record))
             .unwrap_or(1.0);
-        let screen = backend.output_size;
+        // A late buffer commit after the last output disconnects still has
+        // valid geometry. Bound it by the already accepted window size while
+        // headless, rather than turning the empty desktop into a 1x1 resize.
+        // New/unmapped surfaces keep the ordinary conservative fallback.
+        let screen = if backend.monitors.is_empty() && was_mapped {
+            backend.windows.get(&id).map_or(backend.output_size, |record| record.content.size)
+        } else {
+            backend.output_size
+        };
         let committed = committed_content_size(&root, surface_scale, screen);
         if has_buffer && !was_mapped {
             set_mapped_marker(&root, true);

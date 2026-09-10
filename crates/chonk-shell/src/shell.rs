@@ -32,7 +32,7 @@ use crate::launchdock::{LaunchDock, LaunchDockAction};
 use crate::overview::{OverviewHit, OverviewItem, OverviewRelease};
 use crate::session_layout::{
     relative_to_monitor, restored_geometry, restored_on_monitor, RelaunchPlan, SessionLayout,
-    SpatialRecord, WindowRecord,
+    HomeGeometryRecord, SpatialRecord, WindowRecord,
 };
 use crate::startup::SessionState;
 use crate::widgets::DockInput;
@@ -849,18 +849,16 @@ fn layout_snapshot<B: Backend>(wm: &WindowManager<B>, apps: &[AppEntry]) -> Vec<
             let maximized = client
                 .flags
                 .intersects(ClientFlags::MAXIMIZED_H | ClientFlags::MAXIMIZED_V);
-            let root_geometry = wm.fullscreen_restore_geometry(id).or(client.placement.freeform).unwrap_or_else(|| {
-                if maximized {
-                    client.restore_geometry.unwrap_or(client.geometry)
-                } else {
-                    client.geometry
-                }
-            });
+            let root_geometry = client.placement.freeform
+                .or_else(|| maximized.then_some(client.restore_geometry).flatten())
+                .or(wm.fullscreen_restore_geometry(id))
+                .unwrap_or(client.geometry);
             let (geometry, monitor_identity) = layout_record_geometry(wm, root_geometry);
             let floating = floating_record_geometry(wm, id);
             WindowRecord {
                 spatial: Some(SpatialRecord {
                     fullscreen_origin: wm.mac_fullscreen_origin(id),
+                    home_geometry: wm.space_home_geometry(id).map(HomeGeometryRecord::from),
                     floating: client.placement.floating,
                     order: wm
                         .layout_order(client.workspace)
@@ -944,18 +942,19 @@ fn layout_matches_clients<B: Backend>(wm: &WindowManager<B>, records: &[WindowRe
         let maximized = client
             .flags
             .intersects(ClientFlags::MAXIMIZED_H | ClientFlags::MAXIMIZED_V);
-        let root_geometry = wm.fullscreen_restore_geometry(id).or(client.placement.freeform).unwrap_or_else(|| {
-            if maximized {
-                client.restore_geometry.unwrap_or(client.geometry)
-            } else {
-                client.geometry
-            }
-        });
+        let root_geometry = client.placement.freeform
+            .or_else(|| maximized.then_some(client.restore_geometry).flatten())
+            .or(wm.fullscreen_restore_geometry(id))
+            .unwrap_or(client.geometry);
         let (geometry, monitor_identity) = layout_record_geometry(wm, root_geometry);
         let placement = &client.placement;
         let floating = floating_record_geometry(wm, id);
         let spatial_matches = record.spatial.as_ref().is_some_and(|r| {
-            r.fullscreen_origin == wm.mac_fullscreen_origin(id)
+            (match (&r.home_geometry, wm.space_home_geometry(id)) {
+                (Some(record), Some(saved)) => record.matches(saved),
+                (None, None) => true,
+                _ => false,
+            }) && r.fullscreen_origin == wm.mac_fullscreen_origin(id)
                 && r.floating == placement.floating
                 && r.flow_width == placement.flow_width
                 && r.mosaic_weight == placement.mosaic_weight
@@ -3205,6 +3204,9 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
                             spatial.order,
                         );
                         if let Some(origin) = spatial.fullscreen_origin { wm.restore_mac_fullscreen(id, origin); }
+                        if let Some(saved) = spatial.home_geometry.and_then(|r| r.to_geometry()) {
+                            wm.restore_space_home_geometry(id, saved);
+                        }
                         if spatial.focused {
                             self.restore_focus = Some(id);
                         }
@@ -3811,5 +3813,27 @@ mod tests {
         ] {
             assert_eq!(root_action_outcome(&action), ShellOutcome::Continue);
         }
+    }
+}
+
+#[cfg(test)]
+mod adversarial_spaces_review {
+    use super::*;
+    use wm_core::fake_backend::{FakeBackend, FakeTheme};
+
+    #[test]
+    fn adversarial_fullscreen_over_maximize_preserves_original_restore_geometry() {
+        let mut wm = WindowManager::new(FakeBackend::new(), Box::new(FakeTheme));
+        wm.set_interaction_config(wm_core::InteractionConfig { mode: wm_core::InteractionMode::Mac, ..Default::default() });
+        let window = wm.backend_mut().create_window();
+        wm.backend_mut().window_classes.insert(window, "review-test".into());
+        wm.dispatch(wm_core::BackendEvent::MapRequest(window));
+        let id = wm.client_for_window(window).unwrap();
+        let original = wm.client(id).unwrap().geometry;
+        wm.maximize(id, MaximizeDirections::FULL);
+        wm.fullscreen(id);
+        let records = layout_snapshot(&wm, &[]);
+        assert_eq!(restored_geometry(wm.monitors_ref(), &records[0]), original,
+            "fullscreen serialization must preserve the pre-maximize restore point");
     }
 }

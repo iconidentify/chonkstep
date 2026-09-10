@@ -70,6 +70,11 @@ impl Transition {
 }
 
 pub(crate) fn update(comp: &mut Compositor, motion: SwipeMotion) {
+    let Some(monitor) = comp.wm.monitors_ref().get(comp.wm.active_output_index()) else {
+        cancel(comp);
+        return;
+    };
+    let output = comp.wm.separate_spaces().then_some(monitor.geometry);
     if comp
         .wm
         .backend()
@@ -95,7 +100,6 @@ pub(crate) fn update(comp: &mut Compositor, motion: SwipeMotion) {
         }
         let origin = comp.wm.current_workspace();
         let count = comp.wm.workspace_count();
-        let output = comp.wm.separate_spaces().then(|| comp.wm.monitors_ref()[comp.wm.active_output_index()].geometry);
         let previous = if comp.wm.mac_mode() { comp.wm.neighboring_workspace(origin, -1) } else { origin.checked_sub(1) };
         let next = if comp.wm.mac_mode() { comp.wm.neighboring_workspace(origin, 1) } else { (origin + 1 < wm_core::MAX_WORKSPACES
             && (origin + 1 < count || comp.wm.workspace_has_windows(origin)))

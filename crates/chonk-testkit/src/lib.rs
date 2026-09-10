@@ -1502,13 +1502,20 @@ impl Door {
         self.send(&format!("key {code} {}", if pressed { "press" } else { "release" }))
     }
 
-    /// Change the live primary-output scale through the same compositor
-    /// method Hyprland IPC and output-management clients use.
+    /// Change the nested fixture's live output topology through native hotplug policy.
     pub fn virtual_outputs(&mut self, split: bool) -> Result<(), String> {
-        self.send(if split { "virtual-outputs split" } else { "virtual-outputs single" })?;
+        self.set_virtual_outputs(if split { "split" } else { "single" })
+    }
+
+    pub fn set_virtual_outputs(&mut self, topology: &str) -> Result<(), String> {
+        if !matches!(topology, "split" | "single" | "compact" | "none") {
+            return Err("unknown virtual topology".into());
+        }
+        self.send(&format!("virtual-outputs {topology}"))?;
         self.barrier()
     }
 
+    /// Change the live primary-output scale through normal output management.
     pub fn set_primary_scale(&mut self, scale: f64) -> Result<(), String> {
         self.send(&format!("primary-scale {scale}"))
     }

@@ -79,7 +79,11 @@ fn fullscreen_on_each_display_has_its_own_return_space_and_geometry() {
     assert_eq!(wm.active_workspace_on_output(0), full_left);
     assert_eq!(wm.client(right).unwrap().geometry, RIGHT_HEAD);
     wm.unfullscreen(right);
-    assert!(wm.client(left).unwrap().flags.contains(ClientFlags::FULLSCREEN));
+    assert!(wm
+        .client(left)
+        .unwrap()
+        .flags
+        .contains(ClientFlags::FULLSCREEN));
     assert_eq!(wm.client(right).unwrap().geometry, right_geometry);
     wm.unfullscreen(left);
     assert_eq!(wm.client(left).unwrap().geometry, left_geometry);
@@ -97,7 +101,10 @@ fn deleting_a_space_uses_its_own_display_and_keeps_surviving_ids() {
     wm.move_client_to_workspace(right, added);
     wm.switch_workspace(added);
     assert!(wm.remove_workspace(added));
-    assert_eq!(wm.workspace_id(wm.client(right).unwrap().workspace), right_id);
+    assert_eq!(
+        wm.workspace_id(wm.client(right).unwrap().workspace),
+        right_id
+    );
     assert_eq!(wm.workspace_id(wm.client(left).unwrap().workspace), left_id);
     assert!(
         !wm.remove_workspace(wm.client(left).unwrap().workspace),
@@ -132,10 +139,17 @@ fn disconnect_reconnect_and_output_reordering_preserve_spaces_and_windows() {
     let right_geometry = wm.client(right).unwrap().geometry;
     let right_id = wm.workspace_id(wm.client(right).unwrap().workspace);
     let left_space = wm.client(left).unwrap().workspace;
-    wm.backend_mut().set_monitors(vec![dual_monitors()[0].clone()]);
+    wm.backend_mut()
+        .set_monitors(vec![dual_monitors()[0].clone()]);
     wm.reconcile_display_spaces();
-    assert_eq!(wm.workspace_output_index(wm.client(right).unwrap().workspace), Some(0));
-    assert_eq!(wm.workspace_id(wm.client(right).unwrap().workspace), right_id);
+    assert_eq!(
+        wm.workspace_output_index(wm.client(right).unwrap().workspace),
+        Some(0)
+    );
+    assert_eq!(
+        wm.workspace_id(wm.client(right).unwrap().workspace),
+        right_id
+    );
     assert_eq!(wm.active_workspace_on_output(0), left_space);
     wm.switch_workspace(wm.client(right).unwrap().workspace);
     assert!(visible(&wm, right));
@@ -144,10 +158,16 @@ fn disconnect_reconnect_and_output_reordering_preserve_spaces_and_windows() {
     reordered.reverse();
     wm.backend_mut().set_monitors(reordered);
     wm.reconcile_display_spaces();
-    assert_eq!(wm.workspace_output_index(wm.client(right).unwrap().workspace), Some(0));
+    assert_eq!(
+        wm.workspace_output_index(wm.client(right).unwrap().workspace),
+        Some(0)
+    );
     assert_eq!(wm.workspace_output_index(left_space), Some(1));
     assert_eq!(wm.client(right).unwrap().geometry, right_geometry);
-    assert_eq!(wm.workspace_id(wm.client(right).unwrap().workspace), right_id);
+    assert_eq!(
+        wm.workspace_id(wm.client(right).unwrap().workspace),
+        right_id
+    );
     assert!(visible(&wm, left) && visible(&wm, right));
 }
 
@@ -164,7 +184,10 @@ fn linked_display_setting_preserves_the_existing_global_policy() {
     wm.switch_workspace(target);
     assert!(visible(&wm, right));
     assert!(!visible(&wm, left));
-    assert_eq!(wm.active_workspace_on_output(0), wm.active_workspace_on_output(1));
+    assert_eq!(
+        wm.active_workspace_on_output(0),
+        wm.active_workspace_on_output(1)
+    );
 }
 
 #[test]
@@ -172,7 +195,8 @@ fn losing_the_focused_display_repairs_focus_and_all_disconnected_parks_everythin
     let mut wm = dual_mac();
     let left = window_on(&mut wm, 0);
     let right = window_on(&mut wm, 1);
-    wm.backend_mut().set_monitors(vec![dual_monitors()[0].clone()]);
+    wm.backend_mut()
+        .set_monitors(vec![dual_monitors()[0].clone()]);
     wm.reconcile_display_spaces();
     assert_eq!(wm.focused_client(), Some(left));
     assert!(!visible(&wm, right));
@@ -283,7 +307,10 @@ fn moving_between_display_layouts_reflows_both_rows_and_preserves_freeform_resto
     let shared = wm.clients[left].geometry;
     assert!(wm.move_client_to_output(moving, 1));
     assert_eq!(wm.clients[moving].workspace, 1);
-    assert_ne!(wm.clients[left].geometry, shared, "the old layout fills the vacated cell");
+    assert_ne!(
+        wm.clients[left].geometry, shared,
+        "the old layout fills the vacated cell"
+    );
     assert_eq!(wm.client_output_index(moving), 1);
     wm.set_workspace_layout(1, crate::LayoutMode::Freeform);
     assert_eq!(wm.clients[moving].workspace, 1);
@@ -295,7 +322,10 @@ fn first_displays_after_a_headless_start_initialize_independent_rows() {
     let mut backend = FakeBackend::new();
     backend.set_monitors(Vec::new());
     let mut wm = wm(backend);
-    wm.set_interaction_config(crate::InteractionConfig { mode: crate::InteractionMode::Mac, ..Default::default() });
+    wm.set_interaction_config(crate::InteractionConfig {
+        mode: crate::InteractionMode::Mac,
+        ..Default::default()
+    });
     assert!(!wm.separate_spaces());
     wm.backend_mut().set_monitors(dual_monitors());
     wm.reconcile_display_spaces();
@@ -303,4 +333,223 @@ fn first_displays_after_a_headless_start_initialize_independent_rows() {
     assert_eq!(wm.workspace_row_on_output(0), vec![0]);
     assert_eq!(wm.workspace_row_on_output(1), vec![1]);
     assert!(wm.workspace_visible(0) && wm.workspace_visible(1));
+}
+
+#[test]
+fn adversarial_disabling_separate_spaces_must_not_focus_a_parked_window() {
+    let mut wm = dual_mac();
+    let left = window_on(&mut wm, 0);
+    let right = window_on(&mut wm, 1);
+    wm.focus_client(left);
+    wm.select_output(1);
+    assert_eq!(wm.focused_client(), Some(left));
+    let mut config = wm.interaction_config().clone();
+    config.separate_spaces = false;
+    wm.set_interaction_config(config);
+    assert!(visible(&wm, right));
+    assert!(!visible(&wm, left));
+    assert!(
+        wm.focused_client().is_none_or(|id| wm.is_focusable(id)),
+        "a parked window retained keyboard focus: {:?}",
+        wm.focused_client()
+    );
+}
+
+#[test]
+fn adversarial_dragging_fullscreen_dialog_keeps_fullscreen_metadata_consistent() {
+    let mut wm = dual_mac();
+    let parent = window_on(&mut wm, 0);
+    let child = window_on(&mut wm, 0);
+    wm.clients[child].parent = Some(parent);
+    wm.fullscreen(parent);
+    assert!(wm.move_client_to_output(child, 1));
+    if let Some(&(origin, full)) = wm.mac_fullscreen.get(&parent) {
+        assert_eq!(
+            wm.clients[parent].workspace, full,
+            "fullscreen parent moved out of its dedicated Space"
+        );
+        assert_eq!(
+            wm.workspace_output_index(origin),
+            wm.workspace_output_index(full)
+        );
+    } else {
+        assert!(
+            !wm.clients[parent].flags.contains(ClientFlags::FULLSCREEN),
+            "a family move may safely exit fullscreen, but must retire the flag and Space together"
+        );
+    }
+}
+
+#[test]
+fn adversarial_unequal_hotplug_preserves_home_geometry() {
+    let mut wm = dual_mac();
+    let right = window_on(&mut wm, 1);
+    let original = Rect::new(Point::new(1150, 350), Size::new(400, 200));
+    wm.set_client_content_geometry(right, original);
+    assert_eq!(wm.clients[right].geometry, original);
+    let mut smaller = dual_monitors()[0].clone();
+    smaller.geometry.size = Size::new(400, 300);
+    wm.backend_mut().set_monitors(vec![smaller]);
+    wm.reconcile_display_spaces();
+    wm.backend_mut().set_monitors(dual_monitors());
+    wm.reconcile_display_spaces();
+    assert_eq!(
+        wm.clients[right].geometry, original,
+        "returning to the home display must recover its geometry"
+    );
+}
+
+#[test]
+fn adversarial_enabling_separate_spaces_preserves_active_desktop() {
+    let mut backend = FakeBackend::new();
+    backend.set_monitors(dual_monitors());
+    let mut wm = wm(backend);
+    wm.switch_workspace(3);
+    let window = wm.backend_mut().create_window();
+    wm.dispatch(BackendEvent::MapRequest(window));
+    let id = wm.client_for_window(window).unwrap();
+    assert!(visible(&wm, id));
+    wm.set_interaction_config(crate::InteractionConfig {
+        mode: crate::InteractionMode::Mac,
+        ..Default::default()
+    });
+    assert!(
+        visible(&wm, id),
+        "enabling Mac mode parked the active desktop"
+    );
+}
+
+#[test]
+fn adversarial_focusing_pinned_window_does_not_switch_spaces() {
+    let mut wm = dual_mac();
+    let pinned = window_on(&mut wm, 0);
+    wm.set_client_pinned(pinned, true);
+    let next = wm.create_workspace().unwrap();
+    wm.switch_workspace(next);
+    assert!(visible(&wm, pinned));
+    wm.focus_client(pinned);
+    assert_eq!(
+        wm.current_workspace(),
+        next,
+        "clicking a pinned window must not jump to its home Space"
+    );
+}
+
+#[test]
+fn enabling_separate_spaces_preserves_both_active_windows_and_hidden_desktops() {
+    let mut backend = FakeBackend::new();
+    backend.set_monitors(dual_monitors());
+    let mut wm = wm(backend);
+    let hidden = window_on(&mut wm, 1);
+    wm.switch_workspace(3);
+    let left = window_on(&mut wm, 0);
+    let right = window_on(&mut wm, 1);
+    wm.set_interaction_config(crate::InteractionConfig {
+        mode: crate::InteractionMode::Mac,
+        ..Default::default()
+    });
+    assert!(visible(&wm, left) && visible(&wm, right));
+    assert!(!visible(&wm, hidden));
+    assert_eq!(wm.focused_client(), Some(right));
+    assert_eq!(wm.active_output_index(), 1);
+    assert_ne!(wm.clients[hidden].workspace, wm.clients[right].workspace);
+}
+
+#[test]
+fn borrowed_home_geometry_survives_shape_changes_and_restart_metadata() {
+    let mut wm = dual_mac();
+    let right = window_on(&mut wm, 1);
+    let normal = Rect::new(Point::new(1150, 350), Size::new(400, 200));
+    wm.set_client_content_geometry(right, normal);
+    wm.maximize(right, MaximizeDirections::FULL);
+    wm.fullscreen(right);
+    let mut compact = dual_monitors()[0].clone();
+    compact.geometry.size = Size::new(400, 300);
+    wm.backend_mut().set_monitors(vec![compact.clone()]);
+    wm.reconcile_display_spaces();
+    let saved = wm.space_home_geometry(right).unwrap().clone();
+    assert_eq!(saved.normal, normal);
+    wm.unfullscreen(right);
+    wm.unmaximize(right);
+    assert_eq!(wm.space_home_geometry(right), Some(&saved));
+    let topology = wm.display_spaces_snapshot().unwrap().clone();
+    let workspace = wm.clients[right].workspace;
+    let mut fresh = dual_mac();
+    fresh.backend_mut().set_monitors(vec![compact]);
+    assert!(fresh.restore_display_spaces(topology));
+    let restored = window_on(&mut fresh, 0);
+    fresh.move_client_to_workspace(restored, workspace);
+    assert!(fresh.restore_space_home_geometry(restored, saved));
+    fresh.backend_mut().set_monitors(dual_monitors());
+    fresh.reconcile_display_spaces();
+    assert_eq!(fresh.clients[restored].geometry, normal);
+    assert!(fresh.space_home_geometry(restored).is_none());
+}
+
+#[test]
+fn moving_a_borrowed_window_to_another_home_discards_the_old_return_point() {
+    let mut wm = dual_mac();
+    let right = window_on(&mut wm, 1);
+    wm.backend_mut()
+        .set_monitors(vec![dual_monitors()[0].clone()]);
+    wm.reconcile_display_spaces();
+    assert!(wm.space_home_geometry(right).is_some());
+    wm.move_client_to_workspace(right, 0);
+    assert!(wm.space_home_geometry(right).is_none());
+    wm.backend_mut().set_monitors(dual_monitors());
+    wm.reconcile_display_spaces();
+    assert_eq!(
+        wm.workspace_output_index(wm.clients[right].workspace),
+        Some(0)
+    );
+}
+
+#[test]
+fn full_disconnect_parks_pinned_and_maximized_windows_without_refitting() {
+    let mut wm = dual_mac();
+    let pinned = window_on(&mut wm, 0);
+    wm.set_client_pinned(pinned, true);
+    let maximized = window_on(&mut wm, 1);
+    let normal = wm.clients[maximized].geometry;
+    wm.maximize(maximized, MaximizeDirections::FULL);
+    wm.focus_client(pinned);
+    let pinned_geometry = wm.clients[pinned].geometry;
+    let maximized_geometry = wm.clients[maximized].geometry;
+    wm.backend_mut().set_monitors(Vec::new());
+    wm.reconcile_display_spaces();
+    wm.set_workarea(Rect::new(Point::new(0, 0), Size::new(1, 1)));
+    assert!(!visible(&wm, pinned) && !visible(&wm, maximized));
+    assert_eq!(wm.focused_client(), None);
+    assert_eq!(wm.clients[pinned].geometry, pinned_geometry);
+    assert_eq!(wm.clients[maximized].geometry, maximized_geometry);
+    assert_eq!(wm.clients[maximized].restore_geometry, Some(normal));
+    wm.backend_mut().set_monitors(dual_monitors());
+    wm.reconcile_display_spaces();
+    wm.set_workareas(dual_monitors().into_iter().map(|m| m.geometry).collect());
+    assert!(visible(&wm, pinned) && visible(&wm, maximized));
+    wm.unmaximize(maximized);
+    assert_eq!(wm.clients[maximized].geometry, normal);
+}
+
+#[test]
+fn fullscreen_entered_while_borrowed_keeps_its_home_and_return_geometry() {
+    let mut wm = dual_mac();
+    let right = window_on(&mut wm, 1);
+    let original = Rect::new(Point::new(1150, 350), Size::new(400, 200));
+    wm.set_client_content_geometry(right, original);
+    let mut smaller = dual_monitors()[0].clone();
+    smaller.geometry.size = Size::new(400, 300);
+    wm.backend_mut().set_monitors(vec![smaller]);
+    wm.reconcile_display_spaces();
+    wm.switch_workspace(wm.clients[right].workspace);
+    wm.fullscreen(right);
+    let (origin, full) = wm.mac_fullscreen[&right];
+    let snapshot = wm.display_spaces_snapshot().unwrap();
+    assert_eq!(snapshot.spaces[origin].home_display, snapshot.spaces[full].home_display);
+    assert!(wm.space_home_geometry(right).is_some());
+    wm.backend_mut().set_monitors(dual_monitors());
+    wm.reconcile_display_spaces();
+    assert_eq!(wm.workspace_output_index(full), Some(1));
+    wm.unfullscreen(right);
+    assert_eq!(wm.clients[right].geometry, original);
 }
