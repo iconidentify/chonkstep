@@ -51,7 +51,7 @@ use chonk_hyprland_ipc::MonitorMode;
 use smithay::reexports::wayland_protocols::xwayland::keyboard_grab::zv1::server::zwp_xwayland_keyboard_grab_v1::ZwpXwaylandKeyboardGrabV1;
 use smithay::reexports::calloop::generic::Generic;
 use smithay::reexports::calloop::{
-    EventLoop, Interest, LoopHandle, Mode as TriggerMode, PostAction, RegistrationToken,
+    Dispatcher, EventLoop, Interest, LoopHandle, Mode as TriggerMode, PostAction, RegistrationToken,
 };
 use smithay::reexports::wayland_protocols::xdg::shell::server::xdg_toplevel::State as XdgToplevelState;
 use smithay::reexports::wayland_server::backend::{
@@ -752,6 +752,8 @@ pub struct WaylandBackend {
     /// switcher): while set, *every* press becomes a `KeyPress` and
     /// releases additionally queue `KeyRelease` — see wm-x11's
     /// KeyRelease commentary, mirrored by `input.rs`.
+    pub(crate) pending_quit: Vec<(WlWindowId, Instant)>,
+    pub(crate) killed_clients: Vec<ClientId>,
     pub(crate) keyboard_grabbed: bool,
     /// A modal keyboard ownership transition waiting to reach the seat.
     /// Canceling back to the same window may produce no window-focus intent.
@@ -1042,6 +1044,8 @@ impl WaylandBackend {
             repeating_combos: Vec::new(),
             repeat_rate: 25,
             repeat_delay: std::time::Duration::from_millis(200),
+            pending_quit: Vec::new(),
+            killed_clients: Vec::new(),
             keyboard_grabbed: false,
             keyboard_grab_changed: false,
             root_background: RootBackground::Color((0, 0, 0)),
@@ -2320,6 +2324,8 @@ pub struct Compositor {
     /// Last successfully installed settings, not merely the latest request.
     /// `None` after startup fallback so a later valid edit still installs.
     pub(crate) keyboard_config: Option<ResolvedKeyboard>,
+    pub(crate) clipboard_persistence: crate::selection::persistence::Persistence,
+    pub(crate) mac_keyboard: crate::input::keyboard::mac::MacKeyboard,
     pub output_manager_state: OutputManagerState,
     pub data_device_state: DataDeviceState,
     /// The middle-click clipboard. Advertised because the X11 half of
@@ -2525,6 +2531,7 @@ impl Compositor {
     /// ever needs to move.
     #[cfg_attr(feature = "profile", profiling::function)]
     pub(crate) fn dispatch_pending(&mut self) {
+        crate::selection::persistence::tick(self);
         crate::capture_tool::tick(self);
         let dispatch_span = tracing::info_span!("dispatch_pass");
         let _dispatch_guard = dispatch_span.enter();
@@ -3904,8 +3911,7 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
             }
         })
         .map_err(|error| format!("failed to register the wayland socket source: {error}"))?;
-    loop_handle
-        .insert_source(Generic::new(display, Interest::READ, TriggerMode::Level), |_, display, comp| {
+    let display_source = Dispatcher::new(Generic::new(display, Interest::READ, TriggerMode::Level), |_, display, comp: &mut Compositor| {
             // SAFETY: the display is owned by this source and never
             // moved out of it; `get_mut` is the documented access
             // pattern for dispatching from inside calloop.
@@ -3914,7 +3920,9 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
                 comp.running = false;
             }
             Ok(PostAction::Continue)
-        })
+        });
+    loop_handle
+        .register_dispatcher(display_source.clone())
         .map_err(|error| format!("failed to register the wayland display source: {error}"))?;
 
     // This binary IS the Wayland session, and says so rather than
@@ -4087,6 +4095,8 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
         shm_state,
         seat_state,
         keyboard_config,
+        clipboard_persistence: crate::selection::persistence::Persistence::default(),
+        mac_keyboard: crate::input::keyboard::mac::MacKeyboard::default(),
         output_manager_state,
         data_device_state,
         primary_selection_state,
@@ -4234,6 +4244,7 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
         // the seat, not to the backend-generic shell.
         let now = std::time::Instant::now();
         let mut wait = comp.shell.next_housekeeping_in(now);
+        if comp.clipboard_persistence.active() || !comp.wm.backend().pending_quit.is_empty() { wait = wait.min(Duration::from_millis(5)); }
         wait = wait.min(request_poller.next_deadline().saturating_duration_since(now));
         wait = wait.min(comp.screenshot_poller.next_deadline().saturating_duration_since(now));
         if let Some(deadline) = crate::input::repeating_binding_deadline(&comp) {
@@ -4265,6 +4276,23 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
         }
         event_loop.dispatch(Some(wait), &mut comp)?;
         comp.dispatch_pending();
+        let killed = std::mem::take(&mut comp.wm.backend_mut().killed_clients);
+        if !killed.is_empty() {
+            // Server-initiated kills can happen outside display dispatch. The
+            // Rust Wayland backend otherwise defers resource destruction until
+            // another client becomes readable, leaving a hung app's frame up.
+            let mut source = display_source.as_source_mut();
+            // SAFETY: the registered display stays in its Generic source; no
+            // descriptor is moved or replaced, and event dispatch has returned.
+            let display = unsafe { source.get_mut() };
+            for client in killed {
+                // The client may already be gone; dispatch still drains its
+                // queued destructors and never blocks on a silent connection.
+                let _ = display.backend().dispatch_single_client(&mut comp, client);
+            }
+            drop(source);
+            comp.dispatch_pending();
+        }
     }
 
     // Whatever ended the loop — the root menu's Exit, a theme pick, a

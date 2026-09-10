@@ -221,6 +221,7 @@ pub struct SessionState {
     pub bindings: Vec<wm_config::Binding>,
     pub layer_bindings: std::collections::BTreeMap<String, Vec<wm_config::Binding>>,
     pub input: wm_config::InputConfig,
+    pub interaction: wm_core::InteractionConfig,
     pub monitor_rules: Vec<wm_config::hyprland::directive::Monitor>,
     pub keybindings: Vec<(KeyCombo, Action)>,
     /// Retained configuration refusals for the Hyprland-compatible
@@ -297,6 +298,7 @@ impl SessionState {
             },
             layer_bindings: config.layer_bindings.clone(),
             input: config.input.clone(),
+            interaction: config.interaction.clone(),
             monitor_rules: config.monitor_rules.clone(),
             keybindings: config.keybindings.clone(),
             config_diagnostics: config.diagnostics.clone(),
@@ -984,6 +986,7 @@ mod tests {
             bindings: Vec::new(),
             layer_bindings: BTreeMap::new(),
             input: wm_config::InputConfig::default(),
+            interaction: wm_core::InteractionConfig::default(),
             monitor_rules: Vec::new(),
             keybindings: Vec::new(),
             config_diagnostics: Vec::new(),

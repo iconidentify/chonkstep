@@ -153,7 +153,9 @@ fn ensure_x11_record(backend: &mut WaylandBackend, window: &X11Surface) -> WlWin
     // truth is what makes `Backend::window_geometry` answer correctly
     // at map time.
     let geometry = wm_rect(window.geometry(), backend.output_size);
-    backend.remember_window(id, WindowRecord::new(ManagedSurface::X11(window.clone()), geometry));
+    let mut record = WindowRecord::new(ManagedSurface::X11(window.clone()), geometry);
+    record.app_id = Some(window.class());
+    backend.remember_window(id, record);
     id
 }
 
@@ -407,6 +409,9 @@ impl XwmHandler for Compositor {
             return;
         };
         match property {
+            WmWindowProperty::Class => {
+                if let Some(record) = backend.windows.get_mut(&id) { record.app_id = Some(window.class()); }
+            }
             WmWindowProperty::Title => {
                 if let Some(record) = backend.windows.get_mut(&id) {
                     // Keep the record's cache current per its contract
@@ -621,6 +626,11 @@ impl XwmHandler for Compositor {
         // not a warning.
         match selection {
             SelectionTarget::Clipboard => {
+                let data = current_data_device_selection_userdata(&self.seat).map(|data| data.clone());
+                if let Some(data @ crate::selection::persistence::SelectionData::Memory(_)) = data {
+                    self.clipboard_persistence.send(&data, &mime_type, fd);
+                    return;
+                }
                 if let Err(error) = request_data_device_client_selection(&self.seat, mime_type, fd)
                 {
                     tracing::debug!(?error, "no Wayland clipboard data for an X11 paste");
@@ -635,6 +645,19 @@ impl XwmHandler for Compositor {
     }
 
     fn new_selection(&mut self, _xwm: XwmId, selection: SelectionTarget, mime_types: Vec<String>) {
+        if selection == SelectionTarget::Clipboard {
+            self.clipboard_persistence.clear();
+            if self.wm.mac_mode() && self.wm.interaction_config().clipboard_persistence {
+                let requests = self.clipboard_persistence.begin(None, mime_types.clone());
+                for (mime, fd) in requests {
+                    if let Some(xwm) = self.xwayland.wm.as_mut() {
+                        if let Err(error) = xwm.send_selection(selection, mime, fd, self.loop_handle.clone()) {
+                            tracing::warn!(?error, "could not request clipboard persistence from XWayland");
+                        }
+                    }
+                }
+            }
+        }
         // An X client copied something. Installing it as a
         // *compositor-provided* selection is what makes it visible to
         // Wayland clients: they see the offer and its mime types now,
@@ -646,15 +669,16 @@ impl XwmHandler for Compositor {
         let display_handle = self.display_handle.clone();
         match selection {
             SelectionTarget::Clipboard => {
-                set_data_device_selection(&display_handle, &self.seat, mime_types, ())
+                set_data_device_selection(&display_handle, &self.seat, mime_types, crate::selection::persistence::SelectionData::Bridge)
             }
             SelectionTarget::Primary => {
-                set_primary_selection(&display_handle, &self.seat, mime_types, ())
+                set_primary_selection(&display_handle, &self.seat, mime_types, crate::selection::persistence::SelectionData::Bridge)
             }
         }
     }
 
     fn cleared_selection(&mut self, _xwm: XwmId, selection: SelectionTarget) {
+        if selection == SelectionTarget::Clipboard { self.clipboard_persistence.x11_lost(); }
         // The X client that owned the selection dropped it (or exited).
         // Only OUR selection is cleared — the user-data check asks "is
         // the current selection one the compositor installed", i.e. one
@@ -664,7 +688,7 @@ impl XwmHandler for Compositor {
         let display_handle = self.display_handle.clone();
         match selection {
             SelectionTarget::Clipboard => {
-                if current_data_device_selection_userdata(&self.seat).is_some() {
+                if current_data_device_selection_userdata(&self.seat).is_some_and(|data| matches!(*data, crate::selection::persistence::SelectionData::Bridge)) {
                     clear_data_device_selection(&display_handle, &self.seat);
                 }
             }

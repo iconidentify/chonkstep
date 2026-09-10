@@ -210,6 +210,7 @@ impl WaylandBackend {
 }
 
 impl Backend for WaylandBackend {
+    fn supports_mac_interaction(&self) -> bool { true }
     type WindowId = WlWindowId;
     type FrameId = WlFrameId;
     type ShellId = WlShellId;
@@ -817,13 +818,11 @@ impl Backend for WaylandBackend {
     }
 
     fn supports_protocol(&self, window: Self::WindowId, protocol: WmProtocol) -> bool {
-        let _ = window;
         match protocol {
-            // Every xdg toplevel understands xdg_toplevel.close, and
-            // smithay's `X11Surface::close` handles the WM_DELETE-vs-
-            // destroy decision internally — so from `wm-core`'s
-            // perspective a polite close is always available.
-            WmProtocol::DeleteWindow => true,
+            WmProtocol::DeleteWindow => self.windows.get(&window).is_some_and(|record| match &record.surface {
+                ManagedSurface::Xdg(_) => true,
+                ManagedSurface::X11(surface) => surface.supports_delete_window(),
+            }),
             // No Wayland analog of `WM_TAKE_FOCUS` exists (focus is
             // compositor-assigned, never client-negotiated), so no
             // client "supports" it — `wm-core` then just focuses
@@ -1415,6 +1414,14 @@ impl Backend for WaylandBackend {
         self.pending_focus = Some(crate::state::FocusIntent::Window(window));
     }
 
+    fn send_quit(&mut self, window: Self::WindowId) {
+        if !self.pending_quit.iter().any(|(id, _)| *id == window) {
+            // Give the client the already-delivered Copy key before requesting
+            // shutdown. Actual pending transfers then govern the handoff.
+            self.pending_quit.push((window, std::time::Instant::now() + std::time::Duration::from_millis(100)));
+        }
+    }
+
     fn send_close(&mut self, window: Self::WindowId) {
         let Some(record) = self.windows.get(&window) else {
             return;
@@ -1450,6 +1457,7 @@ impl Backend for WaylandBackend {
                 // disconnect; the object fields are zero because no
                 // object misbehaved — the user did the killing.
                 if let Some(client) = toplevel.wl_surface().client() {
+                    if !self.killed_clients.contains(&client.id()) { self.killed_clients.push(client.id()); }
                     client.kill(
                         &self.display_handle,
                         ProtocolError {
@@ -1462,14 +1470,9 @@ impl Backend for WaylandBackend {
                 }
             }
             ManagedSurface::X11(surface) => {
-                // Smithay exposes no XKillClient; close() at least
-                // destroys the window outright for clients without
-                // WM_DELETE_WINDOW. A true connection kill for a hung
-                // XWayland client is a follow-up (needs the XWM's own
-                // connection, which the xwayland module owns).
                 if surface.alive() {
-                    if let Err(error) = surface.close() {
-                        tracing::warn!(?error, ?window, "X11 kill (close) failed");
+                    if let Err(error) = surface.kill_client() {
+                        tracing::warn!(?error, ?window, "X11 force quit failed");
                     }
                 }
             }

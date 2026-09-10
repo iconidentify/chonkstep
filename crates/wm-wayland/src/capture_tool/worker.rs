@@ -14,9 +14,13 @@ use std::sync::mpsc::{self, Receiver, SyncSender};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use wm_theme_api::DecorationBuffer;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Destination { Legacy, File, Clipboard }
+
 pub(super) enum Job {
-    Screenshot(DecorationBuffer),
+    Screenshot(DecorationBuffer, Destination),
     Record {
+        policy: Destination,
         output: String,
         geometry: String,
         filter: String,
@@ -32,6 +36,7 @@ pub(super) enum Update {
 }
 
 struct Recording {
+    review: bool,
     child: Child,
     partial: PathBuf,
     destination: PathBuf,
@@ -509,12 +514,18 @@ pub(super) fn start() -> (
         let mut recording: Option<Recording> = None;
         let mut clipboard = Clipboard::default();
         let mut background = Background::default();
+        let mut temporary = std::collections::HashSet::new();
         loop {
             // Reclaim completed launch slots and service clipboard deadlines
             // before blocking, without sleeping through unrelated commands.
             background.poll();
             for result in clipboard.poll(Instant::now(), spawn_clipboard) {
                 let _ = updates.try_send(Update::ScreenshotDone);
+                if temporary.remove(&result.path) {
+                    let _ = std::fs::remove_file(&result.path);
+                    background.notify(if result.copied { "Screenshot copied" } else { "Screenshot could not be copied" }, "");
+                    continue;
+                }
                 background.notify_with_icon(
                     if result.copied {
                         "Screenshot saved and copied"
@@ -538,14 +549,26 @@ pub(super) fn start() -> (
                     .map_err(|_| mpsc::RecvTimeoutError::Disconnected),
             };
             match job {
-                Ok(Job::Screenshot(pixels)) => {
-                    match screenshot(pixels) {
+                Ok(Job::Screenshot(pixels, destination)) => {
+                    match screenshot(pixels, destination) {
                         Ok(path) => {
                             // The file is synced and published: opening it
                             // need not wait for the clipboard liveness check.
-                            background.review(ReviewKind::Screenshot, path.clone());
+                            if destination == Destination::File {
+                                let _ = updates.try_send(Update::ScreenshotDone);
+                                background.notify_with_icon("Screenshot saved", &path.display().to_string(), NotificationIcon::Image(&path));
+                                continue;
+                            }
+                            if destination == Destination::Legacy {
+                                background.review(ReviewKind::Screenshot, path.clone());
+                            } else { temporary.insert(path.clone()); }
                             if let Err(path) = clipboard.enqueue(path) {
                                 let _ = updates.try_send(Update::ScreenshotDone);
+                                if temporary.remove(&path) {
+                                    let _ = std::fs::remove_file(&path);
+                                    background.notify("Screenshot could not be copied", "Clipboard busy");
+                                    continue;
+                                }
                                 background.notify_with_icon(
                                     "Screenshot saved (clipboard unavailable)",
                                     &path.display().to_string(),
@@ -560,12 +583,13 @@ pub(super) fn start() -> (
                     }
                 }
                 Ok(Job::Record {
+                    policy,
                     output,
                     geometry,
                     filter,
                 }) => {
                     if recording.is_none() {
-                        match record(&output, &geometry, &filter) {
+                        match record(&output, &geometry, &filter, policy) {
                             Ok(child) => recording = Some(child),
                             Err(error) => {
                                 background.notify("Recording could not start", &error);
@@ -576,7 +600,8 @@ pub(super) fn start() -> (
                 }
                 Ok(Job::Stop) => {
                     if let Some(active) = recording.take() {
-                        finish(active, &mut background, true);
+                        let review = active.review;
+                        finish(active, &mut background, review);
                     }
                     let _ = updates.try_send(Update::RecordingEnded);
                 }
@@ -588,6 +613,7 @@ pub(super) fn start() -> (
                         finish(active, &mut background, false);
                     }
                     clipboard.shutdown();
+                    for path in temporary.drain() { let _ = std::fs::remove_file(path); }
                     background.stop_notifications();
                     // Review windows belong to the user: do not kill or wait
                     // for them at logout. The exiting compositor relinquishes
@@ -656,8 +682,7 @@ fn directory(recording: bool) -> Result<PathBuf, String> {
 /// Reserve a unique, private temporary file on the destination filesystem.
 /// Publishing uses a hard link (no replacement), so concurrent captures cannot
 /// overwrite an existing screenshot even if clocks move backwards.
-fn paths(recording: bool, extension: &str) -> Result<(PathBuf, PathBuf, File), String> {
-    let directory = directory(recording)?;
+fn paths_at(directory: PathBuf, recording: bool, extension: &str) -> Result<(PathBuf, PathBuf, File), String> {
     std::fs::create_dir_all(&directory).map_err(|e| e.to_string())?;
     let stamp = Command::new("date")
         .arg("+%Y-%m-%d at %H.%M.%S")
@@ -689,8 +714,27 @@ fn paths(recording: bool, extension: &str) -> Result<(PathBuf, PathBuf, File), S
     Ok((partial, destination, file))
 }
 
-fn screenshot(pixels: DecorationBuffer) -> Result<PathBuf, String> {
-    let (partial, destination, mut file) = paths(false, "png")?;
+fn capture_directory(policy: Destination, recording: bool) -> Result<PathBuf, String> {
+    Ok(match policy {
+        Destination::Legacy => directory(recording)?,
+        Destination::Clipboard => std::env::var_os("XDG_RUNTIME_DIR")
+            .map(PathBuf::from).filter(|p| p.is_absolute())
+            .ok_or("No private runtime directory for clipboard capture")?,
+        Destination::File => {
+            if std::env::var_os(if recording { "OMARCHY_SCREENRECORD_DIR" } else { "OMARCHY_SCREENSHOT_DIR" }).is_some_and(|p| !p.is_empty()) { directory(recording)? }
+            else {
+                Command::new("xdg-user-dir").arg("DESKTOP").output().ok()
+                    .filter(|o| o.status.success()).and_then(|o| String::from_utf8(o.stdout).ok())
+                    .map(|s| PathBuf::from(s.trim())).filter(|p| p.is_absolute())
+                    .or_else(|| std::env::var_os("HOME").map(|p| PathBuf::from(p).join("Desktop")))
+                    .ok_or("No Desktop directory configured")?
+            }
+        }
+    })
+}
+
+fn screenshot(pixels: DecorationBuffer, policy: Destination) -> Result<PathBuf, String> {
+    let (partial, destination, mut file) = paths_at(capture_directory(policy, false)?, false, "png")?;
     let result = (|| {
         write_screenshot_png(pixels, &mut file)?;
         file.sync_all().map_err(|e| e.to_string())?;
@@ -860,8 +904,8 @@ impl<W: Write> Write for CheckedWriter<W> {
     }
 }
 
-fn record(output: &str, geometry: &str, filter: &str) -> Result<Recording, String> {
-    let (partial, destination, file) = paths(true, "mp4")?;
+fn record(output: &str, geometry: &str, filter: &str, policy: Destination) -> Result<Recording, String> {
+    let (partial, destination, file) = paths_at(capture_directory(policy, true)?, true, "mp4")?;
     drop(file);
     let log = partial.with_extension("log");
     let stderr = match OpenOptions::new()
@@ -912,6 +956,7 @@ fn record(output: &str, geometry: &str, filter: &str) -> Result<Recording, Strin
         .spawn();
     match child {
         Ok(child) => Ok(Recording {
+            review: policy == Destination::Legacy,
             child,
             partial,
             destination,

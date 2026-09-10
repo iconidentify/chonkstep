@@ -129,6 +129,10 @@ fn main() {
     // their session, because with the WM refusing to start there is no
     // terminal to fix the typo from.
     let config = wm_config::load();
+    if config.interaction.mode == wm_core::InteractionMode::Mac {
+        eprintln!("Mac interaction requires chonkstep-wayland; X11 applications are supported through XWayland. Use interaction_mode = 'desktop' for the standalone X11 session.");
+        std::process::exit(1);
+    }
 
     // Everything a user can change without restarting, resolved in one
     // place and by one set of rules — the same call a live reload makes
@@ -251,14 +255,16 @@ fn main() {
         let requests = request_poller.poll(Instant::now());
         if requests.reload {
             tracing::info!("reload requested — re-reading the config and applying it in place");
-            let next = SessionState::resolve(&wm_config::load());
-            // Before the shell, so that any application relaunched as a
-            // consequence of the new state already sees the new
-            // settings. Republishing is free when nothing moved — the
-            // manager compares and declines to write.
-            published_appearance = next.appearance;
-            publish_appearance(&mut xsettings, &next);
-            shell.apply_session_state(&mut wm, next);
+            match wm_config::inspect(None) {
+                Ok(config) if config.interaction.mode != wm_core::InteractionMode::Mac => {
+                    let next = SessionState::resolve(&config);
+                    published_appearance = next.appearance;
+                    publish_appearance(&mut xsettings, &next);
+                    shell.apply_session_state(&mut wm, next);
+                }
+                Ok(_) => tracing::warn!("Mac interaction requires chonkstep-wayland; retaining working configuration"),
+                Err(error) => tracing::warn!(%error, "config reload rejected; retaining working configuration"),
+            }
         }
 
         if requests.restart {

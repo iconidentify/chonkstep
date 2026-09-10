@@ -15,6 +15,7 @@ use crate::hittest::{hit_test, HitTarget};
 use crate::placement::{self, FloatPolicy, PlacementPolicy};
 use crate::resize;
 use crate::snap;
+mod mac;
 use crate::types::{
     BackendEvent, ClientChrome, DragHandle, KeyCombo, Modifiers, MouseButton, NetState, NetStateAction,
     NetStateSnapshot, SurfaceRef, WindowType,
@@ -151,6 +152,10 @@ pub enum Notification {
 /// synchronous, doing no I/O of its own beyond calls through `Backend`
 /// and `ThemeEngine`.
 pub struct WindowManager<B: Backend> {
+    interaction: crate::InteractionConfig,
+    mac_hidden: HashSet<ClientId>,
+    mac_fullscreen: HashMap<ClientId, (usize, usize)>,
+    desktop_reveal: Option<(HashSet<ClientId>, Option<ClientId>)>,
     backend: B,
     theme: Box<dyn ThemeEngine>,
     clients: SlotMap<ClientId, Client<B>>,
@@ -325,6 +330,8 @@ pub struct WindowManager<B: Backend> {
 struct CycleSession {
     order: Vec<ClientId>,
     selected: usize,
+    modifier: Modifiers,
+    applications: bool,
 }
 
 impl<B: Backend> WindowManager<B> {
@@ -391,6 +398,10 @@ impl<B: Backend> WindowManager<B> {
             layout_resize_snapshot: None,
             layout_statistics: crate::LayoutStatistics::default(),
             cycle: None,
+            interaction: crate::InteractionConfig::default(),
+            mac_hidden: HashSet::new(),
+            mac_fullscreen: HashMap::new(),
+            desktop_reveal: None,
             managed_order: Vec::new(),
             focus_history: Vec::new(),
             fullscreen_restore: HashMap::new(),
@@ -852,6 +863,7 @@ impl<B: Backend> WindowManager<B> {
     /// and calling the matching public method when its `KeyPress`
     /// arrives. Call once after construction.
     pub fn bind_default_keys(&mut self) {
+        if self.mac_mode() { return; }
         self.backend.grab_key(KeyCombo { keysym: XK_TAB, modifiers: Modifiers::ALT });
         self.backend.grab_key(KeyCombo { keysym: XK_TAB, modifiers: Modifiers::ALT | Modifiers::SHIFT });
     }
@@ -1011,6 +1023,7 @@ impl<B: Backend> WindowManager<B> {
         if !self.clients.contains_key(id) {
             return false;
         }
+        self.reveal_application(id);
         self.focus_client_with(id, false);
         true
     }
@@ -1026,6 +1039,7 @@ impl<B: Backend> WindowManager<B> {
     /// silently refuse it and leave the switcher pointing at a window
     /// that never got focus.
     fn is_focusable(&self, id: ClientId) -> bool {
+        if self.mac_client_hidden(id) { return false; }
         self.clients.get(id).is_some_and(|client| {
             client.lifecycle == Lifecycle::Normal
                 && (client.workspace == self.current_workspace
@@ -1204,6 +1218,7 @@ impl<B: Backend> WindowManager<B> {
         if self.workspace_count <= 1 || workspace >= self.workspace_count {
             return false;
         }
+        if self.mac_fullscreen.values().any(|(_, space)| *space == workspace) { return false; }
         self.end_active_drag();
         let removed = self.layouts.remove(workspace);
         let target = workspace.saturating_sub(1).min(self.layouts.len() - 1);
@@ -1217,6 +1232,10 @@ impl<B: Backend> WindowManager<B> {
                 index - usize::from(index > workspace)
             }
         };
+        for (origin, space) in self.mac_fullscreen.values_mut() {
+            *origin = remap(*origin);
+            *space = remap(*space);
+        }
         let previous = self.current_workspace;
         self.current_workspace = remap(previous);
         self.workspace_count -= 1;
@@ -1340,6 +1359,9 @@ impl<B: Backend> WindowManager<B> {
     /// next/previous workspace" window actions. A no-op if `id` is
     /// already on `workspace` or if the index is out of range.
     pub fn move_client_to_workspace(&mut self, id: ClientId, workspace: usize) {
+        if self.mac_fullscreen.get(&id).is_some_and(|(_, space)| *space != workspace) {
+            self.unfullscreen(id);
+        }
         self.cancel_client_layout_interaction(id);
         for member in self.transient_family(id) {
             self.move_one_client_to_workspace(member, workspace);
@@ -1850,6 +1872,10 @@ impl<B: Backend> WindowManager<B> {
             self.idle_inhibit_clients.insert(id);
         }
         self.window_index.insert(window, id);
+        if self.mac_mode() && self.mac_hidden.iter().any(|other| self.same_application(*other, id)) {
+            self.mac_hidden.insert(id);
+            self.hide_client_surface(id);
+        }
         if let Some(frame) = frame {
             self.frame_index.insert(frame, id);
         }
@@ -1977,6 +2003,11 @@ impl<B: Backend> WindowManager<B> {
         // invariants this vector has are that every id in it is live
         // and that none repeats, and this is the removal half.
         self.focus_history.retain(|&other| other != id);
+        self.mac_hidden.remove(&id);
+        if let Some((ids, focus)) = self.desktop_reveal.as_mut() {
+            ids.remove(&id);
+            if *focus == Some(id) { *focus = None; }
+        }
         if self.active_move.as_ref().is_some_and(|m| m.client == id)
             || self.active_resize.as_ref().is_some_and(|r| r.client == id)
             || self.layout_drop.is_some_and(|(_, target)| target == id)
@@ -1998,6 +2029,7 @@ impl<B: Backend> WindowManager<B> {
                 self.backend.destroy_decoration(frame);
             }
         }
+        self.mac_leave_fullscreen(id);
         for (_, child) in &mut self.clients {
             if child.parent == Some(id) {
                 child.parent = None;
@@ -3196,6 +3228,7 @@ impl<B: Backend> WindowManager<B> {
         self.raise_client(id);
         self.publish_client_net_state(id);
         self.reflow_client_workspace(id);
+        self.mac_enter_fullscreen(id);
         tracing::info!(?id, "entered fullscreen");
     }
 
@@ -3220,6 +3253,7 @@ impl<B: Backend> WindowManager<B> {
         self.reflow_frame(id);
         self.publish_client_net_state(id);
         self.reflow_client_workspace(id);
+        self.mac_leave_fullscreen(id);
         tracing::info!(?id, "left fullscreen");
     }
 
@@ -3337,6 +3371,7 @@ impl<B: Backend> WindowManager<B> {
             tracing::debug!(?id, "window rule refused an activation focus request");
             return;
         }
+        self.reveal_application(id);
         if self.clients.get(id).is_some_and(|c| c.lifecycle == Lifecycle::Miniaturized) {
             self.deminiaturize(id);
         }
@@ -3526,7 +3561,7 @@ impl<B: Backend> WindowManager<B> {
     /// it is).
     fn handle_key_press(&mut self, combo: KeyCombo) {
         match combo.keysym {
-            XK_TAB => {
+            XK_TAB if self.cycle.as_ref().is_none_or(|cycle| !cycle.applications) => {
                 if combo.modifiers.contains(Modifiers::SHIFT) {
                     self.cycle_step(-1);
                 } else if combo.modifiers.contains(Modifiers::ALT) {
@@ -3539,13 +3574,17 @@ impl<B: Backend> WindowManager<B> {
             // lost (it can slip into the gap before the modal keyboard
             // grab activates) — commit rather than leaving the panel
             // stuck on screen.
-            _ if self.cycle.is_some() && !combo.modifiers.contains(Modifiers::ALT) => self.cycle_end(true),
+            _ if self.cycle.as_ref().is_some_and(|cycle| !combo.modifiers.contains(cycle.modifier)) => self.cycle_end(true),
             _ => {}
         }
     }
 
     fn handle_key_release(&mut self, combo: KeyCombo) {
-        if self.cycle.is_some() && matches!(combo.keysym, XK_ALT_L | XK_ALT_R) {
+        if self.cycle.as_ref().is_some_and(|cycle| {
+            if cycle.modifier == Modifiers::SUPER {
+                matches!(combo.keysym, 0xffeb | 0xffec) && !combo.modifiers.contains(Modifiers::SUPER)
+            } else { matches!(combo.keysym, XK_ALT_L | XK_ALT_R) }
+        }) {
             self.cycle_end(true);
         }
     }
@@ -3583,7 +3622,7 @@ impl<B: Backend> WindowManager<B> {
             // backward wrap to the oldest candidate.
             let selected = 0;
             self.backend.grab_keyboard();
-            self.cycle = Some(CycleSession { order, selected });
+            self.cycle = Some(CycleSession { order, selected, modifier: Modifiers::ALT, applications: false });
         }
         let session = self.cycle.as_mut().expect("session exists or was just created");
         session.selected = (session.selected as i32 + direction).rem_euclid(session.order.len() as i32) as usize;
@@ -3600,6 +3639,7 @@ impl<B: Backend> WindowManager<B> {
         self.backend.ungrab_keyboard();
         if commit {
             if let Some(&id) = session.order.get(session.selected) {
+                if session.applications { self.reveal_application(id); }
                 if let Some(client) = self.clients.get(id) {
                     let window = client.window;
                     let content_size = client.geometry.size;
@@ -3637,7 +3677,8 @@ impl<B: Backend> WindowManager<B> {
         let entries = session
             .order
             .iter()
-            .map(|&id| (id, self.clients.get(id).map(|c| c.title.clone()).unwrap_or_default()))
+            .map(|&id| (id, if session.applications { self.application_key(id) }
+                else { self.clients.get(id).map(|c| c.title.clone()).unwrap_or_default() }))
             .collect();
         Some((entries, session.selected))
     }
@@ -3730,6 +3771,7 @@ impl<B: Backend> WindowManager<B> {
     /// existing caller bit-identical through [`Self::focus_client`].
     fn focus_client_with(&mut self, id: ClientId, raise: bool) {
         let id = self.modal_blocker(id).unwrap_or(id);
+        if self.mac_client_hidden(id) { return; }
         if self
             .clients
             .get(id)
@@ -3846,6 +3888,7 @@ impl<B: Backend> WindowManager<B> {
     /// switch, deminiaturize, unshade — means the same thing and none
     /// of them should have to know which kind of client it is holding.
     fn show_client_surface(&mut self, id: ClientId) {
+        if self.mac_client_hidden(id) { return; }
         let Some(client) = self.clients.get(id) else {
             return;
         };
@@ -3991,7 +4034,7 @@ impl<B: Backend> WindowManager<B> {
         // be, rather than assuming the transition left it right. Caught
         // by `a_client_that_starts_drawing_its_own_chrome_loses_its_frame_in_place`,
         // which found the window gone from the screen entirely.
-        let visible = self.clients.get(id).is_some_and(|client| {
+        let visible = !self.mac_client_hidden(id) && self.clients.get(id).is_some_and(|client| {
             client.lifecycle == Lifecycle::Normal
                 && (client.workspace == self.current_workspace || client.flags.contains(ClientFlags::STICKY))
         });
@@ -9455,4 +9498,72 @@ mod tests {
         );
     }
     mod spatial;
+    fn mac_windows() -> (WindowManager<FakeBackend>, [ClientId; 3]) {
+        let mut backend = FakeBackend::new();
+        let windows = [backend.create_window(), backend.create_window(), backend.create_window()];
+        for (window, app) in windows.into_iter().zip(["editor", "browser", "editor"]) {
+            backend.window_classes.insert(window, app.into());
+        }
+        let mut wm = wm(backend);
+        wm.set_interaction_config(crate::InteractionConfig { mode: crate::InteractionMode::Mac, ..Default::default() });
+        for window in windows { wm.dispatch(BackendEvent::MapRequest(window)); }
+        let ids = windows.map(|window| wm.client_for_window(window).unwrap());
+        (wm, ids)
+    }
+
+    #[test]
+    fn mac_switcher_groups_apps_and_restores_hidden_windows_on_command_release() {
+        let (mut wm, [first, browser, last]) = mac_windows();
+        wm.hide_application(false);
+        assert!(wm.mac_client_hidden(first) && wm.mac_client_hidden(last));
+        assert_eq!(wm.focused_client(), Some(browser));
+        wm.cycle_applications(1);
+        assert_eq!(wm.cycle_state().unwrap().0.len(), 2);
+        // Releasing one Command while the other remains held cannot commit.
+        wm.dispatch(BackendEvent::KeyRelease(KeyCombo { keysym: 0xffeb, modifiers: Modifiers::SUPER }));
+        assert!(wm.cycle_state().is_some());
+        wm.dispatch(BackendEvent::KeyRelease(KeyCombo { keysym: 0xffec, modifiers: Modifiers::empty() }));
+        assert!(wm.cycle_state().is_none());
+        assert!(!wm.mac_client_hidden(first) && !wm.mac_client_hidden(last));
+        assert_eq!(wm.focused_client(), Some(last));
+        wm.cycle_application_windows(1);
+        assert_eq!(wm.focused_client(), Some(first));
+    }
+
+    #[test]
+    fn mac_show_desktop_hide_others_and_minimize_are_distinct() {
+        let (mut wm, [first, browser, last]) = mac_windows();
+        wm.miniaturize(first);
+        wm.hide_application(true);
+        assert_eq!(wm.focused_client(), Some(last));
+        assert!(wm.mac_client_hidden(browser));
+        wm.toggle_show_desktop();
+        assert!(!wm.is_focusable(last));
+        wm.toggle_show_desktop();
+        assert_eq!(wm.focused_client(), Some(last));
+        assert!(wm.mac_client_hidden(browser));
+        assert_eq!(wm.client(first).unwrap().lifecycle, Lifecycle::Miniaturized);
+        wm.set_interaction_config(crate::InteractionConfig::default());
+        assert!(wm.is_focusable(browser));
+        assert_eq!(wm.client(first).unwrap().lifecycle, Lifecycle::Miniaturized);
+    }
+
+    #[test]
+    fn mac_fullscreen_space_round_trips_and_compacts_when_window_closes() {
+        let (mut wm, [first, _, last]) = mac_windows();
+        let geometry = wm.client(last).unwrap().geometry;
+        wm.fullscreen(last);
+        assert_eq!((wm.workspace_count(),wm.current_workspace()), (2,1));
+        assert_eq!(wm.client(first).unwrap().workspace,0);
+        assert!(!wm.remove_workspace(1), "a live fullscreen Space is exited through its window");
+        wm.unfullscreen(last);
+        assert_eq!((wm.workspace_count(),wm.current_workspace()), (1,0));
+        assert_eq!(wm.client(last).unwrap().geometry,geometry);
+        wm.fullscreen(last);
+        let window=wm.client(last).unwrap().window;
+        wm.dispatch(BackendEvent::Destroyed(window));
+        assert_eq!((wm.workspace_count(),wm.current_workspace()), (1,0));
+        assert!(wm.mac_fullscreen.is_empty());
+    }
+
 }

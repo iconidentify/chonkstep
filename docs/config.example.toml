@@ -24,6 +24,12 @@
 # the socket they were connected to.
 
 # ============================================================
+# MAC INTERACTION (chonkstep-wayland, including XWayland applications)
+# interaction_mode = "mac"
+# Remove any explicit keymap setting when enabling Mac interaction.
+# Set interaction_mode = "desktop" to return to the existing profile.
+# See docs/mac-mode.md for app overrides, service providers, and coverage.
+#
 # PRESETS -- one line for a whole posture
 # ============================================================
 #

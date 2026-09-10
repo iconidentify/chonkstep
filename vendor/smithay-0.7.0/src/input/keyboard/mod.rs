@@ -1058,6 +1058,11 @@ impl<D: SeatHandler + 'static> KeyboardHandle<D> {
         });
     }
 
+    /// Whether this key currently has a client-visible press awaiting release.
+    pub fn forwarded_key_is_pressed(&self, key: Keycode) -> bool {
+        self.arc.internal.lock().unwrap().forwarded_pressed_keys.contains(&key)
+    }
+
     /// Return the key codes of the currently pressed keys.
     pub fn pressed_keys(&self) -> HashSet<Keycode> {
         let guard = self.arc.internal.lock().unwrap();

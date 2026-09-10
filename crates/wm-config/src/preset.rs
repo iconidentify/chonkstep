@@ -344,6 +344,79 @@ pub fn omarchy_keybindings() -> Vec<(wm_core::KeyCombo, Action)> {
         .collect()
 }
 
+/// Global Mac commands. Application shortcuts deliberately remain client-owned.
+pub const MAC_BINDINGS: &[(&str, &str)] = &[
+    ("cmd+tab", "application-next"),
+    ("cmd+shift+tab", "application-prev"),
+    ("cmd+grave", "application-window-next"),
+    ("cmd+shift+grave", "application-window-prev"),
+    ("cmd+q", "quit-application"),
+    ("cmd+opt+escape", "force-quit-applications"),
+    ("cmd+h", "hide-application"),
+    ("cmd+opt+h", "hide-other-applications"),
+    ("cmd+m", "miniaturize"),
+    ("cmd+opt+m", "miniaturize-application"),
+    ("cmd+ctrl+f", "toggle-fullscreen"),
+    ("ctrl+up", "overview"),
+    ("f3", "overview"),
+    ("ctrl+down", "application-overview"),
+    ("ctrl+left", "workspace-prev"),
+    ("ctrl+right", "workspace-next"),
+    ("cmd+f3", "show-desktop"),
+    ("f11", "show-desktop"),
+    ("cmd+shift+3", "capture-screen"),
+    ("cmd+shift+4", "capture-area"),
+    ("cmd+shift+5", "capture"),
+    ("cmd+ctrl+shift+3", "capture-screen-clipboard"),
+    ("cmd+ctrl+shift+4", "capture-area-clipboard"),
+    ("cmd+ctrl+escape", "capture-stop"),
+    ("cmd+ctrl+q", "run mac-lock"),
+    ("volumeup", "run mac-volume-up"),
+    ("volumedown", "run mac-volume-down"),
+    ("volumemute", "run mac-volume-mute"),
+    ("opt+shift+volumeup", "run mac-volume-up-fine"),
+    ("opt+shift+volumedown", "run mac-volume-down-fine"),
+    ("brightnessup", "run mac-brightness-up"),
+    ("brightnessdown", "run mac-brightness-down"),
+    ("opt+shift+brightnessup", "run mac-brightness-up-fine"),
+    ("opt+shift+brightnessdown", "run mac-brightness-down-fine"),
+    ("kbdbrightnessup", "run mac-keyboard-brightness-up"),
+    ("kbdbrightnessdown", "run mac-keyboard-brightness-down"),
+    ("playpause", "run mac-play-pause"),
+    ("audionext", "run mac-media-next"),
+    ("audioprev", "run mac-media-prev"),
+    ("cmd+space", "root-menu"),
+    ("cmd+opt+d", "toggle-dock"),
+];
+
+/// Native service providers can be replaced individually through `[commands]`.
+pub fn mac_commands() -> BTreeMap<String, Vec<String>> {
+    [
+        ("mac-lock", vec!["swaylock", "-f"]),
+        ("mac-volume-up", vec!["wpctl", "set-volume", "-l", "1.0", "@DEFAULT_AUDIO_SINK@", "5%+"]),
+        ("mac-volume-down", vec!["wpctl", "set-volume", "@DEFAULT_AUDIO_SINK@", "5%-"]),
+        ("mac-volume-mute", vec!["wpctl", "set-mute", "@DEFAULT_AUDIO_SINK@", "toggle"]),
+        ("mac-volume-up-fine", vec!["wpctl", "set-volume", "-l", "1.0", "@DEFAULT_AUDIO_SINK@", "1%+"]),
+        ("mac-volume-down-fine", vec!["wpctl", "set-volume", "@DEFAULT_AUDIO_SINK@", "1%-"]),
+        ("mac-brightness-up", vec!["brightnessctl", "set", "+5%"]),
+        ("mac-brightness-down", vec!["brightnessctl", "set", "5%-"]),
+        ("mac-brightness-up-fine", vec!["brightnessctl", "set", "+1%"]),
+        ("mac-brightness-down-fine", vec!["brightnessctl", "set", "1%-"]),
+        ("mac-keyboard-brightness-up", vec!["brightnessctl", "--device=*kbd_backlight", "set", "+5%"]),
+        ("mac-keyboard-brightness-down", vec!["brightnessctl", "--device=*kbd_backlight", "set", "5%-"]),
+        ("mac-play-pause", vec!["playerctl", "play-pause"]),
+        ("mac-media-next", vec!["playerctl", "next"]),
+        ("mac-media-prev", vec!["playerctl", "previous"]),
+    ].into_iter().map(|(name, argv)| (name.into(), argv.into_iter().map(str::to_owned).collect())).collect()
+}
+
+pub fn mac_keybindings() -> Vec<(wm_core::KeyCombo, Action)> {
+    MAC_BINDINGS.iter().map(|(chord, action)| (
+        parse_key(chord).expect("Mac shortcut must parse"),
+        crate::action_from_name(action).expect("Mac action must parse"),
+    )).collect()
+}
+
 /// The Omarchy keymap: every chord from Omarchy's own `bindings/*.lua`
 /// that has a true chonkstep answer, paired with the action name a
 /// config file would spell.

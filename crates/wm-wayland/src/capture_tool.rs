@@ -27,7 +27,7 @@ use wm_theme_api::{Point, Rect, Size};
 
 use crate::renderer::SceneElement;
 use crate::state::{Compositor, StackEntry, WaylandBackend, WlWindowId};
-use worker::{Job, Update};
+use worker::{Destination, Job, Update};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Mode {
@@ -49,6 +49,7 @@ impl Mode {
 
 pub(crate) struct Overlay {
     mode: Mode,
+    destination: Destination,
     quick: bool,
     /// A recording indicator is clickable but must never grab client input.
     badge: bool,
@@ -153,6 +154,12 @@ pub(crate) fn owns_cursor(backend: &WaylandBackend, at: Point) -> bool {
 }
 
 pub(crate) fn begin(comp: &mut Compositor, mode: CaptureMode) {
+    let (mode, destination) = match mode {
+        CaptureMode::ScreenClipboard => (CaptureMode::Screen, Destination::Clipboard),
+        CaptureMode::AreaClipboard => (CaptureMode::Area, Destination::Clipboard),
+        CaptureMode::WindowClipboard => (CaptureMode::Window, Destination::Clipboard),
+        mode => (mode, if comp.wm.mac_mode() { Destination::File } else { Destination::Legacy }),
+    };
     if mode == CaptureMode::Stop {
         stop(comp);
         return;
@@ -183,7 +190,7 @@ pub(crate) fn begin(comp: &mut Compositor, mode: CaptureMode) {
     }
     if mode == CaptureMode::Screen {
         let rect = Rect::new(Point::new(0, 0), comp.wm.backend().output_size);
-        photograph(comp, rect, None);
+        photograph(comp, rect, None, destination);
         return;
     }
     let at = pointer(comp);
@@ -215,6 +222,7 @@ pub(crate) fn begin(comp: &mut Compositor, mode: CaptureMode) {
     };
     comp.wm.backend_mut().capture_ui = Some(Overlay {
         mode: selected_mode,
+        destination,
         quick: mode != CaptureMode::Toolbar,
         badge: false,
         monitor,
@@ -257,7 +265,7 @@ fn dismiss(comp: &mut Compositor) {
     crate::input::sync_pointer_focus(comp);
 }
 
-fn photograph(comp: &mut Compositor, rect: Rect, window: Option<WlWindowId>) -> bool {
+fn photograph(comp: &mut Compositor, rect: Rect, window: Option<WlWindowId>, destination: Destination) -> bool {
     // Bound readback memory as well as worker queue length, including the image
     // currently being encoded. Repeated shortcuts cannot accumulate 4K buffers.
     if comp.capture_tool.screenshots >= 2 {
@@ -268,7 +276,7 @@ fn photograph(comp: &mut Compositor, rect: Rect, window: Option<WlWindowId>) -> 
     }
     match crate::capture::capture_user_pixels(comp, rect, window) {
         Some(pixels) => {
-            if comp.capture_tool.submit(Job::Screenshot(pixels)) {
+            if comp.capture_tool.submit(Job::Screenshot(pixels, destination)) {
                 comp.capture_tool.screenshots += 1;
                 return true;
             }
@@ -286,6 +294,10 @@ fn commit(comp: &mut Compositor) {
         return;
     };
     let mode = ui.mode;
+    let destination = if ui.destination == Destination::File && comp.wm.mac_mode()
+        && comp.seat.get_keyboard().is_some_and(|keyboard| keyboard.modifier_state().ctrl) {
+        Destination::Clipboard
+    } else { ui.destination };
     let Some(rect) = ui.selection.filter(|r| r.size.w > 0 && r.size.h > 0) else {
         return;
     };
@@ -327,6 +339,7 @@ fn commit(comp: &mut Compositor) {
             return;
         };
         if comp.capture_tool.submit(Job::Record {
+            policy: destination,
             output,
             geometry,
             filter,
@@ -339,6 +352,7 @@ fn commit(comp: &mut Compositor) {
             let width = ((280.0 * scale) as u32).min(monitor.size.w);
             comp.wm.backend_mut().capture_ui = Some(Overlay {
                 mode,
+                destination,
                 quick: false,
                 badge: true,
                 monitor,
@@ -371,7 +385,7 @@ fn commit(comp: &mut Compositor) {
             }
             repaint(comp);
         }
-    } else if photograph(comp, rect, window) {
+    } else if photograph(comp, rect, window, destination) {
         dismiss(comp);
     }
 }

@@ -322,6 +322,19 @@ logind already hands the active session its devices. On a machine
 without logind, enable `seatd` and join the `seat` group; the installer
 prints this only when it finds logind missing.
 
+### Mac keyboard interaction
+
+The Wayland session supports an opt-in Mac interaction profile:
+
+```toml
+interaction_mode = "mac"
+```
+
+It provides app-aware Command shortcuts, terminal copy/paste, application
+switching and hiding, fullscreen desktops, and Mac screenshot destinations.
+It also works with `desktop = "omarchy"`. See [Mac mode](docs/mac-mode.md) for
+setup, tested workflows, providers, and the remaining macOS parity work.
+
 ### One line: chonkstep as Omarchy's window manager
 
 Everything in the rest of this section is a switch you can throw

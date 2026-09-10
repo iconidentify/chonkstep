@@ -1099,6 +1099,7 @@ pub struct Shell<B: Backend + PopupHost<PopupId = B::ShellId>> {
     /// `run_action` `take()`s, so a stale combo cannot leak into a
     /// later session.
     overview_key: Option<KeyCombo>,
+    overview_application: Option<ClientId>,
     /// Armed on press, invalidated whenever Overview's entry set changes.
     overview_close_pressed: Option<usize>,
     /// Every terminal this shell launched that has not been observed
@@ -1358,6 +1359,7 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
             active_layer_namespaces: std::collections::BTreeMap::new(),
             scoped_grabbed: Vec::new(),
             overview_key: None,
+            overview_application: None,
             overview_close_pressed: None,
             grabbed: to_grab,
             layout,
@@ -1421,12 +1423,17 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
     }
 
     fn apply_session_state_inner(&mut self, wm: &mut WindowManager<B>, next: SessionState, reload_menu: bool) {
+        if next.interaction.mode == wm_core::InteractionMode::Mac && !wm.backend().supports_mac_interaction() {
+            tracing::warn!("Mac interaction requires chonkstep-wayland (including XWayland apps); retaining working configuration");
+            return;
+        }
         // 1. Policy.
         wm.set_focus_policy(next.focus);
         wm.set_raise_on_focus(next.autoraise);
         wm.set_placement_policy(next.placement);
         wm.set_snap_threshold(next.edge_resistance);
         wm.set_drag_modifier(next.drag_modifier);
+        wm.set_interaction_config(next.interaction.clone());
         // The scale belongs in this list rather than in the metrics
         // step below: `wm-core` re-lays-out nothing on it — every pixel
         // it draws comes pre-scaled from the theme engine step 3 swaps
@@ -1600,7 +1607,13 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
     /// explicit override. This also retains a scale selected through
     /// Omarchy's monitor UI across its subsequent theme-file rewrite.
     fn resolve_live_config(&self) -> SessionState {
-        SessionState::resolve_with_scale_default(&wm_config::load(), self.state.scale)
+        match wm_config::inspect(None) {
+            Ok(config) => SessionState::resolve_with_scale_default(&config, self.state.scale),
+            Err(error) => {
+                tracing::warn!(%error, "config reload rejected; retaining working configuration");
+                self.state.clone()
+            }
+        }
     }
 
     /// Re-read the complete configuration and remember that IPC
@@ -1993,7 +2006,30 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
             // such registry; keeping it a quiet no-op lets one shared
             // Hyprland config remain usable on both backends.
             Action::GlobalShortcut(_) => {}
-            Action::WorkspaceNext => wm.switch_workspace(wm.current_workspace() + 1),
+            Action::CycleApplications(direction) => wm.cycle_applications(*direction),
+            Action::CycleAppWindows(direction) => wm.cycle_application_windows(*direction),
+            Action::QuitApplication => wm.quit_application(),
+            Action::ForceQuitApplications => {
+                wm.cancel_keyboard_cycle();
+                if self.desktop.overview_visible() { self.close_overview(wm); }
+                let applications = wm.running_applications();
+                self.desktop.open_force_quit_menu(wm.backend_mut(), &self.theme, applications);
+            }
+            Action::ApplicationOverview => {
+                if self.desktop.overview_visible() { self.close_overview(wm); }
+                else if wm.cycle_state().is_none() {
+                    self.overview_application = wm.focused_client();
+                    self.open_overview(wm);
+                }
+            }
+            Action::HideApplication => wm.hide_application(false),
+            Action::HideOtherApplications => wm.hide_application(true),
+            Action::MiniaturizeApplication => wm.miniaturize_application(),
+            Action::ShowDesktop => wm.toggle_show_desktop(),
+            Action::WorkspaceNext => {
+                let next = wm.current_workspace() + 1;
+                if !wm.mac_mode() || next < wm.workspace_count() { wm.switch_workspace(next); }
+            }
             Action::WorkspacePrev => {
                 if wm.current_workspace() > 0 {
                     wm.switch_workspace(wm.current_workspace() - 1);
@@ -2023,6 +2059,7 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
                 let key = self.overview_key.take();
                 if !self.desktop.overview_visible() {
                     if wm.cycle_state().is_none() {
+                        self.overview_application = None;
                         self.open_overview(wm);
                     }
                 } else {
@@ -2119,6 +2156,10 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
 
     fn run_menu_action(&mut self, wm: &mut WindowManager<B>, action: MenuAction) -> ShellOutcome {
         match action {
+            MenuAction::ForceQuitApplication(client) => {
+                wm.force_quit_application(client);
+                ShellOutcome::Continue
+            }
             MenuAction::Root(action) => {
                 let outcome = root_action_outcome(&action);
                 self.run_root_menu_action(wm, action);
@@ -2282,8 +2323,10 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         let current = wm.current_workspace();
         let mut items: Vec<OverviewItem<B>> = wm
             .iter_clients()
-            .filter(|(_, client)| {
-                client.workspace == current && matches!(client.lifecycle, Lifecycle::Normal | Lifecycle::Miniaturized)
+            .filter(|(id, client)| {
+                self.overview_application.is_none_or(|app| wm.same_application(app, *id))
+                    && !wm.mac_client_hidden(*id)
+                    && client.workspace == current && matches!(client.lifecycle, Lifecycle::Normal | Lifecycle::Miniaturized)
             })
             .map(|(id, client)| OverviewItem {
                 client: id,

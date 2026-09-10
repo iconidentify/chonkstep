@@ -86,9 +86,10 @@ impl KeyboardTarget<Compositor> for KeyboardFocus {
         &self,
         seat: &Seat<Compositor>,
         comp: &mut Compositor,
-        keys: Vec<KeysymHandle<'_>>,
+        mut keys: Vec<KeysymHandle<'_>>,
         serial: Serial,
     ) {
+        keys.retain(|key| comp.mac_keyboard.may_enter(key.raw_code()));
         match &self.x11 {
             Some(window) => window.enter(seat, comp, keys, serial),
             None => KeyboardTarget::enter(&self.surface, seat, comp, keys, serial),
@@ -96,6 +97,7 @@ impl KeyboardTarget<Compositor> for KeyboardFocus {
     }
 
     fn leave(&self, seat: &Seat<Compositor>, comp: &mut Compositor, serial: Serial) {
+        comp.mac_keyboard.leave(self);
         match &self.x11 {
             Some(window) => window.leave(seat, comp, serial),
             None => KeyboardTarget::leave(&self.surface, seat, comp, serial),
@@ -111,6 +113,16 @@ impl KeyboardTarget<Compositor> for KeyboardFocus {
         serial: Serial,
         time: u32,
     ) {
+        if comp.mac_keyboard.suppress_key { return; }
+        // Smithay normally sends key then modifiers, which is correct for a
+        // physical modifier key. A translated chord needs its projection in
+        // place before the letter, otherwise clients execute the previous mask.
+        if let Some(modifiers) = comp.mac_keyboard.modifiers {
+            match &self.x11 {
+                Some(window) => window.modifiers(seat, comp, modifiers, serial),
+                None => self.surface.modifiers(seat, comp, modifiers, serial),
+            }
+        }
         match &self.x11 {
             Some(window) => window.key(seat, comp, key, state, serial, time),
             None => self.surface.key(seat, comp, key, state, serial, time),
@@ -124,6 +136,7 @@ impl KeyboardTarget<Compositor> for KeyboardFocus {
         modifiers: ModifiersState,
         serial: Serial,
     ) {
+        let modifiers = comp.mac_keyboard.modifiers.unwrap_or(modifiers);
         match &self.x11 {
             Some(window) => window.modifiers(seat, comp, modifiers, serial),
             None => self.surface.modifiers(seat, comp, modifiers, serial),

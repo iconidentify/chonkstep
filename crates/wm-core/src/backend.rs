@@ -70,6 +70,9 @@ pub trait Backend {
     type WindowId: Copy + Eq + std::hash::Hash + std::fmt::Debug;
     type FrameId: Copy + Eq + std::hash::Hash + std::fmt::Debug;
 
+    /// Whether this backend supplies app-aware Mac keyboard delivery.
+    fn supports_mac_interaction(&self) -> bool { false }
+
     /// Establish output clipping before staging final geometry, then animate
     /// live surfaces from the old frame without intermediate configures.
     /// `clip` confines managed windows to their output workarea. Backends without native transforms settle
@@ -454,6 +457,8 @@ pub trait Backend {
     fn set_input_focus(&mut self, window: Self::WindowId);
     /// `WM_DELETE_WINDOW` if the client supports it, force-kill otherwise.
     fn send_close(&mut self, window: Self::WindowId);
+    /// Polite application quit; a compositor may finish clipboard handoff first.
+    fn send_quit(&mut self, window: Self::WindowId) { self.send_close(window); }
 
     /// Force-kills the client owning `window` (X11: `XKillClient`) —
     /// the escalation for an application that no longer answers

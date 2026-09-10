@@ -104,6 +104,15 @@ use wm_core::{KeyCombo, Modifiers, PlacementPolicy};
 /// do-nothing case that should have been filtered out at parse time.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Action {
+    CycleApplications(i32),
+    CycleAppWindows(i32),
+    QuitApplication,
+    ForceQuitApplications,
+    ApplicationOverview,
+    HideApplication,
+    HideOtherApplications,
+    MiniaturizeApplication,
+    ShowDesktop,
     /// Native Wayland screenshot / recording workflow.
     Capture(CaptureMode),
     SpawnTerminal,
@@ -227,6 +236,9 @@ pub enum Action {
 /// Entry points to the native Wayland capture tool.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CaptureMode {
+    ScreenClipboard,
+    AreaClipboard,
+    WindowClipboard,
     Screen,
     Area,
     Window,
@@ -289,6 +301,17 @@ fn action_from_name(name: &str) -> Option<Action> {
             .then(|| Action::GlobalShortcut(target.to_string()));
     }
     match normalized.as_str() {
+        "application-next" => Some(Action::CycleApplications(1)),
+        "application-prev" => Some(Action::CycleApplications(-1)),
+        "application-window-next" => Some(Action::CycleAppWindows(1)),
+        "application-window-prev" => Some(Action::CycleAppWindows(-1)),
+        "quit-application" => Some(Action::QuitApplication),
+        "force-quit-applications" => Some(Action::ForceQuitApplications),
+        "application-overview" => Some(Action::ApplicationOverview),
+        "hide-application" => Some(Action::HideApplication),
+        "hide-other-applications" => Some(Action::HideOtherApplications),
+        "miniaturize-application" => Some(Action::MiniaturizeApplication),
+        "show-desktop" => Some(Action::ShowDesktop),
         "spawn-terminal" => Some(Action::SpawnTerminal),
         "close" => Some(Action::Close),
         "layout-freeform" => Some(Action::Layout(wm_core::LayoutMode::Freeform)),
@@ -317,6 +340,9 @@ fn action_from_name(name: &str) -> Option<Action> {
         "workspace-prev" => Some(Action::WorkspacePrev),
         "workspace-carry-next" => Some(Action::WorkspaceCarryNext),
         "workspace-carry-prev" => Some(Action::WorkspaceCarryPrev),
+        "capture-screen-clipboard" => Some(Action::Capture(CaptureMode::ScreenClipboard)),
+        "capture-area-clipboard" => Some(Action::Capture(CaptureMode::AreaClipboard)),
+        "capture-window-clipboard" => Some(Action::Capture(CaptureMode::WindowClipboard)),
         "capture-screen" => Some(Action::Capture(CaptureMode::Screen)),
         "capture-area" => Some(Action::Capture(CaptureMode::Area)),
         "capture-window" => Some(Action::Capture(CaptureMode::Window)),
@@ -570,6 +596,7 @@ pub struct Config {
     /// Which binding vocabulary [`Self::keybindings`] started from
     /// ([`preset::Keymap`]), carried for the same reason.
     pub keymap: preset::Keymap,
+    pub interaction: wm_core::InteractionConfig,
     /// Whether to read the machine's live Hyprland configuration —
     /// `~/.config/hypr/**` and Omarchy's shipped defaults — for
     /// bindings, window rules, autostart and session environment (see
@@ -688,6 +715,7 @@ impl Config {
             omarchy_bar: None,
             desktop: preset::Desktop::Chonkstep,
             keymap: preset::Keymap::Chonkstep,
+            interaction: wm_core::InteractionConfig::default(),
             // The read is decided by the posture, not by this value:
             // see `Config::hyprland_config`.
             hyprland_config: None,
@@ -994,10 +1022,10 @@ pub fn parse_key(spec: &str) -> Option<KeyCombo> {
         }
         let token = raw.trim().to_ascii_lowercase();
         match token.as_str() {
-            "alt" => modifiers |= Modifiers::ALT,
+            "alt" | "option" | "opt" => modifiers |= Modifiers::ALT,
             "shift" => modifiers |= Modifiers::SHIFT,
             "ctrl" | "control" => modifiers |= Modifiers::CONTROL,
-            "super" | "mod4" | "win" => modifiers |= Modifiers::SUPER,
+            "super" | "mod4" | "win" | "command" | "cmd" => modifiers |= Modifiers::SUPER,
             // Not a modifier, so it must be the key token; unknown
             // names (and the empty token from "" / "alt+") fail here.
             other => keysym = Some(keysym_for(other)?),
@@ -1254,6 +1282,25 @@ pub fn parse_with(
     // a preset default" (see `preset::base`, which also explains why
     // this cannot happen inside the walk below).
     let mut config = preset::base(&table);
+    if let Some(value) = table.get("interaction_mode") {
+        config.interaction.mode = value.as_str().and_then(wm_core::InteractionMode::from_name)
+            .ok_or("interaction_mode must be 'desktop' or 'mac'")?;
+        config.provenance.insert("interaction_mode".into(), "config file".into());
+    }
+    if config.interaction.mode == wm_core::InteractionMode::Mac {
+        if table.contains_key("keymap") {
+            return Err("interaction_mode = 'mac' owns its keymap; remove the explicit keymap setting (individual [keybindings] overrides are supported)".into());
+        }
+        config.keybindings = preset::mac_keybindings();
+        config.drag_modifier = None;
+        config.provenance.insert("drag_modifier".into(), "Mac interaction profile".into());
+        config.bindings = config.keybindings.iter().filter(|(key,_)| key.keysym >= 0x10080000)
+            .map(|(combo, action)| Binding { combo: *combo, action: action.clone(), description: None,
+                locked: true, repeating: matches!(combo.keysym, 0x1008ff02 | 0x1008ff03 | 0x1008ff12 | 0x1008ff13 | 0x1008ff05 | 0x1008ff06), release: false }).collect();
+        config.layer_bindings.clear();
+        config.commands.extend(preset::mac_commands());
+        config.provenance.insert("keybindings".into(), "Mac interaction profile".into());
+    }
     // `desktop = "omarchy"` asks for all of Omarchy's non-keymap
     // integration too, so it still has to read the live files when an
     // explicit `keymap = "chonkstep"` peels just the bindings back off
@@ -1262,11 +1309,11 @@ pub fn parse_with(
     // Chonkstep is also the implicit default, where
     // `hyprland_config = true` deliberately *does* ask for live
     // bindings.
-    let preserve_keymap = matches!(
+    let preserve_keymap = (config.interaction.mode == wm_core::InteractionMode::Mac || matches!(
         table.get("keymap"),
         Some(toml::Value::String(name))
             if preset::Keymap::from_name(name) == Some(preset::Keymap::Chonkstep)
-    )
+    ))
     .then(|| {
         (
             config.keybindings.clone(),
@@ -1314,7 +1361,19 @@ pub fn parse_with(
         config.keybindings = keybindings;
         config.bindings = bindings;
         config.layer_bindings = layer_bindings;
-        config.commands = commands;
+        if config.interaction.mode == wm_core::InteractionMode::Mac {
+            // Keep imported service commands, but restore profile-owned names.
+            config.commands.extend(commands);
+            config.provenance.insert("keybindings".into(), "Mac interaction profile".into());
+        } else {
+            config.commands = commands;
+        }
+    }
+    if config.interaction.mode == wm_core::InteractionMode::Mac {
+        config.focus_follows_mouse = false;
+        config.drag_modifier = None;
+        config.provenance.insert("focus_follows_mouse".into(), "Mac interaction profile".into());
+        config.provenance.insert("drag_modifier".into(), "Mac interaction profile".into());
     }
     for (key, value) in &table {
         match key.as_str() {
@@ -1407,7 +1466,25 @@ pub fn parse_with(
             // Both preset keys are resolved by `preset::base` above,
             // which also warns about a bad value. Listed here only so
             // they are not reported as unknown top-level keys.
-            "desktop" | "keymap" => {}
+            "desktop" | "keymap" | "interaction_mode" => {}
+            "mac" => {
+                let settings = value.as_table().ok_or("[mac] must be a table")?;
+                for key in settings.keys() {
+                    if !matches!(key.as_str(), "applications" | "clipboard_persistence") { return Err(format!("unknown Mac setting: {key}")); }
+                }
+                if let Some(value) = settings.get("clipboard_persistence") {
+                    config.interaction.clipboard_persistence = value.as_bool().ok_or("mac.clipboard_persistence must be a boolean")?;
+                }
+                if let Some(applications) = settings.get("applications") {
+                    let applications = applications.as_table().ok_or("[mac.applications] must be a table")?;
+                    if applications.len() > 256 { return Err("at most 256 Mac application profiles are supported".into()); }
+                    for (identity, profile) in applications {
+                        let profile = profile.as_str().and_then(wm_core::AppProfile::from_name)
+                            .ok_or_else(|| format!("invalid Mac profile for {identity}: use gui, terminal, terminal-window, browser, files, native, or passthrough"))?;
+                        config.interaction.applications.push((identity.clone(), profile));
+                    }
+                }
+            }
             "omarchy_bar" => match value {
                 toml::Value::Boolean(b) => config.omarchy_bar = Some(*b),
                 other => tracing::warn!(
@@ -1639,6 +1716,13 @@ pub fn parse_with(
     // through a named table is that a typo becomes one warning at
     // startup naming both the key and the command, instead of a key
     // that silently does nothing whenever it is pressed.
+    if config.interaction.mode == wm_core::InteractionMode::Mac {
+        if let Some(command) = config.lock_command.as_ref() {
+            if !table.get("commands").and_then(toml::Value::as_table).is_some_and(|t| t.keys().any(|key| key.eq_ignore_ascii_case("mac-lock"))) {
+                config.commands.insert("mac-lock".into(), command.split_whitespace().map(str::to_owned).collect());
+            }
+        }
+    }
     config.keybindings.retain(|(combo, action)| {
         let Action::Run(name) = action else {
             return true;
@@ -1654,6 +1738,9 @@ pub fn parse_with(
         );
         false
     });
+    if config.interaction.mode == wm_core::InteractionMode::Mac {
+        config.bindings.retain(|binding| config.keybindings.iter().any(|(combo,action)| *combo == binding.combo && *action == binding.action));
+    }
     Ok(config)
 }
 
@@ -1786,7 +1873,8 @@ pub fn effective_config_report(config: &Config) -> String {
         out.push_str(&format!("{key} = {value}\t# {source}\n"));
     };
     line("desktop", config.desktop.id().into());
-    line("keymap", config.keymap.id().into());
+    line("keymap", if config.interaction.mode == wm_core::InteractionMode::Mac { "mac" } else { config.keymap.id() }.into());
+    line("interaction_mode", config.interaction.mode.id().into());
     line(
         "focus_follows_mouse",
         config.focus_follows_mouse.to_string(),
@@ -1806,6 +1894,18 @@ pub fn effective_config_report(config: &Config) -> String {
     line("keybindings", config.keybindings.len().to_string());
     line("commands", config.commands.len().to_string());
     line("autostart", config.autostart.len().to_string());
+    if config.interaction.mode == wm_core::InteractionMode::Mac {
+        line("mac.clipboard_persistence", config.interaction.clipboard_persistence.to_string());
+        line("mac.applications", format!("{:?}", config.interaction.applications));
+        out.push_str("\n# Mac system shortcuts after overrides (client editing is app-aware)\n");
+        for (chord, _) in preset::MAC_BINDINGS {
+            let combo = parse_key(chord).expect("built-in Mac shortcut");
+            match config.keybindings.iter().find(|(key,_)| *key == combo) {
+                Some((_,action)) => out.push_str(&format!("{chord} = {action:?}\n")),
+                None => out.push_str(&format!("{chord} = disabled\n")),
+            }
+        }
+    }
     out
 }
 
@@ -3309,4 +3409,20 @@ mod command_tests {
         assert!(parse("").expect("valid").terminal.is_none());
         assert!(Config::default_config().terminal.is_none());
     }
+    #[test]
+    fn mac_profile_is_validated_and_preserves_desktop_services_without_legacy_shortcuts() {
+        let mac = parse("interaction_mode = 'mac'\nhyprland_config = false\n[mac.applications]\n'foot' = 'native'\n").unwrap();
+        assert_eq!(mac.interaction.mode, wm_core::InteractionMode::Mac);
+        assert_eq!(mac.interaction.profile("foot"), wm_core::AppProfile::Native);
+        assert_eq!(mac.drag_modifier, None);
+        assert_eq!(mac.keybindings.iter().find(|(key,_)| Some(*key)==parse_key("command+shift+3")).map(|(_,a)| a), Some(&Action::Capture(CaptureMode::Screen)));
+        assert_eq!(mac.keybindings.iter().find(|(key,_)| Some(*key)==parse_key("command+control+shift+3")).map(|(_,a)| a), Some(&Action::Capture(CaptureMode::ScreenClipboard)));
+        assert!(parse("interaction_mode = 'typo'").is_err());
+        assert!(parse("interaction_mode = 'mac'\nkeymap = 'omarchy'").is_err());
+        assert!(parse("interaction_mode = 'mac'\n[mac.applications]\nfoot = 'typo'").is_err());
+        assert!(effective_config_report(&mac).contains("keymap = mac"));
+        let mut combos = std::collections::HashSet::new();
+        for (key, _) in &mac.keybindings { assert!(combos.insert(*key), "duplicate Mac shortcut {key:?}"); }
+    }
+
 }

@@ -50,8 +50,8 @@ fn boot(name: &str) -> Session {
     Session::boot(
         name,
         SessionOptions {
-            config_extra: "show_dock = false\nomarchy_menu = false\nhyprland_config = false\n"
-                .into(),
+            config_extra: format!("show_dock = false\nomarchy_menu = false\nhyprland_config = false\n{}",
+                if name.starts_with("mac-") { "interaction_mode = 'mac'\n" } else { "" }),
             env: if std::env::var_os("CHONKSTEP_SELECTION_TRACE").is_some() {
                 vec![(
                     "RUST_LOG".into(),
@@ -927,4 +927,30 @@ fn native_clipboard_and_primary_preserve_binary_and_embedded_nuls() {
 fn native_clipboard_and_primary_transfer_one_mib_without_truncation() {
     let bytes: Vec<_> = (0u8..=255).cycle().take(1024 * 1024 + 17).collect();
     native_roundtrip("selection-native-large", "application/octet-stream", &bytes);
+}
+
+
+#[test]
+#[ignore = "scripts/e2e.sh --headless --test selection_transfer mac_persistence"]
+fn mac_persistence_preserves_rich_payloads_after_the_source_quits() {
+    let mut session = boot("mac-persistence-formats");
+    session.screenshot("clipboard-fixture").unwrap();
+    let png=std::fs::read(session.dir.join("01-clipboard-fixture.png")).unwrap();
+    let formats = [
+        ("text/html", "<p><b>café</b> 日本語 🍎</p>".as_bytes().to_vec()),
+        ("text/uri-list", b"file:///tmp/clipboard%20fixture.txt\r\n".to_vec()),
+        ("image/png", png),
+        ("application/octet-stream", (0u8..=255).cycle().take(1024*1024+17).collect()),
+    ];
+    for (index, (mime, payload)) in formats.into_iter().enumerate() {
+        let source = Native::launch(&mut session,&format!("mac-source-{index}"),mime,&payload);
+        source.copy(&mut session,Kind::Clipboard);
+        // The normal application Quit route finishes outstanding reads before
+        // the client exits. The destination is an ordinary unprivileged client.
+        session.door().chord(125,16).unwrap();
+        session.wait_for_window_gone(&source.name).unwrap();
+        let mut destination=Native::launch(&mut session,&format!("mac-destination-{index}"),mime,b"unused");
+        destination.receive(&mut session,Kind::Clipboard,&payload);
+        session.kill_client(&destination.name);
+    }
 }

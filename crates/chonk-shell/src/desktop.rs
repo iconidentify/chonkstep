@@ -296,6 +296,7 @@ pub enum WindowMenuAction {
 pub enum MenuAction {
     Root(RootMenuAction),
     Window(ClientId, WindowMenuAction),
+    ForceQuitApplication(ClientId),
     /// A pick from a dock tile's own right-click menu, carrying the
     /// tile's persistence id rather than its slot index: the column can
     /// be reordered (or a tile can crash out of it) while the menu sits
@@ -841,6 +842,7 @@ fn resolve_window_action(action: u32, workspace_count: usize) -> Option<WindowMe
 /// session opened last; resolving by id alone would silently make the
 /// id ranges load-bearing for correctness instead of merely tidy.
 enum MenuSession {
+    ForceQuit { applications: Vec<ClientId> },
     Root {
         /// What the Applications and Omarchy submenus were built
         /// against: the resolver's bounds for mapping `ACTION_APP_BASE
@@ -875,6 +877,8 @@ enum MenuSession {
 /// rather than assumed.
 fn resolve_session_action(session: &MenuSession, action: u32) -> Option<MenuAction> {
     match session {
+        MenuSession::ForceQuit { applications } => action.checked_sub(1)
+            .and_then(|index| applications.get(index as usize)).copied().map(MenuAction::ForceQuitApplication),
         MenuSession::Root { bounds } => resolve_action(action, *bounds).map(MenuAction::Root),
         MenuSession::DockItem { id } => {
             resolve_dock_item_action(action).map(|command| MenuAction::DockItem(id.clone(), command))
@@ -3496,6 +3500,27 @@ impl<B: Backend> Desktop<B> {
             self.dock,
         );
         self.menu.open_root(backend, theme, &mut self.fonts.system(), items, root_bounds, at, bounds);
+        self.sync_escape_key_grab(backend);
+    }
+
+    /// Application selection and a separate destructive confirmation. Escape
+    /// and the first confirmation row cancel without touching a client.
+    pub fn open_force_quit_menu(&mut self, backend: &mut B, theme: &Theme, applications: Vec<(ClientId, String)>)
+    where
+        B: wm_theme_api::PopupHost<PopupId = B::ShellId>,
+    {
+        let bounds = self.screen_size();
+        let mut items = vec![MenuItem::Action { label: "Cancel".into(), action: 0 }];
+        for (index, (_, name)) in applications.iter().enumerate() {
+            items.push(MenuItem::Submenu { label: window_menu_title(name), items: vec![
+                MenuItem::Action { label: "Cancel".into(), action: 0 },
+                MenuItem::Action { label: "Force Quit — discard unsaved changes".into(), action: index as u32 + 1 },
+            ] });
+        }
+        let session = MenuSession::ForceQuit { applications: applications.into_iter().map(|(id, _)| id).collect() };
+        self.menu.begin_session(backend, session, "Force Quit Applications".into());
+        let at = Point::new((bounds.w / 3) as i32, (bounds.h / 4) as i32);
+        self.menu.menu.open(backend, theme, &mut self.fonts.system(), items, at, bounds, false);
         self.sync_escape_key_grab(backend);
     }
 

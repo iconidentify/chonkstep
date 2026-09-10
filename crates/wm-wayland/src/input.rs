@@ -363,10 +363,17 @@ pub(crate) fn resynchronise_input_after_resume(state: &mut Compositor) {
     gestures::cancel(state);
     let seat = state.seat.clone();
     cancel_active_touches(state);
-    let suppressed_keys = with_input(&seat, reset_resume_bookkeeping);
+    let mut suppressed_keys = with_input(&seat, reset_resume_bookkeeping);
 
     if let Some(keyboard) = seat.get_keyboard() {
         let time = state.start_time.elapsed().as_millis() as u32;
+        for (physical, output, focus) in state.mac_keyboard.drain() {
+            suppressed_keys.push(physical);
+            let Some(output) = output else { continue; };
+            state.mac_keyboard.suppress_key = focus.is_none() || focus != keyboard.current_focus();
+            keyboard.input_forward(state, output, KeyState::Released, SERIAL_COUNTER.next_serial(), time, true);
+        }
+        state.mac_keyboard.suppress_key = false;
         release_stale_pressed_keys(state, &keyboard, &suppressed_keys, time);
     }
 
@@ -376,6 +383,7 @@ pub(crate) fn resynchronise_input_after_resume(state: &mut Compositor) {
     // panel remains open. Drop exclusivity immediately, then give
     // wm-core the same release its ordinary input path would have queued
     // so it can commit and retire the cycle session on this dispatch.
+    state.wm.cancel_keyboard_cycle();
     reset_modal_keyboard_grab(state.wm.backend_mut());
 }
 
@@ -1271,8 +1279,19 @@ fn on_keyboard_key<I: InputBackend>(state: &mut Compositor, event: I::KeyboardKe
     let seat = state.seat.clone();
     let shortcuts_inhibited = seat.keyboard_shortcuts_inhibited();
     let modal_owns_keyboard = keyboard::modal_owns_keyboard(state);
+    let app_target = if state.wm.mac_mode() {
+        keyboard.current_focus().and_then(|focus| state.wm.backend().window_for_surface(focus.surface()))
+            .and_then(|id| state.wm.backend().windows.get(&id).and_then(|record| record.app_id.as_deref())
+                .map(|identity| (id, state.wm.interaction_config().profile(identity))))
+    } else { None };
+    let passthrough = app_target.is_some_and(|(_, profile)| profile == wm_core::AppProfile::Passthrough);
     let dragging = state.wm.interactive_drag_active();
-    keyboard.input::<(), _>(state, keycode, key_state, serial, time, |data, mods, handle| {
+    let mut physical_modifiers = ModifiersState::default();
+    let mut physical_combo = KeyCombo { keysym: 0, modifiers: Modifiers::empty() };
+    let eligible = !state.wm.backend().locked && !shortcuts_inhibited
+        && state.wm.backend().xwayland_keyboard_grab.as_ref()
+            .is_none_or(|grab| !smithay::reexports::wayland_server::Resource::is_alive(grab));
+    let (route, mods_changed) = keyboard.input_intercept(state, keycode, key_state, |data, mods, handle| {
         // Level-0 (unshifted) keysym, exactly like `wm-x11`'s
         // `keysym_for_keycode` taking the keycode's first sym: a combo
         // bound as Alt+Shift+T must match the T key with SHIFT in the
@@ -1281,8 +1300,17 @@ fn on_keyboard_key<I: InputBackend>(state: &mut Compositor, event: I::KeyboardKe
         // ISO_Left_Tab — `wm-core`'s cycle-backwards match depends on
         // it). The latin fallback keeps bindings working on non-latin
         // layouts.
-        let keysym = handle.raw_latin_sym_or_raw_current_sym().unwrap_or_else(|| handle.modified_sym());
+        let mut keysym = handle.raw_latin_sym_or_raw_current_sym().unwrap_or_else(|| handle.modified_sym());
+        // AZERTY puts digits on the Shift level. Mac screenshot chords name
+        // that digit, while Latin letters and punctuation retain the existing
+        // unshifted matching rule (including Command-Shift-grave).
+        if data.wm.mac_mode() && mods.shift && !(0x30..=0x39).contains(&keysym.raw()) {
+            let shifted = handle.modified_sym();
+            if (0x30..=0x39).contains(&shifted.raw()) { keysym = shifted; }
+        }
         let combo = KeyCombo { keysym: keysym.raw(), modifiers: combo_modifiers(mods) };
+        physical_modifiers = *mods;
+        physical_combo = combo;
         // A repeat belongs to the complete chord, not just its final key.
         // In particular, releasing Super while R remains held must not keep
         // running a Super+R action behind subsequent ordinary typing.
@@ -1331,7 +1359,7 @@ fn on_keyboard_key<I: InputBackend>(state: &mut Compositor, event: I::KeyboardKe
                 if backend.locked && !works_locked {
                     return FilterResult::Forward;
                 }
-                if shortcuts_inhibited {
+                if shortcuts_inhibited || (passthrough && !modal_owns_keyboard && !works_locked) {
                     return FilterResult::Forward;
                 }
                 // An XWayland client holding the keyboard through
@@ -1380,6 +1408,11 @@ fn on_keyboard_key<I: InputBackend>(state: &mut Compositor, event: I::KeyboardKe
                         });
                     });
                     FilterResult::Intercept(())
+                } else if combo.keysym == 0x77 && combo.modifiers == Modifiers::SUPER
+                    && app_target.is_some_and(|(_, profile)| profile == wm_core::AppProfile::TerminalWindow) {
+                    backend.queue(WmEvent::CloseRequested(app_target.unwrap().0));
+                    with_input(&seat, |input| input.suppressed_keys.push(keycode));
+                    FilterResult::Intercept(())
                 } else {
                     FilterResult::Forward
                 }
@@ -1418,6 +1451,16 @@ fn on_keyboard_key<I: InputBackend>(state: &mut Compositor, event: I::KeyboardKe
             }
         }
     });
+    if matches!(route, FilterResult::Forward) {
+        if state.wm.mac_mode() || state.mac_keyboard.has_held(keycode) {
+            keyboard::mac::forward(state, &keyboard, keyboard::mac::Delivery {
+                code: keycode, state: key_state, serial, time,
+                combo: physical_combo, physical: physical_modifiers, eligible,
+            });
+        } else {
+            keyboard.input_forward(state, keycode, key_state, serial, time, mods_changed);
+        }
+    }
     // XKB options such as `grp:alt_shift_toggle` change the active group
     // inside `KeyboardHandle::input`, without going through the IPC action.
     // Mirror that state after every physical key transition so the next
