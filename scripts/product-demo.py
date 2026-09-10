@@ -191,7 +191,7 @@ def environment(root, host):
     home = root/'home'
     home.mkdir()
     env['HOME'] = str(home)
-    env.update(GTK_USE_PORTAL='0', GIO_USE_VFS='local', GTK_A11Y='none', NO_AT_BRIDGE='1')
+    env.update(GTK_THEME='Adwaita', GTK_USE_PORTAL='0', GIO_USE_VFS='local', GTK_A11Y='none', NO_AT_BRIDGE='1')
     for key in ('GTK_IM_MODULE', 'QT_IM_MODULE', 'XMODIFIERS', 'SESSION_MANAGER'):
         env.pop(key, None)
     return env
@@ -217,6 +217,29 @@ def boot(stack, root, host, binary, logs, name):
     client = env | {'WAYLAND_DISPLAY': str(socket)}
     client.pop('CHONKSTEP_TEST_SOCKET')
     return process, door, client, socket
+
+
+def verify_capture_video(video, timeline):
+    # The fixture's Adwaita header is uniformly light along this row. Inspect
+    # every recorded frame during the stable region-selection hold, before a
+    # diagnostic screenshot can force a repaint. A stale dimming strip is a
+    # real failure even if a later PNG is correct. The small tolerance allows
+    # H.264 conversion/quantization, not old dark rectangles or blank frames.
+    start = next(item['seconds'] for item in timeline if item['action'] == 'Select a region') + .25
+    pixels = subprocess.check_output(['ffmpeg','-v','error','-ss',str(start),'-t','1.5',
+        '-i',str(video),'-vf','format=rgb24,crop=680:2:1060:210',
+        '-f','rawvideo','-pix_fmt','rgb24','-'],timeout=30)
+    stride = 680*2*3
+    if len(pixels) % stride or len(pixels) < 20*stride:
+        raise RuntimeError('too few complete frames to verify capture repaint')
+    spreads = []
+    for offset in range(0,len(pixels),stride):
+        row = pixels[offset:offset+680*3:3]
+        spreads.append(max(row)-min(row))
+        if min(row) < 160 or spreads[-1] > 24:
+            raise RuntimeError(f'stale or missing capture pixels in recorded frame {offset//stride}')
+    return {'frames':len(spreads),'max_header_spread':max(spreads),
+            'allowed_spread':24,'start_seconds':start,'duration_seconds':1.5}
 
 
 def caption_file(timeline, output):
@@ -337,10 +360,13 @@ def run(args):
     final = output/f'chonkstep-{args.scenario}-demo.mp4'
     subprocess.run(['ffmpeg','-v','error','-i',str(raw),'-c','copy','-movflags','+faststart',str(final)],check=True,timeout=60)
     raw.unlink()
+    if args.scenario == 'capture':
+        metadata['repaint_verification'] = verify_capture_video(final, metadata['timeline'])
     caption_file(metadata['timeline'],output)
     captioned = output/f'chonkstep-{args.scenario}-captioned.mp4'
-    subtitle_filter = ("subtitles=timeline.srt:force_style='Fontname=DejaVu Sans,Fontsize=9,"
-                       "Outline=0.6,Shadow=0,BorderStyle=3,OutlineColour=&H60000000,MarginV=8'")
+    alignment = 8 if args.scenario == 'capture' else 2
+    subtitle_filter = (f"subtitles=timeline.srt:force_style='Fontname=DejaVu Sans,Fontsize=9,"
+                       f"Outline=0.6,Shadow=0,BorderStyle=3,OutlineColour=&H60000000,MarginV=8,Alignment={alignment}'")
     subprocess.run(['ffmpeg','-v','error','-i',final.name,'-vf',subtitle_filter,
                     '-c:v','libx264','-preset','fast','-crf','18','-pix_fmt','yuv420p',
                     '-movflags','+faststart',captioned.name],cwd=output,check=True,timeout=60)

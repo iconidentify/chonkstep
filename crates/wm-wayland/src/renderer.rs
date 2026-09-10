@@ -882,11 +882,36 @@ fn render_frame_winit(comp: &mut Compositor, plain_capture_pending: bool) -> boo
     let damage_tracker = &mut entry.damage_tracker;
     let scene_scratch = &mut entry.scene_scratch;
 
+    // Imports and timer setup can bind a surfaceless EGL context. Finish them
+    // before latching the window backbuffer and asking for its age; unbinding
+    // between that query and drawing can select a different buffer on NVIDIA.
+    let (clear_color, timing) = {
+        let renderer = winit_backend.renderer();
+        let gesture_build = wm.backend().gesture_scene.as_ref().map(|_| std::time::Instant::now());
+        let clear_color = build_scene_into(
+            scene_scratch,
+            wm.backend(),
+            renderer,
+            *pointer_location,
+            cursor_status,
+            cursors,
+            Rect::new(Point::new(0, 0), entry.size),
+        );
+        if let Some(started) = gesture_build { frame_stats.record_gesture_build(started.elapsed()); }
+
+        crate::capture_tool::render(scene_scratch, renderer, wm.backend(), Rect::new(Point::new(0, 0), entry.size));
+        surface_outputs.update_scene(output, (entry.size.w as i32, entry.size.h as i32).into(), scene_scratch, dmabuf.default_feedback());
+        let timing = if gpu_timer.enabled() { gpu_timer.begin(renderer, &output.name()) } else { None };
+        (clear_color, timing)
+    };
+
     // Smithay 0.7's bind prepares a target and handles resize, but
     // does not make the surface current until Renderer::render. That
     // is too late for buffer_age: captures may have left a surfaceless
     // context current, making this query fail and force full damage.
     if let Err(error) = make_winit_surface_current(winit_backend) {
+        gpu_timer.end(winit_backend.renderer(), timing);
+        scene_scratch.clear();
         if note_frame_failure() {
             tracing::warn!(?error, "could not bind the winit framebuffer; skipping frame");
         }
@@ -904,56 +929,30 @@ fn render_frame_winit(comp: &mut Compositor, plain_capture_pending: bool) -> boo
     } else {
         winit_backend.buffer_age().unwrap_or(0)
     };
-    let render_states = {
-        let (renderer, mut framebuffer) = match winit_backend.bind() {
-            Ok(bound) => bound,
-            Err(error) => {
-                if note_frame_failure() {
-                    tracing::warn!(?error, "could not bind the winit framebuffer; skipping frame");
-                }
-                return false;
+    let rendered = (|| {
+        let (renderer, mut framebuffer) = winit_backend.bind().map_err(|error| {
+            if note_frame_failure() {
+                tracing::warn!(?error, "could not bind the winit framebuffer; skipping frame");
             }
-        };
-
-        let gesture_build = wm.backend().gesture_scene.as_ref().map(|_| std::time::Instant::now());
-        let clear_color = build_scene_into(
-            scene_scratch,
-            wm.backend(),
-            renderer,
-            *pointer_location,
-            cursor_status,
-            cursors,
-            Rect::new(Point::new(0, 0), entry.size),
-        );
-        if let Some(started) = gesture_build { frame_stats.record_gesture_build(started.elapsed()); }
-
-        crate::capture_tool::render(scene_scratch, renderer, wm.backend(), Rect::new(Point::new(0, 0), entry.size));
-        surface_outputs.update_scene(output, (entry.size.w as i32, entry.size.h as i32).into(), scene_scratch, dmabuf.default_feedback());
-        let timing = if gpu_timer.enabled() { gpu_timer.begin(renderer, &output.name()) } else { None };
-        let rendered = damage_tracker.render_output(renderer, &mut framebuffer, age, scene_scratch, clear_color);
-        gpu_timer.end(renderer, timing);
-        match rendered {
+        })?;
+        match damage_tracker.render_output(renderer, &mut framebuffer, age, scene_scratch, clear_color) {
             Ok(result) => {
                 log_damage(age, result.damage.map(Vec::as_slice));
-                result.damage.is_some().then_some(result.states)
+                Ok(result.damage.is_some().then_some(result.states))
             }
             Err(error) => {
                 if note_frame_failure() {
                     tracing::warn!(?error, "render failed; keeping damage for a retry");
                 }
-                // Release element-owned client buffers on the same
-                // boundary the former temporary vector did, while
-                // retaining only its allocation for the retry.
-                scene_scratch.clear();
-                return false;
+                Err(())
             }
         }
-    };
-    // The nested backend has no asynchronous page-flip ownership to
-    // honor. Do not make reusable storage delay `wl_buffer.release`
-    // until some future frame; clear the handles now, exactly where
-    // the old per-frame vector was dropped.
+    })();
+    gpu_timer.end(winit_backend.renderer(), timing);
+    // The nested backend has no asynchronous page-flip ownership. Release
+    // element-owned client buffers on success and failure, retaining capacity.
     scene_scratch.clear();
+    let Ok(render_states) = rendered else { return false; };
 
     if render_states.is_some() {
         // The buffer holds a complete frame either way (the tracker
@@ -1009,11 +1008,9 @@ fn render_frame_winit_outputs(comp: &mut Compositor, capture_pending: bool) -> b
     let Compositor { wm, graphics, outputs, pointer_location, cursor_status, cursors,
         start_time, surface_outputs, dmabuf, .. } = comp;
     let Graphics::Winit(backend) = graphics else { return false; };
-    if make_winit_surface_current(backend).is_err() { return false; }
-    let age = if capture_pending || crate::session::full_damage_forced() { 0 } else { backend.buffer_age().unwrap_or(0) };
-    let result = {
-        let Ok((renderer, mut framebuffer)) = backend.bind() else { return false; };
-        let mut elements = Vec::new();
+    let mut elements = Vec::new();
+    {
+        let renderer = backend.renderer();
         for entry in outputs.iter_mut() {
             let viewport = Rect::new(entry.position, entry.size);
             let scene = &mut entry.scene_scratch;
@@ -1029,6 +1026,11 @@ fn render_frame_winit_outputs(comp: &mut Compositor, capture_pending: bool) -> b
             elements.extend(scene.drain(..).map(|e| RelocateRenderElement::from_element(e,
                 (entry.position.x, entry.position.y), Relocate::Relative)));
         }
+    }
+    if make_winit_surface_current(backend).is_err() { return false; }
+    let age = if capture_pending || crate::session::full_damage_forced() { 0 } else { backend.buffer_age().unwrap_or(0) };
+    let result = {
+        let Ok((renderer, mut framebuffer)) = backend.bind() else { return false; };
         outputs[0].damage_tracker.render_output(renderer, &mut framebuffer, age, &elements,
             Color32F::new(0.015, 0.015, 0.018, 1.0)).map(|r| r.damage.is_some().then_some(r.states))
     };

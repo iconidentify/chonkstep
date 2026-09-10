@@ -14,6 +14,7 @@ prerelease through `preview-v0.5.0`, not a claim of complete macOS compatibility
 | A projected IME chord is followed by an ordinary key without a modifier delta | Projected modifiers could remain in the IME stream | Restore current physical modifiers on leaving projection |
 | Enable Mac mode after a client already owns the clipboard, then quit that client | Persistence had never observed the earlier selection | Adopt the existing native or XWM offer on the enable transition; both `selection_transfer::enabling_mac_preserves_an_existing_*_clipboard_owner` tests failed before and pass after |
 | Open Overview with windows on several desktops | Desktop strip showed wallpaper/counts instead of the actual windows | Render shared window surfaces in desktop geometry, clipped and stacked; new native and XWayland pixel regressions |
+| Scene imports run after querying a nested EGL backbuffer age | NVIDIA recordings could retain dimmed strips on some reused buffers | Complete imports and GPU-timer setup before latching/querying the backbuffer; verify every frame during a stable capture hold |
 | X11 client sets its title before mapping and never changes it | The cached title remained empty | Initialize the title cache when creating its record; exercised by the XWayland miniature workflow |
 
 The clipboard tests toggle the live profile three times and verify exact UTF-8
@@ -36,6 +37,17 @@ semantic revision changes. Geometry is read from the current scene, and each
 miniature is clipped to its owning output. Pinned windows are included in their
 display's desktops; minimized and application-hidden windows are excluded.
 Fullscreen Spaces contain the actual fullscreen client.
+
+The original candidate passed the complete local E2E suite and 2,107 Rust tests
+plus 86 Python harness tests. Subsequent video QA found a nested repaint defect
+that the screenshot-based suite did not catch: 10 of 45 video frames retained a
+dark strip, although the saved PNG was clean. Texture imports could switch to a
+surfaceless EGL context between querying buffer age and drawing. Both single-head
+and virtual-head paths now finish imports before latching/querying the target;
+timer setup follows the same rule. Incremental rendering remains enabled.
+The patched recording passed all 45 sampled frames (maximum header variation
+one level out of 255). The runner now rejects stale, blank, truncated, and
+undecodable capture evidence. Four harness regressions protect that verification.
 
 The nineteen `mac_spaces` workflows pass against the candidate in an isolated GL
 host with two real `wl_output` heads. New assertions cover window positions and

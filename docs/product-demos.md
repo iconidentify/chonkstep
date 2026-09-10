@@ -5,7 +5,8 @@ board, and demonstrate window screenshots and region recording. A second
 scenario shows three Spaces, live desktop miniatures, dragging a window between
 Spaces, keyboard navigation, and entering/leaving a dedicated fullscreen Space. The fixtures
 are scripted sample content, not benchmark results. No existing desktop,
-clipboard, configuration or session bus is used.
+clipboard, configuration or session bus is used. Fixtures select Adwaita for
+a repeatable GTK appearance.
 
 ```sh
 cargo build --locked --release -p chonkstep-wayland
@@ -53,7 +54,9 @@ Outputs:
   remains available without editorial text. FFmpeg must include libass subtitles.
 - `manifest.json`: executable identity and SHA-256, scenario timeline, artifact
   hashes, ffprobe results and Spaces membership checkpoints. Every video must
-  also pass a complete FFmpeg decode. Logs and final window geometry remain alongside it.
+  also pass a complete FFmpeg decode. Capture additionally checks every frame
+  in a stable selection interval for stale dimming, before a diagnostic PNG can
+  force a repaint. An invalid recording fails the run. Logs and final window geometry remain alongside it.
 
 The runner stops its process groups and private bus on exit, refuses to replace
 an existing artifact directory, bounds waits, and rejects missing outputs or
