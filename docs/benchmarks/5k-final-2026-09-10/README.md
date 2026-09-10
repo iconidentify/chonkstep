@@ -6,6 +6,13 @@ Rustdoc. The separately invoked two-GPU hardware test passed eight full/partial
 transfers across both RTX 3090 devices. See [test counts and log hashes](validation.json),
 [hardware output](multi-gpu-hardware.txt), and [Mac workflow details](../../mac-mode-validation.md#final-gpu-backed-regression).
 
+A standalone release build of committed revision `795206b` was then checked
+with a Mac configuration (41 resolved system bindings, zero diagnostics), and
+its 11 Mac workflows and eight screencopy pressure tests passed again. The exact
+binary version and SHA-256 are in `validation.json`; these repeats do not inflate
+the distinct test count above. The executable is preserved locally at
+`/tmp/chonkstep-795206b/chonkstep-wayland`.
+
 The performance experiment comprises **27 verified 5K samples**: 18 paired
 baseline/final runs with GPU queries disabled in both, followed by nine final
 runs with asynchronous GPU queries enabled. Each cell has three runs, with ten

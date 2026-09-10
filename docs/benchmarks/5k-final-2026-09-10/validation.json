@@ -176,5 +176,27 @@
     "workspace_clippy": "/tmp/chonk-interop-lint.log",
     "private_rustdoc": "/tmp/chonk-final-rustdoc.log",
     "gpu_fixture_clippy": "/tmp/chonk-texture-fixture-lint.log"
+  },
+  "committed_release_recheck": {
+    "source_commit": "795206b",
+    "binary": "/tmp/chonkstep-795206b/chonkstep-wayland",
+    "sha256": "041ff5be3d8e558a1d9c65e52d26fdcfa6b80168c9c2e565d11b43f07e23c5b0",
+    "version": "chonkstep-wayland 0.4.4\nsource: preview-v0.4.4-7-g795206b\nbuild id: df08f762133fa79dc2245d02f24bf0e8d5e6794a",
+    "mac_check_config": "resolved 41 bindings; 0 diagnostics",
+    "tests": [
+      {
+        "target": "mac_mode",
+        "passed": 11,
+        "log": "/tmp/chonk-final-shipping-mac.log",
+        "log_sha256": "a6645af166b7d6957c2f7357b19c9474a32b1d57b913149ca9e4e9a63b2f1f49"
+      },
+      {
+        "target": "screencopy_pressure",
+        "passed": 8,
+        "log": "/tmp/chonk-final-shipping-e2e.log",
+        "log_sha256": "08bd352db41d0364abea23d89b7229eff75bc42ac3bb974475d87fcd9d0e0d1f"
+      }
+    ],
+    "note": "These repeat existing cases against the standalone release build; they do not increase the 144 distinct E2E total."
   }
 }
