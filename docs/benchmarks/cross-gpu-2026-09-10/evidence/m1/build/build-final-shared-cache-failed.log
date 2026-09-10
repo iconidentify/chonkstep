@@ -1,0 +1,206 @@
+ Downloading crates ...
+  Downloaded aliasable v0.1.3
+   Compiling smithay v0.7.0 (/home/chrisk/.cache/chonk-gpu-bench/source/final/vendor/smithay-0.7.0)
+   Compiling chonk-build-info v0.4.4 (/home/chrisk/.cache/chonk-gpu-bench/source/final/crates/chonk-build-info)
+   Compiling aliasable v0.1.3
+   Compiling wm-wayland v0.4.4 (/home/chrisk/.cache/chonk-gpu-bench/source/final/crates/wm-wayland)
+error[E0407]: method `set_window_space_output` is not a member of trait `Backend`
+    --> crates/wm-wayland/src/backend_impl.rs:1661:5
+     |
+1661 | /     fn set_window_space_output(&mut self, window: Self::WindowId, output: Option<&str>) {
+1662 | |         if let Some(record) = self.windows.get_mut(&window) {
+1663 | |             if record.space_output.as_deref() != output {
+1664 | |                 record.space_output = output.map(str::to_owned);
+...    |
+1668 | |     }
+     | |_____^ not a member of trait `Backend`
+
+error[E0599]: no method named `separate_spaces` found for reference `&WindowManager<WaylandBackend>` in the current scope
+   --> crates/wm-wayland/src/hyprland_ipc.rs:146:37
+    |
+146 |             focused: index == if wm.separate_spaces() { wm.active_output_index() } else { focused_monitor_index(wm, &monitors_info) },
+    |                                     ^^^^^^^^^^^^^^^ method not found in `&WindowManager<WaylandBackend>`
+
+error[E0599]: no method named `active_output_index` found for reference `&WindowManager<WaylandBackend>` in the current scope
+   --> crates/wm-wayland/src/hyprland_ipc.rs:146:60
+    |
+146 |             focused: index == if wm.separate_spaces() { wm.active_output_index() } else { focused_monitor_index(wm, &monitors_info) },
+    |                                                            ^^^^^^^^^^^^^^^^^^^
+    |
+help: there is a method `client_output_index` with a similar name, but with different arguments
+   --> crates/wm-core/src/manager/spatial_layout.rs:216:4
+
+error[E0599]: no method named `active_workspace_on_output` found for reference `&WindowManager<WaylandBackend>` in the current scope
+   --> crates/wm-wayland/src/hyprland_ipc.rs:147:34
+    |
+147 |             active_workspace: wm.active_workspace_on_output(index),
+    |                                  ^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+help: there is a method `set_workspace_layout` with a similar name, but with different arguments
+   --> crates/wm-core/src/manager/spatial_layout.rs:43:4
+
+error[E0599]: no method named `workspace_output_index` found for reference `&WindowManager<WaylandBackend>` in the current scope
+   --> crates/wm-wayland/src/hyprland_ipc.rs:168:25
+    |
+168 |         .map(|index| wm.workspace_output_index(index).map(|i| i as i32)).collect();
+    |                         ^^^^^^^^^^^^^^^^^^^^^^
+    |
+help: there is a method `workspace_count` with a similar name, but with different arguments
+   --> crates/wm-core/src/manager.rs:1201:4
+
+error[E0599]: no method named `select_output` found for struct `WindowManager<B>` in the current scope
+    --> crates/wm-wayland/src/input.rs:1811:18
+     |
+1811 |         state.wm.select_output(output);
+     |                  ^^^^^^^^^^^^^ method not found in `WindowManager<WaylandBackend>`
+
+error[E0599]: no method named `reconcile_display_spaces` found for struct `WindowManager<B>` in the current scope
+    --> crates/wm-wayland/src/output_mgmt.rs:1047:13
+     |
+1047 |     comp.wm.reconcile_display_spaces();
+     |             ^^^^^^^^^^^^^^^^^^^^^^^^ method not found in `WindowManager<WaylandBackend>`
+
+error[E0599]: no method named `active_output_index` found for struct `WindowManager<B>` in the current scope
+  --> crates/wm-wayland/src/gesture_scene.rs:73:60
+   |
+73 |     let Some(monitor) = comp.wm.monitors_ref().get(comp.wm.active_output_index()) else {
+   |                                                            ^^^^^^^^^^^^^^^^^^^
+   |
+help: there is a method `client_output_index` with a similar name, but with different arguments
+  --> crates/wm-core/src/manager/spatial_layout.rs:216:4
+
+error[E0599]: no method named `separate_spaces` found for struct `WindowManager<B>` in the current scope
+  --> crates/wm-wayland/src/gesture_scene.rs:77:26
+   |
+77 |     let output = comp.wm.separate_spaces().then_some(monitor.geometry);
+   |                          ^^^^^^^^^^^^^^^ method not found in `WindowManager<WaylandBackend>`
+
+error[E0599]: no method named `neighboring_workspace` found for struct `WindowManager<B>` in the current scope
+   --> crates/wm-wayland/src/gesture_scene.rs:103:56
+    |
+103 |         let previous = if comp.wm.mac_mode() { comp.wm.neighboring_workspace(origin, -1) } else { origin.checked_sub(1) };
+    |                                                        ^^^^^^^^^^^^^^^^^^^^^
+    |
+help: there is a method `current_workspace` with a similar name, but with different arguments
+   --> crates/wm-core/src/manager.rs:890:4
+
+error[E0599]: no method named `neighboring_workspace` found for struct `WindowManager<B>` in the current scope
+   --> crates/wm-wayland/src/gesture_scene.rs:104:52
+    |
+104 |         let next = if comp.wm.mac_mode() { comp.wm.neighboring_workspace(origin, 1) } else { (origin + 1 < wm_core::MAX_WORKSPACES
+    |                                                    ^^^^^^^^^^^^^^^^^^^^^
+    |
+help: there is a method `current_workspace` with a similar name, but with different arguments
+   --> crates/wm-core/src/manager.rs:890:4
+
+error[E0599]: no method named `separate_spaces` found for struct `WindowManager<B>` in the current scope
+   --> crates/wm-wayland/src/gesture_scene.rs:124:42
+    |
+124 | ...   && (!comp.wm.separate_spaces() || comp.wm.workspace_output_index(c.workspace) == comp.wm.workspace_output_index(origin))
+    |                    ^^^^^^^^^^^^^^^ method not found in `WindowManager<WaylandBackend>`
+
+error[E0599]: no method named `workspace_output_index` found for struct `WindowManager<B>` in the current scope
+   --> crates/wm-wayland/src/gesture_scene.rs:124:71
+    |
+124 | ...   && (!comp.wm.separate_spaces() || comp.wm.workspace_output_index(c.workspace) == comp.wm.workspace_output_index(origin))
+    |                                                 ^^^^^^^^^^^^^^^^^^^^^^
+    |
+help: there is a method `workspace_count` with a similar name, but with different arguments
+   --> crates/wm-core/src/manager.rs:1201:4
+
+error[E0599]: no method named `workspace_output_index` found for struct `WindowManager<B>` in the current scope
+   --> crates/wm-wayland/src/gesture_scene.rs:124:118
+    |
+124 | ...   && (!comp.wm.separate_spaces() || comp.wm.workspace_output_index(c.workspace) == comp.wm.workspace_output_index(origin))
+    |                                                                                                ^^^^^^^^^^^^^^^^^^^^^^
+    |
+help: there is a method `workspace_count` with a similar name, but with different arguments
+   --> crates/wm-core/src/manager.rs:1201:4
+
+error[E0609]: no field `separate_spaces` on type `&InteractionConfig`
+    --> crates/wm-wayland/src/state.rs:2164:59
+     |
+2164 |     if comp.wm.mac_mode() && comp.wm.interaction_config().separate_spaces {
+     |                                                           ^^^^^^^^^^^^^^^ unknown field
+     |
+     = note: available fields are: `mode`, `clipboard_persistence`, `applications`
+
+error[E0599]: no method named `reconcile_display_spaces` found for struct `WindowManager<B>` in the current scope
+    --> crates/wm-wayland/src/state.rs:2165:17
+     |
+2165 |         comp.wm.reconcile_display_spaces();
+     |                 ^^^^^^^^^^^^^^^^^^^^^^^^ method not found in `WindowManager<WaylandBackend>`
+
+error[E0599]: no method named `reconcile_display_spaces` found for struct `WindowManager<B>` in the current scope
+    --> crates/wm-wayland/src/state.rs:3354:17
+     |
+3354 |         self.wm.reconcile_display_spaces();
+     |                 ^^^^^^^^^^^^^^^^^^^^^^^^ method not found in `WindowManager<WaylandBackend>`
+
+error[E0599]: no method named `separate_spaces` found for struct `WindowManager<B>` in the current scope
+  --> crates/wm-wayland/src/workspace.rs:71:16
+   |
+71 |     if comp.wm.separate_spaces() {
+   |                ^^^^^^^^^^^^^^^ method not found in `WindowManager<WaylandBackend>`
+
+error[E0599]: no method named `workspace_row_on_output` found for struct `WindowManager<B>` in the current scope
+  --> crates/wm-wayland/src/workspace.rs:75:47
+   |
+75 |             for (local, workspace) in comp.wm.workspace_row_on_output(index).into_iter().enumerate() {
+   |                                               ^^^^^^^^^^^^^^^^^^^^^^^
+   |
+help: there is a method `workspace_count` with a similar name, but with different arguments
+  --> crates/wm-core/src/manager.rs:1201:4
+
+error[E0599]: no method named `workspace_id` found for struct `WindowManager<B>` in the current scope
+  --> crates/wm-wayland/src/workspace.rs:77:33
+   |
+77 |                     id: comp.wm.workspace_id(workspace),
+   |                                 ^^^^^^^^^^^^
+   |
+help: there is a method `workspace_has_windows` with a similar name
+   |
+77 -                     id: comp.wm.workspace_id(workspace),
+77 +                     id: comp.wm.workspace_has_windows(workspace),
+   |
+
+error[E0599]: no method named `workspace_visible` found for struct `WindowManager<B>` in the current scope
+  --> crates/wm-wayland/src/workspace.rs:80:37
+   |
+80 |                     active: comp.wm.workspace_visible(workspace),
+   |                                     ^^^^^^^^^^^^^^^^^ method not found in `WindowManager<WaylandBackend>`
+
+error[E0599]: no method named `workspace_id` found for struct `WindowManager<B>` in the current scope
+  --> crates/wm-wayland/src/workspace.rs:91:29
+   |
+91 |                 id: comp.wm.workspace_id(index),
+   |                             ^^^^^^^^^^^^
+   |
+help: there is a method `workspace_has_windows` with a similar name
+   |
+91 -                 id: comp.wm.workspace_id(index),
+91 +                 id: comp.wm.workspace_has_windows(index),
+   |
+
+error[E0599]: no method named `workspace_visible` found for struct `WindowManager<B>` in the current scope
+  --> crates/wm-wayland/src/workspace.rs:94:33
+   |
+94 |                 active: comp.wm.workspace_visible(index),
+   |                                 ^^^^^^^^^^^^^^^^^ method not found in `WindowManager<WaylandBackend>`
+
+error[E0599]: no method named `workspace_id` found for struct `WindowManager<B>` in the current scope
+   --> crates/wm-wayland/src/workspace.rs:239:94
+    |
+239 |                     if let Some(index) = (0..state.wm.workspace_count()).find(|&i| &state.wm.workspace_id(i) == id) {
+    |                                                                                              ^^^^^^^^^^^^
+    |
+help: there is a method `workspace_has_windows` with a similar name
+    |
+239 -                     if let Some(index) = (0..state.wm.workspace_count()).find(|&i| &state.wm.workspace_id(i) == id) {
+239 +                     if let Some(index) = (0..state.wm.workspace_count()).find(|&i| &state.wm.workspace_has_windows(i) == id) {
+    |
+
+Some errors have detailed explanations: E0407, E0599, E0609.
+For more information about an error, try `rustc --explain E0407`.
+error: could not compile `wm-wayland` (lib) due to 24 previous errors
+warning: build failed, waiting for other jobs to finish...

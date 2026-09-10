@@ -1,0 +1,197 @@
+{
+  "label": "baseline",
+  "case": "native",
+  "policy": "default",
+  "seconds": 30.000288585,
+  "cpu_percent": 2.3333108880492457,
+  "render_fps": 44.19957482219,
+  "render_wall_us_per_frame": 375.81749622926094,
+  "presentation": {
+    "count": 1326,
+    "fps": 44.18866230980908,
+    "interval_ms_p50": 16.668,
+    "interval_ms_p95": 33.336,
+    "interval_ms_p99": 33.336,
+    "interval_ms_p99_9": 33.336,
+    "interval_ms_max": 33.336,
+    "intervals_over_1_5_refresh": 474,
+    "estimated_missed_refreshes": 474,
+    "zero_copy_count": 0,
+    "advertised_refresh_ns": [
+      16667500
+    ]
+  },
+  "frames": {
+    "dispatch_calls": 4297,
+    "dispatch_us": 661443,
+    "dispatch_max_us": 3338,
+    "input_us": 2066,
+    "shell_us": 85893,
+    "protocol_us": 28875,
+    "layout_us": 19056,
+    "render_calls": 1326,
+    "render_us": 498334,
+    "render_max_us": 3271,
+    "flush_us": 10929,
+    "ipc_us": 5744,
+    "render_attempts": 2971,
+    "gesture_build_calls": 0,
+    "gesture_build_us": 0,
+    "gesture_build_max_us": 0
+  },
+  "before": {
+    "monotonic_ns": 166664764849007,
+    "wall_ns": 1789068978148851182,
+    "cpu_ticks": 73,
+    "rss_bytes": 324792320
+  },
+  "after": {
+    "monotonic_ns": 166694765137592,
+    "wall_ns": 1789069008149139803,
+    "cpu_ticks": 143,
+    "rss_bytes": 324153344
+  },
+  "native_delta": {},
+  "stages": {},
+  "captures": [],
+  "readback_before": {},
+  "readback_after": {},
+  "multi_gpu_delta": {},
+  "monitors": [
+    {
+      "id": 0,
+      "name": "eDP-1",
+      "description": "Apple Computer Inc iMac 89865974C242D",
+      "make": "Apple Computer Inc",
+      "model": "iMac",
+      "serial": "89865974C242D",
+      "width": 3840,
+      "height": 2160,
+      "refreshRate": 59.997,
+      "x": 0,
+      "y": 0,
+      "activeWorkspace": {
+        "id": 1,
+        "name": "1"
+      },
+      "specialWorkspace": {
+        "id": 0,
+        "name": ""
+      },
+      "reserved": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "scale": 2.0,
+      "transform": 0,
+      "focused": true,
+      "dpmsStatus": true,
+      "vrr": false,
+      "solitaryBlockedBy": [],
+      "activelyTearing": false,
+      "directScanoutTo": null,
+      "disabled": false,
+      "currentFormat": "XRGB8888",
+      "mirrorOf": "none",
+      "availableModes": [
+        "3840x2160@60.00Hz",
+        "3200x1800@59.98Hz",
+        "2560x1440@59.95Hz",
+        "1920x1200@60.00Hz",
+        "1920x1080@60.00Hz",
+        "1600x1200@60.00Hz",
+        "1680x1050@60.00Hz",
+        "1280x1024@60.00Hz",
+        "1440x900@60.00Hz",
+        "1280x800@60.00Hz",
+        "1280x720@60.00Hz",
+        "1024x768@60.00Hz",
+        "800x600@60.00Hz",
+        "640x480@60.00Hz"
+      ]
+    }
+  ],
+  "monitors_after": [
+    {
+      "id": 0,
+      "name": "eDP-1",
+      "description": "Apple Computer Inc iMac 89865974C242D",
+      "make": "Apple Computer Inc",
+      "model": "iMac",
+      "serial": "89865974C242D",
+      "width": 3840,
+      "height": 2160,
+      "refreshRate": 59.997,
+      "x": 0,
+      "y": 0,
+      "activeWorkspace": {
+        "id": 2,
+        "name": "2"
+      },
+      "specialWorkspace": {
+        "id": 0,
+        "name": ""
+      },
+      "reserved": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "scale": 2.0,
+      "transform": 0,
+      "focused": true,
+      "dpmsStatus": true,
+      "vrr": false,
+      "solitaryBlockedBy": [],
+      "activelyTearing": false,
+      "directScanoutTo": null,
+      "disabled": false,
+      "currentFormat": "XRGB8888",
+      "mirrorOf": "none",
+      "availableModes": [
+        "3840x2160@60.00Hz",
+        "3200x1800@59.98Hz",
+        "2560x1440@59.95Hz",
+        "1920x1200@60.00Hz",
+        "1920x1080@60.00Hz",
+        "1600x1200@60.00Hz",
+        "1680x1050@60.00Hz",
+        "1280x1024@60.00Hz",
+        "1440x900@60.00Hz",
+        "1280x800@60.00Hz",
+        "1280x720@60.00Hz",
+        "1024x768@60.00Hz",
+        "800x600@60.00Hz",
+        "640x480@60.00Hz"
+      ]
+    }
+  ],
+  "renderers": [
+    "AMD Radeon Pro 580X (radeonsi, polaris10, ACO, DRM 3.64, 7.1.9-arch1-2)"
+  ],
+  "pixels": {
+    "size": [
+      3840,
+      2160
+    ],
+    "fullscreen_pattern_verified": true,
+    "client_pattern_verified": true,
+    "sha256": "376472af953c1f5d2d854949f8a17fe084c1f3bf387f0a03f81a91ffef210ccc"
+  },
+  "load_average": [
+    0.6748046875,
+    0.63232421875,
+    0.58935546875
+  ],
+  "active_hardware_planes": [
+    {
+      "id": 59,
+      "type": 1,
+      "crtc": 64,
+      "framebuffer": 125
+    }
+  ]
+}

@@ -1,0 +1,61 @@
+{
+  "original_pid": 1034,
+  "preserved_clients": 0,
+  "monitor": {
+    "id": 0,
+    "name": "eDP-1",
+    "description": "eDP-1",
+    "make": "Unknown",
+    "model": "eDP-1",
+    "serial": "",
+    "width": 2560,
+    "height": 1600,
+    "refreshRate": 60.0,
+    "x": 0,
+    "y": 0,
+    "activeWorkspace": {
+      "id": 1,
+      "name": "1"
+    },
+    "specialWorkspace": {
+      "id": 0,
+      "name": ""
+    },
+    "reserved": [
+      0,
+      0,
+      0,
+      0
+    ],
+    "scale": 2.0,
+    "transform": 0,
+    "focused": true,
+    "dpmsStatus": true,
+    "vrr": false,
+    "solitaryBlockedBy": [],
+    "activelyTearing": false,
+    "directScanoutTo": null,
+    "disabled": false,
+    "currentFormat": "XRGB8888",
+    "mirrorOf": "none",
+    "availableModes": [
+      "2560x1600@60.00Hz"
+    ]
+  },
+  "active_crtcs": [
+    {
+      "id": 45,
+      "active": true,
+      "width": 2560,
+      "height": 1600,
+      "hz": 59.999856,
+      "sequence_available": false,
+      "sequence": 0,
+      "sequence_ns": 0
+    }
+  ],
+  "active_vt": "tty1",
+  "test_units_remaining": 0,
+  "installed_binary_sha256": "440711798b4e54a384e6fe9aca3015e924cc36a0db3ca5c1eb520e6c7dd02ce5",
+  "existing_source_checkout": "preserved, including preexisting dirty/untracked files"
+}

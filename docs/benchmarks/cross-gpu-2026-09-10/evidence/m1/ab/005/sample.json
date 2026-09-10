@@ -1,0 +1,171 @@
+{
+  "label": "baseline",
+  "case": "fractional",
+  "policy": "default",
+  "seconds": 30.000534486,
+  "cpu_percent": 5.433236533704601,
+  "render_fps": 51.699078918870164,
+  "render_wall_us_per_frame": 610.618310767247,
+  "presentation": {
+    "count": 1551,
+    "fps": 51.69146133762161,
+    "interval_ms_p50": 16.713,
+    "interval_ms_p95": 32.937,
+    "interval_ms_p99": 32.985,
+    "interval_ms_p99_9": 33.142,
+    "interval_ms_max": 33.328,
+    "intervals_over_1_5_refresh": 249,
+    "estimated_missed_refreshes": 249,
+    "zero_copy_count": 0,
+    "advertised_refresh_ns": [
+      16666666
+    ]
+  },
+  "frames": {
+    "dispatch_calls": 5389,
+    "dispatch_us": 1632655,
+    "dispatch_max_us": 3595,
+    "input_us": 2605,
+    "shell_us": 226356,
+    "protocol_us": 43870,
+    "layout_us": 39517,
+    "render_calls": 1551,
+    "render_us": 947069,
+    "render_max_us": 2299,
+    "flush_us": 332701,
+    "ipc_us": 17340,
+    "render_attempts": 3791,
+    "gesture_build_calls": 0,
+    "gesture_build_us": 0,
+    "gesture_build_max_us": 0
+  },
+  "before": {
+    "monotonic_ns": 5149823957390,
+    "wall_ns": 1789069538658639097,
+    "cpu_ticks": 73,
+    "rss_bytes": 99434496
+  },
+  "after": {
+    "monotonic_ns": 5179824491876,
+    "wall_ns": 1789069568659174333,
+    "cpu_ticks": 236,
+    "rss_bytes": 99434496
+  },
+  "native_delta": {},
+  "stages": {},
+  "captures": [],
+  "readback_before": {},
+  "readback_after": {},
+  "multi_gpu_delta": {},
+  "monitors": [
+    {
+      "id": 0,
+      "name": "eDP-1",
+      "description": "eDP-1",
+      "make": "Unknown",
+      "model": "eDP-1",
+      "serial": "",
+      "width": 2560,
+      "height": 1600,
+      "refreshRate": 60.0,
+      "x": 0,
+      "y": 0,
+      "activeWorkspace": {
+        "id": 1,
+        "name": "1"
+      },
+      "specialWorkspace": {
+        "id": 0,
+        "name": ""
+      },
+      "reserved": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "scale": 1.5,
+      "transform": 0,
+      "focused": true,
+      "dpmsStatus": true,
+      "vrr": false,
+      "solitaryBlockedBy": [],
+      "activelyTearing": false,
+      "directScanoutTo": null,
+      "disabled": false,
+      "currentFormat": "XRGB8888",
+      "mirrorOf": "none",
+      "availableModes": [
+        "2560x1600@60.00Hz"
+      ]
+    }
+  ],
+  "monitors_after": [
+    {
+      "id": 0,
+      "name": "eDP-1",
+      "description": "eDP-1",
+      "make": "Unknown",
+      "model": "eDP-1",
+      "serial": "",
+      "width": 2560,
+      "height": 1600,
+      "refreshRate": 60.0,
+      "x": 0,
+      "y": 0,
+      "activeWorkspace": {
+        "id": 2,
+        "name": "2"
+      },
+      "specialWorkspace": {
+        "id": 0,
+        "name": ""
+      },
+      "reserved": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "scale": 1.5,
+      "transform": 0,
+      "focused": true,
+      "dpmsStatus": true,
+      "vrr": false,
+      "solitaryBlockedBy": [],
+      "activelyTearing": false,
+      "directScanoutTo": null,
+      "disabled": false,
+      "currentFormat": "XRGB8888",
+      "mirrorOf": "none",
+      "availableModes": [
+        "2560x1600@60.00Hz"
+      ]
+    }
+  ],
+  "renderers": [
+    "Apple M1 (G13G B1)"
+  ],
+  "pixels": {
+    "size": [
+      2560,
+      1600
+    ],
+    "fullscreen_pattern_verified": true,
+    "client_pattern_verified": true,
+    "sha256": "d5c74c9f2dd03cdb3ea7725f81057e984f9abf8cb40f7dd69ef51cf276034eb8"
+  },
+  "load_average": [
+    0.390625,
+    0.7255859375,
+    1.2666015625
+  ],
+  "active_hardware_planes": [
+    {
+      "id": 35,
+      "type": 1,
+      "crtc": 45,
+      "framebuffer": 59
+    }
+  ]
+}

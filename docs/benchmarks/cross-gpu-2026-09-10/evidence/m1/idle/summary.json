@@ -1,0 +1,36 @@
+{
+  "baseline/idle/default": {
+    "cpu_percent": {
+      "median": 0.24998923142220236,
+      "min": 0.24998923142220236,
+      "max": 0.24998923142220236
+    },
+    "render_fps": {
+      "median": 0.0,
+      "min": 0.0,
+      "max": 0.0
+    },
+    "render_wall_us_per_frame": {
+      "median": 0.0,
+      "min": 0.0,
+      "max": 0.0
+    }
+  },
+  "final/idle/default": {
+    "cpu_percent": {
+      "median": 0.16665949503082966,
+      "min": 0.16665949503082966,
+      "max": 0.16665949503082966
+    },
+    "render_fps": {
+      "median": 0.0,
+      "min": 0.0,
+      "max": 0.0
+    },
+    "render_wall_us_per_frame": {
+      "median": 0.0,
+      "min": 0.0,
+      "max": 0.0
+    }
+  }
+}

@@ -1,0 +1,105 @@
+{
+  "campaigns": {
+    "imac/ab": {
+      "completed_samples": 20,
+      "expected_samples": 20,
+      "gpu_timings": false,
+      "stress": false
+    },
+    "imac/fresh": {
+      "completed_samples": 1,
+      "expected_samples": 1,
+      "gpu_timings": false,
+      "stress": true
+    },
+    "imac/idle": {
+      "completed_samples": 2,
+      "expected_samples": 2,
+      "gpu_timings": false,
+      "stress": false
+    },
+    "imac/planes": {
+      "completed_samples": 15,
+      "expected_samples": 15,
+      "gpu_timings": false,
+      "stress": false
+    },
+    "imac/smoke": {
+      "completed_samples": 1,
+      "expected_samples": 1,
+      "gpu_timings": false,
+      "stress": false
+    },
+    "imac/timers": {
+      "completed_samples": 4,
+      "expected_samples": 4,
+      "gpu_timings": true,
+      "stress": false
+    },
+    "imac/timers-high": {
+      "completed_samples": 4,
+      "expected_samples": 4,
+      "gpu_timings": true,
+      "stress": false
+    },
+    "m1/ab": {
+      "completed_samples": 20,
+      "expected_samples": 20,
+      "gpu_timings": false,
+      "stress": false
+    },
+    "m1/flags": {
+      "completed_samples": 8,
+      "expected_samples": 8,
+      "gpu_timings": false,
+      "stress": false
+    },
+    "m1/fresh": {
+      "completed_samples": 1,
+      "expected_samples": 1,
+      "gpu_timings": false,
+      "stress": true
+    },
+    "m1/idle": {
+      "completed_samples": 2,
+      "expected_samples": 2,
+      "gpu_timings": false,
+      "stress": false
+    },
+    "m1/planes2": {
+      "completed_samples": 20,
+      "expected_samples": 20,
+      "gpu_timings": false,
+      "stress": false
+    },
+    "m1/smoke2": {
+      "completed_samples": 1,
+      "expected_samples": 1,
+      "gpu_timings": false,
+      "stress": false
+    },
+    "m1/timers": {
+      "completed_samples": 4,
+      "expected_samples": 4,
+      "gpu_timings": true,
+      "stress": false
+    }
+  },
+  "python_tests": 86,
+  "python_result": "passed",
+  "steady_state_render_or_queue_failures": 0,
+  "performance_regressions": [
+    "M1 combined overlay and primary-any policy with visible cursor",
+    "M1 default CPU per displayed frame increases 2.67\u20133.69%"
+  ],
+  "untested": [
+    "iMac native 5120x2880 physical mode (unavailable)",
+    "M1 transition to second physical mode (unavailable)",
+    "input-to-photon latency",
+    "multiple physical monitors on either Mac",
+    "multi-GPU on either Mac"
+  ],
+  "imac_completed_samples": 47,
+  "m1_completed_samples": 56,
+  "total_completed_samples": 103
+}

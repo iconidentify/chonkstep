@@ -1,0 +1,318 @@
+{
+  "crtcs": [
+    {
+      "id": 64,
+      "active": true,
+      "width": 3840,
+      "height": 2160,
+      "hz": 59.996625,
+      "sequence_available": true,
+      "sequence": 5296495,
+      "sequence_ns": 166654843544936
+    },
+    {
+      "id": 67,
+      "active": false,
+      "width": 0,
+      "height": 0,
+      "hz": 0.0,
+      "sequence_available": false,
+      "sequence": 0,
+      "sequence_ns": 0
+    },
+    {
+      "id": 70,
+      "active": false,
+      "width": 0,
+      "height": 0,
+      "hz": 0.0,
+      "sequence_available": false,
+      "sequence": 0,
+      "sequence_ns": 0
+    },
+    {
+      "id": 73,
+      "active": false,
+      "width": 0,
+      "height": 0,
+      "hz": 0.0,
+      "sequence_available": false,
+      "sequence": 0,
+      "sequence_ns": 0
+    },
+    {
+      "id": 76,
+      "active": false,
+      "width": 0,
+      "height": 0,
+      "hz": 0.0,
+      "sequence_available": false,
+      "sequence": 0,
+      "sequence_ns": 0
+    },
+    {
+      "id": 79,
+      "active": false,
+      "width": 0,
+      "height": 0,
+      "hz": 0.0,
+      "sequence_available": false,
+      "sequence": 0,
+      "sequence_ns": 0
+    }
+  ],
+  "connectors": [
+    {
+      "id": 81,
+      "type": 14,
+      "type_id": 1,
+      "connected": true,
+      "modes": 14
+    },
+    {
+      "id": 87,
+      "type": 10,
+      "type_id": 1,
+      "connected": false,
+      "modes": 0
+    },
+    {
+      "id": 94,
+      "type": 10,
+      "type_id": 2,
+      "connected": false,
+      "modes": 0
+    },
+    {
+      "id": 101,
+      "type": 10,
+      "type_id": 3,
+      "connected": false,
+      "modes": 0
+    }
+  ],
+  "planes": [
+    {
+      "id": 44,
+      "type": 1,
+      "crtc": 0,
+      "framebuffer": 0,
+      "possible_crtcs": 32,
+      "formats": [
+        875713112,
+        875713089,
+        875708754,
+        808669784,
+        808665688,
+        808669761,
+        808665665,
+        942953048,
+        942948952,
+        942953025,
+        942948929,
+        875709016,
+        875708993,
+        909199186,
+        1211388504,
+        1211388481,
+        1211384408,
+        1211384385
+      ]
+    },
+    {
+      "id": 47,
+      "type": 1,
+      "crtc": 0,
+      "framebuffer": 0,
+      "possible_crtcs": 16,
+      "formats": [
+        875713112,
+        875713089,
+        875708754,
+        808669784,
+        808665688,
+        808669761,
+        808665665,
+        942953048,
+        942948952,
+        942953025,
+        942948929,
+        875709016,
+        875708993,
+        909199186,
+        1211388504,
+        1211388481,
+        1211384408,
+        1211384385
+      ]
+    },
+    {
+      "id": 50,
+      "type": 1,
+      "crtc": 0,
+      "framebuffer": 0,
+      "possible_crtcs": 8,
+      "formats": [
+        875713112,
+        875713089,
+        875708754,
+        808669784,
+        808665688,
+        808669761,
+        808665665,
+        942953048,
+        942948952,
+        942953025,
+        942948929,
+        875709016,
+        875708993,
+        909199186,
+        1211388504,
+        1211388481,
+        1211384408,
+        1211384385
+      ]
+    },
+    {
+      "id": 53,
+      "type": 1,
+      "crtc": 0,
+      "framebuffer": 0,
+      "possible_crtcs": 4,
+      "formats": [
+        875713112,
+        875713089,
+        875708754,
+        808669784,
+        808665688,
+        808669761,
+        808665665,
+        942953048,
+        942948952,
+        942953025,
+        942948929,
+        875709016,
+        875708993,
+        909199186,
+        1211388504,
+        1211388481,
+        1211384408,
+        1211384385
+      ]
+    },
+    {
+      "id": 56,
+      "type": 1,
+      "crtc": 0,
+      "framebuffer": 0,
+      "possible_crtcs": 2,
+      "formats": [
+        875713112,
+        875713089,
+        875708754,
+        808669784,
+        808665688,
+        808669761,
+        808665665,
+        942953048,
+        942948952,
+        942953025,
+        942948929,
+        875709016,
+        875708993,
+        909199186,
+        1211388504,
+        1211388481,
+        1211384408,
+        1211384385
+      ]
+    },
+    {
+      "id": 59,
+      "type": 1,
+      "crtc": 64,
+      "framebuffer": 125,
+      "possible_crtcs": 1,
+      "formats": [
+        875713112,
+        875713089,
+        875708754,
+        808669784,
+        808665688,
+        808669761,
+        808665665,
+        942953048,
+        942948952,
+        942953025,
+        942948929,
+        875709016,
+        875708993,
+        909199186,
+        1211388504,
+        1211388481,
+        1211384408,
+        1211384385
+      ]
+    },
+    {
+      "id": 62,
+      "type": 2,
+      "crtc": 64,
+      "framebuffer": 126,
+      "possible_crtcs": 1,
+      "formats": [
+        875713089
+      ]
+    },
+    {
+      "id": 65,
+      "type": 2,
+      "crtc": 0,
+      "framebuffer": 0,
+      "possible_crtcs": 2,
+      "formats": [
+        875713089
+      ]
+    },
+    {
+      "id": 68,
+      "type": 2,
+      "crtc": 0,
+      "framebuffer": 0,
+      "possible_crtcs": 4,
+      "formats": [
+        875713089
+      ]
+    },
+    {
+      "id": 71,
+      "type": 2,
+      "crtc": 0,
+      "framebuffer": 0,
+      "possible_crtcs": 8,
+      "formats": [
+        875713089
+      ]
+    },
+    {
+      "id": 74,
+      "type": 2,
+      "crtc": 0,
+      "framebuffer": 0,
+      "possible_crtcs": 16,
+      "formats": [
+        875713089
+      ]
+    },
+    {
+      "id": 77,
+      "type": 2,
+      "crtc": 0,
+      "framebuffer": 0,
+      "possible_crtcs": 32,
+      "formats": [
+        875713089
+      ]
+    }
+  ]
+}

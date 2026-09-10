@@ -1,0 +1,28 @@
+{
+  "artifacts": {
+    "imac-native-2026-09-10.tar.zst": {
+      "path": "/home/chrisk/.local/state/chonkstep/benchmarks/cross-gpu-2026-09-10/imac-native-2026-09-10.tar.zst",
+      "bytes": 222065393,
+      "sha256": "7df54a098cd52bb4a6ecad74e5a6c055c8a623e5e44cfe209fa07f01e40236c6"
+    },
+    "m1-native-2026-09-10.tar.zst": {
+      "path": "/home/chrisk/.local/state/chonkstep/benchmarks/cross-gpu-2026-09-10/m1-native-2026-09-10.tar.zst",
+      "bytes": 220058417,
+      "sha256": "996c93a6b238e0c9eb8f554174c8705dfeb6ad2a69a0d6b677cd25cd15275b09"
+    },
+    "imac-bench-baseline-source.tar.zst": {
+      "path": "/home/chrisk/.local/state/chonkstep/benchmarks/cross-gpu-2026-09-10/imac-bench-baseline-source.tar.zst",
+      "bytes": 23911225,
+      "sha256": "29949b805e5f9e24920cc9b9cd726d86ef94fb26c7fa07830b85a4d076102cc9"
+    },
+    "imac-bench-final-source.tar.zst": {
+      "path": "/home/chrisk/.local/state/chonkstep/benchmarks/cross-gpu-2026-09-10/imac-bench-final-source.tar.zst",
+      "bytes": 23970691,
+      "sha256": "dbf589fa4fa960dd3001b5a15e2690cb1a509e2cf0f194984dab666ccbcb7ce1"
+    }
+  },
+  "harness_commit": "df6bfc1",
+  "baseline_source": "da52c0d",
+  "qualified_source": "52c680d",
+  "i9beef_prior_artifacts": "../i9beef-native-2026-09-10/artifacts.json"
+}

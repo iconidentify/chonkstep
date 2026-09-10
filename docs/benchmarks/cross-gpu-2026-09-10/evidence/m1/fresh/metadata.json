@@ -1,0 +1,64 @@
+{
+  "date_utc": "2026-09-10T20:05:28Z",
+  "backend": "native DRM/KMS",
+  "arguments": {
+    "binary": [
+      "final=/tmp/cm1/bin/final"
+    ],
+    "probe": "/tmp/cm1/bin/probe",
+    "drm_info": "/tmp/cm1/bin/drm-info",
+    "device": "/dev/dri/card2",
+    "render_device": null,
+    "connector": "eDP-1",
+    "test_vt": 3,
+    "return_vt": 1,
+    "width": 2560,
+    "height": 1600,
+    "hz": 60.0,
+    "cases": [
+      "direct"
+    ],
+    "policies": [
+      "both"
+    ],
+    "seconds": 10.0,
+    "settle_seconds": 6.0,
+    "runs": 1,
+    "gpu_timings": false,
+    "vrr": "off",
+    "log_filter": "info",
+    "require_scanout": "primary",
+    "stress": true,
+    "skip_modesets": "The internal M1 panel advertises only 2560x1600 at 60 Hz",
+    "frame_marker": true,
+    "capture_every": 0,
+    "output": "/tmp/cm1/fresh"
+  },
+  "binaries": {
+    "final": {
+      "path": "/tmp/cm1/bin/final",
+      "version": "chonkstep-wayland 0.4.4\nsource: preview-v0.4.4-13-g52c680d\nbuild id: 663d0449b98a375b5600bd3d2c904810d13ff77b",
+      "sha256": "5c04446f3a05d8891f6d6e64aa9eb14db6b3a89b657700abac517f6c104b5306"
+    }
+  },
+  "probe_sha256": "5067f64564ea385b777064d20ac6d6dacf208bb8658d3f1ac388ee1d62150e4f",
+  "harness_sha256": "ae323e94dedeec302cbf8a3298a93ca149ab4d212747f357dbd79853c0567d4a",
+  "kernel": "Linux m1 7.1.13-1-1-ARCH #1 SMP PREEMPT_DYNAMIC Wed, 09 Sep 2026 09:28:26 +0000 aarch64 GNU/Linux",
+  "load_average": [
+    0.40625,
+    0.42138671875,
+    0.60498046875
+  ],
+  "driver": {
+    "driver": "apple-drm/asahi",
+    "telemetry": "Apple SMC system power; includes other processes and components",
+    "unavailable": [
+      "GPU utilization",
+      "GPU clock",
+      "GPU memory clock",
+      "GPU board power",
+      "GPU temperature"
+    ]
+  },
+  "limitations": "Synthetic frame-paced opaque EGL producer uses glFinish before handoff. Single physical output. Presentation is hardware completion, not photon/input latency. GPU board telemetry includes other processes. Histogram percentiles are upper bounds."
+}

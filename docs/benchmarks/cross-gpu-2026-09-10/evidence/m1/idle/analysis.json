@@ -1,0 +1,721 @@
+{
+  "metadata": {
+    "date_utc": "2026-09-10T20:13:52Z",
+    "backend": "native DRM/KMS",
+    "arguments": {
+      "binary": [
+        "baseline=/tmp/cm1/bin/baseline",
+        "final=/tmp/cm1/bin/final"
+      ],
+      "probe": "/tmp/cm1/bin/probe",
+      "drm_info": "/tmp/cm1/bin/drm-info",
+      "device": "/dev/dri/card2",
+      "render_device": null,
+      "connector": "eDP-1",
+      "test_vt": 3,
+      "return_vt": 1,
+      "width": 2560,
+      "height": 1600,
+      "hz": 60.0,
+      "cases": [
+        "idle"
+      ],
+      "policies": [
+        "default"
+      ],
+      "seconds": 12.0,
+      "settle_seconds": 6.0,
+      "runs": 1,
+      "gpu_timings": false,
+      "vrr": "off",
+      "log_filter": "info",
+      "require_scanout": null,
+      "stress": false,
+      "skip_modesets": null,
+      "frame_marker": false,
+      "capture_every": 0,
+      "output": "/tmp/cm1/idle"
+    },
+    "binaries": {
+      "baseline": {
+        "path": "/tmp/cm1/bin/baseline",
+        "version": "chonkstep-wayland 0.4.4\nsource: preview-v0.4.4-1-gda52c0d\nbuild id: 4ce7bbd59540e38427355c644bb7d467e3ea3d88",
+        "sha256": "9f81e5fe4af5f3654fffbba43d3757856575c84e2848ef8fd02c781c4df461ea"
+      },
+      "final": {
+        "path": "/tmp/cm1/bin/final",
+        "version": "chonkstep-wayland 0.4.4\nsource: preview-v0.4.4-13-g52c680d\nbuild id: 663d0449b98a375b5600bd3d2c904810d13ff77b",
+        "sha256": "5c04446f3a05d8891f6d6e64aa9eb14db6b3a89b657700abac517f6c104b5306"
+      }
+    },
+    "probe_sha256": "5067f64564ea385b777064d20ac6d6dacf208bb8658d3f1ac388ee1d62150e4f",
+    "harness_sha256": "ae323e94dedeec302cbf8a3298a93ca149ab4d212747f357dbd79853c0567d4a",
+    "kernel": "Linux m1 7.1.13-1-1-ARCH #1 SMP PREEMPT_DYNAMIC Wed, 09 Sep 2026 09:28:26 +0000 aarch64 GNU/Linux",
+    "load_average": [
+      0.0810546875,
+      0.26318359375,
+      0.4541015625
+    ],
+    "driver": {
+      "driver": "apple-drm/asahi",
+      "telemetry": "Apple SMC system power; includes other processes and components",
+      "unavailable": [
+        "GPU utilization",
+        "GPU clock",
+        "GPU memory clock",
+        "GPU board power",
+        "GPU temperature"
+      ]
+    },
+    "limitations": "Synthetic frame-paced opaque EGL producer uses glFinish before handoff. Single physical output. Presentation is hardware completion, not photon/input latency. GPU board telemetry includes other processes. Histogram percentiles are upper bounds."
+  },
+  "summary": {
+    "baseline/idle/default": {
+      "cpu_percent": {
+        "n": 1,
+        "median": 0.24998923142220236,
+        "mean": 0.24998923142220236,
+        "min": 0.24998923142220236,
+        "max": 0.24998923142220236,
+        "values": [
+          0.24998923142220236
+        ]
+      },
+      "presentation_fps": {
+        "n": 1,
+        "median": 0,
+        "mean": 0,
+        "min": 0,
+        "max": 0,
+        "values": [
+          0
+        ]
+      },
+      "cpu_us_per_presented_frame": {
+        "n": 1,
+        "median": 0,
+        "mean": 0,
+        "min": 0,
+        "max": 0,
+        "values": [
+          0
+        ]
+      },
+      "render_wall_us_per_frame": {
+        "n": 1,
+        "median": 0.0,
+        "mean": 0.0,
+        "min": 0.0,
+        "max": 0.0,
+        "values": [
+          0.0
+        ]
+      },
+      "missed_refreshes": {
+        "n": 1,
+        "median": 0,
+        "mean": 0,
+        "min": 0,
+        "max": 0,
+        "values": [
+          0
+        ]
+      }
+    },
+    "final/idle/default": {
+      "cpu_percent": {
+        "n": 1,
+        "median": 0.16665949503082966,
+        "mean": 0.16665949503082966,
+        "min": 0.16665949503082966,
+        "max": 0.16665949503082966,
+        "values": [
+          0.16665949503082966
+        ]
+      },
+      "presentation_fps": {
+        "n": 1,
+        "median": 0,
+        "mean": 0,
+        "min": 0,
+        "max": 0,
+        "values": [
+          0
+        ]
+      },
+      "cpu_us_per_presented_frame": {
+        "n": 1,
+        "median": 0,
+        "mean": 0,
+        "min": 0,
+        "max": 0,
+        "values": [
+          0
+        ]
+      },
+      "render_wall_us_per_frame": {
+        "n": 1,
+        "median": 0.0,
+        "mean": 0.0,
+        "min": 0.0,
+        "max": 0.0,
+        "values": [
+          0.0
+        ]
+      },
+      "missed_refreshes": {
+        "n": 1,
+        "median": 0,
+        "mean": 0,
+        "min": 0,
+        "max": 0,
+        "values": [
+          0
+        ]
+      }
+    }
+  },
+  "samples": [
+    {
+      "label": "baseline",
+      "case": "idle",
+      "policy": "default",
+      "seconds": 12.000516914,
+      "cpu_percent": 0.24998923142220236,
+      "render_fps": 0.0,
+      "render_wall_us_per_frame": 0.0,
+      "presentation": null,
+      "frames": {
+        "dispatch_calls": 250,
+        "dispatch_us": 18484,
+        "dispatch_max_us": 158,
+        "input_us": 124,
+        "shell_us": 11843,
+        "protocol_us": 2018,
+        "layout_us": 2736,
+        "render_calls": 0,
+        "render_us": 0,
+        "render_max_us": 0,
+        "flush_us": 151,
+        "ipc_us": 806,
+        "render_attempts": 0,
+        "gesture_build_calls": 0,
+        "gesture_build_us": 0,
+        "gesture_build_max_us": 0
+      },
+      "before": {
+        "monotonic_ns": 6850533712221,
+        "wall_ns": 1789071239368394845,
+        "cpu_ticks": 20,
+        "rss_bytes": 97894400
+      },
+      "after": {
+        "monotonic_ns": 6862534229135,
+        "wall_ns": 1789071251368911467,
+        "cpu_ticks": 23,
+        "rss_bytes": 97894400
+      },
+      "native_delta": {},
+      "stages": {},
+      "captures": [],
+      "readback_before": {},
+      "readback_after": {},
+      "multi_gpu_delta": {},
+      "monitors": [
+        {
+          "id": 0,
+          "name": "eDP-1",
+          "description": "eDP-1",
+          "make": "Unknown",
+          "model": "eDP-1",
+          "serial": "",
+          "width": 2560,
+          "height": 1600,
+          "refreshRate": 60.0,
+          "x": 0,
+          "y": 0,
+          "activeWorkspace": {
+            "id": 1,
+            "name": "1"
+          },
+          "specialWorkspace": {
+            "id": 0,
+            "name": ""
+          },
+          "reserved": [
+            0,
+            0,
+            0,
+            0
+          ],
+          "scale": 2.0,
+          "transform": 0,
+          "focused": true,
+          "dpmsStatus": true,
+          "vrr": false,
+          "solitaryBlockedBy": [],
+          "activelyTearing": false,
+          "directScanoutTo": null,
+          "disabled": false,
+          "currentFormat": "XRGB8888",
+          "mirrorOf": "none",
+          "availableModes": [
+            "2560x1600@60.00Hz"
+          ]
+        }
+      ],
+      "monitors_after": [
+        {
+          "id": 0,
+          "name": "eDP-1",
+          "description": "eDP-1",
+          "make": "Unknown",
+          "model": "eDP-1",
+          "serial": "",
+          "width": 2560,
+          "height": 1600,
+          "refreshRate": 60.0,
+          "x": 0,
+          "y": 0,
+          "activeWorkspace": {
+            "id": 1,
+            "name": "1"
+          },
+          "specialWorkspace": {
+            "id": 0,
+            "name": ""
+          },
+          "reserved": [
+            0,
+            0,
+            0,
+            0
+          ],
+          "scale": 2.0,
+          "transform": 0,
+          "focused": true,
+          "dpmsStatus": true,
+          "vrr": false,
+          "solitaryBlockedBy": [],
+          "activelyTearing": false,
+          "directScanoutTo": null,
+          "disabled": false,
+          "currentFormat": "XRGB8888",
+          "mirrorOf": "none",
+          "availableModes": [
+            "2560x1600@60.00Hz"
+          ]
+        }
+      ],
+      "renderers": [
+        "Apple M1 (G13G B1)"
+      ],
+      "pixels": {
+        "size": [
+          2560,
+          1600
+        ],
+        "fullscreen_pattern_verified": false,
+        "client_pattern_verified": false,
+        "sha256": "9789accb281b050a9d51f7079032b3be836329417b632124135f337f0751d0f1"
+      },
+      "load_average": [
+        0.056640625,
+        0.24560546875,
+        0.4443359375
+      ],
+      "active_hardware_planes": [
+        {
+          "id": 35,
+          "type": 1,
+          "crtc": 45,
+          "framebuffer": 70
+        }
+      ],
+      "run": 0,
+      "directory": "000",
+      "presentation_fps": 0,
+      "missed_refreshes": 0,
+      "cpu_us_per_presented_frame": 0,
+      "boards": {
+        "apple-smc-system": {
+          "heatpipe_power_w": {
+            "n": 10,
+            "median": 0.4820455,
+            "mean": 0.4944406,
+            "min": 0.477963,
+            "max": 0.601172,
+            "values": [
+              0.483901,
+              0.479447,
+              0.487241,
+              0.48019,
+              0.479448,
+              0.601172,
+              0.487241,
+              0.488355,
+              0.479448,
+              0.477963
+            ]
+          },
+          "system_power_w": {
+            "n": 10,
+            "median": 6.8588629999999995,
+            "mean": 6.8845993,
+            "min": 6.800167,
+            "max": 7.086011,
+            "values": [
+              6.836468,
+              7.086011,
+              6.849623,
+              6.83193,
+              6.89087,
+              6.874768,
+              6.868103,
+              6.830456,
+              6.977597,
+              6.800167
+            ]
+          },
+          "ac_input_power_w": {
+            "n": 10,
+            "median": 15.5247675,
+            "mean": 15.5280478,
+            "min": 15.41464,
+            "max": 15.751915,
+            "values": [
+              15.751915,
+              15.515527,
+              15.446403,
+              15.505343,
+              15.540672,
+              15.534008,
+              15.44493,
+              15.592749,
+              15.41464,
+              15.534291
+            ]
+          },
+          "rail_3_8v_power_w": {
+            "n": 10,
+            "median": 1.0472195,
+            "mean": 1.067937,
+            "min": 1.03339,
+            "max": 1.238322,
+            "values": [
+              1.238322,
+              1.040303,
+              1.054136,
+              1.03339,
+              1.038072,
+              1.05463,
+              1.060033,
+              1.089967,
+              1.035425,
+              1.035092
+            ]
+          }
+        }
+      }
+    },
+    {
+      "label": "final",
+      "case": "idle",
+      "policy": "default",
+      "seconds": 12.00051638,
+      "cpu_percent": 0.16665949503082966,
+      "render_fps": 0.0,
+      "render_wall_us_per_frame": 0.0,
+      "presentation": null,
+      "frames": {
+        "dispatch_calls": 241,
+        "dispatch_us": 18309,
+        "dispatch_max_us": 234,
+        "input_us": 135,
+        "shell_us": 11772,
+        "protocol_us": 2007,
+        "layout_us": 2765,
+        "render_calls": 0,
+        "render_us": 0,
+        "render_max_us": 0,
+        "flush_us": 137,
+        "ipc_us": 783,
+        "render_attempts": 0,
+        "gesture_build_calls": 0,
+        "gesture_build_us": 0,
+        "gesture_build_max_us": 0
+      },
+      "before": {
+        "monotonic_ns": 6872213125132,
+        "wall_ns": 1789071261047806673,
+        "cpu_ticks": 26,
+        "rss_bytes": 98304000
+      },
+      "after": {
+        "monotonic_ns": 6884213641512,
+        "wall_ns": 1789071273048323345,
+        "cpu_ticks": 28,
+        "rss_bytes": 98304000
+      },
+      "native_delta": {
+        "passes": 0,
+        "skips_off": 0,
+        "skips_flip": 0,
+        "skips_clean": 0,
+        "skips_inactive": 0,
+        "skips_deadline": 0,
+        "attempts": 0,
+        "queued": 0,
+        "empty": 0,
+        "render_failed": 0,
+        "queue_failed": 0,
+        "flips": 0,
+        "primary": 0,
+        "overlay": 0,
+        "composited": 0,
+        "late_presentations": 0
+      },
+      "stages": {},
+      "captures": [],
+      "readback_before": {
+        "queued": 0,
+        "pending_polls": 0,
+        "synchronous_fallbacks": 0,
+        "active_bytes": 0,
+        "peak_bytes": 0,
+        "maps": 0,
+        "map_cpu_ns": 0
+      },
+      "readback_after": {
+        "queued": 0,
+        "pending_polls": 0,
+        "synchronous_fallbacks": 0,
+        "active_bytes": 0,
+        "peak_bytes": 0,
+        "maps": 0,
+        "map_cpu_ns": 0
+      },
+      "multi_gpu_delta": {
+        "dma_frames": 0,
+        "cpu_frames": 0,
+        "cpu_pixels": 0
+      },
+      "monitors": [
+        {
+          "id": 0,
+          "name": "eDP-1",
+          "description": "eDP-1",
+          "make": "Unknown",
+          "model": "eDP-1",
+          "serial": "",
+          "width": 2560,
+          "height": 1600,
+          "refreshRate": 60.0,
+          "x": 0,
+          "y": 0,
+          "activeWorkspace": {
+            "id": 1,
+            "name": "1"
+          },
+          "specialWorkspace": {
+            "id": 0,
+            "name": ""
+          },
+          "reserved": [
+            0,
+            0,
+            0,
+            0
+          ],
+          "scale": 2.0,
+          "transform": 0,
+          "focused": true,
+          "dpmsStatus": true,
+          "vrr": false,
+          "solitaryBlockedBy": [],
+          "activelyTearing": false,
+          "directScanoutTo": null,
+          "disabled": false,
+          "currentFormat": "XRGB8888",
+          "mirrorOf": "none",
+          "availableModes": [
+            "2560x1600@60.00Hz"
+          ]
+        }
+      ],
+      "monitors_after": [
+        {
+          "id": 0,
+          "name": "eDP-1",
+          "description": "eDP-1",
+          "make": "Unknown",
+          "model": "eDP-1",
+          "serial": "",
+          "width": 2560,
+          "height": 1600,
+          "refreshRate": 60.0,
+          "x": 0,
+          "y": 0,
+          "activeWorkspace": {
+            "id": 1,
+            "name": "1"
+          },
+          "specialWorkspace": {
+            "id": 0,
+            "name": ""
+          },
+          "reserved": [
+            0,
+            0,
+            0,
+            0
+          ],
+          "scale": 2.0,
+          "transform": 0,
+          "focused": true,
+          "dpmsStatus": true,
+          "vrr": false,
+          "solitaryBlockedBy": [],
+          "activelyTearing": false,
+          "directScanoutTo": null,
+          "disabled": false,
+          "currentFormat": "XRGB8888",
+          "mirrorOf": "none",
+          "availableModes": [
+            "2560x1600@60.00Hz"
+          ]
+        }
+      ],
+      "renderers": [
+        "Apple M1 (G13G B1)"
+      ],
+      "pixels": {
+        "size": [
+          2560,
+          1600
+        ],
+        "fullscreen_pattern_verified": false,
+        "client_pattern_verified": false,
+        "sha256": "9789accb281b050a9d51f7079032b3be836329417b632124135f337f0751d0f1"
+      },
+      "load_average": [
+        0.03955078125,
+        0.228515625,
+        0.4345703125
+      ],
+      "active_hardware_planes": [
+        {
+          "id": 35,
+          "type": 1,
+          "crtc": 45,
+          "framebuffer": 68
+        }
+      ],
+      "run": 0,
+      "directory": "001",
+      "presentation_fps": 0,
+      "missed_refreshes": 0,
+      "cpu_us_per_presented_frame": 0,
+      "boards": {
+        "apple-smc-system": {
+          "heatpipe_power_w": {
+            "n": 10,
+            "median": 0.601904,
+            "mean": 0.6054657999999999,
+            "min": 0.592255,
+            "max": 0.626396,
+            "values": [
+              0.607099,
+              0.592255,
+              0.602646,
+              0.598193,
+              0.599676,
+              0.596707,
+              0.620457,
+              0.601162,
+              0.610067,
+              0.626396
+            ]
+          },
+          "system_power_w": {
+            "n": 10,
+            "median": 6.857861,
+            "mean": 6.8847138,
+            "min": 6.797091,
+            "max": 7.088019,
+            "values": [
+              6.841756,
+              7.088019,
+              6.904458,
+              6.921541,
+              6.867791,
+              6.858937,
+              6.856281,
+              6.854479,
+              6.856785,
+              6.797091
+            ]
+          },
+          "ac_input_power_w": {
+            "n": 10,
+            "median": 15.4234855,
+            "mean": 15.4461239,
+            "min": 15.310739,
+            "max": 15.652419,
+            "values": [
+              15.652419,
+              15.468858,
+              15.486616,
+              15.432866,
+              15.424012,
+              15.421356,
+              15.419554,
+              15.42186,
+              15.310739,
+              15.422959
+            ]
+          },
+          "rail_3_8v_power_w": {
+            "n": 10,
+            "median": 1.039809,
+            "mean": 1.0643204,
+            "min": 1.0226,
+            "max": 1.236409,
+            "values": [
+              1.236409,
+              1.079738,
+              1.084502,
+              1.058411,
+              1.024545,
+              1.0396,
+              1.040018,
+              1.0226,
+              1.024938,
+              1.032443
+            ]
+          }
+        }
+      }
+    }
+  ],
+  "cpu_comparison": {
+    "idle/default": {
+      "relative_change_percent": {
+        "n": 1,
+        "median": -33.333330366794314,
+        "mean": -33.333330366794314,
+        "min": -33.333330366794314,
+        "max": -33.333330366794314,
+        "values": [
+          -33.333330366794314
+        ]
+      },
+      "paired_mean_bootstrap_95_percent": [
+        -33.333330366794314,
+        -33.333330366794314
+      ],
+      "method": "10000 paired bootstrap resamples, seed 1729; small-sample uncertainty remains"
+    }
+  },
+  "cpu_per_frame_comparison": {}
+}

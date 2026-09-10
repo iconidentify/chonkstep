@@ -1,0 +1,6 @@
+Collecting pillow
+  Downloading pillow-12.3.0-cp314-cp314-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl.metadata (9.1 kB)
+Downloading pillow-12.3.0-cp314-cp314-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl (6.3 MB)
+   ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━ 6.3/6.3 MB 8.3 MB/s  0:00:00
+Installing collected packages: pillow
+Successfully installed pillow-12.3.0

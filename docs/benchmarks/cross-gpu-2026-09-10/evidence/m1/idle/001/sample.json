@@ -1,0 +1,194 @@
+{
+  "label": "final",
+  "case": "idle",
+  "policy": "default",
+  "seconds": 12.00051638,
+  "cpu_percent": 0.16665949503082966,
+  "render_fps": 0.0,
+  "render_wall_us_per_frame": 0.0,
+  "presentation": null,
+  "frames": {
+    "dispatch_calls": 241,
+    "dispatch_us": 18309,
+    "dispatch_max_us": 234,
+    "input_us": 135,
+    "shell_us": 11772,
+    "protocol_us": 2007,
+    "layout_us": 2765,
+    "render_calls": 0,
+    "render_us": 0,
+    "render_max_us": 0,
+    "flush_us": 137,
+    "ipc_us": 783,
+    "render_attempts": 0,
+    "gesture_build_calls": 0,
+    "gesture_build_us": 0,
+    "gesture_build_max_us": 0
+  },
+  "before": {
+    "monotonic_ns": 6872213125132,
+    "wall_ns": 1789071261047806673,
+    "cpu_ticks": 26,
+    "rss_bytes": 98304000
+  },
+  "after": {
+    "monotonic_ns": 6884213641512,
+    "wall_ns": 1789071273048323345,
+    "cpu_ticks": 28,
+    "rss_bytes": 98304000
+  },
+  "native_delta": {
+    "passes": 0,
+    "skips_off": 0,
+    "skips_flip": 0,
+    "skips_clean": 0,
+    "skips_inactive": 0,
+    "skips_deadline": 0,
+    "attempts": 0,
+    "queued": 0,
+    "empty": 0,
+    "render_failed": 0,
+    "queue_failed": 0,
+    "flips": 0,
+    "primary": 0,
+    "overlay": 0,
+    "composited": 0,
+    "late_presentations": 0
+  },
+  "stages": {},
+  "captures": [],
+  "readback_before": {
+    "queued": 0,
+    "pending_polls": 0,
+    "synchronous_fallbacks": 0,
+    "active_bytes": 0,
+    "peak_bytes": 0,
+    "maps": 0,
+    "map_cpu_ns": 0
+  },
+  "readback_after": {
+    "queued": 0,
+    "pending_polls": 0,
+    "synchronous_fallbacks": 0,
+    "active_bytes": 0,
+    "peak_bytes": 0,
+    "maps": 0,
+    "map_cpu_ns": 0
+  },
+  "multi_gpu_delta": {
+    "dma_frames": 0,
+    "cpu_frames": 0,
+    "cpu_pixels": 0
+  },
+  "monitors": [
+    {
+      "id": 0,
+      "name": "eDP-1",
+      "description": "eDP-1",
+      "make": "Unknown",
+      "model": "eDP-1",
+      "serial": "",
+      "width": 2560,
+      "height": 1600,
+      "refreshRate": 60.0,
+      "x": 0,
+      "y": 0,
+      "activeWorkspace": {
+        "id": 1,
+        "name": "1"
+      },
+      "specialWorkspace": {
+        "id": 0,
+        "name": ""
+      },
+      "reserved": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "scale": 2.0,
+      "transform": 0,
+      "focused": true,
+      "dpmsStatus": true,
+      "vrr": false,
+      "solitaryBlockedBy": [],
+      "activelyTearing": false,
+      "directScanoutTo": null,
+      "disabled": false,
+      "currentFormat": "XRGB8888",
+      "mirrorOf": "none",
+      "availableModes": [
+        "2560x1600@60.00Hz"
+      ]
+    }
+  ],
+  "monitors_after": [
+    {
+      "id": 0,
+      "name": "eDP-1",
+      "description": "eDP-1",
+      "make": "Unknown",
+      "model": "eDP-1",
+      "serial": "",
+      "width": 2560,
+      "height": 1600,
+      "refreshRate": 60.0,
+      "x": 0,
+      "y": 0,
+      "activeWorkspace": {
+        "id": 1,
+        "name": "1"
+      },
+      "specialWorkspace": {
+        "id": 0,
+        "name": ""
+      },
+      "reserved": [
+        0,
+        0,
+        0,
+        0
+      ],
+      "scale": 2.0,
+      "transform": 0,
+      "focused": true,
+      "dpmsStatus": true,
+      "vrr": false,
+      "solitaryBlockedBy": [],
+      "activelyTearing": false,
+      "directScanoutTo": null,
+      "disabled": false,
+      "currentFormat": "XRGB8888",
+      "mirrorOf": "none",
+      "availableModes": [
+        "2560x1600@60.00Hz"
+      ]
+    }
+  ],
+  "renderers": [
+    "Apple M1 (G13G B1)"
+  ],
+  "pixels": {
+    "size": [
+      2560,
+      1600
+    ],
+    "fullscreen_pattern_verified": false,
+    "client_pattern_verified": false,
+    "sha256": "9789accb281b050a9d51f7079032b3be836329417b632124135f337f0751d0f1"
+  },
+  "load_average": [
+    0.03955078125,
+    0.228515625,
+    0.4345703125
+  ],
+  "active_hardware_planes": [
+    {
+      "id": 35,
+      "type": 1,
+      "crtc": 45,
+      "framebuffer": 68
+    }
+  ]
+}
