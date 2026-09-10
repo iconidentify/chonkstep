@@ -20,13 +20,21 @@ impl<B: Backend> WindowManager<B> {
         }
         self.cycle_end(false);
         let was_mac = self.mac_mode();
-        if config.mode != crate::InteractionMode::Mac {
+        let spaces_changed = config.separate_spaces != self.interaction.separate_spaces;
+        if config.mode != crate::InteractionMode::Mac || spaces_changed {
             let fullscreen: Vec<_> = self.mac_fullscreen.keys().copied().collect();
             for id in fullscreen {
                 self.unfullscreen(id);
             }
         }
         self.interaction = config;
+        if self.mac_mode() && self.interaction.separate_spaces {
+            self.reconcile_display_spaces();
+        } else if self.display_spaces.take().is_some() {
+            let ids: Vec<_> = self.clients.keys().collect();
+            for id in ids { self.publish_space_output(id); }
+            self.refresh_space_visibility();
+        }
 
         if was_mac != self.mac_mode() {
             for modifiers in [Modifiers::ALT, Modifiers::ALT | Modifiers::SHIFT] {
@@ -164,7 +172,8 @@ impl<B: Backend> WindowManager<B> {
             return;
         }
         let origin = self.clients[id].workspace;
-        let space = self.workspace_count;
+        if self.separate_spaces() { self.select_output(self.client_output_index(id)); }
+        let Some(space) = self.create_workspace() else { return; };
         self.mac_fullscreen.insert(id, (origin, space));
         for member in self.transient_family(id) {
             self.move_one_client_to_workspace(member, space);
@@ -177,7 +186,10 @@ impl<B: Backend> WindowManager<B> {
         let Some((origin, space)) = self.mac_fullscreen.remove(&id) else {
             return;
         };
-        let was_current = self.current_workspace == space;
+        let was_selected = self.current_workspace == space;
+        let selected_output = self.active_output_index();
+        let previous_focus = self.focused;
+        let was_current = self.workspace_visible(space);
         for member in self.transient_family(id) {
             self.move_one_client_to_workspace(member, origin);
         }
@@ -188,8 +200,10 @@ impl<B: Backend> WindowManager<B> {
         if !self.workspace_has_windows(space) {
             self.remove_workspace(space);
         }
-        if was_current && self.is_focusable(id) {
-            self.focus_client(id);
+        if was_current && self.is_focusable(id) && was_selected { self.focus_client(id); }
+        if !was_selected && self.separate_spaces() {
+            self.select_output(selected_output);
+            if let Some(previous) = previous_focus.filter(|&other| other != id && self.is_focusable(other)) { self.focus_client(previous); }
         }
     }
 

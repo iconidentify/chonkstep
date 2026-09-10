@@ -1803,6 +1803,13 @@ fn pointer_moved(
     // answer without reaching the `Compositor` — see that verb for the
     // stale-anchor bug the mirror exists to prevent.
     state.wm.backend_mut().pointer = Some(at);
+    // Idle client-content motion deliberately bypasses wm-core's hover queue.
+    // Display selection still observes the physical seat, without taking focus.
+    if !state.wm.backend().locked && state.wm.backend().gesture_scene.is_none()
+        && state.wm.backend().overview.is_none() {
+        let output = state.wm.monitor_index_at(at);
+        state.wm.select_output(output);
+    }
     if !state.wm.backend().locked && crate::capture_tool::motion(state, at) {
         pointer.motion(state, None, &MotionEvent { location: position, serial, time });
         pointer.frame(state);
@@ -2873,7 +2880,9 @@ fn hit_at(backend: &WaylandBackend, at: Point, position: LogicalPoint<f64, Logic
     // `renderer.rs`'s override-redirect pass reads this same field.
     for window in backend.scene_index.unmanaged() {
         let Some(record) = backend.windows.get(&window) else { continue };
-        if !record.mapped || !record.content.contains(at) {
+        if !record.mapped || !record.content.contains(at)
+            || backend.space_output_for(record).is_some_and(|name|
+                !backend.monitors.iter().any(|m| m.name == name && m.geometry.contains(at))) {
             continue;
         }
         if let Some(hit) = content_hit(backend, None, window, position) {
@@ -2887,7 +2896,9 @@ fn hit_at(backend: &WaylandBackend, at: Point, position: LogicalPoint<f64, Logic
             StackEntry::Window(id) => Some(*id),
             StackEntry::Frame(id) => backend.frames.get(id).map(|f| f.window),
         };
-        if window.is_some_and(|id| !backend.layout_scene.allows_pointer(id, at)) {
+        if window.is_some_and(|id| !backend.layout_scene.allows_pointer(id, at)
+            || backend.windows.get(&id).is_some_and(|record| backend.space_output_for(record).is_some_and(|name|
+                !backend.monitors.iter().any(|m| m.name == name && m.geometry.contains(at))))) {
             continue;
         }
 
@@ -3315,7 +3326,7 @@ fn popup_hit(
             .into();
         let anchor: LogicalPoint<f64, Logical> = (popup_origin.x as f64, popup_origin.y as f64).into();
         let scale = crate::xdg::effective_surface_scale(
-            crate::xdg::committed_surface_scale(popup_surface), backend.scale_at(record.content),
+            crate::xdg::committed_surface_scale(popup_surface), backend.window_output_scale(record),
         );
         let probe = surface_probe(anchor, position, scale);
         if let Some((surface, found)) =

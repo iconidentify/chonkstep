@@ -63,6 +63,8 @@ impl AppProfile {
 pub struct InteractionConfig {
     pub mode: InteractionMode,
     pub clipboard_persistence: bool,
+    /// Give every display its own active Space in Mac mode.
+    pub separate_spaces: bool,
     /// Exact, case-insensitive application identities; user entries win.
     pub applications: Vec<(String, AppProfile)>,
 }
@@ -72,6 +74,7 @@ impl Default for InteractionConfig {
         Self {
             mode: InteractionMode::Desktop,
             clipboard_persistence: true,
+            separate_spaces: true,
             applications: Vec::new(),
         }
     }

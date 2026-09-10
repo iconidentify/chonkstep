@@ -181,6 +181,16 @@ fn set_combo_membership(combos: &mut Vec<KeyCombo>, combo: KeyCombo, enabled: bo
 }
 
 impl WaylandBackend {
+    /// Unmanaged X11 menus inherit the managed parent's display boundary.
+    pub(crate) fn space_output_for<'a>(&'a self, record: &'a crate::state::WindowRecord) -> Option<&'a str> {
+        let mut record = record;
+        for _ in 0..32 {
+            if let Some(output) = record.space_output.as_deref() { return Some(output); }
+            record = self.windows.get(&record.parent?)?;
+        }
+        None
+    }
+
     /// Cheap build/hardware half of `hyprctl systeminfo`. Kept apart
     /// from the full diagnostic dump so routine compatibility queries
     /// never walk every protocol object or `/proc` entry.
@@ -1638,6 +1648,15 @@ impl Backend for WaylandBackend {
 
     fn publish_workarea(&mut self, area: Rect, workspace_count: usize) {
         self.ewmh.note_workarea(area, workspace_count);
+    }
+
+    fn set_window_space_output(&mut self, window: Self::WindowId, output: Option<&str>) {
+        if let Some(record) = self.windows.get_mut(&window) {
+            if record.space_output.as_deref() != output {
+                record.space_output = output.map(str::to_owned);
+                self.mark_damaged();
+            }
+        }
     }
 
     fn publish_window_desktop(&mut self, window: Self::WindowId, desktop: usize) {

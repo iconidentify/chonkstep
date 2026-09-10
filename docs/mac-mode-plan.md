@@ -189,6 +189,11 @@ Desktop needs a reversible visibility snapshot. Neither operation should be
 implemented by indiscriminately minimizing windows. Window closure or app
 creation while hidden must not resurrect stale windows during restore.
 
+The display-owned Space model, independent fullscreen, display-local Overview,
+output boundary clipping, stable native protocol IDs, and session metadata are
+implemented in [display Spaces](mac-display-spaces.md). The broader milestone
+below still includes paired Split View, reordering and assignment controls.
+
 For Spaces, extend the current workspace implementation with:
 
 - Explicit creation, deletion, reordering, and stable IDs; deleting a Space

@@ -482,6 +482,46 @@ fn on_readable(connection: &mut Connection, comp: &mut Compositor) -> PostAction
 /// Parses and executes one command line. Injection goes through
 /// [`crate::input::process_input_event`] — the seam; see the module
 /// docs for why nowhere shallower would do.
+/// Only the explicitly enabled test socket can create nested heads. The output
+/// lifecycle below is the same connector reconciliation native hardware uses.
+fn virtual_outputs(comp: &mut Compositor, split: bool) -> Result<(), &'static str> {
+    use crate::state::{Graphics, OutputSetup};
+    use smithay::output::{Output, PhysicalProperties, Mode, Subpixel};
+    use smithay::utils::Transform;
+    use wm_theme_api::{Point, Size};
+    let Graphics::Winit(host) = &comp.graphics else { return Err("virtual outputs require a nested host"); };
+    let host_size = host.window_size();
+    if host_size.w < 400 || host_size.h < 200 { return Err("host is too small for virtual displays"); }
+    let width = if split { host_size.w / 2 } else { host_size.w };
+    let size = Size::new(width as u32, host_size.h as u32);
+    let mode = Mode { size: (width, host_size.h).into(), refresh: 60_000 };
+    let Some(left) = comp.outputs.first_mut() else { return Err("no nested output"); };
+    left.size = size;
+    left.output.change_current_state(Some(mode), None, None, None);
+    left.output.set_preferred(mode);
+    left.modes = vec![mode];
+    let mut added = Vec::new();
+    if split && comp.outputs.len() == 1 {
+        let right_size = Size::new((host_size.w - width) as u32, host_size.h as u32);
+        let right_mode = Mode { size: (right_size.w as i32, right_size.h as i32).into(), refresh: 60_000 };
+        let output = Output::new("chonkstep-right".into(), PhysicalProperties { size: (0, 0).into(),
+            subpixel: Subpixel::Unknown, make: "chonkstep".into(), model: "nested test display".into() });
+        output.change_current_state(Some(right_mode), Some(Transform::Flipped180), None, Some((width, 0).into()));
+        output.set_preferred(right_mode);
+        added.push(OutputSetup { output, identity: None, serial: String::new(), position: Point::new(width, 0),
+            size: right_size, transform: Transform::Normal, requested_mode: None, modes: vec![right_mode],
+            powered: true, vrr_supported: false, vrr_requested: false, vrr_enabled: false });
+    }
+    let removed: Vec<_> = if split { Vec::new() } else { (1..comp.outputs.len()).rev().collect() };
+    crate::state::apply_connector_hotplug(comp, &removed, added);
+    // A single host swap covers the union, while wl_output continues to expose
+    // each head's actual viewport and membership independently.
+    let total = Size::new(host_size.w as u32, host_size.h as u32);
+    comp.outputs[0].damage_tracker = crate::state::physical_damage_tracker(&comp.outputs[0].output, total);
+    comp.wm.backend_mut().mark_damaged();
+    Ok(())
+}
+
 fn handle_command(line: &str, stream: &mut UnixStream, comp: &mut Compositor) {
     let mut words = line.split_whitespace();
     let time = comp.start_time.elapsed().as_micros() as u64;
@@ -489,6 +529,14 @@ fn handle_command(line: &str, stream: &mut UnixStream, comp: &mut Compositor) {
         let _ = stream.write_all(format!("err {reason}\n").as_bytes());
     };
     match words.next() {
+        Some("virtual-outputs") => {
+            match (words.next(), words.next()) {
+                (Some(mode @ ("split" | "single")), None) => {
+                    if let Err(error) = virtual_outputs(comp, mode == "split") { reply_err(stream, error); }
+                }
+                _ => reply_err(stream, "virtual-outputs wants split or single"),
+            }
+        }
         Some("primary-scale") => {
             let Some(Ok(scale)) = words.next().map(str::parse::<f64>) else {
                 reply_err(stream, "primary-scale wants a numeric FACTOR");

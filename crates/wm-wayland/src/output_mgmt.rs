@@ -1044,6 +1044,7 @@ fn relayout_ledger(comp: &mut Compositor) {
     backend.output_size = crate::state::union_size(&backend.monitors);
     backend.pending_resize = Some(backend.output_size);
     backend.mark_damaged();
+    comp.wm.reconcile_display_spaces();
 }
 
 #[cfg(test)]

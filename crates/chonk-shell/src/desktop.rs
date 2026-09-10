@@ -3734,11 +3734,12 @@ impl<B: Backend> Desktop<B> {
         items: Vec<OverviewItem<B>>,
         workspace: (usize, usize),
         workspace_counts: &[usize],
-        selected: usize,
+        selection: (usize, Option<Rect>),
     ) {
+        let (selected, area) = selection;
         let Self { overview, fonts, tile, primary, .. } = self;
         let (mut font_system, mut swash_cache) = (fonts.system(), fonts.swash());
-        overview.show(backend, theme, &mut font_system, &mut swash_cache, *primary, *tile, items, workspace, workspace_counts, selected);
+        overview.show(backend, theme, &mut font_system, &mut swash_cache, area.unwrap_or(*primary), *tile, items, workspace, workspace_counts, selected);
     }
 
     pub fn overview_visible(&self) -> bool {

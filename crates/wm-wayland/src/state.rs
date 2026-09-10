@@ -378,6 +378,9 @@ pub(crate) struct WindowRecord {
     /// window can occlude desktop-level `Top` and shell furniture on
     /// only the output it occupies.
     pub fullscreen: bool,
+    /// Display boundary for independently visible Spaces; shared by pixels and input.
+    pub space_output: Option<String>,
+    pub space_clip_id: smithay::backend::renderer::element::Id,
     /// Cached title (xdg `set_title` / XWayland property events keep
     /// it current and queue `BackendEvent::TitleChanged`).
     pub title: Option<String>,
@@ -485,6 +488,8 @@ impl WindowRecord {
             content,
             mapped: false,
             fullscreen: false,
+            space_output: None,
+            space_clip_id: smithay::backend::renderer::element::Id::new(),
             title: None,
             app_id: None,
             window_type: WindowType::Normal,
@@ -1204,6 +1209,16 @@ impl WaylandBackend {
         scale_for_rect(&self.monitors, &self.monitor_scales, rect)
     }
 
+    /// Display ownership wins over the geometry of a clipped or sliding window.
+    /// Keep scale negotiation, popup rendering and input on the same output.
+    pub(crate) fn window_output_scale(&self, record: &WindowRecord) -> f64 {
+        if let Some(index) = self.space_output_for(record).and_then(|name| self.monitors.iter().position(|m| m.name == name)) {
+            return self.monitor_scales.get(index).copied().unwrap_or(1.0);
+        }
+        self.scale_at(record.surface.wl_surface().as_ref().and_then(|surface| self.window_for_surface(surface))
+            .and_then(|id| self.layout_scene.workarea(id)).unwrap_or(record.content))
+    }
+
     /// The factor one managed window's surface is composed at: what the
     /// client itself committed, corrected only for the integral-fallback
     /// case (`xdg::effective_surface_scale`) on the output the window
@@ -1223,11 +1238,7 @@ impl WaylandBackend {
         }
         crate::xdg::effective_surface_scale(
             crate::xdg::committed_surface_scale(&surface),
-            self.scale_at(
-                self.window_for_surface(&surface)
-                    .and_then(|id| self.layout_scene.workarea(id))
-                    .unwrap_or(record.content),
-            ),
+            self.window_output_scale(record),
         )
     }
 
@@ -2148,8 +2159,10 @@ pub(crate) fn apply_connector_hotplug(
         backend.layer_layout_dirty = true;
         backend.idle_policy_dirty = true;
     }
-    for rect in departed {
-        comp.wm.rescue_clients_from_removed_monitor(rect);
+    if comp.wm.mac_mode() && comp.wm.interaction_config().separate_spaces {
+        comp.wm.reconcile_display_spaces();
+    } else {
+        for rect in departed { comp.wm.rescue_clients_from_removed_monitor(rect); }
     }
     crate::input::reconcile_pointer_after_output_change(comp);
     crate::gamma::outputs_changed(&mut comp.gamma, &comp.graphics, &comp.display_handle);
@@ -3296,6 +3309,7 @@ impl Compositor {
     /// and re-advertise all of them, which is the connector-hot-plug
     /// work `session.rs`'s module docs scope out.
     pub(crate) fn on_output_resized(&mut self, size: SSize<i32, Physical>) {
+        if matches!(self.graphics, Graphics::Winit(_)) && self.outputs.len() > 1 { return; }
         let mode = Mode { size, refresh: 60_000 };
         let logical = Size::new(size.w.max(0) as u32, size.h.max(0) as u32);
         let Some(entry) = self.outputs.first_mut() else {
@@ -3335,6 +3349,7 @@ impl Compositor {
         backend.output_size = union_size(&backend.monitors);
         backend.pending_resize = Some(backend.output_size);
         backend.mark_damaged();
+        self.wm.reconcile_display_spaces();
         self.layer_shell.needs_arrange = true;
     }
 

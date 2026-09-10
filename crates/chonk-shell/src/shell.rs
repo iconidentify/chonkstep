@@ -849,7 +849,7 @@ fn layout_snapshot<B: Backend>(wm: &WindowManager<B>, apps: &[AppEntry]) -> Vec<
             let maximized = client
                 .flags
                 .intersects(ClientFlags::MAXIMIZED_H | ClientFlags::MAXIMIZED_V);
-            let root_geometry = client.placement.freeform.unwrap_or_else(|| {
+            let root_geometry = wm.fullscreen_restore_geometry(id).or(client.placement.freeform).unwrap_or_else(|| {
                 if maximized {
                     client.restore_geometry.unwrap_or(client.geometry)
                 } else {
@@ -860,6 +860,7 @@ fn layout_snapshot<B: Backend>(wm: &WindowManager<B>, apps: &[AppEntry]) -> Vec<
             let floating = floating_record_geometry(wm, id);
             WindowRecord {
                 spatial: Some(SpatialRecord {
+                    fullscreen_origin: wm.mac_fullscreen_origin(id),
                     floating: client.placement.floating,
                     order: wm
                         .layout_order(client.workspace)
@@ -901,6 +902,14 @@ fn layout_record_geometry<B: Backend>(wm: &WindowManager<B>, geometry: Rect) -> 
         geometry.pos.y.saturating_add(half_height),
     );
     let monitor = wm.monitors_ref().get(wm.monitor_index_at(center));
+    if wm.separate_spaces() {
+        if let Some(monitor) = monitor {
+            let mut local = geometry;
+            local.pos.x = local.pos.x.saturating_sub(monitor.geometry.pos.x);
+            local.pos.y = local.pos.y.saturating_sub(monitor.geometry.pos.y);
+            return (local, Some(monitor.identity.as_deref().unwrap_or(&monitor.name)));
+        }
+    }
     relative_to_monitor(monitor, geometry)
 }
 
@@ -935,7 +944,7 @@ fn layout_matches_clients<B: Backend>(wm: &WindowManager<B>, records: &[WindowRe
         let maximized = client
             .flags
             .intersects(ClientFlags::MAXIMIZED_H | ClientFlags::MAXIMIZED_V);
-        let root_geometry = client.placement.freeform.unwrap_or_else(|| {
+        let root_geometry = wm.fullscreen_restore_geometry(id).or(client.placement.freeform).unwrap_or_else(|| {
             if maximized {
                 client.restore_geometry.unwrap_or(client.geometry)
             } else {
@@ -946,7 +955,8 @@ fn layout_matches_clients<B: Backend>(wm: &WindowManager<B>, records: &[WindowRe
         let placement = &client.placement;
         let floating = floating_record_geometry(wm, id);
         let spatial_matches = record.spatial.as_ref().is_some_and(|r| {
-            r.floating == placement.floating
+            r.fullscreen_origin == wm.mac_fullscreen_origin(id)
+                && r.floating == placement.floating
                 && r.flow_width == placement.flow_width
                 && r.mosaic_weight == placement.mosaic_weight
                 && r.output == placement.output
@@ -1100,6 +1110,8 @@ pub struct Shell<B: Backend + PopupHost<PopupId = B::ShellId>> {
     /// later session.
     overview_key: Option<KeyCombo>,
     overview_application: Option<ClientId>,
+    overview_output: Option<String>,
+    overview_spaces: Vec<String>,
     /// Armed on press, invalidated whenever Overview's entry set changes.
     overview_close_pressed: Option<usize>,
     /// Every terminal this shell launched that has not been observed
@@ -1360,6 +1372,8 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
             scoped_grabbed: Vec::new(),
             overview_key: None,
             overview_application: None,
+            overview_output: None,
+            overview_spaces: Vec::new(),
             overview_close_pressed: None,
             grabbed: to_grab,
             layout,
@@ -2026,13 +2040,12 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
             Action::HideOtherApplications => wm.hide_application(true),
             Action::MiniaturizeApplication => wm.miniaturize_application(),
             Action::ShowDesktop => wm.toggle_show_desktop(),
-            Action::WorkspaceNext => {
-                let next = wm.current_workspace() + 1;
-                if !wm.mac_mode() || next < wm.workspace_count() { wm.switch_workspace(next); }
-            }
-            Action::WorkspacePrev => {
-                if wm.current_workspace() > 0 {
-                    wm.switch_workspace(wm.current_workspace() - 1);
+            Action::WorkspaceNext | Action::WorkspacePrev => {
+                let direction = if matches!(action, Action::WorkspaceNext) { 1 } else { -1 };
+                if let Some(next) = wm.neighboring_workspace(wm.current_workspace(), direction) {
+                    wm.switch_workspace(next);
+                } else if !wm.mac_mode() && direction > 0 {
+                    wm.switch_workspace(wm.current_workspace() + 1);
                 }
             }
             // The same two verbs by number. No left-edge guard and no
@@ -2076,6 +2089,17 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
                         return ShellOutcome::Continue;
                     }
                     match key {
+                        Some(combo) if !rebound_toggle && wm.mac_mode()
+                            && combo.modifiers == wm_core::Modifiers::CONTROL
+                            && matches!(combo.keysym, XK_LEFT | XK_RIGHT) => {
+                            let output = self.overview_output.as_ref().and_then(|name| wm.monitors_ref().iter().position(|m| &m.name == name))
+                                .unwrap_or(wm.active_output_index());
+                            let current = wm.active_workspace_on_output(output);
+                            if let Some(next) = wm.neighboring_workspace(current, if combo.keysym == XK_LEFT { -1 } else { 1 }) {
+                                wm.switch_workspace(next);
+                                self.populate_overview(wm);
+                            }
+                        }
                         Some(combo) if !rebound_toggle => match overview_intent(&combo) {
                             OverviewIntent::Move(dx, dy) => {
                                 self.desktop.move_overview_selection(wm.backend_mut(), &self.theme, dx, dy)
@@ -2092,10 +2116,12 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
                     }
                 }
             }
-            Action::WorkspaceCarryNext => wm.carry_focused_to_workspace(wm.current_workspace() + 1),
-            Action::WorkspaceCarryPrev => {
-                if wm.current_workspace() > 0 {
-                    wm.carry_focused_to_workspace(wm.current_workspace() - 1);
+            Action::WorkspaceCarryNext | Action::WorkspaceCarryPrev => {
+                let direction = if matches!(action, Action::WorkspaceCarryNext) { 1 } else { -1 };
+                if let Some(next) = wm.neighboring_workspace(wm.current_workspace(), direction) {
+                    wm.carry_focused_to_workspace(next);
+                } else if !wm.mac_mode() && direction > 0 {
+                    wm.carry_focused_to_workspace(wm.current_workspace() + 1);
                 }
             }
             // Re-read the config file and apply it here and now:
@@ -2198,6 +2224,8 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         geometry: Rect) -> wm_core::OverviewScene<B::WindowId, B::FrameId> {
         use wm_theme::overview::live;
         let tile = crate::desktop::tile_px(self.state.scale);
+        let row = wm.workspace_row_on_output(wm.workspace_output_index(workspace).unwrap_or(wm.active_output_index()));
+        let local = row.iter().position(|&space| space == workspace).unwrap_or(0);
         let clients: Vec<_> = wm.iter_clients().filter(|(_, c)| c.workspace == workspace
             && matches!(c.lifecycle, Lifecycle::Normal | Lifecycle::Miniaturized)).collect();
         let sources: Vec<_> = clients.iter().map(|(_, c)| if c.frame.is_some() {
@@ -2209,7 +2237,7 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
             geometry.size,
             tile,
             &sizes,
-            wm.workspace_count().max(workspace + 1),
+            row.len().max(local + 1),
         );
         if wm.workspace_layout(workspace) != wm_core::LayoutMode::Freeform {
             live::preserve_arrangement(&mut layout, &sources);
@@ -2222,7 +2250,7 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
                 label: label(&c.title, (tile * 6).min(geometry.size.w)) }
         }).collect();
         let spaces = layout.strip.iter().enumerate().map(|(i, rect)| {
-            let count = wm.iter_clients().filter(|(_, c)| c.workspace == i
+            let count = wm.iter_clients().filter(|(_, c)| Some(&c.workspace) == row.get(i)
                 && matches!(c.lifecycle, Lifecycle::Normal | Lifecycle::Miniaturized)).count();
             wm_core::OverviewWorkspace { rect: *rect,
                 label: label(&format!("Desktop {} · {}", i + 1, count), rect.size.w),
@@ -2230,7 +2258,7 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
                 close: layout.workspace_close_rect(i).map(|r| (r, wm_theme::overview::workspace_close_glyph(r.size.w))) }
         }).collect();
         let selected = wm.focused_client().and_then(|focused| clients.iter().position(|(id, _)| *id == focused)).unwrap_or(0);
-        wm_core::OverviewScene { geometry, windows, spaces, workspace, selected, gap: layout.pad }
+        wm_core::OverviewScene { geometry, windows, spaces, workspace: local, selected, gap: layout.pad }
     }
 
     /// A desktop swipe can share Overview's grab, but cannot displace another
@@ -2266,7 +2294,11 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
             }
             DesktopGesture::WorkspaceNext | DesktopGesture::WorkspacePrevious => {
                 let current = wm.current_workspace();
-                let target = if gesture == DesktopGesture::WorkspaceNext {
+                let target = if wm.mac_mode() {
+                    let direction = if gesture == DesktopGesture::WorkspaceNext { 1 } else { -1 };
+                    let Some(target) = wm.neighboring_workspace(current, direction) else { return; };
+                    target
+                } else if gesture == DesktopGesture::WorkspaceNext {
                     if current + 1 == wm.workspace_count() && !wm.workspace_has_windows(current) {
                         return;
                     }
@@ -2290,6 +2322,7 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
     /// failed to create would leave a desk with dead keys and nothing
     /// on screen explaining why.
     fn open_overview(&mut self, wm: &mut WindowManager<B>) {
+        self.overview_output = wm.separate_spaces().then(|| wm.monitors_ref().get(wm.active_output_index()).map(|m| m.name.clone())).flatten();
         // The Overview covers the monitor the panel hangs on, and its
         // modal grab would eat the panel's Escape: exactly one of the
         // two shell modes at a time.
@@ -2320,7 +2353,17 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
     /// well, never an error.
     fn populate_overview(&mut self, wm: &mut WindowManager<B>) {
         self.overview_close_pressed = None;
-        let current = wm.current_workspace();
+        let output = if let Some(name) = &self.overview_output {
+            let Some(index) = wm.monitors_ref().iter().position(|m| &m.name == name) else {
+                self.close_overview(wm);
+                return;
+            };
+            index
+        } else { wm.active_output_index() };
+        let current = wm.active_workspace_on_output(output);
+        let row = wm.workspace_row_on_output(output);
+        self.overview_spaces = row.iter().map(|&space| wm.workspace_id(space)).collect();
+        let area = wm.monitors_ref().get(output).map(|m| m.geometry);
         let mut items: Vec<OverviewItem<B>> = wm
             .iter_clients()
             .filter(|(id, client)| {
@@ -2363,14 +2406,14 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
             .focused_client()
             .and_then(|focused| items.iter().position(|item| item.client == focused))
             .unwrap_or(0);
-        let workspace = (current, wm.workspace_count());
+        let workspace = (row.iter().position(|&space| space == current).unwrap_or(0), row.len());
         let mut workspace_counts = vec![0; workspace.1];
         for (_, client) in wm.iter_clients() {
             if matches!(client.lifecycle, Lifecycle::Normal | Lifecycle::Miniaturized) {
-                if let Some(count) = workspace_counts.get_mut(client.workspace) { *count += 1; }
+                if let Some(index) = row.iter().position(|&space| space == client.workspace) { workspace_counts[index] += 1; }
             }
         }
-        self.desktop.show_overview(wm.backend_mut(), &self.theme, items, workspace, &workspace_counts, selected);
+        self.desktop.show_overview(wm.backend_mut(), &self.theme, items, workspace, &workspace_counts, (selected, area));
     }
 
     /// Ends the session without committing: grab released first, so
@@ -2380,6 +2423,8 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
     /// bare desktop after an Escape, commanding a card that no longer
     /// exists on screen. A no-op when no menu is open.
     fn close_overview(&mut self, wm: &mut WindowManager<B>) {
+        self.overview_output = None;
+        self.overview_spaces.clear();
         self.overview_close_pressed = None;
         Backend::ungrab_keyboard(wm.backend_mut());
         self.desktop.close_menu(wm.backend_mut());
@@ -2413,6 +2458,11 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
     /// plate), releasing over the same card commits — so a press
     /// dragged off a card and released elsewhere changes the selection
     /// but commits nothing, exactly like backing out of a menu row.
+    fn overview_space(&self, wm: &WindowManager<B>, local: usize) -> Option<usize> {
+        let id = self.overview_spaces.get(local)?;
+        (0..wm.workspace_count()).find(|&space| &wm.workspace_id(space) == id)
+    }
+
     fn on_overview_click(
         &mut self,
         wm: &mut WindowManager<B>,
@@ -2433,11 +2483,10 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
                     Some(OverviewRelease::Move { client, source, target })
                         // Revalidate both identity and the displayed desktop
                         // row. Never turn a stale drop into desktop creation.
-                        if self.desktop.overview_workspace() == (wm.current_workspace(), wm.workspace_count())
-                            && target < wm.workspace_count()
-                            && wm.client(client).is_some_and(|c| c.workspace == source
+                        if self.overview_space(wm, target).is_some()
+                            && wm.client(client).is_some_and(|c| Some(c.workspace) == self.overview_space(wm, source)
                                 && matches!(c.lifecycle, Lifecycle::Normal | Lifecycle::Miniaturized)) => {
-                            wm.move_client_to_workspace(client, target);
+                            wm.move_client_to_workspace(client, self.overview_space(wm, target).unwrap());
                             self.populate_overview(wm);
                     }
                     _ => {}
@@ -2485,8 +2534,14 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
                 // of what just became visible — the panel stays up,
                 // which is the point of having the strip at all.
                 (MouseButton::Left, OverviewHit::Workspace(target)) => {
-                    if target != wm.current_workspace() {
+                    if let Some(target) = self.overview_space(wm, target) {
                         wm.switch_workspace(target);
+                        self.populate_overview(wm);
+                    } else if target == self.overview_spaces.len() {
+                        if let Some(output) = self.overview_output.as_ref().and_then(|name| wm.monitors_ref().iter().position(|m| &m.name == name)) {
+                            wm.select_output(output);
+                        }
+                        if let Some(target) = wm.create_workspace() { wm.switch_workspace(target); }
                         self.populate_overview(wm);
                     }
                 }
@@ -2497,7 +2552,8 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
             }
         } else if button == MouseButton::Left {
             if let Some(index) = self.overview_close_pressed.take() {
-                if hit == OverviewHit::CloseWorkspace(index) && wm.remove_workspace(index) {
+                if hit == OverviewHit::CloseWorkspace(index)
+                    && self.overview_space(wm, index).is_some_and(|space| wm.remove_workspace(space)) {
                     self.populate_overview(wm);
                 }
             }
@@ -3106,7 +3162,7 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
                     let initially_floating = wm.client(id).is_some_and(|c| c.placement.floating);
                     wm.set_floating(id, true);
                     wm.set_client_content_geometry(id, geometry);
-                    if record.workspace != wm.current_workspace() {
+                    if wm.client(id).is_some_and(|c| c.workspace != record.workspace) {
                         wm.move_client_to_workspace(id, record.workspace);
                     }
                     // Geometry before flags, deliberately: maximize records
@@ -3148,6 +3204,7 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
                             },
                             spatial.order,
                         );
+                        if let Some(origin) = spatial.fullscreen_origin { wm.restore_mac_fullscreen(id, origin); }
                         if spatial.focused {
                             self.restore_focus = Some(id);
                         }
@@ -3231,6 +3288,7 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
     /// this routine therefore does not approximate state change with an
     /// action-shaped boolean.
     pub fn tick(&mut self, wm: &mut WindowManager<B>) {
+        if let Some(spaces) = self.layout.take_restored_spaces() { wm.restore_display_spaces(spaces); }
         if let Some(modes) = self.layout.take_restored_modes() {
             for (workspace, mode) in modes.into_iter().enumerate() {
                 wm.set_workspace_layout(workspace, mode);
@@ -3310,7 +3368,11 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
             }
         }
         if let Some(target) = self.desktop.take_workspace_request() {
-            wm.switch_workspace(target);
+            let row = wm.workspace_row();
+            if let Some(&space) = row.get(target) { wm.switch_workspace(space); }
+            else if target == row.len() {
+                if let Some(space) = wm.create_workspace() { wm.switch_workspace(space); }
+            }
         }
         self.service_control(wm);
         // The transient UI's parked Escape (see `keymap_action`) is
@@ -3328,9 +3390,13 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
                 self.desktop.overview_clients().into_iter().map(|client| wm.client_preview(client)).collect();
             self.desktop.update_overview_previews(wm.backend_mut(), &self.theme, previews, generation);
         }
-        let (current, count) = (wm.current_workspace(), wm.workspace_count());
-        if self.desktop.overview_visible() && self.desktop.overview_workspace() != (current, count) {
-            self.populate_overview(wm);
+        let (current, count) = wm.workspace_position_count(wm.active_output_index());
+        if self.desktop.overview_visible() {
+            let output = self.overview_output.as_ref().and_then(|name| wm.monitors_ref().iter().position(|m| &m.name == name));
+            let expected = wm.workspace_position_count(output.unwrap_or(wm.active_output_index()));
+            if self.desktop.overview_workspace() != expected || (self.overview_output.is_some() && output.is_none()) {
+                self.populate_overview(wm);
+            }
         }
         self.desktop.set_workspace_display(wm.backend_mut(), &self.theme, current, count);
         self.desktop.tick_menu(wm.backend_mut(), &self.theme);
@@ -3350,6 +3416,7 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         // debounce without allocating, cloning every class, or
         // rescanning the application index. A real change still builds
         // the full owned snapshot once and resets the settle clock.
+        self.layout.note_spaces(wm.display_spaces_snapshot(), Instant::now());
         self.layout.note_modes(
             (0..wm.workspace_count()).map(|i| wm.workspace_layout(i)),
             now,
@@ -3528,6 +3595,7 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
     /// output being plugged in or unplugged lands the same way a plain
     /// resize does.
     pub fn on_screen_resize(&mut self, wm: &mut WindowManager<B>, size: Size) {
+        if self.desktop.overview_visible() { self.close_overview(wm); }
         let primary = primary_rect(&wm.monitors(), size);
         self.desktop.resize_to_screen(wm.backend_mut(), &self.theme, size, primary);
         // The launcher strip anchors to the primary too, and unlike

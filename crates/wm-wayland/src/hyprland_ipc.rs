@@ -126,7 +126,6 @@ fn build_snapshot(
 ) -> Snapshot {
     tracing::trace!("constructing Hyprland IPC snapshot");
     let monitors_info = wm.monitors();
-    let current = wm.current_workspace();
 
     let monitors: Vec<Monitor> = monitors_info
         .iter()
@@ -143,13 +142,9 @@ fn build_snapshot(
             powered: hardware(wm, index).is_none_or(|out| out.powered),
             vrr_supported: hardware(wm, index).is_some_and(|out| out.vrr_supported),
             vrr_enabled: hardware(wm, index).is_some_and(|out| out.vrr_enabled),
-            // chonkstep has a single global current workspace rather
-            // than one per output, so exactly one monitor is focused
-            // and every monitor shows the same workspace. Saying
-            // otherwise would put a workspace indicator on a bar
-            // instance that no key can change.
-            focused: index == focused_monitor_index(wm, &monitors_info),
-            active_workspace: current,
+            // Mac Spaces expose independently active display rows.
+            focused: index == if wm.separate_spaces() { wm.active_output_index() } else { focused_monitor_index(wm, &monitors_info) },
+            active_workspace: wm.active_workspace_on_output(index),
             // The connector's own account of itself, mirrored onto the
             // backend from the same `Output` that answers `wl_output`
             // and `zwlr_output_management` (see
@@ -169,7 +164,8 @@ fn build_snapshot(
     // do not, and dock and shell surfaces are not clients at all.
     let workspace_count = wm.workspace_count().max(1);
     let mut counts: Vec<u32> = vec![0; workspace_count];
-    let mut workspace_monitors: Vec<Option<i32>> = vec![None; workspace_count];
+    let mut workspace_monitors: Vec<Option<i32>> = (0..workspace_count)
+        .map(|index| wm.workspace_output_index(index).map(|i| i as i32)).collect();
     let mut workspace_fullscreen = vec![false; workspace_count];
     let mut windows = Vec::new();
     let focused = wm.focused_client();

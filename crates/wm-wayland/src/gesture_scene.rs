@@ -21,6 +21,7 @@ struct Plane {
 pub(crate) struct Transition {
     pub motion: SwipeMotion,
     pub origin: usize,
+    pub output: Option<Rect>,
     count: usize,
     pub previous: Option<usize>,
     pub next: Option<usize>,
@@ -94,10 +95,11 @@ pub(crate) fn update(comp: &mut Compositor, motion: SwipeMotion) {
         }
         let origin = comp.wm.current_workspace();
         let count = comp.wm.workspace_count();
-        let previous = origin.checked_sub(1);
-        let next = (origin + 1 < wm_core::MAX_WORKSPACES
+        let output = comp.wm.separate_spaces().then(|| comp.wm.monitors_ref()[comp.wm.active_output_index()].geometry);
+        let previous = if comp.wm.mac_mode() { comp.wm.neighboring_workspace(origin, -1) } else { origin.checked_sub(1) };
+        let next = if comp.wm.mac_mode() { comp.wm.neighboring_workspace(origin, 1) } else { (origin + 1 < wm_core::MAX_WORKSPACES
             && (origin + 1 < count || comp.wm.workspace_has_windows(origin)))
-        .then_some(origin + 1);
+        .then_some(origin + 1) };
         let mut planes = Vec::new();
         if motion.axis == SwipeAxis::Horizontal {
             for workspace in [Some(origin), previous, next].into_iter().flatten() {
@@ -115,6 +117,7 @@ pub(crate) fn update(comp: &mut Compositor, motion: SwipeMotion) {
                     .filter(|c| {
                         (if c.flags.contains(ClientFlags::STICKY) { workspace == origin } else { c.workspace == workspace })
                             && c.lifecycle == Lifecycle::Normal
+                            && (!comp.wm.separate_spaces() || comp.wm.workspace_output_index(c.workspace) == comp.wm.workspace_output_index(origin))
                     })
                     .map(|c| {
                         let source = c.frame.and_then(|id| comp.wm.backend().frames.get(&id))
@@ -172,6 +175,7 @@ pub(crate) fn update(comp: &mut Compositor, motion: SwipeMotion) {
         comp.wm.backend_mut().gesture_scene = Some(Transition {
             motion,
             origin,
+            output,
             count,
             previous,
             next,
@@ -369,7 +373,7 @@ pub(crate) fn render(
     // Clipping to its translated source prevents windows on another monitor
     // from leaking across a mixed-scale output boundary during the slide.
     for plane in &scene.planes {
-        let direction = plane.workspace as f64 - scene.origin as f64;
+        let direction = if Some(plane.workspace) == scene.previous { -1.0 } else if Some(plane.workspace) == scene.next { 1.0 } else { 0.0 };
         let shift = plane_shift(direction, scene.position, viewport.size.w);
         if shift.unsigned_abs() >= viewport.size.w {
             continue;

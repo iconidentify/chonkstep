@@ -1470,7 +1470,10 @@ pub fn parse_with(
             "mac" => {
                 let settings = value.as_table().ok_or("[mac] must be a table")?;
                 for key in settings.keys() {
-                    if !matches!(key.as_str(), "applications" | "clipboard_persistence") { return Err(format!("unknown Mac setting: {key}")); }
+                    if !matches!(key.as_str(), "applications" | "clipboard_persistence" | "separate_spaces") { return Err(format!("unknown Mac setting: {key}")); }
+                }
+                if let Some(value) = settings.get("separate_spaces") {
+                    config.interaction.separate_spaces = value.as_bool().ok_or("mac.separate_spaces must be a boolean")?;
                 }
                 if let Some(value) = settings.get("clipboard_persistence") {
                     config.interaction.clipboard_persistence = value.as_bool().ok_or("mac.clipboard_persistence must be a boolean")?;
@@ -1896,6 +1899,7 @@ pub fn effective_config_report(config: &Config) -> String {
     line("autostart", config.autostart.len().to_string());
     if config.interaction.mode == wm_core::InteractionMode::Mac {
         line("mac.clipboard_persistence", config.interaction.clipboard_persistence.to_string());
+        line("mac.separate_spaces", config.interaction.separate_spaces.to_string());
         line("mac.applications", format!("{:?}", config.interaction.applications));
         out.push_str("\n# Mac system shortcuts after overrides (client editing is app-aware)\n");
         for (chord, _) in preset::MAC_BINDINGS {
@@ -3415,6 +3419,9 @@ mod command_tests {
         assert_eq!(mac.interaction.mode, wm_core::InteractionMode::Mac);
         assert_eq!(mac.interaction.profile("foot"), wm_core::AppProfile::Native);
         assert_eq!(mac.drag_modifier, None);
+        assert!(mac.interaction.separate_spaces);
+        assert!(!parse("interaction_mode = 'mac'\n[mac]\nseparate_spaces = false\n").unwrap().interaction.separate_spaces);
+        assert!(parse("interaction_mode = 'mac'\n[mac]\nseparate_spaces = 'linked'\n").is_err());
         assert_eq!(mac.keybindings.iter().find(|(key,_)| Some(*key)==parse_key("command+shift+3")).map(|(_,a)| a), Some(&Action::Capture(CaptureMode::Screen)));
         assert_eq!(mac.keybindings.iter().find(|(key,_)| Some(*key)==parse_key("command+control+shift+3")).map(|(_,a)| a), Some(&Action::Capture(CaptureMode::ScreenClipboard)));
         assert!(parse("interaction_mode = 'typo'").is_err());

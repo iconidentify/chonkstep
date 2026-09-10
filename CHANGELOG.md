@@ -5,6 +5,12 @@ crate and both session binaries carry the same number.
 
 ## [Unreleased]
 
+- Mac mode now provides independent per-display Spaces, local keyboard/swipe
+  navigation and Overview, simultaneous fullscreen, display boundary clipping,
+  dialog-family moves, and preserved membership through hotplug and session
+  restore. Native workspace groups use stable IDs; linked displays remain
+  available through `mac.separate_spaces = false`.
+
 ## [0.4.4] - 2026-09-08
 
 - LCOS gains an amd64 X11 package, four themes, desktop branding, and

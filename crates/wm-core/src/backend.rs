@@ -609,6 +609,10 @@ pub trait Backend {
     fn publish_active_window(&mut self, _window: Option<Self::WindowId>) {}
     /// Publishes `_NET_NUMBER_OF_DESKTOPS` and `_NET_CURRENT_DESKTOP`.
     fn publish_workspaces(&mut self, _count: usize, _current: usize) {}
+
+    /// Restrict a managed window and its popups to this display in separate
+    /// Spaces mode. None restores the ordinary spanning-window policy.
+    fn set_window_space_output(&mut self, _window: Self::WindowId, _output: Option<&str>) {}
     /// Publishes `_NET_WORKAREA` — the same rectangle for every
     /// desktop, since the dock reserves the same strip on all of them.
     /// `area` is the *union* of the per-monitor workareas, not any one

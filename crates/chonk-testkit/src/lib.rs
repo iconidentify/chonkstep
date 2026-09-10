@@ -1504,6 +1504,11 @@ impl Door {
 
     /// Change the live primary-output scale through the same compositor
     /// method Hyprland IPC and output-management clients use.
+    pub fn virtual_outputs(&mut self, split: bool) -> Result<(), String> {
+        self.send(if split { "virtual-outputs split" } else { "virtual-outputs single" })?;
+        self.barrier()
+    }
+
     pub fn set_primary_scale(&mut self, scale: f64) -> Result<(), String> {
         self.send(&format!("primary-scale {scale}"))
     }

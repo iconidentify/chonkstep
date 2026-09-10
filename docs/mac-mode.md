@@ -62,7 +62,10 @@ Applications are grouped by app ID / WM_CLASS, including later identity updates,
 and transient windows belong to their application. Hide, minimize, and Show
 Desktop maintain separate state. The overview's existing desktop controls create
 and remove desktops; deleting a live fullscreen desktop is declined until its
-window exits fullscreen. Desktop membership is currently global across displays.
+window exits fullscreen. Mac mode gives each connected display its own Space row
+by default; Control-Left/Right and swipes target the selected display. See
+[display Spaces](mac-display-spaces.md) for ownership, hotplug, restore, and IPC policy.
+Use `[mac] separate_spaces = false` for linked displays.
 
 Command-Q requests graceful window closure; it never falls back to force-killing
 an X11 client that lacks WM_DELETE_WINDOW. A Linux app can keep a background
@@ -182,6 +185,7 @@ Run the real client workflows in an isolated headless Weston session:
 scripts/e2e.sh --headless --test mac_mode
 scripts/e2e.sh --headless --test selection_transfer
 scripts/e2e.sh --headless --test capture_tool
+scripts/e2e.sh --headless --host-renderer gl --release --test mac_spaces
 cargo test -p wm-core -p wm-config -p chonk-shell -p wm-wayland --lib
 ```
 
@@ -199,7 +203,7 @@ Rich-format persistence tests compare exact HTML, PNG, URI, and large binary
 payloads after source closure. Optional applications are reported as skipped
 when absent; CI treats missing required clients as failures.
 
-The full plan still requires per-display Spaces and fullscreen combinations,
+The full plan still requires paired Split View, Space reordering and app assignment controls,
 app-specific widget/pane adapters, Finder-specific operations such as
 Command-Option-V move and Return-to-rename,
 Spotlight-style system search, character/dictation/input-source services,

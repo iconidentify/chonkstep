@@ -86,7 +86,7 @@ use wayland_client::protocol::{
     wl_buffer::WlBuffer, wl_callback, wl_compositor::WlCompositor, wl_keyboard, wl_registry,
     wl_seat, wl_shm, wl_shm_pool, wl_surface::{self, WlSurface}, wl_output,
 };
-use wayland_client::{Connection, Dispatch, QueueHandle, WEnum};
+use wayland_client::{Connection, Dispatch, QueueHandle, WEnum, Proxy};
 use wayland_protocols::xdg::shell::client::{
     xdg_surface::{self, XdgSurface},
     xdg_toplevel::{self, XdgToplevel},
@@ -514,10 +514,16 @@ impl Dispatch<WlSurface, ()> for Probe {
              _: &Connection, _: &QueueHandle<Self>) {
         if probe.surface.as_ref() != Some(surface) { return; }
         match event {
-            wl_surface::Event::Enter { .. } => say("surface output enter"),
-            wl_surface::Event::Leave { .. } => say("surface output leave"),
+            wl_surface::Event::Enter { output } => say(&format!("surface output enter id={}", output.id().protocol_id())),
+            wl_surface::Event::Leave { output } => say(&format!("surface output leave id={}", output.id().protocol_id())),
             _ => {}
         }
+    }
+}
+
+impl Dispatch<wl_output::WlOutput, ()> for Probe {
+    fn event(_: &mut Self, output: &wl_output::WlOutput, event: wl_output::Event, _: &(), _: &Connection, _: &QueueHandle<Self>) {
+        if let wl_output::Event::Name { name } = event { say(&format!("output id={} name={name}", output.id().protocol_id())); }
     }
 }
 
@@ -534,7 +540,6 @@ ignore_events!(
     wl_shm::WlShm,
     wl_shm_pool::WlShmPool,
     WlBuffer,
-    wl_output::WlOutput,
     ExtIdleNotifierV1,
     ZwpIdleInhibitManagerV1,
     ZwpIdleInhibitorV1,

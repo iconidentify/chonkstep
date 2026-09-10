@@ -470,7 +470,7 @@ fn render_window_scaled(
                 let popup_surface = popup.wl_surface();
                 let popup_factor = crate::xdg::effective_surface_scale(
                     crate::xdg::committed_surface_scale(popup_surface),
-                    backend.scale_at(record.content),
+                    backend.window_output_scale(record),
                 );
                 let popup_scale = smithay::utils::Scale::from((popup_factor * sx, popup_factor * sy));
                 let at = Point::new(

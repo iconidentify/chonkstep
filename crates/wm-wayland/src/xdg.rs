@@ -1142,8 +1142,7 @@ impl Compositor {
         let backend = self.wm.backend();
         if let Some(id) = owner {
             if let Some(record) = backend.windows.get(&id) {
-                return backend
-                    .scale_at(backend.layout_scene.workarea(id).unwrap_or(record.content));
+                return backend.window_output_scale(record);
             }
         }
         if let Some(record) = backend
@@ -1603,7 +1602,7 @@ impl ShmHandler for Compositor {
 // -- wl_output -----------------------------------------------------------
 
 impl OutputHandler for Compositor {
-    fn output_bound(&mut self, _output: Output, _wl_output: wl_output::WlOutput) {}
+    fn output_bound(&mut self, _output: Output, _wl_output: wl_output::WlOutput) { self.workspaces.mark_dirty(); }
 }
 
 // XWayland uses xdg-output's *logical* size as its X root size whenever

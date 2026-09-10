@@ -16,6 +16,8 @@ use crate::placement::{self, FloatPolicy, PlacementPolicy};
 use crate::resize;
 use crate::snap;
 mod mac;
+mod spaces;
+pub use spaces::{DisplaySpace, DisplaySpacesSnapshot, Space};
 use crate::types::{
     BackendEvent, ClientChrome, DragHandle, KeyCombo, Modifiers, MouseButton, NetState, NetStateAction,
     NetStateSnapshot, SurfaceRef, WindowType,
@@ -155,6 +157,7 @@ pub struct WindowManager<B: Backend> {
     interaction: crate::InteractionConfig,
     mac_hidden: HashSet<ClientId>,
     mac_fullscreen: HashMap<ClientId, (usize, usize)>,
+    display_spaces: Option<spaces::DisplaySpaces>,
     desktop_reveal: Option<(HashSet<ClientId>, Option<ClientId>)>,
     backend: B,
     theme: Box<dyn ThemeEngine>,
@@ -401,6 +404,7 @@ impl<B: Backend> WindowManager<B> {
             interaction: crate::InteractionConfig::default(),
             mac_hidden: HashSet::new(),
             mac_fullscreen: HashMap::new(),
+            display_spaces: None,
             desktop_reveal: None,
             managed_order: Vec::new(),
             focus_history: Vec::new(),
@@ -766,6 +770,7 @@ impl<B: Backend> WindowManager<B> {
     /// geometry obey the same rules if the X backend grows RandR
     /// hotplug later.
     pub fn rescue_clients_from_removed_monitor(&mut self, departed: Rect) {
+        if self.separate_spaces() { self.reconcile_display_spaces(); return; }
         self.end_active_drag();
         let monitors = self.backend.monitors();
         if monitors.is_empty() {
@@ -910,7 +915,7 @@ impl<B: Backend> WindowManager<B> {
         self.idle_inhibit_clients.iter().any(|id| {
             self.clients.get(*id).is_some_and(|client| {
                 client.lifecycle == Lifecycle::Normal
-                    && (client.workspace == self.current_workspace || client.flags.contains(ClientFlags::STICKY))
+                    && (self.workspace_visible(client.workspace) || client.flags.contains(ClientFlags::STICKY))
             })
         })
     }
@@ -954,7 +959,7 @@ impl<B: Backend> WindowManager<B> {
         if pinned {
             self.show_client_surface(id);
             self.raise_client(id);
-        } else if self.clients.get(id).is_some_and(|client| client.workspace != self.current_workspace) {
+        } else if self.clients.get(id).is_some_and(|client| !self.workspace_visible(client.workspace)) {
             self.focus_successor_of(id);
             self.hide_client_surface(id);
         }
@@ -1042,7 +1047,7 @@ impl<B: Backend> WindowManager<B> {
         if self.mac_client_hidden(id) { return false; }
         self.clients.get(id).is_some_and(|client| {
             client.lifecycle == Lifecycle::Normal
-                && (client.workspace == self.current_workspace
+                && (self.workspace_visible(client.workspace)
                     || client.flags.contains(ClientFlags::STICKY))
                 && !client.flags.contains(ClientFlags::NO_FOCUS)
         })
@@ -1215,6 +1220,7 @@ impl<B: Backend> WindowManager<B> {
     /// indices compact. The active desktop and focused window survive this
     /// renumbering, and the last remaining desktop cannot be removed.
     pub fn remove_workspace(&mut self, workspace: usize) -> bool {
+        if self.separate_spaces() { return self.remove_display_workspace(workspace); }
         if self.workspace_count <= 1 || workspace >= self.workspace_count {
             return false;
         }
@@ -1292,6 +1298,7 @@ impl<B: Backend> WindowManager<B> {
         if workspace >= MAX_WORKSPACES {
             return;
         }
+        if self.separate_spaces() { self.switch_display_workspace(workspace); return; }
         if workspace == self.current_workspace {
             return;
         }
@@ -1369,9 +1376,8 @@ impl<B: Backend> WindowManager<B> {
     }
 
     fn move_one_client_to_workspace(&mut self, id: ClientId, workspace: usize) {
-        if workspace >= MAX_WORKSPACES {
-            return;
-        }
+        if workspace >= MAX_WORKSPACES { return; }
+        if !self.ensure_display_space_slots(workspace + 1) { return; }
         if workspace + 1 > self.workspace_count {
             self.workspace_count = workspace + 1;
             self.bump_protocol_state_revision();
@@ -1395,23 +1401,26 @@ impl<B: Backend> WindowManager<B> {
         // visible on every workspace, so moving its membership must not
         // move focus away from it.
         if self.focused == Some(id)
-            && workspace != self.current_workspace
+            && !self.workspace_visible(workspace)
             && !client.flags.contains(ClientFlags::STICKY)
         {
             self.focus_adjacent_client(true);
         }
+        let target_visible = self.workspace_visible(workspace);
+        self.translate_space_move(id, workspace);
         let Some(client) = self.clients.get_mut(id) else {
             return;
         };
         let old_workspace = client.workspace;
         client.workspace = workspace;
         let window = client.window;
-        let should_hide = workspace != self.current_workspace && !client.flags.contains(ClientFlags::STICKY);
+        let should_hide = !target_visible && !client.flags.contains(ClientFlags::STICKY);
         self.bump_protocol_state_revision();
         // A move is precisely when a window's `_NET_WM_DESKTOP`
         // changes — pagers track membership from this property, not by
         // guessing from map/unmap traffic.
         self.backend.publish_window_desktop(window, workspace);
+        self.publish_space_output(id);
         self.layouts[old_workspace]
             .order
             .retain(|&other| other != id);
@@ -1421,6 +1430,7 @@ impl<B: Backend> WindowManager<B> {
         }
         self.reflow_workspace(old_workspace);
         self.reflow_workspace(workspace);
+        if self.separate_spaces() { self.reflow_frame(id); }
         if should_hide {
             self.hide_client_surface(id);
             if self.focused == Some(id) {
@@ -1430,6 +1440,8 @@ impl<B: Backend> WindowManager<B> {
                 self.focused = None;
                 self.backend.publish_active_window(None);
             }
+        } else if self.separate_spaces() && !self.mac_client_hidden(id) && self.clients[id].lifecycle == Lifecycle::Normal {
+            self.show_client_surface(id);
         }
     }
 
@@ -1780,7 +1792,7 @@ impl<B: Backend> WindowManager<B> {
                 .iter()
                 .filter(|(_, c)| {
                     c.lifecycle == Lifecycle::Normal
-                        && (c.workspace == self.current_workspace || c.flags.contains(ClientFlags::STICKY))
+                        && (self.workspace_visible(c.workspace) || c.flags.contains(ClientFlags::STICKY))
                 })
                 .map(|(_, c)| Rect {
                     pos: Point::new(
@@ -1866,7 +1878,12 @@ impl<B: Backend> WindowManager<B> {
                 .zip(hints.max_size)
                 .is_some_and(|(min, max)| min == max);
 
+        if self.separate_spaces() && client.parent.is_none() {
+            let output = self.monitor_index_at(anchor);
+            client.workspace = self.regular_workspace_on_output(output);
+        }
         let id = self.clients.insert(client);
+        self.publish_space_output(id);
         self.bump_protocol_state_revision();
         if self.clients[id].flags.contains(ClientFlags::IDLE_INHIBIT) {
             self.idle_inhibit_clients.insert(id);
@@ -1888,7 +1905,7 @@ impl<B: Backend> WindowManager<B> {
         // lands on the current workspace) and again on every later
         // move; a pager that never sees the property at all would have
         // to treat the window as on-every-desktop.
-        self.backend.publish_window_desktop(window, self.current_workspace);
+        self.backend.publish_window_desktop(window, self.clients[id].workspace);
         // The identity goes in both lines on purpose. A user whose
         // window arrived with the wrong chrome has exactly one thing to
         // do about it — name the application in `[decorations]` — and
@@ -2514,6 +2531,7 @@ impl<B: Backend> WindowManager<B> {
     }
 
     fn handle_pointer_motion(&mut self, root: Point) {
+        self.select_output(self.monitor_index_at(root));
         // Recorded before any drag branch returns: this is the core's
         // only sighting of where the user's attention is, and new-window
         // placement reads it to open on the monitor being looked at
@@ -2595,7 +2613,7 @@ impl<B: Backend> WindowManager<B> {
             .filter(|(id, other)| {
                 *id != client_id
                     && other.lifecycle == Lifecycle::Normal
-                    && (other.workspace == self.current_workspace
+                    && (self.workspace_visible(other.workspace)
                         || other.flags.contains(ClientFlags::STICKY))
             })
             .map(|(_, other)| client_frame_rect(other));
@@ -2629,6 +2647,7 @@ impl<B: Backend> WindowManager<B> {
             new_frame_pos.x + client.layout.client_offset.x,
             new_frame_pos.y + client.layout.client_offset.y,
         );
+        self.track_window_display(client_id);
         let new_scale = self.backend.decoration_scale(Rect { pos: new_frame_pos, size: frame_size });
         if old_scale.to_bits() != new_scale.to_bits() {
             self.reflow_frame(client_id);
@@ -2799,6 +2818,12 @@ impl<B: Backend> WindowManager<B> {
     /// the next best guess (a keyboard-spawned window joins its
     /// siblings), and the primary is the last.
     fn placement_area(&self) -> Rect {
+        if self.separate_spaces() {
+            let index = self.active_output_index();
+            if let Some(monitor) = self.monitors_ref().get(index) {
+                return self.workareas.get(index).copied().unwrap_or(monitor.geometry);
+            }
+        }
         if let Some(pointer) = self.last_pointer {
             return self.usable_area_at(pointer);
         }
@@ -2813,6 +2838,7 @@ impl<B: Backend> WindowManager<B> {
     /// backend. Shared tail of any operation that changes a client's
     /// content size in place (`ConfigureRequest`, maximize, unmaximize).
     fn reflow_frame(&mut self, id: ClientId) {
+        self.track_window_display(id);
         let screen = self.backend.screen_size();
         if let Some(client) = self.clients.get_mut(id) {
             Self::clamp_geometry(client, screen);
@@ -3780,6 +3806,12 @@ impl<B: Backend> WindowManager<B> {
             tracing::debug!(?id, "window rule refused focus");
             return;
         }
+        if self.separate_spaces() {
+            if let Some(workspace) = self.clients.get(id).map(|c| c.workspace) {
+                if !self.workspace_visible(workspace) { self.switch_workspace(workspace); }
+                self.select_space_output(workspace);
+            }
+        }
         if self.focused == Some(id) {
             // Re-assert input focus rather than assume it landed. This
             // early return is the path a user takes to *repair* focus —
@@ -4036,7 +4068,7 @@ impl<B: Backend> WindowManager<B> {
         // which found the window gone from the screen entirely.
         let visible = !self.mac_client_hidden(id) && self.clients.get(id).is_some_and(|client| {
             client.lifecycle == Lifecycle::Normal
-                && (client.workspace == self.current_workspace || client.flags.contains(ClientFlags::STICKY))
+                && (self.workspace_visible(client.workspace) || client.flags.contains(ClientFlags::STICKY))
         });
         if visible {
             self.show_client_surface(id);
@@ -9498,6 +9530,7 @@ mod tests {
         );
     }
     mod spatial;
+    mod spaces;
     fn mac_windows() -> (WindowManager<FakeBackend>, [ClientId; 3]) {
         let mut backend = FakeBackend::new();
         let windows = [backend.create_window(), backend.create_window(), backend.create_window()];
