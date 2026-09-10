@@ -142,7 +142,7 @@ impl<B: Backend> OverviewPanel<B> {
         tile: u32,
         items: Vec<OverviewItem<B>>,
         workspace: (usize, usize),
-        workspace_counts: &[usize],
+        workspace_windows: Vec<Vec<wm_core::OverviewThumbnail<B::WindowId, B::FrameId>>>,
         selected: usize,
     ) {
         self.invalidate_pointer(backend);
@@ -229,18 +229,20 @@ impl<B: Backend> OverviewPanel<B> {
                     .strip
                     .iter()
                     .enumerate()
-                    .map(|(i, rect)| wm_core::OverviewWorkspace {
+                    .zip(workspace_windows)
+                    .map(|((i, rect), windows)| wm_core::OverviewWorkspace {
                             rect: *rect,
                             label: ov::live::label(
                                 theme,
                                 font_system,
                                 swash_cache,
-                                &format!("Desktop {} · {}", i + 1, workspace_counts.get(i).copied().unwrap_or(0)),
+                                &format!("Desktop {} · {}", i + 1, windows.len()),
                                 rect.size.w,
                                 label_h,
                             ),
                             drop_label: ov::live::label(theme, font_system, swash_cache,
                                 &format!("Move to Desktop {}", i + 1), rect.size.w, label_h),
+                            windows,
                             close: layout.workspace_close_rect(i)
                                 .map(|rect| (rect, ov::workspace_close_glyph(rect.size.w))),
                     })

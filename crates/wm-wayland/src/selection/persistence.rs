@@ -4,7 +4,7 @@
 
 use crate::state::Compositor;
 use smithay::wayland::selection::data_device::{current_data_device_selection_userdata, set_data_device_selection};
-use smithay::wayland::selection::{SelectionSource, SelectionTarget};
+use smithay::wayland::selection::{current_client_selection, current_selection_mime_types, SelectionSource, SelectionTarget};
 use std::{
     collections::BTreeMap,
     fs::File,
@@ -52,6 +52,7 @@ struct Snapshot {
 
 #[derive(Default)]
 pub(crate) struct Persistence {
+    enabled: bool,
     snapshot: Option<Snapshot>,
     current: Option<Payloads>,
     writes: Vec<WriteOffer>,
@@ -199,6 +200,29 @@ fn publish(comp: &mut Compositor, data: BTreeMap<String, Arc<Vec<u8>>>) {
 }
 
 fn poll(comp: &mut Compositor) {
+    let enabled = comp.wm.mac_mode() && comp.wm.interaction_config().clipboard_persistence;
+    let newly_enabled = enabled && !comp.clipboard_persistence.enabled;
+    comp.clipboard_persistence.enabled = enabled;
+    // Enabling persistence adopts the authoritative live offer once. A copy
+    // made before a mode/config reload must survive the owner's later exit.
+    if newly_enabled && comp.clipboard_persistence.snapshot.is_none() {
+        if let Some(source) = current_client_selection(&comp.seat, SelectionTarget::Clipboard) {
+            let requests = comp.clipboard_persistence.begin(Some(source.clone()), source.mime_types());
+            for (mime, fd) in requests {
+                source.send(mime, fd);
+            }
+        } else if matches!(current_data_device_selection_userdata(&comp.seat).as_deref(), Some(SelectionData::Bridge)) {
+            let mimes = current_selection_mime_types(&comp.seat, SelectionTarget::Clipboard);
+            if let Some(xwm) = comp.xwayland.wm.as_mut() {
+                let requests = comp.clipboard_persistence.begin(None, mimes);
+                for (mime, fd) in requests {
+                    if let Err(error) = xwm.send_selection(SelectionTarget::Clipboard, mime, fd, comp.loop_handle.clone()) {
+                        tracing::warn!(?error, "could not adopt existing XWayland clipboard for persistence");
+                    }
+                }
+            }
+        }
+    }
     let now = Instant::now();
     let persistence = &mut comp.clipboard_persistence;
     let mut budget = BUDGET;
@@ -221,7 +245,7 @@ fn poll(comp: &mut Compositor) {
         }
         offer.offset < offer.bytes.len()
     });
-    if !comp.wm.mac_mode() || !comp.wm.interaction_config().clipboard_persistence {
+    if !enabled {
         persistence.snapshot = None;
         return;
     }

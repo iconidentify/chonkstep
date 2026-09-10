@@ -22,8 +22,9 @@ struct Label {
     size: Size,
 }
 
-struct Workspace {
-    rect: Rect,
+pub(crate) struct Workspace {
+    pub rect: Rect,
+    pub windows: Vec<Window>,
     label: Label,
     drop_label: Label,
     close: Option<(Rect, Label)>,
@@ -65,7 +66,8 @@ pub(crate) struct Overview {
     pub surface: WlShellId,
     pub geometry: Rect,
     pub windows: Vec<Window>,
-    spaces: Vec<Workspace>,
+    pub spaces: Vec<Workspace>,
+    preview_windows: std::collections::HashSet<WlWindowId>,
     pub selected: usize,
     pub drag: Option<wm_core::OverviewDrag>,
     /// Absolute desktop-to-Overview fraction, independent of output pixels.
@@ -111,6 +113,8 @@ impl Overview {
             },
             workspace: scene.workspace,
             gap: scene.gap,
+            preview_windows: scene.windows.iter().map(|w| w.window)
+                .chain(scene.spaces.iter().flat_map(|s| s.windows.iter().map(|w| w.window))).collect(),
             windows: scene
                 .windows
                 .into_iter()
@@ -144,6 +148,20 @@ impl Overview {
                 .into_iter()
                 .map(|space| Workspace {
                     rect: space.rect,
+                    windows: {
+                        let mut windows: Vec<_> = space.windows.into_iter().map(|w| {
+                            let mut window = Window::snapshot(w.window, w.frame, w.source, backend);
+                            window.draw_content = w.draw_content;
+                            window
+                        }).collect();
+                        let order: std::collections::HashMap<_, _> = backend.stacking.iter().rev()
+                            .filter_map(|entry| match entry {
+                                crate::state::StackEntry::Window(id) => Some(*id),
+                                crate::state::StackEntry::Frame(id) => backend.frames.get(id).map(|f| f.window),
+                            }).enumerate().map(|(index, id)| (id, index)).collect();
+                        windows.sort_by_key(|w| order.get(&w.window).copied().unwrap_or(usize::MAX));
+                        windows
+                    },
                     label: Label::new(space.label),
                     drop_label: Label::new(space.drop_label),
                     close: space.close.map(|(rect, glyph)| (rect, Label::new(glyph))),
@@ -157,6 +175,17 @@ impl Overview {
             band: Id::new(),
             backdrop: Id::new(),
         }
+    }
+
+    pub fn includes_window(&self, window: WlWindowId) -> bool {
+        self.preview_windows.contains(&window)
+    }
+
+    pub fn extra_windows<'a>(&'a self, backend: &'a WaylandBackend)
+        -> impl Iterator<Item = &'a crate::state::WindowRecord>
+    {
+        self.preview_windows.iter().filter(|id| !backend.scene_index.is_presented(**id))
+            .filter_map(|id| backend.windows.get(id)).filter(|r| r.surface.alive())
     }
 
     pub fn presented(&self, backend: &WaylandBackend, viewport: Rect) -> bool {
@@ -349,6 +378,18 @@ pub(crate) fn render(
         if i == overview.workspace {
             outline(elements, &overview.space_ring, rect, edge, alpha);
         }
+        // Miniatures preserve desktop geometry, stacking and output clipping.
+        // Read current geometry so external moves/resizes cannot freeze an old
+        // layout while Overview stays open. Client textures remain shared.
+        for window in &space.windows {
+            let Some(record) = backend.windows.get(&window.window) else { continue; };
+            let source = window.frame.and_then(|id| backend.frames.get(&id))
+                .map_or(record.content, |frame| frame.geometry);
+            let destination = thumbnail_rect(source, overview.geometry, rect);
+            let start = elements.len();
+            render_window_scaled(elements, renderer, backend, window, destination, alpha, false, None, Some(source));
+            crate::renderer::clip_plane(elements, start, rect, &space.background);
+        }
         space_background_alpha(elements, renderer, backend, overview.geometry, rect, &space.background, alpha);
     }
     if let Some(space) = overview.spaces.first() {
@@ -365,6 +406,16 @@ pub(crate) fn render(
             Color32F::new(0.0, 0.0, 0.0, 0.3 * alpha),
         );
     }
+}
+
+pub(crate) fn thumbnail_rect(source: Rect, desktop: Rect, thumbnail: Rect) -> Rect {
+    let scale = (thumbnail.size.w as f64 / desktop.size.w.max(1) as f64)
+        .min(thumbnail.size.h as f64 / desktop.size.h.max(1) as f64);
+    Rect::new(Point::new(
+        thumbnail.pos.x.saturating_add(((i64::from(source.pos.x) - i64::from(desktop.pos.x)) as f64 * scale).round() as i32),
+        thumbnail.pos.y.saturating_add(((i64::from(source.pos.y) - i64::from(desktop.pos.y)) as f64 * scale).round() as i32)),
+        Size::new((source.size.w as f64 * scale).round().max(1.0) as u32,
+            (source.size.h as f64 * scale).round().max(1.0) as u32))
 }
 
 pub(crate) fn interpolate(source: Rect, target: Rect, progress: f64) -> Rect {
@@ -392,6 +443,7 @@ pub(crate) fn render_window(
         alpha,
         false,
         None,
+        None,
     );
 }
 
@@ -403,7 +455,7 @@ pub(crate) fn render_layout_window(
     destination: Rect,
     viewport: Rect,
 ) {
-    render_window_scaled(elements, renderer, backend, window, destination, 1.0, true, Some(viewport));
+    render_window_scaled(elements, renderer, backend, window, destination, 1.0, true, Some(viewport), None);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -416,7 +468,9 @@ fn render_window_scaled(
     alpha: f32,
     stretch: bool,
     viewport: Option<Rect>,
+    source_override: Option<Rect>,
 ) {
+    let source = source_override.unwrap_or(window.source);
     let Some(record) = backend
         .windows
         .get(&window.window)
@@ -424,18 +478,18 @@ fn render_window_scaled(
     else {
         return;
     };
-    let scale = (destination.size.w as f64 / window.source.size.w.max(1) as f64)
-        .min(destination.size.h as f64 / window.source.size.h.max(1) as f64);
+    let scale = (destination.size.w as f64 / source.size.w.max(1) as f64)
+        .min(destination.size.h as f64 / source.size.h.max(1) as f64);
     if scale <= 0.0 {
         return;
     }
     let sx = if stretch {
-        destination.size.w as f64 / window.source.size.w.max(1) as f64
+        destination.size.w as f64 / source.size.w.max(1) as f64
     } else {
         scale
     };
     let sy = if stretch {
-        destination.size.h as f64 / window.source.size.h.max(1) as f64
+        destination.size.h as f64 / source.size.h.max(1) as f64
     } else {
         scale
     };
@@ -443,11 +497,11 @@ fn render_window_scaled(
     if let Some(surface) = record.surface.wl_surface().filter(|_| window.draw_content) {
         let origin = SPoint::<i32, Physical>::from((
             destination.pos.x
-                + ((record.content.pos.x - record.content_offset.x - window.source.pos.x) as f64
+                + ((record.content.pos.x - record.content_offset.x - source.pos.x) as f64
                     * sx)
                     .round() as i32,
             destination.pos.y
-                + ((record.content.pos.y - record.content_offset.y - window.source.pos.y) as f64
+                + ((record.content.pos.y - record.content_offset.y - source.pos.y) as f64
                     * sy)
                     .round() as i32,
         ));
@@ -533,10 +587,10 @@ fn render_window_scaled(
         for part in &frame.parts {
             let origin = SPoint::<i32, Physical>::from((
                 destination.pos.x
-                    + ((frame.geometry.pos.x + part.offset.x - window.source.pos.x) as f64 * sx)
+                    + ((frame.geometry.pos.x + part.offset.x - source.pos.x) as f64 * sx)
                         .round() as i32,
                 destination.pos.y
-                    + ((frame.geometry.pos.y + part.offset.y - window.source.pos.y) as f64 * sy)
+                    + ((frame.geometry.pos.y + part.offset.y - source.pos.y) as f64 * sy)
                         .round() as i32,
             ));
             if let Ok(element) = MemoryRenderBufferRenderElement::from_buffer(

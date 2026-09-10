@@ -1388,9 +1388,14 @@ pub(crate) fn window_is_in_scene(backend: &WaylandBackend, window: WlWindowId) -
     let Some(record) = backend.windows.get(&window) else {
         return false;
     };
-    if !record.mapped || !record.surface.alive() {
+    if !record.surface.alive() {
         return false;
     }
+    if backend.overview.as_ref().is_some_and(|o| o.includes_window(window)
+        && backend.shells.get(&o.surface).is_some_and(|s| s.mapped)) {
+        return true;
+    }
+    if !record.mapped { return false; }
     record.window_type == wm_core::WindowType::Unmanaged || backend.scene_index.is_presented(window)
 }
 

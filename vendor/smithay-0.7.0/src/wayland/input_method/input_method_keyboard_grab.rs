@@ -28,7 +28,7 @@ use super::InputMethodManagerState;
 pub(crate) struct InputMethodKeyboard {
     pub grab: Option<ZwpInputMethodKeyboardGrabV2>,
     pub text_input_handle: TextInputHandle,
-    projected_modifiers: bool,
+    pub(super) projected_modifiers: bool,
 }
 
 /// Handle to an input method instance
@@ -52,6 +52,7 @@ where
         time: u32,
     ) {
         let mut inner = self.inner.lock().unwrap();
+        let modifiers = modifiers.or_else(|| inner.projected_modifiers.then(|| handle.modifier_state()));
         // A projected shortcut changes its modifiers without a physical
         // modifier-key event. The IME must see that mask before the letter it
         // interprets or reinjects. Preserve normal physical-event ordering.
@@ -103,6 +104,7 @@ where
 pub struct InputMethodKeyboardUserData<D: SeatHandler> {
     pub(super) handle: InputMethodKeyboardGrab,
     pub(crate) keyboard_handle: KeyboardHandle<D>,
+    pub(super) serial: Serial,
 }
 
 impl<D: SeatHandler> fmt::Debug for InputMethodKeyboardUserData<D> {
@@ -120,11 +122,21 @@ impl<D: SeatHandler + 'static> Dispatch<ZwpInputMethodKeyboardGrabV2, InputMetho
     fn destroyed(
         state: &mut D,
         _client: ClientId,
-        _object: &ZwpInputMethodKeyboardGrabV2,
+        object: &ZwpInputMethodKeyboardGrabV2,
         data: &InputMethodKeyboardUserData<D>,
     ) {
-        data.handle.inner.lock().unwrap().grab = None;
-        data.keyboard_handle.unset_grab(state);
+        let mut inner = data.handle.inner.lock().unwrap();
+        if inner.grab.as_ref() != Some(object) {
+            return;
+        }
+        inner.grab = None;
+        inner.projected_modifiers = false;
+        drop(inner);
+        // A newer IME or another keyboard grab may have replaced this one.
+        // Retiring a resource must only release the grab it installed.
+        if data.keyboard_handle.has_grab(data.serial) {
+            data.keyboard_handle.unset_grab(state);
+        }
     }
 
     fn request(

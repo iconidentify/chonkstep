@@ -1092,6 +1092,13 @@ impl<D: SeatHandler + 'static> KeyboardHandle<D> {
         self.arc.internal.lock().unwrap().forwarded_pressed_keys.contains(&key)
     }
 
+    /// Retire a forwarded press whose original focus has already left, without
+    /// delivering a release to the new focus or an input-method grab. Physical
+    /// XKB state must already have been updated through `input_intercept`.
+    pub fn retire_forwarded_key(&self, key: Keycode) {
+        self.arc.internal.lock().unwrap().forwarded_pressed_keys.remove(&key);
+    }
+
     /// Return the key codes of the currently pressed keys.
     pub fn pressed_keys(&self) -> HashSet<Keycode> {
         let guard = self.arc.internal.lock().unwrap();

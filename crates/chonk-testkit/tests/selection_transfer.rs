@@ -954,3 +954,59 @@ fn mac_persistence_preserves_rich_payloads_after_the_source_quits() {
         session.kill_client(&destination.name);
     }
 }
+
+fn set_mac_mode(session: &mut Session, enabled: bool) {
+    let reloads = session.log().matches("reload requested").count();
+    session.rewrite_config(&format!(
+        "interaction_mode='{}'\nhyprland_config=false\nshow_dock=false\nomarchy_shell=false\n",
+        if enabled { "mac" } else { "desktop" }
+    )).unwrap();
+    session.request_reload().unwrap();
+    poll_until(EVENT, "interaction mode reload", || {
+        (session.log().matches("reload requested").count() > reloads).then_some(())
+    }).unwrap();
+    session.door().barrier().unwrap();
+}
+
+#[test]
+#[ignore = "scripts/e2e.sh --headless --test selection_transfer enabling_mac"]
+fn enabling_mac_preserves_an_existing_native_clipboard_owner() {
+    let mut session = boot("selection-toggle-native");
+    for cycle in 0..3 {
+        set_mac_mode(&mut session, false);
+        let payload = format!("before Mac enable {cycle}: café 日本語 🍎");
+        let source = Native::launch(&mut session, &format!("toggle-source-{cycle}"),
+            "text/plain;charset=utf-8", payload.as_bytes());
+        source.copy(&mut session, Kind::Clipboard);
+        set_mac_mode(&mut session, true);
+        session.door().chord(125, 16).unwrap();
+        session.wait_for_window_gone(&source.name).unwrap();
+        let mut destination = Native::launch(&mut session, &format!("toggle-target-{cycle}"),
+            "text/plain;charset=utf-8", b"unused");
+        destination.receive(&mut session, Kind::Clipboard, payload.as_bytes());
+        session.kill_client(&destination.name);
+    }
+}
+
+#[test]
+#[ignore = "scripts/e2e.sh --headless --test selection_transfer enabling_mac"]
+fn enabling_mac_preserves_an_existing_x11_clipboard_owner() {
+    let mut session = boot("selection-toggle-x11");
+    let payload = b"X11 clipboard copied before enabling Mac mode";
+    let mut source = x_selection::XSelection::new(&mut session, "text/plain;charset=utf-8", payload);
+    source.copy(false);
+    let mut destination = Native::launch(&mut session, "toggle-x11-target",
+        "text/plain;charset=utf-8", b"unused");
+    destination.receive_with(&mut session, Kind::Clipboard, payload, || source.tick());
+    set_mac_mode(&mut session, true);
+    // Pump the real owner's protocol queue before disconnecting it. A mode
+    // transition must request the existing offer without requiring another copy.
+    let until = std::time::Instant::now() + Duration::from_millis(750);
+    while std::time::Instant::now() < until {
+        source.tick();
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    drop(source);
+    session.wait_for_window_gone("selection-x11").unwrap();
+    destination.receive(&mut session, Kind::Clipboard, payload);
+}

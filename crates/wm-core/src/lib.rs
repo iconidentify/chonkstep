@@ -31,7 +31,7 @@ mod types;
 #[cfg(any(test, feature = "test-support"))]
 pub mod fake_backend;
 
-pub use backend::{Backend, LayoutDrag, OverviewDrag, OverviewScene, OverviewWindow, OverviewWorkspace};
+pub use backend::{Backend, LayoutDrag, OverviewDrag, OverviewScene, OverviewWindow, OverviewWorkspace, OverviewThumbnail};
 pub use client::{
     Client, ClientFlags, ClientId, Lifecycle, MaximizeDirections, MonitorId, MonitorInfo,
 };

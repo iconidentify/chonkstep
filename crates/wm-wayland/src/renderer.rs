@@ -702,6 +702,10 @@ pub(crate) fn take_presentation_feedback(
 /// entries on every frame callback and presentation-feedback drain.
 fn for_each_presented_window(backend: &WaylandBackend, mut visit: impl FnMut(&WindowRecord)) {
     crate::gesture_scene::for_each_neighbor(backend, &mut visit);
+    if let Some(overview) = backend.overview.as_ref()
+        .filter(|o| backend.shells.get(&o.surface).is_some_and(|s| s.mapped)) {
+        for record in overview.extra_windows(backend) { visit(record); }
+    }
     for window in backend.scene_index.unmanaged() {
         if let Some(record) = backend
             .windows

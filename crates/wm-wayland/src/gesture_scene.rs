@@ -452,7 +452,9 @@ pub(crate) fn for_each_neighbor(
     };
     if let Some(plane) = scene.planes.iter().find(|p| Some(p.workspace) == target) {
         for window in &plane.windows {
-            if !backend.scene_index.is_presented(window.window) {
+            if !backend.scene_index.is_presented(window.window)
+                && !backend.overview.as_ref().is_some_and(|o| o.includes_window(window.window)
+                    && backend.shells.get(&o.surface).is_some_and(|s| s.mapped)) {
                 if let Some(record) = backend
                     .windows
                     .get(&window.window)

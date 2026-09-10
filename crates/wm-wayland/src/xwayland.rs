@@ -155,6 +155,11 @@ fn ensure_x11_record(backend: &mut WaylandBackend, window: &X11Surface) -> WlWin
     let geometry = wm_rect(window.geometry(), backend.output_size);
     let mut record = WindowRecord::new(ManagedSurface::X11(window.clone()), geometry);
     record.app_id = Some(window.class());
+    // Pre-map properties are already available. Seed the same title cache
+    // that later PropertyNotify updates; many X11 clients never rename once
+    // mapped, and protocol/test-door snapshots must not report them unnamed.
+    let title = window.title();
+    record.title = (!title.is_empty()).then_some(title);
     backend.remember_window(id, record);
     id
 }

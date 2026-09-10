@@ -1111,6 +1111,7 @@ pub struct Shell<B: Backend + PopupHost<PopupId = B::ShellId>> {
     overview_application: Option<ClientId>,
     overview_output: Option<String>,
     overview_spaces: Vec<String>,
+    overview_revision: u64,
     /// Armed on press, invalidated whenever Overview's entry set changes.
     overview_close_pressed: Option<usize>,
     /// Every terminal this shell launched that has not been observed
@@ -1373,6 +1374,7 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
             overview_application: None,
             overview_output: None,
             overview_spaces: Vec::new(),
+            overview_revision: 0,
             overview_close_pressed: None,
             grabbed: to_grab,
             layout,
@@ -2217,6 +2219,22 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         self.state.input.gestures
     }
 
+    fn workspace_overview_windows(wm: &WindowManager<B>, row: &[usize])
+        -> Vec<Vec<wm_core::OverviewThumbnail<B::WindowId, B::FrameId>>>
+    {
+        row.iter().map(|&space| wm.iter_clients().filter(|(id, c)| {
+            c.lifecycle == Lifecycle::Normal && !wm.mac_client_hidden(*id)
+                && (c.workspace == space || (c.flags.contains(ClientFlags::STICKY) && row.contains(&c.workspace)))
+        }).map(|(_, c)| wm_core::OverviewThumbnail {
+            window: c.window, frame: c.frame,
+            source: if c.frame.is_some() {
+                Rect::new(Point::new(c.geometry.pos.x - c.layout.client_offset.x,
+                    c.geometry.pos.y - c.layout.client_offset.y), c.layout.frame_size)
+            } else { c.geometry },
+            draw_content: !c.flags.contains(ClientFlags::SHADED),
+        }).collect()).collect()
+    }
+
     /// Prepare a neighboring live Overview without switching the WM or taking
     /// any input ownership. Called once at horizontal axis lock, never per frame.
     pub fn desktop_gesture_overview_scene(&self, wm: &WindowManager<B>, workspace: usize,
@@ -2248,10 +2266,10 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
             wm_core::OverviewWindow { window: c.window, frame: c.frame, source, destination: *destination,
                 label: label(&c.title, (tile * 6).min(geometry.size.w)) }
         }).collect();
-        let spaces = layout.strip.iter().enumerate().map(|(i, rect)| {
-            let count = wm.iter_clients().filter(|(_, c)| Some(&c.workspace) == row.get(i)
-                && matches!(c.lifecycle, Lifecycle::Normal | Lifecycle::Miniaturized)).count();
-            wm_core::OverviewWorkspace { rect: *rect,
+        let workspace_windows = Self::workspace_overview_windows(wm, &row);
+        let spaces = layout.strip.iter().enumerate().zip(workspace_windows).map(|((i, rect), windows)| {
+            let count = windows.len();
+            wm_core::OverviewWorkspace { rect: *rect, windows,
                 label: label(&format!("Desktop {} · {}", i + 1, count), rect.size.w),
                 drop_label: label(&format!("Move to Desktop {}", i + 1), rect.size.w),
                 close: layout.workspace_close_rect(i).map(|r| (r, wm_theme::overview::workspace_close_glyph(r.size.w))) }
@@ -2406,13 +2424,9 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
             .and_then(|focused| items.iter().position(|item| item.client == focused))
             .unwrap_or(0);
         let workspace = (row.iter().position(|&space| space == current).unwrap_or(0), row.len());
-        let mut workspace_counts = vec![0; workspace.1];
-        for (_, client) in wm.iter_clients() {
-            if matches!(client.lifecycle, Lifecycle::Normal | Lifecycle::Miniaturized) {
-                if let Some(index) = row.iter().position(|&space| space == client.workspace) { workspace_counts[index] += 1; }
-            }
-        }
-        self.desktop.show_overview(wm.backend_mut(), &self.theme, items, workspace, &workspace_counts, (selected, area));
+        let workspace_windows = Self::workspace_overview_windows(wm, &row);
+        self.overview_revision = wm.protocol_state_revision();
+        self.desktop.show_overview(wm.backend_mut(), &self.theme, items, workspace, workspace_windows, (selected, area));
     }
 
     /// Ends the session without committing: grab released first, so
@@ -3396,7 +3410,8 @@ impl<B: Backend + PopupHost<PopupId = B::ShellId>> Shell<B> {
         if self.desktop.overview_visible() {
             let output = self.overview_output.as_ref().and_then(|name| wm.monitors_ref().iter().position(|m| &m.name == name));
             let expected = wm.workspace_position_count(output.unwrap_or(wm.active_output_index()));
-            if self.desktop.overview_workspace() != expected || (self.overview_output.is_some() && output.is_none()) {
+            if self.desktop.overview_workspace() != expected || (self.overview_output.is_some() && output.is_none())
+                || self.overview_revision != wm.protocol_state_revision() {
                 self.populate_overview(wm);
             }
         }

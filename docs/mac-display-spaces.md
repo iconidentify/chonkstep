@@ -57,6 +57,18 @@ windows. It stays attached to the display where it was opened while the pointer
 moves. Application Overview additionally filters that set by application.
 Topology changes close Overview and release its keyboard grab.
 
+The desktop strip contains live miniatures of the windows on each desktop, in
+actual desktop positions and stacking order. Previews are clipped to the owning
+display and include both Wayland and XWayland clients. Moving, resizing, closing
+or dragging a window to another desktop updates the miniatures while Overview
+remains open. Pinned windows appear in each desktop in their display's row;
+minimized and Command-hidden windows are absent from desktop miniatures. Shaded
+windows show their titlebar. Fullscreen Spaces display the fullscreen window.
+Application Overview filters its main cards; desktop miniatures retain the whole
+desktop. Client textures are shared, without taking full-size screenshots.
+Inactive clients receive frame callbacks while their previews are visible and
+return to the normal parked policy when Overview closes.
+
 The existing Dock, launcher strip, and Clip stay on the primary display. Root
 menus open at the pointer. This change does not implement macOS's edge-triggered
 Dock relocation or a replicated global application menu bar.
@@ -130,10 +142,13 @@ scripts/e2e.sh --headless --host-renderer gl --release --test mac_spaces
 cargo test --locked -p wm-core -p wm-config -p chonk-shell -p wm-wayland --lib
 ```
 
-The sixteen workflows cover independent Control-arrow navigation and Command-Tab,
+The nineteen workflows cover independent Control-arrow navigation and Command-Tab,
 dual fullscreen with exact geometry restore and visible-Space furniture rules, live swipes with local boundary resistance, clipping plus input exclusion and
 surface output membership, native workspace groups, hotplug recovery, second-display
 Overview and grab cleanup, and persisted fullscreen/empty Spaces across reconnect.
+Pixel assertions additionally verify native and XWayland miniature placement,
+parked content updates, edge clipping, drag membership, removal, pinned/minimized
+visibility, fullscreen previews, and callback parking after Overview closes.
 The regression cases also exercise policy reload focus, active-desktop preservation,
 pinned-window clicks, fullscreen-dialog dragging, complete disconnect with swipes,
 unequal display sizes, and maximized/fullscreen save-and-restart both online and

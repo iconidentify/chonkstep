@@ -276,20 +276,23 @@ where
             }
             zwp_input_method_v2::Request::GrabKeyboard { keyboard } => {
                 let input_method = data.handle.inner.lock().unwrap();
+                let serial = SERIAL_COUNTER.next_serial();
                 data.keyboard_handle.set_grab(
                     state,
                     input_method.keyboard_grab.clone(),
-                    SERIAL_COUNTER.next_serial(),
+                    serial,
                 );
                 let instance = data_init.init(
                     keyboard,
                     InputMethodKeyboardUserData {
                         handle: input_method.keyboard_grab.clone(),
                         keyboard_handle: data.keyboard_handle.clone(),
+                        serial,
                     },
                 );
                 let mut keyboard = input_method.keyboard_grab.inner.lock().unwrap();
                 keyboard.grab = Some(instance.clone());
+                keyboard.projected_modifiers = false;
                 keyboard.text_input_handle = data.text_input_handle.clone();
                 let guard = data.keyboard_handle.arc.internal.lock().unwrap();
                 instance.repeat_info(guard.repeat_rate, guard.repeat_delay);

@@ -148,9 +148,13 @@ fn fullscreen_is_independent_and_restores_both_display_geometries() {
     focus(&mut s, "Fullscreen Right");
     chord(&mut s, &[125, 29], 33);
     assert_eq!(heads(&s), (3, 4));
-    let shot = s.screenshot("both-fullscreen").unwrap();
-    assert_eq!(shot.pixel(10, 10), [32, 64, 128, 255]);
-    assert_eq!(shot.pixel(shot.width - 10, 10), [32, 64, 128, 255]);
+    // Workspace publication precedes the clients' configure acknowledgments.
+    // Await their real fullscreen buffers, not just the WM's geometry update.
+    poll_until(WAIT, "both clients paint fullscreen buffers", || {
+        let shot = s.screenshot("both-fullscreen").ok()?;
+        (shot.pixel(10,10) == [32,64,128,255]
+            && shot.pixel(shot.width-10,10) == [32,64,128,255]).then_some(())
+    }).unwrap();
     chord(&mut s, &[125, 29], 33);
     assert_eq!(heads(&s), (3, 2));
     focus(&mut s, "Fullscreen Left");
@@ -363,8 +367,12 @@ fn session_restore_keeps_empty_spaces_and_fullscreen_return_on_a_reconnected_dis
     s.wait_for_window("Restored Right").unwrap();
     s.door().virtual_outputs(true).unwrap();
     assert_eq!(heads(&s), (1, 3));
-    let shot = s.screenshot("restored-fullscreen-right").unwrap();
-    assert_eq!(shot.pixel(shot.width - 10, 10), [32, 64, 128, 255]);
+    // Output publication precedes the client's fullscreen resize response.
+    // Wait for actual pixels, not merely the compositor's configure request.
+    poll_until(WAIT, "restored fullscreen client paints the reconnected output", || {
+        let shot = s.screenshot("restored-fullscreen-right").ok()?;
+        (shot.pixel(shot.width - 10, 10) == [32, 64, 128, 255]).then_some(())
+    }).unwrap();
     focus(&mut s, "Restored Right");
     chord(&mut s, &[125, 29], 33);
     assert_eq!(heads(&s), (1, 2));
@@ -705,4 +713,181 @@ fn saved_fullscreen_over_maximize_unwinds_to_the_original_window() {
             [32, 64, 128, 255]
         );
     }
+}
+
+#[test]
+#[ignore = "scripts/e2e.sh --headless --test mac_spaces thumbnails"]
+fn desktop_thumbnails_show_real_placement_updates_moves_and_removal() {
+    let mut s = boot("mac-spaces-thumbnails");
+    let first = probe(&mut s, "Thumbnail First", 0);
+    dispatch(&mut s, "movewindowpixel exact 40 190,title:^Thumbnail First$");
+    let right = probe(&mut s, "Thumbnail Right", 1);
+    s.door().motion(200.0, 400.0).unwrap();
+    dispatch(&mut s, "workspace 3");
+    let color = s.dir.join("preview-rgb");
+    std::fs::write(&color, [210, 80, 45]).unwrap();
+    let binary = profile_binary("chonk-fullscreen-probe").unwrap();
+    s.launch_isolated("env", &[&format!("CHONKSTEP_PROBE_COLOR_FILE={}", color.display()),
+        binary.to_str().unwrap(), "Thumbnail Second", "thumbnail-second", "animate-frame"]).unwrap();
+    let second = s.wait_for_window("Thumbnail Second").unwrap();
+    dispatch(&mut s, "resizewindowpixel exact 270 210,title:^Thumbnail Second$");
+    dispatch(&mut s, "movewindowpixel exact 315 470,title:^Thumbnail Second$");
+    dispatch(&mut s, "workspace 1");
+    chord(&mut s, &[29], 103);
+    poll_until(WAIT, "each Space lists its own windows", || {
+        let world = s.world().ok()?;
+        (world.overview_space_windows.contains(&(0, first.id))
+            && world.overview_space_windows.contains(&(1, second.id))
+            && !world.overview_space_windows.iter().any(|(_, id)| *id == right.id)).then_some(())
+    }).unwrap();
+    // Independent geometry oracle: left output is 640x800. Sample safely
+    // inside each client's content, not the titlebar or the card caption.
+    let sample = |s: &mut Session, index: usize, id: u64, expected: [u8; 4], label: &str| {
+        poll_until(WAIT, label, || {
+            let world = s.world().ok()?;
+            let thumb = world.overview_spaces.iter().find(|t| t.index == index)?.rect;
+            let window = world.windows.iter().find(|w| w.id == id)?;
+            let scale = (thumb.size.w as f64 / 640.0).min(thumb.size.h as f64 / 800.0);
+            let x = thumb.pos.x + ((window.x + 80) as f64 * scale).round() as i32;
+            let y = thumb.pos.y + ((window.y + 80) as f64 * scale).round() as i32;
+            let shot = s.screenshot(label).ok()?;
+            (shot.pixel(x as u32, y as u32) == expected).then_some(())
+        }).unwrap();
+    };
+    sample(&mut s, 0, first.id, [32,64,128,255], "first-desktop-window-pixels");
+    sample(&mut s, 1, second.id, [210,80,45,255], "parked-desktop-window-pixels");
+    // The parked client's new content must repaint its thumbnail while the
+    // current desktop and keyboard focus remain unchanged.
+    std::fs::write(&color, [40,190,100]).unwrap();
+    dispatch(&mut s, "resizewindowpixel exact 280 220,title:^Thumbnail Second$");
+    sample(&mut s, 1, second.id, [40,190,100,255], "live-parked-thumbnail-update");
+    assert_eq!(heads(&s), (1,2));
+    let callbacks = |s: &Session| s.client_log("env").lines()
+        .filter_map(|line| line.strip_prefix("frame callback=")?.parse::<u64>().ok()).max().unwrap_or(0);
+    let before_callbacks = callbacks(&s);
+    poll_until(WAIT, "an inactive desktop animates only while its thumbnail is visible", || {
+        (callbacks(&s) >= before_callbacks + 3).then_some(())
+    }).unwrap();
+    // Move with Overview's real drag and verify both membership and pixels.
+    let world = s.world().unwrap();
+    let card = world.overview_windows.iter().find(|w| w.id == first.id).unwrap().rect;
+    let target = world.overview_spaces[1].rect;
+    s.door().motion(f64::from(card.pos.x + card.size.w as i32/2), f64::from(card.pos.y + card.size.h as i32/2)).unwrap();
+    s.door().button("left", true).unwrap();
+    s.door().motion(f64::from(target.pos.x + target.size.w as i32/2), f64::from(target.pos.y + target.size.h as i32/2)).unwrap();
+    s.door().button("left", false).unwrap();
+    poll_until(WAIT, "drag updates both desktop thumbnails", || {
+        let world = s.world().ok()?;
+        (!world.overview_space_windows.contains(&(0, first.id))
+            && world.overview_space_windows.contains(&(1, first.id))).then_some(())
+    }).unwrap();
+    sample(&mut s, 1, first.id, [32,64,128,255], "moved-window-thumbnail-pixels");
+    dispatch(&mut s, "closewindow title:^Thumbnail First$");
+    poll_until(WAIT, "closed window disappears from every thumbnail", || {
+        (!s.world().ok()?.overview_space_windows.iter().any(|(_, id)| *id == first.id)).then_some(())
+    }).unwrap();
+    sample(&mut s, 1, second.id, [40,190,100,255], "remaining-window-thumbnail-pixels");
+    chord(&mut s, &[], 1);
+    assert!(s.world().unwrap().overview.is_none());
+    assert_eq!(heads(&s), (1,2));
+    std::thread::sleep(Duration::from_millis(300));
+    let stopped = callbacks(&s);
+    std::thread::sleep(Duration::from_millis(250));
+    assert_eq!(callbacks(&s), stopped, "closing Overview must park off-desktop animation again");
+}
+
+#[test]
+#[ignore = "scripts/e2e.sh --headless --test mac_spaces thumbnails"]
+fn desktop_thumbnails_respect_pinned_minimized_and_fullscreen_windows_per_display() {
+    let mut s = boot("mac-spaces-thumbnail-lifecycle");
+    let pinned = probe(&mut s, "Pinned Preview", 0);
+    dispatch(&mut s, "pin");
+    dispatch(&mut s, "workspace 3");
+    let right = probe(&mut s, "Fullscreen Preview", 1);
+    s.door().motion(200.0, 350.0).unwrap();
+    chord(&mut s, &[29], 103);
+    let world = s.world().unwrap();
+    assert!(world.overview_space_windows.contains(&(0,pinned.id)));
+    assert!(world.overview_space_windows.contains(&(1,pinned.id)));
+    assert!(!world.overview_space_windows.iter().any(|(_,id)| *id == right.id));
+    chord(&mut s, &[], 1);
+    focus(&mut s, "Pinned Preview");
+    chord(&mut s, &[125], 50);
+    chord(&mut s, &[29], 103);
+    assert!(!s.world().unwrap().overview_space_windows.iter().any(|(_,id)| *id == pinned.id),
+        "minimized windows are absent from desktop miniatures");
+    chord(&mut s, &[], 1);
+    focus(&mut s, "Fullscreen Preview");
+    chord(&mut s, &[29,125], 33);
+    poll_until(WAIT, "fullscreen client fills its display", || {
+        let window = s.world().ok()?.window_matching("Fullscreen Preview")?.clone();
+        (window.x == 640 && window.y == 0 && window.w == 640 && window.h == 800).then_some(())
+    }).unwrap();
+    chord(&mut s, &[29], 103);
+    let world = s.world().unwrap();
+    assert!(world.overview_space_windows.iter().any(|(_,id)| *id == right.id));
+    assert!(!world.overview_space_windows.iter().any(|(_,id)| *id == pinned.id));
+    let index = world.overview_space_windows.iter().find(|(_,id)| *id == right.id).unwrap().0;
+    let thumb = world.overview_spaces.iter().find(|t| t.index == index).unwrap().rect;
+    poll_until(WAIT, "fullscreen desktop miniature contains its real pixels", || {
+        let shot = s.screenshot("fullscreen-thumbnail").ok()?;
+        let x = 640 + thumb.pos.x as u32 + thumb.size.w/2;
+        let y = thumb.pos.y as u32 + thumb.size.h/2;
+        (shot.pixel(x,y) == [32,64,128,255]).then_some(())
+    }).unwrap();
+    chord(&mut s, &[], 1);
+    chord(&mut s, &[29,125], 33);
+    chord(&mut s, &[29], 103);
+    assert_eq!(s.world().unwrap().overview_spaces.len(),1,
+        "exiting fullscreen retires its temporary desktop thumbnail");
+}
+
+#[test]
+#[ignore = "scripts/e2e.sh --headless --test mac_spaces thumbnails"]
+fn desktop_thumbnails_update_parked_xwayland_windows_and_clip_to_their_desktop() {
+    use x11rb::connection::Connection;
+    use x11rb::protocol::xproto::{AtomEnum, ChangeWindowAttributesAux, ConnectionExt,
+        CreateWindowAux, PropMode, WindowClass};
+    use x11rb::wrapper::ConnectionExt as _;
+    let mut s = boot("mac-spaces-x11-thumbnails");
+    let (connection, screen) = s.connect_x11().unwrap();
+    let root = connection.setup().roots[screen].root;
+    let window = connection.generate_id().unwrap();
+    connection.create_window(x11rb::COPY_DEPTH_FROM_PARENT, window, root,
+        40, 190, 300, 250, 0, WindowClass::INPUT_OUTPUT, x11rb::COPY_FROM_PARENT,
+        &CreateWindowAux::new().background_pixel(0xd2502d)).unwrap().check().unwrap();
+    connection.change_property8(PropMode::REPLACE, window, AtomEnum::WM_NAME,
+        AtomEnum::STRING, b"X11 Thumbnail").unwrap();
+    connection.map_window(window).unwrap();
+    connection.flush().unwrap();
+    let client = s.wait_for_window("X11 Thumbnail").unwrap();
+    dispatch(&mut s, "movewindowpixel exact 450 350,title:^X11 Thumbnail$");
+    dispatch(&mut s, "workspace 3");
+    chord(&mut s, &[29], 103);
+    let assert_color = |s: &mut Session, expected: [u8;4], label: &str| {
+        poll_until(WAIT, label, || {
+            let world = s.world().ok()?;
+            let thumb = world.overview_spaces.iter().find(|t| t.index == 0)?.rect;
+            if !world.overview_space_windows.contains(&(0,client.id)) { return None; }
+            let scale = (thumb.size.w as f64 / 640.0).min(thumb.size.h as f64 / 800.0);
+            let shot = s.screenshot(label).ok()?;
+            let y = (thumb.pos.y as f64 + 430.0*scale).round() as u32;
+            let x = (thumb.pos.x as f64 + 530.0*scale).round() as u32;
+            // This client crosses the output boundary. Its miniature must end
+            // at the desktop edge, not paint into the neighboring thumbnail.
+            let outside = thumb.pos.x as u32 + thumb.size.w + 3;
+            (shot.pixel(x,y) == expected && shot.pixel(outside,y) != expected).then_some(())
+        }).unwrap();
+    };
+    assert_color(&mut s, [210,80,45,255], "parked-x11-thumbnail");
+    connection.change_window_attributes(window,
+        &ChangeWindowAttributesAux::new().background_pixel(0x28be64)).unwrap();
+    connection.clear_area(false, window, 0, 0, 0, 0).unwrap();
+    connection.flush().unwrap();
+    assert_color(&mut s, [40,190,100,255], "parked-x11-thumbnail-repaint");
+    connection.destroy_window(window).unwrap();
+    connection.flush().unwrap();
+    poll_until(WAIT, "destroyed X11 client leaves no thumbnail", || {
+        (!s.world().ok()?.overview_space_windows.iter().any(|(_,id)| *id == client.id)).then_some(())
+    }).unwrap();
 }

@@ -34,6 +34,8 @@ chonkstep-wayland --print-config
 and application overrides. An invalid reload retains the working configuration.
 Set `interaction_mode = "desktop"` to return to the existing desktop profile.
 Hidden windows and fullscreen desktops are restored when leaving Mac mode.
+Enabling clipboard persistence also adopts the clipboard already owned by a
+live Wayland or X11 application; another Copy is not required.
 
 The standalone `chonkstep` X11 session rejects Mac mode because it does not
 implement the client delivery mechanism. X11 applications work inside the

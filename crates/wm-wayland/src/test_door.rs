@@ -987,6 +987,14 @@ fn handle_command(line: &str, stream: &mut UnixStream, comp: &mut Compositor) {
                         window.source.size.h
                     ));
                 }
+                for (index, space) in overview.spaces.iter().enumerate() {
+                    let r = space.rect;
+                    reply.push_str(&format!("overview-space index={index} x={} y={} w={} h={} windows={}\n",
+                        r.pos.x, r.pos.y, r.size.w, r.size.h, space.windows.len()));
+                    for window in &space.windows {
+                        reply.push_str(&format!("overview-space-window index={index} id={}\n", window.window.0));
+                    }
+                }
                 if let Some(drag) = overview.drag {
                     if let Some(window) = overview.windows.get(drag.index) {
                         let r = drag.destination;

@@ -48,6 +48,7 @@ use wayland_protocols::xdg::shell::client::{
     xdg_wm_base::{self, XdgWmBase},
 };
 use wayland_protocols_misc::zwp_input_method_v2::client::{
+    zwp_input_method_keyboard_grab_v2::{self, ZwpInputMethodKeyboardGrabV2},
     zwp_input_method_manager_v2::ZwpInputMethodManagerV2,
     zwp_input_method_v2::{self, ZwpInputMethodV2},
 };
@@ -485,6 +486,21 @@ impl Dispatch<ZwpInputMethodV2, ()> for Probe {
     }
 }
 
+impl Dispatch<ZwpInputMethodKeyboardGrabV2, u32> for Probe {
+    fn event(
+        _: &mut Self,
+        _: &ZwpInputMethodKeyboardGrabV2,
+        event: zwp_input_method_keyboard_grab_v2::Event,
+        generation: &u32,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        if let zwp_input_method_keyboard_grab_v2::Event::Key { key, state, .. } = event {
+            say(&format!("ime grab {generation} key {key} {state:?}"));
+        }
+    }
+}
+
 impl Dispatch<ZwpTextInputV3, ()> for Probe {
     fn event(
         _: &mut Self,
@@ -604,7 +620,8 @@ fn main() {
     queue.roundtrip(&mut probe).expect("registry");
     queue.roundtrip(&mut probe).expect("seat capabilities");
     let _swipe = probe.gestures.as_ref().map(|manager| manager.get_swipe_gesture(probe.pointer.as_ref().expect("pointer"), &qh, ()));
-    let _input_method = std::env::args().any(|arg| arg == "ime").then(|| {
+    let replace_ime_grab = std::env::args().any(|arg| arg == "ime-replace-grab");
+    let _input_method = (replace_ime_grab || std::env::args().any(|arg| arg == "ime")).then(|| {
         probe
             .input_method_manager
             .as_ref()
@@ -757,6 +774,17 @@ fn main() {
     surface.commit();
     queue.roundtrip(&mut probe).expect("map");
     say("mapped input-probe");
+    let _replacement_grab = replace_ime_grab.then(|| {
+        let method = _input_method.as_ref().expect("input method");
+        let first = method.grab_keyboard(&qh, 0);
+        queue.roundtrip(&mut probe).expect("first IME grab");
+        let second = method.grab_keyboard(&qh, 1);
+        queue.roundtrip(&mut probe).expect("replacement IME grab");
+        first.release();
+        queue.roundtrip(&mut probe).expect("retired IME grab");
+        say("ime replacement ready");
+        second
+    });
     probe.interactive.spawn_auto_request(
         connection.clone(),
         toplevel.clone(),

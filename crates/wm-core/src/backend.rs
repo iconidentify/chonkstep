@@ -18,7 +18,16 @@ pub struct OverviewWindow<W, F> {
 }
 
 /// One desktop thumbnail and its optional close control, in panel pixels.
-pub struct OverviewWorkspace {
+pub struct OverviewThumbnail<W, F> {
+    pub window: W,
+    pub frame: Option<F>,
+    pub source: Rect,
+    pub draw_content: bool,
+}
+
+/// A desktop thumbnail contains its actual windows in desktop coordinates.
+pub struct OverviewWorkspace<W, F> {
+    pub windows: Vec<OverviewThumbnail<W, F>>,
     pub rect: Rect,
     pub label: DecorationBuffer,
     pub drop_label: DecorationBuffer,
@@ -30,7 +39,7 @@ pub struct OverviewWorkspace {
 pub struct OverviewScene<W, F> {
     pub geometry: Rect,
     pub windows: Vec<OverviewWindow<W, F>>,
-    pub spaces: Vec<OverviewWorkspace>,
+    pub spaces: Vec<OverviewWorkspace<W, F>>,
     pub workspace: usize,
     pub selected: usize,
     pub gap: u32,

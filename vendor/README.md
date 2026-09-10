@@ -208,3 +208,22 @@ retention after the owner quits, untranslated chords and release ordering.
 The previously installed i9beef binary fails at Command-A; the patched binary
 selects and transfers the text. Remove this patch when an adopted upstream
 version provides equivalent projection through grabs and passes these tests.
+
+## Release 0.5.0: input-method lifetime and mode-toggle clipboard adoption
+
+- Give each input-method keyboard grab its installation serial. Destroying a
+  superseded protocol object cannot clear the replacement or unset another
+  compositor grab. A normal input after a projected chord restores physical
+  modifiers even when XKB reports no modifier transition.
+- `retire_forwarded_key` balances an already-processed translated release after
+  its original focus leaves, without giving an IME a stale release to reinject
+  into the newly focused client. Physical XKB processing remains unchanged.
+- `current_selection_mime_types` provides a read-only snapshot of the current
+  selection's advertised formats, including compositor bridge offers. It lets
+  persistence adopt an existing X11 clipboard on enable without rereading every
+  frame or replacing an already-published memory snapshot.
+
+Real protocol regressions in `keyboard_focus.rs` reproduce the first two faults.
+`selection_transfer.rs` proves adoption for native and X11 owners and cycles
+Mac mode three times. Both ownership regressions fail on the installed pre-fix
+build. The release review records before/after evidence.

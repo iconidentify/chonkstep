@@ -5,6 +5,22 @@ crate and both session binaries carry the same number.
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-09-10
+
+- Live Spaces thumbnails show actual window content, placement, stacking, and
+  per-display membership, with Wayland/XWayland pixel and callback regression tests.
+
+- Add a reversible Mac keyboard profile with application-aware Command keys,
+  terminal clipboard handling, application switching/hiding and capture shortcuts.
+- Preserve clipboard offers copied before enabling Mac mode, including X11
+  owners. Prevent retiring an old input-method grab from disabling its replacement
+  and prevent translated releases leaking into a newly focused client.
+- Add per-output GPU pipeline counters, refresh-aware surface tracking,
+  asynchronous capture downloads and improved frame pacing. Overlay scanout,
+  broader primary scanout and cross-GPU rendering remain explicit experiments.
+- Add isolated product-demo tooling producing real capture-overlay screenshots,
+  a 1080p video walkthrough and the feature's own screenshot/recording exports.
+
 - Fix all seven findings from the per-display Spaces review: no-output gestures,
   hidden-client keyboard focus on policy reload, fullscreen dialog-family moves,
   home geometry after borrowing a smaller display, active desktops when enabling

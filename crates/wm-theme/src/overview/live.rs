@@ -55,7 +55,7 @@ pub fn layout(panel: Size, tile: u32, sizes: &[Size], workspaces: usize) -> Over
     let label_h = (tile / 2).max(16);
     let available = panel.w.saturating_sub(pad * 2);
     let space_gap = pad.min(available / (workspaces.max(1) as u32 * 2));
-    let width = (tile * 3).min(
+    let width = (tile * 4).min(
         available.saturating_sub(space_gap * workspaces.saturating_sub(1) as u32)
             / workspaces.max(1) as u32,
     );

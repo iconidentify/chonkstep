@@ -592,8 +592,16 @@ fn frame_file(width: i32, height: i32) -> std::fs::File {
     let pixels = (width.max(1) as usize) * (height.max(1) as usize);
     // Premultiplied opaque ARGB little-endian: B, G, R, A.
     let mut bytes = Vec::with_capacity(pixels * 4);
+    // Optional test-owned RGB file changes the next real committed buffer.
+    // Reads are bounded even if a malformed fixture points at a large file.
+    let rgb = std::env::var_os("CHONKSTEP_PROBE_COLOR_FILE")
+        .and_then(|path| std::fs::File::open(path).ok())
+        .and_then(|mut file| {
+            let mut rgb = [0; 3];
+            std::io::Read::read_exact(&mut file, &mut rgb).ok().map(|_| rgb)
+        }).unwrap_or([0x20, 0x40, 0x80]);
     for _ in 0..pixels {
-        bytes.extend_from_slice(&[0x80, 0x40, 0x20, 0xFF]);
+        bytes.extend_from_slice(&[rgb[2], rgb[1], rgb[0], 0xFF]);
     }
     let mut writer = &file;
     writer.write_all(&bytes).unwrap_or_else(|error| fatal(&format!("filling the frame: {error}")));

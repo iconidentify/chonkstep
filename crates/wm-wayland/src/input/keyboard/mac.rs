@@ -204,7 +204,14 @@ pub(crate) fn forward(comp: &mut Compositor, keyboard: &KeyboardHandle<Composito
         });
         return;
     }
-    let modifiers = if translated && !suppress {
+    if suppress {
+        // The old client balanced its keys on leave. Sending this release
+        // through an IME can asynchronously reinject it into the new focus,
+        // bypassing KeyboardFocus's synchronous suppression flag.
+        keyboard.retire_forwarded_key(out_code);
+        return;
+    }
+    let modifiers = if translated {
         keyboard.with_xkb_state(comp, |context| {
             let xkb = context.xkb().lock().unwrap();
             // SAFETY: all keymap operations finish before releasing the guard.

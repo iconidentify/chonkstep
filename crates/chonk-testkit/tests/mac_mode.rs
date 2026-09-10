@@ -125,7 +125,7 @@ fn boot(name: &str) -> Session {
 #[test]
 #[ignore = "scripts/e2e.sh --headless --test mac_mode; requires fcitx5 and Python GTK4"]
 fn command_shortcuts_survive_a_real_input_method_keyboard_grab() {
-    if !chonk_testkit::require_client("fcitx5") || !chonk_testkit::require_client("python") {
+    if !chonk_testkit::require_client("fcitx5") || !chonk_testkit::require_client("python3") {
         return;
     }
     fn ime_chord(s: &mut Session, modifiers: &[u32], code: u32) {
@@ -142,7 +142,7 @@ fn command_shortcuts_survive_a_real_input_method_keyboard_grab() {
     let dir = s.dir.to_string_lossy().into_owned();
     let fixture = fixture.to_string_lossy().into_owned();
     for (role, text) in [("source", CONTENT), ("destination", "")] {
-        s.launch_isolated("env", &["GTK_IM_MODULE=wayland", "python", &fixture, role, &dir, text])
+        s.launch_isolated("env", &["GTK_IM_MODULE=wayland", "python3", &fixture, role, &dir, text])
             .unwrap();
         s.wait_for_window(&format!("IME Probe {role}")).unwrap();
     }
@@ -727,6 +727,32 @@ fn overlapping_navigation_both_commands_caps_lock_and_mode_rollback() {
     s.door().tap_key(30).unwrap();
     s.door().barrier().unwrap();
     expect(&mut b, "target", "a");
+    // Exercise both directions repeatedly without replacing the application,
+    // keymap or compositor. Observe the actual browser-delivered modifiers.
+    for enabled in [true, false, true, false, true, false, true, false] {
+        let reloads = s.log().matches("reload requested").count();
+        s.rewrite_config(&format!("interaction_mode='{}'\nhyprland_config=false\nshow_dock=false\nomarchy_shell=false\n",
+            if enabled { "mac" } else { "desktop" })).unwrap();
+        s.request_reload().unwrap();
+        poll_until(WAIT, "repeated interaction mode toggle", || {
+            (s.log().matches("reload requested").count() > reloads).then_some(())
+        }).unwrap();
+        b.evaluate("events.length=0;true").unwrap();
+        chord(&mut s, &[CMD], 30);
+        let predicate = if enabled {
+            "events.some(e=>e.key==='a' && e.type==='keydown' && e.ctrl && !e.meta)"
+        } else {
+            "events.some(e=>e.key==='a' && e.type==='keydown' && e.meta && !e.ctrl)"
+        };
+        poll_until(WAIT, "client observes toggled Command behavior", || {
+            (b.evaluate(predicate).ok()? == true).then_some(())
+        }).unwrap();
+        b.evaluate("events.length=0;true").unwrap();
+        s.door().tap_key(48).unwrap();
+        poll_until(WAIT, "modifiers clear after toggled shortcut", || {
+            (b.evaluate("events.some(e=>e.key==='b' && e.type==='keydown' && !e.ctrl && !e.meta && !e.alt)").ok()? == true).then_some(())
+        }).unwrap();
+    }
 }
 
 #[test]
