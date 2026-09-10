@@ -87,14 +87,14 @@ use smithay::backend::renderer::element::memory::MemoryRenderBufferRenderElement
 use smithay::backend::renderer::element::solid::SolidColorRenderElement;
 use smithay::backend::renderer::element::surface::WaylandSurfaceRenderElement;
 use smithay::backend::renderer::element::utils::{CropRenderElement, RescaleRenderElement};
-use smithay::backend::renderer::element::{default_primary_scanout_output_compare, Kind, RenderElementStates};
+use smithay::backend::renderer::element::{Kind, RenderElementStates};
 use smithay::backend::renderer::gles::GlesRenderer;
 use smithay::backend::renderer::utils::{CommitCounter, RendererSurfaceStateUserData};
 use smithay::backend::renderer::{Color32F, ImportAll, ImportMem};
 use smithay::desktop::utils::{
     bbox_from_surface_tree, send_frames_surface_tree, take_presentation_feedback_surface_tree,
     surface_presentation_feedback_flags_from_states, surface_primary_scanout_output,
-    update_surface_primary_scanout_output, OutputPresentationFeedback,
+    OutputPresentationFeedback,
 };
 use smithay::input::pointer::{CursorImageAttributes, CursorImageStatus};
 use smithay::reexports::wayland_server::protocol::wl_surface::WlSurface;
@@ -589,7 +589,9 @@ fn signal_pacing_barriers(surface: &WlSurface, output: &smithay::output::Output)
 /// Update surface visibility from a successfully submitted frame and drain
 /// feedback only for surfaces actually presented on their primary output.
 /// Smithay selects that output from visible area and refresh rate.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn take_presentation_feedback(
+    surface_outputs: &mut crate::surface_outputs::SurfaceOutputs,
     backend: &WaylandBackend,
     output: &smithay::output::Output,
     output_rect: Rect,
@@ -607,8 +609,7 @@ pub(crate) fn take_presentation_feedback(
             surface,
             &mut feedback,
             |surface, states| {
-                update_surface_primary_scanout_output(surface, output, states, render_states,
-                    default_primary_scanout_output_compare)
+                surface_outputs.update_primary(surface, output, states, render_states)
             },
             |surface, _| surface_presentation_feedback_flags_from_states(surface, render_states),
         );
@@ -784,6 +785,9 @@ pub(crate) fn note_frame_success() {
 /// flip) and live with their backends; everything visible above them
 /// is [`build_scene`].
 pub(crate) fn render_frame(comp: &mut Compositor) -> bool {
+    if comp.dmabuf.refresh(&comp.graphics, &comp.outputs) {
+        comp.surface_outputs.reset_feedback(comp.dmabuf.default_feedback());
+    }
     // A plain screencopy must complete even when it lands on an idle desktop.
     // The coarse damage bit gets us here; forcing age zero below makes the
     // output damage tracker produce the actual presentation that paces it.
@@ -814,7 +818,7 @@ fn render_frame_winit(comp: &mut Compositor, plain_capture_pending: bool) -> boo
     // framebuffer) mutates while the ledger is read — both live on
     // `Compositor`, so destructure instead of going through `&mut
     // self` methods.
-    let Compositor { wm, graphics, outputs, pointer_location, cursor_status, cursors, start_time, frame_stats, .. } = comp;
+    let Compositor { wm, graphics, outputs, pointer_location, cursor_status, cursors, start_time, frame_stats, surface_outputs, dmabuf, gpu_timer, .. } = comp;
     let Graphics::Winit(winit_backend) = graphics else {
         return false;
     };
@@ -875,7 +879,11 @@ fn render_frame_winit(comp: &mut Compositor, plain_capture_pending: bool) -> boo
         if let Some(started) = gesture_build { frame_stats.record_gesture_build(started.elapsed()); }
 
         crate::capture_tool::render(scene_scratch, renderer, wm.backend(), Rect::new(Point::new(0, 0), entry.size));
-        match damage_tracker.render_output(renderer, &mut framebuffer, age, scene_scratch, clear_color) {
+        surface_outputs.update_scene(output, (entry.size.w as i32, entry.size.h as i32).into(), scene_scratch, dmabuf.default_feedback());
+        let timing = if gpu_timer.enabled() { gpu_timer.begin(renderer, &output.name()) } else { None };
+        let rendered = damage_tracker.render_output(renderer, &mut framebuffer, age, scene_scratch, clear_color);
+        gpu_timer.end(renderer, timing);
+        match rendered {
             Ok(result) => {
                 log_damage(age, result.damage.map(Vec::as_slice));
                 result.damage.is_some().then_some(result.states)
@@ -924,7 +932,8 @@ fn render_frame_winit(comp: &mut Compositor, plain_capture_pending: bool) -> boo
 
     note_frame_success();
     let output_rect = wm.backend().monitors.first().map(|monitor| monitor.geometry).unwrap_or_default();
-    let mut feedback = take_presentation_feedback(wm.backend(), output, output_rect, &render_states, cursor_status, *pointer_location);
+    let mut feedback = take_presentation_feedback(surface_outputs, wm.backend(), output, output_rect, &render_states, cursor_status, *pointer_location);
+    surface_outputs.send_feedback(output, &render_states, dmabuf);
     present_now(
         &mut feedback,
         presentation_refresh(output),

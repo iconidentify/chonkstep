@@ -10,6 +10,8 @@ static FULL_DAMAGE: AtomicBool = AtomicBool::new(false);
 static NO_DIRECT_SCANOUT: AtomicBool = AtomicBool::new(false);
 static NO_CURSOR_PLANE: AtomicBool = AtomicBool::new(false);
 static NO_VRR: AtomicBool = AtomicBool::new(false);
+static OVERLAY_SCANOUT: AtomicBool = AtomicBool::new(false);
+static PRIMARY_SCANOUT_ANY: AtomicBool = AtomicBool::new(false);
 
 type ReloadFilter = dyn Fn(&str) -> Result<(), String> + Send + Sync;
 static LOG_FILTER: OnceLock<Box<ReloadFilter>> = OnceLock::new();
@@ -26,6 +28,8 @@ pub(crate) fn init() {
         NO_DIRECT_SCANOUT.store(env_enabled("CHONKSTEP_NO_DIRECT_SCANOUT"), Ordering::Relaxed);
         NO_CURSOR_PLANE.store(env_enabled("CHONKSTEP_NO_CURSOR_PLANE"), Ordering::Relaxed);
         NO_VRR.store(env_enabled("CHONKSTEP_NO_VRR"), Ordering::Relaxed);
+        OVERLAY_SCANOUT.store(env_enabled("CHONKSTEP_EXPERIMENTAL_OVERLAY_SCANOUT"), Ordering::Relaxed);
+        PRIMARY_SCANOUT_ANY.store(env_enabled("CHONKSTEP_EXPERIMENTAL_PRIMARY_SCANOUT_ANY"), Ordering::Relaxed);
     });
 }
 
@@ -38,6 +42,8 @@ fn value(name: &str) -> Option<&'static AtomicBool> {
         "no-direct-scanout" => Some(&NO_DIRECT_SCANOUT),
         "no-cursor-plane" => Some(&NO_CURSOR_PLANE),
         "no-vrr" => Some(&NO_VRR),
+        "overlay-scanout" => Some(&OVERLAY_SCANOUT),
+        "primary-scanout-any" => Some(&PRIMARY_SCANOUT_ANY),
         _ => None,
     }
 }
@@ -49,7 +55,7 @@ pub(crate) fn enabled(name: &str) -> bool {
 pub(crate) fn set(name: &str, enabled: bool) -> Result<(), String> {
     let value = value(name).ok_or_else(|| {
         format!(
-            "unknown diagnostic {name}; expected damage-log, idle-log, full-damage, no-direct-scanout, no-cursor-plane or no-vrr"
+            "unknown diagnostic {name}; expected damage-log, idle-log, full-damage, no-direct-scanout, no-cursor-plane, no-vrr, overlay-scanout or primary-scanout-any"
         )
     })?;
     value.store(enabled, Ordering::Relaxed);
@@ -65,6 +71,8 @@ pub(crate) fn describe() -> String {
         "no-direct-scanout",
         "no-cursor-plane",
         "no-vrr",
+        "overlay-scanout",
+        "primary-scanout-any",
     ]
     .into_iter()
     .map(|name| format!("{name}={}", enabled(name)))

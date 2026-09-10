@@ -829,6 +829,8 @@ pub struct WaylandBackend {
     /// Selected graphics stack and hardware identity for live system
     /// information (`nested-winit` or the KMS/driver/render-node set).
     pub(crate) graphics_diagnostics: String,
+    pub(crate) gpu_timings: std::rc::Rc<std::cell::RefCell<crate::gpu_timer::Measurements>>,
+    pub(crate) native_frame_stats: Vec<crate::gpu_stats::OutputStats>,
     /// Handle to the wayland display, for verbs that must touch
     /// protocol state directly (client credentials for `window_pid`,
     /// disconnecting a client for `kill_client`).
@@ -1071,6 +1073,8 @@ impl WaylandBackend {
             cursor_hidden: false,
             cursor_hidden_owner: None,
             graphics_diagnostics: "backend=uninitialized".to_string(),
+            gpu_timings: Default::default(),
+            native_frame_stats: Vec::new(),
             display_handle,
             pending_focus: None,
             preview_edge: None,
@@ -2047,12 +2051,16 @@ pub(crate) fn apply_connector_hotplug(
     removed: &[usize],
     added: Vec<OutputSetup>,
 ) {
+    comp.dmabuf.invalidate();
+    comp.surface_outputs.reset_feedback(comp.dmabuf.default_feedback());
+    comp.wm.backend_mut().native_frame_stats = crate::session::native_frame_stats(&comp.graphics);
     let mut departed = Vec::new();
     for &index in removed {
         if index >= comp.outputs.len() {
             continue;
         }
         let entry = comp.outputs.remove(index);
+        comp.surface_outputs.remove_output(&entry.output);
         departed.push(Rect::new(entry.position, entry.size));
         // Registry clients see global_remove immediately. Keep the disabled
         // server-side record rather than freeing it in the same dispatch,
@@ -2303,6 +2311,7 @@ pub struct Compositor {
     /// Fixed-size timing counters exposed through the opt-in test door.
     /// Reading them resets the bracket, so a harness can measure one
     /// interaction without parsing tracing output or wall-clock sleeps.
+    pub(crate) gpu_timer: crate::gpu_timer::GpuTimer,
     pub(crate) frame_stats: FrameStats,
 
     // Per-protocol smithay state. Constructed once in `run`; the
@@ -2370,6 +2379,7 @@ pub struct Compositor {
     /// Every live `wl_surface`, including role-less surfaces and hidden
     /// subsurfaces. Commit-timing blockers can be installed before a role is
     /// assigned, so the ordinary scene ledgers are not a complete registry.
+    pub(crate) surface_outputs: crate::surface_outputs::SurfaceOutputs,
     pub(crate) pacing_surfaces: HashMap<ObjectId, WlSurface>,
     pub(crate) pacing_scratch: crate::xdg::PacingScratch,
     /// Bounded escape for a FIFO barrier whose presentation never completes.
@@ -4035,8 +4045,11 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
     // The desktop shell is built against the mutable backend before
     // `WindowManager::new` takes ownership — the exact construction
     // order the X11 binary uses, for the exact same borrow reason.
+    let gpu_timer = crate::gpu_timer::GpuTimer::default();
     let mut backend = WaylandBackend::new(display_handle.clone(), monitors, scale);
     backend.graphics_diagnostics = crate::session::graphics_diagnostics(&graphics);
+    backend.gpu_timings = gpu_timer.measurements.clone();
+    backend.native_frame_stats = crate::session::native_frame_stats(&graphics);
     backend.monitor_scales = effective_monitor_scales;
     backend.repeat_delay = std::time::Duration::from_millis(repeat_delay as u64);
     backend.repeat_rate = repeat_rate as u32;
@@ -4083,6 +4096,7 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
         foreign_toplevel_dirty: true,
         observed_wm_protocol_revision: wm.protocol_state_revision(),
         protocol_publish_metrics: ProtocolPublishMetrics::default(),
+        gpu_timer,
         frame_stats: FrameStats::default(),
         wm,
         shell,
@@ -4112,6 +4126,7 @@ pub fn run(config: wm_config::Config) -> Result<(), Box<dyn std::error::Error>> 
         hyprland_source_scratch: HashSet::new(),
         seat,
         outputs,
+        surface_outputs: crate::surface_outputs::SurfaceOutputs::default(),
         pacing_surfaces: HashMap::new(),
         pacing_scratch: crate::xdg::PacingScratch::default(),
         pacing_fifo_deadlines: HashMap::new(),

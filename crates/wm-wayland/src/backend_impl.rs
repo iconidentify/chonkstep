@@ -310,6 +310,8 @@ impl Backend for WaylandBackend {
             self.pending_pointer_grab.is_some(),
         );
         let _ = writeln!(report, "diagnostics {}", crate::diagnostics::describe());
+        self.gpu_timings.borrow().describe(&mut report);
+        for output in &self.native_frame_stats { output.describe(&mut report); }
 
         report.push_str("scene bottom-to-top\n");
         for entry in &self.stacking {
@@ -346,6 +348,16 @@ impl Backend for WaylandBackend {
                         window.title.as_deref().unwrap_or(""),
                     );
                 }
+            }
+        }
+        for (id, window) in &self.windows {
+            if let Some(surface) = window.surface.wl_surface() {
+                smithay::backend::renderer::utils::with_renderer_surface_state(&surface, |state| {
+                    let kind = state.buffer().and_then(|buffer| smithay::backend::renderer::buffer_type(buffer));
+                    let size = state.buffer().and_then(|buffer| smithay::backend::renderer::buffer_dimensions(buffer));
+                    let _ = writeln!(report, "surface_buffer window={} kind={:?} scale={} pixels={:?}",
+                        id.0, kind, state.buffer_scale(), size);
+                });
             }
         }
         for layer in &self.layers {

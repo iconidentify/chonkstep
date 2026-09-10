@@ -77,6 +77,7 @@ fn set(comp: &mut Compositor, index: usize, powered: bool) -> bool {
             comp.outputs[index].powered = powered;
             if !powered {
                 comp.outputs[index].vrr_enabled = false;
+                comp.surface_outputs.suspend_output(&comp.outputs[index].output);
             }
             comp.wm.backend_mut().mark_damaged();
             comp.sync_monitor_outputs();

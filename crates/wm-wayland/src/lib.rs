@@ -31,6 +31,10 @@ mod ctm;
 mod data_control;
 mod decoration;
 mod diagnostics;
+#[cfg(target_os = "linux")]
+mod gpu_stats;
+mod gpu_timer;
+mod surface_outputs;
 mod dmabuf;
 // hyprland-focus-grab-v1: click-outside-to-dismiss for shells that ask
 // for it (Omarchy's Quickshell asks on every popup). The one module

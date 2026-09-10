@@ -142,7 +142,13 @@ fn a_parked_frame_driven_client_sleeps_and_resumes_when_exposed() {
     session.wait_for_window("CallbackTarget").expect("target maps and focuses");
     wait_for_animation(&session, &program, 30);
 
+    poll_until(SETTLE, "the client to receive its real surface/output membership", || {
+        session.client_log(&program).contains("surface output enter").then_some(())
+    }).unwrap();
     send_to_workspace_two(&mut session);
+    poll_until(SETTLE, "parking to leave the output on the Wayland wire", || {
+        session.client_log(&program).contains("surface output leave").then_some(())
+    }).unwrap();
     // Let five driver frames absorb any callback which had already
     // crossed the wire before the workspace transition's barrier.
     let settling_at = rendered_frames(&session);
@@ -171,6 +177,9 @@ fn a_parked_frame_driven_client_sleeps_and_resumes_when_exposed() {
     assert_eq!(parked_after, parked_at, "a parked callback-driven client must receive no invisible frame budget");
 
     switch_to_workspace_two(&mut session);
+    poll_until(SETTLE, "exposing the workspace to re-enter its output", || {
+        (session.client_log(&program).matches("surface output enter").count() == 2).then_some(())
+    }).unwrap();
     wait_for_animation(&session, &program, parked_at + 30);
     eprintln!(
         "frame callback visibility sample: parked target received {} callbacks across 50 visible-neighbour frames, then resumed",

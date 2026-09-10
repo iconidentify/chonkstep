@@ -322,6 +322,13 @@ logind already hands the active session its devices. On a machine
 without logind, enable `seatd` and join the `seat` group; the installer
 prints this only when it finds logind missing.
 
+### GPU pipeline diagnostics
+
+Native frame timings, scanout decisions, per-output DMA-BUF feedback and optional
+GPU queries are documented in [GPU pipeline diagnostics](docs/gpu-pipeline.md),
+along with experimental overlay/primary scanout switches and the reproducible
+5K rendering benchmark.
+
 ### Mac keyboard interaction
 
 The Wayland session supports an opt-in Mac interaction profile:

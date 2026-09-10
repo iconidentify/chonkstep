@@ -111,11 +111,44 @@ pub enum UnderlyingStorage<'a> {
 /// Defines the (optional) reason why a [`Element`] was selected for
 /// rendering instead of direct scan-out
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
 pub enum RenderingReason {
     /// The element buffer format is unsuited for direct scan-out
     FormatUnsupported,
     /// Element was selected for direct scan-out but failed
     ScanoutFailed,
+    /// Scanout on this plane is disabled by policy.
+    PolicyDisabled,
+    /// No unassigned compatible plane is available.
+    NoFreePlane,
+    /// Conservative primary scanout requires the swapchain's exact format.
+    PrimaryFormatMismatch,
+    /// The element has no exportable underlying storage.
+    NoUnderlyingStorage,
+    /// The buffer cannot be exported as a DRM scanout buffer.
+    UnsupportedBuffer,
+    /// Existing underlays prevent this primary-plane assignment.
+    UnderlayConflict,
+    /// Underlays require an opaque element and an alpha-capable primary plane.
+    UnderlayAlpha,
+    /// The element overlaps composited elements above the primary plane.
+    PrimaryOverlap,
+    /// The element overlaps an already assigned lower plane.
+    LowerPlaneOverlap,
+    /// Another output owns the requested plane.
+    PlaneClaimFailed,
+    /// Scene ordering/background/coverage requires a composited primary plane.
+    SceneRequiresComposition,
+    /// A single-pixel surface was folded into the primary clear color.
+    ClearColor,
+}
+
+impl RenderingReason {
+    /// Stable labels for bounded per-reason diagnostic counters, in discriminant order.
+    pub const LABELS: [&'static str; 14] = ["format_unsupported", "scanout_failed", "policy_disabled",
+        "no_free_plane", "primary_format_mismatch", "no_underlying_storage", "unsupported_buffer",
+        "underlay_conflict", "underlay_alpha", "primary_overlap", "lower_plane_overlap",
+        "plane_claim_failed", "scene_requires_composition", "clear_color"];
 }
 
 /// Defines the presentation state of an element after rendering
@@ -167,6 +200,14 @@ impl RenderElementState {
 pub struct PrimaryScanoutOutput(Option<(WeakOutput, RenderElementState)>);
 
 impl PrimaryScanoutOutput {
+    /// Replace the selection using a compositor's cached per-output visibility.
+    /// The supplied state must describe pixels actually presented on that output.
+    /// This permits choosing a still-visible output immediately when another
+    /// output is removed or powered down, without waiting for a fresh render.
+    pub fn set_current_output(&mut self, selection: Option<(&Output, RenderElementState)>) {
+        self.0 = selection.map(|(output, state)| (output.downgrade(), state));
+    }
+
     /// Update the primary scan-out output from [`RenderElementStates`]
     ///
     /// If the current primary scan-out output is different than the

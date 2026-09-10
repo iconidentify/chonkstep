@@ -63,17 +63,12 @@
 //!
 //! # Feedback (protocol version 4)
 //!
-//! Advertised whenever the render node can be identified. Every backend
-//! has a main tranche containing the formats GLES can import. A DRM
-//! session puts the exact swapchain-format/modifier pairs shared by all
-//! active outputs into an earlier `Scanout` preference tranche, steering
-//! clients toward buffers the conservative primary-plane path can use
-//! without composition. The intersection is intentional: feedback is
-//! global until per-surface output tracking exists, so an output-specific
-//! promise would become false as soon as a window moved monitors.
-//! Nested sessions have no KMS planes and therefore advertise only the
-//! main tranche. Multi-GPU remains out of scope with multi-GPU support
-//! generally.
+//! Advertised whenever the render node can be identified. The global's main
+//! tranche contains the formats GLES can import. Per-surface feedback adds a
+//! scanout preference for that surface's actual primary output, selected from
+//! clipped scene membership and rendered visibility. Output capability tables
+//! are cached and refreshed on hotplug or live scanout-policy changes. Nested
+//! sessions have no KMS planes and advertise only the rendering tranche.
 //!
 //! A DRM session asks EGL first, because the renderer can live on a
 //! different device from the display-only KMS controller (`kmsro` on
@@ -107,19 +102,19 @@ use smithay::wayland::dmabuf::{
 
 use crate::state::{Compositor, Graphics};
 
-/// The linux-dmabuf protocol state plus the format set it was built
-/// from. The `DmabufGlobal` handle the constructor gets back is
-/// deliberately dropped: it is a `Copy` id (so it provably has no
-/// `Drop` behaviour), and its only uses are withdrawing the global or
-/// swapping the default feedback — neither of which a session does
-/// while it is alive. What must survive is `state`, since every
-/// `zwp_linux_dmabuf_v1` request dispatches through it.
+/// Import capabilities and cached allocation feedback. The global describes
+/// rendering; an output-specific scanout preference is sent only to surfaces
+/// whose scene membership and presentation owner identify that output.
 pub(crate) struct DmabufSupport {
     state: DmabufState,
     /// Exactly what was advertised to clients, kept for the import
     /// check in [`DmabufHandler::dmabuf_imported`]. Empty means no
     /// global was registered and no client can ever reach that check.
     formats: FormatSet,
+    render_node: Option<DrmNode>,
+    default: Option<DmabufFeedback>,
+    outputs: Vec<(smithay::output::Output, DmabufFeedback)>,
+    policy: Option<u32>,
 }
 
 impl DmabufSupport {
@@ -127,7 +122,44 @@ impl DmabufSupport {
     /// the handler always has something to return) but no global
     /// registered, so no client ever sees the protocol.
     fn disabled() -> Self {
-        DmabufSupport { state: DmabufState::new(), formats: FormatSet::default() }
+        DmabufSupport { state: DmabufState::new(), formats: FormatSet::default(), render_node: None, default: None, outputs: Vec::new(), policy: None }
+    }
+}
+
+impl DmabufSupport {
+    pub fn invalidate(&mut self) { self.policy = None; }
+
+    pub fn default_feedback(&self) -> Option<&DmabufFeedback> { self.default.as_ref() }
+
+    pub fn feedback_for<'a>(
+        &'a self, output: &smithay::output::Output,
+        id: &smithay::backend::renderer::element::Id,
+        states: &smithay::backend::renderer::element::RenderElementStates,
+    ) -> Option<&'a DmabufFeedback> {
+        let default = self.default.as_ref()?;
+        let scanout = self.outputs.iter().find(|(entry, _)| entry == output).map(|(_, feedback)| feedback).unwrap_or(default);
+        Some(smithay::backend::renderer::element::utils::select_dmabuf_feedback(id.clone(), states, default, scanout))
+    }
+
+    /// Capability queries and sealed format tables are rebuilt only on policy
+    /// changes or hotplug, never once per surface or once per frame.
+    pub fn refresh(&mut self, graphics: &Graphics, outputs: &[crate::state::OutputEntry]) -> bool {
+        let policy = crate::session::frame_flags().bits();
+        if self.policy == Some(policy) { return false; }
+        self.policy = Some(policy);
+        self.outputs.clear();
+        let (Some(node), Graphics::Session(session)) = (self.render_node, graphics) else { return true; };
+        for (index, output) in outputs.iter().enumerate() {
+            let scanout: FormatSet = session.output_scanout_formats(index).indexset().iter()
+                .filter(|format| self.formats.contains(format)).copied().collect();
+            if scanout.indexset().is_empty() { continue; }
+            match DmabufFeedbackBuilder::new(node.dev_id(), self.formats.clone())
+                .add_preference_tranche(node.dev_id(), Some(TrancheFlags::Scanout), scanout).build() {
+                Ok(feedback) => self.outputs.push((output.output.clone(), feedback)),
+                Err(error) => tracing::warn!(?error, output = %output.output.name(), "could not build output dmabuf feedback"),
+            }
+        }
+        true
     }
 }
 
@@ -135,11 +167,11 @@ impl DmabufSupport {
 /// out of whichever graphics stack this session ended up with and
 /// defers to [`init`].
 pub(crate) fn init_for_graphics(display_handle: &DisplayHandle, graphics: &mut Graphics) -> DmabufSupport {
-    let (session_render_node, scanout_formats) = match graphics {
-        Graphics::Session(session) => (session.render_node(), session.direct_scanout_formats()),
-        Graphics::Winit(_) => (None, FormatSet::default()),
+    let session_render_node = match graphics {
+        Graphics::Session(session) => session.render_node(),
+        Graphics::Winit(_) => None,
     };
-    init(display_handle, graphics_renderer(graphics), session_render_node, scanout_formats)
+    init(display_handle, graphics_renderer(graphics), session_render_node, FormatSet::default())
 }
 
 /// Registers the linux-dmabuf global for `renderer`'s formats.
@@ -181,7 +213,8 @@ pub(crate) fn init(
         .filter(|format| formats.indexset().contains(*format))
         .copied()
         .collect();
-    match default_feedback(renderer, &formats, session_render_node, &scanout_formats) {
+    let render_node = session_render_node.and_then(actual_render_node).or_else(|| render_node_for_renderer(renderer));
+    let default = match default_feedback(renderer, &formats, render_node, &scanout_formats) {
         Some(feedback) => {
             let _global =
                 state.create_global_with_default_feedback::<Compositor>(display_handle, &feedback);
@@ -190,6 +223,7 @@ pub(crate) fn init(
                 scanout_formats = scanout_formats.indexset().len(),
                 "linux-dmabuf with default feedback advertised"
             );
+            feedback
         }
         None => {
             tracing::warn!(
@@ -198,8 +232,8 @@ pub(crate) fn init(
             );
             return DmabufSupport::disabled();
         }
-    }
-    DmabufSupport { state, formats }
+    };
+    DmabufSupport { state, formats, render_node, default: Some(default), outputs: Vec::new(), policy: None }
 }
 
 /// Builds default feedback, or `None` to decline the global.
@@ -341,12 +375,14 @@ impl DmabufHandler for Compositor {
         }
     }
 
-    // `new_surface_feedback` is deliberately left at its default
-    // (`None` — use the global's default feedback). Per-surface
-    // feedback earns its keep by telling a client "allocate this one
-    // differently and a plane can scan it out", and there are no
-    // planes in play here; a single-GPU compositing session has
-    // exactly one right answer for every surface.
+    fn new_surface_feedback(
+        &mut self,
+        surface: &smithay::reexports::wayland_server::protocol::wl_surface::WlSurface,
+        _global: &DmabufGlobal,
+    ) -> Option<DmabufFeedback> {
+        self.surface_outputs.feedback_for(surface).or_else(|| self.dmabuf.default.clone())
+    }
+
 }
 
 delegate_dmabuf!(Compositor);

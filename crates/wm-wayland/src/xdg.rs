@@ -593,20 +593,10 @@ impl CompositorHandler for Compositor {
 
     fn new_surface(&mut self, surface: &WlSurface) {
         self.pacing_surfaces.insert(surface.id(), surface.clone());
-        // This compositor deliberately advertises every surface on
-        // every output: all outputs share the session scale, and true
-        // overlap tracking would add complexity without changing what
-        // a client renders (see the commit handler's scale doctrine).
-        // Membership is a surface-lifecycle fact, so establish it
-        // here exactly once. `Output::enter` takes a mutex and probes
-        // a weak-surface HashSet; doing that for every output on every
-        // buffer commit used to put pure deduplication in the hottest
-        // protocol path. A wl_output bound later is still correct:
-        // Smithay replays `enter` to that client's already-known
-        // surfaces when the output resource is created.
-        for entry in &self.outputs {
-            entry.output.enter(surface);
-        }
+        // Membership is established by the actual output scene, including
+        // independently clipped subsurfaces and popups. Unmapped surfaces do
+        // not belong to every monitor merely because they were created.
+        self.surface_outputs.register(surface);
         // Every surface gets the buffer-readiness pre-commit hook: a
         // commit whose dmabuf the client's GPU is still drawing into
         // must not land until it is finished (explicit syncobj acquire
@@ -707,6 +697,7 @@ impl CompositorHandler for Compositor {
 
     fn destroyed(&mut self, surface: &WlSurface) {
         self.pacing_surfaces.remove(&surface.id());
+        self.surface_outputs.destroy(surface);
         self.pacing_fifo_deadlines.remove(&surface.id());
         // `Output` retains weak surface handles so it can replay
         // `enter` to wl_output objects a client binds later. The

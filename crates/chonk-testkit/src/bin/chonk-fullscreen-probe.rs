@@ -79,10 +79,12 @@ use std::time::Duration;
 
 #[path = "chonk-fullscreen-probe/popup.rs"]
 mod popup;
+#[path = "chonk-fullscreen-probe/gpu.rs"]
+mod gpu;
 
 use wayland_client::protocol::{
     wl_buffer::WlBuffer, wl_callback, wl_compositor::WlCompositor, wl_keyboard, wl_registry,
-    wl_seat, wl_shm, wl_shm_pool, wl_surface::WlSurface,
+    wl_seat, wl_shm, wl_shm_pool, wl_surface::{self, WlSurface}, wl_output,
 };
 use wayland_client::{Connection, Dispatch, QueueHandle, WEnum};
 use wayland_protocols::xdg::shell::client::{
@@ -154,6 +156,7 @@ impl Want {
 #[derive(Default)]
 struct Probe {
     compositor: Option<WlCompositor>,
+    outputs: Vec<wl_output::WlOutput>,
     shm: Option<wl_shm::WlShm>,
     wm_base: Option<XdgWmBase>,
     seat: Option<wl_seat::WlSeat>,
@@ -273,6 +276,7 @@ impl Dispatch<wl_registry::WlRegistry, ()> for Probe {
         if let wl_registry::Event::Global { name, interface, version } = event {
             match interface.as_str() {
                 "wl_compositor" => probe.compositor = Some(registry.bind(name, version.min(4), qh, ())),
+                "wl_output" => probe.outputs.push(registry.bind(name, version.min(4), qh, ())),
                 "wl_shm" => probe.shm = Some(registry.bind(name, 1, qh, ())),
                 "xdg_wm_base" => probe.wm_base = Some(registry.bind(name, version.min(3), qh, ())),
                 "wl_seat" => probe.seat = Some(registry.bind(name, version.min(7), qh, ())),
@@ -505,6 +509,18 @@ impl Dispatch<ZwpInputMethodV2, ()> for Probe {
     }
 }
 
+impl Dispatch<WlSurface, ()> for Probe {
+    fn event(probe: &mut Self, surface: &WlSurface, event: wl_surface::Event, _: &(),
+             _: &Connection, _: &QueueHandle<Self>) {
+        if probe.surface.as_ref() != Some(surface) { return; }
+        match event {
+            wl_surface::Event::Enter { .. } => say("surface output enter"),
+            wl_surface::Event::Leave { .. } => say("surface output leave"),
+            _ => {}
+        }
+    }
+}
+
 macro_rules! ignore_events {
     ($($t:ty),*) => {$(
         impl Dispatch<$t, ()> for Probe {
@@ -518,7 +534,7 @@ ignore_events!(
     wl_shm::WlShm,
     wl_shm_pool::WlShmPool,
     WlBuffer,
-    WlSurface,
+    wl_output::WlOutput,
     ExtIdleNotifierV1,
     ZwpIdleInhibitManagerV1,
     ZwpIdleInhibitorV1,
@@ -560,6 +576,11 @@ fn main() {
     let title = args.next().unwrap_or_else(|| "chonk-fullscreen-probe".to_string());
     let app_id = args.next().unwrap_or_else(|| "chonk-fullscreen-probe".to_string());
     let animation = args.next();
+    let buffer_scale = match std::env::var("CHONKSTEP_PROBE_BUFFER_SCALE") {
+        Ok(value) => value.parse::<i32>().ok().filter(|scale| (1..=3).contains(scale))
+            .unwrap_or_else(|| fatal("CHONKSTEP_PROBE_BUFFER_SCALE must be 1, 2 or 3")),
+        Err(_) => 1,
+    };
     let duplicate_inhibit = animation.as_deref() == Some("animate-duplicate-inhibit-idle");
     let ime_popup_flood = animation.as_deref() == Some("ime-popup-flood");
     let self_timed = matches!(
@@ -618,6 +639,7 @@ fn main() {
         .unwrap_or_else(|error| fatal(&format!("seat roundtrip: {error}")));
 
     let surface = compositor.create_surface(&qh, ());
+    surface.set_buffer_scale(buffer_scale);
     let xdg_surface = wm_base.get_xdg_surface(&surface, &qh, ());
     probe.xdg_surface = Some(xdg_surface.clone());
     let toplevel = xdg_surface.get_toplevel(&qh, ());
@@ -641,13 +663,24 @@ fn main() {
         .roundtrip(&mut probe)
         .unwrap_or_else(|error| fatal(&format!("initial configure: {error}")));
 
+    let gpu = (std::env::var("CHONKSTEP_PROBE_RENDERER").as_deref() == Ok("egl"))
+        .then(|| gpu::Gpu::new(&connection, &surface));
     let mut attached = (0, 0);
     let mut attached_buffer = None;
     let mut animation_frame = 0_u64;
     say(&format!("mapped title={title:?}"));
     while !probe.closed {
         if probe.dirty || attached != probe.size {
-            let (width, height) = probe.size;
+            let (logical_width, logical_height) = probe.size;
+            let (width, height) = (logical_width * buffer_scale, logical_height * buffer_scale);
+            say(&format!("buffer scale={buffer_scale} size={width}x{height}"));
+            if frame_driven && !probe.frame_pending {
+                surface.frame(&qh, ());
+                probe.frame_pending = true;
+            }
+            if let Some(gpu) = &gpu {
+                gpu.draw(width, height);
+            } else {
             let file = frame_file(width, height);
             let stride = width.max(1) * 4;
             let pool = shm.create_pool(file.as_fd(), stride * height.max(1), &qh, ());
@@ -665,14 +698,11 @@ fn main() {
             // repeated layout/focus operations.
             pool.destroy();
             surface.attach(Some(&buffer), 0, 0);
-            surface.damage(0, 0, width.max(1), height.max(1));
-            if frame_driven && !probe.frame_pending {
-                surface.frame(&qh, ());
-                probe.frame_pending = true;
-            }
+            surface.damage(0, 0, logical_width.max(1), logical_height.max(1));
             surface.commit();
             if let Some(previous) = attached_buffer.replace(buffer) {
                 previous.destroy();
+            }
             }
             if inhibit_idle && probe.idle_inhibitor.is_none() {
                 let manager = probe
@@ -729,9 +759,13 @@ fn main() {
             // the next one, while the sleep is the producer's cadence
             // (not a test wait).
             let (width, height) = probe.size;
-            surface.attach(attached_buffer.as_ref(), 0, 0);
-            surface.damage(0, 0, width.max(1), height.max(1));
-            surface.commit();
+            if let Some(gpu) = &gpu {
+                gpu.draw(width * buffer_scale, height * buffer_scale);
+            } else {
+                surface.attach(attached_buffer.as_ref(), 0, 0);
+                surface.damage(0, 0, width.max(1), height.max(1));
+                surface.commit();
+            }
             animation_frame += 1;
             if animation_frame.is_multiple_of(30) {
                 say(&format!("animation frame={animation_frame}"));
@@ -747,11 +781,15 @@ fn main() {
             // commit.
             probe.frame_ready = false;
             let (width, height) = probe.size;
-            surface.attach(attached_buffer.as_ref(), 0, 0);
-            surface.damage(0, 0, width.max(1), height.max(1));
             surface.frame(&qh, ());
             probe.frame_pending = true;
-            surface.commit();
+            if let Some(gpu) = &gpu {
+                gpu.draw(width * buffer_scale, height * buffer_scale);
+            } else {
+                surface.attach(attached_buffer.as_ref(), 0, 0);
+                surface.damage(0, 0, width.max(1), height.max(1));
+                surface.commit();
+            }
             animation_frame += 1;
             if animation_frame.is_multiple_of(30) {
                 say(&format!("animation frame={animation_frame}"));
