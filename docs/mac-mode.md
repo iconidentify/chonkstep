@@ -97,6 +97,22 @@ terminal as Control-C. Single-window terminals (foot, Alacritty, xterm, st) clos
 through their window protocol for Command-W. Terminal navigation and other raw
 Control input remain with the terminal application.
 
+The terminal must retain its Control-Shift-C/V clipboard actions. An existing
+application config can replace those defaults; Mac mode does not overwrite
+application settings. For Foot, keep these bindings alongside any preferred
+Insert-key alternatives:
+
+```ini
+[key-bindings]
+clipboard-copy=Control+Shift+c Control+Insert XF86Copy
+clipboard-paste=Control+Shift+v Shift+Insert XF86Paste
+```
+
+Run `foot --check-config`, then open new terminal windows to apply the bindings.
+Test the installed terminal config as well as the isolated default profile:
+Command-C must copy a selection without writing an interrupt to the PTY, while
+physical Control-C must still interrupt. Foot reads bindings at window startup.
+
 Browser profiles also translate Command-brackets to Back/Forward,
 Command-Shift-brackets and Command-Option-arrows to adjacent tabs, and
 Command-Option-I/J/U to developer tools, console, and source.

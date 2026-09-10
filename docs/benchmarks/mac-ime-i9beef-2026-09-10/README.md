@@ -47,3 +47,20 @@ The existing unsupported Hyprland compatibility diagnostics are unchanged.
 This is the implemented Mac profile described in [mac-mode.md](../../mac-mode.md),
 not a claim of complete macOS parity. Native multi-monitor hotplug and other
 machines were not retested for this keyboard-only deployment.
+
+## Follow-up: installed Foot clipboard overrides
+
+Live UAT found that the user's Foot config had replaced Control-Shift-C/V with
+Control-Insert and Shift-Insert. The standard terminal profile therefore sent
+an unbound Control-Shift-C, which Foot forwarded as byte 03 to the PTY. This
+configuration mismatch was absent from the original isolated terminal test.
+
+Restore the standard clipboard actions alongside the existing Insert bindings.
+The live uinput probe reproduced byte 03 with the prior config, then verified
+zero PTY input for Command-C, byte 03 for physical Control-C, and exact current
+clipboard bytes for Command-V with the corrected config. Clipboard ownership
+was unchanged by that live test. The existing real terminal/browser clipboard
+E2E also passed using the actual installed Foot config, including copying a
+selected terminal line and verifying its exact contents in the browser. Both
+terminal windows were reopened with the corrected bindings; the active tmux
+session was retained. No compositor rebuild was required for this follow-up.

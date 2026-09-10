@@ -66,6 +66,18 @@
     "live-scene.txt": {
       "sha256": "575ee8720e89d306676e55a858302c0c32b3c2089ebb1e61a0ec10fe08d2b067",
       "local_path": "/home/chrisk/.local/state/chonkstep/uat-mac-20260910-142901/live-scene.txt"
+    },
+    "terminal-smoke.log": {
+      "sha256": "029b764c5bc393ba4683a50399b9b120ec223102fe3e992136e08aecd4e9d304",
+      "local_path": "/home/chrisk/.local/state/chonkstep/uat-mac-20260910-142901/terminal-smoke.log"
+    },
+    "foot-config-check.log": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "local_path": "/home/chrisk/.local/state/chonkstep/uat-mac-20260910-142901/foot-config-check.log"
+    },
+    "installed-foot-config-e2e.log": {
+      "sha256": "d48bba8cc4fc85689d701104c2a8b69f2d9b60c51e9c307722f4bc0a3235b920",
+      "local_path": "/home/chrisk/.local/state/chonkstep/uat-mac-20260910-142901/installed-foot-config-e2e.log"
     }
   },
   "release": {
@@ -121,5 +133,26 @@
     "configuration_backups": "/home/chrisk/.local/state/chonkstep/uat-mac-20260910-142901",
     "configuration_check_exit_code": 0,
     "preexisting_hypr_compatibility_diagnostics": 165
+  },
+  "terminal_configuration_followup": {
+    "cause": "Installed Foot config replaced Control-Shift-C/V bindings with Control-Insert and Shift-Insert, allowing Command-C translation to fall through as a PTY interrupt.",
+    "fix": "Restored standard clipboard bindings alongside existing Insert alternatives; reopened both terminal windows and preserved tmux session 0.",
+    "foot_config_check_exit_code": 0,
+    "live_uinput_checks": [
+      "Original Foot config reproduced Command-C as byte 03",
+      "Corrected Foot config: Command-C sends no PTY bytes",
+      "Physical Control-C still sends byte 03",
+      "Command-V pastes the exact current clipboard into the raw PTY"
+    ],
+    "installed_config_terminal_clipboard_e2e": {
+      "passed": 1,
+      "failed": 0,
+      "binary": "/usr/bin/chonkstep-wayland",
+      "config": "/home/chrisk/.config/foot/foot.ini",
+      "test": "terminal_clipboard_control_and_copy_quit_paste",
+      "method": "Private headless session with a foot launcher that loads the actual installed config via --config; real terminal selection copied to a browser, paste into raw PTY, and physical Control-C verified."
+    },
+    "clipboard_preserved_during_live_test": true,
+    "config_backup": "/home/chrisk/.local/state/chonkstep/uat-mac-20260910-142901/foot.ini.before"
   }
 }
