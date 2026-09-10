@@ -94,7 +94,7 @@ def measure(args, label, binary, case, host_socket, directory):
     source = source_size(output_scale, scale)
     directory.mkdir()
     env = bench.isolated_environment(directory, host_socket, software=False)
-    env["CHONKSTEP_GPU_TIMINGS"] = "1"
+    env["CHONKSTEP_GPU_TIMINGS"] = "1" if args.gpu_timings == "on" else "0"
     config = directory / "config/chonkstep"
     config.mkdir()
     (config / "config.toml").write_text(
@@ -111,7 +111,7 @@ def measure(args, label, binary, case, host_socket, directory):
             monitors = wait_for("the kiosk host to configure a 5K framebuffer", lambda: (
                 value if (value := json.loads(ipc(runtime, "j/monitors")))
                 and value[0]["width"] == 5120 and value[0]["height"] == 2880 else None))
-            client_env = env | {"WAYLAND_DISPLAY": str(display), "CHONKSTEP_PROBE_BUFFER_SCALE": str(scale), "CHONKSTEP_PROBE_RENDERER": args.client_renderer}
+            client_env = env | {"WAYLAND_DISPLAY": str(display), "CHONKSTEP_PROBE_BUFFER_SCALE": str(scale), "CHONKSTEP_PROBE_RENDERER": args.client_renderer, "CHONKSTEP_PROBE_GPU_PATTERN": args.pattern}
             with bench.child([str(args.probe), "ScalingProbe", "scaling-probe", "animate-frame"],
                              client_env, directory / "client.log"):
                 wait_for("the scaling client to map", lambda: json.loads(ipc(runtime, "j/clients")))
@@ -122,6 +122,8 @@ def measure(args, label, binary, case, host_socket, directory):
                          "answer granted: asked fullscreen=true, told fullscreen=true" in (directory / "client.log").read_text())
                 wait_for("the requested source resolution", lambda:
                          f"buffer scale={scale} size={source[0]}x{source[1]}" in (directory / "client.log").read_text())
+                if args.pattern == "texture":
+                    wait_for("textured GPU fixture", lambda: "GPU client pattern=texture" in (directory / "client.log").read_text())
                 time.sleep(args.settle_seconds)
                 before_report = diagnostics(runtime)
                 (directory / "diagnostics-before.txt").write_text(before_report)
@@ -144,22 +146,26 @@ def measure(args, label, binary, case, host_socket, directory):
                 # not contaminate the rendering measurements.
                 subprocess.run(["grim", str(directory / "pixels.png")], env=client_env, check=True,
                                timeout=30, capture_output=True)
-                from PIL import Image
+                from PIL import Image, ImageStat
                 with Image.open(directory / "pixels.png") as image:
                     if image.size != (5120, 2880):
                         raise RuntimeError(f"capture is not 5K: {image.size}")
                     for point in ((100, 100), (2560, 1440), (5000, 2700)):
                         if image.convert("RGB").getpixel(point) != (0x20, 0x40, 0x80):
                             raise RuntimeError(f"client pixels do not fill the physical framebuffer at {point}")
+                    if args.pattern == "texture":
+                        spread = ImageStat.Stat(image.convert("RGB").crop((256, 256, 512, 512))).stddev
+                        if min(spread) < 10:
+                            raise RuntimeError(f"textured workload is flat or missing: RGB deviations {spread}")
                 interval = (after["sample_monotonic_ns"] - before["sample_monotonic_ns"]) / 1e9
                 samples = after_gpu["samples"] - before_gpu["samples"] if before_gpu and after_gpu else 0
                 sample = {
                     "label": label, "case": case, "buffer_scale": scale, "output_scale": output_scale,
-                    "client_renderer": args.client_renderer, "framebuffer": [5120, 2880], "source_buffer": source,
+                    "client_renderer": args.client_renderer, "pattern": args.pattern, "framebuffer": [5120, 2880], "source_buffer": source,
                     "seconds": interval, "cpu_percent": (after["cpu_ticks"] - before["cpu_ticks"]) /
                     os.sysconf("SC_CLK_TCK") / interval * 100,
                     "render_frames_per_second": frames["render_calls"] / interval,
-                    "render_cpu_us_per_frame": frames["render_us"] / max(1, frames["render_calls"]),
+                    "render_wall_us_per_frame": frames["render_us"] / max(1, frames["render_calls"]),
                     "composition_gpu_us_per_sample": (after_gpu["total_ns"] - before_gpu["total_ns"]) / samples / 1000 if samples else None,
                     "gpu_samples": samples, "gpu_before": before_gpu, "gpu_after": after_gpu,
                     "frames": frames, "before": before, "after": after,
@@ -182,6 +188,7 @@ def measure(args, label, binary, case, host_socket, directory):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--binary", action="append", required=True, metavar="LABEL=PATH")
+    parser.add_argument("--pattern", choices=("solid", "texture"), default="solid")
     parser.add_argument("--client-renderer", choices=("shm", "egl"), default="egl")
     parser.add_argument("--probe", type=Path, default=Path("target/release/chonk-fullscreen-probe"))
     parser.add_argument("--output", type=Path, required=True)
@@ -189,10 +196,15 @@ def main():
     parser.add_argument("--seconds", type=float, default=15)
     parser.add_argument("--settle-seconds", type=float, default=3)
     parser.add_argument("--cases", nargs="+", choices=tuple(CASES), default=list(CASES))
+    parser.add_argument("--gpu-timings", choices=("on", "off"), default="on")
     parser.add_argument("--require-gpu-timing", action="store_true")
     args = parser.parse_args()
     if args.runs < 1 or not math.isfinite(args.seconds) or args.seconds <= 0 or not math.isfinite(args.settle_seconds) or args.settle_seconds < 0:
         parser.error("invalid measurement duration/runs")
+    if args.pattern == "texture" and args.client_renderer != "egl":
+        parser.error("--pattern texture requires --client-renderer egl")
+    if args.require_gpu_timing and args.gpu_timings == "off":
+        parser.error("--require-gpu-timing conflicts with --gpu-timings off")
     args.output = args.output.resolve()
     args.probe = args.probe.resolve(strict=True)
     binaries = []
@@ -213,6 +225,7 @@ def main():
                 "limitation": "No physical KMS, plane scanout, or monitor latency measurement. Competing GPU load is recorded, not stopped.",
                 "binary": {label: bench.binary_metadata(path) for label, path in binaries},
                 "probe": {"path": str(args.probe), "sha256": hashlib.sha256(args.probe.read_bytes()).hexdigest()}, "runs": args.runs,
+                "gpu_timings": args.gpu_timings, "pattern": args.pattern,
                 "harness_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
                 "weston": bench.command_output(["weston", "--version"])}
     (args.output / "metadata.json").write_text(json.dumps(metadata, indent=2) + "\n")
@@ -236,7 +249,7 @@ def main():
         for case in args.cases:
             group = [sample for sample in samples if sample["label"] == label and sample["case"] == case]
             summary[f"{label}-{case}"] = {key: {"median": statistics.median(values), "min": min(values), "max": max(values), "samples": values}
-                for key in ("cpu_percent", "render_frames_per_second", "render_cpu_us_per_frame", "composition_gpu_us_per_sample")
+                for key in ("cpu_percent", "render_frames_per_second", "render_wall_us_per_frame", "composition_gpu_us_per_sample")
                 if (values := [sample[key] for sample in group if sample[key] is not None])}
     (args.output / "summary.json").write_text(json.dumps(summary, indent=2) + "\n")
     print(json.dumps(summary, indent=2))

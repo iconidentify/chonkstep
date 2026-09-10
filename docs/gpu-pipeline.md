@@ -70,7 +70,7 @@ cargo build --release -p chonkstep-wayland
 cargo build --release -p chonk-testkit --bin chonk-fullscreen-probe --features gpu-probe
 python3 scripts/bench-gpu-scaling.py \
   --binary candidate=target/release/chonkstep-wayland \
-  --output /tmp/cg5-results --require-gpu-timing
+  --output /tmp/cg5-results --pattern texture --require-gpu-timing
 ```
 
 The private Weston GL kiosk host forces a real 5120×2880 nested framebuffer.
@@ -82,7 +82,12 @@ without implicit DMA-BUF synchronization. `--client-renderer shm` measures the
 separate CPU-upload path. Saved screenshots verify dimensions and pixels after
 timing. Raw process counters, GPU samples, competing GPU load, executable hashes,
 renderer identity and individual samples are retained. Repeat `--binary` for
-paired comparisons; run order alternates.
+paired comparisons; run order alternates. Use `--gpu-timings off` for an equally
+uninstrumented CPU/throughput comparison against older binaries, then a separate
+timer-enabled campaign for GPU cost. `--pattern texture` renders deterministic
+pixel-varying content on the producer GPU; captures must pass both calibration
+pixel checks and a non-flat-content check. The default solid workload remains
+available for reproducing the first checkpoint.
 
 This is a rendering experiment, not a physical KMS scanout, panel latency, or
 Apple hardware qualification. On the development machine both RTX 3090 devices
@@ -103,7 +108,8 @@ an explicitly counted synchronous fallback. PNG encoding, publication, clipboard
 I/O and recorder work remain on the existing capture worker.
 
 Staging is bounded: one shared WLR fanout download, one ext-image-copy download,
-two user screenshots (including worker jobs), and two preview downloads. Queues
+two user screenshots (including worker jobs), two preview downloads, and one
+diagnostic screenshot (including its PNG writer). Queues
 retain their existing request limits. Services poll active work every 4 ms and
 retired work every 100 ms, without adding an idle deadline after queues drain.
 A five-second timeout fails consumers; their original staging slot and scene
@@ -117,7 +123,64 @@ not include cached render targets, client SHM or PNG-worker images. The private
 test door allows `CHONKSTEP_TEST_READBACK_DELAY_MS` (bounded at 10 seconds) to defer
 readiness without blocking the compositor, proving input progress, timeout and
 safe retirement deterministically. It has no effect without `CHONKSTEP_TEST_SOCKET`.
-Diagnostic screenshot-marker export currently uses an explicit synchronous wait;
-its frame is a verification artifact and is excluded from benchmark sampling.
+Diagnostic screenshot-marker export follows the same fence polling and uses one
+bounded PNG writer; it no longer waits or compresses PNGs on the event loop.
+Diagnostic frames remain outside benchmark sampling intervals.
 
-Measured 5K results: [paired workload report](benchmarks/5k-2026-09-10/README.md).
+Measured 5K results: [final textured workload and validation report](benchmarks/5k-final-2026-09-10/README.md)
+and [earlier solid-workload checkpoint](benchmarks/5k-2026-09-10/README.md).
+
+## Experimental render/target GPU selection
+
+A native session can compose on another GPU with
+`CHONKSTEP_RENDER_DEVICE=/dev/dri/renderD129`. The value must be a real DRM render
+node. Selecting the existing renderer keeps the ordinary single-GPU path;
+invalid or unidentifiable devices fail startup explicitly. Without the variable,
+the existing device-selection behavior is unchanged.
+
+The source GLES context owns all client imports, chrome textures and capture
+readbacks for the session. Smithay `GpuManager<GbmGlesBackend>` supplies a
+`MultiRenderer` that transfers composition into the target GPU's swapchain.
+Swapchain allocation uses **target-renderable** modifiers, while default DMA-BUF
+feedback identifies the **source** render device. Per-output scanout preferences
+identify the target device and still intersect source-importable formats so
+rejected scanout buffers can be composited. Equal modifier lists alone are not
+enough: startup allocates real 64×64 target buffers for up to 256 candidate
+formats and retains only formats the source GPU actually imports. Diagnostics
+report `verified_scanout_formats`; no verified format means render-only feedback,
+without an unsafe target allocation preference. This is a capability preflight,
+not proof of every size or modifier working on a physical plane.
+Custom GLES element drawing forwards
+its damage rectangles to the multi-GPU transfer; opaque and partial updates must
+not disappear merely because they skipped the frame's clear operation.
+
+Native diagnostics include `multi_gpu=experimental`, both devices, DMA-copy and
+CPU-copy counters, and CPU-copy pixel totals. Smithay prefers a shared DMA-BUF
+texture; incompatible devices fall back to synchronous CPU mapping/upload.
+That fallback is functional, not a performance recommendation. Strict client
+buffer retention defaults on for a multi-GPU session, including when the target
+driver is not NVIDIA. The existing explicit strict-release override still applies.
+GPU elapsed queries measure the **source** GPU's composition timeline, not the
+complete target GPU execution interval or display latency.
+
+Hardware verification on this host passed both RTX 3090 transfer directions:
+96×64 and 5120×2880 opaque frames, then a 31×23 partial update, with unchanged
+surrounding pixels verified on the target. The driver selected CPU fallback for
+all eight transfers; DMA acceleration across these two GPUs is not qualified.
+Neither direction accepted a target allocation on the source GPU during the
+scanout-feedback preflight (zero verified formats), so no target scanout tranche
+is advertised on this pair.
+Using linear-only target allocation failed on this driver; selecting the target's
+advertised renderable modifiers resolved the binding failure. Reproduce:
+
+```sh
+CHONKSTEP_TEST_GPU_PAIR=/dev/dri/renderD128,/dev/dri/renderD129 \
+  cargo test --locked -p wm-wayland --lib multi_gpu::tests::two_real_gpus \
+  -- --ignored --nocapture
+```
+
+This supports a fixed render/target pair and the connected outputs of **one KMS
+controller**. Adopting another KMS controller, render-device hotplug/migration,
+and changing GPU selection during a session require further work. Physical
+page flips, overlay planes, and cross-device scanout remain unverified here
+because every display connector is disconnected.

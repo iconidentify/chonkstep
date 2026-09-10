@@ -4,6 +4,75 @@ Requested after the Mac mode work, 2026-09-10. The Mac implementation and its
 validation report are committed at `da52c0d`; GPU changes follow on
 `codex/native-gpu-performance`.
 
+## Final implementation status
+
+All six audit areas now have an implementation or measurement in this branch:
+
+| Audit priority | Delivered | Qualification limit |
+| --- | --- | --- |
+| Native instrumentation | Ten CPU/wall stages, optional asynchronous GPU queries, bounded per-output history, pass counters, actual plane assignments and principal composition reasons | Real KMS timing and driver rejection frequencies need an attached display; `unclassified` stays visible |
+| Overlay scanout | Independent opt-in and live control, atomic fallback, retention through the replacing flip for every client plane | Experiment remains off by default pending physical plane tests |
+| Broader primary scanout | Independent opt-in, renderer-compatible feedback, atomic fallback, global disable takes precedence | Physical fullscreen acceptance is unqualified here |
+| Surface/output tracking | Clipped scene membership, enter/leave, per-output DMA-BUF feedback, retained visibility and refresh-aware callback ownership | Nested protocol tests pass; physical mixed-refresh cadence remains to qualify |
+| Native 5K scaling | Real GPU-buffer producer, matching/fractional/legacy scales, verified 5120×2880 captures, alternating paired runs and separate GPU-query runs | Nested host cadence and competing compute limit conclusions |
+| Async readback and multi-GPU | Fence-polled bounded capture queues, cancellation/retirement, separate diagnostic PNG writer; explicit fixed render/target pair using Smithay MultiRenderer | GLES/fenceless capture and incompatible GPU transfers have counted synchronous fallbacks; multiple KMS controllers and GPU migration are not implemented |
+
+Controls, queue bounds, feedback policy, and reproduction commands are in
+[GPU pipeline documentation](gpu-pipeline.md). The final tests also fixed a
+[Mac copy/switch race](mac-mode-validation.md#final-gpu-backed-regression) and
+overview preview refresh across multiple asynchronous completion batches.
+
+The [final 27-sample 5K report](benchmarks/5k-final-2026-09-10/README.md) separates
+equally uninstrumented baseline comparisons from GPU-query measurements. Both
+builds sustain about 60.13 FPS, with small mixed CPU differences. Final median
+composition times are 1.678 ms native, 1.673 ms fractional and 1.733 ms legacy;
+overlapping ranges do not establish a reliable fractional cost or a speedup.
+
+### Final correctness evidence
+
+**144 distinct E2E tests across 18 targets passed** on a private Weston GL host
+with a real RTX 3090; no missing-client skips. This includes Mac workflows with
+Chromium, Writer, Nautilus, foot and XWayland; clipboard transport/persistence;
+lock/input/repeat; screenshots/recording and both capture protocols; membership,
+hidden damage, live diagnostic controls, fullscreen, overview and idle.
+Durable counts and log hashes are saved in
+[`validation.json`](benchmarks/5k-final-2026-09-10/validation.json).
+Counts and commands are in [the final validation record](mac-mode-validation.md#final-gpu-backed-regression).
+
+Workspace libraries: **1,917 passed, 12 ignored**. Strict workspace Clippy,
+private Rustdoc, the optional GPU producer's strict Clippy, and all 68 Python
+harness tests passed. The hardware-only multi-GPU test was invoked separately and passed full and partial
+opaque rendering at 96×64 and 5120×2880 in **both** RTX 3090 directions. All eight
+transfers used CPU fallback; zero target formats passed cross-device import
+preflight. The implementation therefore withholds target scanout preferences
+on this pair instead of encouraging allocations the source GPU cannot import.
+
+Local evidence: `/tmp/chonk-final-TARGET.log` (idle's successful run uses
+`/tmp/chonk-final-idle-retry.log`), `/tmp/chonk-gpu-final-unit2.log`,
+`/tmp/chonk-interop-lint.log`, `/tmp/chonk-final-rustdoc.log`,
+`/tmp/chonk-texture-fixture-lint.log`, and
+`/tmp/chonk-multigpu-hardware-final.log`. The 17 non-idle nested targets preceded
+the native-only import preflight change; idle, strict lint and the real two-GPU
+test ran after it. The initial idle build collided with an in-progress edit;
+its completed-source retry passed.
+
+The preserved final benchmark binary is
+`/tmp/chonk-gpu-final2/chonkstep-wayland`, SHA-256
+`fd8c279dd16cc645b1f80c8d5acf5b62b276bfbece16cc53b2aef6e23c8c4613`.
+It was built from this branch before the final source commit, so its embedded
+version correctly reports `preview-v0.4.4-3-g5cb2322-dirty`.
+
+### Hardware qualification still required
+
+All eight physical connectors are disconnected. No result here demonstrates
+overlay acceptance, broadened primary acceptance, physical page-flip latency,
+mixed-refresh monitor pacing, Apple keyboard firmware behavior, or cross-device
+scanout. On attached hardware, collect the diagnostics with each scanout switch
+independently and together, then exercise fullscreen transitions, translucent
+overlap, capture, lock, unplug/replug and DPMS. Verify output membership and
+callback ownership while moving a client between differently scaled/clocked
+outputs. These experiments remain opt-in until that evidence exists.
+
 ## Baseline and environment
 
 Preserved optimized baseline:
@@ -53,10 +122,10 @@ Run the Mac conformance suite against the final candidate so GPU changes cannot
 silently regress the earlier deliverable. No comparative “best compositor” claim
 without measured, reproducible evidence.
 
-## Source observations
+## Baseline source observations
 
-The pinned Smithay 0.7.0 `FrameFlags::DEFAULT` includes overlays. The repository
-currently enables only cursor and conservative primary scanout. The online
+The pinned Smithay 0.7.0 `FrameFlags::DEFAULT` includes overlays. The baseline repository
+enabled only cursor and conservative primary scanout. The online
 Smithay documentation sometimes describes newer APIs than this vendored tree
 (for example `Kind::ScanoutCandidate` is absent locally); implementation must
 follow the pinned source.
@@ -64,15 +133,15 @@ follow the pinned source.
 `RenderFrameResult` exposes actual primary, overlay and cursor assignments and
 per-element presentation states. Existing fallback reasons distinguish only
 unsupported format and failed scanout; unclassified branches need diagnostics.
-The compositor already selects a primary presentation output from rendered
-visibility and refresh rate, but `new_surface` still enters all outputs and
-DMA-BUF feedback uses a global capability intersection.
+The baseline already selected a primary presentation output from rendered
+visibility and refresh rate, but `new_surface` entered all outputs and
+DMA-BUF feedback used a global capability intersection.
 
 References: [Smithay DRM compositor](https://smithay.github.io/smithay/smithay/backend/drm/compositor/index.html),
 [GPU manager](https://smithay.github.io/smithay/smithay/backend/renderer/multigpu/struct.GpuManager.html),
 [memory export](https://smithay.github.io/smithay/smithay/backend/renderer/trait.ExportMem.html).
 
-## First implementation checkpoint
+## Historical first implementation checkpoint
 
 Implemented native per-output CPU telemetry, bounded frame/scanout reason
 history, optional asynchronous GPU timer queries, the two independent scanout
@@ -99,13 +168,13 @@ The first paired harness rejected an incorrect expected source size: integer
 output/client scale mismatches remain native physical pixels; the common
 resampling case is output 1.5 with a client buffer scale of 2. The corrected
 matrix measures 2/2, 1.5/2, and 2/1 and refuses mismatched source dimensions.
-Repeated paired results are being collected in `/tmp/cg5-pair2`.
+The first paired results were collected in `/tmp/cg5-pair2`.
 
-Asynchronous capture completion and render/target GPU support remain the next
-implementation stages. Physical KMS qualification remains unavailable with all
+At this checkpoint, asynchronous capture completion and render/target GPU
+support were the next implementation stages; both have since landed. Physical KMS qualification remains unavailable with all
 connectors disconnected.
 
-## Capture and 5K checkpoint
+## Historical capture and 5K checkpoint
 
 PBO readback now defers mapping behind a post-copy EGL fence for WLR screencopy,
 ext-image-copy output/toplevel capture, user screenshots and window previews.

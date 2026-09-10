@@ -126,12 +126,12 @@ does not establish that readiness. The test still performs one real copy action.
 
 Final workspace library tests: **1,917 passed, 12 environment-dependent tests
 ignored**, across 18 library targets. Strict workspace Clippy, private Rustdoc,
-and optional GPU-producer Clippy passed. The separately invoked ignored two-GPU
-hardware test also passed; see [GPU audit evidence](gpu-audit-work.md).
+optional GPU-producer Clippy, and all 68 Python harness tests passed. The
+separately invoked ignored two-GPU hardware test also passed; see [GPU audit evidence](gpu-audit-work.md).
 
 Logs: `/tmp/chonk-final-TARGET.log` (substitute each target; idle's successful
 retry is `/tmp/chonk-final-idle-retry.log`), `/tmp/chonk-gpu-final-unit2.log`,
-`/tmp/chonk-interop-lint.log`, `/tmp/chonk-gpu-final-docs.log`, and
+`/tmp/chonk-interop-lint.log`, `/tmp/chonk-final-rustdoc.log`, and
 `/tmp/chonk-texture-fixture-lint.log`. The initial idle attempt collided with a
 source edit during compilation; the completed-source retry passed. This was not
 an idle runtime failure. Physical Apple input and native KMS remain unqualified.
