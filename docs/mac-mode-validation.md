@@ -1,6 +1,12 @@
 # Mac interaction validation — 2026-09-10
 
-The per-display Spaces follow-up passed **163 distinct end-to-end tests across
+The seven adversarial review fixes passed **170 distinct end-to-end tests across
+20 targets**, **1,945 workspace library tests**, and **68 Python harness tests**.
+The committed standalone release passed all **16 Spaces workflows**. See
+[review fix validation](#spaces-review-fix-validation) and the
+[findings and fixes](mac-spaces-review-fixes.md).
+
+The original per-display Spaces follow-up passed **163 distinct end-to-end tests across
 20 targets**, **1,933 workspace library tests**, and **68 Python harness tests**.
 The committed standalone release also passed all nine new Spaces workflows;
 see [per-display validation](#per-display-spaces-validation) below.
@@ -212,3 +218,74 @@ physical Apple input, lid events, native KMS hotplug, mixed physical refresh
 rates, or scanout. Paired Split View, Space reordering, per-app assignment controls,
 and automatic Dock relocation remain separate work. No live desktop configuration
 was changed.
+
+## Spaces review fix validation
+
+Implementation `a416af59fbc43333167257f9a6ac90e12bc6b56f` fixes all seven findings from
+the review of `fe81b40`, plus the related lifecycle edges exposed by the expanded
+tests. The [fix matrix](mac-spaces-review-fixes.md) connects each finding to its
+permanent regression. [Machine-readable results](benchmarks/mac-spaces-fixes-2026-09-10/validation.json)
+retain every E2E test name, result, and log checksum; the
+[standalone Spaces log](benchmarks/mac-spaces-fixes-2026-09-10/mac_spaces.log) is
+also committed.
+
+| Target | Passed | Target | Passed |
+| --- | ---: | --- | ---: |
+| `mac_spaces` | 16 | `mac_mode` | 11 |
+| `ext_workspace` | 2 | `hyprland_ipc` | 19 |
+| `overview` | 5 | `desktop_gestures` | 9 |
+| `fullscreen` | 5 | `session_restore` | 5 |
+| `spatial_layout` | 7 | `output_management` | 1 |
+| `surface_pacing` | 7 | `keyboard_focus` | 7 |
+| `client_input_regions` | 4 | `pointer_coordinates` | 12 |
+| `xwayland_input` | 13 | `session_lock` | 3 |
+| `capture_tool` | 17 | `selection_transfer` | 20 |
+| `browser_selection` | 6 | `popup_anchor` | 1 |
+
+The total is **170 distinct E2E tests**, with no missing-client skips. Counts
+exclude reruns and the repeated installed-menu/theme helper checks. The nineteen
+regression targets ran against the final implementation before committing; the
+sixteen-workflow Spaces suite was repeated against the preserved standalone
+release after committing.
+
+The expanded fixture verifies complete disconnect/reconnect during a swipe,
+late client commits while headless, real keyboard delivery after policy reload,
+continued dragging of an actual parented xdg dialog, pinned-window focus, and
+active desktops when enabling separate Spaces. Unequal-output checks use a
+400x300 survivor and enter fullscreen both before and after disconnect. The
+save/restart workflow runs both with the home display connected and while its
+Spaces are borrowed, then verifies the original rectangle after leaving fullscreen
+and maximize. Assertions include captured pixels, seat input, client logs,
+workspace membership, and geometry.
+
+The standalone binary is preserved at `/tmp/chonkstep-a416af5/chonkstep-wayland`.
+Its version reports `preview-v0.4.4-11-ga416af5`.
+The supported source-ID build override was set explicitly to avoid reusing a
+cached source stamp. Its SHA-256 is:
+
+```text
+1b19ec6d5b6d7167846bf1c6f393f0d1a031757942c6e5e765490f3e7967a736
+```
+
+Build and verification commands, run from the implementation checkout:
+
+```sh
+CHONKSTEP_GIT_DESCRIBE=preview-v0.4.4-11-ga416af5 cargo build --locked --release -p chonkstep-wayland
+CHONKSTEP_WAYLAND_BIN=/tmp/chonkstep-a416af5/chonkstep-wayland scripts/e2e.sh --headless --host-renderer gl --release --test mac_spaces
+cargo test --locked --workspace --lib
+scripts/check.sh lint
+scripts/check.sh docs
+scripts/check.sh harness
+```
+
+The final standalone Spaces run passed **16/16**. Workspace library tests passed
+**1,945**, with **zero failures and 12 existing ignored tests** across 18 library
+targets. Strict workspace Clippy, private Rustdoc, and all **68 Python harness
+tests** passed.
+
+Tests ran under an isolated headless Weston GL host using the NVIDIA RTX 3090.
+Both virtual heads share a host swap cadence. These results exercise production
+hotplug policy and real client protocols; they do not qualify physical Apple
+input, lid events, native KMS hotplug, mixed physical refresh rates, or scanout.
+Raw regression logs remain under `/tmp/chonk-spaces-fixes-regression-TARGET.log`;
+additional check paths and checksums are recorded in the JSON artifact.

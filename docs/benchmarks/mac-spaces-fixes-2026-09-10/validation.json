@@ -1,0 +1,416 @@
+{
+  "date": "2026-09-10",
+  "reviewed_implementation": "fe81b40db86f7d7483c72e8931233b29d0b5bb3d",
+  "implementation_commit": "a416af59fbc43333167257f9a6ac90e12bc6b56f",
+  "branch": "codex/mac-display-spaces",
+  "scope": "Seven adversarial review fixes, complete-disconnect geometry and uninterrupted fullscreen-dialog dragging, and retained home identity when entering fullscreen while borrowed.",
+  "environment": {
+    "host": "Private headless Weston GL on NVIDIA RTX 3090",
+    "topologies": [
+      "two 640x800 wl_output heads in one 1280x800 host framebuffer",
+      "one 400x300 surviving output",
+      "no outputs, then reconnect"
+    ],
+    "cadence": "Virtual heads share the host swap cadence"
+  },
+  "release": {
+    "binary": "/tmp/chonkstep-a416af5/chonkstep-wayland",
+    "sha256": "1b19ec6d5b6d7167846bf1c6f393f0d1a031757942c6e5e765490f3e7967a736",
+    "version": "chonkstep-wayland 0.4.4\nsource: preview-v0.4.4-11-ga416af5\nbuild id: 8584e6176a815bb2893a02794c05f11eb4edf88a",
+    "build_command": "CHONKSTEP_GIT_DESCRIBE=preview-v0.4.4-11-ga416af5 cargo build --locked --release -p chonkstep-wayland",
+    "test_command": "CHONKSTEP_WAYLAND_BIN=/tmp/chonkstep-a416af5/chonkstep-wayland scripts/e2e.sh --headless --host-renderer gl --release --test mac_spaces",
+    "passed": 16,
+    "exit_code": 0
+  },
+  "e2e": {
+    "distinct_passed": 170,
+    "targets": 20,
+    "counting": "Final standalone mac_spaces run plus nineteen regression targets. Reruns and ordinary helper tests excluded.",
+    "results": {
+      "mac_spaces": {
+        "passed": 16,
+        "failed": 0,
+        "ignored": 0,
+        "tests": [
+          "a_crossing_window_is_clipped_until_its_center_moves_to_the_other_display",
+          "a_live_swipe_moves_only_its_display_and_stops_at_that_rows_boundary",
+          "clicking_a_pinned_window_keeps_the_current_space",
+          "control_arrows_switch_only_the_pointed_display_and_keep_other_pixels",
+          "dragging_a_fullscreen_dialog_moves_a_consistent_family",
+          "enabling_separate_spaces_preserves_the_live_linked_desktop",
+          "fullscreen_furniture_follows_visible_spaces_instead_of_global_keyboard_focus",
+          "fullscreen_is_independent_and_restores_both_display_geometries",
+          "headless_swipes_are_ignored_and_reconnect_recovers_input_and_pixels",
+          "linking_displays_repairs_focus_before_more_keys_reach_clients",
+          "native_workspace_clients_receive_two_independent_active_groups",
+          "overview_uses_the_selected_display_and_hotplug_releases_its_keyboard_grab",
+          "saved_fullscreen_over_maximize_unwinds_to_the_original_window",
+          "session_restore_keeps_empty_spaces_and_fullscreen_return_on_a_reconnected_display",
+          "smaller_survivor_keeps_home_position_and_restore_geometry",
+          "unplug_reconnect_preserves_membership_and_rehomes_client_pixels"
+        ],
+        "local_log": "/tmp/chonk-spaces-fixes-release-mac_spaces.log",
+        "log_sha256": "8e6e7776c53580e67e3637232ce82126d2a6686898cd52be88f517eefa35a368"
+      },
+      "mac_mode": {
+        "passed": 11,
+        "failed": 0,
+        "ignored": 0,
+        "tests": [
+          "application_hide_desktop_switching_and_fullscreen_spaces",
+          "delayed_real_copy_followed_by_one_burst_switch_and_paste_keeps_clipboard_order",
+          "force_quit_requires_application_selection_and_confirmation",
+          "german_and_french_layouts_use_their_own_letters_and_shifted_digits",
+          "libreoffice_and_browser_exchange_document_text",
+          "native_and_xwayland_copy_cut_paste_undo_and_releases",
+          "nautilus_copies_files_using_command_shortcuts",
+          "navigation_release_focus_resume_and_passthrough",
+          "overlapping_navigation_both_commands_caps_lock_and_mode_rollback",
+          "screenshot_file_and_clipboard_destinations_are_independent",
+          "terminal_clipboard_control_and_copy_quit_paste"
+        ],
+        "local_log": "/tmp/chonk-spaces-fixes-regression-mac_mode.log",
+        "log_sha256": "72c04b9385d909c545057c359f75780807099bd45cf73dae60bddb154e8ecc97"
+      },
+      "ext_workspace": {
+        "passed": 2,
+        "failed": 0,
+        "ignored": 0,
+        "tests": [
+          "a_native_client_can_activate_a_workspace",
+          "the_workspace_row_is_published_to_native_clients"
+        ],
+        "local_log": "/tmp/chonk-spaces-fixes-regression-ext_workspace.log",
+        "log_sha256": "c968803c740a85460c3a360c07f3f267e69f93ac1434097c1afceffbed896077"
+      },
+      "hyprland_ipc": {
+        "passed": 19,
+        "failed": 0,
+        "ignored": 0,
+        "tests": [
+          "a_connection_storm_is_capped_before_it_can_grow_the_source_set",
+          "a_live_monitor_reports_its_real_modes_and_identity",
+          "a_real_window_appears_in_the_stream_and_the_client_list",
+          "answers_the_queries_quickshell_makes_on_connect",
+          "binds_names_every_key_rather_than_reporting_its_keysym_in_hex",
+          "binds_two_private_sockets_where_the_protocol_says",
+          "both_mapping_arms_resolve_one_window_to_one_address",
+          "disconnected_socket_probes_leave_no_fds_and_no_busy_loop_behind",
+          "exec_and_reload_have_observable_effects_before_success",
+          "experimental_scanout_controls_reach_the_live_renderer_policy",
+          "focused_click_is_snapshot_free_and_drag_syncs_only_its_toplevel",
+          "foreign_toplevel_mapping_returns_the_same_live_ipc_address",
+          "inapplicable_layout_messages_are_quiet_and_unavailable_groups_still_fail",
+          "native_control_mutations_reach_the_hyprland_event_stream",
+          "screensaver_cursor_visibility_is_live_and_owned",
+          "silently_moves_a_real_window_without_following_it",
+          "switches_the_workspace_for_real",
+          "the_live_keyword_refusal_does_not_deny_reading_a_hyprland_config",
+          "window_geometry_plain_fields_and_monitor_eval_are_applied_before_ok"
+        ],
+        "local_log": "/tmp/chonk-spaces-fixes-regression-hyprland_ipc.log",
+        "log_sha256": "13792d80c831770127dce9b93e3d5664c0d1d529ebd5d901dc6e64be807af865"
+      },
+      "overview": {
+        "passed": 5,
+        "failed": 0,
+        "ignored": 0,
+        "tests": [
+          "desktop_close_controls_remove_empty_and_occupied_desktops_without_losing_windows",
+          "dragging_a_live_card_moves_only_that_window_and_keeps_overview_open",
+          "native_overview_keeps_wallpaper_proportions_and_live_pixels",
+          "overview_on_an_empty_desk_is_quiet_not_a_crash",
+          "overview_opens_navigates_and_commits"
+        ],
+        "local_log": "/tmp/chonk-spaces-fixes-regression-overview.log",
+        "log_sha256": "37e7a1d36a0d2700e1fe71d9a4f58c67de00455fd00888c543d13e6eea5527f9"
+      },
+      "desktop_gestures": {
+        "passed": 9,
+        "failed": 0,
+        "ignored": 0,
+        "tests": [
+          "a_late_layer_bar_stops_titlebar_drags_and_releases_its_boundary_on_exit",
+          "adjacent_live_workspace_has_no_focus_until_the_single_commit_and_then_stops_animating",
+          "cancellation_resume_device_loss_and_spring_interruption_release_scene_ownership",
+          "configured_fingers_distance_and_disabling_reach_the_live_seat",
+          "fingers_move_live_pixels_without_switching_configuring_or_exposing_pointer_targets",
+          "lock_and_held_client_pointer_grabs_cannot_inherit_partial_desktop_scenes",
+          "overview_morph_follows_reverses_flicks_and_never_resizes_live_clients",
+          "swipes_switch_once_and_open_close_reusable_overview_at_both_scales",
+          "unclaimed_swipe_protocol_streams_reach_clients_whole"
+        ],
+        "local_log": "/tmp/chonk-spaces-fixes-regression-desktop_gestures.log",
+        "log_sha256": "e7aa9ff3771cd7fcb555fd0a96ea55f64bb5e42dce55724bd2a84941e897949e"
+      },
+      "fullscreen": {
+        "passed": 5,
+        "failed": 0,
+        "ignored": 0,
+        "tests": [
+          "a_clients_fullscreen_control_enters_and_leaves_in_one_press_each",
+          "a_clients_maximize_control_is_answered_with_maximized",
+          "absurd_xdg_window_geometry_cannot_kill_or_bloat_the_session",
+          "fullscreen_occludes_top_layers_and_dock_pixels_and_input",
+          "screensaver_covers_the_output_without_any_imported_window_rules"
+        ],
+        "local_log": "/tmp/chonk-spaces-fixes-regression-fullscreen.log",
+        "log_sha256": "d15a089047b0774ca43d7df14b891439fc00ae1803fc06a73a01a7577caa4441"
+      },
+      "session_restore": {
+        "passed": 5,
+        "failed": 0,
+        "ignored": 0,
+        "tests": [
+          "a_closed_window_is_forgotten_by_the_layout",
+          "a_recorded_layout_is_relaunched_and_replaced_at_startup",
+          "a_recovery_marker_locks_before_the_first_ordinary_frame",
+          "a_settled_layout_survives_sigkill",
+          "recovery_without_a_locker_refuses_to_expose_the_desktop"
+        ],
+        "local_log": "/tmp/chonk-spaces-fixes-regression-session_restore.log",
+        "log_sha256": "ba4452b7c351df3fb2565a92f40953322cbf51ed7f8632eab5767f5546009b45"
+      },
+      "spatial_layout": {
+        "passed": 7,
+        "failed": 0,
+        "ignored": 0,
+        "tests": [
+          "a_crashed_managed_desktop_restores_organization_and_original_freeform_geometry",
+          "application_popups_are_visible_and_receive_input_in_every_style",
+          "benchmark_real_reflow_focus_and_reversible_membership",
+          "native_pointer_reorder_resize_cancel_and_modal_takeover_leave_no_transforms",
+          "reflow_stages_final_configures_once_and_has_no_animation_deadline_after_settlement",
+          "steady_flow_rendering_profile_with_a_live_frame_paced_client",
+          "three_views_preserve_intent_with_native_input_and_live_surfaces_at_each_scale"
+        ],
+        "local_log": "/tmp/chonk-spaces-fixes-regression-spatial_layout.log",
+        "log_sha256": "158c45d5acfe0482f6aa3925aca15857c362331d1094f6eac471a4b84ba6ca90"
+      },
+      "output_management": {
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0,
+        "tests": [
+          "wlr_randr_lists_applies_and_observes_output_state"
+        ],
+        "local_log": "/tmp/chonk-spaces-fixes-regression-output_management.log",
+        "log_sha256": "27ac8b53f9acd97f3e74704e8754336d528ce62e12393475bee82dcf513a7e53"
+      },
+      "surface_pacing": {
+        "passed": 7,
+        "failed": 0,
+        "ignored": 0,
+        "tests": [
+          "fifo_preserves_distinct_presentations_and_commit_timing_never_presents_early",
+          "hidden_and_locked_fifo_progress_without_presenting_private_pixels",
+          "no_fifo_many_clients_dispatch_profile",
+          "offscreen_animation_work_profile",
+          "offscreen_windows_sleep_and_are_not_reported_as_presented",
+          "opaque_occlusion_suspends_callbacks_until_the_cover_is_destroyed",
+          "subsurface_visibility_is_independent_of_its_offscreen_parent"
+        ],
+        "local_log": "/tmp/chonk-spaces-fixes-regression-surface_pacing.log",
+        "log_sha256": "f803d36cdc9626ee847f73c30dcaab55c7ff3ded64ce6ac615f3ba2293cd1c07"
+      },
+      "keyboard_focus": {
+        "passed": 7,
+        "failed": 0,
+        "ignored": 0,
+        "tests": [
+          "a_self_minimized_clients_shortcut_inhibitor_is_revoked_with_keyboard_focus",
+          "alt_tab_withdraws_client_focus_and_restores_it_even_when_cancel_keeps_the_same_window",
+          "held_overview_navigation_repeats_and_stops_when_the_modal_closes",
+          "hiding_the_last_window_withdraws_text_input_focus_and_restores_both_together",
+          "overview_withdraws_a_held_keys_client_focus_and_restores_it_on_cancel",
+          "the_first_held_alt_tab_repeats_without_a_second_physical_press",
+          "zero_repeat_rate_applies_to_modal_navigation_too"
+        ],
+        "local_log": "/tmp/chonk-spaces-fixes-regression-keyboard_focus.log",
+        "log_sha256": "eaa1c05c22d5fa327228929054d95e2f76d605f0ca5baa38932f2851bac1a1dd"
+      },
+      "client_input_regions": {
+        "passed": 4,
+        "failed": 0,
+        "ignored": 0,
+        "tests": [
+          "client_resize_handles_and_input_holes_at_1x",
+          "client_resize_handles_and_input_holes_at_2x",
+          "client_resize_handles_and_input_holes_at_fractional_scale",
+          "shadows_and_input_holes_deliver_clicks_to_the_window_underneath"
+        ],
+        "local_log": "/tmp/chonk-spaces-fixes-regression-client_input_regions.log",
+        "log_sha256": "b9bf5f254c8bcad963b56a791f57b909aede81586d1b57bd76836e6472ef20f5"
+      },
+      "pointer_coordinates": {
+        "passed": 12,
+        "failed": 0,
+        "ignored": 0,
+        "tests": [
+          "fractional_scaled_drag_coordinates_match_hover",
+          "fractional_scaled_subsurface_drag_coordinates_match_hover",
+          "fractional_scaled_subsurface_touch_coordinates_and_slots",
+          "fractional_scaled_touch_coordinates_and_slots",
+          "integer_scaled_drag_coordinates_match_hover",
+          "integer_scaled_subsurface_drag_coordinates_match_hover",
+          "integer_scaled_subsurface_touch_coordinates_and_slots",
+          "integer_scaled_touch_coordinates_and_slots",
+          "unscaled_drag_coordinates_match_hover",
+          "unscaled_subsurface_drag_coordinates_match_hover",
+          "unscaled_subsurface_touch_coordinates_and_slots",
+          "unscaled_touch_coordinates_and_slots"
+        ],
+        "local_log": "/tmp/chonk-spaces-fixes-regression-pointer_coordinates.log",
+        "log_sha256": "b90f203a4f82e4fabfeec93afe071b3bc4e598f1be727dda2e553df148554a86"
+      },
+      "xwayland_input": {
+        "passed": 13,
+        "failed": 0,
+        "ignored": 0,
+        "tests": [
+          "a_net_close_window_message_closes_an_xwayland_window",
+          "an_x11_client_exit_collects_all_of_its_window_records",
+          "an_x11_keyboard_grab_keeps_the_combos_the_desktop_binds",
+          "an_x11_window_keeps_its_identity_across_withdrawal_but_retires_on_destroy",
+          "an_x_raise_window_request_reaches_the_x_servers_stacking_order",
+          "an_xwayland_crash_retires_ghosts_and_restarts_exactly_once",
+          "fullscreen_publishes_border_changes_before_a_settled_resize",
+          "wm_hints_urgency_is_read_at_map_and_cleared_by_focus",
+          "x11_autostart_connects_to_the_nested_display_before_the_first_dispatch",
+          "x11_pointer_grab_suspends_typing_suppression_until_ungrab",
+          "xwayland_geometry_and_clicks_match_at_scale_two_from_first_map",
+          "xwayland_resource_manager_publishes_scale_and_preserves_user_resources",
+          "xwayland_wm_change_state_minimizes_and_restores"
+        ],
+        "local_log": "/tmp/chonk-spaces-fixes-regression-xwayland_input.log",
+        "log_sha256": "f86f35fb656e548a77c8ecb6730e2d02848e8876667543b87ad9fbc572a1f8b9"
+      },
+      "session_lock": {
+        "passed": 3,
+        "failed": 0,
+        "ignored": 0,
+        "tests": [
+          "a_client_that_does_not_hold_the_lock_cannot_unlock_the_session",
+          "a_lockers_other_surfaces_survive_the_unlock_teardown",
+          "a_second_output_resource_cannot_cover_one_physical_output_twice"
+        ],
+        "local_log": "/tmp/chonk-spaces-fixes-regression-session_lock.log",
+        "log_sha256": "558cd5ce513981dde7203dc10250dcc17045893fd05efae650110e81e0ecd2ba"
+      },
+      "capture_tool": {
+        "passed": 17,
+        "failed": 0,
+        "ignored": 0,
+        "tests": [
+          "failed_mp4_export_preserves_video_and_muxer_diagnostics",
+          "failed_video_preview_uses_glyph_and_preserves_saved_recording",
+          "recording_odd_area_is_playable_and_controls_are_excluded",
+          "recording_screen_and_area_preserve_changing_content",
+          "retained_area_moves_resizes_and_blocks_desktop_gestures",
+          "saving_failure_does_not_leave_input_grabbed",
+          "screenshots_1x",
+          "screenshots_2x",
+          "screenshots_fractional",
+          "toolbar_cursor_1x",
+          "toolbar_cursor_2x",
+          "toolbar_cursor_fractional",
+          "toolbar_screen_modes_work_without_moving_off_the_toolbar_and_badge_stops",
+          "toolbar_window_click_1x",
+          "toolbar_window_click_2x",
+          "toolbar_window_click_fractional",
+          "window_capture_excludes_occluding_windows"
+        ],
+        "local_log": "/tmp/chonk-spaces-fixes-regression-capture_tool.log",
+        "log_sha256": "85e204a90c0d388f77272f490f37d2c35a192e6a361357be127eebd2eb4c4111"
+      },
+      "selection_transfer": {
+        "passed": 20,
+        "failed": 0,
+        "ignored": 0,
+        "tests": [
+          "a_cancelled_x11_paste_unblocks_the_source_and_allows_the_next_paste",
+          "a_cleared_early_selection_is_not_resurrected_when_xwayland_starts",
+          "a_disconnected_x11_incr_owner_closes_the_native_consumers_pipe",
+          "a_stalled_x11_paste_applies_backpressure_instead_of_buffering_the_whole_payload",
+          "an_exited_early_owner_is_not_resurrected_when_xwayland_starts",
+          "cancelling_one_requestor_retires_both_clipboard_and_primary_transfers",
+          "closing_native_consumers_retires_both_x11_incr_streams",
+          "completed_small_pastes_do_not_retain_a_buffer_per_live_requestor",
+          "mac_persistence_preserves_rich_payloads_after_the_source_quits",
+          "native_clipboard_and_primary_preserve_binary_and_embedded_nuls",
+          "native_clipboard_and_primary_preserve_utf8_and_replace_owners",
+          "native_clipboard_and_primary_transfer_one_mib_without_truncation",
+          "native_selection_access_is_denied_without_x11_keyboard_focus",
+          "native_selection_published_before_xwayland_ready_reaches_x11",
+          "slow_native_consumers_receive_every_x11_incr_byte_in_both_selections",
+          "x11_wayland_clipboard_and_primary_preserve_binary_in_both_directions",
+          "x11_wayland_clipboard_and_primary_preserve_utf8_in_both_directions",
+          "x11_wayland_clipboard_and_primary_use_incr_for_large_transfers",
+          "xwayland_loss_cancels_pending_pastes_and_restores_the_native_owner",
+          "xwayland_loss_retires_offers_owned_by_the_dead_x11_generation"
+        ],
+        "local_log": "/tmp/chonk-spaces-fixes-regression-selection_transfer.log",
+        "log_sha256": "adef323a48b9f407153213d510407ab8e3b2ad27de700494aedb487bc5f7496c"
+      },
+      "browser_selection": {
+        "passed": 6,
+        "failed": 0,
+        "ignored": 0,
+        "tests": [
+          "browser_text_selection_and_repeat_at_fractional_scale",
+          "browser_text_selection_and_repeat_at_one_times_scale",
+          "browser_text_selection_and_repeat_at_two_times_scale",
+          "xwayland_browser_text_selection_and_repeat_at_fractional_scale",
+          "xwayland_browser_text_selection_and_repeat_at_one_times_scale",
+          "xwayland_browser_text_selection_and_repeat_at_two_times_scale"
+        ],
+        "local_log": "/tmp/chonk-spaces-fixes-regression-browser_selection.log",
+        "log_sha256": "ebfef4a370efaef3856610e200ba2e6e09a36e8ef40652834b2a0ae30cc1e0ba"
+      },
+      "popup_anchor": {
+        "passed": 1,
+        "failed": 0,
+        "ignored": 0,
+        "tests": [
+          "chromium_popup_without_a_new_anchor_is_dismissed_on_parent_resize"
+        ],
+        "local_log": "/tmp/chonk-spaces-fixes-regression-popup_anchor.log",
+        "log_sha256": "87b95bceb35de4814fbc73e5211ed33a91c076340c6db0087de660977e82314a"
+      }
+    }
+  },
+  "library_tests": {
+    "passed": 1945,
+    "failed": 0,
+    "ignored": 12,
+    "local_log": "/tmp/chonk-spaces-fixes-libraries-final.log",
+    "log_sha256": "497811d287c8f78dedb93e32a047add80c7c5a3cea532565c539be3a199a482c",
+    "targets": 18
+  },
+  "checks": [
+    {
+      "command": "scripts/check.sh lint",
+      "result": "passed",
+      "local_log": "/tmp/chonk-spaces-fixes-lint-final.log",
+      "log_sha256": "c7666a612fe7c0ef14cf638850d6b5381cade840ab46bfe2f5bb88cfaa2811b5"
+    },
+    {
+      "command": "scripts/check.sh docs",
+      "result": "passed",
+      "local_log": "/tmp/chonk-spaces-fixes-docs.log",
+      "log_sha256": "2199e34822ba5e5022a7e16123361b61a689aa5bd10f0341bae218e4e5d3197f"
+    },
+    {
+      "command": "scripts/check.sh harness",
+      "result": "passed",
+      "local_log": "/tmp/chonk-spaces-fixes-harness.log",
+      "log_sha256": "b6a5c7cd3fe50a68432e6410dd8747e6595e7348c4f5b243cc460cd5b2a6a188",
+      "tests": 68
+    }
+  ],
+  "limitations": [
+    "Physical Apple input and lid events were not tested.",
+    "Nested topology exercises production hotplug policy, not native KMS/scanout or independent physical refresh rates."
+  ],
+  "artifacts_note": "Regression sources and this result manifest are committed. Raw logs, screenshots and binaries remain machine-local temporary artifacts."
+}
